@@ -72,7 +72,7 @@ cannot satisfy a color golden even when it carries valid CICP tags.
 
 An execution slice is intentionally narrower than the complete Golden Project.
 It passes only if its exact required fixture roles, operations, and content have
-typed postcondition evidence. Golden v2 rejects unknown fields; requirement IDs
+typed postcondition evidence. Golden v3 rejects unknown fields; requirement IDs
 select evidence obligations but cannot substitute for observed author, media,
 delivery, or persistence facts.
 The complete Golden status remains blocked until every top-level requirement
@@ -155,6 +155,27 @@ reopened typed author values rather than prose assertions. Its envelope always r
 `complete_golden_project: false`; a passing foundation slice cannot be reported
 as the M1 Golden exit gate.
 
+Run the generated-picture delivery slice during development after placing the
+generated PCM fixture under an untracked fixture root:
+
+```powershell
+pwsh -File scripts/validation/generate-golden-project-media.ps1 `
+  -OutputRoot target/validation/golden-fixtures/large
+$env:MONDRIAN_GOLDEN_FIXTURE_ROOT = "target/validation/golden-fixtures"
+cargo test -p mondrian-app --lib `
+  golden_project_generated_delivery_roundtrip_gate -j1 -- `
+  --ignored --nocapture --test-threads=1
+```
+
+This slice executes a 25-frame work area rather than pretending that generated
+color is a color reference. It proves ordinary Solid Color and PCM authoring,
+exact Trim, Transform and Opacity, H.264 High 8-bit and HEVC Main10 10-bit
+delivery, MP4 mux identity, Rec.709 CICP/range, absence of static HDR metadata,
+48 kHz Stereo AAC, production queue terminal evidence, and reimported typed
+codec/profile/pixel-format facts. It still reports a partial Golden slice:
+missing real color-reference roles, playback, nesting, transitions, recovery,
+and three complete consecutive runs remain open.
+
 Run the complete release-profile M0 playback plan. This preflights the machine
 before expensive generation, validates the Playback corpus, runs the 30-minute
 Video and CPAL A/V gates, and creates one evidence bundle:
@@ -222,7 +243,7 @@ plan on the qualified 16 GiB Windows reference machine and was classified
 `passed-baseline`. Its generated artifacts and evidence bundle remain
 intentionally disposable under `target`; the repository commits the recipes,
 contracts, and this reproducible result record rather than a multi-gigabyte
-machine-specific bundle. The Golden v2 contract now resolves its PCM and AAC
+machine-specific bundle. The Golden v3 contract now resolves its PCM and AAC
 roles, and `foundation-audio-authoring-v1` has a real Headless product-workflow
 gate rather than a declaration-only check. HLG Main10 picture, Rec.709 H.264
 picture, and sRGB Alpha still roles remain deliberately null until qualifying

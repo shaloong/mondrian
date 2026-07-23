@@ -1,6 +1,6 @@
 {
-  "schema_version": 2,
-  "id": "windows-alpha-golden-v2",
+  "schema_version": 3,
+  "id": "windows-alpha-golden-v3",
   "kind": "golden",
   "timeline": {
     "duration_frames": 7500,
@@ -90,7 +90,32 @@
       ],
       "required_content": [
         "clip-audio-gain-pan-fades"
-      ]
+      ],
+      "required_exports": [],
+      "timeline_window": null
+    },
+    {
+      "id": "generated-delivery-roundtrip-v1",
+      "required_fixture_roles": [
+        "pcm-audio"
+      ],
+      "required_operations": [
+        "trim",
+        "export",
+        "reimport"
+      ],
+      "required_content": [
+        "transform",
+        "opacity"
+      ],
+      "required_exports": [
+        "h264-aac-sdr",
+        "hevc-main10"
+      ],
+      "timeline_window": {
+        "start_frame": 0,
+        "end_frame_exclusive": 25
+      }
     }
   ],
   "exports": [

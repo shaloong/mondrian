@@ -3989,7 +3989,7 @@ fn summarize_active_sequence_media_color_issues(
     let mut asset_ids = std::collections::HashSet::new();
     for track in &sequence.video_tracks {
         for clip in &track.clips {
-            if let Some(asset_id) = clip.asset_id() {
+            if let Some(asset_id) = clip.media_asset_id() {
                 asset_ids.insert(asset_id);
             }
         }

@@ -210,13 +210,28 @@ impl ClipContent {
         }
     }
 
-    /// Project asset when this content is backed by the asset library.
-    pub const fn asset_id(&self) -> Option<AssetId> {
+    /// Project Asset Library identity for asset-backed content.
+    ///
+    /// This includes generated palette/effect entries and therefore does not
+    /// imply that the asset owns a readable external media file. Callers that
+    /// need a decode/export file dependency must use [`Self::media_asset_id`].
+    pub const fn library_asset_id(&self) -> Option<AssetId> {
         match self {
             Self::Media { asset_id, .. }
             | Self::AdjustmentLayer { asset_id }
             | Self::SolidColor { asset_id, .. } => Some(*asset_id),
             Self::NestedSequence { .. } | Self::BasicTitle { .. } => None,
+        }
+    }
+
+    /// File-backed media identity that requires a resolved media dependency.
+    pub const fn media_asset_id(&self) -> Option<AssetId> {
+        match self {
+            Self::Media { asset_id, .. } => Some(*asset_id),
+            Self::AdjustmentLayer { .. }
+            | Self::NestedSequence { .. }
+            | Self::SolidColor { .. }
+            | Self::BasicTitle { .. } => None,
         }
     }
 

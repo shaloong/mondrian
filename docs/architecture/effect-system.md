@@ -192,8 +192,10 @@ graph signature, typed float input signature, dimensions, and frame seed when a
 graph is frame-dependent. Deterministic multi-op color-correction chains should
 reuse this cache rather than forcing repeated full-frame float adjustment work
 during preview scrubbing or export retries. Domain-processed entries also key
-the exact color engine, working identity, and OCIO configuration generation so
-cached pixels cannot cross project color semantics.
+the exact color engine and working identity so cached pixels cannot cross
+Project color semantics. Process-global OCIO reload generation remains
+diagnostic evidence and is not allowed to substitute for exact semantic
+identity.
 
 Unsupported graph nodes and render ops return structured
 `EffectFloatExecutionError` / `EffectFloatUnsupportedReason` values so renderer

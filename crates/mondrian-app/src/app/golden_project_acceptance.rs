@@ -6,6 +6,8 @@
 
 mod fixture;
 mod foundation_audio;
+mod generated_delivery;
+mod harness;
 
 use anyhow::{ensure, Context};
 use mondrian_core::{AudioChannelLayout, ColorSpace, Rational, Resolution, WorkingColorSpace};
@@ -70,6 +72,15 @@ pub(super) struct GoldenExecutionSlice {
     pub(super) required_fixture_roles: Vec<String>,
     pub(super) required_operations: Vec<String>,
     pub(super) required_content: Vec<String>,
+    pub(super) required_exports: Vec<String>,
+    pub(super) timeline_window: Option<GoldenTimelineWindow>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct GoldenTimelineWindow {
+    pub(super) start_frame: i64,
+    pub(super) end_frame_exclusive: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -134,7 +145,7 @@ pub(super) fn load_golden_contract(root: &Path) -> anyhow::Result<GoldenProjectC
 
 fn validate_golden_contract(contract: &GoldenProjectContract) -> anyhow::Result<()> {
     ensure!(
-        contract.schema_version == 2,
+        contract.schema_version == 3,
         "unsupported Golden Project schema"
     );
     ensure!(contract.kind == "golden", "contract kind is not golden");
@@ -192,6 +203,11 @@ fn validate_golden_contract(contract: &GoldenProjectContract) -> anyhow::Result<
     let operation_ids =
         contract.required_operations.iter().map(String::as_str).collect::<BTreeSet<_>>();
     let content_ids = contract.required_content.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    let export_ids = contract
+        .exports
+        .iter()
+        .map(|export| export.id.as_str())
+        .collect::<BTreeSet<_>>();
     for role in &contract.required_fixture_roles {
         ensure!(!role.role.trim().is_empty(), "fixture role id is empty");
         ensure!(
@@ -220,6 +236,10 @@ fn validate_golden_contract(contract: &GoldenProjectContract) -> anyhow::Result<
             slice.required_content.iter().map(String::as_str),
             "slice content",
         )?;
+        ensure_unique(
+            slice.required_exports.iter().map(String::as_str),
+            "slice export",
+        )?;
         ensure!(
             slice.required_fixture_roles.iter().all(|id| role_ids.contains(id.as_str())),
             "slice {} references an unknown fixture role",
@@ -235,6 +255,20 @@ fn validate_golden_contract(contract: &GoldenProjectContract) -> anyhow::Result<
             "slice {} references unknown content",
             slice.id
         );
+        ensure!(
+            slice.required_exports.iter().all(|id| export_ids.contains(id.as_str())),
+            "slice {} references an unknown export",
+            slice.id
+        );
+        if let Some(window) = slice.timeline_window {
+            ensure!(
+                window.start_frame >= 0
+                    && window.end_frame_exclusive > window.start_frame
+                    && window.end_frame_exclusive <= contract.timeline.duration_frames,
+                "slice {} has an invalid timeline window",
+                slice.id
+            );
+        }
     }
     Ok(())
 }
@@ -444,10 +478,12 @@ fn assert_export_contract(
         "{} encoded CICP contract drifted",
         export.id
     );
-    let static_hdr_metadata = if expected_signal.static_hdr_metadata.is_some() {
-        "present"
-    } else {
-        "absent"
+    let static_hdr_metadata = match expected_signal.static_hdr_metadata {
+        mondrian_export::validator::ExpectedStaticHdrMetadata::Absent => "absent",
+        mondrian_export::validator::ExpectedStaticHdrMetadata::Exact(_) => "present",
+        mondrian_export::validator::ExpectedStaticHdrMetadata::Unspecified => {
+            anyhow::bail!("{} has no static HDR validation policy", export.id)
+        }
     };
     ensure!(
         static_hdr_metadata == expected.static_hdr_metadata,

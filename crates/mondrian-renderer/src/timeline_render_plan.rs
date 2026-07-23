@@ -893,7 +893,7 @@ mod tests {
         seq.settings.working_color_space = mondrian_core::WorkingColorSpace::LinearRec2020;
         seq.settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
         let mut clip = Clip::new(AssetId::new(), tt(0, tb), tt(20, tb)).expect("valid clip");
-        let asset_id = clip.asset_id().expect("media asset");
+        let asset_id = clip.media_asset_id().expect("media asset");
         let interpretation = clip.media_interpretation_mut().expect("media interpretation");
         interpretation.color_space_override = Some(ColorSpace::AppleLogBt2020);
         interpretation.pixel_aspect_ratio_override = Some(PixelAspectRatio::DvcproHd);

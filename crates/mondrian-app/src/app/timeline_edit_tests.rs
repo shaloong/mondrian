@@ -632,7 +632,7 @@ fn trim_out_updates_linked_clip() {
 
     let mut video = Clip::new(AssetId::new(), tt(0, tb), tt(30, tb)).expect("valid clip");
     let mut audio = Clip::new(
-        video.asset_id().expect("video asset"),
+        video.media_asset_id().expect("video asset"),
         tt(0, tb),
         tt(30, tb),
     )
@@ -777,7 +777,7 @@ fn removing_track_renumbers_tracks_and_clears_broken_links() {
 
     let mut video = Clip::new(AssetId::new(), tt(0, tb), tt(20, tb)).expect("valid clip");
     let mut audio = Clip::new(
-        video.asset_id().expect("video asset"),
+        video.media_asset_id().expect("video asset"),
         tt(0, tb),
         tt(20, tb),
     )
@@ -944,7 +944,7 @@ fn dropping_linked_clip_creates_missing_audio_track_at_target_index() {
         .find(|clip| clip.link_group == video_clip.link_group)
         .expect("linked audio clip should exist");
     assert!(video_clip.link_group.is_some());
-    assert_eq!(audio_clip.asset_id(), Some(asset_id));
+    assert_eq!(audio_clip.media_asset_id(), Some(asset_id));
 }
 
 #[test]
@@ -981,7 +981,7 @@ fn moving_video_track_keeps_existing_linked_audio_on_its_audio_track() {
 
     let mut video = Clip::new(AssetId::new(), tt(0, tb), tt(15, tb)).expect("valid clip");
     let mut audio = Clip::new(
-        video.asset_id().expect("video asset"),
+        video.media_asset_id().expect("video asset"),
         tt(0, tb),
         tt(15, tb),
     )
@@ -1053,7 +1053,7 @@ fn creating_adjustment_layer_on_track_also_creates_library_asset() {
         .find(|clip| clip.id == clip_id)
         .expect("adjustment clip should exist");
     assert!(clip.is_adjustment_layer());
-    assert_eq!(clip.asset_id(), Some(assets[0].id));
+    assert_eq!(clip.library_asset_id(), Some(assets[0].id));
     assert_eq!(clip.position, tt(10, tb));
     assert_eq!(clip.duration, tt(30, tb));
 
@@ -1423,7 +1423,7 @@ fn cross_track_move_linked_clip_follows() {
 
     let mut video = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip");
     let mut audio = Clip::new(
-        video.asset_id().expect("video asset"),
+        video.media_asset_id().expect("video asset"),
         tt(0, tb),
         tt(10, tb),
     )

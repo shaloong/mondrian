@@ -235,7 +235,7 @@ impl ExportVideoSignalContract {
             color_transfer: tags.map(|tags| tags.color_trc.to_owned()),
             color_matrix: self.yuv_matrix.map(|matrix| matrix.tag_name().to_owned()),
             require_color_tags_absent: tags.is_none(),
-            static_hdr_metadata: None,
+            static_hdr_metadata: crate::validator::ExpectedStaticHdrMetadata::Absent,
         }
     }
 }
@@ -267,11 +267,12 @@ pub fn expected_export_video_signal(
         content_light
             .validate()
             .map_err(|error| format!("MaxCLL/MaxFALL 内容光级别元数据无效: {error}"))?;
-        constraints.static_hdr_metadata =
-            Some(crate::validator::ExpectedStaticHdrMetadataConstraints {
+        constraints.static_hdr_metadata = crate::validator::ExpectedStaticHdrMetadata::Exact(
+            crate::validator::ExpectedStaticHdrMetadataConstraints {
                 mastering_display,
                 content_light,
-            });
+            },
+        );
     }
     Ok(constraints)
 }

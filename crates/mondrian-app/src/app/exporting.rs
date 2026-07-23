@@ -352,7 +352,7 @@ fn collect_reachable_media_audio_components(
                 if let mondrian_timeline::audio::AudioComponentSource::Media { component_id } =
                     &edit.source
                 {
-                    if let Some(asset_id) = clip.asset_id() {
+                    if let Some(asset_id) = clip.media_asset_id() {
                         components.entry(asset_id).or_default().insert(*component_id);
                     }
                 }
@@ -399,7 +399,7 @@ pub(crate) fn collect_sequence_asset_ids(
                 )?;
                 continue;
             }
-            if let Some(asset_id) = clip.asset_id() {
+            if let Some(asset_id) = clip.media_asset_id() {
                 asset_ids.insert(asset_id);
             }
         }
@@ -457,11 +457,11 @@ mod tests {
     }
 
     #[test]
-    fn build_media_dependencies_skips_synthetic_adjustment_assets() {
+    fn build_media_dependencies_skips_generated_library_assets() {
         let mut state = AppState::default();
-        state.test_set_sequence(Some(Sequence::new("export-adjustment")));
+        state.test_set_sequence(Some(Sequence::new("export-generated-content")));
         let temp_root = std::env::temp_dir().join(format!(
-            "mondrian-export-adjustment-{}",
+            "mondrian-export-generated-content-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("system time")
@@ -471,16 +471,29 @@ mod tests {
             AssetLibrary::open(temp_root.clone()).expect("open library"),
         ));
 
-        let asset_id = state.create_adjustment_layer_asset(None).expect("create adjustment asset");
+        let adjustment_id =
+            state.create_adjustment_layer_asset(None).expect("create adjustment asset");
+        let solid_id = state.create_solid_color_asset(None).expect("create solid asset");
         {
             let seq = state.active_sequence_mut_uncommitted().expect("sequence should exist");
             let tb = seq.time_base();
             seq.video_tracks[0]
                 .add_clip(
-                    Clip::new_adjustment_layer(asset_id, tt(0, tb), tt(20, tb))
+                    Clip::new_adjustment_layer(adjustment_id, tt(0, tb), tt(20, tb))
                         .expect("valid clip"),
                 )
                 .expect("add adjustment clip");
+            seq.video_tracks[0]
+                .add_clip(
+                    Clip::new_solid_color(
+                        solid_id,
+                        mondrian_core::Color::from_hex(0x336699),
+                        tt(20, tb),
+                        tt(20, tb),
+                    )
+                    .expect("valid solid Clip"),
+                )
+                .expect("add solid clip");
         }
 
         let seq = state.active_sequence().expect("sequence should exist").clone();
@@ -491,7 +504,7 @@ mod tests {
             TimelineExportRange::EntireSequence,
         )
         .expect("capture export snapshot");
-        assert!(!snapshot.media.contains_key(&asset_id));
+        assert!(snapshot.media.is_empty());
 
         let _ = std::fs::remove_dir_all(temp_root);
     }

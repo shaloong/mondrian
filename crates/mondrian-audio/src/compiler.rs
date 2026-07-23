@@ -96,7 +96,7 @@ pub fn compile_audio_program(
                 }
                 let source = match edit.source {
                     AudioComponentSource::Media { component_id } => CompiledAudioSource::Media {
-                        asset_id: clip.asset_id().ok_or_else(|| {
+                        asset_id: clip.media_asset_id().ok_or_else(|| {
                             AudioCompileError::InvalidPlacement(format!(
                                 "media audio edit {} belongs to non-media Clip {}",
                                 edit.id, clip.id

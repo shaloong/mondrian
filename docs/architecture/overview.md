@@ -82,6 +82,13 @@ Lower layers cannot depend on higher layers:
   records the opaque Authoring Session identity and exact Author
   Generation/Sequence Revision transition for every authored, Undo, and Redo
   transaction; descriptive strings are not acceptance facts.
+  The generated-delivery slice uses the same product Actions to create a
+  Solid Color and PCM placement, trim an exact short work area, author
+  Transform/Opacity, enqueue the stable H.264 High and HEVC Main10 presets,
+  wait for production `Completed` evidence, consume the production typed
+  output probe, and reimport both files through the ordinary media worker.
+  Generated picture/audio and reports stay under `target/`; this slice closes
+  only its declared obligations and cannot claim the complete Golden Project.
 
 The audio dependency direction is one-way:
 

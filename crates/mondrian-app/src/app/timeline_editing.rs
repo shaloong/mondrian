@@ -359,7 +359,7 @@ pub(super) fn estimate_asset_total_source_frames(
         return None;
     }
 
-    let asset_id = clip.asset_id()?;
+    let asset_id = clip.media_asset_id()?;
     let asset = match library.get_asset(asset_id) {
         Ok(Some(asset)) => asset,
         Ok(None) => return None,
@@ -697,7 +697,7 @@ pub(super) fn remove_asset_clips_from_tracks(
     let mut removed = 0usize;
     for track in tracks {
         let before = track.clips.len();
-        track.clips.retain(|clip| clip.asset_id() != Some(asset_id));
+        track.clips.retain(|clip| clip.library_asset_id() != Some(asset_id));
         removed += before.saturating_sub(track.clips.len());
         resolve_track_overlaps(track)?;
     }

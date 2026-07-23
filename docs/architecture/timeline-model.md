@@ -253,6 +253,11 @@ The variant is the single source of truth. There is no parallel `kind`,
 contradictory Clip. Current-schema deserialization rejects legacy or unknown
 parallel fields. Constructors create only the identity required by the chosen
 variant; for example, a nested placement does not manufacture a fake Asset ID.
+Callers must also choose the identity they mean: `library_asset_id()` addresses
+Media, Adjustment Layer, and Solid Color records in the Asset Library, while
+`media_asset_id()` returns only file-backed Media dependencies. There is no
+generic `asset_id()` because treating a generated library identity as a file
+dependency made valid Solid Color/Adjustment exports fail as offline media.
 
 `BasicTitle` is a fifth content type, not a synthetic Asset and not an Effect.
 Its closed definition-backed Property Bag owns text, exact requested font

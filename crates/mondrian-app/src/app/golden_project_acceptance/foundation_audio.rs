@@ -1,6 +1,10 @@
 //! First executable Golden slice: PCM Clip authoring and durable reopen.
 
 use super::fixture::{resolve_fixture, sha256_file, CorpusManifest, FixtureEvidence};
+use super::harness::{
+    fixture_root, new_run_directory, rooted_env_path, wait_for_media_imports, write_report,
+    DirectoryCleanup,
+};
 use super::{
     load_golden_contract, load_json, parse_rational, repository_root,
     sequence_settings_from_contract,
@@ -22,13 +26,10 @@ use mondrian_timeline::sequence::SequenceSettings;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const FOUNDATION_SLICE_ID: &str = "foundation-audio-authoring-v1";
-const FIXTURE_ROOT_ENV: &str = "MONDRIAN_GOLDEN_FIXTURE_ROOT";
 const RUN_ROOT_ENV: &str = "MONDRIAN_GOLDEN_FOUNDATION_RUN_ROOT";
 const OUTPUT_ENV: &str = "MONDRIAN_GOLDEN_FOUNDATION_OUTPUT";
-const IMPORT_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct AuthorCheckpoint {
@@ -143,67 +144,16 @@ struct GoldenRunPaths {
     report: PathBuf,
 }
 
-#[derive(Debug, Default)]
-struct DirectoryCleanup {
-    path: Option<PathBuf>,
-}
-
-impl Drop for DirectoryCleanup {
-    fn drop(&mut self) {
-        if let Some(path) = self.path.take() {
-            let _ = std::fs::remove_dir_all(path);
-        }
-    }
-}
-
 fn new_run_paths(root: &Path) -> anyhow::Result<GoldenRunPaths> {
-    let run_root = std::env::var_os(RUN_ROOT_ENV)
-        .map(PathBuf::from)
-        .map(|path| {
-            if path.is_absolute() {
-                path
-            } else {
-                root.join(path)
-            }
-        })
-        .unwrap_or_else(|| root.join("target").join("validation").join("runs"));
-    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-    let directory = run_root.join(format!("golden-foundation-{}-{nonce}", std::process::id()));
-    std::fs::create_dir_all(&directory)?;
-    let report = std::env::var_os(OUTPUT_ENV)
-        .map(PathBuf::from)
-        .map(|path| {
-            if path.is_absolute() {
-                path
-            } else {
-                root.join(path)
-            }
-        })
-        .unwrap_or_else(|| directory.join("golden-foundation-report.json"));
-    if let Some(parent) = report.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    let directory = new_run_directory(root, RUN_ROOT_ENV, "golden-foundation")?;
+    let report = rooted_env_path(root, OUTPUT_ENV, || {
+        directory.join("golden-foundation-report.json")
+    });
     Ok(GoldenRunPaths {
         project: directory.join("windows-alpha-golden-foundation.mdp"),
         directory,
         report,
     })
-}
-
-fn wait_for_media_imports(state: &mut AppState) -> anyhow::Result<()> {
-    let deadline = Instant::now() + IMPORT_TIMEOUT;
-    while state.pending_media_import_batches() > 0 {
-        state.poll_media_imports();
-        if state.pending_media_import_batches() == 0 {
-            break;
-        }
-        ensure!(
-            Instant::now() < deadline,
-            "timed out waiting for media import"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    Ok(())
 }
 
 fn author_checkpoint(state: &AppState) -> anyhow::Result<AuthorCheckpoint> {
@@ -332,18 +282,13 @@ fn execute_foundation_slice(
         slice.required_content == ["clip-audio-gain-pan-fades"],
         "foundation slice content contract drifted"
     );
+    ensure!(
+        slice.required_exports.is_empty() && slice.timeline_window.is_none(),
+        "foundation slice must not claim export coverage"
+    );
 
     let manifest: CorpusManifest = load_json(&root.join("tests/validation/corpus-manifest.json"))?;
-    let fixture_root = std::env::var_os(FIXTURE_ROOT_ENV)
-        .map(PathBuf::from)
-        .map(|path| {
-            if path.is_absolute() {
-                path
-            } else {
-                root.join(path)
-            }
-        })
-        .unwrap_or_else(|| root.join("tests/fixtures"));
+    let fixture_root = fixture_root(root);
     let fixture = resolve_fixture(root, &fixture_root, &contract, &manifest, "pcm-audio")?;
     let settings = sequence_settings_from_contract(&contract.timeline)?;
 
@@ -357,7 +302,7 @@ fn execute_foundation_slice(
         mondrian_core::ProjectColorEnvironment::default(),
         mondrian_core::ProjectSettings::default(),
     )?;
-    runtime_cleanup.path = state.project_runtime_dir().map(Path::to_path_buf);
+    runtime_cleanup.track(state.project_runtime_dir().map(Path::to_path_buf));
     state.close_project();
 
     ensure!(
@@ -541,7 +486,7 @@ fn execute_foundation_slice(
     );
     let reopened_clip = find_audio_clip(&state, clip_id)?.0;
     ensure!(
-        reopened_clip.asset_id() == Some(asset.id),
+        reopened_clip.media_asset_id() == Some(asset.id),
         "save/reopen changed Clip asset identity"
     );
     let reopened_edit = reopened_clip
@@ -581,7 +526,7 @@ fn execute_foundation_slice(
     )?;
 
     Ok(GoldenFoundationReport {
-        schema_version: 2,
+        schema_version: 3,
         profile: FOUNDATION_SLICE_ID,
         contract_id: contract.id,
         corpus_revision: manifest.corpus_revision,
@@ -614,11 +559,6 @@ fn ensure_requirement_evidence<'a>(
     Ok(())
 }
 
-fn write_report<T: Serialize>(path: &Path, report: &T) -> anyhow::Result<()> {
-    let bytes = serde_json::to_vec_pretty(report)?;
-    std::fs::write(path, bytes).with_context(|| format!("write {}", path.display()))
-}
-
 #[test]
 #[ignore = "Golden foundation gate requires the generated canonical PCM fixture"]
 fn golden_project_foundation_audio_authoring_gate() -> anyhow::Result<()> {
@@ -643,7 +583,7 @@ fn golden_project_foundation_audio_authoring_gate() -> anyhow::Result<()> {
         }
         Err(error) => {
             let failure = serde_json::json!({
-                "schema_version": 2,
+                "schema_version": 3,
                 "profile": FOUNDATION_SLICE_ID,
                 "status": "failed",
                 "error": format!("{error:#}")

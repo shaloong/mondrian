@@ -1413,7 +1413,7 @@ impl AppState {
                 if clip.is_disabled {
                     continue;
                 }
-                if let Some(asset_id) = clip.asset_id() {
+                if let Some(asset_id) = clip.media_asset_id() {
                     candidates.push((clip.position, asset_id));
                 }
             }

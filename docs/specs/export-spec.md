@@ -212,8 +212,15 @@ samples from RGBA8.
 
 FFmpeg writes a unique sibling partial path, never the requested final path.
 Mondrian waits with bounded stderr capture and cooperative cancellation, then
-validates stream presence, codec signal, geometry, rate, duration, color/HDR
-metadata, and other preset expectations against that partial deliverable.
+validates the typed preset-derived `ExportValidationExpectations` against that
+partial deliverable. The mux family and MP4/QuickTime major brand must match.
+Video and audio each use a closed `Required(exact constraints) / Forbidden`
+presence contract. Required video proves codec/profile, pixel-format-derived
+bit depth, exact rational frame rate, geometry, range/CICP and static HDR exact
+metadata or required absence. Required audio proves codec, sample rate, channel
+count and semantic layout. Duration must remain within the explicit delivery
+tolerance. The same pass returns a typed `ExportOutputProbe` for Headless
+evidence; acceptance code must not reconstruct a second ffprobe policy.
 
 Only a validated partial may enter Publishing:
 

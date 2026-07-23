@@ -499,9 +499,17 @@ impl Clip {
         self.content.kind()
     }
 
-    /// Asset identity for content backed by the project asset library.
-    pub const fn asset_id(&self) -> Option<AssetId> {
-        self.content.asset_id()
+    /// Asset Library identity for asset-backed Clip content.
+    ///
+    /// Generated content may have a library identity without owning an
+    /// external media file.
+    pub const fn library_asset_id(&self) -> Option<AssetId> {
+        self.content.library_asset_id()
+    }
+
+    /// File-backed media identity required by decode and export.
+    pub const fn media_asset_id(&self) -> Option<AssetId> {
+        self.content.media_asset_id()
     }
 
     /// Nested Sequence identity for nested content.
@@ -1063,6 +1071,25 @@ mod tests {
             clip.media_interpretation().expect("media interpretation").color_space_override,
             Some(ColorSpace::Rec2100Hlg)
         );
+    }
+
+    #[test]
+    fn library_identity_does_not_imply_a_file_media_dependency() {
+        let media_id = AssetId::new();
+        let adjustment_id = AssetId::new();
+        let solid_id = AssetId::new();
+        let media = Clip::new(media_id, tt(0), tt(10)).expect("media Clip");
+        let adjustment =
+            Clip::new_adjustment_layer(adjustment_id, tt(0), tt(10)).expect("adjustment Clip");
+        let solid = Clip::new_solid_color(solid_id, Color::from_hex(0x336699), tt(0), tt(10))
+            .expect("solid Clip");
+
+        assert_eq!(media.library_asset_id(), Some(media_id));
+        assert_eq!(media.media_asset_id(), Some(media_id));
+        assert_eq!(adjustment.library_asset_id(), Some(adjustment_id));
+        assert_eq!(adjustment.media_asset_id(), None);
+        assert_eq!(solid.library_asset_id(), Some(solid_id));
+        assert_eq!(solid.media_asset_id(), None);
     }
 
     #[test]

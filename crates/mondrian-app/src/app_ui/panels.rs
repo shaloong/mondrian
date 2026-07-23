@@ -2597,7 +2597,7 @@ fn timeline_clip_from_sequence_clip(
     }
     if kind == TimelineClipKind::Audio {
         if let Some(lib) = library {
-            if let Some(asset_id) = clip.asset_id() {
+            if let Some(asset_id) = clip.media_asset_id() {
                 if let Ok(Some(record)) = lib.get_asset(asset_id) {
                     view = view.with_source_identity(
                         record.id,
@@ -3074,7 +3074,8 @@ fn inspector_audio_components(state: &AppState, clip: &Clip) -> Vec<InspectorAud
     let asset = (!clip.is_nested_sequence())
         .then(|| {
             state.asset_library().and_then(|library| {
-                clip.asset_id().and_then(|asset_id| library.get_asset(asset_id).ok().flatten())
+                clip.media_asset_id()
+                    .and_then(|asset_id| library.get_asset(asset_id).ok().flatten())
             })
         })
         .flatten();

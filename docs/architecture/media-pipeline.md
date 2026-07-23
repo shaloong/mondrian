@@ -188,6 +188,11 @@ pixel formats retain an unproven marker rather than becoming YUV420P/8-bit.
 bit depth, filename, or extension. A professional Main10 gate requires the
 opened decoder context to report `HevcMain10`; persisted records written before
 these proof fields default to unproven and must be re-probed before acceptance.
+The same rule applies to H.264. Baseline, constrained baseline, Main, Extended,
+High, High10, 4:2:2, 4:4:4, predictive and Intra variants are retained as typed
+`VideoCodecProfile` values from the opened decoder context. A known H.264 High
+stream must not collapse to `Other`, because reimport and proxy/original
+comparison would otherwise discard evidence the decoder already proved.
 Likewise, a container duration cannot prove that its primary audio or video
 stream spans the same interval. Professional acceptance requires a positive
 stream-local duration for the relevant primary stream and rejects missing or

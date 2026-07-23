@@ -6,7 +6,8 @@ use crate::preset::{
     TimelineExportSnapshot, VideoCodecConfig,
 };
 use crate::validator::{
-    validate_export_output, ExpectedVideoConstraints, ExportValidationExpectations,
+    delivery_bit_depth_value, expected_audio_constraints, expected_video_encoding,
+    validate_export_output, ExpectedStream, ExpectedVideoConstraints, ExportValidationExpectations,
 };
 use mondrian_audio::{
     compile_audio_program, AudioCompileRequest, AudioContinuityEpoch, AudioDecodedSource,
@@ -1456,16 +1457,38 @@ fn execute_timeline_export(
                 Ok(signal) => signal,
                 Err(error) => return JobExecutionResult::Failed(error),
             };
+        let expected_audio = match &audio_input {
+            TimelineAudioInput::Disabled => None,
+            TimelineAudioInput::PcmFile { sample_rate, channel_layout, .. }
+            | TimelineAudioInput::Silent { sample_rate, channel_layout } => {
+                match expected_audio_constraints(
+                    &job.config.preset.audio,
+                    *sample_rate,
+                    *channel_layout,
+                ) {
+                    Some(expected) => Some(expected),
+                    None => {
+                        return JobExecutionResult::Failed(
+                            "已启用的音频输出没有可证明的编码合同".to_string(),
+                        );
+                    }
+                }
+            }
+        };
         let validation_expectations = ExportValidationExpectations {
-            require_video_stream: true,
-            require_audio_stream: !matches!(&audio_input, TimelineAudioInput::Disabled),
-            expected_video: Some(ExpectedVideoConstraints {
+            container: job.config.preset.container,
+            video: ExpectedStream::Required(ExpectedVideoConstraints {
+                encoding: Some(expected_video_encoding(&job.config.preset.video)),
+                bit_depth: Some(delivery_bit_depth_value(delivery.bit_depth)),
                 width: Some(width),
                 height: Some(height),
                 fps_num: Some(range.fps_num),
                 fps_den: Some(range.fps_den),
                 signal: Some(expected_video_signal),
             }),
+            audio: expected_audio
+                .map(ExpectedStream::Required)
+                .unwrap_or(ExpectedStream::Forbidden),
             expected_duration_secs: Some(
                 range.total_frames as f64 * range.fps_den as f64 / range.fps_num.max(1) as f64,
             ),
@@ -1606,7 +1629,7 @@ fn execute_timeline_export(
             Ok(output) if output.status.success() => {
                 report(ExportProgress::validating(0.99));
                 match validate_export_output(output_path, &validation_expectations) {
-                    Ok(()) => JobExecutionResult::Completed,
+                    Ok(_) => JobExecutionResult::Completed,
                     Err(err) => JobExecutionResult::Failed(format!("导出结果校验失败: {err}")),
                 }
             }
@@ -2420,7 +2443,7 @@ fn collect_sequence_asset_ids(
                 collect_sequence_asset_ids(timeline, nested_sequence, depth + 1, asset_ids);
                 continue;
             }
-            if let Some(asset_id) = clip.asset_id() {
+            if let Some(asset_id) = clip.media_asset_id() {
                 asset_ids.insert(asset_id);
             }
         }
@@ -5339,7 +5362,10 @@ mod tests {
         assert_eq!(expected.color_transfer.as_deref(), Some("smpte2084"));
         assert_eq!(expected.color_matrix.as_deref(), Some("bt2020nc"));
         assert!(!expected.require_color_tags_absent);
-        assert!(expected.static_hdr_metadata.is_none());
+        assert_eq!(
+            expected.static_hdr_metadata,
+            crate::validator::ExpectedStaticHdrMetadata::Absent
+        );
 
         settings.color_management.static_hdr_metadata_policy =
             StaticHdrMetadataPolicy::WriteAuthored;
@@ -5349,9 +5375,11 @@ mod tests {
             Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
         let expected = expected_export_video_signal(&settings, &delivery)
             .expect("valid static HDR metadata contract");
-        let expected_static_hdr = expected
-            .static_hdr_metadata
-            .expect("post-encode contract must retain authored static HDR metadata");
+        let crate::validator::ExpectedStaticHdrMetadata::Exact(expected_static_hdr) =
+            expected.static_hdr_metadata
+        else {
+            panic!("post-encode contract must retain authored static HDR metadata");
+        };
         assert_eq!(
             expected_static_hdr.content_light,
             VideoContentLightMetadata::rec2100_1000_nit_reference()

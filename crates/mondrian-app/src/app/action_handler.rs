@@ -2496,7 +2496,7 @@ impl AppState {
                             reason: "asset library is unavailable".to_string(),
                         })?;
                     let asset_id =
-                        clip.asset_id().ok_or_else(|| MondrianError::WorkflowStepFailed {
+                        clip.media_asset_id().ok_or_else(|| MondrianError::WorkflowStepFailed {
                             step_id: STEP_ID.to_string(),
                             reason: "non-media Clip cannot select an Asset Component".to_string(),
                         })?;
@@ -3879,7 +3879,7 @@ mod tests {
         let created = sequence.video_tracks[0]
             .clips
             .iter()
-            .find(|clip| clip.asset_id() == Some(asset_id))
+            .find(|clip| clip.library_asset_id() == Some(asset_id))
             .expect("created clip");
         assert_eq!(created.position, tt(40, tb));
         assert_eq!(created.label.as_deref(), Some("Slate"));
@@ -4526,12 +4526,11 @@ mod tests {
             .get_asset(asset_id)
             .expect("get asset")
             .is_none());
-        assert!(state
-            .active_sequence()
-            .expect("sequence")
-            .video_tracks
-            .iter()
-            .all(|track| track.clips.iter().all(|clip| clip.asset_id() != Some(asset_id))));
+        assert!(
+            state.active_sequence().expect("sequence").video_tracks.iter().all(|track| {
+                track.clips.iter().all(|clip| clip.library_asset_id() != Some(asset_id))
+            })
+        );
         assert!(state.can_undo_action());
         assert!(state
             .status_hint
@@ -4871,13 +4870,13 @@ mod tests {
             !sequence.video_tracks[0]
                 .clips
                 .iter()
-                .any(|clip| clip.asset_id() == Some(asset_id)),
+                .any(|clip| clip.library_asset_id() == Some(asset_id)),
             "clips referencing deleted assets should be removed"
         );
         assert!(sequence.video_tracks[0]
             .clips
             .iter()
-            .any(|clip| clip.asset_id() == Some(keep_asset_id)));
+            .any(|clip| clip.library_asset_id() == Some(keep_asset_id)));
         let events: Vec<AppEvent> = events.try_iter().collect();
         assert!(events.iter().any(
             |event| matches!(event, AppEvent::AssetDeleted { asset_id: event_id } if *event_id == asset_id)
@@ -7326,7 +7325,7 @@ mod tests {
 
         let mut video_clip = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
         let mut audio_clip = Clip::new(
-            video_clip.asset_id().expect("video asset"),
+            video_clip.media_asset_id().expect("video asset"),
             tt(10, tb),
             tt(20, tb),
         )

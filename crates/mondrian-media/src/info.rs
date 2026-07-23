@@ -41,12 +41,48 @@ pub enum VideoCodec {
 /// profile from codec, bit depth, filename, or container extension.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VideoCodecProfile {
+    /// Decoder did not prove a codec profile.
     #[default]
     Unknown,
+    /// H.264 constrained profile.
+    H264Constrained,
+    /// H.264 Intra profile.
+    H264Intra,
+    /// H.264 Baseline Profile.
+    H264Baseline,
+    /// H.264 Constrained Baseline Profile.
+    H264ConstrainedBaseline,
+    /// H.264 Main Profile.
+    H264Main,
+    /// H.264 Extended Profile.
+    H264Extended,
+    /// H.264 High Profile.
+    H264High,
+    /// H.264 High 10 Profile.
+    H264High10,
+    /// H.264 High 10 Intra Profile.
+    H264High10Intra,
+    /// H.264 High 4:2:2 Profile.
+    H264High422,
+    /// H.264 High 4:2:2 Intra Profile.
+    H264High422Intra,
+    /// H.264 High 4:4:4 Profile.
+    H264High444,
+    /// H.264 High 4:4:4 Predictive Profile.
+    H264High444Predictive,
+    /// H.264 High 4:4:4 Intra Profile.
+    H264High444Intra,
+    /// H.264 CAVLC 4:4:4 Intra Profile.
+    H264Cavlc444,
+    /// HEVC Main Profile.
     HevcMain,
+    /// HEVC Main 10 Profile.
     HevcMain10,
+    /// HEVC Main Still Picture Profile.
     HevcMainStillPicture,
+    /// HEVC Range Extensions profile family.
     HevcRangeExtensions,
+    /// Decoder proved a profile not represented by this product version.
     Other,
 }
 
@@ -2264,11 +2300,26 @@ fn map_pixel_format(pixel: ffmpeg::util::format::pixel::Pixel) -> Option<PixelFo
 }
 
 fn map_video_codec_profile(profile: ffmpeg::codec::Profile) -> VideoCodecProfile {
-    use ffmpeg::codec::profile::HEVC;
+    use ffmpeg::codec::profile::{H264, HEVC};
     use ffmpeg::codec::Profile;
 
     match profile {
         Profile::Unknown | Profile::Reserved => VideoCodecProfile::Unknown,
+        Profile::H264(H264::Constrained) => VideoCodecProfile::H264Constrained,
+        Profile::H264(H264::Intra) => VideoCodecProfile::H264Intra,
+        Profile::H264(H264::Baseline) => VideoCodecProfile::H264Baseline,
+        Profile::H264(H264::ConstrainedBaseline) => VideoCodecProfile::H264ConstrainedBaseline,
+        Profile::H264(H264::Main) => VideoCodecProfile::H264Main,
+        Profile::H264(H264::Extended) => VideoCodecProfile::H264Extended,
+        Profile::H264(H264::High) => VideoCodecProfile::H264High,
+        Profile::H264(H264::High10) => VideoCodecProfile::H264High10,
+        Profile::H264(H264::High10Intra) => VideoCodecProfile::H264High10Intra,
+        Profile::H264(H264::High422) => VideoCodecProfile::H264High422,
+        Profile::H264(H264::High422Intra) => VideoCodecProfile::H264High422Intra,
+        Profile::H264(H264::High444) => VideoCodecProfile::H264High444,
+        Profile::H264(H264::High444Predictive) => VideoCodecProfile::H264High444Predictive,
+        Profile::H264(H264::High444Intra) => VideoCodecProfile::H264High444Intra,
+        Profile::H264(H264::CAVLC444) => VideoCodecProfile::H264Cavlc444,
         Profile::HEVC(HEVC::Main) => VideoCodecProfile::HevcMain,
         Profile::HEVC(HEVC::Main10) => VideoCodecProfile::HevcMain10,
         Profile::HEVC(HEVC::MainStillPicture) => VideoCodecProfile::HevcMainStillPicture,
@@ -2399,7 +2450,13 @@ mod tests {
     }
 
     #[test]
-    fn probe_mapping_preserves_exact_hevc_main10_profile() {
+    fn probe_mapping_preserves_exact_h264_high_and_hevc_main10_profiles() {
+        assert_eq!(
+            map_video_codec_profile(ffmpeg::codec::Profile::H264(
+                ffmpeg::codec::profile::H264::High
+            )),
+            VideoCodecProfile::H264High
+        );
         assert_eq!(
             map_video_codec_profile(ffmpeg::codec::Profile::HEVC(
                 ffmpeg::codec::profile::HEVC::Main10

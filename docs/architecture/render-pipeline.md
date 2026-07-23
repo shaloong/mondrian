@@ -393,10 +393,19 @@ OCIO export view/display-view transform, the export health report must fail
 with a structured output-transform issue instead of relying on the color-space
 pipeline's `tone_map` flag. That flag is not a substitute for an OCIO view
 transform.
-After encoding, `mondrian-export` runs ffprobe and validates the actual encoded
-pixel format, video range, primaries, transfer characteristic, and matrix
-against expectations derived from the same export signal contract. Encoder
-success without matching signal evidence is an export failure.
+After encoding, `mondrian-export` runs ffprobe through one typed
+`ExportValidationExpectations` contract. Stream presence is a closed
+`Required(exact constraints) / Forbidden` algebra rather than independent
+booleans. Validation proves the mux family and MP4/QuickTime major brand,
+exactly one required video/audio stream, codec/profile, encoded bit depth,
+constant rational frame rate, dimensions, pixel format, range, primaries,
+transfer, matrix, duration, audio codec/sample rate/channel count/layout, and
+either exact authored static HDR metadata or its required absence. Bit depth is
+derived from the already exact pixel format because `bits_per_raw_sample` is
+not consistently populated across encoders. The returned `ExportOutputProbe`
+is the typed evidence consumed by Headless acceptance. Encoder success without
+this evidence is an export failure; the queue may publish `Completed` only
+after validation and atomic final publication.
 
 ## Internal Float Precision
 
