@@ -80,6 +80,7 @@ pub(super) struct TimelineTrackResizeUpdate {
 pub(super) struct TimelineEditCommandContext {
     pub selected_clip: Option<TimelineClipRef>,
     pub selected_track: Option<TimelineTrackRef>,
+    pub selected_transition: bool,
     pub in_point_frame: i64,
     pub has_out_point: bool,
     pub clip_intersects_playhead: bool,
@@ -749,7 +750,12 @@ pub(super) fn edit_command_has_local_target(
             context.in_point_frame > 0 || context.has_out_point
         }
         TimelineEditCommand::SplitAtPlayhead => context.clip_intersects_playhead,
-        TimelineEditCommand::DeleteSelection | TimelineEditCommand::RippleDeleteSelection => {
+        TimelineEditCommand::DeleteSelection => {
+            context.selected_clip.is_some()
+                || context.selected_track.is_some()
+                || context.selected_transition
+        }
+        TimelineEditCommand::RippleDeleteSelection => {
             context.selected_clip.is_some() || context.selected_track.is_some()
         }
         TimelineEditCommand::CutSelection
@@ -1417,6 +1423,7 @@ mod tests {
         let empty = TimelineEditCommandContext {
             selected_clip: None,
             selected_track: None,
+            selected_transition: false,
             in_point_frame: 0,
             has_out_point: false,
             clip_intersects_playhead: false,
@@ -1442,6 +1449,16 @@ mod tests {
         assert!(!edit_command_has_local_target(
             TimelineEditCommand::SplitAtPlayhead,
             empty
+        ));
+
+        let selected_transition = TimelineEditCommandContext { selected_transition: true, ..empty };
+        assert!(edit_command_has_local_target(
+            TimelineEditCommand::DeleteSelection,
+            selected_transition
+        ));
+        assert!(!edit_command_has_local_target(
+            TimelineEditCommand::RippleDeleteSelection,
+            selected_transition
         ));
 
         let selected_track =
@@ -1486,6 +1503,7 @@ mod tests {
         let context = TimelineEditCommandContext {
             selected_clip: Some(clip_ref),
             selected_track: None,
+            selected_transition: false,
             in_point_frame: 0,
             has_out_point: false,
             clip_intersects_playhead: false,

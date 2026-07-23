@@ -17,7 +17,7 @@ use mondrian_core::automation::{ParameterResourceReference, ParameterSchema, Pro
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::types::{
     AssetId, AudioComponentEditId, AudioSourceComponentId, ClipId, ColorSpace, EffectId, JobId,
-    Rational, SequenceId, TrackId,
+    Rational, SequenceId, TrackId, VideoTransitionId,
 };
 use mondrian_core::{
     Color, FrameRounding, TimelineDisplayContract, TimelineDisplayFormat, TimelineTime,
@@ -41,6 +41,7 @@ use mondrian_timeline::sequence::{
     InputColorResolutionSource, MissingColorMetadataPolicy, Sequence,
 };
 use mondrian_timeline::track::Track;
+use mondrian_timeline::VideoTransitionType;
 use mondrian_ui_core::types::SplitDirection;
 use mondrian_ui_core::DragPayload;
 use mondrian_ui_core::Widget;
@@ -54,12 +55,13 @@ use mondrian_ui_widgets::{
     FlexContainer, Label, MenuItem, NodeGraphEdge, NodeGraphNode, NodeGraphView, PanelList,
     PanelListItem, PropertyPanel, PropertyPanelOptions, PropertyRow, PropertySection, RasterImage,
     ScrollView, Slider, TextInput, TimelineAssetDrop, TimelineClip, TimelineClipKind,
-    TimelineClipMove, TimelineClipRef, TimelineClipTrim, TimelineEditCommand, TimelineInOutPoint,
-    TimelineSeek, TimelineSeekSource as WidgetTimelineSeekSource, TimelineToolbarIconSlot,
-    TimelineTrack, TimelineTrackControl, TimelineTrackControlIconSlot, TimelineTrackMove,
-    TimelineTrackRef, TimelineTrimEdge, TimelineView, VideoScopesSurface, VideoScopesTextureSet,
-    ViewerCanvasBackground, ViewerControl, ViewerFrameContent, ViewerStatusTone, ViewerSurface,
-    WaveformDisplay,
+    TimelineClipMove, TimelineClipRef, TimelineClipTrim, TimelineCutRef, TimelineEditCommand,
+    TimelineInOutPoint, TimelineSeek, TimelineSeekSource as WidgetTimelineSeekSource,
+    TimelineToolbarIconSlot, TimelineTrack, TimelineTrackControl, TimelineTrackControlIconSlot,
+    TimelineTrackMove, TimelineTrackRef, TimelineTransition, TimelineTransitionRef,
+    TimelineTransitionResize, TimelineTrimEdge, TimelineView, VideoScopesSurface,
+    VideoScopesTextureSet, ViewerCanvasBackground, ViewerControl, ViewerFrameContent,
+    ViewerStatusTone, ViewerSurface, WaveformDisplay,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -85,11 +87,13 @@ use crate::app::ui_actions::{
     inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
     inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
     inspector_set_effect_enabled_action, inspector_set_effect_property_action,
-    timeline_add_track_action, timeline_clear_in_out_points_action, timeline_drop_asset_action,
-    timeline_move_clip_action, timeline_move_track_action, timeline_open_nested_sequence_action,
+    timeline_add_track_action, timeline_clear_in_out_points_action,
+    timeline_create_cross_dissolve_action, timeline_drop_asset_action, timeline_move_clip_action,
+    timeline_move_track_action, timeline_open_nested_sequence_action,
     timeline_roll_selected_cut_to_playhead_action, timeline_seek_with_source_action,
-    timeline_select_clip_action, timeline_set_in_out_point_action,
-    timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
+    timeline_select_clip_action, timeline_select_video_transition_action,
+    timeline_set_in_out_point_action, timeline_set_selected_clips_enabled_action,
+    timeline_set_track_control_action, timeline_set_video_transition_range_action,
     timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
     viewer_set_preview_resolution_scale_action, viewer_set_zoom_scale_action,
     AppShellInputColorPipelineDiagnostics, AppShellInterpretAssetDialogPayload,
@@ -109,16 +113,19 @@ use crate::app::ui_actions::{
     InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-    TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineMoveClipPayload,
-    TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
+    TimelineCreateCrossDissolvePayload, TimelineDropAssetPayload, TimelineInOutPointPayloadKind,
+    TimelineMoveClipPayload, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
     TimelineSeekSource as AppTimelineSeekSource, TimelineSelectClipPayload,
-    TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
-    TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
-    TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
+    TimelineSelectVideoTransitionPayload, TimelineSetInOutPointPayload,
+    TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
+    TimelineSetVideoTransitionRangePayload, TimelineTrackControlPayloadKind,
+    TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
     ViewerSetPreviewResolutionScalePayload, ViewerSetZoomScalePayload,
 };
 use crate::app::waveform_service::AudioWaveformSource;
-use crate::app::{AppState, SelectedClipRef};
+use crate::app::{
+    AppState, SelectedClipRef, SelectedVideoTransitionRef, VideoTransitionHandleState,
+};
 use crate::app_ui::action_availability::app_state_action_enabled;
 use crate::app_ui::icons::AppIcon;
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
@@ -958,6 +965,7 @@ pub struct TimelinePanelModel {
     edit_availability: Option<TimelineEditAvailability>,
     track_refs: Vec<AppTimelineTrackRef>,
     clip_refs: Vec<Vec<ClipId>>,
+    transition_refs: Vec<Vec<VideoTransitionId>>,
     nested_sequence_refs: Vec<Vec<Option<SequenceId>>>,
     pub waveform_display: WaveformDisplay,
     pub(crate) waveform_source: Option<AudioWaveformSource>,
@@ -976,6 +984,7 @@ impl Default for TimelinePanelModel {
             edit_availability: None,
             track_refs: Vec::new(),
             clip_refs: Vec::new(),
+            transition_refs: Vec::new(),
             nested_sequence_refs: Vec::new(),
             waveform_display: WaveformDisplay::BottomAligned,
             waveform_source: None,
@@ -1079,6 +1088,8 @@ impl TimelinePanelModel {
                 state.selected_clips(),
                 state.selected_tracks(),
                 state.asset_library(),
+                state.selected_video_transition(),
+                Some(state),
             )
             .with_playhead_frame(state.current_frame())
             .with_app_edit_availability(state)
@@ -1095,7 +1106,14 @@ impl TimelinePanelModel {
         selected_clips: &[SelectedClipRef],
         selected_tracks: &[TrackId],
     ) -> Self {
-        Self::from_sequence_with_library(sequence, selected_clips, selected_tracks, None)
+        Self::from_sequence_with_library(
+            sequence,
+            selected_clips,
+            selected_tracks,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Same as [`from_sequence`] but attaches audio waveform peaks for
@@ -1105,10 +1123,12 @@ impl TimelinePanelModel {
         selected_clips: &[SelectedClipRef],
         selected_tracks: &[TrackId],
         library: Option<&AssetLibrary>,
+        selected_transition: Option<SelectedVideoTransitionRef>,
+        state: Option<&AppState>,
     ) -> Self {
         let video_tracks = sequence.video_tracks.iter().enumerate().rev().map(|(index, track)| {
             let label = format!("V{}", index + 1);
-            let mut view_track = timeline_track_from_sequence_track(
+            let mut projection = timeline_track_projection_from_sequence_track(
                 track,
                 true,
                 sequence.settings.frame_rate,
@@ -1116,16 +1136,30 @@ impl TimelinePanelModel {
                 selected_tracks,
                 library,
             );
-            view_track.label = label;
+            projection.track.label = label;
+            let transition_views = timeline_transition_views_for_track(
+                sequence,
+                track,
+                sequence.settings.frame_rate,
+                selected_transition,
+                state,
+            );
+            let transition_ids = transition_views
+                .iter()
+                .map(|(transition_id, _)| *transition_id)
+                .collect::<Vec<_>>();
+            projection.track.transitions =
+                transition_views.into_iter().map(|(_, transition)| transition).collect();
             (
                 AppTimelineTrackRef { track_id: track.id, is_video_track: true },
-                track.clips.iter().map(|clip| clip.id).collect::<Vec<_>>(),
-                track.clips.iter().map(Clip::nested_sequence_id).collect::<Vec<_>>(),
-                view_track,
+                projection.clip_ids,
+                projection.nested_sequence_ids,
+                transition_ids,
+                projection.track,
             )
         });
         let audio_tracks = sequence.audio_tracks.iter().enumerate().map(|(index, track)| {
-            let mut view_track = timeline_track_from_sequence_track(
+            let mut projection = timeline_track_projection_from_sequence_track(
                 track,
                 false,
                 sequence.settings.frame_rate,
@@ -1133,12 +1167,13 @@ impl TimelinePanelModel {
                 selected_tracks,
                 library,
             );
-            view_track.label = format!("A{}", index + 1);
+            projection.track.label = format!("A{}", index + 1);
             (
                 AppTimelineTrackRef { track_id: track.id, is_video_track: false },
-                track.clips.iter().map(|clip| clip.id).collect::<Vec<_>>(),
-                track.clips.iter().map(Clip::nested_sequence_id).collect::<Vec<_>>(),
-                view_track,
+                projection.clip_ids,
+                projection.nested_sequence_ids,
+                Vec::new(),
+                projection.track,
             )
         });
 
@@ -1146,10 +1181,14 @@ impl TimelinePanelModel {
         let mut track_refs = Vec::new();
         let mut clip_refs = Vec::new();
         let mut nested_sequence_refs = Vec::new();
-        for (track_ref, clip_ids, nested_ids, track) in video_tracks.chain(audio_tracks) {
+        let mut transition_refs = Vec::new();
+        for (track_ref, clip_ids, nested_ids, transition_ids, track) in
+            video_tracks.chain(audio_tracks)
+        {
             track_refs.push(track_ref);
             clip_refs.push(clip_ids);
             nested_sequence_refs.push(nested_ids);
+            transition_refs.push(transition_ids);
             tracks.push(track);
         }
         let display = sequence.settings.timeline_display_contract();
@@ -1184,6 +1223,7 @@ impl TimelinePanelModel {
             edit_availability: None,
             track_refs,
             clip_refs,
+            transition_refs,
             nested_sequence_refs,
             waveform_display: WaveformDisplay::BottomAligned,
             waveform_source: None,
@@ -1203,6 +1243,7 @@ impl TimelinePanelModel {
             edit_availability: Some(TimelineEditAvailability::from_app_state(&AppState::new())),
             track_refs: Vec::new(),
             clip_refs: Vec::new(),
+            transition_refs: Vec::new(),
             nested_sequence_refs: Vec::new(),
             waveform_display: WaveformDisplay::BottomAligned,
             waveform_source: None,
@@ -1232,6 +1273,43 @@ impl TimelinePanelModel {
             track_id: track.track_id,
             is_video_track: track.is_video_track,
             clip_id,
+        })
+    }
+
+    fn transition_identity(
+        &self,
+        transition_ref: TimelineTransitionRef,
+    ) -> Option<TimelineSelectVideoTransitionPayload> {
+        let transition_id = *self
+            .transition_refs
+            .get(transition_ref.track_index)?
+            .get(transition_ref.transition_index)?;
+        Some(TimelineSelectVideoTransitionPayload { transition_id })
+    }
+
+    fn cut_transition_payload(
+        &self,
+        cut_ref: TimelineCutRef,
+    ) -> Option<TimelineCreateCrossDissolvePayload> {
+        let clips = self.clip_refs.get(cut_ref.track_index)?;
+        Some(TimelineCreateCrossDissolvePayload {
+            left_clip_id: *clips.get(cut_ref.left_clip_index)?,
+            right_clip_id: *clips.get(cut_ref.right_clip_index)?,
+        })
+    }
+
+    fn transition_resize_payload(
+        &self,
+        resize: TimelineTransitionResize,
+    ) -> Option<TimelineSetVideoTransitionRangePayload> {
+        let transition_id = self.transition_identity(resize.transition_ref)?.transition_id;
+        Some(TimelineSetVideoTransitionRangePayload {
+            transition_id,
+            start_frame: resize.new_start_frame.max(0),
+            end_frame: resize
+                .new_start_frame
+                .saturating_add(resize.new_duration_frames.max(1))
+                .max(1),
         })
     }
 
@@ -2258,38 +2336,137 @@ fn viewer_control_action(control: ViewerControl) -> Action {
     }
 }
 
-fn timeline_track_from_sequence_track(
+struct TimelineTrackProjection {
+    track: TimelineTrack,
+    clip_ids: Vec<ClipId>,
+    nested_sequence_ids: Vec<Option<SequenceId>>,
+}
+
+fn timeline_track_projection_from_sequence_track(
     track: &Track,
     is_video_track: bool,
     frame_rate: Rational,
     selected_clips: &[SelectedClipRef],
     selected_tracks: &[TrackId],
     library: Option<&AssetLibrary>,
-) -> TimelineTrack {
+) -> TimelineTrackProjection {
     let muted = track.is_muted;
     let locked = track.is_locked;
     let visible = track.is_visible;
     let selected = selected_tracks.contains(&track.id);
-    let clips = track
-        .clips
-        .iter()
-        .filter_map(|clip| {
-            timeline_clip_from_sequence_clip(
-                is_video_track,
-                clip,
-                frame_rate,
-                selected_clips,
-                library,
-            )
-        })
-        .collect();
+    let mut clips = Vec::with_capacity(track.clips.len());
+    let mut clip_ids = Vec::with_capacity(track.clips.len());
+    let mut nested_sequence_ids = Vec::with_capacity(track.clips.len());
+    for clip in &track.clips {
+        let Some(view) = timeline_clip_from_sequence_clip(
+            is_video_track,
+            clip,
+            frame_rate,
+            selected_clips,
+            library,
+        ) else {
+            continue;
+        };
+        clips.push(view);
+        clip_ids.push(clip.id);
+        nested_sequence_ids.push(clip.nested_sequence_id());
+    }
 
     let track = if is_video_track {
         TimelineTrack::video(track.name.clone(), clips)
     } else {
         TimelineTrack::audio(track.name.clone(), clips)
     };
-    track.selected(selected).visible(visible).muted(muted).locked(locked)
+    TimelineTrackProjection {
+        track: track.selected(selected).visible(visible).muted(muted).locked(locked),
+        clip_ids,
+        nested_sequence_ids,
+    }
+}
+
+fn timeline_transition_views_for_track(
+    sequence: &Sequence,
+    track: &Track,
+    frame_rate: Rational,
+    selected_transition: Option<SelectedVideoTransitionRef>,
+    state: Option<&AppState>,
+) -> Vec<(VideoTransitionId, TimelineTransition)> {
+    sequence
+        .video_transitions
+        .iter()
+        .filter_map(|transition| {
+            let left = track.clips.iter().find(|clip| clip.id == transition.left)?;
+            let right = track.clips.iter().find(|clip| clip.id == transition.right)?;
+            let start_frame = transition
+                .sequence_range
+                .start
+                .to_frame_position(frame_rate, FrameRounding::Floor)
+                .ok()?
+                .frame
+                .max(0);
+            let end_frame = transition
+                .sequence_range
+                .end()
+                .ok()?
+                .to_frame_position(frame_rate, FrameRounding::Ceil)
+                .ok()?
+                .frame
+                .max(start_frame.saturating_add(1));
+            let cut_frame = left
+                .end_position()
+                .ok()?
+                .to_frame_position(frame_rate, FrameRounding::Nearest)
+                .ok()?
+                .frame
+                .max(0);
+            let minimum_start_frame = left
+                .position
+                .to_frame_position(frame_rate, FrameRounding::Floor)
+                .ok()?
+                .frame
+                .max(0);
+            let maximum_end_frame = right
+                .end_position()
+                .ok()?
+                .to_frame_position(frame_rate, FrameRounding::Ceil)
+                .ok()?
+                .frame
+                .max(end_frame);
+            let label = match &transition.transition_type {
+                VideoTransitionType::CrossDissolve => "Cross Dissolve".to_owned(),
+                VideoTransitionType::Plugin { definition_id } => definition_id.clone(),
+            };
+            let mut view = TimelineTransition::new(
+                label,
+                start_frame,
+                end_frame.saturating_sub(start_frame),
+                cut_frame,
+                minimum_start_frame,
+                maximum_end_frame,
+            )
+            .selected(
+                selected_transition
+                    .is_some_and(|selection| selection.transition_id == transition.id),
+            )
+            .enabled(transition.is_enabled);
+            if let Some(state) = state {
+                let issue = match state.video_transition_handle_state(transition.id) {
+                    Ok(VideoTransitionHandleState::Available) => None,
+                    Ok(VideoTransitionHandleState::Insufficient) => {
+                        Some("当前源素材句柄不足，预览和导出将失败关闭".to_owned())
+                    }
+                    Ok(VideoTransitionHandleState::Unresolved { reason }) => {
+                        Some(format!("无法解析当前源素材句柄：{reason}"))
+                    }
+                    Err(error) => Some(format!("无法解析当前源素材句柄：{error}")),
+                };
+                if let Some(issue) = issue {
+                    view = view.with_handle_issue(issue);
+                }
+            }
+            Some((transition.id, view))
+        })
+        .collect()
 }
 
 fn timeline_clip_from_sequence_clip(
@@ -3435,6 +3612,33 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
                 action_model
                     .clip_identity(clip_ref)
                     .map(timeline_select_clip_action)
+                    .unwrap_or(Action::NoOp)
+            }
+        })
+        .on_transition_select({
+            let action_model = action_model.clone();
+            move |transition_ref, _transition| {
+                action_model
+                    .transition_identity(transition_ref)
+                    .map(timeline_select_video_transition_action)
+                    .unwrap_or(Action::NoOp)
+            }
+        })
+        .on_transition_resize({
+            let action_model = action_model.clone();
+            move |resize, _transition| {
+                action_model
+                    .transition_resize_payload(resize)
+                    .map(timeline_set_video_transition_range_action)
+                    .unwrap_or(Action::NoOp)
+            }
+        })
+        .on_cut_transition_create({
+            let action_model = action_model.clone();
+            move |cut_ref| {
+                action_model
+                    .cut_transition_payload(cut_ref)
+                    .map(timeline_create_cross_dissolve_action)
                     .unwrap_or(Action::NoOp)
             }
         })
@@ -5067,9 +5271,11 @@ mod tests {
         EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_SELECT_EFFECT,
         INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, INSPECTOR_SET_CLIP_CURVE,
         INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK,
-        TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
-        TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT,
-        TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
+        TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_CREATE_CROSS_DISSOLVE, TIMELINE_DROP_ASSET,
+        TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE,
+        TIMELINE_SELECT_CLIP, TIMELINE_SELECT_VIDEO_TRANSITION, TIMELINE_SET_IN_OUT_POINT,
+        TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_VIDEO_TRANSITION_RANGE,
+        TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
     };
     use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
@@ -6680,6 +6886,41 @@ mod tests {
     }
 
     #[test]
+    fn timeline_model_keeps_clip_identity_paired_when_one_projection_fails() {
+        let mut sequence = Sequence::new("projection pairing");
+        let unprojectable = Clip::new(
+            AssetId::new(),
+            TimelineTime::new(i64::MIN, 1).expect("canonical extreme time"),
+            TimelineTime::ONE,
+        )
+        .expect("structurally valid Clip");
+        let expected =
+            Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("visible Clip");
+        let expected_id = expected.id;
+        let track_id = sequence.video_tracks[0].id;
+        sequence.video_tracks[0]
+            .add_clip(unprojectable)
+            .expect("add unprojectable Clip");
+        sequence.video_tracks[0].add_clip(expected).expect("add visible Clip");
+
+        let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
+        let track_index = model
+            .track_refs
+            .iter()
+            .position(|track| track.track_id == track_id)
+            .expect("projected track");
+
+        assert_eq!(model.tracks[track_index].clips.len(), 1);
+        assert_eq!(
+            model
+                .clip_identity(TimelineClipRef { track_index, clip_index: 0 })
+                .expect("visible identity")
+                .clip_id,
+            expected_id
+        );
+    }
+
+    #[test]
     fn timeline_model_maps_sequence_tracks_clips_and_selection() {
         let mut sequence = Sequence::new("edit");
         let tb = sequence.time_base();
@@ -6742,6 +6983,116 @@ mod tests {
         assert!(model.tracks[first_audio].muted);
         assert!(model.tracks[first_audio].locked);
         assert!(model.tracks[first_audio].clips[0].disabled);
+    }
+
+    #[test]
+    fn timeline_model_maps_transition_identity_geometry_and_resize_payload() {
+        let mut sequence = Sequence::new("transition edit");
+        let tb = sequence.time_base();
+        let left = Clip::new_solid_color(
+            AssetId::new(),
+            Color::from_rgba8(255, 0, 0, 255),
+            tt(0, tb),
+            tt(10, tb),
+        )
+        .expect("left Clip");
+        let right = Clip::new_solid_color(
+            AssetId::new(),
+            Color::from_rgba8(0, 0, 255, 255),
+            tt(10, tb),
+            tt(10, tb),
+        )
+        .expect("right Clip");
+        let (left_id, right_id) = (left.id, right.id);
+        sequence.video_tracks[0].add_clip(left).expect("left placement");
+        sequence.video_tracks[0].add_clip(right).expect("right placement");
+
+        let model_without_transition = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
+        let display_track_index = sequence.video_tracks.len() - 1;
+        let create_payload = model_without_transition
+            .cut_transition_payload(TimelineCutRef {
+                track_index: display_track_index,
+                left_clip_index: 0,
+                right_clip_index: 1,
+            })
+            .expect("create payload");
+        assert_eq!(
+            create_payload,
+            TimelineCreateCrossDissolvePayload { left_clip_id: left_id, right_clip_id: right_id }
+        );
+        let Action::Custom { namespace, name, .. } =
+            timeline_create_cross_dissolve_action(create_payload)
+        else {
+            panic!("expected create action");
+        };
+        assert_eq!(namespace, TIMELINE_NAMESPACE);
+        assert_eq!(name, TIMELINE_CREATE_CROSS_DISSOLVE);
+
+        let transition = mondrian_timeline::VideoTransition::cross_dissolve(
+            left_id,
+            right_id,
+            mondrian_core::TimelineTimeRange::new(tt(8, tb), tt(4, tb)).expect("Transition range"),
+        );
+        let transition_id = transition.id;
+        sequence.video_transitions.push(transition);
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.select_video_transition_by_id(transition_id).expect("select Transition");
+
+        let model = TimelinePanelModel::from_app_state(&state);
+        let transition_ref = TimelineTransitionRef {
+            track_index: display_track_index,
+            transition_index: 0,
+        };
+        let view = &model.tracks[display_track_index].transitions[0];
+        assert_eq!(view.start_frame, 8);
+        assert_eq!(view.duration_frames, 4);
+        assert_eq!(view.cut_frame, 10);
+        assert!(view.selected);
+        assert!(view.handle_issue.is_none());
+        assert_eq!(
+            model.transition_identity(transition_ref),
+            Some(TimelineSelectVideoTransitionPayload { transition_id })
+        );
+        let Action::Custom { namespace, name, .. } = timeline_select_video_transition_action(
+            model.transition_identity(transition_ref).expect("selection payload"),
+        ) else {
+            panic!("expected selection action");
+        };
+        assert_eq!(namespace, TIMELINE_NAMESPACE);
+        assert_eq!(name, TIMELINE_SELECT_VIDEO_TRANSITION);
+        assert_eq!(
+            model.transition_resize_payload(TimelineTransitionResize {
+                transition_ref,
+                edge: mondrian_ui_widgets::TimelineTransitionEdge::In,
+                old_start_frame: 8,
+                old_duration_frames: 4,
+                new_start_frame: 7,
+                new_duration_frames: 6,
+            }),
+            Some(TimelineSetVideoTransitionRangePayload {
+                transition_id,
+                start_frame: 7,
+                end_frame: 13,
+            })
+        );
+        let resize_payload = model
+            .transition_resize_payload(TimelineTransitionResize {
+                transition_ref,
+                edge: mondrian_ui_widgets::TimelineTransitionEdge::Out,
+                old_start_frame: 8,
+                old_duration_frames: 4,
+                new_start_frame: 8,
+                new_duration_frames: 5,
+            })
+            .expect("resize payload");
+        let Action::Custom { namespace, name, .. } =
+            timeline_set_video_transition_range_action(resize_payload)
+        else {
+            panic!("expected resize action");
+        };
+        assert_eq!(namespace, TIMELINE_NAMESPACE);
+        assert_eq!(name, TIMELINE_SET_VIDEO_TRANSITION_RANGE);
     }
 
     #[test]

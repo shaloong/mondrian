@@ -112,7 +112,9 @@ pub use selection::{
     SelectedClipRef, SelectedEffectRef, SelectedTrackRef, SelectedVideoTransitionRef,
 };
 use timeline_editing::*;
-pub use video_transitions::{VideoTransitionEditOutcome, VideoTransitionHandlePolicy};
+pub use video_transitions::{
+    VideoTransitionEditOutcome, VideoTransitionHandlePolicy, VideoTransitionHandleState,
+};
 
 #[derive(Debug, Clone)]
 pub struct DraggingAsset {

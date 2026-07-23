@@ -80,11 +80,13 @@ pub use text_input::{MultilineTextInput, TabBehavior, TextInput, TextInputChange
 pub use timeline_view::{
     TimelineAssetDrop, TimelineAssetDropAction, TimelineClip, TimelineClipAction, TimelineClipKind,
     TimelineClipMove, TimelineClipMoveAction, TimelineClipRef, TimelineClipTrim,
-    TimelineClipTrimAction, TimelineEditCommand, TimelineEditCommandAction, TimelineInOutPoint,
-    TimelineInOutPointAction, TimelineSeek, TimelineSeekAction, TimelineSeekSource, TimelineTool,
-    TimelineToolbarIconSlot, TimelineTrack, TimelineTrackAction, TimelineTrackAddAction,
-    TimelineTrackControl, TimelineTrackControlAction, TimelineTrackControlIconSlot,
-    TimelineTrackKind, TimelineTrackMove, TimelineTrackMoveAction, TimelineTrackRef,
+    TimelineClipTrimAction, TimelineCutAction, TimelineCutRef, TimelineEditCommand,
+    TimelineEditCommandAction, TimelineInOutPoint, TimelineInOutPointAction, TimelineSeek,
+    TimelineSeekAction, TimelineSeekSource, TimelineTool, TimelineToolbarIconSlot, TimelineTrack,
+    TimelineTrackAction, TimelineTrackAddAction, TimelineTrackControl, TimelineTrackControlAction,
+    TimelineTrackControlIconSlot, TimelineTrackKind, TimelineTrackMove, TimelineTrackMoveAction,
+    TimelineTrackRef, TimelineTransition, TimelineTransitionAction, TimelineTransitionEdge,
+    TimelineTransitionRef, TimelineTransitionResize, TimelineTransitionResizeAction,
     TimelineTrimEdge, TimelineView, TimelineViewState, WaveformDisplay,
 };
 pub use vector_icon::{VectorIcon, VectorIconError};

@@ -34,7 +34,52 @@ pub struct VideoTransitionEditOutcome {
     pub was_shortened: bool,
 }
 
+/// Current external source-handle state for one authored visual Transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VideoTransitionHandleState {
+    /// Both endpoint sources can satisfy the complete authored range.
+    Available,
+    /// Sources resolved, but at least one lacks the authored handle interval.
+    Insufficient,
+    /// A recoverable external dependency could not be resolved exactly.
+    Unresolved { reason: String },
+}
+
 impl AppState {
+    /// Resolve current source-handle evidence for one authored Transition.
+    ///
+    /// This observation never repairs author state or changes the Transition
+    /// range. Product surfaces use it for fail-closed diagnostics after relink
+    /// or nested-Sequence edits change recoverable dependencies.
+    pub fn video_transition_handle_state(
+        &self,
+        transition_id: VideoTransitionId,
+    ) -> mondrian_core::Result<VideoTransitionHandleState> {
+        let sequence = self.active_sequence().ok_or_else(no_active_sequence)?;
+        let transition = sequence
+            .video_transitions
+            .iter()
+            .find(|transition| transition.id == transition_id)
+            .ok_or_else(|| transition_not_found(transition_id))?;
+        let (_, _, left, right) =
+            transition_endpoints(sequence, transition.left, transition.right)?;
+        let extents = self.transition_source_extent(left).and_then(|left_extent| {
+            self.transition_source_extent(right)
+                .map(|right_extent| (left_extent, right_extent))
+        });
+        let (left_extent, right_extent) = match extents {
+            Ok(extents) => extents,
+            Err(error) => {
+                return Ok(VideoTransitionHandleState::Unresolved { reason: error.to_string() });
+            }
+        };
+        if handles_satisfy(transition, left, right, left_extent, right_extent)? {
+            Ok(VideoTransitionHandleState::Available)
+        } else {
+            Ok(VideoTransitionHandleState::Insufficient)
+        }
+    }
+
     /// Create a centered, approximately one-second Cross Dissolve on the
     /// Sequence frame grid.
     ///
@@ -602,6 +647,12 @@ mod tests {
             .select_video_transition_by_id(created.transition_id)
             .expect("select Transition");
         assert_eq!(selected.transition_id, created.transition_id);
+        assert_eq!(
+            state
+                .video_transition_handle_state(created.transition_id)
+                .expect("handle state"),
+            VideoTransitionHandleState::Available
+        );
         assert!(state.selection.selected_clips.is_empty());
         assert!(state.selection.selected_track_ids.is_empty());
         assert_eq!(

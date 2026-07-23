@@ -303,7 +303,12 @@ grid, clamped only to the endpoint placement union. Real source-handle
 admission remains fail-closed and never silently selects the explicit
 shortening policy. A selected Transition stores only its stable identity;
 Track membership continues to derive from the strong Clip endpoints. Timeline
-gesture/panel affordances and a GPU Transition lowering remain separate M1 work.
+overlays now create Cross Dissolve at an exact adjacent unlocked video cut,
+select/delete by stable identity, and resize either exact range edge through one
+typed App action. The view Adapter reports current insufficient or unresolved
+source handles without modifying author state. A GPU Transition lowering remains
+separate M1 work; until it exists, shared CPU Preview/Export execution remains
+the only normative Cross Dissolve backend.
 
 Transform, speed, blend mode, solid color, masks, and effects are currently
 exposed through `PropertyHost`/`PropertyBag`. Every product definition carries

@@ -129,6 +129,14 @@ pub struct ColorTokens {
     pub timeline_clip_selected_border: Color,
     /// Selected audio timeline clip outline.
     pub timeline_clip_audio_selected_border: Color,
+    /// Visual Transition body.
+    pub timeline_transition: Color,
+    /// Visual Transition body while hovered.
+    pub timeline_transition_hover: Color,
+    /// Selected visual Transition outline and handles.
+    pub timeline_transition_selected: Color,
+    /// Visual Transition whose current source handles fail closed.
+    pub timeline_transition_blocked: Color,
     pub timeline_clip_video: Color,
     pub timeline_clip_video_hover: Color,
     pub timeline_clip_audio: Color,
@@ -263,6 +271,10 @@ impl ColorTokens {
             timeline_range_edge: Color { r: 0.231, g: 0.510, b: 0.965, a: 0.55 },
             timeline_clip_selected_border: Color::from_hex(0x80CFFF),
             timeline_clip_audio_selected_border: Color::from_hex(0xA2D7AF),
+            timeline_transition: Color::from_hex(0xC98A32),
+            timeline_transition_hover: Color::from_hex(0xE0A142),
+            timeline_transition_selected: Color::from_hex(0xFFD27A),
+            timeline_transition_blocked: Color::from_hex(0xFF5D5D),
             timeline_clip_adjustment_selected_border: Color::from_hex(0xB392E6),
             timeline_clip_nested_selected_border: Color::from_hex(0x80CFFF),
             timeline_clip_video: Color::from_hex(0x2F74A0),
@@ -369,6 +381,10 @@ impl ColorTokens {
             timeline_range_edge: Color { r: 0.145, g: 0.388, b: 0.922, a: 0.72 },
             timeline_clip_selected_border: Color::from_hex(0x2563EB),
             timeline_clip_audio_selected_border: Color::from_hex(0x15803D),
+            timeline_transition: Color::from_hex(0xD97706),
+            timeline_transition_hover: Color::from_hex(0xB45309),
+            timeline_transition_selected: Color::from_hex(0x92400E),
+            timeline_transition_blocked: Color::from_hex(0xDC2626),
             timeline_clip_adjustment_selected_border: Color::from_hex(0x7C3AED),
             timeline_clip_nested_selected_border: Color::from_hex(0x2563EB),
             timeline_clip_video: Color::from_hex(0xDBEAFE),

@@ -7,6 +7,7 @@
 
 mod model;
 mod paint;
+mod transition;
 
 use mondrian_core::types::AssetId;
 #[cfg(test)]
@@ -146,6 +147,16 @@ pub type TimelineClipMoveAction = dyn Fn(TimelineClipMove, &TimelineClip) -> Act
 /// Action factory for clip trim commits.
 pub type TimelineClipTrimAction = dyn Fn(TimelineClipTrim, &TimelineClip) -> Action;
 
+/// Action factory for visual-Transition selection.
+pub type TimelineTransitionAction = dyn Fn(TimelineTransitionRef, &TimelineTransition) -> Action;
+
+/// Action factory for visual-Transition range commits.
+pub type TimelineTransitionResizeAction =
+    dyn Fn(TimelineTransitionResize, &TimelineTransition) -> Action;
+
+/// Action factory for creating a visual Transition at an adjacent edit.
+pub type TimelineCutAction = dyn Fn(TimelineCutRef) -> Action;
+
 /// Action factory for in/out point changes.
 pub type TimelineInOutPointAction = dyn Fn(TimelineInOutPoint, i64) -> Action;
 
@@ -160,6 +171,26 @@ pub struct TimelineClipRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimelineTrackRef {
     pub track_index: usize,
+}
+
+/// Stable view reference to a visual Transition inside one track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimelineTransitionRef {
+    /// Display-order index of the containing track.
+    pub track_index: usize,
+    /// Display-order index of the Transition inside the track.
+    pub transition_index: usize,
+}
+
+/// Stable view reference to one adjacent Clip edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimelineCutRef {
+    /// Display-order index of the containing track.
+    pub track_index: usize,
+    /// Display-order index of the Clip ending at the cut.
+    pub left_clip_index: usize,
+    /// Display-order index of the Clip starting at the cut.
+    pub right_clip_index: usize,
 }
 
 /// Track header control rendered by [`TimelineView`].
@@ -202,6 +233,13 @@ pub enum TimelineTrimEdge {
     Out,
 }
 
+/// Visual-Transition range edge being resized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineTransitionEdge {
+    In,
+    Out,
+}
+
 /// Sequence range marker edited from the timeline ruler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimelineInOutPoint {
@@ -218,6 +256,29 @@ pub struct TimelineClipTrim {
     pub old_duration_frames: i64,
     pub new_start_frame: i64,
     pub new_duration_frames: i64,
+}
+
+/// Domain-light visual-Transition resize proposal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimelineTransitionResize {
+    /// Transition being resized.
+    pub transition_ref: TimelineTransitionRef,
+    /// Range edge controlled by the gesture.
+    pub edge: TimelineTransitionEdge,
+    /// Authored range start before the gesture.
+    pub old_start_frame: i64,
+    /// Authored range duration before the gesture.
+    pub old_duration_frames: i64,
+    /// Proposed range start after the gesture.
+    pub new_start_frame: i64,
+    /// Proposed range duration after the gesture.
+    pub new_duration_frames: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TimelineTransitionResizePosition {
+    start_frame: i64,
+    duration_frames: i64,
 }
 
 /// Track category used only for styling.
@@ -490,12 +551,83 @@ impl TimelineClip {
     }
 }
 
+/// Visual-Transition view model rendered above its two endpoint Clips.
+#[derive(Debug, Clone)]
+pub struct TimelineTransition {
+    /// Display label for the Transition definition.
+    pub label: String,
+    /// Authored range start in Sequence frame space.
+    pub start_frame: i64,
+    /// Authored range duration in Sequence frame space.
+    pub duration_frames: i64,
+    /// Endpoint edit position in Sequence frame space.
+    pub cut_frame: i64,
+    /// Earliest range start allowed by endpoint placement geometry.
+    pub minimum_start_frame: i64,
+    /// Latest range end allowed by endpoint placement geometry.
+    pub maximum_end_frame: i64,
+    /// Whether this Transition is the current author selection.
+    pub selected: bool,
+    /// Whether the authored Transition participates in execution.
+    pub enabled: bool,
+    /// Human-readable fail-closed source-handle issue, when current external
+    /// dependencies can no longer satisfy the authored Transition.
+    pub handle_issue: Option<String>,
+}
+
+impl TimelineTransition {
+    /// Create a visual-Transition view model in Sequence frame space.
+    pub fn new(
+        label: impl Into<String>,
+        start_frame: i64,
+        duration_frames: i64,
+        cut_frame: i64,
+        minimum_start_frame: i64,
+        maximum_end_frame: i64,
+    ) -> Self {
+        let start_frame = start_frame.max(minimum_start_frame);
+        let maximum_end_frame = maximum_end_frame.max(start_frame.saturating_add(1));
+        let end_frame = start_frame.saturating_add(duration_frames.max(1)).min(maximum_end_frame);
+        let duration_frames = end_frame.saturating_sub(start_frame).max(1);
+        Self {
+            label: label.into(),
+            start_frame,
+            duration_frames,
+            cut_frame,
+            minimum_start_frame,
+            maximum_end_frame,
+            selected: false,
+            enabled: true,
+            handle_issue: None,
+        }
+    }
+
+    /// Mark this Transition as selected.
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    /// Mark this Transition as disabled in author state.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Attach a fail-closed source-handle diagnostic.
+    pub fn with_handle_issue(mut self, issue: impl Into<String>) -> Self {
+        self.handle_issue = Some(issue.into());
+        self
+    }
+}
+
 /// Track view model rendered by [`TimelineView`].
 #[derive(Debug, Clone)]
 pub struct TimelineTrack {
     pub label: String,
     pub kind: TimelineTrackKind,
     pub clips: Vec<TimelineClip>,
+    pub transitions: Vec<TimelineTransition>,
     pub selected: bool,
     pub visible: bool,
     pub muted: bool,
@@ -526,12 +658,19 @@ impl TimelineTrack {
             label: label.into(),
             kind,
             clips,
+            transitions: Vec::new(),
             selected: false,
             visible: true,
             muted: false,
             locked: false,
             select_action: None,
         }
+    }
+
+    /// Attach visual Transitions projected for this video Track.
+    pub fn with_transitions(mut self, transitions: Vec<TimelineTransition>) -> Self {
+        self.transitions = transitions;
+        self
     }
 
     /// Mark this track as selected.
@@ -576,7 +715,9 @@ pub struct TimelineView {
     body_rect: Rect,
     selected_track: Option<TimelineTrackRef>,
     selected_clip: Option<TimelineClipRef>,
+    selected_transition: Option<TimelineTransitionRef>,
     hovered_clip: Option<TimelineClipRef>,
+    hovered_transition: Option<TimelineTransitionRef>,
     hovered_track_control: Option<(TimelineTrackRef, TimelineTrackControl)>,
     hovered_toolbar_button: Option<TimelineToolbarButton>,
     active_tool: TimelineTool,
@@ -601,6 +742,7 @@ pub struct TimelineView {
     track_drag: Option<TimelineTrackDrag>,
     clip_drag: Option<TimelineClipDrag>,
     trim_drag: Option<TimelineTrimDrag>,
+    transition_resize_drag: Option<TimelineTransitionResizeDrag>,
     scrollbar_drag: Option<TimelineScrollbarDrag>,
     pointer_capture_active: bool,
     context_menu: Option<ContextMenu>,
@@ -620,6 +762,9 @@ pub struct TimelineView {
     on_asset_drop: Option<Box<TimelineAssetDropAction>>,
     on_clip_move: Option<Box<TimelineClipMoveAction>>,
     on_clip_trim: Option<Box<TimelineClipTrimAction>>,
+    on_transition_select: Option<Box<TimelineTransitionAction>>,
+    on_transition_resize: Option<Box<TimelineTransitionResizeAction>>,
+    on_cut_transition_create: Option<Box<TimelineCutAction>>,
     on_in_out_point: Option<Box<TimelineInOutPointAction>>,
     toolbar_icons: Vec<(TimelineToolbarIconSlot, VectorIcon)>,
     track_control_icons: Vec<(TimelineTrackControlIconSlot, VectorIcon)>,
@@ -664,6 +809,17 @@ struct TimelineTrimDrag {
 }
 
 #[derive(Debug, Clone, Copy)]
+struct TimelineTransitionResizeDrag {
+    transition_ref: TimelineTransitionRef,
+    edge: TimelineTransitionEdge,
+    old_start_frame: i64,
+    old_duration_frames: i64,
+    current_start_frame: i64,
+    current_duration_frames: i64,
+    moved: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
 struct TimelineInOutDrag {
     point: TimelineInOutPoint,
     start_frame: i64,
@@ -698,6 +854,13 @@ impl TimelineView {
     /// Create a timeline view with the provided tracks.
     pub fn new(tracks: Vec<TimelineTrack>) -> Self {
         let metrics = TimelineMetrics::current();
+        let selected_transition = tracks.iter().enumerate().find_map(|(track_index, track)| {
+            track
+                .transitions
+                .iter()
+                .position(|transition| transition.selected)
+                .map(|transition_index| TimelineTransitionRef { track_index, transition_index })
+        });
         Self {
             id: WidgetId::new(),
             tracks,
@@ -708,7 +871,9 @@ impl TimelineView {
             body_rect: Rect::ZERO,
             selected_track: None,
             selected_clip: None,
+            selected_transition,
             hovered_clip: None,
+            hovered_transition: None,
             hovered_track_control: None,
             hovered_toolbar_button: None,
             active_tool: TimelineTool::Select,
@@ -733,6 +898,7 @@ impl TimelineView {
             track_drag: None,
             clip_drag: None,
             trim_drag: None,
+            transition_resize_drag: None,
             scrollbar_drag: None,
             pointer_capture_active: false,
             context_menu: None,
@@ -752,6 +918,9 @@ impl TimelineView {
             on_asset_drop: None,
             on_clip_move: None,
             on_clip_trim: None,
+            on_transition_select: None,
+            on_transition_resize: None,
+            on_cut_transition_create: None,
             on_in_out_point: None,
             toolbar_icons: Vec::new(),
             track_control_icons: Vec::new(),
@@ -828,6 +997,7 @@ impl TimelineView {
             self.focused = false;
             self.focus_visible = false;
             self.hovered_clip = None;
+            self.hovered_transition = None;
             self.hovered_track_control = None;
             self.hovered_toolbar_button = None;
             self.active_tool = TimelineTool::Select;
@@ -839,6 +1009,7 @@ impl TimelineView {
             self.track_drag = None;
             self.clip_drag = None;
             self.trim_drag = None;
+            self.transition_resize_drag = None;
             self.scrollbar_drag = None;
             self.context_menu = None;
             self.horizontal_scrollbar_hovered = false;
@@ -1012,6 +1183,33 @@ impl TimelineView {
         self
     }
 
+    /// Set a dynamic visual-Transition selection action factory.
+    pub fn on_transition_select(
+        mut self,
+        action: impl Fn(TimelineTransitionRef, &TimelineTransition) -> Action + 'static,
+    ) -> Self {
+        self.on_transition_select = Some(Box::new(action));
+        self
+    }
+
+    /// Set a dynamic visual-Transition resize action factory.
+    pub fn on_transition_resize(
+        mut self,
+        action: impl Fn(TimelineTransitionResize, &TimelineTransition) -> Action + 'static,
+    ) -> Self {
+        self.on_transition_resize = Some(Box::new(action));
+        self
+    }
+
+    /// Set an action factory for creating a Transition at an adjacent edit.
+    pub fn on_cut_transition_create(
+        mut self,
+        action: impl Fn(TimelineCutRef) -> Action + 'static,
+    ) -> Self {
+        self.on_cut_transition_create = Some(Box::new(action));
+        self
+    }
+
     /// Set an action factory for ruler in/out point edits.
     pub fn on_in_out_point(
         mut self,
@@ -1024,6 +1222,11 @@ impl TimelineView {
     /// Current selected clip reference.
     pub fn selected_clip(&self) -> Option<TimelineClipRef> {
         self.selected_clip
+    }
+
+    /// Current locally selected visual Transition reference.
+    pub fn selected_transition(&self) -> Option<TimelineTransitionRef> {
+        self.selected_transition
     }
 
     /// Current locally selected track reference.
@@ -1703,18 +1906,31 @@ impl TimelineView {
         12.0
     }
 
-    fn update_clip_hover(&mut self, position: Point, ctx: &mut EventContext) -> bool {
-        let hovered = self.hit_clip(position);
-        if hovered == self.hovered_clip {
+    fn update_content_hover(&mut self, position: Point, ctx: &mut EventContext) -> bool {
+        let hovered_transition = self.hit_transition(position);
+        let hovered_clip = hovered_transition.is_none().then(|| self.hit_clip(position)).flatten();
+        if hovered_transition
+            .and_then(|transition_ref| self.hit_transition_edge(transition_ref, position))
+            .is_some()
+        {
+            ctx.set_cursor(CursorRequest::EwResize);
+        }
+        if hovered_transition == self.hovered_transition && hovered_clip == self.hovered_clip {
             return false;
         }
 
-        let had_tooltip = self
-            .hovered_clip
-            .and_then(|clip_ref| self.clip_label_tooltip(clip_ref))
-            .is_some();
-        self.hovered_clip = hovered;
-        if let Some((text, rect)) =
+        let had_tooltip = self.hovered_transition.is_some()
+            || self
+                .hovered_clip
+                .and_then(|clip_ref| self.clip_label_tooltip(clip_ref))
+                .is_some();
+        self.hovered_transition = hovered_transition;
+        self.hovered_clip = hovered_clip;
+        if let Some(transition_ref) = self.hovered_transition {
+            if let Some((text, rect)) = self.transition_tooltip(transition_ref) {
+                ctx.tooltip.show(text, Point::new(rect.x + 8.0, rect.y + rect.height + 4.0));
+            }
+        } else if let Some((text, rect)) =
             self.hovered_clip.and_then(|clip_ref| self.clip_label_tooltip(clip_ref))
         {
             ctx.tooltip.show(text, Point::new(rect.x + 8.0, rect.y + rect.height + 4.0));
@@ -1779,6 +1995,113 @@ impl TimelineView {
         )
     }
 
+    fn transition_rect(
+        &self,
+        transition_ref: TimelineTransitionRef,
+        transition: &TimelineTransition,
+    ) -> Rect {
+        transition::rect(
+            self.body_rect,
+            self.pixels_per_frame,
+            self.scroll_x,
+            self.track_height,
+            self.scroll_y,
+            transition_ref.track_index,
+            transition.start_frame,
+            transition.duration_frames,
+        )
+    }
+
+    fn transition_rect_for_preview(
+        &self,
+        transition_ref: TimelineTransitionRef,
+        start_frame: i64,
+        duration_frames: i64,
+    ) -> Rect {
+        transition::rect(
+            self.body_rect,
+            self.pixels_per_frame,
+            self.scroll_x,
+            self.track_height,
+            self.scroll_y,
+            transition_ref.track_index,
+            start_frame,
+            duration_frames,
+        )
+    }
+
+    fn hit_transition(&self, point: Point) -> Option<TimelineTransitionRef> {
+        if !self.body_rect.contains(point) {
+            return None;
+        }
+        for (track_index, track) in self.tracks.iter().enumerate() {
+            for (transition_index, transition) in track.transitions.iter().enumerate().rev() {
+                let transition_ref = TimelineTransitionRef { track_index, transition_index };
+                if self.transition_rect(transition_ref, transition).contains(point) {
+                    return Some(transition_ref);
+                }
+            }
+        }
+        None
+    }
+
+    fn hit_transition_edge(
+        &self,
+        transition_ref: TimelineTransitionRef,
+        point: Point,
+    ) -> Option<TimelineTransitionEdge> {
+        let transition = self.transition(transition_ref)?;
+        transition::edge_at(self.transition_rect(transition_ref, transition), point)
+    }
+
+    fn transition(&self, transition_ref: TimelineTransitionRef) -> Option<&TimelineTransition> {
+        self.tracks
+            .get(transition_ref.track_index)
+            .and_then(|track| track.transitions.get(transition_ref.transition_index))
+    }
+
+    fn transition_tooltip(&self, transition_ref: TimelineTransitionRef) -> Option<(String, Rect)> {
+        let transition = self.transition(transition_ref)?;
+        let text = transition.handle_issue.as_ref().map_or_else(
+            || transition.label.clone(),
+            |issue| format!("{}\n{}", transition.label, issue),
+        );
+        Some((text, self.transition_rect(transition_ref, transition)))
+    }
+
+    fn hit_cut(&self, point: Point) -> Option<TimelineCutRef> {
+        let track_index = self.track_index_at(point)?;
+        let track = self.tracks.get(track_index)?;
+        if track.kind != TimelineTrackKind::Video || track.locked {
+            return None;
+        }
+        track
+            .clips
+            .windows(2)
+            .enumerate()
+            .filter_map(|(left_clip_index, pair)| {
+                let cut_frame = pair[0].end_frame();
+                let exact_edit = cut_frame == pair[1].start_frame;
+                let already_has_transition =
+                    track.transitions.iter().any(|transition| transition.cut_frame == cut_frame);
+                let distance = (point.x - self.frame_to_x(cut_frame)).abs();
+                (exact_edit && !already_has_transition && distance <= 6.0).then_some((
+                    distance,
+                    TimelineCutRef {
+                        track_index,
+                        left_clip_index,
+                        right_clip_index: left_clip_index + 1,
+                    },
+                ))
+            })
+            .min_by(|(left_distance, left), (right_distance, right)| {
+                left_distance
+                    .total_cmp(right_distance)
+                    .then(left.left_clip_index.cmp(&right.left_clip_index))
+            })
+            .map(|(_, cut_ref)| cut_ref)
+    }
+
     fn hit_clip(&self, point: Point) -> Option<TimelineClipRef> {
         if !self.body_rect.contains(point) {
             return None;
@@ -1834,12 +2157,30 @@ impl TimelineView {
     ) -> EventResult {
         self.selected_track = None;
         self.selected_clip = Some(clip_ref);
+        self.selected_transition = None;
         if let Some(clip) = self.clip(clip_ref) {
             if let Some(action) = clip.select_action.clone() {
                 (ctx.dispatch)(action);
             }
             if let Some(factory) = &self.on_clip_select {
                 (ctx.dispatch)(factory(clip_ref, clip));
+            }
+        }
+        ctx.request_repaint();
+        EventResult::Handled
+    }
+
+    fn select_transition_from_input(
+        &mut self,
+        transition_ref: TimelineTransitionRef,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        self.selected_track = None;
+        self.selected_clip = None;
+        self.selected_transition = Some(transition_ref);
+        if let Some(transition) = self.transition(transition_ref) {
+            if let Some(factory) = &self.on_transition_select {
+                (ctx.dispatch)(factory(transition_ref, transition));
             }
         }
         ctx.request_repaint();
@@ -1853,6 +2194,7 @@ impl TimelineView {
     ) -> EventResult {
         self.selected_track = Some(track_ref);
         self.selected_clip = None;
+        self.selected_transition = None;
         if let Some(track) = self.track(track_ref) {
             if let Some(action) = track.select_action.clone() {
                 (ctx.dispatch)(action);
@@ -1976,6 +2318,28 @@ impl TimelineView {
         });
     }
 
+    fn start_transition_resize(
+        &mut self,
+        transition_ref: TimelineTransitionRef,
+        edge: TimelineTransitionEdge,
+    ) {
+        let Some(transition) = self.transition(transition_ref) else {
+            return;
+        };
+        if self.track_locked(transition_ref.track_index) {
+            return;
+        }
+        self.transition_resize_drag = Some(TimelineTransitionResizeDrag {
+            transition_ref,
+            edge,
+            old_start_frame: transition.start_frame,
+            old_duration_frames: transition.duration_frames.max(1),
+            current_start_frame: transition.start_frame,
+            current_duration_frames: transition.duration_frames.max(1),
+            moved: false,
+        });
+    }
+
     fn drag_clip_to(&mut self, position: Point, ctx: &mut EventContext) -> bool {
         let Some(mut drag) = self.clip_drag else {
             return false;
@@ -2049,6 +2413,36 @@ impl TimelineView {
         true
     }
 
+    fn drag_transition_resize_to(&mut self, position: Point, ctx: &mut EventContext) -> bool {
+        let Some(mut drag) = self.transition_resize_drag else {
+            return false;
+        };
+        let Some(transition) = self.transition(drag.transition_ref) else {
+            self.transition_resize_drag = None;
+            return false;
+        };
+        let resized = transition::resize_position(
+            drag.edge,
+            self.x_to_frame(position.x),
+            drag.old_start_frame,
+            drag.old_duration_frames,
+            transition.cut_frame,
+            transition.minimum_start_frame,
+            transition.maximum_end_frame,
+        );
+        if resized.start_frame == drag.current_start_frame
+            && resized.duration_frames == drag.current_duration_frames
+        {
+            return true;
+        }
+        drag.current_start_frame = resized.start_frame;
+        drag.current_duration_frames = resized.duration_frames;
+        drag.moved = true;
+        self.transition_resize_drag = Some(drag);
+        ctx.request_repaint();
+        true
+    }
+
     fn finish_clip_drag(&mut self, ctx: &mut EventContext) -> bool {
         let Some(drag) = self.clip_drag.take() else {
             return false;
@@ -2102,6 +2496,31 @@ impl TimelineView {
             if let Some(factory) = &self.on_clip_trim {
                 (ctx.dispatch)(factory(trim, clip));
             }
+        }
+        ctx.request_repaint();
+        true
+    }
+
+    fn finish_transition_resize(&mut self, ctx: &mut EventContext) -> bool {
+        let Some(drag) = self.transition_resize_drag.take() else {
+            return false;
+        };
+        if !drag.moved {
+            return true;
+        }
+        let Some(transition) = self.transition(drag.transition_ref) else {
+            return true;
+        };
+        let resize = TimelineTransitionResize {
+            transition_ref: drag.transition_ref,
+            edge: drag.edge,
+            old_start_frame: drag.old_start_frame,
+            old_duration_frames: drag.old_duration_frames,
+            new_start_frame: drag.current_start_frame,
+            new_duration_frames: drag.current_duration_frames,
+        };
+        if let Some(factory) = &self.on_transition_resize {
+            (ctx.dispatch)(factory(resize, transition));
         }
         ctx.request_repaint();
         true
@@ -2289,6 +2708,7 @@ impl TimelineView {
         timeline_model::TimelineEditCommandContext {
             selected_clip: self.selected_clip,
             selected_track: self.selected_track,
+            selected_transition: self.selected_transition.is_some(),
             in_point_frame: self.in_point_frame,
             has_out_point: self.out_point_frame.is_some(),
             clip_intersects_playhead: self.clip_intersects_playhead(),
@@ -2382,6 +2802,30 @@ impl TimelineView {
             self.edit_menu_item("清除入点/出点", TimelineEditCommand::ClearInOutPoints),
         ]);
         items
+    }
+
+    fn transition_context_menu_items(&self) -> Vec<MenuItem> {
+        vec![
+            self.edit_menu_item("删除视频转场", TimelineEditCommand::DeleteSelection),
+            MenuItem::separator(),
+            self.edit_menu_item("标记入点", TimelineEditCommand::MarkInAtPlayhead),
+            self.edit_menu_item("标记出点", TimelineEditCommand::MarkOutAtPlayhead),
+            self.edit_menu_item("清除入点/出点", TimelineEditCommand::ClearInOutPoints),
+        ]
+    }
+
+    fn cut_context_menu_items(&self, cut_ref: TimelineCutRef) -> Vec<MenuItem> {
+        let action = self
+            .on_cut_transition_create
+            .as_ref()
+            .map_or(Action::NoOp, |factory| factory(cut_ref));
+        vec![
+            Self::menu_item("添加交叉溶解", action),
+            MenuItem::separator(),
+            self.edit_menu_item("在播放头处分割", TimelineEditCommand::SplitAtPlayhead),
+            self.edit_menu_item("标记入点", TimelineEditCommand::MarkInAtPlayhead),
+            self.edit_menu_item("标记出点", TimelineEditCommand::MarkOutAtPlayhead),
+        ]
     }
 
     fn timeline_context_menu_items(&self) -> Vec<MenuItem> {
@@ -3048,6 +3492,24 @@ impl TimelineView {
             }
         }
 
+        for (track_index, track) in self.tracks.iter().enumerate() {
+            for (transition_index, transition) in track.transitions.iter().enumerate() {
+                let transition_ref = TimelineTransitionRef { track_index, transition_index };
+                if self
+                    .transition_resize_drag
+                    .is_some_and(|drag| drag.transition_ref == transition_ref)
+                {
+                    continue;
+                }
+                let rect = self.transition_rect(transition_ref, transition);
+                if rect.x <= self.body_rect.x + self.body_rect.width
+                    && rect.x + rect.width >= self.body_rect.x
+                {
+                    self.paint_transition(ctx, transition_ref, transition, rect, false);
+                }
+            }
+        }
+
         if let Some(drag) = self.clip_drag {
             if let Some(clip) = self.clip(drag.clip_ref) {
                 let rect =
@@ -3075,6 +3537,21 @@ impl TimelineView {
                     && rect.y + rect.height >= self.body_rect.y
                 {
                     self.paint_clip(ctx, drag.clip_ref, clip, rect, true);
+                }
+            }
+        }
+
+        if let Some(drag) = self.transition_resize_drag {
+            if let Some(transition) = self.transition(drag.transition_ref) {
+                let rect = self.transition_rect_for_preview(
+                    drag.transition_ref,
+                    drag.current_start_frame,
+                    drag.current_duration_frames,
+                );
+                if rect.x <= self.body_rect.x + self.body_rect.width
+                    && rect.x + rect.width >= self.body_rect.x
+                {
+                    self.paint_transition(ctx, drag.transition_ref, transition, rect, true);
                 }
             }
         }
@@ -3625,6 +4102,95 @@ impl TimelineView {
         }
     }
 
+    fn paint_transition(
+        &self,
+        ctx: &mut PaintContext,
+        transition_ref: TimelineTransitionRef,
+        transition: &TimelineTransition,
+        rect: Rect,
+        dragging: bool,
+    ) {
+        let colors = &ctx.theme.colors;
+        let selected =
+            transition.selected || self.selected_transition == Some(transition_ref) || dragging;
+        let hovered = self.hovered_transition == Some(transition_ref);
+        let blocked = transition.handle_issue.is_some();
+        let mut fill = if blocked {
+            colors.timeline_transition_blocked
+        } else if hovered {
+            colors.timeline_transition_hover
+        } else {
+            colors.timeline_transition
+        };
+        if !transition.enabled {
+            fill.a *= 0.42;
+        } else if dragging {
+            fill.a *= 0.92;
+        } else {
+            fill.a *= 0.84;
+        }
+        let border = if selected {
+            colors.timeline_transition_selected
+        } else if blocked {
+            colors.timeline_transition_blocked
+        } else {
+            color_with_alpha(colors.foreground, 0.42)
+        };
+        ctx.encoder.draw_rect(rect.inset(-1.0, -1.0), border, 4.0);
+        ctx.encoder.draw_rect(rect, fill, 3.0);
+
+        let cut_x = self.frame_to_x(transition.cut_frame).clamp(rect.x, rect.x + rect.width);
+        let middle_y = rect.y + rect.height * 0.5;
+        let line = color_with_alpha(colors.foreground, if selected { 0.86 } else { 0.60 });
+        ctx.encoder.draw_line(
+            Point::new(rect.x, rect.y),
+            Point::new(cut_x, middle_y),
+            1.0,
+            line,
+        );
+        ctx.encoder.draw_line(
+            Point::new(rect.x, rect.y + rect.height),
+            Point::new(cut_x, middle_y),
+            1.0,
+            line,
+        );
+        ctx.encoder.draw_line(
+            Point::new(cut_x, middle_y),
+            Point::new(rect.x + rect.width, rect.y),
+            1.0,
+            line,
+        );
+        ctx.encoder.draw_line(
+            Point::new(cut_x, middle_y),
+            Point::new(rect.x + rect.width, rect.y + rect.height),
+            1.0,
+            line,
+        );
+        ctx.encoder.draw_line(
+            Point::new(cut_x, rect.y),
+            Point::new(cut_x, rect.y + rect.height),
+            1.0,
+            border,
+        );
+        if selected || hovered {
+            ctx.encoder.draw_rect(
+                Rect::new(rect.x, rect.y, 3.0_f32.min(rect.width), rect.height),
+                border,
+                1.0,
+            );
+            ctx.encoder.draw_rect(
+                Rect::new(
+                    (rect.x + rect.width - 3.0).max(rect.x),
+                    rect.y,
+                    3.0_f32.min(rect.width),
+                    rect.height,
+                ),
+                border,
+                1.0,
+            );
+        }
+    }
+
     fn paint_audio_waveform(
         &self,
         ctx: &mut PaintContext,
@@ -3916,8 +4482,10 @@ impl Widget for TimelineView {
             self.track_drag = None;
             self.clip_drag = None;
             self.trim_drag = None;
+            self.transition_resize_drag = None;
             self.scrollbar_drag = None;
             self.hovered_clip = None;
+            self.hovered_transition = None;
             self.hovered_track_control = None;
             self.hovered_toolbar_button = None;
             self.horizontal_scrollbar_hovered = false;
@@ -3962,7 +4530,23 @@ impl Widget for TimelineView {
                 self.track_drag = None;
                 self.clip_drag = None;
                 self.trim_drag = None;
+                self.transition_resize_drag = None;
                 self.scrollbar_drag = None;
+                if let Some(transition_ref) = self.hit_transition(*position) {
+                    let _ = self.select_transition_from_input(transition_ref, ctx);
+                    return self.open_context_menu(
+                        *position,
+                        self.transition_context_menu_items(),
+                        ctx,
+                    );
+                }
+                if let Some(cut_ref) = self.hit_cut(*position) {
+                    return self.open_context_menu(
+                        *position,
+                        self.cut_context_menu_items(cut_ref),
+                        ctx,
+                    );
+                }
                 if let Some(clip_ref) = self.hit_clip(*position) {
                     let _ = self.select_clip_from_input(clip_ref, ctx);
                     return self.open_context_menu(*position, self.clip_context_menu_items(), ctx);
@@ -4118,6 +4702,16 @@ impl Widget for TimelineView {
                     self.request_timeline_pointer_capture(ctx);
                     return result;
                 }
+                if let Some(transition_ref) = self.hit_transition(*position) {
+                    let result = self.select_transition_from_input(transition_ref, ctx);
+                    if let Some(edge) = self.hit_transition_edge(transition_ref, *position) {
+                        self.start_transition_resize(transition_ref, edge);
+                        if self.transition_resize_drag.is_some() {
+                            self.request_timeline_pointer_capture(ctx);
+                        }
+                    }
+                    return result;
+                }
                 if let Some(clip_ref) = self.hit_clip(*position) {
                     if self.active_tool == TimelineTool::Blade {
                         return self.split_at_pointer_frame(*position, ctx);
@@ -4160,6 +4754,7 @@ impl Widget for TimelineView {
                     || self.track_drag.is_some()
                     || self.clip_drag.is_some()
                     || self.trim_drag.is_some()
+                    || self.transition_resize_drag.is_some()
                     || self.scrollbar_drag.is_some();
                 if !self.bounds.contains(*position) && !active_drag {
                     if self.chrome_tooltip().is_some() {
@@ -4168,6 +4763,7 @@ impl Widget for TimelineView {
                     self.hovered_toolbar_button = None;
                     self.hovered_track_control = None;
                     self.hovered_clip = None;
+                    self.hovered_transition = None;
                     if self.horizontal_scrollbar_hovered || self.vertical_scrollbar_hovered {
                         self.horizontal_scrollbar_hovered = false;
                         self.vertical_scrollbar_hovered = false;
@@ -4196,6 +4792,10 @@ impl Widget for TimelineView {
                 }
                 if self.trim_drag.is_some() {
                     self.drag_trim_to(*position, ctx);
+                    return EventResult::Handled;
+                }
+                if self.transition_resize_drag.is_some() {
+                    self.drag_transition_resize_to(*position, ctx);
                     return EventResult::Handled;
                 }
                 if let Some(drag) = self.scrollbar_drag {
@@ -4239,7 +4839,7 @@ impl Widget for TimelineView {
                     ctx.request_repaint();
                     return EventResult::Handled;
                 }
-                if self.update_clip_hover(*position, ctx) {
+                if self.update_content_hover(*position, ctx) {
                     return EventResult::Handled;
                 }
             }
@@ -4273,6 +4873,13 @@ impl Widget for TimelineView {
                 self.release_timeline_pointer_capture(ctx);
                 return EventResult::Handled;
             }
+            UiEvent::MouseUp { button: MouseButton::Left, .. }
+                if self.transition_resize_drag.is_some() =>
+            {
+                self.finish_transition_resize(ctx);
+                self.release_timeline_pointer_capture(ctx);
+                return EventResult::Handled;
+            }
             UiEvent::MouseUp { button: MouseButton::Left, .. } if self.scrollbar_drag.is_some() => {
                 self.scrollbar_drag = None;
                 self.release_timeline_pointer_capture(ctx);
@@ -4294,6 +4901,7 @@ impl Widget for TimelineView {
                 self.track_drag = None;
                 self.clip_drag = None;
                 self.trim_drag = None;
+                self.transition_resize_drag = None;
                 self.scrollbar_drag = None;
                 self.context_menu = None;
                 if self.chrome_tooltip().is_some() {
@@ -8793,5 +9401,207 @@ mod tests {
         assert!(encoder.texts.iter().any(|text| text == "未载入序列"));
         assert!(encoder.texts.iter().any(|text| text == "打开项目或创建序列以开始编辑"));
         assert!(!encoder.line_colors.contains(&theme.colors.timeline_playhead));
+    }
+
+    #[test]
+    fn adjacent_video_cut_exposes_a_domain_light_transition_action() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut view = TimelineView::new(vec![TimelineTrack::video(
+            "V1",
+            vec![
+                TimelineClip::new("Left", 0, 10),
+                TimelineClip::new("Right", 10, 10),
+            ],
+        )])
+        .on_cut_transition_create(|_| Action::DeleteSelection);
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+        let point = Point::new(
+            view.frame_to_x(10),
+            view.track_y(0) + view.track_height * 0.5,
+        );
+
+        let cut = view.hit_cut(point).expect("adjacent cut");
+        assert_eq!(cut.left_clip_index, 0);
+        assert_eq!(cut.right_clip_index, 1);
+        let items = view.cut_context_menu_items(cut);
+        assert_eq!(items[0].action(), Some(&Action::DeleteSelection));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseDown {
+                    position: point,
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(view.selected_clip().is_none());
+        assert_eq!(
+            view.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(actions.borrow().as_slice(), &[Action::DeleteSelection]);
+    }
+
+    #[test]
+    fn cut_hit_testing_chooses_the_nearest_valid_edit_at_low_zoom() {
+        let mut view = TimelineView::new(vec![TimelineTrack::video(
+            "V1",
+            vec![
+                TimelineClip::new("One", 0, 10),
+                TimelineClip::new("Two", 10, 10),
+                TimelineClip::new("Three", 20, 10),
+            ],
+        )])
+        .with_pixels_per_frame(0.5);
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+        let point = Point::new(
+            view.frame_to_x(18),
+            view.track_y(0) + view.track_height * 0.5,
+        );
+
+        assert_eq!(
+            view.hit_cut(point),
+            Some(TimelineCutRef {
+                track_index: 0,
+                left_clip_index: 1,
+                right_clip_index: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn transition_overlay_has_priority_over_its_endpoint_clips() {
+        let transition = TimelineTransition::new("Cross Dissolve", 8, 4, 10, 0, 20).selected(true);
+        let mut view = TimelineView::new(vec![TimelineTrack::video(
+            "V1",
+            vec![
+                TimelineClip::new("Left", 0, 10),
+                TimelineClip::new("Right", 10, 10),
+            ],
+        )
+        .with_transitions(vec![transition])]);
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+        let point = Point::new(
+            view.frame_to_x(10),
+            view.track_y(0) + view.track_height * 0.5,
+        );
+
+        assert_eq!(
+            view.hit_transition(point),
+            Some(TimelineTransitionRef { track_index: 0, transition_index: 0 })
+        );
+        assert_eq!(
+            view.selected_transition(),
+            Some(TimelineTransitionRef { track_index: 0, transition_index: 0 })
+        );
+        assert!(view.hit_cut(point).is_none());
+    }
+
+    #[test]
+    fn transition_view_range_is_clamped_to_endpoint_geometry() {
+        let transition = TimelineTransition::new("Cross Dissolve", 8, 100, 10, 0, 12);
+
+        assert_eq!(transition.start_frame, 8);
+        assert_eq!(transition.duration_frames, 4);
+        assert_eq!(transition.maximum_end_frame, 12);
+    }
+
+    #[test]
+    fn transition_handle_drag_previews_without_mutating_and_commits_once() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let transition = TimelineTransition::new("Cross Dissolve", 8, 4, 10, 0, 20);
+        let mut view = TimelineView::new(vec![TimelineTrack::video(
+            "V1",
+            vec![
+                TimelineClip::new("Left", 0, 10),
+                TimelineClip::new("Right", 10, 10),
+            ],
+        )
+        .with_transitions(vec![transition])])
+        .on_transition_resize(|resize, _| Action::Custom {
+            namespace: "timeline.transition".into(),
+            name: format!(
+                "{:?}:{}+{}->{}+{}",
+                resize.edge,
+                resize.old_start_frame,
+                resize.old_duration_frames,
+                resize.new_start_frame,
+                resize.new_duration_frames
+            ),
+            payload: Default::default(),
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+        let transition_ref = TimelineTransitionRef { track_index: 0, transition_index: 0 };
+        let rect = view.transition_rect(transition_ref, &view.tracks[0].transitions[0]);
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        view.event(
+            &UiEvent::MouseDown {
+                position: Point::new(rect.x + 1.0, rect.center().y),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(view.transition_resize_drag.is_some());
+        view.event(
+            &UiEvent::MouseMove {
+                position: Point::new(view.frame_to_x(6), rect.center().y),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(view.tracks[0].transitions[0].start_frame, 8);
+        assert!(view.transition_resize_drag.is_some_and(|drag| {
+            drag.current_start_frame == 6 && drag.current_duration_frames == 6
+        }));
+        assert!(actions.borrow().is_empty());
+
+        view.event(
+            &UiEvent::MouseUp {
+                position: Point::new(view.frame_to_x(6), rect.center().y),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::Custom {
+                namespace: "timeline.transition".into(),
+                name: "In:8+4->6+6".into(),
+                payload: Default::default(),
+            }]
+        );
     }
 }

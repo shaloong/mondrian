@@ -165,6 +165,23 @@ and the one-Undo author transaction remain App-owned. Ordinary Delete targets a
 selected Transition; Ripple Delete is unavailable because deleting a
 Transition cannot move Timeline placements.
 
+The Timeline Adapter produces every Clip/Transition stable identity and its
+domain-light view model in one projection pass. It must not build a second ID
+list with an independent filter: failed time projection is allowed to omit one
+view, but can never shift later gesture indices onto another author entity.
+Nested-Sequence identities travel in that same Clip projection. The Widget owns
+only overlay geometry, hit testing, resize preview, and an edge-constrained
+frame proposal. Transition overlays take hit priority over their endpoint Clips;
+right-clicking an exact adjacent unlocked video cut exposes the default Cross
+Dissolve command. Resize preview never mutates the supplied model and commits
+exactly once on pointer release.
+
+Transition colors and blocked/hover/selection states are semantic theme tokens.
+The App Adapter re-observes current external source-handle availability when it
+projects the low-frequency author view and exposes a fail-closed diagnostic. It
+does not repair, shorten, or mutate the authored range. Media execution and
+per-frame playback therefore remain outside the Widget and panel seams.
+
 ## Playback Tick Ownership
 
 The winit host may wake the application while playback is running, but playback
