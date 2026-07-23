@@ -26,6 +26,7 @@ use mondrian_core::{
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
 use mondrian_effects::{effect_display_name, effect_library_types};
+use mondrian_export::delivery::resolve_export_delivery;
 use mondrian_export::preset::{ExportPreset, TimelineExportRange, VideoCodecConfig};
 use mondrian_export::queue::{
     ExportColorHealthSeverity, ExportJobColorDiagnostics, ExportProgress, ExportProgressDetail,
@@ -1748,6 +1749,7 @@ pub struct ExportPanelModel {
     pub selected_sequence_id: Option<SequenceId>,
     pub range: TimelineExportRange,
     pub output_path: String,
+    pub delivery_error: Option<String>,
     pub status: Option<(String, bool)>,
     pub jobs: Vec<ExportJobModel>,
     pub can_clear_completed_jobs: bool,
@@ -1897,12 +1899,12 @@ impl ExportPanelModel {
             .collect::<Vec<_>>();
         let max_preset = presets.len().saturating_sub(1);
         let selected_preset_idx = state.export_draft.selected_preset_idx.min(max_preset);
-        let sequences = state
-            .export_sequences_snapshot()
-            .into_iter()
+        let sequence_snapshots = state.export_sequences_snapshot();
+        let sequences = sequence_snapshots
+            .iter()
             .map(|sequence| ExportSequenceOptionModel {
                 id: sequence.id,
-                name: sequence.name,
+                name: sequence.name.clone(),
                 video_clips: sequence.video_tracks.iter().map(|track| track.clips.len()).sum(),
                 audio_clips: sequence.audio_tracks.iter().map(|track| track.clips.len()).sum(),
             })
@@ -1915,6 +1917,22 @@ impl ExportPanelModel {
             .or(state.default_sequence_id())
             .filter(|id| sequences.iter().any(|sequence| sequence.id == *id))
             .or_else(|| sequences.first().map(|sequence| sequence.id));
+        let delivery_error = presets
+            .get(selected_preset_idx)
+            .or_else(|| presets.first())
+            .zip(
+                selected_sequence_id
+                    .and_then(|id| sequence_snapshots.iter().find(|sequence| sequence.id == id)),
+            )
+            .and_then(|(preset, sequence)| {
+                resolve_export_delivery(
+                    &preset.preset,
+                    &sequence.settings,
+                    &state.project_settings().color_management,
+                )
+                .err()
+                .map(|error| error.to_string())
+            });
 
         let jobs = state.export_jobs_snapshot();
         let queue_count = jobs.len();
@@ -1942,6 +1960,7 @@ impl ExportPanelModel {
             selected_sequence_id,
             range: state.export_draft.range,
             output_path: state.export_draft.output_path.clone(),
+            delivery_error,
             status: state.status_hint.clone(),
             jobs,
             can_clear_completed_jobs,
@@ -1959,6 +1978,7 @@ impl ExportPanelModel {
         self.selected_preset().is_some()
             && self.selected_sequence_id.is_some()
             && !self.output_path.trim().is_empty()
+            && self.delivery_error.is_none()
     }
 
     fn can_choose_output(&self) -> bool {
@@ -1970,18 +1990,18 @@ impl ExportPanelModel {
     }
 
     fn readiness_status(&self) -> String {
-        if let Some((message, is_error)) = &self.status {
-            if *is_error {
-                return format!("错误：{message}");
-            }
-            return message.clone();
-        }
         if self.selected_sequence_id.is_none() {
             "导出前请打开或选择序列".to_owned()
         } else if self.selected_preset().is_none() {
             "没有可用导出预设".to_owned()
+        } else if let Some(error) = &self.delivery_error {
+            format!("交付设置不兼容：{error}")
+        } else if let Some((message, true)) = &self.status {
+            format!("错误：{message}")
         } else if self.output_path.trim().is_empty() {
             "选择输出路径后即可加入队列".to_owned()
+        } else if let Some((message, false)) = &self.status {
+            message.clone()
         } else {
             "就绪".to_owned()
         }
@@ -1990,6 +2010,9 @@ impl ExportPanelModel {
     fn enqueue_payload(&self) -> Option<ExportEnqueuePayload> {
         let preset = self.selected_preset()?.clone();
         let sequence_id = self.selected_sequence_id?;
+        if self.delivery_error.is_some() {
+            return None;
+        }
         let output_path = self.output_path.trim();
         if output_path.is_empty() {
             return None;
@@ -4226,26 +4249,43 @@ fn export_preset_summary(preset: Option<&ExportPreset>) -> String {
         .map(|resolution| format!("{}x{}", resolution.width, resolution.height))
         .unwrap_or_else(|| "Follow sequence".to_owned());
     let (codec, bitrate) = match &preset.video {
-        VideoCodecConfig::H264 { bitrate_kbps, .. } => (
-            "H.264",
-            bitrate_kbps
-                .map(|value| format!("{value} kbps"))
-                .unwrap_or_else(|| "Auto".to_owned()),
+        VideoCodecConfig::H264 { rate_control, .. } => {
+            ("H.264 High", export_rate_control_label(*rate_control))
+        }
+        VideoCodecConfig::Hevc { profile, rate_control } => (
+            match profile {
+                mondrian_export::preset::HevcProfile::Main => "HEVC Main",
+                mondrian_export::preset::HevcProfile::Main10 => "HEVC Main10",
+            },
+            export_rate_control_label(*rate_control),
         ),
-        VideoCodecConfig::H265 { bitrate_kbps, .. } => (
-            "H.265",
-            bitrate_kbps
-                .map(|value| format!("{value} kbps"))
-                .unwrap_or_else(|| "Auto".to_owned()),
+        VideoCodecConfig::Av1 { rate_control, .. } => {
+            ("AV1 Main", export_rate_control_label(*rate_control))
+        }
+        VideoCodecConfig::ProRes { profile } => (
+            match profile {
+                mondrian_export::preset::ProResProfile::Proxy => "ProRes Proxy",
+                mondrian_export::preset::ProResProfile::Lt => "ProRes LT",
+                mondrian_export::preset::ProResProfile::Standard => "ProRes Standard",
+                mondrian_export::preset::ProResProfile::Hq => "ProRes HQ",
+                mondrian_export::preset::ProResProfile::FourFourFourFour => "ProRes 4444",
+                mondrian_export::preset::ProResProfile::FourFourFourFourXq => "ProRes 4444 XQ",
+            },
+            "N/A".to_owned(),
         ),
-        VideoCodecConfig::Av1 { .. } => ("AV1", "Auto".to_owned()),
-        VideoCodecConfig::ProRes { .. } => ("ProRes", "N/A".to_owned()),
         VideoCodecConfig::Gif { .. } => ("GIF", "N/A".to_owned()),
     };
     format!(
         "{resolution} / {codec} / {bitrate} / .{}",
         export_preset_extension(preset)
     )
+}
+
+fn export_rate_control_label(rate_control: mondrian_export::preset::VideoRateControl) -> String {
+    match rate_control.max_bitrate_kbps {
+        Some(max_bitrate) => format!("CRF {} / max {max_bitrate} kbps", rate_control.crf),
+        None => format!("CRF {}", rate_control.crf),
+    }
 }
 
 fn export_range_label(range: TimelineExportRange) -> &'static str {
@@ -6065,6 +6105,26 @@ mod tests {
         assert!(model.can_choose_output());
         assert_eq!(model.readiness_status(), "选择输出路径后即可加入队列");
         assert!(model.enqueue_payload().is_none());
+    }
+
+    #[test]
+    fn export_panel_rejects_incompatible_delivery_before_building_an_action() {
+        let mut state = AppState::default();
+        let mut sequence = Sequence::new("HDR Deliverable");
+        sequence.settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
+        let sequence_id = sequence.id;
+        state.test_set_sequence(Some(sequence));
+        state.set_export_draft_preset_index(0);
+        state.set_export_draft_sequence_id(Some(sequence_id));
+        state.set_export_draft_output_path("E:/renders/hdr.mp4");
+        state.set_status_hint("stale success must not hide the blocker", false);
+
+        let model = ExportPanelModel::from_app_state(&state);
+
+        assert!(!model.can_enqueue());
+        assert!(model.enqueue_payload().is_none());
+        assert!(model.delivery_error.as_deref().is_some_and(|error| error.contains("HDR")));
+        assert!(model.readiness_status().starts_with("交付设置不兼容："));
     }
 
     #[test]

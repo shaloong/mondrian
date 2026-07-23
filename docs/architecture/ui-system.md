@@ -318,6 +318,13 @@ color diagnostics; they cannot clone the heavy Timeline payload, mutate status,
 invent progress, or infer completion from file existence. Headless execution
 uses the same queue/evidence Interface rather than a Window-specific path.
 
+The export panel obtains delivery readiness from
+`mondrian_export::resolve_export_delivery`, the same pure Interface enforced by
+queue admission. It does not maintain a codec/color compatibility table.
+Incompatibility disables action construction and outranks stale success status
+text. This UI check is an early projection only; the queue remains authoritative
+against the immutable snapshot.
+
 Media preview frames are held in a bounded LRU cache keyed by asset identity,
 media file fingerprint (file length plus modification timestamp), source
 frame/time, target preview dimensions, input color interpretation, target

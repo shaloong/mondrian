@@ -17,7 +17,7 @@ with its own intent and validation contract rather than a second branch inside
 `ExportConfig` contains exactly three authorities:
 
 - `ExportPreset`: container, video/audio codec settings, output resolution, and
-  explicit Alpha delivery policy;
+  explicit encoded signal representation and Alpha delivery policy;
 - `TimelineExportSnapshot`: the immutable authoring and dependency closure;
 - `output_path`: the final deliverable name reserved by the queue.
 
@@ -46,6 +46,64 @@ Snapshot capture is an App-domain transaction performed before queue admission:
 The snapshot is an execution capture, not a persisted replacement for the
 Project document and not a compatibility boundary between releases.
 
+## Delivery contract and parameter ownership
+
+Sequence authoring owns creative output intent: working/output color identity,
+the output transform, and authored HDR mastering/content-light metadata. Its
+`video_range` and `delivery_bit_depth` values are Sequence-level delivery
+defaults used only when a preset explicitly selects `FollowSequence`.
+
+`ExportPreset` owns the concrete representation of one deliverable:
+
+- container and typed codec profile;
+- explicit or Sequence-default sample depth and range;
+- explicit chroma sampling and Alpha policy;
+- output raster override or exact Sequence raster;
+- rate control and audio codec/disable policy.
+
+The current product boundary intentionally distinguishes “not yet exposed” from
+“supported with an encoder-selected guess.” Sequence settings already expose
+raster, frame rate/time base, pixel aspect, field order, output color, bit-depth
+and range defaults, audio sample rate, and channel layout. M1 export presets can
+override raster, bit depth, range, chroma, codec profile, Alpha, rate control,
+and audio codec. A user-editable export form is still required before these
+typed choices count as generally configurable product features.
+
+Export frame-rate conversion, audio sample-rate/layout conversion, GOP/B-frame
+control, CBR/ABR/two-pass modes, hardware-encoder profiles, and image-sequence
+formats are not represented by placeholder scalars. Each needs its own typed
+policy plus scheduling/resampling or encoder capability evidence before the UI
+may expose it. In particular, an export frame-rate override must define exact
+video cadence and A/V duration semantics; it cannot merely replace the FFmpeg
+`-r` value.
+
+`FollowSequence` is a UI authoring convenience, not an execution-time `Auto`.
+`resolve_export_delivery(...)` lowers every preset choice to one
+`ResolvedExportDeliveryContract` before admission. The resolved contract has an
+exact raster, bit depth, range, chroma sampling, and FFmpeg pixel format.
+Execution, internal frame precision, FFmpeg arguments, and post-encode probe
+expectations consume that same result. Nested Sequences contribute
+working-domain pixels but cannot replace the root job's resolved delivery
+contract.
+
+The product-owned preset catalog has stable identities. M1 includes
+`h264-aac-sdr` (H.264 High, 8-bit 4:2:0 Legal, AAC) and `hevc-main10` (HEVC
+Main10, 10-bit 4:2:0 Legal, AAC). ProRes profiles are typed values rather than
+free-form strings. A ProRes profile, H.264/HEVC profile, bit depth, or chroma
+combination that has no verified lowering is unrepresentable or rejected; it
+does not fall back to another profile.
+
+Single-pass CRF quality may optionally add a complete VBV pair
+(`max_bitrate_kbps` and `buffer_size_kbits`). Supplying only one is invalid.
+The encoder receives `-maxrate/-bufsize`; Mondrian does not mix CRF with an
+ambiguous average `-b:v` request. GOP structure, two-pass encoding, additional
+professional profiles, and other advanced controls must be added as typed
+contracts with argument and roundtrip evidence before a UI can expose them.
+
+Subsampled raster constraints are checked at admission: 4:2:0 requires even
+width and height, and 4:2:2 requires even width. Mondrian rejects invalid
+dimensions instead of silently cropping or rounding the requested deliverable.
+
 ## Range
 
 `TimelineExportRange` has three explicit forms:
@@ -67,14 +125,22 @@ realtime audio capacity.
 
 Admission requirements are:
 
+- preset, root Sequence, and Project color policy resolve to one legal delivery
+  contract;
 - at most 64 Pending/Running/Cancelling jobs per queue;
 - one active owner for each normalized final output path, including lexical and
   canonical-parent aliases where the filesystem can resolve them;
 - a nonempty file-like output path;
 - an available worker and a unique nonzero monotonic attempt generation.
 
+The App Adapter performs the same pure check before expensive media snapshot
+capture so the panel can explain an invalid choice immediately. That check is
+not authority: `RenderQueue` repeats it against the immutable snapshot before
+reserving capacity or dispatching a worker, and execution validates again
+before opening FFmpeg.
+
 Admission returns a structured `ExportAdmissionError`; it never reports success
-after worker startup failure or capacity rejection. The heavy `RenderJob`
+after delivery rejection, worker startup failure, or capacity rejection. The heavy `RenderJob`
 payload is immutable and consumed exactly once at dispatch. UI and Headless
 observers receive only bounded `ExportJobSnapshot` values, so polling cannot
 clone a Project-sized Timeline. Terminal snapshots retain no heavy payload and

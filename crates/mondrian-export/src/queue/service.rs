@@ -303,6 +303,8 @@ pub struct ExportJobSnapshot {
 /// Structured reason why a submission was not admitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExportAdmissionError {
+    /// Preset and immutable Sequence delivery intent cannot form a legal output.
+    InvalidDelivery { detail: String },
     /// The bounded in-flight budget is exhausted.
     CapacityExceeded { capacity: usize },
     /// Another active job owns the same normalized output path.
@@ -318,6 +320,7 @@ pub enum ExportAdmissionError {
 impl std::fmt::Display for ExportAdmissionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidDelivery { detail } => formatter.write_str(detail),
             Self::CapacityExceeded { capacity } => {
                 write!(
                     formatter,
@@ -456,6 +459,11 @@ impl RenderQueue {
 
     /// Admit a heavy immutable submission or return a structured rejection.
     pub fn enqueue(&self, job: RenderJob) -> Result<JobId, ExportAdmissionError> {
+        if let Err(detail) =
+            super::resolve_timeline_export_delivery(&job.config, job.config.timeline.as_ref())
+        {
+            return self.reject(ExportAdmissionError::InvalidDelivery { detail });
+        }
         let output_path = job.config.output_path.clone();
         let Some(output_key) =
             output_reservation_key(&output_path).filter(|_| !output_path.is_dir())

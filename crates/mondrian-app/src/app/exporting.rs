@@ -2,9 +2,10 @@
 
 use super::*;
 use mondrian_core::{JobId, MondrianError, Result};
+use mondrian_export::delivery::resolve_export_delivery;
 use mondrian_export::preset::{
-    Container, ExportConfig, ExportMediaDependency, ExportPreset, TimelineExportRange,
-    TimelineExportSnapshot,
+    BuiltinExportPreset, Container, ExportConfig, ExportMediaDependency, ExportPreset,
+    TimelineExportRange, TimelineExportSnapshot,
 };
 use mondrian_export::queue::{
     ExportCancelOutcome, ExportJobSnapshot, ExportQueueDiagnostics, RenderJob,
@@ -56,24 +57,13 @@ pub struct ExportPresetOption {
 
 /// Built-in export presets shared by app UI panels.
 pub fn builtin_export_presets() -> Vec<ExportPresetOption> {
-    vec![
-        ExportPresetOption {
-            label: "YouTube 1080p H.264".to_owned(),
-            preset: ExportPreset::youtube_1080p(),
-        },
-        ExportPresetOption {
-            label: "TikTok 竖屏 9:16".to_owned(),
-            preset: ExportPreset::tiktok_vertical(),
-        },
-        ExportPresetOption {
-            label: "代理文件 720p".to_owned(),
-            preset: ExportPreset::proxy_720p(),
-        },
-        ExportPresetOption {
-            label: "ProRes 4444 XQ + Alpha（12-bit）".to_owned(),
-            preset: ExportPreset::prores_4444_alpha(),
-        },
-    ]
+    BuiltinExportPreset::ALL
+        .into_iter()
+        .map(|builtin| ExportPresetOption {
+            label: builtin.label().to_owned(),
+            preset: builtin.preset(),
+        })
+        .collect()
 }
 
 /// File extension implied by an export preset container.
@@ -130,6 +120,16 @@ impl AppState {
             self.set_status_hint(format!("导出失败：{reason}"), true);
             return Err(export_error("enqueue_timeline_export", reason));
         };
+
+        if let Err(error) = resolve_export_delivery(
+            &request.preset,
+            &sequence.settings,
+            &self.project_settings().color_management,
+        ) {
+            let reason = error.to_string();
+            self.set_status_hint(format!("导出失败：{reason}"), true);
+            return Err(export_error("enqueue_timeline_export", reason));
+        }
 
         let timeline =
             match capture_timeline_export_snapshot(self, sequence, sequences, request.range) {
@@ -636,7 +636,7 @@ mod tests {
 
         let err = state
             .enqueue_timeline_export(TimelineExportRequest {
-                preset: ExportPreset::youtube_1080p(),
+                preset: ExportPreset::h264_aac_sdr_1080p(),
                 sequence_id: None,
                 range: TimelineExportRange::EntireSequence,
                 output_path: PathBuf::new(),
@@ -665,7 +665,7 @@ mod tests {
 
         let err = state
             .enqueue_timeline_export(TimelineExportRequest {
-                preset: ExportPreset::youtube_1080p(),
+                preset: ExportPreset::h264_aac_sdr_1080p(),
                 sequence_id: Some(SequenceId::new()),
                 range: TimelineExportRange::EntireSequence,
                 output_path: PathBuf::from("E:/renders/out.mp4"),

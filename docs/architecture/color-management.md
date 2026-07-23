@@ -809,7 +809,13 @@ FFmpeg/CICP tags and call those core helpers rather than maintaining a separate
 color-space mapping table.
 
 Export encoding adds an explicit signal-representation contract after the
-renderer output boundary. The pipe always carries full-range encoded RGB;
+renderer output boundary. Sequence color management owns the creative output
+identity and authored HDR metadata. A preset owns (or explicitly follows the
+Sequence default for) encoded bit depth/range and owns its typed codec profile
+and chroma sampling. `resolve_export_delivery(...)` validates those choices and
+produces one immutable `ResolvedExportDeliveryContract`; there is no
+execution-time `Auto` or encoder-selected profile. The pipe always carries
+full-range encoded RGB;
 `ExportVideoSignalContract` binds the codec pixel format, requested YUV range,
 RGB-to-YUV matrix conversion, and emitted CICP matrix tag as one operation.
 BT.2020-family outputs use the BT.2020 non-constant-luminance matrix, while
@@ -820,7 +826,7 @@ copied onto YUV media. Camera-log outputs still omit unverified delivery tags,
 but their RGB-to-YUV matrix and range are explicit. GIF has no reliable color
 tag contract and is therefore accepted only with an explicit sRGB output.
 
-Static HDR metadata is currently supported only by the H.265/libx265
+Static HDR metadata is currently supported only by the HEVC Main10/libx265
 backend. SMPTE ST 2086 mastering-display and MaxCLL/MaxFALL values are emitted
 through one atomic `x265-params` value so neither field can override the other.
 AV1 and ProRes requests with static metadata writing fail validation until they
@@ -852,9 +858,10 @@ ProRes 4444/4444 XQ are verified as 12-bit 4:4:4:4.
 
 Delivery sample depth and renderer transport precision are separate contracts.
 `DeliveryBitDepth` exposes only the 8-bit, 10-bit, and 12-bit formats implemented
-by current codecs. ProRes 422 profiles require 10-bit; ProRes 4444 profiles
-require 12-bit. A 10/12-bit delivery uses the internal `Rgba16Float` export frame
-contract and `rgba64le` FFmpeg pipe so the renderer output transform is not
+by current codecs. H.264 High requires 8-bit 4:2:0; HEVC Main/Main10 require
+8/10-bit 4:2:0 respectively; ProRes 422 profiles require 10-bit 4:2:2; ProRes
+4444 profiles require 12-bit 4:4:4. A 10/12-bit delivery uses the internal
+`Rgba16Float` export frame contract and `rgba64le` FFmpeg pipe so the renderer output transform is not
 quantized to 8-bit before encoding. That internal transport does not represent
 a 16-bit-float deliverable; no such user-facing option exists until a real
 float image/video backend is implemented. If GPU output and the renderer-owned

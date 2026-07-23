@@ -133,12 +133,15 @@ explicit DisplayReferred workflow remains available as a technical colorimetric
 bypass. Project `ColorEngine` alone selects Mondrian Standard, ACES, or Custom
 OCIO; the sequence workflow does not duplicate that mode selection.
 
-`SequenceColorManagement.delivery_bit_depth` is the encoded deliverable sample
-depth and currently permits 8-bit, 10-bit, or 12-bit output. Twelve-bit output
-is reserved for ProRes 4444/4444 XQ. It does not describe
-the float working space or the renderer-to-encoder pipe precision. Those are
-renderer/export implementation contracts and are not persisted as editorial
-intent.
+`SequenceColorManagement.delivery_bit_depth` and `video_range` are the
+Sequence-level delivery defaults. They do not force every export of the
+Sequence to use one representation: a typed `ExportPreset` may follow either
+default or provide an explicit bit depth/range. Export admission resolves that
+choice together with codec profile and chroma sampling before execution.
+Twelve-bit delivery is currently reserved for ProRes 4444/4444 XQ. None of
+these values describes the float working space or renderer-to-encoder pipe
+precision; those are derived execution contracts and are not persisted as
+editorial pixels.
 
 When `static_hdr_metadata_policy` is `WriteAuthored`, `SequenceSettings`
 requires complete typed ST 2086 mastering-display and CTA-861.3 content-light

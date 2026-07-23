@@ -833,6 +833,15 @@ contracts are:
   `RenderColorTransform::delivery_view(...)`, which dispatches through the
   explicit working-identity OCIO display processor.
 
+Before that output boundary executes, the Export Module resolves preset-owned
+codec profile/chroma/Alpha and explicit-or-Sequence-default bit depth/range into
+one `ResolvedExportDeliveryContract`. The root contract selects internal
+RGBA8/16F transport, final pixel format, FFmpeg lowering, and post-encode
+expectations. Nested Sequences remain working-domain render inputs and cannot
+select a different deliverable precision. Invalid 4:2:0/4:2:2 dimensions or
+profile/signal combinations fail at admission; the renderer must not crop,
+round, or ask FFmpeg to choose a substitute profile.
+
 ### Single Output-Intent Authority
 
 `SequenceSettings::root_program_color_context(project_cm)` resolves exactly one

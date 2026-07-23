@@ -1,5 +1,6 @@
 //! 后台渲染队列
 
+use crate::delivery::ResolvedExportDeliveryContract;
 use crate::preset::{
     AudioCodecConfig, Container, ExportAlphaMode, ExportConfig, TimelineExportRange,
     TimelineExportSnapshot, VideoCodecConfig,
@@ -142,9 +143,9 @@ impl ExportFrameContract {
     }
 }
 
-/// Resolve the export frame contract from sequence settings.
-fn export_frame_contract(settings: &SequenceSettings) -> ExportFrameContract {
-    ExportFrameContract::from_bit_depth(settings.color_management.delivery_bit_depth)
+/// Resolve the export frame contract from the admitted delivery sample depth.
+fn export_frame_contract(bit_depth: DeliveryBitDepth) -> ExportFrameContract {
+    ExportFrameContract::from_bit_depth(bit_depth)
 }
 
 /// Renderer-owned CPU float/high-bit output boundary for export.
@@ -1427,9 +1428,10 @@ fn execute_timeline_export(
         if let Err(reason) = validate_snapshot_media_revisions(timeline) {
             return JobExecutionResult::Failed(reason);
         }
-        if let Err(err) = validate_timeline_export_color_compatibility(&job.config, timeline) {
-            return JobExecutionResult::Failed(err);
-        }
+        let delivery = match resolve_timeline_export_delivery(&job.config, timeline) {
+            Ok(delivery) => delivery,
+            Err(error) => return JobExecutionResult::Failed(error),
+        };
 
         let range = match compute_timeline_render_range(timeline) {
             Ok(range) => range,
@@ -1448,15 +1450,12 @@ fn execute_timeline_export(
             temp_audio_path_to_cleanup = Some(path.clone());
         }
 
-        let (width, height) = timeline_output_resolution(job, timeline);
-        let expected_video_signal = match expected_export_video_signal(
-            &timeline.sequence.settings,
-            &job.config.preset.video,
-            job.config.preset.alpha_mode,
-        ) {
-            Ok(signal) => signal,
-            Err(error) => return JobExecutionResult::Failed(error),
-        };
+        let (width, height) = (delivery.resolution.width, delivery.resolution.height);
+        let expected_video_signal =
+            match expected_export_video_signal(&timeline.sequence.settings, &delivery) {
+                Ok(signal) => signal,
+                Err(error) => return JobExecutionResult::Failed(error),
+            };
         let validation_expectations = ExportValidationExpectations {
             require_video_stream: true,
             require_audio_stream: !matches!(&audio_input, TimelineAudioInput::Disabled),
@@ -1472,7 +1471,8 @@ fn execute_timeline_export(
             ),
         };
         let mut cmd = Command::new("ffmpeg");
-        let pix_fmt = export_frame_contract(&timeline.sequence.settings).ffmpeg_pix_fmt();
+        let frame_contract = export_frame_contract(delivery.bit_depth);
+        let pix_fmt = frame_contract.ffmpeg_pix_fmt();
         cmd.arg("-y")
             .arg("-hide_banner")
             .arg("-loglevel")
@@ -1535,12 +1535,7 @@ fn execute_timeline_export(
         }
 
         apply_video_codec_args(&mut cmd, &job.config.preset.video);
-        apply_export_video_signal_args(
-            &mut cmd,
-            &timeline.sequence.settings,
-            &job.config.preset.video,
-            job.config.preset.alpha_mode,
-        );
+        apply_export_video_signal_args(&mut cmd, &timeline.sequence.settings, &delivery);
         if timeline
             .sequence
             .settings
@@ -1582,6 +1577,7 @@ fn execute_timeline_export(
             width,
             height,
             job.config.preset.alpha_mode,
+            frame_contract,
             cancel,
             report,
             report_diagnostics,
@@ -1762,7 +1758,7 @@ fn prepare_timeline_audio_input(
     cancel: &ExecutionCancellationToken,
     report: &mut dyn FnMut(ExportProgress),
 ) -> Result<TimelineAudioInput, JobExecutionResult> {
-    if matches!(job.config.preset.container, Container::Gif) {
+    if matches!(job.config.preset.audio, AudioCodecConfig::Disabled) {
         return Ok(TimelineAudioInput::Disabled);
     }
 
@@ -2059,6 +2055,7 @@ fn write_timeline_frames(
     width: u32,
     height: u32,
     alpha_mode: ExportAlphaMode,
+    frame_contract: ExportFrameContract,
     cancel: &ExecutionCancellationToken,
     report: &mut dyn FnMut(ExportProgress),
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
@@ -2071,6 +2068,7 @@ fn write_timeline_frames(
         width,
         height,
         alpha_mode,
+        frame_contract,
         cancel,
         report,
         report_diagnostics,
@@ -2084,12 +2082,12 @@ fn write_timeline_frames_to_writer<W: Write>(
     width: u32,
     height: u32,
     alpha_mode: ExportAlphaMode,
+    frame_contract: ExportFrameContract,
     cancel: &ExecutionCancellationToken,
     report: &mut dyn FnMut(ExportProgress),
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
 ) -> JobExecutionResult {
     let total = range.total_frames.max(1);
-    let frame_contract = export_frame_contract(&timeline.sequence.settings);
     let mut canvas = vec![0u8; frame_contract.canvas_len(width, height)];
     let mut diagnostics = ExportJobDiagnostics::default();
     diagnostics
@@ -2112,6 +2110,7 @@ fn write_timeline_frames_to_writer<W: Write>(
             width,
             height,
             alpha_mode,
+            frame_contract,
             &mut canvas,
             Some(&mut frame_color_counts),
             Some(&mut frame_stage_diagnostics),
@@ -2186,12 +2185,15 @@ fn render_timeline_frame_into(
     export_diagnostics: Option<&mut ExportJobColorDiagnostics>,
 ) -> Result<(), String> {
     let mut visual_session = ExportVisualRenderSession::default();
+    let frame_contract =
+        export_frame_contract(timeline.sequence.settings.color_management.delivery_bit_depth);
     render_timeline_frame_into_with_session(
         timeline,
         timeline_frame,
         width,
         height,
         alpha_mode,
+        frame_contract,
         canvas,
         input_color_counts,
         stage_diagnostics,
@@ -2207,6 +2209,7 @@ fn render_timeline_frame_into_with_session(
     width: u32,
     height: u32,
     alpha_mode: ExportAlphaMode,
+    frame_contract: ExportFrameContract,
     canvas: &mut Vec<u8>,
     input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
     stage_diagnostics: Option<&mut RenderColorStageDiagnostics>,
@@ -2214,7 +2217,6 @@ fn render_timeline_frame_into_with_session(
     export_diagnostics: Option<&mut ExportJobColorDiagnostics>,
     visual_session: &mut ExportVisualRenderSession,
 ) -> Result<(), String> {
-    let frame_contract = export_frame_contract(&timeline.sequence.settings);
     let required_len = frame_contract.canvas_len(width, height);
     if canvas.len() != required_len {
         canvas.resize(required_len, 0);
@@ -2227,6 +2229,7 @@ fn render_timeline_frame_into_with_session(
     let mut render_context = ExportFrameRenderContext {
         timeline,
         alpha_mode,
+        frame_contract,
         input_color_counts,
         stage_diagnostics,
         composite_diagnostics,
@@ -2277,6 +2280,7 @@ struct ExportVisualRenderSession {
 struct ExportFrameRenderContext<'a> {
     timeline: &'a TimelineExportSnapshot,
     alpha_mode: ExportAlphaMode,
+    frame_contract: ExportFrameContract,
     input_color_counts: Option<&'a mut InputColorResolutionSourceCounts>,
     stage_diagnostics: Option<&'a mut RenderColorStageDiagnostics>,
     composite_diagnostics: Option<&'a mut TimelineCompositeDiagnostics>,
@@ -2561,7 +2565,7 @@ fn render_sequence_frame_into(
     let Resolution { width, height } = resolution;
     let timeline = context.timeline;
 
-    let frame_contract = export_frame_contract(&sequence.settings);
+    let frame_contract = context.frame_contract;
     if let SequenceRenderTarget::Deliverable(canvas) = &mut target {
         let required_len = frame_contract.canvas_len(width, height);
         if canvas.len() != required_len {
@@ -2952,8 +2956,11 @@ fn render_export_nested_plan(
         .iter()
         .find(|sequence| sequence.id == nested.sequence_id)
         .ok_or_else(|| format!("嵌套序列不存在: {}", nested.sequence_id))?;
-    let width = normalize_output_dimension(sequence.settings.resolution.width);
-    let height = normalize_output_dimension(sequence.settings.resolution.height);
+    // Nested Sequences are working-domain images, not subsampled deliverables.
+    // Preserve their authored raster exactly; only the root delivery resolver
+    // may impose codec-specific dimension constraints.
+    let width = sequence.settings.resolution.width;
+    let height = sequence.settings.resolution.height;
     let frame = nested
         .source_time
         .to_frame_position(sequence.settings.frame_rate, FrameRounding::Floor)
@@ -3296,20 +3303,6 @@ fn compute_timeline_render_range(
     Ok(TimelineRenderRange { start_frame: start, total_frames, fps_num, fps_den })
 }
 
-fn timeline_output_resolution(job: &RenderJob, timeline: &TimelineExportSnapshot) -> (u32, u32) {
-    if let Some(resolution) = &job.config.preset.resolution {
-        return (
-            normalize_output_dimension(resolution.width),
-            normalize_output_dimension(resolution.height),
-        );
-    }
-
-    (
-        normalize_output_dimension(timeline.sequence.settings.resolution.width),
-        normalize_output_dimension(timeline.sequence.settings.resolution.height),
-    )
-}
-
 fn ffmpeg_channel_layout(layout: AudioChannelLayout) -> Option<&'static str> {
     match layout {
         AudioChannelLayout::Mono => Some("mono"),
@@ -3319,20 +3312,16 @@ fn ffmpeg_channel_layout(layout: AudioChannelLayout) -> Option<&'static str> {
     }
 }
 
-fn normalize_output_dimension(value: u32) -> u32 {
-    let mut dim = value.max(1);
-    if dim > 1 && dim % 2 == 1 {
-        dim = dim.saturating_sub(1);
-    }
-    dim.max(1)
-}
-
 mod helpers;
 pub(crate) use helpers::*;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::preset::{
+        Av1Profile, ExportChromaSampling, ExportParameter, ExportVideoSignal, HevcProfile,
+        ProResProfile, VideoRateControl,
+    };
     use mondrian_core::timeline_data::{
         AssetColorPayload, AssetMediaInterpretation, MediaColorInterpretation,
         MediaRangeInterpretation, MediaSignalRange,
@@ -3430,9 +3419,24 @@ mod tests {
 
     fn dummy_config(output_name: &str) -> ExportConfig {
         ExportConfig {
-            preset: crate::preset::ExportPreset::youtube_1080p(),
+            preset: crate::preset::ExportPreset::h264_aac_sdr_1080p(),
             timeline: Box::new(timeline_input_with_output_color(ColorSpace::Rec709)),
             output_path: PathBuf::from(output_name),
+        }
+    }
+
+    fn test_delivery_contract(
+        bit_depth: DeliveryBitDepth,
+        video_range: VideoRange,
+        chroma_sampling: ExportChromaSampling,
+        pixel_format: &'static str,
+    ) -> ResolvedExportDeliveryContract {
+        ResolvedExportDeliveryContract {
+            resolution: crate::preset::Resolution { width: 1_920, height: 1_080 },
+            bit_depth,
+            video_range,
+            chroma_sampling,
+            pixel_format,
         }
     }
 
@@ -4215,6 +4219,7 @@ mod tests {
         let mut render_context = ExportFrameRenderContext {
             timeline: &timeline,
             alpha_mode: ExportAlphaMode::FlattenBlack,
+            frame_contract: ExportFrameContract::Rgba8,
             input_color_counts: None,
             stage_diagnostics: None,
             composite_diagnostics: None,
@@ -4283,6 +4288,7 @@ mod tests {
         let mut render_context = ExportFrameRenderContext {
             timeline: &timeline,
             alpha_mode: ExportAlphaMode::Preserve,
+            frame_contract: ExportFrameContract::Rgba8,
             input_color_counts: None,
             stage_diagnostics: None,
             composite_diagnostics: Some(&mut composite_diagnostics),
@@ -4347,6 +4353,7 @@ mod tests {
         let mut render_context = ExportFrameRenderContext {
             timeline: &timeline,
             alpha_mode: ExportAlphaMode::Preserve,
+            frame_contract: ExportFrameContract::Rgba8,
             input_color_counts: None,
             stage_diagnostics: None,
             composite_diagnostics: Some(&mut composite_diagnostics),
@@ -4423,6 +4430,7 @@ mod tests {
         let mut render_context = ExportFrameRenderContext {
             timeline: &timeline,
             alpha_mode: ExportAlphaMode::Preserve,
+            frame_contract: ExportFrameContract::Rgba8,
             input_color_counts: None,
             stage_diagnostics: None,
             composite_diagnostics: None,
@@ -4476,6 +4484,7 @@ mod tests {
         let mut render_context = ExportFrameRenderContext {
             timeline: &timeline,
             alpha_mode: ExportAlphaMode::Preserve,
+            frame_contract: ExportFrameContract::Rgba8,
             input_color_counts: None,
             stage_diagnostics: None,
             composite_diagnostics: None,
@@ -4664,10 +4673,9 @@ mod tests {
         timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
         let config = dummy_config("camera-log.mp4");
 
-        let err = validate_timeline_export_color_compatibility(&config, &timeline)
+        let err = resolve_timeline_export_delivery(&config, &timeline)
             .expect_err("camera log should reject H.264/MP4 delivery");
         assert!(err.contains("Camera log"));
-        assert!(err.contains("ProRes"));
     }
 
     #[test]
@@ -4676,10 +4684,10 @@ mod tests {
         timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Twelve;
 
         let mut config = dummy_config("camera-log.mov");
-        config.preset.container = Container::Mov;
-        config.preset.video = VideoCodecConfig::ProRes { variant: "4444xq".to_string() };
+        config.preset = crate::preset::ExportPreset::prores_4444_alpha();
+        config.preset.alpha_mode = ExportAlphaMode::FlattenBlack;
 
-        validate_timeline_export_color_compatibility(&config, &timeline)
+        resolve_timeline_export_delivery(&config, &timeline)
             .expect("camera log ProRes intermediate should pass");
     }
 
@@ -4689,7 +4697,7 @@ mod tests {
         let mut config = dummy_config("alpha.mp4");
         config.preset.alpha_mode = ExportAlphaMode::Preserve;
 
-        let err = validate_timeline_export_color_compatibility(&config, &timeline)
+        let err = resolve_timeline_export_delivery(&config, &timeline)
             .expect_err("H.264 must not pretend to preserve alpha");
 
         assert!(err.contains("ProRes 4444"));
@@ -4697,34 +4705,40 @@ mod tests {
 
     #[test]
     fn export_alpha_validation_allows_mov_prores_4444_xq() {
-        let mut timeline = timeline_input_with_output_color(ColorSpace::Rec709);
-        timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Twelve;
+        let timeline = timeline_input_with_output_color(ColorSpace::Rec709);
         let mut config = dummy_config("alpha.mov");
-        config.preset.container = Container::Mov;
-        config.preset.video = VideoCodecConfig::ProRes { variant: "4444xq".to_owned() };
-        config.preset.alpha_mode = ExportAlphaMode::Preserve;
+        config.preset = crate::preset::ExportPreset::prores_4444_alpha();
 
-        validate_timeline_export_color_compatibility(&config, &timeline)
+        resolve_timeline_export_delivery(&config, &timeline)
             .expect("MOV ProRes 4444 XQ should preserve alpha");
     }
 
     #[test]
     fn export_color_validation_binds_prores_profile_to_real_sample_depth() {
-        let mut timeline = timeline_input_with_output_color(ColorSpace::Rec709);
+        let timeline = timeline_input_with_output_color(ColorSpace::Rec709);
         let mut config = dummy_config("prores.mov");
         config.preset.container = Container::Mov;
 
-        config.preset.video = VideoCodecConfig::ProRes { variant: "hq".to_owned() };
-        timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Twelve;
-        let err = validate_timeline_export_color_compatibility(&config, &timeline)
+        config.preset.video = VideoCodecConfig::ProRes { profile: ProResProfile::Hq };
+        config.preset.video_signal = ExportVideoSignal {
+            bit_depth: ExportParameter::Explicit(DeliveryBitDepth::Twelve),
+            range: ExportParameter::Explicit(VideoRange::Full),
+            chroma_sampling: ExportChromaSampling::Yuv422,
+        };
+        let err = resolve_timeline_export_delivery(&config, &timeline)
             .expect_err("ProRes HQ is a 10-bit profile");
-        assert!(err.contains("必须声明 10-bit"));
+        assert!(err.contains("profile"));
 
-        config.preset.video = VideoCodecConfig::ProRes { variant: "4444xq".to_owned() };
-        timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
-        let err = validate_timeline_export_color_compatibility(&config, &timeline)
+        config.preset.video =
+            VideoCodecConfig::ProRes { profile: ProResProfile::FourFourFourFourXq };
+        config.preset.video_signal = ExportVideoSignal {
+            bit_depth: ExportParameter::Explicit(DeliveryBitDepth::Ten),
+            range: ExportParameter::Explicit(VideoRange::Full),
+            chroma_sampling: ExportChromaSampling::Yuv444,
+        };
+        let err = resolve_timeline_export_delivery(&config, &timeline)
             .expect_err("ProRes 4444 XQ is a 12-bit profile");
-        assert!(err.contains("必须声明 12-bit"));
+        assert!(err.contains("profile"));
     }
 
     #[test]
@@ -4734,9 +4748,9 @@ mod tests {
         timeline.sequence.settings.color_management.static_hdr_metadata_policy =
             StaticHdrMetadataPolicy::WriteAuthored;
         let mut config = dummy_config("hdr-missing-metadata.mp4");
-        config.preset.video = VideoCodecConfig::H265 { crf: 20, bitrate_kbps: None };
+        config.preset = crate::preset::ExportPreset::hevc_main10_aac();
 
-        let err = validate_timeline_export_color_compatibility(&config, &timeline)
+        let err = resolve_timeline_export_delivery(&config, &timeline)
             .expect_err("static HDR writing should require typed metadata");
         assert!(err.contains("SMPTE ST 2086"));
     }
@@ -4752,9 +4766,9 @@ mod tests {
         timeline.sequence.settings.color_management.hdr_content_light =
             Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
         let mut config = dummy_config("hdr-with-metadata.mp4");
-        config.preset.video = VideoCodecConfig::H265 { crf: 20, bitrate_kbps: None };
+        config.preset = crate::preset::ExportPreset::hevc_main10_aac();
 
-        validate_timeline_export_color_compatibility(&config, &timeline)
+        resolve_timeline_export_delivery(&config, &timeline)
             .expect("typed HDR metadata should pass validation");
     }
 
@@ -4771,9 +4785,9 @@ mod tests {
         timeline.sequence.settings.color_management.hdr_content_light =
             Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
         let mut config = dummy_config("hdr-content-light-contract.mp4");
-        config.preset.video = VideoCodecConfig::H265 { crf: 20, bitrate_kbps: None };
+        config.preset = crate::preset::ExportPreset::hevc_main10_aac();
 
-        validate_timeline_export_color_compatibility(&config, &timeline)
+        resolve_timeline_export_delivery(&config, &timeline)
             .expect("mastering-display capability may exceed the Standard View's content peak");
 
         timeline.sequence.settings.color_management.hdr_mastering_display =
@@ -4783,7 +4797,7 @@ mod tests {
                 max_content_light_level: 1200,
                 max_frame_average_light_level: 400,
             });
-        let err = validate_timeline_export_color_compatibility(&config, &timeline)
+        let err = resolve_timeline_export_delivery(&config, &timeline)
             .expect_err("MaxCLL must not exceed the fixed Standard View peak");
         assert!(err.contains("峰值为 1000 nit"));
         assert!(err.contains("MaxCLL 声明 1200 nit"));
@@ -4800,18 +4814,33 @@ mod tests {
         timeline.sequence.settings.color_management.hdr_content_light =
             Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
 
-        for codec in [
-            VideoCodecConfig::Av1 { crf: 24 },
-            VideoCodecConfig::ProRes { variant: "hq".to_owned() },
+        for (codec, container, chroma) in [
+            (
+                VideoCodecConfig::Av1 {
+                    profile: Av1Profile::Main,
+                    rate_control: VideoRateControl::constant_quality(24),
+                },
+                Container::Mp4,
+                ExportChromaSampling::Yuv420,
+            ),
+            (
+                VideoCodecConfig::ProRes { profile: ProResProfile::Hq },
+                Container::Mov,
+                ExportChromaSampling::Yuv422,
+            ),
         ] {
             let mut config = dummy_config("hdr-unsupported-metadata.mov");
-            config.preset.container = Container::Mov;
+            config.preset.container = container;
             config.preset.video = codec;
+            config.preset.video_signal = ExportVideoSignal {
+                bit_depth: ExportParameter::Explicit(DeliveryBitDepth::Ten),
+                range: ExportParameter::Explicit(VideoRange::Legal),
+                chroma_sampling: chroma,
+            };
 
-            let err = validate_timeline_export_color_compatibility(&config, &timeline)
+            let err = resolve_timeline_export_delivery(&config, &timeline)
                 .expect_err("metadata preservation needs a verified encoder backend");
-            assert!(err.contains("H.265/libx265"));
-            assert!(err.contains("metadata backend"));
+            assert!(err.contains("HEVC Main10/libx265"));
         }
     }
 
@@ -4850,9 +4879,9 @@ mod tests {
             ),
         );
         let mut config = dummy_config("hdr-dynamic-passthrough.mp4");
-        config.preset.video = VideoCodecConfig::H265 { crf: 20, bitrate_kbps: None };
+        config.preset = crate::preset::ExportPreset::hevc_main10_aac();
 
-        let error = validate_timeline_export_color_compatibility(&config, &timeline)
+        let error = resolve_timeline_export_delivery(&config, &timeline)
             .expect_err("rendered export must not claim dynamic HDR passthrough");
         assert!(error.contains("HDR10+ 动态 metadata（1 个）"));
         assert!(error.contains("不能安全透传"));
@@ -4866,8 +4895,14 @@ mod tests {
         let mut config = dummy_config("untagged.gif");
         config.preset.container = Container::Gif;
         config.preset.video = VideoCodecConfig::Gif { colors: 256, dither: true };
+        config.preset.audio = AudioCodecConfig::Disabled;
+        config.preset.video_signal = ExportVideoSignal {
+            bit_depth: ExportParameter::Explicit(DeliveryBitDepth::Eight),
+            range: ExportParameter::Explicit(VideoRange::Full),
+            chroma_sampling: ExportChromaSampling::Rgb,
+        };
 
-        let err = validate_timeline_export_color_compatibility(&config, &timeline)
+        let err = resolve_timeline_export_delivery(&config, &timeline)
             .expect_err("untagged GIF must not imply sRGB");
 
         assert!(err.contains("显式 sRGB"));
@@ -5149,15 +5184,54 @@ mod tests {
     }
 
     #[test]
+    fn ffmpeg_codec_args_lower_profiles_and_vbv_without_ambiguous_bitrate_mode() {
+        let mut h264 = Command::new("ffmpeg");
+        apply_video_codec_args(
+            &mut h264,
+            &VideoCodecConfig::H264 {
+                profile: crate::preset::H264Profile::High,
+                rate_control: VideoRateControl::constrained_quality(18, 8_000, 16_000),
+            },
+        );
+        let h264_args = h264
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(h264_args.windows(2).any(|pair| pair == ["-profile:v", "high"]));
+        assert!(h264_args.windows(2).any(|pair| pair == ["-maxrate", "8000k"]));
+        assert!(h264_args.windows(2).any(|pair| pair == ["-bufsize", "16000k"]));
+        assert!(!h264_args.iter().any(|arg| arg == "-b:v"));
+
+        let mut hevc = Command::new("ffmpeg");
+        apply_video_codec_args(
+            &mut hevc,
+            &VideoCodecConfig::Hevc {
+                profile: HevcProfile::Main10,
+                rate_control: VideoRateControl::constant_quality(20),
+            },
+        );
+        let hevc_args = hevc
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(hevc_args.windows(2).any(|pair| pair == ["-c:v", "libx265"]));
+        assert!(hevc_args.windows(2).any(|pair| pair == ["-profile:v", "main10"]));
+        assert!(hevc_args.windows(2).any(|pair| pair == ["-crf", "20"]));
+    }
+
+    #[test]
     fn export_video_signal_args_bind_bit_depth_range_and_matrix_conversion() {
         let mut settings = mondrian_timeline::sequence::SequenceSettings::default();
-        settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
-        settings.color_management.video_range = VideoRange::Legal;
         settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
-        let codec = VideoCodecConfig::H265 { crf: 20, bitrate_kbps: None };
+        let delivery = test_delivery_contract(
+            DeliveryBitDepth::Ten,
+            VideoRange::Legal,
+            ExportChromaSampling::Yuv420,
+            "yuv420p10le",
+        );
 
         let mut cmd = Command::new("ffmpeg");
-        apply_export_video_signal_args(&mut cmd, &settings, &codec, ExportAlphaMode::FlattenBlack);
+        apply_export_video_signal_args(&mut cmd, &settings, &delivery);
         let args = cmd.get_args().map(|arg| arg.to_string_lossy().to_string()).collect::<Vec<_>>();
 
         assert!(args.windows(2).any(|pair| pair == ["-pix_fmt", "yuv420p10le"]));
@@ -5172,9 +5246,14 @@ mod tests {
     fn color_tag_args_use_export_output_color_space() {
         let mut settings = SequenceSettings::default();
         settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
-        let codec = VideoCodecConfig::H265 { crf: 20, bitrate_kbps: None };
+        let delivery = test_delivery_contract(
+            DeliveryBitDepth::Ten,
+            VideoRange::Legal,
+            ExportChromaSampling::Yuv420,
+            "yuv420p10le",
+        );
         let mut cmd = Command::new("ffmpeg");
-        apply_export_video_signal_args(&mut cmd, &settings, &codec, ExportAlphaMode::FlattenBlack);
+        apply_export_video_signal_args(&mut cmd, &settings, &delivery);
         let args = cmd.get_args().map(|arg| arg.to_string_lossy().to_string()).collect::<Vec<_>>();
 
         assert!(args.windows(2).any(|pair| pair == ["-color_primaries", "bt2020"]));
@@ -5184,7 +5263,12 @@ mod tests {
 
     #[test]
     fn color_tag_args_skip_camera_log_spaces_without_standard_delivery_tags() {
-        let codec = VideoCodecConfig::ProRes { variant: "hq".to_owned() };
+        let delivery = test_delivery_contract(
+            DeliveryBitDepth::Ten,
+            VideoRange::Full,
+            ExportChromaSampling::Yuv422,
+            "yuv422p10le",
+        );
         for color_space in [
             ColorSpace::AppleLogBt2020,
             ColorSpace::SonySLog3SGamut3,
@@ -5201,14 +5285,8 @@ mod tests {
         ] {
             let mut settings = SequenceSettings::default();
             settings.color_management.output_color_space = color_space;
-            settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
             let mut cmd = Command::new("ffmpeg");
-            apply_export_video_signal_args(
-                &mut cmd,
-                &settings,
-                &codec,
-                ExportAlphaMode::FlattenBlack,
-            );
+            apply_export_video_signal_args(&mut cmd, &settings, &delivery);
 
             let args =
                 cmd.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
@@ -5226,10 +5304,15 @@ mod tests {
     fn srgb_yuv_delivery_uses_bt709_matrix_without_relabeling_transfer() {
         let mut settings = SequenceSettings::default();
         settings.color_management.output_color_space = ColorSpace::Srgb;
-        let codec = VideoCodecConfig::H264 { crf: 20, bitrate_kbps: None };
+        let delivery = test_delivery_contract(
+            DeliveryBitDepth::Eight,
+            VideoRange::Legal,
+            ExportChromaSampling::Yuv420,
+            "yuv420p",
+        );
         let mut cmd = Command::new("ffmpeg");
 
-        apply_export_video_signal_args(&mut cmd, &settings, &codec, ExportAlphaMode::FlattenBlack);
+        apply_export_video_signal_args(&mut cmd, &settings, &delivery);
 
         let args = cmd.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
         assert!(args.windows(2).any(|pair| pair == ["-color_trc", "iec61966-2-1"]));
@@ -5243,13 +5326,15 @@ mod tests {
     fn post_encode_expectations_come_from_the_same_signal_contract() {
         let mut settings = SequenceSettings::default();
         settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
-        settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
-        settings.color_management.video_range = VideoRange::Legal;
-        let codec = VideoCodecConfig::H265 { crf: 20, bitrate_kbps: None };
+        let delivery = test_delivery_contract(
+            DeliveryBitDepth::Ten,
+            VideoRange::Legal,
+            ExportChromaSampling::Yuv420,
+            "yuv420p10le",
+        );
 
         let expected =
-            expected_export_video_signal(&settings, &codec, ExportAlphaMode::FlattenBlack)
-                .expect("valid PQ signal contract");
+            expected_export_video_signal(&settings, &delivery).expect("valid PQ signal contract");
 
         assert_eq!(expected.pixel_format.as_deref(), Some("yuv420p10le"));
         assert_eq!(expected.color_range.as_deref(), Some("tv"));
@@ -5265,9 +5350,8 @@ mod tests {
             Some(VideoMasteringDisplayMetadata::rec2100_1000_nit_reference());
         settings.color_management.hdr_content_light =
             Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
-        let expected =
-            expected_export_video_signal(&settings, &codec, ExportAlphaMode::FlattenBlack)
-                .expect("valid static HDR metadata contract");
+        let expected = expected_export_video_signal(&settings, &delivery)
+            .expect("valid static HDR metadata contract");
         let expected_static_hdr = expected
             .static_hdr_metadata
             .expect("post-encode contract must retain authored static HDR metadata");
@@ -5278,22 +5362,31 @@ mod tests {
         settings.color_management.static_hdr_metadata_policy = StaticHdrMetadataPolicy::Omit;
 
         settings.color_management.output_color_space = ColorSpace::AppleLogBt2020;
-        settings.color_management.delivery_bit_depth = DeliveryBitDepth::Twelve;
-        let prores = VideoCodecConfig::ProRes { variant: "4444xq".to_owned() };
+        let prores = test_delivery_contract(
+            DeliveryBitDepth::Twelve,
+            VideoRange::Full,
+            ExportChromaSampling::Yuv444,
+            "yuv444p12le",
+        );
         let expected =
-            expected_export_video_signal(&settings, &prores, ExportAlphaMode::FlattenBlack)
-                .expect("valid ProRes signal contract");
+            expected_export_video_signal(&settings, &prores).expect("valid ProRes signal contract");
         assert_eq!(expected.pixel_format.as_deref(), Some("yuv444p12le"));
-        let alpha_expected =
-            expected_export_video_signal(&settings, &prores, ExportAlphaMode::Preserve)
-                .expect("valid ProRes alpha signal contract");
+        let prores_alpha =
+            ResolvedExportDeliveryContract { pixel_format: "yuva444p12le", ..prores };
+        let alpha_expected = expected_export_video_signal(&settings, &prores_alpha)
+            .expect("valid ProRes alpha signal contract");
         assert_eq!(alpha_expected.pixel_format.as_deref(), Some("yuva444p12le"));
         assert!(expected.require_color_tags_absent);
     }
 
     #[test]
     fn rec601_delivery_preserves_pal_and_ntsc_signal_tags() {
-        let codec = VideoCodecConfig::H264 { crf: 20, bitrate_kbps: None };
+        let delivery = test_delivery_contract(
+            DeliveryBitDepth::Eight,
+            VideoRange::Legal,
+            ExportChromaSampling::Yuv420,
+            "yuv420p",
+        );
         for (color_space, primaries, transfer, matrix) in [
             (ColorSpace::Rec601Pal, "bt470bg", "bt470bg", "bt470bg"),
             (
@@ -5305,20 +5398,14 @@ mod tests {
         ] {
             let mut settings = SequenceSettings::default();
             settings.color_management.output_color_space = color_space;
-            let expected =
-                expected_export_video_signal(&settings, &codec, ExportAlphaMode::FlattenBlack)
-                    .expect("valid Rec.601 signal contract");
+            let expected = expected_export_video_signal(&settings, &delivery)
+                .expect("valid Rec.601 signal contract");
             assert_eq!(expected.color_primaries.as_deref(), Some(primaries));
             assert_eq!(expected.color_transfer.as_deref(), Some(transfer));
             assert_eq!(expected.color_matrix.as_deref(), Some(matrix));
 
             let mut cmd = Command::new("ffmpeg");
-            apply_export_video_signal_args(
-                &mut cmd,
-                &settings,
-                &codec,
-                ExportAlphaMode::FlattenBlack,
-            );
+            apply_export_video_signal_args(&mut cmd, &settings, &delivery);
             let args =
                 cmd.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
             assert!(args.windows(2).any(|pair| {

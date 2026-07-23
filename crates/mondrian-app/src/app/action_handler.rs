@@ -3138,7 +3138,7 @@ mod tests {
 
         let err = state
             .dispatch_action(export_enqueue_action(ExportEnqueuePayload {
-                preset: mondrian_export::preset::ExportPreset::youtube_1080p(),
+                preset: mondrian_export::preset::ExportPreset::h264_aac_sdr_1080p(),
                 sequence_id: None,
                 range: mondrian_export::preset::TimelineExportRange::EntireSequence,
                 output_path: PathBuf::new(),

@@ -81,45 +81,62 @@ pub(crate) fn wait_for_ffmpeg_child(
 
 pub(crate) fn apply_video_codec_args(cmd: &mut Command, codec: &VideoCodecConfig) {
     match codec {
-        VideoCodecConfig::H264 { crf, bitrate_kbps } => {
+        VideoCodecConfig::H264 { profile, rate_control } => {
             cmd.arg("-c:v")
                 .arg("libx264")
                 .arg("-preset")
                 .arg("medium")
-                .arg("-crf")
-                .arg(crf.to_string());
-            if let Some(bitrate) = bitrate_kbps {
-                cmd.arg("-b:v").arg(format!("{}k", bitrate));
-            }
+                .arg("-profile:v")
+                .arg(match profile {
+                    crate::preset::H264Profile::High => "high",
+                });
+            apply_video_rate_control_args(cmd, *rate_control);
         }
-        VideoCodecConfig::H265 { crf, bitrate_kbps } => {
+        VideoCodecConfig::Hevc { profile, rate_control } => {
             cmd.arg("-c:v")
                 .arg("libx265")
                 .arg("-preset")
                 .arg("medium")
-                .arg("-crf")
-                .arg(crf.to_string());
-            if let Some(bitrate) = bitrate_kbps {
-                cmd.arg("-b:v").arg(format!("{}k", bitrate));
-            }
+                .arg("-profile:v")
+                .arg(match profile {
+                    crate::preset::HevcProfile::Main => "main",
+                    crate::preset::HevcProfile::Main10 => "main10",
+                });
+            apply_video_rate_control_args(cmd, *rate_control);
         }
-        VideoCodecConfig::Av1 { crf } => {
+        VideoCodecConfig::Av1 { profile, rate_control } => {
             cmd.arg("-c:v")
                 .arg("libaom-av1")
-                .arg("-crf")
-                .arg(crf.to_string())
+                .arg("-profile:v")
+                .arg(match profile {
+                    crate::preset::Av1Profile::Main => "0",
+                })
                 .arg("-b:v")
                 .arg("0");
+            apply_video_rate_control_args(cmd, *rate_control);
         }
-        VideoCodecConfig::ProRes { variant } => {
+        VideoCodecConfig::ProRes { profile } => {
             cmd.arg("-c:v")
                 .arg("prores_ks")
                 .arg("-profile:v")
-                .arg(prores_profile_variant(variant));
+                .arg(prores_profile_variant(*profile));
         }
         VideoCodecConfig::Gif { .. } => {
             cmd.arg("-c:v").arg("gif");
         }
+    }
+}
+
+fn apply_video_rate_control_args(cmd: &mut Command, rate_control: crate::preset::VideoRateControl) {
+    cmd.arg("-crf").arg(rate_control.crf.to_string());
+    if let (Some(max_bitrate), Some(buffer_size)) = (
+        rate_control.max_bitrate_kbps,
+        rate_control.buffer_size_kbits,
+    ) {
+        cmd.arg("-maxrate")
+            .arg(format!("{max_bitrate}k"))
+            .arg("-bufsize")
+            .arg(format!("{buffer_size}k"));
     }
 }
 
@@ -167,38 +184,18 @@ struct ExportVideoSignalContract {
 }
 
 impl ExportVideoSignalContract {
-    fn resolve(
-        settings: &SequenceSettings,
-        codec: &VideoCodecConfig,
-        alpha_mode: ExportAlphaMode,
-    ) -> Self {
+    fn resolve(settings: &SequenceSettings, delivery: &ResolvedExportDeliveryContract) -> Self {
         let color_space = settings.color_management.output_color_space;
-        if matches!(codec, VideoCodecConfig::Gif { .. }) {
+        if delivery.chroma_sampling == crate::preset::ExportChromaSampling::Rgb {
             return Self {
-                pixel_format: "rgb8",
+                pixel_format: delivery.pixel_format,
                 codec_range: None,
                 scale_range: None,
                 yuv_matrix: None,
                 color_space,
             };
         }
-        let pixel_format = match codec {
-            VideoCodecConfig::ProRes { variant }
-                if prores_variant_is_4444(variant) && alpha_mode == ExportAlphaMode::Preserve =>
-            {
-                "yuva444p12le"
-            }
-            VideoCodecConfig::ProRes { variant } if prores_variant_is_4444(variant) => {
-                "yuv444p12le"
-            }
-            VideoCodecConfig::ProRes { .. } => "yuv422p10le",
-            _ => match settings.color_management.delivery_bit_depth {
-                DeliveryBitDepth::Eight => "yuv420p",
-                DeliveryBitDepth::Ten => "yuv420p10le",
-                DeliveryBitDepth::Twelve => "yuv420p12le",
-            },
-        };
-        let (codec_range, scale_range) = match settings.color_management.video_range {
+        let (codec_range, scale_range) = match delivery.video_range {
             VideoRange::Full => ("pc", "full"),
             VideoRange::Legal => ("tv", "limited"),
         };
@@ -221,7 +218,7 @@ impl ExportVideoSignalContract {
             | mondrian_core::ColorMatrixCoefficients::Unspecified => ExportYuvMatrix::Bt709,
         };
         Self {
-            pixel_format,
+            pixel_format: delivery.pixel_format,
             codec_range: Some(codec_range),
             scale_range: Some(scale_range),
             yuv_matrix: Some(yuv_matrix),
@@ -245,11 +242,10 @@ impl ExportVideoSignalContract {
 
 pub(crate) fn expected_export_video_signal(
     settings: &SequenceSettings,
-    codec: &VideoCodecConfig,
-    alpha_mode: ExportAlphaMode,
+    delivery: &ResolvedExportDeliveryContract,
 ) -> Result<crate::validator::ExpectedVideoSignalConstraints, String> {
     let mut constraints =
-        ExportVideoSignalContract::resolve(settings, codec, alpha_mode).validation_constraints();
+        ExportVideoSignalContract::resolve(settings, delivery).validation_constraints();
     if settings.color_management.static_hdr_metadata_policy.writes_authored_metadata() {
         let mastering_display = settings
             .color_management
@@ -278,10 +274,9 @@ pub(crate) fn expected_export_video_signal(
 pub(crate) fn apply_export_video_signal_args(
     cmd: &mut Command,
     settings: &SequenceSettings,
-    codec: &VideoCodecConfig,
-    alpha_mode: ExportAlphaMode,
+    delivery: &ResolvedExportDeliveryContract,
 ) {
-    let contract = ExportVideoSignalContract::resolve(settings, codec, alpha_mode);
+    let contract = ExportVideoSignalContract::resolve(settings, delivery);
     if let (Some(range), Some(matrix)) = (contract.scale_range, contract.yuv_matrix) {
         cmd.arg("-vf").arg(format!(
             "scale=iw:ih:in_range=full:out_range={range}:out_color_matrix={}",
@@ -337,6 +332,7 @@ fn h265_hdr_metadata_params(settings: &SequenceSettings) -> Result<String, Strin
 
 pub(crate) fn apply_audio_codec_args(cmd: &mut Command, codec: &AudioCodecConfig) {
     match codec {
+        AudioCodecConfig::Disabled => {}
         AudioCodecConfig::Aac { bitrate_kbps } => {
             cmd.arg("-c:a").arg("aac").arg("-b:a").arg(format!("{}k", bitrate_kbps));
         }
@@ -354,83 +350,23 @@ pub(crate) fn apply_audio_codec_args(cmd: &mut Command, codec: &AudioCodecConfig
     }
 }
 
-pub(crate) fn validate_timeline_export_color_compatibility(
+pub(crate) fn resolve_timeline_export_delivery(
     config: &ExportConfig,
     timeline: &TimelineExportSnapshot,
-) -> Result<(), String> {
-    let settings = &timeline.sequence.settings;
-    let output = settings.color_management.output_color_space;
-    let output_encoding = output.encoding();
-    let bit_depth = settings.color_management.delivery_bit_depth;
-    let write_static_hdr =
-        settings.color_management.static_hdr_metadata_policy.writes_authored_metadata();
-
-    if config.preset.alpha_mode == ExportAlphaMode::Preserve
-        && !matches!(
-            (&config.preset.container, &config.preset.video),
-            (Container::Mov, VideoCodecConfig::ProRes { variant })
-                if prores_variant_is_4444(variant)
-        )
-    {
-        return Err(
-            "保留 Alpha 当前仅支持 MOV + ProRes 4444/4444 XQ；请选择专用 RGB+Alpha 交付预设"
-                .to_string(),
-        );
-    }
-
-    if output_encoding.is_scene_log() {
-        if bit_depth == DeliveryBitDepth::Eight {
-            return Err("Camera log 输出需要 10-bit 或更高位深".to_string());
-        }
-        match (&config.preset.container, &config.preset.video) {
-            (Container::Mov | Container::Mxf, VideoCodecConfig::ProRes { .. }) => {}
-            _ => {
-                return Err("Camera log 输出仅支持 MOV/MXF + ProRes 专业中间格式".to_string());
-            }
-        }
-    }
-
-    if output.is_hdr() && bit_depth == DeliveryBitDepth::Eight {
-        return Err("HDR 输出不能使用 8-bit 导出位深".to_string());
-    }
-    if write_static_hdr && !output.is_hdr() {
-        return Err("只有 HDR 输出色彩空间可以写入静态 HDR metadata".to_string());
-    }
-    if write_static_hdr && bit_depth == DeliveryBitDepth::Eight {
-        return Err("写入静态 HDR metadata 需要 10-bit 或更高位深".to_string());
-    }
+) -> Result<ResolvedExportDeliveryContract, String> {
+    let delivery = crate::delivery::resolve_export_delivery(
+        &config.preset,
+        &timeline.sequence.settings,
+        &timeline.project_color_management,
+    )
+    .map_err(|error| error.to_string())?;
+    let write_static_hdr = timeline
+        .sequence
+        .settings
+        .color_management
+        .static_hdr_metadata_policy
+        .writes_authored_metadata();
     if write_static_hdr {
-        let mastering =
-            settings.color_management.hdr_mastering_display.as_ref().ok_or_else(|| {
-                "写入静态 HDR metadata 需要 SMPTE ST 2086 母版显示元数据".to_string()
-            })?;
-        mastering
-            .validate()
-            .map_err(|error| format!("HDR mastering metadata 无效: {error}"))?;
-        let content_light = settings.color_management.hdr_content_light.ok_or_else(|| {
-            "写入静态 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据".to_string()
-        })?;
-        content_light
-            .validate()
-            .map_err(|error| format!("HDR content-light metadata 无效: {error}"))?;
-
-        let engine = if settings.color_management.inherit {
-            &timeline.project_color_management.engine
-        } else {
-            &settings.color_management.engine
-        };
-        if let mondrian_core::ColorEngine::MondrianStandard { package } = engine {
-            let target = mondrian_core::mondrian_standard_output_target_contract_for_package(
-                *package, output,
-            )?;
-            if content_light.max_content_light_level > target.nominal_peak_nits {
-                return Err(format!(
-                    "Mondrian Standard {:?} View 峰值为 {} nit，但 MaxCLL 声明 {} nit",
-                    output, target.nominal_peak_nits, content_light.max_content_light_level
-                ));
-            }
-        }
-
         let source_issues = export_asset_issue_summary(timeline);
         if source_issues.diagnostics_with_dynamic_hdr10_plus > 0
             || source_issues.diagnostics_with_dolby_vision_config > 0
@@ -442,73 +378,18 @@ pub(crate) fn validate_timeline_export_color_compatibility(
             ));
         }
     }
-    if write_static_hdr && !matches!(&config.preset.video, VideoCodecConfig::H265 { .. }) {
-        return Err(
-            "HDR metadata 写入当前仅由 H.265/libx265 编码后端支持；AV1/ProRes 尚无已验证的 metadata backend"
-                .to_string(),
-        );
-    }
-
-    match &config.preset.video {
-        VideoCodecConfig::ProRes { variant }
-            if prores_variant_is_4444(variant) && bit_depth != DeliveryBitDepth::Twelve =>
-        {
-            return Err("ProRes 4444/4444 XQ 交付必须声明 12-bit 位深".to_string());
-        }
-        VideoCodecConfig::ProRes { variant }
-            if !prores_variant_is_4444(variant) && bit_depth != DeliveryBitDepth::Ten =>
-        {
-            return Err("ProRes Proxy/LT/Standard/HQ 交付必须声明 10-bit 位深".to_string());
-        }
-        VideoCodecConfig::H264 { .. }
-        | VideoCodecConfig::H265 { .. }
-        | VideoCodecConfig::Av1 { .. }
-            if bit_depth == DeliveryBitDepth::Twelve =>
-        {
-            return Err("H.264/H.265/AV1 当前仅支持 8-bit 或 10-bit 交付".to_string());
-        }
-        VideoCodecConfig::Gif { .. } => {}
-        _ => {}
-    }
-
-    match (&config.preset.container, &config.preset.video) {
-        (Container::Gif, _) | (_, VideoCodecConfig::Gif { .. }) => {
-            if output.is_hdr() || write_static_hdr || bit_depth != DeliveryBitDepth::Eight {
-                return Err("GIF 导出仅支持 8-bit SDR 输出".to_string());
-            }
-            if output != ColorSpace::Srgb {
-                return Err("GIF 不携带可靠色彩标签，仅允许显式 sRGB 输出".to_string());
-            }
-        }
-        (Container::Webm, VideoCodecConfig::H264 { .. } | VideoCodecConfig::H265 { .. }) => {
-            return Err("WebM 容器不支持 H.264/H.265 视频编码".to_string());
-        }
-        (Container::Mp4, VideoCodecConfig::ProRes { .. }) => {
-            return Err("ProRes 应使用 MOV/MXF 等专业容器导出".to_string());
-        }
-        (_, VideoCodecConfig::H264 { .. }) if output.is_hdr() || write_static_hdr => {
-            return Err("HDR 输出建议使用 H.265、AV1 或 ProRes，当前 H.264 配置已拒绝".to_string());
-        }
-        _ => {}
-    }
-
-    Ok(())
+    Ok(delivery)
 }
 
-pub(crate) fn prores_profile_variant(variant: &str) -> &'static str {
-    match variant.to_ascii_lowercase().as_str() {
-        "proxy" => "0",
-        "lt" => "1",
-        "standard" => "2",
-        "hq" => "3",
-        "4444" => "4",
-        "4444xq" => "5",
-        _ => "3",
+pub(crate) const fn prores_profile_variant(profile: crate::preset::ProResProfile) -> &'static str {
+    match profile {
+        crate::preset::ProResProfile::Proxy => "0",
+        crate::preset::ProResProfile::Lt => "1",
+        crate::preset::ProResProfile::Standard => "2",
+        crate::preset::ProResProfile::Hq => "3",
+        crate::preset::ProResProfile::FourFourFourFour => "4",
+        crate::preset::ProResProfile::FourFourFourFourXq => "5",
     }
-}
-
-fn prores_variant_is_4444(variant: &str) -> bool {
-    matches!(variant.to_ascii_lowercase().as_str(), "4444" | "4444xq")
 }
 
 pub(crate) fn container_format(container: &Container) -> &'static str {

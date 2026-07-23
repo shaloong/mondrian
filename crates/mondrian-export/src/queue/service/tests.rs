@@ -4,11 +4,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use mondrian_core::{ExecutionTerminalDisposition, ProjectColorManagement};
-use mondrian_timeline::sequence::Sequence;
+use mondrian_timeline::sequence::{DeliveryBitDepth, Sequence};
 use parking_lot::{Condvar, Mutex};
 
 use super::*;
-use crate::preset::{ExportPreset, TimelineExportRange, TimelineExportSnapshot};
+use crate::preset::{ExportParameter, ExportPreset, TimelineExportRange, TimelineExportSnapshot};
 use crate::queue::{ExportExecutor, ExportJobDiagnostics, JobExecutionResult};
 
 enum GateOutcome {
@@ -99,7 +99,7 @@ impl ExportExecutor for GateExecutor {
 
 fn dummy_config(output_path: impl Into<PathBuf>) -> ExportConfig {
     ExportConfig {
-        preset: ExportPreset::youtube_1080p(),
+        preset: ExportPreset::h264_aac_sdr_1080p(),
         timeline: Box::new(TimelineExportSnapshot {
             sequence: Sequence::new("queue-test"),
             sequences: Vec::new(),
@@ -127,6 +127,21 @@ fn wait_diagnostics(
         );
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+#[test]
+fn admission_rejects_an_incoherent_delivery_before_worker_dispatch() {
+    let backend = GateExecutor::new([]);
+    let queue = RenderQueue::new_with_executor(backend.clone());
+    let mut config = dummy_config("invalid-delivery.mp4");
+    config.preset.video_signal.bit_depth = ExportParameter::Explicit(DeliveryBitDepth::Ten);
+
+    assert!(matches!(
+        queue.enqueue(RenderJob::new(config)),
+        Err(ExportAdmissionError::InvalidDelivery { .. })
+    ));
+    assert_eq!(queue.diagnostics().rejections, 1);
+    assert_eq!(*backend.started.lock(), 0);
 }
 
 #[test]
