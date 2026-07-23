@@ -86,6 +86,7 @@ use crate::app::preview_scheduler_policy::{
     PREVIEW_SCRUB_SLOW_LATENCY_US,
 };
 use crate::app::preview_timeline_execution::PreviewTimelineResolution;
+use crate::app::preview_title_task::PreviewTitleTask;
 use crate::app::preview_unavailability::{
     PreviewOutputStage, PreviewUnavailability, PreviewUnavailabilityEvidence,
 };
@@ -199,6 +200,7 @@ pub struct PreviewProductionRuntime<O: Clone> {
     transport_playing: Cell<bool>,
     playback_pressure: Cell<PlaybackPressureState>,
     scheduler: MediaPreviewScheduler,
+    title_task: RefCell<PreviewTitleTask>,
     scratch: RefCell<TimelineCompositeScratch>,
     last_color_rejection: RefCell<Option<PreviewColorRejection>>,
     unavailability_evidence: RefCell<PreviewUnavailabilityEvidence>,
@@ -287,6 +289,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             transport_playing: Cell::new(false),
             playback_pressure: Cell::new(PlaybackPressureState::default()),
             scheduler,
+            title_task: RefCell::new(PreviewTitleTask::default()),
             scratch: RefCell::new(TimelineCompositeScratch::default()),
             last_color_rejection: RefCell::new(None),
             unavailability_evidence: RefCell::new(PreviewUnavailabilityEvidence::default()),
@@ -809,6 +812,7 @@ mod request_scheduler;
 mod result_pump;
 mod service_lifecycle;
 mod timeline_evaluation;
+mod title_adapter;
 
 use crate::app::preview_execution::PreviewOutputKey as ViewerPreviewCacheKey;
 
@@ -820,6 +824,9 @@ impl<O: Clone> PlaybackPreviewAdapter for PreviewProductionRuntime<O> {
     ) -> PreviewWorkPoll {
         self.observe_transport_activity(transport_playing);
         let mut outcome = self.poll_finished_outcome(pending_demand);
+        let title_poll = self.title_task.borrow_mut().poll_finished();
+        outcome.visible_change |= title_poll.visible_change;
+        outcome.needs_follow_up_poll |= title_poll.needs_follow_up_poll;
         outcome.merge(self.expire_stalled_realtime_current(pending_demand));
         self.try_release_settled_transport_media_residency();
         outcome

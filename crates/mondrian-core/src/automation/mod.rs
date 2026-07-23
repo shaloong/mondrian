@@ -711,7 +711,7 @@ impl Interpolatable for PropertyValue {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Keyframe<T> {
     pub id: KeyframeId,
     pub time: TimelineTime,
@@ -895,7 +895,7 @@ const fn default_track_enabled() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PropertyDescriptor {
     /// Stable parameter schema; independent from instance addressing.
     pub schema: ParameterSchema,
@@ -987,7 +987,7 @@ impl PropertyDescriptor {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnimationChannel {
     pub index: usize,
     keyframes: Vec<Keyframe<f64>>,
@@ -1102,7 +1102,7 @@ impl AnimationChannel {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnimatedProperty {
     pub track_id: AnimationTrackId,
     pub descriptor: PropertyDescriptor,
@@ -1942,7 +1942,7 @@ impl AnimatedProperty {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PropertyBag {
     properties: BTreeMap<String, AnimatedProperty>,
 }

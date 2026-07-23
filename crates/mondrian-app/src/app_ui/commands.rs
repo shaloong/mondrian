@@ -14,7 +14,7 @@ use crate::app::ui_actions::{
     app_shell_about_action, app_shell_import_media_dialog_action,
     app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
     app_shell_preferences_action, app_shell_project_settings_action, app_shell_quit_action,
-    app_shell_save_project_as_dialog_action,
+    app_shell_save_project_as_dialog_action, timeline_create_basic_title_action,
 };
 
 /// Stable command descriptor consumed by menus, shortcuts, and preferences.
@@ -233,6 +233,14 @@ pub fn default_commands() -> Vec<AppUiCommandDescriptor> {
             action_split_at_playhead,
         ),
         command(
+            "timeline.create_basic_title",
+            "基础标题",
+            "基础标题",
+            AppUiCommandCategory::Timeline,
+            None,
+            action_create_basic_title,
+        ),
+        command(
             "timeline.mark_in",
             "标记入点",
             "标记入点",
@@ -427,6 +435,9 @@ fn action_open_project() -> Action {
 }
 fn action_import_media() -> Action {
     app_shell_import_media_dialog_action()
+}
+fn action_create_basic_title() -> Action {
+    timeline_create_basic_title_action()
 }
 fn action_save_project() -> Action {
     Action::SaveProject

@@ -39,6 +39,8 @@ pub const TIMELINE_SELECT_CLIP: &str = "select_clip";
 pub const TIMELINE_SELECT_VIDEO_TRANSITION: &str = "select_video_transition";
 /// Action name for creating the product-default Cross Dissolve at an edit.
 pub const TIMELINE_CREATE_CROSS_DISSOLVE: &str = "create_cross_dissolve";
+/// Action name for creating a generated Basic Title at the current edit range.
+pub const TIMELINE_CREATE_BASIC_TITLE: &str = "create_basic_title";
 /// Action name for changing one visual Transition range on the frame grid.
 pub const TIMELINE_SET_VIDEO_TRANSITION_RANGE: &str = "set_video_transition_range";
 /// Action name for moving a timeline clip.
@@ -81,6 +83,8 @@ pub const INSPECTOR_SET_CLIP_TINT: &str = "set_clip_tint";
 pub const INSPECTOR_SET_CLIP_TRANSFORM_FIELD: &str = "set_clip_transform_field";
 /// Action name for changing a selected clip's animation curve draft.
 pub const INSPECTOR_SET_CLIP_CURVE: &str = "set_clip_curve";
+/// Action name for changing one definition-backed Clip content property.
+pub const INSPECTOR_SET_CLIP_PROPERTY: &str = "set_clip_property";
 /// Action name for selecting the logical source of one Clip audio Component Edit.
 pub const INSPECTOR_SET_AUDIO_COMPONENT_SOURCE: &str = "set_audio_component_source";
 /// Action name for selecting one effect inside the selected clip.
@@ -719,6 +723,17 @@ pub struct InspectorSetClipCurvePayload {
     pub points: Vec<InspectorCurvePointPayload>,
 }
 
+/// Change one definition-backed Clip property.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InspectorSetClipPropertyPayload {
+    /// Clip targeted by the inspector mutation.
+    pub clip: InspectorClipRefPayload,
+    /// Current authoring address of the definition-backed parameter.
+    pub path: String,
+    /// New typed value.
+    pub value: mondrian_core::automation::PropertyValue,
+}
+
 /// Logical source selected for one placement-local audio Component Edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InspectorAudioComponentSourcePayload {
@@ -1172,6 +1187,11 @@ pub fn timeline_create_cross_dissolve_action(
     custom_timeline_action(TIMELINE_CREATE_CROSS_DISSOLVE, payload)
 }
 
+/// Build an action that creates a generated Basic Title.
+pub fn timeline_create_basic_title_action() -> Action {
+    custom_timeline_action(TIMELINE_CREATE_BASIC_TITLE, ())
+}
+
 /// Build an action that changes one visual Transition range.
 pub fn timeline_set_video_transition_range_action(
     payload: TimelineSetVideoTransitionRangePayload,
@@ -1281,6 +1301,11 @@ pub fn inspector_set_clip_transform_field_action(
 /// Build an action that changes a clip curve from an inspector panel.
 pub fn inspector_set_clip_curve_action(payload: InspectorSetClipCurvePayload) -> Action {
     custom_inspector_action(INSPECTOR_SET_CLIP_CURVE, payload)
+}
+
+/// Build an action that changes one definition-backed Clip property.
+pub fn inspector_set_clip_property_action(payload: InspectorSetClipPropertyPayload) -> Action {
+    custom_inspector_action(INSPECTOR_SET_CLIP_PROPERTY, payload)
 }
 
 /// Build an action that changes one Clip audio Component Edit's logical source.

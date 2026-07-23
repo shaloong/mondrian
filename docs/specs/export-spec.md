@@ -37,6 +37,9 @@ Snapshot capture is an App-domain transaction performed before queue admission:
 - missing or offline real media fails before admission;
 - synthetic Adjustment Layers remain Timeline authoring data and do not create
   a filesystem dependency;
+- Basic Titles remain Sequence-local generated author data; their exact named
+  font dependency is resolved by the shared renderer during execution and a
+  missing/changed/undeclared fallback face fails the job closed;
 - the admitted job remains valid after the live Project is edited or closed,
   because it owns the frozen closure rather than reading mutable `AppState`.
 
@@ -121,6 +124,9 @@ Preview and Export may differ in scheduling, cache lifetime, readback, and
 delivery transform. They must share Timeline ordering, nested Sequence
 semantics, exact time evaluation, processor/effect interpretation, audio
 schedule semantics, working-space compositing, and input-color resolution.
+One Export visual Session is reused across every frame, nested Sequence, and
+Transition endpoint so Basic Title font/raster identity and bounded cache
+lifetime are job-scoped rather than global or frame-local.
 Detected metadata absence invokes the authored missing-metadata policy; it never
 means implicit Rec.709. High-bit-depth output must cross the typed renderer
 float boundary and fails closed rather than manufacturing nominal 10/12-bit

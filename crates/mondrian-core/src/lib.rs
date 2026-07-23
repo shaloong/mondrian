@@ -29,6 +29,7 @@ pub mod project;
 pub mod render_graph;
 pub mod timeline_data;
 pub mod timeline_time;
+pub mod title;
 pub mod types;
 
 pub use audio_layout::*;
@@ -49,4 +50,5 @@ pub use ocio::*;
 pub use parameter::*;
 pub use project::*;
 pub use timeline_time::*;
+pub use title::*;
 pub use types::*;

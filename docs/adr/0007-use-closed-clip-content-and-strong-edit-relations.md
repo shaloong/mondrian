@@ -8,9 +8,20 @@ status: accepted
 
 Timeline placement is the single source of truth. A `Track` owns ordered Clip
 placements; a Clip owns exact placement/source ranges and one closed
-`ClipContent` variant: Media, Adjustment Layer, Nested Sequence, or Solid Color.
-Variant-specific references and interpretation data exist only inside that
-payload. Current-schema deserialization rejects legacy/unknown parallel fields.
+`ClipContent` variant: Media, Adjustment Layer, Nested Sequence, Solid Color,
+or Basic Title. Variant-specific references, generated-source parameters, and
+interpretation data exist only inside that payload. Current-schema
+deserialization rejects legacy/unknown parallel fields.
+
+Basic Title is Sequence-local generated Clip content. It is neither a fake
+Asset nor an Effect: it produces straight-alpha working-linear picture, after
+which the ordinary Clip Transform, effect chain, Mask, blend, Transition,
+nesting, Preview, and Export semantics apply unchanged. Its definition-backed
+Property Bag is a closed author contract evaluated in Clip source-local time.
+The requested system font family is a concrete recoverable dependency; missing
+families, inaccessible face bytes, and undeclared shaping fallback fail
+execution closed instead of substituting pixels. The resolved face-byte/index
+fingerprint participates in generated output identity.
 
 Relationships that are not intrinsic Clip content are explicit Sequence-local
 author entities:
@@ -48,6 +59,9 @@ author data.
 
 - Contradictory Clip kinds or fake nested-Clip Asset identities are
   unrepresentable.
+- Basic Title cannot drift into a renderer-only `TextLayer`, Asset generator,
+  or effect-specific parameter model; it crosses the existing generated-source
+  seam and then shares all downstream visual semantics.
 - Link groups naturally support more than one video/audio pair and preserve
   relative placement under group edits.
 - A Transition cannot disagree with its endpoint Track or silently read beyond

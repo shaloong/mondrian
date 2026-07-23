@@ -432,6 +432,19 @@ impl Clip {
         Ok(clip)
     }
 
+    /// Create one sequence-local Basic Title Clip.
+    pub fn new_basic_title(
+        text: impl Into<String>,
+        font_family: impl Into<String>,
+        position: TimelineTime,
+        duration: TimelineTime,
+    ) -> Result<Self> {
+        let title = mondrian_core::BasicTitle::new(text, font_family)?;
+        let mut clip = Self::with_content(ClipContent::BasicTitle { title }, position, duration)?;
+        clip.label = Some("基础标题".to_owned());
+        Ok(clip)
+    }
+
     pub fn new_adjustment_layer(
         asset_id: AssetId,
         position: TimelineTime,
@@ -471,6 +484,11 @@ impl Clip {
 
     pub fn is_nested_sequence(&self) -> bool {
         matches!(self.content, ClipContent::NestedSequence { .. })
+    }
+
+    /// Whether this Clip contains a generated Basic Title.
+    pub fn is_basic_title(&self) -> bool {
+        matches!(self.content, ClipContent::BasicTitle { .. })
     }
 
     /// Stable content discriminator for presentation adapters.
@@ -564,6 +582,7 @@ impl Clip {
     /// owning Sequence because their Processing Scopes live outside the Clip.
     pub fn fork_visual_placement_identities(&mut self) {
         self.id = ClipId::new();
+        self.content.fork_author_identities();
         self.transform.fork_author_identities();
         for effect in &mut self.effects {
             effect.id = EffectId::new();
@@ -727,6 +746,11 @@ impl PropertyHost for Clip {
             solid_color_property.set_static_value(PropertyValue::Color(solid_color))?;
             properties.upsert(solid_color_property);
         }
+        if let Some(title) = self.content.basic_title() {
+            for (_, property) in title.property_bag().iter() {
+                properties.upsert(property.clone());
+            }
+        }
         Ok(properties)
     }
 
@@ -790,6 +814,14 @@ impl PropertyHost for Clip {
             };
             *current = color;
             Ok(())
+        } else if path.starts_with("title.") {
+            let title = self.content.basic_title_mut().ok_or_else(|| {
+                MondrianError::WorkflowStepFailed {
+                    step_id: "clip_apply_property_mutation".to_owned(),
+                    reason: "title.* properties only apply to Basic Title content".to_owned(),
+                }
+            })?;
+            title.apply_property_mutation(mutation)
         } else if path.starts_with("mask.") {
             // Path format: "mask.<uuid>.<short_prop>"
             let parts: Vec<&str> = path.splitn(3, '.').collect();

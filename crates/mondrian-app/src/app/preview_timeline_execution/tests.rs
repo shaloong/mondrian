@@ -43,6 +43,7 @@ fn solid_plan_is_ui_independent_and_has_mandatory_cache_identity() {
         PreviewResolutionScale::Full,
         color_context(&sequence),
         &mut unexpected_media,
+        &mut |_| panic!("solid plan must not request titles"),
     );
     let PreviewTimelineResolution::Ready(first) = first else {
         panic!("solid Timeline should resolve");
@@ -59,6 +60,7 @@ fn solid_plan_is_ui_independent_and_has_mandatory_cache_identity() {
         PreviewResolutionScale::Full,
         color_context(&sequence),
         &mut unexpected_media,
+        &mut |_| panic!("solid plan must not request titles"),
     );
     let PreviewTimelineResolution::Ready(second) = second else {
         panic!("solid Timeline should resolve twice");
@@ -108,6 +110,7 @@ fn preview_executes_cross_dissolve_through_shared_working_compositor() {
         PreviewResolutionScale::Full,
         context.clone(),
         &mut unexpected_media,
+        &mut |_| panic!("solid Transition must not request titles"),
     ) else {
         panic!("Cross Dissolve must resolve");
     };
@@ -163,6 +166,7 @@ fn nested_sequence_uses_shared_recursion_and_emits_execution_facts() {
         PreviewResolutionScale::Full,
         color_context(&parent),
         &mut unexpected_media,
+        &mut |_| panic!("nested solid plan must not request titles"),
     );
     let PreviewTimelineResolution::Ready(resolved) = resolution else {
         panic!("nested Timeline should resolve");
@@ -235,11 +239,14 @@ fn nested_sequence_keeps_its_own_canvas_under_shared_runtime_quality() {
         PreviewResolutionScale::Quarter,
         color_context(&parent),
         &mut media,
+        &mut |_| panic!("nested media plan must not request titles"),
     );
 
     assert!(matches!(
         result,
-        PreviewTimelineResolution::Pending { asset_id: pending_id } if pending_id == asset_id
+        PreviewTimelineResolution::Pending {
+            dependency: PreviewTimelinePendingDependency::Media(pending_id)
+        } if pending_id == asset_id
     ));
     assert_eq!(
         observed_resolution,
@@ -313,8 +320,11 @@ fn media_pending_and_unavailable_are_distinct_terminal_shapes() {
             PreviewResolutionScale::Full,
             color_context(&sequence),
             &mut pending,
+            &mut |_| panic!("media plan must not request titles"),
         ),
-        PreviewTimelineResolution::Pending { asset_id: pending_id } if pending_id == asset_id
+        PreviewTimelineResolution::Pending {
+            dependency: PreviewTimelinePendingDependency::Media(pending_id)
+        } if pending_id == asset_id
     ));
 
     let mut unavailable = |_| PreviewTimelineMediaFrame::Unavailable {
@@ -329,6 +339,7 @@ fn media_pending_and_unavailable_are_distinct_terminal_shapes() {
             PreviewResolutionScale::Full,
             color_context(&sequence),
             &mut unavailable,
+            &mut |_| panic!("media plan must not request titles"),
         ),
         PreviewTimelineResolution::Unavailable { reason } if reason.detail().contains("offline")
     ));
@@ -367,6 +378,7 @@ fn missing_nested_sequence_is_explicitly_unavailable() {
             PreviewResolutionScale::Full,
             color_context(&parent),
             &mut unexpected_media,
+            &mut |_| panic!("missing nested plan must not request titles"),
         ),
         PreviewTimelineResolution::Unavailable { reason } if reason.detail().contains(&missing_id.to_string())
     ));
@@ -393,6 +405,7 @@ fn empty_nested_sequence_is_transparent_instead_of_blocking_parent_output() {
         PreviewResolutionScale::Full,
         color_context(&parent),
         &mut unexpected_media,
+        &mut |_| panic!("empty nested plan must not request titles"),
     ) else {
         panic!("empty nested Sequence must resolve as a transparent layer");
     };
@@ -402,4 +415,61 @@ fn empty_nested_sequence_is_transparent_instead_of_blocking_parent_output() {
     };
     let working = frame.working_frame().expect("transparent working frame");
     assert!(working.frame.rgba_f32().data.iter().all(|pixel| *pixel == [0.0; 4]));
+}
+
+#[test]
+fn basic_title_enters_the_shared_working_linear_preview_path() {
+    ensure_mondrian_default_ocio_loaded().expect("default OCIO");
+    let mut sequence = Sequence::new("Basic Title");
+    sequence.settings.resolution = Resolution { width: 640, height: 360 };
+    let time_base = sequence.time_base();
+    sequence.video_tracks[0]
+        .add_clip(
+            Clip::new_basic_title(
+                "Mondrian",
+                mondrian_core::default_basic_title_font_family(),
+                tt(0, time_base),
+                tt(24, time_base),
+            )
+            .expect("title"),
+        )
+        .expect("title placement");
+    let mut rasterizer = mondrian_renderer::BasicTitleRasterizer::new();
+    let mut title_frame = |request: PreviewTimelineTitleRequest| {
+        PreviewTimelineTitleFrame::Ready(
+            rasterizer
+                .rasterize(
+                    &request.title,
+                    request.author_resolution,
+                    request.title_safe_margin,
+                    request.target_resolution,
+                    request.working_color_space,
+                )
+                .expect("title raster"),
+        )
+    };
+    let mut unexpected_media = |_| panic!("Basic Title must not request media decode");
+
+    let PreviewTimelineResolution::Ready(resolved) = resolve_preview_timeline(
+        &sequence,
+        &[],
+        0,
+        Resolution { width: 320, height: 180 },
+        PreviewResolutionScale::Full,
+        color_context(&sequence),
+        &mut unexpected_media,
+        &mut title_frame,
+    ) else {
+        panic!("Basic Title must resolve");
+    };
+    let [ResolvedPreviewElement::Media { frame, .. }] = resolved.plan.elements.as_slice() else {
+        panic!("Basic Title must lower to the shared source path");
+    };
+    let working = frame.working_frame().expect("working title");
+    assert_eq!(
+        working.frame.descriptor().alpha,
+        mondrian_renderer::ColorFrameAlpha::StraightCoverage
+    );
+    assert!(working.frame.rgba_f32().data.iter().any(|pixel| pixel[3] > 0.0));
+    assert_eq!(frame.decode_execution().media_layers, 0);
 }

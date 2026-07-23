@@ -416,6 +416,7 @@ pub enum TimelineClipKind {
     Adjustment,
     NestedSequence,
     SolidColor,
+    BasicTitle,
 }
 
 /// Callback for paint-time waveform peak lookup.
@@ -4017,6 +4018,11 @@ impl TimelineView {
             TimelineClipKind::SolidColor => (
                 clip.color.unwrap_or(colors.timeline_clip_solid),
                 colors.timeline_clip_solid_hover,
+                colors.timeline_clip_selected_border,
+            ),
+            TimelineClipKind::BasicTitle => (
+                clip.color.unwrap_or(colors.timeline_clip_title),
+                colors.timeline_clip_title_hover,
                 colors.timeline_clip_selected_border,
             ),
         }

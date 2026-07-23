@@ -374,8 +374,16 @@ The filesystem boundary at which a flushed and validated Project archive or reco
 _Avoid_: ZIP writer close alone, temporary-file existence, enqueue success, rename-old-then-rename-new sequence
 
 **Clip Content**:
-The one closed payload that identifies a Clip placement as Media, Adjustment Layer, Nested Sequence, or Solid Color and carries only that variant's external references and interpretation data.
-_Avoid_: Parallel Clip kind/asset/nested/color fields, fake Asset ID for a nested Sequence
+The one closed payload that identifies a Clip placement as Media, Adjustment Layer, Nested Sequence, Solid Color, or Basic Title and carries only that variant's external references, interpretation data, or generated-source author state.
+_Avoid_: Parallel Clip kind/asset/nested/color/title fields, fake Asset ID for a nested Sequence or generated source
+
+**Basic Title**:
+A Sequence-local generated Clip content type whose closed definition-backed Property Bag is evaluated in Clip source-local time and rasterized as tightly cropped straight-alpha working-linear picture before the ordinary Clip transform/effect/mask/composite path.
+_Avoid_: Asset-library text generator, renderer-only TextLayer, text Effect, implicit system-font fallback
+
+**Basic Title Font Dependency**:
+The exact requested system font family plus the resolved face bytes/index fingerprint used by one generation Session. Missing families, inaccessible bytes, or an undeclared fallback face are recoverable execution blockers and never authorize visually different substitution.
+_Avoid_: Font display name as output fingerprint, platform default fallback, silent emoji/CJK fallback chain
 
 **Clip Link Group**:
 A Sequence-local set identity shared by two or more Clip placements whose ordinary editorial selection and structural edits are synchronized.
@@ -444,6 +452,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - `app::preview_media_source` is the single Preview source-interpretation boundary. It owns source/proxy fingerprinting, color/range/Alpha interpretation, native-surface classification, proxy-generation intent, and canonical decode geometry; Window code only looks up the `AssetRecord`, dispatches the returned intent, and projects typed outcomes into evidence.
 - A **Media Decode Target** is one canonical nonnegative source-local **Timeline Time** retained unchanged by the Render Plan, Preview Frame Store key, Broker job, media request, and Export decode cache. Only an explicit media frame-rate override quantizes once onto its declared source Evaluation Grid; nested Sequence consumers project exact child-local time onto the child grid. The FFmpeg Adapter alone lowers the target to stream PTS with checked nearest rounding and the declared stream start PTS. Floating seconds and microsecond keys are not authority.
 - `app::preview_timeline_execution` owns **Preview Timeline Execution** for Window and Headless consumers. It is the only Preview traversal and nested-composition implementation; Adapters supply typed media readiness, consume its canonical media-demand collection, and may record returned facts but cannot duplicate recursion, child sizing, working-space conversion, or cache identity.
+- `renderer::BasicTitleRasterizer` is the shared Basic Title generation Interface for Preview and Export. Sequence resolution plus the persisted total title-safe margin define layout; exact face resolution/shaping and bounded raster caching remain Session-owned. Preview schedules this work on its bounded title worker, while Export reuses one raster Session for the complete job and nested closure.
 - **Preview Output Unavailability** is exhaustive at every production output boundary: absence of an active output target is `NoContent`; unresolved dependencies and invalid display/color contracts are `Blocked`; an admitted decode, composite, color, or packaging execution error is `Failed`. Empty active root and nested Sequences contribute exact transparent Program pixels rather than becoming unavailable. Any terminal unavailability clears current and pinned stale output; only `Pending` may reuse a same-scope prior frame.
 - `app::preview_frame_store::PreviewFrameStoreAdapter` is the sole Frame Store policy Adapter inside `PreviewProductionRuntime`, over the playback-owned generic Store. Window and Headless specializations share it; `app_ui` cannot own another cache or residency policy.
 - `app::preview_raster_frame` owns the validated RGBA8 extent, encoded color identity, exact byte reservation, and stable resource key for a final CPU Preview raster. Cache and stale-reuse paths retain that application contract; the Window Presentation Adapter performs the only conversion to `ViewerFrameImage`, sharing the pixel allocation rather than copying it.

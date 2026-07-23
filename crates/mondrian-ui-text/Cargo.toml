@@ -13,8 +13,8 @@ mondrian-ui-core    = { workspace = true }
 mondrian-ui-theme   = { workspace = true }
 mondrian-ui-renderer = { workspace = true }
 
-cosmic-text = "0.19"
-fontdb = { version = "0.23", default-features = false, features = ["fontconfig"] }
+cosmic-text = { workspace = true }
+fontdb = { workspace = true }
 wgpu        = { workspace = true }
 
 [dev-dependencies]

@@ -14,11 +14,12 @@ use mondrian_core::types::{AssetId, ColorSpace, SequenceId};
 use mondrian_core::{FrameRounding, Resolution, TimelineTime};
 use mondrian_playback::PreviewResolutionScale;
 use mondrian_renderer::{
-    evaluate_timeline_render_plan, execute_cpu_working_transform, CpuColorFrame,
+    basic_title_raster_request_key, evaluate_timeline_render_plan, execute_cpu_working_transform,
+    project_basic_title_transform, BasicTitleRasterFrame, CpuColorFrame,
     RenderColorStageDiagnostics, RenderColorTransformDiagnostics, TimelineAdjustmentLayer,
-    TimelineCompositeDiagnostics, TimelineCompositeScratch, TimelineEvaluationRequest,
-    TimelineMediaPlan, TimelineRenderPlan, TimelineRenderPlanElement, TimelineSolidColorLayer,
-    TimelineTransitionInputPlan,
+    TimelineBasicTitlePlan, TimelineCompositeDiagnostics, TimelineCompositeScratch,
+    TimelineEvaluationRequest, TimelineMediaPlan, TimelineRenderPlan, TimelineRenderPlanElement,
+    TimelineSolidColorLayer, TimelineTransitionInputPlan,
 };
 use mondrian_timeline::sequence::{ColorContext, Sequence, MAX_NESTED_SEQUENCE_RENDER_DEPTH};
 
@@ -55,6 +56,42 @@ pub(crate) enum PreviewTimelineMediaFrame {
     Unavailable { reason: PreviewUnavailability },
 }
 
+/// Complete generated-title request emitted by canonical Timeline traversal.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PreviewTimelineTitleRequest {
+    pub(crate) title: mondrian_core::EvaluatedBasicTitle,
+    pub(crate) author_resolution: Resolution,
+    pub(crate) title_safe_margin: f32,
+    pub(crate) target_resolution: Resolution,
+    pub(crate) working_color_space: mondrian_core::WorkingColorSpace,
+}
+
+impl PreviewTimelineTitleRequest {
+    pub(crate) fn key(&self) -> u64 {
+        basic_title_raster_request_key(
+            &self.title,
+            self.author_resolution,
+            self.title_safe_margin,
+            self.target_resolution,
+            self.working_color_space,
+        )
+    }
+}
+
+/// Exhaustive Adapter response for one generated title source.
+pub(crate) enum PreviewTimelineTitleFrame {
+    Ready(BasicTitleRasterFrame),
+    Pending,
+    Unavailable { reason: PreviewUnavailability },
+}
+
+/// Typed dependency that keeps media identity distinct from generated work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreviewTimelinePendingDependency {
+    Media(AssetId),
+    BasicTitle(u64),
+}
+
 /// Resolved root Viewer plan with an always-present semantic cache identity.
 pub(crate) struct ResolvedPreviewPlan {
     pub(crate) elements: Vec<ResolvedPreviewElement>,
@@ -80,8 +117,12 @@ pub(crate) struct ResolvedPreviewTimeline {
 pub(crate) enum PreviewTimelineResolution {
     Ready(ResolvedPreviewTimeline),
     Empty,
-    Pending { asset_id: AssetId },
-    Unavailable { reason: PreviewUnavailability },
+    Pending {
+        dependency: PreviewTimelinePendingDependency,
+    },
+    Unavailable {
+        reason: PreviewUnavailability,
+    },
 }
 
 /// Collect the media dependencies of one frame without executing or scheduling them.
@@ -119,9 +160,11 @@ pub(crate) fn resolve_preview_timeline(
     runtime_scale: PreviewResolutionScale,
     color_context: ColorContext,
     media_frame: &mut impl FnMut(PreviewTimelineMediaRequest) -> PreviewTimelineMediaFrame,
+    title_frame: &mut impl FnMut(PreviewTimelineTitleRequest) -> PreviewTimelineTitleFrame,
 ) -> PreviewTimelineResolution {
     let graph = PreviewTimelineGraph { root_sequence: sequence, sequences, runtime_scale };
-    let mut execution = PreviewTimelineExecutionContext { graph, media_frame, facts: Vec::new() };
+    let mut execution =
+        PreviewTimelineExecutionContext { graph, media_frame, title_frame, facts: Vec::new() };
     let elements = match resolve_sequence_elements(
         &mut execution,
         sequence,
@@ -132,8 +175,8 @@ pub(crate) fn resolve_preview_timeline(
     ) {
         Ok(Some(elements)) => elements,
         Ok(None) => return PreviewTimelineResolution::Empty,
-        Err(PreviewTimelineAbort::Pending { asset_id }) => {
-            return PreviewTimelineResolution::Pending { asset_id };
+        Err(PreviewTimelineAbort::Pending { dependency }) => {
+            return PreviewTimelineResolution::Pending { dependency };
         }
         Err(PreviewTimelineAbort::Unavailable(reason)) => {
             return PreviewTimelineResolution::Unavailable { reason };
@@ -215,9 +258,10 @@ impl<'a> PreviewTimelineGraph<'a> {
     }
 }
 
-struct PreviewTimelineExecutionContext<'a, MediaFrame> {
+struct PreviewTimelineExecutionContext<'a, MediaFrame, TitleFrame> {
     graph: PreviewTimelineGraph<'a>,
     media_frame: &'a mut MediaFrame,
+    title_frame: &'a mut TitleFrame,
     facts: Vec<PreviewTimelineExecutionFact>,
 }
 
@@ -253,8 +297,9 @@ fn collect_sequence_media_demands(
                     demands,
                 )?;
             }
-            TimelineRenderPlanElement::SolidColor(_) | TimelineRenderPlanElement::Adjustment(_) => {
-            }
+            TimelineRenderPlanElement::SolidColor(_)
+            | TimelineRenderPlanElement::BasicTitle(_)
+            | TimelineRenderPlanElement::Adjustment(_) => {}
             TimelineRenderPlanElement::CrossDissolve(transition) => {
                 collect_transition_input_media_demands(
                     graph,
@@ -280,8 +325,8 @@ fn collect_sequence_media_demands(
     Ok(())
 }
 
-fn resolve_sequence_elements<MediaFrame>(
-    execution: &mut PreviewTimelineExecutionContext<'_, MediaFrame>,
+fn resolve_sequence_elements<MediaFrame, TitleFrame>(
+    execution: &mut PreviewTimelineExecutionContext<'_, MediaFrame, TitleFrame>,
     sequence: &Sequence,
     frame: i64,
     target_resolution: Resolution,
@@ -290,6 +335,7 @@ fn resolve_sequence_elements<MediaFrame>(
 ) -> Result<Option<Vec<ResolvedPreviewElement>>, PreviewTimelineAbort>
 where
     MediaFrame: FnMut(PreviewTimelineMediaRequest) -> PreviewTimelineMediaFrame,
+    TitleFrame: FnMut(PreviewTimelineTitleRequest) -> PreviewTimelineTitleFrame,
 {
     validate_nested_depth(sequence, depth).map_err(PreviewTimelineAbort::Unavailable)?;
     let evaluation = execution
@@ -322,7 +368,9 @@ where
                 let frame = match (execution.media_frame)(request) {
                     PreviewTimelineMediaFrame::Ready(frame) => frame,
                     PreviewTimelineMediaFrame::Pending => {
-                        return Err(PreviewTimelineAbort::Pending { asset_id });
+                        return Err(PreviewTimelineAbort::Pending {
+                            dependency: PreviewTimelinePendingDependency::Media(asset_id),
+                        });
                     }
                     PreviewTimelineMediaFrame::Unavailable { reason } => {
                         return Err(PreviewTimelineAbort::Unavailable(
@@ -349,6 +397,23 @@ where
                     transform,
                     effect_graph: media.effect_graph,
                     frame_seed: media.frame_seed,
+                });
+            }
+            TimelineRenderPlanElement::BasicTitle(title) => {
+                let (frame, transform) = resolve_basic_title_frame(
+                    execution,
+                    sequence,
+                    &title,
+                    target_resolution,
+                    color_context.working_color_space,
+                )?;
+                resolved.push(ResolvedPreviewElement::Media {
+                    frame,
+                    opacity: title.opacity,
+                    blend_mode: title.blend_mode,
+                    transform,
+                    effect_graph: title.effect_graph,
+                    frame_seed: title.frame_seed,
                 });
             }
             TimelineRenderPlanElement::Adjustment(adjustment) => {
@@ -450,7 +515,9 @@ fn collect_transition_input_media_demands(
     demands: &mut Vec<PreviewTimelineMediaRequest>,
 ) -> Result<(), PreviewUnavailability> {
     match input {
-        TimelineTransitionInputPlan::Transparent | TimelineTransitionInputPlan::SolidColor(_) => {}
+        TimelineTransitionInputPlan::Transparent
+        | TimelineTransitionInputPlan::SolidColor(_)
+        | TimelineTransitionInputPlan::BasicTitle(_) => {}
         TimelineTransitionInputPlan::Media(media) => demands.push(preview_timeline_media_request(
             media,
             target_resolution,
@@ -473,8 +540,8 @@ fn collect_transition_input_media_demands(
     Ok(())
 }
 
-fn resolve_transition_input<MediaFrame>(
-    execution: &mut PreviewTimelineExecutionContext<'_, MediaFrame>,
+fn resolve_transition_input<MediaFrame, TitleFrame>(
+    execution: &mut PreviewTimelineExecutionContext<'_, MediaFrame, TitleFrame>,
     parent_sequence: &Sequence,
     input: TimelineTransitionInputPlan,
     target_resolution: Resolution,
@@ -483,6 +550,7 @@ fn resolve_transition_input<MediaFrame>(
 ) -> Result<ResolvedPreviewTransitionInput, PreviewTimelineAbort>
 where
     MediaFrame: FnMut(PreviewTimelineMediaRequest) -> PreviewTimelineMediaFrame,
+    TitleFrame: FnMut(PreviewTimelineTitleRequest) -> PreviewTimelineTitleFrame,
 {
     Ok(match input {
         TimelineTransitionInputPlan::Transparent => ResolvedPreviewTransitionInput::Transparent,
@@ -502,7 +570,9 @@ where
             let frame = match (execution.media_frame)(request) {
                 PreviewTimelineMediaFrame::Ready(frame) => frame,
                 PreviewTimelineMediaFrame::Pending => {
-                    return Err(PreviewTimelineAbort::Pending { asset_id });
+                    return Err(PreviewTimelineAbort::Pending {
+                        dependency: PreviewTimelinePendingDependency::Media(asset_id),
+                    });
                 }
                 PreviewTimelineMediaFrame::Unavailable { reason } => {
                     return Err(PreviewTimelineAbort::Unavailable(
@@ -529,6 +599,23 @@ where
                 transform,
                 effect_graph: media.effect_graph,
                 frame_seed: media.frame_seed,
+            }
+        }
+        TimelineTransitionInputPlan::BasicTitle(title) => {
+            let (frame, transform) = resolve_basic_title_frame(
+                execution,
+                parent_sequence,
+                &title,
+                target_resolution,
+                color_context.working_color_space,
+            )?;
+            ResolvedPreviewTransitionInput::Media {
+                frame,
+                opacity: title.opacity,
+                blend_mode: title.blend_mode,
+                transform,
+                effect_graph: title.effect_graph,
+                frame_seed: title.frame_seed,
             }
         }
         TimelineTransitionInputPlan::NestedSequence(nested) => {
@@ -581,6 +668,62 @@ where
             }
         }
     })
+}
+
+fn resolve_basic_title_frame<MediaFrame, TitleFrame>(
+    execution: &mut PreviewTimelineExecutionContext<'_, MediaFrame, TitleFrame>,
+    sequence: &Sequence,
+    title: &TimelineBasicTitlePlan,
+    target_resolution: Resolution,
+    working_color_space: mondrian_core::WorkingColorSpace,
+) -> Result<(MediaPreviewFrame, [f32; 6]), PreviewTimelineAbort>
+where
+    MediaFrame: FnMut(PreviewTimelineMediaRequest) -> PreviewTimelineMediaFrame,
+    TitleFrame: FnMut(PreviewTimelineTitleRequest) -> PreviewTimelineTitleFrame,
+{
+    let request = PreviewTimelineTitleRequest {
+        title: title.title.clone(),
+        author_resolution: sequence.settings.resolution,
+        title_safe_margin: sequence.settings.title_safe_margin,
+        target_resolution,
+        working_color_space,
+    };
+    let request_key = request.key();
+    let raster = match (execution.title_frame)(request) {
+        PreviewTimelineTitleFrame::Ready(frame) => frame,
+        PreviewTimelineTitleFrame::Pending => {
+            return Err(PreviewTimelineAbort::Pending {
+                dependency: PreviewTimelinePendingDependency::BasicTitle(request_key),
+            });
+        }
+        PreviewTimelineTitleFrame::Unavailable { reason } => {
+            return Err(PreviewTimelineAbort::Unavailable(reason.with_context(
+                format_args!("Basic Title raster request {request_key:016x}"),
+            )));
+        }
+    };
+    let transform = project_basic_title_transform(
+        title.transform,
+        raster.sampled_source_to_author,
+        sequence.settings.resolution,
+        target_resolution,
+    )
+    .ok_or_else(|| {
+        PreviewTimelineAbort::Unavailable(PreviewUnavailability::blocked(
+            PreviewOutputStage::GeneratedSource,
+            "Basic Title has invalid Preview transform geometry",
+        ))
+    })?;
+    Ok((
+        MediaPreviewFrame::from_working(
+            raster.frame,
+            sequence.settings.resolution,
+            raster.signature,
+            mondrian_playback::FramePresentationQuality::Ready,
+            super::preview_execution::PreviewDecodeExecutionSummary::default(),
+        ),
+        transform,
+    ))
 }
 
 fn render_nested_sequence(
@@ -754,7 +897,9 @@ fn nested_preview_frame_signature(
 }
 
 enum PreviewTimelineAbort {
-    Pending { asset_id: AssetId },
+    Pending {
+        dependency: PreviewTimelinePendingDependency,
+    },
     Unavailable(PreviewUnavailability),
 }
 

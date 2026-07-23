@@ -3,7 +3,7 @@
 use super::*;
 use crate::app::preview_timeline_execution::{
     resolve_preview_timeline, PreviewTimelineExecutionFact, PreviewTimelineMediaRequest,
-    PreviewTimelineResolution,
+    PreviewTimelinePendingDependency, PreviewTimelineResolution, PreviewTimelineTitleRequest,
 };
 
 impl<O: Clone> PreviewProductionRuntime<O> {
@@ -18,6 +18,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     ) -> PreviewTimelineResolution {
         let mut media_frame =
             |request: PreviewTimelineMediaRequest| self.media_frame_for_plan(state, request);
+        let mut title_frame =
+            |request: PreviewTimelineTitleRequest| self.title_frame_for_plan(request);
         let resolution = resolve_preview_timeline(
             sequence,
             state.sequences(),
@@ -26,6 +28,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             state.playback_preview_resolution_scale(),
             color_context,
             &mut media_frame,
+            &mut title_frame,
         );
         match &resolution {
             PreviewTimelineResolution::Ready(resolved) => {
@@ -33,9 +36,17 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     self.record_timeline_execution_fact(fact);
                 }
             }
-            PreviewTimelineResolution::Pending { asset_id } => {
-                tracing::trace!(%asset_id, "viewer Timeline is waiting for media");
-            }
+            PreviewTimelineResolution::Pending { dependency } => match dependency {
+                PreviewTimelinePendingDependency::Media(asset_id) => {
+                    tracing::trace!(%asset_id, "viewer Timeline is waiting for media");
+                }
+                PreviewTimelinePendingDependency::BasicTitle(request_key) => {
+                    tracing::trace!(
+                        request_key = format_args!("{request_key:016x}"),
+                        "viewer Timeline is waiting for Basic Title generation"
+                    );
+                }
+            },
             PreviewTimelineResolution::Unavailable { reason } => {
                 tracing::warn!(
                     code = reason.code(),

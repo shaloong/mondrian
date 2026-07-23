@@ -20,6 +20,11 @@ Clip rendering must show:
 - disabled/offline state
 - effect/mask/keyframe affordances when appropriate
 
+Basic Title is an ordinary generated Clip for selection, placement, trim,
+transform, effects, masks, transitions, and nesting. It uses a dedicated
+semantic theme token so it is distinguishable from media and solid-color
+sources without encoding domain meaning as a hard-coded Widget color.
+
 ## Time
 
 The timeline ruler uses frame-exact time. Zoom and scroll must keep playhead and selection stable. Snapping should consider clip in/out, playhead, marks, and eventually keyframes.

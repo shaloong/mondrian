@@ -52,16 +52,16 @@ use mondrian_ui_widgets::NumberInput;
 use mondrian_ui_widgets::{
     AssetGrid, AssetGridBadgeTone, AssetGridItem, Button, Checkbox, ColorPickerAreaMode,
     ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel, DockPanelDropArea, Dropdown, FlexChild,
-    FlexContainer, Label, MenuItem, NodeGraphEdge, NodeGraphNode, NodeGraphView, PanelList,
-    PanelListItem, PropertyPanel, PropertyPanelOptions, PropertyRow, PropertySection, RasterImage,
-    ScrollView, Slider, TextInput, TimelineAssetDrop, TimelineClip, TimelineClipKind,
-    TimelineClipMove, TimelineClipRef, TimelineClipTrim, TimelineCutRef, TimelineEditCommand,
-    TimelineInOutPoint, TimelineSeek, TimelineSeekSource as WidgetTimelineSeekSource,
-    TimelineToolbarIconSlot, TimelineTrack, TimelineTrackControl, TimelineTrackControlIconSlot,
-    TimelineTrackMove, TimelineTrackRef, TimelineTransition, TimelineTransitionRef,
-    TimelineTransitionResize, TimelineTrimEdge, TimelineView, VideoScopesSurface,
-    VideoScopesTextureSet, ViewerCanvasBackground, ViewerControl, ViewerFrameContent,
-    ViewerStatusTone, ViewerSurface, WaveformDisplay,
+    FlexContainer, Label, MenuItem, MultilineTextInput, NodeGraphEdge, NodeGraphNode,
+    NodeGraphView, PanelList, PanelListItem, PropertyPanel, PropertyPanelOptions, PropertyRow,
+    PropertySection, RasterImage, ScrollView, Slider, TextInput, TimelineAssetDrop, TimelineClip,
+    TimelineClipKind, TimelineClipMove, TimelineClipRef, TimelineClipTrim, TimelineCutRef,
+    TimelineEditCommand, TimelineInOutPoint, TimelineSeek,
+    TimelineSeekSource as WidgetTimelineSeekSource, TimelineToolbarIconSlot, TimelineTrack,
+    TimelineTrackControl, TimelineTrackControlIconSlot, TimelineTrackMove, TimelineTrackRef,
+    TimelineTransition, TimelineTransitionRef, TimelineTransitionResize, TimelineTrimEdge,
+    TimelineView, VideoScopesSurface, VideoScopesTextureSet, ViewerCanvasBackground, ViewerControl,
+    ViewerFrameContent, ViewerStatusTone, ViewerSurface, WaveformDisplay,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -85,32 +85,33 @@ use crate::app::ui_actions::{
     export_set_draft_action, inspector_remove_effect_action, inspector_select_effect_action,
     inspector_set_audio_component_source_action, inspector_set_clip_curve_action,
     inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
-    inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
-    inspector_set_effect_enabled_action, inspector_set_effect_property_action,
-    timeline_add_track_action, timeline_clear_in_out_points_action,
-    timeline_create_cross_dissolve_action, timeline_drop_asset_action, timeline_move_clip_action,
-    timeline_move_track_action, timeline_open_nested_sequence_action,
-    timeline_roll_selected_cut_to_playhead_action, timeline_seek_with_source_action,
-    timeline_select_clip_action, timeline_select_video_transition_action,
-    timeline_set_in_out_point_action, timeline_set_selected_clips_enabled_action,
-    timeline_set_track_control_action, timeline_set_video_transition_range_action,
-    timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
-    viewer_set_preview_resolution_scale_action, viewer_set_zoom_scale_action,
-    AppShellInputColorPipelineDiagnostics, AppShellInterpretAssetDialogPayload,
-    AppShellRelinkAssetDialogPayload, AppShellRelocatePanelPayload,
-    AppShellRevealInFileManagerPayload, AppShellVideoSignalDiagnostics, AssetsCreateAssetPayload,
-    AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
-    AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
-    AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsOpenFolderPayload,
-    AssetsPrepareDragPayload, AssetsRebindAudioComponentPayload,
-    AssetsRefreshAudioComponentsPayload, AssetsRenameAssetPayload, AssetsRenameFolderPayload,
-    AssetsSetProxyModePayload, DockDropAreaPayload, EffectsAddToClipPayload,
-    ExportDraftUpdatePayload, ExportEnqueuePayload, ExportJobTargetPayload,
-    ExportOutputDialogPayload, ImportMediaDialogPayload, InspectorAudioComponentSourcePayload,
-    InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
-    InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
+    inspector_set_clip_property_action, inspector_set_clip_tint_action,
+    inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
+    inspector_set_effect_property_action, timeline_add_track_action,
+    timeline_clear_in_out_points_action, timeline_create_cross_dissolve_action,
+    timeline_drop_asset_action, timeline_move_clip_action, timeline_move_track_action,
+    timeline_open_nested_sequence_action, timeline_roll_selected_cut_to_playhead_action,
+    timeline_seek_with_source_action, timeline_select_clip_action,
+    timeline_select_video_transition_action, timeline_set_in_out_point_action,
+    timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
+    timeline_set_video_transition_range_action, timeline_trim_clips_action,
+    timeline_trim_selected_clips_to_playhead_action, viewer_set_preview_resolution_scale_action,
+    viewer_set_zoom_scale_action, AppShellInputColorPipelineDiagnostics,
+    AppShellInterpretAssetDialogPayload, AppShellRelinkAssetDialogPayload,
+    AppShellRelocatePanelPayload, AppShellRevealInFileManagerPayload,
+    AppShellVideoSignalDiagnostics, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
+    AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
+    AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
+    AssetsMoveSelectionPayload, AssetsOpenFolderPayload, AssetsPrepareDragPayload,
+    AssetsRebindAudioComponentPayload, AssetsRefreshAudioComponentsPayload,
+    AssetsRenameAssetPayload, AssetsRenameFolderPayload, AssetsSetProxyModePayload,
+    DockDropAreaPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
+    ExportJobTargetPayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
+    InspectorAudioComponentSourcePayload, InspectorClipRefPayload, InspectorClipTransformField,
+    InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
     InspectorSetAudioComponentSourcePayload, InspectorSetClipCurvePayload,
-    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+    InspectorSetClipPropertyPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
     TimelineCreateCrossDissolvePayload, TimelineDropAssetPayload, TimelineInOutPointPayloadKind,
@@ -1442,6 +1443,8 @@ pub struct InspectorPanelModel {
     pub opacity: f32,
     /// Solid/tint color shown by the color trigger.
     pub tint: Color,
+    /// Whether the selected Clip owns the editable solid-color property.
+    pub shows_tint: bool,
     /// Horizontal transform position in sequence pixels.
     pub position_x: f32,
     /// Vertical transform position in sequence pixels.
@@ -1462,6 +1465,8 @@ pub struct InspectorPanelModel {
     pub curve_points: Vec<CurvePoint>,
     /// Placement-local audio Component Edits and their source choices.
     pub audio_components: Vec<InspectorAudioComponentModel>,
+    /// Definition-backed properties owned by the selected Clip content.
+    pub clip_properties: Vec<InspectorEffectPropertyModel>,
     /// Effects currently attached to the selected clip.
     pub effects: Vec<InspectorEffectModel>,
 }
@@ -1551,6 +1556,26 @@ pub struct InspectorEffectPropertyModel {
     pub is_animatable: bool,
 }
 
+fn inspector_property_model(
+    path: &str,
+    property: &mondrian_core::automation::AnimatedProperty,
+    author_time: TimelineTime,
+) -> InspectorEffectPropertyModel {
+    let numeric = property.descriptor.schema.numeric;
+    InspectorEffectPropertyModel {
+        schema: property.descriptor.schema.clone(),
+        path: path.to_owned(),
+        label: property.descriptor.display_name.clone(),
+        value: property.evaluate(author_time),
+        min: numeric.map(|contract| contract.soft_range.min),
+        max: numeric.map(|contract| contract.soft_range.max),
+        hard_min: numeric.map(|contract| contract.hard_range.min),
+        hard_max: numeric.map(|contract| contract.hard_range.max),
+        step: numeric.and_then(|contract| contract.step),
+        is_animatable: property.descriptor.schema.is_animatable,
+    }
+}
+
 impl InspectorPanelModel {
     pub fn from_app_state(state: &AppState) -> Self {
         let Some(sequence) = state.active_sequence() else {
@@ -1568,6 +1593,24 @@ impl InspectorPanelModel {
         let position = clip.transform.get_position(time);
         let scale = clip.transform.get_scale(time);
         let is_editable = !selected_clip_track_is_locked(state, resolved_selection);
+        let clip_author_time = clip
+            .end_position()
+            .and_then(|end| clip.timeline_to_source_time(time.clamp(clip.position, end)))
+            .unwrap_or(TimelineTime::ZERO);
+        let clip_properties = clip
+            .content
+            .basic_title()
+            .map(|title| {
+                mondrian_core::BasicTitle::PROPERTY_PATHS
+                    .iter()
+                    .filter_map(|path| {
+                        title.property_bag().property(path).map(|property| {
+                            inspector_property_model(path, property, clip_author_time)
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             selected_clip: Some(resolved_selection),
             empty_message: None,
@@ -1584,6 +1627,7 @@ impl InspectorPanelModel {
                 .solid_color()
                 .or_else(|| timeline_clip_color(clip, resolved_selection.is_video_track))
                 .unwrap_or_else(|| current_theme().colors.media_video),
+            shows_tint: clip.is_solid_color(),
             position_x: position.x,
             position_y: position.y,
             scale_percent: scale.x * 100.0,
@@ -1612,6 +1656,7 @@ impl InspectorPanelModel {
             tint_area_mode: ColorPickerAreaMode::Wheel,
             curve_points: opacity_curve_points_for_clip(clip, time),
             audio_components: inspector_audio_components(state, clip),
+            clip_properties,
             effects: clip
                 .effects
                 .iter()
@@ -1625,19 +1670,7 @@ impl InspectorPanelModel {
                             .properties
                             .iter()
                             .map(|(path, property)| {
-                                let numeric = property.descriptor.schema.numeric;
-                                InspectorEffectPropertyModel {
-                                    schema: property.descriptor.schema.clone(),
-                                    path: path.to_string(),
-                                    label: property.descriptor.display_name.clone(),
-                                    value: property.evaluate(time_ticks),
-                                    min: numeric.map(|contract| contract.soft_range.min),
-                                    max: numeric.map(|contract| contract.soft_range.max),
-                                    hard_min: numeric.map(|contract| contract.hard_range.min),
-                                    hard_max: numeric.map(|contract| contract.hard_range.max),
-                                    step: numeric.and_then(|contract| contract.step),
-                                    is_animatable: property.descriptor.schema.is_animatable,
-                                }
+                                inspector_property_model(path, property, time_ticks)
                             })
                             .collect(),
                     }
@@ -1656,6 +1689,7 @@ impl InspectorPanelModel {
             enabled: false,
             opacity: 100.0,
             tint: Color::from_rgba8(128, 128, 128, 255),
+            shows_tint: false,
             position_x: 0.0,
             position_y: 0.0,
             scale_percent: 100.0,
@@ -1666,6 +1700,7 @@ impl InspectorPanelModel {
             tint_area_mode: ColorPickerAreaMode::Wheel,
             curve_points: vec![CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)],
             audio_components: Vec::new(),
+            clip_properties: Vec::new(),
             effects: Vec::new(),
         }
     }
@@ -1681,6 +1716,7 @@ impl InspectorPanelModel {
             enabled: true,
             opacity: 72.0,
             tint: Color::from_rgba8(132, 180, 255, 220),
+            shows_tint: true,
             position_x: 12.0,
             position_y: -8.0,
             scale_percent: 100.0,
@@ -1696,6 +1732,7 @@ impl InspectorPanelModel {
                 CurvePoint::new(1.0, 1.0),
             ],
             audio_components: Vec::new(),
+            clip_properties: Vec::new(),
             effects: Vec::new(),
         }
     }
@@ -2485,6 +2522,8 @@ fn timeline_clip_from_sequence_clip(
         TimelineClipKind::NestedSequence
     } else if clip.is_solid_color() {
         TimelineClipKind::SolidColor
+    } else if clip.is_basic_title() {
+        TimelineClipKind::BasicTitle
     } else if is_video {
         TimelineClipKind::Video
     } else {
@@ -2553,6 +2592,8 @@ fn default_clip_label(clip: &Clip) -> String {
         "Nested Sequence".to_string()
     } else if clip.is_solid_color() {
         "Solid Color".to_string()
+    } else if clip.is_basic_title() {
+        "Basic Title".to_string()
     } else {
         format!("Clip {}", clip.id)
     }
@@ -2565,6 +2606,8 @@ fn timeline_clip_color(clip: &Clip, is_video_track: bool) -> Option<Color> {
     let colors = current_theme().colors.clone();
     if clip.is_adjustment_layer() {
         Some(colors.timeline_clip_adjustment)
+    } else if clip.is_basic_title() {
+        Some(colors.timeline_clip_title)
     } else if clip.is_nested_sequence() {
         Some(colors.timeline_clip_nested)
     } else if is_video_track {
@@ -4288,43 +4331,50 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
         }
         return panel;
     }
-    let mut tint = color_picker_trigger(model.tint).enabled(can_edit);
-    tint.picker_mut().set_area_mode(model.tint_area_mode);
     let curve = CurveEditor::with_points(model.curve_points.clone())
         .enabled(can_edit)
         .on_change(move |points| inspector_curve_action(selected_clip, points));
+    let mut style_section = PropertySection::new("剪辑样式")
+        .with_row(PropertyRow::new(
+            "启用",
+            Box::new(
+                Checkbox::new("启用效果", model.enabled)
+                    .enabled(can_edit)
+                    .on_change(move |value| inspector_bool_action(selected_clip, value)),
+            ),
+        ))
+        .with_row(PropertyRow::new(
+            "不透明度",
+            numeric_slider_input_control(
+                model.opacity,
+                0.0,
+                100.0,
+                Some(1.0),
+                0,
+                can_edit,
+                move |value| inspector_value_action(selected_clip, "opacity", value),
+            ),
+        ));
+    if model.shows_tint {
+        let mut tint = color_picker_trigger(model.tint).enabled(can_edit);
+        tint.picker_mut().set_area_mode(model.tint_area_mode);
+        style_section = style_section.with_row(PropertyRow::new(
+            "颜色",
+            Box::new(tint.on_change(move |color| inspector_color_action(selected_clip, color))),
+        ));
+    }
     let mut panel = PropertyPanel::new("检查器")
         .with_subtitle(subtitle)
         .with_embedded_panel_chrome()
-        .with_section(
-            PropertySection::new("剪辑样式")
-                .with_row(PropertyRow::new(
-                    "启用",
-                    Box::new(
-                        Checkbox::new("启用效果", model.enabled)
-                            .enabled(can_edit)
-                            .on_change(move |value| inspector_bool_action(selected_clip, value)),
-                    ),
-                ))
-                .with_row(PropertyRow::new(
-                    "不透明度",
-                    numeric_slider_input_control(
-                        model.opacity,
-                        0.0,
-                        100.0,
-                        Some(1.0),
-                        0,
-                        can_edit,
-                        move |value| inspector_value_action(selected_clip, "opacity", value),
-                    ),
-                ))
-                .with_row(PropertyRow::new(
-                    "Tint",
-                    Box::new(
-                        tint.on_change(move |color| inspector_color_action(selected_clip, color)),
-                    ),
-                )),
-        );
+        .with_section(style_section);
+
+    if !model.clip_properties.is_empty() {
+        let mut section = PropertySection::new("基础标题");
+        for property in &model.clip_properties {
+            section = section.with_row(clip_property_row(property, can_edit, selected_clip));
+        }
+        panel = panel.with_section(section);
+    }
 
     if !model.audio_components.is_empty() {
         let mut section = PropertySection::new("音频 Component");
@@ -4863,17 +4913,46 @@ fn effect_property_row(
     selection: Option<SelectedClipRef>,
     effect_id: EffectId,
 ) -> PropertyRow {
+    inspector_property_row(
+        property,
+        can_edit,
+        selection,
+        InspectorPropertyTarget::Effect(effect_id),
+    )
+}
+
+fn clip_property_row(
+    property: &InspectorEffectPropertyModel,
+    can_edit: bool,
+    selection: Option<SelectedClipRef>,
+) -> PropertyRow {
+    inspector_property_row(property, can_edit, selection, InspectorPropertyTarget::Clip)
+}
+
+fn inspector_property_row(
+    property: &InspectorEffectPropertyModel,
+    can_edit: bool,
+    selection: Option<SelectedClipRef>,
+    target: InspectorPropertyTarget,
+) -> PropertyRow {
     let row = PropertyRow::new(
         property.label.clone(),
-        effect_property_value_widget(
+        inspector_property_value_widget(
             property,
             can_edit,
             selection,
-            effect_id,
+            target,
             property.path.clone(),
         ),
     );
-    if let Some(height) = effect_property_row_height(&property.value) {
+    let height = if target == InspectorPropertyTarget::Clip
+        && property.path == mondrian_core::BasicTitle::TEXT_PATH
+    {
+        Some(92.0)
+    } else {
+        effect_property_row_height(&property.value)
+    };
+    if let Some(height) = height {
         row.with_height(height)
     } else {
         row
@@ -4895,6 +4974,7 @@ fn effect_property_row_height(value: &PropertyValue) -> Option<f32> {
 /// Widget construction depends on the `PropertyValue` variant present in the
 /// snapshot. The returned widget dispatches `INSPECTOR_SET_EFFECT_PROPERTY`
 /// through the existing inspector custom-action path.
+#[cfg(test)]
 fn effect_property_value_widget(
     property: &InspectorEffectPropertyModel,
     can_edit: bool,
@@ -4902,17 +4982,34 @@ fn effect_property_value_widget(
     effect_id: EffectId,
     path: String,
 ) -> Box<dyn Widget> {
+    inspector_property_value_widget(
+        property,
+        can_edit,
+        selection,
+        InspectorPropertyTarget::Effect(effect_id),
+        path,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InspectorPropertyTarget {
+    Clip,
+    Effect(EffectId),
+}
+
+fn inspector_property_value_widget(
+    property: &InspectorEffectPropertyModel,
+    can_edit: bool,
+    selection: Option<SelectedClipRef>,
+    target: InspectorPropertyTarget,
+    path: String,
+) -> Box<dyn Widget> {
     match &property.value {
         PropertyValue::Bool(value) => {
             let selected_clip = selection;
             Box::new(
                 Checkbox::new(&property.label, *value).enabled(can_edit).on_change(move |v| {
-                    inspector_effect_property_action(
-                        selected_clip,
-                        effect_id,
-                        &path,
-                        PropertyValue::Bool(v),
-                    )
+                    inspector_property_action(selected_clip, target, &path, PropertyValue::Bool(v))
                 }),
             )
         }
@@ -4930,9 +5027,9 @@ fn effect_property_value_widget(
                 numeric_decimals(property.step, *value),
                 can_edit,
                 move |v| {
-                    inspector_effect_property_action(
+                    inspector_property_action(
                         selected_clip,
-                        effect_id,
+                        target,
                         &path,
                         PropertyValue::Float(v.clamp(hard_min, hard_max)),
                     )
@@ -4953,9 +5050,9 @@ fn effect_property_value_widget(
                 numeric_decimals(property.step, *value as f32),
                 can_edit,
                 move |v: f32| {
-                    inspector_effect_property_action(
+                    inspector_property_action(
                         selected_clip,
-                        effect_id,
+                        target,
                         &path,
                         PropertyValue::Double((v as f64).clamp(hard_min as f64, hard_max as f64)),
                     )
@@ -4976,9 +5073,9 @@ fn effect_property_value_widget(
                 0,
                 can_edit,
                 move |v: f32| {
-                    inspector_effect_property_action(
+                    inspector_property_action(
                         selected_clip,
-                        effect_id,
+                        target,
                         &path,
                         PropertyValue::Int(
                             (v.round() as i64).clamp(hard_min as i64, hard_max as i64),
@@ -4992,27 +5089,41 @@ fn effect_property_value_widget(
             let path = path.clone();
             let trigger = color_picker_trigger(*value).enabled(can_edit);
             Box::new(trigger.on_change(move |color| {
-                inspector_effect_property_action(
-                    selected_clip,
-                    effect_id,
-                    &path,
-                    PropertyValue::Color(color),
-                )
+                inspector_property_action(selected_clip, target, &path, PropertyValue::Color(color))
             }))
         }
         PropertyValue::Text(value) => {
             let text = value.clone();
+            if target == InspectorPropertyTarget::Clip
+                && path == mondrian_core::BasicTitle::TEXT_PATH
+            {
+                let selected_clip = selection;
+                return Box::new(
+                    MultilineTextInput::new("标题文本")
+                        .with_text(text)
+                        .min_lines(3)
+                        .enabled(can_edit)
+                        .on_change(move |text| {
+                            inspector_property_action(
+                                selected_clip,
+                                target,
+                                &path,
+                                PropertyValue::Text(text.to_owned()),
+                            )
+                        }),
+                );
+            }
             let max_width = 180.0;
-            if text.len() > 60 {
+            if target != InspectorPropertyTarget::Clip && text.len() > 60 {
                 Box::new(Label::new(text).with_max_width(max_width))
             } else {
                 let selected_clip = selection;
                 let path = path.clone();
                 Box::new(
                     TextInput::new(text).enabled(can_edit).on_change(move |text| {
-                        inspector_effect_property_action(
+                        inspector_property_action(
                             selected_clip,
-                            effect_id,
+                            target,
                             &path,
                             PropertyValue::Text(text.to_string()),
                         )
@@ -5028,9 +5139,9 @@ fn effect_property_value_widget(
                 .map(|option| {
                     MenuItem::new(
                         option.key.clone(),
-                        inspector_effect_property_action(
+                        inspector_property_action(
                             selection,
-                            effect_id,
+                            target,
                             &path,
                             PropertyValue::Enum(option.key.clone()),
                         ),
@@ -5055,9 +5166,9 @@ fn effect_property_value_widget(
                     } else {
                         ParameterResourceReference::ExternalFile { path: PathBuf::from(text) }
                     };
-                    inspector_effect_property_action(
+                    inspector_property_action(
                         selected_clip,
-                        effect_id,
+                        target,
                         &path,
                         PropertyValue::Resource(value),
                     )
@@ -5070,7 +5181,7 @@ fn effect_property_value_widget(
             property,
             can_edit,
             selection,
-            effect_id,
+            target,
             path,
             |values| PropertyValue::Vec2(glam::Vec2::new(values[0], values[1])),
         ),
@@ -5080,7 +5191,7 @@ fn effect_property_value_widget(
             property,
             can_edit,
             selection,
-            effect_id,
+            target,
             path,
             |values| PropertyValue::Vec3(glam::Vec3::new(values[0], values[1], values[2])),
         ),
@@ -5090,7 +5201,7 @@ fn effect_property_value_widget(
             property,
             can_edit,
             selection,
-            effect_id,
+            target,
             path,
             |values| PropertyValue::Vec4([values[0], values[1], values[2], values[3]]),
         ),
@@ -5103,7 +5214,7 @@ fn vector_property_widget(
     property: &InspectorEffectPropertyModel,
     can_edit: bool,
     selection: Option<SelectedClipRef>,
-    effect_id: EffectId,
+    target: InspectorPropertyTarget,
     path: String,
     build_value: fn(&[f32]) -> PropertyValue,
 ) -> Box<dyn Widget> {
@@ -5132,9 +5243,9 @@ fn vector_property_widget(
                 move |v| {
                     let mut next_values = base_values.clone();
                     next_values[component_index] = v.clamp(hard_min, hard_max);
-                    inspector_effect_property_action(
+                    inspector_property_action(
                         selected_clip,
-                        effect_id,
+                        target,
                         &path,
                         build_value(&next_values),
                     )
@@ -5229,21 +5340,47 @@ fn decimal_places_for_step(step: f64) -> usize {
     4
 }
 
+#[cfg(test)]
 fn inspector_effect_property_action(
     selection: Option<SelectedClipRef>,
     effect_id: EffectId,
     path: &str,
     value: PropertyValue,
 ) -> Action {
+    inspector_property_action(
+        selection,
+        InspectorPropertyTarget::Effect(effect_id),
+        path,
+        value,
+    )
+}
+
+fn inspector_property_action(
+    selection: Option<SelectedClipRef>,
+    target: InspectorPropertyTarget,
+    path: &str,
+    value: PropertyValue,
+) -> Action {
     let Some(selection) = selection else {
         return Action::NoOp;
     };
-    inspector_set_effect_property_action(InspectorSetEffectPropertyPayload {
-        clip: inspector_clip_payload(selection),
-        effect_id,
-        path: path.to_string(),
-        value,
-    })
+    match target {
+        InspectorPropertyTarget::Clip => {
+            inspector_set_clip_property_action(InspectorSetClipPropertyPayload {
+                clip: inspector_clip_payload(selection),
+                path: path.to_owned(),
+                value,
+            })
+        }
+        InspectorPropertyTarget::Effect(effect_id) => {
+            inspector_set_effect_property_action(InspectorSetEffectPropertyPayload {
+                clip: inspector_clip_payload(selection),
+                effect_id,
+                path: path.to_owned(),
+                value,
+            })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -5461,6 +5598,45 @@ mod tests {
         drop(model);
         drop(state);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn inspector_model_exposes_basic_title_properties_in_canonical_order() {
+        let mut sequence = Sequence::new("Inspector Basic Title");
+        let track_id = sequence.video_tracks[0].id;
+        let clip = Clip::new_basic_title(
+            "Mondrian",
+            mondrian_core::default_basic_title_font_family(),
+            TimelineTime::ZERO,
+            tt(25, sequence.time_base()),
+        )
+        .expect("Basic Title");
+        let clip_id = clip.id;
+        sequence.video_tracks[0].add_clip(clip).expect("title placement");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.selection.selected_clips =
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
+
+        let model = InspectorPanelModel::from_app_state(&state);
+
+        assert_eq!(
+            model.clip_properties.len(),
+            mondrian_core::BasicTitle::PROPERTY_PATHS.len()
+        );
+        assert_eq!(
+            model
+                .clip_properties
+                .iter()
+                .map(|property| property.path.as_str())
+                .collect::<Vec<_>>(),
+            mondrian_core::BasicTitle::PROPERTY_PATHS
+        );
+        assert!(!model.shows_tint);
+        assert_eq!(
+            model.clip_properties[0].value,
+            PropertyValue::Text("Mondrian".to_owned())
+        );
     }
 
     #[test]
@@ -10060,6 +10236,7 @@ mod tests {
             enabled: true,
             opacity: 100.0,
             tint: Color::from_rgba8(64, 128, 192, 255),
+            shows_tint: true,
             position_x: 0.0,
             position_y: 0.0,
             scale_percent: 100.0,
@@ -10070,6 +10247,7 @@ mod tests {
             tint_area_mode: ColorPickerAreaMode::Wheel,
             curve_points: vec![CurvePoint::new(0.0, 1.0), CurvePoint::new(1.0, 1.0)],
             audio_components: Vec::new(),
+            clip_properties: Vec::new(),
             effects: Vec::new(),
         };
         let mut panel = inspector_panel(&model);
@@ -10129,6 +10307,7 @@ mod tests {
             enabled: true,
             opacity: 100.0,
             tint: Color::from_rgba8(64, 128, 192, 255),
+            shows_tint: true,
             position_x: 0.0,
             position_y: 0.0,
             scale_percent: 100.0,
@@ -10139,6 +10318,7 @@ mod tests {
             tint_area_mode: ColorPickerAreaMode::Wheel,
             curve_points: vec![CurvePoint::new(0.0, 1.0), CurvePoint::new(1.0, 1.0)],
             audio_components: Vec::new(),
+            clip_properties: Vec::new(),
             effects: vec![InspectorEffectModel {
                 effect_id,
                 label: "Gaussian Blur".to_owned(),

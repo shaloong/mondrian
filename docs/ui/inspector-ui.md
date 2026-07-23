@@ -11,7 +11,7 @@ Inspector reads `SelectionState`. It must not keep a parallel selected effect/ma
 Recommended order:
 
 1. Clip summary
-2. Built-in transform/opacity/speed/blend/solid color where applicable
+2. Built-in transform/opacity/speed/blend/content properties where applicable
 3. Effect stack
 4. Mask stack
 5. Timing or advanced metadata
@@ -27,6 +27,12 @@ Adding an effect may update selection/navigation immediately; that follow-up sel
 ## Built-In Properties
 
 Built-in transform and clip properties are not removable. UI may reset values or hide controls but must not present deletion as if these were ordinary user effects.
+
+Basic Title exposes its canonical text, font, size, fill, tracking, line
+height, and alignment Property Bag in this section. Text is multiline; title
+fill replaces the solid-color tint control rather than appearing beside a
+second color authority. The panel projects definition metadata and current
+Clip-source-local values, while the App owns validation and Undo.
 
 ## Parameter Controls
 

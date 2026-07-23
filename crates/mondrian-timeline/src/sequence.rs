@@ -592,6 +592,17 @@ impl SequenceSettings {
                 reason: format!("预览分辨率比例无效: {}", self.preview.resolution_scale),
             });
         }
+        for (name, margin) in [
+            ("action_safe_margin", self.action_safe_margin),
+            ("title_safe_margin", self.title_safe_margin),
+        ] {
+            if !margin.is_finite() || !(0.0..1.0).contains(&margin) {
+                return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "sequence_settings_validate".to_owned(),
+                    reason: format!("{name} 必须是 [0, 1) 内的有限总边距比例，当前值为 {margin}"),
+                });
+            }
+        }
         if !self.color_management.output_color_space.is_display_referred() {
             return Err(mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "sequence_settings_validate".to_string(),
@@ -2461,6 +2472,18 @@ mod tests {
             ..Default::default()
         };
         assert!(bad_preview.validate().is_err());
+    }
+
+    #[test]
+    fn sequence_settings_reject_non_finite_or_canvas_consuming_safe_margins() {
+        for title_safe_margin in [f32::NAN, f32::INFINITY, -0.01, 1.0] {
+            let settings = SequenceSettings { title_safe_margin, ..SequenceSettings::default() };
+            assert!(settings.validate().is_err());
+        }
+        for action_safe_margin in [f32::NAN, f32::NEG_INFINITY, -0.01, 1.0] {
+            let settings = SequenceSettings { action_safe_margin, ..SequenceSettings::default() };
+            assert!(settings.validate().is_err());
+        }
     }
 
     #[test]

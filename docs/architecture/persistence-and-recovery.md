@@ -18,7 +18,7 @@ plans, plugin runtime state, UI navigation, and device handles never enter the
 archive.
 
 The archive format, Project document schema, and SQLite schema are independent
-version axes. The current values are archive v1, document v17, and library v2.
+version axes. The current values are archive v1, document v18, and library v2.
 An archive is accepted only when all three declarations match their registered
 contracts. During Alpha, old and future document schemas fail closed; absence
 of a migration is explicit and is never replaced by broad serde defaults.
@@ -123,7 +123,7 @@ architecture documents. Schema v16 replaces proxy-mode `Vec<AssetId>` state
 with a canonical ordered set so duplicate or order-dependent author state is
 unrepresentable.
 
-Schema v17 is the current clean Alpha author contract:
+Schema v17 establishes:
 
 - `ClipContent` is a closed payload; legacy parallel kind/asset/nested/color
   fields and unknown Clip fields are rejected;
@@ -136,9 +136,17 @@ Schema v17 is the current clean Alpha author contract:
 - copied, split, and duplicated author graphs must have disjoint instance
   identities while retaining intended external references.
 
+Schema v18 is the current clean Alpha author contract. It adds the closed
+`BasicTitle` Clip content payload and persists its complete canonical
+definition-backed Property Bag. Project validation requires the exact property
+set, Parameter Schemas, value domains, and animation state. Text/font/alignment
+author intent therefore round-trips without a renderer-only `TextLayer`, fake
+Asset record, or reopen-time defaults. Schema v17 and all other old/future
+schemas fail closed during Alpha.
+
 The current fixture in `crates/mondrian-project/tests/fixtures/current` must
 open idempotently, save, reopen, and retain its semantic fingerprint. Dedicated
 round-trip tests additionally cover visual parameters, mask animation, audio
-processor schema/curves, exact Transition/link relationships, and SQLite
-content. A schema number is not advanced unless these required semantics are
-represented and validated.
+processor schema/curves, Basic Title animation, exact Transition/link
+relationships, and SQLite content. A schema number is not advanced unless
+these required semantics are represented and validated.

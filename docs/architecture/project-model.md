@@ -94,6 +94,8 @@ Selection/navigation updates that follow a user command may be immediate UI stat
 The project runtime directory contains a SQLite asset library. On save, `library/index.db` is streamed into the `.mdp`; on open it is extracted into the runtime directory. Timeline clips reference assets by `AssetId`.
 
 Generated assets such as adjustment layers and solid colors are represented as library records with synthetic `mondrian://...` paths.
+Basic Title is deliberately different: it is closed Sequence-local Clip content
+and creates no Asset Library row or synthetic path.
 
 SQLite schema v2 stores an `audio_components` catalog beside probe metadata and
 user interpretation. The catalog owns stable logical audio Component IDs,
@@ -126,7 +128,7 @@ is written with that field explicitly.
 
 Archive and document JSON pass through separate version registries before typed
 deserialization. During Alpha there are deliberately no legacy document steps:
-schema v17 is the sole accepted author schema, and older/future versions fail
+schema v18 is the sole accepted author schema, and older/future versions fail
 instead of being guessed. Version 5 introduced the explicit tagged
 `mondrian_standard` / `aces` / `custom_ocio` project contract and makes every
 Mondrian Standard package-identity field mandatory: product ID/version, config
@@ -185,6 +187,12 @@ typed visual Transitions with strong endpoints, and persists complete Mask
 Property Bags. Unknown/legacy Clip fields, singleton link groups, invalid
 Transition geometry, missing Mask parameters, and duplicate author identities
 fail before the document enters a Session.
+Version 18 adds `BasicTitle` as closed Sequence-local generated Clip content.
+Its complete canonical Property Bag, exact requested font intent, and
+source-local animation state persist with the Clip. Validation rejects missing,
+extra, schema-divergent, or out-of-range title properties before a document
+enters an Authoring Session. Alpha does not reinterpret a v17 Clip or construct
+title defaults while opening it.
 
 SQLite schema ownership remains in `mondrian-assets`; the current version is
 v2. Its ordered Registry uses
@@ -197,7 +205,7 @@ Future split-entry layouts require an archive migration and new
 SQLite migrates only in the extracted runtime copy. The source `.mdp` is never
 rewritten by open.
 
-Current document schema v17 persists canonical rational `TimelineTime` values
+Current document schema v18 persists canonical rational `TimelineTime` values
 directly and requires the shared visual/audio `ParameterSchema`. It does not
 contain frame-oriented `TimeCode`, `TimeTicks`, descriptor-level duplicate
 defaults/types, editor-preset interpolation capabilities, or compatibility

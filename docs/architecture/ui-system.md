@@ -41,6 +41,16 @@ persists the definition-stable `ParameterId`. It must not recreate ranges,
 accept enum keys absent from the schema, or flatten a resource reference into a
 generic text parameter.
 
+Basic Title Inspector rows use the same definition-backed property projection
+and mutation action as other Clip content; the panel does not own a parallel
+title draft or reconstruct property ranges/options. Text is multiline, the
+concrete font family remains editable regardless of display length, and
+font-size/fill/tracking/line-height animation is evaluated at exact Clip
+source-local author time. A mutation validates Track lock and the complete
+candidate title before recording one Sequence snapshot. The generic legacy
+solid-color tint row is hidden for Basic Title so two controls cannot claim
+authority over its fill.
+
 Inspector audio source controls project existing author state rather than own
 it. Each row addresses one stable `AudioComponentEditId`; media choices carry
 only Asset `AudioSourceComponentId` values and nested choices carry only child
@@ -182,6 +192,14 @@ projects the low-frequency author view and exposes a fail-closed diagnostic. It
 does not repair, shorten, or mutate the authored range. Media execution and
 per-frame playback therefore remain outside the Widget and panel seams.
 
+Basic Title creation is a stable command exposed by the Graphics menu and
+command registry. The App authoring Module—not the menu, panel, or Timeline
+Widget—chooses the selected/free video Track, derives the selected range or
+five-second default from the current edit state, adds a Track only when all
+existing unlocked tracks are occupied, and commits placement plus any new
+Track as one Undo transaction. Timeline presentation uses dedicated semantic
+title colors and the ordinary Clip selection/trim/drag model.
+
 ## Playback Tick Ownership
 
 The winit host may wake the application while playback is running, but playback
@@ -267,6 +285,13 @@ starts a monotonic generation, and background media jobs check that their key is
 still requested by the latest generation before decoding. Completed stale jobs
 may warm the cache, but they do not force a UI refresh for an older playback
 frame.
+The same production runtime owns one bounded Basic Title task. The Timeline
+evaluator emits a complete generated-title request including evaluated author
+state, Sequence resolution, persisted title-safe margin, target resolution, and
+working space. The background task owns font discovery, shaping, cache, and
+failure memory; the Window Adapter only observes typed
+Ready/Pending/Unavailable results. Title generation can therefore neither block
+the winit thread nor rebuild shell chrome while Preview is pending.
 If a later generation requests the same media-preview key while a worker is
 already decoding it, that in-flight decode remains current: generation changes
 alone must not cancel identical frame/key work, or the viewer can livelock in a

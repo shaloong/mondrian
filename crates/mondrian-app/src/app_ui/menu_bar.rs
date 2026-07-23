@@ -73,6 +73,11 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
         ),
         // ── View ────────────────────────────────────────────────────────
         ("视图", vec![command_menu_item("view.toggle_fullscreen")]),
+        // ── Graphics ────────────────────────────────────────────────────
+        (
+            "图形",
+            vec![command_menu_item("timeline.create_basic_title")],
+        ),
         // ── Window ──────────────────────────────────────────────────────
         (
             "窗口",
@@ -534,7 +539,9 @@ mod tests {
         let numerator = frame.checked_mul(time_base.num).expect("test time fits i64");
         mondrian_core::TimelineTime::new(numerator, time_base.den).expect("valid test time")
     }
-    use crate::app::ui_actions::{APP_SHELL_ABOUT, APP_SHELL_NAMESPACE};
+    use crate::app::ui_actions::{
+        timeline_create_basic_title_action, APP_SHELL_ABOUT, APP_SHELL_NAMESPACE,
+    };
     use crate::app::SelectedClipRef;
     use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyMutation, PropertyValue};
@@ -680,8 +687,17 @@ mod tests {
     #[test]
     fn default_menu_bar_exposes_primary_menu_groups() {
         let menu = MenuBar::default();
+        let menu_items = default_menu_items();
 
-        assert_eq!(menu.child_count(), 5);
+        assert_eq!(menu.child_count(), 6);
+        assert_eq!(
+            menu_items.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
+            vec!["文件", "编辑", "视图", "图形", "窗口", "帮助"]
+        );
+        assert_eq!(
+            menu_item(&menu_items, "图形", "基础标题").action(),
+            Some(&timeline_create_basic_title_action())
+        );
     }
 
     #[test]

@@ -258,7 +258,8 @@ impl AppState {
         clip: &Clip,
     ) -> mondrian_core::Result<Option<TimelineTimeRange>> {
         match &clip.content {
-            mondrian_core::timeline_data::ClipContent::SolidColor { .. } => Ok(None),
+            mondrian_core::timeline_data::ClipContent::SolidColor { .. }
+            | mondrian_core::timeline_data::ClipContent::BasicTitle { .. } => Ok(None),
             mondrian_core::timeline_data::ClipContent::AdjustmentLayer { .. } => {
                 Err(MondrianError::WorkflowStepFailed {
                     step_id: "video_transition_source_extent".to_owned(),

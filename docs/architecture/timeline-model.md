@@ -230,12 +230,30 @@ Its content is one closed `ClipContent` payload:
 - `AdjustmentLayer { asset_id }`
 - `NestedSequence { sequence_id }`
 - `SolidColor { asset_id, color }`
+- `BasicTitle { title }`
 
 The variant is the single source of truth. There is no parallel `kind`,
 `asset_id`, nested ID, interpretation, or solid-color field that can describe a
 contradictory Clip. Current-schema deserialization rejects legacy or unknown
 parallel fields. Constructors create only the identity required by the chosen
 variant; for example, a nested placement does not manufacture a fake Asset ID.
+
+`BasicTitle` is a fifth content type, not a synthetic Asset and not an Effect.
+Its closed definition-backed Property Bag owns text, exact requested font
+family/weight/style, font size, working-linear fill, tracking, line height, and
+horizontal/vertical alignment. Font size, fill, tracking, and line height use
+the ordinary exact automation model in Clip source-local time; discrete text,
+font, and alignment values remain static until the product defines an explicit
+discrete-edit workflow. Unknown, missing, removed, type-divergent, or
+out-of-contract properties are rejected before an author snapshot commits.
+
+The Sequence `title_safe_margin` is a total width/height fraction: `0.20`
+means 10% per edge. Both action/title safe margins must be finite and in
+`[0, 1)`, so persisted settings can never yield NaN layout or consume the
+complete canvas. Title creation prefers the selected free unlocked video Track,
+then the topmost free unlocked Track; only when none is available does it add a
+Track. Adding that Track and placing the title is one author transaction and one
+Undo step.
 
 Copy, paste, razor, overwrite-created fragments, and Sequence duplication fork
 every addressable placement identity: Clip, Effect, Mask, visual animation

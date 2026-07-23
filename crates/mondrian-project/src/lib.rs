@@ -23,7 +23,7 @@ use migration::JsonMigrationRegistry;
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 17;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 18;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 2;
 
@@ -183,6 +183,11 @@ impl ProjectDocument {
                     format!("track '{}' parameter schema is invalid", track.name)
                 })?;
                 for clip in &track.clips {
+                    if let Some(title) = clip.content.basic_title() {
+                        title.validate_author_state().with_context(|| {
+                            format!("Basic Title '{}' author state is invalid", clip.id)
+                        })?;
+                    }
                     clip.property_bag()?.validate().with_context(|| {
                         format!("clip '{}' parameter schema is invalid", clip.id)
                     })?;
@@ -530,7 +535,9 @@ fn replace_file_preserving_original_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_core::automation::{InterpolationType, PropertyDescriptor, PropertyValue};
+    use mondrian_core::automation::{
+        InterpolationType, Keyframe, PropertyDescriptor, PropertyMutation, PropertyValue,
+    };
     use mondrian_core::effect_data::{EffectNode, EffectType};
     use mondrian_core::mask_data::{MaskComponent, MaskKeyframe};
     use mondrian_core::{
@@ -712,6 +719,56 @@ mod tests {
             property.descriptor.schema.message_id,
             "mondrian.effect.builtin.gaussian_blur.radius.label"
         );
+    }
+
+    #[test]
+    fn basic_title_closed_author_state_round_trips_with_exact_animation() {
+        let root = unique_temp_dir("basic-title-round-trip");
+        let db_path = root.join("index.db");
+        fs::write(&db_path, b"sqlite placeholder").expect("write db");
+        let project_path = root.join("basic-title.mdp");
+
+        let mut document = test_document();
+        let mut clip = Clip::new_basic_title(
+            "Mondrian 标题",
+            mondrian_core::default_basic_title_font_family(),
+            TimelineTime::ZERO,
+            TimelineTime::new(5, 1).expect("duration"),
+        )
+        .expect("Basic Title");
+        clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+            path: mondrian_core::BasicTitle::FONT_SIZE_PATH.to_owned(),
+            keyframe: Keyframe::linear(TimelineTime::ZERO, PropertyValue::Float(72.0)),
+        })
+        .expect("first font-size key");
+        clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+            path: mondrian_core::BasicTitle::FONT_SIZE_PATH.to_owned(),
+            keyframe: Keyframe::linear(
+                TimelineTime::new(4, 1).expect("key time"),
+                PropertyValue::Float(144.0),
+            ),
+        })
+        .expect("second font-size key");
+        let clip_id = clip.id;
+        document.sequences.active_mut().expect("active sequence").video_tracks[0]
+            .add_clip(clip)
+            .expect("add Basic Title");
+
+        save_project_archive(&document, &db_path, &project_path).expect("save project");
+        let reopened = read_project_document_from_archive(&project_path).expect("reopen project");
+        let reopened_title = reopened.sequences.active().expect("active sequence").video_tracks[0]
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_id)
+            .and_then(|clip| clip.content.basic_title())
+            .expect("reopened Basic Title");
+
+        reopened_title.validate_author_state().expect("valid title state");
+        let midpoint = reopened_title
+            .evaluate(TimelineTime::new(2, 1).expect("midpoint"))
+            .expect("evaluate title");
+        assert_eq!(midpoint.text, "Mondrian 标题");
+        assert!((midpoint.font_size - 108.0).abs() < 1.0e-5);
     }
 
     #[test]
@@ -1018,7 +1075,7 @@ mod tests {
     #[test]
     fn older_schemas_are_rejected_without_an_alpha_compatibility_migration() {
         let mut legacy = serde_json::to_value(test_document()).expect("serialize document");
-        for version in [5, 6, 10, 14] {
+        for version in [5, 6, 10, 14, 17] {
             legacy["schema_version"] = serde_json::json!(version);
             let err = DOCUMENT_MIGRATIONS
                 .migrate(legacy.clone())

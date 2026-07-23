@@ -1,5 +1,11 @@
 # Effect System
 
+Timeline text generation is not an Effect capability. Basic Title is closed
+Clip content whose generated working-linear frame enters this effect system at
+the ordinary Clip source boundary. The former disconnected renderer-only
+`TextLayer` placeholder has been removed; text parameters and animation cannot
+form a second effect-specific author model.
+
 Effects are timeline-instance operations that transform image data through a compiled render graph.
 
 This document describes visual effects. Audio processing uses the distinct

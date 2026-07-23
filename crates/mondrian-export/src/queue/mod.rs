@@ -18,7 +18,7 @@ use mondrian_core::types::{AssetId, ColorEngine, ColorSpace, FramePosition, JobI
 use mondrian_core::{
     AudioChannelLayout, AudioChannelMixMatrix, AudioSamplePosition, AudioSampleRate,
     AudioSampleRounding, AudioSourceComponentId, ExecutionCancellationToken, FrameRounding,
-    TimelineTime, WorkingColorSpace, WorkingRgbaF32Frame,
+    Resolution, TimelineTime, WorkingColorSpace, WorkingRgbaF32Frame,
 };
 use mondrian_media::AudioSourceCache;
 use mondrian_media::{
@@ -30,18 +30,19 @@ use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
     evaluate_timeline_render_plan, execute_cpu_output_boundary_float,
     execute_cpu_output_boundary_rgba8, execute_cpu_source_input_stage,
-    execute_cpu_working_transform, ColorFrameResidency, CpuColorFrame, CpuEncodedColorFrame,
-    CpuSourceColorFrame, GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat, GpuContext,
-    LinearFloatSource, RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
+    execute_cpu_working_transform, project_basic_title_transform, BasicTitleRasterizer,
+    ColorFrameResidency, CpuColorFrame, CpuEncodedColorFrame, CpuSourceColorFrame,
+    GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat, GpuContext, LinearFloatSource,
+    RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
     RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
     RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderInputTransform,
-    RenderOutputColorBoundary, TimelineAdjustmentLayer, TimelineCompositeColorPathSummary,
-    TimelineCompositeDiagnostics, TimelineCompositeDomainBlockerBreakdown,
-    TimelineCompositeElement, TimelineCompositeLegacyBreakdown, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineCrossDissolveLayer, TimelineEffectColorRuntime,
-    TimelineEvaluationRequest, TimelineMediaLayer, TimelineMediaPlan, TimelineNestedSequencePlan,
-    TimelineRenderPlanElement, TimelineSolidColorLayer, TimelineTransitionInput,
-    TimelineTransitionInputPlan,
+    RenderOutputColorBoundary, TimelineAdjustmentLayer, TimelineBasicTitlePlan,
+    TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
+    TimelineCompositeDomainBlockerBreakdown, TimelineCompositeElement,
+    TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
+    TimelineCrossDissolveLayer, TimelineEffectColorRuntime, TimelineEvaluationRequest,
+    TimelineMediaLayer, TimelineMediaPlan, TimelineNestedSequencePlan, TimelineRenderPlanElement,
+    TimelineSolidColorLayer, TimelineTransitionInput, TimelineTransitionInputPlan,
 };
 use mondrian_timeline::sequence::{
     ColorContext, DeliveryBitDepth, InputColorResolutionSourceCounts, ResolvedInputColor,
@@ -2094,6 +2095,7 @@ fn write_timeline_frames_to_writer<W: Write>(
     diagnostics
         .color
         .record_asset_issue_summary(export_asset_issue_summary(timeline));
+    let mut visual_session = ExportVisualRenderSession::default();
 
     for index in 0..total {
         if cancel.is_canceled() {
@@ -2104,7 +2106,7 @@ fn write_timeline_frames_to_writer<W: Write>(
         let mut frame_color_counts = InputColorResolutionSourceCounts::default();
         let mut frame_stage_diagnostics = RenderColorStageDiagnostics::default();
         let mut frame_composite_diagnostics = TimelineCompositeDiagnostics::default();
-        let render_result = render_timeline_frame_into(
+        let render_result = render_timeline_frame_into_with_session(
             timeline,
             timeline_frame,
             width,
@@ -2115,6 +2117,7 @@ fn write_timeline_frames_to_writer<W: Write>(
             Some(&mut frame_stage_diagnostics),
             Some(&mut frame_composite_diagnostics),
             Some(&mut diagnostics.color),
+            &mut visual_session,
         );
         diagnostics.color.record_frame_diagnostics(
             frame_color_counts,
@@ -2182,6 +2185,35 @@ fn render_timeline_frame_into(
     composite_diagnostics: Option<&mut TimelineCompositeDiagnostics>,
     export_diagnostics: Option<&mut ExportJobColorDiagnostics>,
 ) -> Result<(), String> {
+    let mut visual_session = ExportVisualRenderSession::default();
+    render_timeline_frame_into_with_session(
+        timeline,
+        timeline_frame,
+        width,
+        height,
+        alpha_mode,
+        canvas,
+        input_color_counts,
+        stage_diagnostics,
+        composite_diagnostics,
+        export_diagnostics,
+        &mut visual_session,
+    )
+}
+
+fn render_timeline_frame_into_with_session(
+    timeline: &TimelineExportSnapshot,
+    timeline_frame: i64,
+    width: u32,
+    height: u32,
+    alpha_mode: ExportAlphaMode,
+    canvas: &mut Vec<u8>,
+    input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
+    stage_diagnostics: Option<&mut RenderColorStageDiagnostics>,
+    composite_diagnostics: Option<&mut TimelineCompositeDiagnostics>,
+    export_diagnostics: Option<&mut ExportJobColorDiagnostics>,
+    visual_session: &mut ExportVisualRenderSession,
+) -> Result<(), String> {
     let frame_contract = export_frame_contract(&timeline.sequence.settings);
     let required_len = frame_contract.canvas_len(width, height);
     if canvas.len() != required_len {
@@ -2192,21 +2224,24 @@ fn render_timeline_frame_into(
         .sequence
         .settings
         .root_program_color_context(&timeline.project_color_management);
-
-    render_sequence_frame_into(
+    let mut render_context = ExportFrameRenderContext {
         timeline,
-        &timeline.sequence,
-        timeline_frame,
-        width,
-        height,
-        color_context,
         alpha_mode,
-        SequenceRenderTarget::Deliverable(canvas),
-        0,
         input_color_counts,
         stage_diagnostics,
         composite_diagnostics,
         export_diagnostics,
+        visual_session,
+    };
+
+    render_sequence_frame_into(
+        &mut render_context,
+        &timeline.sequence,
+        timeline_frame,
+        Resolution { width, height },
+        color_context,
+        SequenceRenderTarget::Deliverable(canvas),
+        0,
     )
 }
 
@@ -2219,7 +2254,34 @@ enum ResolvedExportTransitionInput {
     Transparent,
     Decoded(Arc<DecodedVideoLayer>),
     Nested(CpuColorFrame),
+    BasicTitle(ResolvedExportTitle),
     SolidColor,
+}
+
+struct ResolvedExportTitle {
+    frame: CpuColorFrame,
+    transform: [f32; 6],
+}
+
+#[derive(Default)]
+struct ExportVisualRenderSession {
+    title_rasterizer: BasicTitleRasterizer,
+}
+
+/// Frame-scoped execution dependencies shared by root, nested, and Transition
+/// rendering.
+///
+/// The admitted Timeline and alpha policy are immutable for one frame. Mutable
+/// diagnostics and the job-owned visual Session travel through the same
+/// recursion so nested Sequences cannot create parallel execution semantics.
+struct ExportFrameRenderContext<'a> {
+    timeline: &'a TimelineExportSnapshot,
+    alpha_mode: ExportAlphaMode,
+    input_color_counts: Option<&'a mut InputColorResolutionSourceCounts>,
+    stage_diagnostics: Option<&'a mut RenderColorStageDiagnostics>,
+    composite_diagnostics: Option<&'a mut TimelineCompositeDiagnostics>,
+    export_diagnostics: Option<&'a mut ExportJobColorDiagnostics>,
+    visual_session: &'a mut ExportVisualRenderSession,
 }
 
 type ExportDecodeCacheKey = (
@@ -2414,8 +2476,9 @@ fn export_sequence_input_color_resolution_counts(
                 )?;
                 counts.accumulate(nested_counts);
             }
-            TimelineRenderPlanElement::Adjustment(_) | TimelineRenderPlanElement::SolidColor(_) => {
-            }
+            TimelineRenderPlanElement::Adjustment(_)
+            | TimelineRenderPlanElement::SolidColor(_)
+            | TimelineRenderPlanElement::BasicTitle(_) => {}
             TimelineRenderPlanElement::CrossDissolve(transition) => {
                 counts.accumulate(export_transition_input_color_resolution_counts(
                     timeline,
@@ -2443,7 +2506,9 @@ fn export_transition_input_color_resolution_counts(
 ) -> Result<InputColorResolutionSourceCounts, String> {
     let mut counts = InputColorResolutionSourceCounts::default();
     match input {
-        TimelineTransitionInputPlan::Transparent | TimelineTransitionInputPlan::SolidColor(_) => {}
+        TimelineTransitionInputPlan::Transparent
+        | TimelineTransitionInputPlan::SolidColor(_)
+        | TimelineTransitionInputPlan::BasicTitle(_) => {}
         TimelineTransitionInputPlan::Media(media) => {
             let dependency = timeline
                 .media
@@ -2482,23 +2547,19 @@ fn export_transition_input_color_resolution_counts(
 }
 
 fn render_sequence_frame_into(
-    timeline: &TimelineExportSnapshot,
+    context: &mut ExportFrameRenderContext<'_>,
     sequence: &mondrian_timeline::sequence::Sequence,
     timeline_frame: i64,
-    width: u32,
-    height: u32,
+    resolution: Resolution,
     color_context: ColorContext,
-    alpha_mode: ExportAlphaMode,
     mut target: SequenceRenderTarget<'_>,
     depth: usize,
-    mut input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
-    mut stage_diagnostics: Option<&mut RenderColorStageDiagnostics>,
-    mut composite_diagnostics: Option<&mut TimelineCompositeDiagnostics>,
-    mut export_diagnostics: Option<&mut ExportJobColorDiagnostics>,
 ) -> Result<(), String> {
     if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
         return Err("序列嵌套层级过深，已停止渲染以避免循环".to_string());
     }
+    let Resolution { width, height } = resolution;
+    let timeline = context.timeline;
 
     let frame_contract = export_frame_contract(&sequence.settings);
     if let SequenceRenderTarget::Deliverable(canvas) = &mut target {
@@ -2518,7 +2579,7 @@ fn render_sequence_frame_into(
             width,
             height,
             color_context.working_color_space,
-            alpha_mode,
+            context.alpha_mode,
         );
         return Ok(());
     }
@@ -2531,6 +2592,9 @@ fn render_sequence_frame_into(
     let mut nested_media = std::iter::repeat_with(|| None)
         .take(render_plan.len())
         .collect::<Vec<Option<CpuColorFrame>>>();
+    let mut title_media = std::iter::repeat_with(|| None)
+        .take(render_plan.len())
+        .collect::<Vec<Option<ResolvedExportTitle>>>();
     let mut transition_inputs = std::iter::repeat_with(|| None)
         .take(render_plan.len())
         .collect::<Vec<Option<(ResolvedExportTransitionInput, ResolvedExportTransitionInput)>>>();
@@ -2545,38 +2609,38 @@ fn render_sequence_frame_into(
                     height,
                     &color_context,
                     &mut decode_cache,
-                    input_color_counts.as_deref_mut(),
-                    stage_diagnostics.as_deref_mut(),
+                    context.input_color_counts.as_deref_mut(),
+                    context.stage_diagnostics.as_deref_mut(),
+                )?);
+            }
+            TimelineRenderPlanElement::BasicTitle(title) => {
+                title_media[index] = Some(render_export_basic_title_plan(
+                    context.visual_session,
+                    sequence,
+                    title,
+                    width,
+                    height,
+                    color_context.working_color_space,
                 )?);
             }
             TimelineRenderPlanElement::CrossDissolve(transition) => {
                 let left = resolve_export_transition_input(
-                    timeline,
+                    context,
+                    sequence,
                     &transition.left,
-                    width,
-                    height,
+                    resolution,
                     &color_context,
-                    alpha_mode,
                     depth,
                     &mut decode_cache,
-                    input_color_counts.as_deref_mut(),
-                    stage_diagnostics.as_deref_mut(),
-                    composite_diagnostics.as_deref_mut(),
-                    export_diagnostics.as_deref_mut(),
                 )?;
                 let right = resolve_export_transition_input(
-                    timeline,
+                    context,
+                    sequence,
                     &transition.right,
-                    width,
-                    height,
+                    resolution,
                     &color_context,
-                    alpha_mode,
                     depth,
                     &mut decode_cache,
-                    input_color_counts.as_deref_mut(),
-                    stage_diagnostics.as_deref_mut(),
-                    composite_diagnostics.as_deref_mut(),
-                    export_diagnostics.as_deref_mut(),
                 )?;
                 transition_inputs[index] = Some((left, right));
             }
@@ -2591,15 +2655,10 @@ fn render_sequence_frame_into(
             continue;
         };
         nested_media[index] = Some(render_export_nested_plan(
-            timeline,
+            context,
             nested,
             &color_context,
-            alpha_mode,
             depth,
-            input_color_counts.as_deref_mut(),
-            stage_diagnostics.as_deref_mut(),
-            composite_diagnostics.as_deref_mut(),
-            export_diagnostics.as_deref_mut(),
         )?);
     }
 
@@ -2627,6 +2686,19 @@ fn render_sequence_frame_into(
                     transform: media.transform,
                     effect_graph: media.effect_graph.clone(),
                     frame_seed: media.frame_seed,
+                }));
+            }
+            TimelineRenderPlanElement::BasicTitle(title) => {
+                let resolved = title_media[index].as_ref().ok_or_else(|| {
+                    "Basic Title plan was not resolved before compositing".to_owned()
+                })?;
+                composite_elements.push(TimelineCompositeElement::Media(TimelineMediaLayer {
+                    frame: &resolved.frame,
+                    opacity: title.opacity,
+                    blend_mode: title.blend_mode,
+                    transform: resolved.transform,
+                    effect_graph: title.effect_graph.clone(),
+                    frame_seed: title.frame_seed,
                 }));
             }
             TimelineRenderPlanElement::NestedSequence(nested) => {
@@ -2676,14 +2748,14 @@ fn render_sequence_frame_into(
             width,
             height,
             color_context.working_color_space,
-            alpha_mode,
+            context.alpha_mode,
         );
         return Ok(());
     }
 
     let mut scratch = TimelineCompositeScratch::default();
     let composite_options = if matches!(&target, SequenceRenderTarget::Deliverable(_))
-        && alpha_mode == ExportAlphaMode::FlattenBlack
+        && context.alpha_mode == ExportAlphaMode::FlattenBlack
     {
         TimelineCompositeOptions::opaque_black()
     } else {
@@ -2698,7 +2770,7 @@ fn render_sequence_frame_into(
         &mut scratch,
     )
     .map_err(|error| format!("timeline composite failed: {error}"))?;
-    if let Some(diagnostics) = composite_diagnostics {
+    if let Some(diagnostics) = context.composite_diagnostics.as_deref_mut() {
         diagnostics.accumulate(rendered.diagnostics);
     }
 
@@ -2712,7 +2784,7 @@ fn render_sequence_frame_into(
     let mut gpu_output_cpu_fallbacks = 0u64;
     let boundary = export_output_boundary_from_context(&color_context)?;
     if color_context.tone_map && boundary.display_view.is_none() {
-        if let Some(diagnostics) = export_diagnostics.as_deref_mut() {
+        if let Some(diagnostics) = context.export_diagnostics.as_deref_mut() {
             diagnostics.record_output_transform_issue(
                 ExportOutputTransformIssueReason::ToneMapRequestedWithoutExportViewTransform,
             );
@@ -2728,7 +2800,7 @@ fn render_sequence_frame_into(
 
     let final_bytes = match attempt {
         Some(attempt) => {
-            if let Some(diagnostics) = stage_diagnostics.as_deref_mut() {
+            if let Some(diagnostics) = context.stage_diagnostics.as_deref_mut() {
                 diagnostics.accumulate(attempt.stage_diagnostics);
             }
             attempt.rgba
@@ -2737,7 +2809,7 @@ fn render_sequence_frame_into(
             if frame_contract.requires_high_precision_boundary() {
                 match cpu_output_boundary_float(&rendered.frame, &boundary) {
                     Ok(float_result) => {
-                        if let Some(diagnostics) = stage_diagnostics {
+                        if let Some(diagnostics) = context.stage_diagnostics.as_deref_mut() {
                             diagnostics.accumulate(float_result.stage_diagnostics);
                         }
                         let flat: Vec<f32> = float_result
@@ -2750,7 +2822,7 @@ fn render_sequence_frame_into(
                         frame_contract.pack_rgba_f32(&flat)
                     }
                     Err(float_err) => {
-                        if let Some(diagnostics) = export_diagnostics.as_deref_mut() {
+                        if let Some(diagnostics) = context.export_diagnostics.as_deref_mut() {
                             diagnostics.record_export_output_boundary(
                                 gpu_output_attempts,
                                 gpu_output_cpu_fallbacks,
@@ -2768,7 +2840,7 @@ fn render_sequence_frame_into(
             } else {
                 let encoded = execute_cpu_output_boundary_rgba8(&rendered.frame, &boundary)
                     .map_err(|err| format!("final color transform failed: {err}"))?;
-                if let Some(diagnostics) = stage_diagnostics {
+                if let Some(diagnostics) = context.stage_diagnostics.as_deref_mut() {
                     diagnostics.accumulate(encoded.stage_diagnostics);
                 }
                 frame_contract.pack_rgba8(&encoded.rgba)
@@ -2776,7 +2848,7 @@ fn render_sequence_frame_into(
         }
     };
 
-    if let Some(diagnostics) = export_diagnostics {
+    if let Some(diagnostics) = context.export_diagnostics.as_deref_mut() {
         diagnostics.record_export_output_boundary(
             gpu_output_attempts,
             gpu_output_cpu_fallbacks,
@@ -2791,7 +2863,6 @@ fn render_sequence_frame_into(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn decode_export_media_plan(
     timeline: &TimelineExportSnapshot,
     media: &TimelineMediaPlan,
@@ -2869,18 +2940,13 @@ fn decode_export_media_plan(
     Ok(decoded)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_export_nested_plan(
-    timeline: &TimelineExportSnapshot,
+    context: &mut ExportFrameRenderContext<'_>,
     nested: &TimelineNestedSequencePlan,
     parent_color_context: &ColorContext,
-    alpha_mode: ExportAlphaMode,
     depth: usize,
-    input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
-    mut stage_diagnostics: Option<&mut RenderColorStageDiagnostics>,
-    composite_diagnostics: Option<&mut TimelineCompositeDiagnostics>,
-    export_diagnostics: Option<&mut ExportJobColorDiagnostics>,
 ) -> Result<CpuColorFrame, String> {
+    let timeline = context.timeline;
     let sequence = timeline
         .sequences
         .iter()
@@ -2903,19 +2969,13 @@ fn render_export_nested_plan(
     let nested_context =
         sequence.settings.nested_render_color_context(parent_color_context.clone());
     render_sequence_frame_into(
-        timeline,
+        context,
         sequence,
         frame,
-        width,
-        height,
+        Resolution { width, height },
         nested_context,
-        alpha_mode,
         SequenceRenderTarget::Working(&mut output),
         depth + 1,
-        input_color_counts,
-        stage_diagnostics.as_deref_mut(),
-        composite_diagnostics,
-        export_diagnostics,
     )?;
     let mut frame = output.ok_or_else(|| {
         format!(
@@ -2930,7 +2990,7 @@ fn render_export_nested_plan(
             parent_color_context.engine.clone(),
         )
         .map_err(|error| format!("nested working-space transform failed: {error}"))?;
-        if let Some(diagnostics) = stage_diagnostics {
+        if let Some(diagnostics) = context.stage_diagnostics.as_deref_mut() {
             diagnostics.accumulate(converted.stage_diagnostics);
         }
         frame = converted.result.frame;
@@ -2938,24 +2998,59 @@ fn render_export_nested_plan(
     Ok(frame)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn resolve_export_transition_input(
-    timeline: &TimelineExportSnapshot,
-    input: &TimelineTransitionInputPlan,
+fn render_export_basic_title_plan(
+    visual_session: &mut ExportVisualRenderSession,
+    sequence: &mondrian_timeline::sequence::Sequence,
+    title: &TimelineBasicTitlePlan,
     width: u32,
     height: u32,
+    working_color_space: WorkingColorSpace,
+) -> Result<ResolvedExportTitle, String> {
+    let target_resolution = mondrian_core::Resolution { width, height };
+    let raster = visual_session
+        .title_rasterizer
+        .rasterize(
+            &title.title,
+            sequence.settings.resolution,
+            sequence.settings.title_safe_margin,
+            target_resolution,
+            working_color_space,
+        )
+        .map_err(|error| format!("Basic Title generation failed closed: {error}"))?;
+    let transform = project_basic_title_transform(
+        title.transform,
+        raster.sampled_source_to_author,
+        sequence.settings.resolution,
+        target_resolution,
+    )
+    .ok_or_else(|| "Basic Title export transform geometry is invalid".to_owned())?;
+    Ok(ResolvedExportTitle { frame: raster.frame, transform })
+}
+
+fn resolve_export_transition_input(
+    context: &mut ExportFrameRenderContext<'_>,
+    sequence: &mondrian_timeline::sequence::Sequence,
+    input: &TimelineTransitionInputPlan,
+    resolution: Resolution,
     color_context: &ColorContext,
-    alpha_mode: ExportAlphaMode,
     depth: usize,
     decode_cache: &mut HashMap<ExportDecodeCacheKey, Arc<DecodedVideoLayer>>,
-    input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
-    stage_diagnostics: Option<&mut RenderColorStageDiagnostics>,
-    composite_diagnostics: Option<&mut TimelineCompositeDiagnostics>,
-    export_diagnostics: Option<&mut ExportJobColorDiagnostics>,
 ) -> Result<ResolvedExportTransitionInput, String> {
+    let timeline = context.timeline;
+    let Resolution { width, height } = resolution;
     Ok(match input {
         TimelineTransitionInputPlan::Transparent => ResolvedExportTransitionInput::Transparent,
         TimelineTransitionInputPlan::SolidColor(_) => ResolvedExportTransitionInput::SolidColor,
+        TimelineTransitionInputPlan::BasicTitle(title) => {
+            ResolvedExportTransitionInput::BasicTitle(render_export_basic_title_plan(
+                context.visual_session,
+                sequence,
+                title,
+                width,
+                height,
+                color_context.working_color_space,
+            )?)
+        }
         TimelineTransitionInputPlan::Media(media) => {
             ResolvedExportTransitionInput::Decoded(decode_export_media_plan(
                 timeline,
@@ -2964,21 +3059,16 @@ fn resolve_export_transition_input(
                 height,
                 color_context,
                 decode_cache,
-                input_color_counts,
-                stage_diagnostics,
+                context.input_color_counts.as_deref_mut(),
+                context.stage_diagnostics.as_deref_mut(),
             )?)
         }
         TimelineTransitionInputPlan::NestedSequence(nested) => {
             ResolvedExportTransitionInput::Nested(render_export_nested_plan(
-                timeline,
+                context,
                 nested,
                 color_context,
-                alpha_mode,
                 depth,
-                input_color_counts,
-                stage_diagnostics,
-                composite_diagnostics,
-                export_diagnostics,
             )?)
         }
     })
@@ -3013,6 +3103,17 @@ fn lower_export_transition_input<'a>(
             transform: nested.transform,
             effect_graph: nested.effect_graph.clone(),
             frame_seed: nested.frame_seed,
+        }),
+        (
+            TimelineTransitionInputPlan::BasicTitle(title),
+            ResolvedExportTransitionInput::BasicTitle(resolved),
+        ) => TimelineTransitionInput::Media(TimelineMediaLayer {
+            frame: &resolved.frame,
+            opacity: title.opacity,
+            blend_mode: title.blend_mode,
+            transform: resolved.transform,
+            effect_graph: title.effect_graph.clone(),
+            frame_seed: title.frame_seed,
         }),
         (
             TimelineTransitionInputPlan::SolidColor(solid),
@@ -4110,20 +4211,24 @@ mod tests {
 
         let mut diagnostics = ExportJobColorDiagnostics::default();
         let mut canvas = vec![0u8; 2 * 2 * 4];
+        let mut visual_session = ExportVisualRenderSession::default();
+        let mut render_context = ExportFrameRenderContext {
+            timeline: &timeline,
+            alpha_mode: ExportAlphaMode::FlattenBlack,
+            input_color_counts: None,
+            stage_diagnostics: None,
+            composite_diagnostics: None,
+            export_diagnostics: Some(&mut diagnostics),
+            visual_session: &mut visual_session,
+        };
         render_sequence_frame_into(
-            &timeline,
+            &mut render_context,
             &timeline.sequence,
             0,
-            2,
-            2,
+            Resolution { width: 2, height: 2 },
             ctx,
-            ExportAlphaMode::FlattenBlack,
             SequenceRenderTarget::Deliverable(&mut canvas),
             0,
-            None,
-            None,
-            None,
-            Some(&mut diagnostics),
         )
         .expect("render with engine-owned output intent");
 
@@ -4174,21 +4279,25 @@ mod tests {
         };
         let mut output = None;
         let mut composite_diagnostics = TimelineCompositeDiagnostics::default();
+        let mut visual_session = ExportVisualRenderSession::default();
+        let mut render_context = ExportFrameRenderContext {
+            timeline: &timeline,
+            alpha_mode: ExportAlphaMode::Preserve,
+            input_color_counts: None,
+            stage_diagnostics: None,
+            composite_diagnostics: Some(&mut composite_diagnostics),
+            export_diagnostics: None,
+            visual_session: &mut visual_session,
+        };
 
         render_sequence_frame_into(
-            &timeline,
+            &mut render_context,
             &timeline.sequence,
             2,
-            1,
-            1,
+            Resolution { width: 1, height: 1 },
             color_context,
-            ExportAlphaMode::Preserve,
             SequenceRenderTarget::Working(&mut output),
             0,
-            None,
-            None,
-            Some(&mut composite_diagnostics),
-            None,
         )
         .expect("render Cross Dissolve");
 
@@ -4203,6 +4312,191 @@ mod tests {
         assert_eq!(pixel[3], 1.0);
         assert_eq!(composite_diagnostics.float_linear_composites, 1);
         assert_eq!(composite_diagnostics.legacy_rgba8_composites, 0);
+    }
+
+    #[test]
+    fn export_executes_basic_title_through_shared_working_compositor() {
+        let mut sequence = Sequence::new("export Basic Title");
+        sequence.settings.resolution = mondrian_core::Resolution { width: 320, height: 180 };
+        let time_base = sequence.time_base();
+        sequence.video_tracks[0]
+            .add_clip(
+                Clip::new_basic_title(
+                    "Mondrian",
+                    mondrian_core::default_basic_title_font_family(),
+                    tt(0, time_base),
+                    tt(24, time_base),
+                )
+                .expect("Basic Title"),
+            )
+            .expect("title placement");
+        sequence.validate_author_identities().expect("valid author graph");
+        let color_context = sequence
+            .settings
+            .root_program_color_context(&mondrian_core::ProjectColorManagement::default());
+        let timeline = TimelineExportSnapshot {
+            sequence,
+            sequences: Vec::new(),
+            media: HashMap::new(),
+            range: TimelineExportRange::SequenceInOut,
+            project_color_management: mondrian_core::ProjectColorManagement::default(),
+        };
+        let mut output = None;
+        let mut composite_diagnostics = TimelineCompositeDiagnostics::default();
+        let mut visual_session = ExportVisualRenderSession::default();
+        let mut render_context = ExportFrameRenderContext {
+            timeline: &timeline,
+            alpha_mode: ExportAlphaMode::Preserve,
+            input_color_counts: None,
+            stage_diagnostics: None,
+            composite_diagnostics: Some(&mut composite_diagnostics),
+            export_diagnostics: None,
+            visual_session: &mut visual_session,
+        };
+
+        render_sequence_frame_into(
+            &mut render_context,
+            &timeline.sequence,
+            0,
+            Resolution { width: 320, height: 180 },
+            color_context,
+            SequenceRenderTarget::Working(&mut output),
+            0,
+        )
+        .expect("render Basic Title");
+
+        let frame = output.expect("working output");
+        assert_eq!(
+            frame.descriptor().alpha,
+            mondrian_renderer::ColorFrameAlpha::StraightCoverage
+        );
+        assert!(frame.rgba_f32().data.iter().any(|pixel| pixel[3] > 0.0));
+        assert_eq!(composite_diagnostics.float_linear_composites, 1);
+        assert_eq!(composite_diagnostics.legacy_rgba8_composites, 0);
+    }
+
+    #[test]
+    fn nested_basic_title_preserves_child_canvas_and_shared_visual_session() {
+        let mut child = Sequence::new("nested Basic Title");
+        child.settings.resolution = mondrian_core::Resolution { width: 640, height: 360 };
+        let child_time_base = child.time_base();
+        child.video_tracks[0]
+            .add_clip(
+                Clip::new_basic_title(
+                    "Nested",
+                    mondrian_core::default_basic_title_font_family(),
+                    tt(0, child_time_base),
+                    tt(24, child_time_base),
+                )
+                .expect("nested Basic Title"),
+            )
+            .expect("nested title placement");
+
+        let mut root = Sequence::new("root");
+        root.settings.resolution = mondrian_core::Resolution { width: 320, height: 180 };
+        let root_time_base = root.time_base();
+        root.video_tracks[0]
+            .add_clip(
+                Clip::new_nested_sequence(
+                    child.id,
+                    tt(0, root_time_base),
+                    tt(24, root_time_base),
+                    None,
+                )
+                .expect("nested Sequence clip"),
+            )
+            .expect("nested Sequence placement");
+        root.validate_author_identities().expect("valid root author graph");
+        child.validate_author_identities().expect("valid child author graph");
+        let color_context = root
+            .settings
+            .root_program_color_context(&mondrian_core::ProjectColorManagement::default());
+        let timeline = TimelineExportSnapshot {
+            sequence: root,
+            sequences: vec![child],
+            media: HashMap::new(),
+            range: TimelineExportRange::SequenceInOut,
+            project_color_management: mondrian_core::ProjectColorManagement::default(),
+        };
+        let mut output = None;
+        let mut visual_session = ExportVisualRenderSession::default();
+        let mut render_context = ExportFrameRenderContext {
+            timeline: &timeline,
+            alpha_mode: ExportAlphaMode::Preserve,
+            input_color_counts: None,
+            stage_diagnostics: None,
+            composite_diagnostics: None,
+            export_diagnostics: None,
+            visual_session: &mut visual_session,
+        };
+
+        render_sequence_frame_into(
+            &mut render_context,
+            &timeline.sequence,
+            0,
+            Resolution { width: 320, height: 180 },
+            color_context,
+            SequenceRenderTarget::Working(&mut output),
+            0,
+        )
+        .expect("render nested Basic Title");
+
+        let frame = output.expect("nested working output");
+        assert!(frame.rgba_f32().data.iter().any(|pixel| pixel[3] > 0.0));
+    }
+
+    #[test]
+    fn export_rejects_missing_basic_title_font_instead_of_substituting() {
+        let mut sequence = Sequence::new("missing Basic Title font");
+        sequence.settings.resolution = mondrian_core::Resolution { width: 320, height: 180 };
+        let time_base = sequence.time_base();
+        sequence.video_tracks[0]
+            .add_clip(
+                Clip::new_basic_title(
+                    "Mondrian",
+                    "Mondrian Font That Must Never Exist 8E43D879",
+                    tt(0, time_base),
+                    tt(24, time_base),
+                )
+                .expect("valid author title"),
+            )
+            .expect("title placement");
+        let color_context = sequence
+            .settings
+            .root_program_color_context(&mondrian_core::ProjectColorManagement::default());
+        let timeline = TimelineExportSnapshot {
+            sequence,
+            sequences: Vec::new(),
+            media: HashMap::new(),
+            range: TimelineExportRange::SequenceInOut,
+            project_color_management: mondrian_core::ProjectColorManagement::default(),
+        };
+        let mut output = None;
+        let mut visual_session = ExportVisualRenderSession::default();
+        let mut render_context = ExportFrameRenderContext {
+            timeline: &timeline,
+            alpha_mode: ExportAlphaMode::Preserve,
+            input_color_counts: None,
+            stage_diagnostics: None,
+            composite_diagnostics: None,
+            export_diagnostics: None,
+            visual_session: &mut visual_session,
+        };
+
+        let error = render_sequence_frame_into(
+            &mut render_context,
+            &timeline.sequence,
+            0,
+            Resolution { width: 320, height: 180 },
+            color_context,
+            SequenceRenderTarget::Working(&mut output),
+            0,
+        )
+        .expect_err("missing font must fail closed");
+
+        assert!(error.contains("Basic Title generation failed closed"));
+        assert!(error.contains("Mondrian Font That Must Never Exist 8E43D879"));
+        assert!(output.is_none());
     }
 
     #[test]

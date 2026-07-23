@@ -211,9 +211,9 @@ pub use timeline_composite::{
 pub use timeline_render_plan::{
     collect_timeline_color_diagnostics, collect_timeline_color_diagnostics_with_display_view,
     evaluate_timeline_render_plan, mat3_to_affine, project_affine_to_sampled_extents,
-    TimelineAdjustmentPlan, TimelineColorDiagnostic, TimelineCrossDissolvePlan,
-    TimelineEvaluationDiagnostics, TimelineEvaluationRequest, TimelineMediaPlan,
-    TimelineNestedSequencePlan, TimelineRenderColorTarget, TimelineRenderIntent,
+    TimelineAdjustmentPlan, TimelineBasicTitlePlan, TimelineColorDiagnostic,
+    TimelineCrossDissolvePlan, TimelineEvaluationDiagnostics, TimelineEvaluationRequest,
+    TimelineMediaPlan, TimelineNestedSequencePlan, TimelineRenderColorTarget, TimelineRenderIntent,
     TimelineRenderPlan, TimelineRenderPlanElement, TimelineRenderQuality, TimelineRenderSettings,
     TimelineSolidColorPlan, TimelineTransitionInputPlan,
 };
@@ -232,4 +232,9 @@ pub use viewer_spatial::{
     GpuViewerSpatialPlan, GpuViewerSpatialPlanError, GpuViewerSpatialRecord,
     GpuViewerSpatialRuntime, GpuViewerSpatialRuntimeDiagnostics, GpuViewerSpatialRuntimeError,
     ViewerSourceRect,
+};
+mod basic_title;
+pub use basic_title::{
+    basic_title_raster_request_key, project_basic_title_transform, BasicTitleRasterDiagnostics,
+    BasicTitleRasterError, BasicTitleRasterFrame, BasicTitleRasterizer,
 };

@@ -18,7 +18,8 @@ library/index.db
   "format_version": 1,
   "document_layout": "single-project-json",
   "project_entry": "project.json",
-  "library_entry": "library/index.db"
+  "library_entry": "library/index.db",
+  "library_schema_version": 2
 }
 ```
 
@@ -30,9 +31,14 @@ library/index.db
 - `meta: ProjectMeta`
 - `sequences: SequenceCollection`
 - `settings: ProjectSettings`
-- `proxy_mode_assets: Vec<AssetId>`
+- `proxy_mode_assets: BTreeSet<AssetId>`
 
 `library/index.db` is the project asset library.
+
+The current independent versions are archive v1, document schema v18, and
+library schema v2. Schema v18 adds the complete closed Basic Title author
+payload. During Alpha, document schemas other than the exact current version
+are rejected because no compatibility migration is promised yet.
 
 ## Required Evolution Rules
 
@@ -54,4 +60,9 @@ partial recovery, or measurable save/load bottlenecks.
 
 ## Save Semantics
 
-Save writes a temporary archive and renames it into place. The project archive must never be left half-written after a failed save.
+Save captures one immutable Authoring Session generation and an SQLite online
+backup. It writes and flushes a unique sibling archive, reopens and validates
+it, then crosses one platform atomic replace/create boundary. A failed
+serialization, database backup, validation, flush, or replacement leaves the
+existing target untouched. Autosave uses the same archive publication rule and
+publishes its manifest only after the referenced archive is durable.

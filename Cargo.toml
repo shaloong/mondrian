@@ -110,6 +110,8 @@ chrono           = { version = "0.4",  features = ["serde"] }
 unicode-segmentation = "1"
 arboard              = "3"
 xcap                 = "0.3"
+cosmic-text          = "0.19"
+fontdb               = { version = "0.23", default-features = false, features = ["fontconfig"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Devices_Display",
     "Win32_Foundation",

@@ -5,7 +5,8 @@ use mondrian_core::{
         RenderPlanSource,
     },
     types::{AssetId, BlendMode, Color, ColorSpace, FramePosition, Rational, SequenceId},
-    ColorEncodingSpec, FrameRounding, MondrianError, Result, TimelineTime, WorkingColorSpace,
+    ColorEncodingSpec, EvaluatedBasicTitle, FrameRounding, MondrianError, Result, TimelineTime,
+    WorkingColorSpace,
 };
 use mondrian_effects::CompiledEffectGraph;
 use std::sync::Arc;
@@ -208,6 +209,23 @@ pub struct TimelineSolidColorPlan {
     pub frame_seed: i64,
 }
 
+/// Evaluated sequence-local Basic Title source.
+#[derive(Debug, Clone)]
+pub struct TimelineBasicTitlePlan {
+    /// Typed title semantics evaluated at the Clip's exact source-local time.
+    pub title: EvaluatedBasicTitle,
+    /// Clip opacity evaluated at the same author time.
+    pub opacity: f32,
+    /// Clip blend mode used by ordinary Timeline compositing.
+    pub blend_mode: BlendMode,
+    /// Clip source-to-Sequence affine transform.
+    pub transform: [f32; 6],
+    /// Compiled ordered visual Effect graph applied after title generation.
+    pub effect_graph: Arc<CompiledEffectGraph>,
+    /// Deterministic per-frame seed shared with other Clip content types.
+    pub frame_seed: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct TimelineNestedSequencePlan {
     pub sequence_id: SequenceId,
@@ -230,6 +248,8 @@ pub enum TimelineTransitionInputPlan {
     Media(TimelineMediaPlan),
     /// A generated solid evaluated through its Clip processing.
     SolidColor(TimelineSolidColorPlan),
+    /// A generated Basic Title evaluated through its Clip processing.
+    BasicTitle(TimelineBasicTitlePlan),
     /// A child Sequence evaluated before the parent Transition.
     NestedSequence(TimelineNestedSequencePlan),
 }
@@ -250,6 +270,7 @@ pub enum TimelineRenderPlanElement {
     Media(TimelineMediaPlan),
     Adjustment(TimelineAdjustmentPlan),
     SolidColor(TimelineSolidColorPlan),
+    BasicTitle(TimelineBasicTitlePlan),
     NestedSequence(TimelineNestedSequencePlan),
     /// A two-input operation occupying one position in the Track stack.
     CrossDissolve(TimelineCrossDissolvePlan),
@@ -330,6 +351,7 @@ pub fn collect_timeline_color_diagnostics_with_display_view(
                     }
                     TimelineRenderPlanElement::Adjustment(_)
                     | TimelineRenderPlanElement::SolidColor(_)
+                    | TimelineRenderPlanElement::BasicTitle(_)
                     | TimelineRenderPlanElement::NestedSequence(_) => {}
                 }
                 diagnostics
@@ -490,6 +512,9 @@ fn compile_transition_input(
         TimelineRenderPlanElement::SolidColor(solid) => {
             Ok(TimelineTransitionInputPlan::SolidColor(solid))
         }
+        TimelineRenderPlanElement::BasicTitle(title) => {
+            Ok(TimelineTransitionInputPlan::BasicTitle(title))
+        }
         TimelineRenderPlanElement::NestedSequence(nested) => {
             Ok(TimelineTransitionInputPlan::NestedSequence(nested))
         }
@@ -543,6 +568,17 @@ fn compile_flat_clip(
         ClipContent::SolidColor { color, .. } => {
             TimelineRenderPlanElement::SolidColor(TimelineSolidColorPlan {
                 color,
+                opacity,
+                blend_mode: ac.blend_mode,
+                transform: ac.transform_matrix,
+                effect_graph,
+                frame_seed,
+            })
+        }
+        ClipContent::BasicTitle { title } => {
+            let title = title.evaluate(ac.source_time)?;
+            TimelineRenderPlanElement::BasicTitle(TimelineBasicTitlePlan {
+                title,
                 opacity,
                 blend_mode: ac.blend_mode,
                 transform: ac.transform_matrix,
@@ -1170,6 +1206,13 @@ mod tests {
             transform: [f32; 6],
             frame_seed: i64,
         },
+        BasicTitle {
+            title: EvaluatedBasicTitle,
+            opacity: f32,
+            blend_mode: BlendMode,
+            transform: [f32; 6],
+            frame_seed: i64,
+        },
         NestedSequence {
             sequence_id: SequenceId,
             source_time: TimelineTime,
@@ -1195,6 +1238,9 @@ mod tests {
         },
         SolidColor {
             color: Color,
+        },
+        BasicTitle {
+            title: EvaluatedBasicTitle,
         },
         NestedSequence {
             sequence_id: SequenceId,
@@ -1235,6 +1281,15 @@ mod tests {
                         frame_seed: solid.frame_seed,
                     }
                 }
+                TimelineRenderPlanElement::BasicTitle(title) => {
+                    RenderPlanSemanticElement::BasicTitle {
+                        title: title.title.clone(),
+                        opacity: title.opacity,
+                        blend_mode: title.blend_mode,
+                        transform: title.transform,
+                        frame_seed: title.frame_seed,
+                    }
+                }
                 TimelineRenderPlanElement::NestedSequence(nested) => {
                     RenderPlanSemanticElement::NestedSequence {
                         sequence_id: nested.sequence_id,
@@ -1270,6 +1325,9 @@ mod tests {
             },
             TimelineTransitionInputPlan::SolidColor(solid) => {
                 RenderPlanSemanticTransitionInput::SolidColor { color: solid.color }
+            }
+            TimelineTransitionInputPlan::BasicTitle(title) => {
+                RenderPlanSemanticTransitionInput::BasicTitle { title: title.title.clone() }
             }
             TimelineTransitionInputPlan::NestedSequence(nested) => {
                 RenderPlanSemanticTransitionInput::NestedSequence {

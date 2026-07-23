@@ -40,6 +40,8 @@ pub enum PreviewOutputStage {
     MediaResolution,
     /// Concrete decode failed or is retained in terminal failure memory.
     MediaDecode,
+    /// A generated Timeline source could not be materialized correctly.
+    GeneratedSource,
     /// Input color interpretation rejected the media.
     InputColor,
     /// A decoded payload cannot enter the requested working-frame path.
@@ -141,6 +143,9 @@ impl PreviewUnavailability {
             (PreviewUnavailabilityDisposition::Blocked, PreviewOutputStage::MediaDecode) => {
                 "preview.blocked.media_decode"
             }
+            (PreviewUnavailabilityDisposition::Blocked, PreviewOutputStage::GeneratedSource) => {
+                "preview.blocked.generated_source"
+            }
             (PreviewUnavailabilityDisposition::Blocked, PreviewOutputStage::InputColor) => {
                 "preview.blocked.input_color"
             }
@@ -168,6 +173,9 @@ impl PreviewUnavailability {
             }
             (PreviewUnavailabilityDisposition::Failed, PreviewOutputStage::MediaDecode) => {
                 "preview.failed.media_decode"
+            }
+            (PreviewUnavailabilityDisposition::Failed, PreviewOutputStage::GeneratedSource) => {
+                "preview.failed.generated_source"
             }
             (PreviewUnavailabilityDisposition::Failed, PreviewOutputStage::InputAdaptation) => {
                 "preview.failed.input_adaptation"
@@ -211,6 +219,8 @@ pub struct PreviewOutputStageBreakdown {
     pub media_resolution: u64,
     /// Media-decode observations.
     pub media_decode: u64,
+    /// Generated-source observations.
+    pub generated_source: u64,
     /// Input-color observations.
     pub input_color: u64,
     /// Input-adaptation observations.
@@ -235,6 +245,7 @@ impl PreviewOutputStageBreakdown {
             PreviewOutputStage::TimelineEvaluation => &mut self.timeline_evaluation,
             PreviewOutputStage::MediaResolution => &mut self.media_resolution,
             PreviewOutputStage::MediaDecode => &mut self.media_decode,
+            PreviewOutputStage::GeneratedSource => &mut self.generated_source,
             PreviewOutputStage::InputColor => &mut self.input_color,
             PreviewOutputStage::InputAdaptation => &mut self.input_adaptation,
             PreviewOutputStage::TimelineComposite => &mut self.timeline_composite,

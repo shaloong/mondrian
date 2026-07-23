@@ -23,7 +23,8 @@ use crate::app::ui_actions::{
     ExportJobTargetPayload, InspectorAudioComponentSourcePayload, InspectorClipTransformField,
     InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
     InspectorSetAudioComponentSourcePayload, InspectorSetClipCurvePayload,
-    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+    InspectorSetClipPropertyPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
     ProjectRecoverFromAutosavePayload, ProjectSetColorEnginePayload, SequenceTargetPayload,
@@ -44,12 +45,13 @@ use crate::app::ui_actions::{
     EFFECTS_NAMESPACE, EXPORT_CANCEL_JOB, EXPORT_CLEAR_COMPLETED, EXPORT_ENQUEUE, EXPORT_NAMESPACE,
     EXPORT_SET_DRAFT, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT,
     INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED,
-    INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
-    INSPECTOR_SET_EFFECT_ENABLED, INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS,
-    PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_SET_COLOR_ENGINE, SEQUENCE_DELETE,
-    SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE, SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT,
-    SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE, SEQUENCE_UPDATE_SETTINGS,
-    TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_CREATE_CROSS_DISSOLVE,
+    INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_PROPERTY, INSPECTOR_SET_CLIP_TINT,
+    INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
+    INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
+    PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_SET_COLOR_ENGINE, SEQUENCE_DELETE, SEQUENCE_DUPLICATE,
+    SEQUENCE_NAMESPACE, SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT,
+    SEQUENCE_SWITCH_ACTIVE, SEQUENCE_UPDATE_SETTINGS, TIMELINE_ADD_TRACK,
+    TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_CREATE_BASIC_TITLE, TIMELINE_CREATE_CROSS_DISSOLVE,
     TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
     TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SEEK,
     TIMELINE_SELECT_CLIP, TIMELINE_SELECT_VIDEO_TRANSITION, TIMELINE_SET_IN_OUT_POINT,
@@ -62,7 +64,9 @@ use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, SelectedClipRef};
 use glam::Vec2;
 use mondrian_assets::library::FolderRecord;
 use mondrian_assets::{AssetKind, AssetLibrary};
-use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
+use mondrian_core::automation::{
+    InterpolationType, Keyframe, PropertyHost, PropertyMutation, PropertyValue,
+};
 use mondrian_core::events::AppEvent;
 use mondrian_core::types::{ClipId, EffectId, FramePosition, Rational};
 use mondrian_core::{FrameRounding, MondrianError, Result, TimeScale, TimelineTime};
@@ -1170,6 +1174,7 @@ impl AppState {
                     }
                 }
             }
+            TIMELINE_CREATE_BASIC_TITLE => self.create_basic_title_at_playhead().map(|_| ()),
             TIMELINE_SET_VIDEO_TRANSITION_RANGE => {
                 let payload = parse_ui_payload::<TimelineSetVideoTransitionRangePayload>(
                     "timeline_ui_action",
@@ -1388,6 +1393,22 @@ impl AppState {
                     payload,
                 )?;
                 self.set_clip_curve_from_ui(payload)
+            }
+            INSPECTOR_SET_CLIP_PROPERTY => {
+                let payload = parse_ui_payload::<InspectorSetClipPropertyPayload>(
+                    "inspector_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.set_clip_property_from_ui(
+                    SelectedClipRef {
+                        track_id: payload.clip.track_id,
+                        is_video_track: payload.clip.is_video_track,
+                        clip_id: payload.clip.clip_id,
+                    },
+                    &payload.path,
+                    payload.value,
+                )
             }
             INSPECTOR_SET_AUDIO_COMPONENT_SOURCE => {
                 let payload = parse_ui_payload::<InspectorSetAudioComponentSourcePayload>(
@@ -1938,6 +1959,72 @@ impl AppState {
         };
         if changed {
             self.record_sequence_snapshot_command("调整特效属性", before, after)?;
+        }
+        Ok(())
+    }
+
+    fn set_clip_property_from_ui(
+        &mut self,
+        selection: SelectedClipRef,
+        path: &str,
+        value: PropertyValue,
+    ) -> Result<()> {
+        self.ensure_clip_track_unlocked("set_clip_property", selection.clip_id)?;
+        let current_time = self.current_timeline_time()?.unwrap_or(TimelineTime::ZERO);
+        let Some(before) = self.active_sequence().cloned() else {
+            return Err(missing_sequence_error("set_clip_property"));
+        };
+        let mut after = before.clone();
+        let changed = {
+            let clip = find_clip_mut(&mut after, selection.clip_id)
+                .ok_or_else(|| missing_clip_error("set_clip_property", selection.clip_id))?;
+            let properties = clip.property_bag()?;
+            let property =
+                properties.property(path).ok_or_else(|| MondrianError::WorkflowStepFailed {
+                    step_id: "set_clip_property".to_owned(),
+                    reason: format!("Clip property not found: {path}"),
+                })?;
+            let mutation = if property.is_animated() {
+                let end = clip.end_position()?;
+                let sequence_time = current_time.clamp(clip.position, end);
+                let author_time = clip.timeline_to_source_time(sequence_time)?;
+                if property.evaluate(author_time) == value {
+                    None
+                } else {
+                    let interpolation = match value {
+                        PropertyValue::Float(_)
+                        | PropertyValue::Double(_)
+                        | PropertyValue::Color(_)
+                        | PropertyValue::Vec2(_)
+                        | PropertyValue::Vec3(_)
+                        | PropertyValue::Vec4(_) => InterpolationType::Linear,
+                        PropertyValue::Bool(_)
+                        | PropertyValue::Int(_)
+                        | PropertyValue::Enum(_)
+                        | PropertyValue::Resource(_)
+                        | PropertyValue::Text(_) => InterpolationType::Hold,
+                    };
+                    Some(PropertyMutation::SetKeyframe {
+                        path: path.to_owned(),
+                        keyframe: Keyframe::from_preset(author_time, value, interpolation),
+                    })
+                }
+            } else if property.static_value() == &value {
+                None
+            } else {
+                Some(PropertyMutation::SetStaticValue { path: path.to_owned(), value })
+            };
+            if let Some(mutation) = mutation {
+                clip.apply_property_mutation(mutation)?;
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            let sequence_id = after.id;
+            self.record_sequence_snapshot_command("调整剪辑属性", before, after)?;
+            self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         }
         Ok(())
     }
@@ -2775,16 +2862,17 @@ mod tests {
         export_set_draft_action, inspector_remove_effect_action, inspector_select_effect_action,
         inspector_set_audio_component_source_action, inspector_set_clip_curve_action,
         inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
-        inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
-        inspector_set_effect_enabled_action, inspector_set_effect_property_action,
-        project_create_with_settings_action, project_recover_from_autosave_action,
-        project_set_color_engine_action, sequence_delete_action, sequence_duplicate_action,
-        sequence_new_action, sequence_return_to_parent_action, sequence_set_active_default_action,
+        inspector_set_clip_property_action, inspector_set_clip_tint_action,
+        inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
+        inspector_set_effect_property_action, project_create_with_settings_action,
+        project_recover_from_autosave_action, project_set_color_engine_action,
+        sequence_delete_action, sequence_duplicate_action, sequence_new_action,
+        sequence_return_to_parent_action, sequence_set_active_default_action,
         sequence_switch_active_action, sequence_update_settings_action, timeline_add_track_action,
-        timeline_clear_in_out_points_action, timeline_drop_asset_action, timeline_move_clip_action,
-        timeline_move_track_action, timeline_open_nested_sequence_action,
-        timeline_roll_selected_cut_to_playhead_action, timeline_seek_action,
-        timeline_seek_with_source_action, timeline_select_clip_action,
+        timeline_clear_in_out_points_action, timeline_create_basic_title_action,
+        timeline_drop_asset_action, timeline_move_clip_action, timeline_move_track_action,
+        timeline_open_nested_sequence_action, timeline_roll_selected_cut_to_playhead_action,
+        timeline_seek_action, timeline_seek_with_source_action, timeline_select_clip_action,
         timeline_set_in_out_point_action, timeline_set_selected_clips_enabled_action,
         timeline_set_track_control_action, timeline_trim_clips_action,
         timeline_trim_selected_clips_to_playhead_action, viewer_set_clip_transform_action,
@@ -2800,17 +2888,17 @@ mod tests {
         InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
         InspectorSetAudioComponentSourcePayload, InspectorSetClipCurvePayload,
         InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-        InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
-        InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
-        ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
-        ProjectSetColorEnginePayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
-        TimelineAddTrackKind, TimelineAddTrackPayload, TimelineDropAssetPayload,
-        TimelineInOutPointPayloadKind, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
-        TimelineSeekSource, TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
-        TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
-        TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
-        ViewerSetClipTransformPayload, ViewerSetPreviewResolutionScalePayload,
-        ViewerTransformPositionPayload,
+        InspectorSetClipPropertyPayload, InspectorSetClipTintPayload,
+        InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+        InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
+        ProjectRecoverFromAutosavePayload, ProjectSetColorEnginePayload, SequenceTargetPayload,
+        SequenceUpdateSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
+        TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineMoveTrackPayload,
+        TimelineOpenNestedSequencePayload, TimelineSeekSource, TimelineSetInOutPointPayload,
+        TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
+        TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+        TimelineTrimSelectedClipsToPlayheadPayload, ViewerSetClipTransformPayload,
+        ViewerSetPreviewResolutionScalePayload, ViewerTransformPositionPayload,
     };
     use mondrian_assets::AssetLibrary;
     use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
@@ -6362,6 +6450,67 @@ mod tests {
             .and_then(|effect| effect.properties.property(&path))
             .expect("restored property");
         assert_eq!(property.static_value(), &initial_value);
+    }
+
+    #[test]
+    fn dispatch_basic_title_creation_and_inspector_edit_form_one_author_path() {
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(Sequence::new("Basic Title")));
+
+        state
+            .dispatch_action(timeline_create_basic_title_action())
+            .expect("dispatch Basic Title creation");
+
+        let selection = state.primary_selected_clip().expect("selected Basic Title");
+        let initial_text = state
+            .active_sequence()
+            .and_then(|sequence| find_clip(sequence, selection.clip_id))
+            .and_then(|clip| clip.content.basic_title())
+            .expect("Basic Title author state")
+            .evaluate(TimelineTime::ZERO)
+            .expect("evaluate initial title")
+            .text;
+        assert_eq!(initial_text, "标题");
+
+        state
+            .dispatch_action(inspector_set_clip_property_action(
+                InspectorSetClipPropertyPayload {
+                    clip: inspector_clip_payload(selection.track_id, selection.clip_id),
+                    path: mondrian_core::BasicTitle::TEXT_PATH.to_owned(),
+                    value: PropertyValue::Text("Mondrian".to_owned()),
+                },
+            ))
+            .expect("dispatch Basic Title property edit");
+
+        let edited_text = state
+            .active_sequence()
+            .and_then(|sequence| find_clip(sequence, selection.clip_id))
+            .and_then(|clip| clip.content.basic_title())
+            .expect("edited Basic Title")
+            .evaluate(TimelineTime::ZERO)
+            .expect("evaluate edited title")
+            .text;
+        assert_eq!(edited_text, "Mondrian");
+
+        assert!(state.undo_timeline().expect("undo property edit"));
+        let restored_text = state
+            .active_sequence()
+            .and_then(|sequence| find_clip(sequence, selection.clip_id))
+            .and_then(|clip| clip.content.basic_title())
+            .expect("restored Basic Title")
+            .evaluate(TimelineTime::ZERO)
+            .expect("evaluate restored title")
+            .text;
+        assert_eq!(restored_text, "标题");
+
+        assert!(state.undo_timeline().expect("undo title creation"));
+        assert!(state
+            .active_sequence()
+            .expect("sequence")
+            .video_tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .all(|clip| clip.id != selection.clip_id));
     }
 
     #[test]

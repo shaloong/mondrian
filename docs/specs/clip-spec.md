@@ -1,43 +1,66 @@
-# Clip Spec
+# Clip Specification
 
-A clip is a timeline instance that references an asset or nested sequence.
+A Clip is one Timeline placement. It is not an Asset or Sequence definition.
+Track membership is owned only by the containing Track.
 
-## Required Fields
+## Common author state
 
-- `id: ClipId`
-- `kind: ClipKind`
-- `asset_id: AssetId`
-- optional `nested_sequence_id`
-- `interpretation: MediaInterpretation`
-- `position`
-- `duration`
-- `source_in`
-- `source_out`
-- `transform`
-- `speed`
-- `effects`
-- `masks`
-- optional `linked_clip`
-- `is_disabled`
-- optional `blend_mode`
-- optional `label`
-- optional `solid_color`
+Every Clip owns:
 
-## Kinds
+- stable `ClipId`;
+- one closed `ClipContent` payload;
+- exact rational `position`, `duration`, `source_in`, and `source_out`;
+- exact speed/time mapping;
+- built-in visual Transform and opacity;
+- ordered visual effects and masks;
+- optional `ClipLinkGroupId` membership;
+- placement-local audio Component Edits;
+- disabled state, optional blend override, and optional label.
 
-- `Media`: file-backed media.
-- `AdjustmentLayer`: applies effects to lower accumulated image.
-- `NestedSequence`: references another sequence.
-- `SolidColor`: generated color source.
+Timeline coverage is the half-open range `[position, position + duration)`.
+`timeline_to_source_time()` subtracts placement position, applies the explicit
+time transform, and adds `source_in`. Persisted author coordinates are
+`TimelineTime`; frame numbers are evaluation/display projections only.
 
-## Timing
+## Closed content variants
 
-Timeline range is `[position, position + duration)`. `timeline_to_source_time()` subtracts clip position, applies speed mapping, then adds `source_in`.
+Exactly one variant is present:
 
-## Built-In Properties
+- `Media { asset_id, interpretation }`
+- `AdjustmentLayer { asset_id }`
+- `NestedSequence { sequence_id }`
+- `SolidColor { asset_id, color }`
+- `BasicTitle { title }`
 
-Built-in transform, speed, blend mode, and solid color properties are not removable through property mutations. UI may hide or reset them but cannot delete them.
+There is no parallel kind/asset/nested/color/title payload. Unknown or legacy
+parallel fields fail current-schema deserialization.
 
-## Link Semantics
+Basic Title is Sequence-local generated content, not an Asset and not an
+Effect. Its canonical Property Bag owns text, concrete requested font intent,
+size, working-linear fill, tracking, line height, and alignment. Animatable
+properties evaluate in Clip source-local time. Missing/extra/schema-divergent
+properties make the author snapshot invalid.
 
-`linked_clip` keeps audio/video clips synchronized. Link state must not imply both clips share effects, transform, masks, or selection state.
+## Built-in and effect properties
+
+Built-in Transform, opacity, speed, Solid Color, and Basic Title properties are
+not removable. UI may reset or hide them but cannot present them as deletable
+effect instances. Visual effects remain ordered instances with their own stable
+`EffectId` and definition-backed Property Bags.
+
+## Link semantics
+
+`ClipLinkGroupId` is Sequence-local set membership for two or more placements.
+It synchronizes ordinary selection and structural edits; it does not imply
+shared effects, Transform, masks, processing state, or media ownership.
+Singleton groups are invalid. Structural commands either preserve the complete
+group promise or remove membership from fragments for which it no longer
+holds.
+
+## Identity copying
+
+Copy, paste, razor-created fragments, overwrite fragments, precompose, and
+Sequence duplication fork placement-local Clip, Effect, Mask, animation, and
+audio identities. Asset and nested Sequence identities remain external
+references. A copied Basic Title retains values and curves while receiving
+independent animation/keyframe identities.

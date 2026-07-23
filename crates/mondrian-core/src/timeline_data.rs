@@ -14,7 +14,7 @@ use crate::mask_data::MaskComponent;
 use crate::types::{
     AssetId, BlendMode, ClipId, Color, ColorSpace, Rational, SequenceId, VideoTransitionId,
 };
-use crate::{Result, TimelineTime};
+use crate::{BasicTitle, Result, TimelineTime};
 use serde::{Deserialize, Serialize};
 
 // ── Pure data enums (moved from mondrian-timeline) ────────────────────
@@ -27,6 +27,7 @@ pub enum ClipKind {
     AdjustmentLayer,
     NestedSequence,
     SolidColor,
+    BasicTitle,
 }
 
 /// How to interpret alpha channel in media assets.
@@ -186,6 +187,8 @@ pub enum ClipContent {
     NestedSequence { sequence_id: SequenceId },
     /// Deterministic project generator sourced from a reusable palette entry.
     SolidColor { asset_id: AssetId, color: Color },
+    /// Sequence-local generated text with a closed parameter definition.
+    BasicTitle { title: BasicTitle },
 }
 
 impl ClipContent {
@@ -196,6 +199,7 @@ impl ClipContent {
             Self::AdjustmentLayer { .. } => ClipKind::AdjustmentLayer,
             Self::NestedSequence { .. } => ClipKind::NestedSequence,
             Self::SolidColor { .. } => ClipKind::SolidColor,
+            Self::BasicTitle { .. } => ClipKind::BasicTitle,
         }
     }
 
@@ -205,7 +209,7 @@ impl ClipContent {
             Self::Media { asset_id, .. }
             | Self::AdjustmentLayer { asset_id }
             | Self::SolidColor { asset_id, .. } => Some(*asset_id),
-            Self::NestedSequence { .. } => None,
+            Self::NestedSequence { .. } | Self::BasicTitle { .. } => None,
         }
     }
 
@@ -238,6 +242,29 @@ impl ClipContent {
         match self {
             Self::SolidColor { color, .. } => Some(*color),
             _ => None,
+        }
+    }
+
+    /// Basic Title author state when this is generated text content.
+    pub const fn basic_title(&self) -> Option<&BasicTitle> {
+        match self {
+            Self::BasicTitle { title } => Some(title),
+            _ => None,
+        }
+    }
+
+    /// Mutable Basic Title author state for command routing.
+    pub fn basic_title_mut(&mut self) -> Option<&mut BasicTitle> {
+        match self {
+            Self::BasicTitle { title } => Some(title),
+            _ => None,
+        }
+    }
+
+    /// Fork author identities owned by this content occurrence.
+    pub fn fork_author_identities(&mut self) {
+        if let Self::BasicTitle { title } = self {
+            title.fork_author_identities();
         }
     }
 }

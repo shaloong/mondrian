@@ -59,6 +59,7 @@ mod animation_state;
 #[cfg(test)]
 mod audio_playback_acceptance;
 mod audio_rendering;
+mod basic_titles;
 mod clip_clipboard;
 pub(crate) mod exporting;
 #[cfg(test)]
@@ -85,6 +86,7 @@ pub(crate) mod preview_raster_frame;
 pub mod preview_runtime;
 pub(crate) mod preview_scheduler_policy;
 pub(crate) mod preview_timeline_execution;
+pub(crate) mod preview_title_task;
 pub mod preview_unavailability;
 pub(crate) mod preview_viewer_plan;
 mod project_lifecycle;

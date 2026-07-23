@@ -1,6 +1,6 @@
 //! # mondrian-effects
 //!
-//! 高级效果系统：LUT 调色 / 滤镜 / 转场 / 文字动画 / 蒙版
+//! 高级效果系统：LUT 调色 / 滤镜 / 转场 / 蒙版
 
 pub mod adjustment;
 pub mod effect;
@@ -12,7 +12,6 @@ pub mod mask;
 pub mod mask_raster;
 pub mod plugin_contract;
 pub mod plugin_sdk;
-pub mod text;
 pub mod transition;
 
 pub use adjustment::{

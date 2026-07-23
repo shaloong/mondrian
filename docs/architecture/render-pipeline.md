@@ -53,19 +53,67 @@ thumbnail, and analysis paths cannot accidentally share ambiguous defaults.
 - `Media`
 - `Adjustment`
 - `SolidColor`
+- `BasicTitle`
 - `NestedSequence`
 - `CrossDissolve`
 
 Each element carries opacity, blend mode, transforms where applicable, effect graph, frame seed, and color/media interpretation data.
 
 `CrossDissolve` contains two typed endpoint plans (`Media`, `SolidColor`,
-`NestedSequence`, or explicit transparent coverage) and one coefficient derived
-from exact elapsed/duration author time. Timeline evaluation replaces the two
-endpoint placements with this single Track-stack item, evaluates Clip effects
-and transforms independently for each endpoint, and never clamps a demanded
-source time to zero. Unknown plugin Transition definitions and unsupported
-built-in parameter payloads fail plan compilation instead of substituting a
-Cross Dissolve.
+`BasicTitle`, `NestedSequence`, or explicit transparent coverage) and one
+coefficient derived from exact elapsed/duration author time. Timeline
+evaluation replaces the two endpoint placements with this single Track-stack
+item, evaluates Clip effects and transforms independently for each endpoint,
+and never clamps a demanded source time to zero. Unknown plugin Transition
+definitions and unsupported built-in parameter payloads fail plan compilation
+instead of substituting a Cross Dissolve.
+
+### Basic Title generated-source boundary
+
+`TimelineBasicTitlePlan` carries one fully evaluated Basic Title at exact Clip
+source-local author time plus the ordinary Clip opacity, blend, transform,
+effect graph, and frame seed. `BasicTitleRasterizer` is the single Preview and
+Export generation Interface. It:
+
+- resolves the exact named system-font family, weight, and style;
+- fingerprints the resolved face bytes plus face index;
+- binds the first fingerprint observed for each family/weight/style query to
+  the owning Preview or Export generation Session, rechecks the dependency
+  before cache reuse and after rasterization, and fails closed if it changes;
+- rejects a missing family, inaccessible face data, or any shaping run that
+  selects an undeclared fallback face;
+- shapes against the Sequence canvas and persisted total `title_safe_margin`;
+- emits a tightly cropped straight-alpha `CpuColorFrame` in the Sequence
+  working space plus an affine mapping back to full-resolution author
+  coordinates;
+- keys and bounds its Session cache by evaluated title semantics, author and
+  sampled geometry, title-safe margin, working space, and resolved font
+  fingerprint.
+
+A font-catalog refresh rotates the Preview generation Session; it must not
+silently mutate an existing Session's output identity. Export owns one
+generation Session for the admitted job, including nested Sequences and
+Transition endpoints.
+
+The cropped generated frame is lowered as an ordinary media-shaped compositor
+input. Clip Transform, effects, masks, blend, Cross Dissolve, nested working
+space conversion, and root output transform therefore have one interpretation;
+there is no Preview-only or Export-only text compositor. An empty title yields a
+transparent generated frame. A missing dependency blocks the frame/job rather
+than substituting another font or claiming successful output.
+
+Preview owns a bounded background title worker, pending state, and result
+residency (entry and host-byte budgets, with at most one bounded oversize
+current result) so font discovery, shaping, allocation, and an accumulation of
+large title rasters never execute on or exhaust the winit/UI thread. Export
+owns one `ExportVisualRenderSession` for the complete job and passes it through
+nested recursion and Transition endpoints, allowing identical title requests
+to reuse the same bounded raster cache without introducing global mutable font
+state. Preview shutdown signals the worker before disconnecting transport, so
+queued obsolete title jobs are skipped and shutdown waits for at most the one
+bounded CPU generation already executing. An unexpected worker disconnect
+converts every pending request to a typed terminal failure; it cannot leave the
+Viewer in an infinite Pending loop.
 
 Effect graph construction is part of render-plan evaluation and is fallible.
 An enabled effect with no executable definition, unavailable runtime, invalid
@@ -517,7 +565,10 @@ those types instead of carrying a test-private schema copy.
 - Disabled clips and zero-opacity clips do not enter the render plan.
 - Clip blend mode overrides track blend mode; otherwise track blend mode applies.
 - Adjustment layers operate on lower accumulated pixels, not as standalone media.
-- Solid colors are generated sources, not file-backed frames.
+- Solid colors and Basic Titles are generated sources, not file-backed frames.
+- Basic Titles enter the ordinary source/effect/transform/compositor path only
+  after exact font/layout generation; Preview and Export share that generation
+  contract and fail closed on dependency drift.
 - Nested sequences must preserve the configured nested color-processing mode.
 - Effect graphs are compiled from clip effects plus masks at the evaluated time.
 
