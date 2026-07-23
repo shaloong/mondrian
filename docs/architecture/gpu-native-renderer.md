@@ -311,12 +311,17 @@ inverse-sampled in that same GPU pass for both uploaded and native-decoder GPU
 working frames, so ordinary clip transforms do not introduce a readback.
 
 Typed two-input visual Transitions are not decomposed into ordinary GPU layers.
-Until the composite graph owns a dedicated two-branch working-linear pass with
-coverage-correct interpolation, Viewer lowering returns
-`GpuCompositingBlockerReason::UnsupportedTransition` and executes the shared CPU
-reference compositor. This is an explicit performance fallback, not a semantic
-fallback: Preview and Export still consume the same `CrossDissolve` render-plan
-operation and cannot silently approximate it with two source-over opacities.
+`ViewerGpuExecutionLayer::CrossDissolve` owns two
+`ViewerGpuTransitionInput` branches, and every non-transparent branch reuses
+the same `ViewerGpuSourceLayer` preparation contract as an ordinary Timeline
+source. Each branch therefore completes source color conversion, affine
+transform, Clip opacity and effect-domain processing before a dedicated
+working-linear pass interpolates premultiplied coverage and restores the public
+straight-alpha contract. Transparent endpoints reduce to one correctly
+weighted source without inventing pixels. Preview execution records a distinct
+`gpu_cross_dissolve_passes` fact, while a real-wgpu readback test compares the
+shader with the Export/CPU reference formula. An ordinary source-over opacity
+pair remains an invalid lowering.
 
 The first native subset is a bounded single-source chain of ColorAdjust,
 WhiteBalance, Vignette, and deterministic Grain. Unsupported topology, spatial
@@ -355,9 +360,10 @@ upload/readback nodes around the effect route.
 ## Viewer Working-Linear Spatial Processing
 
 `viewer_execution.rs` is the renderer-neutral entry boundary for Viewer GPU
-inputs. `ViewerGpuExecutionLayer`, `ViewerGpuMediaSource`, and
+inputs. `ViewerGpuExecutionLayer`, `ViewerGpuSourceLayer`,
+`ViewerGpuTransitionInput`, `ViewerGpuMediaSource`, and
 `ViewerGpuNativeSource` contain only media payloads, color transforms, effect
-plans, compositing parameters, and native-resource lifetime. They contain no
+plans, typed graph relationships, compositing parameters, and native-resource lifetime. They contain no
 Window registration key, playback ticket, cache key, or headless completion
 policy. App code consumes these contracts directly; it must not re-export them
 under App-owned aliases.

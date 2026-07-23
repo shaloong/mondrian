@@ -13,7 +13,7 @@ use crate::app::preview_execution::{PreviewGpuFrame, PreviewGpuWorkingInput};
 use mondrian_platform::NativeVideoTextureImportProbeResult;
 use mondrian_renderer::{
     GpuNativeDecodedFrameImportSupport, ViewerGpuExecutionLayer, ViewerGpuExecutionResidency,
-    ViewerGpuNativeVideoFacts,
+    ViewerGpuNativeVideoFacts, ViewerGpuSourceLayer, ViewerGpuTransitionInput,
 };
 
 /// Serializable residency evidence for one Viewer GPU-output attempt.
@@ -103,37 +103,88 @@ pub(crate) fn declared_viewer_gpu_output_residency(
 ) -> ViewerGpuOutputFrameResidency {
     match &frame.working_input {
         PreviewGpuWorkingInput::GpuComposite { layers } => {
-            let media_layers = layers
-                .iter()
-                .filter(|layer| matches!(layer, ViewerGpuExecutionLayer::Media { .. }))
-                .count() as u32;
-            let gpu_input_eligible_layers = layers
-                .iter()
-                .filter(|layer| {
-                    matches!(
-                        layer,
-                        ViewerGpuExecutionLayer::Media { gpu_source: Some(_), .. }
-                    )
-                })
-                .count() as u32;
-            let native_media_layers = layers
-                .iter()
-                .filter(|layer| {
-                    matches!(
-                        layer,
-                        ViewerGpuExecutionLayer::Media { native_source: Some(_), .. }
-                    )
-                })
-                .count() as u32;
+            let counts =
+                layers.iter().fold(DeclaredViewerLayerCounts::default(), |mut counts, layer| {
+                    counts.record_execution_layer(layer);
+                    counts
+                });
             declared_residency_from_layer_counts(
-                media_layers,
-                gpu_input_eligible_layers,
-                native_media_layers,
-                layers.len() as u32,
+                counts.media_layers,
+                counts.gpu_input_eligible_layers,
+                counts.native_media_layers,
+                counts.media_layers.saturating_add(counts.procedural_layers),
                 platform_probe,
             )
         }
     }
+}
+
+#[derive(Default)]
+struct DeclaredViewerLayerCounts {
+    media_layers: u32,
+    gpu_input_eligible_layers: u32,
+    native_media_layers: u32,
+    procedural_layers: u32,
+}
+
+impl DeclaredViewerLayerCounts {
+    fn record_execution_layer(&mut self, layer: &ViewerGpuExecutionLayer) {
+        match layer {
+            ViewerGpuExecutionLayer::Source(source) => {
+                if source_has_contribution(source) {
+                    self.record_source(source);
+                }
+            }
+            ViewerGpuExecutionLayer::Adjustment { opacity, .. } => {
+                if opacity.clamp(0.0, 1.0) > 0.0 {
+                    self.procedural_layers = self.procedural_layers.saturating_add(1);
+                }
+            }
+            ViewerGpuExecutionLayer::CrossDissolve { left, right, progress } => {
+                let progress = progress.clamp(0.0, 1.0);
+                self.record_transition_input(left, 1.0 - progress);
+                self.record_transition_input(right, progress);
+            }
+        }
+    }
+
+    fn record_transition_input(&mut self, input: &ViewerGpuTransitionInput, weight: f32) {
+        if weight <= 0.0 {
+            return;
+        }
+        let ViewerGpuTransitionInput::Source(source) = input else {
+            return;
+        };
+        if source_has_contribution(source) {
+            self.record_source(source);
+        }
+    }
+
+    fn record_source(&mut self, source: &ViewerGpuSourceLayer) {
+        match source {
+            ViewerGpuSourceLayer::Media { gpu_source, native_source, .. } => {
+                self.media_layers = self.media_layers.saturating_add(1);
+                if gpu_source.is_some() {
+                    self.gpu_input_eligible_layers =
+                        self.gpu_input_eligible_layers.saturating_add(1);
+                }
+                if native_source.is_some() {
+                    self.native_media_layers = self.native_media_layers.saturating_add(1);
+                }
+            }
+            ViewerGpuSourceLayer::SolidColor { .. } => {
+                self.procedural_layers = self.procedural_layers.saturating_add(1);
+            }
+        }
+    }
+}
+
+fn source_has_contribution(source: &ViewerGpuSourceLayer) -> bool {
+    let opacity = match source {
+        ViewerGpuSourceLayer::Media { opacity, .. } => *opacity,
+        ViewerGpuSourceLayer::SolidColor { layer, .. } => layer.opacity,
+    };
+    opacity.clamp(0.0, 1.0) > 0.0
 }
 
 fn declared_residency_from_layer_counts(

@@ -17,7 +17,7 @@ use mondrian_effects::{
 use mondrian_playback::FramePresentationQuality;
 use mondrian_renderer::{
     GpuCompositingBlockerReason, TimelineAdjustmentLayer, TimelineSolidColorLayer,
-    ViewerGpuExecutionLayer,
+    ViewerGpuExecutionLayer, ViewerGpuSourceLayer, ViewerGpuTransitionInput,
 };
 use mondrian_timeline::sequence::ColorContext;
 
@@ -191,45 +191,20 @@ pub(crate) fn gpu_composite_layers_for_resolved(
                 effect_graph,
                 frame_seed,
             } => {
-                let effect_plan = get_or_lower_effect_graph_to_gpu_plan(effect_graph)
-                    .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
-                if *blend_mode != BlendMode::Normal {
-                    return Err(GpuCompositingBlockerReason::UnsupportedBlendMode);
-                }
-                let layer_working_color_space = frame
-                    .working_color_space()
-                    .ok_or(GpuCompositingBlockerReason::GpuUnavailable)?;
-                if layer_working_color_space != working_color_space {
-                    return Err(GpuCompositingBlockerReason::UnsupportedTransform);
-                }
-                if !is_preview_gpu_media_transform_supported(*transform) {
-                    return Err(GpuCompositingBlockerReason::UnsupportedTransform);
-                }
-                layers.push(ViewerGpuExecutionLayer::Media {
-                    frame: frame.working_payload(),
-                    gpu_source: frame.gpu_source(),
-                    native_source: frame.native_source(),
-                    opacity: *opacity,
-                    transform: *transform,
-                    effect_plan,
-                    frame_seed: *frame_seed,
-                });
-                has_composited_layer = true;
+                layers.push(ViewerGpuExecutionLayer::Source(gpu_media_source(
+                    frame,
+                    *opacity,
+                    *blend_mode,
+                    *transform,
+                    effect_graph,
+                    *frame_seed,
+                    working_color_space,
+                )?));
+                has_composited_layer |= opacity.clamp(0.0, 1.0) > 0.0;
             }
             ResolvedPreviewElement::SolidColor(layer) => {
-                let effect_plan = get_or_lower_effect_graph_to_gpu_plan(&layer.effect_graph)
-                    .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
-                if layer.blend_mode != BlendMode::Normal {
-                    return Err(GpuCompositingBlockerReason::UnsupportedBlendMode);
-                }
-                if !is_preview_identity_transform(layer.transform) {
-                    return Err(GpuCompositingBlockerReason::UnsupportedTransform);
-                }
-                layers.push(ViewerGpuExecutionLayer::SolidColor {
-                    layer: layer.clone(),
-                    effect_plan,
-                });
-                has_composited_layer = true;
+                layers.push(ViewerGpuExecutionLayer::Source(gpu_solid_source(layer)?));
+                has_composited_layer |= layer.opacity.clamp(0.0, 1.0) > 0.0;
             }
             ResolvedPreviewElement::Adjustment(layer) => {
                 if !has_composited_layer
@@ -251,8 +226,15 @@ pub(crate) fn gpu_composite_layers_for_resolved(
                     frame_seed: layer.frame_seed,
                 });
             }
-            ResolvedPreviewElement::CrossDissolve { .. } => {
-                return Err(GpuCompositingBlockerReason::UnsupportedTransition);
+            ResolvedPreviewElement::CrossDissolve { left, right, progress } => {
+                let progress = progress.clamp(0.0, 1.0);
+                layers.push(ViewerGpuExecutionLayer::CrossDissolve {
+                    left: gpu_transition_input(left, working_color_space)?,
+                    right: gpu_transition_input(right, working_color_space)?,
+                    progress,
+                });
+                has_composited_layer |= transition_input_has_contribution(left, 1.0 - progress)
+                    || transition_input_has_contribution(right, progress);
             }
         }
     }
@@ -265,9 +247,107 @@ pub(crate) fn gpu_composite_layers_for_resolved(
 pub(crate) fn preview_elements_require_deferred_composite(
     resolved: &[ResolvedPreviewElement],
 ) -> bool {
-    resolved
-        .iter()
-        .any(|element| matches!(element, ResolvedPreviewElement::Media { .. }))
+    resolved.iter().any(|element| match element {
+        ResolvedPreviewElement::Media { .. } => true,
+        ResolvedPreviewElement::CrossDissolve { left, right, .. } => {
+            transition_input_contains_media(left) || transition_input_contains_media(right)
+        }
+        ResolvedPreviewElement::SolidColor(_) | ResolvedPreviewElement::Adjustment(_) => false,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gpu_media_source(
+    frame: &MediaPreviewFrame,
+    opacity: f32,
+    blend_mode: BlendMode,
+    transform: [f32; 6],
+    effect_graph: &Arc<CompiledEffectGraph>,
+    frame_seed: i64,
+    working_color_space: WorkingColorSpace,
+) -> Result<ViewerGpuSourceLayer, GpuCompositingBlockerReason> {
+    if blend_mode != BlendMode::Normal {
+        return Err(GpuCompositingBlockerReason::UnsupportedBlendMode);
+    }
+    let layer_working_color_space =
+        frame.working_color_space().ok_or(GpuCompositingBlockerReason::GpuUnavailable)?;
+    if layer_working_color_space != working_color_space
+        || !is_preview_gpu_transform_supported(transform)
+    {
+        return Err(GpuCompositingBlockerReason::UnsupportedTransform);
+    }
+    let effect_plan = get_or_lower_effect_graph_to_gpu_plan(effect_graph)
+        .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
+    Ok(ViewerGpuSourceLayer::Media {
+        frame: frame.working_payload(),
+        gpu_source: frame.gpu_source(),
+        native_source: frame.native_source(),
+        opacity,
+        transform,
+        effect_plan,
+        frame_seed,
+    })
+}
+
+fn gpu_solid_source(
+    layer: &TimelineSolidColorLayer,
+) -> Result<ViewerGpuSourceLayer, GpuCompositingBlockerReason> {
+    if layer.blend_mode != BlendMode::Normal {
+        return Err(GpuCompositingBlockerReason::UnsupportedBlendMode);
+    }
+    if !is_preview_gpu_transform_supported(layer.transform) {
+        return Err(GpuCompositingBlockerReason::UnsupportedTransform);
+    }
+    let effect_plan = get_or_lower_effect_graph_to_gpu_plan(&layer.effect_graph)
+        .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
+    Ok(ViewerGpuSourceLayer::SolidColor { layer: layer.clone(), effect_plan })
+}
+
+fn gpu_transition_input(
+    input: &ResolvedPreviewTransitionInput,
+    working_color_space: WorkingColorSpace,
+) -> Result<ViewerGpuTransitionInput, GpuCompositingBlockerReason> {
+    let source = match input {
+        ResolvedPreviewTransitionInput::Transparent => {
+            return Ok(ViewerGpuTransitionInput::Transparent);
+        }
+        ResolvedPreviewTransitionInput::SolidColor(layer) => gpu_solid_source(layer)?,
+        ResolvedPreviewTransitionInput::Media {
+            frame,
+            opacity,
+            blend_mode,
+            transform,
+            effect_graph,
+            frame_seed,
+        } => gpu_media_source(
+            frame,
+            *opacity,
+            *blend_mode,
+            *transform,
+            effect_graph,
+            *frame_seed,
+            working_color_space,
+        )?,
+    };
+    Ok(ViewerGpuTransitionInput::Source(source))
+}
+
+fn transition_input_has_contribution(
+    input: &ResolvedPreviewTransitionInput,
+    transition_weight: f32,
+) -> bool {
+    if transition_weight <= 0.0 {
+        return false;
+    }
+    match input {
+        ResolvedPreviewTransitionInput::Transparent => false,
+        ResolvedPreviewTransitionInput::SolidColor(layer) => layer.opacity.clamp(0.0, 1.0) > 0.0,
+        ResolvedPreviewTransitionInput::Media { opacity, .. } => opacity.clamp(0.0, 1.0) > 0.0,
+    }
+}
+
+fn transition_input_contains_media(input: &ResolvedPreviewTransitionInput) -> bool {
+    matches!(input, ResolvedPreviewTransitionInput::Media { .. })
 }
 
 pub(crate) fn resolved_preview_presentation_quality(
@@ -322,17 +402,10 @@ pub(crate) fn resolved_preview_decode_execution(
     summary
 }
 
-fn is_preview_identity_transform(transform: [f32; 6]) -> bool {
-    const EPSILON: f32 = 1.0e-6;
-    (transform[0] - 1.0).abs() <= EPSILON
-        && transform[1].abs() <= EPSILON
-        && transform[2].abs() <= EPSILON
-        && transform[3].abs() <= EPSILON
-        && (transform[4] - 1.0).abs() <= EPSILON
-        && transform[5].abs() <= EPSILON
-}
-
-fn is_preview_gpu_media_transform_supported(transform: [f32; 6]) -> bool {
+fn is_preview_gpu_transform_supported(transform: [f32; 6]) -> bool {
+    if !transform.iter().all(|value| value.is_finite()) {
+        return false;
+    }
     let det = transform[0] * transform[4] - transform[3] * transform[1];
     det.abs() > 1.0e-8
 }

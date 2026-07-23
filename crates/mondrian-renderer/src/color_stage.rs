@@ -860,6 +860,34 @@ impl RenderGpuOutputBoundaryRuntime {
         )
     }
 
+    /// Record one typed two-input Cross Dissolve into the shared working-frame table.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_wgpu_cross_dissolve(
+        &mut self,
+        compositor: &GpuFrameCompositor,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        left: &GpuColorFrameHandle,
+        right: &GpuColorFrameHandle,
+        progress: f32,
+        working_color_space: WorkingColorSpace,
+    ) -> Result<GpuCompositeRecord, GpuCompositeError> {
+        let Self { frame_ids, frame_table, resource_pool, .. } = self;
+        compositor.record_cross_dissolve_pass(
+            device,
+            queue,
+            encoder,
+            frame_ids,
+            frame_table,
+            Some(resource_pool),
+            left,
+            right,
+            progress,
+            working_color_space,
+        )
+    }
+
     /// Upload one CPU working frame into this runtime's pooled GPU frame table.
     ///
     /// This is an explicit source-residency boundary for CPU decode/fallback

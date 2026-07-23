@@ -27,8 +27,11 @@ use crate::{
     GpuVideoRange, NativeVideoImportCpuTimings, RenderInputTransform, TimelineSolidColorLayer,
 };
 
-/// One renderer-neutral layer entering Viewer GPU execution.
-pub enum ViewerGpuExecutionLayer {
+/// One renderer-neutral source branch entering Viewer GPU execution.
+///
+/// Ordinary Timeline layers and two-input visual Transitions share this exact
+/// source contract so media/color/effect preparation cannot diverge.
+pub enum ViewerGpuSourceLayer {
     /// Working-space media with preferred GPU inputs and a CPU correctness fallback.
     Media {
         /// CPU working frame used if GPU input preparation cannot execute.
@@ -53,6 +56,20 @@ pub enum ViewerGpuExecutionLayer {
         /// Working-space GPU effect plan.
         effect_plan: Arc<CompiledEffectGpuPlan>,
     },
+}
+
+/// One input to a typed two-input Viewer visual Transition.
+pub enum ViewerGpuTransitionInput {
+    /// Explicit absence of coverage from a disabled endpoint.
+    Transparent,
+    /// Media or generated source prepared through the ordinary source seam.
+    Source(ViewerGpuSourceLayer),
+}
+
+/// One renderer-neutral layer or graph node entering Viewer GPU execution.
+pub enum ViewerGpuExecutionLayer {
+    /// Ordinary source occupying one position in the bottom-to-top stack.
+    Source(ViewerGpuSourceLayer),
     /// Full-frame adjustment over the current working composite.
     Adjustment {
         /// Working-space GPU effect plan.
@@ -63,6 +80,16 @@ pub enum ViewerGpuExecutionLayer {
         blend_mode: BlendMode,
         /// Timeline seed for temporal effects.
         frame_seed: i64,
+    },
+    /// Two independently prepared sources replacing their endpoint Clips at
+    /// one Track-stack position.
+    CrossDissolve {
+        /// Earlier edit endpoint.
+        left: ViewerGpuTransitionInput,
+        /// Later edit endpoint.
+        right: ViewerGpuTransitionInput,
+        /// Normalized interpolation coefficient.
+        progress: f32,
     },
 }
 

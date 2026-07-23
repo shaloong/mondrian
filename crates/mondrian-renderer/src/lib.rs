@@ -219,8 +219,8 @@ pub use timeline_render_plan::{
 };
 pub use viewer_execution::{
     native_source_texture_format_from_decoded, native_video_sampling_from_decoded,
-    ViewerGpuExecutionLayer, ViewerGpuMediaSource, ViewerGpuNativeSource,
-    ViewerNativeVideoImportRuntime,
+    ViewerGpuExecutionLayer, ViewerGpuMediaSource, ViewerGpuNativeSource, ViewerGpuSourceLayer,
+    ViewerGpuTransitionInput, ViewerNativeVideoImportRuntime,
 };
 pub use viewer_runtime::{
     ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionError, ViewerGpuExecutionGpuStage,

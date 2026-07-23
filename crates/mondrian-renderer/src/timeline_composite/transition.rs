@@ -108,7 +108,7 @@ pub(super) fn composite_transition_input_f32(
     Ok(())
 }
 
-pub(super) fn cross_dissolve_straight_rgba_f32(
+pub(crate) fn cross_dissolve_straight_rgba_f32(
     output: &mut [[f32; 4]],
     left: &[[f32; 4]],
     right: &[[f32; 4]],
@@ -136,6 +136,11 @@ pub(super) fn diagnose_transition_input(
     match input {
         TimelineTransitionInput::Transparent => {}
         TimelineTransitionInput::Media(layer) => {
+            diagnostics.effect_gpu_blockers =
+                diagnostics.effect_gpu_blockers.saturating_add(u64::from(
+                    mondrian_effects::get_or_lower_effect_graph_to_gpu_plan(&layer.effect_graph)
+                        .is_err(),
+                ));
             if effect_domain_is_blocked(&layer.effect_graph) {
                 diagnostics.blocked_media_effect_domain =
                     diagnostics.blocked_media_effect_domain.saturating_add(1);
@@ -146,6 +151,11 @@ pub(super) fn diagnose_transition_input(
             }
         }
         TimelineTransitionInput::SolidColor(layer) => {
+            diagnostics.effect_gpu_blockers =
+                diagnostics.effect_gpu_blockers.saturating_add(u64::from(
+                    mondrian_effects::get_or_lower_effect_graph_to_gpu_plan(&layer.effect_graph)
+                        .is_err(),
+                ));
             if effect_domain_is_blocked(&layer.effect_graph) {
                 diagnostics.blocked_solid_effect_domain =
                     diagnostics.blocked_solid_effect_domain.saturating_add(1);

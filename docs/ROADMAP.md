@@ -407,7 +407,7 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 - [ ] 巩固 Select、Cut、Move、Trim、Ripple、Roll、Slip、Slide、Insert、Overwrite、Delete 和 snapping 的 UI 可发现性与边界反馈。
 - [ ] 补齐 Lift/Extract、显式 Link/Unlink、Track Targeting；链接片段与锁定/静音/可见状态行为一致。
 - [ ] 实现可交付的 speed、reverse、freeze frame；复杂 time remap 可延后，但持久化格式现在必须可扩展。
-- [ ] 视频 Transition 作者模型、共享 Preview/Export CPU 执行、产品命令和基础时间线 UI 已闭合：强端点、同轨非重叠、unclamped 双源 demand、媒体/嵌套范围准入、默认拒绝、显式缩短与单次 Undo 均有测试；App 选择只保存稳定 Transition ID；精确相邻且未锁定的视频 cut 可创建约 1 秒居中 Cross Dissolve，Overlay 优先于 Clip 命中，可选择、普通 Delete、拖动两侧范围并显示当前 handle 失败诊断，Ripple Delete 不误用于转场。ID 与视图投影成对产生，预览拖动不修改作者模型，释放时只提交一个类型化事务。补齐 GPU lowering 和 Golden Project 预览/导出一致性验收后完成产品闭环。绝不读取片段外错误帧或隐式重复边界帧。
+- [ ] 视频 Transition 作者模型、共享 Preview/Export CPU 执行、产品命令、基础时间线 UI 与 GPU lowering 已闭合：强端点、同轨非重叠、unclamped 双源 demand、媒体/嵌套范围准入、默认拒绝、显式缩短与单次 Undo 均有测试；App 选择只保存稳定 Transition ID；精确相邻且未锁定的视频 cut 可创建约 1 秒居中 Cross Dissolve，Overlay 优先于 Clip 命中，可选择、普通 Delete、拖动两侧范围并显示当前 handle 失败诊断，Ripple Delete 不误用于转场。ID 与视图投影成对产生，预览拖动不修改作者模型，释放时只提交一个类型化事务。Viewer GPU 执行图以普通 Source 为唯一输入准备结构，Cross Dissolve 两端各自完成颜色、变换、透明度与效果后，由专用 working-linear pass 做 coverage-correct 插值；真实 wgpu readback 已逐通道对照 Export/CPU 共用公式，并有独立执行证据。补齐 Golden Project 预览/导出一致性验收后完成产品闭环。绝不读取片段外错误帧或隐式重复边界帧。
 
 ### 播放、缓存与代理
 

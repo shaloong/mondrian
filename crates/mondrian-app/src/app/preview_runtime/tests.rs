@@ -1,6 +1,7 @@
 use super::*;
 use crate::app::preview_raster_frame::PreviewRasterColorSpace;
 use crate::app::preview_unavailability::PreviewUnavailabilityDisposition;
+use crate::app::preview_viewer_plan::ResolvedPreviewTransitionInput;
 use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
 use crate::app_ui::playback_feedback::ViewerPlaybackFeedback;
 use crate::app_ui::preview::{WindowPreviewAdapter, WindowPreviewOutputRegistration};
@@ -85,7 +86,10 @@ use mondrian_media::{
     DetectedColorInterpretation, HwAccelPixelFormat, MediaInfo, VideoColorDetectionMethod,
     VideoColorInterpretationConfidence, VideoColorSpaceSource, VideoStreamInfo,
 };
-use mondrian_renderer::{ColorFrameDomain, RenderColorStageGpuBlockerBreakdown};
+use mondrian_renderer::{
+    ColorFrameDomain, RenderColorStageGpuBlockerBreakdown, ViewerGpuSourceLayer,
+    ViewerGpuTransitionInput,
+};
 use mondrian_timeline::clip::Clip;
 use mondrian_timeline::sequence::{MissingColorMetadataPolicy, Sequence};
 use mondrian_timeline::track::Track;
@@ -631,7 +635,7 @@ fn paused_gpu_candidate_carries_untimed_presentation_authority() {
             assert_eq!(layers.len(), 1);
             assert!(matches!(
                 layers[0],
-                ViewerGpuExecutionLayer::SolidColor { .. }
+                ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::SolidColor { .. })
             ));
         }
     }
@@ -735,13 +739,62 @@ fn gpu_composite_layers_accept_transformed_media_frame() {
 
     assert_eq!(layers.len(), 1);
     match &layers[0] {
-        ViewerGpuExecutionLayer::Media { opacity, transform: actual_transform, .. } => {
+        ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::Media {
+            opacity,
+            transform: actual_transform,
+            ..
+        }) => {
             assert_eq!(*opacity, 0.85);
             assert_eq!(*actual_transform, transform);
         }
-        ViewerGpuExecutionLayer::SolidColor { .. } | ViewerGpuExecutionLayer::Adjustment { .. } => {
-            panic!("expected media layer")
+        _ => panic!("expected media layer"),
+    }
+}
+
+#[test]
+fn gpu_composite_layers_lower_cross_dissolve_as_typed_two_input_node() {
+    let effect_graph = mondrian_effects::get_or_compile_scheduled_effect_graph(
+        &mondrian_effects::EffectRenderPlan::default(),
+    )
+    .expect("compile identity graph");
+    let elements = vec![ResolvedPreviewElement::CrossDissolve {
+        left: ResolvedPreviewTransitionInput::Media {
+            frame: test_media_frame_with_size(180, 320, 180, 42),
+            opacity: 0.8,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_graph: Arc::clone(&effect_graph),
+            frame_seed: 7,
+        },
+        right: ResolvedPreviewTransitionInput::SolidColor(TimelineSolidColorLayer {
+            color: Color { r: 0.1, g: 0.2, b: 0.3, a: 0.6 },
+            opacity: 0.75,
+            blend_mode: BlendMode::Normal,
+            transform: [0.75, 0.0, 0.125, 0.0, 0.75, 0.125],
+            effect_graph,
+            frame_seed: 8,
+        }),
+        progress: 0.25,
+    }];
+
+    let layers = gpu_composite_layers_for_resolved(&elements, WorkingColorSpace::LinearRec709)
+        .expect("Cross Dissolve inputs should share the ordinary GPU source contract");
+
+    assert!(preview_elements_require_deferred_composite(&elements));
+    assert_eq!(layers.len(), 1);
+    match &layers[0] {
+        ViewerGpuExecutionLayer::CrossDissolve { left, right, progress } => {
+            assert_eq!(*progress, 0.25);
+            assert!(matches!(
+                left,
+                ViewerGpuTransitionInput::Source(ViewerGpuSourceLayer::Media { opacity: 0.8, .. })
+            ));
+            assert!(matches!(
+                right,
+                ViewerGpuTransitionInput::Source(ViewerGpuSourceLayer::SolidColor { .. })
+            ));
         }
+        _ => panic!("expected typed Cross Dissolve execution node"),
     }
 }
 
@@ -785,13 +838,15 @@ fn gpu_composite_layers_lower_supported_working_effects() {
         .expect("supported effects should stay on GPU composite path");
 
     match &layers[0] {
-        ViewerGpuExecutionLayer::Media { effect_plan, frame_seed, .. } => {
+        ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::Media {
+            effect_plan,
+            frame_seed,
+            ..
+        }) => {
             assert_eq!(effect_plan.operations().len(), 2);
             assert_eq!(*frame_seed, 19);
         }
-        ViewerGpuExecutionLayer::SolidColor { .. } | ViewerGpuExecutionLayer::Adjustment { .. } => {
-            panic!("expected media layer")
-        }
+        _ => panic!("expected media layer"),
     }
 }
 
@@ -827,7 +882,9 @@ fn gpu_composite_layers_lower_solid_and_adjustment_effects() {
 
     assert_eq!(layers.len(), 2);
     match &layers[0] {
-        ViewerGpuExecutionLayer::SolidColor { effect_plan, .. } => {
+        ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::SolidColor {
+            effect_plan, ..
+        }) => {
             assert_eq!(effect_plan.operations().len(), 1);
         }
         _ => panic!("expected solid layer"),
@@ -877,7 +934,7 @@ fn gpu_composite_layers_skip_leading_adjustment_before_layer_limit() {
     assert_eq!(layers.len(), 1);
     assert!(matches!(
         layers[0],
-        ViewerGpuExecutionLayer::SolidColor { .. }
+        ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::SolidColor { .. })
     ));
 }
 
@@ -914,14 +971,17 @@ fn gpu_composite_layers_accept_source_only_media_frame() {
         .expect("source-only media should stay on GPU input/composite path");
 
     match &layers[0] {
-        ViewerGpuExecutionLayer::Media { frame, gpu_source, native_source, .. } => {
+        ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::Media {
+            frame,
+            gpu_source,
+            native_source,
+            ..
+        }) => {
             assert!(frame.is_none());
             assert!(gpu_source.is_some());
             assert!(native_source.is_none());
         }
-        ViewerGpuExecutionLayer::SolidColor { .. } | ViewerGpuExecutionLayer::Adjustment { .. } => {
-            panic!("expected media layer")
-        }
+        _ => panic!("expected media layer"),
     }
 }
 
@@ -951,7 +1011,12 @@ fn gpu_composite_layers_preserve_native_source_only_media_frame() {
         .expect("native source-only media should reach GPU composite admission");
 
     match &layers[0] {
-        ViewerGpuExecutionLayer::Media { frame, gpu_source, native_source, .. } => {
+        ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::Media {
+            frame,
+            gpu_source,
+            native_source,
+            ..
+        }) => {
             assert!(frame.is_none());
             assert!(gpu_source.is_none());
             let native_source = native_source.as_ref().expect("native source");
@@ -991,9 +1056,7 @@ fn gpu_composite_layers_preserve_native_source_only_media_frame() {
                 GpuNativeDecodedFrameTextureFormat::P010
             );
         }
-        ViewerGpuExecutionLayer::SolidColor { .. } | ViewerGpuExecutionLayer::Adjustment { .. } => {
-            panic!("expected media layer")
-        }
+        _ => panic!("expected media layer"),
     }
 }
 

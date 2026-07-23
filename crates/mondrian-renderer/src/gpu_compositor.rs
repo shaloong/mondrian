@@ -90,9 +90,29 @@ fn over_straight_alpha(base_px: vec4<f32>, blend_px: vec4<f32>, opacity: f32) ->
     return vec4<f32>(premul / out_alpha, out_alpha);
 }
 
+fn cross_dissolve_straight_alpha(
+    left_px: vec4<f32>,
+    right_px: vec4<f32>,
+    progress: f32,
+) -> vec4<f32> {
+    let right_weight = clamp(progress, 0.0, 1.0);
+    let left_weight = 1.0 - right_weight;
+    let out_alpha = left_px.a * left_weight + right_px.a * right_weight;
+    if (out_alpha <= 0.00000011920929) {
+        return vec4<f32>(0.0);
+    }
+    let premul = left_px.rgb * left_px.a * left_weight +
+        right_px.rgb * right_px.a * right_weight;
+    return vec4<f32>(premul / out_alpha, out_alpha);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let base_px = textureSample(accum_tex, linear_sampler, in.uv);
+    if (uniforms.source_kind == 5u) {
+        let right_px = textureSample(layer_tex, linear_sampler, in.uv);
+        return cross_dissolve_straight_alpha(base_px, right_px, uniforms.opacity);
+    }
     let source_position = source_coordinate(in.uv);
     var layer_px: vec4<f32>;
     if (uniforms.source_kind == 1u) {
@@ -217,8 +237,6 @@ pub enum GpuCompositingBlockerReason {
     FrameNotGpuResident,
     /// Too many layers for the bounded GPU composite path.
     TooManyLayers,
-    /// A typed two-input Transition has no GPU lowering yet.
-    UnsupportedTransition,
     /// GPU compositor is not initialized (device/queue unavailable).
     GpuUnavailable,
 }
@@ -232,7 +250,6 @@ impl GpuCompositingBlockerReason {
             Self::UnsupportedTransform => "unsupported_transform",
             Self::FrameNotGpuResident => "frame_not_gpu_resident",
             Self::TooManyLayers => "too_many_layers",
-            Self::UnsupportedTransition => "unsupported_transition",
             Self::GpuUnavailable => "gpu_unavailable",
         }
     }
@@ -247,7 +264,6 @@ impl GpuCompositingBlockerReason {
             Self::UnsupportedTransform => "Transform cannot be represented by GPU compositor",
             Self::FrameNotGpuResident => "Frame requires CPU-to-GPU upload before compositing",
             Self::TooManyLayers => "Too many layers for bounded GPU compositing",
-            Self::UnsupportedTransition => "Visual Transition has no GPU compositor lowering",
             Self::GpuUnavailable => "GPU device/queue not available for compositing",
         }
     }
@@ -262,6 +278,8 @@ pub struct GpuCompositingDiagnostics {
     pub gpu_native_composites: u64,
     /// Number of compositing operations that uploaded CPU layers for GPU compositing.
     pub gpu_with_upload_composites: u64,
+    /// Dedicated two-input working-linear Cross Dissolve passes.
+    pub gpu_cross_dissolve_passes: u64,
     /// Number of compositing operations that fell back to CPU compositing.
     pub cpu_fallback_composites: u64,
     /// Total pixels processed through GPU compositing.
@@ -281,6 +299,8 @@ impl GpuCompositingDiagnostics {
             self.gpu_native_composites.saturating_add(other.gpu_native_composites);
         self.gpu_with_upload_composites =
             self.gpu_with_upload_composites.saturating_add(other.gpu_with_upload_composites);
+        self.gpu_cross_dissolve_passes =
+            self.gpu_cross_dissolve_passes.saturating_add(other.gpu_cross_dissolve_passes);
         self.cpu_fallback_composites =
             self.cpu_fallback_composites.saturating_add(other.cpu_fallback_composites);
         self.gpu_composited_pixels =
@@ -501,6 +521,12 @@ pub enum GpuCompositeError {
     /// The shared resource table rejected an inserted resource.
     #[error("GPU composite resource table error: {0:?}")]
     ResourceTable(crate::GpuColorFrameResourceTableError),
+    /// Transition progress must be a finite coefficient before clamping.
+    #[error("GPU Cross Dissolve progress must be finite, got IEEE-754 bits {progress_bits:#010x}")]
+    NonFiniteTransitionProgress {
+        /// Rejected coefficient encoded without weakening structural equality.
+        progress_bits: u32,
+    },
 }
 
 /// Runtime for recording GPU working-space composites.
@@ -759,6 +785,7 @@ impl GpuFrameCompositor {
     ) -> Result<GpuCompositeRecord, GpuCompositeError> {
         validate_request(&request)?;
         if let Some(output) = single_layer_gpu_passthrough(&request) {
+            table.get(output).map_err(GpuCompositeError::ResourceTable)?;
             return Ok(GpuCompositeRecord {
                 output: output.clone(),
                 diagnostics: GpuCompositingDiagnostics {
@@ -961,6 +988,138 @@ impl GpuFrameCompositor {
         Ok(GpuPointEffectRecord {
             output,
             processed_pixels: u64::from(width).saturating_mul(u64::from(height)),
+        })
+    }
+
+    /// Interpolate two already prepared working-linear source branches.
+    ///
+    /// RGB is weighted in premultiplied coverage and converted back to the
+    /// public straight-alpha contract. This is not equivalent to submitting
+    /// two ordinary source-over layers with complementary opacity.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_cross_dissolve_pass(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+        left: &GpuColorFrameHandle,
+        right: &GpuColorFrameHandle,
+        progress: f32,
+        working_color_space: mondrian_core::WorkingColorSpace,
+    ) -> Result<GpuCompositeRecord, GpuCompositeError> {
+        if !progress.is_finite() {
+            return Err(GpuCompositeError::NonFiniteTransitionProgress {
+                progress_bits: progress.to_bits(),
+            });
+        }
+        let left_descriptor = left.descriptor();
+        let right_descriptor = right.descriptor();
+        let validation_layers = [
+            GpuCompositeLayer {
+                source: GpuCompositeLayerSource::GpuFrame(left),
+                opacity: 1.0,
+                blend_mode: BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: None,
+                frame_seed: 0,
+            },
+            GpuCompositeLayer {
+                source: GpuCompositeLayerSource::GpuFrame(right),
+                opacity: 1.0,
+                blend_mode: BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: None,
+                frame_seed: 0,
+            },
+        ];
+        validate_request(&GpuCompositeRequest {
+            width: left_descriptor.width,
+            height: left_descriptor.height,
+            working_color_space,
+            layers: &validation_layers,
+        })?;
+        if right_descriptor.width != left_descriptor.width
+            || right_descriptor.height != left_descriptor.height
+        {
+            let expected = ColorFrameDescriptor {
+                width: left_descriptor.width,
+                height: left_descriptor.height,
+                ..right_descriptor
+            };
+            return Err(GpuCompositeError::SourceDescriptorMismatch {
+                expected,
+                actual: right_descriptor,
+            });
+        }
+        let left_resource = table.get(left).map_err(GpuCompositeError::ResourceTable)?;
+        let right_resource = table.get(right).map_err(GpuCompositeError::ResourceTable)?;
+        if progress <= 0.0 {
+            return Ok(GpuCompositeRecord {
+                output: left.clone(),
+                diagnostics: GpuCompositingDiagnostics {
+                    gpu_passthrough_frames: 1,
+                    ..GpuCompositingDiagnostics::default()
+                },
+            });
+        }
+        if progress >= 1.0 {
+            return Ok(GpuCompositeRecord {
+                output: right.clone(),
+                diagnostics: GpuCompositingDiagnostics {
+                    gpu_passthrough_frames: 1,
+                    ..GpuCompositingDiagnostics::default()
+                },
+            });
+        }
+        let descriptor = ColorFrameDescriptor {
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
+            ..left_descriptor
+        };
+        let output_resource = create_working_resource(
+            device,
+            ids,
+            descriptor,
+            "gpu-cross-dissolve-output",
+            resource_pool,
+        )?;
+        self.record_layer_pass(
+            device,
+            queue,
+            encoder,
+            GpuCompositeTextureBinding::Resource(left_resource.resource()),
+            &output_resource.resource().texture_view,
+            GpuCompositeTextureBinding::Resource(right_resource.resource()),
+            GpuCompositeUniforms {
+                opacity: progress,
+                source_kind: 5,
+                effect_count: 0,
+                frame_seed: 0,
+                solid_color: [0.0; 4],
+                inv_transform0: [1.0, 0.0, 0.0, 0.0],
+                inv_transform1: [1.0, 0.0, 0.0, 0.0],
+                geometry: [
+                    descriptor.width as f32,
+                    descriptor.height as f32,
+                    descriptor.width as f32,
+                    descriptor.height as f32,
+                ],
+                effects: effect_uniforms(None),
+            },
+        )?;
+        let output = output_resource.handle().clone();
+        table.insert(output_resource).map_err(GpuCompositeError::ResourceTable)?;
+        Ok(GpuCompositeRecord {
+            output,
+            diagnostics: GpuCompositingDiagnostics {
+                gpu_native_composites: 1,
+                gpu_cross_dissolve_passes: 1,
+                gpu_composited_pixels: u64::from(descriptor.width)
+                    .saturating_mul(u64::from(descriptor.height)),
+                ..GpuCompositingDiagnostics::default()
+            },
         })
     }
 
@@ -2037,6 +2196,121 @@ mod tests {
         for row in mapped.chunks_exact(256).take(4) {
             for pixel in bytemuck::cast_slice::<u8, f32>(&row[..64]).chunks_exact(4) {
                 assert_eq!(pixel, &[color.r, color.g, color.b, color.a]);
+            }
+        }
+        readback.unmap();
+    }
+
+    #[tokio::test]
+    async fn cross_dissolve_matches_shared_cpu_straight_alpha_reference() {
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping Cross Dissolve parity test: no GPU adapter available");
+            return;
+        };
+        let left_color = Color { r: 1.2, g: -0.1, b: 0.35, a: 0.25 };
+        let right_color = Color { r: 0.05, g: 0.8, b: 1.4, a: 0.75 };
+        let progress = 0.4;
+        let compositor = GpuFrameCompositor::new(&context.device);
+        let mut ids = GpuColorFrameIdAllocator::new(960);
+        let mut table = GpuColorFrameResourceTable::new();
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("cross-dissolve-parity"),
+        });
+        let left = compositor
+            .record_solid_source_pass(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                &mut ids,
+                &mut table,
+                None,
+                4,
+                4,
+                WorkingColorSpace::LinearRec709,
+                left_color,
+            )
+            .expect("materialize left Transition source")
+            .output;
+        let right = compositor
+            .record_solid_source_pass(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                &mut ids,
+                &mut table,
+                None,
+                4,
+                4,
+                WorkingColorSpace::LinearRec709,
+                right_color,
+            )
+            .expect("materialize right Transition source")
+            .output;
+        let record = compositor
+            .record_cross_dissolve_pass(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                &mut ids,
+                &mut table,
+                None,
+                &left,
+                &right,
+                progress,
+                WorkingColorSpace::LinearRec709,
+            )
+            .expect("record typed Cross Dissolve");
+
+        assert_eq!(record.diagnostics.gpu_cross_dissolve_passes, 1);
+        assert_eq!(record.diagnostics.gpu_composited_pixels, 16);
+        assert_eq!(
+            record.output.descriptor().alpha,
+            crate::ColorFrameAlpha::StraightCoverage
+        );
+
+        let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cross-dissolve-parity-readback"),
+            size: 256 * 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let output = table.get(&record.output).expect("Cross Dissolve output");
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &output.resource().texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(4),
+                },
+            },
+            wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+        );
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let mapped = map_test_readback(&context.device, &readback);
+        let mut expected = [[0.0; 4]];
+        crate::timeline_composite::cross_dissolve_straight_rgba_f32(
+            &mut expected,
+            &[[left_color.r, left_color.g, left_color.b, left_color.a]],
+            &[[right_color.r, right_color.g, right_color.b, right_color.a]],
+            progress,
+        );
+        for row in mapped.chunks_exact(256).take(4) {
+            for actual in bytemuck::cast_slice::<u8, f32>(&row[..64]).chunks_exact(4) {
+                for channel in 0..4 {
+                    assert!(
+                        (actual[channel] - expected[0][channel]).abs() <= 1.0e-6,
+                        "Cross Dissolve mismatch in channel {channel}: expected {}, actual {}",
+                        expected[0][channel],
+                        actual[channel]
+                    );
+                }
             }
         }
         readback.unmap();

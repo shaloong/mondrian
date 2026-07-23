@@ -20,9 +20,10 @@ use std::{
 };
 
 mod transition;
+pub(crate) use transition::cross_dissolve_straight_rgba_f32;
 use transition::{
     composite_transition_input_f32, composite_transition_input_rgba8,
-    cross_dissolve_straight_rgba8, cross_dissolve_straight_rgba_f32, diagnose_transition_input,
+    cross_dissolve_straight_rgba8, diagnose_transition_input,
 };
 pub use transition::{TimelineCrossDissolveLayer, TimelineTransitionInput};
 
@@ -781,7 +782,6 @@ pub fn composite_path_diagnostics(
             TimelineCompositeElement::CrossDissolve(transition) => {
                 diagnose_transition_input(&transition.left, &mut diagnostics);
                 diagnose_transition_input(&transition.right, &mut diagnostics);
-                diagnostics.effect_gpu_blockers = diagnostics.effect_gpu_blockers.saturating_add(1);
             }
         }
     }
@@ -1392,6 +1392,11 @@ mod tests {
         assert_eq!(pixel[1], 0.0);
         assert!((pixel[2] - 0.5).abs() < 1.0e-6);
         assert_eq!(pixel[3], 1.0);
+        assert_eq!(
+            composite_path_diagnostics(&elements).effect_gpu_blockers,
+            0,
+            "a supported typed Transition must not remain a synthetic GPU blocker"
+        );
     }
 
     #[test]

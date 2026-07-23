@@ -246,7 +246,7 @@ impl ViewerGpuExecutionRuntime {
         validate_program_scopes_contract(request.program_output_boundary, request.program_scopes)?;
         self.native_video_import.reset_frame_cpu_timings();
         let input_prepare_started = Instant::now();
-        let prepared = prepare_composite(
+        let mut prepared = prepare_composite(
             &request,
             &mut self.color_output,
             &mut self.native_video_import,
@@ -256,11 +256,17 @@ impl ViewerGpuExecutionRuntime {
             encoder,
         )?;
         let input_prepare_us = elapsed_us(input_prepare_started);
-        let residency = prepared.residency;
-        let fallback_reasons = prepared.fallback_reasons;
-        let mut stage_diagnostics = prepared.input_stage_diagnostics;
-        let gpu_layers = composite_layers(&prepared.layers, &prepared.gpu_input_handles);
         let working_composite_started = Instant::now();
+        let (prepared_layers, mut compositing_diagnostics) = execute_prepared_composite_nodes(
+            &mut prepared,
+            &request,
+            &self.working_compositor,
+            &mut self.color_output,
+            device,
+            queue,
+            encoder,
+        )?;
+        let gpu_layers = composite_layers(&prepared_layers, &prepared.gpu_input_handles);
         let composite = self
             .color_output
             .record_wgpu_composite_graph(
@@ -278,6 +284,10 @@ impl ViewerGpuExecutionRuntime {
                 RenderColorTransformGpuOptions::default(),
             )
             .map_err(ViewerGpuExecutionError::WorkingComposite)?;
+        compositing_diagnostics.accumulate(composite.compositing_diagnostics);
+        let residency = prepared.residency;
+        let fallback_reasons = prepared.fallback_reasons;
+        let mut stage_diagnostics = prepared.input_stage_diagnostics;
         stage_diagnostics.accumulate(composite.color_stage_diagnostics);
         let working_composite_us = elapsed_us(working_composite_started);
         mark_gpu_stage(
@@ -455,7 +465,7 @@ impl ViewerGpuExecutionRuntime {
             output,
             output_owner,
             stage_diagnostics,
-            compositing_diagnostics: composite.compositing_diagnostics,
+            compositing_diagnostics,
             spatial_diagnostics,
             residency,
             fallback_reasons,
@@ -659,6 +669,9 @@ pub enum ViewerGpuExecutionError {
     },
     #[error("Viewer GPU working composite graph failed: {0:?}")]
     WorkingComposite(RenderGpuCompositeGraphRecordError),
+    /// A typed two-input Transition could not be materialized exactly.
+    #[error("Viewer GPU Transition execution failed: {0}")]
+    Transition(crate::GpuCompositeError),
     #[error("Viewer GPU effect-domain processing failed: {0}")]
     EffectDomain(String),
     #[error("Viewer GPU working output is missing: {0}")]
@@ -728,12 +741,13 @@ impl Default for ViewerGpuNativeVideoFacts {
 
 struct PreparedComposite<'a> {
     gpu_input_handles: Vec<GpuColorFrameHandle>,
-    layers: Vec<PreparedCompositeLayer<'a>>,
+    nodes: Vec<PreparedCompositeNode<'a>>,
     residency: ViewerGpuExecutionResidency,
     input_stage_diagnostics: RenderColorStageDiagnostics,
     fallback_reasons: Vec<String>,
 }
 
+#[derive(Clone, Copy)]
 struct PreparedCompositeLayer<'a> {
     source: PreparedCompositeLayerSource<'a>,
     opacity: f32,
@@ -743,11 +757,21 @@ struct PreparedCompositeLayer<'a> {
     frame_seed: i64,
 }
 
+#[derive(Clone, Copy)]
 enum PreparedCompositeLayerSource<'a> {
     CpuFrame(&'a CpuColorFrame),
     GpuFrame(usize),
     SolidColor(Color),
     Adjustment,
+}
+
+enum PreparedCompositeNode<'a> {
+    Layer(PreparedCompositeLayer<'a>),
+    CrossDissolve {
+        left: Option<PreparedCompositeLayer<'a>>,
+        right: Option<PreparedCompositeLayer<'a>>,
+        progress: f32,
+    },
 }
 
 fn prepare_composite<'a>(
@@ -761,129 +785,256 @@ fn prepare_composite<'a>(
 ) -> Result<PreparedComposite<'a>, ViewerGpuExecutionError> {
     let mut prepared = PreparedComposite {
         gpu_input_handles: Vec::new(),
-        layers: Vec::with_capacity(request.layers.len()),
+        nodes: Vec::with_capacity(request.layers.len()),
         residency: ViewerGpuExecutionResidency::default(),
         input_stage_diagnostics: RenderColorStageDiagnostics::default(),
         fallback_reasons: Vec::new(),
     };
 
-    for layer in request.layers {
-        if viewer_layer_has_zero_contribution(layer) {
-            continue;
-        }
-        match layer {
-            ViewerGpuExecutionLayer::Media {
-                frame,
-                gpu_source,
-                native_source,
-                opacity,
-                transform,
+    for node in request.layers {
+        match node {
+            ViewerGpuExecutionLayer::Source(source) => {
+                if source_layer_has_zero_contribution(source) {
+                    continue;
+                }
+                let layer = prepare_source_layer(
+                    source,
+                    request,
+                    &mut prepared,
+                    runtime,
+                    native_runtime,
+                    compositor,
+                    device,
+                    queue,
+                    encoder,
+                )?;
+                prepared.nodes.push(PreparedCompositeNode::Layer(layer));
+            }
+            ViewerGpuExecutionLayer::Adjustment {
                 effect_plan,
+                opacity,
+                blend_mode,
                 frame_seed,
             } => {
-                prepared.residency.media_layers = prepared.residency.media_layers.saturating_add(1);
-                prepared.residency.record_source(gpu_source.as_ref(), native_source.as_ref());
-                let mut native_import_error = None;
-                let native_handle = match native_source.as_ref() {
+                if opacity.clamp(0.0, 1.0) == 0.0 {
+                    continue;
+                }
+                prepared.residency.procedural_layers =
+                    prepared.residency.procedural_layers.saturating_add(1);
+                prepared.nodes.push(PreparedCompositeNode::Layer(PreparedCompositeLayer {
+                    source: PreparedCompositeLayerSource::Adjustment,
+                    opacity: *opacity,
+                    blend_mode: *blend_mode,
+                    transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    effect_plan: Some(effect_plan),
+                    frame_seed: *frame_seed,
+                }));
+            }
+            ViewerGpuExecutionLayer::CrossDissolve { left, right, progress } => {
+                if !progress.is_finite() {
+                    return Err(ViewerGpuExecutionError::Transition(
+                        crate::GpuCompositeError::NonFiniteTransitionProgress {
+                            progress_bits: progress.to_bits(),
+                        },
+                    ));
+                }
+                let progress = progress.clamp(0.0, 1.0);
+                let left = prepare_transition_input(
+                    left,
+                    1.0 - progress,
+                    request,
+                    &mut prepared,
+                    runtime,
+                    native_runtime,
+                    compositor,
+                    device,
+                    queue,
+                    encoder,
+                )?;
+                let right = prepare_transition_input(
+                    right,
+                    progress,
+                    request,
+                    &mut prepared,
+                    runtime,
+                    native_runtime,
+                    compositor,
+                    device,
+                    queue,
+                    encoder,
+                )?;
+                if left.is_some() || right.is_some() {
+                    prepared.nodes.push(PreparedCompositeNode::CrossDissolve {
+                        left,
+                        right,
+                        progress,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(prepared)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_transition_input<'a>(
+    input: &'a crate::ViewerGpuTransitionInput,
+    weight: f32,
+    request: &ViewerGpuExecutionRequest<'a>,
+    prepared: &mut PreparedComposite<'a>,
+    runtime: &mut RenderGpuOutputBoundaryRuntime,
+    native_runtime: &mut ViewerNativeVideoImportRuntime,
+    compositor: &GpuFrameCompositor,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    encoder: &mut wgpu::CommandEncoder,
+) -> Result<Option<PreparedCompositeLayer<'a>>, ViewerGpuExecutionError> {
+    if weight <= 0.0 {
+        return Ok(None);
+    }
+    match input {
+        crate::ViewerGpuTransitionInput::Transparent => Ok(None),
+        crate::ViewerGpuTransitionInput::Source(source)
+            if source_layer_has_zero_contribution(source) =>
+        {
+            Ok(None)
+        }
+        crate::ViewerGpuTransitionInput::Source(source) => prepare_source_layer(
+            source,
+            request,
+            prepared,
+            runtime,
+            native_runtime,
+            compositor,
+            device,
+            queue,
+            encoder,
+        )
+        .map(Some),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_source_layer<'a>(
+    source_layer: &'a crate::ViewerGpuSourceLayer,
+    request: &ViewerGpuExecutionRequest<'a>,
+    prepared: &mut PreparedComposite<'a>,
+    runtime: &mut RenderGpuOutputBoundaryRuntime,
+    native_runtime: &mut ViewerNativeVideoImportRuntime,
+    compositor: &GpuFrameCompositor,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    encoder: &mut wgpu::CommandEncoder,
+) -> Result<PreparedCompositeLayer<'a>, ViewerGpuExecutionError> {
+    match source_layer {
+        crate::ViewerGpuSourceLayer::Media {
+            frame,
+            gpu_source,
+            native_source,
+            opacity,
+            transform,
+            effect_plan,
+            frame_seed,
+        } => {
+            prepared.residency.media_layers = prepared.residency.media_layers.saturating_add(1);
+            prepared.residency.record_source(gpu_source.as_ref(), native_source.as_ref());
+            let mut native_import_error = None;
+            let native_handle = match native_source.as_ref() {
+                Some(source) => match record_native_video_layer(source, native_runtime, runtime) {
+                    Ok(handle) => Some(handle),
+                    Err(error) if error.is_backpressure() => {
+                        return Err(ViewerGpuExecutionError::Backpressure(error.to_string()));
+                    }
+                    Err(error) => {
+                        prepared.residency.gpu_input_failures =
+                            prepared.residency.gpu_input_failures.saturating_add(1);
+                        prepared
+                            .fallback_reasons
+                            .push(format!("viewer native video import failed: {error}"));
+                        tracing::warn!(
+                            sequence_id = %request.sequence_id,
+                            frame = request.timeline_frame,
+                            width = request.width,
+                            height = request.height,
+                            "viewer native video import failed: {error}"
+                        );
+                        native_import_error = Some(error.to_string());
+                        None
+                    }
+                },
+                None => None,
+            };
+            let source = if let Some(handle) = native_handle {
+                let index = prepared.gpu_input_handles.len();
+                prepared.gpu_input_handles.push(handle);
+                PreparedCompositeLayerSource::GpuFrame(index)
+            } else {
+                match gpu_source.as_ref() {
                     Some(source) => {
-                        match record_native_video_layer(source, native_runtime, runtime) {
-                            Ok(handle) => Some(handle),
-                            Err(error) if error.is_backpressure() => {
-                                return Err(ViewerGpuExecutionError::Backpressure(
-                                    error.to_string(),
-                                ));
+                        match record_gpu_input_layer(source, runtime, device, queue, encoder) {
+                            Ok(record) => {
+                                prepared
+                                    .input_stage_diagnostics
+                                    .accumulate(record.stage_diagnostics);
+                                let index = prepared.gpu_input_handles.len();
+                                prepared.gpu_input_handles.push(record.materialized.output);
+                                prepared.residency.gpu_input_layers =
+                                    prepared.residency.gpu_input_layers.saturating_add(1);
+                                PreparedCompositeLayerSource::GpuFrame(index)
                             }
                             Err(error) => {
                                 prepared.residency.gpu_input_failures =
                                     prepared.residency.gpu_input_failures.saturating_add(1);
                                 prepared
                                     .fallback_reasons
-                                    .push(format!("viewer native video import failed: {error}"));
-                                tracing::warn!(
-                                    sequence_id = %request.sequence_id,
-                                    frame = request.timeline_frame,
-                                    width = request.width,
-                                    height = request.height,
-                                    "viewer native video import failed: {error}"
-                                );
-                                native_import_error = Some(error.to_string());
-                                None
-                            }
-                        }
-                    }
-                    None => None,
-                };
-                let source = if let Some(handle) = native_handle {
-                    let index = prepared.gpu_input_handles.len();
-                    prepared.gpu_input_handles.push(handle);
-                    PreparedCompositeLayerSource::GpuFrame(index)
-                } else {
-                    match gpu_source.as_ref() {
-                        Some(source) => {
-                            match record_gpu_input_layer(source, runtime, device, queue, encoder) {
-                                Ok(record) => {
-                                    prepared
-                                        .input_stage_diagnostics
-                                        .accumulate(record.stage_diagnostics);
-                                    let index = prepared.gpu_input_handles.len();
-                                    prepared.gpu_input_handles.push(record.materialized.output);
-                                    prepared.residency.gpu_input_layers =
-                                        prepared.residency.gpu_input_layers.saturating_add(1);
-                                    PreparedCompositeLayerSource::GpuFrame(index)
-                                }
-                                Err(error) => {
-                                    prepared.residency.gpu_input_failures =
-                                        prepared.residency.gpu_input_failures.saturating_add(1);
-                                    prepared.fallback_reasons.push(format!(
-                                        "viewer GPU input transform failed: {error:?}"
-                                    ));
-                                    if let Some(frame) = frame.as_ref() {
-                                        prepared.residency.cpu_upload_layers =
-                                            prepared.residency.cpu_upload_layers.saturating_add(1);
-                                        tracing::warn!(
-                                            sequence_id = %request.sequence_id,
-                                            frame = request.timeline_frame,
-                                            width = request.width,
-                                            height = request.height,
-                                            "viewer GPU input transform failed; using CPU working layer upload: {error:?}"
-                                        );
-                                        PreparedCompositeLayerSource::CpuFrame(frame)
-                                    } else {
-                                        return Err(ViewerGpuExecutionError::InputPreparation(
+                                    .push(format!("viewer GPU input transform failed: {error:?}"));
+                                if let Some(frame) = frame.as_ref() {
+                                    prepared.residency.cpu_upload_layers =
+                                        prepared.residency.cpu_upload_layers.saturating_add(1);
+                                    tracing::warn!(
+                                        sequence_id = %request.sequence_id,
+                                        frame = request.timeline_frame,
+                                        width = request.width,
+                                        height = request.height,
+                                        "viewer GPU input transform failed; using CPU working layer upload: {error:?}"
+                                    );
+                                    PreparedCompositeLayerSource::CpuFrame(frame)
+                                } else {
+                                    return Err(ViewerGpuExecutionError::InputPreparation(
                                         format!(
                                             "GPU input transform failed without a CPU working fallback: {error:?}"
                                         ),
                                     ));
-                                    }
                                 }
                             }
                         }
-                        None => {
-                            let Some(frame) = frame.as_ref() else {
-                                let reason = native_source.as_ref().map_or_else(
-                                    || {
-                                        "media layer has no GPU source or CPU working fallback"
-                                            .to_owned()
-                                    },
-                                    |source| {
-                                        native_import_failure_without_cpu_fallback(
-                                            source.native_frame.handle_kind(),
-                                            source.native_frame.surface_format,
-                                            native_import_error.as_deref(),
-                                        )
-                                    },
-                                );
-                                return Err(ViewerGpuExecutionError::InputPreparation(reason));
-                            };
-                            prepared.residency.cpu_upload_layers =
-                                prepared.residency.cpu_upload_layers.saturating_add(1);
-                            PreparedCompositeLayerSource::CpuFrame(frame)
-                        }
                     }
-                };
-                let (source, effect_plan) = if effect_plan.processing_domain()
-                    == EffectColorDomain::SceneLinearRgb
-                {
+                    None => {
+                        let Some(frame) = frame.as_ref() else {
+                            let reason = native_source.as_ref().map_or_else(
+                                || {
+                                    "media layer has no GPU source or CPU working fallback"
+                                        .to_owned()
+                                },
+                                |source| {
+                                    native_import_failure_without_cpu_fallback(
+                                        source.native_frame.handle_kind(),
+                                        source.native_frame.surface_format,
+                                        native_import_error.as_deref(),
+                                    )
+                                },
+                            );
+                            return Err(ViewerGpuExecutionError::InputPreparation(reason));
+                        };
+                        prepared.residency.cpu_upload_layers =
+                            prepared.residency.cpu_upload_layers.saturating_add(1);
+                        PreparedCompositeLayerSource::CpuFrame(frame)
+                    }
+                }
+            };
+            let (source, effect_plan) =
+                if effect_plan.processing_domain() == EffectColorDomain::SceneLinearRgb {
                     (source, Some(effect_plan.as_ref()))
                 } else {
                     let input = match source {
@@ -909,7 +1060,7 @@ fn prepare_composite<'a>(
                         }
                     };
                     let index = record_external_domain_effect(
-                        &mut prepared,
+                        prepared,
                         runtime,
                         compositor,
                         effect_plan,
@@ -922,105 +1073,197 @@ fn prepare_composite<'a>(
                     )?;
                     (PreparedCompositeLayerSource::GpuFrame(index), None)
                 };
-                prepared.layers.push(PreparedCompositeLayer {
-                    source,
-                    opacity: *opacity,
-                    blend_mode: BlendMode::Normal,
-                    transform: *transform,
+            Ok(PreparedCompositeLayer {
+                source,
+                opacity: *opacity,
+                blend_mode: BlendMode::Normal,
+                transform: *transform,
+                effect_plan,
+                frame_seed: *frame_seed,
+            })
+        }
+        crate::ViewerGpuSourceLayer::SolidColor { layer, effect_plan } => {
+            prepared.residency.procedural_layers =
+                prepared.residency.procedural_layers.saturating_add(1);
+            let scene_linear = effect_plan.processing_domain() == EffectColorDomain::SceneLinearRgb;
+            if scene_linear {
+                Ok(PreparedCompositeLayer {
+                    source: PreparedCompositeLayerSource::SolidColor(layer.color),
+                    opacity: layer.opacity,
+                    blend_mode: layer.blend_mode,
+                    transform: layer.transform,
+                    effect_plan: Some(effect_plan),
+                    frame_seed: layer.frame_seed,
+                })
+            } else {
+                let materialized = runtime
+                    .record_wgpu_solid_source(
+                        compositor,
+                        device,
+                        queue,
+                        encoder,
+                        request.width,
+                        request.height,
+                        request.working_color_space,
+                        layer.color,
+                    )
+                    .map_err(|error| {
+                        ViewerGpuExecutionError::EffectDomain(format!(
+                            "solid source materialization failed: {error:?}"
+                        ))
+                    })?;
+                let index = record_external_domain_effect(
+                    prepared,
+                    runtime,
+                    compositor,
                     effect_plan,
-                    frame_seed: *frame_seed,
-                });
+                    materialized.output,
+                    request.program_output_boundary.engine.clone(),
+                    layer.frame_seed,
+                    device,
+                    queue,
+                    encoder,
+                )?;
+                Ok(PreparedCompositeLayer {
+                    source: PreparedCompositeLayerSource::GpuFrame(index),
+                    opacity: layer.opacity,
+                    blend_mode: layer.blend_mode,
+                    transform: layer.transform,
+                    effect_plan: None,
+                    frame_seed: layer.frame_seed,
+                })
             }
-            ViewerGpuExecutionLayer::SolidColor { layer, effect_plan } => {
-                prepared.residency.procedural_layers =
-                    prepared.residency.procedural_layers.saturating_add(1);
-                let scene_linear =
-                    effect_plan.processing_domain() == EffectColorDomain::SceneLinearRgb;
-                if scene_linear {
-                    prepared.layers.push(PreparedCompositeLayer {
-                        source: PreparedCompositeLayerSource::SolidColor(layer.color),
-                        opacity: layer.opacity,
-                        blend_mode: layer.blend_mode,
-                        transform: layer.transform,
-                        effect_plan: Some(effect_plan),
-                        frame_seed: layer.frame_seed,
-                    });
-                } else {
-                    let materialized = runtime
-                        .record_wgpu_solid_source(
-                            compositor,
-                            device,
-                            queue,
-                            encoder,
-                            request.width,
-                            request.height,
-                            request.working_color_space,
-                            layer.color,
-                        )
-                        .map_err(|error| {
-                            ViewerGpuExecutionError::EffectDomain(format!(
-                                "solid source materialization failed: {error:?}"
-                            ))
-                        })?;
-                    let (index, prepared_effect_plan) = if scene_linear {
-                        let index = prepared.gpu_input_handles.len();
-                        prepared.gpu_input_handles.push(materialized.output);
-                        (index, Some(effect_plan.as_ref()))
-                    } else {
-                        (
-                            record_external_domain_effect(
-                                &mut prepared,
-                                runtime,
+        }
+    }
+}
+
+fn source_layer_has_zero_contribution(layer: &crate::ViewerGpuSourceLayer) -> bool {
+    let opacity = match layer {
+        crate::ViewerGpuSourceLayer::Media { opacity, .. } => *opacity,
+        crate::ViewerGpuSourceLayer::SolidColor { layer, .. } => layer.opacity,
+    };
+    opacity.clamp(0.0, 1.0) == 0.0
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_prepared_composite_nodes<'a>(
+    prepared: &mut PreparedComposite<'a>,
+    request: &ViewerGpuExecutionRequest<'a>,
+    compositor: &GpuFrameCompositor,
+    runtime: &mut RenderGpuOutputBoundaryRuntime,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    encoder: &mut wgpu::CommandEncoder,
+) -> Result<(Vec<PreparedCompositeLayer<'a>>, GpuCompositingDiagnostics), ViewerGpuExecutionError> {
+    let nodes = std::mem::take(&mut prepared.nodes);
+    let mut layers = Vec::with_capacity(nodes.len());
+    let mut diagnostics = GpuCompositingDiagnostics::default();
+
+    for node in nodes {
+        match node {
+            PreparedCompositeNode::Layer(layer) => layers.push(layer),
+            PreparedCompositeNode::CrossDissolve { left, right, progress } => {
+                let left = materialize_transition_source(
+                    left,
+                    prepared,
+                    request,
+                    compositor,
+                    runtime,
+                    device,
+                    queue,
+                    encoder,
+                    &mut diagnostics,
+                )?;
+                let right = materialize_transition_source(
+                    right,
+                    prepared,
+                    request,
+                    compositor,
+                    runtime,
+                    device,
+                    queue,
+                    encoder,
+                    &mut diagnostics,
+                )?;
+
+                let (output, opacity) = match (left, right) {
+                    (None, None) => continue,
+                    (Some(left), None) => (left, 1.0 - progress),
+                    (None, Some(right)) => (right, progress),
+                    (Some(left), Some(right)) => {
+                        let record = runtime
+                            .record_wgpu_cross_dissolve(
                                 compositor,
-                                effect_plan,
-                                materialized.output,
-                                request.program_output_boundary.engine.clone(),
-                                layer.frame_seed,
                                 device,
                                 queue,
                                 encoder,
-                            )?,
-                            None,
-                        )
-                    };
-                    prepared.layers.push(PreparedCompositeLayer {
-                        source: PreparedCompositeLayerSource::GpuFrame(index),
-                        opacity: layer.opacity,
-                        blend_mode: layer.blend_mode,
-                        transform: layer.transform,
-                        effect_plan: prepared_effect_plan,
-                        frame_seed: layer.frame_seed,
-                    });
-                }
-            }
-            ViewerGpuExecutionLayer::Adjustment {
-                effect_plan,
-                opacity,
-                blend_mode,
-                frame_seed,
-            } => {
-                prepared.layers.push(PreparedCompositeLayer {
-                    source: PreparedCompositeLayerSource::Adjustment,
-                    opacity: *opacity,
-                    blend_mode: *blend_mode,
-                    transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                    effect_plan: Some(effect_plan),
-                    frame_seed: *frame_seed,
-                });
+                                &left,
+                                &right,
+                                progress,
+                                request.working_color_space,
+                            )
+                            .map_err(ViewerGpuExecutionError::Transition)?;
+                        diagnostics.accumulate(record.diagnostics);
+                        (record.output, 1.0)
+                    }
+                };
+                layers.push(push_prepared_gpu_layer(prepared, output, opacity));
             }
         }
     }
 
-    Ok(prepared)
+    Ok((layers, diagnostics))
 }
 
-fn viewer_layer_has_zero_contribution(layer: &ViewerGpuExecutionLayer) -> bool {
-    let opacity = match layer {
-        ViewerGpuExecutionLayer::Media { opacity, .. }
-        | ViewerGpuExecutionLayer::Adjustment { opacity, .. } => *opacity,
-        ViewerGpuExecutionLayer::SolidColor { layer, .. } => layer.opacity,
+#[allow(clippy::too_many_arguments)]
+fn materialize_transition_source<'a>(
+    layer: Option<PreparedCompositeLayer<'a>>,
+    prepared: &PreparedComposite<'a>,
+    request: &ViewerGpuExecutionRequest<'a>,
+    compositor: &GpuFrameCompositor,
+    runtime: &mut RenderGpuOutputBoundaryRuntime,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    encoder: &mut wgpu::CommandEncoder,
+    diagnostics: &mut GpuCompositingDiagnostics,
+) -> Result<Option<GpuColorFrameHandle>, ViewerGpuExecutionError> {
+    let Some(layer) = layer else {
+        return Ok(None);
     };
-    opacity.clamp(0.0, 1.0) == 0.0
+    let gpu_layer = composite_layer(&layer, &prepared.gpu_input_handles);
+    let record = runtime
+        .record_wgpu_working_composite(
+            compositor,
+            device,
+            queue,
+            encoder,
+            GpuCompositeRequest {
+                width: request.width,
+                height: request.height,
+                working_color_space: request.working_color_space,
+                layers: std::slice::from_ref(&gpu_layer),
+            },
+        )
+        .map_err(ViewerGpuExecutionError::Transition)?;
+    diagnostics.accumulate(record.diagnostics);
+    Ok(Some(record.output))
+}
+
+fn push_prepared_gpu_layer<'a>(
+    prepared: &mut PreparedComposite<'a>,
+    output: GpuColorFrameHandle,
+    opacity: f32,
+) -> PreparedCompositeLayer<'a> {
+    let index = prepared.gpu_input_handles.len();
+    prepared.gpu_input_handles.push(output);
+    PreparedCompositeLayer {
+        source: PreparedCompositeLayerSource::GpuFrame(index),
+        opacity,
+        blend_mode: BlendMode::Normal,
+        transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        effect_plan: None,
+        frame_seed: 0,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1126,28 +1369,32 @@ fn composite_layers<'a>(
     layers: &'a [PreparedCompositeLayer<'a>],
     gpu_input_handles: &'a [GpuColorFrameHandle],
 ) -> Vec<GpuCompositeLayer<'a>> {
-    layers
-        .iter()
-        .map(|layer| GpuCompositeLayer {
-            source: match layer.source {
-                PreparedCompositeLayerSource::CpuFrame(frame) => {
-                    GpuCompositeLayerSource::CpuFrame(frame)
-                }
-                PreparedCompositeLayerSource::GpuFrame(index) => {
-                    GpuCompositeLayerSource::GpuFrame(&gpu_input_handles[index])
-                }
-                PreparedCompositeLayerSource::SolidColor(color) => {
-                    GpuCompositeLayerSource::SolidColor(color)
-                }
-                PreparedCompositeLayerSource::Adjustment => GpuCompositeLayerSource::Adjustment,
-            },
-            opacity: layer.opacity,
-            blend_mode: layer.blend_mode,
-            transform: layer.transform,
-            effect_plan: layer.effect_plan,
-            frame_seed: layer.frame_seed,
-        })
-        .collect()
+    layers.iter().map(|layer| composite_layer(layer, gpu_input_handles)).collect()
+}
+
+fn composite_layer<'a>(
+    layer: &PreparedCompositeLayer<'a>,
+    gpu_input_handles: &'a [GpuColorFrameHandle],
+) -> GpuCompositeLayer<'a> {
+    GpuCompositeLayer {
+        source: match layer.source {
+            PreparedCompositeLayerSource::CpuFrame(frame) => {
+                GpuCompositeLayerSource::CpuFrame(frame)
+            }
+            PreparedCompositeLayerSource::GpuFrame(index) => {
+                GpuCompositeLayerSource::GpuFrame(&gpu_input_handles[index])
+            }
+            PreparedCompositeLayerSource::SolidColor(color) => {
+                GpuCompositeLayerSource::SolidColor(color)
+            }
+            PreparedCompositeLayerSource::Adjustment => GpuCompositeLayerSource::Adjustment,
+        },
+        opacity: layer.opacity,
+        blend_mode: layer.blend_mode,
+        transform: layer.transform,
+        effect_plan: layer.effect_plan,
+        frame_seed: layer.frame_seed,
+    }
 }
 
 impl ViewerGpuExecutionResidency {
@@ -1434,7 +1681,7 @@ mod tests {
         let mut runtime =
             ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue);
         for timeline_frame in 7..10 {
-            let layer = ViewerGpuExecutionLayer::Media {
+            let layer = ViewerGpuExecutionLayer::Source(crate::ViewerGpuSourceLayer::Media {
                 frame: None,
                 gpu_source: Some(ViewerGpuMediaSource {
                     source: Arc::clone(&source),
@@ -1453,7 +1700,7 @@ mod tests {
                 transform: [0.5, 0.0, 1.0, 0.0, 0.5, 1.0],
                 effect_plan: Arc::clone(&effect_plan),
                 frame_seed: timeline_frame,
-            };
+            });
             let mut encoder =
                 context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("viewer-effect-domain-integration-resource-reuse"),
@@ -1525,7 +1772,7 @@ mod tests {
             color_space: WorkingColorSpace::LinearRec709,
             data: vec![[0.18, 0.08, 0.02, 1.0]; 16],
         });
-        let layer = ViewerGpuExecutionLayer::Media {
+        let layer = ViewerGpuExecutionLayer::Source(crate::ViewerGpuSourceLayer::Media {
             frame: Some(frame),
             gpu_source: None,
             native_source: None,
@@ -1533,7 +1780,7 @@ mod tests {
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan,
             frame_seed: 9,
-        };
+        });
         let output_boundary = RenderOutputColorBoundary::display(
             ColorSpace::Rec709,
             false,
@@ -1610,7 +1857,7 @@ mod tests {
             color_space: WorkingColorSpace::LinearRec709,
             data: vec![[0.18, 0.08, 0.02, 1.0]; 16],
         });
-        let layer = ViewerGpuExecutionLayer::Media {
+        let layer = ViewerGpuExecutionLayer::Source(crate::ViewerGpuSourceLayer::Media {
             frame: Some(frame),
             gpu_source: None,
             native_source: None,
@@ -1618,7 +1865,7 @@ mod tests {
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan,
             frame_seed: 9,
-        };
+        });
         let output_boundary = RenderOutputColorBoundary::display(
             ColorSpace::Rec709,
             false,
@@ -1693,7 +1940,7 @@ mod tests {
         .expect("valid display-domain graph");
         let effect_plan =
             Arc::new(lower_effect_graph_to_gpu_plan(&graph).expect("GPU effect plan"));
-        let layer = ViewerGpuExecutionLayer::SolidColor {
+        let layer = ViewerGpuExecutionLayer::Source(crate::ViewerGpuSourceLayer::SolidColor {
             layer: TimelineSolidColorLayer {
                 color: Color { r: 0.18, g: 0.08, b: 0.02, a: 0.75 },
                 opacity: 1.0,
@@ -1703,7 +1950,7 @@ mod tests {
                 frame_seed: 11,
             },
             effect_plan,
-        };
+        });
         let output_boundary = RenderOutputColorBoundary::display(
             ColorSpace::Rec709,
             false,
@@ -1765,7 +2012,7 @@ mod tests {
             .expect("valid scene-linear identity graph");
         let effect_plan =
             Arc::new(lower_effect_graph_to_gpu_plan(&graph).expect("GPU identity plan"));
-        let layer = ViewerGpuExecutionLayer::SolidColor {
+        let layer = ViewerGpuExecutionLayer::Source(crate::ViewerGpuSourceLayer::SolidColor {
             layer: TimelineSolidColorLayer {
                 color: Color { r: 0.18, g: 0.08, b: 0.02, a: 1.0 },
                 opacity: 1.0,
@@ -1775,7 +2022,7 @@ mod tests {
                 frame_seed: 0,
             },
             effect_plan,
-        };
+        });
         let output_boundary = RenderOutputColorBoundary::display(
             ColorSpace::Rec709,
             false,
@@ -1829,6 +2076,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn viewer_executes_cross_dissolve_as_one_typed_working_node() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping Viewer Cross Dissolve test: no GPU adapter available");
+            return;
+        };
+        let graph = get_or_compile_scheduled_render_graph(EffectGraphBuilderState::new().finish())
+            .expect("valid scene-linear identity graph");
+        let effect_plan =
+            Arc::new(lower_effect_graph_to_gpu_plan(&graph).expect("GPU identity plan"));
+        let source = |color, frame_seed| {
+            crate::ViewerGpuTransitionInput::Source(crate::ViewerGpuSourceLayer::SolidColor {
+                layer: TimelineSolidColorLayer {
+                    color,
+                    opacity: 1.0,
+                    blend_mode: BlendMode::Normal,
+                    transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    effect_graph: Arc::clone(&graph),
+                    frame_seed,
+                },
+                effect_plan: Arc::clone(&effect_plan),
+            })
+        };
+        let layer = ViewerGpuExecutionLayer::CrossDissolve {
+            left: source(Color { r: 1.0, g: 0.0, b: 0.0, a: 0.25 }, 7),
+            right: source(Color { r: 0.0, g: 0.0, b: 1.0, a: 0.75 }, 8),
+            progress: 0.4,
+        };
+        let output_boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let monitor_adaptation = RenderMonitorAdaptation::new(
+            ColorSpace::Rec709,
+            ColorSpace::Rec709,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("matching monitor adaptation");
+        let mut runtime =
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("viewer-cross-dissolve"),
+        });
+
+        let record = runtime
+            .record(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                ViewerGpuExecutionRequest {
+                    sequence_id: SequenceId::new(),
+                    timeline_frame: 8,
+                    width: 4,
+                    height: 4,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                    layers: &[layer],
+                    program_output_boundary: &output_boundary,
+                    monitor_adaptation: &monitor_adaptation,
+                    source_rect: ViewerSourceRect::FULL,
+                    output_width: 4,
+                    output_height: 4,
+                    output_precision: ViewerGpuOutputPrecision::Encoded8,
+                    display_calibration: None,
+                    program_scopes: None,
+                },
+            )
+            .expect("Viewer typed Cross Dissolve frame");
+        context.queue.submit(std::iter::once(encoder.finish()));
+
+        assert_eq!(record.compositing_diagnostics.gpu_cross_dissolve_passes, 1);
+        assert_eq!(record.residency.procedural_layers, 2);
+        assert_eq!(record.residency.cpu_upload_layers, 0);
+        assert_eq!(record.stage_diagnostics.readback_stages, 0);
+    }
+
+    #[tokio::test]
     async fn viewer_composite_to_program_output_matches_cpu_on_real_wgpu_device() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let Ok(context) = GpuContext::new().await else {
@@ -1850,7 +2174,7 @@ mod tests {
             false,
             ColorEngine::mondrian_standard(),
         );
-        let layer = ViewerGpuExecutionLayer::Media {
+        let layer = ViewerGpuExecutionLayer::Source(crate::ViewerGpuSourceLayer::Media {
             frame: None,
             gpu_source: Some(ViewerGpuMediaSource {
                 source: Arc::clone(&source),
@@ -1867,7 +2191,7 @@ mod tests {
                 lower_effect_graph_to_gpu_plan(&graph).expect("GPU identity plan"),
             ),
             frame_seed: 0,
-        };
+        });
         let boundary = RenderOutputColorBoundary::from_intent(
             crate::RenderOutputColorBoundaryTarget::Display,
             ColorSpace::Rec709,
@@ -1990,7 +2314,7 @@ mod tests {
             lower_effect_graph_to_gpu_plan(&adjustment_graph).expect("GPU adjustment plan"),
         );
         let layers = [
-            ViewerGpuExecutionLayer::SolidColor {
+            ViewerGpuExecutionLayer::Source(crate::ViewerGpuSourceLayer::SolidColor {
                 layer: TimelineSolidColorLayer {
                     color: Color { r: 0.18, g: 0.08, b: 0.02, a: 1.0 },
                     opacity: 1.0,
@@ -2000,7 +2324,7 @@ mod tests {
                     frame_seed: 0,
                 },
                 effect_plan: scene_plan,
-            },
+            }),
             ViewerGpuExecutionLayer::Adjustment {
                 effect_plan: adjustment_plan,
                 opacity: 0.6,

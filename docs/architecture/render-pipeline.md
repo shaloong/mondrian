@@ -110,16 +110,18 @@ must never imply alpha preservation, and setting alpha opaque after an encoded
 output transform is not a valid flatten operation.
 
 Cross Dissolve is a compositor operation, not two ordinary layers with reduced
-opacity. At its Track position, the compositor copies the same lower
-accumulator, composites each endpoint independently (including its own opacity,
-blend mode, transform, and Clip effect graph), then interpolates the two results
-in the scene-linear working space. RGB is associated with coverage for the
-interpolation and restored to the public straight-alpha contract afterward.
-This preserves transparent edges and endpoint blend semantics; sequential
-source-over layers would produce different and incorrect weights. Preview and
-Export consume this same plan and compositor operation. The current bounded GPU
-viewer plan reports `UnsupportedTransition` and takes the diagnosed CPU path;
-it never lowers the Transition to an approximate GPU opacity pair.
+opacity. At its Track position, the compositor prepares each endpoint
+independently (including its own opacity, transform, and Clip effect graph),
+then interpolates the two prepared results in the scene-linear working space.
+RGB is associated with coverage for the interpolation and restored to the
+public straight-alpha contract afterward. This preserves transparent edges and
+endpoint semantics; sequential source-over layers would produce different and
+incorrect weights. Preview and Export consume the same typed operation and CPU
+reference formula. The bounded Viewer GPU graph reuses the ordinary source
+preparation Interface for both Transition inputs, materializes those branches,
+and records one dedicated coverage-correct interpolation pass. A real-wgpu
+readback test compares that pass per channel with the shared CPU formula; GPU
+lowering must never substitute an approximate opacity pair.
 
 `LinearFloatSource` accepts either an external scene-linear `ColorSpace` or an
 internal `WorkingColorSpace`. Its frame descriptor preserves that role through
