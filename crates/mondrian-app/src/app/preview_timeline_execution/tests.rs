@@ -67,6 +67,75 @@ fn solid_plan_is_ui_independent_and_has_mandatory_cache_identity() {
 }
 
 #[test]
+fn preview_executes_cross_dissolve_through_shared_working_compositor() {
+    ensure_mondrian_default_ocio_loaded().expect("default OCIO");
+    let mut sequence = Sequence::new("preview Cross Dissolve");
+    let time_base = sequence.time_base();
+    let left = Clip::new_solid_color(
+        AssetId::new(),
+        Color::from_rgba8(255, 0, 0, 255),
+        tt(0, time_base),
+        tt(2, time_base),
+    )
+    .expect("left solid");
+    let right = Clip::new_solid_color(
+        AssetId::new(),
+        Color::from_rgba8(0, 0, 255, 255),
+        tt(2, time_base),
+        tt(2, time_base),
+    )
+    .expect("right solid");
+    let (left_id, right_id) = (left.id, right.id);
+    sequence.video_tracks[0].add_clip(left).expect("left placement");
+    sequence.video_tracks[0].add_clip(right).expect("right placement");
+    sequence
+        .video_transitions
+        .push(mondrian_timeline::VideoTransition::cross_dissolve(
+            left_id,
+            right_id,
+            mondrian_core::TimelineTimeRange::new(tt(1, time_base), tt(2, time_base))
+                .expect("transition range"),
+        ));
+    sequence.validate_author_identities().expect("valid author graph");
+    let target = Resolution { width: 1, height: 1 };
+    let context = color_context(&sequence);
+    let mut unexpected_media = |_| panic!("solid Transition must not request media");
+    let PreviewTimelineResolution::Ready(resolved) = resolve_preview_timeline(
+        &sequence,
+        &[],
+        2,
+        target,
+        PreviewResolutionScale::Full,
+        context.clone(),
+        &mut unexpected_media,
+    ) else {
+        panic!("Cross Dissolve must resolve");
+    };
+    assert!(matches!(
+        resolved.plan.elements.as_slice(),
+        [ResolvedPreviewElement::CrossDissolve { progress, .. }] if *progress == 0.5
+    ));
+    let mut scratch = TimelineCompositeScratch::default();
+    let output = composite_resolved_preview_working(
+        1,
+        1,
+        &resolved.plan.elements,
+        &resolved.plan.color_context,
+        &mut scratch,
+    )
+    .expect("Preview Cross Dissolve composite");
+    let pixel = output.frame.rgba_f32().data[0];
+    assert!((pixel[0] - 0.5).abs() < 1.0e-6, "unexpected red: {pixel:?}");
+    assert_eq!(pixel[1], 0.0);
+    assert!(
+        (pixel[2] - 0.5).abs() < 1.0e-6,
+        "unexpected blue: {pixel:?}"
+    );
+    assert_eq!(pixel[3], 1.0);
+    assert_eq!(output.composite_diagnostics.float_linear_composites, 1);
+}
+
+#[test]
 fn nested_sequence_uses_shared_recursion_and_emits_execution_facts() {
     ensure_mondrian_default_ocio_loaded().expect("default OCIO");
     let child = solid_sequence("child", Color::from_rgba8(48, 120, 220, 255));

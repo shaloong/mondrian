@@ -5,7 +5,7 @@ The intended render path is shared by preview and export:
 ```text
 TimelineEvaluationRequest
   -> Timeline Evaluation
-  -> FlatActiveClip
+  -> FlatVisualItem (Clip or two-input Transition)
   -> TimelineRenderPlan
   -> TimelineRenderPlanElement
   -> Clip Sampling / Generated Source
@@ -34,7 +34,7 @@ do not introduce a renderer-private tick scale.
 - preview/export resolution scale
 
 The result is a `TimelineRenderPlan` with ordered `TimelineRenderPlanElement`
-values plus diagnostics for active clips, emitted elements, zero-opacity skips,
+values plus diagnostics for active visual items, emitted elements, zero-opacity skips,
 and unrenderable skips.
 
 `collect_timeline_color_diagnostics(...)` reports the clip override, working
@@ -54,8 +54,18 @@ thumbnail, and analysis paths cannot accidentally share ambiguous defaults.
 - `Adjustment`
 - `SolidColor`
 - `NestedSequence`
+- `CrossDissolve`
 
 Each element carries opacity, blend mode, transforms where applicable, effect graph, frame seed, and color/media interpretation data.
+
+`CrossDissolve` contains two typed endpoint plans (`Media`, `SolidColor`,
+`NestedSequence`, or explicit transparent coverage) and one coefficient derived
+from exact elapsed/duration author time. Timeline evaluation replaces the two
+endpoint placements with this single Track-stack item, evaluates Clip effects
+and transforms independently for each endpoint, and never clamps a demanded
+source time to zero. Unknown plugin Transition definitions and unsupported
+built-in parameter payloads fail plan compilation instead of substituting a
+Cross Dissolve.
 
 Effect graph construction is part of render-plan evaluation and is fallible.
 An enabled effect with no executable definition, unavailable runtime, invalid
@@ -98,6 +108,18 @@ only for a validated alpha-capable codec/container contract, while
 transform. Codec selection alone
 must never imply alpha preservation, and setting alpha opaque after an encoded
 output transform is not a valid flatten operation.
+
+Cross Dissolve is a compositor operation, not two ordinary layers with reduced
+opacity. At its Track position, the compositor copies the same lower
+accumulator, composites each endpoint independently (including its own opacity,
+blend mode, transform, and Clip effect graph), then interpolates the two results
+in the scene-linear working space. RGB is associated with coverage for the
+interpolation and restored to the public straight-alpha contract afterward.
+This preserves transparent edges and endpoint blend semantics; sequential
+source-over layers would produce different and incorrect weights. Preview and
+Export consume this same plan and compositor operation. The current bounded GPU
+viewer plan reports `UnsupportedTransition` and takes the diagnosed CPU path;
+it never lowers the Transition to an approximate GPU opacity pair.
 
 `LinearFloatSource` accepts either an external scene-linear `ColorSpace` or an
 internal `WorkingColorSpace`. Its frame descriptor preserves that role through

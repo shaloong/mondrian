@@ -35,6 +35,24 @@ pub(crate) enum ResolvedPreviewElement {
         effect_graph: Arc<CompiledEffectGraph>,
         frame_seed: i64,
     },
+    CrossDissolve {
+        left: ResolvedPreviewTransitionInput,
+        right: ResolvedPreviewTransitionInput,
+        progress: f32,
+    },
+}
+
+pub(crate) enum ResolvedPreviewTransitionInput {
+    Transparent,
+    SolidColor(TimelineSolidColorLayer),
+    Media {
+        frame: MediaPreviewFrame,
+        opacity: f32,
+        blend_mode: BlendMode,
+        transform: [f32; 6],
+        effect_graph: Arc<CompiledEffectGraph>,
+        frame_seed: i64,
+    },
 }
 
 pub(crate) fn viewer_preview_cache_key_for_resolved_plan(
@@ -90,9 +108,46 @@ pub(crate) fn viewer_preview_cache_key_for_resolved_plan(
                 hash_transform(*transform, &mut hasher);
                 hash_effect_graph_signature(effect_graph, *frame_seed, &mut hasher);
             }
+            ResolvedPreviewElement::CrossDissolve { left, right, progress } => {
+                3u8.hash(&mut hasher);
+                hash_transition_input(left, &mut hasher);
+                hash_transition_input(right, &mut hasher);
+                progress.to_bits().hash(&mut hasher);
+            }
         }
     }
     PreviewOutputKey::new(sequence_id, width, height, hasher.finish())
+}
+
+fn hash_transition_input(input: &ResolvedPreviewTransitionInput, hasher: &mut impl Hasher) {
+    match input {
+        ResolvedPreviewTransitionInput::Transparent => 0u8.hash(hasher),
+        ResolvedPreviewTransitionInput::SolidColor(solid) => {
+            1u8.hash(hasher);
+            hash_color(solid.color, hasher);
+            solid.opacity.to_bits().hash(hasher);
+            solid.blend_mode.hash(hasher);
+            hash_transform(solid.transform, hasher);
+            hash_effect_graph_signature(&solid.effect_graph, solid.frame_seed, hasher);
+        }
+        ResolvedPreviewTransitionInput::Media {
+            frame,
+            opacity,
+            blend_mode,
+            transform,
+            effect_graph,
+            frame_seed,
+        } => {
+            2u8.hash(hasher);
+            frame.signature().hash(hasher);
+            frame.width().hash(hasher);
+            frame.height().hash(hasher);
+            opacity.to_bits().hash(hasher);
+            blend_mode.hash(hasher);
+            hash_transform(*transform, hasher);
+            hash_effect_graph_signature(effect_graph, *frame_seed, hasher);
+        }
+    }
 }
 
 fn hash_color(color: mondrian_core::Color, hasher: &mut impl Hasher) {
@@ -196,6 +251,9 @@ pub(crate) fn gpu_composite_layers_for_resolved(
                     frame_seed: layer.frame_seed,
                 });
             }
+            ResolvedPreviewElement::CrossDissolve { .. } => {
+                return Err(GpuCompositingBlockerReason::UnsupportedTransition);
+            }
         }
     }
     if layers.len() > 5 {
@@ -215,18 +273,31 @@ pub(crate) fn preview_elements_require_deferred_composite(
 pub(crate) fn resolved_preview_presentation_quality(
     resolved: &[ResolvedPreviewElement],
 ) -> FramePresentationQuality {
-    if resolved.iter().any(|element| {
-        matches!(
-            element,
-            ResolvedPreviewElement::Media { frame, .. }
-                if frame.presentation_quality()
-                    == FramePresentationQuality::Degraded
-        )
-    }) {
+    if resolved.iter().any(resolved_element_is_degraded) {
         FramePresentationQuality::Degraded
     } else {
         FramePresentationQuality::Ready
     }
+}
+
+fn resolved_element_is_degraded(element: &ResolvedPreviewElement) -> bool {
+    match element {
+        ResolvedPreviewElement::Media { frame, .. } => {
+            frame.presentation_quality() == FramePresentationQuality::Degraded
+        }
+        ResolvedPreviewElement::CrossDissolve { left, right, .. } => {
+            transition_input_is_degraded(left) || transition_input_is_degraded(right)
+        }
+        ResolvedPreviewElement::SolidColor(_) | ResolvedPreviewElement::Adjustment(_) => false,
+    }
+}
+
+fn transition_input_is_degraded(input: &ResolvedPreviewTransitionInput) -> bool {
+    matches!(
+        input,
+        ResolvedPreviewTransitionInput::Media { frame, .. }
+            if frame.presentation_quality() == FramePresentationQuality::Degraded
+    )
 }
 
 pub(crate) fn resolved_preview_decode_execution(
@@ -234,8 +305,18 @@ pub(crate) fn resolved_preview_decode_execution(
 ) -> PreviewDecodeExecutionSummary {
     let mut summary = PreviewDecodeExecutionSummary::default();
     for element in resolved {
-        if let ResolvedPreviewElement::Media { frame, .. } = element {
-            summary.accumulate(frame.decode_execution());
+        match element {
+            ResolvedPreviewElement::Media { frame, .. } => {
+                summary.accumulate(frame.decode_execution());
+            }
+            ResolvedPreviewElement::CrossDissolve { left, right, .. } => {
+                for input in [left, right] {
+                    if let ResolvedPreviewTransitionInput::Media { frame, .. } = input {
+                        summary.accumulate(frame.decode_execution());
+                    }
+                }
+            }
+            ResolvedPreviewElement::SolidColor(_) | ResolvedPreviewElement::Adjustment(_) => {}
         }
     }
     summary

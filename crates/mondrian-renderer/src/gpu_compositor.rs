@@ -217,6 +217,8 @@ pub enum GpuCompositingBlockerReason {
     FrameNotGpuResident,
     /// Too many layers for the bounded GPU composite path.
     TooManyLayers,
+    /// A typed two-input Transition has no GPU lowering yet.
+    UnsupportedTransition,
     /// GPU compositor is not initialized (device/queue unavailable).
     GpuUnavailable,
 }
@@ -230,6 +232,7 @@ impl GpuCompositingBlockerReason {
             Self::UnsupportedTransform => "unsupported_transform",
             Self::FrameNotGpuResident => "frame_not_gpu_resident",
             Self::TooManyLayers => "too_many_layers",
+            Self::UnsupportedTransition => "unsupported_transition",
             Self::GpuUnavailable => "gpu_unavailable",
         }
     }
@@ -244,6 +247,7 @@ impl GpuCompositingBlockerReason {
             Self::UnsupportedTransform => "Transform cannot be represented by GPU compositor",
             Self::FrameNotGpuResident => "Frame requires CPU-to-GPU upload before compositing",
             Self::TooManyLayers => "Too many layers for bounded GPU compositing",
+            Self::UnsupportedTransition => "Visual Transition has no GPU compositor lowering",
             Self::GpuUnavailable => "GPU device/queue not available for compositing",
         }
     }

@@ -5089,10 +5089,15 @@ colorspaces:
 
     #[test]
     fn ensure_ocio_loaded_is_idempotent() {
-        // Ensure config is loaded first.
-        ensure_mondrian_default_ocio_loaded().expect("load default config");
+        // Idempotence is defined while no different source is selected between
+        // the two calls. Hold the same operation lease used by production
+        // selection so unrelated parallel tests cannot switch the process-global
+        // OCIO config between the generation observations.
+        let _lease = lock_ocio_config_operation().expect("OCIO operation lease");
+        let source = mondrian_default_ocio_source();
+        ensure_ocio_loaded_locked(&source).expect("load default config");
         let gen1 = ocio_config_generation();
-        ensure_mondrian_default_ocio_loaded().expect("second load");
+        ensure_ocio_loaded_locked(&source).expect("second load");
         let gen2 = ocio_config_generation();
         assert_eq!(gen1, gen2, "repeated load should not change generation");
     }

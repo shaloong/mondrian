@@ -515,6 +515,18 @@ impl Clip {
         Ok(self.source_in.checked_add(source_local)?)
     }
 
+    /// Map one source-domain time back into this Clip's Sequence placement.
+    ///
+    /// This is used by source-handle admission to intersect an authored
+    /// Transition range with real media or nested-Sequence extents. A zero-rate
+    /// hold has no unique inverse and is rejected; callers handle it as a
+    /// constant sample after checking whether `source_in` exists.
+    pub fn source_to_timeline_time(&self, source_time: TimelineTime) -> Result<TimelineTime> {
+        let source_local = source_time.checked_sub(self.source_in)?;
+        let local = source_local.checked_scale(self.speed.scale().reciprocal()?)?;
+        Ok(self.position.checked_add(local)?)
+    }
+
     /// Fork placement-local audio edit identities for the right side of a razor.
     ///
     /// Processing definitions remain shared through their Scope IDs, while

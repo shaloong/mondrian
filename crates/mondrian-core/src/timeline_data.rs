@@ -4,13 +4,16 @@
 //!
 //! ## Architecture (P-ARCH2)
 //! - `mondrian-timeline` defines `Sequence`, `Track`, `Clip` and implements
-//!   `RenderPlanSource` to project them into `FlatActiveClip` slices.
+//!   `RenderPlanSource` to project them into ordered `FlatVisualItem` values.
 //! - `mondrian-renderer` consumes `&dyn RenderPlanSource` only, with zero
 //!   knowledge of `Sequence`/`Track`/`Clip`.
 
+use crate::automation::PropertyBag;
 use crate::effect_data::EffectNode;
 use crate::mask_data::MaskComponent;
-use crate::types::{AssetId, BlendMode, ClipId, Color, ColorSpace, Rational, SequenceId};
+use crate::types::{
+    AssetId, BlendMode, ClipId, Color, ColorSpace, Rational, SequenceId, VideoTransitionId,
+};
 use crate::{Result, TimelineTime};
 use serde::{Deserialize, Serialize};
 
@@ -309,6 +312,76 @@ pub struct FlatActiveClip {
     pub track_index: usize,
 }
 
+/// Timeline-agnostic identity of a two-input visual Transition definition.
+///
+/// The authoring crate owns endpoint geometry and persistence. The renderer
+/// receives only this closed execution-facing discriminator, so it does not
+/// need to depend on `Sequence` or author-model types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlatVideoTransitionDefinition {
+    /// Scene-linear, coverage-correct two-input Cross Dissolve.
+    CrossDissolve,
+    /// Recoverable author intent for an externally supplied definition.
+    Plugin { definition_id: String },
+}
+
+/// Exact progress coordinates for one Transition evaluation.
+///
+/// Keeping elapsed and duration exact until render-plan lowering avoids
+/// making a floating-point sample the cache or scheduling authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FlatTransitionProgress {
+    /// Exact elapsed Sequence time since the Transition range start.
+    pub elapsed: TimelineTime,
+    /// Exact non-zero Transition duration.
+    pub duration: TimelineTime,
+}
+
+impl FlatTransitionProgress {
+    /// Project exact author time to the normalized execution coefficient.
+    pub fn normalized(self) -> Option<f32> {
+        if self.duration <= TimelineTime::ZERO
+            || self.elapsed.is_negative()
+            || self.elapsed > self.duration
+        {
+            return None;
+        }
+        let normalized = self.elapsed.to_f64() / self.duration.to_f64();
+        normalized.is_finite().then_some(normalized as f32)
+    }
+}
+
+/// Flattened two-input visual Transition at one Sequence time.
+#[derive(Debug, Clone)]
+pub struct FlatVideoTransition {
+    /// Stable author identity for diagnostics and future execution caches.
+    pub transition_id: VideoTransitionId,
+    /// Built-in or external definition selected by the author.
+    pub definition: FlatVideoTransitionDefinition,
+    /// Earlier edit endpoint evaluated at the requested Sequence time.
+    pub left: FlatActiveClip,
+    /// Later edit endpoint evaluated at the requested Sequence time.
+    pub right: FlatActiveClip,
+    /// Exact normalized-progress source coordinates.
+    pub progress: FlatTransitionProgress,
+    /// Definition-described parameter state.
+    pub properties: PropertyBag,
+    /// Definition-specific non-parameter payload.
+    pub params: serde_json::Value,
+}
+
+/// One ordered visual item emitted by timeline semantic evaluation.
+///
+/// A Transition replaces its two endpoint placements at that track position;
+/// consumers must not independently composite those endpoints a second time.
+#[derive(Debug, Clone)]
+pub enum FlatVisualItem {
+    /// One ordinary active Clip.
+    Clip(FlatActiveClip),
+    /// One explicit two-input visual Transition.
+    Transition(Box<FlatVideoTransition>),
+}
+
 // ── Trait for render plan sources ─────────────────────────────────────
 
 /// Source of timeline data for building render plans.
@@ -316,8 +389,8 @@ pub struct FlatActiveClip {
 /// Implemented by `Sequence` in `mondrian-timeline`. The renderer only
 /// knows about this trait, never about `Sequence` itself.
 pub trait RenderPlanSource {
-    /// Return all active clips at a given time, flattened.
-    fn flat_active_clips_at(&self, time: TimelineTime) -> Result<Vec<FlatActiveClip>>;
+    /// Return the ordered visual program at a given time, flattened.
+    fn flat_visual_items_at(&self, time: TimelineTime) -> Result<Vec<FlatVisualItem>>;
 
     /// Time base of the sequence.
     fn source_time_base(&self) -> Rational;

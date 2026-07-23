@@ -203,6 +203,16 @@ pub(crate) fn capture_timeline_export_snapshot(
         &mut active_sequences,
         &mut asset_ids,
     )?;
+    state
+        .validate_video_transition_source_handles(&sequence)
+        .map_err(|error| error.to_string())?;
+    for nested in sequences.iter().filter(|candidate| {
+        candidate.id != sequence.id && visited_sequences.contains(&candidate.id)
+    }) {
+        state
+            .validate_video_transition_source_handles(nested)
+            .map_err(|error| error.to_string())?;
+    }
     let audio_component_ids =
         collect_reachable_media_audio_components(&sequence, &sequences, &visited_sequences);
 

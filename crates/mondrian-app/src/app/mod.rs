@@ -95,6 +95,7 @@ pub mod thumbnail_service;
 mod timeline_commands;
 mod timeline_editing;
 pub mod ui_actions;
+mod video_transitions;
 pub mod viewer_gpu_output_health;
 pub(crate) mod viewer_gpu_output_residency;
 pub mod waveform_service;
@@ -109,6 +110,7 @@ use proxy_generation::{
 };
 pub use selection::{SelectedClipRef, SelectedEffectRef, SelectedTrackRef};
 use timeline_editing::*;
+pub use video_transitions::{VideoTransitionEditOutcome, VideoTransitionHandlePolicy};
 
 #[derive(Debug, Clone)]
 pub struct DraggingAsset {

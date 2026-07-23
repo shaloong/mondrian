@@ -38,8 +38,10 @@ use mondrian_renderer::{
     RenderOutputColorBoundary, TimelineAdjustmentLayer, TimelineCompositeColorPathSummary,
     TimelineCompositeDiagnostics, TimelineCompositeDomainBlockerBreakdown,
     TimelineCompositeElement, TimelineCompositeLegacyBreakdown, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineEffectColorRuntime, TimelineEvaluationRequest,
-    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
+    TimelineCompositeScratch, TimelineCrossDissolveLayer, TimelineEffectColorRuntime,
+    TimelineEvaluationRequest, TimelineMediaLayer, TimelineMediaPlan, TimelineNestedSequencePlan,
+    TimelineRenderPlanElement, TimelineSolidColorLayer, TimelineTransitionInput,
+    TimelineTransitionInputPlan,
 };
 use mondrian_timeline::sequence::{
     ColorContext, DeliveryBitDepth, InputColorResolutionSourceCounts, ResolvedInputColor,
@@ -2213,6 +2215,21 @@ enum SequenceRenderTarget<'a> {
     Deliverable(&'a mut Vec<u8>),
 }
 
+enum ResolvedExportTransitionInput {
+    Transparent,
+    Decoded(Arc<DecodedVideoLayer>),
+    Nested(CpuColorFrame),
+    SolidColor,
+}
+
+type ExportDecodeCacheKey = (
+    AssetId,
+    TimelineTime,
+    ColorSpace,
+    DecodedVideoRangeContract,
+    AlphaInterpretation,
+);
+
 /// Collect input color-resolution source counts for one export timeline frame.
 ///
 /// This uses the same render-plan evaluation path as timeline export, including
@@ -2399,6 +2416,66 @@ fn export_sequence_input_color_resolution_counts(
             }
             TimelineRenderPlanElement::Adjustment(_) | TimelineRenderPlanElement::SolidColor(_) => {
             }
+            TimelineRenderPlanElement::CrossDissolve(transition) => {
+                counts.accumulate(export_transition_input_color_resolution_counts(
+                    timeline,
+                    &transition.left,
+                    color_context.clone(),
+                    depth,
+                )?);
+                counts.accumulate(export_transition_input_color_resolution_counts(
+                    timeline,
+                    &transition.right,
+                    color_context.clone(),
+                    depth,
+                )?);
+            }
+        }
+    }
+    Ok(counts)
+}
+
+fn export_transition_input_color_resolution_counts(
+    timeline: &TimelineExportSnapshot,
+    input: &TimelineTransitionInputPlan,
+    color_context: ColorContext,
+    depth: usize,
+) -> Result<InputColorResolutionSourceCounts, String> {
+    let mut counts = InputColorResolutionSourceCounts::default();
+    match input {
+        TimelineTransitionInputPlan::Transparent | TimelineTransitionInputPlan::SolidColor(_) => {}
+        TimelineTransitionInputPlan::Media(media) => {
+            let dependency = timeline
+                .media
+                .get(&media.asset_id)
+                .ok_or_else(|| format!("导出快照缺少素材依赖: {}", media.asset_id))?;
+            let resolution = color_context.missing_metadata_policy.resolve_asset_input_decision(
+                media.color_space_override,
+                dependency.interpretation,
+                dependency.detected_color_space,
+                color_context.working_color_space,
+            );
+            counts.record(resolution.source);
+        }
+        TimelineTransitionInputPlan::NestedSequence(nested) => {
+            let sequence = timeline
+                .sequences
+                .iter()
+                .find(|sequence| sequence.id == nested.sequence_id)
+                .ok_or_else(|| format!("嵌套序列不存在: {}", nested.sequence_id))?;
+            let frame = nested
+                .source_time
+                .to_frame_position(sequence.settings.frame_rate, FrameRounding::Floor)
+                .map_err(|error| error.to_string())?
+                .frame;
+            let nested_context = sequence.settings.nested_render_color_context(color_context);
+            counts.accumulate(export_sequence_input_color_resolution_counts(
+                timeline,
+                sequence,
+                frame,
+                nested_context,
+                depth + 1,
+            )?);
         }
     }
     Ok(counts)
@@ -2446,178 +2523,84 @@ fn render_sequence_frame_into(
         return Ok(());
     }
 
-    let mut decode_cache = (render_plan.len() > 1).then(|| {
-        HashMap::<
-            (
-                AssetId,
-                TimelineTime,
-                ColorSpace,
-                DecodedVideoRangeContract,
-                AlphaInterpretation,
-            ),
-            Arc<DecodedVideoLayer>,
-        >::with_capacity(render_plan.len())
-    });
+    let mut decode_cache = HashMap::<ExportDecodeCacheKey, Arc<DecodedVideoLayer>>::with_capacity(
+        render_plan.len().saturating_mul(2),
+    );
     let mut decoded_media =
         std::iter::repeat_with(|| None).take(render_plan.len()).collect::<Vec<_>>();
     let mut nested_media = std::iter::repeat_with(|| None)
         .take(render_plan.len())
         .collect::<Vec<Option<CpuColorFrame>>>();
+    let mut transition_inputs = std::iter::repeat_with(|| None)
+        .take(render_plan.len())
+        .collect::<Vec<Option<(ResolvedExportTransitionInput, ResolvedExportTransitionInput)>>>();
 
     for (index, element) in render_plan.elements.iter().enumerate() {
-        let TimelineRenderPlanElement::Media(media) = element else {
-            continue;
-        };
-        let dependency = timeline
-            .media
-            .get(&media.asset_id)
-            .ok_or_else(|| format!("导出快照缺少素材依赖: {}", media.asset_id))?;
-        let path = &dependency.path;
-        let detected_color_space = dependency.detected_color_space;
-        let asset_interpretation = dependency.interpretation;
-        let input_color_resolution =
-            color_context.missing_metadata_policy.resolve_asset_input_decision(
-                media.color_space_override,
-                asset_interpretation,
-                detected_color_space,
-                color_context.working_color_space,
-            );
-        if let Some(counts) = input_color_counts.as_deref_mut() {
-            counts.record(input_color_resolution.source);
-        }
-        let input_color_space = match input_color_resolution.resolved {
-            ResolvedInputColor::Color(color_space) => color_space,
-            ResolvedInputColor::Data | ResolvedInputColor::Rejected => {
-                return Err({
-                    let diagnostic = dependency
-                        .color_diagnostic
-                        .as_ref()
-                        .map(mondrian_media::VideoColorDiagnostic::summary)
-                        .unwrap_or_else(|| "unavailable".to_string());
-                    format!(
-                    "asset={} path={} missing color metadata rejected by sequence policy {:?}; resolution={:?} override={:?} detected={:?} working={:?}; {}",
-                    media.asset_id,
-                    path.display(),
-                    color_context.missing_metadata_policy,
-                    input_color_resolution.source,
-                    input_color_resolution.override_color_space,
-                    input_color_resolution.detected_color_space,
-                    input_color_resolution.working_color_space,
-                    diagnostic
-                )
-                })
-            }
-        };
-        let input_video_range =
-            resolve_export_input_video_range(timeline, media.asset_id, asset_interpretation);
-        let cache_key = (
-            media.asset_id,
-            media.source_time,
-            input_color_space,
-            input_video_range,
-            media.alpha_interpretation,
-        );
-        let decoded = if let Some(cache) = decode_cache.as_mut() {
-            if let Some(hit) = cache.get(&cache_key) {
-                Arc::clone(hit)
-            } else {
-                let decoded = decode_video_layer_scaled(
-                    media.asset_id,
-                    path.as_path(),
-                    input_color_space,
-                    input_video_range,
-                    media.alpha_interpretation,
-                    color_context.working_color_space,
-                    &color_context.engine,
-                    color_context.tone_map,
-                    media.source_time,
+        match element {
+            TimelineRenderPlanElement::Media(media) => {
+                decoded_media[index] = Some(decode_export_media_plan(
+                    timeline,
+                    media,
                     width,
                     height,
+                    &color_context,
+                    &mut decode_cache,
+                    input_color_counts.as_deref_mut(),
+                    stage_diagnostics.as_deref_mut(),
+                )?);
+            }
+            TimelineRenderPlanElement::CrossDissolve(transition) => {
+                let left = resolve_export_transition_input(
+                    timeline,
+                    &transition.left,
+                    width,
+                    height,
+                    &color_context,
+                    alpha_mode,
+                    depth,
+                    &mut decode_cache,
+                    input_color_counts.as_deref_mut(),
+                    stage_diagnostics.as_deref_mut(),
+                    composite_diagnostics.as_deref_mut(),
+                    export_diagnostics.as_deref_mut(),
                 )?;
-                if let Some(diagnostics) = stage_diagnostics.as_deref_mut() {
-                    diagnostics.accumulate(decoded.stage_diagnostics);
-                }
-                cache.insert(cache_key, Arc::clone(&decoded));
-                decoded
+                let right = resolve_export_transition_input(
+                    timeline,
+                    &transition.right,
+                    width,
+                    height,
+                    &color_context,
+                    alpha_mode,
+                    depth,
+                    &mut decode_cache,
+                    input_color_counts.as_deref_mut(),
+                    stage_diagnostics.as_deref_mut(),
+                    composite_diagnostics.as_deref_mut(),
+                    export_diagnostics.as_deref_mut(),
+                )?;
+                transition_inputs[index] = Some((left, right));
             }
-        } else {
-            let decoded = decode_video_layer_scaled(
-                media.asset_id,
-                path.as_path(),
-                input_color_space,
-                input_video_range,
-                media.alpha_interpretation,
-                color_context.working_color_space,
-                &color_context.engine,
-                color_context.tone_map,
-                media.source_time,
-                width,
-                height,
-            )?;
-            if let Some(diagnostics) = stage_diagnostics.as_deref_mut() {
-                diagnostics.accumulate(decoded.stage_diagnostics);
-            }
-            decoded
-        };
-        decoded_media[index] = Some(decoded);
+            TimelineRenderPlanElement::Adjustment(_)
+            | TimelineRenderPlanElement::SolidColor(_)
+            | TimelineRenderPlanElement::NestedSequence(_) => {}
+        }
     }
 
     for (index, element) in render_plan.elements.iter().enumerate() {
         let TimelineRenderPlanElement::NestedSequence(nested) = element else {
             continue;
         };
-        let Some(nested_sequence) =
-            timeline.sequences.iter().find(|sequence| sequence.id == nested.sequence_id)
-        else {
-            return Err(format!("嵌套序列不存在: {}", nested.sequence_id));
-        };
-        let nested_width = normalize_output_dimension(nested_sequence.settings.resolution.width);
-        let nested_height = normalize_output_dimension(nested_sequence.settings.resolution.height);
-        let nested_frame = nested
-            .source_time
-            .to_frame_position(nested_sequence.settings.frame_rate, FrameRounding::Floor)
-            .map_err(|error| error.to_string())?
-            .frame
-            .max(0);
-        let mut nested_frame_output = None;
-        let nested_context =
-            nested_sequence.settings.nested_render_color_context(color_context.clone());
-        render_sequence_frame_into(
+        nested_media[index] = Some(render_export_nested_plan(
             timeline,
-            nested_sequence,
-            nested_frame,
-            nested_width,
-            nested_height,
-            nested_context,
+            nested,
+            &color_context,
             alpha_mode,
-            SequenceRenderTarget::Working(&mut nested_frame_output),
-            depth + 1,
+            depth,
             input_color_counts.as_deref_mut(),
             stage_diagnostics.as_deref_mut(),
             composite_diagnostics.as_deref_mut(),
             export_diagnostics.as_deref_mut(),
-        )?;
-        let mut nested_frame = nested_frame_output.ok_or_else(|| {
-            format!(
-                "nested sequence produced no working frame: {}",
-                nested.sequence_id
-            )
-        })?;
-        if nested_frame.descriptor().color_space.working()
-            != Some(color_context.working_color_space)
-        {
-            let converted = execute_cpu_working_transform(
-                &nested_frame,
-                color_context.working_color_space,
-                color_context.engine.clone(),
-            )
-            .map_err(|err| format!("nested working-space transform failed: {err}"))?;
-            if let Some(diagnostics) = stage_diagnostics.as_deref_mut() {
-                diagnostics.accumulate(converted.stage_diagnostics);
-            }
-            nested_frame = converted.result.frame;
-        }
-        nested_media[index] = Some(nested_frame);
+        )?);
     }
 
     let mut composite_elements = Vec::with_capacity(render_plan.len());
@@ -2634,9 +2617,9 @@ fn render_sequence_frame_into(
                 ));
             }
             TimelineRenderPlanElement::Media(media) => {
-                let Some(decoded) = decoded_media[index].as_ref() else {
-                    continue;
-                };
+                let decoded = decoded_media[index]
+                    .as_ref()
+                    .ok_or_else(|| "media plan was not resolved before compositing".to_owned())?;
                 composite_elements.push(TimelineCompositeElement::Media(TimelineMediaLayer {
                     frame: &decoded.frame,
                     opacity: media.opacity,
@@ -2647,9 +2630,9 @@ fn render_sequence_frame_into(
                 }));
             }
             TimelineRenderPlanElement::NestedSequence(nested) => {
-                let Some(frame) = nested_media[index].as_ref() else {
-                    continue;
-                };
+                let frame = nested_media[index].as_ref().ok_or_else(|| {
+                    "nested-Sequence plan was not resolved before compositing".to_owned()
+                })?;
                 composite_elements.push(TimelineCompositeElement::Media(TimelineMediaLayer {
                     frame,
                     opacity: nested.opacity,
@@ -2668,6 +2651,18 @@ fn render_sequence_frame_into(
                         transform: solid.transform,
                         effect_graph: solid.effect_graph.clone(),
                         frame_seed: solid.frame_seed,
+                    },
+                ));
+            }
+            TimelineRenderPlanElement::CrossDissolve(transition) => {
+                let Some((left, right)) = transition_inputs[index].as_ref() else {
+                    return Err("Cross Dissolve inputs were not resolved".to_owned());
+                };
+                composite_elements.push(TimelineCompositeElement::CrossDissolve(
+                    TimelineCrossDissolveLayer {
+                        left: lower_export_transition_input(&transition.left, left)?,
+                        right: lower_export_transition_input(&transition.right, right)?,
+                        progress: transition.progress,
                     },
                 ));
             }
@@ -2794,6 +2789,246 @@ fn render_sequence_frame_into(
     canvas.clear();
     canvas.extend_from_slice(&final_bytes);
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_export_media_plan(
+    timeline: &TimelineExportSnapshot,
+    media: &TimelineMediaPlan,
+    width: u32,
+    height: u32,
+    color_context: &ColorContext,
+    cache: &mut HashMap<ExportDecodeCacheKey, Arc<DecodedVideoLayer>>,
+    input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
+    stage_diagnostics: Option<&mut RenderColorStageDiagnostics>,
+) -> Result<Arc<DecodedVideoLayer>, String> {
+    let dependency = timeline
+        .media
+        .get(&media.asset_id)
+        .ok_or_else(|| format!("导出快照缺少素材依赖: {}", media.asset_id))?;
+    let input_color_resolution =
+        color_context.missing_metadata_policy.resolve_asset_input_decision(
+            media.color_space_override,
+            dependency.interpretation,
+            dependency.detected_color_space,
+            color_context.working_color_space,
+        );
+    if let Some(counts) = input_color_counts {
+        counts.record(input_color_resolution.source);
+    }
+    let input_color_space = match input_color_resolution.resolved {
+        ResolvedInputColor::Color(color_space) => color_space,
+        ResolvedInputColor::Data | ResolvedInputColor::Rejected => {
+            let diagnostic = dependency
+                .color_diagnostic
+                .as_ref()
+                .map(mondrian_media::VideoColorDiagnostic::summary)
+                .unwrap_or_else(|| "unavailable".to_string());
+            return Err(format!(
+                "asset={} path={} missing color metadata rejected by sequence policy {:?}; resolution={:?} override={:?} detected={:?} working={:?}; {}",
+                media.asset_id,
+                dependency.path.display(),
+                color_context.missing_metadata_policy,
+                input_color_resolution.source,
+                input_color_resolution.override_color_space,
+                input_color_resolution.detected_color_space,
+                input_color_resolution.working_color_space,
+                diagnostic
+            ));
+        }
+    };
+    let input_video_range =
+        resolve_export_input_video_range(timeline, media.asset_id, dependency.interpretation);
+    let key = (
+        media.asset_id,
+        media.source_time,
+        input_color_space,
+        input_video_range,
+        media.alpha_interpretation,
+    );
+    if let Some(decoded) = cache.get(&key) {
+        return Ok(Arc::clone(decoded));
+    }
+    let decoded = decode_video_layer_scaled(
+        media.asset_id,
+        dependency.path.as_path(),
+        input_color_space,
+        input_video_range,
+        media.alpha_interpretation,
+        color_context.working_color_space,
+        &color_context.engine,
+        color_context.tone_map,
+        media.source_time,
+        width,
+        height,
+    )?;
+    if let Some(diagnostics) = stage_diagnostics {
+        diagnostics.accumulate(decoded.stage_diagnostics);
+    }
+    cache.insert(key, Arc::clone(&decoded));
+    Ok(decoded)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_export_nested_plan(
+    timeline: &TimelineExportSnapshot,
+    nested: &TimelineNestedSequencePlan,
+    parent_color_context: &ColorContext,
+    alpha_mode: ExportAlphaMode,
+    depth: usize,
+    input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
+    mut stage_diagnostics: Option<&mut RenderColorStageDiagnostics>,
+    composite_diagnostics: Option<&mut TimelineCompositeDiagnostics>,
+    export_diagnostics: Option<&mut ExportJobColorDiagnostics>,
+) -> Result<CpuColorFrame, String> {
+    let sequence = timeline
+        .sequences
+        .iter()
+        .find(|sequence| sequence.id == nested.sequence_id)
+        .ok_or_else(|| format!("嵌套序列不存在: {}", nested.sequence_id))?;
+    let width = normalize_output_dimension(sequence.settings.resolution.width);
+    let height = normalize_output_dimension(sequence.settings.resolution.height);
+    let frame = nested
+        .source_time
+        .to_frame_position(sequence.settings.frame_rate, FrameRounding::Floor)
+        .map_err(|error| error.to_string())?
+        .frame;
+    if frame < 0 {
+        return Err(format!(
+            "nested Sequence {} has insufficient source handle for target {}",
+            nested.sequence_id, nested.source_time
+        ));
+    }
+    let mut output = None;
+    let nested_context =
+        sequence.settings.nested_render_color_context(parent_color_context.clone());
+    render_sequence_frame_into(
+        timeline,
+        sequence,
+        frame,
+        width,
+        height,
+        nested_context,
+        alpha_mode,
+        SequenceRenderTarget::Working(&mut output),
+        depth + 1,
+        input_color_counts,
+        stage_diagnostics.as_deref_mut(),
+        composite_diagnostics,
+        export_diagnostics,
+    )?;
+    let mut frame = output.ok_or_else(|| {
+        format!(
+            "nested sequence produced no working frame: {}",
+            nested.sequence_id
+        )
+    })?;
+    if frame.descriptor().color_space.working() != Some(parent_color_context.working_color_space) {
+        let converted = execute_cpu_working_transform(
+            &frame,
+            parent_color_context.working_color_space,
+            parent_color_context.engine.clone(),
+        )
+        .map_err(|error| format!("nested working-space transform failed: {error}"))?;
+        if let Some(diagnostics) = stage_diagnostics {
+            diagnostics.accumulate(converted.stage_diagnostics);
+        }
+        frame = converted.result.frame;
+    }
+    Ok(frame)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_export_transition_input(
+    timeline: &TimelineExportSnapshot,
+    input: &TimelineTransitionInputPlan,
+    width: u32,
+    height: u32,
+    color_context: &ColorContext,
+    alpha_mode: ExportAlphaMode,
+    depth: usize,
+    decode_cache: &mut HashMap<ExportDecodeCacheKey, Arc<DecodedVideoLayer>>,
+    input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
+    stage_diagnostics: Option<&mut RenderColorStageDiagnostics>,
+    composite_diagnostics: Option<&mut TimelineCompositeDiagnostics>,
+    export_diagnostics: Option<&mut ExportJobColorDiagnostics>,
+) -> Result<ResolvedExportTransitionInput, String> {
+    Ok(match input {
+        TimelineTransitionInputPlan::Transparent => ResolvedExportTransitionInput::Transparent,
+        TimelineTransitionInputPlan::SolidColor(_) => ResolvedExportTransitionInput::SolidColor,
+        TimelineTransitionInputPlan::Media(media) => {
+            ResolvedExportTransitionInput::Decoded(decode_export_media_plan(
+                timeline,
+                media,
+                width,
+                height,
+                color_context,
+                decode_cache,
+                input_color_counts,
+                stage_diagnostics,
+            )?)
+        }
+        TimelineTransitionInputPlan::NestedSequence(nested) => {
+            ResolvedExportTransitionInput::Nested(render_export_nested_plan(
+                timeline,
+                nested,
+                color_context,
+                alpha_mode,
+                depth,
+                input_color_counts,
+                stage_diagnostics,
+                composite_diagnostics,
+                export_diagnostics,
+            )?)
+        }
+    })
+}
+
+fn lower_export_transition_input<'a>(
+    plan: &'a TimelineTransitionInputPlan,
+    resolved: &'a ResolvedExportTransitionInput,
+) -> Result<TimelineTransitionInput<'a>, String> {
+    Ok(match (plan, resolved) {
+        (TimelineTransitionInputPlan::Transparent, ResolvedExportTransitionInput::Transparent) => {
+            TimelineTransitionInput::Transparent
+        }
+        (
+            TimelineTransitionInputPlan::Media(media),
+            ResolvedExportTransitionInput::Decoded(frame),
+        ) => TimelineTransitionInput::Media(TimelineMediaLayer {
+            frame: &frame.frame,
+            opacity: media.opacity,
+            blend_mode: media.blend_mode,
+            transform: media.transform,
+            effect_graph: media.effect_graph.clone(),
+            frame_seed: media.frame_seed,
+        }),
+        (
+            TimelineTransitionInputPlan::NestedSequence(nested),
+            ResolvedExportTransitionInput::Nested(frame),
+        ) => TimelineTransitionInput::Media(TimelineMediaLayer {
+            frame,
+            opacity: nested.opacity,
+            blend_mode: nested.blend_mode,
+            transform: nested.transform,
+            effect_graph: nested.effect_graph.clone(),
+            frame_seed: nested.frame_seed,
+        }),
+        (
+            TimelineTransitionInputPlan::SolidColor(solid),
+            ResolvedExportTransitionInput::SolidColor,
+        ) => TimelineTransitionInput::SolidColor(TimelineSolidColorLayer {
+            color: solid.color,
+            opacity: solid.opacity,
+            blend_mode: solid.blend_mode,
+            transform: solid.transform,
+            effect_graph: solid.effect_graph.clone(),
+            frame_seed: solid.frame_seed,
+        }),
+        _ => {
+            return Err("Transition plan and resolved input diverged before compositing".to_owned())
+        }
+    })
 }
 
 fn resolve_export_input_video_range(
@@ -3895,6 +4130,79 @@ mod tests {
         assert_eq!(canvas.len(), 2 * 2 * 4);
         assert_eq!(diagnostics.output_transform_issues, 0);
         assert_eq!(diagnostics.output_transform_issue_reasons.total(), 0);
+    }
+
+    #[test]
+    fn export_executes_cross_dissolve_through_shared_working_compositor() {
+        let mut sequence = Sequence::new("export Cross Dissolve");
+        let time_base = sequence.time_base();
+        let left = Clip::new_solid_color(
+            AssetId::new(),
+            mondrian_core::Color::from_rgba8(255, 0, 0, 255),
+            tt(0, time_base),
+            tt(2, time_base),
+        )
+        .expect("left solid");
+        let right = Clip::new_solid_color(
+            AssetId::new(),
+            mondrian_core::Color::from_rgba8(0, 0, 255, 255),
+            tt(2, time_base),
+            tt(2, time_base),
+        )
+        .expect("right solid");
+        let (left_id, right_id) = (left.id, right.id);
+        sequence.video_tracks[0].add_clip(left).expect("left placement");
+        sequence.video_tracks[0].add_clip(right).expect("right placement");
+        sequence
+            .video_transitions
+            .push(mondrian_timeline::VideoTransition::cross_dissolve(
+                left_id,
+                right_id,
+                mondrian_core::TimelineTimeRange::new(tt(1, time_base), tt(2, time_base))
+                    .expect("transition range"),
+            ));
+        sequence.validate_author_identities().expect("valid author graph");
+        let color_context = sequence
+            .settings
+            .root_program_color_context(&mondrian_core::ProjectColorManagement::default());
+        let timeline = TimelineExportSnapshot {
+            sequence,
+            sequences: Vec::new(),
+            media: HashMap::new(),
+            range: TimelineExportRange::SequenceInOut,
+            project_color_management: mondrian_core::ProjectColorManagement::default(),
+        };
+        let mut output = None;
+        let mut composite_diagnostics = TimelineCompositeDiagnostics::default();
+
+        render_sequence_frame_into(
+            &timeline,
+            &timeline.sequence,
+            2,
+            1,
+            1,
+            color_context,
+            ExportAlphaMode::Preserve,
+            SequenceRenderTarget::Working(&mut output),
+            0,
+            None,
+            None,
+            Some(&mut composite_diagnostics),
+            None,
+        )
+        .expect("render Cross Dissolve");
+
+        let frame = output.expect("working output");
+        let pixel = frame.rgba_f32().data[0];
+        assert!((pixel[0] - 0.5).abs() < 1.0e-6, "unexpected red: {pixel:?}");
+        assert_eq!(pixel[1], 0.0);
+        assert!(
+            (pixel[2] - 0.5).abs() < 1.0e-6,
+            "unexpected blue: {pixel:?}"
+        );
+        assert_eq!(pixel[3], 1.0);
+        assert_eq!(composite_diagnostics.float_linear_composites, 1);
+        assert_eq!(composite_diagnostics.legacy_rgba8_composites, 0);
     }
 
     #[test]

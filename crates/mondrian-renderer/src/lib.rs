@@ -205,15 +205,17 @@ pub use timeline_composite::{
     TimelineCompositeDiagnostics, TimelineCompositeDomainBlockerBreakdown,
     TimelineCompositeElement, TimelineCompositeError, TimelineCompositeFrame,
     TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineEffectColorRuntime, TimelineMediaLayer, TimelineSolidColorLayer,
+    TimelineCrossDissolveLayer, TimelineEffectColorRuntime, TimelineMediaLayer,
+    TimelineSolidColorLayer, TimelineTransitionInput,
 };
 pub use timeline_render_plan::{
     collect_timeline_color_diagnostics, collect_timeline_color_diagnostics_with_display_view,
     evaluate_timeline_render_plan, mat3_to_affine, project_affine_to_sampled_extents,
-    TimelineAdjustmentPlan, TimelineColorDiagnostic, TimelineEvaluationDiagnostics,
-    TimelineEvaluationRequest, TimelineMediaPlan, TimelineNestedSequencePlan,
-    TimelineRenderColorTarget, TimelineRenderIntent, TimelineRenderPlan, TimelineRenderPlanElement,
-    TimelineRenderQuality, TimelineRenderSettings, TimelineSolidColorPlan,
+    TimelineAdjustmentPlan, TimelineColorDiagnostic, TimelineCrossDissolvePlan,
+    TimelineEvaluationDiagnostics, TimelineEvaluationRequest, TimelineMediaPlan,
+    TimelineNestedSequencePlan, TimelineRenderColorTarget, TimelineRenderIntent,
+    TimelineRenderPlan, TimelineRenderPlanElement, TimelineRenderQuality, TimelineRenderSettings,
+    TimelineSolidColorPlan, TimelineTransitionInputPlan,
 };
 pub use viewer_execution::{
     native_source_texture_format_from_decoded, native_video_sampling_from_decoded,

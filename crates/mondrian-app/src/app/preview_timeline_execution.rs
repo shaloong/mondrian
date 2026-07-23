@@ -18,6 +18,7 @@ use mondrian_renderer::{
     RenderColorStageDiagnostics, RenderColorTransformDiagnostics, TimelineAdjustmentLayer,
     TimelineCompositeDiagnostics, TimelineCompositeScratch, TimelineEvaluationRequest,
     TimelineMediaPlan, TimelineRenderPlan, TimelineRenderPlanElement, TimelineSolidColorLayer,
+    TimelineTransitionInputPlan,
 };
 use mondrian_timeline::sequence::{ColorContext, Sequence, MAX_NESTED_SEQUENCE_RENDER_DEPTH};
 
@@ -31,6 +32,7 @@ use super::preview_unavailability::{PreviewOutputStage, PreviewUnavailability};
 use super::preview_viewer_plan::{
     resolved_preview_decode_execution, resolved_preview_presentation_quality,
     viewer_preview_cache_key_for_resolved_plan, ResolvedPreviewElement,
+    ResolvedPreviewTransitionInput,
 };
 
 /// Complete media-layer request emitted by canonical Timeline traversal.
@@ -253,6 +255,26 @@ fn collect_sequence_media_demands(
             }
             TimelineRenderPlanElement::SolidColor(_) | TimelineRenderPlanElement::Adjustment(_) => {
             }
+            TimelineRenderPlanElement::CrossDissolve(transition) => {
+                collect_transition_input_media_demands(
+                    graph,
+                    sequence,
+                    &transition.left,
+                    target_resolution,
+                    depth,
+                    color_context.clone(),
+                    demands,
+                )?;
+                collect_transition_input_media_demands(
+                    graph,
+                    sequence,
+                    &transition.right,
+                    target_resolution,
+                    depth,
+                    color_context.clone(),
+                    demands,
+                )?;
+            }
         }
     }
     Ok(())
@@ -390,9 +412,175 @@ where
                     frame_seed: nested.frame_seed,
                 });
             }
+            TimelineRenderPlanElement::CrossDissolve(transition) => {
+                let left = resolve_transition_input(
+                    execution,
+                    sequence,
+                    transition.left,
+                    target_resolution,
+                    depth,
+                    color_context.clone(),
+                )?;
+                let right = resolve_transition_input(
+                    execution,
+                    sequence,
+                    transition.right,
+                    target_resolution,
+                    depth,
+                    color_context.clone(),
+                )?;
+                resolved.push(ResolvedPreviewElement::CrossDissolve {
+                    left,
+                    right,
+                    progress: transition.progress,
+                });
+            }
         }
     }
     Ok(Some(resolved))
+}
+
+fn collect_transition_input_media_demands(
+    graph: PreviewTimelineGraph<'_>,
+    _parent_sequence: &Sequence,
+    input: &TimelineTransitionInputPlan,
+    target_resolution: Resolution,
+    depth: usize,
+    color_context: ColorContext,
+    demands: &mut Vec<PreviewTimelineMediaRequest>,
+) -> Result<(), PreviewUnavailability> {
+    match input {
+        TimelineTransitionInputPlan::Transparent | TimelineTransitionInputPlan::SolidColor(_) => {}
+        TimelineTransitionInputPlan::Media(media) => demands.push(preview_timeline_media_request(
+            media,
+            target_resolution,
+            &color_context,
+        )),
+        TimelineTransitionInputPlan::NestedSequence(nested) => {
+            let child = graph.nested(nested.sequence_id, &color_context)?;
+            let child_frame = nested_sequence_frame(nested.source_time, child.sequence)?;
+            collect_sequence_media_demands(
+                graph,
+                child.sequence,
+                child_frame,
+                child.target_resolution,
+                depth + 1,
+                child.color_context,
+                demands,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_transition_input<MediaFrame>(
+    execution: &mut PreviewTimelineExecutionContext<'_, MediaFrame>,
+    parent_sequence: &Sequence,
+    input: TimelineTransitionInputPlan,
+    target_resolution: Resolution,
+    depth: usize,
+    color_context: ColorContext,
+) -> Result<ResolvedPreviewTransitionInput, PreviewTimelineAbort>
+where
+    MediaFrame: FnMut(PreviewTimelineMediaRequest) -> PreviewTimelineMediaFrame,
+{
+    Ok(match input {
+        TimelineTransitionInputPlan::Transparent => ResolvedPreviewTransitionInput::Transparent,
+        TimelineTransitionInputPlan::SolidColor(solid) => {
+            ResolvedPreviewTransitionInput::SolidColor(TimelineSolidColorLayer {
+                color: solid.color,
+                opacity: solid.opacity,
+                blend_mode: solid.blend_mode,
+                transform: solid.transform,
+                effect_graph: solid.effect_graph,
+                frame_seed: solid.frame_seed,
+            })
+        }
+        TimelineTransitionInputPlan::Media(media) => {
+            let asset_id = media.asset_id;
+            let request = preview_timeline_media_request(&media, target_resolution, &color_context);
+            let frame = match (execution.media_frame)(request) {
+                PreviewTimelineMediaFrame::Ready(frame) => frame,
+                PreviewTimelineMediaFrame::Pending => {
+                    return Err(PreviewTimelineAbort::Pending { asset_id });
+                }
+                PreviewTimelineMediaFrame::Unavailable { reason } => {
+                    return Err(PreviewTimelineAbort::Unavailable(
+                        reason.with_context(format_args!("Transition media {asset_id}")),
+                    ));
+                }
+            };
+            let transform = project_preview_media_transform(
+                media.transform,
+                &frame,
+                parent_sequence.settings.resolution,
+                target_resolution,
+            )
+            .ok_or_else(|| {
+                PreviewTimelineAbort::Unavailable(PreviewUnavailability::blocked(
+                    PreviewOutputStage::TimelineEvaluation,
+                    format!("Transition media {asset_id} has invalid Preview transform geometry"),
+                ))
+            })?;
+            ResolvedPreviewTransitionInput::Media {
+                frame,
+                opacity: media.opacity,
+                blend_mode: media.blend_mode,
+                transform,
+                effect_graph: media.effect_graph,
+                frame_seed: media.frame_seed,
+            }
+        }
+        TimelineTransitionInputPlan::NestedSequence(nested) => {
+            let graph = execution.graph;
+            let child = graph
+                .nested(nested.sequence_id, &color_context)
+                .map_err(PreviewTimelineAbort::Unavailable)?;
+            let child_frame = nested_sequence_frame(nested.source_time, child.sequence)
+                .map_err(PreviewTimelineAbort::Unavailable)?;
+            let child_elements = resolve_sequence_elements(
+                execution,
+                child.sequence,
+                child_frame,
+                child.target_resolution,
+                depth + 1,
+                child.color_context.clone(),
+            )?
+            .unwrap_or_default();
+            let frame = render_nested_sequence(
+                child.sequence,
+                child_frame,
+                child.target_resolution,
+                color_context.working_color_space,
+                child.color_context,
+                child_elements,
+                &mut execution.facts,
+            )?;
+            let transform = project_preview_media_transform(
+                nested.transform,
+                &frame,
+                parent_sequence.settings.resolution,
+                target_resolution,
+            )
+            .ok_or_else(|| {
+                PreviewTimelineAbort::Unavailable(PreviewUnavailability::blocked(
+                    PreviewOutputStage::TimelineEvaluation,
+                    format!(
+                        "nested Transition input {} has invalid Preview transform geometry",
+                        nested.sequence_id
+                    ),
+                ))
+            })?;
+            ResolvedPreviewTransitionInput::Media {
+                frame,
+                opacity: nested.opacity,
+                blend_mode: nested.blend_mode,
+                transform,
+                effect_graph: nested.effect_graph,
+                frame_seed: nested.frame_seed,
+            }
+        }
+    })
 }
 
 fn render_nested_sequence(
@@ -495,9 +683,8 @@ fn nested_sequence_frame(
     source_time: TimelineTime,
     sequence: &Sequence,
 ) -> Result<i64, PreviewUnavailability> {
-    source_time
+    let frame = source_time
         .to_frame_position(sequence.settings.frame_rate, FrameRounding::Floor)
-        .map(|position| position.frame.max(0))
         .map_err(|error| {
             PreviewUnavailability::blocked(
                 PreviewOutputStage::TimelineEvaluation,
@@ -506,7 +693,18 @@ fn nested_sequence_frame(
                     sequence.id
                 ),
             )
-        })
+        })?
+        .frame;
+    if frame < 0 {
+        return Err(PreviewUnavailability::blocked(
+            PreviewOutputStage::TimelineEvaluation,
+            format!(
+                "nested Sequence {} has insufficient source handle for target {source_time}",
+                sequence.id
+            ),
+        ));
+    }
+    Ok(frame)
 }
 
 fn validate_nested_depth(sequence: &Sequence, depth: usize) -> Result<(), PreviewUnavailability> {

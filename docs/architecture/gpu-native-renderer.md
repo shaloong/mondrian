@@ -310,6 +310,14 @@ Media affine transforms (translate, scale, rotate, and non-singular shear) are
 inverse-sampled in that same GPU pass for both uploaded and native-decoder GPU
 working frames, so ordinary clip transforms do not introduce a readback.
 
+Typed two-input visual Transitions are not decomposed into ordinary GPU layers.
+Until the composite graph owns a dedicated two-branch working-linear pass with
+coverage-correct interpolation, Viewer lowering returns
+`GpuCompositingBlockerReason::UnsupportedTransition` and executes the shared CPU
+reference compositor. This is an explicit performance fallback, not a semantic
+fallback: Preview and Export still consume the same `CrossDissolve` render-plan
+operation and cannot silently approximate it with two source-over opacities.
+
 The first native subset is a bounded single-source chain of ColorAdjust,
 WhiteBalance, Vignette, and deterministic Grain. Unsupported topology, spatial
 sampling, LUT resources, and custom operations remain explicit lowering

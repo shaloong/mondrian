@@ -19,6 +19,13 @@ use std::{
     sync::Arc,
 };
 
+mod transition;
+use transition::{
+    composite_transition_input_f32, composite_transition_input_rgba8,
+    cross_dissolve_straight_rgba8, cross_dissolve_straight_rgba_f32, diagnose_transition_input,
+};
+pub use transition::{TimelineCrossDissolveLayer, TimelineTransitionInput};
+
 #[derive(Debug, Clone)]
 pub struct TimelineMediaLayer<'a> {
     pub frame: &'a CpuColorFrame,
@@ -52,6 +59,7 @@ pub enum TimelineCompositeElement<'a> {
     Media(TimelineMediaLayer<'a>),
     Adjustment(TimelineAdjustmentLayer),
     SolidColor(TimelineSolidColorLayer),
+    CrossDissolve(TimelineCrossDissolveLayer<'a>),
 }
 
 /// Initial coverage behind a timeline composite.
@@ -619,6 +627,28 @@ fn composite_supported_elements_to_working_frame(
                     runtime,
                 )?;
             }
+            TimelineCompositeElement::CrossDissolve(transition) => {
+                let mut left = canvas.clone();
+                composite_transition_input_f32(
+                    &mut left,
+                    width,
+                    height,
+                    &transition.left,
+                    runtime,
+                    scratch,
+                )?;
+                let mut right = canvas.clone();
+                composite_transition_input_f32(
+                    &mut right,
+                    width,
+                    height,
+                    &transition.right,
+                    runtime,
+                    scratch,
+                )?;
+                cross_dissolve_straight_rgba_f32(&mut canvas, &left, &right, transition.progress);
+                has_composited_layer = true;
+            }
         }
     }
 
@@ -747,6 +777,11 @@ pub fn composite_path_diagnostics(
                         )
                         .is_err(),
                     ));
+            }
+            TimelineCompositeElement::CrossDissolve(transition) => {
+                diagnose_transition_input(&transition.left, &mut diagnostics);
+                diagnose_transition_input(&transition.right, &mut diagnostics);
+                diagnostics.effect_gpu_blockers = diagnostics.effect_gpu_blockers.saturating_add(1);
             }
         }
     }
@@ -1015,6 +1050,26 @@ pub fn composite_timeline_elements_into(
                 )?;
                 std::mem::swap(out, &mut scratch.adjustment);
             }
+            TimelineCompositeElement::CrossDissolve(transition) => {
+                let mut left = out.clone();
+                composite_transition_input_rgba8(
+                    &mut left,
+                    width,
+                    height,
+                    &transition.left,
+                    scratch,
+                )?;
+                let mut right = out.clone();
+                composite_transition_input_rgba8(
+                    &mut right,
+                    width,
+                    height,
+                    &transition.right,
+                    scratch,
+                )?;
+                cross_dissolve_straight_rgba8(out, &left, &right, transition.progress);
+                has_composited_media = true;
+            }
         }
     }
 
@@ -1266,6 +1321,18 @@ mod tests {
         })
     }
 
+    fn identity_solid(color: Color) -> TimelineSolidColorLayer {
+        TimelineSolidColorLayer {
+            color,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_graph: get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
+                .expect("compile identity graph"),
+            frame_seed: 0,
+        }
+    }
+
     #[test]
     fn empty_program_frame_preserves_alpha_or_flattens_to_black_by_output_contract() {
         let mut scratch = TimelineCompositeScratch::default();
@@ -1288,6 +1355,78 @@ mod tests {
         )
         .expect("opaque empty program frame");
         assert_eq!(opaque, vec![0, 0, 0, 255, 0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn cross_dissolve_interpolates_opaque_inputs_in_working_linear_space() {
+        let elements = [TimelineCompositeElement::CrossDissolve(
+            TimelineCrossDissolveLayer {
+                left: TimelineTransitionInput::SolidColor(identity_solid(Color {
+                    r: 1.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                })),
+                right: TimelineTransitionInput::SolidColor(identity_solid(Color {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 1.0,
+                    a: 1.0,
+                })),
+                progress: 0.5,
+            },
+        )];
+        let mut scratch = TimelineCompositeScratch::default();
+        let frame = composite_timeline_elements_color_frame(
+            1,
+            1,
+            &elements,
+            TimelineCompositeOptions::default(),
+            test_color_runtime(WorkingColorSpace::LinearRec709),
+            &mut scratch,
+        )
+        .expect("Cross Dissolve");
+
+        let pixel = frame.rgba_f32().data[0];
+        assert!((pixel[0] - 0.5).abs() < 1.0e-6);
+        assert_eq!(pixel[1], 0.0);
+        assert!((pixel[2] - 0.5).abs() < 1.0e-6);
+        assert_eq!(pixel[3], 1.0);
+    }
+
+    #[test]
+    fn cross_dissolve_uses_premultiplied_coverage_without_dark_fringe() {
+        let elements = [TimelineCompositeElement::CrossDissolve(
+            TimelineCrossDissolveLayer {
+                left: TimelineTransitionInput::SolidColor(identity_solid(Color {
+                    r: 1.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.5,
+                })),
+                right: TimelineTransitionInput::Transparent,
+                progress: 0.5,
+            },
+        )];
+        let mut scratch = TimelineCompositeScratch::default();
+        let frame = composite_timeline_elements_color_frame(
+            1,
+            1,
+            &elements,
+            TimelineCompositeOptions::default(),
+            test_color_runtime(WorkingColorSpace::LinearRec709),
+            &mut scratch,
+        )
+        .expect("coverage-correct Cross Dissolve");
+
+        let pixel = frame.rgba_f32().data[0];
+        assert!(
+            (pixel[0] - 1.0).abs() < 1.0e-6,
+            "red must not darken: {pixel:?}"
+        );
+        assert_eq!(pixel[1], 0.0);
+        assert_eq!(pixel[2], 0.0);
+        assert!((pixel[3] - 0.25).abs() < 1.0e-6);
     }
 
     #[test]

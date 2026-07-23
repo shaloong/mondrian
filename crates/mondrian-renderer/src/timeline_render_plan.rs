@@ -1,6 +1,7 @@
 use mondrian_core::{
     timeline_data::{
-        AlphaInterpretation, ClipContent, FieldOrder, NestedColorProcessing, PixelAspectRatio,
+        AlphaInterpretation, ClipContent, FieldOrder, FlatActiveClip, FlatVideoTransition,
+        FlatVideoTransitionDefinition, FlatVisualItem, NestedColorProcessing, PixelAspectRatio,
         RenderPlanSource,
     },
     types::{AssetId, BlendMode, Color, ColorSpace, FramePosition, Rational, SequenceId},
@@ -132,8 +133,8 @@ impl TimelineEvaluationRequest {
 /// Diagnostics captured while evaluating a timeline frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TimelineEvaluationDiagnostics {
-    /// Active clips returned by the source at the requested time.
-    pub active_clips: usize,
+    /// Ordered visual items returned by the source at the requested time.
+    pub active_visual_items: usize,
     /// Render-plan elements emitted after filtering.
     pub emitted_elements: usize,
     /// Active clips skipped because effective opacity was zero.
@@ -220,12 +221,38 @@ pub struct TimelineNestedSequencePlan {
     pub frame_seed: i64,
 }
 
+/// One renderable endpoint of a two-input visual Transition.
+#[derive(Debug, Clone)]
+pub enum TimelineTransitionInputPlan {
+    /// A disabled endpoint contributes transparent scene-linear coverage.
+    Transparent,
+    /// File-backed media evaluated at the Transition's exact source demand.
+    Media(TimelineMediaPlan),
+    /// A generated solid evaluated through its Clip processing.
+    SolidColor(TimelineSolidColorPlan),
+    /// A child Sequence evaluated before the parent Transition.
+    NestedSequence(TimelineNestedSequencePlan),
+}
+
+/// Scene-linear, coverage-correct Cross Dissolve plan.
+#[derive(Debug, Clone)]
+pub struct TimelineCrossDissolvePlan {
+    /// Earlier editorial endpoint after Clip-local evaluation.
+    pub left: TimelineTransitionInputPlan,
+    /// Later editorial endpoint after Clip-local evaluation.
+    pub right: TimelineTransitionInputPlan,
+    /// Normalized coefficient derived from exact author time.
+    pub progress: f32,
+}
+
 #[derive(Debug, Clone)]
 pub enum TimelineRenderPlanElement {
     Media(TimelineMediaPlan),
     Adjustment(TimelineAdjustmentPlan),
     SolidColor(TimelineSolidColorPlan),
     NestedSequence(TimelineNestedSequencePlan),
+    /// A two-input operation occupying one position in the Track stack.
+    CrossDissolve(TimelineCrossDissolvePlan),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -276,26 +303,63 @@ pub fn collect_timeline_color_diagnostics_with_display_view(
         evaluate_timeline_render_plan(source, TimelineEvaluationRequest::analysis(timeline_frame))?
             .elements
             .into_iter()
-            .filter_map(|element| match element {
-                TimelineRenderPlanElement::Media(media) => Some(TimelineColorDiagnostic {
-                    asset_id: media.asset_id,
-                    input_color_space_override: media.color_space_override,
-                    input_encoding_override: media.color_space_override.map(ColorSpace::encoding),
-                    working_color_space,
-                    output_color_space,
-                    output_encoding: output_color_space.encoding(),
-                    ocio_display: ocio_display.map(str::to_owned),
-                    ocio_view: ocio_view.map(str::to_owned),
-                    tone_map: media.auto_tone_map,
-                    pixel_aspect_ratio_override: media.pixel_aspect_ratio_override,
-                    field_order_override: media.field_order_override,
-                    alpha_interpretation: media.alpha_interpretation,
-                    source_time: media.source_time,
-                }),
-                _ => None,
+            .flat_map(|element| {
+                let mut diagnostics = Vec::with_capacity(2);
+                match element {
+                    TimelineRenderPlanElement::Media(media) => {
+                        diagnostics.push(timeline_media_color_diagnostic(
+                            &media,
+                            working_color_space,
+                            output_color_space,
+                            ocio_display,
+                            ocio_view,
+                        ))
+                    }
+                    TimelineRenderPlanElement::CrossDissolve(transition) => {
+                        for input in [transition.left, transition.right] {
+                            if let TimelineTransitionInputPlan::Media(media) = input {
+                                diagnostics.push(timeline_media_color_diagnostic(
+                                    &media,
+                                    working_color_space,
+                                    output_color_space,
+                                    ocio_display,
+                                    ocio_view,
+                                ));
+                            }
+                        }
+                    }
+                    TimelineRenderPlanElement::Adjustment(_)
+                    | TimelineRenderPlanElement::SolidColor(_)
+                    | TimelineRenderPlanElement::NestedSequence(_) => {}
+                }
+                diagnostics
             })
             .collect(),
     )
+}
+
+fn timeline_media_color_diagnostic(
+    media: &TimelineMediaPlan,
+    working_color_space: WorkingColorSpace,
+    output_color_space: ColorSpace,
+    ocio_display: Option<&str>,
+    ocio_view: Option<&str>,
+) -> TimelineColorDiagnostic {
+    TimelineColorDiagnostic {
+        asset_id: media.asset_id,
+        input_color_space_override: media.color_space_override,
+        input_encoding_override: media.color_space_override.map(ColorSpace::encoding),
+        working_color_space,
+        output_color_space,
+        output_encoding: output_color_space.encoding(),
+        ocio_display: ocio_display.map(str::to_owned),
+        ocio_view: ocio_view.map(str::to_owned),
+        tone_map: media.auto_tone_map,
+        pixel_aspect_ratio_override: media.pixel_aspect_ratio_override,
+        field_order_override: media.field_order_override,
+        alpha_interpretation: media.alpha_interpretation,
+        source_time: media.source_time,
+    }
 }
 
 /// Evaluate one timeline frame into a typed render plan and diagnostics.
@@ -307,88 +371,30 @@ pub fn evaluate_timeline_render_plan(
     let timeline_frame = request.timeline_frame.max(0);
     let current = FramePosition::new(timeline_frame, time_base);
     let current_time = TimelineTime::from_frame_position(current)?;
-    let active = source.flat_active_clips_at(current_time)?;
-    let mut diagnostics =
-        TimelineEvaluationDiagnostics { active_clips: active.len(), ..Default::default() };
+    let active = source.flat_visual_items_at(current_time)?;
+    let mut diagnostics = TimelineEvaluationDiagnostics {
+        active_visual_items: active.len(),
+        ..Default::default()
+    };
     let mut elements = Vec::with_capacity(active.len());
 
-    for ac in active {
-        let opacity = ac.opacity.clamp(0.0, 1.0);
-        if opacity <= 0.0 {
-            diagnostics.skipped_zero_opacity += 1;
-            continue;
-        }
-
-        let effect_graph =
-            mondrian_effects::compile_clip_effect_graph(&ac.effects, &ac.masks, current_time)
-                .map_err(|error| MondrianError::EffectGraphEvaluationFailed {
-                    reason: error.to_string(),
-                })?;
-
-        match ac.content {
-            ClipContent::NestedSequence { sequence_id } => {
-                elements.push(TimelineRenderPlanElement::NestedSequence(
-                    TimelineNestedSequencePlan {
-                        sequence_id,
-                        source_time: ac.source_time.max(TimelineTime::ZERO),
-                        nested_processing: source.nested_color_processing(),
-                        opacity,
-                        blend_mode: ac.blend_mode,
-                        transform: ac.transform_matrix,
-                        effect_graph,
-                        frame_seed: timeline_frame.max(0),
-                    },
-                ));
-            }
-            ClipContent::AdjustmentLayer { .. } => {
-                elements.push(TimelineRenderPlanElement::Adjustment(
-                    TimelineAdjustmentPlan {
-                        effect_graph,
-                        opacity,
-                        blend_mode: ac.blend_mode,
-                        frame_seed: timeline_frame.max(0),
-                    },
-                ));
-            }
-            ClipContent::SolidColor { color, .. } => {
-                elements.push(TimelineRenderPlanElement::SolidColor(
-                    TimelineSolidColorPlan {
-                        color,
-                        opacity,
-                        blend_mode: ac.blend_mode,
-                        transform: ac.transform_matrix,
-                        effect_graph,
-                        frame_seed: timeline_frame.max(0),
-                    },
-                ));
-            }
-            ClipContent::Media { asset_id, interpretation } => {
-                let source_time = if let Some(frame_rate) = interpretation.frame_rate_override {
-                    TimelineTime::from_frame_position(
-                        ac.source_time.to_frame_position(frame_rate, FrameRounding::Floor)?,
-                    )?
-                } else {
-                    ac.source_time
+    for item in active {
+        match item {
+            FlatVisualItem::Clip(clip) => {
+                if let Some(element) =
+                    compile_flat_clip(clip, source, current_time, timeline_frame, &mut diagnostics)?
+                {
+                    elements.push(element);
                 }
-                .max(TimelineTime::ZERO);
-                let transform = apply_pixel_aspect_to_affine(
-                    ac.transform_matrix,
-                    interpretation.pixel_aspect_ratio_override,
-                );
-                elements.push(TimelineRenderPlanElement::Media(TimelineMediaPlan {
-                    asset_id,
-                    color_space_override: interpretation.color_space_override,
-                    pixel_aspect_ratio_override: interpretation.pixel_aspect_ratio_override,
-                    field_order_override: interpretation.field_order_override,
-                    alpha_interpretation: interpretation.alpha,
-                    source_time,
-                    opacity,
-                    blend_mode: ac.blend_mode,
-                    transform,
-                    effect_graph,
-                    frame_seed: timeline_frame.max(0),
-                    auto_tone_map: source.auto_tone_map_media(),
-                }));
+            }
+            FlatVisualItem::Transition(transition) => {
+                elements.push(compile_transition(
+                    *transition,
+                    source,
+                    current_time,
+                    timeline_frame,
+                    &mut diagnostics,
+                )?);
             }
         }
     }
@@ -403,6 +409,175 @@ pub fn evaluate_timeline_render_plan(
         elements,
         diagnostics,
     })
+}
+
+fn compile_transition(
+    transition: FlatVideoTransition,
+    source: &dyn RenderPlanSource,
+    current_time: TimelineTime,
+    timeline_frame: i64,
+    diagnostics: &mut TimelineEvaluationDiagnostics,
+) -> Result<TimelineRenderPlanElement> {
+    match transition.definition {
+        FlatVideoTransitionDefinition::CrossDissolve => {
+            if transition.properties.iter().next().is_some()
+                || transition.params.as_object().is_none_or(|params| !params.is_empty())
+            {
+                return Err(MondrianError::WorkflowStepFailed {
+                    step_id: "compile_video_transition".to_owned(),
+                    reason: format!(
+                        "Cross Dissolve {} carries unsupported definition state",
+                        transition.transition_id
+                    ),
+                });
+            }
+            let left = compile_transition_input(
+                transition.left,
+                source,
+                current_time,
+                timeline_frame,
+                diagnostics,
+            )?;
+            let right = compile_transition_input(
+                transition.right,
+                source,
+                current_time,
+                timeline_frame,
+                diagnostics,
+            )?;
+            let progress = transition.progress.normalized().ok_or_else(|| {
+                MondrianError::WorkflowStepFailed {
+                    step_id: "compile_video_transition".to_owned(),
+                    reason: format!(
+                        "video Transition {} has invalid progress coordinates",
+                        transition.transition_id
+                    ),
+                }
+            })?;
+            Ok(TimelineRenderPlanElement::CrossDissolve(
+                TimelineCrossDissolvePlan { left, right, progress },
+            ))
+        }
+        FlatVideoTransitionDefinition::Plugin { definition_id } => {
+            Err(MondrianError::WorkflowStepFailed {
+                step_id: "compile_video_transition".to_owned(),
+                reason: format!(
+                    "video Transition {} requires unavailable definition `{definition_id}`",
+                    transition.transition_id
+                ),
+            })
+        }
+    }
+}
+
+fn compile_transition_input(
+    clip: FlatActiveClip,
+    source: &dyn RenderPlanSource,
+    current_time: TimelineTime,
+    timeline_frame: i64,
+    diagnostics: &mut TimelineEvaluationDiagnostics,
+) -> Result<TimelineTransitionInputPlan> {
+    if clip.is_disabled || clip.opacity.clamp(0.0, 1.0) <= 0.0 {
+        return Ok(TimelineTransitionInputPlan::Transparent);
+    }
+    let element = compile_flat_clip(clip, source, current_time, timeline_frame, diagnostics)?
+        .ok_or_else(|| MondrianError::WorkflowStepFailed {
+            step_id: "compile_video_transition".to_owned(),
+            reason: "Transition endpoint did not produce a visual input".to_owned(),
+        })?;
+    match element {
+        TimelineRenderPlanElement::Media(media) => Ok(TimelineTransitionInputPlan::Media(media)),
+        TimelineRenderPlanElement::SolidColor(solid) => {
+            Ok(TimelineTransitionInputPlan::SolidColor(solid))
+        }
+        TimelineRenderPlanElement::NestedSequence(nested) => {
+            Ok(TimelineTransitionInputPlan::NestedSequence(nested))
+        }
+        TimelineRenderPlanElement::Adjustment(_) => Err(MondrianError::WorkflowStepFailed {
+            step_id: "compile_video_transition".to_owned(),
+            reason: "Adjustment Layer cannot be a Transition endpoint".to_owned(),
+        }),
+        TimelineRenderPlanElement::CrossDissolve(_) => unreachable!("a Clip cannot lower itself"),
+    }
+}
+
+fn compile_flat_clip(
+    ac: FlatActiveClip,
+    source: &dyn RenderPlanSource,
+    current_time: TimelineTime,
+    timeline_frame: i64,
+    diagnostics: &mut TimelineEvaluationDiagnostics,
+) -> Result<Option<TimelineRenderPlanElement>> {
+    let opacity = ac.opacity.clamp(0.0, 1.0);
+    if ac.is_disabled || opacity <= 0.0 {
+        diagnostics.skipped_zero_opacity += 1;
+        return Ok(None);
+    }
+
+    let effect_graph =
+        mondrian_effects::compile_clip_effect_graph(&ac.effects, &ac.masks, current_time).map_err(
+            |error| MondrianError::EffectGraphEvaluationFailed { reason: error.to_string() },
+        )?;
+    let frame_seed = timeline_frame.max(0);
+    Ok(Some(match ac.content {
+        ClipContent::NestedSequence { sequence_id } => {
+            TimelineRenderPlanElement::NestedSequence(TimelineNestedSequencePlan {
+                sequence_id,
+                source_time: ac.source_time,
+                nested_processing: source.nested_color_processing(),
+                opacity,
+                blend_mode: ac.blend_mode,
+                transform: ac.transform_matrix,
+                effect_graph,
+                frame_seed,
+            })
+        }
+        ClipContent::AdjustmentLayer { .. } => {
+            TimelineRenderPlanElement::Adjustment(TimelineAdjustmentPlan {
+                effect_graph,
+                opacity,
+                blend_mode: ac.blend_mode,
+                frame_seed,
+            })
+        }
+        ClipContent::SolidColor { color, .. } => {
+            TimelineRenderPlanElement::SolidColor(TimelineSolidColorPlan {
+                color,
+                opacity,
+                blend_mode: ac.blend_mode,
+                transform: ac.transform_matrix,
+                effect_graph,
+                frame_seed,
+            })
+        }
+        ClipContent::Media { asset_id, interpretation } => {
+            let source_time = if let Some(frame_rate) = interpretation.frame_rate_override {
+                TimelineTime::from_frame_position(
+                    ac.source_time.to_frame_position(frame_rate, FrameRounding::Floor)?,
+                )?
+            } else {
+                ac.source_time
+            };
+            let transform = apply_pixel_aspect_to_affine(
+                ac.transform_matrix,
+                interpretation.pixel_aspect_ratio_override,
+            );
+            TimelineRenderPlanElement::Media(TimelineMediaPlan {
+                asset_id,
+                color_space_override: interpretation.color_space_override,
+                pixel_aspect_ratio_override: interpretation.pixel_aspect_ratio_override,
+                field_order_override: interpretation.field_order_override,
+                alpha_interpretation: interpretation.alpha,
+                source_time,
+                opacity,
+                blend_mode: ac.blend_mode,
+                transform,
+                effect_graph,
+                frame_seed,
+                auto_tone_map: source.auto_tone_map_media(),
+            })
+        }
+    }))
 }
 
 pub fn mat3_to_affine(cols: [f32; 9]) -> [f32; 6] {
@@ -480,6 +655,7 @@ mod tests {
     use mondrian_timeline::clip::{Clip, Transform2D};
     use mondrian_timeline::sequence::Sequence;
     use mondrian_timeline::track::Track;
+    use mondrian_timeline::VideoTransition;
 
     fn tt(frame: i64, time_base: Rational) -> TimelineTime {
         TimelineTime::from_frame_position(FramePosition::new(frame, time_base))
@@ -883,10 +1059,88 @@ mod tests {
 
         assert_eq!(plan.timeline_frame, 4);
         assert_eq!(plan.intent, TimelineRenderIntent::Preview);
-        assert_eq!(plan.diagnostics.active_clips, 2);
+        assert_eq!(plan.diagnostics.active_visual_items, 2);
         assert_eq!(plan.diagnostics.emitted_elements, 1);
         assert_eq!(plan.diagnostics.skipped_zero_opacity, 1);
         assert_eq!(plan.len(), 1);
+    }
+
+    #[test]
+    fn cross_dissolve_plan_uses_unclamped_endpoint_source_times_and_exact_progress() {
+        let mut sequence = Sequence::new("cross dissolve render plan");
+        let time_base = sequence.time_base();
+        let mut left =
+            Clip::new(AssetId::new(), tt(0, time_base), tt(10, time_base)).expect("left");
+        left.source_in = tt(5, time_base);
+        left.source_out = tt(15, time_base);
+        let mut right =
+            Clip::new(AssetId::new(), tt(10, time_base), tt(10, time_base)).expect("right");
+        right.source_in = tt(20, time_base);
+        right.source_out = tt(30, time_base);
+        let (left_id, right_id) = (left.id, right.id);
+        sequence.video_tracks[0].add_clip(left).expect("left placement");
+        sequence.video_tracks[0].add_clip(right).expect("right placement");
+        sequence.video_transitions.push(VideoTransition::cross_dissolve(
+            left_id,
+            right_id,
+            mondrian_core::TimelineTimeRange::new(tt(8, time_base), tt(4, time_base))
+                .expect("transition range"),
+        ));
+        sequence.validate_author_identities().expect("valid author graph");
+
+        let plan = evaluate_timeline_render_plan(&sequence, TimelineEvaluationRequest::export(10))
+            .expect("transition plan");
+        assert_eq!(plan.diagnostics.active_visual_items, 1);
+        assert_eq!(plan.len(), 1);
+        let TimelineRenderPlanElement::CrossDissolve(transition) = &plan.elements[0] else {
+            panic!("expected one Cross Dissolve");
+        };
+        assert_eq!(transition.progress, 0.5);
+        let TimelineTransitionInputPlan::Media(left) = &transition.left else {
+            panic!("left input must be media");
+        };
+        let TimelineTransitionInputPlan::Media(right) = &transition.right else {
+            panic!("right input must be media");
+        };
+        assert_eq!(left.source_time, tt(15, time_base));
+        assert_eq!(right.source_time, tt(20, time_base));
+
+        let start = evaluate_timeline_render_plan(&sequence, TimelineEvaluationRequest::export(8))
+            .expect("transition start plan");
+        let TimelineRenderPlanElement::CrossDissolve(start) = &start.elements[0] else {
+            panic!("expected Cross Dissolve at start");
+        };
+        assert_eq!(start.progress, 0.0);
+        let TimelineTransitionInputPlan::Media(right) = &start.right else {
+            panic!("right input must be media");
+        };
+        assert_eq!(right.source_time, tt(18, time_base));
+    }
+
+    #[test]
+    fn unavailable_transition_definition_fails_closed() {
+        let mut sequence = Sequence::new("missing transition plugin");
+        let time_base = sequence.time_base();
+        let left = Clip::new(AssetId::new(), tt(0, time_base), tt(10, time_base)).expect("left");
+        let right = Clip::new(AssetId::new(), tt(10, time_base), tt(10, time_base)).expect("right");
+        let (left_id, right_id) = (left.id, right.id);
+        sequence.video_tracks[0].add_clip(left).expect("left placement");
+        sequence.video_tracks[0].add_clip(right).expect("right placement");
+        let mut transition = VideoTransition::cross_dissolve(
+            left_id,
+            right_id,
+            mondrian_core::TimelineTimeRange::new(tt(8, time_base), tt(4, time_base))
+                .expect("transition range"),
+        );
+        transition.transition_type = mondrian_timeline::VideoTransitionType::Plugin {
+            definition_id: "vendor.missing.transition".to_owned(),
+        };
+        sequence.video_transitions.push(transition);
+
+        let error =
+            evaluate_timeline_render_plan(&sequence, TimelineEvaluationRequest::preview(10, 1.0))
+                .expect_err("missing plugin must not substitute Cross Dissolve");
+        assert!(error.to_string().contains("unavailable definition"));
     }
 
     #[derive(Debug, PartialEq)]
@@ -924,6 +1178,27 @@ mod tests {
             blend_mode: BlendMode,
             transform: [f32; 6],
             frame_seed: i64,
+        },
+        CrossDissolve {
+            left: RenderPlanSemanticTransitionInput,
+            right: RenderPlanSemanticTransitionInput,
+            progress: f32,
+        },
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum RenderPlanSemanticTransitionInput {
+        Transparent,
+        Media {
+            asset_id: AssetId,
+            source_time: TimelineTime,
+        },
+        SolidColor {
+            color: Color,
+        },
+        NestedSequence {
+            sequence_id: SequenceId,
+            source_time: TimelineTime,
         },
     }
 
@@ -971,7 +1246,37 @@ mod tests {
                         frame_seed: nested.frame_seed,
                     }
                 }
+                TimelineRenderPlanElement::CrossDissolve(transition) => {
+                    RenderPlanSemanticElement::CrossDissolve {
+                        left: transition_input_signature(&transition.left),
+                        right: transition_input_signature(&transition.right),
+                        progress: transition.progress,
+                    }
+                }
             })
             .collect()
+    }
+
+    fn transition_input_signature(
+        input: &TimelineTransitionInputPlan,
+    ) -> RenderPlanSemanticTransitionInput {
+        match input {
+            TimelineTransitionInputPlan::Transparent => {
+                RenderPlanSemanticTransitionInput::Transparent
+            }
+            TimelineTransitionInputPlan::Media(media) => RenderPlanSemanticTransitionInput::Media {
+                asset_id: media.asset_id,
+                source_time: media.source_time,
+            },
+            TimelineTransitionInputPlan::SolidColor(solid) => {
+                RenderPlanSemanticTransitionInput::SolidColor { color: solid.color }
+            }
+            TimelineTransitionInputPlan::NestedSequence(nested) => {
+                RenderPlanSemanticTransitionInput::NestedSequence {
+                    sequence_id: nested.sequence_id,
+                    source_time: nested.source_time,
+                }
+            }
+        }
     }
 }

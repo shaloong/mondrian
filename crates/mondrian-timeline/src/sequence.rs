@@ -1492,6 +1492,7 @@ impl Sequence {
 
         let mut transition_ids = HashSet::new();
         let mut transition_endpoints = HashSet::new();
+        let mut transition_ranges = Vec::with_capacity(self.video_transitions.len());
         for transition in &self.video_transitions {
             if !transition_ids.insert(transition.id) {
                 return Err(duplicate_author_identity("VideoTransition", transition.id));
@@ -1503,6 +1504,33 @@ impl Sequence {
                 ));
             }
             validate_video_transition(&self.video_tracks, transition)?;
+            let track_index = self
+                .video_tracks
+                .iter()
+                .position(|track| track.clips.iter().any(|clip| clip.id == transition.left))
+                .ok_or_else(|| {
+                    crate::video_transition::invalid_transition(
+                        transition.id,
+                        "left endpoint Track disappeared during validation",
+                    )
+                })?;
+            transition_ranges.push((
+                track_index,
+                transition.sequence_range.start,
+                transition.sequence_range.end()?,
+                transition.id,
+            ));
+        }
+        transition_ranges.sort_unstable_by_key(|(track, start, _, _)| (*track, *start));
+        for pair in transition_ranges.windows(2) {
+            let (left_track, _, left_end, _) = pair[0];
+            let (right_track, right_start, _, right_id) = pair[1];
+            if left_track == right_track && right_start < left_end {
+                return Err(crate::video_transition::invalid_transition(
+                    right_id,
+                    "Transition ranges on one Track must not overlap",
+                ));
+            }
         }
         Ok(())
     }
@@ -1603,37 +1631,94 @@ fn rekey_exact_curve(curve: &mut mondrian_core::ExactAutomationCurve) {
 }
 
 impl mondrian_core::timeline_data::RenderPlanSource for Sequence {
-    fn flat_active_clips_at(
+    fn flat_visual_items_at(
         &self,
         time: TimelineTime,
-    ) -> mondrian_core::Result<Vec<mondrian_core::timeline_data::FlatActiveClip>> {
-        use mondrian_core::timeline_data::FlatActiveClip;
-        Ok(self
-            .active_clips_at(time)?
-            .into_iter()
-            .map(|ac| {
-                let matrix = ac.transform_matrix;
-                FlatActiveClip {
-                    clip_id: ac.clip.id,
-                    content: ac.clip.content.clone(),
-                    is_disabled: ac.clip.is_disabled,
-                    effects: ac.clip.effects.clone(),
-                    masks: ac.clip.masks.clone(),
-                    source_time: ac.source_time,
-                    transform_matrix: [
-                        matrix.x_axis.x,
-                        matrix.x_axis.y,
-                        matrix.z_axis.x,
-                        matrix.y_axis.x,
-                        matrix.y_axis.y,
-                        matrix.z_axis.y,
-                    ],
-                    opacity: ac.opacity,
-                    blend_mode: ac.blend_mode,
-                    track_index: ac.track_index,
+    ) -> mondrian_core::Result<Vec<mondrian_core::timeline_data::FlatVisualItem>> {
+        use mondrian_core::timeline_data::{
+            FlatTransitionProgress, FlatVideoTransition, FlatVideoTransitionDefinition,
+            FlatVisualItem,
+        };
+
+        let mut items = Vec::new();
+        for (track_index, track) in self.video_tracks.iter().enumerate() {
+            if !track.is_visible || track.is_muted {
+                continue;
+            }
+            let track_opacity = track.evaluate_opacity(time).clamp(0.0, 1.0);
+            let mut active_transitions = self.video_transitions.iter().filter(|transition| {
+                transition.is_enabled
+                    && time >= transition.sequence_range.start
+                    && transition.sequence_range.end().is_ok_and(|end| time < end)
+                    && track.clips.iter().any(|clip| clip.id == transition.left)
+            });
+            let active_transition = active_transitions.next();
+            if let Some(conflict) = active_transitions.next() {
+                return Err(crate::video_transition::invalid_transition(
+                    conflict.id,
+                    "multiple visual Transitions are active on one Track",
+                ));
+            }
+            let mut replaced_endpoints = None;
+            if let Some(transition) = active_transition {
+                let left = track.clips.iter().find(|clip| clip.id == transition.left).ok_or_else(
+                    || {
+                        crate::video_transition::invalid_transition(
+                            transition.id,
+                            "left endpoint disappeared during evaluation",
+                        )
+                    },
+                )?;
+                let right =
+                    track.clips.iter().find(|clip| clip.id == transition.right).ok_or_else(
+                        || {
+                            crate::video_transition::invalid_transition(
+                                transition.id,
+                                "right endpoint disappeared during evaluation",
+                            )
+                        },
+                    )?;
+                let definition = match &transition.transition_type {
+                    crate::video_transition::VideoTransitionType::CrossDissolve => {
+                        FlatVideoTransitionDefinition::CrossDissolve
+                    }
+                    crate::video_transition::VideoTransitionType::Plugin { definition_id } => {
+                        FlatVideoTransitionDefinition::Plugin {
+                            definition_id: definition_id.clone(),
+                        }
+                    }
+                };
+                items.push(FlatVisualItem::Transition(Box::new(FlatVideoTransition {
+                    transition_id: transition.id,
+                    definition,
+                    left: flatten_visual_clip(left, track, track_index, track_opacity, time)?,
+                    right: flatten_visual_clip(right, track, track_index, track_opacity, time)?,
+                    progress: FlatTransitionProgress {
+                        elapsed: time.checked_sub(transition.sequence_range.start)?,
+                        duration: transition.sequence_range.duration,
+                    },
+                    properties: transition.properties.clone(),
+                    params: transition.params.clone(),
+                })));
+                replaced_endpoints = Some((transition.left, transition.right));
+            }
+
+            for clip in track.active_clips_at(time)? {
+                if replaced_endpoints
+                    .is_some_and(|(left, right)| clip.id == left || clip.id == right)
+                {
+                    continue;
                 }
-            })
-            .collect())
+                items.push(FlatVisualItem::Clip(flatten_visual_clip(
+                    clip,
+                    track,
+                    track_index,
+                    track_opacity,
+                    time,
+                )?));
+            }
+        }
+        Ok(items)
     }
 
     fn source_time_base(&self) -> mondrian_core::types::Rational {
@@ -1647,6 +1732,35 @@ impl mondrian_core::timeline_data::RenderPlanSource for Sequence {
     fn auto_tone_map_media(&self) -> bool {
         self.settings.auto_tone_map_media
     }
+}
+
+fn flatten_visual_clip(
+    clip: &crate::clip::Clip,
+    track: &Track,
+    track_index: usize,
+    track_opacity: f32,
+    time: TimelineTime,
+) -> mondrian_core::Result<mondrian_core::timeline_data::FlatActiveClip> {
+    let matrix = clip.transform.evaluate_matrix(time);
+    Ok(mondrian_core::timeline_data::FlatActiveClip {
+        clip_id: clip.id,
+        content: clip.content.clone(),
+        is_disabled: clip.is_disabled,
+        effects: clip.effects.clone(),
+        masks: clip.masks.clone(),
+        source_time: clip.timeline_to_source_time(time)?,
+        transform_matrix: [
+            matrix.x_axis.x,
+            matrix.x_axis.y,
+            matrix.z_axis.x,
+            matrix.y_axis.x,
+            matrix.y_axis.y,
+            matrix.z_axis.y,
+        ],
+        opacity: (clip.transform.evaluate_opacity(time) * track_opacity).clamp(0.0, 1.0),
+        blend_mode: clip.blend_mode.unwrap_or(track.blend_mode),
+        track_index,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1947,6 +2061,37 @@ mod tests {
         assert!(error.to_string().contains("exact editorial cut"));
         sequence.compact_video_transitions();
         assert!(sequence.video_transitions.is_empty());
+    }
+
+    #[test]
+    fn video_transition_ranges_on_one_track_cannot_overlap() {
+        let mut sequence = Sequence::new("transition overlap");
+        let time_base = sequence.time_base();
+        let first = Clip::new(AssetId::new(), tt(0, time_base), tt(10, time_base)).expect("first");
+        let middle =
+            Clip::new(AssetId::new(), tt(10, time_base), tt(4, time_base)).expect("middle");
+        let last = Clip::new(AssetId::new(), tt(14, time_base), tt(10, time_base)).expect("last");
+        let (first_id, middle_id, last_id) = (first.id, middle.id, last.id);
+        sequence.video_tracks[0].add_clip(first).expect("first placement");
+        sequence.video_tracks[0].add_clip(middle).expect("middle placement");
+        sequence.video_tracks[0].add_clip(last).expect("last placement");
+        sequence.video_transitions.push(crate::VideoTransition::cross_dissolve(
+            first_id,
+            middle_id,
+            mondrian_core::TimelineTimeRange::new(tt(8, time_base), tt(4, time_base))
+                .expect("first transition"),
+        ));
+        sequence.video_transitions.push(crate::VideoTransition::cross_dissolve(
+            middle_id,
+            last_id,
+            mondrian_core::TimelineTimeRange::new(tt(11, time_base), tt(6, time_base))
+                .expect("second transition"),
+        ));
+
+        let error = sequence
+            .validate_author_identities()
+            .expect_err("ambiguous simultaneous Transitions must fail");
+        assert!(error.to_string().contains("must not overlap"));
     }
 
     #[test]

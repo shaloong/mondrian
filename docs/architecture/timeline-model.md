@@ -270,7 +270,9 @@ disagreeing.
 Validation requires distinct endpoints on the same video Track, exact adjacent
 edit geometry at one shared cut, a non-empty range that covers that cut and is
 contained by the two placement ranges, a unique endpoint pair, valid properties,
-and non-adjustment endpoints. Structural edits either preserve those facts or
+non-adjustment endpoints, and non-overlapping Transition ranges on one Track.
+The last rule removes otherwise undefined simultaneous three-input evaluation
+around a short middle Clip. Structural edits either preserve those facts or
 remove the now-invalid Transition before commit; invalid persisted graphs are
 rejected instead of repaired during open.
 
@@ -279,8 +281,23 @@ both source domains without clamping. A media/nested Adapter must supply probed
 source extents to `validate_source_extents`; insufficient handles fail closed.
 The author model therefore never substitutes repeated boundary frames or reads
 outside a source. This is the frozen author/adapter contract. The current
-renderer does not yet execute Cross Dissolve, so the existence of this type is
-not a product-support claim.
+App authoring boundary resolves the primary video stream's declared duration,
+single-frame still semantics, or child-Sequence duration before create/range
+edits. Container duration is never substituted for a missing video-stream
+extent because a longer audio stream could admit nonexistent video handles. Insufficient
+handles reject by default. `ShortenToAvailable` is an explicit product command,
+intersects both exact source extents while retaining the edit, and commits the
+shortened range in the same single Undo transaction. Export snapshot capture
+repeats the preflight because relink or child edits can change a recoverable
+external dependency without making the author graph structurally illegal.
+
+`RenderPlanSource::flat_visual_items_at` projects ordinary Clips and explicit
+two-input Transitions as ordered visual items. During the Transition interval,
+one Transition replaces both endpoint placements at that Track stack position.
+Both endpoint source times remain unclamped, so Preview/Export either obtain
+the requested handles or fail; neither repeats a boundary frame. Cross Dissolve
+is executed by the shared Preview/Export CPU working compositor. Product
+gesture/panel affordances and a GPU Transition lowering remain separate M1 work.
 
 Transform, speed, blend mode, solid color, masks, and effects are currently
 exposed through `PropertyHost`/`PropertyBag`. Every product definition carries

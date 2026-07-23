@@ -20,14 +20,15 @@ use mondrian_renderer::{
     RenderColorTransformDiagnostics, RenderColorTransformError, RenderMonitorAdaptation,
     RenderMonitorAdaptationError, RenderOutputColorBoundary, TimelineAdjustmentLayer,
     TimelineCompositeDiagnostics, TimelineCompositeElement, TimelineCompositeError,
-    TimelineCompositeOptions, TimelineCompositeScratch, TimelineEffectColorRuntime,
-    TimelineMediaLayer, TimelineSolidColorLayer,
+    TimelineCompositeOptions, TimelineCompositeScratch, TimelineCrossDissolveLayer,
+    TimelineEffectColorRuntime, TimelineMediaLayer, TimelineSolidColorLayer,
+    TimelineTransitionInput,
 };
 use mondrian_timeline::sequence::ColorContext;
 
 use super::preview_media_frame::MediaPreviewWorkingFrameError;
 use super::preview_unavailability::{PreviewOutputStage, PreviewUnavailability};
-use super::preview_viewer_plan::ResolvedPreviewElement;
+use super::preview_viewer_plan::{ResolvedPreviewElement, ResolvedPreviewTransitionInput};
 
 /// Typed failure from the shared CPU Preview execution path.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -148,6 +149,24 @@ enum PreviewWorkingElement {
         effect_graph: Arc<CompiledEffectGraph>,
         frame_seed: i64,
     },
+    CrossDissolve {
+        left: PreviewWorkingTransitionInput,
+        right: PreviewWorkingTransitionInput,
+        progress: f32,
+    },
+}
+
+enum PreviewWorkingTransitionInput {
+    Transparent,
+    SolidColor(TimelineSolidColorLayer),
+    Media {
+        frame_index: usize,
+        opacity: f32,
+        blend_mode: BlendMode,
+        transform: [f32; 6],
+        effect_graph: Arc<CompiledEffectGraph>,
+        frame_seed: i64,
+    },
 }
 
 pub(crate) fn composite_resolved_preview_working(
@@ -195,6 +214,25 @@ pub(crate) fn composite_resolved_preview_working(
                     frame_seed: *frame_seed,
                 });
             }
+            ResolvedPreviewElement::CrossDissolve { left, right, progress } => {
+                let left = prepare_transition_input(
+                    left,
+                    &mut working_frames,
+                    &mut input_color_diagnostics,
+                    &mut input_color_stage_diagnostics,
+                )?;
+                let right = prepare_transition_input(
+                    right,
+                    &mut working_frames,
+                    &mut input_color_diagnostics,
+                    &mut input_color_stage_diagnostics,
+                )?;
+                working_elements.push(PreviewWorkingElement::CrossDissolve {
+                    left,
+                    right,
+                    progress: *progress,
+                });
+            }
         }
     }
 
@@ -222,6 +260,13 @@ pub(crate) fn composite_resolved_preview_working(
                 effect_graph: Arc::clone(effect_graph),
                 frame_seed: *frame_seed,
             }),
+            PreviewWorkingElement::CrossDissolve { left, right, progress } => {
+                TimelineCompositeElement::CrossDissolve(TimelineCrossDissolveLayer {
+                    left: lower_transition_input(left, &working_frames),
+                    right: lower_transition_input(right, &working_frames),
+                    progress: *progress,
+                })
+            }
         })
         .collect();
     let working_prepare_us = duration_us(working_prepare_started_at.elapsed());
@@ -246,6 +291,71 @@ pub(crate) fn composite_resolved_preview_working(
             ..PreviewCpuExecutionDurations::default()
         },
     })
+}
+
+fn prepare_transition_input(
+    input: &ResolvedPreviewTransitionInput,
+    working_frames: &mut Vec<CpuColorFrame>,
+    input_color_diagnostics: &mut Vec<RenderColorTransformDiagnostics>,
+    input_color_stage_diagnostics: &mut RenderColorStageDiagnostics,
+) -> Result<PreviewWorkingTransitionInput, PreviewCpuExecutionError> {
+    Ok(match input {
+        ResolvedPreviewTransitionInput::Transparent => PreviewWorkingTransitionInput::Transparent,
+        ResolvedPreviewTransitionInput::SolidColor(solid) => {
+            PreviewWorkingTransitionInput::SolidColor(solid.clone())
+        }
+        ResolvedPreviewTransitionInput::Media {
+            frame,
+            opacity,
+            blend_mode,
+            transform,
+            effect_graph,
+            frame_seed,
+        } => {
+            let working = frame.working_frame()?;
+            if let Some(diagnostics) = working.color_diagnostics {
+                input_color_diagnostics.push(diagnostics);
+            }
+            input_color_stage_diagnostics.accumulate(working.stage_diagnostics);
+            let frame_index = working_frames.len();
+            working_frames.push(working.frame);
+            PreviewWorkingTransitionInput::Media {
+                frame_index,
+                opacity: *opacity,
+                blend_mode: *blend_mode,
+                transform: *transform,
+                effect_graph: Arc::clone(effect_graph),
+                frame_seed: *frame_seed,
+            }
+        }
+    })
+}
+
+fn lower_transition_input<'a>(
+    input: &'a PreviewWorkingTransitionInput,
+    frames: &'a [CpuColorFrame],
+) -> TimelineTransitionInput<'a> {
+    match input {
+        PreviewWorkingTransitionInput::Transparent => TimelineTransitionInput::Transparent,
+        PreviewWorkingTransitionInput::SolidColor(solid) => {
+            TimelineTransitionInput::SolidColor(solid.clone())
+        }
+        PreviewWorkingTransitionInput::Media {
+            frame_index,
+            opacity,
+            blend_mode,
+            transform,
+            effect_graph,
+            frame_seed,
+        } => TimelineTransitionInput::Media(TimelineMediaLayer {
+            frame: &frames[*frame_index],
+            opacity: *opacity,
+            blend_mode: *blend_mode,
+            transform: *transform,
+            effect_graph: Arc::clone(effect_graph),
+            frame_seed: *frame_seed,
+        }),
+    }
 }
 
 pub(crate) fn output_boundary_from_color_context(
