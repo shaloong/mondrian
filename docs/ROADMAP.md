@@ -261,7 +261,7 @@ Platform Capability Contract
 
 ### 5.1 Reference Corpus
 
-M0 建立可重现的 corpus manifest。固定文件由 manifest 固定 SHA-256/字节数；确定性生成文件固定配方哈希、语义 probe 契约和权利依据，并由每次参考运行的 attestation 固定实际产物哈希，避免把不同 FFmpeg/encoder 版本的输出伪称为同一字节资产。现有规范清单包含许可明确的色彩数值参考，以及可本地生成的 1812 秒 4K25 HEVC Main10 Long-GOP 播放压力码流和 1835 秒 48 kHz stereo AAC 设备时钟压力流；两者只证明播放、Seek、取消、缓存、内存与设备时钟负载，明确不得充当色彩 reference。Golden/Stress 主工作流所需 HLG/PQ、相机 Log、VFR、多声道与损坏素材仍不足。每个样本记录来源许可、身份策略、容器、codec、分辨率、帧率模式、bit depth、CICP/side data、预期解释和可公开性。
+M0 建立可重现的 corpus manifest。固定文件由 manifest 固定 SHA-256/字节数；确定性生成文件固定配方哈希、语义 probe 契约和权利依据，并由每次参考运行的 attestation 固定实际产物哈希，避免把不同 FFmpeg/encoder 版本的输出伪称为同一字节资产。现有规范清单包含许可明确的色彩数值参考、可本地生成的 1812 秒 4K25 HEVC Main10 Long-GOP 播放压力码流、1835 秒 48 kHz stereo AAC 设备时钟压力流，以及 MOV 承载的 305 秒 48 kHz stereo PCM S16LE Golden 音频作者样本。前两种压力流只证明播放、Seek、取消、缓存、内存与设备时钟负载，明确不得充当色彩 reference；PCM 样本用解析式且左右不等的信号验证 gain/pan/fade、通道身份、导入与持久化，必须由 probe 与产品导入同时证明 FL/FR Stereo 而不能从“双通道”猜测，也不冒充声学 loopback。Golden 的 PCM/AAC 角色已绑定；HLG Main10、Rec.709 H.264、sRGB Alpha 图片角色仍保持 null，直到有合格样本及其所需独立色彩证据。Golden/Stress 主工作流所需 HLG/PQ、相机 Log、VFR、多声道与损坏素材仍不足。每个样本记录来源许可、身份策略、容器、codec、分辨率、帧率模式、bit depth、CICP/side data、预期解释和可公开性。
 
 最低覆盖：
 
@@ -285,6 +285,8 @@ M0 建立可重现的 corpus manifest。固定文件由 manifest 固定 SHA-256/
 - 代理/原片切换、至少一个离线再重连素材、序列 In/Out。
 
 每个候选构建必须完成：打开 → 播放 → seek/scrub → 编辑 → undo/redo → 保存 → 重开 → 导出 → 重导入 → 校验。任何一步只能通过自动或记录明确的人工证据，不允许用“单元测试覆盖了相关函数”替代。
+
+机器可读合同已升级为封闭 schema v2：未知或拼错字段失败关闭；Sequence 明确为 3840×2160、25/1、square pixel、progressive、linear Rec.2020 working、Rec.709 legal 输出、10-bit 交付默认值和 48 kHz stereo；H.264/AAC 与 HEVC Main10 门禁绑定稳定内建 preset ID，并固定 profile、分辨率、位深、chroma、pixel format、range、Alpha、音频码率、Rec.709 CICP 与静态 HDR metadata 缺席策略。`foundation-audio-authoring-v1` 是首个真实 Headless 执行切片：使用规范 PCM fixture 和普通产品导入/时间线/Inspector/Undo/Redo/耐久保存接口，记录完整 Sequence settings、原生 Stereo、每个作者事务的 Session/Generation/Sequence Revision、持久化 request/archive identity 与重开后类型化作者值。它只关闭 open、undo-redo、save-reopen 与 Clip audio gain/pan/fades，报告强制标记非完整 Golden；其余顶层要求不得因该切片通过而变绿。
 
 ### 5.3 Stress Project
 
@@ -380,7 +382,7 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 
 **验证基础**
 
-- [x] 建立版本化 Reference Corpus manifest、Golden/Stress Project 机器可读契约、Windows 参考机 profile、机器证据采集与资格验证、分层校验门禁；generated fixture 采用“固定 recipe、run-local artifact hash”而非伪造跨 encoder 位级稳定性。`windows-playback-m0-v3` 将完整 Video+Audio gate、素材用途、环境绑定、45 分钟外部进程期限、Video 解码进度 journal、16 GiB baseline 内存档位和预期报告 profile 固化；编排器只允许清洁且首尾同 revision、完整门禁、合格机器和全部结构化报告通过的运行成为 baseline。低于门禁档位只有在所有资格问题均被版本化合同显式列为可诊断、且操作员显式 opt-in 时才可继续，结果必为 diagnostic；缺 GPU/工具链/系统等执行前提仍失败关闭。完整 Golden/Stress 素材角色与真实工作流仍按 M1/M2 退出门槛验收。
+- [x] 建立版本化 Reference Corpus manifest、Golden/Stress Project 机器可读契约、Windows 参考机 profile、机器证据采集与资格验证、分层校验门禁；generated fixture 采用“固定 recipe、run-local artifact hash”而非伪造跨 encoder 位级稳定性，既有产物只有 attestation 同时匹配当前 recipe 与 artifact identity 才能复用，不能被新配方重新背书。`windows-playback-m0-v3` 将完整 Video+Audio gate、素材用途、环境绑定、45 分钟外部进程期限、Video 解码进度 journal、16 GiB baseline 内存档位和预期报告 profile 固化；编排器只允许清洁且首尾同 revision、完整门禁、合格机器和全部结构化报告通过的运行成为 baseline。Golden v2 已固定完整 Sequence/交付合同、fixture purpose 和“未执行不得通过”规则，并以有外部期限的 `foundation-audio-authoring-v1` 首次执行真实产品工作流；证据是完整设置与逐事务/持久化/重开类型化事实，不以字符串清单冒充执行。App Action 不再允许未知/未实现意图静默成功。低于门禁档位只有在所有资格问题均被版本化合同显式列为可诊断、且操作员显式 opt-in 时才可继续，结果必为 diagnostic；缺 GPU/工具链/系统等执行前提仍失败关闭。完整 Golden/Stress 素材角色与真实工作流仍按 M1/M2 退出门槛验收。
 - [x] 将 capability probe、逐帧 decode provenance、最终 Viewer GPU completion 与 fallback/blocker 写入同一结构化报告，同时保持 media/renderer/playback 的诊断所有权；预取 aggregate 不得代替已呈现帧证据。
 - [x] 路线图、效果规格与色彩规格已统一五级能力口径：作者模型存在、产品可选择、图可执行、具体 backend 可执行、真实 preview/export 已验证。效果库只暴露可构图 definition；共享 Render Plan 对启用但未实现/缺失定义/运行时不可用/资源无效/构图崩溃失败关闭；CPU、GPU、颜色 reference 与产品发布证据分别列示，类型、OCIO 映射、shader 创建或单次 lower 成功均不得自动写成产品支持。
 
@@ -419,7 +421,7 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 
 ### 音频最低闭环
 
-- [ ] Clip gain、pan、fade in/out 已贯通稳定 Edit ID 的产品 UI、单字段类型化命令、完整作者校验、细粒度 Undo、保存重开和 scalar/SIMD 公共执行；0 fade 规范为 `None`，非法时长原子拒绝。仅在 Golden Project 实际完成并复核这些操作后勾选。
+- [ ] Clip gain、pan、fade in/out 已贯通稳定 Edit ID 的产品 UI、单字段类型化命令、完整作者校验、细粒度 Undo、保存重开和 scalar/SIMD 公共执行；0 fade 规范为 `None`，非法时长原子拒绝。规范 PCM 的 Headless Golden foundation 切片现已真实执行 -6 dB、+0.25 pan、双侧 1 秒 equal-power fade、四次 Undo/Redo、耐久保存重开和稳定 ID 后置条件；但顶层 Golden 尚未完成连续三轮完整工作流，因此仍不勾选。
 - [ ] Track mute 已进入公共执行；实现 transient solo audition、master meter、显式基础 limiter，波形与缩放/代理/relink 后保持正确。
 - [ ] 为已执行的规范 Component matrix 提供矩阵编辑器、可审阅预设与 Undo；custom media layout probe、Sequence→设备布局协商和非标准设备/编码拒绝必须保留源布局、目标布局、所选矩阵及拒绝原因，不调用 FFmpeg/CPAL 隐式猜测。
 - [ ] 为 Clip/Track/Bus/Program Output 的 Rack、参数自动化和 meter 提供同一套稳定 Scope/Processor/ParameterId 驱动的编辑 UI/命令；首个生产级 lookahead limiter 必须复用公共 Processor Host，并以真实 state、entry/deadline/PDC、嵌套、播放/导出一致性和 callback 实时安全证据验收。
@@ -439,7 +441,7 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 
 ### 导出与颜色
 
-- [ ] 产品 UI 已完成 H.264/AAC SDR MP4 与 HEVC Main10 的稳定合法预设、类型化 profile/位深/range/chroma/Alpha 合同、统一兼容性阻塞、队列、取消和失败原因；继续补齐用户可编辑的导出参数表单，以及有明确 cadence/resampling 语义的帧率、音频采样率/布局覆盖，随后完成覆盖确认与失败重试，并以 Golden Project 真实 roundtrip 验收，不能因参数类型或 FFmpeg 参数单测存在而勾选。
+- [ ] 产品 UI 已完成 H.264/AAC SDR MP4 与 HEVC Main10 的稳定合法预设、类型化 profile/位深/range/chroma/Alpha 合同、统一兼容性阻塞、队列、取消和失败原因；Golden v2 的两条交付合同已绑定稳定内建 preset ID，普通 CI 会逐项对照真实 `resolve_export_delivery` 与共享 `expected_export_video_signal`，防止 8/10-bit、profile、chroma、pixel format、range、Rec.709 CICP、静态 HDR metadata 缺席策略、Alpha、分辨率和 AAC 码率漂移。继续补齐用户可编辑的导出参数表单，以及有明确 cadence/resampling 语义的帧率、音频采样率/布局覆盖，随后完成覆盖确认与失败重试，并以 Golden Project 真实 roundtrip 验收，不能因参数类型或 FFmpeg 参数单测存在而勾选。
 - [ ] 预览/导出使用同一 timeline/effect/color/alpha 解释；Golden frame 与 report signature 对齐。
 - [ ] Rec.709、sRGB、HLG、PQ 与列入 Beta floor 的 Log reference 全链验证；无法解析的 Log 阻止并提示 override，不输出“差不多”的颜色。
 - [ ] 导出后自动 probe 并重导入，校验 codec/container、分辨率、fps、时长、音频、primaries/transfer/matrix/range 与静态 HDR metadata。

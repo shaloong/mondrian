@@ -20,7 +20,7 @@ use mondrian_core::{
     AudioChannelLayout, AudioSamplePosition, AudioSampleRate, AudioSampleRounding, FrameRounding,
     ProjectId, ProjectSettings, TimelineTime,
 };
-use mondrian_editor_state::AuthoringSession;
+use mondrian_editor_state::{AuthoringSession, AuthoringSessionId};
 use mondrian_effects::{
     EffectNode, EffectNodeExt, EffectType, MaskComponent, MaskId, MaskKeyframe, MaskShape,
 };
@@ -62,6 +62,8 @@ mod audio_rendering;
 mod basic_titles;
 mod clip_clipboard;
 pub(crate) mod exporting;
+#[cfg(test)]
+mod golden_project_acceptance;
 #[cfg(test)]
 pub(crate) mod headless_viewer_gpu;
 mod media_import;
@@ -461,6 +463,11 @@ impl AppState {
             .as_ref()
             .map(|session| session.author_generation().get())
             .unwrap_or(0)
+    }
+
+    /// Process-local identity of the currently open Authoring Session.
+    pub fn authoring_session_id(&self) -> Option<AuthoringSessionId> {
+        self.authoring.as_ref().map(AuthoringSession::session_id)
     }
 
     /// Current project identity.

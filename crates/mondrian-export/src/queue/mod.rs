@@ -3313,6 +3313,7 @@ fn ffmpeg_channel_layout(layout: AudioChannelLayout) -> Option<&'static str> {
 }
 
 mod helpers;
+pub use helpers::expected_export_video_signal;
 pub(crate) use helpers::*;
 
 #[cfg(test)]

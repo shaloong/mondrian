@@ -18,10 +18,11 @@ pub use preset::{
     TimelineExportSnapshot,
 };
 pub use queue::{
-    ExportAdmissionError, ExportCancelOutcome, ExportColorHealthAction, ExportColorHealthArea,
-    ExportColorHealthCheck, ExportColorHealthReport, ExportColorHealthRootCause,
-    ExportColorHealthSeverity, ExportColorHealthVerdict, ExportFailure, ExportFailureReason,
-    ExportJobColorDiagnostics, ExportJobColorDiagnosticsSummary, ExportJobDiagnostics,
-    ExportJobSnapshot, ExportProgress, ExportProgressDetail, ExportProgressPhase,
-    ExportQueueDiagnostics, JobStatus, RenderJob, RenderQueue,
+    expected_export_video_signal, ExportAdmissionError, ExportCancelOutcome,
+    ExportColorHealthAction, ExportColorHealthArea, ExportColorHealthCheck,
+    ExportColorHealthReport, ExportColorHealthRootCause, ExportColorHealthSeverity,
+    ExportColorHealthVerdict, ExportFailure, ExportFailureReason, ExportJobColorDiagnostics,
+    ExportJobColorDiagnosticsSummary, ExportJobDiagnostics, ExportJobSnapshot, ExportProgress,
+    ExportProgressDetail, ExportProgressPhase, ExportQueueDiagnostics, JobStatus, RenderJob,
+    RenderQueue,
 };

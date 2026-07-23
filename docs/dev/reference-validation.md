@@ -11,8 +11,11 @@ control exists.
   purposes. Fixed files pin bytes globally; generated files pin the recipe and
   are byte-pinned by each run.
 - `tests/validation/golden-project.json` defines the five-minute editing and
-  export workflow. It is the source contract for a generated `.mdp`; hand-written
-  project JSON is not accepted as execution evidence.
+  export workflow. Schema v2 fixes exact Sequence raster/timing/color/audio
+  values, fixture-role purposes, stable built-in delivery preset identities,
+  resolved profile/depth/chroma/range/Alpha expectations, and independently
+  executable evidence slices. It is the source contract for a generated `.mdp`;
+  hand-written project JSON is not accepted as execution evidence.
 - `tests/validation/stress-project.json` defines the 30–60 minute workload and
   stability thresholds.
 - `tests/validation/windows-alpha-reference.json` defines the reference-machine
@@ -67,6 +70,14 @@ and probe; a Reference Playback Run repeats those hashes in its evidence
 bundle. A generated workload fixture marked `color_reference_eligible: false`
 cannot satisfy a color golden even when it carries valid CICP tags.
 
+An execution slice is intentionally narrower than the complete Golden Project.
+It passes only if its exact required fixture roles, operations, and content have
+typed postcondition evidence. Golden v2 rejects unknown fields; requirement IDs
+select evidence obligations but cannot substitute for observed author, media,
+delivery, or persistence facts.
+The complete Golden status remains blocked until every top-level requirement
+has evidence and the release repetition count is satisfied.
+
 Material whose redistribution is prohibited must not be uploaded to CI
 artifacts, mirrors, releases, or public fixture bundles. Runtime downloads from
 mutable or “latest” URLs are prohibited.
@@ -115,7 +126,34 @@ Generate the disposable canonical workload media when needed:
 
 ```powershell
 pwsh -File scripts/validation/generate-reference-playback-media.ps1 -Profile All -Force
+pwsh -File scripts/validation/generate-golden-project-media.ps1 -Force
 ```
+
+The Golden generator currently creates a 305-second, 48 kHz stereo PCM S16LE
+stream in a MOV container with analytically different left/right signals. MOV
+is intentional because it preserves the declared Front-Left/Front-Right layout;
+two channels without a Stereo layout cannot qualify. It is sufficient to make
+gain, pan, fades, channel swaps, import, and persistence observable; it is not a
+color or acoustic-loopback reference. A non-`-Force` run only reuses an artifact
+whose existing attestation matches the current recipe and artifact hash; it
+never rewrites an old artifact's provenance.
+
+Run the first Headless Golden execution slice:
+
+```powershell
+pwsh -File scripts/validation/invoke-golden-foundation-gate.ps1 `
+  -RegenerateGeneratedFixture
+```
+
+The bounded runner invokes only `mondrian-app --lib` and records a structured
+report for canonical fixture/attestation identity, semantic project open, PCM
+import, exact five-minute placement, typed Clip gain/pan/fades, four Undo plus
+four Redo steps, durable save, and fresh reopen. The report records exact
+Session/Generation/Sequence Revision transitions, complete Sequence settings,
+native Stereo layout, persistence request identity, archive identity, and
+reopened typed author values rather than prose assertions. Its envelope always records
+`complete_golden_project: false`; a passing foundation slice cannot be reported
+as the M1 Golden exit gate.
 
 Run the complete release-profile M0 playback plan. This preflights the machine
 before expensive generation, validates the Playback corpus, runs the 30-minute
@@ -173,9 +211,10 @@ and passing structured profiles. A loose cargo log is not acceptance evidence.
 
 ## Current coverage status
 
-The manifest contains the committed Standard numeric color corpus and two
-project-generated M0 workload recipes: 1812 seconds of 4K25 HEVC Main10
-Long-GOP Rec.709 code-pattern video, and 1835 seconds of 48 kHz stereo AAC.
+The manifest contains the committed Standard numeric color corpus, two
+project-generated M0 workload recipes (1812 seconds of 4K25 HEVC Main10
+Long-GOP Rec.709 code-pattern video and 1835 seconds of 48 kHz stereo AAC), plus
+the 305-second Golden PCM authoring fixture.
 They make the professional playback run reproducible without importing local
 downloads or asserting false color correctness. The clean `c484c47` run
 `20260722T065141Z-local-windows-dev-01-f4fc3eff` completed the full Video+Audio
@@ -183,7 +222,10 @@ plan on the qualified 16 GiB Windows reference machine and was classified
 `passed-baseline`. Its generated artifacts and evidence bundle remain
 intentionally disposable under `target`; the repository commits the recipes,
 contracts, and this reproducible result record rather than a multi-gigabyte
-machine-specific bundle. Golden/Stress still lack verified HLG/PQ, Rec.709
-H.264, sRGB alpha, PCM/WAV, camera Log, VFR, multichannel, damaged-media, and
-independent image references, so `Nightly/Release -Scope All` correctly remains
-blocked.
+machine-specific bundle. The Golden v2 contract now resolves its PCM and AAC
+roles, and `foundation-audio-authoring-v1` has a real Headless product-workflow
+gate rather than a declaration-only check. HLG Main10 picture, Rec.709 H.264
+picture, and sRGB Alpha still roles remain deliberately null until qualifying
+fixtures and appropriate independent color evidence exist. Stress coverage
+also still lacks 4K60 and broader Log/VFR/multichannel/damaged-media fixtures,
+so `Nightly/Release -Scope All` correctly remains blocked.

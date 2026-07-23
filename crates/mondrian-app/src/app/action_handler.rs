@@ -77,10 +77,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 impl AppState {
-    /// 派发 Action，修改内部状态
+    /// Dispatch one semantic Action into its owning product Interface.
     ///
-    /// 每个 Action 映射到 AppState 已有的方法。
-    /// 已实现的直接调用，未实现的记录 trace 日志后返回 Ok。
+    /// An Action handled by a shell-only Interface, an unknown namespace, or
+    /// an unimplemented product path is rejected. A caller must never infer
+    /// successful execution from a silent no-op.
     pub fn dispatch_action(&mut self, action: mondrian_editor_state::Action) -> Result<()> {
         use mondrian_editor_state::Action;
 
@@ -141,11 +142,11 @@ impl AppState {
 
             // ── 撤销/重做（已有方法）─────────────────────────────────────
             Action::Undo => {
-                let _ = self.undo_timeline();
+                let _ = self.undo_timeline()?;
                 Ok(())
             }
             Action::Redo => {
-                let _ = self.redo_timeline();
+                let _ = self.redo_timeline()?;
                 Ok(())
             }
 
@@ -221,11 +222,12 @@ impl AppState {
                 self.dispatch_sequence_ui_action(&name, payload)
             }
 
-            // ── 尚未实现的操作（Stage B-F 逐步添加）─────────────────────
-            _ => {
-                tracing::debug!(target: "mondrian::action", "Action not yet implemented: {:?}", action);
-                Ok(())
-            }
+            unsupported => Err(MondrianError::WorkflowStepFailed {
+                step_id: "dispatch_action".to_owned(),
+                reason: format!(
+                    "Action has no AppState product Interface implementation: {unsupported:?}"
+                ),
+            }),
         }
     }
 
@@ -7268,5 +7270,40 @@ mod tests {
             ]
         );
         assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_rejects_action_without_an_app_state_product_interface() {
+        let mut state = AppState::new();
+
+        let error = state
+            .dispatch_action(mondrian_editor_state::Action::NewProject)
+            .expect_err("shell-owned action must not report product success");
+
+        assert!(matches!(
+            error,
+            MondrianError::WorkflowStepFailed { ref step_id, .. }
+                if step_id == "dispatch_action"
+        ));
+        assert!(!state.has_open_project());
+    }
+
+    #[test]
+    fn dispatch_rejects_unknown_custom_namespace() {
+        let mut state = AppState::new();
+
+        let error = state
+            .dispatch_action(mondrian_editor_state::Action::Custom {
+                namespace: "third-party.unbound".to_owned(),
+                name: "pretend-success".to_owned(),
+                payload: serde_json::Value::Null,
+            })
+            .expect_err("unbound namespace must not report product success");
+
+        assert!(matches!(
+            error,
+            MondrianError::WorkflowStepFailed { ref step_id, .. }
+                if step_id == "dispatch_action"
+        ));
     }
 }

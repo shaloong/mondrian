@@ -212,6 +212,22 @@ existing unlocked tracks are occupied, and commits placement plus any new
 Track as one Undo transaction. Timeline presentation uses dedicated semantic
 title colors and the ordinary Clip selection/trim/drag model.
 
+## Semantic Action Completion
+
+`Action` is an intent envelope, not proof that work happened. `AppState` accepts
+only Actions owned by a concrete product Interface. Shell-only window/layout
+Actions, unknown custom namespaces, and product operations without an
+implementation return a structured failure; they never log and return
+`Ok(())`. Undo/Redo errors cross the same boundary instead of being discarded.
+
+Callers that need acceptance evidence must also verify domain postconditions.
+For example, the Golden audio slice checks the installed `AuthoringSession`,
+exact Sequence contract, stable Clip and Component Edit identities, values
+before/after all Undo and Redo steps, a precise Generation/Sequence Revision
+advance for every transaction, durable request identity and archive hash, and
+values observed under a distinct fresh Session after load. Action admission or
+a human-readable status hint alone cannot satisfy a Golden operation.
+
 ## Playback Tick Ownership
 
 The winit host may wake the application while playback is running, but playback

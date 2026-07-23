@@ -287,7 +287,7 @@ impl AppState {
         }
     }
 
-    fn wait_for_persistence_request(
+    pub(crate) fn wait_for_persistence_request(
         &mut self,
         request_id: ProjectPersistenceRequestId,
     ) -> anyhow::Result<()> {

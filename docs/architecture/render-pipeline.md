@@ -841,6 +841,11 @@ expectations. Nested Sequences remain working-domain render inputs and cannot
 select a different deliverable precision. Invalid 4:2:0/4:2:2 dimensions or
 profile/signal combinations fail at admission; the renderer must not crop,
 round, or ask FFmpeg to choose a substitute profile.
+`expected_export_video_signal` is the single shared projection from that
+admitted delivery plus Sequence output color intent to encoded pixel format,
+range, CICP primaries/transfer/matrix, and static-HDR metadata expectation.
+Queue execution, post-encode validation, and Golden acceptance consume this
+projection; no acceptance Adapter may reconstruct FFmpeg color-tag policy.
 
 ### Single Output-Intent Authority
 

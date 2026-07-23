@@ -39,6 +39,9 @@ persisted `SequenceRevision` (execution invalidation) and
 request also receives a monotonic request ID. Completion is accepted only by
 the still-open matching Session and request; reopening the same Project ID does
 not make a completion from the previous lifetime valid.
+The identity is printable for structured runtime and Headless evidence, but
+remains opaque: callers may compare or record it and must not derive ordering,
+Project identity, or persisted author semantics from its UUID representation.
 
 Manual save, Save As, and autosave all enter the dedicated
 `ProjectPersistenceService`. The worker first uses SQLite's online backup API

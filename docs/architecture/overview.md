@@ -63,11 +63,25 @@ Lower layers cannot depend on higher layers:
 - Core data cannot know UI, renderer, media, platform, or app.
 - Timeline can use core effect/mask/automation data, but renderer consumes it through `RenderPlanSource`, not `Sequence` internals.
 - Effects own effect evaluation, but pure effect data lives in core so timeline can store effects without depending on the evaluator.
-- UI widgets dispatch `Action`; app decides what actions mean.
+- UI widgets dispatch `Action`; app decides what actions mean. `AppState`
+  rejects shell-only, unknown-namespace, and unimplemented Actions with a
+  structured error. Logging and returning success for an unexecuted intent is
+  forbidden because UI automation, scripting, and Golden evidence share this
+  boundary.
 - Platform services are injected into event/app layers; widgets never call OS APIs directly.
 - `mondrian-core::ExecutionCancellationToken` is the payload-agnostic monotonic cancellation primitive. Domain schedulers own when to cancel; lower execution and media Adapters only observe it. Reusing or resetting a canceled token is forbidden.
 - Native process-memory observation is a separate read-only `ProcessMemoryProbe` seam. Windows reports Private Commit plus current/peak Working Set through the Process Status API; acceptance policy lives above the platform crate. Unsupported operating systems return explicit unavailable evidence rather than fabricated zeros, so future Linux/macOS Adapters can preserve the same contract.
 - Professional playback acceptance is likewise policy above the execution Modules. The real-cadence CPAL A/V Adapter drives the ordinary App transport, Audio Playback, bounded media-source cache, Playback Evidence, headless Viewer GPU execution, and process-memory probe; it does not own a second transport or test-only mixer. A CPAL callback report is intentionally distinct from an acoustic loopback measurement.
+- Golden Project acceptance is an App-level Headless Adapter over production
+  Interfaces, not a second editor implementation. A versioned execution slice
+  may pass only when its exact fixture roles, operations, and content
+  postconditions all have structured evidence; that never implies the complete
+  Golden Project passed. The foundation audio slice uses the normal media
+  import worker, Timeline drop/trim, typed Inspector Actions, project-wide
+  Undo/Redo, durable archive service, and fresh archive load. Its evidence
+  records the opaque Authoring Session identity and exact Author
+  Generation/Sequence Revision transition for every authored, Undo, and Redo
+  transaction; descriptive strings are not acceptance facts.
 
 The audio dependency direction is one-way:
 

@@ -240,7 +240,12 @@ impl ExportVideoSignalContract {
     }
 }
 
-pub(crate) fn expected_export_video_signal(
+/// Resolve the exact encoded color tags, range, pixel representation, and
+/// static-HDR metadata expected from one admitted delivery.
+///
+/// Execution and acceptance Adapters must consume this shared expectation
+/// instead of reconstructing FFmpeg color-tag policy.
+pub fn expected_export_video_signal(
     settings: &SequenceSettings,
     delivery: &ResolvedExportDeliveryContract,
 ) -> Result<crate::validator::ExpectedVideoSignalConstraints, String> {

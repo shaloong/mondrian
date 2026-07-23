@@ -204,9 +204,138 @@ foreach ($entry in $manifest.entries) {
 
 $golden = Get-Content -LiteralPath $goldenPath -Raw | ConvertFrom-Json
 $stress = Get-Content -LiteralPath $stressPath -Raw | ConvertFrom-Json
-foreach ($project in @($golden, $stress)) {
-    if ($project.schema_version -ne 1) { Add-Issue "error" "project.schema-unsupported" "$($project.id) has an unsupported schema version" }
-    if ($project.kind -notin @("golden", "stress")) { Add-Issue "error" "project.bad-kind" "$($project.id) has an invalid project kind" }
+if ($golden.schema_version -ne 2) {
+    Add-Issue "error" "golden.schema-unsupported" "$($golden.id) has an unsupported Golden Project schema version"
+}
+if ($golden.kind -ne "golden") {
+    Add-Issue "error" "golden.bad-kind" "$($golden.id) is not a Golden Project contract"
+}
+if ($stress.schema_version -ne 1) {
+    Add-Issue "error" "stress.schema-unsupported" "$($stress.id) has an unsupported Stress Project schema version"
+}
+if ($stress.kind -ne "stress") {
+    Add-Issue "error" "stress.bad-kind" "$($stress.id) is not a Stress Project contract"
+}
+
+$goldenRoleNames = @($golden.required_fixture_roles | ForEach-Object { [string]$_.role })
+if (@($goldenRoleNames | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0) {
+    Add-Issue "error" "golden.fixture-role-empty" "Golden Project fixture roles must have non-empty stable names"
+}
+if (@($goldenRoleNames | Select-Object -Unique).Count -ne $goldenRoleNames.Count) {
+    Add-Issue "error" "golden.fixture-role-duplicate" "Golden Project fixture role names must be unique"
+}
+foreach ($role in $golden.required_fixture_roles) {
+    $roleName = [string]$role.role
+    if (-not (Has-Property $role "required_purpose") -or [string]::IsNullOrWhiteSpace([string]$role.required_purpose)) {
+        Add-Issue "error" "golden.fixture-purpose-missing" "Golden Project role '$roleName' must declare one required corpus purpose"
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$role.fixture_id)) {
+        if (-not $ids.ContainsKey([string]$role.fixture_id)) {
+            Add-Issue "error" "golden.fixture-unknown" "Golden Project role '$roleName' references unknown fixture '$($role.fixture_id)'"
+        } elseif ((Has-Property $role "required_purpose") -and [string]$role.required_purpose -notin @($ids[[string]$role.fixture_id].purposes)) {
+            Add-Issue "error" "golden.fixture-purpose-mismatch" "Golden Project role '$roleName' requires purpose '$($role.required_purpose)', but fixture '$($role.fixture_id)' does not declare it"
+        }
+    }
+}
+
+$requiredOperationIds = @($golden.required_operations | ForEach-Object { [string]$_ })
+$requiredContentIds = @($golden.required_content | ForEach-Object { [string]$_ })
+foreach ($requirementSet in @(
+    [pscustomobject]@{ Name = "operation"; Values = $requiredOperationIds },
+    [pscustomobject]@{ Name = "content"; Values = $requiredContentIds }
+)) {
+    if (@($requirementSet.Values | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0) {
+        Add-Issue "error" "golden.requirement-empty" "Golden Project $($requirementSet.Name) requirements must be non-empty"
+    }
+    if (@($requirementSet.Values | Select-Object -Unique).Count -ne $requirementSet.Values.Count) {
+        Add-Issue "error" "golden.requirement-duplicate" "Golden Project $($requirementSet.Name) requirements must be unique"
+    }
+}
+
+if (-not (Has-Property $golden "execution_slices") -or @($golden.execution_slices).Count -eq 0) {
+    Add-Issue "error" "golden.execution-slices-missing" "Golden Project must define at least one independently executable evidence slice"
+} else {
+    $sliceIds = @($golden.execution_slices | ForEach-Object { [string]$_.id })
+    if (@($sliceIds | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0 -or @($sliceIds | Select-Object -Unique).Count -ne $sliceIds.Count) {
+        Add-Issue "error" "golden.execution-slice-id-invalid" "Golden Project execution-slice ids must be non-empty and unique"
+    }
+    foreach ($slice in $golden.execution_slices) {
+        $sliceId = [string]$slice.id
+        foreach ($field in @("required_fixture_roles", "required_operations", "required_content")) {
+            if (-not (Has-Property $slice $field)) {
+                Add-Issue "error" "golden.execution-slice-field-missing" "Golden Project slice '$sliceId' is missing '$field'"
+            }
+        }
+        $sliceRoleNames = if (Has-Property $slice "required_fixture_roles") {
+            @($slice.required_fixture_roles | ForEach-Object { [string]$_ })
+        } else {
+            @()
+        }
+        $sliceOperationIds = if (Has-Property $slice "required_operations") {
+            @($slice.required_operations | ForEach-Object { [string]$_ })
+        } else {
+            @()
+        }
+        $sliceContentIds = if (Has-Property $slice "required_content") {
+            @($slice.required_content | ForEach-Object { [string]$_ })
+        } else {
+            @()
+        }
+        foreach ($roleName in $sliceRoleNames) {
+            if ($roleName -notin $goldenRoleNames) {
+                Add-Issue "error" "golden.execution-slice-role-unknown" "Golden Project slice '$sliceId' references unknown fixture role '$roleName'"
+            }
+        }
+        foreach ($operationId in $sliceOperationIds) {
+            if ($operationId -notin $requiredOperationIds) {
+                Add-Issue "error" "golden.execution-slice-operation-unknown" "Golden Project slice '$sliceId' references unknown operation '$operationId'"
+            }
+        }
+        foreach ($contentId in $sliceContentIds) {
+            if ($contentId -notin $requiredContentIds) {
+                Add-Issue "error" "golden.execution-slice-content-unknown" "Golden Project slice '$sliceId' references unknown content '$contentId'"
+            }
+        }
+    }
+}
+
+if (-not (Has-Property $golden.acceptance "unexecuted_requirement_may_pass") -or $golden.acceptance.unexecuted_requirement_may_pass -ne $false) {
+    Add-Issue "error" "golden.unexecuted-requirement-policy-invalid" "Golden Project acceptance must explicitly forbid unexecuted requirements from passing"
+}
+if (-not (Has-Property $golden.acceptance "duration_error_max_frames") -or [int]$golden.acceptance.duration_error_max_frames -ne 1) {
+    Add-Issue "error" "golden.duration-tolerance-invalid" "Golden Project duration tolerance must be exactly one frame"
+}
+if (-not (Has-Property $golden.acceptance "av_boundary_error_max_ms") -or [int]$golden.acceptance.av_boundary_error_max_ms -ne 20) {
+    Add-Issue "error" "golden.av-boundary-tolerance-invalid" "Golden Project A/V boundary tolerance must be exactly 20 ms"
+}
+if (-not (Has-Property $golden.acceptance "silent_fallback_allowed") -or $golden.acceptance.silent_fallback_allowed -ne $false) {
+    Add-Issue "error" "golden.silent-fallback-policy-invalid" "Golden Project acceptance must explicitly forbid silent fallback"
+}
+
+$exportIds = @($golden.exports | ForEach-Object { [string]$_.id })
+if (@($exportIds | Select-Object -Unique).Count -ne $exportIds.Count) {
+    Add-Issue "error" "golden.export-id-duplicate" "Golden Project export ids must be unique"
+}
+foreach ($export in $golden.exports) {
+    foreach ($field in @("id", "builtin_preset_id", "expected_delivery", "required_probe_fields")) {
+        if (-not (Has-Property $export $field)) {
+            Add-Issue "error" "golden.export-field-missing" "Golden Project export '$($export.id)' is missing '$field'"
+        }
+    }
+    if (Has-Property $export "expected_delivery") {
+        foreach ($field in @("container", "video_codec", "video_profile", "width", "height", "bit_depth", "chroma_sampling", "pixel_format", "range", "color_primaries", "color_transfer", "color_matrix", "static_hdr_metadata", "alpha", "audio_codec", "audio_bitrate_kbps")) {
+            if (-not (Has-Property $export.expected_delivery $field)) {
+                Add-Issue "error" "golden.export-delivery-field-missing" "Golden Project export '$($export.id)' expected delivery is missing '$field'"
+            }
+        }
+    }
+    if (Has-Property $export "required_probe_fields") {
+        foreach ($field in @("bit_depth", "primaries", "transfer", "matrix", "range", "hdr_static_metadata")) {
+            if ($field -notin @($export.required_probe_fields)) {
+                Add-Issue "error" "golden.export-probe-field-missing" "Golden Project export '$($export.id)' probe contract is missing '$field'"
+            }
+        }
+    }
 }
 
 $gateIds = @{}
@@ -257,8 +386,6 @@ if ($Tier -in @("Nightly", "Release") -and $Scope -eq "All") {
     foreach ($role in $golden.required_fixture_roles) {
         if ($role.required -and [string]::IsNullOrWhiteSpace($role.fixture_id)) {
             Add-Issue "blocked" "golden.fixture-unassigned" "Golden Project role '$($role.role)' has no verified fixture assigned"
-        } elseif (-not [string]::IsNullOrWhiteSpace($role.fixture_id) -and -not $ids.ContainsKey($role.fixture_id)) {
-            Add-Issue "error" "golden.fixture-unknown" "Golden Project role '$($role.role)' references unknown fixture '$($role.fixture_id)'"
         }
     }
     foreach ($purpose in $stress.required_fixture_purposes) {

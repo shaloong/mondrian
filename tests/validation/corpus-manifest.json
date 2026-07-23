@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "corpus_revision": "2026-07-20",
+  "corpus_revision": "2026-07-23",
   "entries": [
     {
       "id": "mondrian-standard-quality-v1",
@@ -109,7 +109,43 @@
         "device-clock",
         "av-drift",
         "decoded-window-cache",
-        "whole-process-memory"
+        "whole-process-memory",
+        "golden-aac-audio"
+      ]
+    },
+    {
+      "id": "generated-golden-pcm-s16-48k-stereo-305s-v1",
+      "path": "large/golden-pcm-s16-48k-stereo-305s-v1.mov",
+      "availability": "generated",
+      "sha256": null,
+      "size_bytes": null,
+      "generation": {
+        "recipe_path": "scripts/validation/generate-golden-project-media.ps1",
+        "recipe_sha256": "0aebc637ba11e4eae740d17300ba58f85ffd4e034e3420f675e57c7b7d6630ce",
+        "profile": "FoundationAudioAuthoring",
+        "attestation_suffix": ".attestation.json",
+        "artifact_hash_scope": "reference-run"
+      },
+      "provenance": {
+        "source": "Deterministic project-authored unequal-channel analytic tone recipe encoded as PCM S16LE",
+        "rights_basis": "project-generated-synthetic-stimulus",
+        "redistribution": "permitted"
+      },
+      "media": {
+        "kind": "audio",
+        "container": "mov",
+        "codec": "pcm_s16le",
+        "sample_format": "s16",
+        "sample_rate": 48000,
+        "channels": 2,
+        "channel_layout": "stereo",
+        "minimum_stream_duration_seconds": 304.9,
+        "color_reference_eligible": false
+      },
+      "purposes": [
+        "golden-pcm-audio",
+        "clip-audio-authoring",
+        "project-save-reopen"
       ]
     }
   ]
