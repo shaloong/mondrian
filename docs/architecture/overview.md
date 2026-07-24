@@ -82,6 +82,13 @@ Lower layers cannot depend on higher layers:
   records the opaque Authoring Session identity and exact Author
   Generation/Sequence Revision transition for every authored, Undo, and Redo
   transaction; descriptive strings are not acceptance facts.
+  The editorial-transport slice imports the attested AAC fixture, builds
+  overlapping and downstream placements through ordinary Timeline Actions,
+  and records exact Overwrite, Split, and Ripple postconditions. Pointer-drag
+  and settled seeks must complete through Playback Evidence, while Play must
+  advance under the Synthetic Clock Master. This closes short Golden workflow
+  obligations only; it cannot substitute for the long-form CPAL/GPU/memory/A/V
+  acceptance profiles.
   The generated-delivery slice uses the same product Actions to create a
   Solid Color and PCM placement, trim an exact short work area, author
   Transform/Opacity, enqueue the stable H.264 High and HEVC Main10 presets,

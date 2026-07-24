@@ -3,12 +3,13 @@
 use super::harness::{new_run_directory, DirectoryCleanup};
 use super::workflow::GoldenProductWorkflowDriver;
 use super::{
-    foundation_audio, generated_delivery, load_golden_contract, repository_root,
-    sequence_settings_from_contract, visual_authoring, GoldenProjectContract,
+    editorial_transport, foundation_audio, generated_delivery, load_golden_contract,
+    repository_root, sequence_settings_from_contract, visual_authoring, GoldenProjectContract,
 };
 use anyhow::{ensure, Context};
 use mondrian_core::{ProjectColorEnvironment, ProjectSettings, SequenceId};
 use mondrian_media::info::VideoCodecProfile;
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 struct ComposedRun {
@@ -86,6 +87,19 @@ fn execute_foundation_and_visual(
     Ok((foundation_sequence_id, visual_sequence.id))
 }
 
+fn sequence_snapshot(
+    workflow: &GoldenProductWorkflowDriver,
+    sequence_id: SequenceId,
+) -> anyhow::Result<Value> {
+    let sequence = workflow
+        .app()
+        .sequences()
+        .iter()
+        .find(|sequence| sequence.id == sequence_id)
+        .with_context(|| format!("stage Sequence is absent: {sequence_id}"))?;
+    Ok(serde_json::to_value(sequence)?)
+}
+
 #[test]
 #[ignore = "composed Golden stages require the canonical PCM fixture and Windows Basic Title font"]
 fn golden_foundation_and_visual_stages_share_one_project() -> anyhow::Result<()> {
@@ -106,14 +120,37 @@ fn golden_foundation_and_visual_stages_share_one_project() -> anyhow::Result<()>
 }
 
 #[test]
-#[ignore = "three-stage Golden composition requires PCM, Windows Basic Title font, and production FFmpeg encoders"]
-fn golden_existing_stages_share_one_project() -> anyhow::Result<()> {
+#[ignore = "four-stage Golden composition requires PCM/AAC, Windows Basic Title font, and production FFmpeg encoders"]
+fn golden_current_stages_share_one_project() -> anyhow::Result<()> {
     let root = repository_root();
     let (contract, mut run) = ComposedRun::create(&root, "Windows Alpha Golden Existing Stages")?;
     let project_id = run.workflow.project_id();
     let project_path = run.workflow.project_path().to_path_buf();
     let (foundation_sequence_id, visual_sequence_id) =
         execute_foundation_and_visual(&root, &contract, &mut run.workflow)?;
+
+    let _editorial =
+        editorial_transport::execute_editorial_stage(&root, &contract, &mut run.workflow)?;
+    let editorial_sequence_id =
+        run.workflow.app().active_sequence().context("editorial Sequence is absent")?.id;
+    ensure!(
+        ![foundation_sequence_id, visual_sequence_id].contains(&editorial_sequence_id),
+        "editorial did not create a distinct stage Sequence"
+    );
+    let pre_delivery_snapshots = [
+        (
+            foundation_sequence_id,
+            sequence_snapshot(&run.workflow, foundation_sequence_id)?,
+        ),
+        (
+            visual_sequence_id,
+            sequence_snapshot(&run.workflow, visual_sequence_id)?,
+        ),
+        (
+            editorial_sequence_id,
+            sequence_snapshot(&run.workflow, editorial_sequence_id)?,
+        ),
+    ];
 
     let _delivery = generated_delivery::execute_delivery_stage(
         &root,
@@ -124,29 +161,34 @@ fn golden_existing_stages_share_one_project() -> anyhow::Result<()> {
     let delivery_sequence_id =
         run.workflow.app().active_sequence().context("delivery Sequence is absent")?.id;
     ensure!(
-        ![foundation_sequence_id, visual_sequence_id].contains(&delivery_sequence_id),
+        ![
+            foundation_sequence_id,
+            visual_sequence_id,
+            editorial_sequence_id
+        ]
+        .contains(&delivery_sequence_id),
         "delivery did not create a distinct stage Sequence"
     );
+    let delivery_snapshot = sequence_snapshot(&run.workflow, delivery_sequence_id)?;
     run.workflow.durable_save_reopen()?;
     run.workflow.verify_binding()?;
     ensure!(
         run.workflow.project_id() == project_id
             && run.workflow.project_path() == project_path
             && run.workflow.app().project_id() == Some(project_id),
-        "three-stage workflow changed the Golden Project binding"
+        "four-stage workflow changed the Golden Project binding"
     );
     ensure!(
-        run.workflow.app().sequences().len() == 3,
-        "three existing Golden stages must retain exactly three Sequences"
+        run.workflow.app().sequences().len() == 4,
+        "four current Golden stages must retain exactly four Sequences"
     );
-    for sequence_id in [
-        foundation_sequence_id,
-        visual_sequence_id,
-        delivery_sequence_id,
-    ] {
+    for (sequence_id, expected) in pre_delivery_snapshots
+        .into_iter()
+        .chain([(delivery_sequence_id, delivery_snapshot)])
+    {
         ensure!(
-            run.workflow.app().sequences().iter().any(|sequence| sequence.id == sequence_id),
-            "final durable reopen discarded stage Sequence {sequence_id}"
+            sequence_snapshot(&run.workflow, sequence_id)? == expected,
+            "final durable reopen changed stage Sequence {sequence_id}"
         );
     }
 

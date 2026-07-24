@@ -95,6 +95,26 @@
       "timeline_window": null
     },
     {
+      "id": "editorial-transport-v1",
+      "required_fixture_roles": [
+        "aac-audio"
+      ],
+      "required_operations": [
+        "play",
+        "accurate-seek",
+        "scrub",
+        "overwrite",
+        "ripple",
+        "split"
+      ],
+      "required_content": [],
+      "required_exports": [],
+      "timeline_window": {
+        "start_frame": 0,
+        "end_frame_exclusive": 150
+      }
+    },
+    {
       "id": "generated-delivery-roundtrip-v1",
       "required_fixture_roles": [
         "pcm-audio"

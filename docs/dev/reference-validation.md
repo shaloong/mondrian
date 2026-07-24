@@ -11,7 +11,7 @@ control exists.
   purposes. Fixed files pin bytes globally; generated files pin the recipe and
   are byte-pinned by each run.
 - `tests/validation/golden-project.json` defines the five-minute editing and
-  export workflow. Schema v2 fixes exact Sequence raster/timing/color/audio
+  export workflow. Schema v3 fixes exact Sequence raster/timing/color/audio
   values, fixture-role purposes, stable built-in delivery preset identities,
   resolved profile/depth/chroma/range/Alpha expectations, and independently
   executable evidence slices. It is the source contract for a generated `.mdp`;
@@ -112,12 +112,30 @@ cargo test -p mondrian-app --lib `
   --nocapture
 ```
 
-The ledger deliberately remains blocked. The current slices do not plan AAC
-audio, HLG Main10/Rec.709 H.264/sRGB Alpha picture roles; Play, accurate Seek,
-Scrub, Insert, Overwrite, Ripple, Split, Proxy switch, and offline Relink;
+The ledger deliberately remains blocked. The AAC role plus Play, accurate
+Seek, Scrub, Overwrite, Ripple, and Split now have a real executable slice.
+The current slices still do not plan HLG Main10/Rec.709 H.264/sRGB Alpha
+picture roles; a fully specified Insert Edit, Proxy switch, offline Relink;
 primary color correction and LUT. The three picture roles also remain unbound
 to qualifying fixtures. Export contracts are already assigned, but that alone
 is not a complete product workflow.
+
+Run the AAC editorial and Transport slice after generating the canonical
+playback audio:
+
+```powershell
+cargo test -p mondrian-app --lib `
+  golden_project_editorial_transport_gate `
+  -j1 -- --ignored --nocapture --test-threads=1
+```
+
+The slice imports the attested AAC through the production media worker,
+authors overlapping and downstream placements, and requires exact range
+postconditions for Overwrite, Split, and Ripple Delete. Pointer-drag and
+settled seeks must produce the corresponding Playback Evidence classes, and
+Play must advance monotonically under the Synthetic Clock Master. This is a
+short semantic workflow gate; it does not replace the long CPAL, GPU,
+cancellation, memory, or A/V drift gates.
 
 Verify the single-Project Headless workflow boundary:
 
@@ -158,15 +176,16 @@ Golden stage in one Project:
 ```powershell
 $env:MONDRIAN_GOLDEN_FIXTURE_ROOT='target/validation/golden-fixtures'
 cargo test -p mondrian-app --lib `
-  golden_existing_stages_share_one_project `
+  golden_current_stages_share_one_project `
   -j1 -- --ignored --nocapture --test-threads=1
 ```
 
-This extends the two-stage gate with Generated Delivery, reuses the already
-imported canonical PCM asset, creates one third stage Sequence, executes both
-typed exports and ordinary media reimports, then performs a final durable
-reopen. It requires one Project ID/path, exactly three retained Sequences, and
-reimported `H264High` plus `HevcMain10` assets in the reopened Project library.
+This extends the two-stage gate with AAC Editorial/Transport and Generated
+Delivery, reuses canonical generated fixtures, creates two more stage
+Sequences, executes both typed exports and ordinary media reimports, then
+performs a final durable reopen. It requires one Project ID/path, exactly four
+retained Sequences, and reimported `H264High` plus `HevcMain10` assets in the
+reopened Project library.
 The still-missing plan obligations mean this is not yet the top-level Golden
 coordinator and cannot contribute a consecutive complete run.
 

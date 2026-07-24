@@ -5,6 +5,7 @@
 //! second monolithic acceptance harness.
 
 mod composed_workflow;
+mod editorial_transport;
 mod fixture;
 mod foundation_audio;
 mod generated_delivery;
@@ -556,7 +557,6 @@ fn golden_acceptance_plan_reports_current_top_level_blockers() -> anyhow::Result
     assert_eq!(
         plan.missing.fixture_roles,
         [
-            "aac-audio",
             "hlg-main10-picture",
             "rec709-h264-picture",
             "srgb-alpha-still"
@@ -567,20 +567,10 @@ fn golden_acceptance_plan_reports_current_top_level_blockers() -> anyhow::Result
     );
     assert_eq!(
         plan.missing.operations,
-        [
-            "accurate-seek",
-            "insert",
-            "offline-relink",
-            "overwrite",
-            "play",
-            "proxy-original-switch",
-            "ripple",
-            "scrub",
-            "split",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect()
+        ["insert", "offline-relink", "proxy-original-switch",]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
     );
     assert_eq!(
         plan.missing.content,
@@ -598,7 +588,7 @@ fn golden_acceptance_plan_reports_current_top_level_blockers() -> anyhow::Result
         .map(str::to_owned)
         .collect()
     );
-    assert_eq!(plan.slices.len(), 3);
+    assert_eq!(plan.slices.len(), 4);
 
     eprintln!(
         "MONDRIAN_GOLDEN_ACCEPTANCE_PLAN_JSON={}",
