@@ -116,6 +116,26 @@
         "start_frame": 0,
         "end_frame_exclusive": 25
       }
+    },
+    {
+      "id": "visual-authoring-roundtrip-v1",
+      "required_fixture_roles": [],
+      "required_operations": [
+        "undo-redo",
+        "save-reopen"
+      ],
+      "required_content": [
+        "cross-dissolve",
+        "basic-title",
+        "hold-keyframe",
+        "linear-keyframe",
+        "bezier-keyframe"
+      ],
+      "required_exports": [],
+      "timeline_window": {
+        "start_frame": 0,
+        "end_frame_exclusive": 100
+      }
     }
   ],
   "exports": [

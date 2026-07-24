@@ -176,6 +176,29 @@ codec/profile/pixel-format facts. It still reports a partial Golden slice:
 missing real color-reference roles, playback, nesting, transitions, recovery,
 and three complete consecutive runs remain open.
 
+Run the fixture-free visual-authoring slice on Windows:
+
+```powershell
+cargo test -p mondrian-app --lib `
+  golden_project_visual_authoring_roundtrip_gate -j1 -- `
+  --ignored --nocapture --test-threads=1
+```
+
+This slice creates an exact adjacent generated edit, adds the product-default
+Cross Dissolve, creates and edits a Basic Title, and authors two-key Hold,
+Linear, and Bezier curves through production App Interfaces. Every edit,
+Undo, and Redo must advance the installed Authoring Session by exactly one
+Author Generation and Sequence Revision. The gate then performs production
+durable save/close/fresh-open and repeats Headless Preview execution. Preview
+uses the recursive timeline executor, real system-font rasterizer, and
+float-linear CPU compositor; its evaluated title and Cross Dissolve coefficient
+must equal the Export render plan, and its raster signature and pixel hash must
+be unchanged after reopen. The exact named Windows font is a real dependency,
+so missing or changed font data fails closed. These generated pixels prove
+regression parity only: they do not replace an independent application or
+specification reference, real-media handle coverage, the complete keyframe
+editing UI, or the three-run top-level Golden exit gate.
+
 Run the complete release-profile M0 playback plan. This preflights the machine
 before expensive generation, validates the Playback corpus, runs the 30-minute
 Video and CPAL A/V gates, and creates one evidence bundle:

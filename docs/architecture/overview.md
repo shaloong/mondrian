@@ -89,6 +89,18 @@ Lower layers cannot depend on higher layers:
   output probe, and reimport both files through the ordinary media worker.
   Generated picture/audio and reports stay under `target/`; this slice closes
   only its declared obligations and cannot claim the complete Golden Project.
+  The fixture-free visual-authoring slice creates two generated Solid Color
+  placements, an explicit Cross Dissolve, and a generated Basic Title through
+  the same product Actions. It authors Hold, Linear, and Bezier curves through
+  the production property-mutation Interface, verifies one-generation/
+  one-revision transaction boundaries and Undo/Redo, then saves, closes, and
+  freshly reopens the archive. Its Headless Adapter resolves the ordinary
+  recursive Preview plan, invokes the production Basic Title rasterizer,
+  executes the float-linear CPU compositor, and compares the evaluated title
+  and transition coefficient with the Export render plan. Save/reopen must
+  retain the same typed semantics, raster signature, and preview pixel hash.
+  This is generated regression evidence, not an external visual-quality
+  reference and not proof that the complete keyframe UI is finished.
 
 The audio dependency direction is one-way:
 

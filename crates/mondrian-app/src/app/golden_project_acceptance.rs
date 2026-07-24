@@ -8,6 +8,7 @@ mod fixture;
 mod foundation_audio;
 mod generated_delivery;
 mod harness;
+mod visual_authoring;
 
 use anyhow::{ensure, Context};
 use mondrian_core::{AudioChannelLayout, ColorSpace, Rational, Resolution, WorkingColorSpace};

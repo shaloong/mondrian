@@ -212,7 +212,7 @@ pub struct TimelineSolidColorPlan {
 /// Evaluated sequence-local Basic Title source.
 #[derive(Debug, Clone)]
 pub struct TimelineBasicTitlePlan {
-    /// Typed title semantics evaluated at the Clip's exact source-local time.
+    /// Typed title semantics evaluated at the Clip's exact visual author time.
     pub title: EvaluatedBasicTitle,
     /// Clip opacity evaluated at the same author time.
     pub opacity: f32,

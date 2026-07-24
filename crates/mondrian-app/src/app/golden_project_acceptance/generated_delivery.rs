@@ -2,8 +2,8 @@
 
 use super::fixture::{resolve_fixture, sha256_file, CorpusManifest, FixtureEvidence};
 use super::harness::{
-    fixture_root, new_run_directory, rooted_env_path, wait_for_export_job, wait_for_media_imports,
-    write_report, DirectoryCleanup,
+    ensure_exact_requirement_evidence, fixture_root, new_run_directory, rooted_env_path,
+    wait_for_export_job, wait_for_media_imports, write_report, DirectoryCleanup,
 };
 use super::{
     builtin_preset, load_golden_contract, load_json, repository_root,
@@ -677,20 +677,16 @@ fn execute_delivery_slice(
         OperationEvidence::Export { deliveries: exports },
         OperationEvidence::Reimport { assets: reimports },
     ];
-    let operation_ids = operations.iter().map(OperationEvidence::id).collect::<BTreeSet<_>>();
-    let required_operations =
-        slice.required_operations.iter().map(String::as_str).collect::<BTreeSet<_>>();
-    ensure!(
-        operation_ids == required_operations,
-        "operation evidence does not exactly cover the delivery slice"
-    );
-    let content_ids = content.iter().map(ContentEvidence::id).collect::<BTreeSet<_>>();
-    let required_content =
-        slice.required_content.iter().map(String::as_str).collect::<BTreeSet<_>>();
-    ensure!(
-        content_ids == required_content,
-        "content evidence does not exactly cover the delivery slice"
-    );
+    ensure_exact_requirement_evidence(
+        &slice.required_operations,
+        operations.iter().map(OperationEvidence::id),
+        "operation",
+    )?;
+    ensure_exact_requirement_evidence(
+        &slice.required_content,
+        content.iter().map(ContentEvidence::id),
+        "content",
+    )?;
 
     Ok(GoldenDeliveryReport {
         schema_version: 3,

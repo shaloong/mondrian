@@ -1,8 +1,10 @@
 //! First executable Golden slice: PCM Clip authoring and durable reopen.
 
-use super::fixture::{resolve_fixture, sha256_file, CorpusManifest, FixtureEvidence};
+use super::fixture::{resolve_fixture, CorpusManifest, FixtureEvidence};
 use super::harness::{
-    fixture_root, new_run_directory, rooted_env_path, wait_for_media_imports, write_report,
+    author_checkpoint, dispatch_author_transition, durable_save_reopen,
+    ensure_exact_requirement_evidence, fixture_root, new_run_directory, rooted_env_path,
+    wait_for_media_imports, write_report, AuthorCheckpoint, AuthorTransitionEvidence,
     DirectoryCleanup,
 };
 use super::{
@@ -30,20 +32,6 @@ use std::path::{Path, PathBuf};
 const FOUNDATION_SLICE_ID: &str = "foundation-audio-authoring-v1";
 const RUN_ROOT_ENV: &str = "MONDRIAN_GOLDEN_FOUNDATION_RUN_ROOT";
 const OUTPUT_ENV: &str = "MONDRIAN_GOLDEN_FOUNDATION_OUTPUT";
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct AuthorCheckpoint {
-    session_id: String,
-    author_generation: u64,
-    sequence_revision: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct AuthorTransitionEvidence {
-    intent: &'static str,
-    before: AuthorCheckpoint,
-    after: AuthorCheckpoint,
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct AudioEditObservation {
@@ -154,44 +142,6 @@ fn new_run_paths(root: &Path) -> anyhow::Result<GoldenRunPaths> {
         directory,
         report,
     })
-}
-
-fn author_checkpoint(state: &AppState) -> anyhow::Result<AuthorCheckpoint> {
-    Ok(AuthorCheckpoint {
-        session_id: state
-            .authoring_session_id()
-            .context("Authoring Session is absent")?
-            .to_string(),
-        author_generation: state.project_author_generation(),
-        sequence_revision: state
-            .active_sequence()
-            .context("active Sequence is absent")?
-            .revision
-            .get(),
-    })
-}
-
-fn dispatch_author_transition(
-    state: &mut AppState,
-    intent: &'static str,
-    action: Action,
-) -> anyhow::Result<AuthorTransitionEvidence> {
-    let before = author_checkpoint(state)?;
-    state.dispatch_action(action)?;
-    let after = author_checkpoint(state)?;
-    ensure!(
-        before.session_id == after.session_id,
-        "{intent} replaced the Authoring Session"
-    );
-    ensure!(
-        before.author_generation.checked_add(1) == Some(after.author_generation),
-        "{intent} did not advance Author Generation exactly once"
-    );
-    ensure!(
-        before.sequence_revision.checked_add(1) == Some(after.sequence_revision),
-        "{intent} did not advance Sequence Author Revision exactly once"
-    );
-    Ok(AuthorTransitionEvidence { intent, before, after })
 }
 
 fn observe_audio_edit(edit: &AudioComponentEdit) -> AudioEditObservation {
@@ -457,33 +407,7 @@ fn execute_foundation_slice(
     let undo_evidence =
         OperationEvidence::UndoRedo { undo_steps, after_undo, redo_steps, after_redo };
 
-    let persistence_request_id = state.request_project_save()?;
-    state.wait_for_persistence_request(persistence_request_id)?;
-    ensure!(
-        !state.has_unsaved_project_changes(),
-        "durable save completion did not cover current author and Asset Library state"
-    );
-    let saved_session = author_checkpoint(&state)?;
-    let project_archive_sha256 = sha256_file(&paths.project)?;
-    state.close_project();
-    ensure!(
-        state.authoring_session_id().is_none(),
-        "close retained the saved Authoring Session"
-    );
-    state.dispatch_action(Action::OpenProject(paths.project.clone()))?;
-    let reopened_session = author_checkpoint(&state)?;
-    ensure!(
-        saved_session.session_id != reopened_session.session_id,
-        "save/reopen reused an Authoring Session identity"
-    );
-    ensure!(
-        reopened_session.author_generation == 1,
-        "freshly reopened Authoring Session did not begin at generation one"
-    );
-    ensure!(
-        reopened_session.sequence_revision == saved_session.sequence_revision,
-        "save/reopen changed persisted Sequence Author Revision"
-    );
+    let persistence = durable_save_reopen(&mut state, &paths.project)?;
     let reopened_clip = find_audio_clip(&state, clip_id)?.0;
     ensure!(
         reopened_clip.media_asset_id() == Some(asset.id),
@@ -504,22 +428,22 @@ fn execute_foundation_slice(
         "save/reopen lost the imported asset"
     );
     let save_evidence = OperationEvidence::SaveReopen {
-        persistence_request_id: persistence_request_id.get(),
-        saved_session,
-        reopened_session,
-        session_identity_changed: true,
+        persistence_request_id: persistence.persistence_request_id,
+        saved_session: persistence.saved_session,
+        reopened_session: persistence.reopened_session,
+        session_identity_changed: persistence.session_identity_changed,
         reopened_edit: observe_audio_edit(reopened_edit),
-        project_archive_sha256,
+        project_archive_sha256: persistence.project_archive_sha256,
     };
 
     let operations = vec![open_evidence, undo_evidence, save_evidence];
     let content = vec![content_evidence];
-    ensure_requirement_evidence(
+    ensure_exact_requirement_evidence(
         &slice.required_operations,
         operations.iter().map(OperationEvidence::id),
         "operation",
     )?;
-    ensure_requirement_evidence(
+    ensure_exact_requirement_evidence(
         &slice.required_content,
         content.iter().map(|evidence| evidence.id),
         "content",
@@ -543,20 +467,6 @@ fn execute_foundation_slice(
         operations,
         content,
     })
-}
-
-fn ensure_requirement_evidence<'a>(
-    required: &[String],
-    evidence_ids: impl IntoIterator<Item = &'a str>,
-    kind: &str,
-) -> anyhow::Result<()> {
-    let required = required.iter().map(String::as_str).collect::<BTreeSet<_>>();
-    let observed = evidence_ids.into_iter().collect::<BTreeSet<_>>();
-    ensure!(
-        required == observed,
-        "{kind} evidence does not exactly cover its slice contract"
-    );
-    Ok(())
 }
 
 #[test]
