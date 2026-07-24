@@ -176,7 +176,7 @@ fn resolve_export_color_target(
                     "Rendering View 导出目标必须是显示或交付色彩空间；Log 中间格式应使用 Colorimetric",
                 ));
             }
-            let output_transform = match &color_environment.engine {
+            let output_transform = match color_environment.engine() {
                 ColorEngine::MondrianStandard { package } => {
                     OutputTransformIntent::mondrian_standard_package(*package)
                 }
@@ -186,7 +186,7 @@ fn resolve_export_color_target(
                 }
             };
             let resolved_view = output_transform
-                .resolve_display_view(color_space, &color_environment.engine)
+                .resolve_display_view(color_space, color_environment.engine())
                 .map_err(|detail| {
                     ExportDeliveryError::new(
                         ExportDeliveryIssueCode::IncompatibleColorOutput,
@@ -558,7 +558,7 @@ fn validate_color_output(
             )
         })?;
 
-        let engine = &color_environment.engine;
+        let engine = color_environment.engine();
         if let ColorEngine::MondrianStandard { package } = engine {
             let target = mondrian_core::mondrian_standard_output_target_contract_for_package(
                 *package, output,

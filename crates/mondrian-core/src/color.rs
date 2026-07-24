@@ -160,7 +160,21 @@ impl ColorEngine {
         working_space: WorkingColorSpace,
         output_color_space: ColorSpace,
     ) -> Result<Self, String> {
-        crate::ocio::pin_custom_ocio_project_for_output(source, working_space, output_color_space)
+        Self::custom_ocio_for_outputs(source, working_space, &[output_color_space])
+    }
+
+    /// Resolve and pin a Custom OCIO config for every required output target.
+    ///
+    /// Targets are canonicalized as a set. Every target must resolve to one
+    /// unambiguous display/view binding in the selected config; a missing or
+    /// ambiguous target fails the complete project identity instead of
+    /// retaining a partial binding.
+    pub fn custom_ocio_for_outputs(
+        source: OcioConfigSource,
+        working_space: WorkingColorSpace,
+        output_color_spaces: &[ColorSpace],
+    ) -> Result<Self, String> {
+        crate::ocio::pin_custom_ocio_project_for_outputs(source, working_space, output_color_spaces)
     }
 
     /// Return the single working space pinned by this product mode, if any.

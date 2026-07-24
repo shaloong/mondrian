@@ -66,7 +66,7 @@ use crate::app_ui::project_settings_dialog::AppUiProjectSettingsDraft;
 use crate::app_ui::sequence_settings_dialog::AppUiSequenceSettingsDraft;
 use crate::app_ui::title_bar::{TitleBar, TITLE_BAR_HEIGHT};
 use crate::app_ui::workspace_layout::{AppUiWorkspaceLayout, DockDropArea};
-use mondrian_core::{MondrianError, Result};
+use mondrian_core::{ColorSpace, MondrianError, Result, WorkingColorSpace};
 
 /// Default file extension for Mondrian project containers.
 pub const PROJECT_FILE_EXTENSION: &str = "mdp";
@@ -564,6 +564,24 @@ fn apply_viewer_canvas_background(
     models.viewer.canvas_background = background;
 }
 
+fn project_sequence_color_contracts(state: &AppState) -> Vec<(WorkingColorSpace, ColorSpace)> {
+    let defaults = state.new_sequence_defaults();
+    let mut contracts = vec![(
+        defaults.color.working_color_space,
+        defaults.color.program_output.color_space,
+    )];
+    for sequence in state.sequences() {
+        let contract = (
+            sequence.settings.color.working_color_space,
+            sequence.settings.color.program_output.color_space,
+        );
+        if !contracts.contains(&contract) {
+            contracts.push(contract);
+        }
+    }
+    contracts
+}
+
 fn apply_viewer_zoom_mode_to_model(model: &mut ViewerPanelModel, mode: ViewerZoomMode) {
     model.zoom_label = mode.label();
     model.zoom_scale = mode.scale();
@@ -584,6 +602,7 @@ pub struct AppUiAppRoot {
     active_sequence: Option<Sequence>,
     project_color_environment: mondrian_core::ProjectColorEnvironment,
     new_sequence_defaults: mondrian_timeline::SequenceSettings,
+    project_sequence_color_contracts: Vec<(WorkingColorSpace, ColorSpace)>,
     modal: Option<ShellModal>,
     bounds: Rect,
 }
@@ -661,6 +680,7 @@ impl AppUiAppRoot {
         root.active_sequence = state.active_sequence().cloned();
         root.project_color_environment = state.project_color_environment().clone();
         root.new_sequence_defaults = state.new_sequence_defaults().clone();
+        root.project_sequence_color_contracts = project_sequence_color_contracts(state);
         root
     }
 
@@ -732,6 +752,10 @@ impl AppUiAppRoot {
             active_sequence: None,
             project_color_environment: mondrian_core::ProjectColorEnvironment::default(),
             new_sequence_defaults: mondrian_timeline::SequenceSettings::default(),
+            project_sequence_color_contracts: vec![(
+                WorkingColorSpace::LinearRec2020,
+                ColorSpace::Rec709,
+            )],
             modal: None,
             bounds: Rect::ZERO,
         };
@@ -980,6 +1004,7 @@ impl AppUiAppRoot {
         self.active_sequence = state.active_sequence().cloned();
         self.project_color_environment = state.project_color_environment().clone();
         self.new_sequence_defaults = state.new_sequence_defaults().clone();
+        self.project_sequence_color_contracts = project_sequence_color_contracts(state);
         let mut models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
             state,
             self.asset_folder_id.as_deref(),
@@ -1289,9 +1314,8 @@ impl AppUiAppRoot {
             {
                 self.modal = Some(ShellModal::project_settings(
                     AppUiProjectSettingsDraft::new(
-                        self.project_color_environment.engine.clone(),
-                        self.new_sequence_defaults.color.working_color_space,
-                        self.new_sequence_defaults.color.program_output.color_space,
+                        self.project_color_environment.engine().clone(),
+                        self.project_sequence_color_contracts.clone(),
                     ),
                 ));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
@@ -1327,7 +1351,7 @@ impl AppUiAppRoot {
                 self.modal = None;
                 Ok(Some(project_update_color_environment_action(
                     ProjectUpdateColorEnvironmentPayload {
-                        color_environment: mondrian_core::ProjectColorEnvironment { engine },
+                        color_environment: mondrian_core::ProjectColorEnvironment::new(engine),
                     },
                 )))
             }
@@ -3049,7 +3073,7 @@ mod tests {
         let payload: ProjectCreateWithSettingsPayload =
             serde_json::from_value(payload).expect("project create payload");
 
-        assert_eq!(payload.color_environment.engine, engine);
+        assert_eq!(payload.color_environment.engine(), &engine);
     }
 
     #[test]
@@ -3077,7 +3101,7 @@ mod tests {
         let identity = dialog
             .draft()
             .color_environment
-            .engine
+            .engine()
             .custom_ocio_identity()
             .expect("complete Custom OCIO identity");
         assert_eq!(
@@ -3116,8 +3140,8 @@ mod tests {
             .and_then(ShellModal::as_new_project)
             .expect("new-project dialog remains open");
         assert_eq!(
-            dialog.draft().color_environment.engine,
-            mondrian_core::ColorEngine::mondrian_standard()
+            dialog.draft().color_environment.engine(),
+            &mondrian_core::ColorEngine::mondrian_standard()
         );
         assert!(dialog.error_text().contains("not found"));
     }
@@ -3152,7 +3176,7 @@ mod tests {
         assert_eq!(name, PROJECT_UPDATE_COLOR_ENVIRONMENT);
         let payload: ProjectUpdateColorEnvironmentPayload =
             serde_json::from_value(payload).expect("project color environment payload");
-        assert_eq!(payload.color_environment.engine, engine);
+        assert_eq!(payload.color_environment.engine(), &engine);
         assert!(root.modal.is_none());
     }
 
@@ -3189,6 +3213,81 @@ mod tests {
         assert!(!identity.config_sha256().is_empty());
         assert!(!identity.processor_graph_sha256().is_empty());
         assert!(dialog.error_text().is_empty());
+    }
+
+    #[test]
+    fn project_settings_custom_ocio_pins_template_and_all_sequence_outputs() {
+        let config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../mondrian-core/assets/ocio/mondrian_default_ocio_v2.ocio");
+        let platform = FakePlatform {
+            open_paths: Some(vec![config_path]),
+            ..FakePlatform::default()
+        };
+        let mut state = AppState::new();
+        let rec709 = Sequence::new("SDR Program");
+        let mut pq = Sequence::new("HDR Program");
+        pq.settings.color.program_output.color_space = ColorSpace::Rec2100Pq;
+        state.test_set_sequences(vec![rec709, pq]);
+        let mut root = AppUiAppRoot::from_app_state(&state);
+
+        root.handle_shell_action(app_shell_project_settings_action(), &platform, None);
+        root.handle_shell_action(
+            app_shell_select_custom_ocio_config_action(),
+            &platform,
+            None,
+        );
+
+        let dialog = root
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_project_settings)
+            .expect("project-settings dialog");
+        let identity = dialog
+            .draft()
+            .engine
+            .custom_ocio_identity()
+            .expect("complete Custom OCIO identity");
+        assert!(identity.output(ColorSpace::Rec709).is_some());
+        assert!(identity.output(ColorSpace::Rec2100Pq).is_some());
+        assert_eq!(identity.outputs().len(), 2);
+        assert!(dialog.error_text().is_empty());
+    }
+
+    #[test]
+    fn project_settings_custom_ocio_rejects_multiple_project_working_spaces() {
+        let config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../mondrian-core/assets/ocio/mondrian_default_ocio_v2.ocio");
+        let platform = FakePlatform {
+            open_paths: Some(vec![config_path]),
+            ..FakePlatform::default()
+        };
+        let mut state = AppState::new();
+        *state.test_project_color_environment_mut() =
+            mondrian_core::ProjectColorEnvironment::new(mondrian_core::ColorEngine::Aces {
+                preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+            });
+        let mut aces_cg = Sequence::new("ACEScg Program");
+        aces_cg.settings.color.working_color_space = WorkingColorSpace::AcesCg;
+        state.test_set_sequences(vec![aces_cg]);
+        let mut root = AppUiAppRoot::from_app_state(&state);
+
+        root.handle_shell_action(app_shell_project_settings_action(), &platform, None);
+        root.handle_shell_action(
+            app_shell_select_custom_ocio_config_action(),
+            &platform,
+            None,
+        );
+
+        let dialog = root
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_project_settings)
+            .expect("project-settings dialog");
+        assert!(matches!(
+            dialog.draft().engine,
+            mondrian_core::ColorEngine::Aces { .. }
+        ));
+        assert!(dialog.error_text().contains("exactly one working space"));
     }
 
     #[test]

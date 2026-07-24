@@ -29,12 +29,16 @@ Sequence owns an independent monotonic `SequenceRevision`; Playback, Preview,
 audio compilation, and render caches bind that revision, so an edited draft or
 failed save cannot continue under an older Timeline identity.
 
-`ProjectColorEnvironment.engine` is the one persisted product-mode selector for
-Mondrian Standard, ACES, or Custom OCIO. A Sequence never stores, overrides, or
-inherits another engine. `SequenceColorSettings` stores only the working domain,
-media-input policy, and Program Output policy interpreted inside the Project
-environment. `SequenceDeliveryDefaults` separately stores encoded
-range/bit-depth defaults and authored HDR metadata.
+`ProjectColorEnvironment` privately owns the one persisted product-mode selector
+for Mondrian Standard, ACES, or Custom OCIO and exposes that exact value through
+its stable interface. Callers cannot construct or mutate a partial environment
+by reaching through a public field. This keeps the top-level Project seam
+available for future environment-wide invariants without changing the v21 JSON
+shape. A Sequence never stores, overrides, or inherits another engine.
+`SequenceColorSettings` stores only the working domain, media-input policy, and
+Program Output policy interpreted inside the Project environment.
+`SequenceDeliveryDefaults` separately stores encoded range/bit-depth defaults
+and authored HDR metadata.
 
 `ProjectSettings` remains a container/runtime policy object (proxy, cache and
 autosave settings); placing the engine there would mix image semantics with
@@ -59,11 +63,19 @@ engine/output route. A failure leaves the previous environment and history
 unchanged.
 
 The Project Settings draft edits this same global environment. A Custom OCIO
-selection is pinned to a complete config/resource/processor identity before it
-can replace the draft. If an already-authored Custom dependency is unavailable
-on reopen, the document still preserves the exact author intent; execution
-prepare fails closed until the dependency is restored. It must not fall back to
-Mondrian Standard, ACES, or a same-path-but-different config.
+selection collects the future-Sequence template and every current Sequence,
+deduplicates all required Program Output targets, and pins them together into
+one complete config/resource/processor identity before it can replace the
+draft. Every target must resolve to one unambiguous display/View binding; one
+missing or ambiguous target rejects the whole candidate rather than retaining a
+partially usable project engine. The current Custom identity intentionally pins
+one exact working space, so a Project using several Sequence working spaces
+must unify them before selecting Custom OCIO. The final AppState transaction
+still revalidates the template and every Sequence, so a stale UI snapshot
+cannot commit an incomplete identity. If an already-authored Custom dependency
+is unavailable on reopen, the document preserves the exact author intent;
+execution prepare fails closed until the dependency is restored. It must not
+fall back to Mondrian Standard, ACES, or a same-path-but-different config.
 
 Nested color integration is not a Sequence-global setting. It belongs to each
 `ClipContent::NestedSequence` placement edge, because the same child can be

@@ -2463,7 +2463,38 @@ pub fn pin_custom_ocio_project_for_output(
     working_space: WorkingColorSpace,
     output_color_space: ColorSpace,
 ) -> Result<ColorEngine, String> {
-    pin_custom_ocio_project_with_selection(source, working_space, output_color_space, None)
+    pin_custom_ocio_project_for_outputs(source, working_space, &[output_color_space])
+}
+
+/// Resolve a Custom OCIO source and pin every uniquely compatible output View.
+pub fn pin_custom_ocio_project_for_outputs(
+    source: OcioConfigSource,
+    working_space: WorkingColorSpace,
+    output_color_spaces: &[ColorSpace],
+) -> Result<ColorEngine, String> {
+    if output_color_spaces.is_empty() {
+        return Err("Custom OCIO project requires at least one output target".to_owned());
+    }
+    let invalid_targets = output_color_spaces
+        .iter()
+        .copied()
+        .filter(|target| !target.is_display_referred())
+        .collect::<Vec<_>>();
+    if !invalid_targets.is_empty() {
+        return Err(format!(
+            "Custom OCIO project output targets must be display-referred, got {invalid_targets:?}"
+        ));
+    }
+    let output_color_spaces = ColorSpace::ALL
+        .iter()
+        .copied()
+        .filter(|target| output_color_spaces.contains(target))
+        .collect::<Vec<_>>();
+    pin_custom_ocio_project_for_output_selections(
+        source,
+        working_space,
+        output_color_spaces.into_iter().map(|target| (target, None)).collect(),
+    )
 }
 
 fn pin_custom_ocio_project_with_selection(
@@ -2471,6 +2502,18 @@ fn pin_custom_ocio_project_with_selection(
     working_space: WorkingColorSpace,
     output_color_space: ColorSpace,
     display_view: Option<(String, String)>,
+) -> Result<ColorEngine, String> {
+    pin_custom_ocio_project_for_output_selections(
+        source,
+        working_space,
+        vec![(output_color_space, display_view)],
+    )
+}
+
+fn pin_custom_ocio_project_for_output_selections(
+    source: OcioConfigSource,
+    working_space: WorkingColorSpace,
+    output_selections: Vec<(ColorSpace, Option<(String, String)>)>,
 ) -> Result<ColorEngine, String> {
     if matches!(source, OcioConfigSource::MondrianStandard { .. }) {
         return Err(
@@ -2489,16 +2532,16 @@ fn pin_custom_ocio_project_with_selection(
                 "Custom OCIO config has no requested working color space '{working_space}'"
             ));
         }
-        let (display, view) = match display_view {
-            Some((display, view)) => (display, view),
-            None => resolve_custom_ocio_view_for_output(config, output_color_space)?,
-        };
-        let outputs = vec![resolve_custom_ocio_output_identity(
-            config,
-            output_color_space,
-            display,
-            view,
-        )?];
+        let outputs = output_selections
+            .into_iter()
+            .map(|(output_color_space, display_view)| {
+                let (display, view) = match display_view {
+                    Some((display, view)) => (display, view),
+                    None => resolve_custom_ocio_view_for_output(config, output_color_space)?,
+                };
+                resolve_custom_ocio_output_identity(config, output_color_space, display, view)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let identity = CustomOcioProjectIdentity::from_resolved(
             source.clone(),
             primary_config_sha256(&source, config)?,
@@ -4645,6 +4688,78 @@ mod tests {
             )
         );
         engine.ensure_loaded().expect("reopen pinned defaults");
+
+        std::fs::remove_file(path).expect("remove Custom OCIO test config");
+    }
+
+    #[test]
+    fn custom_ocio_project_pins_the_complete_required_output_set() {
+        let path = std::env::temp_dir().join(format!(
+            "mondrian-custom-ocio-multi-output-{}-{}.ocio",
+            std::process::id(),
+            ocio_config_generation()
+        ));
+        std::fs::write(&path, mondrian_default_ocio_config_text())
+            .expect("write Custom OCIO test config");
+
+        let environment = crate::ProjectColorEnvironment::custom_ocio(
+            OcioConfigSource::Path { path: path.clone() },
+            &[
+                (WorkingColorSpace::LinearRec2020, ColorSpace::Rec2100Pq),
+                (WorkingColorSpace::LinearRec2020, ColorSpace::Rec709),
+                (WorkingColorSpace::LinearRec2020, ColorSpace::Rec709),
+            ],
+        )
+        .expect("pin every required Custom OCIO output");
+        let engine = environment.engine();
+        let identity = engine.custom_ocio_identity().expect("Custom OCIO identity");
+        assert_eq!(identity.outputs().len(), 2);
+        assert_eq!(
+            engine.output_display_view(ColorSpace::Rec709).expect("Rec.709 binding"),
+            (
+                "Rec.1886 Rec.709 - Display".to_owned(),
+                "ACES 2.0 - SDR 100 nits (Rec.709)".to_owned()
+            )
+        );
+        assert_eq!(
+            engine.output_display_view(ColorSpace::Rec2100Pq).expect("PQ binding"),
+            (
+                "Rec.2100-PQ - Display".to_owned(),
+                "ACES 2.0 - HDR 1000 nits (P3 D65)".to_owned()
+            )
+        );
+        engine.ensure_loaded().expect("complete identity reopens");
+
+        let empty = crate::ProjectColorEnvironment::custom_ocio(
+            OcioConfigSource::Path { path: path.clone() },
+            &[],
+        )
+        .expect_err("empty output set must fail");
+        assert!(
+            empty.contains("at least one Sequence color contract"),
+            "{empty}"
+        );
+        let multiple_working = crate::ProjectColorEnvironment::custom_ocio(
+            OcioConfigSource::Path { path: path.clone() },
+            &[
+                (WorkingColorSpace::LinearRec2020, ColorSpace::Rec709),
+                (WorkingColorSpace::AcesCg, ColorSpace::Rec2100Pq),
+            ],
+        )
+        .expect_err("one Custom project cannot carry multiple working identities");
+        assert!(
+            multiple_working.contains("exactly one working space"),
+            "{multiple_working}"
+        );
+        let non_display = crate::ProjectColorEnvironment::custom_ocio(
+            OcioConfigSource::Path { path: path.clone() },
+            &[(
+                WorkingColorSpace::LinearRec2020,
+                ColorSpace::SonySLog3SGamut3Cine,
+            )],
+        )
+        .expect_err("camera Log cannot become a Program Output binding");
+        assert!(non_display.contains("display-referred"), "{non_display}");
 
         std::fs::remove_file(path).expect("remove Custom OCIO test config");
     }

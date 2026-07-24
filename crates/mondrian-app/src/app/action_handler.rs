@@ -3682,8 +3682,9 @@ mod tests {
         state.test_add_sequence(sequence);
         let mut settings = SequenceSettings::default();
         settings.color.working_color_space = WorkingColorSpace::AcesCg;
-        state.test_project_color_environment_mut().engine =
-            pinned_test_custom_engine("Linear Rec.2020");
+        *state.test_project_color_environment_mut() = mondrian_core::ProjectColorEnvironment::new(
+            pinned_test_custom_engine("Linear Rec.2020"),
+        );
 
         let error = state
             .dispatch_action(sequence_update_settings_action(
@@ -3732,7 +3733,8 @@ mod tests {
         let mut existing = Sequence::new("Existing");
         existing.settings.color.working_color_space = WorkingColorSpace::AcesCg;
         state.test_set_sequence(Some(existing));
-        state.test_project_color_environment_mut().engine = pinned_test_custom_engine("ACEScg");
+        *state.test_project_color_environment_mut() =
+            mondrian_core::ProjectColorEnvironment::new(pinned_test_custom_engine("ACEScg"));
         let defaults = state.test_new_sequence_defaults_mut();
         defaults.color.working_color_space = WorkingColorSpace::AcesCg;
 
@@ -5402,8 +5404,9 @@ mod tests {
     #[test]
     fn unavailable_custom_ocio_does_not_block_structurally_valid_author_edits() {
         let mut state = AppState::new();
-        state.test_project_color_environment_mut().engine =
-            pinned_test_custom_engine("Linear Rec.2020");
+        *state.test_project_color_environment_mut() = mondrian_core::ProjectColorEnvironment::new(
+            pinned_test_custom_engine("Linear Rec.2020"),
+        );
         let mut defaults = state.new_sequence_defaults().clone();
         defaults.resolution = Resolution::UHD4K;
 
@@ -5426,11 +5429,10 @@ mod tests {
         state.test_set_active_sequence(sequence_id);
         state.test_set_sequence(Some(sequence.clone()));
         state.test_add_sequence(sequence);
-        let color_environment = mondrian_core::ProjectColorEnvironment {
-            engine: mondrian_core::ColorEngine::Aces {
+        let color_environment =
+            mondrian_core::ProjectColorEnvironment::new(mondrian_core::ColorEngine::Aces {
                 preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
-            },
-        };
+            });
 
         state
             .dispatch_action(project_update_color_environment_action(
@@ -5445,11 +5447,11 @@ mod tests {
         assert_eq!(active.revision, original_revision);
         assert_eq!(state.project_color_environment(), &color_environment);
         assert_eq!(
-            active
+            &active
                 .settings
                 .root_program_color_context(state.project_color_environment())
                 .engine,
-            color_environment.engine
+            color_environment.engine()
         );
         assert_eq!(
             state.authoring_history().expect("history").diagnostics().undo_entries,
@@ -5460,11 +5462,10 @@ mod tests {
     #[test]
     fn project_color_environment_update_rejects_any_invalid_sequence_atomically() {
         let mut state = AppState::new();
-        let aces_environment = mondrian_core::ProjectColorEnvironment {
-            engine: mondrian_core::ColorEngine::Aces {
+        let aces_environment =
+            mondrian_core::ProjectColorEnvironment::new(mondrian_core::ColorEngine::Aces {
                 preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
-            },
-        };
+            });
         *state.test_project_color_environment_mut() = aces_environment.clone();
         let mut incompatible = Sequence::new("ACEScg Program");
         incompatible.settings.color.working_color_space = WorkingColorSpace::AcesCg;
@@ -5533,9 +5534,10 @@ mod tests {
         state.test_set_active_sequence(sequence.id);
         state.test_set_sequence(Some(sequence.clone()));
         state.test_add_sequence(sequence);
-        state.test_project_color_environment_mut().engine = mondrian_core::ColorEngine::Aces {
-            preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
-        };
+        *state.test_project_color_environment_mut() =
+            mondrian_core::ProjectColorEnvironment::new(mondrian_core::ColorEngine::Aces {
+                preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+            });
         let mut defaults = state.new_sequence_defaults().clone();
         defaults.resolution = Resolution::UHD4K;
         defaults.color.working_color_space = WorkingColorSpace::AcesCg;

@@ -708,7 +708,7 @@ impl SequenceSettings {
     ) -> mondrian_core::Result<()> {
         self.validate()?;
         color_environment
-            .engine
+            .engine()
             .validate_working_space(self.color.working_color_space)
             .map_err(|reason| mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "sequence_color_settings_validate".to_owned(),
@@ -751,7 +751,7 @@ impl SequenceSettings {
         color_environment: &mondrian_core::ProjectColorEnvironment,
         output_color_space: ColorSpace,
     ) -> ProgramColorContext {
-        let engine = color_environment.engine.clone();
+        let engine = color_environment.engine().clone();
 
         // Scene-referred workflows need the Project-owned engine's view
         // transform at a display-referred output. The engine alone decides
@@ -2012,7 +2012,7 @@ mod tests {
     }
 
     fn color_environment(engine: ColorEngine) -> mondrian_core::ProjectColorEnvironment {
-        mondrian_core::ProjectColorEnvironment { engine }
+        mondrian_core::ProjectColorEnvironment::new(engine)
     }
 
     fn standard_environment() -> mondrian_core::ProjectColorEnvironment {
@@ -2771,14 +2771,14 @@ mod tests {
             parent_context.clone(),
             NestedColorProcessing::PreserveChildWorkingSpace,
         );
-        assert_eq!(preserved.engine, environment.engine);
+        assert_eq!(&preserved.engine, environment.engine());
         assert_eq!(preserved.working_color_space, WorkingColorSpace::AcesCg);
 
         let forced = child.nested_render_color_context(
             parent_context.clone(),
             NestedColorProcessing::ForceParentWorkingSpace,
         );
-        assert_eq!(forced.engine, environment.engine);
+        assert_eq!(&forced.engine, environment.engine());
         assert_eq!(
             forced.working_color_space,
             parent_context.working_color_space
@@ -2796,8 +2796,8 @@ mod tests {
         let environment = color_environment(pinned_custom_engine(OcioConfigSource::Environment));
 
         assert_eq!(
-            settings.root_program_color_context(&environment).engine,
-            environment.engine
+            &settings.root_program_color_context(&environment).engine,
+            environment.engine()
         );
     }
 
@@ -2962,7 +2962,7 @@ mod tests {
             color_environment(ColorEngine::MondrianStandard { package: legacy_package });
         let context = settings.root_program_color_context(&environment);
 
-        assert_eq!(context.engine, environment.engine);
+        assert_eq!(&context.engine, environment.engine());
         assert_eq!(
             context.output_transform,
             mondrian_core::OutputTransformIntent::mondrian_standard_package(legacy_package)
@@ -2997,7 +2997,7 @@ mod tests {
             let intent = mondrian_core::OutputTransformIntent::mondrian_standard();
             assert_eq!(
                 intent
-                    .resolve_display_view(target, &environment.engine)
+                    .resolve_display_view(target, environment.engine())
                     .expect("supported Standard target"),
                 Some((expected_display.to_owned(), expected_view.to_owned()))
             );

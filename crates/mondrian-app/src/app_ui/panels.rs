@@ -351,12 +351,12 @@ impl AppUiPanelModels {
 fn asset_input_pipeline_for_state(state: &AppState) -> AppShellInputColorPipelineDiagnostics {
     let Some(sequence) = state.active_sequence() else {
         return AppShellInputColorPipelineDiagnostics {
-            engine: state.project_color_environment().engine.clone(),
+            engine: state.project_color_environment().engine().clone(),
             working_color_space: state.new_sequence_defaults().color.working_color_space,
         };
     };
     AppShellInputColorPipelineDiagnostics {
-        engine: state.project_color_environment().engine.clone(),
+        engine: state.project_color_environment().engine().clone(),
         working_color_space: sequence.settings.color.working_color_space,
     }
 }

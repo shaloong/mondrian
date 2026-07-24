@@ -5,7 +5,8 @@
 //! their draft-specific actions.
 
 use mondrian_core::{
-    AcesConfigPreset, ColorEngine, ColorSpace, OcioConfigSource, WorkingColorSpace,
+    AcesConfigPreset, ColorEngine, ColorSpace, OcioConfigSource, ProjectColorEnvironment,
+    WorkingColorSpace,
 };
 use mondrian_editor_state::Action;
 use mondrian_platform::{FileFilter, PlatformService};
@@ -19,8 +20,7 @@ use crate::app::ui_actions::app_shell_select_custom_ocio_config_action;
 /// any partial Custom mode can enter a dialog draft.
 pub(crate) fn choose_custom_ocio_config(
     platform: &dyn PlatformService,
-    working_space: WorkingColorSpace,
-    output_color_space: ColorSpace,
+    sequence_color_contracts: &[(WorkingColorSpace, ColorSpace)],
 ) -> Result<Option<ColorEngine>, String> {
     let Some(path) = platform
         .open_file_dialog(
@@ -31,12 +31,9 @@ pub(crate) fn choose_custom_ocio_config(
     else {
         return Ok(None);
     };
-    ColorEngine::custom_ocio_for_output(
-        OcioConfigSource::Path { path },
-        working_space,
-        output_color_space,
-    )
-    .map(Some)
+    ProjectColorEnvironment::custom_ocio(OcioConfigSource::Path { path }, sequence_color_contracts)
+        .map(ProjectColorEnvironment::into_engine)
+        .map(Some)
 }
 
 /// Return the stable product label for a project color engine.

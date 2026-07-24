@@ -228,16 +228,21 @@ Missing fields, semantic mismatches, config edits, role/view/endpoint changes,
 and external LUT changes fail closed during deserialization or config validation.
 
 When the UI selects only a Custom `.ocio` file,
-`custom_ocio_for_output` scans the config for a uniquely target-compatible
-display color-space endpoint. It prefers that display's declared default View,
-but never substitutes the config's global default for another output target.
+`ProjectColorEnvironment::custom_ocio` validates the complete set of Sequence
+working/output pairs, then `ColorEngine::custom_ocio_for_outputs` scans the
+config for a uniquely target-compatible display color-space endpoint for every
+output required by the future-Sequence template and all current Sequences. It
+prefers each display's declared default View, but never substitutes the config's
+global default for another output target.
 Recognized sRGB, Rec.709, Display P3, Rec.2020 SDR, PQ, and HLG endpoint names
 must agree with the requested label. Unknown or ambiguous studio conventions
 require an explicit `custom_ocio` display/view declaration; that declaration and
-the actual endpoint are both pinned. The current simple UI creates one binding
-for the active/new sequence output. The identity is already a set so an advanced
-mapping UI can add multiple delivery targets without changing project semantics;
-until then, any unbound sequence output fails validation rather than relabeling.
+the actual endpoint are both pinned. The simple Project Settings flow creates
+the complete deduplicated binding set atomically. The new-Project flow naturally
+starts with its one initial Program Output. A future advanced mapping UI may
+author explicit mappings for ambiguous facility names without changing project
+semantics; until then, one unresolved required target rejects the complete
+Custom candidate rather than relabeling or retaining partial bindings.
 The current Custom identity also pins exactly one Mondrian working-space name;
 its processor-graph digest is defined around that space. Sequence/project
 validation therefore rejects a Custom engine paired with any other sequence

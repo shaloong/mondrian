@@ -390,7 +390,7 @@ impl AppState {
             anyhow::bail!("项目文件已存在：{}", project_file.display());
         }
         settings.validate_with_color_environment(&color_environment)?;
-        color_environment.engine.ensure_loaded().map_err(anyhow::Error::msg)?;
+        color_environment.engine().ensure_loaded().map_err(anyhow::Error::msg)?;
 
         if let Some(parent) = project_file.parent() {
             fs::create_dir_all(parent)?;
@@ -467,7 +467,7 @@ impl AppState {
         &mut self,
         color_environment: mondrian_core::ProjectColorEnvironment,
     ) -> mondrian_core::Result<()> {
-        color_environment.engine.ensure_loaded().map_err(|reason| {
+        color_environment.engine().ensure_loaded().map_err(|reason| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "update_project_color_environment".to_owned(),
                 reason,

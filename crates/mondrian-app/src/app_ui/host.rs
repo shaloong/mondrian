@@ -219,7 +219,7 @@ impl AppUiHost {
         mondrian_core::color_models::DisplayManagementPolicy,
     ) {
         let state = self.app_state.borrow();
-        let engine = state.project_color_environment().engine.clone();
+        let engine = state.project_color_environment().engine().clone();
         (engine, state.viewer_display_management().clone())
     }
 
@@ -1053,7 +1053,7 @@ fn thumbnail_color_context(state: &AppState) -> mondrian_timeline::sequence::Pro
     let mut context = state.new_sequence_defaults().root_program_color_context(environment);
     context.output_color_space = mondrian_core::types::ColorSpace::Srgb.into();
     context.output_tone_map = true;
-    context.output_transform = match &environment.engine {
+    context.output_transform = match environment.engine() {
         mondrian_core::ColorEngine::MondrianStandard { package } => {
             mondrian_core::OutputTransformIntent::mondrian_standard_package(*package)
         }

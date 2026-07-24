@@ -28,20 +28,18 @@ use crate::app_ui::color_management_controls::{
 pub struct AppUiProjectSettingsDraft {
     /// Proposed complete project color engine.
     pub engine: ColorEngine,
-    /// Active sequence working space used when pinning a Custom config.
-    pub working_space: WorkingColorSpace,
-    /// Active sequence output target bound while pinning a Custom config.
-    pub output_color_space: ColorSpace,
+    /// Distinct Sequence working/output pairs required by the future-Sequence
+    /// template and every current Sequence.
+    sequence_color_contracts: Vec<(WorkingColorSpace, ColorSpace)>,
 }
 
 impl AppUiProjectSettingsDraft {
-    /// Build a draft from current project and active-sequence state.
+    /// Build a draft from the complete current Project color requirements.
     pub fn new(
         engine: ColorEngine,
-        working_space: WorkingColorSpace,
-        output_color_space: ColorSpace,
+        sequence_color_contracts: Vec<(WorkingColorSpace, ColorSpace)>,
     ) -> Self {
-        Self { engine, working_space, output_color_space }
+        Self { engine, sequence_color_contracts }
     }
 
     /// Apply one shell-local update.
@@ -49,6 +47,20 @@ impl AppUiProjectSettingsDraft {
         match update {
             ProjectSettingsDraftUpdatePayload::ColorEngine(engine) => self.engine = engine,
         }
+    }
+
+    fn working_space_summary(&self) -> String {
+        let mut working_spaces = Vec::new();
+        for (working_space, _) in &self.sequence_color_contracts {
+            if !working_spaces.contains(working_space) {
+                working_spaces.push(*working_space);
+            }
+        }
+        working_spaces
+            .into_iter()
+            .map(working_space_label)
+            .collect::<Vec<_>>()
+            .join("、")
     }
 }
 
@@ -73,17 +85,17 @@ fn working_space_label(working_space: WorkingColorSpace) -> &'static str {
     }
 }
 
-fn engine_detail(engine: &ColorEngine, working_space: WorkingColorSpace) -> String {
+fn engine_detail(engine: &ColorEngine, working_space_summary: &str) -> String {
     match engine {
         ColorEngine::MondrianStandard { package } => format!(
             "内置固定包：{} · 当前工作空间：{}",
             package.package_id(),
-            working_space_label(working_space)
+            working_space_summary
         ),
         ColorEngine::Aces { preset } => format!(
             "正式 OCIO 内置配置：{} · 当前工作空间：{}",
             preset.builtin_name(),
-            working_space_label(working_space)
+            working_space_summary
         ),
         ColorEngine::CustomOcio { identity } => {
             let outputs = identity
@@ -149,7 +161,7 @@ impl ProjectSettingsDialog {
     /// Build a project-settings dialog from current state.
     pub fn new(draft: AppUiProjectSettingsDraft) -> Self {
         let mode_dropdown = project_color_dropdown_for(&draft);
-        let detail_label = Label::new(engine_detail(&draft.engine, draft.working_space))
+        let detail_label = Label::new(engine_detail(&draft.engine, &draft.working_space_summary()))
             .secondary()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0)
@@ -195,8 +207,10 @@ impl ProjectSettingsDialog {
     pub fn apply_update(&mut self, update: ProjectSettingsDraftUpdatePayload) {
         self.draft.apply_update(update);
         self.mode_dropdown = project_color_dropdown_for(&self.draft);
-        self.detail_label
-            .set_text(engine_detail(&self.draft.engine, self.draft.working_space));
+        self.detail_label.set_text(engine_detail(
+            &self.draft.engine,
+            &self.draft.working_space_summary(),
+        ));
         self.error_label.set_text(String::new());
         if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
             self.layout(self.bounds);
@@ -205,11 +219,7 @@ impl ProjectSettingsDialog {
 
     /// Run native Custom OCIO selection and update only after complete pinning.
     pub fn choose_custom_ocio(&mut self, platform: &dyn PlatformService) {
-        match choose_custom_ocio_config(
-            platform,
-            self.draft.working_space,
-            self.draft.output_color_space,
-        ) {
+        match choose_custom_ocio_config(platform, &self.draft.sequence_color_contracts) {
             Ok(Some(engine)) => {
                 self.apply_update(ProjectSettingsDraftUpdatePayload::ColorEngine(engine));
             }

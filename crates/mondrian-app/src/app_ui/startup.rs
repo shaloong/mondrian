@@ -1202,7 +1202,7 @@ mod tests {
             .expect("new-project modal")
             .draft()
             .color_environment
-            .engine
+            .engine()
             .custom_ocio_identity()
             .expect("pinned Custom OCIO identity");
         assert_eq!(

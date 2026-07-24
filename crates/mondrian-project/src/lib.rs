@@ -962,9 +962,11 @@ mod tests {
     fn document_fingerprint_includes_exact_standard_package_identity() {
         let current = test_document();
         let mut legacy = current.clone();
-        legacy.color_environment.engine = mondrian_core::ColorEngine::MondrianStandard {
-            package: mondrian_core::MondrianStandardPackageIdentity::V2,
-        };
+        legacy.color_environment = mondrian_core::ProjectColorEnvironment::new(
+            mondrian_core::ColorEngine::MondrianStandard {
+                package: mondrian_core::MondrianStandardPackageIdentity::V2,
+            },
+        );
 
         assert_ne!(
             project_document_fingerprint(current).expect("current package fingerprint"),
@@ -998,8 +1000,8 @@ mod tests {
         let first = read_project_document_from_archive(&source).expect("first open");
         let second = read_project_document_from_archive(&source).expect("second open");
         assert_eq!(
-            first.color_environment.engine,
-            mondrian_core::ColorEngine::mondrian_standard()
+            first.color_environment.engine(),
+            &mondrian_core::ColorEngine::mondrian_standard()
         );
         let first_context = first
             .sequences
@@ -1042,13 +1044,13 @@ mod tests {
         let v2_engine = mondrian_core::ColorEngine::MondrianStandard {
             package: mondrian_core::MondrianStandardPackageIdentity::V2,
         };
-        document.color_environment.engine = v2_engine.clone();
+        document.color_environment = mondrian_core::ProjectColorEnvironment::new(v2_engine.clone());
 
         save_project_archive(&document, &db_path, &project_path)
             .expect("save legacy Standard v2 archive");
         let reopened = read_project_document_from_archive(&project_path)
             .expect("reopen legacy Standard v2 archive");
-        assert_eq!(reopened.color_environment.engine, v2_engine);
+        assert_eq!(reopened.color_environment.engine(), &v2_engine);
         let context = reopened
             .sequences
             .active()
@@ -1065,7 +1067,7 @@ mod tests {
             .output_transform
             .resolve_display_view(
                 mondrian_core::ColorSpace::Rec709,
-                &reopened.color_environment.engine,
+                reopened.color_environment.engine(),
             )
             .expect("resolve legacy Standard v2 output")
             .expect("legacy Standard v2 display/view");
@@ -1143,7 +1145,8 @@ mod tests {
             "mondrian-missing-project-custom-ocio-{}.ocio",
             std::process::id()
         ));
-        document.color_environment.engine = missing_custom_engine(missing_path);
+        document.color_environment =
+            mondrian_core::ProjectColorEnvironment::new(missing_custom_engine(missing_path));
         document
             .validate()
             .expect("unavailable external resources do not corrupt the author snapshot");
@@ -1154,7 +1157,7 @@ mod tests {
 
         let error = round_tripped
             .color_environment
-            .engine
+            .engine()
             .ensure_loaded()
             .expect_err("missing Project Custom OCIO config must block execution prepare");
         assert!(
@@ -1166,8 +1169,9 @@ mod tests {
     #[test]
     fn document_validation_rejects_custom_ocio_working_space_mismatch() {
         let mut document = test_document();
-        document.color_environment.engine =
-            missing_custom_engine(PathBuf::from("E:/studio/config.ocio"));
+        document.color_environment = mondrian_core::ProjectColorEnvironment::new(
+            missing_custom_engine(PathBuf::from("E:/studio/config.ocio")),
+        );
         document
             .sequences
             .active_mut()

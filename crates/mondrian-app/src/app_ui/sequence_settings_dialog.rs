@@ -79,7 +79,7 @@ impl AppUiSequenceSettingsDraft {
     }
 
     fn can_edit_working_color_space(&self) -> bool {
-        self.project_color_environment.engine.pinned_working_space().is_none()
+        self.project_color_environment.engine().pinned_working_space().is_none()
     }
 
     /// Apply one shell-local form update to the real sequence settings.
@@ -815,7 +815,7 @@ fn maybe_disable_dropdown(dropdown: Dropdown, disabled: bool) -> Dropdown {
 fn project_color_engine_label_for(draft: &AppUiSequenceSettingsDraft) -> Label {
     Label::new(format!(
         "项目色彩引擎：{}",
-        color_engine_label(&draft.project_color_environment.engine)
+        color_engine_label(draft.project_color_environment.engine())
     ))
     .muted()
     .with_font_size(LABEL_FONT_SIZE)
@@ -1771,11 +1771,10 @@ mod tests {
         );
 
         let aces_sequence = Sequence::new("ACES");
-        let aces_environment = mondrian_core::ProjectColorEnvironment {
-            engine: mondrian_core::ColorEngine::Aces {
+        let aces_environment =
+            mondrian_core::ProjectColorEnvironment::new(mondrian_core::ColorEngine::Aces {
                 preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
-            },
-        };
+            });
         let mut aces = AppUiSequenceSettingsDraft::from_sequence_in_environment(
             &aces_sequence,
             &aces_environment,
@@ -1797,8 +1796,8 @@ mod tests {
         let draft = AppUiSequenceSettingsDraft::from_sequence(&sequence);
 
         assert_eq!(
-            draft.project_color_environment.engine,
-            mondrian_core::ColorEngine::mondrian_standard()
+            draft.project_color_environment.engine(),
+            &mondrian_core::ColorEngine::mondrian_standard()
         );
         assert!(output_color_space_dropdown_for(&draft).is_enabled());
         assert!(color_workflow_dropdown_for(&draft).is_enabled());

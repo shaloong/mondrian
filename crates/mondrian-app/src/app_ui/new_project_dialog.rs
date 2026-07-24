@@ -88,7 +88,7 @@ impl AppUiNewProjectDraft {
                 if let Some(working_space) = engine.pinned_working_space() {
                     self.sequence_settings.color.working_color_space = working_space;
                 }
-                self.color_environment.engine = engine;
+                self.color_environment = ProjectColorEnvironment::new(engine);
             }
             NewProjectDraftUpdatePayload::ProxyEnabled(enabled) => {
                 self.project_settings.proxy_enabled = enabled;
@@ -260,7 +260,7 @@ fn audio_sample_rate_dropdown_for(draft: &AppUiNewProjectDraft) -> Dropdown {
 
 fn color_engine_dropdown_for(draft: &AppUiNewProjectDraft) -> Dropdown {
     Dropdown::new(
-        color_engine_label(&draft.color_environment.engine),
+        color_engine_label(draft.color_environment.engine()),
         color_engine_menu_items(|engine| {
             app_shell_new_project_draft_changed_action(NewProjectDraftUpdatePayload::ColorEngine(
                 engine,
@@ -444,8 +444,10 @@ impl NewProjectDialog {
     pub fn choose_custom_ocio(&mut self, platform: &dyn PlatformService) {
         match choose_custom_ocio_config(
             platform,
-            self.draft.sequence_settings.color.working_color_space,
-            self.draft.sequence_settings.color.program_output.color_space,
+            &[(
+                self.draft.sequence_settings.color.working_color_space,
+                self.draft.sequence_settings.color.program_output.color_space,
+            )],
         ) {
             Ok(Some(engine)) => {
                 self.apply_update(NewProjectDraftUpdatePayload::ColorEngine(engine));
