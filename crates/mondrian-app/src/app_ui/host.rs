@@ -2317,8 +2317,10 @@ mod tests {
         autosave_state
             .open_project_file(project_file.clone())
             .expect("project should open for autosave");
-        autosave_state.active_sequence_mut_uncommitted().expect("active sequence").name =
-            "Recovered Edit".to_owned();
+        let sequence_id = autosave_state.active_sequence().expect("active sequence").id;
+        autosave_state
+            .rename_sequence(sequence_id, "Recovered Edit")
+            .expect("rename through author transaction");
         let autosave_file = autosave_state
             .write_autosave_snapshot(2, 7)
             .expect("autosave snapshot should write");

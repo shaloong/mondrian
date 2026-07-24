@@ -40,6 +40,7 @@ use mondrian_playback::{
 use mondrian_timeline::clip::{Clip, TrimEdge};
 use mondrian_timeline::sequence::{Sequence, SequenceCollection, SequenceSettings};
 use project_persistence::{ProjectPersistencePurpose, ProjectPersistenceService};
+pub(crate) use project_recovery::{discover_crash_recovery_candidates, CrashRecoveryCandidate};
 use serde::{Deserialize, Serialize};
 
 const PROJECT_EXTENSION: &str = "mdp";
@@ -94,6 +95,7 @@ pub mod preview_unavailability;
 pub(crate) mod preview_viewer_plan;
 mod project_lifecycle;
 mod project_persistence;
+mod project_recovery;
 pub mod proxy_generation;
 mod selection;
 pub mod thumbnail_service;
@@ -232,35 +234,6 @@ pub enum ClipOverlapMode {
     #[default]
     Overwrite,
     PushForward,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AutosaveManifest {
-    project_file: PathBuf,
-    #[serde(default)]
-    snapshots: Vec<AutosaveSnapshotEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AutosaveSnapshotEntry {
-    file: PathBuf,
-    saved_at_unix_ms: u64,
-}
-
-impl AutosaveManifest {
-    fn normalize(&mut self) {
-        self.snapshots.retain(|s| s.file.exists());
-        self.snapshots.sort_by_key(|s| std::cmp::Reverse(s.saved_at_unix_ms));
-        self.snapshots.dedup_by_key(|s| s.file.clone());
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CrashRecoveryCandidate {
-    pub(crate) project_file: PathBuf,
-    pub(crate) autosave_file: PathBuf,
-    pub(crate) saved_at_unix_ms: u64,
-    pub(crate) total_snapshots: usize,
 }
 
 // ─────────────────────────────────────────────
@@ -962,89 +935,6 @@ fn unix_now_ms() -> u64 {
     }
 }
 
-fn apply_autosave_retention(
-    manifest: &mut AutosaveManifest,
-    max_recovery_points: usize,
-    retention_days: u32,
-) {
-    manifest.normalize();
-    let now_ms = unix_now_ms();
-    let retention_ms = (retention_days as u64)
-        .saturating_mul(24)
-        .saturating_mul(60)
-        .saturating_mul(60)
-        .saturating_mul(1000);
-    let cutoff_ms = now_ms.saturating_sub(retention_ms);
-
-    let mut dropped_files: Vec<PathBuf> = Vec::new();
-    let mut retained = Vec::<AutosaveSnapshotEntry>::new();
-    for snapshot in &manifest.snapshots {
-        if snapshot.saved_at_unix_ms < cutoff_ms {
-            dropped_files.push(snapshot.file.clone());
-        } else {
-            retained.push(snapshot.clone());
-        }
-    }
-
-    retained.sort_by_key(|s| std::cmp::Reverse(s.saved_at_unix_ms));
-    if retained.len() > max_recovery_points {
-        for snapshot in retained.drain(max_recovery_points..) {
-            dropped_files.push(snapshot.file);
-        }
-    }
-
-    for file in dropped_files {
-        let _ = fs::remove_file(file);
-    }
-
-    manifest.snapshots = retained;
-    manifest.normalize();
-}
-
-pub(crate) fn discover_crash_recovery_candidates() -> Vec<CrashRecoveryCandidate> {
-    let root = std::env::temp_dir().join("mondrian-runtime");
-    let mut candidates = Vec::<CrashRecoveryCandidate>::new();
-
-    let entries = match fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(_) => return candidates,
-    };
-
-    for entry in entries.flatten() {
-        let runtime_root = entry.path();
-        let manifest_path = AppState::autosave_manifest_path(runtime_root.as_path());
-        if !manifest_path.exists() {
-            continue;
-        }
-
-        let bytes = match fs::read(&manifest_path) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let mut manifest = match serde_json::from_slice::<AutosaveManifest>(&bytes) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        manifest.normalize();
-        let total = manifest.snapshots.len();
-        if total == 0 {
-            continue;
-        }
-
-        for snapshot in manifest.snapshots {
-            candidates.push(CrashRecoveryCandidate {
-                project_file: manifest.project_file.clone(),
-                autosave_file: snapshot.file,
-                saved_at_unix_ms: snapshot.saved_at_unix_ms,
-                total_snapshots: total,
-            });
-        }
-    }
-
-    candidates.sort_by_key(|m| std::cmp::Reverse(m.saved_at_unix_ms));
-    candidates
-}
-
 fn collect_files_by_name(
     root: &Path,
     index: &mut HashMap<String, Vec<PathBuf>>,
@@ -1077,8 +967,6 @@ fn collect_files_by_name(
 
 #[cfg(test)]
 mod animation_selection_tests;
-#[cfg(test)]
-mod autosave_tests;
 #[cfg(test)]
 mod perf_tests;
 #[cfg(test)]

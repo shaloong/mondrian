@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "id": "windows-alpha-golden-v3",
+  "id": "windows-alpha-golden-v4",
   "kind": "golden",
   "timeline": {
     "duration_frames": 7500,
@@ -61,6 +61,7 @@
     "undo-redo",
     "proxy-original-switch",
     "offline-relink",
+    "autosave-recovery",
     "save-reopen",
     "export",
     "reimport"
@@ -75,7 +76,8 @@
     "clip-audio-gain-pan-fades",
     "hold-keyframe",
     "linear-keyframe",
-    "bezier-keyframe"
+    "bezier-keyframe",
+    "nested-sequence"
   ],
   "execution_slices": [
     {
@@ -174,6 +176,22 @@
       "timeline_window": {
         "start_frame": 0,
         "end_frame_exclusive": 100
+      }
+    },
+    {
+      "id": "recovery-nesting-v1",
+      "required_fixture_roles": [],
+      "required_operations": [
+        "autosave-recovery",
+        "save-reopen"
+      ],
+      "required_content": [
+        "nested-sequence"
+      ],
+      "required_exports": [],
+      "timeline_window": {
+        "start_frame": 0,
+        "end_frame_exclusive": 25
       }
     }
   ],

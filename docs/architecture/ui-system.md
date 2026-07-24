@@ -224,6 +224,21 @@ right-clicking an exact adjacent unlocked video cut exposes the default Cross
 Dissolve command. Resize preview never mutates the supplied model and commits
 exactly once on pointer release.
 
+Precompose is likewise a semantic Timeline Action, not a Widget-side graph
+rewrite. Its payload carries only the requested nested Sequence name; the App
+resolves the current stable-ID Clip selection, expands complete link groups,
+rejects locked or empty ranges, projects selected content and transitions into
+child-local time, and replaces the parent range in one Project transaction.
+The new child uses `NestedComposition`, retains the parent Sequence settings,
+forks placement-local audio identities where required, and becomes reachable
+only through ordinary nested Clip content. After commit the App selects the
+replacement Clip. Video-only and audio-only selections create only their
+corresponding parent placement; a linked A/V selection creates one linked
+video/audio replacement pair targeting the same child output. UI surfaces may
+prompt or choose presentation details, but
+must not pass an independently computed child graph or duplicate selection
+membership.
+
 Transition colors and blocked/hover/selection states are semantic theme tokens.
 The App Adapter re-observes current external source-handle availability when it
 projects the low-frequency author view and exposes a fail-closed diagnostic. It
@@ -255,11 +270,12 @@ values observed under a distinct fresh Session after load. Action admission or
 a human-readable status hint alone cannot satisfy a Golden operation.
 
 Golden validation has one UI-independent planning Module. It compiles the
-closed v3 contract into a deterministic ledger of required fixture roles,
+closed schema-v3 / `windows-alpha-golden-v4` contract into a deterministic
+ledger of required fixture roles,
 operations, content, and exports, then reports every unplanned or unresolved
 obligation. A slice is an independently executable evidence Adapter, not a
 top-level run: successful and failed slice reports both carry
-`complete_golden_project: false`. The future top-level run coordinator must
+`complete_golden_project: false`. The top-level run coordinator must
 execute all obligations against one Project identity, preserve typed evidence,
 and own consecutive-run classification. PowerShell remains an external process
 supervisor and schema validator; it cannot infer semantic completion from test
@@ -275,14 +291,24 @@ Sequence-scoped evidence requires one Generation plus one stable active
 Sequence Revision advance; Project-scoped evidence requires one Generation but
 allows active Sequence change. Durable reopen must replace only the
 process-local Session, preserving Project, path, active Sequence, and saved
-revision. Foundation audio, visual authoring, and generated delivery are stages
-over this driver. Their composed gate runs the ordinary PCM import/authoring
-flow, creates dedicated stage Sequences through the product action, executes
-the Transition/Basic Title/curve workflow, exports and reimports H.264 High
-plus HEVC Main10, and then crosses one final durable reopen. That boundary must
-preserve the fixed Project binding, all three Sequences and their earlier
-author content, plus both typed reimport profiles. Missing editing, playback,
-recovery, fixture, and color obligations still prevent top-level completion.
+revision. Foundation Audio, Editorial/Transport, Proxy/Relink, Generated
+Delivery, Visual Authoring, and Recovery/Nesting are reusable stages over this
+driver. Their composed gate runs ordinary product Actions and services in six
+dedicated Sequences: PCM authoring; AAC editing/transport; proxy/offline/relink;
+H.264 High and HEVC Main10 delivery/reimport; Transition/Basic Title/curve/
+Primary/LUT authoring; and nested-Sequence autosave recovery.
+
+The Recovery/Nesting stage is fixture-independent. It selects a generated Clip
+through the Timeline Action boundary, dispatches one Precompose Action, and
+requires exactly one Project author transaction. It then executes recursive
+Preview and Export frames, publishes an autosave, closes the Session, recovers
+through the product recovery Action, and compares parent/child author hashes
+and deterministic execution evidence. The recovered Session must remain dirty
+and the recovery archive authoritative until a covering manual save atomically
+retires it. A final composed reopen must preserve the fixed Project binding,
+all six Sequences, earlier stage content, relinked Asset intent, and both typed
+reimport profiles. Missing qualifying color fixtures and the coordinated
+three-run release classification still prevent top-level completion.
 
 ## Playback Tick Ownership
 

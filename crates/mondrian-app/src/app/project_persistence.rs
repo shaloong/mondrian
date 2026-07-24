@@ -4,9 +4,10 @@
 //! SQLite backup, and atomically publishes an `.mdp` archive on a dedicated
 //! worker. Window and command Adapters only submit intent and poll completions.
 
+use super::project_recovery::{publish_recovery_point, RecoveryPointPublication};
 use mondrian_core::ProjectMeta;
 use mondrian_editor_state::{AuthorGeneration, AuthoringSessionId, AuthoringSnapshot};
-use mondrian_project::{save_project_archive, write_durable_file_atomically};
+use mondrian_project::save_project_archive;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
@@ -197,14 +198,18 @@ fn execute_persistence_request(request: ProjectPersistenceRequest) -> ProjectPer
             saved_at_unix_ms,
         } = &request.purpose
         {
-            publish_autosave_manifest(
-                original_project_file,
+            publish_recovery_point(RecoveryPointPublication {
+                project_id: document.project_id,
+                project_file: original_project_file,
                 runtime_root,
-                &request.target_file,
-                *max_recovery_points,
-                *retention_days,
-                *saved_at_unix_ms,
-            )?;
+                autosave_file: &request.target_file,
+                author_generation: generation.get(),
+                asset_library_revision,
+                document_revision: document.document_revision,
+                saved_at_unix_ms: *saved_at_unix_ms,
+                max_recovery_points: *max_recovery_points,
+                retention_days: *retention_days,
+            })?;
         }
         Ok(PersistedProjectState {
             document_revision: document.document_revision,
@@ -240,43 +245,6 @@ fn database_snapshot_path(target_file: &Path, request_id: ProjectPersistenceRequ
         request_id.get()
     ))
 }
-fn publish_autosave_manifest(
-    project_file: &Path,
-    runtime_root: &Path,
-    autosave_file: &Path,
-    max_recovery_points: usize,
-    retention_days: u32,
-    saved_at_unix_ms: u64,
-) -> Result<(), String> {
-    let manifest_path = runtime_root.join("autosave").join("manifest.json");
-    let mut manifest = if manifest_path.exists() {
-        std::fs::read(&manifest_path)
-            .map_err(|error| error.to_string())
-            .and_then(|bytes| {
-                serde_json::from_slice::<super::AutosaveManifest>(&bytes)
-                    .map_err(|error| error.to_string())
-            })?
-    } else {
-        super::AutosaveManifest {
-            project_file: project_file.to_path_buf(),
-            snapshots: Vec::new(),
-        }
-    };
-    manifest.project_file = project_file.to_path_buf();
-    manifest.snapshots.push(super::AutosaveSnapshotEntry {
-        file: autosave_file.to_path_buf(),
-        saved_at_unix_ms,
-    });
-    super::apply_autosave_retention(
-        &mut manifest,
-        max_recovery_points.max(1),
-        retention_days.max(1),
-    );
-    manifest.normalize();
-    let bytes = serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
-    write_durable_file_atomically(&manifest_path, &bytes).map_err(|error| error.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,13 +381,24 @@ mod tests {
             );
         }
 
-        let manifest: super::super::AutosaveManifest = serde_json::from_slice(
+        let manifest: serde_json::Value = serde_json::from_slice(
             &std::fs::read(runtime_root.join("autosave").join("manifest.json"))
                 .expect("autosave manifest"),
         )
         .expect("valid autosave manifest");
-        assert_eq!(manifest.project_file, original);
-        assert_eq!(manifest.snapshots.len(), 2);
-        assert_eq!(manifest.snapshots[0].saved_at_unix_ms, saved_at_base + 2);
+        assert_eq!(manifest["schema_version"], 1);
+        assert_eq!(
+            manifest["project_file"],
+            original.to_string_lossy().as_ref()
+        );
+        let snapshots = manifest["snapshots"].as_array().expect("snapshot array");
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0]["saved_at_unix_ms"], saved_at_base + 2);
+        assert_eq!(snapshots[0]["author_generation"], 1);
+        assert_eq!(snapshots[0]["asset_library_revision"], 0);
+        assert_eq!(
+            snapshots[0]["archive_sha256"].as_str().map(str::len),
+            Some(64)
+        );
     }
 }

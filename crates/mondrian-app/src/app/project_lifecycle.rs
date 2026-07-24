@@ -1,10 +1,14 @@
 use super::project_persistence::{ProjectPersistenceCompletion, ProjectPersistenceRequestId};
+use super::project_recovery::{
+    reconcile_recovery_after_manual_save, recovery_manifest_path, validate_recovery_selection,
+};
 use super::*;
 use mondrian_project::{load_project_archive, ProjectDocument};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum PersistenceCompletionDisposition {
     Applied,
+    AppliedWithRecoveryWarning { reason: String },
     IgnoredStaleSession,
 }
 
@@ -19,7 +23,7 @@ impl AppState {
     }
 
     pub(super) fn autosave_manifest_path(runtime_root: &Path) -> PathBuf {
-        runtime_root.join("autosave").join("manifest.json")
+        recovery_manifest_path(runtime_root)
     }
 
     pub fn open_project_from_autosave_snapshot(
@@ -30,6 +34,8 @@ impl AppState {
         if !autosave_file.exists() {
             anyhow::bail!("未找到自动保存文件：{}", autosave_file.display());
         }
+        let selection = validate_recovery_selection(&project_file, &autosave_file)
+            .map_err(anyhow::Error::msg)?;
 
         let staged = std::env::temp_dir().join(format!(
             "mondrian-autosave-recover-{}-{}.mdp",
@@ -38,7 +44,11 @@ impl AppState {
         ));
         fs::copy(&autosave_file, &staged)?;
 
-        let open_result = self.open_project_archive(project_file.clone(), staged.as_path());
+        let open_result = self.open_project_archive_in_runtime(
+            project_file.clone(),
+            staged.as_path(),
+            selection.runtime_root,
+        );
         let _ = fs::remove_file(&staged);
         open_result?;
 
@@ -83,6 +93,15 @@ impl AppState {
         archive_file: &Path,
     ) -> anyhow::Result<()> {
         let runtime_root = Self::project_runtime_root(&project_file);
+        self.open_project_archive_in_runtime(project_file, archive_file, runtime_root)
+    }
+
+    fn open_project_archive_in_runtime(
+        &mut self,
+        project_file: PathBuf,
+        archive_file: &Path,
+        runtime_root: PathBuf,
+    ) -> anyhow::Result<()> {
         let library_root = runtime_root.join("library");
         if library_root.exists() {
             fs::remove_dir_all(&library_root)?;
@@ -209,10 +228,28 @@ impl AppState {
                     self.set_status_hint("项目已耐久保存", false);
                 }
                 (
+                    ProjectPersistencePurpose::Manual { .. },
+                    Ok(PersistenceCompletionDisposition::AppliedWithRecoveryWarning { reason }),
+                ) => {
+                    self.set_status_hint(
+                        format!("项目已耐久保存，但恢复点清理失败：{reason}"),
+                        true,
+                    );
+                }
+                (
                     ProjectPersistencePurpose::Autosave { .. },
                     Ok(PersistenceCompletionDisposition::Applied),
                 )
                 | (_, Ok(PersistenceCompletionDisposition::IgnoredStaleSession)) => {}
+                (
+                    ProjectPersistencePurpose::Autosave { .. },
+                    Ok(PersistenceCompletionDisposition::AppliedWithRecoveryWarning { reason }),
+                ) => {
+                    self.set_status_hint(
+                        format!("自动保存完成，但恢复点清理状态异常：{reason}"),
+                        true,
+                    );
+                }
                 (ProjectPersistencePurpose::Manual { .. }, Err(error)) => {
                     self.set_status_hint(format!("保存项目失败：{error}"), true);
                 }
@@ -245,20 +282,53 @@ impl AppState {
         let Some(session) = self.authoring.as_mut() else {
             return Ok(PersistenceCompletionDisposition::IgnoredStaleSession);
         };
-        match completion.purpose {
-            ProjectPersistencePurpose::Manual { update_project_path } => session
-                .mark_saved(
-                    completion.generation,
-                    persisted.document_revision,
-                    persisted.asset_library_revision,
-                    persisted.meta,
-                    update_project_path.then_some(completion.target_file),
-                )
-                .map_err(|error| error.to_string())?,
+        let recovery_reconciliation = match completion.purpose {
+            ProjectPersistencePurpose::Manual { update_project_path } => {
+                let runtime_root = session.runtime_root().to_path_buf();
+                let project_id = session.project_id();
+                session
+                    .mark_saved(
+                        completion.generation,
+                        persisted.document_revision,
+                        persisted.asset_library_revision,
+                        persisted.meta,
+                        update_project_path.then_some(completion.target_file),
+                    )
+                    .map_err(|error| error.to_string())?;
+                let current_project_file = session.project_file().to_path_buf();
+                let retire_all = !session.is_dirty();
+                Some((runtime_root, project_id, current_project_file, retire_all))
+            }
             ProjectPersistencePurpose::Autosave { .. } => {
                 session
                     .mark_autosaved(completion.generation, persisted.asset_library_revision)
                     .map_err(|error| error.to_string())?;
+                (session.has_durable_baseline() && !session.is_dirty()).then(|| {
+                    (
+                        session.runtime_root().to_path_buf(),
+                        session.project_id(),
+                        session.project_file().to_path_buf(),
+                        true,
+                    )
+                })
+            }
+        };
+        if let Some((runtime_root, project_id, current_project_file, retire_all)) =
+            recovery_reconciliation
+        {
+            if let Err(reason) = reconcile_recovery_after_manual_save(
+                &runtime_root,
+                project_id,
+                &current_project_file,
+                retire_all,
+            ) {
+                tracing::warn!(
+                    project_id = %project_id,
+                    runtime_root = %runtime_root.display(),
+                    %reason,
+                    "manual Project save succeeded but recovery authority reconciliation failed"
+                );
+                return Ok(PersistenceCompletionDisposition::AppliedWithRecoveryWarning { reason });
             }
         }
         Ok(PersistenceCompletionDisposition::Applied)
@@ -300,6 +370,13 @@ impl AppState {
                 if is_requested {
                     return match result? {
                         PersistenceCompletionDisposition::Applied => Ok(()),
+                        PersistenceCompletionDisposition::AppliedWithRecoveryWarning { reason } => {
+                            self.set_status_hint(
+                                format!("项目已耐久保存，但恢复点清理失败：{reason}"),
+                                true,
+                            );
+                            Ok(())
+                        }
                         PersistenceCompletionDisposition::IgnoredStaleSession => {
                             anyhow::bail!("项目会话在耐久保存完成前已被替换")
                         }
@@ -562,6 +639,122 @@ mod persistence_lifecycle_tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         assert!(state.authoring.as_ref().expect("session").is_current_autosaved());
+    }
+
+    #[test]
+    fn current_manual_save_durably_retires_recovery_points() {
+        let root = unique_root("retire-current");
+        let mut state = AppState::new();
+        state.authoring = Some(test_session(&root));
+
+        let autosave = state.write_autosave_snapshot(4, 7).expect("write autosave");
+        assert!(autosave.is_file());
+        assert!(AppState::autosave_manifest_path(&root.join("runtime")).is_file());
+
+        state.save_project_file().expect("manual save");
+        assert!(!state.has_unsaved_project_changes());
+        assert!(
+            !autosave.exists(),
+            "current manual save must retire covered recovery archive"
+        );
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(AppState::autosave_manifest_path(&root.join("runtime")))
+                .expect("retired manifest"),
+        )
+        .expect("valid retired manifest");
+        assert_eq!(
+            manifest["snapshots"].as_array().map(Vec::len),
+            Some(0),
+            "retirement must first publish an empty canonical manifest"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stale_manual_completion_cannot_retire_newer_recovery_authority() {
+        let root = unique_root("retain-on-stale-save");
+        let mut state = AppState::new();
+        state.authoring = Some(test_session(&root));
+        let autosave = state.write_autosave_snapshot(4, 7).expect("write autosave");
+        let request_id = state.request_project_save().expect("submit manual save");
+
+        state
+            .authoring
+            .as_mut()
+            .expect("session")
+            .edit_active_sequence("edit-after-save-snapshot", |sequence| {
+                sequence.name = "Newer Author State".to_owned();
+                Ok(())
+            })
+            .expect("commit newer author state");
+        state.wait_for_persistence_request(request_id).expect("wait stale manual save");
+
+        assert!(state.has_unsaved_project_changes());
+        assert!(
+            autosave.is_file(),
+            "a stale manual completion must not remove recovery authority"
+        );
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(AppState::autosave_manifest_path(&root.join("runtime")))
+                .expect("recovery manifest"),
+        )
+        .expect("valid recovery manifest");
+        assert_eq!(manifest["snapshots"].as_array().map(Vec::len), Some(1));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stale_save_as_rebinds_recovery_without_moving_the_live_runtime() {
+        let root = unique_root("rebind-stale-save-as");
+        let runtime_root = root.join("runtime");
+        let target = root.join("save-as.mdp");
+        let mut state = AppState::new();
+        state.authoring = Some(test_session(&root));
+        let first_autosave = state.write_autosave_snapshot(4, 7).expect("first autosave");
+        let request_id = state.request_project_save_as(target.clone()).expect("submit save as");
+
+        state
+            .authoring
+            .as_mut()
+            .expect("session")
+            .edit_active_sequence("edit-after-save-as-snapshot", |sequence| {
+                sequence.name = "Unsaved After Save As".to_owned();
+                Ok(())
+            })
+            .expect("commit newer author state");
+        state.wait_for_persistence_request(request_id).expect("wait stale save as");
+
+        let session = state.authoring.as_ref().expect("session");
+        assert_eq!(session.project_file(), target);
+        assert_eq!(session.runtime_root(), runtime_root);
+        assert!(session.is_dirty());
+        let manifest_path = AppState::autosave_manifest_path(&runtime_root);
+        let rebound: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("rebound manifest"))
+                .expect("valid rebound manifest");
+        assert_eq!(rebound["project_file"], target.to_string_lossy().as_ref());
+        assert_eq!(rebound["snapshots"].as_array().map(Vec::len), Some(1));
+        assert!(first_autosave.is_file());
+
+        let second_autosave = state.write_autosave_snapshot(4, 7).expect("second autosave");
+        assert!(second_autosave.is_file());
+        let mut recovered = AppState::new();
+        recovered
+            .open_project_from_autosave_snapshot(target.clone(), second_autosave.clone())
+            .expect("recover through rebound authority");
+        let recovered_session = recovered.authoring.as_ref().expect("recovered session");
+        assert_eq!(recovered_session.runtime_root(), runtime_root);
+        assert!(recovered_session.is_dirty());
+
+        recovered.save_project_file().expect("save recovered project");
+        assert!(!first_autosave.exists());
+        assert!(!second_autosave.exists());
+        let retired: serde_json::Value =
+            serde_json::from_slice(&fs::read(manifest_path).expect("retired manifest"))
+                .expect("valid retired manifest");
+        assert_eq!(retired["project_file"], target.to_string_lossy().as_ref());
+        assert_eq!(retired["snapshots"].as_array().map(Vec::len), Some(0));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

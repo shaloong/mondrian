@@ -12,6 +12,7 @@ mod generated_delivery;
 mod harness;
 mod plan;
 mod proxy_relink;
+mod recovery_nesting;
 mod visual_authoring;
 mod workflow;
 
@@ -572,7 +573,7 @@ fn golden_acceptance_plan_reports_current_top_level_blockers() -> anyhow::Result
             .map(str::to_owned)
             .collect()
     );
-    assert_eq!(plan.slices.len(), 5);
+    assert_eq!(plan.slices.len(), 6);
 
     eprintln!(
         "MONDRIAN_GOLDEN_ACCEPTANCE_PLAN_JSON={}",

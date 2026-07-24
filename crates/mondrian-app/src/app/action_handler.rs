@@ -34,19 +34,20 @@ use crate::app::ui_actions::{
     TimelineAddTrackKind, TimelineAddTrackPayload, TimelineCreateCrossDissolvePayload,
     TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineInsertAssetPayload,
     TimelineMoveClipPayload, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
-    TimelineSeekPayload, TimelineSelectClipPayload, TimelineSelectVideoTransitionPayload,
-    TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
-    TimelineSetTrackControlPayload, TimelineSetVideoTransitionRangePayload,
-    TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
-    TimelineTrimSelectedClipsToPlayheadPayload, ViewerSetClipTransformPayload,
-    ViewerSetPreviewResolutionScalePayload, ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER,
-    ASSETS_CREATE_SOLID_COLOR, ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION,
-    ASSETS_IMPORT_FILES, ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION,
-    ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, ASSETS_REBIND_AUDIO_COMPONENT,
-    ASSETS_REFRESH_AUDIO_COMPONENTS, ASSETS_RELINK_ASSET, ASSETS_RENAME_ASSET,
-    ASSETS_RENAME_FOLDER, ASSETS_SET_INTERPRETATION, ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP,
-    EFFECTS_NAMESPACE, EXPORT_CANCEL_JOB, EXPORT_CLEAR_COMPLETED, EXPORT_ENQUEUE, EXPORT_NAMESPACE,
-    EXPORT_SET_DRAFT, INSPECTOR_EDIT_CLIP_CURVE, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT,
+    TimelinePrecomposeSelectionPayload, TimelineSeekPayload, TimelineSelectClipPayload,
+    TimelineSelectVideoTransitionPayload, TimelineSetInOutPointPayload,
+    TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
+    TimelineSetVideoTransitionRangePayload, TimelineTrackControlPayloadKind,
+    TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
+    ViewerSetClipTransformPayload, ViewerSetPreviewResolutionScalePayload,
+    ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
+    ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
+    ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
+    ASSETS_PREPARE_DRAG, ASSETS_REBIND_AUDIO_COMPONENT, ASSETS_REFRESH_AUDIO_COMPONENTS,
+    ASSETS_RELINK_ASSET, ASSETS_RENAME_ASSET, ASSETS_RENAME_FOLDER, ASSETS_SET_INTERPRETATION,
+    ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, EXPORT_CANCEL_JOB,
+    EXPORT_CLEAR_COMPLETED, EXPORT_ENQUEUE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT,
+    INSPECTOR_EDIT_CLIP_CURVE, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT,
     INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_AUDIO_COMPONENT_EDIT_FIELD,
     INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
     INSPECTOR_SET_CLIP_PROPERTY, INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
@@ -57,8 +58,9 @@ use crate::app::ui_actions::{
     SEQUENCE_UPDATE_SETTINGS, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
     TIMELINE_CREATE_BASIC_TITLE, TIMELINE_CREATE_CROSS_DISSOLVE, TIMELINE_DROP_ASSET,
     TIMELINE_INSERT_ASSET, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
-    TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SEEK,
-    TIMELINE_SELECT_CLIP, TIMELINE_SELECT_VIDEO_TRANSITION, TIMELINE_SET_IN_OUT_POINT,
+    TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_PRECOMPOSE_SELECTION,
+    TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
+    TIMELINE_SELECT_VIDEO_TRANSITION, TIMELINE_SET_IN_OUT_POINT,
     TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
     TIMELINE_SET_VIDEO_TRANSITION_RANGE, TIMELINE_TRIM_CLIPS,
     TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, VIEWER_NAMESPACE, VIEWER_SET_CLIP_TRANSFORM,
@@ -1352,6 +1354,14 @@ impl AppState {
                 )?;
                 self.insert_asset_from_ui(payload).map(|_| ())
             }
+            TIMELINE_PRECOMPOSE_SELECTION => {
+                let payload = parse_ui_payload::<TimelinePrecomposeSelectionPayload>(
+                    "timeline_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.precompose_selection_from_ui(payload)
+            }
             TIMELINE_OPEN_NESTED_SEQUENCE => {
                 let payload = parse_ui_payload::<TimelineOpenNestedSequencePayload>(
                     "timeline_ui_action",
@@ -2143,6 +2153,34 @@ impl AppState {
             }
         }
         clip_ids
+    }
+
+    fn precompose_selection_from_ui(
+        &mut self,
+        payload: TimelinePrecomposeSelectionPayload,
+    ) -> Result<()> {
+        let name = payload.name.trim();
+        if name.is_empty() {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "timeline_precompose_selection".to_owned(),
+                reason: "嵌套序列名称不能为空".to_owned(),
+            });
+        }
+        let selections = self
+            .selected_clips()
+            .iter()
+            .map(|selection| {
+                (
+                    selection.track_id,
+                    selection.is_video_track,
+                    selection.clip_id,
+                )
+            })
+            .collect::<Vec<_>>();
+        let nested_clip_id = self.precompose_clips_as_sequence(&selections, name)?;
+        self.select_clip_for_action("timeline_precompose_selection", nested_clip_id)?;
+        self.set_status_hint(format!("已创建嵌套序列“{name}”"), false);
+        Ok(())
     }
 
     fn set_clip_enabled_from_ui(&mut self, clip_id: ClipId, enabled: bool) -> Result<()> {

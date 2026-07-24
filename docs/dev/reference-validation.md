@@ -11,7 +11,8 @@ control exists.
   purposes. Fixed files pin bytes globally; generated files pin the recipe and
   are byte-pinned by each run.
 - `tests/validation/golden-project.json` defines the five-minute editing and
-  export workflow. Schema v3 fixes exact Sequence raster/timing/color/audio
+  export workflow. Contract identity `windows-alpha-golden-v4` uses closed
+  schema v3 and fixes exact Sequence raster/timing/color/audio
   values, fixture-role purposes, stable built-in delivery preset identities,
   resolved profile/depth/chroma/range/Alpha expectations, and independently
   executable evidence slices. It is the source contract for a generated `.mdp`;
@@ -72,7 +73,7 @@ cannot satisfy a color golden even when it carries valid CICP tags.
 
 An execution slice is intentionally narrower than the complete Golden Project.
 It passes only if its exact required fixture roles, operations, and content have
-typed postcondition evidence. Golden v3 rejects unknown fields; requirement IDs
+typed postcondition evidence. Golden v4 rejects unknown fields; requirement IDs
 select evidence obligations but cannot substitute for observed author, media,
 delivery, or persistence facts.
 Every slice report explicitly records `complete_golden_project: false`. A
@@ -117,8 +118,10 @@ Seek, Scrub, Overwrite, Ripple, and Split have a real executable slice.
 The generated Rec.709 H.264 role plus Proxy/Original switch and offline Relink
 now have a second real slice. Professional multi-track Insert is assigned and
 executed by the Editorial/Transport slice. Primary Color and explicitly
-domain-bound LUT authoring are assigned to the Visual slice. The operation and
-content ledgers therefore have no unplanned obligations. HLG Main10 and sRGB
+domain-bound LUT authoring are assigned to the Visual slice. Autosave recovery
+and nested-Sequence content are assigned to the fixture-free Recovery/Nesting
+slice. The operation and content ledgers therefore have no unplanned
+obligations. HLG Main10 and sRGB
 Alpha picture roles remain unbound to qualifying fixtures, and their associated
 fixture obligations remain the current plan blockers. Export contracts are
 already assigned, but that alone is not a complete product workflow.
@@ -184,13 +187,14 @@ cargo test -p mondrian-app --lib `
 ```
 
 This extends the two-stage gate with AAC Editorial/Transport,
-Proxy/Original+Offline Relink, and Generated Delivery. It reuses canonical
-generated fixtures, creates three more stage Sequences, executes two real
-proxy generations, both typed exports, and ordinary media reimports, then
-performs a final durable reopen. It requires one Project ID/path, exactly five
-retained Sequences, the same relinked `AssetId`/Clip reference and replacement
-path, persisted proxy intent, plus reimported `H264High` and `HevcMain10`
-assets in the reopened Project library.
+Proxy/Original+Offline Relink, Generated Delivery, and fixture-free
+Recovery/Nesting. It reuses canonical generated fixtures, creates four more
+stage Sequences, executes two real proxy generations, both typed exports,
+ordinary media reimports, Precompose, autosave, fresh recovery, recovery-point
+retirement, and a final durable reopen. It requires one Project ID/path,
+exactly six retained Sequences, the same relinked `AssetId`/Clip reference and
+replacement path, persisted proxy intent, a closed nested Sequence graph, plus
+reimported `H264High` and `HevcMain10` assets in the reopened Project library.
 The still-missing plan obligations mean this is not yet the top-level Golden
 coordinator and cannot contribute a consecutive complete run.
 
@@ -302,8 +306,8 @@ exact Trim, Transform and Opacity, H.264 High 8-bit and HEVC Main10 10-bit
 delivery, MP4 mux identity, Rec.709 CICP/range, absence of static HDR metadata,
 48 kHz Stereo AAC, production queue terminal evidence, and reimported typed
 codec/profile/pixel-format facts. It still reports a partial Golden slice:
-missing real color-reference roles, playback, nesting, transitions, recovery,
-and three complete consecutive runs remain open. Delivery report schema v4
+missing real color-reference roles, the remaining complete playback/workflow
+composition, and three complete consecutive runs remain open. Delivery report schema v4
 records its Project-scoped stage-Sequence creation and the implementation now
 runs over `GoldenProductWorkflowDriver`; the standalone gate is only a
 development wrapper around that reusable stage.
@@ -337,7 +341,37 @@ editing UI, or the three-run top-level Golden exit gate. Visual report schema
 v7 records the Project-scoped stage-Sequence creation and runs over the same
 `GoldenProductWorkflowDriver` used by Foundation Audio. Its standalone wrapper
 still creates an isolated development run, while the composed gates invoke the
-reusable Foundation, Visual, and Delivery stages against one Project.
+reusable Foundation, Editorial/Transport, Proxy/Relink, Visual, Delivery, and
+Recovery/Nesting stages against one Project.
+
+Run the fixture-free Recovery/Nesting slice:
+
+```powershell
+cargo test -p mondrian-app --lib `
+  golden_project_recovery_nesting_roundtrip_gate -j1 -- `
+  --nocapture --test-threads=1
+```
+
+The slice creates a generated Solid Color placement and dispatches the formal
+Timeline Precompose Action from the current selection. Precompose must replace
+the parent placement, create one `NestedComposition` Sequence, project selected
+content to child-local zero, advance Project Generation and the parent Sequence
+Revision exactly once, and select the replacement Clip. The Headless Adapter
+then runs the ordinary recursive Preview compositor and actual recursive Export
+frame renderer; both parent and child must remain float-linear without a legacy
+RGBA8 fallback.
+
+The same dirty author state is published through the production autosave
+worker. Discovery must validate manifest schema, exact child path, archive
+SHA-256, document revision, Project identity, and canonical source identity.
+The test closes the original Session and recovers only through the product
+recovery Action. Parent/child Sequence hashes, nested IDs, Preview pixels, and
+Export diagnostics must match; opening recovery must not retire its source.
+Only a manual save that covers current author and Asset Library revisions may
+atomically publish an empty manifest and remove the recovery archive. A final
+fresh reopen must still match all author and execution evidence. This proves a
+generated recovery/nesting path, not recovery-conflict UI, disk-full/permission
+fault handling, real-media nested color, or complete Golden status.
 
 Run the complete release-profile M0 playback plan. This preflights the machine
 before expensive generation, validates the Playback corpus, runs the 30-minute
@@ -407,7 +441,7 @@ plan on the qualified 16 GiB Windows reference machine and was classified
 `passed-baseline`. Its generated artifacts and evidence bundle remain
 intentionally disposable under `target`; the repository commits the recipes,
 contracts, and this reproducible result record rather than a multi-gigabyte
-machine-specific bundle. The Golden v3 contract resolves PCM, AAC, and Rec.709
+machine-specific bundle. The Golden v4 contract resolves PCM, AAC, and Rec.709
 H.264 fixture identities and assigns all three to executable slices.
 `foundation-audio-authoring-v1`, `editorial-transport-v1`, and
 `proxy-relink-v1` are real Headless product-workflow gates rather than

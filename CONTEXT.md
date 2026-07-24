@@ -408,6 +408,14 @@ _Avoid_: Mutate then record, best-effort rollback, UI-owned command side effect
 The filesystem boundary at which a flushed and validated Project archive or recovery manifest atomically replaces or creates its target. Completion before this boundary is not a successful save.
 _Avoid_: ZIP writer close alone, temporary-file existence, enqueue success, rename-old-then-rename-new sequence
 
+**Recovery Manifest**:
+The strict versioned Project-runtime index that binds one canonical Project ID/path to immutable autosave archives by exact child path, timestamp, Author Generation, Asset Library revision, embedded document revision, and SHA-256.
+_Avoid_: Directory scan as authority, unversioned file list, path-only recovery candidate, manifest published before its archive
+
+**Recovery Authority**:
+The right of an exact validated autosave archive, while referenced by the canonical Recovery Manifest, to be offered and opened as a new dirty Authoring Session. Only a current covering manual Project publication may first retire that authority durably and then remove the archive.
+_Avoid_: Latest filename wins, delete-on-open, stale save completion clearing recovery, recovered Session treated as clean
+
 **Clip Content**:
 The one closed payload that identifies a Clip placement as Media, Adjustment Layer, Nested Sequence, Solid Color, or Basic Title and carries only that variant's external references, interpretation data, or generated-source author state.
 _Avoid_: Parallel Clip kind/asset/nested/color/title fields, fake Asset ID for a nested Sequence or generated source
@@ -427,6 +435,10 @@ _Avoid_: Font display name as output fingerprint, platform default fallback, sil
 **Clip Link Group**:
 A Sequence-local set identity shared by two or more Clip placements whose ordinary editorial selection and structural edits are synchronized.
 _Avoid_: Pair pointer, linked-list chain, singleton group, media ownership relation
+
+**Precompose Action**:
+One Project-scoped Author Transaction that resolves the current stable-ID Clip selection, expands complete link groups, projects selected author content into a new Nested Composition Sequence, and replaces only the represented video/audio placement kinds in the parent.
+_Avoid_: Widget-built child graph, invisible video placement for audio-only content, separately committed child and parent edits, duplicated external Project
 
 **Video Transition**:
 A Sequence-owned, typed two-input visual author entity with strong adjacent Clip endpoints, an exact Sequence-time interval, stable instance identity, and validated source-handle demand.
@@ -527,6 +539,11 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - A Project-scoped **Author Transaction** advances Author Generation exactly once and may change the active Sequence; a Sequence-scoped transaction additionally keeps the active Sequence identity stable and advances that Sequence revision exactly once. Evidence cannot apply the Sequence rule to Project navigation or creation.
 - Durable reopen changes the process-local Authoring Session identity but preserves persisted Project ID/path, active Sequence identity, and its saved revision. Reusing a Session or changing Project identity is a failed Golden lifecycle boundary.
 - A persistence request binds one Authoring Session identity, **Author Generation**, Asset Library revision, and request identity. A stale or previous-session completion may not clear dirty state or replace newer in-memory metadata.
+- A **Recovery Manifest** is published only after its new archive validates. Retention publishes the replacement manifest before removing entries it no longer references; a failure therefore leaves the previous **Recovery Authority** closed and usable.
+- Recovery selection must name one exact manifest entry whose hash, document revision, Project ID, safe path, and existing canonical Project identity still match. Opening creates a new dirty Authoring Session and does not consume the source.
+- A manual save may retire **Recovery Authority** only when its completion covers current author and Asset Library state. It publishes an empty canonical Recovery Manifest before deleting archives; stale completion and cleanup failure cannot fabricate successful retirement.
+- Save As keeps the live Session runtime root stable. A stale Save As completion rebinds retained **Recovery Authority** to the newly published canonical path without deleting it; exact recovery selection reuses the manifest's actual runtime authority rather than deriving one from the changed path.
+- A **Precompose Action** commits parent replacement and child Sequence creation once. Video-only or audio-only input produces only that placement kind; linked A/V input produces one linked pair targeting the same nested Sequence.
 - Manual save and autosave share **Durable Project Publication**, but only manual save advances the durable baseline; autosave advances recovery coverage and never makes an unsaved Project appear saved.
 - Every Clip has exactly one **Clip Content** variant. Unknown or legacy parallel content fields fail current-schema loading rather than being ignored.
 - Every non-null **Clip Link Group** has at least two members. Commands expand a selected member to the complete set, validate all locked Tracks and zero-boundary constraints before mutation, and compact broken/singleton membership before commit.

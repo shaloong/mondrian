@@ -4,7 +4,8 @@ use super::harness::{new_run_directory, DirectoryCleanup};
 use super::workflow::GoldenProductWorkflowDriver;
 use super::{
     editorial_transport, foundation_audio, generated_delivery, load_golden_contract, proxy_relink,
-    repository_root, sequence_settings_from_contract, visual_authoring, GoldenProjectContract,
+    recovery_nesting, repository_root, sequence_settings_from_contract, visual_authoring,
+    GoldenProjectContract,
 };
 use anyhow::{ensure, Context};
 use mondrian_core::{ProjectColorEnvironment, ProjectSettings, SequenceId};
@@ -124,7 +125,7 @@ fn golden_foundation_and_visual_stages_share_one_project() -> anyhow::Result<()>
 }
 
 #[test]
-#[ignore = "five-stage Golden composition requires PCM/AAC/H.264 fixtures, Windows Basic Title font, and production FFmpeg encoders"]
+#[ignore = "six-stage Golden composition requires PCM/AAC/H.264 fixtures, Windows Basic Title font, and production FFmpeg encoders"]
 fn golden_current_stages_share_one_project() -> anyhow::Result<()> {
     let root = repository_root();
     let (contract, mut run) = ComposedRun::create(&root, "Windows Alpha Golden Existing Stages")?;
@@ -216,22 +217,42 @@ fn golden_current_stages_share_one_project() -> anyhow::Result<()> {
         "delivery did not create a distinct stage Sequence"
     );
     let delivery_snapshot = sequence_snapshot(&run.workflow, delivery_sequence_id)?;
+    let _recovery_nesting =
+        recovery_nesting::execute_recovery_nesting_stage(&contract, &mut run.workflow)?;
+    let recovery_nesting_sequence_id = run
+        .workflow
+        .app()
+        .active_sequence()
+        .context("recovery/nesting Sequence is absent")?
+        .id;
+    ensure!(
+        ![
+            foundation_sequence_id,
+            visual_sequence_id,
+            editorial_sequence_id,
+            proxy_relink_sequence_id,
+            delivery_sequence_id
+        ]
+        .contains(&recovery_nesting_sequence_id),
+        "recovery/nesting did not create a distinct stage Sequence"
+    );
+    let recovery_nesting_snapshot = sequence_snapshot(&run.workflow, recovery_nesting_sequence_id)?;
     run.workflow.durable_save_reopen()?;
     run.workflow.verify_binding()?;
     ensure!(
         run.workflow.project_id() == project_id
             && run.workflow.project_path() == project_path
             && run.workflow.app().project_id() == Some(project_id),
-        "five-stage workflow changed the Golden Project binding"
+        "six-stage workflow changed the Golden Project binding"
     );
     ensure!(
-        run.workflow.app().sequences().len() == 5,
-        "five current Golden stages must retain exactly five Sequences"
+        run.workflow.app().sequences().len() == 6,
+        "six current Golden stages must retain exactly six Sequences"
     );
-    for (sequence_id, expected) in pre_delivery_snapshots
-        .into_iter()
-        .chain([(delivery_sequence_id, delivery_snapshot)])
-    {
+    for (sequence_id, expected) in pre_delivery_snapshots.into_iter().chain([
+        (delivery_sequence_id, delivery_snapshot),
+        (recovery_nesting_sequence_id, recovery_nesting_snapshot),
+    ]) {
         ensure!(
             sequence_snapshot(&run.workflow, sequence_id)? == expected,
             "final durable reopen changed stage Sequence {sequence_id}"

@@ -68,6 +68,8 @@ pub const TIMELINE_MOVE_TRACK: &str = "move_track";
 pub const TIMELINE_DROP_ASSET: &str = "drop_asset";
 /// Action name for inserting one Asset through explicit target/ripple scope.
 pub const TIMELINE_INSERT_ASSET: &str = "insert_asset";
+/// Action name for replacing the current clip selection with a nested Sequence.
+pub const TIMELINE_PRECOMPOSE_SELECTION: &str = "precompose_selection";
 /// Action name for opening a nested sequence clip.
 pub const TIMELINE_OPEN_NESTED_SEQUENCE: &str = "open_nested_sequence";
 
@@ -503,6 +505,13 @@ pub struct TimelineSetInOutPointPayload {
 pub struct TimelineSetSelectedClipsEnabledPayload {
     /// `true` when selected clips should participate in rendering/playback.
     pub enabled: bool,
+}
+
+/// Replace the current clip selection with one nested Sequence placement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelinePrecomposeSelectionPayload {
+    /// User-facing name assigned to the new nested Sequence.
+    pub name: String,
 }
 
 /// Open one nested sequence from a timeline clip.
@@ -1359,6 +1368,11 @@ pub fn timeline_drop_asset_action(payload: TimelineDropAssetPayload) -> Action {
 /// Build an action that performs one professional Insert Edit from an Asset.
 pub fn timeline_insert_asset_action(payload: TimelineInsertAssetPayload) -> Action {
     custom_timeline_action(TIMELINE_INSERT_ASSET, payload)
+}
+
+/// Build an action that precomposes the current clip selection.
+pub fn timeline_precompose_selection_action(payload: TimelinePrecomposeSelectionPayload) -> Action {
+    custom_timeline_action(TIMELINE_PRECOMPOSE_SELECTION, payload)
 }
 
 /// Build an action that opens one nested sequence from the timeline.

@@ -317,6 +317,152 @@ fn precompose_clips_creates_nested_sequence_and_replacement_clip() {
     assert_eq!(nested.video_tracks[0].clips[0].position, tt(0, tb));
 }
 
+#[test]
+fn precompose_product_action_commits_once_and_selects_replacement() {
+    let mut state = create_state_with_sequence();
+    let tb = state.active_sequence().expect("sequence should exist").time_base();
+    let clip = Clip::new(AssetId::new(), tt(12, tb), tt(30, tb)).expect("valid clip");
+    let clip_id = clip.id;
+    state
+        .active_sequence_mut_uncommitted()
+        .expect("sequence should exist")
+        .video_tracks[0]
+        .add_clip(clip)
+        .expect("add clip");
+    state.select_clip_by_id(clip_id).expect("select source clip");
+    let generation_before = state.project_author_generation();
+
+    state
+        .dispatch_action(
+            crate::app::ui_actions::timeline_precompose_selection_action(
+                crate::app::ui_actions::TimelinePrecomposeSelectionPayload {
+                    name: "Nested Product Action".to_owned(),
+                },
+            ),
+        )
+        .expect("precompose product action");
+
+    assert_eq!(state.project_author_generation(), generation_before + 1);
+    let selected = state.primary_selected_clip().expect("replacement selection");
+    let replacement = state
+        .active_sequence()
+        .expect("parent sequence")
+        .video_tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .find(|clip| clip.id == selected.clip_id)
+        .expect("replacement clip");
+    let nested_sequence_id = replacement.nested_sequence_id().expect("nested Sequence id");
+    assert_ne!(selected.clip_id, clip_id);
+    assert_eq!(
+        state.sequence_by_id(nested_sequence_id).map(|sequence| sequence.name.as_str()),
+        Some("Nested Product Action")
+    );
+}
+
+#[test]
+fn precompose_audio_only_selection_creates_only_an_audio_replacement() {
+    let mut state = create_state_with_sequence();
+    let tb = state.active_sequence().expect("sequence should exist").time_base();
+    let audio_track_id = state.active_sequence().expect("sequence should exist").audio_tracks[0].id;
+    let source_clip_id = state
+        .active_sequence_mut_uncommitted()
+        .expect("sequence should exist")
+        .add_media_audio_clip(
+            audio_track_id,
+            Clip::new(AssetId::new(), tt(20, tb), tt(40, tb)).expect("valid clip"),
+            AudioSourceComponentId::new(),
+        )
+        .expect("add audio clip");
+    state.select_clip_by_id(source_clip_id).expect("select audio clip");
+
+    state
+        .dispatch_action(
+            crate::app::ui_actions::timeline_precompose_selection_action(
+                crate::app::ui_actions::TimelinePrecomposeSelectionPayload {
+                    name: "Audio Nested".to_owned(),
+                },
+            ),
+        )
+        .expect("precompose audio selection");
+
+    let selected = state.primary_selected_clip().expect("audio replacement selection");
+    assert!(!selected.is_video_track);
+    let parent = state.active_sequence().expect("parent sequence");
+    assert!(
+        parent.video_tracks.iter().all(|track| track.clips.is_empty()),
+        "audio-only Precompose must not create an invisible video placement"
+    );
+    let replacement = parent
+        .audio_tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .find(|clip| clip.id == selected.clip_id)
+        .expect("audio nested replacement");
+    let nested_sequence_id = replacement.nested_sequence_id().expect("nested Sequence id");
+    let nested = state.sequence_by_id(nested_sequence_id).expect("nested Sequence");
+    assert!(nested.video_tracks.iter().all(|track| track.clips.is_empty()));
+    assert_eq!(
+        nested.audio_tracks.iter().map(|track| track.clips.len()).sum::<usize>(),
+        1
+    );
+}
+
+#[test]
+fn precompose_linked_av_selection_preserves_one_linked_parent_pair() {
+    let mut state = create_state_with_sequence();
+    let tb = state.active_sequence().expect("sequence should exist").time_base();
+    let video_track_id = state.active_sequence().expect("sequence should exist").video_tracks[0].id;
+    let audio_track_id = state.active_sequence().expect("sequence should exist").audio_tracks[0].id;
+    let link_group = mondrian_core::ClipLinkGroupId::new();
+    let mut video_clip =
+        Clip::new(AssetId::new(), tt(8, tb), tt(32, tb)).expect("valid video clip");
+    video_clip.link_group = Some(link_group);
+    let video_clip_id = video_clip.id;
+    state
+        .active_sequence_mut_uncommitted()
+        .expect("sequence should exist")
+        .video_track_mut(video_track_id)
+        .expect("video track")
+        .add_clip(video_clip)
+        .expect("add video clip");
+    let mut audio_clip =
+        Clip::new(AssetId::new(), tt(8, tb), tt(32, tb)).expect("valid audio clip");
+    audio_clip.link_group = Some(link_group);
+    state
+        .active_sequence_mut_uncommitted()
+        .expect("sequence should exist")
+        .add_media_audio_clip(audio_track_id, audio_clip, AudioSourceComponentId::new())
+        .expect("add audio clip");
+    state.select_clip_by_id(video_clip_id).expect("select linked video");
+
+    state
+        .dispatch_action(
+            crate::app::ui_actions::timeline_precompose_selection_action(
+                crate::app::ui_actions::TimelinePrecomposeSelectionPayload {
+                    name: "Linked AV Nested".to_owned(),
+                },
+            ),
+        )
+        .expect("precompose linked selection");
+
+    let parent = state.active_sequence().expect("parent sequence");
+    let video_replacement = parent.video_tracks[0].clips.first().expect("video replacement");
+    let audio_replacement = parent.audio_tracks[0].clips.first().expect("audio replacement");
+    assert!(video_replacement.is_nested_sequence());
+    assert!(audio_replacement.is_nested_sequence());
+    assert_eq!(
+        video_replacement.nested_sequence_id(),
+        audio_replacement.nested_sequence_id()
+    );
+    assert_eq!(video_replacement.link_group, audio_replacement.link_group);
+    assert!(video_replacement.link_group.is_some());
+    assert_eq!(
+        state.primary_selected_clip().map(|selection| selection.clip_id),
+        Some(video_replacement.id)
+    );
+}
+
 fn video_clip_is_disabled(state: &AppState, clip_id: ClipId) -> bool {
     state
         .active_sequence()

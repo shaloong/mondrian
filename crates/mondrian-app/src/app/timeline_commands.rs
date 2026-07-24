@@ -1341,32 +1341,52 @@ impl AppState {
             }
             parent.compact_structural_references();
 
-            let target_video_track_index = target_video_track_index.unwrap_or(0);
             let duration = max_time.checked_sub(min_time)?;
-            let mut nested_clip = Clip::new_nested_sequence(
-                nested_sequence.id,
-                min_time,
-                duration,
-                Some(nested_sequence.name.clone()),
-            )?;
-            let nested_clip_id = nested_clip.id;
+            let has_nested_video =
+                nested_sequence.video_tracks.iter().any(|track| !track.clips.is_empty());
             let has_nested_audio =
                 nested_sequence.audio_tracks.iter().any(|track| !track.clips.is_empty());
-            let nested_audio = if has_nested_audio {
-                let mut audio_clip = Clip::new_nested_sequence(
+            let link_group = (has_nested_video && has_nested_audio).then(ClipLinkGroupId::new);
+            let nested_video = if has_nested_video {
+                let mut clip = Clip::new_nested_sequence(
                     nested_sequence.id,
                     min_time,
                     duration,
                     Some(nested_sequence.name.clone()),
                 )?;
-                let link_group = ClipLinkGroupId::new();
-                nested_clip.link_group = Some(link_group);
-                audio_clip.link_group = Some(link_group);
-                Some(audio_clip)
+                clip.link_group = link_group;
+                Some(clip)
             } else {
                 None
             };
-            parent.video_tracks[target_video_track_index].add_clip(nested_clip)?;
+            let nested_audio = if has_nested_audio {
+                let mut clip = Clip::new_nested_sequence(
+                    nested_sequence.id,
+                    min_time,
+                    duration,
+                    Some(nested_sequence.name.clone()),
+                )?;
+                clip.link_group = link_group;
+                Some(clip)
+            } else {
+                None
+            };
+            let nested_clip_id =
+                nested_video.as_ref().or(nested_audio.as_ref()).map(|clip| clip.id).ok_or_else(
+                    || mondrian_core::MondrianError::WorkflowStepFailed {
+                        step_id: "precompose_clips_as_sequence".to_owned(),
+                        reason: "选区没有可放置到嵌套序列的内容".to_owned(),
+                    },
+                )?;
+            if let Some(video_clip) = nested_video {
+                let video_track_index = target_video_track_index.ok_or_else(|| {
+                    mondrian_core::MondrianError::WorkflowStepFailed {
+                        step_id: "precompose_clips_as_sequence".to_owned(),
+                        reason: "视频选区缺少父序列目标轨道".to_owned(),
+                    }
+                })?;
+                parent.video_tracks[video_track_index].add_clip(video_clip)?;
+            }
             if let Some(audio_clip) = nested_audio {
                 let output_id = nested_sequence
                     .audio_program
@@ -1377,7 +1397,13 @@ impl AppState {
                         step_id: "precompose_clips_as_sequence".to_owned(),
                         reason: "嵌套序列缺少音频 Program Output".to_owned(),
                     })?;
-                let audio_track_id = parent.audio_tracks[target_audio_track_index.unwrap_or(0)].id;
+                let audio_track_index = target_audio_track_index.ok_or_else(|| {
+                    mondrian_core::MondrianError::WorkflowStepFailed {
+                        step_id: "precompose_clips_as_sequence".to_owned(),
+                        reason: "音频选区缺少父序列目标轨道".to_owned(),
+                    }
+                })?;
+                let audio_track_id = parent.audio_tracks[audio_track_index].id;
                 parent.add_nested_audio_clip(audio_track_id, audio_clip, output_id)?;
             }
 
@@ -1395,7 +1421,10 @@ impl AppState {
         project_after.sequences.add_sequence(nested_sequence)?;
         self.authoring
             .as_mut()
-            .expect("authoring session checked above")
+            .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "precompose_clips_as_sequence".to_owned(),
+                reason: "项目事务提交前 Authoring Session 已关闭".to_owned(),
+            })?
             .commit_project_snapshot("预合成为嵌套序列", project_before, project_after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         Ok(nested_clip_id)

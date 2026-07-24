@@ -118,6 +118,16 @@ Lower layers cannot depend on higher layers:
   retain the same typed semantics, raster signature, and preview pixel hash.
   This is generated regression evidence, not an external visual-quality
   reference and not proof that the complete keyframe UI is finished.
+  The fixture-free recovery/nesting slice drives the formal Timeline
+  Precompose Action, requires one Project transaction, and verifies the closed
+  parent/child Sequence graph under recursive Preview and Export execution. It
+  then publishes a versioned, hashed autosave manifest, closes the original
+  Session, recovers through the ordinary product Action, and requires identical
+  author/pixel evidence. Recovery stays dirty and authoritative until a current
+  manual save publishes an empty manifest before deleting covered archives.
+  This closes the generated nested/recovery obligation only; it is not evidence
+  for real-media nested color, conflict UX, fault injection, or the three-run
+  top-level release gate.
 
 The audio dependency direction is one-way:
 
