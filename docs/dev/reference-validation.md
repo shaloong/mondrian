@@ -75,8 +75,12 @@ It passes only if its exact required fixture roles, operations, and content have
 typed postcondition evidence. Golden v3 rejects unknown fields; requirement IDs
 select evidence obligations but cannot substitute for observed author, media,
 delivery, or persistence facts.
-The complete Golden status remains blocked until every top-level requirement
-has evidence and the release repetition count is satisfied.
+Every slice report explicitly records `complete_golden_project: false`. A
+deterministic Golden Acceptance Plan compiles the top-level fixture, operation,
+content, and export sets against all declared slices; the plan is diagnostic
+structure, not execution evidence. The complete Golden status remains blocked
+until one coordinated Project run observes every top-level requirement and the
+release repetition count is satisfied.
 
 Material whose redistribution is prohibited must not be uploaded to CI
 artifacts, mirrors, releases, or public fixture bundles. Runtime downloads from
@@ -99,6 +103,21 @@ Run manifest validation:
 pwsh -File scripts/validation/validate-reference-assets.ps1 -Tier Pr
 pwsh -File scripts/validation/validate-reference-assets.ps1 -Tier Nightly -Scope Playback
 ```
+
+Inspect the current top-level Golden coverage ledger without generating media:
+
+```powershell
+cargo test -p mondrian-app --lib `
+  golden_acceptance_plan_reports_current_top_level_blockers -j1 -- `
+  --nocapture
+```
+
+The ledger deliberately remains blocked. The current slices do not plan AAC
+audio, HLG Main10/Rec.709 H.264/sRGB Alpha picture roles; Play, accurate Seek,
+Scrub, Insert, Overwrite, Ripple, Split, Proxy switch, and offline Relink;
+primary color correction and LUT. The three picture roles also remain unbound
+to qualifying fixtures. Export contracts are already assigned, but that alone
+is not a complete product workflow.
 
 Preflight a candidate reference machine before generating large media. The
 machine ID is an operator-owned stable label, not a serial number or an
@@ -266,9 +285,10 @@ plan on the qualified 16 GiB Windows reference machine and was classified
 `passed-baseline`. Its generated artifacts and evidence bundle remain
 intentionally disposable under `target`; the repository commits the recipes,
 contracts, and this reproducible result record rather than a multi-gigabyte
-machine-specific bundle. The Golden v3 contract now resolves its PCM and AAC
-roles, and `foundation-audio-authoring-v1` has a real Headless product-workflow
-gate rather than a declaration-only check. HLG Main10 picture, Rec.709 H.264
+machine-specific bundle. The Golden v3 contract resolves its PCM and AAC
+fixture identities, but only PCM is assigned to an executable slice.
+`foundation-audio-authoring-v1` has a real Headless product-workflow gate rather
+than a declaration-only check. HLG Main10 picture, Rec.709 H.264
 picture, and sRGB Alpha still roles remain deliberately null until qualifying
 fixtures and appropriate independent color evidence exist. Stress coverage
 also still lacks 4K60 and broader Log/VFR/multichannel/damaged-media fixtures,

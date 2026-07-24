@@ -8,6 +8,7 @@ mod fixture;
 mod foundation_audio;
 mod generated_delivery;
 mod harness;
+mod plan;
 mod visual_authoring;
 
 use anyhow::{ensure, Context};
@@ -534,6 +535,72 @@ fn golden_contract_rejects_unknown_fields() -> anyhow::Result<()> {
     ensure!(
         error.to_string().contains("unknown field"),
         "unexpected closed-schema diagnostic: {error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn golden_acceptance_plan_reports_current_top_level_blockers() -> anyhow::Result<()> {
+    use plan::{GoldenAcceptancePlan, GoldenAcceptancePlanStatus};
+
+    let root = repository_root();
+    let contract = load_golden_contract(&root)?;
+    let plan = GoldenAcceptancePlan::compile(&contract);
+
+    assert_eq!(plan.schema_version, 1);
+    assert_eq!(plan.status, GoldenAcceptancePlanStatus::Blocked);
+    assert!(!plan.complete_golden_project);
+    assert_eq!(plan.required_consecutive_passes, 3);
+    assert_eq!(
+        plan.missing.fixture_roles,
+        [
+            "aac-audio",
+            "hlg-main10-picture",
+            "rec709-h264-picture",
+            "srgb-alpha-still"
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
+    assert_eq!(
+        plan.missing.operations,
+        [
+            "accurate-seek",
+            "insert",
+            "offline-relink",
+            "overwrite",
+            "play",
+            "proxy-original-switch",
+            "ripple",
+            "scrub",
+            "split",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
+    assert_eq!(
+        plan.missing.content,
+        ["lut", "primary-color"].into_iter().map(str::to_owned).collect()
+    );
+    assert!(plan.missing.exports.is_empty());
+    assert_eq!(
+        plan.unassigned_required_fixture_roles,
+        [
+            "hlg-main10-picture",
+            "rec709-h264-picture",
+            "srgb-alpha-still"
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
+    assert_eq!(plan.slices.len(), 3);
+
+    eprintln!(
+        "MONDRIAN_GOLDEN_ACCEPTANCE_PLAN_JSON={}",
+        serde_json::to_string(&plan)?
     );
     Ok(())
 }

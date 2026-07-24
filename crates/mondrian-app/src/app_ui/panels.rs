@@ -16,6 +16,7 @@ use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
 use mondrian_core::automation::{
     AnimationParameterAddress, ParameterResourceReference, ParameterSchema, PropertyValue,
 };
+use mondrian_core::display_labels::color_space_label;
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::types::{
     AssetId, AudioComponentEditId, AudioSourceComponentId, ClipId, ColorSpace, EffectId, JobId,
@@ -31,8 +32,9 @@ use mondrian_effects::{effect_display_name, effect_library_types};
 use mondrian_export::delivery::resolve_export_delivery;
 use mondrian_export::preset::{
     AudioCodecConfig, Av1Profile, BuiltinExportPreset, Container, ExportAlphaMode,
-    ExportChromaSampling, ExportParameter, ExportPreset, H264Profile, HevcProfile, ProResProfile,
-    Resolution as ExportResolution, TimelineExportRange, VideoCodecConfig, VideoRateControl,
+    ExportChromaSampling, ExportColorTarget, ExportParameter, ExportPreset, H264Profile,
+    HevcProfile, ProResProfile, Resolution as ExportResolution, TimelineExportRange,
+    VideoCodecConfig, VideoRateControl,
 };
 use mondrian_export::queue::{
     ExportColorHealthSeverity, ExportJobColorDiagnostics, ExportProgress, ExportProgressDetail,
@@ -4292,6 +4294,138 @@ fn export_alpha_mode_items(preset: &ExportPreset) -> Vec<MenuItem> {
         .collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExportColorTargetMode {
+    FollowSequence,
+    RenderingView,
+    Colorimetric,
+}
+
+fn export_color_target_mode(target: ExportColorTarget) -> ExportColorTargetMode {
+    match target {
+        ExportColorTarget::FollowSequence => ExportColorTargetMode::FollowSequence,
+        ExportColorTarget::RenderingView(_) => ExportColorTargetMode::RenderingView,
+        ExportColorTarget::Colorimetric(_) => ExportColorTargetMode::Colorimetric,
+    }
+}
+
+fn export_color_target_mode_label(mode: ExportColorTargetMode) -> &'static str {
+    match mode {
+        ExportColorTargetMode::FollowSequence => "跟随序列 Program Output",
+        ExportColorTargetMode::RenderingView => "项目引擎 Rendering View",
+        ExportColorTargetMode::Colorimetric => "直接 Colorimetric 转换",
+    }
+}
+
+fn export_color_target_label(target: ExportColorTarget) -> String {
+    match target {
+        ExportColorTarget::FollowSequence => {
+            export_color_target_mode_label(ExportColorTargetMode::FollowSequence).to_owned()
+        }
+        ExportColorTarget::RenderingView(color_space) => format!(
+            "{} / {}",
+            export_color_target_mode_label(ExportColorTargetMode::RenderingView),
+            color_space_label(color_space)
+        ),
+        ExportColorTarget::Colorimetric(color_space) => format!(
+            "{} / {}",
+            export_color_target_mode_label(ExportColorTargetMode::Colorimetric),
+            color_space_label(color_space)
+        ),
+    }
+}
+
+fn export_color_target_with_mode(
+    target: ExportColorTarget,
+    mode: ExportColorTargetMode,
+) -> ExportColorTarget {
+    match mode {
+        ExportColorTargetMode::FollowSequence => ExportColorTarget::FollowSequence,
+        ExportColorTargetMode::RenderingView => {
+            let color_space = match target {
+                ExportColorTarget::RenderingView(color_space)
+                | ExportColorTarget::Colorimetric(color_space)
+                    if color_space.is_display_referred() =>
+                {
+                    color_space
+                }
+                ExportColorTarget::FollowSequence
+                | ExportColorTarget::RenderingView(_)
+                | ExportColorTarget::Colorimetric(_) => ColorSpace::Rec709,
+            };
+            ExportColorTarget::RenderingView(color_space)
+        }
+        ExportColorTargetMode::Colorimetric => {
+            let color_space = match target {
+                ExportColorTarget::RenderingView(color_space)
+                | ExportColorTarget::Colorimetric(color_space)
+                    if is_explicit_export_color_space(color_space) =>
+                {
+                    color_space
+                }
+                ExportColorTarget::FollowSequence
+                | ExportColorTarget::RenderingView(_)
+                | ExportColorTarget::Colorimetric(_) => ColorSpace::Rec709,
+            };
+            ExportColorTarget::Colorimetric(color_space)
+        }
+    }
+}
+
+fn is_explicit_export_color_space(color_space: ColorSpace) -> bool {
+    color_space.is_display_referred() || color_space.encoding().is_scene_log()
+}
+
+fn export_color_target_spaces(mode: ExportColorTargetMode) -> Vec<ColorSpace> {
+    ColorSpace::ALL
+        .into_iter()
+        .filter(|color_space| match mode {
+            ExportColorTargetMode::FollowSequence => false,
+            ExportColorTargetMode::RenderingView => color_space.is_display_referred(),
+            ExportColorTargetMode::Colorimetric => is_explicit_export_color_space(*color_space),
+        })
+        .collect()
+}
+
+fn export_color_target_mode_items(preset: &ExportPreset) -> Vec<MenuItem> {
+    [
+        ExportColorTargetMode::FollowSequence,
+        ExportColorTargetMode::RenderingView,
+        ExportColorTargetMode::Colorimetric,
+    ]
+    .into_iter()
+    .map(|mode| {
+        let mut updated = preset.clone();
+        updated.color_target = export_color_target_with_mode(updated.color_target, mode);
+        MenuItem::new(
+            export_color_target_mode_label(mode),
+            export_preset_update_action(updated),
+        )
+    })
+    .collect()
+}
+
+fn export_color_target_space_items(preset: &ExportPreset) -> Vec<MenuItem> {
+    let mode = export_color_target_mode(preset.color_target);
+    export_color_target_spaces(mode)
+        .into_iter()
+        .map(|color_space| {
+            let mut updated = preset.clone();
+            updated.color_target = match mode {
+                ExportColorTargetMode::FollowSequence => ExportColorTarget::FollowSequence,
+                ExportColorTargetMode::RenderingView => {
+                    ExportColorTarget::RenderingView(color_space)
+                }
+                ExportColorTargetMode::Colorimetric => ExportColorTarget::Colorimetric(color_space),
+            };
+            MenuItem::new(
+                color_space_label(color_space),
+                export_preset_update_action(updated),
+            )
+        })
+        .collect()
+}
+
 fn export_with_rate_control(
     mut preset: ExportPreset,
     rate_control: VideoRateControl,
@@ -4346,6 +4480,23 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         export_bit_depth_items(&model.preset),
     )
     .with_max_visible_items(4);
+    let color_target_mode = export_color_target_mode(model.preset.color_target);
+    let color_target_mode_dropdown = Dropdown::new(
+        export_color_target_mode_label(color_target_mode),
+        export_color_target_mode_items(&model.preset),
+    )
+    .with_max_visible_items(3);
+    let color_target_space_label = match model.preset.color_target {
+        ExportColorTarget::FollowSequence => "由序列 Program Output 决定".to_owned(),
+        ExportColorTarget::RenderingView(color_space)
+        | ExportColorTarget::Colorimetric(color_space) => color_space_label(color_space).to_owned(),
+    };
+    let color_target_space_dropdown = Dropdown::new(
+        color_target_space_label,
+        export_color_target_space_items(&model.preset),
+    )
+    .with_max_visible_items(8)
+    .enabled(color_target_mode != ExportColorTargetMode::FollowSequence);
     let video_range_dropdown = Dropdown::new(
         export_video_range_label(model.preset.video_signal.range),
         export_video_range_items(&model.preset),
@@ -4489,6 +4640,15 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         .with_row(PropertyRow::new("范围", Box::new(video_range_dropdown)))
         .with_row(PropertyRow::new("色度采样", Box::new(chroma_dropdown)))
         .with_row(PropertyRow::new("Alpha", Box::new(alpha_dropdown)));
+    let color_section = PropertySection::new("色彩输出")
+        .with_row(PropertyRow::new(
+            "处理方式",
+            Box::new(color_target_mode_dropdown),
+        ))
+        .with_row(PropertyRow::new(
+            "目标空间",
+            Box::new(color_target_space_dropdown),
+        ));
 
     let mut encoding_section = PropertySection::new("编码参数");
     if let Some((rate_control, max_crf)) = export_video_rate_control(&model.preset.video) {
@@ -4640,6 +4800,7 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
                 ),
         )
         .with_section(format_section)
+        .with_section(color_section)
         .with_section(signal_section)
         .with_section(encoding_section)
         .with_section(audio_section)
@@ -4854,8 +5015,9 @@ fn export_preset_summary(preset: Option<&ExportPreset>) -> String {
         AudioCodecConfig::Mp3 { bitrate_kbps } => format!("MP3 {bitrate_kbps} kbps"),
     };
     format!(
-        "{resolution} / {} / {bitrate} / {} / {} / {} / {} / {audio} / .{}",
+        "{resolution} / {} / {bitrate} / {} / {} / {} / {} / {} / {audio} / .{}",
         export_video_codec_label(&preset.video),
+        export_color_target_label(preset.color_target),
         export_bit_depth_label(preset.video_signal.bit_depth),
         export_video_range_label(preset.video_signal.range),
         export_chroma_label(preset.video_signal.chroma_sampling),
@@ -6988,6 +7150,72 @@ mod tests {
     }
 
     #[test]
+    fn export_color_target_modes_expose_only_semantically_valid_spaces() {
+        let rendering = export_color_target_spaces(ExportColorTargetMode::RenderingView);
+        assert!(rendering.contains(&ColorSpace::Rec709));
+        assert!(rendering.contains(&ColorSpace::Rec2100Hlg));
+        assert!(rendering.contains(&ColorSpace::Rec2100Pq));
+        assert!(!rendering.contains(&ColorSpace::AppleLogBt2020));
+        assert!(!rendering.contains(&ColorSpace::LinearRec709));
+
+        let colorimetric = export_color_target_spaces(ExportColorTargetMode::Colorimetric);
+        assert!(colorimetric.contains(&ColorSpace::Rec709));
+        assert!(colorimetric.contains(&ColorSpace::AppleLogBt2020));
+        assert!(!colorimetric.contains(&ColorSpace::LinearRec709));
+        assert!(!colorimetric.contains(&ColorSpace::Aces2065_1));
+    }
+
+    #[test]
+    fn export_color_target_mode_change_preserves_only_legal_endpoints() {
+        assert_eq!(
+            export_color_target_with_mode(
+                ExportColorTarget::Colorimetric(ColorSpace::Rec2100Pq),
+                ExportColorTargetMode::RenderingView,
+            ),
+            ExportColorTarget::RenderingView(ColorSpace::Rec2100Pq)
+        );
+        assert_eq!(
+            export_color_target_with_mode(
+                ExportColorTarget::Colorimetric(ColorSpace::AppleLogBt2020),
+                ExportColorTargetMode::RenderingView,
+            ),
+            ExportColorTarget::RenderingView(ColorSpace::Rec709)
+        );
+        assert_eq!(
+            export_color_target_with_mode(
+                ExportColorTarget::FollowSequence,
+                ExportColorTargetMode::Colorimetric,
+            ),
+            ExportColorTarget::Colorimetric(ColorSpace::Rec709)
+        );
+    }
+
+    #[test]
+    fn export_panel_submits_an_explicit_log_target_without_mutating_the_sequence() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("Log Deliverable");
+        let sequence_id = sequence.id;
+        let program_output = sequence.settings.color.program_output.clone();
+        state.test_set_sequence(Some(sequence));
+        state.set_export_draft_sequence_id(Some(sequence_id));
+        state.set_export_draft_output_path("E:/renders/log.mov");
+
+        let mut preset = ExportPreset::prores_4444_alpha();
+        preset.alpha_mode = ExportAlphaMode::FlattenBlack;
+        preset.color_target = ExportColorTarget::Colorimetric(ColorSpace::AppleLogBt2020);
+        state.set_export_draft_preset(preset.clone());
+
+        let model = ExportPanelModel::from_app_state(&state);
+        let payload = model.enqueue_payload().expect("valid explicit log target");
+
+        assert_eq!(payload.preset, preset);
+        assert_eq!(
+            state.active_sequence().expect("active sequence").settings.color.program_output,
+            program_output
+        );
+    }
+
+    #[test]
     fn export_panel_model_does_not_build_enqueue_payload_when_disabled() {
         let mut state = AppState::new();
         let sequence = Sequence::new("Deliverable");
@@ -7013,6 +7241,9 @@ mod tests {
         let sequence_id = sequence.id;
         state.test_set_sequence(Some(sequence));
         state.set_export_draft_builtin_preset(BuiltinExportPreset::H264AacSdr1080p);
+        let mut incompatible = state.export_draft.preset.clone();
+        incompatible.color_target = ExportColorTarget::RenderingView(ColorSpace::Rec2100Pq);
+        state.set_export_draft_preset(incompatible);
         state.set_export_draft_sequence_id(Some(sequence_id));
         state.set_export_draft_output_path("E:/renders/hdr.mp4");
         state.set_status_hint("stale success must not hide the blocker", false);

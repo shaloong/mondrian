@@ -245,6 +245,17 @@ advance for every transaction, durable request identity and archive hash, and
 values observed under a distinct fresh Session after load. Action admission or
 a human-readable status hint alone cannot satisfy a Golden operation.
 
+Golden validation has one UI-independent planning Module. It compiles the
+closed v3 contract into a deterministic ledger of required fixture roles,
+operations, content, and exports, then reports every unplanned or unresolved
+obligation. A slice is an independently executable evidence Adapter, not a
+top-level run: successful and failed slice reports both carry
+`complete_golden_project: false`. The future top-level run coordinator must
+execute all obligations against one Project identity, preserve typed evidence,
+and own consecutive-run classification. PowerShell remains an external process
+supervisor and schema validator; it cannot infer semantic completion from test
+names, process exit, or a union of unrelated projects.
+
 ## Playback Tick Ownership
 
 The winit host may wake the application while playback is running, but playback
@@ -385,9 +396,13 @@ The materialized preset also carries one typed `ExportColorTarget`: follow
 Sequence Program Output, explicit colorimetric output, or an explicit
 Project-engine Rendering View. Built-in SDR presets pin their Rec.709 rendering
 target; HEVC Main10 and ProRes follow the Sequence until explicitly changed.
-The backend contract is complete even while a general-purpose target picker is
-not yet exposed; the UI must not simulate Camera Log by editing Sequence Program
-Output or infer a transform from the codec.
+The export form exposes mode and target space as two controls so the user cannot
+accidentally turn a display Rendering View into a direct Camera Log conversion.
+Rendering View offers only display-referred targets; Colorimetric offers encoded
+display and scene-log endpoints. Switching modes preserves a legal endpoint and
+otherwise chooses explicit Rec.709, while queue admission remains authoritative.
+The UI must not simulate Camera Log by editing Sequence Program Output or infer
+a transform from the codec.
 
 Sequence working/input/Program Output color policy and separate delivery
 range/bit-depth/HDR defaults remain Sequence-owned and editable. The Project

@@ -64,16 +64,18 @@ authored delivery defaults. Its `delivery.video_range` and
 - output raster override or exact Sequence raster;
 - rate control and audio codec/disable policy.
 
-The current product boundary intentionally distinguishes “not yet exposed” from
-“supported with an encoder-selected guess.” Sequence settings already expose
-raster, frame rate/time base, pixel aspect, field order, output color, bit-depth
-and range defaults, audio sample rate, and channel layout. M1 export presets can
-override raster, bit depth, range, chroma, codec profile, Alpha, rate control,
-and audio codec. The product export form edits all of those currently
-implemented preset-owned values through one materialized typed draft, including
-GIF palette controls and PCM integer depth. Selecting a stable built-in preset
-resets that draft; editing it never mutates the catalog or a previously admitted
-job. Illegal intermediate combinations remain visible with the structured
+The product boundary distinguishes “not represented” from “supported with an
+encoder-selected guess.” Sequence settings expose raster, frame rate/time base,
+pixel aspect, field order, output color, bit-depth and range defaults, audio
+sample rate, and channel layout. M1 export presets can override raster, bit
+depth, range, chroma, codec profile, Alpha, rate control, audio codec, and the
+typed color target. The export form edits all currently implemented
+preset-owned values through one materialized typed draft, including GIF palette
+controls and PCM integer depth. Color target mode and endpoint are separate:
+Rendering View lists display-referred spaces, while Colorimetric lists encoded
+display and scene-log spaces. Selecting a stable built-in preset resets the
+draft; editing it never mutates the catalog or a previously admitted job.
+Illegal intermediate combinations remain visible with the structured
 delivery-admission reason and cannot enqueue.
 
 Export frame-rate conversion, audio sample-rate/layout conversion, GOP/B-frame

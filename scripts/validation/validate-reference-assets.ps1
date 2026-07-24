@@ -204,7 +204,7 @@ foreach ($entry in $manifest.entries) {
 
 $golden = Get-Content -LiteralPath $goldenPath -Raw | ConvertFrom-Json
 $stress = Get-Content -LiteralPath $stressPath -Raw | ConvertFrom-Json
-if ($golden.schema_version -ne 2) {
+if ($golden.schema_version -ne 3) {
     Add-Issue "error" "golden.schema-unsupported" "$($golden.id) has an unsupported Golden Project schema version"
 }
 if ($golden.kind -ne "golden") {
@@ -240,6 +240,7 @@ foreach ($role in $golden.required_fixture_roles) {
 
 $requiredOperationIds = @($golden.required_operations | ForEach-Object { [string]$_ })
 $requiredContentIds = @($golden.required_content | ForEach-Object { [string]$_ })
+$exportIds = @($golden.exports | ForEach-Object { [string]$_.id })
 foreach ($requirementSet in @(
     [pscustomobject]@{ Name = "operation"; Values = $requiredOperationIds },
     [pscustomobject]@{ Name = "content"; Values = $requiredContentIds }
@@ -261,7 +262,7 @@ if (-not (Has-Property $golden "execution_slices") -or @($golden.execution_slice
     }
     foreach ($slice in $golden.execution_slices) {
         $sliceId = [string]$slice.id
-        foreach ($field in @("required_fixture_roles", "required_operations", "required_content")) {
+        foreach ($field in @("required_fixture_roles", "required_operations", "required_content", "required_exports")) {
             if (-not (Has-Property $slice $field)) {
                 Add-Issue "error" "golden.execution-slice-field-missing" "Golden Project slice '$sliceId' is missing '$field'"
             }
@@ -281,6 +282,11 @@ if (-not (Has-Property $golden "execution_slices") -or @($golden.execution_slice
         } else {
             @()
         }
+        $sliceExportIds = if (Has-Property $slice "required_exports") {
+            @($slice.required_exports | ForEach-Object { [string]$_ })
+        } else {
+            @()
+        }
         foreach ($roleName in $sliceRoleNames) {
             if ($roleName -notin $goldenRoleNames) {
                 Add-Issue "error" "golden.execution-slice-role-unknown" "Golden Project slice '$sliceId' references unknown fixture role '$roleName'"
@@ -296,11 +302,19 @@ if (-not (Has-Property $golden "execution_slices") -or @($golden.execution_slice
                 Add-Issue "error" "golden.execution-slice-content-unknown" "Golden Project slice '$sliceId' references unknown content '$contentId'"
             }
         }
+        foreach ($exportId in $sliceExportIds) {
+            if ($exportId -notin $exportIds) {
+                Add-Issue "error" "golden.execution-slice-export-unknown" "Golden Project slice '$sliceId' references unknown export '$exportId'"
+            }
+        }
     }
 }
 
 if (-not (Has-Property $golden.acceptance "unexecuted_requirement_may_pass") -or $golden.acceptance.unexecuted_requirement_may_pass -ne $false) {
     Add-Issue "error" "golden.unexecuted-requirement-policy-invalid" "Golden Project acceptance must explicitly forbid unexecuted requirements from passing"
+}
+if (-not (Has-Property $golden.acceptance "consecutive_passes") -or [int]$golden.acceptance.consecutive_passes -ne 3) {
+    Add-Issue "error" "golden.consecutive-pass-policy-invalid" "Golden Project acceptance must require exactly three consecutive passes"
 }
 if (-not (Has-Property $golden.acceptance "duration_error_max_frames") -or [int]$golden.acceptance.duration_error_max_frames -ne 1) {
     Add-Issue "error" "golden.duration-tolerance-invalid" "Golden Project duration tolerance must be exactly one frame"
@@ -312,7 +326,6 @@ if (-not (Has-Property $golden.acceptance "silent_fallback_allowed") -or $golden
     Add-Issue "error" "golden.silent-fallback-policy-invalid" "Golden Project acceptance must explicitly forbid silent fallback"
 }
 
-$exportIds = @($golden.exports | ForEach-Object { [string]$_.id })
 if (@($exportIds | Select-Object -Unique).Count -ne $exportIds.Count) {
     Add-Issue "error" "golden.export-id-duplicate" "Golden Project export ids must be unique"
 }

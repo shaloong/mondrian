@@ -50,6 +50,7 @@ struct GoldenDeliveryReport {
     contract_id: String,
     corpus_revision: String,
     status: &'static str,
+    complete_golden_project: bool,
     fixture: FixtureEvidence,
     setup: DeliverySetupEvidence,
     operations: Vec<OperationEvidence>,
@@ -694,6 +695,7 @@ fn execute_delivery_slice(
         contract_id: contract.id,
         corpus_revision: manifest.corpus_revision,
         status: "passed",
+        complete_golden_project: false,
         fixture,
         setup: DeliverySetupEvidence {
             project_path: paths.project.clone(),
@@ -738,6 +740,7 @@ fn golden_project_generated_delivery_roundtrip_gate() -> anyhow::Result<()> {
                 "schema_version": 3,
                 "profile": DELIVERY_SLICE_ID,
                 "status": "failed",
+                "complete_golden_project": false,
                 "error": format!("{error:#}")
             });
             write_report(&paths.report, &failure)?;

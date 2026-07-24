@@ -113,6 +113,7 @@ struct GoldenFoundationReport {
     contract_id: String,
     corpus_revision: String,
     status: GoldenRunStatus,
+    complete_golden_project: bool,
     fixture: FixtureEvidence,
     setup: GoldenSetupEvidence,
     operations: Vec<OperationEvidence>,
@@ -455,6 +456,7 @@ fn execute_foundation_slice(
         contract_id: contract.id,
         corpus_revision: manifest.corpus_revision,
         status: GoldenRunStatus::Passed,
+        complete_golden_project: false,
         fixture,
         setup: GoldenSetupEvidence {
             project_path: paths.project.clone(),
@@ -496,6 +498,7 @@ fn golden_project_foundation_audio_authoring_gate() -> anyhow::Result<()> {
                 "schema_version": 3,
                 "profile": FOUNDATION_SLICE_ID,
                 "status": "failed",
+                "complete_golden_project": false,
                 "error": format!("{error:#}")
             });
             write_report(&paths.report, &failure)?;

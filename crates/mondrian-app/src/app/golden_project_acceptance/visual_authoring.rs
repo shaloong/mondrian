@@ -68,6 +68,7 @@ struct GoldenVisualReport {
     profile: &'static str,
     contract_id: String,
     status: &'static str,
+    complete_golden_project: bool,
     setup: VisualSetupEvidence,
     operations: Vec<OperationEvidence>,
     content: Vec<ContentEvidence>,
@@ -984,6 +985,7 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
         profile: VISUAL_SLICE_ID,
         contract_id: contract.id,
         status: "passed",
+        complete_golden_project: false,
         setup: VisualSetupEvidence {
             project_path: paths.project.clone(),
             solid_asset_id: solid_asset_id.to_string(),
@@ -1027,9 +1029,10 @@ fn golden_project_visual_authoring_roundtrip_gate() -> anyhow::Result<()> {
         }
         Err(error) => {
             let failure = serde_json::json!({
-                "schema_version": 3,
+                "schema_version": 4,
                 "profile": VISUAL_SLICE_ID,
                 "status": "failed",
+                "complete_golden_project": false,
                 "error": format!("{error:#}")
             });
             write_report(&paths.report, &failure)?;
