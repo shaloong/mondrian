@@ -3,11 +3,12 @@
 use super::fixture::{resolve_fixture, sha256_file, CorpusManifest, FixtureEvidence};
 use super::harness::{
     ensure_exact_requirement_evidence, fixture_root, new_run_directory, rooted_env_path,
-    wait_for_export_job, wait_for_media_imports, write_report, DirectoryCleanup,
+    wait_for_export_job, wait_for_media_imports, write_report,
 };
+use super::workflow::{GoldenProductWorkflowDriver, GoldenSequenceStageEvidence};
 use super::{
     builtin_preset, load_golden_contract, load_json, repository_root,
-    sequence_settings_from_contract, GoldenExportContract,
+    sequence_settings_from_contract, GoldenExportContract, GoldenProjectContract,
 };
 use crate::app::ui_actions::{
     assets_create_solid_color_action, export_enqueue_action, inspector_set_clip_opacity_action,
@@ -44,7 +45,7 @@ struct GoldenRunPaths {
 }
 
 #[derive(Debug, Serialize)]
-struct GoldenDeliveryReport {
+pub(super) struct GoldenDeliveryReport {
     schema_version: u32,
     profile: &'static str,
     contract_id: String,
@@ -60,6 +61,7 @@ struct GoldenDeliveryReport {
 #[derive(Debug, Serialize)]
 struct DeliverySetupEvidence {
     project_path: PathBuf,
+    stage: GoldenSequenceStageEvidence,
     video_track_id: String,
     audio_track_id: String,
     solid_asset_id: String,
@@ -452,11 +454,12 @@ fn reimport_export(
     })
 }
 
-fn execute_delivery_slice(
+pub(super) fn execute_delivery_stage(
     root: &Path,
-    paths: &GoldenRunPaths,
+    contract: &GoldenProjectContract,
+    workflow: &mut GoldenProductWorkflowDriver,
+    output_directory: &Path,
 ) -> anyhow::Result<GoldenDeliveryReport> {
-    let contract = load_golden_contract(root)?;
     let slice = contract
         .execution_slices
         .iter()
@@ -473,29 +476,27 @@ fn execute_delivery_slice(
     let duration_frames = window.end_frame_exclusive - window.start_frame;
     let settings = sequence_settings_from_contract(&contract.timeline)?;
     let manifest: CorpusManifest = load_json(&root.join("tests/validation/corpus-manifest.json"))?;
-    let fixture = resolve_fixture(root, &fixture_root(root), &contract, &manifest, "pcm-audio")?;
+    let fixture = resolve_fixture(root, &fixture_root(root), contract, &manifest, "pcm-audio")?;
 
-    // Declared before AppState so unwinding drops all open SQLite handles first.
-    let mut runtime_cleanup = DirectoryCleanup::default();
-    let mut state = AppState::new();
-    state.create_new_project_with_settings_at(
-        paths.project.clone(),
-        "Windows Alpha Golden Delivery",
-        settings.clone(),
-        mondrian_core::ProjectColorEnvironment::default(),
-        mondrian_core::ProjectSettings::default(),
-    )?;
-    runtime_cleanup.track(state.project_runtime_dir().map(Path::to_path_buf));
-
-    state.dispatch_action(Action::ImportMedia(vec![fixture.path.clone()]))?;
-    wait_for_media_imports(&mut state)?;
-    let audio_asset = state
+    let stage = workflow.create_sequence_stage("generated-delivery")?;
+    let state = workflow.app_mut();
+    let mut audio_asset = state
         .asset_library()
         .context("Asset Library is absent")?
         .list_assets()?
         .into_iter()
-        .find(|asset| asset.path == fixture.path)
-        .context("PCM fixture import is absent")?;
+        .find(|asset| asset.path == fixture.path);
+    if audio_asset.is_none() {
+        state.dispatch_action(Action::ImportMedia(vec![fixture.path.clone()]))?;
+        wait_for_media_imports(state)?;
+        audio_asset = state
+            .asset_library()
+            .context("Asset Library is absent after PCM import")?
+            .list_assets()?
+            .into_iter()
+            .find(|asset| asset.path == fixture.path);
+    }
+    let audio_asset = audio_asset.context("PCM fixture import is absent")?;
     ensure!(
         audio_asset.kind == AssetKind::Audio,
         "PCM fixture is not audio"
@@ -645,9 +646,9 @@ fn execute_delivery_slice(
             .find(|export| &export.id == export_id)
             .with_context(|| format!("Golden export contract is absent: {export_id}"))?;
         exports.push(export_and_probe(
-            &mut state,
+            state,
             export,
-            paths.directory.join(format!("{export_id}.mp4")),
+            output_directory.join(format!("{export_id}.mp4")),
             range,
             settings.frame_rate,
             duration_frames,
@@ -663,7 +664,7 @@ fn execute_delivery_slice(
             .find(|export| export.id == evidence.export_id)
             .context("export evidence lost its Golden contract")?;
         reimports.push(reimport_export(
-            &mut state,
+            state,
             evidence,
             expected,
             settings.frame_rate,
@@ -688,17 +689,19 @@ fn execute_delivery_slice(
         content.iter().map(ContentEvidence::id),
         "content",
     )?;
+    workflow.verify_binding()?;
 
     Ok(GoldenDeliveryReport {
-        schema_version: 3,
+        schema_version: 4,
         profile: DELIVERY_SLICE_ID,
-        contract_id: contract.id,
+        contract_id: contract.id.clone(),
         corpus_revision: manifest.corpus_revision,
         status: "passed",
         complete_golden_project: false,
         fixture,
         setup: DeliverySetupEvidence {
-            project_path: paths.project.clone(),
+            project_path: workflow.project_path().to_path_buf(),
+            stage,
             video_track_id: video_track_id.to_string(),
             audio_track_id: audio_track_id.to_string(),
             solid_asset_id: solid_asset.id.to_string(),
@@ -711,6 +714,22 @@ fn execute_delivery_slice(
         operations,
         content,
     })
+}
+
+fn execute_delivery_slice(
+    root: &Path,
+    paths: &GoldenRunPaths,
+) -> anyhow::Result<GoldenDeliveryReport> {
+    let contract = load_golden_contract(root)?;
+    let settings = sequence_settings_from_contract(&contract.timeline)?;
+    let mut workflow = GoldenProductWorkflowDriver::create(
+        paths.project.clone(),
+        "Windows Alpha Golden Delivery",
+        settings,
+        mondrian_core::ProjectColorEnvironment::default(),
+        mondrian_core::ProjectSettings::default(),
+    )?;
+    execute_delivery_stage(root, &contract, &mut workflow, &paths.directory)
 }
 
 #[test]
@@ -737,7 +756,7 @@ fn golden_project_generated_delivery_roundtrip_gate() -> anyhow::Result<()> {
         }
         Err(error) => {
             let failure = serde_json::json!({
-                "schema_version": 3,
+                "schema_version": 4,
                 "profile": DELIVERY_SLICE_ID,
                 "status": "failed",
                 "complete_golden_project": false,

@@ -119,6 +119,57 @@ primary color correction and LUT. The three picture roles also remain unbound
 to qualifying fixtures. Export contracts are already assigned, but that alone
 is not a complete product workflow.
 
+Verify the single-Project Headless workflow boundary:
+
+```powershell
+cargo test -p mondrian-app --lib `
+  golden_product_workflow_preserves_one_project_across_sequences_and_reopen `
+  -j1
+```
+
+This ordinary-CI test creates one production project, crosses a fresh open,
+creates a second stage Sequence through the product action, and performs
+durable save/close/reopen. Every checkpoint records typed Project, Session, and
+active Sequence identities plus Generation and Revision. Project/path and both
+Sequences must survive; only Session identity may change. It is infrastructure
+evidence, not a Golden operation and therefore does not alter the coverage
+ledger.
+
+After the canonical PCM fixture is available, verify that the first two real
+stages compose without report union:
+
+```powershell
+$env:MONDRIAN_GOLDEN_FIXTURE_ROOT='target/validation/golden-fixtures'
+cargo test -p mondrian-app --lib `
+  golden_foundation_and_visual_stages_share_one_project `
+  -j1 -- --ignored --nocapture --test-threads=1
+```
+
+The gate runs Foundation Audio in the initial Sequence, creates the Visual
+Authoring Sequence through the production action, and crosses the visual
+durable reopen. It requires one unchanged Project ID/path, exactly two
+Sequences, the original PCM Clip, and the second Sequence's Transition plus
+Basic Title. It remains partial execution evidence and cannot report
+`complete_golden_project: true`.
+
+With production FFmpeg encoders available, compose every currently executable
+Golden stage in one Project:
+
+```powershell
+$env:MONDRIAN_GOLDEN_FIXTURE_ROOT='target/validation/golden-fixtures'
+cargo test -p mondrian-app --lib `
+  golden_existing_stages_share_one_project `
+  -j1 -- --ignored --nocapture --test-threads=1
+```
+
+This extends the two-stage gate with Generated Delivery, reuses the already
+imported canonical PCM asset, creates one third stage Sequence, executes both
+typed exports and ordinary media reimports, then performs a final durable
+reopen. It requires one Project ID/path, exactly three retained Sequences, and
+reimported `H264High` plus `HevcMain10` assets in the reopened Project library.
+The still-missing plan obligations mean this is not yet the top-level Golden
+coordinator and cannot contribute a consecutive complete run.
+
 Preflight a candidate reference machine before generating large media. The
 machine ID is an operator-owned stable label, not a serial number or an
 automatically harvested hardware identifier:
@@ -172,7 +223,9 @@ Session/Generation/Sequence Revision transitions, complete Sequence settings,
 native Stereo layout, persistence request identity, archive identity, and
 reopened typed author values rather than prose assertions. Its envelope always records
 `complete_golden_project: false`; a passing foundation slice cannot be reported
-as the M1 Golden exit gate.
+as the M1 Golden exit gate. Foundation report schema v4 additionally records
+the fixed Project ID/path at each lifecycle checkpoint and runs as a reusable
+stage over `GoldenProductWorkflowDriver`.
 
 Run the generated-picture delivery slice during development after placing the
 generated PCM fixture under an untracked fixture root:
@@ -193,7 +246,10 @@ delivery, MP4 mux identity, Rec.709 CICP/range, absence of static HDR metadata,
 48 kHz Stereo AAC, production queue terminal evidence, and reimported typed
 codec/profile/pixel-format facts. It still reports a partial Golden slice:
 missing real color-reference roles, playback, nesting, transitions, recovery,
-and three complete consecutive runs remain open.
+and three complete consecutive runs remain open. Delivery report schema v4
+records its Project-scoped stage-Sequence creation and the implementation now
+runs over `GoldenProductWorkflowDriver`; the standalone gate is only a
+development wrapper around that reusable stage.
 
 Run the fixture-free visual-authoring slice on Windows:
 
@@ -216,7 +272,11 @@ be unchanged after reopen. The exact named Windows font is a real dependency,
 so missing or changed font data fails closed. These generated pixels prove
 regression parity only: they do not replace an independent application or
 specification reference, real-media handle coverage, the complete keyframe
-editing UI, or the three-run top-level Golden exit gate.
+editing UI, or the three-run top-level Golden exit gate. Visual report schema
+v6 records the Project-scoped stage-Sequence creation and runs over the same
+`GoldenProductWorkflowDriver` used by Foundation Audio. Its standalone wrapper
+still creates an isolated development run, while the composed gates invoke the
+reusable Foundation, Visual, and Delivery stages against one Project.
 
 Run the complete release-profile M0 playback plan. This preflights the machine
 before expensive generation, validates the Playback corpus, runs the 30-minute

@@ -4,12 +4,14 @@
 //! are deliberately separate so adding later Golden coverage does not create a
 //! second monolithic acceptance harness.
 
+mod composed_workflow;
 mod fixture;
 mod foundation_audio;
 mod generated_delivery;
 mod harness;
 mod plan;
 mod visual_authoring;
+mod workflow;
 
 use anyhow::{ensure, Context};
 use mondrian_core::{AudioChannelLayout, ColorSpace, Rational, Resolution, WorkingColorSpace};

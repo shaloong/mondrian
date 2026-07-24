@@ -2,14 +2,14 @@
 
 use super::fixture::{resolve_fixture, CorpusManifest, FixtureEvidence};
 use super::harness::{
-    author_checkpoint, dispatch_author_transition, durable_save_reopen,
-    ensure_exact_requirement_evidence, fixture_root, new_run_directory, rooted_env_path,
-    wait_for_media_imports, write_report, AuthorCheckpoint, AuthorTransitionEvidence,
-    DirectoryCleanup,
+    dispatch_author_transition, ensure_exact_requirement_evidence, fixture_root, new_run_directory,
+    rooted_env_path, wait_for_media_imports, write_report, AuthorCheckpoint,
+    AuthorTransitionEvidence,
 };
+use super::workflow::{GoldenProductWorkflowDriver, GoldenProjectOpenEvidence};
 use super::{
     load_golden_contract, load_json, parse_rational, repository_root,
-    sequence_settings_from_contract,
+    sequence_settings_from_contract, GoldenProjectContract,
 };
 use crate::app::ui_actions::{
     inspector_set_audio_component_edit_field_action, timeline_drop_asset_action,
@@ -48,7 +48,7 @@ struct AudioEditObservation {
 enum OperationEvidence {
     #[serde(rename = "open")]
     Open {
-        opened: AuthorCheckpoint,
+        lifecycle: GoldenProjectOpenEvidence,
         duration_frames: i64,
         settings: SequenceSettings,
     },
@@ -65,6 +65,7 @@ enum OperationEvidence {
         saved_session: AuthorCheckpoint,
         reopened_session: AuthorCheckpoint,
         session_identity_changed: bool,
+        project_identity_preserved: bool,
         reopened_edit: AudioEditObservation,
         project_archive_sha256: String,
     },
@@ -107,7 +108,7 @@ struct ImportedAudioObservation {
 }
 
 #[derive(Debug, Serialize)]
-struct GoldenFoundationReport {
+pub(super) struct GoldenFoundationReport {
     schema_version: u32,
     profile: &'static str,
     contract_id: String,
@@ -211,11 +212,11 @@ fn assert_edit_authored(edit: &AudioComponentEdit, fade: AudioFade) -> anyhow::R
     Ok(())
 }
 
-fn execute_foundation_slice(
+pub(super) fn execute_foundation_stage(
     root: &Path,
-    paths: &GoldenRunPaths,
+    contract: &GoldenProjectContract,
+    workflow: &mut GoldenProductWorkflowDriver,
 ) -> anyhow::Result<GoldenFoundationReport> {
-    let contract = load_golden_contract(root)?;
     let slice = contract
         .execution_slices
         .iter()
@@ -240,28 +241,11 @@ fn execute_foundation_slice(
 
     let manifest: CorpusManifest = load_json(&root.join("tests/validation/corpus-manifest.json"))?;
     let fixture_root = fixture_root(root);
-    let fixture = resolve_fixture(root, &fixture_root, &contract, &manifest, "pcm-audio")?;
+    let fixture = resolve_fixture(root, &fixture_root, contract, &manifest, "pcm-audio")?;
     let settings = sequence_settings_from_contract(&contract.timeline)?;
 
-    // Declared before AppState so unwinding drops all open SQLite handles first.
-    let mut runtime_cleanup = DirectoryCleanup::default();
-    let mut state = AppState::new();
-    state.create_new_project_with_settings_at(
-        paths.project.clone(),
-        "Windows Alpha Golden Foundation",
-        settings.clone(),
-        mondrian_core::ProjectColorEnvironment::default(),
-        mondrian_core::ProjectSettings::default(),
-    )?;
-    runtime_cleanup.track(state.project_runtime_dir().map(Path::to_path_buf));
-    state.close_project();
-
-    ensure!(
-        state.authoring_session_id().is_none(),
-        "close retained an Authoring Session"
-    );
-    state.dispatch_action(Action::OpenProject(paths.project.clone()))?;
-    let opened = state.active_sequence().context("open produced no active sequence")?;
+    let open_lifecycle = workflow.reopen_created_project()?;
+    let opened = workflow.app().active_sequence().context("open produced no active sequence")?;
     ensure!(
         opened.settings == settings,
         "opened Sequence settings differ from the complete Golden timeline contract"
@@ -271,13 +255,14 @@ fn execute_foundation_slice(
         "opened frame rate differs from the textual Golden contract"
     );
     let open_evidence = OperationEvidence::Open {
-        opened: author_checkpoint(&state)?,
+        lifecycle: open_lifecycle,
         duration_frames: contract.timeline.duration_frames,
         settings: opened.settings.clone(),
     };
 
+    let state = workflow.app_mut();
     state.dispatch_action(Action::ImportMedia(vec![fixture.path.clone()]))?;
-    wait_for_media_imports(&mut state)?;
+    wait_for_media_imports(state)?;
     let library = state.asset_library().context("asset library missing after import")?;
     let assets = library.list_assets()?;
     let asset = assets
@@ -328,7 +313,7 @@ fn execute_foundation_slice(
         clip_id,
         new_source_out: FramePosition::new(contract.timeline.duration_frames, time_base),
     })?;
-    let (clip, actual_audio_track_id) = find_audio_clip(&state, clip_id)?;
+    let (clip, actual_audio_track_id) = find_audio_clip(state, clip_id)?;
     ensure!(
         clip.duration
             == TimelineTime::from_frame_position(FramePosition::new(
@@ -368,14 +353,14 @@ fn execute_foundation_slice(
         ),
     ] {
         content_steps.push(dispatch_author_transition(
-            &mut state,
+            state,
             intent,
             inspector_set_audio_component_edit_field_action(
                 InspectorSetAudioComponentEditFieldPayload { clip: clip_ref, edit_id, field },
             ),
         )?);
     }
-    let authored_edit = find_audio_edit(&state, clip_id, edit_id)?;
+    let authored_edit = find_audio_edit(state, clip_id, edit_id)?;
     assert_edit_authored(authored_edit, fade)?;
     let content_evidence = ContentEvidence {
         id: "clip-audio-gain-pan-fades",
@@ -385,31 +370,24 @@ fn execute_foundation_slice(
 
     let mut undo_steps = Vec::new();
     for intent in ["undo-fade-out", "undo-fade-in", "undo-pan", "undo-volume"] {
-        undo_steps.push(dispatch_author_transition(
-            &mut state,
-            intent,
-            Action::Undo,
-        )?);
+        undo_steps.push(dispatch_author_transition(state, intent, Action::Undo)?);
     }
-    let undone_edit = find_audio_edit(&state, clip_id, edit_id)?;
+    let undone_edit = find_audio_edit(state, clip_id, edit_id)?;
     assert_edit_defaults(undone_edit)?;
     let after_undo = observe_audio_edit(undone_edit);
     let mut redo_steps = Vec::new();
     for intent in ["redo-volume", "redo-pan", "redo-fade-in", "redo-fade-out"] {
-        redo_steps.push(dispatch_author_transition(
-            &mut state,
-            intent,
-            Action::Redo,
-        )?);
+        redo_steps.push(dispatch_author_transition(state, intent, Action::Redo)?);
     }
-    let redone_edit = find_audio_edit(&state, clip_id, edit_id)?;
+    let redone_edit = find_audio_edit(state, clip_id, edit_id)?;
     assert_edit_authored(redone_edit, fade)?;
     let after_redo = observe_audio_edit(redone_edit);
     let undo_evidence =
         OperationEvidence::UndoRedo { undo_steps, after_undo, redo_steps, after_redo };
 
-    let persistence = durable_save_reopen(&mut state, &paths.project)?;
-    let reopened_clip = find_audio_clip(&state, clip_id)?.0;
+    let persistence = workflow.durable_save_reopen()?;
+    let state = workflow.app();
+    let reopened_clip = find_audio_clip(state, clip_id)?.0;
     ensure!(
         reopened_clip.media_asset_id() == Some(asset.id),
         "save/reopen changed Clip asset identity"
@@ -433,6 +411,7 @@ fn execute_foundation_slice(
         saved_session: persistence.saved_session,
         reopened_session: persistence.reopened_session,
         session_identity_changed: persistence.session_identity_changed,
+        project_identity_preserved: persistence.project_identity_preserved,
         reopened_edit: observe_audio_edit(reopened_edit),
         project_archive_sha256: persistence.project_archive_sha256,
     };
@@ -449,17 +428,18 @@ fn execute_foundation_slice(
         content.iter().map(|evidence| evidence.id),
         "content",
     )?;
+    workflow.verify_binding()?;
 
     Ok(GoldenFoundationReport {
-        schema_version: 3,
+        schema_version: 4,
         profile: FOUNDATION_SLICE_ID,
-        contract_id: contract.id,
+        contract_id: contract.id.clone(),
         corpus_revision: manifest.corpus_revision,
         status: GoldenRunStatus::Passed,
         complete_golden_project: false,
         fixture,
         setup: GoldenSetupEvidence {
-            project_path: paths.project.clone(),
+            project_path: workflow.project_path().to_path_buf(),
             asset_id: asset.id.to_string(),
             clip_id: clip_id.to_string(),
             audio_track_id: actual_audio_track_id.to_string(),
@@ -469,6 +449,22 @@ fn execute_foundation_slice(
         operations,
         content,
     })
+}
+
+fn execute_foundation_slice(
+    root: &Path,
+    paths: &GoldenRunPaths,
+) -> anyhow::Result<GoldenFoundationReport> {
+    let contract = load_golden_contract(root)?;
+    let settings = sequence_settings_from_contract(&contract.timeline)?;
+    let mut workflow = GoldenProductWorkflowDriver::create(
+        paths.project.clone(),
+        "Windows Alpha Golden Foundation",
+        settings,
+        mondrian_core::ProjectColorEnvironment::default(),
+        mondrian_core::ProjectSettings::default(),
+    )?;
+    execute_foundation_stage(root, &contract, &mut workflow)
 }
 
 #[test]
@@ -495,7 +491,7 @@ fn golden_project_foundation_audio_authoring_gate() -> anyhow::Result<()> {
         }
         Err(error) => {
             let failure = serde_json::json!({
-                "schema_version": 3,
+                "schema_version": 4,
                 "profile": FOUNDATION_SLICE_ID,
                 "status": "failed",
                 "complete_golden_project": false,

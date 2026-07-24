@@ -3,10 +3,10 @@
 use super::fixture::sha256_file;
 use crate::app::AppState;
 use anyhow::{ensure, Context};
-use mondrian_core::JobId;
-use mondrian_editor_state::Action;
+use mondrian_core::{JobId, ProjectId, SequenceId};
+use mondrian_editor_state::{Action, AuthoringSessionId};
 use mondrian_export::queue::ExportJobSnapshot;
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -16,14 +16,36 @@ const IMPORT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Author-state identity before or after one product command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(super) struct AuthorCheckpoint {
-    pub(super) session_id: String,
+    pub(super) project_id: ProjectId,
+    pub(super) project_path: PathBuf,
+    #[serde(serialize_with = "serialize_display")]
+    pub(super) session_id: AuthoringSessionId,
     pub(super) author_generation: u64,
+    pub(super) active_sequence_id: SequenceId,
     pub(super) sequence_revision: u64,
+}
+
+fn serialize_display<T: std::fmt::Display, S: Serializer>(
+    value: &T,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(value)
 }
 
 /// Proof that one product intent committed exactly one author transaction.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct AuthorTransitionEvidence {
+    pub(super) intent: &'static str,
+    pub(super) before: AuthorCheckpoint,
+    pub(super) after: AuthorCheckpoint,
+}
+
+/// Proof that one Project-scoped product intent committed exactly once.
+///
+/// Project transactions may change the active Sequence and therefore cannot
+/// require one particular Sequence revision to advance.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct ProjectAuthorTransitionEvidence {
     pub(super) intent: &'static str,
     pub(super) before: AuthorCheckpoint,
     pub(super) after: AuthorCheckpoint,
@@ -36,6 +58,7 @@ pub(super) struct DurableReopenEvidence {
     pub(super) saved_session: AuthorCheckpoint,
     pub(super) reopened_session: AuthorCheckpoint,
     pub(super) session_identity_changed: bool,
+    pub(super) project_identity_preserved: bool,
     pub(super) project_archive_sha256: String,
 }
 
@@ -60,18 +83,27 @@ impl Drop for DirectoryCleanup {
 }
 
 pub(super) fn author_checkpoint(state: &AppState) -> anyhow::Result<AuthorCheckpoint> {
+    let sequence = state.active_sequence().context("active Sequence is absent")?;
     Ok(AuthorCheckpoint {
-        session_id: state
-            .authoring_session_id()
-            .context("Authoring Session is absent")?
-            .to_string(),
+        project_id: state.project_id().context("Project identity is absent")?,
+        project_path: state.current_project_path().context("Project path is absent")?.to_path_buf(),
+        session_id: state.authoring_session_id().context("Authoring Session is absent")?,
         author_generation: state.project_author_generation(),
-        sequence_revision: state
-            .active_sequence()
-            .context("active Sequence is absent")?
-            .revision
-            .get(),
+        active_sequence_id: sequence.id,
+        sequence_revision: sequence.revision.get(),
     })
+}
+
+fn ensure_same_project(before: &AuthorCheckpoint, after: &AuthorCheckpoint) -> anyhow::Result<()> {
+    ensure!(
+        before.project_id == after.project_id,
+        "author transaction changed Project identity"
+    );
+    ensure!(
+        before.project_path == after.project_path,
+        "author transaction changed Project path"
+    );
+    Ok(())
 }
 
 /// Execute one production authoring Interface and enforce the transaction boundary.
@@ -83,6 +115,7 @@ pub(super) fn author_transition<T>(
     let before = author_checkpoint(state)?;
     let output = edit(state)?;
     let after = author_checkpoint(state)?;
+    ensure_same_project(&before, &after)?;
     ensure!(
         before.session_id == after.session_id,
         "{intent} replaced the Authoring Session"
@@ -90,6 +123,10 @@ pub(super) fn author_transition<T>(
     ensure!(
         before.author_generation.checked_add(1) == Some(after.author_generation),
         "{intent} did not advance Author Generation exactly once"
+    );
+    ensure!(
+        before.active_sequence_id == after.active_sequence_id,
+        "{intent} changed the active Sequence in a Sequence-scoped transaction"
     );
     ensure!(
         before.sequence_revision.checked_add(1) == Some(after.sequence_revision),
@@ -108,6 +145,30 @@ pub(super) fn dispatch_author_transition(
         Ok(())
     })
     .map(|(_, evidence)| evidence)
+}
+
+/// Execute one Project-scoped authoring Interface and enforce one transaction.
+pub(super) fn project_author_transition<T>(
+    state: &mut AppState,
+    intent: &'static str,
+    edit: impl FnOnce(&mut AppState) -> anyhow::Result<T>,
+) -> anyhow::Result<(T, ProjectAuthorTransitionEvidence)> {
+    let before = author_checkpoint(state)?;
+    let output = edit(state)?;
+    let after = author_checkpoint(state)?;
+    ensure_same_project(&before, &after)?;
+    ensure!(
+        before.session_id == after.session_id,
+        "{intent} replaced the Authoring Session"
+    );
+    ensure!(
+        before.author_generation.checked_add(1) == Some(after.author_generation),
+        "{intent} did not advance Author Generation exactly once"
+    );
+    Ok((
+        output,
+        ProjectAuthorTransitionEvidence { intent, before, after },
+    ))
 }
 
 /// Save, close, and reopen one project through the production persistence boundary.
@@ -138,6 +199,11 @@ pub(super) fn durable_save_reopen(
         reopened_session.author_generation == 1,
         "freshly reopened Authoring Session did not begin at generation one"
     );
+    ensure_same_project(&saved_session, &reopened_session)?;
+    ensure!(
+        reopened_session.active_sequence_id == saved_session.active_sequence_id,
+        "save/reopen changed the active Sequence identity"
+    );
     ensure!(
         reopened_session.sequence_revision == saved_session.sequence_revision,
         "save/reopen changed persisted Sequence Author Revision"
@@ -147,6 +213,7 @@ pub(super) fn durable_save_reopen(
         saved_session,
         reopened_session,
         session_identity_changed: true,
+        project_identity_preserved: true,
         project_archive_sha256,
     })
 }

@@ -1,12 +1,14 @@
 //! Generated visual authoring Golden slice with real Headless execution.
 
 use super::harness::{
-    author_transition, dispatch_author_transition, durable_save_reopen,
-    ensure_exact_requirement_evidence, new_run_directory, rooted_env_path, write_report,
-    AuthorTransitionEvidence, DirectoryCleanup, DurableReopenEvidence,
+    author_transition, dispatch_author_transition, ensure_exact_requirement_evidence,
+    new_run_directory, rooted_env_path, write_report, AuthorTransitionEvidence,
+    DurableReopenEvidence,
 };
+use super::workflow::{GoldenProductWorkflowDriver, GoldenSequenceStageEvidence};
 use super::{
     load_golden_contract, repository_root, sequence_settings_from_contract, GoldenExecutionSlice,
+    GoldenProjectContract,
 };
 use crate::app::preview_cpu_execution::composite_resolved_preview;
 use crate::app::preview_timeline_execution::{
@@ -63,7 +65,7 @@ struct GoldenRunPaths {
 }
 
 #[derive(Debug, Serialize)]
-struct GoldenVisualReport {
+pub(super) struct GoldenVisualReport {
     schema_version: u32,
     profile: &'static str,
     contract_id: String,
@@ -79,6 +81,7 @@ struct GoldenVisualReport {
 #[derive(Debug, Serialize)]
 struct VisualSetupEvidence {
     project_path: PathBuf,
+    stage: GoldenSequenceStageEvidence,
     solid_asset_id: String,
     video_track_id: String,
     left_clip_id: String,
@@ -515,25 +518,17 @@ fn execute_visual_frame(state: &AppState, frame: i64) -> anyhow::Result<VisualEx
     })
 }
 
-fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<GoldenVisualReport> {
-    let contract = load_golden_contract(root)?;
+pub(super) fn execute_visual_stage(
+    contract: &GoldenProjectContract,
+    workflow: &mut GoldenProductWorkflowDriver,
+) -> anyhow::Result<GoldenVisualReport> {
     let slice = visual_slice(&contract.execution_slices)?;
     let window = slice.timeline_window.context("visual slice has no timeline window")?;
     let edit_frame = window.start_frame + (window.end_frame_exclusive - window.start_frame) / 2;
-    let settings = sequence_settings_from_contract(&contract.timeline)?;
+    let stage = workflow.create_sequence_stage("visual-authoring")?;
+    let state = workflow.app_mut();
 
-    let mut runtime_cleanup = DirectoryCleanup::default();
-    let mut state = AppState::new();
-    state.create_new_project_with_settings_at(
-        paths.project.clone(),
-        "Windows Alpha Golden Visual",
-        settings,
-        mondrian_core::ProjectColorEnvironment::default(),
-        mondrian_core::ProjectSettings::default(),
-    )?;
-    runtime_cleanup.track(state.project_runtime_dir().map(Path::to_path_buf));
-
-    let solid_asset_id = new_solid_asset(&mut state)?;
+    let solid_asset_id = new_solid_asset(state)?;
     let video_track_id =
         state.active_sequence().context("active Sequence is absent")?.video_tracks[0].id;
     let before = state.active_sequence().context("active Sequence is absent")?.video_tracks[0]
@@ -542,7 +537,7 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
         .map(|clip| clip.id)
         .collect::<BTreeSet<_>>();
     dispatch_author_transition(
-        &mut state,
+        state,
         "drop-left-solid",
         timeline_drop_asset_action(TimelineDropAssetPayload {
             asset_id: solid_asset_id,
@@ -551,9 +546,9 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
             frame: window.start_frame,
         }),
     )?;
-    let left_clip_id = new_clip_after(&state, video_track_id, &before)?;
+    let left_clip_id = new_clip_after(state, video_track_id, &before)?;
     dispatch_author_transition(
-        &mut state,
+        state,
         "trim-left-solid",
         timeline_trim_clips_action(TimelineTrimClipsPayload {
             clip_ids: vec![left_clip_id],
@@ -568,7 +563,7 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
         .map(|clip| clip.id)
         .collect::<BTreeSet<_>>();
     dispatch_author_transition(
-        &mut state,
+        state,
         "drop-right-solid",
         timeline_drop_asset_action(TimelineDropAssetPayload {
             asset_id: solid_asset_id,
@@ -577,9 +572,9 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
             frame: edit_frame,
         }),
     )?;
-    let right_clip_id = new_clip_after(&state, video_track_id, &before)?;
+    let right_clip_id = new_clip_after(state, video_track_id, &before)?;
     dispatch_author_transition(
-        &mut state,
+        state,
         "trim-right-solid",
         timeline_trim_clips_action(TimelineTrimClipsPayload {
             clip_ids: vec![right_clip_id],
@@ -601,7 +596,7 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
         ),
     ] {
         dispatch_author_transition(
-            &mut state,
+            state,
             intent,
             inspector_set_clip_tint_action(InspectorSetClipTintPayload {
                 clip: InspectorClipRefPayload {
@@ -622,7 +617,7 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
         .map(|transition| transition.id)
         .collect::<BTreeSet<_>>();
     let transition_step = dispatch_author_transition(
-        &mut state,
+        state,
         "create-cross-dissolve",
         timeline_create_cross_dissolve_action(TimelineCreateCrossDissolvePayload {
             left_clip_id,
@@ -654,7 +649,7 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
 
     state.dispatch_action(timeline_seek_action(window.start_frame))?;
     let title_create_step = dispatch_author_transition(
-        &mut state,
+        state,
         "create-basic-title",
         timeline_create_basic_title_action(),
     )?;
@@ -664,7 +659,7 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
         .context("Basic Title action did not select its created Clip")?;
     let title_clip_id = title_selection.clip_id;
     let title_text_step = dispatch_author_transition(
-        &mut state,
+        state,
         "set-basic-title-text",
         inspector_set_clip_property_action(InspectorSetClipPropertyPayload {
             clip: InspectorClipRefPayload {
@@ -704,7 +699,7 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
     let midpoint = TimelineTime::from_frame_position(FramePosition::new(edit_frame, time_base))?;
     let hold_steps = vec![
         add_keyframe(
-            &mut state,
+            state,
             title_selection,
             "hold-line-height-start",
             BasicTitle::LINE_HEIGHT_PATH,
@@ -713,7 +708,7 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
             InterpolationType::Hold,
         )?,
         add_keyframe(
-            &mut state,
+            state,
             title_selection,
             "hold-line-height-end",
             BasicTitle::LINE_HEIGHT_PATH,
@@ -724,7 +719,7 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
     ];
     let linear_steps = vec![
         add_keyframe(
-            &mut state,
+            state,
             title_selection,
             "linear-tracking-start",
             BasicTitle::TRACKING_PATH,
@@ -733,7 +728,7 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
             InterpolationType::Linear,
         )?,
         add_keyframe(
-            &mut state,
+            state,
             title_selection,
             "linear-tracking-end",
             BasicTitle::TRACKING_PATH,
@@ -743,7 +738,7 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
         )?,
     ];
     let mut bezier_steps = vec![add_keyframe(
-        &mut state,
+        state,
         title_selection,
         "bezier-font-size-start",
         BasicTitle::FONT_SIZE_PATH,
@@ -752,7 +747,7 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
         InterpolationType::Bezier,
     )?];
     let bezier_end = add_keyframe(
-        &mut state,
+        state,
         title_selection,
         "bezier-font-size-end",
         BasicTitle::FONT_SIZE_PATH,
@@ -762,7 +757,7 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
     )?;
     bezier_steps.push(bezier_end);
 
-    let undo = dispatch_author_transition(&mut state, "undo-bezier-font-size-end", Action::Undo)?;
+    let undo = dispatch_author_transition(state, "undo-bezier-font-size-end", Action::Undo)?;
     let after_undo = find_video_clip(
         state.active_sequence().context("active Sequence is absent")?,
         title_clip_id,
@@ -777,7 +772,7 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
         after_undo == 1,
         "Undo did not remove the last Bezier keyframe"
     );
-    let redo = dispatch_author_transition(&mut state, "redo-bezier-font-size-end", Action::Redo)?;
+    let redo = dispatch_author_transition(state, "redo-bezier-font-size-end", Action::Redo)?;
     let after_redo = find_video_clip(
         state.active_sequence().context("active Sequence is absent")?,
         title_clip_id,
@@ -815,7 +810,7 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
         (property.address(), keyframe.id, ratio)
     };
     let curve_edit_step = dispatch_author_transition(
-        &mut state,
+        state,
         "curve-editor-move-bezier-font-size-end",
         inspector_edit_clip_curve_action(InspectorEditClipCurvePayload {
             clip: InspectorClipRefPayload {
@@ -912,8 +907,9 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
         },
     ];
 
-    let execution_before_save = execute_visual_frame(&state, edit_frame)?;
-    let durability = durable_save_reopen(&mut state, &paths.project)?;
+    let execution_before_save = execute_visual_frame(state, edit_frame)?;
+    let durability = workflow.durable_save_reopen()?;
+    let state = workflow.app();
     let sequence = state.active_sequence().context("reopened Sequence is absent")?;
     let transition = sequence
         .video_transitions
@@ -954,11 +950,12 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
                 == KeyframeInterpolationKind::Bezier,
         "save/reopen changed the incrementally edited Bezier key"
     );
-    let execution_after_reopen = execute_visual_frame(&state, edit_frame)?;
+    let execution_after_reopen = execute_visual_frame(state, edit_frame)?;
     ensure!(
         execution_before_save == execution_after_reopen,
         "save/reopen changed Headless Preview or Export semantics"
     );
+    workflow.verify_binding()?;
 
     let operations = vec![
         OperationEvidence::UndoRedo {
@@ -981,13 +978,14 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
     )?;
 
     Ok(GoldenVisualReport {
-        schema_version: 4,
+        schema_version: 6,
         profile: VISUAL_SLICE_ID,
-        contract_id: contract.id,
+        contract_id: contract.id.clone(),
         status: "passed",
         complete_golden_project: false,
         setup: VisualSetupEvidence {
-            project_path: paths.project.clone(),
+            project_path: workflow.project_path().to_path_buf(),
+            stage,
             solid_asset_id: solid_asset_id.to_string(),
             video_track_id: video_track_id.to_string(),
             left_clip_id: left_clip_id.to_string(),
@@ -1003,6 +1001,19 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
         execution_before_save,
         execution_after_reopen,
     })
+}
+
+fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<GoldenVisualReport> {
+    let contract = load_golden_contract(root)?;
+    let settings = sequence_settings_from_contract(&contract.timeline)?;
+    let mut workflow = GoldenProductWorkflowDriver::create(
+        paths.project.clone(),
+        "Windows Alpha Golden Visual",
+        settings,
+        mondrian_core::ProjectColorEnvironment::default(),
+        mondrian_core::ProjectSettings::default(),
+    )?;
+    execute_visual_stage(&contract, &mut workflow)
 }
 
 #[test]
@@ -1029,7 +1040,7 @@ fn golden_project_visual_authoring_roundtrip_gate() -> anyhow::Result<()> {
         }
         Err(error) => {
             let failure = serde_json::json!({
-                "schema_version": 4,
+                "schema_version": 6,
                 "profile": VISUAL_SLICE_ID,
                 "status": "failed",
                 "complete_golden_project": false,

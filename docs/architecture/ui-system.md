@@ -256,6 +256,25 @@ and own consecutive-run classification. PowerShell remains an external process
 supervisor and schema validator; it cannot infer semantic completion from test
 names, process exit, or a union of unrelated projects.
 
+`GoldenProductWorkflowDriver` is the Headless product composition owner for
+that future coordinator. It creates one real `.mdp`, captures its typed
+`ProjectId` and path, retains one production `AppState`, and rejects identity
+drift before and after open, stage creation, and durable reopen. Stages may use
+separate Sequences, created through the same product action and Project-level
+Author Transaction, so their author content does not need artificial overlap.
+Sequence-scoped evidence requires one Generation plus one stable active
+Sequence Revision advance; Project-scoped evidence requires one Generation but
+allows active Sequence change. Durable reopen must replace only the
+process-local Session, preserving Project, path, active Sequence, and saved
+revision. Foundation audio, visual authoring, and generated delivery are stages
+over this driver. Their composed gate runs the ordinary PCM import/authoring
+flow, creates dedicated stage Sequences through the product action, executes
+the Transition/Basic Title/curve workflow, exports and reimports H.264 High
+plus HEVC Main10, and then crosses one final durable reopen. That boundary must
+preserve the fixed Project binding, all three Sequences and their earlier
+author content, plus both typed reimport profiles. Missing editing, playback,
+recovery, fixture, and color obligations still prevent top-level completion.
+
 ## Playback Tick Ownership
 
 The winit host may wake the application while playback is running, but playback

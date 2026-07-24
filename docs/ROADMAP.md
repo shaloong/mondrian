@@ -290,6 +290,8 @@ M0 建立可重现的 corpus manifest。固定文件由 manifest 固定 SHA-256/
 
 顶层 `GoldenAcceptancePlan` 现把 fixture/operation/content/export 全部义务编译成确定性账本，并明确报告未规划与未绑定项；计划与三个切片报告都固定 `complete_golden_project: false`，只有未来单一 Project 身份的总运行协调器可在完整观察后声明顶层通过。当前账本明确缺少 AAC/三类图片切片，Play/准确 Seek/Scrub/Insert/Overwrite/Ripple/Split/Proxy/Relink，Primary Color/LUT，以及三类合格图片 fixture。Rust 与 PowerShell 校验器均以 schema v3、三轮通过要求和 slice export 引用失败关闭，不能再由旧脚本或测试进程退出码虚构完整性。
 
+单 Project 执行地基现已开始收敛：`GoldenProductWorkflowDriver` 持有一个真实 App composition、固定 `ProjectId + project path` 与该运行的全部阶段 Sequence；Project-scoped 作者事务只要求 Generation 精确前进并允许活动 Sequence 改变，Sequence-scoped 事务还要求活动 Sequence 不变且其 Revision 精确前进。普通 CI 已证明同一项目中新建第二阶段 Sequence、耐久保存、关闭和重开后 Project/path/两个 Sequence 均不漂移且只有 Session 身份更新。foundation audio、visual authoring 与 generated delivery 三个现有真实切片均已成为可组合阶段：门禁在同一 Project 中依次保留 PCM 作者内容、Transition/Basic Title、H.264 High 与 HEVC Main10 导出/重导入，再经最终 durable reopen 证明三个 Sequence、Project/path 和两个成品 profile 均不漂移。顶层 Coordinator、完整编辑/播放/恢复阶段、缺失 fixture/内容义务与连续三轮完整运行仍明确阻塞。
+
 ### 5.3 Stress Project
 
 建立 30–60 分钟压力项目，用于：
@@ -386,6 +388,7 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 
 - [x] 建立版本化 Reference Corpus manifest、Golden/Stress Project 机器可读契约、Windows 参考机 profile、机器证据采集与资格验证、分层校验门禁；generated fixture 采用“固定 recipe、run-local artifact hash”而非伪造跨 encoder 位级稳定性，既有产物只有 attestation 同时匹配当前 recipe 与 artifact identity 才能复用，不能被新配方重新背书。`windows-playback-m0-v3` 将完整 Video+Audio gate、素材用途、环境绑定、45 分钟外部进程期限、Video 解码进度 journal、16 GiB baseline 内存档位和预期报告 profile 固化；编排器只允许清洁且首尾同 revision、完整门禁、合格机器和全部结构化报告通过的运行成为 baseline。Golden v3 已固定完整 Sequence/交付合同、fixture purpose、slice export/window obligation 和“未执行不得通过”规则；`foundation-audio-authoring-v1`、`generated-delivery-roundtrip-v1` 与 `visual-authoring-roundtrip-v1` 分别执行真实音频作者/持久化、短窗交付/重导入以及标题/转场/三种插值/Preview-Export 同义的产品工作流，证据是类型化事实而非字符串清单。App Action 不再允许未知/未实现意图静默成功。低于门禁档位只有在所有资格问题均被版本化合同显式列为可诊断、且操作员显式 opt-in 时才可继续，结果必为 diagnostic；缺 GPU/工具链/系统等执行前提仍失败关闭。完整 Golden/Stress 素材角色、三轮完整工作流和 release evidence bundle 仍按 M1/M2 退出门槛验收。
 - [x] Golden v3 的结构完整性已有单一深 Module：确定性计划账本逐类计算必需、已规划、缺失与未绑定义务；Rust/PowerShell 同步校验 schema、三轮要求和 slice export 引用；所有独立切片无论成功或失败都显式声明 `complete_golden_project: false`。这只关闭“不会误报”的地基，不表示 Golden 已完成；单一 Project 总运行协调器、全部缺失义务和连续三轮仍是 M1 门槛。
+- [x] Golden 单 Project 工作流已有生产接缝：Headless driver 固定一个 `ProjectId + path + AppState`，区分 Project/Sequence 两类作者事务证据，并在初次 open、阶段 Sequence 创建和 durable reopen 前后失败关闭身份漂移；foundation audio、visual authoring 与 generated delivery 已成为可复用阶段。真实 PCM+系统字体+FFmpeg 组合门禁在同一项目内完成三阶段、两种交付和重导入，并经最终 reopen 验证三个 Sequence 及 H264High/HevcMain10 成品仍存在。播放/恢复与其他缺失义务、顶层 Coordinator 和连续三轮仍须完成。
 - [x] 将 capability probe、逐帧 decode provenance、最终 Viewer GPU completion 与 fallback/blocker 写入同一结构化报告，同时保持 media/renderer/playback 的诊断所有权；预取 aggregate 不得代替已呈现帧证据。
 - [x] 路线图、效果规格与色彩规格已统一五级能力口径：作者模型存在、产品可选择、图可执行、具体 backend 可执行、真实 preview/export 已验证。效果库只暴露可构图 definition；共享 Render Plan 对启用但未实现/缺失定义/运行时不可用/资源无效/构图崩溃失败关闭；CPU、GPU、颜色 reference 与产品发布证据分别列示，类型、OCIO 映射、shader 创建或单次 lower 成功均不得自动写成产品支持。
 

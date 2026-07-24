@@ -1,0 +1,175 @@
+//! Composed partial Golden gates over one production Project.
+
+use super::harness::{new_run_directory, DirectoryCleanup};
+use super::workflow::GoldenProductWorkflowDriver;
+use super::{
+    foundation_audio, generated_delivery, load_golden_contract, repository_root,
+    sequence_settings_from_contract, visual_authoring, GoldenProjectContract,
+};
+use anyhow::{ensure, Context};
+use mondrian_core::{ProjectColorEnvironment, ProjectSettings, SequenceId};
+use mondrian_media::info::VideoCodecProfile;
+use std::path::{Path, PathBuf};
+
+struct ComposedRun {
+    // Field order is intentional: close App/SQLite/export handles before deleting the run root.
+    workflow: GoldenProductWorkflowDriver,
+    _cleanup: DirectoryCleanup,
+    directory: PathBuf,
+}
+
+impl ComposedRun {
+    fn create(root: &Path, name: &str) -> anyhow::Result<(GoldenProjectContract, Self)> {
+        let contract = load_golden_contract(root)?;
+        let settings = sequence_settings_from_contract(&contract.timeline)?;
+        let directory =
+            new_run_directory(root, "MONDRIAN_GOLDEN_COMPOSED_RUN_ROOT", "golden-composed")?;
+        let mut cleanup = DirectoryCleanup::default();
+        cleanup.track(Some(directory.clone()));
+        let workflow = GoldenProductWorkflowDriver::create(
+            directory.join("windows-alpha-golden-composed.mdp"),
+            name,
+            settings,
+            ProjectColorEnvironment::default(),
+            ProjectSettings::default(),
+        )?;
+        Ok((contract, Self { workflow, _cleanup: cleanup, directory }))
+    }
+}
+
+fn execute_foundation_and_visual(
+    root: &Path,
+    contract: &GoldenProjectContract,
+    workflow: &mut GoldenProductWorkflowDriver,
+) -> anyhow::Result<(SequenceId, SequenceId)> {
+    let _foundation = foundation_audio::execute_foundation_stage(root, contract, workflow)?;
+    let foundation_sequence_id =
+        workflow.app().active_sequence().context("foundation Sequence is absent")?.id;
+    ensure!(
+        workflow.app().active_sequence().is_some_and(|sequence| sequence
+            .audio_tracks
+            .iter()
+            .any(|track| !track.clips.is_empty())),
+        "foundation stage did not retain its authored PCM Clip"
+    );
+
+    let _visual = visual_authoring::execute_visual_stage(contract, workflow)?;
+    workflow.verify_binding()?;
+    ensure!(
+        workflow.app().sequences().len() == 2,
+        "foundation and visual stages must occupy exactly two Sequences in one Project"
+    );
+    let foundation_sequence = workflow
+        .app()
+        .sequences()
+        .iter()
+        .find(|sequence| sequence.id == foundation_sequence_id)
+        .context("visual stage removed the foundation Sequence")?;
+    ensure!(
+        foundation_sequence.audio_tracks.iter().any(|track| !track.clips.is_empty()),
+        "visual save/reopen discarded foundation audio authoring"
+    );
+    let visual_sequence = workflow
+        .app()
+        .active_sequence()
+        .context("visual Sequence is absent after durable reopen")?;
+    ensure!(
+        visual_sequence.id != foundation_sequence_id
+            && visual_sequence.video_transitions.len() == 1
+            && visual_sequence
+                .video_tracks
+                .iter()
+                .flat_map(|track| &track.clips)
+                .any(|clip| clip.is_basic_title()),
+        "visual stage did not retain its distinct Transition and Basic Title Sequence"
+    );
+    Ok((foundation_sequence_id, visual_sequence.id))
+}
+
+#[test]
+#[ignore = "composed Golden stages require the canonical PCM fixture and Windows Basic Title font"]
+fn golden_foundation_and_visual_stages_share_one_project() -> anyhow::Result<()> {
+    let root = repository_root();
+    let (contract, mut run) =
+        ComposedRun::create(&root, "Windows Alpha Golden Foundation + Visual")?;
+    let project_id = run.workflow.project_id();
+    let project_path = run.workflow.project_path().to_path_buf();
+
+    execute_foundation_and_visual(&root, &contract, &mut run.workflow)?;
+    ensure!(
+        run.workflow.project_id() == project_id
+            && run.workflow.project_path() == project_path
+            && run.workflow.app().project_id() == Some(project_id),
+        "composed stages changed the Golden Project binding"
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "three-stage Golden composition requires PCM, Windows Basic Title font, and production FFmpeg encoders"]
+fn golden_existing_stages_share_one_project() -> anyhow::Result<()> {
+    let root = repository_root();
+    let (contract, mut run) = ComposedRun::create(&root, "Windows Alpha Golden Existing Stages")?;
+    let project_id = run.workflow.project_id();
+    let project_path = run.workflow.project_path().to_path_buf();
+    let (foundation_sequence_id, visual_sequence_id) =
+        execute_foundation_and_visual(&root, &contract, &mut run.workflow)?;
+
+    let _delivery = generated_delivery::execute_delivery_stage(
+        &root,
+        &contract,
+        &mut run.workflow,
+        &run.directory,
+    )?;
+    let delivery_sequence_id =
+        run.workflow.app().active_sequence().context("delivery Sequence is absent")?.id;
+    ensure!(
+        ![foundation_sequence_id, visual_sequence_id].contains(&delivery_sequence_id),
+        "delivery did not create a distinct stage Sequence"
+    );
+    run.workflow.durable_save_reopen()?;
+    run.workflow.verify_binding()?;
+    ensure!(
+        run.workflow.project_id() == project_id
+            && run.workflow.project_path() == project_path
+            && run.workflow.app().project_id() == Some(project_id),
+        "three-stage workflow changed the Golden Project binding"
+    );
+    ensure!(
+        run.workflow.app().sequences().len() == 3,
+        "three existing Golden stages must retain exactly three Sequences"
+    );
+    for sequence_id in [
+        foundation_sequence_id,
+        visual_sequence_id,
+        delivery_sequence_id,
+    ] {
+        ensure!(
+            run.workflow.app().sequences().iter().any(|sequence| sequence.id == sequence_id),
+            "final durable reopen discarded stage Sequence {sequence_id}"
+        );
+    }
+
+    let assets = run
+        .workflow
+        .app()
+        .asset_library()
+        .context("Asset Library is absent after final durable reopen")?
+        .list_assets()?;
+    let exported_profiles = assets
+        .iter()
+        .filter(|asset| {
+            asset
+                .path
+                .extension()
+                .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("mp4"))
+        })
+        .filter_map(|asset| asset.media_info.primary_video().map(|video| video.codec_profile))
+        .collect::<Vec<_>>();
+    ensure!(
+        exported_profiles.contains(&VideoCodecProfile::H264High)
+            && exported_profiles.contains(&VideoCodecProfile::HevcMain10),
+        "final Project library lost the reimported H.264 High or HEVC Main10 deliverable"
+    );
+    Ok(())
+}
