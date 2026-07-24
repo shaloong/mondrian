@@ -178,6 +178,13 @@ impl ProxyEncodingProfile {
         }
     }
 
+    fn output_container(self) -> &'static str {
+        match self {
+            Self::H264High8 | Self::H265Main10 => "mp4",
+            Self::DnxHrSq8 | Self::DnxHrHqx10 => "mov",
+        }
+    }
+
     fn identity_label(self) -> &'static str {
         match self {
             Self::H264High8 => "h264-high8",
@@ -973,7 +980,10 @@ fn ffmpeg_proxy_command(
         }
     }
 
-    cmd.arg(output_path);
+    // Atomic publication deliberately writes through a `.part` suffix. Never
+    // ask FFmpeg to infer a muxer from that temporary path: container identity
+    // is part of the proxy encoding contract.
+    cmd.arg("-f").arg(encoding.output_container()).arg(output_path);
     Ok(cmd)
 }
 
@@ -1223,6 +1233,7 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["-profile:v", "main10"]));
         assert!(args.windows(2).any(|pair| pair == ["-color_trc", "smpte2084"]));
         assert!(args.windows(2).any(|pair| pair == ["-color_range", "tv"]));
+        assert!(args.windows(2).any(|pair| pair == ["-f", "mp4"]));
         let filter = args
             .windows(2)
             .find_map(|pair| (pair[0] == "-vf").then_some(pair[1].as_str()))
@@ -1260,6 +1271,7 @@ mod tests {
         assert!(!args.iter().any(|arg| arg == "-color_trc"));
         assert!(!args.iter().any(|arg| arg == "-colorspace"));
         assert!(args.windows(2).any(|pair| pair == ["-color_range", "pc"]));
+        assert!(args.windows(2).any(|pair| pair == ["-f", "mp4"]));
         let filter = args
             .windows(2)
             .find_map(|pair| (pair[0] == "-vf").then_some(pair[1].as_str()))
@@ -1268,6 +1280,25 @@ mod tests {
             filter,
             "setparams=range=full,scale=-2:720:flags=lanczos:in_range=pc:out_range=pc"
         );
+    }
+
+    #[test]
+    fn dnxhr_proxy_command_pins_mov_muxer_for_atomic_partial_path() {
+        let command = ffmpeg_proxy_command(
+            ProxyEncodingProfile::DnxHrSq8,
+            20,
+            720,
+            rec709_contract(),
+            std::path::Path::new("source.mov"),
+            std::path::Path::new("proxy.mov.part"),
+        )
+        .expect("valid DNxHR proxy command");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(args.windows(2).any(|pair| pair == ["-f", "mov"]));
     }
 
     #[test]

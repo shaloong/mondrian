@@ -89,6 +89,16 @@ Lower layers cannot depend on higher layers:
   advance under the Synthetic Clock Master. This closes short Golden workflow
   obligations only; it cannot substitute for the long-form CPAL/GPU/memory/A/V
   acceptance profiles.
+  The proxy/relink slice imports an attested project-generated H.264 source
+  through the same media worker used by the product, waits for the
+  instance-owned proxy service to cross a real FFmpeg worker boundary, and
+  asks the canonical Preview media resolver to prove Proxy → Original → Proxy
+  selection. Its offline Relink step changes only the Asset Library revision,
+  retains `AssetId`, Clip reference, author name, Project Generation, and
+  Sequence Revision, then requires the replacement source path to select a
+  distinct proxy identity and complete a fresh generation. The fixture proves
+  codec/proxy/relink semantics only and is forbidden as independent color
+  reference evidence.
   The generated-delivery slice uses the same product Actions to create a
   Solid Color and PCM placement, trim an exact short work area, author
   Transform/Opacity, enqueue the stable H.264 High and HEVC Main10 presets,

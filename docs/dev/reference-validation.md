@@ -113,12 +113,13 @@ cargo test -p mondrian-app --lib `
 ```
 
 The ledger deliberately remains blocked. The AAC role plus Play, accurate
-Seek, Scrub, Overwrite, Ripple, and Split now have a real executable slice.
-The current slices still do not plan HLG Main10/Rec.709 H.264/sRGB Alpha
-picture roles; a fully specified Insert Edit, Proxy switch, offline Relink;
-primary color correction and LUT. The three picture roles also remain unbound
-to qualifying fixtures. Export contracts are already assigned, but that alone
-is not a complete product workflow.
+Seek, Scrub, Overwrite, Ripple, and Split have a real executable slice.
+The generated Rec.709 H.264 role plus Proxy/Original switch and offline Relink
+now have a second real slice. The remaining unplanned obligations are HLG
+Main10 and sRGB Alpha picture roles, a fully specified professional Insert
+Edit, primary color correction, and LUT. The two remaining picture roles are
+also unbound to qualifying fixtures. Export contracts are already assigned,
+but that alone is not a complete product workflow.
 
 Run the AAC editorial and Transport slice after generating the canonical
 playback audio:
@@ -180,12 +181,14 @@ cargo test -p mondrian-app --lib `
   -j1 -- --ignored --nocapture --test-threads=1
 ```
 
-This extends the two-stage gate with AAC Editorial/Transport and Generated
-Delivery, reuses canonical generated fixtures, creates two more stage
-Sequences, executes both typed exports and ordinary media reimports, then
-performs a final durable reopen. It requires one Project ID/path, exactly four
-retained Sequences, and reimported `H264High` plus `HevcMain10` assets in the
-reopened Project library.
+This extends the two-stage gate with AAC Editorial/Transport,
+Proxy/Original+Offline Relink, and Generated Delivery. It reuses canonical
+generated fixtures, creates three more stage Sequences, executes two real
+proxy generations, both typed exports, and ordinary media reimports, then
+performs a final durable reopen. It requires one Project ID/path, exactly five
+retained Sequences, the same relinked `AssetId`/Clip reference and replacement
+path, persisted proxy intent, plus reimported `H264High` and `HevcMain10`
+assets in the reopened Project library.
 The still-missing plan obligations mean this is not yet the top-level Golden
 coordinator and cannot contribute a consecutive complete run.
 
@@ -216,6 +219,7 @@ Generate the disposable canonical workload media when needed:
 ```powershell
 pwsh -File scripts/validation/generate-reference-playback-media.ps1 -Profile All -Force
 pwsh -File scripts/validation/generate-golden-project-media.ps1 -Force
+pwsh -File scripts/validation/generate-golden-editorial-video.ps1 -Force
 ```
 
 The Golden generator currently creates a 305-second, 48 kHz stereo PCM S16LE
@@ -226,6 +230,38 @@ gain, pan, fades, channel swaps, import, and persistence observable; it is not a
 color or acoustic-loopback reference. A non-`-Force` run only reuses an artifact
 whose existing attestation matches the current recipe and artifact hash; it
 never rewrites an old artifact's provenance.
+
+The editorial-video generator creates an eight-second 1920×1080, 25 fps,
+H.264 High 8-bit 4:2:0, limited-range Rec.709 code pattern with no audio. It is
+project-authored and redistribution-safe, but explicitly has
+`color_reference_eligible: false`: CICP/probe checks qualify codec, source
+interpretation, proxy, and relink behavior only. They do not establish color
+accuracy.
+
+Run the Proxy/Original and Offline Relink slice:
+
+```powershell
+pwsh -File scripts/validation/generate-golden-editorial-video.ps1 `
+  -OutputRoot target/validation/golden-fixtures/large -Force
+$env:MONDRIAN_GOLDEN_FIXTURE_ROOT = "target/validation/golden-fixtures"
+cargo test -p mondrian-app --lib `
+  golden_project_proxy_original_offline_relink_gate -j1 -- `
+  --ignored --nocapture --test-threads=1
+```
+
+The slice copies the attested fixture into two run-local source locations and
+imports the first through the production media worker. Import-driven proxy
+generation must cross a real worker boundary and publish a fresh proxy. Product
+Actions then switch Preview to original, back to the exact same fresh proxy,
+and finally to original again; every switch is exactly one Project author
+transaction and does not revise the Sequence. The run-local source is then
+made offline. Preview must report a structured unavailable source, the ordinary
+Relink Action must advance only the Asset Library revision, publish its reload
+event, and retain the same Asset/Clip identities and authored name. Because
+proxy identity includes the source path and fingerprint contract, the old
+proxy must be ineligible for the replacement path; a second real generation
+must publish a distinct fresh proxy. The report remains a partial slice and
+never claims independent color-reference or complete Golden status.
 
 Run the first Headless Golden execution slice:
 
@@ -355,8 +391,9 @@ and passing structured profiles. A loose cargo log is not acceptance evidence.
 
 The manifest contains the committed Standard numeric color corpus, two
 project-generated M0 workload recipes (1812 seconds of 4K25 HEVC Main10
-Long-GOP Rec.709 code-pattern video and 1835 seconds of 48 kHz stereo AAC), plus
-the 305-second Golden PCM authoring fixture.
+Long-GOP Rec.709 code-pattern video and 1835 seconds of 48 kHz stereo AAC), the
+305-second Golden PCM authoring fixture, and the short H.264 High editorial
+fixture used only for proxy/relink semantics.
 They make the professional playback run reproducible without importing local
 downloads or asserting false color correctness. The clean `c484c47` run
 `20260722T065141Z-local-windows-dev-01-f4fc3eff` completed the full Video+Audio
@@ -364,11 +401,13 @@ plan on the qualified 16 GiB Windows reference machine and was classified
 `passed-baseline`. Its generated artifacts and evidence bundle remain
 intentionally disposable under `target`; the repository commits the recipes,
 contracts, and this reproducible result record rather than a multi-gigabyte
-machine-specific bundle. The Golden v3 contract resolves its PCM and AAC
-fixture identities, but only PCM is assigned to an executable slice.
-`foundation-audio-authoring-v1` has a real Headless product-workflow gate rather
-than a declaration-only check. HLG Main10 picture, Rec.709 H.264
-picture, and sRGB Alpha still roles remain deliberately null until qualifying
-fixtures and appropriate independent color evidence exist. Stress coverage
+machine-specific bundle. The Golden v3 contract resolves PCM, AAC, and Rec.709
+H.264 fixture identities and assigns all three to executable slices.
+`foundation-audio-authoring-v1`, `editorial-transport-v1`, and
+`proxy-relink-v1` are real Headless product-workflow gates rather than
+declaration-only checks. HLG Main10 picture and sRGB Alpha still roles remain
+deliberately null until qualifying fixtures and appropriate independent color
+evidence exist. The H.264 fixture is not eligible to close primary-color or LUT
+coverage. Stress coverage
 also still lacks 4K60 and broader Log/VFR/multichannel/damaged-media fixtures,
 so `Nightly/Release -Scope All` correctly remains blocked.

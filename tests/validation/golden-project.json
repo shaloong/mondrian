@@ -25,7 +25,7 @@
     },
     {
       "role": "rec709-h264-picture",
-      "fixture_id": null,
+      "fixture_id": "generated-golden-rec709-h264-25fps-v1",
       "required": true,
       "required_purpose": "golden-rec709-h264-picture"
     },
@@ -106,6 +106,22 @@
         "overwrite",
         "ripple",
         "split"
+      ],
+      "required_content": [],
+      "required_exports": [],
+      "timeline_window": {
+        "start_frame": 0,
+        "end_frame_exclusive": 150
+      }
+    },
+    {
+      "id": "proxy-relink-v1",
+      "required_fixture_roles": [
+        "rec709-h264-picture"
+      ],
+      "required_operations": [
+        "proxy-original-switch",
+        "offline-relink"
       ],
       "required_content": [],
       "required_exports": [],

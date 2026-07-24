@@ -127,7 +127,7 @@ pub(super) fn resolve_fixture(
     );
     ensure!(
         fixture.availability == "generated",
-        "foundation fixture must be generated"
+        "Golden fixture must be generated"
     );
     let generation = fixture.generation.as_ref().context("generated fixture contract missing")?;
     ensure!(

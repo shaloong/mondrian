@@ -3,7 +3,7 @@
 use super::harness::{new_run_directory, DirectoryCleanup};
 use super::workflow::GoldenProductWorkflowDriver;
 use super::{
-    editorial_transport, foundation_audio, generated_delivery, load_golden_contract,
+    editorial_transport, foundation_audio, generated_delivery, load_golden_contract, proxy_relink,
     repository_root, sequence_settings_from_contract, visual_authoring, GoldenProjectContract,
 };
 use anyhow::{ensure, Context};
@@ -27,12 +27,16 @@ impl ComposedRun {
             new_run_directory(root, "MONDRIAN_GOLDEN_COMPOSED_RUN_ROOT", "golden-composed")?;
         let mut cleanup = DirectoryCleanup::default();
         cleanup.track(Some(directory.clone()));
+        let project_settings = ProjectSettings {
+            cache_dir: Some(directory.join("cache")),
+            ..ProjectSettings::default()
+        };
         let workflow = GoldenProductWorkflowDriver::create(
             directory.join("windows-alpha-golden-composed.mdp"),
             name,
             settings,
             ProjectColorEnvironment::default(),
-            ProjectSettings::default(),
+            project_settings,
         )?;
         Ok((contract, Self { workflow, _cleanup: cleanup, directory }))
     }
@@ -120,7 +124,7 @@ fn golden_foundation_and_visual_stages_share_one_project() -> anyhow::Result<()>
 }
 
 #[test]
-#[ignore = "four-stage Golden composition requires PCM/AAC, Windows Basic Title font, and production FFmpeg encoders"]
+#[ignore = "five-stage Golden composition requires PCM/AAC/H.264 fixtures, Windows Basic Title font, and production FFmpeg encoders"]
 fn golden_current_stages_share_one_project() -> anyhow::Result<()> {
     let root = repository_root();
     let (contract, mut run) = ComposedRun::create(&root, "Windows Alpha Golden Existing Stages")?;
@@ -137,6 +141,43 @@ fn golden_current_stages_share_one_project() -> anyhow::Result<()> {
         ![foundation_sequence_id, visual_sequence_id].contains(&editorial_sequence_id),
         "editorial did not create a distinct stage Sequence"
     );
+    let _proxy_relink = proxy_relink::execute_proxy_relink_stage(
+        &root,
+        &contract,
+        &mut run.workflow,
+        &run.directory,
+    )?;
+    let proxy_relink_sequence_id = run
+        .workflow
+        .app()
+        .active_sequence()
+        .context("proxy/relink Sequence is absent")?
+        .id;
+    ensure!(
+        ![
+            foundation_sequence_id,
+            visual_sequence_id,
+            editorial_sequence_id
+        ]
+        .contains(&proxy_relink_sequence_id),
+        "proxy/relink did not create a distinct stage Sequence"
+    );
+    let proxy_relink_asset_id = run
+        .workflow
+        .app()
+        .active_sequence()
+        .and_then(|sequence| sequence.video_tracks.first())
+        .and_then(|track| track.clips.first())
+        .and_then(|clip| clip.library_asset_id())
+        .context("proxy/relink stage retained no media-backed video Clip")?;
+    let proxy_relink_asset_path = run
+        .workflow
+        .app()
+        .asset_library()
+        .context("Asset Library is absent after proxy/relink stage")?
+        .get_asset(proxy_relink_asset_id)?
+        .context("relinked asset is absent after proxy/relink stage")?
+        .path;
     let pre_delivery_snapshots = [
         (
             foundation_sequence_id,
@@ -149,6 +190,10 @@ fn golden_current_stages_share_one_project() -> anyhow::Result<()> {
         (
             editorial_sequence_id,
             sequence_snapshot(&run.workflow, editorial_sequence_id)?,
+        ),
+        (
+            proxy_relink_sequence_id,
+            sequence_snapshot(&run.workflow, proxy_relink_sequence_id)?,
         ),
     ];
 
@@ -164,7 +209,8 @@ fn golden_current_stages_share_one_project() -> anyhow::Result<()> {
         ![
             foundation_sequence_id,
             visual_sequence_id,
-            editorial_sequence_id
+            editorial_sequence_id,
+            proxy_relink_sequence_id
         ]
         .contains(&delivery_sequence_id),
         "delivery did not create a distinct stage Sequence"
@@ -176,11 +222,11 @@ fn golden_current_stages_share_one_project() -> anyhow::Result<()> {
         run.workflow.project_id() == project_id
             && run.workflow.project_path() == project_path
             && run.workflow.app().project_id() == Some(project_id),
-        "four-stage workflow changed the Golden Project binding"
+        "five-stage workflow changed the Golden Project binding"
     );
     ensure!(
-        run.workflow.app().sequences().len() == 4,
-        "four current Golden stages must retain exactly four Sequences"
+        run.workflow.app().sequences().len() == 5,
+        "five current Golden stages must retain exactly five Sequences"
     );
     for (sequence_id, expected) in pre_delivery_snapshots
         .into_iter()
@@ -198,6 +244,16 @@ fn golden_current_stages_share_one_project() -> anyhow::Result<()> {
         .asset_library()
         .context("Asset Library is absent after final durable reopen")?
         .list_assets()?;
+    let reopened_proxy_asset = assets
+        .iter()
+        .find(|asset| asset.id == proxy_relink_asset_id)
+        .context("final Project library lost the relinked H.264 asset")?;
+    ensure!(
+        reopened_proxy_asset.path == proxy_relink_asset_path
+            && reopened_proxy_asset.path.is_file()
+            && run.workflow.app().is_asset_proxy_mode(proxy_relink_asset_id),
+        "final durable reopen lost relinked source identity or proxy author intent"
+    );
     let exported_profiles = assets
         .iter()
         .filter(|asset| {

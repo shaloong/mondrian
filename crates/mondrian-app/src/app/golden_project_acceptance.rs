@@ -11,6 +11,7 @@ mod foundation_audio;
 mod generated_delivery;
 mod harness;
 mod plan;
+mod proxy_relink;
 mod visual_authoring;
 mod workflow;
 
@@ -556,21 +557,14 @@ fn golden_acceptance_plan_reports_current_top_level_blockers() -> anyhow::Result
     assert_eq!(plan.required_consecutive_passes, 3);
     assert_eq!(
         plan.missing.fixture_roles,
-        [
-            "hlg-main10-picture",
-            "rec709-h264-picture",
-            "srgb-alpha-still"
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect()
-    );
-    assert_eq!(
-        plan.missing.operations,
-        ["insert", "offline-relink", "proxy-original-switch",]
+        ["hlg-main10-picture", "srgb-alpha-still"]
             .into_iter()
             .map(str::to_owned)
             .collect()
+    );
+    assert_eq!(
+        plan.missing.operations,
+        ["insert"].into_iter().map(str::to_owned).collect()
     );
     assert_eq!(
         plan.missing.content,
@@ -579,16 +573,12 @@ fn golden_acceptance_plan_reports_current_top_level_blockers() -> anyhow::Result
     assert!(plan.missing.exports.is_empty());
     assert_eq!(
         plan.unassigned_required_fixture_roles,
-        [
-            "hlg-main10-picture",
-            "rec709-h264-picture",
-            "srgb-alpha-still"
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect()
+        ["hlg-main10-picture", "srgb-alpha-still"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
     );
-    assert_eq!(plan.slices.len(), 4);
+    assert_eq!(plan.slices.len(), 5);
 
     eprintln!(
         "MONDRIAN_GOLDEN_ACCEPTANCE_PLAN_JSON={}",

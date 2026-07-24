@@ -1325,6 +1325,14 @@ has a versioned `.color.json` sidecar containing that contract and an exact
 source file fingerprint. `ProxyStatus::Fresh` requires both the proxy and an
 exactly matching, parseable sidecar; file modification ordering alone is not
 proof of color or source identity.
+The artifact path also includes the canonical source-path hash. Relinking one
+stable `AssetId` to another path therefore cannot reuse the prior path's proxy,
+even when the replacement bytes happen to have the same file fingerprint. The
+Asset Library remains the source-path authority and Timeline Clips retain only
+the stable Asset identity; Relink is an Asset Library transaction, not a
+Sequence edit. Preview re-resolves the live record, observes a missing
+replacement proxy, and may request a fresh artifact through the same service.
+No UI-owned cache invalidation list is required for correctness.
 `ProxyCodec::Auto` selects H.264 High 8-bit only for ordinary 8-bit SDR and
 selects H.265 Main10 for HDR, camera-log, or greater-than-8-bit sources.
 Explicit H.264 requests for high-precision sources fail closed. H.265 Main10
@@ -1353,6 +1361,12 @@ Generation must also use `ProxyStatus`: a `Fresh` proxy is reused, while a
 `Stale` proxy is regenerated in the background. Failed regeneration must not
 delete the previous proxy file, because preview can keep falling back to source
 until a fresh proxy is finalized.
+FFmpeg transcodes write through an atomic `.part` path, whose suffix is not a
+valid container extension. The concrete `ProxyEncodingProfile` therefore pins
+both codec/pixel format and muxer (`mp4` for H.264/HEVC, `mov` for DNxHR), and
+the command passes that muxer explicitly. Inferring the container from the
+temporary file name is forbidden; it can fail before encoding and would make
+atomic publication platform/tool-version dependent.
 `ProxyConfig.concurrent_jobs` is an execution contract, not a UI preference.
 `app::proxy_generation::ProxyGenerationService` acquires cache-root capacity
 before an attempt leaves Queued and enters Running; workers therefore cannot
