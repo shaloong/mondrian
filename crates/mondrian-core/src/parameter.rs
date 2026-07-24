@@ -226,6 +226,34 @@ impl ExactAutomationCurve {
             .map(|pair| ExactAutomationSegment { left: pair[0].clone(), right: pair[1].clone() })
             .collect())
     }
+
+    /// Shift every key at or after an exact owner-time boundary.
+    ///
+    /// This is the primitive used when an owning Sequence-time region follows
+    /// an editorial insert. The edit is atomic: overflow or an invalid final
+    /// curve leaves the original curve unchanged.
+    pub fn shift_keyframes_at_or_after(
+        &mut self,
+        boundary: TimelineTime,
+        delta: TimelineTime,
+    ) -> Result<(), AutomationError> {
+        if delta.is_negative() {
+            return Err(AutomationError::Time(TimelineTimeError::NegativeDuration));
+        }
+        if delta.is_zero() {
+            return Ok(());
+        }
+
+        let mut candidate = self.clone();
+        for keyframe in &mut candidate.keyframes {
+            if keyframe.time >= boundary {
+                keyframe.time = keyframe.time.checked_add(delta)?;
+            }
+        }
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
 }
 
 /// One validated, immutable interpolation span from an exact automation curve.

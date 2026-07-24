@@ -65,6 +65,15 @@ non-deletable, while real author keys remain movable and deletable even when
 their time lies exactly on a boundary. Escape cancels widget-local preview
 state and publishes no author mutation.
 
+Timeline Track Targeting and Sync-Lock are editor interaction policy, not
+renderable Sequence fields. A Timeline Adapter snapshots those controls into a
+typed Insert Action containing explicit target Tracks, the complete ripple
+Track set, source interval, and automation/Transition/navigation policies. The
+domain operation never reads selected Track, panel focus, or process-global UI
+state. This makes the same Action deterministic in Window, Headless Golden, and
+future scripting adapters. The existing drag collision choice is labeled
+`PushForward`; UI code must not expose it as professional Insert.
+
 Inspector audio source controls project existing author state rather than own
 it. Each row addresses one stable `AudioComponentEditId`; media choices carry
 only Asset `AudioSourceComponentId` values and nested choices carry only child

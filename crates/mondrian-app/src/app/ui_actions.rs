@@ -66,6 +66,8 @@ pub const TIMELINE_ADD_TRACK: &str = "add_track";
 pub const TIMELINE_MOVE_TRACK: &str = "move_track";
 /// Action name for dropping one prepared asset onto a timeline track.
 pub const TIMELINE_DROP_ASSET: &str = "drop_asset";
+/// Action name for inserting one Asset through explicit target/ripple scope.
+pub const TIMELINE_INSERT_ASSET: &str = "insert_asset";
 /// Action name for opening a nested sequence clip.
 pub const TIMELINE_OPEN_NESTED_SEQUENCE: &str = "open_nested_sequence";
 
@@ -644,6 +646,31 @@ pub struct TimelineDropAssetPayload {
     pub is_video_track: bool,
     /// Target timeline frame for the new clip start.
     pub frame: i64,
+}
+
+/// Insert one Asset through an explicit professional edit scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineInsertAssetPayload {
+    /// Asset whose selected source interval should be inserted.
+    pub asset_id: AssetId,
+    /// Insert boundary on the active Sequence video evaluation grid.
+    pub insert_frame: i64,
+    /// Source selection start on the active Sequence video evaluation grid.
+    pub source_in_frame: i64,
+    /// Positive selected source duration on the active Sequence video grid.
+    pub duration_frames: i64,
+    /// Target video Track, when this insertion contains picture.
+    pub video_target_track_id: Option<TrackId>,
+    /// Target audio Track, when this insertion contains audio.
+    pub audio_target_track_id: Option<TrackId>,
+    /// Exact Track set resolved from targeting and Sync-Lock UI state.
+    pub ripple_track_ids: Vec<TrackId>,
+    /// Sequence-time automation behavior.
+    pub automation_policy: mondrian_timeline::InsertAutomationPolicy,
+    /// Disposition for Transitions intersected by the edit.
+    pub transition_policy: mondrian_timeline::InsertTransitionPolicy,
+    /// Playhead and In/Out behavior.
+    pub timeline_state_policy: mondrian_timeline::InsertTimelineStatePolicy,
 }
 
 /// Application-level identity for an inspector-selected clip.
@@ -1327,6 +1354,11 @@ pub fn timeline_move_track_action(payload: TimelineMoveTrackPayload) -> Action {
 /// Build an action that drops an asset onto a timeline track.
 pub fn timeline_drop_asset_action(payload: TimelineDropAssetPayload) -> Action {
     custom_timeline_action(TIMELINE_DROP_ASSET, payload)
+}
+
+/// Build an action that performs one professional Insert Edit from an Asset.
+pub fn timeline_insert_asset_action(payload: TimelineInsertAssetPayload) -> Action {
+    custom_timeline_action(TIMELINE_INSERT_ASSET, payload)
 }
 
 /// Build an action that opens one nested sequence from the timeline.

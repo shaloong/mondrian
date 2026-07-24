@@ -1099,15 +1099,35 @@ impl Sequence {
         mut clip: crate::clip::Clip,
         component_id: AudioSourceComponentId,
     ) -> mondrian_core::Result<ClipId> {
+        self.attach_default_media_audio_component(&mut clip, component_id)?;
+        let clip_id = clip.id;
+        self.audio_track_mut(track_id)
+            .ok_or_else(|| mondrian_core::MondrianError::TrackNotFound {
+                track_id: track_id.to_string(),
+            })?
+            .add_clip(clip)?;
+        Ok(clip_id)
+    }
+
+    /// Attach one default media Component and register its processing Scope.
+    ///
+    /// This prepares a fully authored audio Clip for structural operations,
+    /// such as Insert Edit, that must place it only after validating a larger
+    /// atomic Track scope. It deliberately does not choose or mutate a Track.
+    pub fn attach_default_media_audio_component(
+        &mut self,
+        clip: &mut crate::clip::Clip,
+        component_id: AudioSourceComponentId,
+    ) -> mondrian_core::Result<()> {
         if clip.is_nested_sequence() {
             return Err(mondrian_core::MondrianError::WorkflowStepFailed {
-                step_id: "add_media_audio_clip".to_owned(),
+                step_id: "attach_default_media_audio_component".to_owned(),
                 reason: "nested Sequence audio requires an explicit output binding".to_owned(),
             });
         }
         if !clip.audio_components.is_empty() {
             return Err(mondrian_core::MondrianError::WorkflowStepFailed {
-                step_id: "add_media_audio_clip".to_owned(),
+                step_id: "attach_default_media_audio_component".to_owned(),
                 reason: "audio Clip already contains audio component authoring".to_owned(),
             });
         }
@@ -1116,14 +1136,8 @@ impl Sequence {
             component_id,
             scope.id,
         ));
-        let clip_id = clip.id;
         self.audio_program.add_processing_scope(scope);
-        self.audio_track_mut(track_id)
-            .ok_or_else(|| mondrian_core::MondrianError::TrackNotFound {
-                track_id: track_id.to_string(),
-            })?
-            .add_clip(clip)?;
-        Ok(clip_id)
+        Ok(())
     }
 
     /// Add one nested-Sequence public output as an audio placement.

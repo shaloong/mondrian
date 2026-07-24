@@ -32,21 +32,21 @@ use crate::app::ui_actions::{
     ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
     ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
     TimelineAddTrackKind, TimelineAddTrackPayload, TimelineCreateCrossDissolvePayload,
-    TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineMoveClipPayload,
-    TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload, TimelineSeekPayload,
-    TimelineSelectClipPayload, TimelineSelectVideoTransitionPayload, TimelineSetInOutPointPayload,
-    TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
-    TimelineSetVideoTransitionRangePayload, TimelineTrackControlPayloadKind,
-    TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
-    ViewerSetClipTransformPayload, ViewerSetPreviewResolutionScalePayload,
-    ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
-    ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
-    ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
-    ASSETS_PREPARE_DRAG, ASSETS_REBIND_AUDIO_COMPONENT, ASSETS_REFRESH_AUDIO_COMPONENTS,
-    ASSETS_RELINK_ASSET, ASSETS_RENAME_ASSET, ASSETS_RENAME_FOLDER, ASSETS_SET_INTERPRETATION,
-    ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, EXPORT_CANCEL_JOB,
-    EXPORT_CLEAR_COMPLETED, EXPORT_ENQUEUE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT,
-    INSPECTOR_EDIT_CLIP_CURVE, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT,
+    TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineInsertAssetPayload,
+    TimelineMoveClipPayload, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
+    TimelineSeekPayload, TimelineSelectClipPayload, TimelineSelectVideoTransitionPayload,
+    TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
+    TimelineSetTrackControlPayload, TimelineSetVideoTransitionRangePayload,
+    TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+    TimelineTrimSelectedClipsToPlayheadPayload, ViewerSetClipTransformPayload,
+    ViewerSetPreviewResolutionScalePayload, ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER,
+    ASSETS_CREATE_SOLID_COLOR, ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION,
+    ASSETS_IMPORT_FILES, ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION,
+    ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, ASSETS_REBIND_AUDIO_COMPONENT,
+    ASSETS_REFRESH_AUDIO_COMPONENTS, ASSETS_RELINK_ASSET, ASSETS_RENAME_ASSET,
+    ASSETS_RENAME_FOLDER, ASSETS_SET_INTERPRETATION, ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP,
+    EFFECTS_NAMESPACE, EXPORT_CANCEL_JOB, EXPORT_CLEAR_COMPLETED, EXPORT_ENQUEUE, EXPORT_NAMESPACE,
+    EXPORT_SET_DRAFT, INSPECTOR_EDIT_CLIP_CURVE, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT,
     INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_AUDIO_COMPONENT_EDIT_FIELD,
     INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
     INSPECTOR_SET_CLIP_PROPERTY, INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
@@ -56,9 +56,9 @@ use crate::app::ui_actions::{
     SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE,
     SEQUENCE_UPDATE_SETTINGS, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
     TIMELINE_CREATE_BASIC_TITLE, TIMELINE_CREATE_CROSS_DISSOLVE, TIMELINE_DROP_ASSET,
-    TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE,
-    TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
-    TIMELINE_SELECT_VIDEO_TRANSITION, TIMELINE_SET_IN_OUT_POINT,
+    TIMELINE_INSERT_ASSET, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
+    TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SEEK,
+    TIMELINE_SELECT_CLIP, TIMELINE_SELECT_VIDEO_TRANSITION, TIMELINE_SET_IN_OUT_POINT,
     TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
     TIMELINE_SET_VIDEO_TRANSITION_RANGE, TIMELINE_TRIM_CLIPS,
     TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, VIEWER_NAMESPACE, VIEWER_SET_CLIP_TRANSFORM,
@@ -1343,6 +1343,14 @@ impl AppState {
                     payload,
                 )?;
                 self.drop_asset_from_ui(payload)
+            }
+            TIMELINE_INSERT_ASSET => {
+                let payload = parse_ui_payload::<TimelineInsertAssetPayload>(
+                    "timeline_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.insert_asset_from_ui(payload).map(|_| ())
             }
             TIMELINE_OPEN_NESTED_SEQUENCE => {
                 let payload = parse_ui_payload::<TimelineOpenNestedSequencePayload>(
@@ -2977,9 +2985,10 @@ mod tests {
         sequence_return_to_parent_action, sequence_set_active_default_action,
         sequence_switch_active_action, sequence_update_settings_action, timeline_add_track_action,
         timeline_clear_in_out_points_action, timeline_create_basic_title_action,
-        timeline_drop_asset_action, timeline_move_clip_action, timeline_move_track_action,
-        timeline_open_nested_sequence_action, timeline_roll_selected_cut_to_playhead_action,
-        timeline_seek_action, timeline_seek_with_source_action, timeline_select_clip_action,
+        timeline_drop_asset_action, timeline_insert_asset_action, timeline_move_clip_action,
+        timeline_move_track_action, timeline_open_nested_sequence_action,
+        timeline_roll_selected_cut_to_playhead_action, timeline_seek_action,
+        timeline_seek_with_source_action, timeline_select_clip_action,
         timeline_set_in_out_point_action, timeline_set_selected_clips_enabled_action,
         timeline_set_track_control_action, timeline_trim_clips_action,
         timeline_trim_selected_clips_to_playhead_action, viewer_set_clip_transform_action,
@@ -3003,8 +3012,8 @@ mod tests {
         ProjectUpdateColorEnvironmentPayload, ProjectUpdateNewSequenceDefaultsPayload,
         SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineAddTrackKind,
         TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineInOutPointPayloadKind,
-        TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload, TimelineSeekSource,
-        TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
+        TimelineInsertAssetPayload, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
+        TimelineSeekSource, TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
         TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
         TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
         ViewerSetClipTransformPayload, ViewerSetPreviewResolutionScalePayload,
@@ -3025,6 +3034,9 @@ mod tests {
     use mondrian_timeline::clip::Clip;
     use mondrian_timeline::sequence::{
         PreviewRenderFormat, Sequence, SequencePreviewSettings, SequenceSettings,
+    };
+    use mondrian_timeline::{
+        InsertAutomationPolicy, InsertTimelineStatePolicy, InsertTransitionPolicy,
     };
 
     fn pinned_test_custom_engine(working_space: &str) -> mondrian_core::ColorEngine {
@@ -3920,6 +3932,67 @@ mod tests {
             .status_hint
             .as_ref()
             .is_some_and(|(message, is_error)| !*is_error && message.contains("已添加素材")));
+
+        remove_temp_path(&library_root);
+    }
+
+    #[test]
+    fn dispatch_timeline_ui_performs_atomic_professional_insert() {
+        let (mut state, target_track_id, original_clip_id) = state_with_two_video_tracks();
+        let secondary_track_id = state.active_sequence().expect("sequence").video_tracks[1].id;
+        let library_root = unique_temp_path("timeline-insert-asset-library");
+        let library = AssetLibrary::open(library_root.clone()).expect("library");
+        let asset_id = library
+            .create_solid_color_asset(Some("Insert"))
+            .expect("create solid color asset");
+        state.test_set_asset_library(Some(library));
+
+        let generation_before = state.project_author_generation();
+        state
+            .dispatch_action(timeline_insert_asset_action(TimelineInsertAssetPayload {
+                asset_id,
+                insert_frame: 15,
+                source_in_frame: 0,
+                duration_frames: 5,
+                video_target_track_id: Some(target_track_id),
+                audio_target_track_id: None,
+                ripple_track_ids: vec![target_track_id, secondary_track_id],
+                automation_policy: InsertAutomationPolicy::FollowEditorialContent,
+                transition_policy: InsertTransitionPolicy::RejectAffected,
+                timeline_state_policy: InsertTimelineStatePolicy::FollowEdit,
+            }))
+            .expect("Insert Edit");
+
+        let sequence = state.active_sequence().expect("sequence");
+        let track = &sequence.video_tracks[0];
+        let tb = sequence.time_base();
+        assert_eq!(state.project_author_generation(), generation_before + 1);
+        assert_eq!(
+            track
+                .clips
+                .iter()
+                .find(|clip| clip.id == original_clip_id)
+                .expect("left fragment")
+                .duration,
+            tt(5, tb)
+        );
+        assert!(track.clips.iter().any(|clip| {
+            clip.library_asset_id() == Some(asset_id)
+                && clip.position == tt(15, tb)
+                && clip.duration == tt(5, tb)
+        }));
+        assert!(track.clips.iter().any(|clip| {
+            clip.id != original_clip_id
+                && clip.library_asset_id() != Some(asset_id)
+                && clip.position == tt(20, tb)
+                && clip.duration == tt(15, tb)
+        }));
+        assert!(state.can_undo_action());
+        state.undo_timeline().expect("undo Insert");
+        let restored = state.active_sequence().expect("restored sequence");
+        assert_eq!(restored.video_tracks[0].clips.len(), 1);
+        assert_eq!(restored.video_tracks[0].clips[0].position, tt(10, tb));
+        assert_eq!(restored.video_tracks[0].clips[0].duration, tt(20, tb));
 
         remove_temp_path(&library_root);
     }

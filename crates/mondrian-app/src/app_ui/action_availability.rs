@@ -8,15 +8,16 @@ use mondrian_core::TimelineTime;
 use mondrian_editor_state::Action;
 
 use crate::app::ui_actions::{
-    TimelineCreateCrossDissolvePayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
-    TimelineSelectClipPayload, TimelineSelectVideoTransitionPayload, TimelineSetInOutPointPayload,
-    TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
-    TimelineSetVideoTransitionRangePayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
-    TimelineTrimSelectedClipsToPlayheadPayload, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
-    APP_SHELL_PROJECT_SETTINGS, APP_SHELL_SAVE_PROJECT_AS_DIALOG, APP_SHELL_SEQUENCE_SETTINGS,
-    SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE, SEQUENCE_RETURN_TO_PARENT,
-    SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE, TIMELINE_ADD_TRACK,
-    TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_CREATE_BASIC_TITLE, TIMELINE_CREATE_CROSS_DISSOLVE,
+    TimelineCreateCrossDissolvePayload, TimelineInsertAssetPayload, TimelineMoveClipPayload,
+    TimelineMoveTrackPayload, TimelineSelectClipPayload, TimelineSelectVideoTransitionPayload,
+    TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
+    TimelineSetTrackControlPayload, TimelineSetVideoTransitionRangePayload,
+    TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
+    APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_PROJECT_SETTINGS,
+    APP_SHELL_SAVE_PROJECT_AS_DIALOG, APP_SHELL_SEQUENCE_SETTINGS, SEQUENCE_DELETE,
+    SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT,
+    SEQUENCE_SWITCH_ACTIVE, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
+    TIMELINE_CREATE_BASIC_TITLE, TIMELINE_CREATE_CROSS_DISSOLVE, TIMELINE_INSERT_ASSET,
     TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
     TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
     TIMELINE_SELECT_VIDEO_TRANSITION, TIMELINE_SET_IN_OUT_POINT,
@@ -190,6 +191,12 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
                 sequence_has_track(state, payload.track_id, payload.is_video_track)
             })
         }
+        Action::Custom { namespace, name, payload }
+            if namespace == TIMELINE_NAMESPACE && name == TIMELINE_INSERT_ASSET =>
+        {
+            parse_payload::<TimelineInsertAssetPayload>(payload)
+                .is_some_and(|payload| timeline_insert_scope_is_available(state, &payload))
+        }
         Action::Custom { namespace, name, .. }
             if namespace == SEQUENCE_NAMESPACE && name == SEQUENCE_RETURN_TO_PARENT =>
         {
@@ -221,6 +228,42 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         }
         _ => true,
     }
+}
+
+fn timeline_insert_scope_is_available(
+    state: &AppState,
+    payload: &TimelineInsertAssetPayload,
+) -> bool {
+    if payload.insert_frame < 0
+        || payload.source_in_frame < 0
+        || payload.duration_frames <= 0
+        || payload.ripple_track_ids.is_empty()
+    {
+        return false;
+    }
+    let Some(sequence) = state.active_sequence() else {
+        return false;
+    };
+    let ripple_tracks = payload
+        .ripple_track_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let targets = [payload.video_target_track_id, payload.audio_target_track_id]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if targets.is_empty() || targets.iter().any(|track_id| !ripple_tracks.contains(track_id)) {
+        return false;
+    }
+    ripple_tracks.iter().all(|track_id| {
+        sequence
+            .video_tracks
+            .iter()
+            .chain(&sequence.audio_tracks)
+            .find(|track| track.id == *track_id)
+            .is_some_and(|track| !track.is_locked)
+    })
 }
 
 fn parse_payload<T: serde::de::DeserializeOwned>(payload: &serde_json::Value) -> Option<T> {

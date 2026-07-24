@@ -103,6 +103,7 @@
         "play",
         "accurate-seek",
         "scrub",
+        "insert",
         "overwrite",
         "ripple",
         "split"

@@ -1270,6 +1270,41 @@ impl AnimatedProperty {
         times
     }
 
+    /// Shift every key at or after an exact owner-time boundary.
+    ///
+    /// Key identities, values, interpolation, and handle offsets are retained.
+    /// The mutation is atomic and is intended for owners whose coordinate
+    /// domain is Sequence time; Clip-local properties must move with their
+    /// Clip without calling this method.
+    pub fn shift_keyframes_at_or_after(
+        &mut self,
+        boundary: TimelineTime,
+        delta: TimelineTime,
+    ) -> Result<()> {
+        if delta.is_negative() {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "shift_property_keyframes".to_owned(),
+                reason: "keyframe shift delta must not be negative".to_owned(),
+            });
+        }
+        if delta.is_zero() {
+            return Ok(());
+        }
+
+        let mut candidate = self.clone();
+        for channel in &mut candidate.channels {
+            for keyframe in &mut channel.keyframes {
+                if keyframe.time >= boundary {
+                    keyframe.time = keyframe.time.checked_add(delta)?;
+                }
+            }
+            channel.normalize_keyframes();
+        }
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+
     /// Resolve the exact author time currently owned by a stable keyframe ID.
     pub fn keyframe_time_by_id(&self, keyframe_id: KeyframeId) -> Option<TimelineTime> {
         self.channels
@@ -2130,6 +2165,24 @@ impl PropertyBag {
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, &AnimatedProperty)> {
         self.properties.iter().map(|(path, property)| (path.as_str(), property))
+    }
+
+    /// Shift Sequence-time keys in every property at or after one boundary.
+    ///
+    /// The complete bag is validated before publication, so one failing
+    /// property cannot expose a partially shifted owner.
+    pub fn shift_keyframes_at_or_after(
+        &mut self,
+        boundary: TimelineTime,
+        delta: TimelineTime,
+    ) -> Result<()> {
+        let mut candidate = self.clone();
+        for property in candidate.properties.values_mut() {
+            property.shift_keyframes_at_or_after(boundary, delta)?;
+        }
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
     }
 
     /// Fork all property-owner and keyframe identities in this bag.

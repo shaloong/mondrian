@@ -12,9 +12,9 @@ use super::{
 };
 use crate::app::playback::PlaybackAdvanceStatus;
 use crate::app::ui_actions::{
-    timeline_drop_asset_action, timeline_seek_with_source_action, timeline_trim_clips_action,
-    TimelineDropAssetPayload, TimelineSeekSource, TimelineTrimClipsPayload,
-    TimelineTrimPayloadEdge,
+    timeline_drop_asset_action, timeline_insert_asset_action, timeline_seek_with_source_action,
+    timeline_trim_clips_action, TimelineDropAssetPayload, TimelineInsertAssetPayload,
+    TimelineSeekSource, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
 };
 use crate::app::AppState;
 use anyhow::{ensure, Context};
@@ -24,6 +24,9 @@ use mondrian_editor_state::action::SelectionTarget;
 use mondrian_editor_state::Action;
 use mondrian_media::info::{AudioCodec, ChannelLayout};
 use mondrian_playback::{ClockMaster, FrameDeliveryKind};
+use mondrian_timeline::{
+    InsertAutomationPolicy, InsertTimelineStatePolicy, InsertTransitionPolicy,
+};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -42,6 +45,19 @@ struct ClipRangeObservation {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "id")]
 enum OperationEvidence {
+    #[serde(rename = "insert")]
+    Insert {
+        author_step: AuthorTransitionEvidence,
+        inserted_clip_id: String,
+        inserted_range: ClipRangeObservation,
+        ripple_track_ids: Vec<String>,
+        primary_downstream_clip_id: String,
+        primary_before: ClipRangeObservation,
+        primary_after: ClipRangeObservation,
+        secondary_downstream_clip_id: String,
+        secondary_before: ClipRangeObservation,
+        secondary_after: ClipRangeObservation,
+    },
     #[serde(rename = "overwrite")]
     Overwrite {
         author_step: AuthorTransitionEvidence,
@@ -93,6 +109,7 @@ enum OperationEvidence {
 impl OperationEvidence {
     const fn id(&self) -> &'static str {
         match self {
+            Self::Insert { .. } => "insert",
             Self::Overwrite { .. } => "overwrite",
             Self::Split { .. } => "split",
             Self::Ripple { .. } => "ripple",
@@ -115,7 +132,8 @@ struct ImportedAacObservation {
 #[derive(Debug, Clone, Serialize)]
 struct EditorialSetupEvidence {
     stage: GoldenSequenceStageEvidence,
-    audio_track_id: String,
+    primary_audio_track_id: String,
+    secondary_audio_track_id: String,
     asset_id: String,
     imported_audio: ImportedAacObservation,
     setup_steps: Vec<AuthorTransitionEvidence>,
@@ -276,6 +294,7 @@ pub(super) fn execute_editorial_stage(
                 "play",
                 "accurate-seek",
                 "scrub",
+                "insert",
                 "overwrite",
                 "ripple",
                 "split"
@@ -330,6 +349,13 @@ pub(super) fn execute_editorial_stage(
         .audio_tracks
         .first()
         .context("editorial Sequence has no audio Track")?
+        .id;
+    let secondary_track_id = state
+        .active_sequence()
+        .context("editorial Sequence is absent")?
+        .audio_tracks
+        .get(1)
+        .context("editorial Sequence has no secondary audio Track")?
         .id;
 
     let mut setup_steps = Vec::new();
@@ -426,6 +452,74 @@ pub(super) fn execute_editorial_stage(
         downstream_after,
     };
 
+    let (secondary_downstream_clip_id, secondary_drop) = drop_audio(
+        state,
+        asset.id,
+        secondary_track_id,
+        75,
+        "drop-secondary-insert-aac",
+    )?;
+    setup_steps.push(secondary_drop);
+    setup_steps.push(trim_audio_out(
+        state,
+        secondary_downstream_clip_id,
+        100,
+        "trim-secondary-insert-aac",
+    )?);
+    let primary_before_insert = clip_range(state, track_id, downstream_clip_id)?;
+    let secondary_before_insert =
+        clip_range(state, secondary_track_id, secondary_downstream_clip_id)?;
+    let primary_ids_before_insert = audio_track(state, track_id)?
+        .clips
+        .iter()
+        .map(|clip| clip.id)
+        .collect::<BTreeSet<_>>();
+    let insert_step = dispatch_author_transition(
+        state,
+        "insert-aac-multitrack",
+        timeline_insert_asset_action(TimelineInsertAssetPayload {
+            asset_id: asset.id,
+            insert_frame: 60,
+            source_in_frame: 0,
+            duration_frames: 10,
+            video_target_track_id: None,
+            audio_target_track_id: Some(track_id),
+            ripple_track_ids: vec![track_id, secondary_track_id],
+            automation_policy: InsertAutomationPolicy::FollowEditorialContent,
+            transition_policy: InsertTransitionPolicy::RejectAffected,
+            timeline_state_policy: InsertTimelineStatePolicy::FollowEdit,
+        }),
+    )?;
+    let inserted_clip_id = new_audio_clip_after(state, track_id, &primary_ids_before_insert)?;
+    let inserted_range = clip_range(state, track_id, inserted_clip_id)?;
+    let primary_after_insert = clip_range(state, track_id, downstream_clip_id)?;
+    let secondary_after_insert =
+        clip_range(state, secondary_track_id, secondary_downstream_clip_id)?;
+    ensure!(
+        inserted_range == (ClipRangeObservation { start_frame: 60, end_frame_exclusive: 70 })
+            && primary_before_insert
+                == (ClipRangeObservation { start_frame: 75, end_frame_exclusive: 100 })
+            && primary_after_insert
+                == (ClipRangeObservation { start_frame: 85, end_frame_exclusive: 110 })
+            && secondary_before_insert
+                == (ClipRangeObservation { start_frame: 75, end_frame_exclusive: 100 })
+            && secondary_after_insert
+                == (ClipRangeObservation { start_frame: 85, end_frame_exclusive: 110 }),
+        "Insert Edit did not open one exact ten-frame gap across both ripple Tracks"
+    );
+    let insert_evidence = OperationEvidence::Insert {
+        author_step: insert_step,
+        inserted_clip_id: inserted_clip_id.to_string(),
+        inserted_range,
+        ripple_track_ids: vec![track_id.to_string(), secondary_track_id.to_string()],
+        primary_downstream_clip_id: downstream_clip_id.to_string(),
+        primary_before: primary_before_insert,
+        primary_after: primary_after_insert,
+        secondary_downstream_clip_id: secondary_downstream_clip_id.to_string(),
+        secondary_before: secondary_before_insert,
+        secondary_after: secondary_after_insert,
+    };
+
     let target_frames = vec![5, 15, 30];
     for frame in &target_frames {
         state.dispatch_action(timeline_seek_with_source_action(
@@ -495,6 +589,7 @@ pub(super) fn execute_editorial_stage(
         play_evidence,
         accurate_evidence,
         scrub_evidence,
+        insert_evidence,
         overwrite_evidence,
         ripple_evidence,
         split_evidence,
@@ -516,7 +611,8 @@ pub(super) fn execute_editorial_stage(
         fixture,
         setup: EditorialSetupEvidence {
             stage,
-            audio_track_id: track_id.to_string(),
+            primary_audio_track_id: track_id.to_string(),
+            secondary_audio_track_id: secondary_track_id.to_string(),
             asset_id: asset.id.to_string(),
             imported_audio,
             setup_steps,

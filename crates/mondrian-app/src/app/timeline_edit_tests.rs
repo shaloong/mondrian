@@ -452,7 +452,7 @@ fn move_clip_conflict_respects_insert_mode() {
     }
 
     state
-        .move_clip_in_track_with_mode(track_id, true, clip_b_id, 5, ClipOverlapMode::Insert)
+        .move_clip_in_track_with_mode(track_id, true, clip_b_id, 5, ClipOverlapMode::PushForward)
         .expect("move should succeed");
 
     let clips = &state.active_sequence().expect("sequence should exist").video_tracks[0].clips;
@@ -1585,7 +1585,13 @@ fn cross_track_move_insert_mode_pushes_existing() {
     }
 
     state
-        .move_clip_to_track_with_mode(target_track_id, true, mover_id, 5, ClipOverlapMode::Insert)
+        .move_clip_to_track_with_mode(
+            target_track_id,
+            true,
+            mover_id,
+            5,
+            ClipOverlapMode::PushForward,
+        )
         .expect("insert move should succeed");
 
     let seq = state.active_sequence().expect("sequence should exist");

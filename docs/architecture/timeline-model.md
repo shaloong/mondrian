@@ -313,6 +313,61 @@ breaks the synchronization promise, affected fragments leave the group rather
 than retaining a misleading relationship. Singleton groups are compacted after
 structural edits and rejected at the persisted boundary.
 
+### Insert Edit
+
+Professional Insert is a single `InsertEditRequest`, not a collision mode.
+The request contains one exact Sequence-time boundary and duration, fully
+authored target placements, an explicit set of ripple Tracks, and explicit
+policies for Sequence-time automation, intersected Transitions, and
+playhead/In/Out coordinates. Track Targeting and Sync-Lock controls are editor
+state that compile into this request. They are not persisted on `Track`, do not
+affect rendering, and cannot become hidden inputs to Headless execution.
+
+`apply_insert_edit` clones the Sequence, preflights the complete request, and
+publishes the candidate only after author-identity and Audio Program validation.
+Every target must be in the ripple set and every participating Track must be
+present and unlocked. The operation splits each crossing Clip at the exact
+boundary, advances the right fragment's Clip/audio local origins, moves whole
+downstream Clips by the exact inserted duration, and then places the requested
+content inside the opened interval. A split preserves only the original outer
+audio fades: the left fragment keeps fade-in, the right keeps fade-out, and no
+new fade is invented at the cut.
+
+An existing link group may be transformed only when every member participates
+and has the same temporal class (before, crossing, or downstream). Crossing
+members receive one fresh right-hand group; a partial Track scope or unequal
+classification fails the whole edit. New linked placements must form a complete
+new group and cannot alias an existing group. This conservative rule supports
+ordinary linked picture/audio and refuses J/L-edge cases whose synchronization
+meaning has not been explicitly resolved by the editor.
+
+Transitions wholly before the boundary remain fixed. A Transition whose
+endpoints are wholly downstream on participating Tracks moves by the same exact
+duration. Any Transition touching the insertion cut or a split endpoint cannot
+retain its geometry and therefore either rejects the operation or is removed
+only under `RemoveAffected`. Video Transition properties remain Transition-local
+when their owner moves; Audio Transition intervals are Sequence-local and move
+with their endpoints.
+
+Sequence-time automation has two explicit modes. `PreserveSequenceTime` leaves
+keys at absolute time. `FollowEditorialContent` shifts video Track opacity,
+audio Track channel-strip/rack automation, and Routes sourced from a shifted
+Track. A Bus follows only when every authored input follows; a Program Output
+does the same, while a semantic projection follows only when every audio Track
+participates. This ownership closure prevents a mixed Bus from arbitrarily
+choosing one input's timeline. Clip Component and Processing Scope automation
+is already local and moves through Clip placement/local-origin mapping rather
+than having its keys rewritten. Navigation/range coordinates independently use
+`PreserveSequenceTime` or `FollowEdit`.
+
+The application Asset Adapter converts frame-grid UI fields to exact
+`TimelineTime` once, creates picture/audio placements and processing scopes, and
+invokes this operation inside one `AuthoringSession` transaction. A linked
+picture/audio insertion therefore advances Author Generation and Sequence
+Revision exactly once and is one Undo step. The old local overlap option is
+named `ClipOverlapMode::PushForward`; it is deliberately not presented as
+Insert Edit.
+
 ### Video Transitions
 
 A visual Transition is a Sequence-owned, typed two-input author entity. It has

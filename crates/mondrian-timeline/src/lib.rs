@@ -11,6 +11,7 @@
 
 pub mod audio;
 pub mod clip;
+pub mod insert_edit;
 pub mod keyframe;
 pub mod sequence;
 pub mod track;
@@ -18,6 +19,11 @@ pub mod video_transition;
 
 pub use audio::*;
 pub use clip::{ActiveClip, Clip, ClipKind};
+pub use insert_edit::{
+    apply_insert_edit, InsertAutomationPolicy, InsertEditError, InsertEditOutcome,
+    InsertEditPlacement, InsertEditRequest, InsertSplitOutcome, InsertTimelineStatePolicy,
+    InsertTransitionPolicy,
+};
 pub use keyframe::{InterpolationType, Keyframe, KeyframeTrack};
 pub use sequence::{
     AudioChannelLayout, AudioDisplayFormat, EditingMode, FieldOrder, PixelAspectRatio,

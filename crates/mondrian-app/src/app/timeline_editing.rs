@@ -872,7 +872,7 @@ pub(super) fn resolve_track_conflicts(
     mode: ClipOverlapMode,
 ) -> mondrian_core::Result<()> {
     match mode {
-        ClipOverlapMode::Insert => resolve_track_overlaps(track)?,
+        ClipOverlapMode::PushForward => resolve_track_overlaps(track)?,
         ClipOverlapMode::Overwrite => {
             let Some(focus) = track.clips.iter().find(|c| c.id == focus_clip_id).cloned() else {
                 track.clips.sort_by_key(|c| c.position);
@@ -898,7 +898,7 @@ pub(super) fn apply_track_conflicts_for_focus_group(
         return Ok(());
     }
     match mode {
-        ClipOverlapMode::Insert => resolve_track_overlaps(track)?,
+        ClipOverlapMode::PushForward => resolve_track_overlaps(track)?,
         ClipOverlapMode::Overwrite => {
             let focus_ranges = track
                 .clips

@@ -99,6 +99,7 @@ mod selection;
 pub mod thumbnail_service;
 mod timeline_commands;
 mod timeline_editing;
+mod timeline_insert;
 pub mod ui_actions;
 mod video_transitions;
 pub mod viewer_gpu_output_health;
@@ -230,7 +231,7 @@ pub struct StatusLogEntry {
 pub enum ClipOverlapMode {
     #[default]
     Overwrite,
-    Insert,
+    PushForward,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -562,10 +562,7 @@ fn golden_acceptance_plan_reports_current_top_level_blockers() -> anyhow::Result
             .map(str::to_owned)
             .collect()
     );
-    assert_eq!(
-        plan.missing.operations,
-        ["insert"].into_iter().map(str::to_owned).collect()
-    );
+    assert!(plan.missing.operations.is_empty());
     assert_eq!(
         plan.missing.content,
         ["lut", "primary-color"].into_iter().map(str::to_owned).collect()
