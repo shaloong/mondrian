@@ -184,8 +184,8 @@ struct ExportVideoSignalContract {
 }
 
 impl ExportVideoSignalContract {
-    fn resolve(settings: &SequenceSettings, delivery: &ResolvedExportDeliveryContract) -> Self {
-        let color_space = settings.color_management.output_color_space;
+    fn resolve(_settings: &SequenceSettings, delivery: &ResolvedExportDeliveryContract) -> Self {
+        let color_space = delivery.color_target.color_space;
         if delivery.chroma_sampling == crate::preset::ExportChromaSampling::Rgb {
             return Self {
                 pixel_format: delivery.pixel_format,
@@ -251,9 +251,9 @@ pub fn expected_export_video_signal(
 ) -> Result<crate::validator::ExpectedVideoSignalConstraints, String> {
     let mut constraints =
         ExportVideoSignalContract::resolve(settings, delivery).validation_constraints();
-    if settings.color_management.static_hdr_metadata_policy.writes_authored_metadata() {
+    if settings.delivery.static_hdr_metadata_policy.writes_authored_metadata() {
         let mastering_display = settings
-            .color_management
+            .delivery
             .hdr_mastering_display
             .as_ref()
             .ok_or_else(|| "写入静态 HDR metadata 需要 SMPTE ST 2086 母版显示元数据".to_string())?
@@ -261,7 +261,7 @@ pub fn expected_export_video_signal(
         mastering_display
             .validate()
             .map_err(|error| format!("SMPTE ST 2086 母版显示元数据无效: {error}"))?;
-        let content_light = settings.color_management.hdr_content_light.ok_or_else(|| {
+        let content_light = settings.delivery.hdr_content_light.ok_or_else(|| {
             "写入静态 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据".to_string()
         })?;
         content_light
@@ -315,8 +315,8 @@ pub(crate) fn apply_h265_hdr_metadata_args(
 }
 
 fn h265_hdr_metadata_params(settings: &SequenceSettings) -> Result<String, String> {
-    let cm = &settings.color_management;
-    let mastering_metadata = cm
+    let delivery = &settings.delivery;
+    let mastering_metadata = delivery
         .hdr_mastering_display
         .as_ref()
         .ok_or_else(|| "写入静态 HDR metadata 需要 SMPTE ST 2086 母版显示元数据".to_string())?;
@@ -326,7 +326,7 @@ fn h265_hdr_metadata_params(settings: &SequenceSettings) -> Result<String, Strin
     let mastering = mastering_metadata
         .to_x265_master_display()
         .ok_or_else(|| "SMPTE ST 2086 母版显示元数据不完整".to_string())?;
-    let content_light = cm
+    let content_light = delivery
         .hdr_content_light
         .ok_or_else(|| "写入静态 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据".to_string())?;
     content_light
@@ -369,7 +369,7 @@ pub(crate) fn resolve_timeline_export_delivery(
     let write_static_hdr = timeline
         .sequence
         .settings
-        .color_management
+        .delivery
         .static_hdr_metadata_policy
         .writes_authored_metadata();
     if write_static_hdr {
@@ -417,9 +417,9 @@ mod hdr_metadata_tests {
     #[test]
     fn h265_hdr_metadata_is_one_atomic_encoder_parameter() {
         let mut settings = SequenceSettings::default();
-        settings.color_management.hdr_mastering_display =
+        settings.delivery.hdr_mastering_display =
             Some(VideoMasteringDisplayMetadata::rec2100_1000_nit_reference());
-        settings.color_management.hdr_content_light =
+        settings.delivery.hdr_content_light =
             Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
         let mut command = Command::new("ffmpeg");
 

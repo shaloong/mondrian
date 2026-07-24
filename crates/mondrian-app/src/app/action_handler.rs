@@ -3680,10 +3680,8 @@ mod tests {
         state.test_set_active_sequence(sequence_id);
         state.test_set_sequence(Some(sequence.clone()));
         state.test_add_sequence(sequence);
-        let settings = SequenceSettings {
-            working_color_space: WorkingColorSpace::AcesCg,
-            ..SequenceSettings::default()
-        };
+        let mut settings = SequenceSettings::default();
+        settings.color.working_color_space = WorkingColorSpace::AcesCg;
         state.test_project_color_environment_mut().engine =
             pinned_test_custom_engine("Linear Rec.2020");
 
@@ -3712,10 +3710,8 @@ mod tests {
         state.test_set_active_sequence(sequence_id);
         state.test_set_sequence(Some(sequence.clone()));
         state.test_add_sequence(sequence);
-        let settings = SequenceSettings {
-            working_color_space: WorkingColorSpace::LinearP3D65,
-            ..SequenceSettings::default()
-        };
+        let mut settings = SequenceSettings::default();
+        settings.color.working_color_space = WorkingColorSpace::LinearP3D65;
 
         let error = state
             .dispatch_action(sequence_update_settings_action(
@@ -3734,11 +3730,11 @@ mod tests {
     fn new_sequence_adopts_custom_ocio_pinned_working_space() {
         let mut state = AppState::new();
         let mut existing = Sequence::new("Existing");
-        existing.settings.working_color_space = WorkingColorSpace::AcesCg;
+        existing.settings.color.working_color_space = WorkingColorSpace::AcesCg;
         state.test_set_sequence(Some(existing));
         state.test_project_color_environment_mut().engine = pinned_test_custom_engine("ACEScg");
         let defaults = state.test_new_sequence_defaults_mut();
-        defaults.working_color_space = WorkingColorSpace::AcesCg;
+        defaults.color.working_color_space = WorkingColorSpace::AcesCg;
 
         state.new_sequence("Custom Working");
 
@@ -3747,6 +3743,7 @@ mod tests {
                 .active_sequence()
                 .expect("new active sequence")
                 .settings
+                .color
                 .working_color_space,
             WorkingColorSpace::AcesCg
         );
@@ -5329,7 +5326,7 @@ mod tests {
             PreviewRenderFormat::ProResProxy
         );
         assert_eq!(
-            sequence.settings.color_management.workflow,
+            sequence.settings.color.program_output.workflow,
             mondrian_timeline::sequence::ColorWorkflow::SceneReferred
         );
         let context =
@@ -5470,7 +5467,7 @@ mod tests {
         };
         *state.test_project_color_environment_mut() = aces_environment.clone();
         let mut incompatible = Sequence::new("ACEScg Program");
-        incompatible.settings.working_color_space = WorkingColorSpace::AcesCg;
+        incompatible.settings.color.working_color_space = WorkingColorSpace::AcesCg;
         state.test_set_active_sequence(incompatible.id);
         state.test_set_sequence(Some(incompatible.clone()));
         state.test_add_sequence(incompatible);
@@ -5486,7 +5483,12 @@ mod tests {
         assert!(error.to_string().contains("Mondrian Standard"));
         assert_eq!(state.project_color_environment(), &aces_environment);
         assert_eq!(
-            state.active_sequence().expect("active sequence").settings.working_color_space,
+            state
+                .active_sequence()
+                .expect("active sequence")
+                .settings
+                .color
+                .working_color_space,
             WorkingColorSpace::AcesCg
         );
         assert_eq!(
@@ -5505,7 +5507,7 @@ mod tests {
         let previous = state.new_sequence_defaults().clone();
         let previous_revision = state.active_sequence().expect("sequence").revision;
         let mut invalid = previous.clone();
-        invalid.working_color_space = WorkingColorSpace::AcesCg;
+        invalid.color.working_color_space = WorkingColorSpace::AcesCg;
 
         let error = state
             .dispatch_action(project_update_new_sequence_defaults_action(
@@ -5536,7 +5538,7 @@ mod tests {
         };
         let mut defaults = state.new_sequence_defaults().clone();
         defaults.resolution = Resolution::UHD4K;
-        defaults.working_color_space = WorkingColorSpace::AcesCg;
+        defaults.color.working_color_space = WorkingColorSpace::AcesCg;
         state
             .dispatch_action(project_update_new_sequence_defaults_action(
                 ProjectUpdateNewSequenceDefaultsPayload { settings: defaults.clone() },

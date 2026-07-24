@@ -1,5 +1,5 @@
 {
-  "schema_version": 20,
+  "schema_version": 21,
   "project_id": "97f12455-ec34-4b5d-a696-3da93cd914d7",
   "document_revision": 1,
   "meta": {
@@ -67,19 +67,25 @@
       "resolution_scale": 0.5,
       "cache_enabled": true
     },
-    "working_color_space": "linear_rec2020",
-    "auto_tone_map_media": true,
-    "action_safe_margin": 0.1,
-    "title_safe_margin": 0.2,
-    "color_management": {
-      "workflow": "SceneReferred",
-      "missing_metadata_policy": "AssumeRec709",
-      "output_tone_map_policy": "Automatic",
-      "output_color_space": "Rec709",
+    "color": {
+      "working_color_space": "linear_rec2020",
+      "input": {
+        "missing_metadata_policy": "AssumeRec709",
+        "auto_tone_map_media": true
+      },
+      "program_output": {
+        "workflow": "SceneReferred",
+        "tone_map_policy": "Automatic",
+        "color_space": "Rec709"
+      }
+    },
+    "delivery": {
       "video_range": "Full",
-      "delivery_bit_depth": "Ten",
+      "bit_depth": "Ten",
       "static_hdr_metadata_policy": "Omit"
-    }
+    },
+    "action_safe_margin": 0.1,
+    "title_safe_margin": 0.2
   },
   "sequences": {
     "sequences": [
@@ -119,19 +125,25 @@
             "resolution_scale": 0.5,
             "cache_enabled": true
           },
-          "working_color_space": "linear_rec2020",
-          "auto_tone_map_media": true,
-          "action_safe_margin": 0.1,
-          "title_safe_margin": 0.2,
-          "color_management": {
-            "workflow": "SceneReferred",
-            "missing_metadata_policy": "AssumeRec709",
-            "output_tone_map_policy": "Automatic",
-            "output_color_space": "Rec709",
+          "color": {
+            "working_color_space": "linear_rec2020",
+            "input": {
+              "missing_metadata_policy": "AssumeRec709",
+              "auto_tone_map_media": true
+            },
+            "program_output": {
+              "workflow": "SceneReferred",
+              "tone_map_policy": "Automatic",
+              "color_space": "Rec709"
+            }
+          },
+          "delivery": {
             "video_range": "Full",
-            "delivery_bit_depth": "Ten",
+            "bit_depth": "Ten",
             "static_hdr_metadata_policy": "Omit"
-          }
+          },
+          "action_safe_margin": 0.1,
+          "title_safe_margin": 0.2
         },
         "video_tracks": [
           {

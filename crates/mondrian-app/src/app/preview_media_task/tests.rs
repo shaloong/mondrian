@@ -35,7 +35,7 @@ fn test_media_key(label: &str) -> MediaPreviewKey {
         source_has_alpha: false,
         alpha_interpretation: AlphaInterpretation::Straight,
         working_color_space: WorkingColorSpace::LinearRec709,
-        tone_map: false,
+        input_tone_map: false,
         engine: ColorEngine::mondrian_standard(),
     }
 }

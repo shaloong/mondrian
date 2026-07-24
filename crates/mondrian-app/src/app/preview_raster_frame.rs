@@ -9,7 +9,7 @@ use std::sync::Arc;
 use mondrian_core::types::ColorSpace;
 use mondrian_core::OcioColorSpaceIdentity;
 use mondrian_renderer::{RenderMonitorAdaptation, RenderMonitorAdaptationError};
-use mondrian_timeline::sequence::ColorContext;
+use mondrian_timeline::sequence::ProgramColorContext;
 
 use super::preview_execution::PreviewOutputKey;
 use super::preview_unavailability::{PreviewOutputStage, PreviewUnavailability};
@@ -76,7 +76,7 @@ pub(crate) enum PreviewRasterFrameError {
 
 /// Resolve the final CPU raster contract from the authored Program Output.
 pub(crate) fn preview_raster_presentation_contract(
-    requested: &ColorContext,
+    requested: &ProgramColorContext,
 ) -> Result<PreviewRasterPresentationContract, PreviewRasterPresentationContractError> {
     let program_output = requested.output_color_space.color().ok_or({
         PreviewRasterPresentationContractError::ProgramOutputIdentity {

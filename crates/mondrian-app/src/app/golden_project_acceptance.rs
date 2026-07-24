@@ -327,14 +327,14 @@ pub(super) fn sequence_settings_from_contract(
         frame_rate,
         pixel_aspect_ratio: PixelAspectRatio::Square,
         field_order: FieldOrder::Progressive,
-        working_color_space: WorkingColorSpace::LinearRec2020,
         audio_sample_rate: timeline.audio_sample_rate,
         audio_channel_layout: AudioChannelLayout::Stereo,
         ..SequenceSettings::default()
     };
-    settings.color_management.output_color_space = ColorSpace::Rec709;
-    settings.color_management.video_range = VideoRange::Legal;
-    settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
+    settings.color.working_color_space = WorkingColorSpace::LinearRec2020;
+    settings.color.program_output.color_space = ColorSpace::Rec709;
+    settings.delivery.video_range = VideoRange::Legal;
+    settings.delivery.bit_depth = DeliveryBitDepth::Ten;
     settings.validate()?;
     Ok(settings)
 }

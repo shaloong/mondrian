@@ -920,8 +920,8 @@ mod tests {
     fn color_diagnostics_expose_media_interpretation_and_sequence_output() {
         let mut seq = Sequence::new("color-diagnostics");
         let tb = seq.time_base();
-        seq.settings.working_color_space = mondrian_core::WorkingColorSpace::LinearRec2020;
-        seq.settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
+        seq.settings.color.working_color_space = mondrian_core::WorkingColorSpace::LinearRec2020;
+        seq.settings.color.program_output.color_space = ColorSpace::Rec2100Pq;
         let mut clip = Clip::new(AssetId::new(), tt(0, tb), tt(20, tb)).expect("valid clip");
         let asset_id = clip.media_asset_id().expect("media asset");
         let interpretation = clip.media_interpretation_mut().expect("media interpretation");
@@ -934,8 +934,8 @@ mod tests {
         let diagnostics = collect_timeline_color_diagnostics(
             &seq,
             4,
-            seq.settings.working_color_space,
-            seq.settings.color_management.output_color_space,
+            seq.settings.color.working_color_space,
+            seq.settings.color.program_output.color_space,
         )
         .expect("collect diagnostics");
         assert_eq!(diagnostics.len(), 1);

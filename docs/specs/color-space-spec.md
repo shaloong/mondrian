@@ -69,8 +69,14 @@ CPU and GPU OCIO processor requests use `OcioColorSpaceIdentity`, so an encoded
 
 ## Media Interpretation
 
-Clip-level media interpretation may override detected color space. Missing metadata policy is owned by sequence color management.
+Clip-level media interpretation may override detected color space. Missing
+metadata and automatic input-tone-map policy are owned by
+`SequenceColorSettings.input`; they are resolved into a
+`MediaInputColorContext` independently from Program Output tone mapping.
 
 ## Display vs Export
 
-Display transform is for preview output only. Export transform and tags are export-path responsibilities. Neither should modify source media or clip data.
+Program Output precedes machine-local monitor adaptation. Export resolves an
+explicit `ExportColorTarget` and matching tags. Neither path modifies source
+media or Clip data, and changing a display profile cannot change media input
+interpretation or decode-cache identity.

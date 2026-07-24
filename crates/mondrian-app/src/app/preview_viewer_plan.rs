@@ -19,7 +19,7 @@ use mondrian_renderer::{
     GpuCompositingBlockerReason, TimelineAdjustmentLayer, TimelineSolidColorLayer,
     ViewerGpuExecutionLayer, ViewerGpuSourceLayer, ViewerGpuTransitionInput,
 };
-use mondrian_timeline::sequence::ColorContext;
+use mondrian_timeline::sequence::ProgramColorContext;
 
 use super::preview_execution::{PreviewDecodeExecutionSummary, PreviewOutputKey};
 use super::preview_media_frame::MediaPreviewFrame;
@@ -60,12 +60,12 @@ pub(crate) fn viewer_preview_cache_key_for_resolved_plan(
     width: u32,
     height: u32,
     elements: &[ResolvedPreviewElement],
-    color_context: &ColorContext,
+    color_context: &ProgramColorContext,
 ) -> PreviewOutputKey {
     let mut hasher = DefaultHasher::new();
     color_context.working_color_space.hash(&mut hasher);
     color_context.output_color_space.hash(&mut hasher);
-    color_context.tone_map.hash(&mut hasher);
+    color_context.output_tone_map.hash(&mut hasher);
     color_context.engine.hash(&mut hasher);
     color_context.output_transform.hash(&mut hasher);
     elements.len().hash(&mut hasher);

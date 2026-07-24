@@ -19,12 +19,20 @@ Mondrian exposes three product-level modes over one OCIO integration:
 
 One Project owns exactly one complete, versioned `ProjectColorEnvironment`.
 Sequences do not persist an engine, an override, or an inheritance flag. They
-persist program semantics interpreted by that environment: working space,
-workflow, Program Output, tone-map and metadata policies, and delivery
-defaults. Changing the Project environment is an atomic transaction that must
+persist three color-authoring responsibilities interpreted by that environment:
+the working space, media-input policy, and Program Output policy. Encoded
+range/bit-depth defaults and authored HDR payloads are a separate Sequence
+delivery structure; machine-local monitor policy is not author data. Changing
+the Project environment is an atomic transaction that must
 prepare the candidate dependency and validate the future-Sequence template plus
 every existing Sequence before committing; it never rewrites a Sequence or
 falls back to a different engine.
+
+Export may either follow Program Output or admit an explicit `ExportColorTarget`.
+An explicit target states direct colorimetric conversion or an engine-owned
+rendering View independently from codec/range/bit-depth/chroma. Camera Log
+intermediates therefore do not make Sequence Program Output illegal, and a
+consumer codec cannot silently imply or relabel a color transform.
 
 Nested color handoff is a property of each parent-to-child placement edge, not
 of either Sequence. The same child may therefore be placed with different

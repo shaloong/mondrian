@@ -12,12 +12,12 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use mondrian_assets::AssetRecord;
-use mondrian_core::types::{AssetId, ColorSpace, ProjectId};
+use mondrian_core::types::{AssetId, ProjectId};
 use mondrian_core::{ExecutionPriority, ExecutionTerminalEvidence};
 use mondrian_media::{
     resolve_decoded_video_range, MediaFileFingerprint, ProxyColorContract, ProxyConfig, ProxyStatus,
 };
-use mondrian_timeline::sequence::{ColorContext, ResolvedInputColor};
+use mondrian_timeline::sequence::{MediaInputColorContext, ResolvedInputColor};
 use parking_lot::{Condvar, Mutex};
 
 use self::backend::{MediaProxyGenerationBackend, ProxyGenerationBackend};
@@ -402,14 +402,14 @@ impl Drop for ProxyGenerationService {
 /// Resolve the source-referred color identity used by proxy generation and lookup.
 pub(crate) fn resolve_asset_proxy_color_contract(
     asset: &AssetRecord,
-    color_context: &ColorContext,
+    input_color: &MediaInputColorContext,
 ) -> Result<ProxyColorContract, String> {
     let detected = asset.media_info.primary_video().and_then(|video| video.detected_color_space);
-    let resolution = color_context.missing_metadata_policy.resolve_asset_input_decision(
+    let resolution = input_color.missing_metadata_policy.resolve_asset_input_decision(
         None,
         asset.interpretation,
         detected,
-        color_context.working_color_space,
+        input_color.working_color_space,
     );
     let source_color_space = match resolution.resolved {
         ResolvedInputColor::Color(color_space) => color_space,
@@ -419,7 +419,7 @@ pub(crate) fn resolve_asset_proxy_color_contract(
         ResolvedInputColor::Rejected => {
             return Err(format!(
                 "proxy generation rejected source with unresolved color metadata (policy={:?})",
-                color_context.missing_metadata_policy
+                input_color.missing_metadata_policy
             ));
         }
     };
@@ -432,7 +432,8 @@ pub(crate) fn resolve_asset_proxy_color_contract(
         .map_err(|error| error.to_string())
 }
 
-/// Resolve a proxy contract from the active sequence and project color policy.
+/// Resolve a proxy contract from the active Sequence input policy and Project
+/// color environment.
 pub(crate) fn resolve_app_state_proxy_color_contract(
     state: &AppState,
     asset: &AssetRecord,
@@ -440,10 +441,11 @@ pub(crate) fn resolve_app_state_proxy_color_contract(
     let sequence = state
         .active_sequence()
         .ok_or_else(|| "proxy generation requires an active sequence color context".to_owned())?;
-    let color_context = sequence
+    let input_color = sequence
         .settings
-        .root_preview_color_context(state.project_color_environment(), ColorSpace::Rec709);
-    resolve_asset_proxy_color_contract(asset, &color_context)
+        .root_program_color_context(state.project_color_environment())
+        .media_input(sequence.settings.color.input.auto_tone_map_media);
+    resolve_asset_proxy_color_contract(asset, &input_color)
 }
 
 fn proxy_generation_worker_count() -> usize {

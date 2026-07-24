@@ -245,6 +245,24 @@ pub enum ExportAlphaMode {
     Preserve,
 }
 
+/// Creative color target applied after Timeline compositing.
+///
+/// This is distinct from encoded range, bit depth, and chroma sampling.
+/// `FollowSequence` preserves Program Output. Explicit targets state whether
+/// the Project engine's rendering View or a direct colorimetric transform is
+/// required; execution never infers that choice from a codec name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case", tag = "mode", content = "color_space")]
+pub enum ExportColorTarget {
+    /// Deliver the selected Sequence's Program Output.
+    #[default]
+    FollowSequence,
+    /// Transform working pixels directly into an encoded delivery space.
+    Colorimetric(ColorSpace),
+    /// Apply the Project engine's rendering View for this display target.
+    RenderingView(ColorSpace),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExportPreset {
     pub name: String,
@@ -258,6 +276,9 @@ pub struct ExportPreset {
     /// Explicit alpha delivery policy; codec choice alone never implies transparency.
     #[serde(default)]
     pub alpha_mode: ExportAlphaMode,
+    /// Explicit creative color target, independent from encoded signal layout.
+    #[serde(default)]
+    pub color_target: ExportColorTarget,
 }
 
 impl ExportPreset {
@@ -278,6 +299,7 @@ impl ExportPreset {
                 ExportChromaSampling::Yuv420,
             ),
             alpha_mode: ExportAlphaMode::FlattenBlack,
+            color_target: ExportColorTarget::RenderingView(ColorSpace::Rec709),
         }
     }
 
@@ -298,6 +320,7 @@ impl ExportPreset {
                 ExportChromaSampling::Yuv420,
             ),
             alpha_mode: ExportAlphaMode::FlattenBlack,
+            color_target: ExportColorTarget::FollowSequence,
         }
     }
 
@@ -317,6 +340,7 @@ impl ExportPreset {
                 ExportChromaSampling::Yuv420,
             ),
             alpha_mode: ExportAlphaMode::FlattenBlack,
+            color_target: ExportColorTarget::RenderingView(ColorSpace::Rec709),
         }
     }
 
@@ -336,6 +360,7 @@ impl ExportPreset {
                 ExportChromaSampling::Yuv420,
             ),
             alpha_mode: ExportAlphaMode::FlattenBlack,
+            color_target: ExportColorTarget::RenderingView(ColorSpace::Rec709),
         }
     }
 
@@ -353,6 +378,7 @@ impl ExportPreset {
                 ExportChromaSampling::Yuv444,
             ),
             alpha_mode: ExportAlphaMode::Preserve,
+            color_target: ExportColorTarget::FollowSequence,
         }
     }
 }

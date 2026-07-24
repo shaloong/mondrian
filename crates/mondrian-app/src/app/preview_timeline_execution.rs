@@ -21,7 +21,9 @@ use mondrian_renderer::{
     TimelineEvaluationRequest, TimelineMediaPlan, TimelineRenderPlan, TimelineRenderPlanElement,
     TimelineSolidColorLayer, TimelineTransitionInputPlan,
 };
-use mondrian_timeline::sequence::{ColorContext, Sequence, MAX_NESTED_SEQUENCE_RENDER_DEPTH};
+use mondrian_timeline::sequence::{
+    MediaInputColorContext, ProgramColorContext, Sequence, MAX_NESTED_SEQUENCE_RENDER_DEPTH,
+};
 
 use super::preview_cpu_execution::{
     composite_resolved_preview_working, PreviewCpuExecutionDurations,
@@ -46,7 +48,7 @@ pub(crate) struct PreviewTimelineMediaRequest {
     /// value into an FFmpeg stream PTS.
     pub(crate) source_time: TimelineTime,
     pub(crate) target_resolution: Resolution,
-    pub(crate) color_context: ColorContext,
+    pub(crate) input_color: MediaInputColorContext,
 }
 
 /// Exhaustive Adapter response for one media layer needed by Timeline execution.
@@ -96,7 +98,7 @@ pub(crate) enum PreviewTimelinePendingDependency {
 pub(crate) struct ResolvedPreviewPlan {
     pub(crate) elements: Vec<ResolvedPreviewElement>,
     pub(crate) cache_key: PreviewOutputKey,
-    pub(crate) color_context: ColorContext,
+    pub(crate) color_context: ProgramColorContext,
 }
 
 /// Ordered execution fact emitted while materializing nested Sequences.
@@ -135,7 +137,7 @@ pub(crate) fn collect_preview_timeline_media_demands(
     frame: i64,
     target_resolution: Resolution,
     runtime_scale: PreviewResolutionScale,
-    color_context: ColorContext,
+    color_context: ProgramColorContext,
 ) -> Result<Vec<PreviewTimelineMediaRequest>, PreviewUnavailability> {
     let graph = PreviewTimelineGraph { root_sequence: sequence, sequences, runtime_scale };
     let mut demands = Vec::new();
@@ -158,7 +160,7 @@ pub(crate) fn resolve_preview_timeline(
     frame: i64,
     target_resolution: Resolution,
     runtime_scale: PreviewResolutionScale,
-    color_context: ColorContext,
+    color_context: ProgramColorContext,
     media_frame: &mut impl FnMut(PreviewTimelineMediaRequest) -> PreviewTimelineMediaFrame,
     title_frame: &mut impl FnMut(PreviewTimelineTitleRequest) -> PreviewTimelineTitleFrame,
 ) -> PreviewTimelineResolution {
@@ -205,7 +207,7 @@ struct PreviewTimelineGraph<'a> {
 struct NestedPreviewSequence<'a> {
     sequence: &'a Sequence,
     target_resolution: Resolution,
-    color_context: ColorContext,
+    color_context: ProgramColorContext,
 }
 
 impl<'a> PreviewTimelineGraph<'a> {
@@ -235,7 +237,7 @@ impl<'a> PreviewTimelineGraph<'a> {
     fn nested(
         self,
         sequence_id: SequenceId,
-        parent_color_context: &ColorContext,
+        parent_color_context: &ProgramColorContext,
         color_processing: mondrian_core::timeline_data::NestedColorProcessing,
     ) -> Result<NestedPreviewSequence<'a>, PreviewUnavailability> {
         let sequence =
@@ -272,7 +274,7 @@ fn collect_sequence_media_demands(
     frame: i64,
     target_resolution: Resolution,
     depth: usize,
-    color_context: ColorContext,
+    color_context: ProgramColorContext,
     demands: &mut Vec<PreviewTimelineMediaRequest>,
 ) -> Result<(), PreviewUnavailability> {
     validate_nested_depth(sequence, depth)?;
@@ -336,7 +338,7 @@ fn resolve_sequence_elements<MediaFrame, TitleFrame>(
     frame: i64,
     target_resolution: Resolution,
     depth: usize,
-    color_context: ColorContext,
+    color_context: ProgramColorContext,
 ) -> Result<Option<Vec<ResolvedPreviewElement>>, PreviewTimelineAbort>
 where
     MediaFrame: FnMut(PreviewTimelineMediaRequest) -> PreviewTimelineMediaFrame,
@@ -516,7 +518,7 @@ fn collect_transition_input_media_demands(
     input: &TimelineTransitionInputPlan,
     target_resolution: Resolution,
     depth: usize,
-    color_context: ColorContext,
+    color_context: ProgramColorContext,
     demands: &mut Vec<PreviewTimelineMediaRequest>,
 ) -> Result<(), PreviewUnavailability> {
     match input {
@@ -552,7 +554,7 @@ fn resolve_transition_input<MediaFrame, TitleFrame>(
     input: TimelineTransitionInputPlan,
     target_resolution: Resolution,
     depth: usize,
-    color_context: ColorContext,
+    color_context: ProgramColorContext,
 ) -> Result<ResolvedPreviewTransitionInput, PreviewTimelineAbort>
 where
     MediaFrame: FnMut(PreviewTimelineMediaRequest) -> PreviewTimelineMediaFrame,
@@ -737,7 +739,7 @@ fn render_nested_sequence(
     frame: i64,
     target_resolution: Resolution,
     parent_working_color_space: mondrian_core::WorkingColorSpace,
-    color_context: ColorContext,
+    color_context: ProgramColorContext,
     resolved: Vec<ResolvedPreviewElement>,
     facts: &mut Vec<PreviewTimelineExecutionFact>,
 ) -> Result<MediaPreviewFrame, PreviewTimelineAbort> {
@@ -816,7 +818,7 @@ fn render_nested_sequence(
 fn preview_timeline_media_request(
     media: &TimelineMediaPlan,
     target_resolution: Resolution,
-    color_context: &ColorContext,
+    color_context: &ProgramColorContext,
 ) -> PreviewTimelineMediaRequest {
     PreviewTimelineMediaRequest {
         asset_id: media.asset_id,
@@ -824,7 +826,7 @@ fn preview_timeline_media_request(
         alpha_interpretation: media.alpha_interpretation,
         source_time: media.source_time,
         target_resolution,
-        color_context: color_context.clone(),
+        input_color: color_context.media_input(media.auto_tone_map),
     }
 }
 

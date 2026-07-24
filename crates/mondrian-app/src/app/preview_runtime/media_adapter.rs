@@ -32,7 +32,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             request.source_time,
             request.target_resolution.width,
             request.target_resolution.height,
-            &request.color_context,
+            &request.input_color,
             true,
             access_mode == PreviewDecodeAccessMode::PlaybackCursor,
         ) {
@@ -98,7 +98,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         source_time: TimelineTime,
         target_width: u32,
         target_height: u32,
-        color_context: &ColorContext,
+        input_color: &MediaInputColorContext,
         record_color_rejection: bool,
         request_missing_proxy_generation: bool,
     ) -> Result<MediaPreviewKey, PreviewUnavailability> {
@@ -130,7 +130,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             }
         };
         let proxy_config = state.proxy_config();
-        let proxy_color = resolve_asset_proxy_color_contract(&asset, color_context).ok();
+        let proxy_color = resolve_asset_proxy_color_contract(&asset, input_color).ok();
         let prefer_proxy =
             state.project_settings().proxy_enabled && state.is_asset_proxy_mode(*asset_id);
         match resolve_preview_media_source(PreviewMediaSourceRequest {
@@ -139,7 +139,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             alpha_interpretation,
             source_time,
             target_resolution: Resolution { width: target_width, height: target_height },
-            color_context,
+            input_color,
             prefer_proxy,
             request_missing_proxy_generation,
             proxy_config: &proxy_config,
@@ -182,7 +182,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 tracing::warn!(
                     asset_id = %rejection.asset_id,
                     path = %rejection.path.display(),
-                    missing_metadata_policy = ?color_context.missing_metadata_policy,
+                    missing_metadata_policy = ?input_color.missing_metadata_policy,
                     color_resolution_source = ?resolution.source,
                     override_color_space = ?resolution.override_color_space,
                     detected_color_space = ?resolution.detected_color_space,

@@ -16,11 +16,10 @@ use mondrian_timeline::sequence::{MissingColorMetadataPolicy, SequenceSettings};
 use super::analysis::{color_manage_rgba, thumbnail_key, ThumbnailColorContract};
 use super::*;
 
-fn color_context() -> ColorContext {
-    SequenceSettings::default().root_preview_color_context(
-        &mondrian_core::ProjectColorEnvironment::default(),
-        ColorSpace::Srgb,
-    )
+fn color_context() -> ProgramColorContext {
+    let mut settings = SequenceSettings::default();
+    settings.color.program_output.color_space = ColorSpace::Srgb;
+    settings.root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
 }
 
 fn color_contract() -> ThumbnailColorContract {
@@ -256,10 +255,10 @@ fn color_contract_rejections_and_range_authority_remain_distinct() {
 #[test]
 fn unsupported_encoded_output_is_rejected_before_decode() {
     let asset = missing_video_asset();
-    let context = SequenceSettings::default().root_preview_color_context(
-        &mondrian_core::ProjectColorEnvironment::default(),
-        ColorSpace::DisplayP3,
-    );
+    let mut settings = SequenceSettings::default();
+    settings.color.program_output.color_space = ColorSpace::DisplayP3;
+    let context =
+        settings.root_program_color_context(&mondrian_core::ProjectColorEnvironment::default());
     let failure = ThumbnailColorContract::resolve(&asset, &context)
         .expect_err("Widget raster currently supports only sRGB");
     assert_eq!(

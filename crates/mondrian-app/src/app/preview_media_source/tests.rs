@@ -95,11 +95,11 @@ fn video_asset(path: PathBuf) -> AssetRecord {
     }
 }
 
-fn color_context() -> ColorContext {
-    Sequence::new("preview media source").settings.root_preview_color_context(
-        &mondrian_core::ProjectColorEnvironment::default(),
-        ColorSpace::Rec709,
-    )
+fn color_context() -> MediaInputColorContext {
+    Sequence::new("preview media source")
+        .settings
+        .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+        .media_input(true)
 }
 
 fn gpu_admission() -> PreviewHardwareDecodeAdmissionState {
@@ -202,7 +202,7 @@ fn complete_resolution_emits_one_canonical_key_and_proxy_intent() {
         alpha_interpretation: AlphaInterpretation::Straight,
         source_time: TimelineTime::new(1, 2).expect("exact source time"),
         target_resolution: Resolution { width: 960, height: 540 },
-        color_context: &context,
+        input_color: &context,
         prefer_proxy: true,
         request_missing_proxy_generation: true,
         proxy_config: &config,
@@ -248,7 +248,7 @@ fn unavailable_and_color_rejected_sources_are_explicit_outcomes() {
         alpha_interpretation: AlphaInterpretation::Straight,
         source_time: TimelineTime::ZERO,
         target_resolution: Resolution { width: 320, height: 180 },
-        color_context: &context,
+        input_color: &context,
         prefer_proxy: false,
         request_missing_proxy_generation: false,
         proxy_config: &config,
@@ -274,7 +274,7 @@ fn unavailable_and_color_rejected_sources_are_explicit_outcomes() {
         alpha_interpretation: AlphaInterpretation::Straight,
         source_time: TimelineTime::ZERO,
         target_resolution: Resolution { width: 320, height: 180 },
-        color_context: &context,
+        input_color: &context,
         prefer_proxy: false,
         request_missing_proxy_generation: false,
         proxy_config: &config,

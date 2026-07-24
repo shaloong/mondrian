@@ -86,7 +86,7 @@ impl AppUiNewProjectDraft {
             }
             NewProjectDraftUpdatePayload::ColorEngine(engine) => {
                 if let Some(working_space) = engine.pinned_working_space() {
-                    self.sequence_settings.working_color_space = working_space;
+                    self.sequence_settings.color.working_color_space = working_space;
                 }
                 self.color_environment.engine = engine;
             }
@@ -444,8 +444,8 @@ impl NewProjectDialog {
     pub fn choose_custom_ocio(&mut self, platform: &dyn PlatformService) {
         match choose_custom_ocio_config(
             platform,
-            self.draft.sequence_settings.working_color_space,
-            self.draft.sequence_settings.color_management.output_color_space,
+            self.draft.sequence_settings.color.working_color_space,
+            self.draft.sequence_settings.color.program_output.color_space,
         ) {
             Ok(Some(engine)) => {
                 self.apply_update(NewProjectDraftUpdatePayload::ColorEngine(engine));

@@ -31,10 +31,10 @@ failed save cannot continue under an older Timeline identity.
 
 `ProjectColorEnvironment.engine` is the one persisted product-mode selector for
 Mondrian Standard, ACES, or Custom OCIO. A Sequence never stores, overrides, or
-inherits another engine. It stores only program semantics interpreted inside
-the Project environment: working space, scene/display-referred workflow,
-input-metadata policy, Program Output target and tone-map policy, delivery
-range/bit-depth defaults, and authored HDR metadata.
+inherits another engine. `SequenceColorSettings` stores only the working domain,
+media-input policy, and Program Output policy interpreted inside the Project
+environment. `SequenceDeliveryDefaults` separately stores encoded
+range/bit-depth defaults and authored HDR metadata.
 
 `ProjectSettings` remains a container/runtime policy object (proxy, cache and
 autosave settings); placing the engine there would mix image semantics with
@@ -143,7 +143,7 @@ is written with that field explicitly.
 
 Archive and document JSON pass through separate version registries before typed
 deserialization. During Alpha there are deliberately no legacy document steps:
-schema v20 is the sole accepted author schema, and older/future versions fail
+schema v21 is the sole accepted author schema, and older/future versions fail
 instead of being guessed. Version 5 introduced the explicit tagged
 `mondrian_standard` / `aces` / `custom_ocio` project contract and makes every
 Mondrian Standard package-identity field mandatory: product ID/version, config
@@ -224,7 +224,7 @@ rewritten by open.
 Version 19 moves the exact engine into the mandatory top-level
 `ProjectColorEnvironment`, adds the complete mandatory
 `new_sequence_defaults`, removes engine/inheritance/display and nested-edge
-policy from `SequenceColorManagement`, and stores nested processing on each
+policy from the then-current mixed Sequence color shape, and stores nested processing on each
 `NestedSequence` Clip edge. Alpha intentionally provides no v18 migration:
 duplicated engine truth and ambiguous nested ownership are rejected rather than
 guessed.
@@ -235,7 +235,15 @@ visual Effects, Masks, and Basic Title share that domain. Sequence placement
 and source sampling remain independent; Alpha rejects v19 instead of guessing
 whether existing curves were authored against Sequence or source time.
 
-Current document schema v20 persists canonical rational `TimelineTime` values
+Version 21 replaces the mixed `working_color_space`/`auto_tone_map_media`/
+color-management shape with closed `color` and `delivery` objects.
+`color` contains only working, input, and Program Output authoring; `delivery`
+contains encoded defaults and authored HDR payloads. `ProjectDocument`,
+`ProjectManifest`, `SequenceSettings`, `Sequence`, and `SequenceCollection`
+reject unknown fields, so a forged Sequence engine or inheritance switch cannot
+be silently ignored. Alpha rejects v20 instead of guessing this regrouping.
+
+Current document schema v21 persists canonical rational `TimelineTime` values
 directly and requires the shared visual/audio `ParameterSchema`. It does not
 contain frame-oriented `TimeCode`, `TimeTicks`, descriptor-level duplicate
 defaults/types, editor-preset interpolation capabilities, or compatibility

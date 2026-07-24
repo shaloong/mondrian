@@ -132,7 +132,8 @@ Applying the project-settings modal emits one complete project-domain engine
 replacement action. App-domain admission prepares the candidate config and
 validates the future-Sequence template plus every existing Sequence atomically;
 the modal never mutates renderer, Sequence, or persistence state directly.
-Sequence settings shows the Project engine as read-only and disables its
+Sequence settings renders the Project engine as a non-interactive readout, not
+as a disabled dropdown that could imply Sequence ownership. It disables the
 working-space control when that engine pins one immutable working identity. The
 shell draft also ignores forged changes through that disabled control;
 app-domain validation remains the final authority for persisted actions.
@@ -380,18 +381,27 @@ container edit rewrites the output suffix only when that suffix still matched
 the previous container; an explicitly custom suffix is preserved. Admission
 freezes the edited preset into the job.
 
-Sequence output color, workflow, missing-metadata policy, tone-map intent,
-delivery range/bit-depth defaults, and authored HDR metadata remain
-Sequence-owned and editable. The Project engine is edited only through Project
-Settings; machine-local display management is edited only through local Viewer
-preferences. Only working-space editing is gated by the Project engine
-contract. Nested processing is edited on a selected nested Clip placement, not
-in Sequence Settings, because it describes that parent-to-child edge.
+The materialized preset also carries one typed `ExportColorTarget`: follow
+Sequence Program Output, explicit colorimetric output, or an explicit
+Project-engine Rendering View. Built-in SDR presets pin their Rec.709 rendering
+target; HEVC Main10 and ProRes follow the Sequence until explicitly changed.
+The backend contract is complete even while a general-purpose target picker is
+not yet exposed; the UI must not simulate Camera Log by editing Sequence Program
+Output or infer a transform from the codec.
+
+Sequence working/input/Program Output color policy and separate delivery
+range/bit-depth/HDR defaults remain Sequence-owned and editable. The Project
+engine is edited only through Project Settings; machine-local display management
+is edited only through local Viewer preferences. Only working-space editing is
+gated by the Project engine contract. Nested processing is edited on a selected
+nested Clip placement, not in Sequence Settings, because it describes that
+parent-to-child edge.
 
 Media preview frames are held in a bounded LRU cache keyed by asset identity,
 media file fingerprint (file length plus modification timestamp), source
 frame/time, target preview dimensions, input color interpretation, target
-working color space, tone-map policy, and color engine. A media frame decoded
+working color space, media-input tone-map policy, and color engine. Program
+Output and monitor-adaptation tone mapping are excluded. A media frame decoded
 for one working-space contract must never be reused for another viewer/export
 color contract, and same-path media/proxy replacements must not reuse stale app
 cache entries when the file fingerprint changes. Preview path resolution should
@@ -451,7 +461,7 @@ Standard View or an ACES View. Surface/monitor validation remains a later,
 independent boundary and may still block presentation when the device cannot
 carry the requested HDR signal.
 Those snapshot strings are validation evidence only. Preview and asset
-thumbnail execution pass the typed `ColorContext::output_transform` to
+thumbnail execution pass the typed resolved `output_transform` to
 `RenderOutputColorBoundary::from_intent(...)`; neither app path reconstructs
 the OCIO boundary from snapshot or optional context strings.
 Window display resolution is computed from both the resolved `ColorEngine` and

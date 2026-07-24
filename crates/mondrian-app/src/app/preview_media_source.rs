@@ -19,7 +19,9 @@ use mondrian_media::{
     PreviewHardwareDecodeRequest, ProxyColorContract, ProxyConfig, ProxyGenerator, ProxyStatus,
     VideoColorDiagnostic,
 };
-use mondrian_timeline::sequence::{ColorContext, InputColorResolution, ResolvedInputColor};
+use mondrian_timeline::sequence::{
+    InputColorResolution, MediaInputColorContext, ResolvedInputColor,
+};
 
 use super::preview_access_mode::{MediaPreviewKey, MediaPreviewNativeSurfaceHint};
 use super::preview_hardware_admission::PreviewHardwareDecodeAdmissionState;
@@ -66,7 +68,7 @@ pub(crate) struct PreviewMediaSourceRequest<'a> {
     pub(crate) alpha_interpretation: AlphaInterpretation,
     pub(crate) source_time: TimelineTime,
     pub(crate) target_resolution: Resolution,
-    pub(crate) color_context: &'a ColorContext,
+    pub(crate) input_color: &'a MediaInputColorContext,
     pub(crate) prefer_proxy: bool,
     pub(crate) request_missing_proxy_generation: bool,
     pub(crate) proxy_config: &'a ProxyConfig,
@@ -155,7 +157,7 @@ pub(crate) fn resolve_preview_media_source(
         request.color_space_override,
         request.asset.interpretation,
         detected_color_space,
-        request.color_context,
+        request.input_color,
     );
     let input_color_space = match input_color_resolution.resolved {
         ResolvedInputColor::Color(color_space) => color_space,
@@ -195,9 +197,9 @@ pub(crate) fn resolve_preview_media_source(
         native_surface_hint,
         source_has_alpha,
         alpha_interpretation: request.alpha_interpretation,
-        working_color_space: request.color_context.working_color_space,
-        tone_map: request.color_context.tone_map,
-        engine: request.color_context.engine.clone(),
+        working_color_space: request.input_color.working_color_space,
+        input_tone_map: request.input_color.input_tone_map,
+        engine: request.input_color.engine.clone(),
     };
     canonicalize_media_decode_geometry(&mut key, request.hardware_admission);
 
@@ -219,13 +221,13 @@ pub(crate) fn resolve_preview_input_color_space(
     override_color_space: Option<ColorSpace>,
     asset_interpretation: mondrian_core::timeline_data::AssetMediaInterpretation,
     detected_color_space: Option<ColorSpace>,
-    color_context: &ColorContext,
+    input_color: &MediaInputColorContext,
 ) -> InputColorResolution {
-    color_context.missing_metadata_policy.resolve_asset_input_decision(
+    input_color.missing_metadata_policy.resolve_asset_input_decision(
         override_color_space,
         asset_interpretation,
         detected_color_space,
-        color_context.working_color_space,
+        input_color.working_color_space,
     )
 }
 

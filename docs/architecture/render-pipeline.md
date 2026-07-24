@@ -237,7 +237,8 @@ nodes require log/perceptual, display-linear, or display-encoded RGB is not a
 legacy effect. `TimelineEffectColorRuntime` maps the sequence working domain and
 named effect domains to exact OCIO identities, and the CPU timeline compositor
 executes each planned edge in-place around the relevant graph node. Preview and
-export both supply their project `ColorContext` to this renderer-owned boundary.
+export both supply a resolved Project-engine/working-domain context to this
+renderer-owned boundary.
 The float effect-output cache includes the engine/config/working-space identity.
 If a processor cannot be resolved, `timeline_composite` returns a structured
 `TimelineCompositeError` identifying execution or media/solid/adjustment domain

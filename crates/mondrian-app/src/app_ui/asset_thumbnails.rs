@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use mondrian_assets::AssetRecord;
-use mondrian_timeline::sequence::ColorContext;
+use mondrian_timeline::sequence::ProgramColorContext;
 use mondrian_ui_core::RasterImageColorSpace;
 use mondrian_ui_widgets::RasterImage;
 
@@ -24,8 +24,8 @@ impl AssetThumbnailAdapter {
         Self { service: AssetThumbnailService::new() }
     }
 
-    /// Forward the resolved project/sequence color context.
-    pub fn set_color_context(&self, context: Option<ColorContext>) {
+    /// Forward the Project-owned engine plus Project future-Sequence defaults.
+    pub fn set_color_context(&self, context: Option<ProgramColorContext>) {
         self.service.set_color_context(context);
     }
 

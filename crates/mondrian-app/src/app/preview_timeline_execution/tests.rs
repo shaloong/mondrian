@@ -24,7 +24,7 @@ fn solid_sequence(name: &str, color: Color) -> Sequence {
     sequence
 }
 
-fn color_context(sequence: &Sequence) -> ColorContext {
+fn color_context(sequence: &Sequence) -> ProgramColorContext {
     sequence
         .settings
         .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
@@ -189,6 +189,7 @@ fn nested_sequence_keeps_its_own_canvas_under_shared_runtime_quality() {
     let mut child = Sequence::new("child media");
     child.settings.resolution = Resolution { width: 1280, height: 720 };
     child.settings.preview.resolution_scale = 0.5;
+    child.settings.color.input.auto_tone_map_media = false;
     let asset_id = AssetId::new();
     let child_time_base = child.time_base();
     child.video_tracks[0]
@@ -223,6 +224,10 @@ fn nested_sequence_keeps_its_own_canvas_under_shared_runtime_quality() {
     .expect("nested media demands");
     assert_eq!(demands.len(), 1);
     assert_eq!(demands[0].asset_id, asset_id);
+    assert!(
+        !demands[0].input_color.input_tone_map,
+        "nested media input policy must come from the child Sequence, not parent Program Output"
+    );
     assert_eq!(
         demands[0].target_resolution,
         Resolution { width: 160, height: 90 }

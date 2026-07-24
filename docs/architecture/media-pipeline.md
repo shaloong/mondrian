@@ -2062,4 +2062,7 @@ with one separate precedence rule: explicit asset range override, then probed
 range, otherwise `Unknown`. `Unknown` continues to fail closed at YUV conversion
 or proxy-generation boundaries.
 
-Unknown/missing metadata policy is resolved at sequence color-management time, not by UI panels.
+Unknown/missing metadata policy is resolved from the Sequence input-color
+settings, not by UI panels. A nested Sequence keeps its own media
+interpretation policy even when its placement forces evaluation in the parent
+working space.

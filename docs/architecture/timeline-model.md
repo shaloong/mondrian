@@ -120,7 +120,8 @@ Sequence snapshot. Project-environment replacement validates the complete
 future-Sequence template and every existing Sequence as one transaction.
 Editing-mode presets preserve that space: DCI raster dimensions do not imply a
 P3 working-space change.
-The persisted `working_color_space` is a `WorkingColorSpace`, distinct from
+The persisted `SequenceSettings.color.working_color_space` is a
+`WorkingColorSpace`, distinct from
 external input and output `ColorSpace` values. Root color contexts carry a
 display-referred output identity, while nested contexts carry their parent working
 identity so render recursion cannot mistake an internal handoff for a delivery
@@ -139,8 +140,8 @@ DisplayReferred workflow remains available as a technical colorimetric bypass.
 Project `ColorEngine` alone selects Mondrian Standard, ACES, or Custom OCIO;
 the Sequence workflow does not duplicate that mode selection.
 
-`SequenceColorManagement.delivery_bit_depth` and `video_range` are the
-Sequence-level delivery defaults. They do not force every export of the
+`SequenceSettings.delivery.bit_depth` and `video_range` are the Sequence-level
+delivery defaults. They do not force every export of the
 Sequence to use one representation: a typed `ExportPreset` may follow either
 default or provide an explicit bit depth/range. Export admission resolves that
 choice together with codec profile and chroma sampling before execution.
@@ -149,11 +150,13 @@ these values describes the float working space or renderer-to-encoder pipe
 precision; those are derived execution contracts and are not persisted as
 editorial pixels.
 
-`SequenceColorManagement` has no engine, override, or inheritance flag. It owns
-workflow, input-metadata policy, Program Output color and tone-map intent,
-delivery range/bit-depth defaults, and authored HDR metadata. Machine-local
-Viewer display policy belongs outside author data. Nested processing belongs to
-the parent-to-child Clip placement edge, not either Sequence.
+`SequenceColorSettings` has no engine, override, or inheritance flag. Its three
+deep responsibilities are `working_color_space`, `input` (missing-metadata and
+per-media automatic tone-map policy), and `program_output` (workflow, target,
+and output tone-map policy). `SequenceDeliveryDefaults` separately owns encoded
+range/bit-depth defaults and authored HDR metadata. Machine-local Viewer display
+policy belongs outside author data. Nested processing belongs to the
+parent-to-child Clip placement edge, not either Sequence.
 
 When `static_hdr_metadata_policy` is `WriteAuthored`, `SequenceSettings`
 requires complete typed ST 2086 mastering-display and CTA-861.3 content-light
@@ -166,11 +169,13 @@ responsibility because they depend on the exact Project color engine.
 
 `root_program_color_context(ProjectColorEnvironment)` combines the Project
 engine with Sequence semantics and carries the one typed
-`OutputTransformIntent` shared by preview program pixels, scopes, and export.
-`root_preview_color_context(ProjectColorEnvironment, target)` remains the
-explicitly separate local monitor
-presentation request until the renderer applies it as monitor adaptation after
-Program Output; it must never be used as the scope or delivery identity.
+`OutputTransformIntent` shared by preview Program pixels and scopes. Media
+requests derive a narrower `MediaInputColorContext` using the individual render
+plan's `auto_tone_map` value; Program Output tone mapping never enters a media
+decode/cache key. Local monitor adaptation is resolved after Program Output and
+does not create another Sequence context. Export either follows the Program
+context or resolves an explicit `ExportColorTarget`; it never mutates the
+Sequence to obtain a different deliverable.
 An ordinary display-referred SDR context remains `Colorimetric`; a
 scene-referred or explicitly tone-mapped Mondrian Standard boundary resolves to
 the fully pinned `MondrianStandard { package }` product intent. ACES carries its

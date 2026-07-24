@@ -16,7 +16,7 @@ use mondrian_renderer::{
     execute_cpu_input_stage, execute_cpu_input_stage_float, execute_cpu_output_boundary_rgba8,
     CpuEncodedColorFrame, LinearFloatSource, RenderInputTransform, RenderOutputColorBoundary,
 };
-use mondrian_timeline::sequence::{ColorContext, ResolvedInputColor};
+use mondrian_timeline::sequence::{ProgramColorContext, ResolvedInputColor};
 
 use crate::app::preview_access_mode::{
     media_preview_access_mode_for_intent, MediaPreviewAccessIntent,
@@ -63,7 +63,7 @@ pub(super) struct ThumbnailColorContract {
 impl ThumbnailColorContract {
     pub(super) fn resolve(
         asset: &AssetRecord,
-        context: &ColorContext,
+        context: &ProgramColorContext,
     ) -> Result<Self, ThumbnailFailure> {
         let primary_video = asset.media_info.primary_video().ok_or_else(|| {
             failure(
@@ -116,7 +116,7 @@ impl ThumbnailColorContract {
             source_range,
             working_color_space: context.working_color_space,
             output_color_space,
-            tone_map: context.tone_map,
+            tone_map: context.output_tone_map,
             engine: context.engine.clone(),
             output_transform: context.output_transform.clone(),
         })

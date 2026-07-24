@@ -1290,8 +1290,8 @@ impl AppUiAppRoot {
                 self.modal = Some(ShellModal::project_settings(
                     AppUiProjectSettingsDraft::new(
                         self.project_color_environment.engine.clone(),
-                        self.new_sequence_defaults.working_color_space,
-                        self.new_sequence_defaults.color_management.output_color_space,
+                        self.new_sequence_defaults.color.working_color_space,
+                        self.new_sequence_defaults.color.program_output.color_space,
                     ),
                 ));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
@@ -2884,7 +2884,7 @@ mod tests {
         assert_eq!(payload.name, "My Cut");
         assert!(payload.sequence_settings.validate().is_ok());
         assert_eq!(
-            payload.sequence_settings.color_management.workflow,
+            payload.sequence_settings.color.program_output.workflow,
             ColorWorkflow::SceneReferred
         );
         let context =
@@ -3196,9 +3196,9 @@ mod tests {
         let platform = FakePlatform::default();
         let mut state = AppState::new();
         let mut sequence = Sequence::new("Scene 01");
-        sequence.settings.color_management.hdr_mastering_display =
+        sequence.settings.delivery.hdr_mastering_display =
             Some(VideoMasteringDisplayMetadata::rec2100_1000_nit_reference());
-        sequence.settings.color_management.hdr_content_light =
+        sequence.settings.delivery.hdr_content_light =
             Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
         let sequence_id = sequence.id;
         state.test_set_active_sequence(sequence_id);
@@ -3439,32 +3439,26 @@ mod tests {
         );
         assert_eq!(payload.settings.timeline_display.timecode_start_frame, 120);
         assert_eq!(
-            payload.settings.working_color_space,
+            payload.settings.color.working_color_space,
             WorkingColorSpace::LinearRec2020
         );
-        assert!(!payload.settings.auto_tone_map_media);
+        assert!(!payload.settings.color.input.auto_tone_map_media);
         assert_eq!(
-            payload.settings.color_management.workflow,
+            payload.settings.color.program_output.workflow,
             ColorWorkflow::SceneReferred
         );
         assert_eq!(
-            payload.settings.color_management.missing_metadata_policy,
+            payload.settings.color.input.missing_metadata_policy,
             MissingColorMetadataPolicy::AssumeRec709
         );
         assert_eq!(
-            payload.settings.color_management.output_color_space,
+            payload.settings.color.program_output.color_space,
             ColorSpace::Rec2100Pq
         );
+        assert_eq!(payload.settings.delivery.video_range, VideoRange::Legal);
+        assert_eq!(payload.settings.delivery.bit_depth, DeliveryBitDepth::Ten);
         assert_eq!(
-            payload.settings.color_management.video_range,
-            VideoRange::Legal
-        );
-        assert_eq!(
-            payload.settings.color_management.delivery_bit_depth,
-            DeliveryBitDepth::Ten
-        );
-        assert_eq!(
-            payload.settings.color_management.static_hdr_metadata_policy,
+            payload.settings.delivery.static_hdr_metadata_policy,
             StaticHdrMetadataPolicy::WriteAuthored
         );
         assert_eq!(payload.settings.audio_sample_rate, 96_000);

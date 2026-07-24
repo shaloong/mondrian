@@ -6,10 +6,11 @@
 //! Timeline Export Snapshot before admitting work.
 
 use crate::preset::{
-    AudioCodecConfig, Av1Profile, Container, ExportAlphaMode, ExportChromaSampling, ExportPreset,
-    HevcProfile, ProResProfile, Resolution, VideoCodecConfig, VideoRateControl,
+    AudioCodecConfig, Av1Profile, Container, ExportAlphaMode, ExportChromaSampling,
+    ExportColorTarget, ExportPreset, HevcProfile, ProResProfile, Resolution, VideoCodecConfig,
+    VideoRateControl,
 };
-use mondrian_core::{ColorEngine, ColorSpace, ProjectColorEnvironment};
+use mondrian_core::{ColorEngine, ColorSpace, OutputTransformIntent, ProjectColorEnvironment};
 use mondrian_timeline::sequence::{
     DeliveryBitDepth, SequenceSettings, StaticHdrMetadataPolicy, VideoRange,
 };
@@ -63,7 +64,18 @@ impl std::fmt::Display for ExportDeliveryError {
 impl std::error::Error for ExportDeliveryError {}
 
 /// Fully explicit encoded representation produced by export admission.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedExportColorTarget {
+    /// Exact encoded color identity written by the output boundary.
+    pub color_space: ColorSpace,
+    /// Whether the output boundary performs a rendering/tone-mapping View.
+    pub tone_map: bool,
+    /// Exact Project-engine transform intent consumed by the renderer.
+    pub output_transform: OutputTransformIntent,
+}
+
+/// Fully explicit export target admitted before rendering begins.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedExportDeliveryContract {
     /// Exact encoded raster size; execution must not normalize it.
     pub resolution: Resolution,
@@ -75,6 +87,8 @@ pub struct ResolvedExportDeliveryContract {
     pub chroma_sampling: ExportChromaSampling,
     /// Exact FFmpeg output pixel format.
     pub pixel_format: &'static str,
+    /// Exact creative color target, independent from signal representation.
+    pub color_target: ResolvedExportColorTarget,
 }
 
 /// Resolve and validate one preset against complete Sequence output intent.
@@ -85,15 +99,18 @@ pub fn resolve_export_delivery(
     settings: &SequenceSettings,
     color_environment: &ProjectColorEnvironment,
 ) -> Result<ResolvedExportDeliveryContract, ExportDeliveryError> {
+    settings.validate_with_color_environment(color_environment).map_err(|error| {
+        ExportDeliveryError::new(
+            ExportDeliveryIssueCode::IncompatibleColorOutput,
+            format!("Sequence Program Output 无效: {error}"),
+        )
+    })?;
     validate_rate_control(&preset.video)?;
     validate_audio_parameters(&preset.audio)?;
     validate_container(&preset.container, &preset.video, &preset.audio)?;
 
-    let bit_depth = preset
-        .video_signal
-        .bit_depth
-        .resolve(settings.color_management.delivery_bit_depth);
-    let video_range = preset.video_signal.range.resolve(settings.color_management.video_range);
+    let bit_depth = preset.video_signal.bit_depth.resolve(settings.delivery.bit_depth);
+    let video_range = preset.video_signal.range.resolve(settings.delivery.video_range);
     let chroma_sampling = preset.video_signal.chroma_sampling;
     let resolution = preset.resolution.unwrap_or(Resolution {
         width: settings.resolution.width,
@@ -104,7 +121,15 @@ pub fn resolve_export_delivery(
     let pixel_format =
         resolve_pixel_format(&preset.video, preset.alpha_mode, bit_depth, chroma_sampling)?;
     validate_dimensions(resolution, chroma_sampling)?;
-    validate_color_output(preset, settings, color_environment, bit_depth, video_range)?;
+    let color_target = resolve_export_color_target(preset, settings, color_environment)?;
+    validate_color_output(
+        preset,
+        settings,
+        color_environment,
+        &color_target,
+        bit_depth,
+        video_range,
+    )?;
 
     Ok(ResolvedExportDeliveryContract {
         resolution,
@@ -112,7 +137,83 @@ pub fn resolve_export_delivery(
         video_range,
         chroma_sampling,
         pixel_format,
+        color_target,
     })
+}
+
+fn resolve_export_color_target(
+    preset: &ExportPreset,
+    settings: &SequenceSettings,
+    color_environment: &ProjectColorEnvironment,
+) -> Result<ResolvedExportColorTarget, ExportDeliveryError> {
+    match preset.color_target {
+        ExportColorTarget::FollowSequence => {
+            let context = settings.root_program_color_context(color_environment);
+            let color_space = context.output_color_space.color().ok_or_else(|| {
+                ExportDeliveryError::new(
+                    ExportDeliveryIssueCode::IncompatibleColorOutput,
+                    "Sequence Program Output 必须是可编码色彩空间",
+                )
+            })?;
+            Ok(ResolvedExportColorTarget {
+                color_space,
+                tone_map: context.output_tone_map,
+                output_transform: context.output_transform,
+            })
+        }
+        ExportColorTarget::Colorimetric(color_space) => {
+            validate_explicit_export_color_space(color_space)?;
+            Ok(ResolvedExportColorTarget {
+                color_space,
+                tone_map: false,
+                output_transform: OutputTransformIntent::Colorimetric,
+            })
+        }
+        ExportColorTarget::RenderingView(color_space) => {
+            if !color_space.is_display_referred() {
+                return Err(ExportDeliveryError::new(
+                    ExportDeliveryIssueCode::IncompatibleColorOutput,
+                    "Rendering View 导出目标必须是显示或交付色彩空间；Log 中间格式应使用 Colorimetric",
+                ));
+            }
+            let output_transform = match &color_environment.engine {
+                ColorEngine::MondrianStandard { package } => {
+                    OutputTransformIntent::mondrian_standard_package(*package)
+                }
+                ColorEngine::Aces { preset } => OutputTransformIntent::aces_preset(*preset),
+                ColorEngine::CustomOcio { .. } => {
+                    OutputTransformIntent::CustomOcio { output_color_space: color_space }
+                }
+            };
+            let resolved_view = output_transform
+                .resolve_display_view(color_space, &color_environment.engine)
+                .map_err(|detail| {
+                    ExportDeliveryError::new(
+                        ExportDeliveryIssueCode::IncompatibleColorOutput,
+                        detail.to_string(),
+                    )
+                })?;
+            if resolved_view.is_none() {
+                return Err(ExportDeliveryError::new(
+                    ExportDeliveryIssueCode::IncompatibleColorOutput,
+                    format!("Project 色彩引擎没有可用于 {color_space:?} 的 Rendering View"),
+                ));
+            }
+            Ok(ResolvedExportColorTarget { color_space, tone_map: true, output_transform })
+        }
+    }
+}
+
+fn validate_explicit_export_color_space(
+    color_space: ColorSpace,
+) -> Result<(), ExportDeliveryError> {
+    if color_space.is_display_referred() || color_space.encoding().is_scene_log() {
+        return Ok(());
+    }
+    Err(ExportDeliveryError::new(
+        ExportDeliveryIssueCode::IncompatibleColorOutput,
+        "显式导出目标必须是显示/交付色彩空间或受支持的 Camera Log 编码",
+    ))
 }
 
 fn validate_rate_control(codec: &VideoCodecConfig) -> Result<(), ExportDeliveryError> {
@@ -362,12 +463,13 @@ fn validate_color_output(
     preset: &ExportPreset,
     settings: &SequenceSettings,
     color_environment: &ProjectColorEnvironment,
+    color_target: &ResolvedExportColorTarget,
     bit_depth: DeliveryBitDepth,
     video_range: VideoRange,
 ) -> Result<(), ExportDeliveryError> {
-    let output = settings.color_management.output_color_space;
+    let output = color_target.color_space;
     let write_static_hdr = matches!(
-        settings.color_management.static_hdr_metadata_policy,
+        settings.delivery.static_hdr_metadata_policy,
         StaticHdrMetadataPolicy::WriteAuthored
     );
 
@@ -431,20 +533,19 @@ fn validate_color_output(
                 "静态 HDR metadata 当前仅由 HEVC Main10/libx265 后端写入",
             ));
         }
-        let mastering =
-            settings.color_management.hdr_mastering_display.as_ref().ok_or_else(|| {
-                ExportDeliveryError::new(
-                    ExportDeliveryIssueCode::UnsupportedHdrMetadata,
-                    "写入静态 HDR metadata 需要 SMPTE ST 2086 母版显示元数据",
-                )
-            })?;
+        let mastering = settings.delivery.hdr_mastering_display.as_ref().ok_or_else(|| {
+            ExportDeliveryError::new(
+                ExportDeliveryIssueCode::UnsupportedHdrMetadata,
+                "写入静态 HDR metadata 需要 SMPTE ST 2086 母版显示元数据",
+            )
+        })?;
         mastering.validate().map_err(|error| {
             ExportDeliveryError::new(
                 ExportDeliveryIssueCode::UnsupportedHdrMetadata,
                 format!("SMPTE ST 2086 母版显示元数据无效: {error}"),
             )
         })?;
-        let content_light = settings.color_management.hdr_content_light.ok_or_else(|| {
+        let content_light = settings.delivery.hdr_content_light.ok_or_else(|| {
             ExportDeliveryError::new(
                 ExportDeliveryIssueCode::UnsupportedHdrMetadata,
                 "写入静态 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据",
@@ -517,8 +618,8 @@ mod tests {
     #[test]
     fn follow_sequence_values_are_resolved_before_execution() {
         let mut settings = SequenceSettings::default();
-        settings.color_management.delivery_bit_depth = DeliveryBitDepth::Eight;
-        settings.color_management.video_range = VideoRange::Full;
+        settings.delivery.bit_depth = DeliveryBitDepth::Eight;
+        settings.delivery.video_range = VideoRange::Full;
         let preset = ExportPreset {
             name: "follow".to_owned(),
             container: Container::Mp4,
@@ -530,6 +631,7 @@ mod tests {
             resolution: None,
             video_signal: ExportVideoSignal::default(),
             alpha_mode: ExportAlphaMode::FlattenBlack,
+            color_target: crate::preset::ExportColorTarget::FollowSequence,
         };
 
         let contract =
@@ -537,6 +639,30 @@ mod tests {
                 .expect("sequence defaults should resolve to a concrete contract");
         assert_eq!(contract.bit_depth, DeliveryBitDepth::Eight);
         assert_eq!(contract.video_range, VideoRange::Full);
+    }
+
+    #[test]
+    fn explicit_log_target_does_not_mutate_sequence_program_output() {
+        let settings = SequenceSettings::default();
+        let sequence_output = settings.color.program_output.clone();
+        let mut preset = ExportPreset::prores_4444_alpha();
+        preset.alpha_mode = ExportAlphaMode::FlattenBlack;
+        preset.color_target = ExportColorTarget::Colorimetric(ColorSpace::AppleLogBt2020);
+
+        let contract =
+            resolve_export_delivery(&preset, &settings, &ProjectColorEnvironment::default())
+                .expect("explicit 12-bit ProRes log output should be admitted");
+
+        assert_eq!(settings.color.program_output, sequence_output);
+        assert_eq!(
+            contract.color_target.color_space,
+            ColorSpace::AppleLogBt2020
+        );
+        assert!(!contract.color_target.tone_map);
+        assert_eq!(
+            contract.color_target.output_transform,
+            OutputTransformIntent::Colorimetric
+        );
     }
 
     #[test]

@@ -56,7 +56,7 @@ DisplayOutputSnapshot {
 ```
 
 The snapshot's `ocio_display`/`ocio_view` fields are resolved surface-validation
-evidence, not the execution state stored in timeline `ColorContext`. Production
+evidence, not the execution state stored in `ProgramColorContext`. Production
 preview/export execution uses the context's typed `OutputTransformIntent` and
 the shared renderer boundary resolver; this prevents display probing and render
 scheduling from becoming competing color-science authorities.

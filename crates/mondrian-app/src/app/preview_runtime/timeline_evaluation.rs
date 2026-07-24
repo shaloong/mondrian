@@ -14,7 +14,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         frame: i64,
         width: u32,
         height: u32,
-        color_context: ColorContext,
+        color_context: ProgramColorContext,
     ) -> PreviewTimelineResolution {
         let mut media_frame =
             |request: PreviewTimelineMediaRequest| self.media_frame_for_plan(state, request);

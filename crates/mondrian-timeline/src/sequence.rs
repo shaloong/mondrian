@@ -98,7 +98,7 @@ pub enum ColorWorkflow {
     SceneReferred,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum MissingColorMetadataPolicy {
     /// 无标签素材视为 Rec.709（行业默认）。
     #[default]
@@ -384,17 +384,47 @@ pub enum DeliveryBitDepth {
     Twelve,
 }
 
+/// Sequence-owned color authoring.
+///
+/// This contains working-domain, media-input, and Program Output semantics.
+/// The color engine itself is Project-owned and deliberately absent.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct SequenceColorManagement {
-    pub workflow: ColorWorkflow,
+pub struct SequenceColorSettings {
+    pub working_color_space: WorkingColorSpace,
+    pub input: SequenceInputColorSettings,
+    pub program_output: ProgramOutputColorSettings,
+}
+
+/// Default media-input policy for Timeline contributions in one Sequence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SequenceInputColorSettings {
     pub missing_metadata_policy: MissingColorMetadataPolicy,
+    #[serde(default)]
+    pub auto_tone_map_media: bool,
+}
+
+/// Program Output semantics authored by one Sequence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ProgramOutputColorSettings {
+    pub workflow: ColorWorkflow,
     /// Program-output tone-map policy authored for this Sequence.
-    pub output_tone_map_policy: DisplayToneMapPolicy,
-    pub output_color_space: ColorSpace,
+    pub tone_map_policy: DisplayToneMapPolicy,
+    pub color_space: ColorSpace,
+}
+
+/// Sequence defaults copied into an export target before per-export overrides.
+///
+/// Encoded delivery properties are intentionally separate from creative color
+/// processing. They do not alter Timeline evaluation or Program Output pixels.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SequenceDeliveryDefaults {
     pub video_range: VideoRange,
     /// Actual encoded sample depth of the deliverable.
-    pub delivery_bit_depth: DeliveryBitDepth,
+    pub bit_depth: DeliveryBitDepth,
     /// Whether export omits static HDR metadata or writes the explicitly
     /// authored delivery values below.
     pub static_hdr_metadata_policy: StaticHdrMetadataPolicy,
@@ -406,7 +436,7 @@ pub struct SequenceColorManagement {
     pub hdr_content_light: Option<VideoContentLightMetadata>,
 }
 
-/// Project-level policy for static HDR delivery metadata.
+/// Sequence-owned default policy for static HDR delivery metadata.
 ///
 /// This policy never means source passthrough. Rendered output may only write
 /// metadata explicitly authored for the finished sequence.
@@ -426,30 +456,85 @@ impl StaticHdrMetadataPolicy {
     }
 }
 
-/// 渲染色彩上下文 —— 单帧渲染所需的全部色彩信息。
+/// Resolved Program Output color context for one Sequence evaluation.
 ///
-/// 由序列设置 + 项目设置合并生成，贯穿整个渲染管线。
+/// This combines the Project-owned engine with Sequence-owned program
+/// semantics. It deliberately excludes machine-local monitor adaptation and
+/// per-media input tone mapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ColorContext {
+pub struct ProgramColorContext {
     pub working_color_space: WorkingColorSpace,
     pub output_color_space: OcioColorSpaceIdentity,
-    pub tone_map: bool,
+    /// Whether the working-to-Program-Output boundary applies tone mapping.
+    pub output_tone_map: bool,
     pub workflow: ColorWorkflow,
     pub engine: ColorEngine,
+    /// Sequence input interpretation retained only to derive per-media input
+    /// contexts while traversing nested Timelines; it never changes Program
+    /// Output pixels by itself.
     pub missing_metadata_policy: MissingColorMetadataPolicy,
     /// Product-level final output transform selected for this context.
     pub output_transform: mondrian_core::OutputTransformIntent,
 }
 
-impl Default for SequenceColorManagement {
+/// Resolved media-input color context for one Timeline media contribution.
+///
+/// Input tone mapping is authored on the Sequence/Timeline source plan and is
+/// independent from Program Output tone mapping and monitor adaptation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MediaInputColorContext {
+    pub working_color_space: WorkingColorSpace,
+    pub input_tone_map: bool,
+    pub engine: ColorEngine,
+    pub missing_metadata_policy: MissingColorMetadataPolicy,
+}
+
+impl ProgramColorContext {
+    /// Derive the source-to-working contract for one media contribution.
+    pub fn media_input(&self, input_tone_map: bool) -> MediaInputColorContext {
+        MediaInputColorContext {
+            working_color_space: self.working_color_space,
+            input_tone_map,
+            engine: self.engine.clone(),
+            missing_metadata_policy: self.missing_metadata_policy,
+        }
+    }
+}
+
+impl Default for SequenceColorSettings {
+    fn default() -> Self {
+        Self {
+            working_color_space: WorkingColorSpace::LinearRec2020,
+            input: SequenceInputColorSettings::default(),
+            program_output: ProgramOutputColorSettings::default(),
+        }
+    }
+}
+
+impl Default for SequenceInputColorSettings {
+    fn default() -> Self {
+        Self {
+            missing_metadata_policy: MissingColorMetadataPolicy::AssumeRec709,
+            auto_tone_map_media: true,
+        }
+    }
+}
+
+impl Default for ProgramOutputColorSettings {
     fn default() -> Self {
         Self {
             workflow: ColorWorkflow::SceneReferred,
-            missing_metadata_policy: MissingColorMetadataPolicy::AssumeRec709,
-            output_tone_map_policy: DisplayToneMapPolicy::default(),
-            output_color_space: ColorSpace::Rec709,
+            tone_map_policy: DisplayToneMapPolicy::default(),
+            color_space: ColorSpace::Rec709,
+        }
+    }
+}
+
+impl Default for SequenceDeliveryDefaults {
+    fn default() -> Self {
+        Self {
             video_range: VideoRange::Full,
-            delivery_bit_depth: DeliveryBitDepth::Ten,
+            bit_depth: DeliveryBitDepth::Ten,
             static_hdr_metadata_policy: StaticHdrMetadataPolicy::Omit,
             hdr_mastering_display: None,
             hdr_content_light: None,
@@ -459,6 +544,7 @@ impl Default for SequenceColorManagement {
 
 /// 序列设置（帧率/分辨率/音频配置）
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct SequenceSettings {
     #[serde(default)]
     pub editing_mode: EditingMode,
@@ -477,16 +563,14 @@ pub struct SequenceSettings {
     pub audio_channel_layout: AudioChannelLayout,
     #[serde(default)]
     pub preview: SequencePreviewSettings,
-    pub working_color_space: WorkingColorSpace,
-    #[serde(default)]
-    pub auto_tone_map_media: bool,
+    pub color: SequenceColorSettings,
+    pub delivery: SequenceDeliveryDefaults,
     /// Action-safe margin as fraction of frame (0.10 = 10% total, 5% per side).
     #[serde(default = "default_action_safe_margin")]
     pub action_safe_margin: f32,
     /// Title-safe margin as fraction of frame (0.20 = 20% total, 10% per side).
     #[serde(default = "default_title_safe_margin")]
     pub title_safe_margin: f32,
-    pub color_management: SequenceColorManagement,
 }
 
 fn default_action_safe_margin() -> f32 {
@@ -509,11 +593,10 @@ impl Default for SequenceSettings {
             audio_display_format: AudioDisplayFormat::AudioSamples,
             audio_channel_layout: AudioChannelLayout::Stereo,
             preview: SequencePreviewSettings::default(),
-            working_color_space: WorkingColorSpace::LinearRec2020,
-            auto_tone_map_media: true,
+            color: SequenceColorSettings::default(),
+            delivery: SequenceDeliveryDefaults::default(),
             action_safe_margin: default_action_safe_margin(),
             title_safe_margin: default_title_safe_margin(),
-            color_management: SequenceColorManagement::default(),
         }
     }
 }
@@ -573,37 +656,35 @@ impl SequenceSettings {
                 });
             }
         }
-        if !self.color_management.output_color_space.is_display_referred() {
+        if !self.color.program_output.color_space.is_display_referred() {
             return Err(mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "sequence_settings_validate".to_string(),
                 reason: "序列输出必须是显示或交付色彩空间，不能使用场景线性或 Log 输入空间"
                     .to_string(),
             });
         }
-        if self.color_management.static_hdr_metadata_policy.writes_authored_metadata()
-            && !self.color_management.output_color_space.is_hdr()
+        if self.delivery.static_hdr_metadata_policy.writes_authored_metadata()
+            && !self.color.program_output.color_space.is_hdr()
         {
             return Err(mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "sequence_settings_validate".to_string(),
                 reason: "只有 HDR 输出色彩空间可以写入静态 HDR metadata".to_string(),
             });
         }
-        if self.color_management.static_hdr_metadata_policy.writes_authored_metadata() {
-            let mastering =
-                self.color_management.hdr_mastering_display.as_ref().ok_or_else(|| {
-                    mondrian_core::MondrianError::WorkflowStepFailed {
-                        step_id: "sequence_settings_validate".to_string(),
-                        reason: "写入静态 HDR metadata 需要 SMPTE ST 2086 母版显示元数据"
-                            .to_string(),
-                    }
-                })?;
+        if self.delivery.static_hdr_metadata_policy.writes_authored_metadata() {
+            let mastering = self.delivery.hdr_mastering_display.as_ref().ok_or_else(|| {
+                mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "sequence_settings_validate".to_string(),
+                    reason: "写入静态 HDR metadata 需要 SMPTE ST 2086 母版显示元数据".to_string(),
+                }
+            })?;
             mastering.validate().map_err(|error| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
                     step_id: "sequence_settings_validate".to_string(),
                     reason: format!("HDR mastering metadata 无效: {error}"),
                 }
             })?;
-            let content_light = self.color_management.hdr_content_light.ok_or_else(|| {
+            let content_light = self.delivery.hdr_content_light.ok_or_else(|| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
                     step_id: "sequence_settings_validate".to_string(),
                     reason: "写入静态 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据"
@@ -628,20 +709,20 @@ impl SequenceSettings {
         self.validate()?;
         color_environment
             .engine
-            .validate_working_space(self.working_color_space)
+            .validate_working_space(self.color.working_color_space)
             .map_err(|reason| mondrian_core::MondrianError::WorkflowStepFailed {
-                step_id: "sequence_color_management_validate".to_owned(),
+                step_id: "sequence_color_settings_validate".to_owned(),
                 reason,
             })?;
 
         let output_context = self.root_color_context_for_output(
             color_environment,
-            self.color_management.output_color_space,
+            self.color.program_output.color_space,
         );
         output_context
             .output_transform
             .resolve_display_view(
-                self.color_management.output_color_space,
+                self.color.program_output.color_space,
                 &output_context.engine,
             )
             .map(|_| ())
@@ -661,39 +742,23 @@ impl SequenceSettings {
     pub fn root_program_color_context(
         &self,
         color_environment: &mondrian_core::ProjectColorEnvironment,
-    ) -> ColorContext {
-        self.root_color_context_for_output(
-            color_environment,
-            self.color_management.output_color_space,
-        )
-    }
-
-    /// Build the presentation color context for root sequence preview.
-    ///
-    /// Preview uses the display/output color space supplied by the caller rather
-    /// than the sequence export output, so monitor presentation can evolve
-    /// independently from delivery encoding.
-    pub fn root_preview_color_context(
-        &self,
-        color_environment: &mondrian_core::ProjectColorEnvironment,
-        display_color_space: ColorSpace,
-    ) -> ColorContext {
-        self.root_color_context_for_output(color_environment, display_color_space)
+    ) -> ProgramColorContext {
+        self.root_color_context_for_output(color_environment, self.color.program_output.color_space)
     }
 
     fn root_color_context_for_output(
         &self,
         color_environment: &mondrian_core::ProjectColorEnvironment,
         output_color_space: ColorSpace,
-    ) -> ColorContext {
+    ) -> ProgramColorContext {
         let engine = color_environment.engine.clone();
 
         // Scene-referred workflows need the Project-owned engine's view
         // transform at a display-referred output. The engine alone decides
         // whether that view is Mondrian Standard, ACES, or Custom OCIO.
-        let tone_map = self.color_management.output_tone_map_policy.resolve(
-            self.color_management.workflow == ColorWorkflow::SceneReferred,
-            self.working_color_space,
+        let tone_map = self.color.program_output.tone_map_policy.resolve(
+            self.color.program_output.workflow == ColorWorkflow::SceneReferred,
+            self.color.working_color_space,
             output_color_space,
         );
 
@@ -714,39 +779,39 @@ impl SequenceSettings {
             _ => mondrian_core::OutputTransformIntent::Colorimetric,
         };
 
-        ColorContext {
-            working_color_space: self.working_color_space,
+        ProgramColorContext {
+            working_color_space: self.color.working_color_space,
             output_color_space: OcioColorSpaceIdentity::Color(output_color_space),
-            tone_map,
+            output_tone_map: tone_map,
             engine,
-            missing_metadata_policy: self.color_management.missing_metadata_policy,
+            missing_metadata_policy: self.color.input.missing_metadata_policy,
             output_transform,
-            workflow: self.color_management.workflow,
+            workflow: self.color.program_output.workflow,
         }
     }
 
     pub fn nested_render_color_context(
         &self,
-        parent: ColorContext,
+        parent: ProgramColorContext,
         processing: NestedColorProcessing,
-    ) -> ColorContext {
+    ) -> ProgramColorContext {
         match processing {
-            NestedColorProcessing::PreserveChildWorkingSpace => ColorContext {
-                working_color_space: self.working_color_space,
+            NestedColorProcessing::PreserveChildWorkingSpace => ProgramColorContext {
+                working_color_space: self.color.working_color_space,
                 output_color_space: OcioColorSpaceIdentity::Working(parent.working_color_space),
-                tone_map: self.auto_tone_map_media,
+                output_tone_map: false,
                 engine: parent.engine.clone(),
-                missing_metadata_policy: self.color_management.missing_metadata_policy,
-                output_transform: parent.output_transform.clone(),
-                workflow: self.color_management.workflow,
+                missing_metadata_policy: self.color.input.missing_metadata_policy,
+                output_transform: mondrian_core::OutputTransformIntent::Colorimetric,
+                workflow: self.color.program_output.workflow,
             },
-            NestedColorProcessing::ForceParentWorkingSpace => ColorContext {
+            NestedColorProcessing::ForceParentWorkingSpace => ProgramColorContext {
                 working_color_space: parent.working_color_space,
                 output_color_space: OcioColorSpaceIdentity::Working(parent.working_color_space),
-                tone_map: parent.tone_map,
+                output_tone_map: false,
                 engine: parent.engine.clone(),
-                missing_metadata_policy: parent.missing_metadata_policy,
-                output_transform: parent.output_transform.clone(),
+                missing_metadata_policy: self.color.input.missing_metadata_policy,
+                output_transform: mondrian_core::OutputTransformIntent::Colorimetric,
                 workflow: parent.workflow,
             },
         }
@@ -810,22 +875,21 @@ impl SequenceSettings {
         let audio_channel_layout = self.audio_channel_layout;
         let start_timecode_frame = self.timeline_display.timecode_start_frame;
         let preview = self.preview.clone();
-        let working_color_space = self.working_color_space;
-        let color_management = self.color_management.clone();
-        let auto_tone_map_media = self.auto_tone_map_media;
+        let color = self.color.clone();
+        let delivery = self.delivery.clone();
         *self = Self::from_editing_mode(mode);
         self.audio_sample_rate = audio_sample_rate;
         self.audio_display_format = audio_display_format;
         self.audio_channel_layout = audio_channel_layout;
         self.timeline_display.timecode_start_frame = start_timecode_frame;
         self.preview = preview;
-        self.working_color_space = working_color_space;
-        self.color_management = color_management;
-        self.auto_tone_map_media = auto_tone_map_media;
+        self.color = color;
+        self.delivery = delivery;
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct SequencePreset {
     pub name: String,
     pub settings: SequenceSettings,
@@ -847,6 +911,7 @@ impl SequencePreset {
 
 /// Mondrian 时间线序列
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Sequence {
     pub id: SequenceId,
     /// Monotonic authoring transaction revision for this stable Sequence ID.
@@ -1669,7 +1734,7 @@ impl mondrian_core::timeline_data::RenderPlanSource for Sequence {
     }
 
     fn auto_tone_map_media(&self) -> bool {
-        self.settings.auto_tone_map_media
+        self.settings.color.input.auto_tone_map_media
     }
 }
 
@@ -1705,6 +1770,7 @@ fn flatten_visual_clip(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SequenceCollection {
     pub sequences: Vec<Sequence>,
     pub default_sequence_id: SequenceId,
@@ -2114,11 +2180,11 @@ mod tests {
 
     #[test]
     fn delivery_bit_depth_defaults_to_ten_bit_and_serializes_explicitly() {
-        let color = SequenceColorManagement::default();
-        assert_eq!(color.delivery_bit_depth, DeliveryBitDepth::Ten);
+        let delivery = SequenceDeliveryDefaults::default();
+        assert_eq!(delivery.bit_depth, DeliveryBitDepth::Ten);
 
-        let json = serde_json::to_value(color).expect("serialize sequence color management");
-        assert_eq!(json["delivery_bit_depth"], "Ten");
+        let json = serde_json::to_value(delivery).expect("serialize Sequence delivery defaults");
+        assert_eq!(json["bit_depth"], "Ten");
         assert!(json.get("export_bit_depth").is_none());
     }
 
@@ -2389,7 +2455,10 @@ mod tests {
                 SmpteCountingMode::NonDropFrame,
                 24 * 60 * 60,
             ),
-            working_color_space: WorkingColorSpace::LinearRec2020,
+            color: SequenceColorSettings {
+                working_color_space: WorkingColorSpace::LinearRec2020,
+                ..SequenceColorSettings::default()
+            },
             audio_sample_rate: 96_000,
             audio_display_format: AudioDisplayFormat::Milliseconds,
             audio_channel_layout: AudioChannelLayout::Surround51Side,
@@ -2417,7 +2486,10 @@ mod tests {
         let cinema = SequenceSettings::from_editing_mode(EditingMode::DigitalCinema4k);
         assert_eq!(cinema.resolution, Resolution::DCI4K);
         assert_eq!(cinema.frame_rate, Rational::FPS_24);
-        assert_eq!(cinema.working_color_space, WorkingColorSpace::LinearRec2020);
+        assert_eq!(
+            cinema.color.working_color_space,
+            WorkingColorSpace::LinearRec2020
+        );
     }
 
     #[test]
@@ -2461,62 +2533,45 @@ mod tests {
 
     #[test]
     fn sequence_color_management_rejects_invalid_hdr_metadata_policy() {
-        let settings = SequenceSettings {
-            color_management: SequenceColorManagement {
-                output_color_space: ColorSpace::Rec709,
-                static_hdr_metadata_policy: StaticHdrMetadataPolicy::WriteAuthored,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let mut settings = SequenceSettings::default();
+        settings.delivery.static_hdr_metadata_policy = StaticHdrMetadataPolicy::WriteAuthored;
         assert!(settings.validate().is_err());
     }
 
     #[test]
     fn sequence_color_management_rejects_source_only_output_space() {
-        let settings = SequenceSettings {
-            color_management: SequenceColorManagement {
-                output_color_space: ColorSpace::AcesCg,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let mut settings = SequenceSettings::default();
+        settings.color.program_output.color_space = ColorSpace::AcesCg;
 
         assert!(settings.validate().is_err());
     }
 
     #[test]
     fn sequence_color_management_accepts_hdr_output_metadata_policy() {
-        let settings = SequenceSettings {
-            working_color_space: WorkingColorSpace::LinearRec2020,
-            color_management: SequenceColorManagement {
-                output_color_space: ColorSpace::Rec2100Pq,
-                static_hdr_metadata_policy: StaticHdrMetadataPolicy::WriteAuthored,
-                hdr_mastering_display: Some(
-                    VideoMasteringDisplayMetadata::rec2100_1000_nit_reference(),
-                ),
-                hdr_content_light: Some(VideoContentLightMetadata::rec2100_1000_nit_reference()),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let mut settings = SequenceSettings::default();
+        settings.color.program_output.color_space = ColorSpace::Rec2100Pq;
+        settings.delivery.static_hdr_metadata_policy = StaticHdrMetadataPolicy::WriteAuthored;
+        settings.delivery.hdr_mastering_display =
+            Some(VideoMasteringDisplayMetadata::rec2100_1000_nit_reference());
+        settings.delivery.hdr_content_light =
+            Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
         assert!(settings.validate().is_ok());
     }
 
     #[test]
     fn static_hdr_metadata_policy_serialization_is_explicit_and_breaking() {
-        let color_management = SequenceColorManagement {
+        let delivery = SequenceDeliveryDefaults {
             static_hdr_metadata_policy: StaticHdrMetadataPolicy::WriteAuthored,
-            ..SequenceColorManagement::default()
+            ..SequenceDeliveryDefaults::default()
         };
-        let json = serde_json::to_value(&color_management).expect("serialize color management");
+        let json = serde_json::to_value(&delivery).expect("serialize delivery defaults");
         assert_eq!(
             json.get("static_hdr_metadata_policy"),
             Some(&serde_json::Value::String("WriteAuthored".to_owned()))
         );
 
         let old_shape = serde_json::json!({ "preserve_hdr_metadata": true });
-        let error = serde_json::from_value::<SequenceColorManagement>(old_shape)
+        let error = serde_json::from_value::<SequenceDeliveryDefaults>(old_shape)
             .expect_err("removed preservation flag must not silently become Omit");
         assert!(error.to_string().contains("preserve_hdr_metadata"));
     }
@@ -2526,72 +2581,62 @@ mod tests {
         let mut mastering = VideoMasteringDisplayMetadata::rec2100_1000_nit_reference();
         mastering.luminance.as_mut().expect("reference luminance").max =
             mondrian_core::VideoHdrRational::new(1000, 0);
-        let invalid_mastering = SequenceSettings {
-            color_management: SequenceColorManagement {
-                output_color_space: ColorSpace::Rec2100Pq,
-                static_hdr_metadata_policy: StaticHdrMetadataPolicy::WriteAuthored,
-                hdr_mastering_display: Some(mastering),
-                hdr_content_light: Some(VideoContentLightMetadata::rec2100_1000_nit_reference()),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let mut invalid_mastering = SequenceSettings::default();
+        invalid_mastering.color.program_output.color_space = ColorSpace::Rec2100Pq;
+        invalid_mastering.delivery.static_hdr_metadata_policy =
+            StaticHdrMetadataPolicy::WriteAuthored;
+        invalid_mastering.delivery.hdr_mastering_display = Some(mastering);
+        invalid_mastering.delivery.hdr_content_light =
+            Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
         assert!(invalid_mastering.validate().is_err());
 
-        let invalid_content_light = SequenceSettings {
-            color_management: SequenceColorManagement {
-                output_color_space: ColorSpace::Rec2100Pq,
-                static_hdr_metadata_policy: StaticHdrMetadataPolicy::WriteAuthored,
-                hdr_mastering_display: Some(
-                    VideoMasteringDisplayMetadata::rec2100_1000_nit_reference(),
-                ),
-                hdr_content_light: Some(VideoContentLightMetadata {
-                    max_content_light_level: 400,
-                    max_frame_average_light_level: 500,
-                }),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let mut invalid_content_light = SequenceSettings::default();
+        invalid_content_light.color.program_output.color_space = ColorSpace::Rec2100Pq;
+        invalid_content_light.delivery.static_hdr_metadata_policy =
+            StaticHdrMetadataPolicy::WriteAuthored;
+        invalid_content_light.delivery.hdr_mastering_display =
+            Some(VideoMasteringDisplayMetadata::rec2100_1000_nit_reference());
+        invalid_content_light.delivery.hdr_content_light = Some(VideoContentLightMetadata {
+            max_content_light_level: 400,
+            max_frame_average_light_level: 500,
+        });
         assert!(invalid_content_light.validate().is_err());
     }
 
     #[test]
     fn editing_mode_preserves_color_management_policy() {
-        let mut settings = SequenceSettings {
-            working_color_space: WorkingColorSpace::AcesCg,
-            color_management: SequenceColorManagement {
-                workflow: ColorWorkflow::SceneReferred,
-                output_color_space: ColorSpace::Rec2100Pq,
-                static_hdr_metadata_policy: StaticHdrMetadataPolicy::WriteAuthored,
-                hdr_mastering_display: Some(
-                    VideoMasteringDisplayMetadata::rec2100_1000_nit_reference(),
-                ),
-                hdr_content_light: Some(VideoContentLightMetadata::rec2100_1000_nit_reference()),
-                ..Default::default()
-            },
-            auto_tone_map_media: false,
-            ..Default::default()
-        };
+        let mut settings = SequenceSettings::default();
+        settings.color.working_color_space = WorkingColorSpace::AcesCg;
+        settings.color.program_output.workflow = ColorWorkflow::SceneReferred;
+        settings.color.program_output.color_space = ColorSpace::Rec2100Pq;
+        settings.color.input.auto_tone_map_media = false;
+        settings.delivery.static_hdr_metadata_policy = StaticHdrMetadataPolicy::WriteAuthored;
+        settings.delivery.hdr_mastering_display =
+            Some(VideoMasteringDisplayMetadata::rec2100_1000_nit_reference());
+        settings.delivery.hdr_content_light =
+            Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
 
         settings.apply_editing_mode_preset(EditingMode::Custom);
 
-        assert_eq!(settings.working_color_space, WorkingColorSpace::AcesCg);
         assert_eq!(
-            settings.color_management.workflow,
+            settings.color.working_color_space,
+            WorkingColorSpace::AcesCg
+        );
+        assert_eq!(
+            settings.color.program_output.workflow,
             ColorWorkflow::SceneReferred
         );
         assert_eq!(
-            settings.color_management.output_color_space,
+            settings.color.program_output.color_space,
             ColorSpace::Rec2100Pq
         );
         assert_eq!(
-            settings.color_management.static_hdr_metadata_policy,
+            settings.delivery.static_hdr_metadata_policy,
             StaticHdrMetadataPolicy::WriteAuthored
         );
-        assert!(settings.color_management.hdr_mastering_display.is_some());
-        assert!(settings.color_management.hdr_content_light.is_some());
-        assert!(!settings.auto_tone_map_media);
+        assert!(settings.delivery.hdr_mastering_display.is_some());
+        assert!(settings.delivery.hdr_content_light.is_some());
+        assert!(!settings.color.input.auto_tone_map_media);
         assert!(settings.validate().is_ok());
     }
 
@@ -2709,7 +2754,7 @@ mod tests {
         assert_eq!(seq.video_tracks[2].name, "V3");
     }
 
-    // ── ColorEngine / ColorContext tests ──────────────────────────────────────
+    // ── ColorEngine / ProgramColorContext tests ───────────────────────────────
 
     #[test]
     fn nested_edge_policy_changes_working_semantics_without_changing_project_engine() {
@@ -2718,10 +2763,9 @@ mod tests {
         });
         let parent = SequenceSettings::default();
         let parent_context = parent.root_program_color_context(&environment);
-        let child = SequenceSettings {
-            working_color_space: WorkingColorSpace::AcesCg,
-            ..SequenceSettings::default()
-        };
+        let mut child = SequenceSettings::default();
+        child.color.working_color_space = WorkingColorSpace::AcesCg;
+        child.color.input.missing_metadata_policy = MissingColorMetadataPolicy::RejectMedia;
 
         let preserved = child.nested_render_color_context(
             parent_context.clone(),
@@ -2739,6 +2783,11 @@ mod tests {
             forced.working_color_space,
             parent_context.working_color_space
         );
+        assert_eq!(
+            forced.missing_metadata_policy,
+            MissingColorMetadataPolicy::RejectMedia,
+            "forcing the parent working space must not replace child media interpretation"
+        );
     }
 
     #[test]
@@ -2755,36 +2804,46 @@ mod tests {
     #[test]
     fn output_tone_map_policy_is_sequence_author_semantics() {
         let environment = standard_environment();
-        let mut settings = SequenceSettings {
-            working_color_space: WorkingColorSpace::LinearRec2020,
-            auto_tone_map_media: false,
-            ..Default::default()
-        };
+        let mut settings = SequenceSettings::default();
+        settings.color.working_color_space = WorkingColorSpace::LinearRec2020;
+        settings.color.input.auto_tone_map_media = false;
 
         assert!(
-            settings.root_program_color_context(&environment).tone_map,
+            settings.root_program_color_context(&environment).output_tone_map,
             "automatic policy maps scene-referred content to a display output"
         );
-        settings.color_management.output_tone_map_policy = DisplayToneMapPolicy::Never;
-        assert!(!settings.root_program_color_context(&environment).tone_map);
-        settings.color_management.output_tone_map_policy = DisplayToneMapPolicy::Always;
-        assert!(settings.root_program_color_context(&environment).tone_map);
+        settings.color.program_output.tone_map_policy = DisplayToneMapPolicy::Never;
+        assert!(!settings.root_program_color_context(&environment).output_tone_map);
+        settings.color.program_output.tone_map_policy = DisplayToneMapPolicy::Always;
+        assert!(settings.root_program_color_context(&environment).output_tone_map);
+    }
+
+    #[test]
+    fn media_input_tone_map_is_independent_from_program_output() {
+        let environment = standard_environment();
+        let mut settings = SequenceSettings::default();
+        settings.color.program_output.tone_map_policy = DisplayToneMapPolicy::Never;
+        let program = settings.root_program_color_context(&environment);
+
+        assert!(!program.output_tone_map);
+        assert!(program.media_input(true).input_tone_map);
+        assert!(!program.media_input(false).input_tone_map);
+
+        settings.color.program_output.tone_map_policy = DisplayToneMapPolicy::Always;
+        let program = settings.root_program_color_context(&environment);
+        assert!(program.output_tone_map);
+        assert!(!program.media_input(false).input_tone_map);
     }
 
     #[test]
     fn display_referred_workflow_can_remain_colorimetric() {
-        let settings = SequenceSettings {
-            auto_tone_map_media: false,
-            color_management: SequenceColorManagement {
-                workflow: ColorWorkflow::DisplayReferred,
-                output_tone_map_policy: DisplayToneMapPolicy::Automatic,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let mut settings = SequenceSettings::default();
+        settings.color.input.auto_tone_map_media = false;
+        settings.color.program_output.workflow = ColorWorkflow::DisplayReferred;
+        settings.color.program_output.tone_map_policy = DisplayToneMapPolicy::Automatic;
 
         let context = settings.root_program_color_context(&standard_environment());
-        assert!(!context.tone_map);
+        assert!(!context.output_tone_map);
         assert_eq!(
             context.output_transform,
             mondrian_core::OutputTransformIntent::Colorimetric
@@ -2801,7 +2860,7 @@ mod tests {
             context.output_color_space,
             OcioColorSpaceIdentity::Color(ColorSpace::Rec709)
         );
-        assert!(context.tone_map);
+        assert!(context.output_tone_map);
         assert_eq!(
             context.output_transform,
             mondrian_core::OutputTransformIntent::mondrian_standard()
@@ -2810,44 +2869,13 @@ mod tests {
     }
 
     #[test]
-    fn preview_and_program_contexts_share_sequence_semantics_but_not_output_target() {
-        let environment = standard_environment();
-        let settings = SequenceSettings {
-            working_color_space: WorkingColorSpace::LinearRec2020,
-            color_management: SequenceColorManagement {
-                output_color_space: ColorSpace::Rec2100Pq,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let preview = settings.root_preview_color_context(&environment, ColorSpace::Rec709);
-        let program = settings.root_program_color_context(&environment);
-
-        assert_eq!(
-            preview.output_color_space,
-            OcioColorSpaceIdentity::Color(ColorSpace::Rec709)
-        );
-        assert_eq!(
-            program.output_color_space,
-            OcioColorSpaceIdentity::Color(ColorSpace::Rec2100Pq)
-        );
-        assert_eq!(preview.engine, program.engine);
-        assert_eq!(preview.workflow, program.workflow);
-        assert_eq!(
-            preview.missing_metadata_policy,
-            program.missing_metadata_policy
-        );
-    }
-
-    #[test]
     fn custom_ocio_scene_output_uses_its_pinned_binding() {
         let settings = SequenceSettings::default();
         let environment = color_environment(pinned_custom_engine(OcioConfigSource::Environment));
 
-        let context = settings.root_preview_color_context(&environment, ColorSpace::Rec709);
+        let context = settings.root_program_color_context(&environment);
 
-        assert!(context.tone_map);
+        assert!(context.output_tone_map);
         assert_eq!(
             context.output_transform,
             mondrian_core::OutputTransformIntent::CustomOcio {
@@ -2860,14 +2888,14 @@ mod tests {
     fn custom_ocio_rejects_unpinned_output_and_working_space() {
         let mut settings = SequenceSettings::default();
         let environment = color_environment(pinned_custom_engine(OcioConfigSource::Environment));
-        settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
+        settings.color.program_output.color_space = ColorSpace::Rec2100Pq;
         let output_error = settings
             .validate_with_color_environment(&environment)
             .expect_err("Custom OCIO must reject an unpinned output binding");
         assert!(output_error.to_string().contains("output binding"));
 
-        settings.color_management.output_color_space = ColorSpace::Rec709;
-        settings.working_color_space = WorkingColorSpace::AcesCg;
+        settings.color.program_output.color_space = ColorSpace::Rec709;
+        settings.color.working_color_space = WorkingColorSpace::AcesCg;
         let working_error = settings
             .validate_with_color_environment(&environment)
             .expect_err("Custom OCIO must reject an unpinned working space");
@@ -2877,17 +2905,15 @@ mod tests {
     #[test]
     fn standard_rejects_unversioned_working_space_and_scene_view() {
         let environment = standard_environment();
-        let mut settings = SequenceSettings {
-            working_color_space: WorkingColorSpace::LinearP3D65,
-            ..Default::default()
-        };
+        let mut settings = SequenceSettings::default();
+        settings.color.working_color_space = WorkingColorSpace::LinearP3D65;
         let working_error = settings
             .validate_with_color_environment(&environment)
             .expect_err("Standard must reject a non-versioned working space");
         assert!(working_error.to_string().contains("Mondrian Standard"));
 
-        settings.working_color_space = WorkingColorSpace::LinearRec2020;
-        settings.color_management.output_color_space = ColorSpace::Rec601Pal;
+        settings.color.working_color_space = WorkingColorSpace::LinearRec2020;
+        settings.color.program_output.color_space = ColorSpace::Rec601Pal;
         let output_error = settings
             .validate_with_color_environment(&environment)
             .expect_err("scene-referred Standard must require a product View");
@@ -2896,7 +2922,7 @@ mod tests {
             "{output_error:#}"
         );
 
-        settings.color_management.workflow = ColorWorkflow::DisplayReferred;
+        settings.color.program_output.workflow = ColorWorkflow::DisplayReferred;
         settings
             .validate_with_color_environment(&environment)
             .expect("display-referred colorimetric output remains valid");
@@ -2907,7 +2933,7 @@ mod tests {
         let preset = mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25;
         let mut settings = SequenceSettings::default();
         let environment = color_environment(ColorEngine::Aces { preset });
-        settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
+        settings.color.program_output.color_space = ColorSpace::Rec2100Pq;
 
         let pq = settings.root_program_color_context(&environment);
         assert_eq!(
@@ -2921,7 +2947,7 @@ mod tests {
             )
         );
 
-        settings.color_management.output_color_space = ColorSpace::Rec2020;
+        settings.color.program_output.color_space = ColorSpace::Rec2020;
         let error = settings
             .validate_with_color_environment(&environment)
             .expect_err("ACES must not relabel its default Rec.709 View as Rec.2020 SDR");
@@ -2944,8 +2970,7 @@ mod tests {
     }
 
     #[test]
-    fn mondrian_standard_resolves_each_supported_preview_target() {
-        let settings = SequenceSettings::default();
+    fn mondrian_standard_output_intent_resolves_each_supported_delivery_target() {
         let environment = standard_environment();
         for (target, expected_display, expected_view) in [
             (
@@ -2969,11 +2994,10 @@ mod tests {
                 "Mondrian Standard HDR 1000 nits v1",
             ),
         ] {
-            let context = settings.root_preview_color_context(&environment, target);
+            let intent = mondrian_core::OutputTransformIntent::mondrian_standard();
             assert_eq!(
-                context
-                    .output_transform
-                    .resolve_display_view(target, &context.engine)
+                intent
+                    .resolve_display_view(target, &environment.engine)
                     .expect("supported Standard target"),
                 Some((expected_display.to_owned(), expected_view.to_owned()))
             );

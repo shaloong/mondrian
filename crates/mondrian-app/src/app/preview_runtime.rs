@@ -146,8 +146,8 @@ use mondrian_renderer::{
 #[cfg(test)]
 use mondrian_timeline::sequence::ResolvedInputColor;
 use mondrian_timeline::sequence::{
-    ColorContext, InputColorResolution, InputColorResolutionSource,
-    InputColorResolutionSourceCounts, MissingColorMetadataPolicy, Sequence,
+    InputColorResolution, InputColorResolutionSource, InputColorResolutionSourceCounts,
+    MediaInputColorContext, MissingColorMetadataPolicy, ProgramColorContext, Sequence,
 };
 const MEDIA_PREVIEW_PLAYBACK_BUFFERING_STALL_TIMEOUT_US: u64 = 250_000;
 const MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL: usize = 8;
@@ -364,7 +364,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             source_has_alpha: false,
             alpha_interpretation: AlphaInterpretation::Straight,
             working_color_space: WorkingColorSpace::LinearRec709,
-            tone_map: false,
+            input_tone_map: false,
             engine: ColorEngine::mondrian_standard(),
         };
         let generation = self.scheduler.begin_generation();
@@ -875,20 +875,17 @@ impl<O: Clone> PreviewProductionRuntime<O> {
 ///
 /// This uses the same preview-intent render-plan evaluation as the viewer. It
 /// intentionally returns source counts only; output/display differences are
-/// handled by the preview color context and must not change input
-/// interpretation source categories.
+/// handled after Program Output and must not change input interpretation
+/// source categories.
 pub fn preview_input_color_resolution_counts_for_frame(
     sequence: &Sequence,
     sequences: &[Sequence],
     asset_color_spaces: &HashMap<AssetId, ColorSpace>,
     asset_interpretations: &HashMap<AssetId, AssetMediaInterpretation>,
     color_environment: &mondrian_core::ProjectColorEnvironment,
-    display_color_space: ColorSpace,
     frame: i64,
 ) -> Result<InputColorResolutionSourceCounts, PreviewUnavailability> {
-    let color_context = sequence
-        .settings
-        .root_preview_color_context(color_environment, display_color_space);
+    let color_context = sequence.settings.root_program_color_context(color_environment);
     let target_resolution = preview_execution_resolution(
         sequence.settings.resolution,
         sequence.settings.preview.resolution_scale,
@@ -911,7 +908,7 @@ pub fn preview_input_color_resolution_counts_for_frame(
             demand.color_space_override,
             asset_interpretation,
             detected_color_space,
-            &demand.color_context,
+            &demand.input_color,
         );
         counts.record(resolution.source);
     }
@@ -1130,7 +1127,7 @@ fn preview_display_color_space(
     viewer_display_management: &mondrian_core::DisplayManagementPolicy,
     display_snapshot: Option<&DisplayOutputSnapshot>,
 ) -> Result<ColorSpace, crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker> {
-    let sequence_output = sequence.settings.color_management.output_color_space;
+    let sequence_output = sequence.settings.color.program_output.color_space;
     let profile_space = match viewer_display_management.monitor_profile {
         mondrian_core::MonitorProfileReference::IccProfile { .. } => {
             preview_icc_display_color_space(display_snapshot)?

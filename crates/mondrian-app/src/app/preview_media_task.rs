@@ -512,7 +512,7 @@ fn decode_media_preview_inner(
             };
             let input_transform = RenderInputTransform::to_working(
                 job.key.working_color_space,
-                job.key.tone_map,
+                job.key.input_tone_map,
                 job.key.engine.clone(),
             );
             let gpu_source = MediaPreviewGpuSourceFrame::from_decode_diagnostics(
@@ -578,7 +578,7 @@ fn decode_media_preview_inner(
             };
             let input_transform = RenderInputTransform::to_working(
                 job.key.working_color_space,
-                job.key.tone_map,
+                job.key.input_tone_map,
                 job.key.engine.clone(),
             );
             let gpu_source = MediaPreviewGpuSourceFrame::from_decode_diagnostics(
@@ -631,7 +631,7 @@ fn decode_media_preview_inner(
             let presentation_quality = preview_decode_presentation_quality(&decode_diagnostics);
             let input_transform = RenderInputTransform::to_working_gpu(
                 job.key.working_color_space,
-                job.key.tone_map,
+                job.key.input_tone_map,
                 job.key.engine.clone(),
             );
             let native_source = MediaPreviewNativeSourceFrame::from_native_frame(

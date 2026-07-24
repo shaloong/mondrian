@@ -121,7 +121,7 @@ impl AppUiHost {
         let system_theme_preset = ThemePreset::Dark;
         set_theme_preset(preferences.theme_preference.resolve(system_theme_preset));
         let asset_thumbnails = AssetThumbnailAdapter::new();
-        asset_thumbnails.set_color_context(thumbnail_color_context(&app_state));
+        asset_thumbnails.set_color_context(Some(thumbnail_color_context(&app_state)));
         let waveform_service = AudioWaveformService::new();
         waveform_service.set_library(app_state.asset_library_handle());
         let preview_service = WindowPreviewAdapter::new();
@@ -363,7 +363,7 @@ impl AppUiHost {
         }
         self.normalize_asset_folder_selection();
         self.asset_thumbnails
-            .set_color_context(thumbnail_color_context(&self.app_state.borrow()));
+            .set_color_context(Some(thumbnail_color_context(&self.app_state.borrow())));
         self.root.refresh_from_app_state_with_preferences_thumbnails_and_preview(
             &self.app_state.borrow(),
             &self.preferences,
@@ -1048,13 +1048,25 @@ impl AppUiHost {
     }
 }
 
-fn thumbnail_color_context(state: &AppState) -> Option<mondrian_timeline::sequence::ColorContext> {
-    state.active_sequence().map(|sequence| {
-        sequence.settings.root_preview_color_context(
-            state.project_color_environment(),
-            mondrian_core::types::ColorSpace::Srgb,
-        )
-    })
+fn thumbnail_color_context(state: &AppState) -> mondrian_timeline::sequence::ProgramColorContext {
+    let environment = state.project_color_environment();
+    let mut context = state.new_sequence_defaults().root_program_color_context(environment);
+    context.output_color_space = mondrian_core::types::ColorSpace::Srgb.into();
+    context.output_tone_map = true;
+    context.output_transform = match &environment.engine {
+        mondrian_core::ColorEngine::MondrianStandard { package } => {
+            mondrian_core::OutputTransformIntent::mondrian_standard_package(*package)
+        }
+        mondrian_core::ColorEngine::Aces { preset } => {
+            mondrian_core::OutputTransformIntent::aces_preset(*preset)
+        }
+        mondrian_core::ColorEngine::CustomOcio { .. } => {
+            mondrian_core::OutputTransformIntent::CustomOcio {
+                output_color_space: mondrian_core::types::ColorSpace::Srgb,
+            }
+        }
+    };
+    context
 }
 
 fn action_prefers_transport_refresh_without_preview(action: &Action) -> bool {

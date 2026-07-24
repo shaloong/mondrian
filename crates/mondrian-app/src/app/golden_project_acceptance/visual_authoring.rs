@@ -386,10 +386,8 @@ fn sha256_bytes(bytes: &[u8]) -> String {
 
 fn execute_visual_frame(state: &AppState, frame: i64) -> anyhow::Result<VisualExecutionEvidence> {
     let sequence = state.active_sequence().context("active Sequence is absent")?;
-    let color_context = sequence.settings.root_preview_color_context(
-        state.project_color_environment(),
-        mondrian_core::ColorSpace::Rec709,
-    );
+    let color_context =
+        sequence.settings.root_program_color_context(state.project_color_environment());
     let export_plan =
         evaluate_timeline_render_plan(sequence, TimelineEvaluationRequest::export(frame))?;
     let export_transition = export_plan

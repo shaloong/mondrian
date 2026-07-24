@@ -301,7 +301,8 @@ and generation and never repeat that work per frame.
 `ocio_config_generation()` remains operational diagnostics for process-global
 OCIO reloads. It is not semantic cache identity. Final-frame, media, thumbnail,
 diagnostic, CPU-processor and GPU-shader caches carry the exact `ColorEngine`
-or resolved `ColorContext`; switching the process-global current config cannot
+and their resolved `ProgramColorContext` or `MediaInputColorContext`; switching
+the process-global current config cannot
 make an object from one engine satisfy another engine's key.
 
 `ocio_config_source()` returns the source identity of the currently loaded
@@ -311,24 +312,28 @@ source-aware idempotency.
 ## Project and Sequence
 
 `ProjectColorEnvironment` stores the Project's one exact engine.
-`SequenceColorManagement` stores no engine and has no inheritance switch.
-Every resolved context is the product of that Project engine and one
-Sequence's program semantics.
+`SequenceColorSettings` stores no engine and has no inheritance switch. It has
+three closed parts: working-space identity, media-input policy, and Program
+Output policy. `SequenceDeliveryDefaults` separately owns encoded defaults and
+authored HDR metadata. Every resolved context is the product of the Project
+engine and only the Sequence semantics needed at that stage.
 Sequence editing-mode presets may update editing format defaults such as
 resolution, frame rate, and display format, but they preserve working color
-space, `SequenceColorManagement`, authored static HDR payloads, and
+space, `SequenceColorSettings`, `SequenceDeliveryDefaults`, and
 tone-map policy. Color-management state is explicit user/project intent and is
 validated fail-closed after the preset is applied.
 
 Important fields:
 
-- `workflow`: SceneReferred (default Standard picture formation) or explicit DisplayReferred colorimetric bypass
-- `missing_metadata_policy`
-- `output_tone_map_policy`
-- `output_color_space`
-- `video_range`
-- `delivery_bit_depth`: default encoded 8/10/12-bit delivery sample depth
-- static HDR metadata authoring policy and payloads
+- `color.working_color_space`
+- `color.input.missing_metadata_policy`
+- `color.input.auto_tone_map_media`
+- `color.program_output.workflow`: SceneReferred (default Standard picture formation) or explicit DisplayReferred colorimetric bypass
+- `color.program_output.tone_map_policy`
+- `color.program_output.color_space`
+- `delivery.video_range`
+- `delivery.bit_depth`: default encoded 8/10/12-bit delivery sample depth
+- `delivery` static HDR metadata authoring policy and payloads
 
 Viewer display/profile policy is machine-local runtime state. It is not saved
 in the Project or Sequence and is applied only after Program Output. Nested
@@ -336,12 +341,16 @@ processing belongs to each `NestedSequence` Clip placement edge. The supported
 policies either convert the completed child working image exactly once at the
 edge or evaluate the child directly in parent working space. A nominal
 child-output bake is intentionally absent until its full execution and
-reference contract exists. No edge can select another engine.
+reference contract exists. No edge can select another engine, and forcing the
+parent working space never replaces the child's media-input interpretation
+policy.
 
-`DisplayToneMapPolicy` controls the final working-to-display/export boundary.
+`DisplayToneMapPolicy` controls the final working-to-Program-Output boundary.
 Its `Automatic` mode follows the effective workflow; the per-sequence
-`auto_tone_map_media` authoring preference remains attached to individual media
-render plans. New sequences are scene-referred and execute the selected
+`color.input.auto_tone_map_media` preference is copied onto each media render
+plan and becomes `MediaInputColorContext.input_tone_map`. Current-frame,
+prefetch, and preroll resolution consume that same value. New sequences are
+scene-referred and execute the selected
 engine's product View. DisplayReferred is an explicit direct-colorimetric bypass.
 `ColorEngine` is the sole Standard/ACES/Custom mode selector; workflow
 deliberately has no ACES-branded variant.
@@ -429,7 +438,7 @@ external linear ACEScg source and an internal ACEScg working frame remain
 different pipeline roles even though their numerical color space is identical.
 Only scene-linear `ColorSpace` values convert directly into a working identity;
 display-encoded and Log values require an OCIO processor.
-`SequenceSettings.working_color_space` persists `WorkingColorSpace` directly.
+`SequenceSettings.color.working_color_space` persists `WorkingColorSpace` directly.
 Project files and sequence-setting actions do not accept encoded acquisition or
 delivery identities in this field.
 
@@ -650,7 +659,8 @@ the generated GLSL source span and complete error chain, rather than only the
 invalid function name.
 
 Preview and export final transforms are renderer execution concerns.
-`ColorContext::output_transform` is the only product-level transform truth;
+The resolved output context's `output_transform` is the only product-level
+transform truth;
 the context does not duplicate resolved OCIO display/view strings.
 App, thumbnail, and export code call
 `RenderOutputColorBoundary::from_intent(...)`, which resolves the same intent
@@ -898,9 +908,11 @@ Asset thumbnails are presentation artifacts, not source frames. The app-owned
 thumbnail worker resolves `AssetMediaInterpretation`, detected input color,
 encoded source range, working space, engine, display/view, output space,
 tone-map intent, and current OCIO config generation into one contract. Output
-space and tone mapping come from the resolved `ColorContext`; the worker must
-not replace them with thumbnail-local defaults. The product thumbnail host
-currently requests an explicit sRGB presentation context, executes the same
+space and tone mapping come from one explicit thumbnail presentation contract;
+the worker must not infer them locally. The product thumbnail host derives that
+contract from the Project engine and future-Sequence input/working defaults,
+then requests an explicit sRGB rendering target independently from the active
+Sequence. It executes the same
 renderer CPU input and output boundary APIs used by preview, and submits the
 result as `RasterImageColorSpace::Srgb` to the UI atlas. Cache, failure,
 pending-request, active-request, and raster-atlas identities include the full
@@ -1094,18 +1106,24 @@ than recomputing color interpretation from asset records.
 Display transforms belong at preview presentation. Export transforms belong at export encoding/tagging. Do not bake display transforms into timeline source data.
 
 `SequenceSettings::root_program_color_context(...)` builds the shared Program
-Output context from the sequence output color space. Preview, scopes, and export
-must consume this semantic boundary before any local monitor adaptation. Its
+Output context from the Sequence output color space. Preview and scopes consume
+this semantic boundary before any local monitor adaptation. Its
 typed output intent is resolved exclusively from the effective color engine and
 requested output target; display management cannot replace that engine-owned
 intent. The native GPU Viewer resolves this Program Output context first. The
 CPU raster fallback does the same through
 `execute_cpu_program_monitor_boundary_rgba8()`: it retains float Program Output,
 adapts to the sRGB UI atlas with a second stock-OCIO processor, and quantizes
-only at the atlas boundary. `SequenceSettings::root_preview_color_context(...)`
-remains only in analysis/test utilities that explicitly inspect a requested
-preview target; production Viewer scheduling does not use it as a substitute
-for Program Output.
+only at the atlas boundary. There is no Sequence “preview color context”:
+prefetch/preroll use Program semantics only to derive media-input contracts,
+while presentation resolves monitor policy after Program Output.
+
+Export admission resolves an independent `ExportColorTarget`. `FollowSequence`
+uses Program Output; `Colorimetric` permits an explicit display or Camera Log
+encoding without changing the Sequence; `RenderingView` resolves exactly one
+View from the Project engine and requires a display-referred target. The
+resolved target, encoded representation, renderer boundary, FFmpeg tags, and
+post-encode validation share one admitted contract.
 
 `RenderMonitorAdaptation` is the renderer-owned preview-only contract from the
 encoded Program Output identity to the local monitor identity. It is a stock
@@ -1119,7 +1137,8 @@ unaffected by ICC/surface policy.
 Display management is machine-local runtime state. `DisplayManagementPolicy`
 carries monitor/profile reference and Viewer output mode and is never persisted
 as Project or Sequence author data. The Program Output tone-map policy is a
-different concern and remains explicit in `SequenceColorManagement`.
+different concern and remains explicit in
+`SequenceColorSettings.program_output`.
 `DisplayToneMapPolicy` resolves the concrete Program Output `tone_map` flag for
 working -> output boundaries, including HDR-working to SDR-output delivery, so
 preview, export, cache keys, and diagnostics do not infer it from scattered
@@ -1338,9 +1357,10 @@ targets share one device/runtime during the test, matching production cache
 reuse instead of hiding target-specific shader drift behind separate setup.
 
 CPU fallback is always explicitly recorded — never silently used as "GPU ready".
-Preview and export never independently interpret color spaces; they share the
-same `ColorContext`, `RenderOutputColorBoundary`, and `RenderColorTransform`
-resolution through the renderer layer.
+Preview and export never independently implement color math; they share
+`RenderOutputColorBoundary` and `RenderColorTransform` resolution through the
+renderer layer. Preview supplies `ProgramColorContext`; Export supplies its
+admitted target with the same Project engine and working-domain contract.
 
 ## Structured Fallback Diagnostics
 

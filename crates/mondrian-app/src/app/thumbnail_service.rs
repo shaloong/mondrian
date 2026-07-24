@@ -14,7 +14,7 @@ use mondrian_core::{
     AssetId, ExecutionCancellationToken, ExecutionTerminalDisposition, ExecutionTerminalEvidence,
 };
 use mondrian_media::MediaFileFingerprint;
-use mondrian_timeline::sequence::ColorContext;
+use mondrian_timeline::sequence::ProgramColorContext;
 use parking_lot::Mutex;
 
 use analysis::{thumbnail_worker, ThumbnailColorContract};
@@ -244,8 +244,8 @@ impl AssetThumbnailService {
         })
     }
 
-    /// Rotate execution generation when the resolved sequence/project color context changes.
-    pub fn set_color_context(&self, context: Option<ColorContext>) {
+    /// Rotate execution generation when the resolved Project thumbnail context changes.
+    pub fn set_color_context(&self, context: Option<ProgramColorContext>) {
         let mut state = self.state.lock();
         if state.color_context == context {
             return;

@@ -381,12 +381,13 @@ fn calibrated_icc_display_snapshot(color_space: ColorSpace) -> DisplayOutputSnap
     snapshot
 }
 
-fn test_color_context(output_color_space: ColorSpace) -> ColorContext {
+fn test_color_context(output_color_space: ColorSpace) -> ProgramColorContext {
     ensure_test_ocio_loaded();
-    Sequence::new("color-context").settings.root_preview_color_context(
-        &mondrian_core::ProjectColorEnvironment::default(),
-        output_color_space,
-    )
+    let mut sequence = Sequence::new("color-context");
+    sequence.settings.color.program_output.color_space = output_color_space;
+    sequence
+        .settings
+        .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
 }
 
 #[test]
@@ -2336,12 +2337,10 @@ fn playback_video_preroll_requires_next_media_payload_and_observes_cache_residen
         .expect("next frame media");
     assert_eq!(media.asset_id, asset_id);
     let (width, height) = preview_dimensions_for_state(&state, sequence);
-    let display_color_space =
-        preview_display_color_space(sequence, state.viewer_display_management(), None)
-            .expect("default display contract");
-    let color_context = sequence
+    let input_color = sequence
         .settings
-        .root_preview_color_context(state.project_color_environment(), display_color_space);
+        .root_program_color_context(state.project_color_environment())
+        .media_input(media.auto_tone_map);
     let key = service
         .media_preview_key_for_asset(
             &state,
@@ -2351,7 +2350,7 @@ fn playback_video_preroll_requires_next_media_payload_and_observes_cache_residen
             media.source_time,
             width,
             height,
-            &color_context,
+            &input_color,
             false,
             false,
         )
@@ -5487,7 +5486,7 @@ fn resolved_media_preview_cache_key_includes_output_transform_intent() {
     let sequence_id = SequenceId::new();
 
     let mut standard = test_color_context(ColorSpace::Rec709);
-    standard.tone_map = true;
+    standard.output_tone_map = true;
     standard.output_transform = mondrian_core::OutputTransformIntent::mondrian_standard();
     let mut colorimetric = standard.clone();
     colorimetric.output_transform = mondrian_core::OutputTransformIntent::Colorimetric;
@@ -5530,7 +5529,7 @@ fn resolved_media_preview_cache_key_includes_exact_standard_package() {
 #[test]
 fn preview_working_composite_boundary_uses_resolved_display_view() {
     let mut color_context = test_color_context(ColorSpace::Rec709);
-    color_context.tone_map = true;
+    color_context.output_tone_map = true;
     color_context.output_transform = mondrian_core::OutputTransformIntent::mondrian_standard();
     let mut scratch = TimelineCompositeScratch::default();
 
@@ -5548,7 +5547,7 @@ fn preview_working_composite_boundary_uses_resolved_display_view() {
 #[test]
 fn preview_boundary_uses_colorimetric_intent_when_tone_map_is_disabled() {
     let mut color_context = test_color_context(ColorSpace::Rec709);
-    color_context.tone_map = false;
+    color_context.output_tone_map = false;
     color_context.output_transform = mondrian_core::OutputTransformIntent::Colorimetric;
 
     let boundary =
@@ -5560,7 +5559,7 @@ fn preview_boundary_uses_colorimetric_intent_when_tone_map_is_disabled() {
 
 #[test]
 fn preview_input_color_resolution_honors_override_metadata_and_missing_policy() {
-    let mut color_context = test_color_context(ColorSpace::Rec709);
+    let mut color_context = test_color_context(ColorSpace::Rec709).media_input(true);
     color_context.working_color_space = WorkingColorSpace::LinearRec2020;
     color_context.missing_metadata_policy = MissingColorMetadataPolicy::AssumeRec709;
 
@@ -5682,7 +5681,7 @@ fn preview_input_color_resolution_honors_override_metadata_and_missing_policy() 
 #[test]
 fn preview_color_rejection_preserves_resolution_and_media_diagnostic() {
     let service = WindowPreviewAdapter::new();
-    let mut color_context = test_color_context(ColorSpace::Rec709);
+    let mut color_context = test_color_context(ColorSpace::Rec709).media_input(true);
     color_context.working_color_space = WorkingColorSpace::LinearRec2020;
     color_context.missing_metadata_policy = MissingColorMetadataPolicy::RejectMedia;
     let resolution = resolve_preview_input_color_space(
@@ -5764,7 +5763,7 @@ fn preview_color_rejection_preserves_resolution_and_media_diagnostic() {
 #[test]
 fn preview_render_request_clears_stale_color_rejection() {
     let service = WindowPreviewAdapter::new();
-    let color_context = test_color_context(ColorSpace::Rec709);
+    let color_context = test_color_context(ColorSpace::Rec709).media_input(true);
     service.record_color_rejection(PreviewColorRejection::new(
         AssetId::new(),
         PathBuf::from("E:/media/old.mov"),
@@ -5840,8 +5839,8 @@ fn export_test_media_dependencies(
 #[test]
 fn preview_and_export_input_color_resolution_counts_match_for_frame() {
     let mut sequence = Sequence::new("preview-export-color-resolution-parity");
-    sequence.settings.working_color_space = WorkingColorSpace::LinearRec2020;
-    sequence.settings.color_management.missing_metadata_policy =
+    sequence.settings.color.working_color_space = WorkingColorSpace::LinearRec2020;
+    sequence.settings.color.input.missing_metadata_policy =
         MissingColorMetadataPolicy::AssumeRec709;
     let tb = sequence.time_base();
     let detected_id = AssetId::new();
@@ -5889,7 +5888,6 @@ fn preview_and_export_input_color_resolution_counts_match_for_frame() {
         &asset_color_spaces,
         &asset_interpretations,
         &mondrian_core::ProjectColorEnvironment::default(),
-        ColorSpace::Rec709,
         0,
     )
     .expect("preview counts");
@@ -5937,13 +5935,11 @@ fn preview_and_export_input_color_resolution_counts_match_for_frame() {
 #[test]
 fn preview_and_export_nested_input_color_resolution_counts_match_for_frame() {
     let mut parent = Sequence::new("parent-color-resolution-parity");
-    parent.settings.working_color_space = WorkingColorSpace::LinearRec2020;
-    parent.settings.color_management.missing_metadata_policy =
-        MissingColorMetadataPolicy::AssumeRec709;
+    parent.settings.color.working_color_space = WorkingColorSpace::LinearRec2020;
+    parent.settings.color.input.missing_metadata_policy = MissingColorMetadataPolicy::AssumeRec709;
     let mut nested = Sequence::new("nested-color-resolution-parity");
-    nested.settings.working_color_space = WorkingColorSpace::LinearRec2020;
-    nested.settings.color_management.missing_metadata_policy =
-        MissingColorMetadataPolicy::AssumeRec709;
+    nested.settings.color.working_color_space = WorkingColorSpace::LinearRec2020;
+    nested.settings.color.input.missing_metadata_policy = MissingColorMetadataPolicy::AssumeRec709;
 
     let parent_tb = parent.time_base();
     let nested_tb = nested.time_base();
@@ -6011,7 +6007,6 @@ fn preview_and_export_nested_input_color_resolution_counts_match_for_frame() {
         &asset_color_spaces,
         &asset_interpretations,
         &mondrian_core::ProjectColorEnvironment::default(),
-        ColorSpace::Rec709,
         0,
     )
     .expect("preview nested counts");
@@ -6349,7 +6344,7 @@ fn preview_single_media_color_output_matches_export_composite_contract() {
         mondrian_renderer::RenderOutputColorBoundaryTarget::Export,
         color_context.output_color_space.color().expect("encoded export output"),
         &color_context.output_transform,
-        color_context.tone_map,
+        color_context.output_tone_map,
         color_context.engine.clone(),
     )
     .expect("resolved export intent");
@@ -6396,7 +6391,7 @@ fn preview_camera_log_input_matches_export_frame_hash() {
     );
     let mut color_context = test_color_context(ColorSpace::Srgb);
     color_context.working_color_space = WorkingColorSpace::LinearRec2020;
-    color_context.tone_map = true;
+    color_context.output_tone_map = true;
     color_context.output_transform = mondrian_core::OutputTransformIntent::mondrian_standard();
     let resolved = [ResolvedPreviewElement::Media {
         frame: media,
@@ -6436,7 +6431,7 @@ fn preview_camera_log_input_matches_export_frame_hash() {
         mondrian_renderer::RenderOutputColorBoundaryTarget::Export,
         ColorSpace::Srgb,
         &color_context.output_transform,
-        color_context.tone_map,
+        color_context.output_tone_map,
         color_context.engine.clone(),
     )
     .expect("resolved export Standard SDR intent");
@@ -6508,7 +6503,7 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
     };
     let mut color_context = test_color_context(ColorSpace::Srgb);
     color_context.working_color_space = WorkingColorSpace::LinearRec2020;
-    color_context.tone_map = true;
+    color_context.output_tone_map = true;
     color_context.output_transform = mondrian_core::OutputTransformIntent::mondrian_standard();
 
     let resolved = vec![
@@ -6558,7 +6553,7 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
         mondrian_renderer::RenderOutputColorBoundaryTarget::Export,
         color_context.output_color_space.color().expect("encoded export output"),
         &color_context.output_transform,
-        color_context.tone_map,
+        color_context.output_tone_map,
         color_context.engine.clone(),
     )
     .expect("resolved export intent");
@@ -7825,9 +7820,10 @@ fn failed_current_media_preview_cache_does_not_leave_viewer_loading() {
     let service = WindowPreviewAdapter::new();
     let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
-    let color_context = sequence
+    let input_color = sequence
         .settings
-        .root_preview_color_context(state.project_color_environment(), ColorSpace::Rec709);
+        .root_program_color_context(state.project_color_environment())
+        .media_input(sequence.settings.color.input.auto_tone_map_media);
     let key = service
         .media_preview_key_for_asset(
             &state,
@@ -7837,7 +7833,7 @@ fn failed_current_media_preview_cache_does_not_leave_viewer_loading() {
             mondrian_core::TimelineTime::ZERO,
             width,
             height,
-            &color_context,
+            &input_color,
             true,
             false,
         )
@@ -7861,9 +7857,10 @@ fn media_preview_cache_identity_changes_with_range_override() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
-    let color_context = sequence
+    let input_color = sequence
         .settings
-        .root_preview_color_context(state.project_color_environment(), ColorSpace::Rec709);
+        .root_program_color_context(state.project_color_environment())
+        .media_input(sequence.settings.color.input.auto_tone_map_media);
     let key_for_state = || {
         service
             .media_preview_key_for_asset(
@@ -7874,7 +7871,7 @@ fn media_preview_cache_identity_changes_with_range_override() {
                 mondrian_core::TimelineTime::ZERO,
                 width,
                 height,
-                &color_context,
+                &input_color,
                 false,
                 false,
             )
@@ -7920,9 +7917,10 @@ fn playing_cached_media_preview_defers_sync_raster_composite() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
-    let color_context = sequence
+    let input_color = sequence
         .settings
-        .root_preview_color_context(state.project_color_environment(), ColorSpace::Rec709);
+        .root_program_color_context(state.project_color_environment())
+        .media_input(sequence.settings.color.input.auto_tone_map_media);
     let key = service
         .media_preview_key_for_asset(
             &state,
@@ -7932,7 +7930,7 @@ fn playing_cached_media_preview_defers_sync_raster_composite() {
             mondrian_core::TimelineTime::ZERO,
             width,
             height,
-            &color_context,
+            &input_color,
             true,
             false,
         )
@@ -7981,7 +7979,7 @@ fn test_media_key(source_frame: i64) -> MediaPreviewKey {
         source_has_alpha: false,
         alpha_interpretation: AlphaInterpretation::Straight,
         working_color_space: WorkingColorSpace::LinearRec709,
-        tone_map: false,
+        input_tone_map: false,
         engine: ColorEngine::mondrian_standard(),
     }
 }

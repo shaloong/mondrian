@@ -74,19 +74,16 @@ fn create_new_project_with_settings_preserves_sequence_color_management() {
     let project_file = root.join("project.mdp");
 
     let mut state = AppState::new();
-    let settings = SequenceSettings {
+    let mut settings = SequenceSettings {
         resolution: Resolution { width: 3840, height: 2160 },
         frame_rate: Rational::FPS_23976,
-        working_color_space: WorkingColorSpace::LinearRec2020,
-        color_management: mondrian_timeline::sequence::SequenceColorManagement {
-            workflow: ColorWorkflow::SceneReferred,
-            output_color_space: ColorSpace::Rec2100Pq,
-            video_range: VideoRange::Legal,
-            delivery_bit_depth: DeliveryBitDepth::Ten,
-            ..Default::default()
-        },
         ..Default::default()
     };
+    settings.color.working_color_space = WorkingColorSpace::LinearRec2020;
+    settings.color.program_output.workflow = ColorWorkflow::SceneReferred;
+    settings.color.program_output.color_space = ColorSpace::Rec2100Pq;
+    settings.delivery.video_range = VideoRange::Legal;
+    settings.delivery.bit_depth = DeliveryBitDepth::Ten;
     state
         .create_new_project_with_settings_at(
             project_file.clone(),
@@ -101,25 +98,19 @@ fn create_new_project_with_settings_preserves_sequence_color_management() {
     assert_eq!(sequence.settings.resolution, settings.resolution);
     assert_eq!(sequence.settings.frame_rate, Rational::FPS_23976);
     assert_eq!(
-        sequence.settings.working_color_space,
+        sequence.settings.color.working_color_space,
         WorkingColorSpace::LinearRec2020
     );
     assert_eq!(
-        sequence.settings.color_management.workflow,
+        sequence.settings.color.program_output.workflow,
         ColorWorkflow::SceneReferred
     );
     assert_eq!(
-        sequence.settings.color_management.output_color_space,
+        sequence.settings.color.program_output.color_space,
         ColorSpace::Rec2100Pq
     );
-    assert_eq!(
-        sequence.settings.color_management.video_range,
-        VideoRange::Legal
-    );
-    assert_eq!(
-        sequence.settings.color_management.delivery_bit_depth,
-        DeliveryBitDepth::Ten
-    );
+    assert_eq!(sequence.settings.delivery.video_range, VideoRange::Legal);
+    assert_eq!(sequence.settings.delivery.bit_depth, DeliveryBitDepth::Ten);
 
     let _ = std::fs::remove_dir_all(root);
 }

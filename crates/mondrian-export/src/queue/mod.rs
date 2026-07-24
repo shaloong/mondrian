@@ -47,7 +47,7 @@ use mondrian_renderer::{
     TimelineSolidColorLayer, TimelineTransitionInput, TimelineTransitionInputPlan,
 };
 use mondrian_timeline::sequence::{
-    ColorContext, DeliveryBitDepth, InputColorResolutionSourceCounts, ResolvedInputColor,
+    DeliveryBitDepth, InputColorResolutionSourceCounts, ProgramColorContext, ResolvedInputColor,
     SequenceSettings, VideoRange, MAX_NESTED_SEQUENCE_RENDER_DEPTH,
 };
 use serde::{Deserialize, Serialize};
@@ -1562,7 +1562,7 @@ fn execute_timeline_export(
         if timeline
             .sequence
             .settings
-            .color_management
+            .delivery
             .static_hdr_metadata_policy
             .writes_authored_metadata()
         {
@@ -1600,7 +1600,7 @@ fn execute_timeline_export(
             width,
             height,
             job.config.preset.alpha_mode,
-            frame_contract,
+            &delivery,
             cancel,
             report,
             report_diagnostics,
@@ -2078,7 +2078,7 @@ fn write_timeline_frames(
     width: u32,
     height: u32,
     alpha_mode: ExportAlphaMode,
-    frame_contract: ExportFrameContract,
+    delivery: &ResolvedExportDeliveryContract,
     cancel: &ExecutionCancellationToken,
     report: &mut dyn FnMut(ExportProgress),
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
@@ -2091,7 +2091,7 @@ fn write_timeline_frames(
         width,
         height,
         alpha_mode,
-        frame_contract,
+        delivery,
         cancel,
         report,
         report_diagnostics,
@@ -2105,11 +2105,13 @@ fn write_timeline_frames_to_writer<W: Write>(
     width: u32,
     height: u32,
     alpha_mode: ExportAlphaMode,
-    frame_contract: ExportFrameContract,
+    delivery: &ResolvedExportDeliveryContract,
     cancel: &ExecutionCancellationToken,
     report: &mut dyn FnMut(ExportProgress),
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
 ) -> JobExecutionResult {
+    let frame_contract = export_frame_contract(delivery.bit_depth);
+    let root_color_context = resolved_export_color_context(timeline, delivery);
     let total = range.total_frames.max(1);
     let mut canvas = vec![0u8; frame_contract.canvas_len(width, height)];
     let mut diagnostics = ExportJobDiagnostics::default();
@@ -2133,6 +2135,7 @@ fn write_timeline_frames_to_writer<W: Write>(
             width,
             height,
             alpha_mode,
+            root_color_context.clone(),
             frame_contract,
             &mut canvas,
             Some(&mut frame_color_counts),
@@ -2180,7 +2183,7 @@ fn write_timeline_frames_to_writer<W: Write>(
 /// and export therefore cannot independently reinterpret Mondrian Standard,
 /// an explicit OCIO view, or a colorimetric delivery.
 fn export_output_boundary_from_context(
-    color_context: &ColorContext,
+    color_context: &ProgramColorContext,
 ) -> Result<RenderOutputColorBoundary, String> {
     let output_color_space = color_context.output_color_space.color().ok_or_else(|| {
         "deliverable output boundary requires an encoded output color space".to_owned()
@@ -2189,10 +2192,24 @@ fn export_output_boundary_from_context(
         mondrian_renderer::RenderOutputColorBoundaryTarget::Export,
         output_color_space,
         &color_context.output_transform,
-        color_context.tone_map,
+        color_context.output_tone_map,
         color_context.engine.clone(),
     )
     .map_err(|error| error.to_string())
+}
+
+fn resolved_export_color_context(
+    timeline: &TimelineExportSnapshot,
+    delivery: &ResolvedExportDeliveryContract,
+) -> ProgramColorContext {
+    let mut context = timeline
+        .sequence
+        .settings
+        .root_program_color_context(&timeline.color_environment);
+    context.output_color_space = delivery.color_target.color_space.into();
+    context.output_tone_map = delivery.color_target.tone_map;
+    context.output_transform = delivery.color_target.output_transform.clone();
+    context
 }
 
 fn render_timeline_frame_into(
@@ -2208,14 +2225,18 @@ fn render_timeline_frame_into(
     export_diagnostics: Option<&mut ExportJobColorDiagnostics>,
 ) -> Result<(), String> {
     let mut visual_session = ExportVisualRenderSession::default();
-    let frame_contract =
-        export_frame_contract(timeline.sequence.settings.color_management.delivery_bit_depth);
+    let frame_contract = export_frame_contract(timeline.sequence.settings.delivery.bit_depth);
+    let color_context = timeline
+        .sequence
+        .settings
+        .root_program_color_context(&timeline.color_environment);
     render_timeline_frame_into_with_session(
         timeline,
         timeline_frame,
         width,
         height,
         alpha_mode,
+        color_context,
         frame_contract,
         canvas,
         input_color_counts,
@@ -2232,6 +2253,7 @@ fn render_timeline_frame_into_with_session(
     width: u32,
     height: u32,
     alpha_mode: ExportAlphaMode,
+    color_context: ProgramColorContext,
     frame_contract: ExportFrameContract,
     canvas: &mut Vec<u8>,
     input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
@@ -2245,10 +2267,6 @@ fn render_timeline_frame_into_with_session(
         canvas.resize(required_len, 0);
     }
 
-    let color_context = timeline
-        .sequence
-        .settings
-        .root_program_color_context(&timeline.color_environment);
     let mut render_context = ExportFrameRenderContext {
         timeline,
         alpha_mode,
@@ -2454,7 +2472,7 @@ fn export_sequence_input_color_resolution_counts(
     timeline: &TimelineExportSnapshot,
     sequence: &mondrian_timeline::sequence::Sequence,
     timeline_frame: i64,
-    color_context: ColorContext,
+    color_context: ProgramColorContext,
     depth: usize,
 ) -> Result<InputColorResolutionSourceCounts, String> {
     if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
@@ -2530,7 +2548,7 @@ fn export_sequence_input_color_resolution_counts(
 fn export_transition_input_color_resolution_counts(
     timeline: &TimelineExportSnapshot,
     input: &TimelineTransitionInputPlan,
-    color_context: ColorContext,
+    color_context: ProgramColorContext,
     depth: usize,
 ) -> Result<InputColorResolutionSourceCounts, String> {
     let mut counts = InputColorResolutionSourceCounts::default();
@@ -2582,7 +2600,7 @@ fn render_sequence_frame_into(
     sequence: &mondrian_timeline::sequence::Sequence,
     timeline_frame: i64,
     resolution: Resolution,
-    color_context: ColorContext,
+    color_context: ProgramColorContext,
     mut target: SequenceRenderTarget<'_>,
     depth: usize,
 ) -> Result<(), String> {
@@ -2814,7 +2832,7 @@ fn render_sequence_frame_into(
     let mut gpu_output_attempts = 0u64;
     let mut gpu_output_cpu_fallbacks = 0u64;
     let boundary = export_output_boundary_from_context(&color_context)?;
-    if color_context.tone_map && boundary.display_view.is_none() {
+    if color_context.output_tone_map && boundary.display_view.is_none() {
         if let Some(diagnostics) = context.export_diagnostics.as_deref_mut() {
             diagnostics.record_output_transform_issue(
                 ExportOutputTransformIssueReason::ToneMapRequestedWithoutExportViewTransform,
@@ -2899,7 +2917,7 @@ fn decode_export_media_plan(
     media: &TimelineMediaPlan,
     width: u32,
     height: u32,
-    color_context: &ColorContext,
+    color_context: &ProgramColorContext,
     cache: &mut HashMap<ExportDecodeCacheKey, Arc<DecodedVideoLayer>>,
     input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
     stage_diagnostics: Option<&mut RenderColorStageDiagnostics>,
@@ -2959,7 +2977,7 @@ fn decode_export_media_plan(
         media.alpha_interpretation,
         color_context.working_color_space,
         &color_context.engine,
-        color_context.tone_map,
+        media.auto_tone_map,
         media.source_time,
         width,
         height,
@@ -2974,7 +2992,7 @@ fn decode_export_media_plan(
 fn render_export_nested_plan(
     context: &mut ExportFrameRenderContext<'_>,
     nested: &TimelineNestedSequencePlan,
-    parent_color_context: &ColorContext,
+    parent_color_context: &ProgramColorContext,
     depth: usize,
 ) -> Result<CpuColorFrame, String> {
     let timeline = context.timeline;
@@ -3067,7 +3085,7 @@ fn resolve_export_transition_input(
     sequence: &mondrian_timeline::sequence::Sequence,
     input: &TimelineTransitionInputPlan,
     resolution: Resolution,
-    color_context: &ColorContext,
+    color_context: &ProgramColorContext,
     depth: usize,
     decode_cache: &mut HashMap<ExportDecodeCacheKey, Arc<DecodedVideoLayer>>,
 ) -> Result<ResolvedExportTransitionInput, String> {
@@ -3466,12 +3484,17 @@ mod tests {
             video_range,
             chroma_sampling,
             pixel_format,
+            color_target: crate::delivery::ResolvedExportColorTarget {
+                color_space: ColorSpace::Rec709,
+                tone_map: true,
+                output_transform: mondrian_core::OutputTransformIntent::mondrian_standard(),
+            },
         }
     }
 
     fn timeline_input_with_output_color(output_color_space: ColorSpace) -> TimelineExportSnapshot {
         let mut sequence = Sequence::new("color-validation");
-        sequence.settings.color_management.output_color_space = output_color_space;
+        sequence.settings.color.program_output.color_space = output_color_space;
         TimelineExportSnapshot {
             sequence,
             sequences: Vec::new(),
@@ -4005,7 +4028,7 @@ mod tests {
     #[test]
     fn high_bit_export_fails_closed_when_float_helper_is_unavailable() {
         let mut seq = Sequence::new("precision-failure-injected");
-        seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
+        seq.settings.delivery.bit_depth = DeliveryBitDepth::Ten;
         let tb = seq.time_base();
         seq.video_tracks[0]
             .add_clip(
@@ -4120,10 +4143,10 @@ mod tests {
 
     #[test]
     fn export_output_boundary_from_context_uses_export_view_when_view_present() {
-        let ctx = ColorContext {
+        let ctx = ProgramColorContext {
             working_color_space: WorkingColorSpace::LinearRec709,
             output_color_space: ColorSpace::Srgb.into(),
-            tone_map: true,
+            output_tone_map: true,
             workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
             engine: ColorEngine::mondrian_standard(),
             missing_metadata_policy:
@@ -4142,10 +4165,10 @@ mod tests {
 
     #[test]
     fn export_output_boundary_preserves_engine_intent_without_tone_flag() {
-        let ctx = ColorContext {
+        let ctx = ProgramColorContext {
             working_color_space: WorkingColorSpace::LinearRec709,
             output_color_space: ColorSpace::Rec709.into(),
-            tone_map: false,
+            output_tone_map: false,
             workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
             engine: ColorEngine::mondrian_standard(),
             missing_metadata_policy:
@@ -4196,7 +4219,7 @@ mod tests {
     #[test]
     fn export_real_render_with_engine_output_intent_records_no_transform_issue() {
         let mut seq = Sequence::new("engine-output-intent");
-        seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Eight;
+        seq.settings.delivery.bit_depth = DeliveryBitDepth::Eight;
         let tb = seq.time_base();
         seq.video_tracks[0]
             .add_clip(
@@ -4216,10 +4239,10 @@ mod tests {
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: TimelineExportRange::SequenceInOut,
         };
-        let ctx = ColorContext {
+        let ctx = ProgramColorContext {
             working_color_space: WorkingColorSpace::LinearRec709,
             output_color_space: ColorSpace::Rec709.into(),
-            tone_map: true,
+            output_tone_map: true,
             workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
             engine: ColorEngine::mondrian_standard(),
             missing_metadata_policy:
@@ -4689,9 +4712,11 @@ mod tests {
 
     #[test]
     fn export_color_validation_rejects_camera_log_consumer_codecs() {
-        let mut timeline = timeline_input_with_output_color(ColorSpace::AppleLogBt2020);
-        timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
-        let config = dummy_config("camera-log.mp4");
+        let mut timeline = timeline_input_with_output_color(ColorSpace::Rec709);
+        timeline.sequence.settings.delivery.bit_depth = DeliveryBitDepth::Ten;
+        let mut config = dummy_config("camera-log.mp4");
+        config.preset.color_target =
+            crate::preset::ExportColorTarget::Colorimetric(ColorSpace::AppleLogBt2020);
 
         let err = resolve_timeline_export_delivery(&config, &timeline)
             .expect_err("camera log should reject H.264/MP4 delivery");
@@ -4700,12 +4725,14 @@ mod tests {
 
     #[test]
     fn export_color_validation_allows_camera_log_prores_intermediate() {
-        let mut timeline = timeline_input_with_output_color(ColorSpace::AppleLogBt2020);
-        timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Twelve;
+        let mut timeline = timeline_input_with_output_color(ColorSpace::Rec709);
+        timeline.sequence.settings.delivery.bit_depth = DeliveryBitDepth::Twelve;
 
         let mut config = dummy_config("camera-log.mov");
         config.preset = crate::preset::ExportPreset::prores_4444_alpha();
         config.preset.alpha_mode = ExportAlphaMode::FlattenBlack;
+        config.preset.color_target =
+            crate::preset::ExportColorTarget::Colorimetric(ColorSpace::AppleLogBt2020);
 
         resolve_timeline_export_delivery(&config, &timeline)
             .expect("camera log ProRes intermediate should pass");
@@ -4764,8 +4791,8 @@ mod tests {
     #[test]
     fn export_color_validation_rejects_static_hdr_write_without_typed_metadata() {
         let mut timeline = timeline_input_with_output_color(ColorSpace::Rec2100Pq);
-        timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
-        timeline.sequence.settings.color_management.static_hdr_metadata_policy =
+        timeline.sequence.settings.delivery.bit_depth = DeliveryBitDepth::Ten;
+        timeline.sequence.settings.delivery.static_hdr_metadata_policy =
             StaticHdrMetadataPolicy::WriteAuthored;
         let mut config = dummy_config("hdr-missing-metadata.mp4");
         config.preset = crate::preset::ExportPreset::hevc_main10_aac();
@@ -4778,12 +4805,12 @@ mod tests {
     #[test]
     fn export_color_validation_allows_static_hdr_write_with_typed_metadata() {
         let mut timeline = timeline_input_with_output_color(ColorSpace::Rec2100Pq);
-        timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
-        timeline.sequence.settings.color_management.static_hdr_metadata_policy =
+        timeline.sequence.settings.delivery.bit_depth = DeliveryBitDepth::Ten;
+        timeline.sequence.settings.delivery.static_hdr_metadata_policy =
             StaticHdrMetadataPolicy::WriteAuthored;
-        timeline.sequence.settings.color_management.hdr_mastering_display =
+        timeline.sequence.settings.delivery.hdr_mastering_display =
             Some(VideoMasteringDisplayMetadata::rec2100_1000_nit_reference());
-        timeline.sequence.settings.color_management.hdr_content_light =
+        timeline.sequence.settings.delivery.hdr_content_light =
             Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
         let mut config = dummy_config("hdr-with-metadata.mp4");
         config.preset = crate::preset::ExportPreset::hevc_main10_aac();
@@ -4795,14 +4822,14 @@ mod tests {
     #[test]
     fn export_color_validation_binds_content_light_to_standard_view_peak() {
         let mut timeline = timeline_input_with_output_color(ColorSpace::Rec2100Pq);
-        timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
-        timeline.sequence.settings.color_management.static_hdr_metadata_policy =
+        timeline.sequence.settings.delivery.bit_depth = DeliveryBitDepth::Ten;
+        timeline.sequence.settings.delivery.static_hdr_metadata_policy =
             StaticHdrMetadataPolicy::WriteAuthored;
         let mut mastering = VideoMasteringDisplayMetadata::rec2100_1000_nit_reference();
         mastering.luminance.as_mut().expect("reference luminance").max =
             mondrian_core::VideoHdrRational::new(4000, 1);
-        timeline.sequence.settings.color_management.hdr_mastering_display = Some(mastering);
-        timeline.sequence.settings.color_management.hdr_content_light =
+        timeline.sequence.settings.delivery.hdr_mastering_display = Some(mastering);
+        timeline.sequence.settings.delivery.hdr_content_light =
             Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
         let mut config = dummy_config("hdr-content-light-contract.mp4");
         config.preset = crate::preset::ExportPreset::hevc_main10_aac();
@@ -4810,13 +4837,12 @@ mod tests {
         resolve_timeline_export_delivery(&config, &timeline)
             .expect("mastering-display capability may exceed the Standard View's content peak");
 
-        timeline.sequence.settings.color_management.hdr_mastering_display =
+        timeline.sequence.settings.delivery.hdr_mastering_display =
             Some(VideoMasteringDisplayMetadata::rec2100_1000_nit_reference());
-        timeline.sequence.settings.color_management.hdr_content_light =
-            Some(VideoContentLightMetadata {
-                max_content_light_level: 1200,
-                max_frame_average_light_level: 400,
-            });
+        timeline.sequence.settings.delivery.hdr_content_light = Some(VideoContentLightMetadata {
+            max_content_light_level: 1200,
+            max_frame_average_light_level: 400,
+        });
         let err = resolve_timeline_export_delivery(&config, &timeline)
             .expect_err("MaxCLL must not exceed the fixed Standard View peak");
         assert!(err.contains("峰值为 1000 nit"));
@@ -4826,12 +4852,12 @@ mod tests {
     #[test]
     fn export_color_validation_rejects_unimplemented_hdr_metadata_backends() {
         let mut timeline = timeline_input_with_output_color(ColorSpace::Rec2100Pq);
-        timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
-        timeline.sequence.settings.color_management.static_hdr_metadata_policy =
+        timeline.sequence.settings.delivery.bit_depth = DeliveryBitDepth::Ten;
+        timeline.sequence.settings.delivery.static_hdr_metadata_policy =
             StaticHdrMetadataPolicy::WriteAuthored;
-        timeline.sequence.settings.color_management.hdr_mastering_display =
+        timeline.sequence.settings.delivery.hdr_mastering_display =
             Some(VideoMasteringDisplayMetadata::rec2100_1000_nit_reference());
-        timeline.sequence.settings.color_management.hdr_content_light =
+        timeline.sequence.settings.delivery.hdr_content_light =
             Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
 
         for (codec, container, chroma) in [
@@ -4857,6 +4883,8 @@ mod tests {
                 range: ExportParameter::Explicit(VideoRange::Legal),
                 chroma_sampling: chroma,
             };
+            config.preset.color_target =
+                crate::preset::ExportColorTarget::RenderingView(ColorSpace::Rec2100Pq);
 
             let err = resolve_timeline_export_delivery(&config, &timeline)
                 .expect_err("metadata preservation needs a verified encoder backend");
@@ -4867,12 +4895,12 @@ mod tests {
     #[test]
     fn export_color_validation_rejects_dynamic_hdr_passthrough_claim() {
         let mut timeline = timeline_input_with_output_color(ColorSpace::Rec2100Pq);
-        timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
-        timeline.sequence.settings.color_management.static_hdr_metadata_policy =
+        timeline.sequence.settings.delivery.bit_depth = DeliveryBitDepth::Ten;
+        timeline.sequence.settings.delivery.static_hdr_metadata_policy =
             StaticHdrMetadataPolicy::WriteAuthored;
-        timeline.sequence.settings.color_management.hdr_mastering_display =
+        timeline.sequence.settings.delivery.hdr_mastering_display =
             Some(VideoMasteringDisplayMetadata::rec2100_1000_nit_reference());
-        timeline.sequence.settings.color_management.hdr_content_light =
+        timeline.sequence.settings.delivery.hdr_content_light =
             Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
         let asset_id = AssetId::new();
         let tb = timeline.sequence.time_base();
@@ -4911,7 +4939,7 @@ mod tests {
     #[test]
     fn export_color_validation_requires_explicit_srgb_for_untagged_gif() {
         let mut timeline = timeline_input_with_output_color(ColorSpace::Rec709);
-        timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Eight;
+        timeline.sequence.settings.delivery.bit_depth = DeliveryBitDepth::Eight;
         let mut config = dummy_config("untagged.gif");
         config.preset.container = Container::Gif;
         config.preset.video = VideoCodecConfig::Gif { colors: 256, dither: true };
@@ -4975,9 +5003,8 @@ mod tests {
     #[test]
     fn export_input_color_resolution_counts_for_frame_tracks_media_sources() {
         let mut seq = Sequence::new("export-input-color-counts");
-        seq.settings.working_color_space = WorkingColorSpace::LinearRec2020;
-        seq.settings.color_management.missing_metadata_policy =
-            MissingColorMetadataPolicy::AssumeRec709;
+        seq.settings.color.working_color_space = WorkingColorSpace::LinearRec2020;
+        seq.settings.color.input.missing_metadata_policy = MissingColorMetadataPolicy::AssumeRec709;
         let tb = seq.time_base();
         let detected_id = AssetId::new();
         let override_id = AssetId::new();
@@ -5242,13 +5269,14 @@ mod tests {
     #[test]
     fn export_video_signal_args_bind_bit_depth_range_and_matrix_conversion() {
         let mut settings = mondrian_timeline::sequence::SequenceSettings::default();
-        settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
-        let delivery = test_delivery_contract(
+        settings.color.program_output.color_space = ColorSpace::Rec2100Pq;
+        let mut delivery = test_delivery_contract(
             DeliveryBitDepth::Ten,
             VideoRange::Legal,
             ExportChromaSampling::Yuv420,
             "yuv420p10le",
         );
+        delivery.color_target.color_space = ColorSpace::Rec2100Pq;
 
         let mut cmd = Command::new("ffmpeg");
         apply_export_video_signal_args(&mut cmd, &settings, &delivery);
@@ -5265,13 +5293,14 @@ mod tests {
     #[test]
     fn color_tag_args_use_export_output_color_space() {
         let mut settings = SequenceSettings::default();
-        settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
-        let delivery = test_delivery_contract(
+        settings.color.program_output.color_space = ColorSpace::Rec2100Pq;
+        let mut delivery = test_delivery_contract(
             DeliveryBitDepth::Ten,
             VideoRange::Legal,
             ExportChromaSampling::Yuv420,
             "yuv420p10le",
         );
+        delivery.color_target.color_space = ColorSpace::Rec2100Pq;
         let mut cmd = Command::new("ffmpeg");
         apply_export_video_signal_args(&mut cmd, &settings, &delivery);
         let args = cmd.get_args().map(|arg| arg.to_string_lossy().to_string()).collect::<Vec<_>>();
@@ -5283,7 +5312,7 @@ mod tests {
 
     #[test]
     fn color_tag_args_skip_camera_log_spaces_without_standard_delivery_tags() {
-        let delivery = test_delivery_contract(
+        let mut delivery = test_delivery_contract(
             DeliveryBitDepth::Ten,
             VideoRange::Full,
             ExportChromaSampling::Yuv422,
@@ -5303,8 +5332,9 @@ mod tests {
             ColorSpace::DjiDLogDGamut,
             ColorSpace::DavinciIntermediateWideGamut,
         ] {
+            delivery.color_target.color_space = color_space;
             let mut settings = SequenceSettings::default();
-            settings.color_management.output_color_space = color_space;
+            settings.color.program_output.color_space = color_space;
             let mut cmd = Command::new("ffmpeg");
             apply_export_video_signal_args(&mut cmd, &settings, &delivery);
 
@@ -5323,13 +5353,14 @@ mod tests {
     #[test]
     fn srgb_yuv_delivery_uses_bt709_matrix_without_relabeling_transfer() {
         let mut settings = SequenceSettings::default();
-        settings.color_management.output_color_space = ColorSpace::Srgb;
-        let delivery = test_delivery_contract(
+        settings.color.program_output.color_space = ColorSpace::Srgb;
+        let mut delivery = test_delivery_contract(
             DeliveryBitDepth::Eight,
             VideoRange::Legal,
             ExportChromaSampling::Yuv420,
             "yuv420p",
         );
+        delivery.color_target.color_space = ColorSpace::Srgb;
         let mut cmd = Command::new("ffmpeg");
 
         apply_export_video_signal_args(&mut cmd, &settings, &delivery);
@@ -5345,13 +5376,14 @@ mod tests {
     #[test]
     fn post_encode_expectations_come_from_the_same_signal_contract() {
         let mut settings = SequenceSettings::default();
-        settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
-        let delivery = test_delivery_contract(
+        settings.color.program_output.color_space = ColorSpace::Rec2100Pq;
+        let mut delivery = test_delivery_contract(
             DeliveryBitDepth::Ten,
             VideoRange::Legal,
             ExportChromaSampling::Yuv420,
             "yuv420p10le",
         );
+        delivery.color_target.color_space = ColorSpace::Rec2100Pq;
 
         let expected =
             expected_export_video_signal(&settings, &delivery).expect("valid PQ signal contract");
@@ -5367,11 +5399,10 @@ mod tests {
             crate::validator::ExpectedStaticHdrMetadata::Absent
         );
 
-        settings.color_management.static_hdr_metadata_policy =
-            StaticHdrMetadataPolicy::WriteAuthored;
-        settings.color_management.hdr_mastering_display =
+        settings.delivery.static_hdr_metadata_policy = StaticHdrMetadataPolicy::WriteAuthored;
+        settings.delivery.hdr_mastering_display =
             Some(VideoMasteringDisplayMetadata::rec2100_1000_nit_reference());
-        settings.color_management.hdr_content_light =
+        settings.delivery.hdr_content_light =
             Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
         let expected = expected_export_video_signal(&settings, &delivery)
             .expect("valid static HDR metadata contract");
@@ -5384,15 +5415,16 @@ mod tests {
             expected_static_hdr.content_light,
             VideoContentLightMetadata::rec2100_1000_nit_reference()
         );
-        settings.color_management.static_hdr_metadata_policy = StaticHdrMetadataPolicy::Omit;
+        settings.delivery.static_hdr_metadata_policy = StaticHdrMetadataPolicy::Omit;
 
-        settings.color_management.output_color_space = ColorSpace::AppleLogBt2020;
-        let prores = test_delivery_contract(
+        settings.color.program_output.color_space = ColorSpace::AppleLogBt2020;
+        let mut prores = test_delivery_contract(
             DeliveryBitDepth::Twelve,
             VideoRange::Full,
             ExportChromaSampling::Yuv444,
             "yuv444p12le",
         );
+        prores.color_target.color_space = ColorSpace::AppleLogBt2020;
         let expected =
             expected_export_video_signal(&settings, &prores).expect("valid ProRes signal contract");
         assert_eq!(expected.pixel_format.as_deref(), Some("yuv444p12le"));
@@ -5406,7 +5438,7 @@ mod tests {
 
     #[test]
     fn rec601_delivery_preserves_pal_and_ntsc_signal_tags() {
-        let delivery = test_delivery_contract(
+        let mut delivery = test_delivery_contract(
             DeliveryBitDepth::Eight,
             VideoRange::Legal,
             ExportChromaSampling::Yuv420,
@@ -5421,8 +5453,9 @@ mod tests {
                 "smpte170m",
             ),
         ] {
+            delivery.color_target.color_space = color_space;
             let mut settings = SequenceSettings::default();
-            settings.color_management.output_color_space = color_space;
+            settings.color.program_output.color_space = color_space;
             let expected = expected_export_video_signal(&settings, &delivery)
                 .expect("valid Rec.601 signal contract");
             assert_eq!(expected.color_primaries.as_deref(), Some(primaries));
@@ -5442,7 +5475,7 @@ mod tests {
     #[test]
     fn render_timeline_frame_into_clears_canvas_when_no_layers() {
         let mut seq = Sequence::new("empty");
-        seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Eight;
+        seq.settings.delivery.bit_depth = DeliveryBitDepth::Eight;
         let tb = seq.time_base();
         seq.in_point = Some(tt(0, tb));
         seq.out_point = Some(tt(10, tb));
@@ -5493,7 +5526,7 @@ mod tests {
     #[test]
     fn render_timeline_frame_into_preserves_or_flattens_alpha_explicitly() {
         let mut seq = Sequence::new("alpha-delivery");
-        seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Eight;
+        seq.settings.delivery.bit_depth = DeliveryBitDepth::Eight;
         let tb = seq.time_base();
         seq.video_tracks[0]
             .add_clip(
@@ -5552,7 +5585,7 @@ mod tests {
     #[test]
     fn render_timeline_frame_into_uses_rgba64le_canvas_for_ten_bit_no_layers() {
         let mut seq = Sequence::new("empty-ten-bit");
-        seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
+        seq.settings.delivery.bit_depth = DeliveryBitDepth::Ten;
         let tb = seq.time_base();
         seq.in_point = Some(tt(0, tb));
         seq.out_point = Some(tt(10, tb));
@@ -5644,8 +5677,7 @@ mod tests {
     #[test]
     fn render_timeline_frame_respects_reject_missing_media_color_metadata() {
         let mut seq = Sequence::new("missing-media-color");
-        seq.settings.color_management.missing_metadata_policy =
-            MissingColorMetadataPolicy::RejectMedia;
+        seq.settings.color.input.missing_metadata_policy = MissingColorMetadataPolicy::RejectMedia;
         let tb = seq.time_base();
         let asset_id = AssetId::new();
         seq.video_tracks[0]
@@ -5865,7 +5897,7 @@ mod tests {
     #[test]
     fn ten_bit_cpu_float_fallback_does_not_record_precision_failure() {
         let mut seq = Sequence::new("high-bit-float-fallback");
-        seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
+        seq.settings.delivery.bit_depth = DeliveryBitDepth::Ten;
         let tb = seq.time_base();
         seq.video_tracks[0]
             .add_clip(
@@ -5917,7 +5949,7 @@ mod tests {
     #[test]
     fn ten_bit_cpu_fallback_produces_correct_rgba64le_canvas() {
         let mut seq = Sequence::new("high-bit-canvas-check");
-        seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
+        seq.settings.delivery.bit_depth = DeliveryBitDepth::Ten;
         let tb = seq.time_base();
         seq.video_tracks[0]
             .add_clip(

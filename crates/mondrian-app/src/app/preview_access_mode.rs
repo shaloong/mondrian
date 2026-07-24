@@ -51,7 +51,7 @@ pub(crate) struct MediaPreviewKey {
     pub(crate) source_has_alpha: bool,
     pub(crate) alpha_interpretation: AlphaInterpretation,
     pub(crate) working_color_space: WorkingColorSpace,
-    pub(crate) tone_map: bool,
+    pub(crate) input_tone_map: bool,
     pub(crate) engine: ColorEngine,
 }
 

@@ -76,6 +76,26 @@ _Avoid_: Process-global app dispatcher, unbounded FIFO, worker blocked on a limi
 One immutable execution capture containing a root Sequence, only its reachable nested Sequence closure, one internally consistent media-dependency record per reachable file-backed Media Asset, the selected range, and the exact Project Color Environment. Generated Asset Library identities do not become file dependencies. Capture rejects missing/cyclic internal references and offline media before admission; the snapshot then executes independently of later Project edits or closure.
 _Avoid_: Whole-Project clone, four parallel asset maps, live Asset Library lookup from the worker, path without source revision, snapshot presented as persisted author state
 
+**Project Color Environment**:
+The one persisted, exact Mondrian Standard package, ACES preset, or Custom OCIO engine identity shared by the future-Sequence template and every Sequence in one Project. A Sequence has no engine, override, or inheritance state.
+_Avoid_: Sequence color engine, active-Sequence engine, implicit process-global OCIO default
+
+**Sequence Color Settings**:
+The Sequence-owned working domain, media-input policy, and Program Output policy, represented as `working_color_space`, `input`, and `program_output`. Encoded bit depth/range and authored HDR payloads are separate Sequence Delivery Defaults.
+_Avoid_: One color-management bag mixing engine, input, Program Output, monitor, and codec representation
+
+**Program Color Context**:
+The resolved Project engine plus one Sequence's working and Program Output semantics. It excludes per-media input tone mapping and machine-local monitor adaptation; the Sequence missing-metadata policy is carried only to derive explicit Media Input Color Contexts during nested Timeline traversal.
+_Avoid_: Viewer display target as source interpretation, export codec settings as Program Output, one tone-map boolean reused for input and output
+
+**Media Input Color Context**:
+The exact Project engine, effective working domain, Sequence missing-metadata policy, and per-contribution input-tone-map decision used to transform one media contribution into working pixels. It has no Program Output or monitor target.
+_Avoid_: Display ICC profile in source cache identity, Program Output tone map reused as input tone map, parent Sequence replacing nested-child media interpretation
+
+**Export Color Target**:
+The admitted post-composite output intent for one deliverable: follow Sequence Program Output, direct colorimetric conversion to an explicit encoded space, or the Project engine's rendering View for an explicit display target. It is independent from codec, bit depth, range, and chroma.
+_Avoid_: Making a Sequence Program Output illegal to request Camera Log, inferring a View from codec name, relabeling unchanged pixels
+
 **Export Execution Service**:
 The instance-owned offline Module that admits immutable Timeline Export Snapshots into a bounded dedicated queue, reserves final output identities, owns attempt generations and cancellation, consumes each heavy payload once, and exposes only bounded lightweight lifecycle/evidence snapshots. It shares cross-domain execution value semantics but not worker capacity with Preview, Thumbnail, Waveform, Proxy, or realtime audio.
 _Avoid_: Process-global queue, universal media worker pool, UI-mutated job status, unbounded terminal Project retention, enqueue success after worker failure

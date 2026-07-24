@@ -26,7 +26,7 @@ use migration::JsonMigrationRegistry;
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 20;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 21;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 2;
 
@@ -54,6 +54,7 @@ const DOCUMENT_MIGRATIONS: JsonMigrationRegistry = JsonMigrationRegistry::new(
 
 /// `.mdp` archive manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectManifest {
     /// Archive family identifier. Current value is `mondrian-project`.
     pub format: String,
@@ -118,6 +119,7 @@ impl ProjectManifest {
 
 /// Canonical persisted project document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectDocument {
     /// JSON document schema version.
     pub schema_version: u32,
@@ -628,7 +630,7 @@ mod tests {
             document.sequences.active().expect("source sequence").revision
         );
         assert_eq!(
-            opened_sequence.settings.color_management.workflow,
+            opened_sequence.settings.color.program_output.workflow,
             mondrian_timeline::sequence::ColorWorkflow::SceneReferred
         );
         let opened_context =
@@ -653,7 +655,7 @@ mod tests {
         let loaded_sequence =
             loaded.document.sequences.active().expect("active sequence after archive load");
         assert_eq!(
-            loaded_sequence.settings.color_management.workflow,
+            loaded_sequence.settings.color.program_output.workflow,
             mondrian_timeline::sequence::ColorWorkflow::SceneReferred
         );
         assert_eq!(
@@ -1113,12 +1115,25 @@ mod tests {
     #[test]
     fn current_schema_rejects_removed_aces_sequence_workflow() {
         let mut value = serde_json::to_value(test_document()).expect("serialize document");
-        value["sequences"]["sequences"][0]["settings"]["color_management"]["workflow"] =
+        value["sequences"]["sequences"][0]["settings"]["color"]["program_output"]["workflow"] =
             serde_json::json!("Aces");
 
         let error = serde_json::from_value::<ProjectDocument>(value)
             .expect_err("project mode must not be duplicated by an ACES sequence workflow");
         assert!(error.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn current_schema_rejects_sequence_engine_and_inheritance_fields() {
+        for field in ["engine", "inherit_project_engine"] {
+            let mut value = serde_json::to_value(test_document()).expect("serialize document");
+            value["sequences"]["sequences"][0]["settings"]["color"][field] =
+                serde_json::json!("MondrianStandard");
+
+            let error = serde_json::from_value::<ProjectDocument>(value)
+                .expect_err("Sequence must not persist a Project-owned engine contract");
+            assert!(error.to_string().contains("unknown field"), "{error}");
+        }
     }
 
     #[test]
@@ -1158,6 +1173,7 @@ mod tests {
             .active_mut()
             .expect("active sequence")
             .settings
+            .color
             .working_color_space = mondrian_core::WorkingColorSpace::AcesCg;
 
         let error = document
@@ -1175,6 +1191,7 @@ mod tests {
             .active_mut()
             .expect("active sequence")
             .settings
+            .color
             .working_color_space = mondrian_core::WorkingColorSpace::LinearP3D65;
 
         let error = document

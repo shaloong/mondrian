@@ -17,7 +17,8 @@ with its own intent and validation contract rather than a second branch inside
 `ExportConfig` contains exactly three authorities:
 
 - `ExportPreset`: container, video/audio codec settings, output resolution, and
-  explicit encoded signal representation and Alpha delivery policy;
+  explicit `ExportColorTarget`, encoded signal representation, and Alpha
+  delivery policy;
 - `TimelineExportSnapshot`: the immutable authoring and dependency closure;
 - `output_path`: the final deliverable name reserved by the queue.
 
@@ -48,14 +49,16 @@ Project document and not a compatibility boundary between releases.
 
 ## Delivery contract and parameter ownership
 
-Sequence authoring owns creative output intent: working/output color identity,
-the output transform, and authored HDR mastering/content-light metadata. Its
-`video_range` and `delivery_bit_depth` values are Sequence-level delivery
-defaults used only when a preset explicitly selects `FollowSequence`.
+Sequence authoring owns working/input/Program Output color intent and separate
+authored delivery defaults. Its `delivery.video_range` and
+`delivery.bit_depth` values are used only when a preset parameter selects
+`FollowSequence`.
 
 `ExportPreset` owns the concrete representation of one deliverable:
 
 - container and typed codec profile;
+- `ExportColorTarget`: follow Sequence Program Output, explicit colorimetric
+  output, or an explicit Project-engine Rendering View;
 - explicit or Sequence-default sample depth and range;
 - explicit chroma sampling and Alpha policy;
 - output raster override or exact Sequence raster;
@@ -84,11 +87,18 @@ video cadence and A/V duration semantics; it cannot merely replace the FFmpeg
 `FollowSequence` is a UI authoring convenience, not an execution-time `Auto`.
 `resolve_export_delivery(...)` lowers every preset choice to one
 `ResolvedExportDeliveryContract` before admission. The resolved contract has an
-exact raster, bit depth, range, chroma sampling, and FFmpeg pixel format.
+exact color target/output-transform intent, raster, bit depth, range, chroma
+sampling, and FFmpeg pixel format.
 Execution, internal frame precision, FFmpeg arguments, and post-encode probe
 expectations consume that same result. Nested Sequences contribute
 working-domain pixels but cannot replace the root job's resolved delivery
 contract.
+
+Sequence Program Output remains display/delivery-referred and valid on its own.
+Camera Log intermediates use an explicit colorimetric `ExportColorTarget`;
+export admission then requires 10-bit-or-higher MOV/MXF ProRes. A codec name
+never changes Program Output, selects a Rendering View, or authorizes relabeling
+unchanged samples.
 
 Renderer working precision is not an export-form parameter. Working-space CPU
 and composite targets remain the fixed 32-bit-float correctness contract;

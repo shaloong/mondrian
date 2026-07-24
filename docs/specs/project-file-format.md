@@ -37,13 +37,16 @@ library/index.db
 
 `library/index.db` is the project asset library.
 
-The current independent versions are archive v1, document schema v20, and
+The current independent versions are archive v1, document schema v21, and
 library schema v2. Schema v18 added the complete closed Basic Title author
 payload. Schema v19 establishes one mandatory Project color environment, one
 complete future-Sequence template, engine-free Sequence color semantics, and
 per-placement nested color processing. Schema v20 adds mandatory
 `clip_time_in`, the persistent origin for one shared Clip-local visual
-automation domain independent of placement and source sampling. During Alpha,
+automation domain independent of placement and source sampling. Schema v21
+regroups Sequence color authoring into closed `color` (working/input/Program
+Output) and `delivery` objects and rejects unknown Project/Sequence fields.
+During Alpha,
 document schemas other than the exact current version are rejected because no
 compatibility migration is promised yet.
 

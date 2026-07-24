@@ -350,12 +350,12 @@ fn asset_input_pipeline_for_state(state: &AppState) -> AppShellInputColorPipelin
     let Some(sequence) = state.active_sequence() else {
         return AppShellInputColorPipelineDiagnostics {
             engine: state.project_color_environment().engine.clone(),
-            working_color_space: state.new_sequence_defaults().working_color_space,
+            working_color_space: state.new_sequence_defaults().color.working_color_space,
         };
     };
     AppShellInputColorPipelineDiagnostics {
         engine: state.project_color_environment().engine.clone(),
-        working_color_space: sequence.settings.working_color_space,
+        working_color_space: sequence.settings.color.working_color_space,
     }
 }
 
@@ -7009,7 +7009,7 @@ mod tests {
     fn export_panel_rejects_incompatible_delivery_before_building_an_action() {
         let mut state = AppState::default();
         let mut sequence = Sequence::new("HDR Deliverable");
-        sequence.settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
+        sequence.settings.color.program_output.color_space = ColorSpace::Rec2100Pq;
         let sequence_id = sequence.id;
         state.test_set_sequence(Some(sequence));
         state.set_export_draft_builtin_preset(BuiltinExportPreset::H264AacSdr1080p);

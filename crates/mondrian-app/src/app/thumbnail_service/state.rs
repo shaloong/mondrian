@@ -9,7 +9,7 @@ use mondrian_core::{
     ExecutionTerminalDisposition, ExecutionTerminalEvidence,
 };
 use mondrian_media::MediaFileFingerprint;
-use mondrian_timeline::sequence::ColorContext;
+use mondrian_timeline::sequence::ProgramColorContext;
 
 use super::analysis::ThumbnailColorContract;
 use super::{
@@ -79,7 +79,7 @@ pub(super) struct ThumbnailCounters {
 
 pub(super) struct ThumbnailState {
     pub(super) generation: u64,
-    pub(super) color_context: Option<ColorContext>,
+    pub(super) color_context: Option<ProgramColorContext>,
     pub(super) cache: HashMap<AssetId, ThumbnailCacheEntry>,
     pub(super) cache_lru: VecDeque<AssetId>,
     pub(super) cached_bytes: usize,

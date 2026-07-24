@@ -24,7 +24,7 @@ use mondrian_renderer::{
     TimelineEffectColorRuntime, TimelineMediaLayer, TimelineSolidColorLayer,
     TimelineTransitionInput,
 };
-use mondrian_timeline::sequence::ColorContext;
+use mondrian_timeline::sequence::ProgramColorContext;
 
 use super::preview_media_frame::MediaPreviewWorkingFrameError;
 use super::preview_unavailability::{PreviewOutputStage, PreviewUnavailability};
@@ -173,7 +173,7 @@ pub(crate) fn composite_resolved_preview_working(
     width: u32,
     height: u32,
     resolved: &[ResolvedPreviewElement],
-    color_context: &ColorContext,
+    color_context: &ProgramColorContext,
     scratch: &mut TimelineCompositeScratch,
 ) -> Result<PreviewWorkingCompositeOutput, PreviewCpuExecutionError> {
     let working_prepare_started_at = Instant::now();
@@ -359,7 +359,7 @@ fn lower_transition_input<'a>(
 }
 
 pub(crate) fn output_boundary_from_color_context(
-    color_context: &ColorContext,
+    color_context: &ProgramColorContext,
 ) -> Result<RenderOutputColorBoundary, PreviewCpuExecutionError> {
     let output_color_space = color_context.output_color_space.color().ok_or({
         PreviewCpuExecutionError::ProgramOutputIdentity {
@@ -370,7 +370,7 @@ pub(crate) fn output_boundary_from_color_context(
         mondrian_renderer::RenderOutputColorBoundaryTarget::Display,
         output_color_space,
         &color_context.output_transform,
-        color_context.tone_map,
+        color_context.output_tone_map,
         color_context.engine.clone(),
     )
     .map_err(PreviewCpuExecutionError::from)
@@ -380,7 +380,7 @@ pub(crate) fn composite_resolved_preview(
     width: u32,
     height: u32,
     resolved: &[ResolvedPreviewElement],
-    color_context: &ColorContext,
+    color_context: &ProgramColorContext,
     scratch: &mut TimelineCompositeScratch,
 ) -> Result<PreviewCompositeOutput, PreviewCpuExecutionError> {
     let composite =
