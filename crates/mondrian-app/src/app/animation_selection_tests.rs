@@ -27,18 +27,53 @@ fn clip_ref(track_id: TrackId, clip_id: ClipId) -> SelectedClipRef {
     SelectedClipRef { track_id, is_video_track: true, clip_id }
 }
 
+fn property_address(state: &AppState, clip_id: ClipId, path: &str) -> AnimationParameterAddress {
+    state
+        .active_sequence()
+        .and_then(|sequence| find_clip(sequence, clip_id))
+        .and_then(|clip| clip.property_bag().ok())
+        .and_then(|bag| bag.address_for_path(path))
+        .expect("property address")
+}
+
+fn key_selection(
+    state: &AppState,
+    clip_id: ClipId,
+    path: &str,
+    time: TimelineTime,
+) -> AnimationKeyframeSelection {
+    let property = property_address(state, clip_id, path);
+    let keyframe_id = state
+        .active_sequence()
+        .and_then(|sequence| find_clip(sequence, clip_id))
+        .and_then(|clip| clip.property_bag().ok())
+        .and_then(|bag| {
+            bag.property_by_address(&property)
+                .and_then(|(_, property)| property.keyframe_at(time))
+        })
+        .map(|keyframe| keyframe.id)
+        .expect("keyframe");
+    AnimationKeyframeSelection {
+        property: AnimationPropertySelection { clip_id, property },
+        keyframe_id,
+    }
+}
+
 #[test]
 fn switching_active_animation_clip_clears_selection_and_bubble_host() {
     let (mut state, _track_id, clip_ids, _tb) = create_state_with_video_clips(2);
     let selected = AnimationKeyframeSelection {
-        clip_id: clip_ids[0],
-        path: Transform2D::OPACITY_PATH.to_string(),
-        time: TimelineTime::ZERO,
+        property: AnimationPropertySelection {
+            clip_id: clip_ids[0],
+            property: property_address(&state, clip_ids[0], Transform2D::OPACITY_PATH),
+        },
+        keyframe_id: KeyframeId::new(),
     };
     state.select_animation_keyframe_only(selected);
     state.set_animation_bubble_host(AnimationBubbleHost::Graph);
 
-    state.set_active_animation_property(clip_ids[1], Transform2D::POSITION_PATH.to_string());
+    let position = property_address(&state, clip_ids[1], Transform2D::POSITION_PATH);
+    state.set_active_animation_property(clip_ids[1], position);
 
     assert!(state.selected_animation_keyframes_for_clip(clip_ids[0]).is_empty());
     assert_eq!(state.animation_bubble_host(), None);
@@ -56,14 +91,17 @@ fn switching_active_animation_clip_clears_selection_and_bubble_host() {
 fn switching_active_animation_property_within_clip_preserves_selection_and_bubble_host() {
     let (mut state, _track_id, clip_ids, _tb) = create_state_with_video_clips(1);
     let selected = AnimationKeyframeSelection {
-        clip_id: clip_ids[0],
-        path: Transform2D::OPACITY_PATH.to_string(),
-        time: TimelineTime::ZERO,
+        property: AnimationPropertySelection {
+            clip_id: clip_ids[0],
+            property: property_address(&state, clip_ids[0], Transform2D::OPACITY_PATH),
+        },
+        keyframe_id: KeyframeId::new(),
     };
     state.select_animation_keyframe_only(selected.clone());
     state.set_animation_bubble_host(AnimationBubbleHost::Timeline);
 
-    state.set_active_animation_property(clip_ids[0], Transform2D::POSITION_PATH.to_string());
+    let position = property_address(&state, clip_ids[0], Transform2D::POSITION_PATH);
+    state.set_active_animation_property(clip_ids[0], position);
 
     assert!(state.is_animation_keyframe_selected(&selected));
     assert_eq!(
@@ -76,17 +114,19 @@ fn switching_active_animation_property_within_clip_preserves_selection_and_bubbl
 fn clearing_animation_selection_preserves_last_active_property_per_clip() {
     let (mut state, _track_id, clip_ids, _tb) = create_state_with_video_clips(2);
 
-    state.set_active_animation_property(clip_ids[0], Transform2D::POSITION_PATH.to_string());
-    state.set_active_animation_property(clip_ids[1], Transform2D::OPACITY_PATH.to_string());
+    let position = property_address(&state, clip_ids[0], Transform2D::POSITION_PATH);
+    let opacity = property_address(&state, clip_ids[1], Transform2D::OPACITY_PATH);
+    state.set_active_animation_property(clip_ids[0], position);
+    state.set_active_animation_property(clip_ids[1], opacity);
     state.clear_animation_selection();
 
     assert_eq!(
         state.active_animation_property_path(clip_ids[0]),
-        Some(Transform2D::POSITION_PATH)
+        Some(Transform2D::POSITION_PATH.to_owned())
     );
     assert_eq!(
         state.active_animation_property_path(clip_ids[1]),
-        Some(Transform2D::OPACITY_PATH)
+        Some(Transform2D::OPACITY_PATH.to_owned())
     );
     assert!(state.animation_selection.active_property.is_none());
 }
@@ -123,16 +163,8 @@ fn selected_animation_interpolation_mode_returns_none_for_mixed_modes() {
         )
         .expect("set end");
     state.set_animation_keyframe_selection(vec![
-        AnimationKeyframeSelection {
-            clip_id: clip_ids[0],
-            path: Transform2D::OPACITY_PATH.to_string(),
-            time: start,
-        },
-        AnimationKeyframeSelection {
-            clip_id: clip_ids[0],
-            path: Transform2D::OPACITY_PATH.to_string(),
-            time: end,
-        },
+        key_selection(&state, clip_ids[0], Transform2D::OPACITY_PATH, start),
+        key_selection(&state, clip_ids[0], Transform2D::OPACITY_PATH, end),
     ]);
 
     assert_eq!(state.selected_animation_interpolation_mode(selection), None);
@@ -172,16 +204,8 @@ fn copy_paste_animation_keyframes_reassigns_ids_and_updates_selection() {
         .expect("before ids");
 
     state.set_animation_keyframe_selection(vec![
-        AnimationKeyframeSelection {
-            clip_id: clip_ids[0],
-            path: Transform2D::OPACITY_PATH.to_string(),
-            time: first,
-        },
-        AnimationKeyframeSelection {
-            clip_id: clip_ids[0],
-            path: Transform2D::OPACITY_PATH.to_string(),
-            time: second,
-        },
+        key_selection(&state, clip_ids[0], Transform2D::OPACITY_PATH, first),
+        key_selection(&state, clip_ids[0], Transform2D::OPACITY_PATH, second),
     ]);
     assert!(state.copy_selected_animation_keyframes(selection).expect("copy"));
     assert!(state.paste_animation_keyframes(selection, destination).expect("paste"));
@@ -205,7 +229,12 @@ fn copy_paste_animation_keyframes_reassigns_ids_and_updates_selection() {
     let selected_times = state
         .selected_animation_keyframes_for_clip(clip_ids[0])
         .into_iter()
-        .map(|selection| selection.time)
+        .map(|selection| {
+            property
+                .keyframe_by_id(selection.keyframe_id)
+                .expect("selected pasted key")
+                .time
+        })
         .collect::<std::collections::HashSet<_>>();
     assert_eq!(selected_times, pasted_times.into_iter().collect());
 }

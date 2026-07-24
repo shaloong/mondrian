@@ -53,6 +53,18 @@ candidate title before recording one Sequence snapshot. The generic legacy
 solid-color tint row is hidden for Basic Title so two controls cannot claim
 authority over its fill.
 
+`CurveEditor` is a normalized interaction Module, not an automation owner. It
+keeps high-frequency pointer motion local and emits exactly one committed
+`CurveEdit::{Insert, Move, Delete}` for a pointer gesture; keyboard edits are
+already atomic. The Inspector Adapter maps the snapshot-local point index to
+`AnimationParameterAddress + KeyframeId` before dispatch. Evaluated
+Hold/Linear/Bezier samples are a separate read-only paint series, so display
+fidelity cannot rewrite interpolation. Each editable point also carries an
+explicit interaction policy: virtual Clip-boundary samples are fixed and
+non-deletable, while real author keys remain movable and deletable even when
+their time lies exactly on a boundary. Escape cancels widget-local preview
+state and publishes no author mutation.
+
 Inspector audio source controls project existing author state rather than own
 it. Each row addresses one stable `AudioComponentEditId`; media choices carry
 only Asset `AudioSourceComponentId` values and nested choices carry only child

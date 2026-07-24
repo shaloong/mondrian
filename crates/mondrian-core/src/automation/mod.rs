@@ -1247,6 +1247,18 @@ impl AnimatedProperty {
         self.channels.get(index)
     }
 
+    /// Stable authoring address for this property instance.
+    ///
+    /// `ParameterId` identifies the shared definition while
+    /// `AnimationTrackId` distinguishes this concrete owner-local instance.
+    /// The descriptor path remains only a current routing alias.
+    pub fn address(&self) -> AnimationParameterAddress {
+        AnimationParameterAddress {
+            animation_track_id: self.track_id,
+            parameter_id: self.descriptor.parameter_id().clone(),
+        }
+    }
+
     pub fn keyframe_times(&self) -> Vec<TimelineTime> {
         let mut times = self
             .channels
@@ -1256,6 +1268,35 @@ impl AnimatedProperty {
         times.sort_unstable();
         times.dedup();
         times
+    }
+
+    /// Resolve the exact author time currently owned by a stable keyframe ID.
+    pub fn keyframe_time_by_id(&self, keyframe_id: KeyframeId) -> Option<TimelineTime> {
+        self.channels
+            .iter()
+            .flat_map(|channel| channel.keyframes())
+            .find(|keyframe| keyframe.id == keyframe_id)
+            .map(|keyframe| keyframe.time)
+    }
+
+    /// Resolve a complete property keyframe by stable identity.
+    ///
+    /// A complete property key must use the same identity for every populated
+    /// numeric channel at its author time. Channel-specific keys are not
+    /// representable as one `PropertyValue` key and therefore return `None`.
+    pub fn keyframe_by_id(&self, keyframe_id: KeyframeId) -> Option<Keyframe<PropertyValue>> {
+        let time = self.keyframe_time_by_id(keyframe_id)?;
+        let populated = self
+            .channels
+            .iter()
+            .filter_map(|channel| channel.keyframe_at(time))
+            .collect::<Vec<_>>();
+        if populated.len() != self.channels.len()
+            || populated.iter().any(|keyframe| keyframe.id != keyframe_id)
+        {
+            return None;
+        }
+        self.keyframe_at(time)
     }
 
     pub fn keyframe_at(&self, time: TimelineTime) -> Option<Keyframe<PropertyValue>> {
@@ -1412,6 +1453,75 @@ impl AnimatedProperty {
                 temporal_flags: keyframe.temporal_flags,
             });
         }
+        self.normalize_channels();
+        Ok(())
+    }
+
+    /// Atomically edit one complete property key by stable identity.
+    ///
+    /// Time and value change together against cloned channels, so no
+    /// remove-then-insert intermediate state can normalize neighboring
+    /// Bezier handles. The stored interpolation, temporal flags, and identity
+    /// remain unchanged.
+    pub fn edit_keyframe(
+        &mut self,
+        keyframe_id: KeyframeId,
+        time: TimelineTime,
+        value: PropertyValue,
+    ) -> Result<()> {
+        if self.keyframe_by_id(keyframe_id).is_none() {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "property_edit_keyframe".to_owned(),
+                reason: format!(
+                    "关键帧 {keyframe_id} 不存在或不是完整属性关键帧: {}",
+                    self.descriptor.path
+                ),
+            });
+        }
+
+        let value = self.normalize_value(value)?;
+        let channel_values = self.value_to_channel_values(&value)?;
+        validate_channel_updates(
+            self.channel_count(),
+            &channel_values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| (index, *value))
+                .collect::<Vec<_>>(),
+            &self.descriptor.path,
+        )?;
+
+        let mut channels = self.channels.clone();
+        for (channel, value) in channels.iter_mut().zip(channel_values) {
+            if channel
+                .keyframes
+                .iter()
+                .any(|keyframe| keyframe.time == time && keyframe.id != keyframe_id)
+            {
+                return Err(MondrianError::WorkflowStepFailed {
+                    step_id: "property_edit_keyframe".to_owned(),
+                    reason: format!(
+                        "关键帧 {keyframe_id} 不能移动到已占用时间 {time}: {}",
+                        self.descriptor.path
+                    ),
+                });
+            }
+            let keyframe = channel
+                .keyframes
+                .iter_mut()
+                .find(|keyframe| keyframe.id == keyframe_id)
+                .ok_or_else(|| MondrianError::WorkflowStepFailed {
+                    step_id: "property_edit_keyframe".to_owned(),
+                    reason: format!(
+                        "关键帧 {keyframe_id} 缺少完整属性通道: {}",
+                        self.descriptor.path
+                    ),
+                })?;
+            keyframe.time = time;
+            keyframe.value = value;
+            channel.keyframes.sort_by_key(|keyframe| keyframe.time);
+        }
+        self.channels = channels;
         self.normalize_channels();
         Ok(())
     }
@@ -1865,6 +1975,11 @@ impl AnimatedProperty {
                 self.set_animation_enabled(true);
                 self.set_exact_keyframe(keyframe)
             }
+            PropertyMutation::EditKeyframe { path, keyframe_id, time, value } => {
+                self.ensure_path(&path)?;
+                ensure_value_compatible(&path, &self.descriptor.schema.default_value, &value)?;
+                self.edit_keyframe(keyframe_id, time, value)
+            }
             PropertyMutation::RemoveKeyframe { path, time } => {
                 self.ensure_path(&path)?;
                 self.remove_keyframe(time);
@@ -1942,6 +2057,19 @@ impl AnimatedProperty {
     }
 }
 
+/// Stable authoring address for one visual/property automation instance.
+///
+/// `ParameterId` is definition identity. `AnimationTrackId` is the stable
+/// owner-local instance identity. Property paths are deliberately excluded
+/// because they are mutable Adapter aliases rather than author identity.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct AnimationParameterAddress {
+    /// Stable owner-local automation instance.
+    pub animation_track_id: AnimationTrackId,
+    /// Definition-stable Parameter Schema identity.
+    pub parameter_id: ParameterId,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PropertyBag {
     properties: BTreeMap<String, AnimatedProperty>,
@@ -1961,6 +2089,39 @@ impl PropertyBag {
 
     pub fn property(&self, path: &str) -> Option<&AnimatedProperty> {
         self.properties.get(path)
+    }
+
+    /// Resolve one property through its stable instance and schema identity.
+    pub fn property_by_address(
+        &self,
+        address: &AnimationParameterAddress,
+    ) -> Option<(&str, &AnimatedProperty)> {
+        self.iter().find(|(_, property)| {
+            property.track_id == address.animation_track_id
+                && property.descriptor.parameter_id() == &address.parameter_id
+        })
+    }
+
+    /// Resolve the stable instance address currently routed by one path alias.
+    pub fn address_for_path(&self, path: &str) -> Option<AnimationParameterAddress> {
+        self.property(path).map(AnimatedProperty::address)
+    }
+
+    /// Resolve a definition identity only when exactly one instance owns it.
+    ///
+    /// This supports paste into a different owner. Ambiguous repeated effect
+    /// instances fail closed instead of selecting by suffix or collection
+    /// order.
+    pub fn unique_address_for_parameter_id(
+        &self,
+        parameter_id: &ParameterId,
+    ) -> Option<AnimationParameterAddress> {
+        let mut matches = self
+            .iter()
+            .filter(|(_, property)| property.descriptor.parameter_id() == parameter_id)
+            .map(|(_, property)| property.address());
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
     }
 
     pub fn evaluate(&self, path: &str, time: TimelineTime) -> Option<PropertyValue> {
@@ -2092,6 +2253,18 @@ impl PropertyBag {
         property.update_keyframe_interpolation(time, interpolation)
     }
 
+    /// Atomically edit one complete property key through its stable identity.
+    pub fn edit_keyframe(
+        &mut self,
+        path: &str,
+        keyframe_id: KeyframeId,
+        time: TimelineTime,
+        value: PropertyValue,
+    ) -> Result<()> {
+        let property = self.require_property_mut(path)?;
+        property.edit_keyframe(keyframe_id, time, value)
+    }
+
     pub fn update_channel_keyframe_handles(
         &mut self,
         path: &str,
@@ -2137,6 +2310,9 @@ impl PropertyBag {
             }
             PropertyMutation::SetStaticValue { path, value } => self.set_static_value(&path, value),
             PropertyMutation::SetKeyframe { path, keyframe } => self.set_keyframe(&path, keyframe),
+            PropertyMutation::EditKeyframe { path, keyframe_id, time, value } => {
+                self.edit_keyframe(&path, keyframe_id, time, value)
+            }
             PropertyMutation::RemoveKeyframe { path, time } => self.remove_keyframe(&path, time),
             PropertyMutation::MoveKeyframe { path, from_time, to_time } => {
                 self.move_keyframe(&path, from_time, to_time)
@@ -2199,6 +2375,13 @@ pub enum PropertyMutation {
     SetKeyframe {
         path: String,
         keyframe: Keyframe<PropertyValue>,
+    },
+    /// Atomically change one complete key's time and value by stable identity.
+    EditKeyframe {
+        path: String,
+        keyframe_id: KeyframeId,
+        time: TimelineTime,
+        value: PropertyValue,
     },
     RemoveKeyframe {
         path: String,
@@ -2267,6 +2450,7 @@ impl PropertyMutation {
             Self::DefineProperty(descriptor) => &descriptor.path,
             Self::SetStaticValue { path, .. }
             | Self::SetKeyframe { path, .. }
+            | Self::EditKeyframe { path, .. }
             | Self::RemoveKeyframe { path, .. }
             | Self::MoveKeyframe { path, .. }
             | Self::UpdateKeyframeInterpolation { path, .. }
@@ -2293,6 +2477,9 @@ impl PropertyMutation {
             }
             SetStaticValue { path, value } => SetStaticValue { path: f(path), value },
             SetKeyframe { path, keyframe } => SetKeyframe { path: f(path), keyframe },
+            EditKeyframe { path, keyframe_id, time, value } => {
+                EditKeyframe { path: f(path), keyframe_id, time, value }
+            }
             RemoveKeyframe { path, time } => RemoveKeyframe { path: f(path), time },
             MoveKeyframe { path, from_time, to_time } => {
                 MoveKeyframe { path: f(path), from_time, to_time }
@@ -2617,6 +2804,114 @@ mod tests {
             .and_then(|value| value.as_f32())
             .expect("evaluate interpolated value");
         assert!((value - 18.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn stable_parameter_address_survives_path_alias_changes() {
+        let parameter_id = ParameterId::new_static("mondrian.test.stable_amount");
+        let mut bag = PropertyBag::default();
+        bag.define(
+            PropertyDescriptor::new("effect.initial.amount", "Amount", PropertyValue::Float(0.0))
+                .with_parameter_id(parameter_id),
+        );
+        let address = bag.address_for_path("effect.initial.amount").expect("stable address");
+        let mut property = bag.properties.remove("effect.initial.amount").expect("property");
+        property.descriptor.path = "effect.renamed.amount".to_owned();
+        bag.upsert(property);
+
+        let (path, resolved) = bag.property_by_address(&address).expect("resolve by identity");
+        assert_eq!(path, "effect.renamed.amount");
+        assert_eq!(resolved.address(), address);
+        assert!(bag.property("effect.initial.amount").is_none());
+    }
+
+    #[test]
+    fn edit_keyframe_is_atomic_and_preserves_manual_bezier_identity() {
+        let mut bag = PropertyBag::default();
+        bag.define(PropertyDescriptor::new(
+            "effect.amount",
+            "Amount",
+            PropertyValue::Float(0.0),
+        ));
+        let first = Keyframe::linear(tt(0), PropertyValue::Float(0.0));
+        let edited_id = KeyframeId::new();
+        let middle = Keyframe {
+            id: edited_id,
+            time: tt(10),
+            value: PropertyValue::Float(0.5),
+            interp_in: KeyframeInterpolation::Bezier(BezierHandle {
+                time_offset: ht(-0.2),
+                value_offset: -0.1,
+            }),
+            interp_out: KeyframeInterpolation::Bezier(BezierHandle {
+                time_offset: ht(0.3),
+                value_offset: 0.2,
+            }),
+            temporal_flags: KeyframeTemporalFlags {
+                auto_bezier: false,
+                continuous: false,
+                broken_handles: true,
+            },
+        };
+        let last = Keyframe::linear(tt(20), PropertyValue::Float(1.0));
+        for keyframe in [first, middle.clone(), last] {
+            bag.apply_mutation(PropertyMutation::SetKeyframe {
+                path: "effect.amount".to_owned(),
+                keyframe,
+            })
+            .expect("seed key");
+        }
+
+        bag.apply_mutation(PropertyMutation::EditKeyframe {
+            path: "effect.amount".to_owned(),
+            keyframe_id: edited_id,
+            time: tt(12),
+            value: PropertyValue::Float(0.75),
+        })
+        .expect("edit key");
+
+        let property = bag.property("effect.amount").expect("property");
+        assert!(property.keyframe_at(tt(10)).is_none());
+        let edited = property.keyframe_by_id(edited_id).expect("edited key");
+        assert_eq!(edited.time, tt(12));
+        assert_eq!(edited.value, PropertyValue::Float(0.75));
+        assert_eq!(edited.id, middle.id);
+        assert_eq!(edited.interp_in, middle.interp_in);
+        assert_eq!(edited.interp_out, middle.interp_out);
+        assert_eq!(edited.temporal_flags, middle.temporal_flags);
+    }
+
+    #[test]
+    fn edit_keyframe_collision_rejects_without_partial_curve_changes() {
+        let mut bag = PropertyBag::default();
+        bag.define(PropertyDescriptor::new(
+            "effect.amount",
+            "Amount",
+            PropertyValue::Float(0.0),
+        ));
+        let first = Keyframe::linear(tt(5), PropertyValue::Float(0.25));
+        let first_id = first.id;
+        let second = Keyframe::linear(tt(10), PropertyValue::Float(0.75));
+        for keyframe in [first, second] {
+            bag.apply_mutation(PropertyMutation::SetKeyframe {
+                path: "effect.amount".to_owned(),
+                keyframe,
+            })
+            .expect("seed key");
+        }
+        let before = bag.clone();
+
+        let error = bag
+            .apply_mutation(PropertyMutation::EditKeyframe {
+                path: "effect.amount".to_owned(),
+                keyframe_id: first_id,
+                time: tt(10),
+                value: PropertyValue::Float(0.5),
+            })
+            .expect_err("occupied target must reject");
+
+        assert!(error.to_string().contains("已占用"));
+        assert_eq!(bag, before);
     }
 
     #[test]

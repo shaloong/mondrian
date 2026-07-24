@@ -17,13 +17,14 @@ use crate::app::preview_unavailability::{PreviewOutputStage, PreviewUnavailabili
 use crate::app::preview_viewer_plan::ResolvedPreviewElement;
 use crate::app::selection::SelectedClipRef;
 use crate::app::ui_actions::{
-    assets_create_solid_color_action, inspector_set_clip_property_action,
-    inspector_set_clip_tint_action, timeline_create_basic_title_action,
-    timeline_create_cross_dissolve_action, timeline_drop_asset_action, timeline_seek_action,
-    timeline_trim_clips_action, AssetsCreateAssetPayload, InspectorClipRefPayload,
-    InspectorSetClipPropertyPayload, InspectorSetClipTintPayload,
-    TimelineCreateCrossDissolvePayload, TimelineDropAssetPayload, TimelineTrimClipsPayload,
-    TimelineTrimPayloadEdge,
+    assets_create_solid_color_action, inspector_edit_clip_curve_action,
+    inspector_set_clip_property_action, inspector_set_clip_tint_action,
+    timeline_create_basic_title_action, timeline_create_cross_dissolve_action,
+    timeline_drop_asset_action, timeline_seek_action, timeline_trim_clips_action,
+    AssetsCreateAssetPayload, InspectorClipRefPayload, InspectorCurveEditPayload,
+    InspectorCurvePointPayload, InspectorEditClipCurvePayload, InspectorSetClipPropertyPayload,
+    InspectorSetClipTintPayload, TimelineCreateCrossDissolvePayload, TimelineDropAssetPayload,
+    TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
 };
 use crate::app::AppState;
 use anyhow::{bail, ensure, Context};
@@ -143,6 +144,8 @@ enum ContentEvidence {
     },
     BezierKeyframe {
         author_steps: Vec<AuthorTransitionEvidence>,
+        curve_edit_step: AuthorTransitionEvidence,
+        edited_keyframe_id: String,
         property_path: &'static str,
         keyframes: usize,
         midpoint_value: f32,
@@ -788,6 +791,69 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
     .len();
     ensure!(after_redo == 2, "Redo did not restore the Bezier keyframe");
 
+    let (bezier_address, bezier_end_id, bezier_end_value_ratio) = {
+        let bag = find_video_clip(
+            state.active_sequence().context("active Sequence is absent")?,
+            title_clip_id,
+        )?
+        .0
+        .property_bag()?;
+        let property = bag
+            .property(BasicTitle::FONT_SIZE_PATH)
+            .context("font size property is absent before Curve Editor edit")?;
+        let keyframe = property
+            .keyframe_at(end_time)
+            .context("Bezier endpoint is absent before Curve Editor edit")?;
+        let numeric = property
+            .descriptor
+            .schema
+            .numeric
+            .context("font size property has no numeric editor contract")?;
+        let value = f64::from(keyframe.value.as_f32().context("font size endpoint is not scalar")?);
+        let ratio = ((value - numeric.soft_range.min)
+            / (numeric.soft_range.max - numeric.soft_range.min))
+            .clamp(0.0, 1.0) as f32;
+        (property.address(), keyframe.id, ratio)
+    };
+    let curve_edit_step = dispatch_author_transition(
+        &mut state,
+        "curve-editor-move-bezier-font-size-end",
+        inspector_edit_clip_curve_action(InspectorEditClipCurvePayload {
+            clip: InspectorClipRefPayload {
+                track_id: title_selection.track_id,
+                is_video_track: true,
+                clip_id: title_clip_id,
+            },
+            property: bezier_address,
+            edit: InspectorCurveEditPayload::Upsert {
+                keyframe_id: Some(bezier_end_id),
+                point: InspectorCurvePointPayload { x: 0.875, y: bezier_end_value_ratio },
+            },
+        }),
+    )?;
+    let (edited_bezier_time, edited_bezier_value) = {
+        let bag = find_video_clip(
+            state.active_sequence().context("active Sequence is absent")?,
+            title_clip_id,
+        )?
+        .0
+        .property_bag()?;
+        let keyframe = bag
+            .property(BasicTitle::FONT_SIZE_PATH)
+            .and_then(|property| property.keyframe_by_id(bezier_end_id))
+            .context("Curve Editor edit changed the Bezier key identity")?;
+        ensure!(
+            KeyframeInterpolationKind::from(keyframe.interp_out)
+                == KeyframeInterpolationKind::Bezier,
+            "Curve Editor edit changed Bezier interpolation"
+        );
+        ensure!(
+            keyframe.time != end_time,
+            "Curve Editor edit did not move the addressed Bezier key"
+        );
+        (keyframe.time, keyframe.value.clone())
+    };
+
     let sequence = state.active_sequence().context("active Sequence is absent")?;
     let (hold_count, hold_midpoint) = keyframe_observation(
         sequence,
@@ -839,6 +905,8 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
         },
         ContentEvidence::BezierKeyframe {
             author_steps: bezier_steps,
+            curve_edit_step,
+            edited_keyframe_id: bezier_end_id.to_string(),
             property_path: BasicTitle::FONT_SIZE_PATH,
             keyframes: bezier_count,
             midpoint_value: bezier_midpoint,
@@ -875,6 +943,18 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
     ] {
         keyframe_observation(sequence, title_clip_id, path, midpoint, kind)?;
     }
+    let reopened_title_properties = reopened_title.property_bag()?;
+    let reopened_bezier = reopened_title_properties
+        .property(BasicTitle::FONT_SIZE_PATH)
+        .and_then(|property| property.keyframe_by_id(bezier_end_id))
+        .context("save/reopen changed the Curve Editor key identity")?;
+    ensure!(
+        reopened_bezier.time == edited_bezier_time
+            && reopened_bezier.value == edited_bezier_value
+            && KeyframeInterpolationKind::from(reopened_bezier.interp_out)
+                == KeyframeInterpolationKind::Bezier,
+        "save/reopen changed the incrementally edited Bezier key"
+    );
     let execution_after_reopen = execute_visual_frame(&state, edit_frame)?;
     ensure!(
         execution_before_save == execution_after_reopen,
@@ -902,7 +982,7 @@ fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<G
     )?;
 
     Ok(GoldenVisualReport {
-        schema_version: 3,
+        schema_version: 4,
         profile: VISUAL_SLICE_ID,
         contract_id: contract.id,
         status: "passed",

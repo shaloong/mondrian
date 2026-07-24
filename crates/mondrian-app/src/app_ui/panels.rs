@@ -6,21 +6,23 @@
 //! changing dock layout or widget construction.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use mondrian_assets::library::FolderRecord;
 use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
-use mondrian_core::automation::{ParameterResourceReference, ParameterSchema, PropertyValue};
+use mondrian_core::automation::{
+    AnimationParameterAddress, ParameterResourceReference, ParameterSchema, PropertyValue,
+};
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::types::{
     AssetId, AudioComponentEditId, AudioSourceComponentId, ClipId, ColorSpace, EffectId, JobId,
-    Rational, SequenceId, TrackId, VideoTransitionId,
+    KeyframeId, Rational, SequenceId, TrackId, VideoTransitionId,
 };
 use mondrian_core::{
-    Color, FrameRounding, TimelineDisplayContract, TimelineDisplayFormat, TimelineTime,
+    Color, FrameRounding, TimeScale, TimelineDisplayContract, TimelineDisplayFormat, TimelineTime,
     WorkingColorSpace,
 };
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
@@ -59,12 +61,12 @@ use mondrian_ui_widgets::dock_tab_bar::TabInfo;
 use mondrian_ui_widgets::NumberInput;
 use mondrian_ui_widgets::{
     AssetGrid, AssetGridBadgeTone, AssetGridItem, Button, Checkbox, ColorPickerAreaMode,
-    ColorPickerTrigger, CurveEditor, CurvePoint, DockPanel, DockPanelDropArea, Dropdown, FlexChild,
-    FlexContainer, Label, MenuItem, MultilineTextInput, NodeGraphEdge, NodeGraphNode,
-    NodeGraphView, PanelList, PanelListItem, PropertyPanel, PropertyPanelOptions, PropertyRow,
-    PropertySection, RasterImage, ScrollView, Slider, TextInput, TimelineAssetDrop, TimelineClip,
-    TimelineClipKind, TimelineClipMove, TimelineClipRef, TimelineClipTrim, TimelineCutRef,
-    TimelineEditCommand, TimelineInOutPoint, TimelineSeek,
+    ColorPickerTrigger, CurveEdit, CurveEditor, CurvePoint, CurvePointPolicy, DockPanel,
+    DockPanelDropArea, Dropdown, FlexChild, FlexContainer, Label, MenuItem, MultilineTextInput,
+    NodeGraphEdge, NodeGraphNode, NodeGraphView, PanelList, PanelListItem, PropertyPanel,
+    PropertyPanelOptions, PropertyRow, PropertySection, RasterImage, ScrollView, Slider, TextInput,
+    TimelineAssetDrop, TimelineClip, TimelineClipKind, TimelineClipMove, TimelineClipRef,
+    TimelineClipTrim, TimelineCutRef, TimelineEditCommand, TimelineInOutPoint, TimelineSeek,
     TimelineSeekSource as WidgetTimelineSeekSource, TimelineToolbarIconSlot, TimelineTrack,
     TimelineTrackControl, TimelineTrackControlIconSlot, TimelineTrackMove, TimelineTrackRef,
     TimelineTransition, TimelineTransitionRef, TimelineTransitionResize, TimelineTrimEdge,
@@ -90,9 +92,9 @@ use crate::app::ui_actions::{
     assets_refresh_audio_components_action, assets_rename_asset_action,
     assets_rename_folder_action, assets_set_proxy_mode_action, effects_add_to_clip_action,
     export_cancel_job_action, export_clear_completed_action, export_enqueue_action,
-    export_set_draft_action, inspector_remove_effect_action, inspector_select_effect_action,
-    inspector_set_audio_component_edit_field_action, inspector_set_audio_component_source_action,
-    inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
+    export_set_draft_action, inspector_edit_clip_curve_action, inspector_remove_effect_action,
+    inspector_select_effect_action, inspector_set_audio_component_edit_field_action,
+    inspector_set_audio_component_source_action, inspector_set_clip_enabled_action,
     inspector_set_clip_opacity_action, inspector_set_clip_property_action,
     inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
     inspector_set_effect_enabled_action, inspector_set_effect_property_action,
@@ -117,9 +119,10 @@ use crate::app::ui_actions::{
     ExportDraftUpdatePayload, ExportEnqueuePayload, ExportJobTargetPayload,
     ExportOutputDialogPayload, ImportMediaDialogPayload, InspectorAudioComponentEditField,
     InspectorAudioComponentSourcePayload, InspectorClipRefPayload, InspectorClipTransformField,
-    InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
+    InspectorCurveEditPayload, InspectorCurvePointPayload, InspectorEditClipCurvePayload,
+    InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
     InspectorSetAudioComponentEditFieldPayload, InspectorSetAudioComponentSourcePayload,
-    InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
     InspectorSetClipPropertyPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
@@ -1428,6 +1431,26 @@ impl TimelinePanelModel {
     }
 }
 
+/// One editable key projected into the normalized Curve Editor viewport.
+#[derive(Debug, Clone)]
+pub struct InspectorCurveKeyModel {
+    /// Stable author identity. Virtual Clip-boundary points have no key yet.
+    pub keyframe_id: Option<KeyframeId>,
+    /// Normalized screen-space position.
+    pub point: CurvePoint,
+}
+
+/// Stable author target plus editable keys and read-only evaluated samples.
+#[derive(Debug, Clone)]
+pub struct InspectorCurveModel {
+    /// Stable property instance and definition identity.
+    pub property: AnimationParameterAddress,
+    /// Editable keys in monotonic-time order.
+    pub keys: Vec<InspectorCurveKeyModel>,
+    /// Evaluated samples used to paint Hold/Bezier semantics faithfully.
+    pub display_points: Vec<CurvePoint>,
+}
+
 /// Inspector fixture data independent from a concrete property widget tree.
 #[derive(Debug, Clone)]
 pub struct InspectorPanelModel {
@@ -1465,8 +1488,8 @@ pub struct InspectorPanelModel {
     pub max_frame: f32,
     /// Preferred color-picker area style for this inspector instance.
     pub tint_area_mode: ColorPickerAreaMode,
-    /// Opacity animation curve points normalized over the selected clip span.
-    pub curve_points: Vec<CurvePoint>,
+    /// Opacity animation projected through stable property/key identities.
+    pub opacity_curve: Option<InspectorCurveModel>,
     /// Placement-local audio Component Edits and their source choices.
     pub audio_components: Vec<InspectorAudioComponentModel>,
     /// Definition-backed properties owned by the selected Clip content.
@@ -1667,7 +1690,7 @@ impl InspectorPanelModel {
                 .map(|position| position.frame.max(1) as f32)
                 .unwrap_or(1.0),
             tint_area_mode: ColorPickerAreaMode::Wheel,
-            curve_points: opacity_curve_points_for_clip(clip, time),
+            opacity_curve: opacity_curve_model_for_clip(clip, time),
             audio_components: inspector_audio_components(state, clip),
             clip_properties,
             effects: clip
@@ -1708,7 +1731,7 @@ impl InspectorPanelModel {
             out_frame: 1.0,
             max_frame: 1.0,
             tint_area_mode: ColorPickerAreaMode::Wheel,
-            curve_points: vec![CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)],
+            opacity_curve: None,
             audio_components: Vec::new(),
             clip_properties: Vec::new(),
             effects: Vec::new(),
@@ -1735,12 +1758,7 @@ impl InspectorPanelModel {
             out_frame: 96.0,
             max_frame: 240.0,
             tint_area_mode: ColorPickerAreaMode::Wheel,
-            curve_points: vec![
-                CurvePoint::new(0.0, 0.0),
-                CurvePoint::new(0.35, 0.68),
-                CurvePoint::new(0.72, 0.42),
-                CurvePoint::new(1.0, 1.0),
-            ],
+            opacity_curve: None,
             audio_components: Vec::new(),
             clip_properties: Vec::new(),
             effects: Vec::new(),
@@ -2674,53 +2692,80 @@ fn clip_rotation_degrees(clip: &Clip, time: TimelineTime) -> f32 {
         .unwrap_or(0.0)
 }
 
-fn opacity_curve_points_for_clip(clip: &Clip, time: TimelineTime) -> Vec<CurvePoint> {
-    let author_time = clip_visual_author_time_at(clip, time).unwrap_or(clip.clip_time_in);
+fn opacity_curve_model_for_clip(clip: &Clip, _time: TimelineTime) -> Option<InspectorCurveModel> {
     let bag = clip.transform.to_property_bag();
-    let Some(opacity) = bag.property(Transform2D::OPACITY_PATH) else {
-        return default_opacity_curve(clip.transform.evaluate_opacity(author_time));
-    };
-    let start_tick = clip.clip_time_in;
-    let Ok(end_tick) = clip.clip_time_out() else {
-        return default_opacity_curve(clip.transform.evaluate_opacity(author_time));
-    };
-    let Ok(duration_ticks) = end_tick.checked_sub(start_tick) else {
-        return default_opacity_curve(clip.transform.evaluate_opacity(author_time));
-    };
-
-    let mut points = vec![CurvePoint::new(
-        0.0,
-        clip.transform.evaluate_opacity(start_tick),
-    )];
-    points.extend(
-        opacity.keyframe_times().into_iter().filter_map(|keyframe_time| {
-            if keyframe_time <= start_tick || keyframe_time >= end_tick {
-                return None;
-            }
-            let keyframe = opacity.keyframe_at(keyframe_time)?;
-            let y = keyframe.value.as_f32()?.clamp(0.0, 1.0);
-            let elapsed = keyframe_time.checked_sub(start_tick).ok()?.to_f64();
-            let x = (elapsed / duration_ticks.to_f64()).clamp(0.0, 1.0) as f32;
-            Some(CurvePoint::new(x, y))
-        }),
-    );
-    points.push(CurvePoint::new(
-        1.0,
-        clip.transform.evaluate_opacity(end_tick),
-    ));
-    points.sort_by(|a, b| a.x.total_cmp(&b.x));
-    points.dedup_by(|a, b| (a.x - b.x).abs() < f32::EPSILON);
-
-    if points.len() < 2 {
-        default_opacity_curve(clip.transform.evaluate_opacity(author_time))
-    } else {
-        points
+    let opacity = bag.property(Transform2D::OPACITY_PATH)?;
+    let numeric = opacity.descriptor.schema.numeric?;
+    let value_span = numeric.soft_range.max - numeric.soft_range.min;
+    if !value_span.is_finite() || value_span <= 0.0 {
+        return None;
     }
-}
+    let start_tick = clip.clip_time_in;
+    let end_tick = clip.clip_time_out().ok()?;
+    let duration_ticks = end_tick.checked_sub(start_tick).ok()?;
+    if duration_ticks.is_zero() {
+        return None;
+    }
 
-fn default_opacity_curve(opacity: f32) -> Vec<CurvePoint> {
-    let opacity = opacity.clamp(0.0, 1.0);
-    vec![CurvePoint::new(0.0, opacity), CurvePoint::new(1.0, opacity)]
+    let normalized_value = |value: PropertyValue| {
+        let value = f64::from(value.as_f32()?);
+        Some(((value - numeric.soft_range.min) / value_span).clamp(0.0, 1.0) as f32)
+    };
+    let normalized_time = |keyframe_time: TimelineTime| {
+        let elapsed = keyframe_time.checked_sub(start_tick).ok()?.to_f64();
+        Some((elapsed / duration_ticks.to_f64()).clamp(0.0, 1.0) as f32)
+    };
+
+    let mut keys = BTreeMap::<TimelineTime, InspectorCurveKeyModel>::new();
+    keys.insert(
+        start_tick,
+        InspectorCurveKeyModel {
+            keyframe_id: None,
+            point: CurvePoint::new(0.0, normalized_value(opacity.evaluate(start_tick))?),
+        },
+    );
+    keys.insert(
+        end_tick,
+        InspectorCurveKeyModel {
+            keyframe_id: None,
+            point: CurvePoint::new(1.0, normalized_value(opacity.evaluate(end_tick))?),
+        },
+    );
+    for keyframe_time in opacity.keyframe_times() {
+        if keyframe_time < start_tick || keyframe_time > end_tick {
+            continue;
+        }
+        let keyframe = opacity.keyframe_at(keyframe_time)?;
+        keys.insert(
+            keyframe_time,
+            InspectorCurveKeyModel {
+                keyframe_id: Some(keyframe.id),
+                point: CurvePoint::new(
+                    normalized_time(keyframe_time)?,
+                    normalized_value(keyframe.value)?,
+                ),
+            },
+        );
+    }
+
+    const DISPLAY_SEGMENTS: i64 = 128;
+    let display_points = (0..=DISPLAY_SEGMENTS)
+        .map(|index| {
+            let scale = TimeScale::new(index, DISPLAY_SEGMENTS).ok()?;
+            let sample_time =
+                start_tick.checked_add(duration_ticks.checked_scale(scale).ok()?).ok()?;
+            Some(CurvePoint::new(
+                index as f32 / DISPLAY_SEGMENTS as f32,
+                normalized_value(opacity.evaluate(sample_time))?,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    Some(InspectorCurveModel {
+        property: opacity.address(),
+        keys: keys.into_values().collect(),
+        display_points,
+    })
 }
 
 fn asset_grid_item_from_asset(
@@ -4909,9 +4954,32 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
         }
         return panel;
     }
-    let curve = CurveEditor::with_points(model.curve_points.clone())
-        .enabled(can_edit)
-        .on_change(move |points| inspector_curve_action(selected_clip, points));
+    let curve = if let Some(curve_model) = model.opacity_curve.clone() {
+        let points = curve_model.keys.iter().map(|key| key.point).collect();
+        let point_policies = curve_model
+            .keys
+            .iter()
+            .map(|key| {
+                if key.keyframe_id.is_some() {
+                    CurvePointPolicy::editable()
+                } else {
+                    CurvePointPolicy::anchor()
+                }
+            })
+            .collect();
+        let display_points = curve_model.display_points.clone();
+        CurveEditor::with_points(points)
+            .with_point_policies(point_policies)
+            .with_display_points(display_points)
+            .enabled(can_edit)
+            .on_edit(move |edit| inspector_curve_edit_action(selected_clip, &curve_model, edit))
+    } else {
+        CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, model.opacity / 100.0),
+            CurvePoint::new(1.0, model.opacity / 100.0),
+        ])
+        .disabled()
+    };
     let mut style_section = PropertySection::new("剪辑样式")
         .with_row(PropertyRow::new(
             "启用",
@@ -5626,22 +5694,47 @@ fn inspector_reorder_effect_action(
         .unwrap_or(Action::NoOp)
 }
 
-fn inspector_curve_action(selection: Option<SelectedClipRef>, points: &[CurvePoint]) -> Action {
-    if let Some(selection) = selection {
-        let points = points
-            .iter()
-            .filter(|point| point.x.is_finite() && point.y.is_finite())
-            .map(|point| InspectorCurvePointPayload {
-                x: point.x.clamp(0.0, 1.0),
-                y: point.y.clamp(0.0, 1.0),
-            })
-            .collect();
-        return inspector_set_clip_curve_action(InspectorSetClipCurvePayload {
-            clip: inspector_clip_payload(selection),
-            points,
-        });
+fn inspector_curve_edit_action(
+    selection: Option<SelectedClipRef>,
+    model: &InspectorCurveModel,
+    edit: CurveEdit,
+) -> Action {
+    let Some(selection) = selection else {
+        return Action::NoOp;
+    };
+    let edit = match edit {
+        CurveEdit::Insert { point, .. } => InspectorCurveEditPayload::Upsert {
+            keyframe_id: None,
+            point: inspector_curve_point_payload(point),
+        },
+        CurveEdit::Move { index, point } => {
+            let Some(key) = model.keys.get(index) else {
+                return Action::NoOp;
+            };
+            InspectorCurveEditPayload::Upsert {
+                keyframe_id: key.keyframe_id,
+                point: inspector_curve_point_payload(point),
+            }
+        }
+        CurveEdit::Delete { index } => {
+            let Some(keyframe_id) = model.keys.get(index).and_then(|key| key.keyframe_id) else {
+                return Action::NoOp;
+            };
+            InspectorCurveEditPayload::Remove { keyframe_id }
+        }
+    };
+    inspector_edit_clip_curve_action(InspectorEditClipCurvePayload {
+        clip: inspector_clip_payload(selection),
+        property: model.property.clone(),
+        edit,
+    })
+}
+
+fn inspector_curve_point_payload(point: CurvePoint) -> InspectorCurvePointPayload {
+    InspectorCurvePointPayload {
+        x: point.x.clamp(0.0, 1.0),
+        y: point.y.clamp(0.0, 1.0),
     }
-    Action::NoOp
 }
 
 fn node_graph_node_action(
@@ -6187,9 +6280,9 @@ mod tests {
         ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
         ASSETS_OPEN_FOLDER, ASSETS_PREPARE_DRAG, ASSETS_REBIND_AUDIO_COMPONENT,
         ASSETS_REFRESH_AUDIO_COMPONENTS, ASSETS_RENAME_ASSET, ASSETS_SET_PROXY_MODE,
-        EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_SELECT_EFFECT,
-        INSPECTOR_SET_AUDIO_COMPONENT_EDIT_FIELD, INSPECTOR_SET_AUDIO_COMPONENT_SOURCE,
-        INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
+        EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_EDIT_CLIP_CURVE, INSPECTOR_NAMESPACE,
+        INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_AUDIO_COMPONENT_EDIT_FIELD,
+        INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
         INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
         TIMELINE_CREATE_CROSS_DISSOLVE, TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK,
         TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_SELECT_CLIP,
@@ -6311,7 +6404,20 @@ mod tests {
         assert_eq!(models.viewer.preview_quality_label, "1/2");
         assert_eq!(models.viewer.preview_resolution_scale, 0.5);
         assert!(!models.timeline.tracks.is_empty());
-        assert!(!models.inspector.curve_points.is_empty());
+        let opacity_curve = models
+            .inspector
+            .opacity_curve
+            .as_ref()
+            .expect("selected demo Clip exposes its opacity curve");
+        assert_eq!(
+            opacity_curve.property.parameter_id,
+            mondrian_core::ParameterId::new_static("mondrian.transform.opacity")
+        );
+        assert_eq!(opacity_curve.keys.len(), 2);
+        assert!(opacity_curve.keys.iter().all(|key| key.keyframe_id.is_none()));
+        assert_eq!(opacity_curve.keys[0].point.x, 0.0);
+        assert_eq!(opacity_curve.keys[1].point.x, 1.0);
+        assert_eq!(opacity_curve.display_points.len(), 129);
         assert!(!models.node_graph.nodes.is_empty());
     }
 
@@ -9003,7 +9109,15 @@ mod tests {
         assert!(!models.inspector.enabled);
         assert_eq!(models.inspector.opacity, 100.0);
         assert_eq!(
-            models.inspector.curve_points,
+            models
+                .inspector
+                .opacity_curve
+                .as_ref()
+                .expect("opacity curve")
+                .keys
+                .iter()
+                .map(|key| key.point)
+                .collect::<Vec<_>>(),
             vec![CurvePoint::new(0.0, 1.0), CurvePoint::new(1.0, 1.0)]
         );
 
@@ -9516,14 +9630,17 @@ mod tests {
 
         let models = AppUiPanelModels::from_app_state(&state);
 
+        let opacity_curve = models.inspector.opacity_curve.expect("opacity curve");
         assert_eq!(
-            models.inspector.curve_points,
+            opacity_curve.keys.iter().map(|key| key.point).collect::<Vec<_>>(),
             vec![
                 CurvePoint::new(0.0, 0.0),
                 CurvePoint::new(0.5, 0.5),
                 CurvePoint::new(1.0, 1.0),
             ]
         );
+        assert!(opacity_curve.keys.iter().all(|key| key.keyframe_id.is_some()));
+        assert_eq!(opacity_curve.display_points.len(), 129);
     }
 
     #[test]
@@ -9551,13 +9668,22 @@ mod tests {
 
         let models = AppUiPanelModels::from_app_state(&state);
 
+        let opacity_curve = models.inspector.opacity_curve.expect("opacity curve");
         assert_eq!(
-            models.inspector.curve_points,
+            opacity_curve.keys.iter().map(|key| key.point).collect::<Vec<_>>(),
             vec![
                 CurvePoint::new(0.0, 0.5),
                 CurvePoint::new(0.5, 0.5),
                 CurvePoint::new(1.0, 0.5),
             ]
+        );
+        assert_eq!(
+            opacity_curve
+                .keys
+                .iter()
+                .map(|key| key.keyframe_id.is_some())
+                .collect::<Vec<_>>(),
+            vec![false, true, false]
         );
     }
 
@@ -10936,38 +11062,89 @@ mod tests {
     }
 
     #[test]
-    fn inspector_curve_action_uses_typed_payload_for_selected_clip() {
+    fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
         let selection = SelectedClipRef {
             track_id: TrackId::new(),
             is_video_track: true,
             clip_id: ClipId::new(),
         };
-        let action = inspector_curve_action(
-            Some(selection),
-            &[
-                CurvePoint::new(-0.2, 0.25),
-                CurvePoint::new(0.5, f32::NAN),
-                CurvePoint::new(1.2, 0.75),
+        let keyframe_id = KeyframeId::new();
+        let property = AnimationParameterAddress {
+            animation_track_id: mondrian_core::types::AnimationTrackId::new(),
+            parameter_id: mondrian_core::ParameterId::new_static("mondrian.transform.opacity"),
+        };
+        let model = InspectorCurveModel {
+            property: property.clone(),
+            keys: vec![
+                InspectorCurveKeyModel {
+                    keyframe_id: None,
+                    point: CurvePoint::new(0.0, 0.25),
+                },
+                InspectorCurveKeyModel {
+                    keyframe_id: Some(keyframe_id),
+                    point: CurvePoint::new(0.5, 0.5),
+                },
+                InspectorCurveKeyModel {
+                    keyframe_id: None,
+                    point: CurvePoint::new(1.0, 0.75),
+                },
             ],
+            display_points: Vec::new(),
+        };
+        let action = inspector_curve_edit_action(
+            Some(selection),
+            &model,
+            CurveEdit::Move { index: 1, point: CurvePoint::new(0.6, 0.7) },
         );
 
         match action {
             Action::Custom { namespace, name, payload } => {
                 assert_eq!(namespace, INSPECTOR_NAMESPACE);
-                assert_eq!(name, INSPECTOR_SET_CLIP_CURVE);
-                let payload: InspectorSetClipCurvePayload =
+                assert_eq!(name, INSPECTOR_EDIT_CLIP_CURVE);
+                let payload: InspectorEditClipCurvePayload =
                     serde_json::from_value(payload).expect("curve payload");
                 assert_eq!(payload.clip.clip_id, selection.clip_id);
+                assert_eq!(payload.property, property);
                 assert_eq!(
-                    payload.points,
-                    vec![
-                        InspectorCurvePointPayload { x: 0.0, y: 0.25 },
-                        InspectorCurvePointPayload { x: 1.0, y: 0.75 },
-                    ]
+                    payload.edit,
+                    InspectorCurveEditPayload::Upsert {
+                        keyframe_id: Some(keyframe_id),
+                        point: InspectorCurvePointPayload { x: 0.6, y: 0.7 },
+                    }
                 );
             }
             other => panic!("expected inspector curve action, got {other:?}"),
         }
+
+        let boundary_keyframe_id = KeyframeId::new();
+        let boundary_model = InspectorCurveModel {
+            property: property.clone(),
+            keys: vec![
+                InspectorCurveKeyModel {
+                    keyframe_id: Some(boundary_keyframe_id),
+                    point: CurvePoint::new(0.0, 0.25),
+                },
+                InspectorCurveKeyModel {
+                    keyframe_id: None,
+                    point: CurvePoint::new(1.0, 0.75),
+                },
+            ],
+            display_points: Vec::new(),
+        };
+        let boundary_delete = inspector_curve_edit_action(
+            Some(selection),
+            &boundary_model,
+            CurveEdit::Delete { index: 0 },
+        );
+        let Action::Custom { payload, .. } = boundary_delete else {
+            panic!("expected boundary keyframe removal action");
+        };
+        let payload: InspectorEditClipCurvePayload =
+            serde_json::from_value(payload).expect("boundary curve payload");
+        assert_eq!(
+            payload.edit,
+            InspectorCurveEditPayload::Remove { keyframe_id: boundary_keyframe_id }
+        );
     }
 
     #[test]
@@ -11110,8 +11287,20 @@ mod tests {
             ),
             Action::NoOp
         );
+        let curve_model = InspectorCurveModel {
+            property: AnimationParameterAddress {
+                animation_track_id: mondrian_core::types::AnimationTrackId::new(),
+                parameter_id: mondrian_core::ParameterId::new_static("mondrian.transform.opacity"),
+            },
+            keys: Vec::new(),
+            display_points: Vec::new(),
+        };
         assert_eq!(
-            inspector_curve_action(None, &[CurvePoint::new(0.0, 1.0)]),
+            inspector_curve_edit_action(
+                None,
+                &curve_model,
+                CurveEdit::Insert { index: 0, point: CurvePoint::new(0.0, 1.0) },
+            ),
             Action::NoOp
         );
     }
@@ -11141,7 +11330,7 @@ mod tests {
             out_frame: 30.0,
             max_frame: 60.0,
             tint_area_mode: ColorPickerAreaMode::Wheel,
-            curve_points: vec![CurvePoint::new(0.0, 1.0), CurvePoint::new(1.0, 1.0)],
+            opacity_curve: None,
             audio_components: Vec::new(),
             clip_properties: Vec::new(),
             effects: Vec::new(),
@@ -11212,7 +11401,7 @@ mod tests {
             out_frame: 30.0,
             max_frame: 60.0,
             tint_area_mode: ColorPickerAreaMode::Wheel,
-            curve_points: vec![CurvePoint::new(0.0, 1.0), CurvePoint::new(1.0, 1.0)],
+            opacity_curve: None,
             audio_components: Vec::new(),
             clip_properties: Vec::new(),
             effects: vec![InspectorEffectModel {

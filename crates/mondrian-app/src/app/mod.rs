@@ -9,8 +9,8 @@ use std::{fs, path::Path, path::PathBuf};
 use mondrian_assets::{AssetKind, AssetLibrary};
 use mondrian_core::{
     automation::{
-        interpolation_mode_from_keyframe, InterpolationType, Keyframe, PropertyHost,
-        PropertyMutation, PropertyValue,
+        interpolation_mode_from_keyframe, AnimationParameterAddress, InterpolationType, Keyframe,
+        PropertyHost, PropertyMutation, PropertyValue,
     },
     events::{AppEvent, EventBus},
     types::{
@@ -55,6 +55,7 @@ pub(crate) fn tt(frame: i64, time_base: Rational) -> TimelineTime {
 }
 
 mod action_handler;
+mod animation_authoring;
 mod animation_state;
 #[cfg(test)]
 mod audio_playback_acceptance;
@@ -132,15 +133,13 @@ pub struct DraggingAsset {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AnimationPropertySelection {
     pub clip_id: ClipId,
-    pub path: String,
+    pub property: AnimationParameterAddress,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AnimationKeyframeSelection {
-    pub clip_id: ClipId,
-    pub path: String,
-    /// Exact coordinate in the selected Clip's visual authoring domain.
-    pub time: TimelineTime,
+    pub property: AnimationPropertySelection,
+    pub keyframe_id: KeyframeId,
 }
 
 /// Unified timeline, clip, mask, and effect selection — single source of truth.
@@ -167,7 +166,7 @@ pub struct SelectionState {
 #[derive(Debug, Clone, Default)]
 pub struct AnimationSelectionState {
     pub active_property: Option<AnimationPropertySelection>,
-    pub remembered_active_properties: HashMap<ClipId, String>,
+    pub remembered_active_properties: HashMap<ClipId, AnimationParameterAddress>,
     pub selected_keyframes: HashSet<AnimationKeyframeSelection>,
     pub bubble_host: Option<AnimationBubbleHost>,
 }
@@ -180,7 +179,7 @@ pub enum AnimationBubbleHost {
 
 #[derive(Debug, Clone)]
 pub struct AnimationClipboardEntry {
-    pub path: String,
+    pub property: AnimationParameterAddress,
     pub relative_time: TimelineTime,
     pub keyframe: Keyframe<PropertyValue>,
 }

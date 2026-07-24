@@ -1,4 +1,5 @@
-use super::AppState;
+use super::{AnimationKeyframeSelection, AnimationPropertySelection, AppState};
+use mondrian_core::automation::PropertyHost;
 use mondrian_core::types::{ClipId, EffectId, TrackId, VideoTransitionId};
 use mondrian_timeline::sequence::Sequence;
 use std::collections::{HashMap, HashSet};
@@ -233,7 +234,6 @@ impl AppState {
             .into_iter()
             .map(|selection| (selection.clip_id, selection))
             .collect::<HashMap<_, _>>();
-        let valid_clip_ids = clip_updates.keys().copied().collect::<HashSet<_>>();
 
         self.selection
             .selected_track_ids
@@ -259,26 +259,59 @@ impl AppState {
                 resolve_video_transition_selection(&sequence, selection.transition_id)
             });
 
-        if self
+        self.animation_selection.active_property = self
             .animation_selection
             .active_property
-            .as_ref()
-            .is_some_and(|selection| !valid_clip_ids.contains(&selection.clip_id))
-        {
-            self.animation_selection.active_property = None;
-        }
+            .take()
+            .filter(|selection| animation_property_exists(&sequence, selection));
         self.animation_selection
             .selected_keyframes
-            .retain(|selection| valid_clip_ids.contains(&selection.clip_id));
+            .retain(|selection| animation_keyframe_exists(&sequence, selection));
         self.animation_selection
             .remembered_active_properties
-            .retain(|clip_id, _| valid_clip_ids.contains(clip_id));
+            .retain(|clip_id, property| {
+                animation_property_exists(
+                    &sequence,
+                    &AnimationPropertySelection { clip_id: *clip_id, property: property.clone() },
+                )
+            });
         if self.animation_selection.active_property.is_none()
             && self.animation_selection.selected_keyframes.is_empty()
         {
             self.animation_selection.bubble_host = None;
         }
     }
+}
+
+fn animation_property_exists(sequence: &Sequence, selection: &AnimationPropertySelection) -> bool {
+    let Some(clip) = sequence
+        .video_tracks
+        .iter()
+        .chain(&sequence.audio_tracks)
+        .flat_map(|track| &track.clips)
+        .find(|clip| clip.id == selection.clip_id)
+    else {
+        return false;
+    };
+    clip.property_bag()
+        .ok()
+        .is_some_and(|bag| bag.property_by_address(&selection.property).is_some())
+}
+
+fn animation_keyframe_exists(sequence: &Sequence, selection: &AnimationKeyframeSelection) -> bool {
+    let Some(clip) = sequence
+        .video_tracks
+        .iter()
+        .chain(&sequence.audio_tracks)
+        .flat_map(|track| &track.clips)
+        .find(|clip| clip.id == selection.property.clip_id)
+    else {
+        return false;
+    };
+    clip.property_bag().ok().is_some_and(|bag| {
+        bag.property_by_address(&selection.property.property)
+            .is_some_and(|(_, property)| property.keyframe_by_id(selection.keyframe_id).is_some())
+    })
 }
 
 /// Resolve a track id to its current timeline-track selection reference.

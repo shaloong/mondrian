@@ -1,22 +1,33 @@
 use super::*;
 
 impl AppState {
-    pub fn active_animation_property_path(&self, clip_id: ClipId) -> Option<&str> {
+    pub fn active_animation_property_address(
+        &self,
+        clip_id: ClipId,
+    ) -> Option<&AnimationParameterAddress> {
         self.animation_selection
             .active_property
             .as_ref()
             .filter(|selection| selection.clip_id == clip_id)
-            .map(|selection| selection.path.as_str())
-            .or_else(|| {
-                self.animation_selection
-                    .remembered_active_properties
-                    .get(&clip_id)
-                    .map(|path| path.as_str())
-            })
+            .map(|selection| &selection.property)
+            .or_else(|| self.animation_selection.remembered_active_properties.get(&clip_id))
     }
 
-    pub fn set_active_animation_property(&mut self, clip_id: ClipId, path: impl Into<String>) {
-        let path = path.into();
+    pub fn active_animation_property_path(&self, clip_id: ClipId) -> Option<String> {
+        let address = self.active_animation_property_address(clip_id)?;
+        let sequence = self.active_sequence()?;
+        let clip = find_clip(sequence, clip_id)?;
+        clip.property_bag()
+            .ok()?
+            .property_by_address(address)
+            .map(|(path, _)| path.to_owned())
+    }
+
+    pub fn set_active_animation_property(
+        &mut self,
+        clip_id: ClipId,
+        property: AnimationParameterAddress,
+    ) {
         let changed_clip = self
             .animation_selection
             .active_property
@@ -29,9 +40,9 @@ impl AppState {
         }
         self.animation_selection
             .remembered_active_properties
-            .insert(clip_id, path.clone());
+            .insert(clip_id, property.clone());
         self.animation_selection.active_property =
-            Some(AnimationPropertySelection { clip_id, path });
+            Some(AnimationPropertySelection { clip_id, property });
     }
 
     pub fn clear_animation_selection(&mut self) {
@@ -51,7 +62,7 @@ impl AppState {
     pub fn clear_animation_keyframe_selection_for_clip(&mut self, clip_id: ClipId) {
         self.animation_selection
             .selected_keyframes
-            .retain(|selection| selection.clip_id != clip_id);
+            .retain(|selection| selection.property.clip_id != clip_id);
     }
 
     pub fn selected_animation_keyframes_for_clip(
@@ -61,7 +72,7 @@ impl AppState {
         self.animation_selection
             .selected_keyframes
             .iter()
-            .filter(|selection| selection.clip_id == clip_id)
+            .filter(|selection| selection.property.clip_id == clip_id)
             .cloned()
             .collect()
     }
@@ -85,10 +96,10 @@ impl AppState {
 
         let current = selected
             .iter()
-            .filter_map(|item| {
+            .filter_map(|selection| {
                 property_bag
-                    .property(&item.path)
-                    .and_then(|property| property.keyframe_at(item.time))
+                    .property_by_address(&selection.property.property)
+                    .and_then(|(_, property)| property.keyframe_by_id(selection.keyframe_id))
                     .map(|keyframe| {
                         interpolation_mode_from_keyframe(
                             keyframe.interp_in,
@@ -123,10 +134,10 @@ impl AppState {
         let property_bag = clip.property_bag().ok()?;
         let mut modes = selected
             .iter()
-            .filter_map(|item| {
+            .filter_map(|selection| {
                 property_bag
-                    .property(&item.path)
-                    .and_then(|property| property.keyframe_at(item.time))
+                    .property_by_address(&selection.property.property)
+                    .and_then(|(_, property)| property.keyframe_by_id(selection.keyframe_id))
                     .map(|keyframe| {
                         interpolation_mode_from_keyframe(
                             keyframe.interp_in,
@@ -149,13 +160,19 @@ impl AppState {
     }
 
     pub fn select_animation_keyframe_only(&mut self, selection: AnimationKeyframeSelection) {
-        self.set_active_animation_property(selection.clip_id, selection.path.clone());
+        self.set_active_animation_property(
+            selection.property.clip_id,
+            selection.property.property.clone(),
+        );
         self.animation_selection.selected_keyframes.clear();
         self.animation_selection.selected_keyframes.insert(selection);
     }
 
     pub fn toggle_animation_keyframe_selection(&mut self, selection: AnimationKeyframeSelection) {
-        self.set_active_animation_property(selection.clip_id, selection.path.clone());
+        self.set_active_animation_property(
+            selection.property.clip_id,
+            selection.property.property.clone(),
+        );
         if !self.animation_selection.selected_keyframes.insert(selection.clone()) {
             self.animation_selection.selected_keyframes.remove(&selection);
         }
@@ -166,7 +183,10 @@ impl AppState {
         selections: Vec<AnimationKeyframeSelection>,
     ) {
         if let Some(first) = selections.first() {
-            self.set_active_animation_property(first.clip_id, first.path.clone());
+            self.set_active_animation_property(
+                first.property.clip_id,
+                first.property.property.clone(),
+            );
         }
         self.animation_selection.selected_keyframes = selections.into_iter().collect();
     }
@@ -174,11 +194,10 @@ impl AppState {
     pub fn retain_animation_keyframe_selection_for_clip(
         &mut self,
         clip_id: ClipId,
-        valid_keys: &HashSet<(String, mondrian_core::TimelineTime)>,
+        valid_keys: &HashSet<KeyframeId>,
     ) {
         self.animation_selection.selected_keyframes.retain(|selection| {
-            selection.clip_id != clip_id
-                || valid_keys.contains(&(selection.path.clone(), selection.time))
+            selection.property.clip_id != clip_id || valid_keys.contains(&selection.keyframe_id)
         });
     }
 
@@ -202,26 +221,36 @@ impl AppState {
             mondrian_core::MondrianError::ClipNotFound { clip_id: selection.clip_id.to_string() }
         })?;
         let property_bag = clip.property_bag()?;
-        let anchor_time = selected.iter().map(|item| item.time).min().unwrap_or(TimelineTime::ZERO);
+        let mut resolved = Vec::new();
+        for selection in selected {
+            let Some((_, property)) =
+                property_bag.property_by_address(&selection.property.property)
+            else {
+                continue;
+            };
+            let Some(keyframe) = property.keyframe_by_id(selection.keyframe_id) else {
+                continue;
+            };
+            resolved.push((selection, keyframe));
+        }
+        let anchor_time = resolved
+            .iter()
+            .map(|(_, keyframe)| keyframe.time)
+            .min()
+            .unwrap_or(TimelineTime::ZERO);
 
         let mut entries = Vec::new();
-        for item in selected {
-            let Some(property) = property_bag.property(&item.path) else {
-                continue;
-            };
-            let Some(mut keyframe) = property.keyframe_at(item.time) else {
-                continue;
-            };
+        for (selection, mut keyframe) in resolved {
             keyframe.id = KeyframeId::new();
             entries.push(AnimationClipboardEntry {
-                path: item.path,
-                relative_time: item.time.checked_sub(anchor_time)?,
+                property: selection.property.property,
+                relative_time: keyframe.time.checked_sub(anchor_time)?,
                 keyframe,
             });
         }
 
         entries.sort_by(|a, b| {
-            a.relative_time.cmp(&b.relative_time).then_with(|| a.path.cmp(&b.path))
+            a.relative_time.cmp(&b.relative_time).then_with(|| a.property.cmp(&b.property))
         });
         self.animation_clipboard = if entries.is_empty() {
             None
@@ -246,21 +275,58 @@ impl AppState {
             return Ok(false);
         }
 
+        let clip = self.clip_snapshot(selection).ok_or_else(|| {
+            mondrian_core::MondrianError::ClipNotFound { clip_id: selection.clip_id.to_string() }
+        })?;
+        let property_bag = clip.property_bag()?;
+        let active_property = self.active_animation_property_address(selection.clip_id).cloned();
         let mut mutations = Vec::with_capacity(clipboard.entries.len());
         let mut selections = Vec::with_capacity(clipboard.entries.len());
 
         for entry in clipboard.entries {
+            let destination_property =
+                if property_bag.property_by_address(&entry.property).is_some() {
+                    entry.property
+                } else if let Some(active) = active_property.as_ref().filter(|active| {
+                    active.parameter_id == entry.property.parameter_id
+                        && property_bag.property_by_address(active).is_some()
+                }) {
+                    active.clone()
+                } else {
+                    property_bag
+                        .unique_address_for_parameter_id(&entry.property.parameter_id)
+                        .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
+                            step_id: "paste_animation_keyframes".to_owned(),
+                            reason: format!(
+                                "参数 {} 在目标 Clip 中缺失或存在多个实例",
+                                entry.property.parameter_id
+                            ),
+                        })?
+                };
+            let (path, _) =
+                property_bag.property_by_address(&destination_property).ok_or_else(|| {
+                    mondrian_core::MondrianError::WorkflowStepFailed {
+                        step_id: "paste_animation_keyframes".to_owned(),
+                        reason: format!(
+                            "目标参数实例 {} / {} 已失效",
+                            destination_property.animation_track_id,
+                            destination_property.parameter_id
+                        ),
+                    }
+                })?;
             let mut keyframe = entry.keyframe;
             keyframe.id = KeyframeId::new();
             keyframe.time = destination_clip_time.checked_add(entry.relative_time)?;
             mutations.push(PropertyMutation::SetKeyframe {
-                path: entry.path.clone(),
+                path: path.to_owned(),
                 keyframe: keyframe.clone(),
             });
             selections.push(AnimationKeyframeSelection {
-                clip_id: selection.clip_id,
-                path: entry.path,
-                time: keyframe.time,
+                property: AnimationPropertySelection {
+                    clip_id: selection.clip_id,
+                    property: destination_property,
+                },
+                keyframe_id: keyframe.id,
             });
         }
 

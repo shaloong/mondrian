@@ -544,7 +544,7 @@ mod tests {
     };
     use crate::app::SelectedClipRef;
     use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
-    use mondrian_core::automation::{Keyframe, PropertyMutation, PropertyValue};
+    use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::types::{AssetId, TrackId};
     use mondrian_timeline::clip::{Clip, Transform2D};
     use mondrian_timeline::sequence::Sequence;
@@ -1240,10 +1240,21 @@ mod tests {
                 "seed opacity keyframe",
             )
             .expect("seed keyframe");
+        let (property, keyframe_id) = state
+            .clip_snapshot(selection)
+            .and_then(|clip| clip.property_bag().ok())
+            .and_then(|bag| {
+                let property = bag.address_for_path(Transform2D::OPACITY_PATH)?;
+                let keyframe_id = bag.property_by_address(&property)?.1.keyframe_at(key_time)?.id;
+                Some((property, keyframe_id))
+            })
+            .expect("opacity key identity");
         state.set_animation_keyframe_selection(vec![crate::app::AnimationKeyframeSelection {
-            clip_id: selection.clip_id,
-            path: Transform2D::OPACITY_PATH.to_owned(),
-            time: key_time,
+            property: crate::app::AnimationPropertySelection {
+                clip_id: selection.clip_id,
+                property,
+            },
+            keyframe_id,
         }]);
         assert!(state.copy_selected_animation_keyframes(selection).expect("copy keyframe"));
 

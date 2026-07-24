@@ -3,10 +3,11 @@
 //! Reusable widget crates remain domain-light. UI adapters attach stable app ids
 //! to `Action::Custom` payloads before actions reach the app state layer.
 
+use mondrian_core::automation::AnimationParameterAddress;
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{
-    AssetId, AudioComponentEditId, AudioSourceComponentId, ClipId, EffectId, JobId,
+    AssetId, AudioComponentEditId, AudioSourceComponentId, ClipId, EffectId, JobId, KeyframeId,
     ProgramOutputId, SequenceId, TrackId, VideoTransitionId,
 };
 use mondrian_core::{
@@ -79,8 +80,8 @@ pub const INSPECTOR_SET_CLIP_OPACITY: &str = "set_clip_opacity";
 pub const INSPECTOR_SET_CLIP_TINT: &str = "set_clip_tint";
 /// Action name for changing one selected clip transform field.
 pub const INSPECTOR_SET_CLIP_TRANSFORM_FIELD: &str = "set_clip_transform_field";
-/// Action name for changing a selected clip's animation curve draft.
-pub const INSPECTOR_SET_CLIP_CURVE: &str = "set_clip_curve";
+/// Action name for committing one stable-identity Clip curve edit.
+pub const INSPECTOR_EDIT_CLIP_CURVE: &str = "edit_clip_curve";
 /// Action name for changing one definition-backed Clip content property.
 pub const INSPECTOR_SET_CLIP_PROPERTY: &str = "set_clip_property";
 /// Action name for selecting the logical source of one Clip audio Component Edit.
@@ -716,13 +717,33 @@ pub struct InspectorCurvePointPayload {
     pub y: f32,
 }
 
-/// Change a selected clip's animation curve draft.
+/// One incremental stable-key curve edit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct InspectorSetClipCurvePayload {
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InspectorCurveEditPayload {
+    /// Insert a key, or move/update the addressed key.
+    Upsert {
+        /// Existing stable key identity. `None` inserts or updates by time.
+        keyframe_id: Option<KeyframeId>,
+        /// New normalized time and value.
+        point: InspectorCurvePointPayload,
+    },
+    /// Remove one existing key by stable identity.
+    Remove {
+        /// Stable key identity captured by the panel snapshot.
+        keyframe_id: KeyframeId,
+    },
+}
+
+/// Commit one selected Clip curve edit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InspectorEditClipCurvePayload {
     /// Clip targeted by the inspector mutation.
     pub clip: InspectorClipRefPayload,
-    /// Ordered normalized curve points.
-    pub points: Vec<InspectorCurvePointPayload>,
+    /// Stable property-instance and Parameter Schema identity.
+    pub property: AnimationParameterAddress,
+    /// One incremental point intent.
+    pub edit: InspectorCurveEditPayload,
 }
 
 /// Change one definition-backed Clip property.
@@ -1335,9 +1356,9 @@ pub fn inspector_set_clip_transform_field_action(
     custom_inspector_action(INSPECTOR_SET_CLIP_TRANSFORM_FIELD, payload)
 }
 
-/// Build an action that changes a clip curve from an inspector panel.
-pub fn inspector_set_clip_curve_action(payload: InspectorSetClipCurvePayload) -> Action {
-    custom_inspector_action(INSPECTOR_SET_CLIP_CURVE, payload)
+/// Build an action that commits one Clip curve edit from an inspector panel.
+pub fn inspector_edit_clip_curve_action(payload: InspectorEditClipCurvePayload) -> Action {
+    custom_inspector_action(INSPECTOR_EDIT_CLIP_CURVE, payload)
 }
 
 /// Build an action that changes one definition-backed Clip property.

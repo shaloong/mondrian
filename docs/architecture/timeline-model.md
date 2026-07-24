@@ -379,6 +379,23 @@ exactly representable in the shared curve domain, and a parameter that changes
 storage or continuity topology is non-animatable and forces plan re-preparation
 rather than a live callback event.
 
+Automation authoring uses `AnimationParameterAddress { animation_track_id,
+parameter_id }` as the stable property-instance address and `KeyframeId` as the
+stable control-point identity. A `PropertyBag` resolves that pair to its current
+path only at the mutation boundary. Selection, clipboard, and UI commands never
+persist point indices, key times, display labels, or paths as identity; repeated
+effects with the same `ParameterId` therefore remain distinct, while a
+definition-compatible path alias change does not invalidate selection.
+
+Moving a key is the atomic `EditKeyframe` mutation. It validates the complete
+multi-channel key, target-time collision, value schema, and final curve before
+publication, while preserving the key ID, interpolation handles, and temporal
+flags. Stale or ambiguous identities and collisions reject the detached
+candidate without advancing Author Generation, Sequence Author Revision,
+dirty state, or Undo history. Insert, move/value edit, and remove are
+incremental intents; no editor may implement one gesture by replacing the
+whole curve or by exposing a remove-then-insert intermediate.
+
 `ExactAutomationCurve::prepared_segments` validates author order, finite values,
 and Bezier time monotonicity once, then returns immutable interpolation segments
 whose evaluator reuses the same Hold/Linear/Bezier mathematics as direct curve

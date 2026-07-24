@@ -238,8 +238,11 @@ One versioned definition-stable contract for a parameter's `ParameterId`, value 
 _Avoid_: Instance property path as identity, UI-only min/max, duplicated CPU/GPU or color-domain claims
 
 **Parameter Instance Address**:
-A current authoring and command-routing address for one parameter instance, which may include an Effect or owner ID and may change without changing its Parameter Schema identity.
-_Avoid_: ParameterId derived from display name, suffix matching during execution
+A stable authoring and command-routing address for one parameter instance,
+formed from its stable owner/animation-track identity and definition-stable
+`ParameterId`. A property path is only a current lookup alias and may change
+without changing this address.
+_Avoid_: Property path as identity, ParameterId derived from display name, suffix matching during execution
 
 **Parameter Resource Reference**:
 A recoverable typed parameter value representing unbound intent, a Project Asset, an external file, or a URI, with resource-level invalidation semantics.
@@ -492,6 +495,9 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - **Timeline Time** equality, ordering, arithmetic, and hashing use checked canonical rational semantics; serialized numerator/denominator field order can never define chronology.
 - Timeline Times from different **Authoring Time Domains** cannot be compared or combined until an explicit **Time Transform** maps one domain into the other.
 - Video automation and audio automation share the same exact curve and stable parameter-identity foundation; their Evaluation Grids, supported value types, and delivery cadence remain domain-specific.
+- Animation selection, clipboard state, and incremental editing address a property by **Parameter Instance Address** and a key by `KeyframeId`; point index, key time, display name, and property-path alias are snapshot-local lookup data and never author identity.
+- Moving one key's time and value is one atomic author mutation that preserves its `KeyframeId`, interpolation handles, and temporal flags. Collision, ambiguity, stale identity, or invalid schema state fails before an **Author Transaction** and cannot expose a remove-then-insert intermediate.
+- One committed curve gesture produces at most one **Author Transaction**. Pointer motion is widget-local preview state; a Curve Editor emits one incremental Insert/Move/Delete intent on commit and never replaces an entire author curve.
 - Every renderer-stage exchange uses a **Color Frame Contract**. OCIO transforms process RGB only and require straight/opaque coverage; spatial filtering may materialize a typed premultiplied internal frame but must restore the declared public association before the next Module.
 - **Display Timecode** formats a Timeline Time but never owns it; changing drop-frame display or start timecode cannot move authored media.
 - One Sequence persists exactly one position-display setting and resolves it with its video Evaluation Grid into one validated display contract shared by Viewer and Timeline ruler. Frames ignore the retained timecode origin; drop-frame is valid only for its exact supported rational rates, and neither negative positions nor SMPTE 24-hour label wrapping alter Timeline Time.
@@ -524,8 +530,8 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - CPU scalar, CPU SIMD, isolated plugin, and optional GPU execution are prepared processor backends for the same compiled semantics, not alternate Audio Programs. A GPU backend must declare and account for batch/transfer latency, PDC, state ordering, cancellation, bounded in-flight storage, and device loss; the audio callback never waits for GPU work.
 - Equal **Signal Closures** may share immutable plans, but mutable processors share an **Audio State Domain** only when all continuity and evaluation identities also match; fingerprints alone never authorize state sharing.
 - An **Audio Program** exposes one or more stable **Sequence Output Ports** and never binds physical listening devices.
-- A **Parameter Schema** has one stable identity shared by all instances; each instance has its own **Parameter Instance Address** and author value.
-- Effect execution selects parameters by Parameter Schema identity, never by address suffix; UI and commands may route through the current Parameter Instance Address.
+- A **Parameter Schema** has one stable identity shared by all instances; each instance has its own stable **Parameter Instance Address** and author value.
+- Effect execution selects parameters by Parameter Schema identity, never by address suffix; UI and commands route through the stable Parameter Instance Address and resolve its current property-path alias only at the author boundary.
 - Color/Alpha domain, CPU/GPU support, determinism, temporal extent, and ROI have one owner on the Processor/Effect Definition and compiled graph; Parameter Schema cache impact only determines what must be re-resolved.
 - A nested Sequence is one instanced composite audio source in its parent; it consumes selected **Sequence Output Ports** and owns independent mutable DSP execution state.
 - A parent binds nested PCM through the child's stable public output identities and records any semantic assignment separately against parent-local **Audio Roles**; it never references child-internal Audio Role identities.

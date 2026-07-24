@@ -29,17 +29,23 @@ pub(super) fn constrained_point(
     points: &[CurvePoint],
     index: usize,
     mut point: CurvePoint,
+    lock_x: bool,
 ) -> CurvePoint {
-    let last = points.len().saturating_sub(1);
-    if index == 0 {
-        point.x = 0.0;
-    } else if let Some(prev) = points.get(index - 1) {
-        point.x = point.x.max(prev.x + MIN_POINT_GAP);
-    }
-    if index == last {
-        point.x = 1.0;
-    } else if let Some(next) = points.get(index + 1) {
-        point.x = point.x.min(next.x - MIN_POINT_GAP);
+    let Some(current) = points.get(index) else {
+        return CurvePoint::new(point.x, point.y);
+    };
+    if lock_x {
+        point.x = current.x;
+    } else {
+        let min_x = points
+            .get(index.wrapping_sub(1))
+            .map_or(0.0, |previous| previous.x + MIN_POINT_GAP);
+        let max_x = points.get(index + 1).map_or(1.0, |next| next.x - MIN_POINT_GAP);
+        point.x = if min_x <= max_x {
+            point.x.clamp(min_x, max_x)
+        } else {
+            current.x
+        };
     }
     CurvePoint::new(point.x, point.y)
 }
@@ -173,16 +179,30 @@ mod tests {
         ];
 
         assert_eq!(
-            constrained_point(&points, 0, CurvePoint::new(0.5, 0.2)),
+            constrained_point(&points, 0, CurvePoint::new(0.5, 0.2), true),
             CurvePoint::new(0.0, 0.2)
         );
         assert_close(
-            constrained_point(&points, 1, CurvePoint::new(0.9, 0.7)).x,
+            constrained_point(&points, 1, CurvePoint::new(0.9, 0.7), false).x,
             0.599,
         );
         assert_close(
-            constrained_point(&points, 2, CurvePoint::new(0.1, 0.7)).x,
+            constrained_point(&points, 2, CurvePoint::new(0.1, 0.7), false).x,
             0.401,
+        );
+    }
+
+    #[test]
+    fn editable_endpoint_moves_inside_domain_without_crossing_neighbor() {
+        let points = vec![CurvePoint::new(0.0, 0.25), CurvePoint::new(1.0, 0.75)];
+
+        assert_eq!(
+            constrained_point(&points, 0, CurvePoint::new(0.4, 0.5), false),
+            CurvePoint::new(0.4, 0.5)
+        );
+        assert_close(
+            constrained_point(&points, 0, CurvePoint::new(1.0, 0.5), false).x,
+            0.999,
         );
     }
 

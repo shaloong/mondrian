@@ -68,16 +68,64 @@ impl CurvePoint {
     }
 }
 
+/// Interaction policy for one editable curve point.
+///
+/// This separates domain-owned points from viewport anchors. For example, an
+/// animation key at the start of a Clip remains movable and deletable, while a
+/// virtual point used only to display the Clip boundary can stay fixed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CurvePointPolicy {
+    /// Keep the point's horizontal position fixed during pointer and keyboard
+    /// edits.
+    pub lock_x: bool,
+    /// Allow Delete or Backspace to remove this point.
+    pub deletable: bool,
+}
+
+impl CurvePointPolicy {
+    /// Policy for a virtual viewport anchor.
+    pub const fn anchor() -> Self {
+        Self { lock_x: true, deletable: false }
+    }
+
+    /// Policy for a domain-owned editable point.
+    pub const fn editable() -> Self {
+        Self { lock_x: false, deletable: true }
+    }
+}
+
 /// Adapter that maps the current curve points to an editor [`Action`].
 pub type CurveChangeAction = dyn Fn(&[CurvePoint]) -> Action;
+
+/// One committed control-point edit.
+///
+/// The index is ephemeral and valid only for the curve snapshot supplied to
+/// this widget. Domain Adapters map it to their stable point or keyframe
+/// identity before constructing an authoring action.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CurveEdit {
+    /// Insert a new point between existing neighbors.
+    Insert { index: usize, point: CurvePoint },
+    /// Move an existing point without changing its identity.
+    Move { index: usize, point: CurvePoint },
+    /// Delete one existing interior point.
+    Delete { index: usize },
+}
+
+/// Adapter that maps one committed point edit to an editor [`Action`].
+pub type CurveEditAction = dyn Fn(CurveEdit) -> Action;
 
 /// Interactive normalized curve editor.
 pub struct CurveEditor {
     id: WidgetId,
     bounds: Rect,
     points: Vec<CurvePoint>,
+    point_policies: Vec<CurvePointPolicy>,
+    display_points: Option<Vec<CurvePoint>>,
     selected: Option<usize>,
     dragging: Option<usize>,
+    drag_origin: Option<CurvePoint>,
+    drag_inserted: bool,
     grid_columns: usize,
     grid_rows: usize,
     focused: bool,
@@ -85,6 +133,7 @@ pub struct CurveEditor {
     pending_capture_release: bool,
     enabled: bool,
     on_change: Option<Box<CurveChangeAction>>,
+    on_edit: Option<Box<CurveEditAction>>,
 }
 
 impl CurveEditor {
@@ -104,8 +153,12 @@ impl CurveEditor {
             id: WidgetId::new(),
             bounds: Rect::ZERO,
             points: Vec::new(),
+            point_policies: Vec::new(),
+            display_points: None,
             selected: None,
             dragging: None,
+            drag_origin: None,
+            drag_inserted: false,
             grid_columns: 4,
             grid_rows: 3,
             focused: false,
@@ -113,15 +166,65 @@ impl CurveEditor {
             pending_capture_release: false,
             enabled: true,
             on_change: None,
+            on_edit: None,
         };
         editor.set_points(points);
         editor
+    }
+
+    /// Override the interaction policy for each point.
+    ///
+    /// Policies must have the same length and order as [`Self::points`].
+    /// A mismatched policy list is ignored, preserving the safe default of
+    /// fixed, non-deletable endpoints and editable interior points.
+    pub fn with_point_policies(mut self, policies: Vec<CurvePointPolicy>) -> Self {
+        self.set_point_policies(policies);
+        self
+    }
+
+    /// Replace the interaction policy for each point.
+    ///
+    /// See [`Self::with_point_policies`] for mismatch behavior.
+    pub fn set_point_policies(&mut self, policies: Vec<CurvePointPolicy>) {
+        if policies.len() == self.points.len() {
+            self.point_policies = policies;
+        }
     }
 
     /// Dispatch a value-aware action whenever user input changes curve points.
     pub fn on_change(mut self, action: impl Fn(&[CurvePoint]) -> Action + 'static) -> Self {
         self.on_change = Some(Box::new(action));
         self
+    }
+
+    /// Dispatch one incremental edit after a pointer gesture commits.
+    ///
+    /// Unlike [`Self::on_change`], pointer drags emit exactly once on release.
+    /// Keyboard nudges and deletion are already atomic gestures and emit
+    /// immediately.
+    pub fn on_edit(mut self, action: impl Fn(CurveEdit) -> Action + 'static) -> Self {
+        self.on_edit = Some(Box::new(action));
+        self
+    }
+
+    /// Supply a read-only sampled curve used for painting.
+    ///
+    /// Editable points remain the hit targets. This lets a domain Adapter show
+    /// Hold or Bezier evaluation without teaching the generic widget those
+    /// interpolation semantics.
+    pub fn with_display_points(mut self, points: Vec<CurvePoint>) -> Self {
+        self.set_display_points(points);
+        self
+    }
+
+    /// Replace the read-only sampled curve used for painting.
+    pub fn set_display_points(&mut self, points: Vec<CurvePoint>) {
+        self.display_points = Some(normalize_points(points));
+    }
+
+    /// Paint through the editable points again.
+    pub fn clear_display_points(&mut self) {
+        self.display_points = None;
     }
 
     /// Set whether the editor accepts pointer, keyboard, and focus input.
@@ -147,9 +250,9 @@ impl CurveEditor {
             if self.dragging.is_some() {
                 self.pending_capture_release = true;
             }
+            self.cancel_drag_state();
             self.focused = false;
             self.focus_visible = false;
-            self.dragging = None;
         }
     }
 
@@ -161,8 +264,13 @@ impl CurveEditor {
     /// Replace curve points. Points are clamped and sorted by x.
     pub fn set_points(&mut self, points: Vec<CurvePoint>) {
         self.points = normalize_points(points);
+        self.point_policies = default_point_policies(self.points.len());
         self.selected = self.selected.filter(|index| *index < self.points.len());
         self.dragging = self.dragging.filter(|index| *index < self.points.len());
+        if self.dragging.is_none() {
+            self.drag_origin = None;
+            self.drag_inserted = false;
+        }
     }
 
     /// Selected point index, if any.
@@ -196,7 +304,8 @@ impl CurveEditor {
     }
 
     fn constrained_point(&self, index: usize, point: CurvePoint) -> CurvePoint {
-        constrained_point(&self.points, index, point)
+        let lock_x = self.point_policies.get(index).is_none_or(|policy| policy.lock_x);
+        constrained_point(&self.points, index, point, lock_x)
     }
 
     fn move_point(&mut self, index: usize, point: CurvePoint) -> bool {
@@ -231,6 +340,65 @@ impl CurveEditor {
         }
     }
 
+    fn dispatch_edit(&self, edit: CurveEdit, ctx: &mut EventContext) {
+        if let Some(action) = &self.on_edit {
+            (ctx.dispatch)(action(edit));
+        }
+    }
+
+    fn begin_drag(&mut self, index: usize, inserted: bool) {
+        self.dragging = Some(index);
+        self.drag_origin = (!inserted).then(|| self.points[index]);
+        self.drag_inserted = inserted;
+    }
+
+    fn commit_drag_edit(&mut self, ctx: &mut EventContext) {
+        let Some(index) = self.dragging.take() else {
+            return;
+        };
+        let point = self.points.get(index).copied();
+        if self.drag_inserted {
+            if let Some(point) = point {
+                self.dispatch_edit(CurveEdit::Insert { index, point }, ctx);
+            }
+        } else if let (Some(origin), Some(point)) = (self.drag_origin, point) {
+            if origin != point {
+                self.dispatch_edit(CurveEdit::Move { index, point }, ctx);
+            }
+        }
+        self.drag_origin = None;
+        self.drag_inserted = false;
+    }
+
+    fn cancel_drag_state(&mut self) -> bool {
+        let Some(index) = self.dragging.take() else {
+            return false;
+        };
+        let changed = if self.drag_inserted {
+            if index < self.points.len() {
+                self.points.remove(index);
+                self.point_policies.remove(index);
+                true
+            } else {
+                false
+            }
+        } else if let Some(origin) = self.drag_origin {
+            self.points
+                .get_mut(index)
+                .map(|point| {
+                    let changed = *point != origin;
+                    *point = origin;
+                    changed
+                })
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        self.drag_origin = None;
+        self.drag_inserted = false;
+        changed
+    }
+
     fn nudge_selected(
         &mut self,
         key: KeyCode,
@@ -255,7 +423,12 @@ impl CurveEditor {
             KeyCode::Down => next.y -= step,
             _ => return false,
         }
-        self.move_point_from_input(index, next, ctx)
+        if !self.move_point_from_input(index, next, ctx) {
+            return false;
+        }
+        let point = self.points[index];
+        self.dispatch_edit(CurveEdit::Move { index, point }, ctx);
+        true
     }
 
     fn insertion_at(&self, position: Point) -> Option<(usize, CurvePoint)> {
@@ -269,6 +442,7 @@ impl CurveEditor {
     ) -> Option<usize> {
         let (index, point) = self.insertion_at(position)?;
         self.points.insert(index, point);
+        self.point_policies.insert(index, CurvePointPolicy::editable());
         self.selected = Some(index);
         self.dispatch_change(ctx);
         ctx.request_repaint();
@@ -279,17 +453,30 @@ impl CurveEditor {
         let Some(index) = self.selected else {
             return false;
         };
-        if index == 0 || index + 1 >= self.points.len() {
+        if !self.point_policies.get(index).is_some_and(|policy| policy.deletable) {
             return false;
         }
 
         self.points.remove(index);
-        let last = self.points.len().saturating_sub(1);
-        self.selected = Some(index.min(last.saturating_sub(1)).max(1));
+        self.point_policies.remove(index);
+        self.selected = (!self.points.is_empty()).then(|| index.min(self.points.len() - 1));
         self.dispatch_change(ctx);
+        self.dispatch_edit(CurveEdit::Delete { index }, ctx);
         ctx.request_repaint();
         true
     }
+}
+
+fn default_point_policies(point_count: usize) -> Vec<CurvePointPolicy> {
+    (0..point_count)
+        .map(|index| {
+            if index == 0 || index + 1 == point_count {
+                CurvePointPolicy::anchor()
+            } else {
+                CurvePointPolicy::editable()
+            }
+        })
+        .collect()
 }
 
 impl Default for CurveEditor {
@@ -330,12 +517,12 @@ impl Widget for CurveEditor {
                 self.focus_visible = false;
                 if let Some(index) = self.hit_point(*position) {
                     self.selected = Some(index);
-                    self.dragging = Some(index);
+                    self.begin_drag(index, false);
                     ctx.request_pointer_capture(self.id);
                     return EventResult::Handled;
                 }
                 if let Some(index) = self.insert_point_from_input(*position, ctx) {
-                    self.dragging = Some(index);
+                    self.begin_drag(index, true);
                     ctx.request_pointer_capture(self.id);
                     return EventResult::Handled;
                 }
@@ -350,7 +537,7 @@ impl Widget for CurveEditor {
                 EventResult::Ignored
             }
             UiEvent::MouseUp { button: MouseButton::Left, .. } if self.dragging.is_some() => {
-                self.dragging = None;
+                self.commit_drag_edit(ctx);
                 ctx.release_pointer_capture(self.id);
                 EventResult::Handled
             }
@@ -361,18 +548,23 @@ impl Widget for CurveEditor {
             }
             UiEvent::FocusLost => {
                 let was_dragging = self.dragging.is_some();
+                self.commit_drag_edit(ctx);
                 self.focused = false;
                 self.focus_visible = false;
                 self.selected = None;
-                self.dragging = None;
                 if was_dragging {
                     ctx.release_pointer_capture(self.id);
                 }
                 EventResult::Handled
             }
             UiEvent::KeyDown { key: KeyCode::Escape, .. } if self.selected.is_some() => {
+                let changed = self.cancel_drag_state();
                 self.selected = None;
-                self.dragging = None;
+                if changed {
+                    self.dispatch_change(ctx);
+                    ctx.request_repaint();
+                    ctx.release_pointer_capture(self.id);
+                }
                 EventResult::Handled
             }
             UiEvent::KeyDown { key: KeyCode::Delete | KeyCode::Backspace, .. }
@@ -430,7 +622,8 @@ impl Widget for CurveEditor {
             );
         }
 
-        for pair in self.points.windows(2) {
+        let painted_curve = self.display_points.as_deref().unwrap_or(&self.points);
+        for pair in painted_curve.windows(2) {
             let a = self.to_screen(pair[0]);
             let b = self.to_screen(pair[1]);
             ctx.encoder.draw_line(a, b, v.curve_line_width, curve);
@@ -524,6 +717,23 @@ mod tests {
         }
         Action::Custom {
             namespace: "test.curve".into(),
+            name,
+            payload: Default::default(),
+        }
+    }
+
+    fn curve_edit_action(edit: CurveEdit) -> Action {
+        let name = match edit {
+            CurveEdit::Insert { index, point } => {
+                format!("insert:{index}:{:.4},{:.4}", point.x, point.y)
+            }
+            CurveEdit::Move { index, point } => {
+                format!("move:{index}:{:.4},{:.4}", point.x, point.y)
+            }
+            CurveEdit::Delete { index } => format!("delete:{index}"),
+        };
+        Action::Custom {
+            namespace: "test.curve-edit".into(),
             name,
             payload: Default::default(),
         }
@@ -690,6 +900,152 @@ mod tests {
             &[curve_action(editor.points())]
         );
         assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn committed_drag_emits_one_incremental_edit_only_on_release() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        let mut editor = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 1.0),
+        ])
+        .on_edit(curve_edit_action);
+        editor.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+        let start = editor.to_screen(editor.points()[1]);
+
+        editor.event(
+            &UiEvent::MouseDown {
+                position: start,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        for position in [
+            Point::new(start.x + 8.0, start.y - 5.0),
+            Point::new(start.x + 18.0, start.y - 12.0),
+        ] {
+            editor.event(
+                &UiEvent::MouseMove { position, modifiers: Modifiers::none() },
+                &mut ctx,
+            );
+        }
+        assert!(actions.borrow().is_empty());
+        let committed = editor.points()[1];
+
+        editor.event(
+            &UiEvent::MouseUp {
+                position: editor.to_screen(committed),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[curve_edit_action(CurveEdit::Move {
+                index: 1,
+                point: committed,
+            })]
+        );
+    }
+
+    #[test]
+    fn inserted_point_emits_one_incremental_edit_on_release() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        let mut editor =
+            CurveEditor::with_points(vec![CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)])
+                .on_edit(curve_edit_action);
+        editor.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+        let position = Point::new(100.0, 50.0);
+
+        editor.event(
+            &UiEvent::MouseDown {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(actions.borrow().is_empty());
+        let inserted = editor.points()[1];
+        editor.event(
+            &UiEvent::MouseUp {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[curve_edit_action(CurveEdit::Insert {
+                index: 1,
+                point: inserted,
+            })]
+        );
+    }
+
+    #[test]
+    fn escape_reverts_drag_without_committing_incremental_edit() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        let original = CurvePoint::new(0.5, 0.5);
+        let mut editor = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            original,
+            CurvePoint::new(1.0, 1.0),
+        ])
+        .on_edit(curve_edit_action);
+        editor.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+        let start = editor.to_screen(original);
+
+        editor.event(
+            &UiEvent::MouseDown {
+                position: start,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        editor.event(
+            &UiEvent::MouseMove {
+                position: Point::new(start.x + 20.0, start.y - 15.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_ne!(editor.points()[1], original);
+        editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(editor.points()[1], original);
+        assert!(actions.borrow().is_empty());
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(mondrian_ui_core::widget::PointerCaptureRequest::Release(
+                editor.id()
+            ))
+        );
     }
 
     #[test]
@@ -1126,6 +1482,94 @@ mod tests {
                 key: KeyCode::Backspace,
                 modifiers: Modifiers::none(),
             },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(editor.points().len(), 2);
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn explicit_editable_boundary_point_can_move_and_emits_incremental_edit() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        let mut editor =
+            CurveEditor::with_points(vec![CurvePoint::new(0.0, 0.25), CurvePoint::new(1.0, 0.75)])
+                .with_point_policies(vec![
+                    CurvePointPolicy::editable(),
+                    CurvePointPolicy::anchor(),
+                ])
+                .on_edit(curve_edit_action);
+        editor.select(Some(0));
+
+        let result = editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(editor.points()[0], CurvePoint::new(0.01, 0.25));
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[curve_edit_action(CurveEdit::Move {
+                index: 0,
+                point: CurvePoint::new(0.01, 0.25),
+            })]
+        );
+    }
+
+    #[test]
+    fn explicit_editable_boundary_point_can_be_deleted() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        let mut editor =
+            CurveEditor::with_points(vec![CurvePoint::new(0.0, 0.25), CurvePoint::new(1.0, 0.75)])
+                .with_point_policies(vec![
+                    CurvePointPolicy::editable(),
+                    CurvePointPolicy::anchor(),
+                ])
+                .on_edit(curve_edit_action);
+        editor.select(Some(0));
+
+        let result = editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Delete, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(editor.points(), &[CurvePoint::new(1.0, 0.75)]);
+        assert_eq!(editor.selected_index(), Some(0));
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[curve_edit_action(CurveEdit::Delete { index: 0 })]
+        );
+    }
+
+    #[test]
+    fn mismatched_point_policies_preserve_safe_endpoint_defaults() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        let mut editor =
+            CurveEditor::with_points(vec![CurvePoint::new(0.0, 0.25), CurvePoint::new(1.0, 0.75)])
+                .with_point_policies(vec![CurvePointPolicy::editable()])
+                .on_edit(curve_edit_action);
+        editor.select(Some(0));
+
+        let result = editor.event(
+            &UiEvent::KeyDown { key: KeyCode::Delete, modifiers: Modifiers::none() },
             &mut ctx,
         );
 

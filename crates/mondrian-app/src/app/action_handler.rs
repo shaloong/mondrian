@@ -3,6 +3,7 @@
 //! UI intent is routed to the owning domain Interface. Project mutations go
 //! through `AuthoringSession`; transport intent goes through `PlaybackEngine`.
 
+use crate::app::animation_authoring::{ClipNumericCurveEdit, NormalizedCurvePoint};
 use crate::app::exporting::TimelineExportRequest;
 use crate::app::preview_quality::normalize_preview_resolution_scale;
 use crate::app::proxy_generation::{
@@ -21,9 +22,10 @@ use crate::app::ui_actions::{
     AssetsRenameFolderPayload, AssetsSetInterpretationPayload, AssetsSetProxyModePayload,
     EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
     ExportJobTargetPayload, InspectorAudioComponentEditField, InspectorAudioComponentSourcePayload,
-    InspectorClipTransformField, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
+    InspectorClipTransformField, InspectorCurveEditPayload, InspectorEditClipCurvePayload,
+    InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
     InspectorSetAudioComponentEditFieldPayload, InspectorSetAudioComponentSourcePayload,
-    InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
     InspectorSetClipPropertyPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
@@ -44,9 +46,9 @@ use crate::app::ui_actions::{
     ASSETS_RELINK_ASSET, ASSETS_RENAME_ASSET, ASSETS_RENAME_FOLDER, ASSETS_SET_INTERPRETATION,
     ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, EXPORT_CANCEL_JOB,
     EXPORT_CLEAR_COMPLETED, EXPORT_ENQUEUE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT,
-    INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT,
-    INSPECTOR_SET_AUDIO_COMPONENT_EDIT_FIELD, INSPECTOR_SET_AUDIO_COMPONENT_SOURCE,
-    INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
+    INSPECTOR_EDIT_CLIP_CURVE, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT,
+    INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_AUDIO_COMPONENT_EDIT_FIELD,
+    INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
     INSPECTOR_SET_CLIP_PROPERTY, INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
     INSPECTOR_SET_EFFECT_ENABLED, INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS,
     PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_UPDATE_COLOR_ENVIRONMENT,
@@ -71,10 +73,9 @@ use mondrian_core::automation::{
 };
 use mondrian_core::events::AppEvent;
 use mondrian_core::types::{AudioComponentEditId, ClipId, EffectId, FramePosition, Rational};
-use mondrian_core::{FrameRounding, MondrianError, Result, TimeScale, TimelineTime};
+use mondrian_core::{FrameRounding, MondrianError, Result, TimelineTime};
 use mondrian_timeline::audio::AudioComponentSource;
 use mondrian_timeline::clip::{Clip, Transform2D, TrimEdge};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -1397,13 +1398,13 @@ impl AppState {
                     payload.value,
                 )
             }
-            INSPECTOR_SET_CLIP_CURVE => {
-                let payload = parse_ui_payload::<InspectorSetClipCurvePayload>(
+            INSPECTOR_EDIT_CLIP_CURVE => {
+                let payload = parse_ui_payload::<InspectorEditClipCurvePayload>(
                     "inspector_ui_action",
                     name,
                     payload,
                 )?;
-                self.set_clip_curve_from_ui(payload)
+                self.edit_clip_curve_from_ui(payload)
             }
             INSPECTOR_SET_CLIP_PROPERTY => {
                 let payload = parse_ui_payload::<InspectorSetClipPropertyPayload>(
@@ -2400,61 +2401,39 @@ impl AppState {
         Ok(())
     }
 
-    fn set_clip_curve_from_ui(&mut self, payload: InspectorSetClipCurvePayload) -> Result<()> {
-        if payload.points.len() < 2 {
-            return Err(MondrianError::WorkflowStepFailed {
-                step_id: "inspector_set_clip_curve".to_string(),
-                reason: "curve requires at least two points".to_string(),
-            });
-        }
-        if payload.points.iter().any(|point| !point.x.is_finite() || !point.y.is_finite()) {
-            return Err(MondrianError::WorkflowStepFailed {
-                step_id: "inspector_set_clip_curve".to_string(),
-                reason: "curve points must be finite".to_string(),
-            });
-        }
-        self.ensure_clip_track_unlocked("inspector_set_clip_curve", payload.clip.clip_id)?;
-        let Some(before) = self.active_sequence().cloned() else {
-            return Err(missing_sequence_error("inspector_set_clip_curve"));
+    fn edit_clip_curve_from_ui(&mut self, payload: InspectorEditClipCurvePayload) -> Result<()> {
+        let selection = SelectedClipRef {
+            track_id: payload.clip.track_id,
+            is_video_track: payload.clip.is_video_track,
+            clip_id: payload.clip.clip_id,
         };
-        let mut after = before.clone();
-        {
-            let clip = find_clip_mut(&mut after, payload.clip.clip_id).ok_or_else(|| {
-                missing_clip_error("inspector_set_clip_curve", payload.clip.clip_id)
-            })?;
-            let start_tick = clip.clip_time_in;
-            let end_tick = clip.clip_time_out()?;
-            let duration_ticks = end_tick.checked_sub(start_tick)?;
-            let mut keyframes = BTreeMap::new();
-            for point in payload.points {
-                let x = point.x.clamp(0.0, 1.0);
-                let y = point.y.clamp(0.0, 1.0);
-                let scale = TimeScale::try_from(TimelineTime::from_f64_quantized(
-                    f64::from(x),
-                    1_000_000,
-                )?)?;
-                let time = start_tick.checked_add(duration_ticks.checked_scale(scale)?)?;
-                keyframes.insert(time, y);
+        let edit = match payload.edit {
+            InspectorCurveEditPayload::Upsert { keyframe_id, point } => {
+                ClipNumericCurveEdit::Upsert {
+                    keyframe_id,
+                    point: NormalizedCurvePoint::new(f64::from(point.x), f64::from(point.y))?,
+                }
             }
-            if keyframes.len() < 2 {
-                return Err(MondrianError::WorkflowStepFailed {
-                    step_id: "inspector_set_clip_curve".to_string(),
-                    reason: "curve requires at least two unique keyframe times".to_string(),
-                });
+            InspectorCurveEditPayload::Remove { keyframe_id } => {
+                ClipNumericCurveEdit::Remove { keyframe_id }
             }
-
-            clip.apply_property_mutation(PropertyMutation::ClearAnimation {
-                path: Transform2D::OPACITY_PATH.to_string(),
-                time: start_tick,
-            })?;
-            for (time, value) in keyframes {
-                clip.apply_property_mutation(PropertyMutation::SetKeyframe {
-                    path: Transform2D::OPACITY_PATH.to_string(),
-                    keyframe: Keyframe::linear(time, PropertyValue::Float(value)),
-                })?;
-            }
+        };
+        let removing = matches!(edit, ClipNumericCurveEdit::Remove { .. });
+        let property = payload.property;
+        let outcome = self.edit_clip_numeric_curve(selection, property.clone(), edit)?;
+        let key_selection = crate::app::AnimationKeyframeSelection {
+            property: crate::app::AnimationPropertySelection {
+                clip_id: selection.clip_id,
+                property: property.clone(),
+            },
+            keyframe_id: outcome.keyframe_id,
+        };
+        if removing {
+            self.animation_selection.selected_keyframes.remove(&key_selection);
+            self.set_active_animation_property(selection.clip_id, property);
+        } else {
+            self.select_animation_keyframe_only(key_selection);
         }
-        self.record_sequence_snapshot_command("调整片段不透明度曲线", before, after)?;
         Ok(())
     }
 
@@ -2986,18 +2965,17 @@ mod tests {
         assets_relink_asset_action, assets_rename_asset_action, assets_rename_folder_action,
         assets_set_interpretation_action, assets_set_proxy_mode_action, effects_add_to_clip_action,
         export_cancel_job_action, export_clear_completed_action, export_enqueue_action,
-        export_set_draft_action, inspector_remove_effect_action, inspector_select_effect_action,
-        inspector_set_audio_component_edit_field_action,
-        inspector_set_audio_component_source_action, inspector_set_clip_curve_action,
-        inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
-        inspector_set_clip_property_action, inspector_set_clip_tint_action,
-        inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
-        inspector_set_effect_property_action, project_create_with_settings_action,
-        project_recover_from_autosave_action, project_update_color_environment_action,
-        project_update_new_sequence_defaults_action, sequence_delete_action,
-        sequence_duplicate_action, sequence_new_action, sequence_return_to_parent_action,
-        sequence_set_active_default_action, sequence_switch_active_action,
-        sequence_update_settings_action, timeline_add_track_action,
+        export_set_draft_action, inspector_edit_clip_curve_action, inspector_remove_effect_action,
+        inspector_select_effect_action, inspector_set_audio_component_edit_field_action,
+        inspector_set_audio_component_source_action, inspector_set_clip_enabled_action,
+        inspector_set_clip_opacity_action, inspector_set_clip_property_action,
+        inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
+        inspector_set_effect_enabled_action, inspector_set_effect_property_action,
+        project_create_with_settings_action, project_recover_from_autosave_action,
+        project_update_color_environment_action, project_update_new_sequence_defaults_action,
+        sequence_delete_action, sequence_duplicate_action, sequence_new_action,
+        sequence_return_to_parent_action, sequence_set_active_default_action,
+        sequence_switch_active_action, sequence_update_settings_action, timeline_add_track_action,
         timeline_clear_in_out_points_action, timeline_create_basic_title_action,
         timeline_drop_asset_action, timeline_move_clip_action, timeline_move_track_action,
         timeline_open_nested_sequence_action, timeline_roll_selected_cut_to_playhead_action,
@@ -3014,10 +2992,10 @@ mod tests {
         AssetsSetInterpretationPayload, AssetsSetProxyModePayload, EffectsAddToClipPayload,
         ExportDraftUpdatePayload, ExportEnqueuePayload, ExportJobTargetPayload,
         InspectorAudioComponentEditField, InspectorAudioComponentSourcePayload,
-        InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
-        InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
-        InspectorSetAudioComponentEditFieldPayload, InspectorSetAudioComponentSourcePayload,
-        InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
+        InspectorClipRefPayload, InspectorClipTransformField, InspectorCurveEditPayload,
+        InspectorCurvePointPayload, InspectorEditClipCurvePayload, InspectorRemoveEffectPayload,
+        InspectorSelectEffectPayload, InspectorSetAudioComponentEditFieldPayload,
+        InspectorSetAudioComponentSourcePayload, InspectorSetClipEnabledPayload,
         InspectorSetClipOpacityPayload, InspectorSetClipPropertyPayload,
         InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
         InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
@@ -3033,6 +3011,7 @@ mod tests {
         ViewerTransformPositionPayload,
     };
     use mondrian_assets::AssetLibrary;
+    use mondrian_core::automation::AnimationParameterAddress;
     use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
     use mondrian_core::types::{
         AssetId, AudioSourceComponentId, ClipLinkGroupId, EffectId, FramePosition, MaskId, TrackId,
@@ -3161,6 +3140,46 @@ mod tests {
         clip_id: mondrian_core::types::ClipId,
     ) -> InspectorClipRefPayload {
         InspectorClipRefPayload { track_id, is_video_track: true, clip_id }
+    }
+
+    fn opacity_parameter_address(state: &AppState, clip_id: ClipId) -> AnimationParameterAddress {
+        let clip = state
+            .active_sequence()
+            .and_then(|sequence| find_clip(sequence, clip_id))
+            .expect("clip");
+        clip.transform
+            .to_property_bag()
+            .address_for_path(Transform2D::OPACITY_PATH)
+            .expect("opacity address")
+    }
+
+    fn opacity_property_selection(
+        state: &AppState,
+        clip_id: ClipId,
+    ) -> crate::app::AnimationPropertySelection {
+        crate::app::AnimationPropertySelection {
+            clip_id,
+            property: opacity_parameter_address(state, clip_id),
+        }
+    }
+
+    fn opacity_keyframe_selection(
+        state: &AppState,
+        clip_id: ClipId,
+        time: TimelineTime,
+    ) -> crate::app::AnimationKeyframeSelection {
+        let property = opacity_property_selection(state, clip_id);
+        let keyframe_id = state
+            .active_sequence()
+            .and_then(|sequence| find_clip(sequence, clip_id))
+            .and_then(|clip| {
+                let bag = clip.transform.to_property_bag();
+                bag.property_by_address(&property.property)
+                    .and_then(|(_, property)| property.keyframe_at(time))
+                    .map(|keyframe| keyframe.id)
+            })
+            .unwrap_or_default();
+        crate::app::AnimationKeyframeSelection { property, keyframe_id }
     }
 
     fn add_default_effect_with_first_property(
@@ -3365,17 +3384,14 @@ mod tests {
         let (mut state, track_id, clip_id) = state_with_two_video_tracks();
         let stale_track_id = state.active_sequence().expect("sequence").video_tracks[1].id;
         state.selection.selected_mask = Some((MaskId::new(), clip_id, track_id));
-        state.animation_selection.active_property = Some(crate::app::AnimationPropertySelection {
+        let property = opacity_property_selection(&state, clip_id);
+        let keyframe = opacity_keyframe_selection(
+            &state,
             clip_id,
-            path: Transform2D::OPACITY_PATH.to_string(),
-        });
-        state.animation_selection.selected_keyframes.insert(
-            crate::app::AnimationKeyframeSelection {
-                clip_id,
-                path: Transform2D::OPACITY_PATH.to_string(),
-                time: tt(12, state.active_sequence().expect("sequence").time_base()),
-            },
+            tt(12, state.active_sequence().expect("sequence").time_base()),
         );
+        state.animation_selection.active_property = Some(property);
+        state.animation_selection.selected_keyframes.insert(keyframe);
 
         state
             .dispatch_action(timeline_select_clip_action(TimelineSelectClipPayload {
@@ -5561,17 +5577,14 @@ mod tests {
         state.selection.selected_clips =
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
         state.selection.selected_mask = Some((MaskId::new(), clip_id, track_id));
-        state.animation_selection.active_property = Some(crate::app::AnimationPropertySelection {
+        let property = opacity_property_selection(&state, clip_id);
+        let keyframe = opacity_keyframe_selection(
+            &state,
             clip_id,
-            path: Transform2D::OPACITY_PATH.to_string(),
-        });
-        state.animation_selection.selected_keyframes.insert(
-            crate::app::AnimationKeyframeSelection {
-                clip_id,
-                path: Transform2D::OPACITY_PATH.to_string(),
-                time: tt(10, state.active_sequence().expect("sequence").time_base()),
-            },
+            tt(10, state.active_sequence().expect("sequence").time_base()),
         );
+        state.animation_selection.active_property = Some(property);
+        state.animation_selection.selected_keyframes.insert(keyframe);
 
         state
             .dispatch_action(mondrian_editor_state::Action::Select(
@@ -5648,10 +5661,8 @@ mod tests {
             .expect("add audio");
         state.selection.selected_track_ids = vec![video_track_id, audio_track_id];
         state.selection.selected_mask = Some((MaskId::new(), video_clip_id, video_track_id));
-        state.animation_selection.active_property = Some(crate::app::AnimationPropertySelection {
-            clip_id: video_clip_id,
-            path: Transform2D::OPACITY_PATH.to_string(),
-        });
+        state.animation_selection.active_property =
+            Some(opacity_property_selection(&state, video_clip_id));
 
         state
             .dispatch_action(mondrian_editor_state::Action::SelectAll)
@@ -5685,17 +5696,14 @@ mod tests {
         state.selection.selected_clips =
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
         state.selection.selected_mask = Some((MaskId::new(), clip_id, track_id));
-        state.animation_selection.active_property = Some(crate::app::AnimationPropertySelection {
+        let property = opacity_property_selection(&state, clip_id);
+        let keyframe = opacity_keyframe_selection(
+            &state,
             clip_id,
-            path: Transform2D::OPACITY_PATH.to_string(),
-        });
-        state.animation_selection.selected_keyframes.insert(
-            crate::app::AnimationKeyframeSelection {
-                clip_id,
-                path: Transform2D::OPACITY_PATH.to_string(),
-                time: tt(10, state.active_sequence().expect("sequence").time_base()),
-            },
+            tt(10, state.active_sequence().expect("sequence").time_base()),
         );
+        state.animation_selection.active_property = Some(property);
+        state.animation_selection.selected_keyframes.insert(keyframe);
 
         state
             .dispatch_action(mondrian_editor_state::Action::DeselectAll)
@@ -5715,10 +5723,8 @@ mod tests {
         state.selection.selected_clips =
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
         state.selection.selected_mask = Some((MaskId::new(), clip_id, track_id));
-        state.animation_selection.active_property = Some(crate::app::AnimationPropertySelection {
-            clip_id,
-            path: Transform2D::OPACITY_PATH.to_string(),
-        });
+        state.animation_selection.active_property =
+            Some(opacity_property_selection(&state, clip_id));
 
         state
             .dispatch_action(mondrian_editor_state::Action::DeleteSelection)
@@ -6587,21 +6593,25 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_inspector_ui_maps_curve_payload_to_opacity_keyframes() {
+    fn dispatch_inspector_ui_maps_incremental_curve_edits_to_opacity_keyframes() {
         let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        let property = opacity_parameter_address(&state, clip_id);
 
-        state
-            .dispatch_action(inspector_set_clip_curve_action(
-                InspectorSetClipCurvePayload {
-                    clip: inspector_clip_payload(track_id, clip_id),
-                    points: vec![
-                        InspectorCurvePointPayload { x: 0.0, y: 0.0 },
-                        InspectorCurvePointPayload { x: 0.5, y: 0.72 },
-                        InspectorCurvePointPayload { x: 1.0, y: 1.0 },
-                    ],
-                },
-            ))
-            .expect("dispatch curve");
+        for point in [
+            InspectorCurvePointPayload { x: 0.0, y: 0.0 },
+            InspectorCurvePointPayload { x: 0.5, y: 0.72 },
+            InspectorCurvePointPayload { x: 1.0, y: 1.0 },
+        ] {
+            state
+                .dispatch_action(inspector_edit_clip_curve_action(
+                    InspectorEditClipCurvePayload {
+                        clip: inspector_clip_payload(track_id, clip_id),
+                        property: property.clone(),
+                        edit: InspectorCurveEditPayload::Upsert { keyframe_id: None, point },
+                    },
+                ))
+                .expect("dispatch curve point");
+        }
 
         let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
@@ -6616,6 +6626,7 @@ mod tests {
     #[test]
     fn dispatch_inspector_clip_mutations_preserve_locked_track() {
         let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        let opacity_property = opacity_parameter_address(&state, clip_id);
         state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked = true;
         let clip_ref = inspector_clip_payload(track_id, clip_id);
 
@@ -6643,12 +6654,13 @@ mod tests {
                 scale_percent: Some(125.0),
                 rotation_degrees: Some(8.5),
             }),
-            inspector_set_clip_curve_action(InspectorSetClipCurvePayload {
+            inspector_edit_clip_curve_action(InspectorEditClipCurvePayload {
                 clip: clip_ref,
-                points: vec![
-                    InspectorCurvePointPayload { x: 0.0, y: 0.0 },
-                    InspectorCurvePointPayload { x: 1.0, y: 0.5 },
-                ],
+                property: opacity_property,
+                edit: InspectorCurveEditPayload::Upsert {
+                    keyframe_id: None,
+                    point: InspectorCurvePointPayload { x: 0.0, y: 0.5 },
+                },
             }),
         ] {
             let err = state
@@ -7156,11 +7168,8 @@ mod tests {
                 "seed opacity keyframe",
             )
             .expect("seed keyframe");
-        state.set_animation_keyframe_selection(vec![crate::app::AnimationKeyframeSelection {
-            clip_id,
-            path: Transform2D::OPACITY_PATH.to_string(),
-            time: source_time,
-        }]);
+        let keyframe_selection = opacity_keyframe_selection(&state, clip_id, source_time);
+        state.set_animation_keyframe_selection(vec![keyframe_selection]);
         state.seek(18);
 
         state
@@ -7208,10 +7217,8 @@ mod tests {
         state.selection.selected_clips =
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
         state.selection.selected_mask = Some((MaskId::new(), clip_id, track_id));
-        state.animation_selection.active_property = Some(crate::app::AnimationPropertySelection {
-            clip_id,
-            path: Transform2D::OPACITY_PATH.to_string(),
-        });
+        state.animation_selection.active_property =
+            Some(opacity_property_selection(&state, clip_id));
         state.seek(50);
 
         state.dispatch_action(mondrian_editor_state::Action::Copy).expect("copy clip");
@@ -7241,10 +7248,8 @@ mod tests {
         state.selection.selected_clips =
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
         state.selection.selected_mask = Some((MaskId::new(), clip_id, track_id));
-        state.animation_selection.active_property = Some(crate::app::AnimationPropertySelection {
-            clip_id,
-            path: Transform2D::OPACITY_PATH.to_string(),
-        });
+        state.animation_selection.active_property =
+            Some(opacity_property_selection(&state, clip_id));
 
         state.dispatch_action(mondrian_editor_state::Action::Cut).expect("cut clip");
 
@@ -7285,10 +7290,8 @@ mod tests {
         state.selection.selected_clips =
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
         state.selection.selected_mask = Some((MaskId::new(), clip_id, track_id));
-        state.animation_selection.active_property = Some(crate::app::AnimationPropertySelection {
-            clip_id,
-            path: Transform2D::OPACITY_PATH.to_string(),
-        });
+        state.animation_selection.active_property =
+            Some(opacity_property_selection(&state, clip_id));
         state.seek(0);
 
         state

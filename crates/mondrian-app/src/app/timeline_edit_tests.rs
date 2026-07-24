@@ -1,4 +1,5 @@
 use super::*;
+use mondrian_core::automation::PropertyHost;
 use mondrian_core::AudioSourceComponentId;
 use mondrian_core::{ColorSpace, WorkingColorSpace};
 use mondrian_effects::EffectRenderOp;
@@ -915,14 +916,21 @@ fn removing_track_prunes_stale_app_selection() {
         },
     ];
     state.selection.selected_mask = Some((MaskId::new(), removed_clip_id, removed_track_id));
-    state.animation_selection.active_property = Some(AnimationPropertySelection {
+    let opacity_property = state
+        .active_sequence()
+        .and_then(|sequence| find_clip(sequence, removed_clip_id))
+        .and_then(|clip| {
+            clip.transform.to_property_bag().address_for_path(Transform2D::OPACITY_PATH)
+        })
+        .expect("opacity property address");
+    let property_selection = AnimationPropertySelection {
         clip_id: removed_clip_id,
-        path: Transform2D::OPACITY_PATH.to_string(),
-    });
+        property: opacity_property,
+    };
+    state.animation_selection.active_property = Some(property_selection.clone());
     state.animation_selection.selected_keyframes.insert(AnimationKeyframeSelection {
-        clip_id: removed_clip_id,
-        path: Transform2D::OPACITY_PATH.to_string(),
-        time: TimelineTime::ZERO,
+        property: property_selection,
+        keyframe_id: mondrian_core::KeyframeId::new(),
     });
 
     state.remove_track(removed_track_id, true).expect("remove track");
