@@ -65,6 +65,7 @@ fn clip_with_effect_graph_compiles() {
         &active[0].clip.effects,
         &active[0].clip.masks,
         active[0].clip_time,
+        seq.settings.color.working_color_space,
     );
     assert!(
         graph.is_ok(),

@@ -391,6 +391,23 @@ pub enum WorkingColorSpace {
     AcesCg,
 }
 
+impl WorkingColorSpace {
+    /// Linear-light RGB coefficients that reproduce CIE Y for this working
+    /// space's primaries and white point.
+    ///
+    /// Primary color operators use these coefficients for luminance-preserving
+    /// saturation. Keeping the values on the semantic color identity prevents
+    /// effects and renderer backends from silently assuming BT.709 primaries.
+    pub const fn luminance_coefficients(self) -> [f32; 3] {
+        match self {
+            Self::LinearRec709 => [0.2126, 0.7152, 0.0722],
+            Self::LinearRec2020 => [0.2627, 0.6780, 0.0593],
+            Self::LinearP3D65 => [0.228_974_6, 0.691_738_5, 0.079_286_9],
+            Self::AcesCg => [0.272_228_72, 0.674_081_74, 0.053_689_52],
+        }
+    }
+}
+
 /// Error returned when an encoded source/output space is not a valid working space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("{color_space:?} cannot be used as a linear working color space")]

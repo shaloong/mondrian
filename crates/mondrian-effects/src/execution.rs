@@ -1361,7 +1361,6 @@ fn unsupported_float_graph_node(
 fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
     match op {
         EffectRenderOp::ColorAdjust { .. } => "color_adjust",
-        EffectRenderOp::WhiteBalance { .. } => "white_balance",
         EffectRenderOp::GaussianBlur { .. } => "gaussian_blur",
         EffectRenderOp::Sharpen { .. } => "sharpen",
         EffectRenderOp::Vignette { .. } => "vignette",
@@ -1650,19 +1649,22 @@ fn apply_alpha_mask_f32_in_place(
 mod tests {
     use super::*;
 
+    fn color_adjust(exposure: f32, contrast: f32, saturation: f32) -> EffectRenderOp {
+        EffectRenderOp::ColorAdjust {
+            exposure,
+            contrast,
+            saturation,
+            working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
+        }
+    }
+
     #[test]
     fn display_encoded_effect_cannot_execute_as_scene_linear_without_ocio_transitions() {
         let display_domain = crate::EffectColorDomain::DisplayEncodedRgb {
             color_space: mondrian_core::ColorSpace::Rec709,
         };
         let compiled = crate::compile_scheduled_effect_graph_in_domain(
-            &EffectRenderPlan {
-                ops: vec![EffectRenderOp::ColorAdjust {
-                    exposure: 0.25,
-                    contrast: 1.0,
-                    saturation: 1.0,
-                }],
-            },
+            &EffectRenderPlan { ops: vec![color_adjust(0.25, 1.0, 1.0)] },
             crate::EffectColorDomainContract::preserving(display_domain),
         )
         .expect("valid display-domain graph");
@@ -1689,13 +1691,7 @@ mod tests {
             color_space: mondrian_core::ColorSpace::Rec709,
         };
         let compiled = crate::compile_scheduled_effect_graph_in_domain(
-            &EffectRenderPlan {
-                ops: vec![EffectRenderOp::ColorAdjust {
-                    exposure: 0.0,
-                    contrast: 1.0,
-                    saturation: 1.0,
-                }],
-            },
+            &EffectRenderPlan { ops: vec![color_adjust(0.0, 1.0, 1.0)] },
             crate::EffectColorDomainContract::preserving(display_domain),
         )
         .expect("valid display-domain graph");
@@ -1737,13 +1733,7 @@ mod tests {
             color_space: mondrian_core::ColorSpace::Rec709,
         };
         let compiled = crate::compile_scheduled_effect_graph_in_domain(
-            &EffectRenderPlan {
-                ops: vec![EffectRenderOp::ColorAdjust {
-                    exposure: 0.0,
-                    contrast: 1.0,
-                    saturation: 1.0,
-                }],
-            },
+            &EffectRenderPlan { ops: vec![color_adjust(0.0, 1.0, 1.0)] },
             crate::EffectColorDomainContract::preserving(display_domain),
         )
         .expect("valid display-domain graph");
@@ -1780,10 +1770,10 @@ mod tests {
         let compiled = crate::compile_scheduled_effect_graph_in_domain(
             &EffectRenderPlan {
                 ops: vec![
-                    EffectRenderOp::ColorAdjust { exposure: 0.0, contrast: 1.0, saturation: 1.0 },
-                    EffectRenderOp::WhiteBalance { temperature: 0.1, tint: -0.1 },
-                    EffectRenderOp::ColorAdjust { exposure: 0.0, contrast: 1.1, saturation: 0.9 },
-                    EffectRenderOp::WhiteBalance { temperature: -0.05, tint: 0.05 },
+                    color_adjust(0.0, 1.0, 1.0),
+                    EffectRenderOp::Vignette { intensity: 0.1, feather: 0.8 },
+                    color_adjust(0.0, 1.1, 0.9),
+                    EffectRenderOp::Vignette { intensity: 0.05, feather: 0.6 },
                 ],
             },
             crate::EffectColorDomainContract::preserving(display_domain),
@@ -1818,11 +1808,7 @@ mod tests {
     #[test]
     fn float_effect_graph_runs_color_adjust_without_clamping_extended_values() {
         let compiled = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
-            ops: vec![EffectRenderOp::ColorAdjust {
-                exposure: 1.0,
-                contrast: 1.0,
-                saturation: 1.0,
-            }],
+            ops: vec![color_adjust(1.0, 1.0, 1.0)],
         })
         .expect("compile color adjust graph");
 
@@ -1840,11 +1826,7 @@ mod tests {
     #[test]
     fn float_effect_graph_pass_blends_normal_adjustment_without_clamping_extended_values() {
         let compiled = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
-            ops: vec![EffectRenderOp::ColorAdjust {
-                exposure: 1.0,
-                contrast: 1.0,
-                saturation: 1.0,
-            }],
+            ops: vec![color_adjust(1.0, 1.0, 1.0)],
         })
         .expect("compile color adjust graph");
 
@@ -1869,11 +1851,7 @@ mod tests {
     #[test]
     fn float_effect_graph_pass_supports_non_normal_blend_modes() {
         let compiled = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
-            ops: vec![EffectRenderOp::ColorAdjust {
-                exposure: 0.0,
-                contrast: 1.0,
-                saturation: 1.0,
-            }],
+            ops: vec![color_adjust(0.0, 1.0, 1.0)],
         })
         .expect("compile color adjust graph");
 
@@ -1898,10 +1876,10 @@ mod tests {
     fn float_effect_graph_caches_deterministic_multi_op_output() {
         let compiled = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
             ops: vec![
-                EffectRenderOp::ColorAdjust { exposure: 1.0, contrast: 1.0, saturation: 1.0 },
-                EffectRenderOp::WhiteBalance { temperature: 0.1, tint: -0.1 },
-                EffectRenderOp::ColorAdjust { exposure: 0.0, contrast: 1.1, saturation: 0.9 },
-                EffectRenderOp::WhiteBalance { temperature: -0.05, tint: 0.05 },
+                color_adjust(1.0, 1.0, 1.0),
+                EffectRenderOp::Vignette { intensity: 0.1, feather: 0.8 },
+                color_adjust(0.0, 1.1, 0.9),
+                EffectRenderOp::Vignette { intensity: 0.05, feather: 0.6 },
             ],
         })
         .expect("compile float adjustment chain");
@@ -1922,8 +1900,8 @@ mod tests {
     fn float_effect_graph_avoids_output_cache_for_low_cost_adjustments() {
         let compiled = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
             ops: vec![
-                EffectRenderOp::ColorAdjust { exposure: 1.0, contrast: 1.0, saturation: 1.0 },
-                EffectRenderOp::WhiteBalance { temperature: 0.1, tint: -0.1 },
+                color_adjust(1.0, 1.0, 1.0),
+                EffectRenderOp::Vignette { intensity: 0.1, feather: 0.8 },
             ],
         })
         .expect("compile low-cost float adjustment chain");
@@ -1974,11 +1952,7 @@ mod tests {
                     id: EffectGraphNodeId(1),
                     kind: EffectGraphNodeKind::UnaryEffect {
                         input: EffectGraphNodeId(0),
-                        op: EffectRenderOp::ColorAdjust {
-                            exposure: 1.0,
-                            contrast: 1.0,
-                            saturation: 1.0,
-                        },
+                        op: color_adjust(1.0, 1.0, 1.0),
                     },
                 },
                 crate::EffectGraphNode {
@@ -2076,11 +2050,7 @@ mod tests {
                     id: EffectGraphNodeId(1),
                     kind: EffectGraphNodeKind::UnaryEffect {
                         input: EffectGraphNodeId(0),
-                        op: EffectRenderOp::ColorAdjust {
-                            exposure: 1.0,
-                            contrast: 1.0,
-                            saturation: 1.0,
-                        },
+                        op: color_adjust(1.0, 1.0, 1.0),
                     },
                 },
                 crate::EffectGraphNode {
@@ -2189,11 +2159,7 @@ mod tests {
     #[test]
     fn float_effect_graph_rejects_mismatched_input_extent() {
         let compiled = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
-            ops: vec![EffectRenderOp::ColorAdjust {
-                exposure: 0.0,
-                contrast: 1.0,
-                saturation: 1.0,
-            }],
+            ops: vec![color_adjust(0.0, 1.0, 1.0)],
         })
         .expect("compile color adjust graph");
 

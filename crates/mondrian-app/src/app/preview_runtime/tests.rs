@@ -786,9 +786,11 @@ fn preview_transform_projection_does_not_double_apply_resolution_scale() {
 fn gpu_composite_layers_lower_supported_working_effects() {
     let media = test_media_frame_with_size(180, 320, 180, 43);
     let mut graph = mondrian_effects::EffectGraphBuilderState::new();
-    graph.append_unary(mondrian_effects::EffectRenderOp::WhiteBalance {
-        temperature: 0.2,
-        tint: -0.1,
+    graph.append_unary(mondrian_effects::EffectRenderOp::ColorAdjust {
+        exposure: 0.2,
+        contrast: 1.0,
+        saturation: 0.9,
+        working_color_space: WorkingColorSpace::LinearRec709,
     });
     graph.append_unary(mondrian_effects::EffectRenderOp::Vignette { intensity: 0.6, feather: 0.7 });
     let effect_graph = mondrian_effects::get_or_compile_scheduled_render_graph(graph.finish())
@@ -825,6 +827,7 @@ fn gpu_composite_layers_lower_solid_and_adjustment_effects() {
         exposure: 0.2,
         contrast: 1.1,
         saturation: 0.9,
+        working_color_space: WorkingColorSpace::LinearRec709,
     });
     let effect_graph = mondrian_effects::get_or_compile_scheduled_render_graph(graph.finish())
         .expect("compile supported effect graph");
@@ -5350,6 +5353,7 @@ fn stable_parameter_value_changes_compiled_graph_and_viewer_cache_identity() {
         &[effect.clone()],
         &[],
         mondrian_core::TimelineTime::ZERO,
+        WorkingColorSpace::LinearRec709,
     )
     .expect("compile first graph");
     effect
@@ -5362,6 +5366,7 @@ fn stable_parameter_value_changes_compiled_graph_and_viewer_cache_identity() {
         &[effect],
         &[],
         mondrian_core::TimelineTime::ZERO,
+        WorkingColorSpace::LinearRec709,
     )
     .expect("compile second graph");
     assert_ne!(first_graph.signature_hash, second_graph.signature_hash);

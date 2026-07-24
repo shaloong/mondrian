@@ -24,9 +24,9 @@ pub enum EffectGpuPointOp {
         exposure: f32,
         contrast: f32,
         saturation: f32,
+        /// CIE Y coefficients for the authored Sequence working space.
+        luminance_coefficients: [f32; 3],
     },
-    /// Temperature and tint adjustment.
-    WhiteBalance { temperature: f32, tint: f32 },
     /// Source-relative radial vignette.
     Vignette { intensity: f32, feather: f32 },
     /// Deterministic monochromatic grain.
@@ -317,16 +317,17 @@ fn lower_point_op(
     op: &EffectRenderOp,
 ) -> Result<EffectGpuPointOp, EffectGpuPlanBlocker> {
     match op {
-        EffectRenderOp::ColorAdjust { exposure, contrast, saturation } => {
-            Ok(EffectGpuPointOp::ColorAdjust {
-                exposure: *exposure,
-                contrast: *contrast,
-                saturation: *saturation,
-            })
-        }
-        EffectRenderOp::WhiteBalance { temperature, tint } => {
-            Ok(EffectGpuPointOp::WhiteBalance { temperature: *temperature, tint: *tint })
-        }
+        EffectRenderOp::ColorAdjust {
+            exposure,
+            contrast,
+            saturation,
+            working_color_space,
+        } => Ok(EffectGpuPointOp::ColorAdjust {
+            exposure: *exposure,
+            contrast: *contrast,
+            saturation: *saturation,
+            luminance_coefficients: working_color_space.luminance_coefficients(),
+        }),
         EffectRenderOp::Vignette { intensity, feather } => {
             Ok(EffectGpuPointOp::Vignette { intensity: *intensity, feather: *feather })
         }
@@ -353,7 +354,6 @@ fn node_kind_name(kind: &EffectGraphNodeKind) -> &'static str {
 fn operation_name(op: &EffectRenderOp) -> &'static str {
     match op {
         EffectRenderOp::ColorAdjust { .. } => "color_adjust",
-        EffectRenderOp::WhiteBalance { .. } => "white_balance",
         EffectRenderOp::GaussianBlur { .. } => "gaussian_blur",
         EffectRenderOp::Sharpen { .. } => "sharpen",
         EffectRenderOp::Vignette { .. } => "vignette",
@@ -376,6 +376,7 @@ mod tests {
             exposure: 1.0,
             contrast: 1.2,
             saturation: 0.8,
+            working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
         });
         builder.append_unary(EffectRenderOp::Grain { amount: 0.25 });
         let compiled =
@@ -408,6 +409,7 @@ mod tests {
                     exposure: 0.25,
                     contrast: 1.0,
                     saturation: 1.0,
+                    working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
                 }],
             },
             crate::EffectColorDomainContract::preserving(display_domain),
@@ -435,6 +437,7 @@ mod tests {
                     exposure: 0.25,
                     contrast: 1.0,
                     saturation: 1.0,
+                    working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
                 }],
             },
             crate::EffectColorDomainContract { input, output },

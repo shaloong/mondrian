@@ -13,6 +13,7 @@ use crate::effect_data::EffectNode;
 use crate::mask_data::MaskComponent;
 use crate::types::{
     AssetId, BlendMode, ClipId, Color, ColorSpace, Rational, SequenceId, VideoTransitionId,
+    WorkingColorSpace,
 };
 use crate::{BasicTitle, Result, TimelineTime};
 use serde::{Deserialize, Serialize};
@@ -447,6 +448,9 @@ pub trait RenderPlanSource {
 
     /// Time base of the sequence.
     fn source_time_base(&self) -> Rational;
+
+    /// Linear-light working color space in which clip effects execute.
+    fn source_working_color_space(&self) -> WorkingColorSpace;
 
     /// Whether to auto tone-map media to the working color space.
     fn auto_tone_map_media(&self) -> bool;

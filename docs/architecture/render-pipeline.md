@@ -200,10 +200,16 @@ and float-capable adjustment layers in the typed float/linear working frame.
 Timeline blend modes, including seeded Dissolve, are implemented by
 `mondrian-effects`' float pixel blend contract and must not round-trip through
 RGBA8 scratch buffers. Extended working values therefore remain available to the
-final output boundary. Every existing built-in unary render operation, including
-color adjustment, white balance, blur, sharpen, vignette, chromatic aberration,
-grain, and LUT, runs in this path through the same `mondrian-effects` float
-contract. Spatial effects use premultiplied-alpha sampling internally while the
+final output boundary. Every executable built-in unary render operation,
+including Primary Color, blur, sharpen, vignette, chromatic aberration, grain,
+and LUT, runs in this path through the same `mondrian-effects` float contract.
+Primary Color carries the Sequence working-space identity and coefficients into
+both CPU and GPU plans; contrast pivots at linear 0.18. LUT execution first
+satisfies its explicitly authored processing-domain transition, then applies
+the same domain-normalized tetrahedral cube on Preview and Export CPU paths.
+GPU LUT execution remains a typed blocker until a backend implements that exact
+contract; it may not substitute trilinear or guessed-domain output. Spatial
+effects use premultiplied-alpha sampling internally while the
 typed public frame remains straight-alpha. The Viewer spatial Module records its
 horizontal RGBA32F intermediate as `PremultipliedCoverage`; shader uniforms are
 derived from the input/output descriptors, and the vertical pass restores the
@@ -1213,7 +1219,7 @@ and adjustment elements:
   carry a source/input contract whose target working color space matches the
   sequence; differing source/preview extents are supported through
   inverse-affine GPU sampling;
-- media and solid sources may carry a lowered ColorAdjust, WhiteBalance,
+- media and solid sources may carry a lowered working-space-aware ColorAdjust,
   Vignette, or Grain chain; effects run before source-over composition;
 - adjustment layers process the lower accumulated working pixels and blend the
   result back with their opacity, matching the CPU float reference semantics;

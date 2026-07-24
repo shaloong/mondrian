@@ -1450,6 +1450,7 @@ mod tests {
                         exposure: 0.0,
                         contrast: 1.0,
                         saturation: 0.0,
+                        working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
                     }],
                 })
                 .expect("compile effect graph"),
@@ -1524,6 +1525,7 @@ mod tests {
                             exposure: 0.0,
                             contrast: 1.0,
                             saturation: 0.0,
+                            working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
                         }],
                     })
                     .expect("compile adjustment graph"),
@@ -1691,6 +1693,7 @@ mod tests {
                         exposure: 1.0,
                         contrast: 1.0,
                         saturation: 1.0,
+                        working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
                     }],
                 })
                 .expect("compile float color adjust"),
@@ -1731,6 +1734,7 @@ mod tests {
                             exposure: 1.0,
                             contrast: 1.0,
                             saturation: 1.0,
+                            working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
                         }],
                     })
                     .expect("compile adjustment"),
@@ -1812,6 +1816,7 @@ mod tests {
                         exposure: 0.0,
                         contrast: 1.0,
                         saturation: 0.0,
+                        working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
                     }],
                 })
                 .expect("compile adjustment"),
@@ -2061,6 +2066,7 @@ mod tests {
                         exposure: 0.25,
                         contrast: 1.0,
                         saturation: 1.0,
+                        working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
                     }],
                 },
                 mondrian_effects::EffectColorDomainContract::preserving(display_domain),
@@ -2123,6 +2129,7 @@ mod tests {
                         exposure,
                         contrast: 1.0,
                         saturation: 1.0,
+                        working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
                     }],
                 },
                 mondrian_effects::EffectColorDomainContract::preserving(display_domain),

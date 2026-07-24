@@ -1,7 +1,7 @@
 use crate::execution::custom_render_processor_registry;
 use crate::{effect_definition, plugin_contract, record_plugin_runtime_failure};
 use crate::{EffectExecutionError, EffectRenderOp};
-use mondrian_core::types::BlendMode;
+use mondrian_core::types::{BlendMode, WorkingColorSpace};
 use serde::{Deserialize, Serialize};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -15,9 +15,8 @@ pub use crate::execution::{
 pub struct AdjustmentLayerParams {
     pub exposure: f32,
     pub contrast: f32,
-    pub temperature: f32,
-    pub tint: f32,
     pub saturation: f32,
+    pub working_color_space: WorkingColorSpace,
     pub blur_radius: f32,
     pub sharpen_amount: f32,
     pub vignette_intensity: f32,
@@ -31,9 +30,8 @@ impl Default for AdjustmentLayerParams {
         Self {
             exposure: 0.0,
             contrast: 1.0,
-            temperature: 0.0,
-            tint: 0.0,
             saturation: 1.0,
+            working_color_space: WorkingColorSpace::LinearRec709,
             blur_radius: 0.0,
             sharpen_amount: 0.0,
             vignette_intensity: 0.0,
@@ -48,8 +46,6 @@ impl AdjustmentLayerParams {
     pub fn is_identity(&self) -> bool {
         (self.exposure.abs() <= 1.0e-4)
             && ((self.contrast - 1.0).abs() <= 1.0e-4)
-            && (self.temperature.abs() <= 1.0e-4)
-            && (self.tint.abs() <= 1.0e-4)
             && ((self.saturation - 1.0).abs() <= 1.0e-4)
             && (self.blur_radius.abs() <= 1.0e-4)
             && (self.sharpen_amount.abs() <= 1.0e-4)
@@ -58,13 +54,12 @@ impl AdjustmentLayerParams {
             && (self.grain_amount.abs() <= 1.0e-4)
     }
 
-    pub fn signature_words(&self) -> [u32; 11] {
+    pub fn signature_words(&self) -> [u32; 10] {
         [
             self.exposure.to_bits(),
             self.contrast.to_bits(),
-            self.temperature.to_bits(),
-            self.tint.to_bits(),
             self.saturation.to_bits(),
+            self.working_color_space as u32,
             self.blur_radius.to_bits(),
             self.sharpen_amount.to_bits(),
             self.vignette_intensity.to_bits(),
@@ -137,23 +132,19 @@ pub(crate) fn apply_render_op(
     frame_seed: i64,
 ) -> Result<(), EffectExecutionError> {
     match op {
-        EffectRenderOp::ColorAdjust { exposure, contrast, saturation } => {
+        EffectRenderOp::ColorAdjust {
+            exposure,
+            contrast,
+            saturation,
+            working_color_space,
+        } => {
             apply_primary_color_adjustments(
                 working,
                 AdjustmentLayerParams {
                     exposure: *exposure,
                     contrast: *contrast,
                     saturation: *saturation,
-                    ..AdjustmentLayerParams::default()
-                },
-            );
-        }
-        EffectRenderOp::WhiteBalance { temperature, tint } => {
-            apply_primary_color_adjustments(
-                working,
-                AdjustmentLayerParams {
-                    temperature: *temperature,
-                    tint: *tint,
+                    working_color_space: *working_color_space,
                     ..AdjustmentLayerParams::default()
                 },
             );
@@ -262,24 +253,19 @@ pub(crate) fn apply_render_op_f32(
     frame_seed: i64,
 ) -> bool {
     match op {
-        EffectRenderOp::ColorAdjust { exposure, contrast, saturation } => {
+        EffectRenderOp::ColorAdjust {
+            exposure,
+            contrast,
+            saturation,
+            working_color_space,
+        } => {
             apply_primary_color_adjustments_f32(
                 working.as_mut_slice(),
                 AdjustmentLayerParams {
                     exposure: *exposure,
                     contrast: *contrast,
                     saturation: *saturation,
-                    ..AdjustmentLayerParams::default()
-                },
-            );
-            true
-        }
-        EffectRenderOp::WhiteBalance { temperature, tint } => {
-            apply_primary_color_adjustments_f32(
-                working.as_mut_slice(),
-                AdjustmentLayerParams {
-                    temperature: *temperature,
-                    tint: *tint,
+                    working_color_space: *working_color_space,
                     ..AdjustmentLayerParams::default()
                 },
             );
@@ -550,9 +536,9 @@ pub fn apply_adjustment_pass(
 fn apply_primary_color_adjustments(buffer: &mut [u8], params: AdjustmentLayerParams) {
     let exposure_scale = 2.0f32.powf(params.exposure.clamp(-4.0, 4.0));
     let contrast = params.contrast.clamp(0.0, 3.0);
-    let temperature = params.temperature.clamp(-1.0, 1.0);
-    let tint = params.tint.clamp(-1.0, 1.0);
     let saturation = params.saturation.clamp(0.0, 3.0);
+    let luma_coefficients = params.working_color_space.luminance_coefficients();
+    const CONTRAST_PIVOT: f32 = 0.18;
 
     for px in buffer.chunks_exact_mut(4) {
         if px[3] == 0 {
@@ -562,14 +548,10 @@ fn apply_primary_color_adjustments(buffer: &mut [u8], params: AdjustmentLayerPar
         let mut rgb = rgb_to_unit(px);
         for channel in &mut rgb {
             *channel = (*channel * exposure_scale).clamp(0.0, 1.0);
-            *channel = ((*channel - 0.5) * contrast + 0.5).clamp(0.0, 1.0);
+            *channel = ((*channel - CONTRAST_PIVOT) * contrast + CONTRAST_PIVOT).clamp(0.0, 1.0);
         }
 
-        rgb[0] = (rgb[0] + temperature * 0.12 - tint * 0.04).clamp(0.0, 1.0);
-        rgb[1] = (rgb[1] + tint * 0.05).clamp(0.0, 1.0);
-        rgb[2] = (rgb[2] - temperature * 0.12 - tint * 0.02).clamp(0.0, 1.0);
-
-        let luma = rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
+        let luma = dot3(rgb, luma_coefficients);
         rgb[0] = (luma + (rgb[0] - luma) * saturation).clamp(0.0, 1.0);
         rgb[1] = (luma + (rgb[1] - luma) * saturation).clamp(0.0, 1.0);
         rgb[2] = (luma + (rgb[2] - luma) * saturation).clamp(0.0, 1.0);
@@ -583,9 +565,9 @@ fn apply_primary_color_adjustments(buffer: &mut [u8], params: AdjustmentLayerPar
 fn apply_primary_color_adjustments_f32(buffer: &mut [[f32; 4]], params: AdjustmentLayerParams) {
     let exposure_scale = 2.0f32.powf(params.exposure.clamp(-4.0, 4.0));
     let contrast = params.contrast.clamp(0.0, 3.0);
-    let temperature = params.temperature.clamp(-1.0, 1.0);
-    let tint = params.tint.clamp(-1.0, 1.0);
     let saturation = params.saturation.clamp(0.0, 3.0);
+    let luma_coefficients = params.working_color_space.luminance_coefficients();
+    const CONTRAST_PIVOT: f32 = 0.18;
 
     for px in buffer {
         if px[3] <= 1.0e-6 {
@@ -595,18 +577,18 @@ fn apply_primary_color_adjustments_f32(buffer: &mut [[f32; 4]], params: Adjustme
         let mut rgb = [px[0], px[1], px[2]];
         for channel in &mut rgb {
             *channel *= exposure_scale;
-            *channel = (*channel - 0.5) * contrast + 0.5;
+            *channel = (*channel - CONTRAST_PIVOT) * contrast + CONTRAST_PIVOT;
         }
 
-        rgb[0] += temperature * 0.12 - tint * 0.04;
-        rgb[1] += tint * 0.05;
-        rgb[2] += -temperature * 0.12 - tint * 0.02;
-
-        let luma = rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
+        let luma = dot3(rgb, luma_coefficients);
         px[0] = luma + (rgb[0] - luma) * saturation;
         px[1] = luma + (rgb[1] - luma) * saturation;
         px[2] = luma + (rgb[2] - luma) * saturation;
     }
+}
+
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
 fn gaussian_blur_rgba_f32(
@@ -1326,6 +1308,48 @@ mod tests {
     }
 
     #[test]
+    fn primary_color_uses_sequence_luminance_and_scene_linear_contrast_pivot() {
+        let source = [0.7, 0.2, 0.05, 0.8];
+        let mut rec2020 = vec![source];
+        assert!(apply_render_op_f32(
+            &mut rec2020,
+            1,
+            1,
+            &EffectRenderOp::ColorAdjust {
+                exposure: 0.0,
+                contrast: 1.0,
+                saturation: 0.0,
+                working_color_space: WorkingColorSpace::LinearRec2020,
+            },
+            0,
+        ));
+        let coefficients = WorkingColorSpace::LinearRec2020.luminance_coefficients();
+        let expected_luminance =
+            source[0] * coefficients[0] + source[1] * coefficients[1] + source[2] * coefficients[2];
+        for channel in rec2020[0].iter().take(3) {
+            assert!((*channel - expected_luminance).abs() <= 1.0e-6);
+        }
+        assert_eq!(rec2020[0][3], source[3]);
+
+        let mut pivot = vec![[0.18, 0.18, 0.18, 1.0]];
+        assert!(apply_render_op_f32(
+            &mut pivot,
+            1,
+            1,
+            &EffectRenderOp::ColorAdjust {
+                exposure: 0.0,
+                contrast: 2.5,
+                saturation: 1.0,
+                working_color_space: WorkingColorSpace::LinearRec2020,
+            },
+            0,
+        ));
+        for channel in pivot[0].iter().take(3) {
+            assert!((*channel - 0.18).abs() <= 1.0e-6);
+        }
+    }
+
+    #[test]
     fn custom_render_processor_can_modify_effect_render_plan_output() {
         register_custom_render_processor(
             "plugin.render.glow",
@@ -1375,6 +1399,7 @@ mod tests {
                             exposure: 0.0,
                             contrast: 1.0,
                             saturation: 0.0,
+                            working_color_space: WorkingColorSpace::LinearRec709,
                         },
                     },
                 },
@@ -1665,7 +1690,12 @@ mod tests {
                     cache_key: Some("shared-subtree".to_string()),
                     cache_policy: crate::effect::EffectCachePolicy::Deterministic,
                 },
-                EffectRenderOp::ColorAdjust { exposure: 0.0, contrast: 1.0, saturation: 0.0 },
+                EffectRenderOp::ColorAdjust {
+                    exposure: 0.0,
+                    contrast: 1.0,
+                    saturation: 0.0,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                },
             ],
         })
         .expect("compile first graph");
@@ -1743,6 +1773,8 @@ mod tests {
         let lut = crate::Lut3D {
             name: "red-to-blue".to_string(),
             size: 2,
+            domain_min: [0.0; 3],
+            domain_max: [1.0; 3],
             data: vec![
                 [0.0, 0.0, 0.0],
                 [0.0, 0.0, 1.0],

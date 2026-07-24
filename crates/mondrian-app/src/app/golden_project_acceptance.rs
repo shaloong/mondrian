@@ -563,10 +563,7 @@ fn golden_acceptance_plan_reports_current_top_level_blockers() -> anyhow::Result
             .collect()
     );
     assert!(plan.missing.operations.is_empty());
-    assert_eq!(
-        plan.missing.content,
-        ["lut", "primary-color"].into_iter().map(str::to_owned).collect()
-    );
+    assert!(plan.missing.content.is_empty());
     assert!(plan.missing.exports.is_empty());
     assert_eq!(
         plan.unassigned_required_fixture_roles,

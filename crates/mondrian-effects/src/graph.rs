@@ -292,6 +292,24 @@ impl EffectGraphBuilderState {
         node_id
     }
 
+    /// Append one operation with an instance-resolved processing-domain
+    /// contract without mutating the definition's default contract.
+    ///
+    /// This is used by resource effects such as `.cube` LUTs whose files carry
+    /// numeric domains but no color-space identity. The authored instance must
+    /// resolve that identity explicitly before graph construction.
+    pub fn append_unary_in_domain(
+        &mut self,
+        op: EffectRenderOp,
+        domain_contract: EffectColorDomainContract,
+    ) -> EffectGraphNodeId {
+        let previous = self.active_domain_contract;
+        self.active_domain_contract = domain_contract;
+        let node_id = self.append_unary(op);
+        self.active_domain_contract = previous;
+        node_id
+    }
+
     pub fn add_unary_from(
         &mut self,
         input: EffectGraphNodeId,
@@ -1028,6 +1046,7 @@ mod tests {
                 exposure: 0.25,
                 contrast: 1.0,
                 saturation: 1.0,
+                working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
             }],
         };
 
@@ -1089,7 +1108,12 @@ mod tests {
     fn scheduler_orders_dependencies_before_consumers() {
         let graph = compile_effect_render_graph(&EffectRenderPlan {
             ops: vec![
-                EffectRenderOp::ColorAdjust { exposure: 0.5, contrast: 1.0, saturation: 1.0 },
+                EffectRenderOp::ColorAdjust {
+                    exposure: 0.5,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
+                },
                 EffectRenderOp::Grain { amount: 0.2 },
             ],
         });

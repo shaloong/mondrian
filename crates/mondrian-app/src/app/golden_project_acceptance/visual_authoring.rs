@@ -16,29 +16,32 @@ use crate::app::preview_timeline_execution::{
     PreviewTimelineTitleFrame,
 };
 use crate::app::preview_unavailability::{PreviewOutputStage, PreviewUnavailability};
-use crate::app::preview_viewer_plan::ResolvedPreviewElement;
+use crate::app::preview_viewer_plan::{ResolvedPreviewElement, ResolvedPreviewTransitionInput};
 use crate::app::selection::SelectedClipRef;
 use crate::app::ui_actions::{
-    assets_create_solid_color_action, inspector_edit_clip_curve_action,
+    assets_create_solid_color_action, effects_add_to_clip_action, inspector_edit_clip_curve_action,
     inspector_set_clip_property_action, inspector_set_clip_tint_action,
-    timeline_create_basic_title_action, timeline_create_cross_dissolve_action,
-    timeline_drop_asset_action, timeline_seek_action, timeline_trim_clips_action,
-    AssetsCreateAssetPayload, InspectorClipRefPayload, InspectorCurveEditPayload,
-    InspectorCurvePointPayload, InspectorEditClipCurvePayload, InspectorSetClipPropertyPayload,
-    InspectorSetClipTintPayload, TimelineCreateCrossDissolvePayload, TimelineDropAssetPayload,
-    TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+    inspector_set_effect_property_action, timeline_create_basic_title_action,
+    timeline_create_cross_dissolve_action, timeline_drop_asset_action, timeline_seek_action,
+    timeline_trim_clips_action, AssetsCreateAssetPayload, EffectsAddToClipPayload,
+    InspectorClipRefPayload, InspectorCurveEditPayload, InspectorCurvePointPayload,
+    InspectorEditClipCurvePayload, InspectorSetClipPropertyPayload, InspectorSetClipTintPayload,
+    InspectorSetEffectPropertyPayload, TimelineCreateCrossDissolvePayload,
+    TimelineDropAssetPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
 };
 use crate::app::AppState;
 use anyhow::{bail, ensure, Context};
 use mondrian_assets::AssetKind;
 use mondrian_core::automation::{
-    InterpolationType, Keyframe, KeyframeInterpolation, PropertyMutation, PropertyValue,
+    InterpolationType, Keyframe, KeyframeInterpolation, ParameterResourceReference,
+    PropertyMutation, PropertyValue,
 };
 use mondrian_core::{
-    BasicTitle, ClipId, Color, EvaluatedBasicTitle, FramePosition, FrameRounding, PropertyHost,
-    Resolution, TimelineTime, TrackId,
+    BasicTitle, ClipId, Color, EffectId, EvaluatedBasicTitle, FramePosition, FrameRounding,
+    PropertyHost, Resolution, TimelineTime, TrackId,
 };
 use mondrian_editor_state::Action;
+use mondrian_effects::{EffectNode, EffectType};
 use mondrian_playback::PreviewResolutionScale;
 use mondrian_renderer::{
     evaluate_timeline_render_plan, BasicTitleRasterizer, TimelineCompositeScratch,
@@ -56,6 +59,19 @@ const RUN_ROOT_ENV: &str = "MONDRIAN_GOLDEN_VISUAL_RUN_ROOT";
 const OUTPUT_ENV: &str = "MONDRIAN_GOLDEN_VISUAL_OUTPUT";
 const TITLE_TEXT: &str = "Mondrian Golden";
 const PREVIEW_RESOLUTION: Resolution = Resolution { width: 640, height: 360 };
+const LUT_PROCESSING_SPACE: &str = "rec709";
+const GENERATED_LUT: &str = "TITLE \"Mondrian Golden Rec709 Look\"\n\
+LUT_3D_SIZE 2\n\
+DOMAIN_MIN 0 0 0\n\
+DOMAIN_MAX 1 1 1\n\
+0.02 0.00 0.01\n\
+0.92 0.04 0.02\n\
+0.03 0.90 0.02\n\
+0.95 0.94 0.03\n\
+0.02 0.03 0.88\n\
+0.91 0.05 0.92\n\
+0.04 0.89 0.90\n\
+0.96 0.95 0.94\n";
 
 #[derive(Debug)]
 struct GoldenRunPaths {
@@ -119,6 +135,27 @@ impl OperationEvidence {
 #[derive(Debug, Serialize)]
 #[serde(tag = "id", rename_all = "kebab-case")]
 enum ContentEvidence {
+    PrimaryColor {
+        author_steps: Vec<AuthorTransitionEvidence>,
+        clip_id: String,
+        effect_id: String,
+        working_color_space: &'static str,
+        exposure: f32,
+        contrast: f32,
+        saturation: f32,
+    },
+    Lut {
+        author_steps: Vec<AuthorTransitionEvidence>,
+        clip_id: String,
+        effect_id: String,
+        processing_space: &'static str,
+        resource_path: PathBuf,
+        resource_sha256: String,
+        domain_min: [f32; 3],
+        domain_max: [f32; 3],
+        interpolation: &'static str,
+        intensity: f32,
+    },
     CrossDissolve {
         author_step: AuthorTransitionEvidence,
         transition_id: String,
@@ -159,6 +196,8 @@ enum ContentEvidence {
 impl ContentEvidence {
     const fn id(&self) -> &'static str {
         match self {
+            Self::PrimaryColor { .. } => "primary-color",
+            Self::Lut { .. } => "lut",
             Self::CrossDissolve { .. } => "cross-dissolve",
             Self::BasicTitle { .. } => "basic-title",
             Self::HoldKeyframe { .. } => "hold-keyframe",
@@ -187,6 +226,7 @@ struct VisualExecutionEvidence {
     preview_elements: usize,
     export_elements: usize,
     cross_dissolve_progress: f32,
+    left_effect_graph_signature: u64,
     title_raster_signatures: Vec<u64>,
     title: EvaluatedTitleEvidence,
     rgba_sha256: String,
@@ -221,6 +261,8 @@ fn visual_slice(slices: &[GoldenExecutionSlice]) -> anyhow::Result<&GoldenExecut
     ensure!(
         slice.required_content
             == [
+                "primary-color",
+                "lut",
                 "cross-dissolve",
                 "basic-title",
                 "hold-keyframe",
@@ -239,6 +281,118 @@ fn find_video_clip(sequence: &Sequence, clip_id: ClipId) -> anyhow::Result<(&Cli
         }
     }
     bail!("video Clip does not exist: {clip_id}")
+}
+
+fn find_clip_effect(
+    sequence: &Sequence,
+    clip_id: ClipId,
+    effect_id: EffectId,
+) -> anyhow::Result<&EffectNode> {
+    find_video_clip(sequence, clip_id)?
+        .0
+        .effects
+        .iter()
+        .find(|effect| effect.id == effect_id)
+        .with_context(|| format!("Effect {effect_id} is absent from Clip {clip_id}"))
+}
+
+fn add_effect(
+    state: &mut AppState,
+    clip: InspectorClipRefPayload,
+    effect_type: EffectType,
+    intent: &'static str,
+) -> anyhow::Result<(EffectId, AuthorTransitionEvidence)> {
+    let before = find_video_clip(
+        state.active_sequence().context("active Sequence is absent")?,
+        clip.clip_id,
+    )?
+    .0
+    .effects
+    .iter()
+    .map(|effect| effect.id)
+    .collect::<BTreeSet<_>>();
+    let step = dispatch_author_transition(
+        state,
+        intent,
+        effects_add_to_clip_action(EffectsAddToClipPayload {
+            clip,
+            effect_type: effect_type.clone(),
+        }),
+    )?;
+    let created = find_video_clip(
+        state.active_sequence().context("active Sequence is absent")?,
+        clip.clip_id,
+    )?
+    .0
+    .effects
+    .iter()
+    .filter(|effect| !before.contains(&effect.id) && effect.effect_type == effect_type)
+    .map(|effect| effect.id)
+    .collect::<Vec<_>>();
+    ensure!(
+        created.len() == 1,
+        "{intent} created {} candidate Effects",
+        created.len()
+    );
+    Ok((created[0], step))
+}
+
+fn set_effect_parameter(
+    state: &mut AppState,
+    clip: InspectorClipRefPayload,
+    effect_id: EffectId,
+    parameter: &'static str,
+    value: PropertyValue,
+    intent: &'static str,
+) -> anyhow::Result<AuthorTransitionEvidence> {
+    let effect = find_clip_effect(
+        state.active_sequence().context("active Sequence is absent")?,
+        clip.clip_id,
+        effect_id,
+    )?;
+    let parameter_id = effect
+        .effect_type
+        .parameter_id(parameter)
+        .with_context(|| format!("invalid parameter name: {parameter}"))?;
+    let path = effect
+        .properties
+        .iter()
+        .find(|(_, property)| property.descriptor.parameter_id() == &parameter_id)
+        .map(|(path, _)| path.to_owned())
+        .with_context(|| format!("Effect {effect_id} has no parameter {parameter_id}"))?;
+    dispatch_author_transition(
+        state,
+        intent,
+        inspector_set_effect_property_action(InspectorSetEffectPropertyPayload {
+            clip,
+            effect_id,
+            path,
+            value,
+        }),
+    )
+}
+
+fn assert_effect_parameter(
+    sequence: &Sequence,
+    clip_id: ClipId,
+    effect_id: EffectId,
+    effect_type: EffectType,
+    parameter: &str,
+    expected: PropertyValue,
+) -> anyhow::Result<()> {
+    let effect = find_clip_effect(sequence, clip_id, effect_id)?;
+    ensure!(
+        effect.effect_type == effect_type,
+        "save/reopen changed Effect {effect_id} type"
+    );
+    let parameter_id = effect_type
+        .parameter_id(parameter)
+        .with_context(|| format!("invalid parameter name: {parameter}"))?;
+    ensure!(
+        effect.evaluate_parameter(&parameter_id, TimelineTime::ZERO) == Some(expected),
+        "save/reopen changed Effect {effect_id} parameter {parameter_id}"
+    );
+    Ok(())
 }
 
 fn new_solid_asset(state: &mut AppState) -> anyhow::Result<mondrian_core::AssetId> {
@@ -388,6 +542,26 @@ fn sha256_bytes(bytes: &[u8]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn export_transition_input_effect_signature(
+    input: &mondrian_renderer::TimelineTransitionInputPlan,
+) -> anyhow::Result<u64> {
+    match input {
+        mondrian_renderer::TimelineTransitionInputPlan::SolidColor(layer) => {
+            Ok(layer.effect_graph.signature_hash)
+        }
+        other => bail!("visual Golden expected a Solid Color transition input, got {other:?}"),
+    }
+}
+
+fn preview_transition_input_effect_signature(
+    input: &ResolvedPreviewTransitionInput,
+) -> anyhow::Result<u64> {
+    match input {
+        ResolvedPreviewTransitionInput::SolidColor(layer) => Ok(layer.effect_graph.signature_hash),
+        _ => bail!("visual Golden expected a resolved Solid Color transition input"),
+    }
+}
+
 fn execute_visual_frame(state: &AppState, frame: i64) -> anyhow::Result<VisualExecutionEvidence> {
     let sequence = state.active_sequence().context("active Sequence is absent")?;
     let color_context =
@@ -410,6 +584,8 @@ fn execute_visual_frame(state: &AppState, frame: i64) -> anyhow::Result<VisualEx
             _ => None,
         })
         .context("Export render plan contains no Basic Title")?;
+    let export_left_effect_signature =
+        export_transition_input_effect_signature(&export_transition.left)?;
 
     let mut rasterizer = BasicTitleRasterizer::new();
     let mut raster_signatures = Vec::new();
@@ -483,6 +659,20 @@ fn execute_visual_frame(state: &AppState, frame: i64) -> anyhow::Result<VisualEx
             _ => None,
         })
         .context("resolved Preview contains no Cross Dissolve")?;
+    let preview_left_effect_signature = resolved
+        .plan
+        .elements
+        .iter()
+        .find_map(|element| match element {
+            ResolvedPreviewElement::CrossDissolve { left, .. } => Some(left),
+            _ => None,
+        })
+        .context("resolved Preview contains no Cross Dissolve input")
+        .and_then(preview_transition_input_effect_signature)?;
+    ensure!(
+        preview_left_effect_signature == export_left_effect_signature,
+        "Preview and Export compiled different Clip effect graphs"
+    );
     ensure!(
         preview_progress.to_bits() == export_transition.progress.to_bits(),
         "Preview and Export evaluated different Cross Dissolve progress"
@@ -511,6 +701,7 @@ fn execute_visual_frame(state: &AppState, frame: i64) -> anyhow::Result<VisualEx
         preview_elements: resolved.plan.elements.len(),
         export_elements: export_plan.elements.len(),
         cross_dissolve_progress: preview_progress,
+        left_effect_graph_signature: export_left_effect_signature,
         title_raster_signatures: raster_signatures,
         title: title_evidence(&preview_title),
         rgba_sha256: sha256_bytes(&output.rgba),
@@ -526,6 +717,15 @@ pub(super) fn execute_visual_stage(
     let window = slice.timeline_window.context("visual slice has no timeline window")?;
     let edit_frame = window.start_frame + (window.end_frame_exclusive - window.start_frame) / 2;
     let stage = workflow.create_sequence_stage("visual-authoring")?;
+    let lut_path = workflow
+        .project_path()
+        .parent()
+        .context("Golden Project path has no parent")?
+        .join("mondrian-golden-rec709-look.cube");
+    std::fs::write(&lut_path, GENERATED_LUT).context("write generated Golden LUT")?;
+    let parsed_lut =
+        mondrian_effects::Lut3D::from_cube_file(&lut_path).context("parse generated Golden LUT")?;
+    let lut_sha256 = sha256_bytes(GENERATED_LUT.as_bytes());
     let state = workflow.app_mut();
 
     let solid_asset_id = new_solid_asset(state)?;
@@ -608,6 +808,111 @@ pub(super) fn execute_visual_stage(
             }),
         )?;
     }
+
+    ensure!(
+        state
+            .active_sequence()
+            .context("active Sequence is absent")?
+            .settings
+            .color
+            .working_color_space
+            == mondrian_core::WorkingColorSpace::LinearRec2020,
+        "visual Golden Primary Color requires the contract's Linear Rec.2020 working space"
+    );
+    let left_clip = InspectorClipRefPayload {
+        track_id: video_track_id,
+        is_video_track: true,
+        clip_id: left_clip_id,
+    };
+    let (primary_effect_id, primary_add_step) = add_effect(
+        state,
+        left_clip,
+        EffectType::BasicCorrection,
+        "add-primary-color",
+    )?;
+    let primary_exposure = 0.35;
+    let primary_contrast = 1.2;
+    let primary_saturation = 0.72;
+    let primary_steps = vec![
+        primary_add_step,
+        set_effect_parameter(
+            state,
+            left_clip,
+            primary_effect_id,
+            "exposure",
+            PropertyValue::Float(primary_exposure),
+            "set-primary-exposure",
+        )?,
+        set_effect_parameter(
+            state,
+            left_clip,
+            primary_effect_id,
+            "contrast",
+            PropertyValue::Float(primary_contrast),
+            "set-primary-contrast",
+        )?,
+        set_effect_parameter(
+            state,
+            left_clip,
+            primary_effect_id,
+            "saturation",
+            PropertyValue::Float(primary_saturation),
+            "set-primary-saturation",
+        )?,
+    ];
+    let primary_content = ContentEvidence::PrimaryColor {
+        author_steps: primary_steps,
+        clip_id: left_clip_id.to_string(),
+        effect_id: primary_effect_id.to_string(),
+        working_color_space: "linear_rec2020",
+        exposure: primary_exposure,
+        contrast: primary_contrast,
+        saturation: primary_saturation,
+    };
+
+    let (lut_effect_id, lut_add_step) = add_effect(state, left_clip, EffectType::Lut3D, "add-lut")?;
+    let lut_intensity = 0.65;
+    let lut_steps = vec![
+        lut_add_step,
+        set_effect_parameter(
+            state,
+            left_clip,
+            lut_effect_id,
+            "processing_space",
+            PropertyValue::Enum(LUT_PROCESSING_SPACE.to_owned()),
+            "set-lut-processing-space",
+        )?,
+        set_effect_parameter(
+            state,
+            left_clip,
+            lut_effect_id,
+            "path",
+            PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+                path: lut_path.clone(),
+            }),
+            "bind-lut-resource",
+        )?,
+        set_effect_parameter(
+            state,
+            left_clip,
+            lut_effect_id,
+            "intensity",
+            PropertyValue::Float(lut_intensity),
+            "set-lut-intensity",
+        )?,
+    ];
+    let lut_content = ContentEvidence::Lut {
+        author_steps: lut_steps,
+        clip_id: left_clip_id.to_string(),
+        effect_id: lut_effect_id.to_string(),
+        processing_space: LUT_PROCESSING_SPACE,
+        resource_path: lut_path.clone(),
+        resource_sha256: lut_sha256.clone(),
+        domain_min: parsed_lut.domain_min,
+        domain_max: parsed_lut.domain_max,
+        interpolation: "tetrahedral",
+        intensity: lut_intensity,
+    };
 
     let transitions_before = state
         .active_sequence()
@@ -883,6 +1188,8 @@ pub(super) fn execute_visual_stage(
         "Bezier interpolation midpoint is outside its authored endpoints"
     );
     let content = vec![
+        primary_content,
+        lut_content,
         transition_content,
         title_content,
         ContentEvidence::HoldKeyframe {
@@ -919,6 +1226,66 @@ pub(super) fn execute_visual_stage(
     ensure!(
         transition.left == left_clip_id && transition.right == right_clip_id,
         "save/reopen changed Cross Dissolve endpoints"
+    );
+    let (reopened_left, reopened_left_track) = find_video_clip(sequence, left_clip_id)?;
+    ensure!(
+        reopened_left_track == video_track_id,
+        "save/reopen changed Primary Color/LUT Clip placement"
+    );
+    let reopened_effect_order = reopened_left
+        .effects
+        .iter()
+        .filter(|effect| effect.id == primary_effect_id || effect.id == lut_effect_id)
+        .map(|effect| effect.id)
+        .collect::<Vec<_>>();
+    ensure!(
+        reopened_effect_order == [primary_effect_id, lut_effect_id],
+        "save/reopen changed Primary Color/LUT stack order"
+    );
+    for (parameter, value) in [
+        ("exposure", primary_exposure),
+        ("contrast", primary_contrast),
+        ("saturation", primary_saturation),
+    ] {
+        assert_effect_parameter(
+            sequence,
+            left_clip_id,
+            primary_effect_id,
+            EffectType::BasicCorrection,
+            parameter,
+            PropertyValue::Float(value),
+        )?;
+    }
+    assert_effect_parameter(
+        sequence,
+        left_clip_id,
+        lut_effect_id,
+        EffectType::Lut3D,
+        "processing_space",
+        PropertyValue::Enum(LUT_PROCESSING_SPACE.to_owned()),
+    )?;
+    assert_effect_parameter(
+        sequence,
+        left_clip_id,
+        lut_effect_id,
+        EffectType::Lut3D,
+        "path",
+        PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+            path: lut_path.clone(),
+        }),
+    )?;
+    assert_effect_parameter(
+        sequence,
+        left_clip_id,
+        lut_effect_id,
+        EffectType::Lut3D,
+        "intensity",
+        PropertyValue::Float(lut_intensity),
+    )?;
+    let reopened_lut_bytes = std::fs::read(&lut_path).context("read reopened Golden LUT")?;
+    ensure!(
+        sha256_bytes(&reopened_lut_bytes) == lut_sha256,
+        "save/reopen changed the bound LUT dependency"
     );
     let (reopened_title, reopened_track) = find_video_clip(sequence, title_clip_id)?;
     ensure!(
@@ -978,7 +1345,7 @@ pub(super) fn execute_visual_stage(
     )?;
 
     Ok(GoldenVisualReport {
-        schema_version: 6,
+        schema_version: 7,
         profile: VISUAL_SLICE_ID,
         contract_id: contract.id.clone(),
         status: "passed",
@@ -1040,7 +1407,7 @@ fn golden_project_visual_authoring_roundtrip_gate() -> anyhow::Result<()> {
         }
         Err(error) => {
             let failure = serde_json::json!({
-                "schema_version": 6,
+                "schema_version": 7,
                 "profile": VISUAL_SLICE_ID,
                 "status": "failed",
                 "complete_golden_project": false,

@@ -5497,6 +5497,7 @@ mod tests {
             exposure: 0.25,
             contrast: 1.1,
             saturation: 0.9,
+            working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
         });
         effect_graph.append_unary(mondrian_effects::EffectRenderOp::Grain { amount: 0.05 });
         let compiled_effect_graph =
@@ -7436,6 +7437,7 @@ mod tests {
                     exposure: 0.5,
                     contrast: 1.0,
                     saturation: 1.0,
+                    working_color_space: WorkingColorSpace::LinearRec709,
                 }],
             },
             EffectColorDomainContract::preserving(domain),
@@ -7595,6 +7597,7 @@ mod tests {
                     exposure: 0.5,
                     contrast: 1.0,
                     saturation: 1.0,
+                    working_color_space: WorkingColorSpace::LinearRec709,
                 }],
             },
             EffectColorDomainContract::preserving(domain),
@@ -8287,6 +8290,7 @@ mod tests {
                     exposure: 0.5,
                     contrast: 1.0,
                     saturation: 1.0,
+                    working_color_space: WorkingColorSpace::LinearRec709,
                 }],
             },
             EffectColorDomainContract::preserving(domain),

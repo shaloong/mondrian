@@ -967,6 +967,7 @@ fn create_spatially_varying_4k_working_frame(
         exposure: 2.0,
         contrast: 1.1,
         saturation: 1.15,
+        working_color_space: WorkingColorSpace::LinearRec2020,
     });
     graph.append_unary(EffectRenderOp::Grain { amount: 0.35 });
     let graph = get_or_compile_scheduled_render_graph(graph.finish())

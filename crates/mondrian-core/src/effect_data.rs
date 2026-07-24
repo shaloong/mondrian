@@ -72,7 +72,7 @@ impl EffectType {
 
     pub fn display_name(&self) -> &str {
         match self {
-            Self::BasicCorrection => "基本校正",
+            Self::BasicCorrection => "基础调色",
             Self::WhiteBalance => "白平衡",
             Self::Lut3D => "3D LUT",
             Self::ColorWheel => "色轮",
@@ -238,6 +238,18 @@ impl EffectNode {
     ) -> Option<String> {
         self.evaluate_parameter(parameter_id, time).and_then(|value| match value {
             PropertyValue::Text(text) if !text.trim().is_empty() => Some(text),
+            _ => None,
+        })
+    }
+
+    /// Evaluate one stable enum key by definition-stable parameter identity.
+    pub fn evaluate_enum_parameter(
+        &self,
+        parameter_id: &ParameterId,
+        time: TimelineTime,
+    ) -> Option<String> {
+        self.evaluate_parameter(parameter_id, time).and_then(|value| match value {
+            PropertyValue::Enum(key) => Some(key),
             _ => None,
         })
     }

@@ -115,11 +115,13 @@ cargo test -p mondrian-app --lib `
 The ledger deliberately remains blocked. The AAC role plus Play, accurate
 Seek, Scrub, Overwrite, Ripple, and Split have a real executable slice.
 The generated Rec.709 H.264 role plus Proxy/Original switch and offline Relink
-now have a second real slice. The remaining unplanned obligations are HLG
-Main10 and sRGB Alpha picture roles, a fully specified professional Insert
-Edit, primary color correction, and LUT. The two remaining picture roles are
-also unbound to qualifying fixtures. Export contracts are already assigned,
-but that alone is not a complete product workflow.
+now have a second real slice. Professional multi-track Insert is assigned and
+executed by the Editorial/Transport slice. Primary Color and explicitly
+domain-bound LUT authoring are assigned to the Visual slice. The operation and
+content ledgers therefore have no unplanned obligations. HLG Main10 and sRGB
+Alpha picture roles remain unbound to qualifying fixtures, and their associated
+fixture obligations remain the current plan blockers. Export contracts are
+already assigned, but that alone is not a complete product workflow.
 
 Run the AAC editorial and Transport slice after generating the canonical
 playback audio:
@@ -167,8 +169,8 @@ cargo test -p mondrian-app --lib `
 The gate runs Foundation Audio in the initial Sequence, creates the Visual
 Authoring Sequence through the production action, and crosses the visual
 durable reopen. It requires one unchanged Project ID/path, exactly two
-Sequences, the original PCM Clip, and the second Sequence's Transition plus
-Basic Title. It remains partial execution evidence and cannot report
+Sequences, the original PCM Clip, and the second Sequence's Transition,
+Basic Title, Primary Color, and LUT stack. It remains partial execution evidence and cannot report
 `complete_golden_project: true`.
 
 With production FFmpeg encoders available, compose every currently executable
@@ -315,20 +317,24 @@ cargo test -p mondrian-app --lib `
 ```
 
 This slice creates an exact adjacent generated edit, adds the product-default
-Cross Dissolve, creates and edits a Basic Title, and authors two-key Hold,
-Linear, and Bezier curves through production App Interfaces. Every edit,
+Cross Dissolve, creates and edits a Basic Title, applies working-space-aware
+Primary Color, and binds a generated identity cube to an explicitly authored
+Rec.709 processing domain. It also authors two-key Hold, Linear, and Bezier
+curves through production App Interfaces. Every edit,
 Undo, and Redo must advance the installed Authoring Session by exactly one
 Author Generation and Sequence Revision. The gate then performs production
 durable save/close/fresh-open and repeats Headless Preview execution. Preview
 uses the recursive timeline executor, real system-font rasterizer, and
-float-linear CPU compositor; its evaluated title and Cross Dissolve coefficient
-must equal the Export render plan, and its raster signature and pixel hash must
-be unchanged after reopen. The exact named Windows font is a real dependency,
-so missing or changed font data fails closed. These generated pixels prove
+float-linear CPU compositor; its evaluated title, Cross Dissolve coefficient,
+and compiled effect-graph signature must equal the Export render plan. Effect
+IDs/order, Primary parameters, LUT processing space/path/content hash/domain,
+raster signature, and pixel hash must be unchanged after reopen. The exact named
+Windows font is a real dependency, so missing or changed font data fails closed.
+These generated pixels and the generated identity LUT prove
 regression parity only: they do not replace an independent application or
 specification reference, real-media handle coverage, the complete keyframe
 editing UI, or the three-run top-level Golden exit gate. Visual report schema
-v6 records the Project-scoped stage-Sequence creation and runs over the same
+v7 records the Project-scoped stage-Sequence creation and runs over the same
 `GoldenProductWorkflowDriver` used by Foundation Audio. Its standalone wrapper
 still creates an isolated development run, while the composed gates invoke the
 reusable Foundation, Visual, and Delivery stages against one Project.

@@ -162,6 +162,8 @@
         "save-reopen"
       ],
       "required_content": [
+        "primary-color",
+        "lut",
         "cross-dissolve",
         "basic-title",
         "hold-keyframe",

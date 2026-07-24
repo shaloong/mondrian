@@ -307,7 +307,12 @@ mod tests {
         register_effect_definition(definition).expect("register SDK definition");
 
         let effect = crate::EffectNode::with_defaults(plugin_type.clone());
-        let graph = build_effect_render_graph(&[effect], tt(0)).expect("build plugin SDK graph");
+        let graph = build_effect_render_graph(
+            &[effect],
+            tt(0),
+            mondrian_core::WorkingColorSpace::LinearRec709,
+        )
+        .expect("build plugin SDK graph");
         assert_eq!(graph.nodes.len(), 3);
 
         let caps = effect_definition(&plugin_type).expect("effect definition").capabilities();

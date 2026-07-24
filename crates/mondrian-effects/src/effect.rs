@@ -10,11 +10,11 @@ use crate::plugin_contract::{
 };
 use mondrian_core::{
     automation::{
-        AnimatablePropertyUiMetadata, ParameterCacheImpact, ParameterInvalidValuePolicy,
-        ParameterNumericContract, ParameterNumericRange, ParameterResourceReference, ParameterUnit,
-        PropertyBag, PropertyDescriptor, PropertyValue,
+        AnimatablePropertyUiMetadata, ParameterCacheImpact, ParameterEnumOption,
+        ParameterInvalidValuePolicy, ParameterNumericContract, ParameterNumericRange,
+        ParameterResourceReference, ParameterUnit, PropertyBag, PropertyDescriptor, PropertyValue,
     },
-    types::{Color, ColorSpace, EffectId},
+    types::{Color, ColorSpace, EffectId, WorkingColorSpace},
     ParameterId, TimelineTime,
 };
 // Re-export effect data types from mondrian-core.
@@ -30,6 +30,8 @@ use std::{
 #[derive(Debug, Clone, Copy)]
 pub struct EffectEvalContext {
     pub time: TimelineTime,
+    /// Sequence working identity used by scene-linear effect algorithms.
+    pub working_color_space: WorkingColorSpace,
 }
 
 /// Failure to turn an enabled authored effect into an executable render graph.
@@ -186,10 +188,7 @@ pub enum EffectRenderOp {
         exposure: f32,
         contrast: f32,
         saturation: f32,
-    },
-    WhiteBalance {
-        temperature: f32,
-        tint: f32,
+        working_color_space: WorkingColorSpace,
     },
     GaussianBlur {
         radius: f32,
@@ -245,42 +244,46 @@ impl EffectRenderOp {
         use std::hash::Hash;
 
         match self {
-            EffectRenderOp::ColorAdjust { exposure, contrast, saturation } => {
+            EffectRenderOp::ColorAdjust {
+                exposure,
+                contrast,
+                saturation,
+                working_color_space,
+            } => {
                 0u8.hash(state);
                 exposure.to_bits().hash(state);
                 contrast.to_bits().hash(state);
                 saturation.to_bits().hash(state);
-            }
-            EffectRenderOp::WhiteBalance { temperature, tint } => {
-                1u8.hash(state);
-                temperature.to_bits().hash(state);
-                tint.to_bits().hash(state);
+                working_color_space.hash(state);
             }
             EffectRenderOp::GaussianBlur { radius } => {
-                2u8.hash(state);
+                1u8.hash(state);
                 radius.to_bits().hash(state);
             }
             EffectRenderOp::Sharpen { amount } => {
-                3u8.hash(state);
+                2u8.hash(state);
                 amount.to_bits().hash(state);
             }
             EffectRenderOp::Vignette { intensity, feather } => {
-                4u8.hash(state);
+                3u8.hash(state);
                 intensity.to_bits().hash(state);
                 feather.to_bits().hash(state);
             }
             EffectRenderOp::ChromaticAberration { amount } => {
-                5u8.hash(state);
+                4u8.hash(state);
                 amount.to_bits().hash(state);
             }
             EffectRenderOp::Grain { amount } => {
-                6u8.hash(state);
+                5u8.hash(state);
                 amount.to_bits().hash(state);
             }
             EffectRenderOp::Lut3D { lut, intensity } => {
-                7u8.hash(state);
+                6u8.hash(state);
                 lut.name.hash(state);
                 lut.size.hash(state);
+                for value in lut.domain_min.into_iter().chain(lut.domain_max) {
+                    value.to_bits().hash(state);
+                }
                 intensity.to_bits().hash(state);
                 for rgb in &lut.data {
                     rgb[0].to_bits().hash(state);
@@ -289,7 +292,7 @@ impl EffectRenderOp {
                 }
             }
             EffectRenderOp::Custom { key, params, cache_key, cache_policy } => {
-                8u8.hash(state);
+                7u8.hash(state);
                 key.hash(state);
                 cache_policy.hash(state);
                 if let Some(cache_key) = cache_key {
@@ -314,7 +317,6 @@ impl EffectRenderOp {
     pub fn estimated_cost(&self) -> u32 {
         match self {
             EffectRenderOp::ColorAdjust { .. } => 1,
-            EffectRenderOp::WhiteBalance { .. } => 1,
             EffectRenderOp::Vignette { .. } => 1,
             EffectRenderOp::Grain { .. } => 2,
             EffectRenderOp::Lut3D { .. } => 2,
@@ -728,9 +730,10 @@ fn sort_category_tree(nodes: &mut [EffectCategoryNode]) {
 pub fn build_effect_render_graph(
     effects: &[EffectNode],
     time: TimelineTime,
+    working_color_space: WorkingColorSpace,
 ) -> Result<EffectRenderGraph, EffectGraphBuildError> {
     let mut builder = EffectGraphBuilderState::new();
-    let context = EffectEvalContext { time };
+    let context = EffectEvalContext { time, working_color_space };
     for effect in effects.iter().filter(|effect| effect.is_enabled) {
         effect.evaluate_graph_into(context, &mut builder)?;
     }
@@ -746,6 +749,7 @@ pub fn compile_clip_effect_graph(
     effects: &[EffectNode],
     masks: &[MaskComponent],
     time: TimelineTime,
+    working_color_space: WorkingColorSpace,
 ) -> Result<Arc<CompiledEffectGraph>, EffectGraphBuildError> {
     use crate::graph::{get_or_compile_scheduled_render_graph, identity_compiled_effect_graph};
     use crate::graph::{EffectGraphNode, EffectGraphNodeId, EffectGraphNodeKind};
@@ -753,7 +757,7 @@ pub fn compile_clip_effect_graph(
         return identity_compiled_effect_graph().ok_or(EffectGraphBuildError::InvalidGraph);
     }
 
-    let mut graph = build_effect_render_graph(effects, time)?;
+    let mut graph = build_effect_render_graph(effects, time, working_color_space)?;
 
     // Inject mask nodes after effects for each enabled mask.
     let mut current_output = graph.output;
@@ -933,6 +937,15 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
             );
         }
         EffectType::Lut3D => {
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "processing_space",
+                "LUT",
+                "处理色彩空间",
+                "unassigned",
+                lut_processing_space_options(),
+            );
             define_builtin_property(
                 &mut properties,
                 &effect_type,
@@ -1237,6 +1250,87 @@ fn define_builtin_property(
     properties.define(descriptor);
 }
 
+fn define_builtin_enum_property(
+    properties: &mut PropertyBag,
+    effect_type: &EffectType,
+    parameter: &str,
+    group: &str,
+    name: &str,
+    default_key: &str,
+    options: Vec<ParameterEnumOption>,
+) {
+    let path = effect_type.property_path(parameter);
+    let mut descriptor =
+        PropertyDescriptor::new(path, name, PropertyValue::Enum(default_key.to_owned()))
+            .with_parameter_id(builtin_parameter_id(effect_type, parameter))
+            .with_enum_options(options)
+            .with_animatable(false);
+    descriptor.ui_metadata = AnimatablePropertyUiMetadata {
+        group_name: Some(group.to_owned()),
+        supports_spatial: false,
+    };
+    properties.define(descriptor);
+}
+
+fn lut_processing_space_options() -> Vec<ParameterEnumOption> {
+    [
+        "unassigned",
+        "scene_linear",
+        "rec709",
+        "srgb",
+        "rec2020",
+        "display_p3",
+        "rec2100_hlg",
+        "rec2100_pq",
+        "aces_cct",
+        "apple_log_bt2020",
+        "sony_slog2_sgamut",
+        "sony_slog3_sgamut3",
+        "sony_slog3_sgamut3_cine",
+        "arri_logc3_wide_gamut3",
+        "arri_logc4_wide_gamut4",
+        "canon_log2_cinema_gamut_d55",
+        "canon_log3_cinema_gamut_d55",
+        "panasonic_vlog_vgamut",
+        "red_log3g10_wide_gamut_rgb",
+        "blackmagic_film_wide_gamut_gen5",
+        "dji_dlog_dgamut",
+        "davinci_intermediate_wide_gamut",
+    ]
+    .into_iter()
+    .map(|key| ParameterEnumOption::new(key, format!("builtin.lut_3d.processing_space.{key}")))
+    .collect()
+}
+
+fn lut_processing_domain(key: &str) -> Option<EffectColorDomain> {
+    let display_encoded = |color_space| EffectColorDomain::DisplayEncodedRgb { color_space };
+    let log = |color_space| EffectColorDomain::LogPerceptualRgb { color_space };
+    match key {
+        "scene_linear" => Some(EffectColorDomain::SceneLinearRgb),
+        "rec709" => Some(display_encoded(ColorSpace::Rec709)),
+        "srgb" => Some(display_encoded(ColorSpace::Srgb)),
+        "rec2020" => Some(display_encoded(ColorSpace::Rec2020)),
+        "display_p3" => Some(display_encoded(ColorSpace::DisplayP3)),
+        "rec2100_hlg" => Some(display_encoded(ColorSpace::Rec2100Hlg)),
+        "rec2100_pq" => Some(display_encoded(ColorSpace::Rec2100Pq)),
+        "aces_cct" => Some(log(ColorSpace::AcesCct)),
+        "apple_log_bt2020" => Some(log(ColorSpace::AppleLogBt2020)),
+        "sony_slog2_sgamut" => Some(log(ColorSpace::SonySLog2SGamut)),
+        "sony_slog3_sgamut3" => Some(log(ColorSpace::SonySLog3SGamut3)),
+        "sony_slog3_sgamut3_cine" => Some(log(ColorSpace::SonySLog3SGamut3Cine)),
+        "arri_logc3_wide_gamut3" => Some(log(ColorSpace::ArriLogC3WideGamut3)),
+        "arri_logc4_wide_gamut4" => Some(log(ColorSpace::ArriLogC4WideGamut4)),
+        "canon_log2_cinema_gamut_d55" => Some(log(ColorSpace::CanonLog2CinemaGamutD55)),
+        "canon_log3_cinema_gamut_d55" => Some(log(ColorSpace::CanonLog3CinemaGamutD55)),
+        "panasonic_vlog_vgamut" => Some(log(ColorSpace::PanasonicVLogVGamut)),
+        "red_log3g10_wide_gamut_rgb" => Some(log(ColorSpace::RedLog3G10WideGamutRgb)),
+        "blackmagic_film_wide_gamut_gen5" => Some(log(ColorSpace::BlackmagicFilmWideGamutGen5)),
+        "dji_dlog_dgamut" => Some(log(ColorSpace::DjiDLogDGamut)),
+        "davinci_intermediate_wide_gamut" => Some(log(ColorSpace::DavinciIntermediateWideGamut)),
+        _ => None,
+    }
+}
+
 fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> ParameterUnit {
     match (effect_type, parameter) {
         (EffectType::BasicCorrection, "exposure") => ParameterUnit::Stops,
@@ -1306,24 +1400,14 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                         exposure,
                         contrast,
                         saturation,
+                        working_color_space: context.working_color_space,
                     });
                 }
                 Ok(())
             }))
         }
-        EffectType::WhiteBalance => {
-            let temperature_id = builtin_parameter_id(effect_type, "temperature");
-            let tint_id = builtin_parameter_id(effect_type, "tint");
-            Some(Arc::new(move |effect, context, graph| {
-                let temperature = effect.evaluate_f32_parameter(&temperature_id, context.time, 0.0);
-                let tint = effect.evaluate_f32_parameter(&tint_id, context.time, 0.0);
-                if temperature.abs() > 1.0e-4 || tint.abs() > 1.0e-4 {
-                    graph.append_unary(EffectRenderOp::WhiteBalance { temperature, tint });
-                }
-                Ok(())
-            }))
-        }
         EffectType::Lut3D => {
+            let processing_space_id = builtin_parameter_id(effect_type, "processing_space");
             let path_id = builtin_parameter_id(effect_type, "path");
             let intensity_id = builtin_parameter_id(effect_type, "intensity");
             Some(Arc::new(move |effect, context, graph| {
@@ -1331,6 +1415,17 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 if intensity <= 1.0e-4 {
                     return Ok(());
                 }
+                let processing_key = effect
+                    .evaluate_enum_parameter(&processing_space_id, context.time)
+                    .unwrap_or_else(|| "unassigned".to_owned());
+                let Some(processing_domain) = lut_processing_domain(&processing_key) else {
+                    return Err(EffectGraphBuildError::ResourceUnavailable {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        parameter_id: processing_space_id.clone(),
+                        reason: "LUT processing color space is unassigned".to_owned(),
+                    });
+                };
                 let Some(ParameterResourceReference::ExternalFile { path }) =
                     effect.evaluate_resource_parameter(&path_id, context.time)
                 else {
@@ -1343,7 +1438,10 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 };
                 match Lut3D::from_cube_file_cached(&path) {
                     Ok(lut) => {
-                        graph.append_unary(EffectRenderOp::Lut3D { lut, intensity });
+                        graph.append_unary_in_domain(
+                            EffectRenderOp::Lut3D { lut, intensity },
+                            EffectColorDomainContract::preserving(processing_domain),
+                        );
                         Ok(())
                     }
                     Err(error) => Err(EffectGraphBuildError::ResourceUnavailable {
@@ -1413,7 +1511,7 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
 
 fn builtin_display_name(effect_type: &EffectType) -> &'static str {
     match effect_type {
-        EffectType::BasicCorrection => "基础校正",
+        EffectType::BasicCorrection => "基础调色",
         EffectType::WhiteBalance => "白平衡",
         EffectType::Lut3D => "LUT",
         EffectType::ColorWheel => "色轮",
@@ -1450,8 +1548,10 @@ mod tests {
     use crate::LutCache;
     use mondrian_core::{
         automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue},
-        TimelineTime,
+        TimelineTime, WorkingColorSpace,
     };
+
+    const TEST_WORKING_SPACE: WorkingColorSpace = WorkingColorSpace::LinearRec709;
 
     fn tt(frame: i64) -> TimelineTime {
         TimelineTime::new(frame, 25).expect("valid test time")
@@ -1459,8 +1559,10 @@ mod tests {
 
     #[test]
     fn compile_clip_effect_graph_reuses_static_identity_for_empty_clip() {
-        let first = compile_clip_effect_graph(&[], &[], tt(0)).expect("identity graph");
-        let second = compile_clip_effect_graph(&[], &[], tt(100)).expect("identity graph");
+        let first =
+            compile_clip_effect_graph(&[], &[], tt(0), TEST_WORKING_SPACE).expect("identity graph");
+        let second = compile_clip_effect_graph(&[], &[], tt(100), TEST_WORKING_SPACE)
+            .expect("identity graph");
 
         assert!(Arc::ptr_eq(&first, &second));
         assert!(first.graph.is_identity());
@@ -1471,8 +1573,10 @@ mod tests {
         let mut effect = EffectNode::with_defaults(EffectType::GaussianBlur);
         effect.is_enabled = false;
 
-        let first = compile_clip_effect_graph(&[effect], &[], tt(0)).expect("identity graph");
-        let second = compile_clip_effect_graph(&[], &[], tt(0)).expect("identity graph");
+        let first = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("identity graph");
+        let second =
+            compile_clip_effect_graph(&[], &[], tt(0), TEST_WORKING_SPACE).expect("identity graph");
 
         assert!(Arc::ptr_eq(&first, &second));
         assert!(first.graph.is_identity());
@@ -1541,7 +1645,6 @@ mod tests {
     fn effect_library_exposes_only_builtins_with_executable_graphs() {
         let expected = [
             EffectType::BasicCorrection,
-            EffectType::WhiteBalance,
             EffectType::Lut3D,
             EffectType::GaussianBlur,
             EffectType::Sharpen,
@@ -1560,6 +1663,7 @@ mod tests {
 
         assert_eq!(actual, expected);
         for modeled_only in [
+            EffectType::WhiteBalance,
             EffectType::ColorWheel,
             EffectType::Curves,
             EffectType::HueSaturationLightness,
@@ -1575,7 +1679,7 @@ mod tests {
     fn enabled_modeled_only_effect_fails_instead_of_rendering_identity() {
         let effect = EffectNode::with_defaults(EffectType::ColorWheel);
 
-        let error = build_effect_render_graph(&[effect], tt(0))
+        let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
             .expect_err("modeled-only effect must not render as identity");
 
         assert!(matches!(
@@ -1586,17 +1690,71 @@ mod tests {
     }
 
     #[test]
-    fn enabled_lut_with_unbound_resource_fails_instead_of_rendering_identity() {
+    fn enabled_lut_without_processing_space_fails_instead_of_guessing_from_file() {
         let effect = EffectNode::with_defaults(EffectType::Lut3D);
+        let processing_space_id = EffectType::Lut3D
+            .parameter_id("processing_space")
+            .expect("processing-space parameter ID");
 
-        let error = build_effect_render_graph(&[effect], tt(0))
-            .expect_err("unbound LUT must not render as identity");
+        let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect_err("unassigned LUT processing space must fail");
 
         assert!(matches!(
             error,
-            EffectGraphBuildError::ResourceUnavailable { effect_key, .. }
-                if effect_key == "builtin.lut_3d"
+            EffectGraphBuildError::ResourceUnavailable {
+                effect_key,
+                parameter_id,
+                ..
+            } if effect_key == "builtin.lut_3d" && parameter_id == processing_space_id
         ));
+    }
+
+    #[test]
+    fn enabled_lut_with_explicit_space_but_unbound_resource_fails_closed() {
+        let mut effect = EffectNode::with_defaults(EffectType::Lut3D);
+        let processing_space_id = EffectType::Lut3D
+            .parameter_id("processing_space")
+            .expect("processing-space parameter ID");
+        let path_id = EffectType::Lut3D.parameter_id("path").expect("path parameter ID");
+        effect
+            .set_static_value_by_parameter(
+                &processing_space_id,
+                PropertyValue::Enum("scene_linear".to_owned()),
+            )
+            .expect("set processing space");
+
+        let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect_err("unbound LUT resource must fail");
+
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::ResourceUnavailable { parameter_id, .. }
+                if parameter_id == path_id
+        ));
+    }
+
+    #[test]
+    fn primary_color_graph_identity_includes_sequence_working_space() {
+        let mut effect = EffectNode::with_defaults(EffectType::BasicCorrection);
+        let saturation_id = EffectType::BasicCorrection
+            .parameter_id("saturation")
+            .expect("saturation parameter ID");
+        effect
+            .set_static_value_by_parameter(&saturation_id, PropertyValue::Float(0.5))
+            .expect("set saturation");
+
+        let rec709 = compile_clip_effect_graph(
+            &[effect.clone()],
+            &[],
+            tt(0),
+            WorkingColorSpace::LinearRec709,
+        )
+        .expect("compile Rec.709 graph");
+        let rec2020 =
+            compile_clip_effect_graph(&[effect], &[], tt(0), WorkingColorSpace::LinearRec2020)
+                .expect("compile Rec.2020 graph");
+
+        assert_ne!(rec709.signature_hash, rec2020.signature_hash);
     }
 
     #[test]
@@ -1605,7 +1763,7 @@ mod tests {
             "plugin.missing.persisted-definition".to_string(),
         ));
 
-        let error = build_effect_render_graph(&[effect], tt(0))
+        let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
             .expect_err("missing plugin definition must not render as identity");
 
         assert!(matches!(
@@ -1630,14 +1788,14 @@ mod tests {
         effect
             .set_static_value_by_parameter(&radius_id, PropertyValue::Float(4.0))
             .expect("set radius by stable ID");
-        let first =
-            compile_clip_effect_graph(&[effect.clone()], &[], tt(0)).expect("compile first graph");
+        let first = compile_clip_effect_graph(&[effect.clone()], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile first graph");
 
         effect
             .set_static_value_by_parameter(&radius_id, PropertyValue::Float(12.0))
             .expect("set changed radius by stable ID");
-        let second =
-            compile_clip_effect_graph(&[effect], &[], tt(0)).expect("compile second graph");
+        let second = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile second graph");
 
         assert_ne!(first.signature_hash, second.signature_hash);
         let blur_radius = |graph: &CompiledEffectGraph| {
@@ -1684,6 +1842,15 @@ mod tests {
         let path_id = EffectType::Lut3D.parameter_id("path").expect("path parameter ID");
         let intensity_id =
             EffectType::Lut3D.parameter_id("intensity").expect("intensity parameter ID");
+        let processing_space_id = EffectType::Lut3D
+            .parameter_id("processing_space")
+            .expect("processing-space parameter ID");
+        effect
+            .set_static_value_by_parameter(
+                &processing_space_id,
+                PropertyValue::Enum("scene_linear".to_owned()),
+            )
+            .expect("set LUT processing space");
         effect
             .set_static_value_by_parameter(
                 &path_id,
@@ -1696,10 +1863,12 @@ mod tests {
             .set_static_value_by_parameter(&intensity_id, PropertyValue::Float(0.75))
             .expect("set intensity");
 
-        let graph = build_effect_render_graph(&[effect], tt(0)).expect("build LUT graph");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("build LUT graph");
         assert!(graph.nodes.iter().any(|n| matches!(
             &n.kind,
             EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Lut3D { .. }, .. }
+                | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Lut3D { .. }, .. }
         )));
 
         let _ = std::fs::remove_file(path);
@@ -1734,6 +1903,7 @@ mod tests {
                         exposure,
                         contrast: 1.0,
                         saturation: 1.0,
+                        working_color_space: context.working_color_space,
                     });
                 }
                 Ok(())
@@ -1756,7 +1926,8 @@ mod tests {
         assert!((value - 0.85).abs() < 0.001);
 
         // Verify the effect produces a graph node
-        let graph = build_effect_render_graph(&[effect], tt(0)).expect("build plugin graph");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("build plugin graph");
         assert!(!graph.nodes.is_empty());
         assert_eq!(effect_display_name(&plugin_type), "AI 自动曝光".to_string());
     }
@@ -1796,7 +1967,8 @@ mod tests {
         .expect("register custom render definition");
 
         let effect = EffectNode::with_defaults(plugin_type);
-        let graph = build_effect_render_graph(&[effect], tt(0)).expect("build custom graph");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("build custom graph");
         let custom_node = graph.nodes.iter().find(|n| {
             matches!(
                 &n.kind,
@@ -1868,7 +2040,8 @@ mod tests {
         .expect("register branching definition");
 
         let effect = EffectNode::with_defaults(plugin_type.clone());
-        let graph = build_effect_render_graph(&[effect], tt(0)).expect("build branching graph");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("build branching graph");
         assert_eq!(graph.nodes.len(), 3);
         assert!(matches!(
             graph.node(crate::graph::EffectGraphNodeId(1)).map(|node| &node.kind),
@@ -1935,7 +2108,8 @@ mod tests {
         .expect("register cached render definition");
 
         let effect = EffectNode::with_defaults(plugin_type.clone());
-        let graph = build_effect_render_graph(&[effect], tt(0)).expect("build cached graph");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("build cached graph");
         let custom_node = graph.nodes.iter().find_map(|n| match &n.kind {
             EffectGraphNodeKind::UnaryEffect {
                 op: EffectRenderOp::Custom { cache_key, cache_policy, .. },
@@ -1976,7 +2150,8 @@ mod tests {
         .expect("register unstable definition");
 
         let effect = EffectNode::new(plugin_type.clone());
-        let error = build_effect_render_graph(&[effect], tt(0)).expect_err("builder must fail");
+        let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect_err("builder must fail");
         assert!(matches!(
             error,
             EffectGraphBuildError::BuilderPanicked { .. }

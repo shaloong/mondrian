@@ -2,15 +2,25 @@
 
 use mondrian_core::{MondrianError, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
-use std::time::SystemTime;
+use std::time::{Duration, Instant};
 
+const HOT_REVALIDATION_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Parsed three-dimensional `.cube` lookup table.
+///
+/// `domain_min` and `domain_max` are part of the LUT semantics, not loader
+/// metadata. Sampling normalizes through that declared domain and uses
+/// tetrahedral interpolation with red as the fastest-varying table axis.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Lut3D {
     pub name: String,
     pub size: u32,
+    pub domain_min: [f32; 3],
+    pub domain_max: [f32; 3],
     pub data: Vec<[f32; 3]>,
 }
 
@@ -118,71 +128,101 @@ impl Lut3D {
                 }
             }
         }
-        Ok(Self { name: format!("identity-{size}"), size, data })
+        Ok(Self {
+            name: format!("identity-{size}"),
+            size,
+            domain_min: [0.0; 3],
+            domain_max: [1.0; 3],
+            data,
+        })
     }
 
     /// 从 .cube 文件解析 3D LUT
     pub fn from_cube_file(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path)?;
+        let bytes = std::fs::read(path)?;
+        let content = std::str::from_utf8(&bytes)
+            .map_err(|error| lut_error(format!("LUT is not UTF-8 text: {error}")))?;
         let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown").to_string();
-        Self::from_cube_str(name, &content)
+        Self::from_cube_str(name, content)
     }
 
     pub fn from_cube_file_cached(path: &Path) -> Result<Self> {
-        LutCache::global().load_cube(path)
+        LutCache::global().load_cube_for_render(path)
     }
 
     pub fn from_cube_str(name: impl Into<String>, content: &str) -> Result<Self> {
-        let mut size = 0u32;
+        let mut size = None;
+        let mut domain_min = None;
+        let mut domain_max = None;
         let mut data = Vec::new();
 
         for (line_index, line) in content.lines().enumerate() {
-            let line = line.trim();
-            if line.starts_with('#') || line.is_empty() {
+            let line_number = line_index + 1;
+            let line = line.split_once('#').map_or(line, |(before, _)| before).trim();
+            if line.is_empty() {
                 continue;
             }
-            if line.starts_with("TITLE")
-                || line.starts_with("DOMAIN_MIN")
-                || line.starts_with("DOMAIN_MAX")
-                || line.starts_with("LUT_1D_SIZE")
-            {
+            if line.starts_with("TITLE") {
                 continue;
             }
             if line.starts_with("LUT_3D_SIZE") {
-                size = line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).ok_or_else(
-                    || lut_error(format!("invalid LUT_3D_SIZE at line {}", line_index + 1)),
-                )?;
-                validate_lut_size(size)?;
-                continue;
-            }
-            let vals: Vec<f32> = line
-                .split_whitespace()
-                .map(str::parse::<f32>)
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|err| {
-                    lut_error(format!(
-                        "invalid LUT value at line {}: {err}",
-                        line_index + 1
-                    ))
-                })?;
-            if vals.len() == 3 {
-                if vals.iter().any(|v| !v.is_finite()) {
+                if size.is_some() {
                     return Err(lut_error(format!(
-                        "non-finite LUT value at line {}",
-                        line_index + 1
+                        "duplicate LUT_3D_SIZE at line {line_number}"
                     )));
                 }
-                data.push([vals[0], vals[1], vals[2]]);
-            } else {
+                let fields = line.split_whitespace().collect::<Vec<_>>();
+                if fields.len() != 2 {
+                    return Err(lut_error(format!(
+                        "LUT_3D_SIZE must contain exactly one value at line {line_number}"
+                    )));
+                }
+                let parsed = fields[1].parse::<u32>().map_err(|error| {
+                    lut_error(format!(
+                        "invalid LUT_3D_SIZE at line {line_number}: {error}"
+                    ))
+                })?;
+                validate_lut_size(parsed)?;
+                size = Some(parsed);
+                continue;
+            }
+            if line.starts_with("LUT_1D_SIZE") {
                 return Err(lut_error(format!(
-                    "expected 3 LUT values at line {}, got {}",
-                    line_index + 1,
-                    vals.len()
+                    "1D or combined .cube LUTs are not supported (line {line_number})"
                 )));
             }
+            if line.starts_with("DOMAIN_MIN") {
+                if domain_min.is_some() {
+                    return Err(lut_error(format!(
+                        "duplicate DOMAIN_MIN at line {line_number}"
+                    )));
+                }
+                domain_min = Some(parse_triplet(line, "DOMAIN_MIN", line_number)?);
+                continue;
+            }
+            if line.starts_with("DOMAIN_MAX") {
+                if domain_max.is_some() {
+                    return Err(lut_error(format!(
+                        "duplicate DOMAIN_MAX at line {line_number}"
+                    )));
+                }
+                domain_max = Some(parse_triplet(line, "DOMAIN_MAX", line_number)?);
+                continue;
+            }
+
+            if size.is_none() {
+                return Err(lut_error(format!(
+                    "LUT data appears before LUT_3D_SIZE at line {line_number}"
+                )));
+            }
+            data.push(parse_triplet(line, "LUT data", line_number)?);
         }
 
+        let size = size.ok_or_else(|| lut_error("LUT_3D_SIZE is missing"))?;
         validate_lut_size(size)?;
+        let domain_min = domain_min.unwrap_or([0.0; 3]);
+        let domain_max = domain_max.unwrap_or([1.0; 3]);
+        validate_domain(domain_min, domain_max)?;
         let expected = size as usize * size as usize * size as usize;
         if data.len() != expected {
             return Err(lut_error(format!(
@@ -191,18 +231,34 @@ impl Lut3D {
             )));
         }
 
-        Ok(Self { name: name.into(), size, data })
+        Ok(Self {
+            name: name.into(),
+            size,
+            domain_min,
+            domain_max,
+            data,
+        })
     }
 
+    /// Sample the LUT with tetrahedral interpolation.
+    ///
+    /// Inputs outside the declared `.cube` domain are clamped to its boundary.
+    /// Callers performing a partial-intensity mix blend the sampled result back
+    /// to the original unbounded source value.
     pub fn sample(&self, rgb: [f32; 3]) -> [f32; 3] {
         if self.size < 2 || self.data.is_empty() {
             return rgb;
         }
 
         let max = (self.size - 1) as f32;
-        let r = rgb[0].clamp(0.0, 1.0) * max;
-        let g = rgb[1].clamp(0.0, 1.0) * max;
-        let b = rgb[2].clamp(0.0, 1.0) * max;
+        let normalized: [f32; 3] = std::array::from_fn(|channel| {
+            ((rgb[channel] - self.domain_min[channel])
+                / (self.domain_max[channel] - self.domain_min[channel]))
+                .clamp(0.0, 1.0)
+        });
+        let r = normalized[0] * max;
+        let g = normalized[1] * max;
+        let b = normalized[2] * max;
         let r0 = r.floor() as u32;
         let g0 = g.floor() as u32;
         let b0 = b.floor() as u32;
@@ -222,10 +278,9 @@ impl Lut3D {
         let c011 = self.at(r0, g1, b1);
         let c111 = self.at(r1, g1, b1);
 
-        lerp3(
-            lerp3(lerp3(c000, c100, fr), lerp3(c010, c110, fr), fg),
-            lerp3(lerp3(c001, c101, fr), lerp3(c011, c111, fr), fg),
-            fb,
+        tetrahedral_interpolate(
+            [c000, c100, c010, c110, c001, c101, c011, c111],
+            [fr, fg, fb],
         )
     }
 
@@ -250,9 +305,9 @@ impl Lut3D {
 
     /// Apply the LUT to straight-alpha linear float RGBA pixels.
     ///
-    /// LUT sampling uses the LUT's normalized 0..1 domain. The blend back to
-    /// the source remains in float so partial intensity preserves extended
-    /// working-range values instead of introducing an RGBA8 boundary.
+    /// LUT sampling uses its declared domain. The blend back to the source
+    /// remains in float so partial intensity preserves extended working-range
+    /// values instead of introducing an RGBA8 boundary.
     pub fn apply_rgba_f32_in_place(&self, rgba: &mut [[f32; 4]], intensity: f32) {
         let intensity = intensity.clamp(0.0, 1.0);
         if intensity <= 1.0e-4 {
@@ -279,14 +334,14 @@ impl Lut3D {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LutCacheFingerprint {
-    len: u64,
-    modified: Option<SystemTime>,
+    sha256: [u8; 32],
 }
 
 #[derive(Debug, Clone)]
 struct LutCacheEntry {
     fingerprint: LutCacheFingerprint,
     lut: Lut3D,
+    validated_at: Instant,
 }
 
 #[derive(Debug, Default)]
@@ -302,23 +357,50 @@ impl LutCache {
 
     pub fn load_cube(&self, path: &Path) -> Result<Lut3D> {
         let key = cache_key_for_path(path);
-        let fingerprint = lut_file_fingerprint(path)?;
-        if let Some(entry) = self
+        let bytes = std::fs::read(path)?;
+        let fingerprint = lut_file_fingerprint(&bytes);
+        let cached = {
+            let entries = self.entries.read().expect("LUT cache read lock");
+            entries
+                .get(&key)
+                .filter(|entry| entry.fingerprint == fingerprint)
+                .map(|entry| entry.lut.clone())
+        };
+        if let Some(lut) = cached {
+            if let Some(entry) = self.entries.write().expect("LUT cache write lock").get_mut(&key) {
+                entry.validated_at = Instant::now();
+            }
+            return Ok(lut);
+        }
+
+        let content = std::str::from_utf8(&bytes)
+            .map_err(|error| lut_error(format!("LUT is not UTF-8 text: {error}")))?;
+        let name = path.file_stem().and_then(|value| value.to_str()).unwrap_or("unknown");
+        let lut = Lut3D::from_cube_str(name, content)?;
+        self.entries.write().expect("LUT cache write lock").insert(
+            key,
+            LutCacheEntry {
+                fingerprint,
+                lut: lut.clone(),
+                validated_at: Instant::now(),
+            },
+        );
+        Ok(lut)
+    }
+
+    fn load_cube_for_render(&self, path: &Path) -> Result<Lut3D> {
+        let key = cache_key_for_path(path);
+        if let Some(lut) = self
             .entries
             .read()
             .expect("LUT cache read lock")
             .get(&key)
-            .filter(|entry| entry.fingerprint == fingerprint)
+            .filter(|entry| entry.validated_at.elapsed() < HOT_REVALIDATION_INTERVAL)
+            .map(|entry| entry.lut.clone())
         {
-            return Ok(entry.lut.clone());
+            return Ok(lut);
         }
-
-        let lut = Lut3D::from_cube_file(path)?;
-        self.entries
-            .write()
-            .expect("LUT cache write lock")
-            .insert(key, LutCacheEntry { fingerprint, lut: lut.clone() });
-        Ok(lut)
+        self.load_cube(path)
     }
 
     pub fn clear(&self) {
@@ -338,12 +420,8 @@ fn cache_key_for_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn lut_file_fingerprint(path: &Path) -> Result<LutCacheFingerprint> {
-    let metadata = std::fs::metadata(path)?;
-    Ok(LutCacheFingerprint {
-        len: metadata.len(),
-        modified: metadata.modified().ok(),
-    })
+fn lut_file_fingerprint(bytes: &[u8]) -> LutCacheFingerprint {
+    LutCacheFingerprint { sha256: Sha256::digest(bytes).into() }
 }
 
 fn validate_lut_size(size: u32) -> Result<()> {
@@ -351,6 +429,124 @@ fn validate_lut_size(size: u32) -> Result<()> {
         return Err(lut_error(format!("unsupported 3D LUT size: {size}")));
     }
     Ok(())
+}
+
+fn parse_triplet(line: &str, directive: &str, line_number: usize) -> Result<[f32; 3]> {
+    let fields = line.split_whitespace().collect::<Vec<_>>();
+    let values = if fields.first().copied() == Some(directive) {
+        &fields[1..]
+    } else {
+        fields.as_slice()
+    };
+    if values.len() != 3 {
+        return Err(lut_error(format!(
+            "{directive} must contain exactly three values at line {line_number}"
+        )));
+    }
+    let mut parsed = [0.0; 3];
+    for (index, value) in values.iter().enumerate() {
+        parsed[index] = value.parse::<f32>().map_err(|error| {
+            lut_error(format!(
+                "invalid {directive} value at line {line_number}: {error}"
+            ))
+        })?;
+        if !parsed[index].is_finite() {
+            return Err(lut_error(format!(
+                "non-finite {directive} value at line {line_number}"
+            )));
+        }
+    }
+    Ok(parsed)
+}
+
+fn validate_domain(domain_min: [f32; 3], domain_max: [f32; 3]) -> Result<()> {
+    for channel in 0..3 {
+        if !domain_min[channel].is_finite()
+            || !domain_max[channel].is_finite()
+            || domain_min[channel] >= domain_max[channel]
+        {
+            return Err(lut_error(format!(
+                "invalid LUT domain on channel {channel}: {}..{}",
+                domain_min[channel], domain_max[channel]
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn tetrahedral_interpolate(corners: [[f32; 3]; 8], fraction: [f32; 3]) -> [f32; 3] {
+    let [c000, c100, c010, c110, c001, c101, c011, c111] = corners;
+    let [r, g, b] = fraction;
+    if r >= g {
+        if g >= b {
+            add_scaled3(
+                c000,
+                [
+                    (sub3(c100, c000), r),
+                    (sub3(c110, c100), g),
+                    (sub3(c111, c110), b),
+                ],
+            )
+        } else if r >= b {
+            add_scaled3(
+                c000,
+                [
+                    (sub3(c100, c000), r),
+                    (sub3(c101, c100), b),
+                    (sub3(c111, c101), g),
+                ],
+            )
+        } else {
+            add_scaled3(
+                c000,
+                [
+                    (sub3(c001, c000), b),
+                    (sub3(c101, c001), r),
+                    (sub3(c111, c101), g),
+                ],
+            )
+        }
+    } else if b >= g {
+        add_scaled3(
+            c000,
+            [
+                (sub3(c001, c000), b),
+                (sub3(c011, c001), g),
+                (sub3(c111, c011), r),
+            ],
+        )
+    } else if b >= r {
+        add_scaled3(
+            c000,
+            [
+                (sub3(c010, c000), g),
+                (sub3(c011, c010), b),
+                (sub3(c111, c011), r),
+            ],
+        )
+    } else {
+        add_scaled3(
+            c000,
+            [
+                (sub3(c010, c000), g),
+                (sub3(c110, c010), r),
+                (sub3(c111, c110), b),
+            ],
+        )
+    }
+}
+
+fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn add_scaled3(base: [f32; 3], terms: [([f32; 3], f32); 3]) -> [f32; 3] {
+    std::array::from_fn(|channel| {
+        base[channel]
+            + terms[0].0[channel] * terms[0].1
+            + terms[1].0[channel] * terms[1].1
+            + terms[2].0[channel] * terms[2].1
+    })
 }
 
 fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
@@ -409,6 +605,51 @@ mod tests {
     fn cube_parser_rejects_missing_values() {
         let cube = "LUT_3D_SIZE 2\n0 0 0\n";
         assert!(Lut3D::from_cube_str("bad", cube).is_err());
+    }
+
+    #[test]
+    fn cube_domain_is_preserved_and_normalized_before_sampling() {
+        let cube = format!(
+            "DOMAIN_MIN -1 -1 -1\nDOMAIN_MAX 1 1 1\n{}",
+            cube_identity_2()
+        );
+        let lut = Lut3D::from_cube_str("domain", &cube).expect("domain LUT");
+        assert_eq!(lut.domain_min, [-1.0; 3]);
+        assert_eq!(lut.domain_max, [1.0; 3]);
+        let midpoint = lut.sample([0.0; 3]);
+        for value in midpoint {
+            assert!((value - 0.5).abs() <= 1.0e-6);
+        }
+    }
+
+    #[test]
+    fn cube_sampling_uses_tetrahedral_interpolation() {
+        let lut = Lut3D {
+            name: "tetrahedral-reference".to_owned(),
+            size: 2,
+            domain_min: [0.0; 3],
+            domain_max: [1.0; 3],
+            data: vec![
+                [0.0; 3], [1.0; 3], [0.0; 3], [0.0; 3], [0.0; 3], [0.0; 3], [0.0; 3], [1.0; 3],
+            ],
+        };
+        let sampled = lut.sample([0.75, 0.5, 0.25]);
+        for value in sampled {
+            assert!((value - 0.5).abs() <= 1.0e-6);
+        }
+    }
+
+    #[test]
+    fn cube_parser_rejects_unsupported_combined_lut_and_invalid_domain() {
+        let combined = format!("LUT_1D_SIZE 2\n{}", cube_identity_2());
+        let combined_error =
+            Lut3D::from_cube_str("combined", &combined).expect_err("combined LUT must fail");
+        assert!(combined_error.to_string().contains("1D or combined"));
+
+        let invalid_domain = format!("DOMAIN_MIN 1 0 0\nDOMAIN_MAX 1 1 1\n{}", cube_identity_2());
+        let domain_error = Lut3D::from_cube_str("domain", &invalid_domain)
+            .expect_err("zero-width domain must fail");
+        assert!(domain_error.to_string().contains("invalid LUT domain"));
     }
 
     #[test]
@@ -481,13 +722,13 @@ mod tests {
         std::fs::create_dir_all(&root).expect("root");
         let path = root.join("look.cube");
         std::fs::write(&path, cube_identity_2()).expect("cube");
+        let original_len = std::fs::metadata(&path).expect("metadata").len();
 
         let first = cache.load_cube(&path).expect("first");
         let second = cache.load_cube(&path).expect("second");
         assert_eq!(first, second);
         assert_eq!(cache.len(), 1);
 
-        std::thread::sleep(std::time::Duration::from_millis(10));
         std::fs::write(
             &path,
             "LUT_3D_SIZE 2
@@ -502,6 +743,11 @@ mod tests {
 ",
         )
         .expect("changed cube");
+        assert_eq!(
+            std::fs::metadata(&path).expect("changed metadata").len(),
+            original_len,
+            "fixture must prove same-length mutation invalidation"
+        );
         let changed = cache.load_cube(&path).expect("changed");
         assert_ne!(first.data, changed.data);
         assert_eq!(
@@ -518,6 +764,8 @@ mod tests {
         let lut = Lut3D {
             name: "invert".to_string(),
             size: 2,
+            domain_min: [0.0; 3],
+            domain_max: [1.0; 3],
             data: vec![
                 [1.0, 1.0, 1.0],
                 [0.0, 1.0, 1.0],

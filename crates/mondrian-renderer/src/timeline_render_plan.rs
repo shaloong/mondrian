@@ -527,10 +527,13 @@ fn compile_flat_clip(
         return Ok(None);
     }
 
-    let effect_graph =
-        mondrian_effects::compile_clip_effect_graph(&ac.effects, &ac.masks, ac.clip_time).map_err(
-            |error| MondrianError::EffectGraphEvaluationFailed { reason: error.to_string() },
-        )?;
+    let effect_graph = mondrian_effects::compile_clip_effect_graph(
+        &ac.effects,
+        &ac.masks,
+        ac.clip_time,
+        source.source_working_color_space(),
+    )
+    .map_err(|error| MondrianError::EffectGraphEvaluationFailed { reason: error.to_string() })?;
     let frame_seed = timeline_frame.max(0);
     Ok(Some(match ac.content {
         ClipContent::NestedSequence { sequence_id, color_processing } => {

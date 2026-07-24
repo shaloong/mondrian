@@ -420,6 +420,16 @@ source handles without modifying author state. A GPU Transition lowering remains
 separate M1 work; until it exists, shared CPU Preview/Export execution remains
 the only normative Cross Dissolve backend.
 
+`RenderPlanSource` also projects the Sequence working color space as a required
+typed value. Effect compilation consumes that value for every ordinary Clip and
+Transition endpoint; it is not recovered from the Viewer, export preset,
+Project default, or source-media metadata. This keeps the ownership boundary
+single: the Project owns the color engine/configuration, the Sequence owns its
+working space, and a Clip-local effect owns only its parameters. Any
+working-space-dependent operation includes the projected identity in its
+compiled graph/cache signature, so changing Sequence settings cannot reuse
+pixels evaluated under the previous coefficients or processing domain.
+
 Transform, speed, blend mode, solid color, masks, and effects are currently
 exposed through `PropertyHost`/`PropertyBag`. Every product definition carries
 a versioned `ParameterSchema` with an address-independent `ParameterId`, value

@@ -55,7 +55,11 @@ from that same schema; UI metadata only owns presentation grouping and spatial
 layout hints. Enum parameters use Hold automation over stable option keys.
 Resource parameters distinguish unbound, project-asset, external-file, and URI
 intent and require resource-level cache invalidation. LUT selection uses this
-typed resource value rather than a free-form text parameter.
+typed resource value rather than a free-form text parameter. LUT processing
+space is a separate non-animatable enum because resource identity and color
+interpretation are independent author facts. `unassigned` remains a valid
+recoverable author value but blocks execution; no filename heuristic may
+silently fill it.
 
 Parameter cache impact describes whether a value changes output, selects a
 resource, or changes topology. Processor capabilities are not copied into every
@@ -101,8 +105,11 @@ frame semantics or authorizes identity fallback.
 
 Every `EffectDefinition`, including plugin-authored definitions, declares an
 `EffectColorDomainContract` at registration. There is no implicit compatibility
-default in the definition or plugin-builder APIs. Current built-ins explicitly
-declare the scene-linear working RGB contract.
+default in the definition or plugin-builder APIs. A builder may resolve a
+topology-affecting parameter to a stricter per-instance contract through
+`append_unary_in_domain`; graph construction scopes that override to the one
+node and restores the definition contract afterwards. The resolved domain is
+compiled and signed, never retained as mutable graph-builder ambient state.
 
 The contract distinguishes scene-linear RGB, named log/perceptual RGB,
 display-linear RGB, display-encoded RGB, non-color data, and alpha/mask values.
@@ -158,9 +165,9 @@ compiled-effect-graph LRU mutex every frame just to represent the identity path.
 graphs that can operate directly on working-space `f32` RGBA pixels.
 `compiled_effect_graph_supports_rgba_f32(...)` and
 `apply_compiled_effect_graph_rgba_f32(...)` use the same validation rules. All
-existing built-in unary render operations (`ColorAdjust`, `WhiteBalance`,
+existing executable built-in unary render operations (`ColorAdjust`,
 `GaussianBlur`, `Sharpen`, `Vignette`, `ChromaticAberration`, `Grain`, and
-`Lut3D`) execute in this domain. The float path preserves extended scene-linear
+`Lut3D`) execute in this boundary. The float path preserves extended scene-linear
 values and does not clamp RGB to 0..1 as the legacy RGBA8 path does.
 
 Spatial operations sample straight-alpha input through premultiplied-alpha
@@ -168,6 +175,16 @@ intermediates so transparent pixels cannot contaminate visible colors. Grain
 uses the graph frame seed, and LUT intensity blends back to the unbounded float
 source after normalized LUT sampling. These rules are shared by media, solid,
 and adjustment-layer execution.
+
+Primary Color is not a Rec.709-coded display adjustment. Sequence evaluation
+projects the exact `WorkingColorSpace` into graph construction; its operation
+stores that identity, uses the corresponding RGB luminance coefficients for
+saturation, applies exposure as a power-of-two scene-linear gain, and pivots
+contrast at 0.18. CPU and GPU consume the same operation values. The old
+WhiteBalance operation used additive RGB offsets without an observer,
+illuminant, or chromatic-adaptation contract and was therefore capable of
+plausible-looking false color. Its persisted author type remains modeled for
+structured diagnosis, but it is not registered as selectable or executable.
 
 `Blend`, `Mask`, `MaskSource`, and ordered `MultiInput` nodes use the same float
 working-frame contract. Mask rasterization produces native float coverage rather
@@ -218,7 +235,7 @@ propagate that error instead of substituting black or unchanged pixels.
 accepts only a compiled single-source unary chain and emits an immutable fused
 point plan without wgpu objects. One preserving scene-linear, log/perceptual,
 display-linear, or display-encoded processing domain is retained as part of the
-plan rather than interpreted by the effects crate. ColorAdjust, WhiteBalance, Vignette, and Grain
+plan rather than interpreted by the effects crate. ColorAdjust, Vignette, and Grain
 are supported in source order with a bounded eight-op pass; spatial operations,
 LUT resources, custom processors, and branching graph nodes return typed
 `EffectGpuPlanBlocker` values. This makes capability checks deterministic and
@@ -228,7 +245,15 @@ deterministic blockers in a bounded 256-entry LRU keyed by compiled graph
 signature. Playback and diagnostics share the returned `Arc` instead of
 re-traversing and reallocating an unchanged graph every frame.
 
-File-backed LUT caches key existing files by canonical path and invalidate on
-file fingerprint changes. Tests that validate cache behavior should use local
-cache instances rather than the process-global cache so workspace-level
-parallel test runs remain deterministic.
+The `.cube` adapter accepts one finite 3D table of size 2 through 129, requires
+the exact payload count, honors finite monotonic `DOMAIN_MIN`/`DOMAIN_MAX`, and
+rejects 1D or combined 1D+3D files rather than partially interpreting them.
+Sampling uses tetrahedral interpolation with red-fastest cube ordering and
+domain normalization. File-backed LUT caches key canonical paths but establish
+semantic identity with SHA-256 over the complete bytes. The render hot path may
+reuse a previously validated entry for at most 250 ms to avoid hashing the same
+file every frame; after that interval it rereads and rehashes the bytes, so
+same-size or timestamp-preserving replacement cannot survive validation.
+Explicit loads validate immediately. Tests that validate cache behavior should
+use local cache instances rather than the process-global cache so
+workspace-level parallel test runs remain deterministic.

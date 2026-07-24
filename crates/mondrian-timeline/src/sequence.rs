@@ -1747,6 +1747,10 @@ impl mondrian_core::timeline_data::RenderPlanSource for Sequence {
         Sequence::time_base(self)
     }
 
+    fn source_working_color_space(&self) -> mondrian_core::WorkingColorSpace {
+        self.settings.color.working_color_space
+    }
+
     fn auto_tone_map_media(&self) -> bool {
         self.settings.color.input.auto_tone_map_media
     }

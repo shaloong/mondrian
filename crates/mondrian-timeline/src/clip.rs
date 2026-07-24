@@ -959,8 +959,12 @@ mod tests {
 
     fn exposure_from_graph(effects: &[EffectNode], time: TimelineTime) -> f32 {
         // Build graph and extract ColorAdjust exposure from UnaryEffect nodes.
-        let graph =
-            mondrian_effects::build_effect_render_graph(effects, time).expect("build effect graph");
+        let graph = mondrian_effects::build_effect_render_graph(
+            effects,
+            time,
+            mondrian_core::WorkingColorSpace::LinearRec709,
+        )
+        .expect("build effect graph");
         graph
             .nodes
             .iter()

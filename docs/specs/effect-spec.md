@@ -26,9 +26,9 @@ successful graph lowering is evidence only for the corresponding level.
 
 | Effect family | Modeled | Product-library selectable | Graph executable | Current backend scope |
 | --- | --- | --- | --- | --- |
-| Basic correction | yes | yes | yes | float CPU; bounded point-op GPU |
-| White balance | yes | yes | yes | float CPU; bounded point-op GPU |
-| LUT 3D | yes | yes | yes when a valid LUT resource is bound | float CPU; GPU lowering blocked |
+| Primary color (`BasicCorrection`) | yes | yes | yes | working-space-aware float CPU; bounded point-op GPU |
+| White balance | yes | no | no | none; the former additive-RGB approximation was removed |
+| LUT 3D | yes | yes | yes when an explicit processing space and valid LUT resource are bound | float CPU; GPU lowering blocked |
 | Gaussian blur | yes | yes | yes | float CPU; GPU lowering blocked |
 | Sharpen | yes | yes | yes | float CPU; GPU lowering blocked |
 | Vignette | yes | yes | yes | float CPU; bounded point-op GPU |
@@ -96,12 +96,39 @@ differently but may not interpret authoring semantics differently.
 
 ## Color and alpha behavior
 
-Every definition declares an `EffectColorDomainContract`. Current built-ins
-declare scene-linear working RGB. The compiler inserts only legal RGB-domain
+Every definition declares an `EffectColorDomainContract`. A definition may
+resolve a topology-affecting parameter to a stricter per-instance contract
+during graph construction; that resolved contract is part of the compiled
+graph and cache signature. The compiler inserts only legal RGB-domain
 transitions; data/alpha crossings and unavailable OCIO processors fail closed.
 Display transforms occur after effects and composition. Spatial filters use
 premultiplied intermediates internally while public working-frame seams remain
 straight/opaque as required by the frame contract.
+
+Primary Color is evaluated in the Sequence working space. Exposure is a
+scene-linear power-of-two gain, contrast pivots around scene-linear 18% gray,
+and saturation uses the luminance coefficients of that exact working space
+instead of a fixed Rec.709 approximation. The working-space identity and
+coefficients are included in the render operation and graph signature so CPU,
+GPU, Preview, Export, and caches cannot silently disagree.
+
+The persisted White Balance type is currently modeled-only. It is intentionally
+absent from the product library and has no executable graph until a chromatic
+adaptation/temperature model with defined observer, illuminant, adaptation
+space, and Preview/Export evidence exists. An existing enabled instance fails
+closed rather than executing the removed additive RGB approximation.
+
+LUT never guesses its processing space from a filename, title, or cube values.
+An enabled non-identity LUT requires the non-animatable `processing_space`
+parameter and a bound external resource. `unassigned` is a blocking author
+state for execution. Scene-linear, named log/perceptual, display-linear, and
+display-encoded choices lower to the corresponding color-domain contract;
+unavailable conversions fail before pixels are accepted. The `.cube` loader
+requires one 3D table, rejects 1D/combined tables and malformed or non-finite
+payloads, honors `DOMAIN_MIN`/`DOMAIN_MAX`, and samples with tetrahedral
+interpolation. File identity uses the complete content hash; path, size, or
+modification time alone never authorize stale pixels. Intensity blends the LUT
+result with the unbounded float source after domain-normalized sampling.
 
 ## Masks, branching and adjustment layers
 

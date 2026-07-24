@@ -5778,6 +5778,7 @@ mod tests {
                             exposure: 0.0,
                             contrast: 1.0,
                             saturation: 0.0,
+                            working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
                         }],
                     })
                     .expect("compile media effect graph"),
@@ -5823,6 +5824,7 @@ mod tests {
                                 exposure: 0.0,
                                 contrast: 1.0,
                                 saturation: 0.0,
+                                working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
                             }],
                         })
                         .expect("compile adjustment graph"),

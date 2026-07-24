@@ -46,6 +46,7 @@ struct CompositeUniforms {
 struct EffectUniform {
     header: vec4<u32>,
     params: vec4<f32>,
+    color: vec4<f32>,
 };
 
 @group(0) @binding(0) var layer_tex: texture_2d<f32>;
@@ -182,15 +183,10 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
             let exposure = exp2(clamp(effect.params.x, -4.0, 4.0));
             let contrast = clamp(effect.params.y, 0.0, 3.0);
             let saturation = clamp(effect.params.z, 0.0, 3.0);
-            var rgb = (pixel.rgb * exposure - vec3<f32>(0.5)) * contrast + vec3<f32>(0.5);
-            let luma = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+            let pivot = vec3<f32>(0.18);
+            var rgb = (pixel.rgb * exposure - pivot) * contrast + pivot;
+            let luma = dot(rgb, effect.color.xyz);
             pixel = vec4<f32>(vec3<f32>(luma) + (rgb - vec3<f32>(luma)) * saturation, pixel.a);
-        } else if (effect.header.x == 2u) {
-            let temperature = clamp(effect.params.x, -1.0, 1.0);
-            let tint = clamp(effect.params.y, -1.0, 1.0);
-            pixel.r = pixel.r + temperature * 0.12 - tint * 0.04;
-            pixel.g = pixel.g + tint * 0.05;
-            pixel.b = pixel.b - temperature * 0.12 - tint * 0.02;
         } else if (effect.header.x == 3u) {
             let center = max((uniforms.geometry.zw - vec2<f32>(1.0)) * 0.5, vec2<f32>(1.0));
             let normalized = (position - center) / center;
@@ -577,6 +573,7 @@ struct GpuCompositeUniforms {
 struct GpuEffectUniform {
     header: [u32; 4],
     params: [f32; 4],
+    color: [f32; 4],
 }
 
 impl GpuFrameCompositor {
@@ -1459,21 +1456,30 @@ fn effect_uniforms(
     let Some(plan) = plan else { return uniforms };
     for (target, operation) in uniforms.iter_mut().zip(plan.operations()) {
         *target = match *operation {
-            EffectGpuPointOp::ColorAdjust { exposure, contrast, saturation } => GpuEffectUniform {
+            EffectGpuPointOp::ColorAdjust {
+                exposure,
+                contrast,
+                saturation,
+                luminance_coefficients,
+            } => GpuEffectUniform {
                 header: [1, 0, 0, 0],
                 params: [exposure, contrast, saturation, 0.0],
-            },
-            EffectGpuPointOp::WhiteBalance { temperature, tint } => GpuEffectUniform {
-                header: [2, 0, 0, 0],
-                params: [temperature, tint, 0.0, 0.0],
+                color: [
+                    luminance_coefficients[0],
+                    luminance_coefficients[1],
+                    luminance_coefficients[2],
+                    0.0,
+                ],
             },
             EffectGpuPointOp::Vignette { intensity, feather } => GpuEffectUniform {
                 header: [3, 0, 0, 0],
                 params: [intensity, feather, 0.0, 0.0],
+                color: [0.0; 4],
             },
             EffectGpuPointOp::Grain { amount } => GpuEffectUniform {
                 header: [4, 0, 0, 0],
                 params: [amount, 0.0, 0.0, 0.0],
+                color: [0.0; 4],
             },
         };
     }
@@ -1818,15 +1824,21 @@ mod tests {
         };
 
         let mut builder = EffectGraphBuilderState::new();
-        builder.append_unary(EffectRenderOp::WhiteBalance { temperature: 0.25, tint: -0.5 });
+        builder.append_unary(EffectRenderOp::ColorAdjust {
+            exposure: 0.25,
+            contrast: 1.1,
+            saturation: 0.8,
+            working_color_space: WorkingColorSpace::LinearRec2020,
+        });
         builder.append_unary(EffectRenderOp::Vignette { intensity: 0.7, feather: 0.4 });
         let graph = get_or_compile_scheduled_render_graph(builder.finish()).expect("valid graph");
         let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point chain");
 
         let uniforms = effect_uniforms(Some(&plan));
 
-        assert_eq!(uniforms[0].header[0], 2);
-        assert_eq!(uniforms[0].params, [0.25, -0.5, 0.0, 0.0]);
+        assert_eq!(uniforms[0].header[0], 1);
+        assert_eq!(uniforms[0].params, [0.25, 1.1, 0.8, 0.0]);
+        assert_eq!(uniforms[0].color, [0.2627, 0.6780, 0.0593, 0.0]);
         assert_eq!(uniforms[1].header[0], 3);
         assert_eq!(uniforms[1].params, [0.7, 0.4, 0.0, 0.0]);
         assert!(uniforms[2..].iter().all(|uniform| uniform.header[0] == 0));
@@ -1870,6 +1882,7 @@ mod tests {
                     exposure: 0.25,
                     contrast: 1.0,
                     saturation: 1.0,
+                    working_color_space: WorkingColorSpace::LinearRec709,
                 }],
             },
             EffectColorDomainContract::preserving(domain),
@@ -1912,6 +1925,7 @@ mod tests {
                     exposure: 0.25,
                     contrast: 1.0,
                     saturation: 1.0,
+                    working_color_space: WorkingColorSpace::LinearRec709,
                 }],
             },
             EffectColorDomainContract::preserving(domain),
@@ -2005,8 +2019,8 @@ mod tests {
             exposure: 0.35,
             contrast: 1.15,
             saturation: 0.8,
+            working_color_space: WorkingColorSpace::LinearRec709,
         });
-        builder.append_unary(EffectRenderOp::WhiteBalance { temperature: 0.2, tint: -0.15 });
         builder.append_unary(EffectRenderOp::Vignette { intensity: 0.45, feather: 0.7 });
         builder.append_unary(EffectRenderOp::Grain { amount: 0.1 });
         let graph = get_or_compile_scheduled_render_graph(builder.finish()).expect("valid graph");
@@ -2482,6 +2496,7 @@ mod tests {
                     exposure: 1.0,
                     contrast: 1.0,
                     saturation: 1.0,
+                    working_color_space: WorkingColorSpace::LinearRec709,
                 }],
             },
             EffectColorDomainContract::preserving(domain),
