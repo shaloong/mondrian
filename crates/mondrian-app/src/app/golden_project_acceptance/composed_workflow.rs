@@ -3,9 +3,9 @@
 use super::harness::{new_run_directory, DirectoryCleanup};
 use super::workflow::GoldenProductWorkflowDriver;
 use super::{
-    editorial_transport, foundation_audio, generated_delivery, load_golden_contract, proxy_relink,
-    recovery_nesting, repository_root, sequence_settings_from_contract, visual_authoring,
-    GoldenProjectContract,
+    color_media_roundtrip, editorial_transport, foundation_audio, generated_delivery,
+    load_golden_contract, proxy_relink, recovery_nesting, repository_root,
+    sequence_settings_from_contract, visual_authoring, GoldenProjectContract,
 };
 use anyhow::{ensure, Context};
 use mondrian_core::{ProjectColorEnvironment, ProjectSettings, SequenceId};
@@ -125,7 +125,7 @@ fn golden_foundation_and_visual_stages_share_one_project() -> anyhow::Result<()>
 }
 
 #[test]
-#[ignore = "six-stage Golden composition requires PCM/AAC/H.264 fixtures, Windows Basic Title font, and production FFmpeg encoders"]
+#[ignore = "seven-stage Golden composition requires generated PCM/AAC/H.264/HLG/PNG fixtures, Windows Basic Title font, and production FFmpeg encoders"]
 fn golden_current_stages_share_one_project() -> anyhow::Result<()> {
     let root = repository_root();
     let (contract, mut run) = ComposedRun::create(&root, "Windows Alpha Golden Existing Stages")?;
@@ -237,21 +237,47 @@ fn golden_current_stages_share_one_project() -> anyhow::Result<()> {
         "recovery/nesting did not create a distinct stage Sequence"
     );
     let recovery_nesting_snapshot = sequence_snapshot(&run.workflow, recovery_nesting_sequence_id)?;
+    let _color_media = color_media_roundtrip::execute_color_media_stage(
+        &root,
+        &contract,
+        &mut run.workflow,
+        &run.directory,
+    )?;
+    let color_media_sequence_id = run
+        .workflow
+        .app()
+        .active_sequence()
+        .context("color-media Sequence is absent")?
+        .id;
+    ensure!(
+        ![
+            foundation_sequence_id,
+            visual_sequence_id,
+            editorial_sequence_id,
+            proxy_relink_sequence_id,
+            delivery_sequence_id,
+            recovery_nesting_sequence_id
+        ]
+        .contains(&color_media_sequence_id),
+        "color-media did not create a distinct stage Sequence"
+    );
+    let color_media_snapshot = sequence_snapshot(&run.workflow, color_media_sequence_id)?;
     run.workflow.durable_save_reopen()?;
     run.workflow.verify_binding()?;
     ensure!(
         run.workflow.project_id() == project_id
             && run.workflow.project_path() == project_path
             && run.workflow.app().project_id() == Some(project_id),
-        "six-stage workflow changed the Golden Project binding"
+        "seven-stage workflow changed the Golden Project binding"
     );
     ensure!(
-        run.workflow.app().sequences().len() == 6,
-        "six current Golden stages must retain exactly six Sequences"
+        run.workflow.app().sequences().len() == 7,
+        "seven current Golden stages must retain exactly seven Sequences"
     );
     for (sequence_id, expected) in pre_delivery_snapshots.into_iter().chain([
         (delivery_sequence_id, delivery_snapshot),
         (recovery_nesting_sequence_id, recovery_nesting_snapshot),
+        (color_media_sequence_id, color_media_snapshot),
     ]) {
         ensure!(
             sequence_snapshot(&run.workflow, sequence_id)? == expected,

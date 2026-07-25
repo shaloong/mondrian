@@ -32,14 +32,14 @@ use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
     evaluate_timeline_render_plan, execute_cpu_output_boundary_float,
     execute_cpu_output_boundary_rgba8, execute_cpu_source_input_stage,
-    execute_cpu_working_transform, project_basic_title_transform, BasicTitleRasterizer,
-    ColorFrameResidency, CpuColorFrame, CpuEncodedColorFrame, CpuSourceColorFrame,
-    GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat, GpuContext, LinearFloatSource,
-    RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
-    RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
-    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderInputTransform,
-    RenderOutputColorBoundary, TimelineAdjustmentLayer, TimelineBasicTitlePlan,
-    TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
+    execute_cpu_working_transform, project_affine_to_sampled_extents,
+    project_basic_title_transform, BasicTitleRasterizer, ColorFrameResidency, CpuColorFrame,
+    CpuEncodedColorFrame, CpuSourceColorFrame, GpuColorFrameReadbackPlan,
+    GpuColorFrameTextureFormat, GpuContext, LinearFloatSource, RenderColorStageDiagnostics,
+    RenderColorStageGpuBlockerBreakdown, RenderColorTransformGpuOptions,
+    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
+    RenderInputTransform, RenderOutputColorBoundary, TimelineAdjustmentLayer,
+    TimelineBasicTitlePlan, TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
     TimelineCompositeDomainBlockerBreakdown, TimelineCompositeElement,
     TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
     TimelineCrossDissolveLayer, TimelineEffectColorRuntime, TimelineEvaluationRequest,
@@ -1409,6 +1409,7 @@ enum TimelineAudioInput {
 #[derive(Clone)]
 struct DecodedVideoLayer {
     frame: CpuColorFrame,
+    source_resolution: Resolution,
     stage_diagnostics: RenderColorStageDiagnostics,
 }
 
@@ -2335,6 +2336,8 @@ type ExportDecodeCacheKey = (
     ColorSpace,
     DecodedVideoRangeContract,
     AlphaInterpretation,
+    u32,
+    u32,
 );
 
 /// Collect input color-resolution source counts for one export timeline frame.
@@ -2728,11 +2731,19 @@ fn render_sequence_frame_into(
                 let decoded = decoded_media[index]
                     .as_ref()
                     .ok_or_else(|| "media plan was not resolved before compositing".to_owned())?;
+                let transform = project_export_affine(
+                    media.transform,
+                    decoded.source_resolution,
+                    decoded_frame_resolution(&decoded.frame),
+                    sequence.settings.resolution,
+                    resolution,
+                    "media",
+                )?;
                 composite_elements.push(TimelineCompositeElement::Media(TimelineMediaLayer {
                     frame: &decoded.frame,
                     opacity: media.opacity,
                     blend_mode: media.blend_mode,
-                    transform: media.transform,
+                    transform,
                     effect_graph: media.effect_graph.clone(),
                     frame_seed: media.frame_seed,
                 }));
@@ -2754,22 +2765,44 @@ fn render_sequence_frame_into(
                 let frame = nested_media[index].as_ref().ok_or_else(|| {
                     "nested-Sequence plan was not resolved before compositing".to_owned()
                 })?;
+                let source_resolution = timeline
+                    .sequences
+                    .iter()
+                    .find(|candidate| candidate.id == nested.sequence_id)
+                    .map(|candidate| candidate.settings.resolution)
+                    .ok_or_else(|| format!("嵌套序列不存在: {}", nested.sequence_id))?;
+                let transform = project_export_affine(
+                    nested.transform,
+                    source_resolution,
+                    decoded_frame_resolution(frame),
+                    sequence.settings.resolution,
+                    resolution,
+                    "nested Sequence",
+                )?;
                 composite_elements.push(TimelineCompositeElement::Media(TimelineMediaLayer {
                     frame,
                     opacity: nested.opacity,
                     blend_mode: nested.blend_mode,
-                    transform: nested.transform,
+                    transform,
                     effect_graph: nested.effect_graph.clone(),
                     frame_seed: nested.frame_seed,
                 }));
             }
             TimelineRenderPlanElement::SolidColor(solid) => {
+                let transform = project_export_affine(
+                    solid.transform,
+                    sequence.settings.resolution,
+                    resolution,
+                    sequence.settings.resolution,
+                    resolution,
+                    "solid color",
+                )?;
                 composite_elements.push(TimelineCompositeElement::SolidColor(
                     TimelineSolidColorLayer {
                         color: solid.color,
                         opacity: solid.opacity,
                         blend_mode: solid.blend_mode,
-                        transform: solid.transform,
+                        transform,
                         effect_graph: solid.effect_graph.clone(),
                         frame_seed: solid.frame_seed,
                     },
@@ -2781,8 +2814,20 @@ fn render_sequence_frame_into(
                 };
                 composite_elements.push(TimelineCompositeElement::CrossDissolve(
                     TimelineCrossDissolveLayer {
-                        left: lower_export_transition_input(&transition.left, left)?,
-                        right: lower_export_transition_input(&transition.right, right)?,
+                        left: lower_export_transition_input(
+                            timeline,
+                            sequence,
+                            resolution,
+                            &transition.left,
+                            left,
+                        )?,
+                        right: lower_export_transition_input(
+                            timeline,
+                            sequence,
+                            resolution,
+                            &transition.right,
+                            right,
+                        )?,
                         progress: transition.progress,
                     },
                 ));
@@ -2965,6 +3010,8 @@ fn decode_export_media_plan(
         input_color_space,
         input_video_range,
         media.alpha_interpretation,
+        width,
+        height,
     );
     if let Some(decoded) = cache.get(&key) {
         return Ok(Arc::clone(decoded));
@@ -2981,6 +3028,12 @@ fn decode_export_media_plan(
         media.source_time,
         width,
         height,
+        dependency.source_resolution.ok_or_else(|| {
+            format!(
+                "asset={} export snapshot has no source extent",
+                media.asset_id
+            )
+        })?,
     )?;
     if let Some(diagnostics) = stage_diagnostics {
         diagnostics.accumulate(decoded.stage_diagnostics);
@@ -3127,7 +3180,33 @@ fn resolve_export_transition_input(
     })
 }
 
+fn decoded_frame_resolution(frame: &CpuColorFrame) -> Resolution {
+    let descriptor = frame.descriptor();
+    Resolution { width: descriptor.width, height: descriptor.height }
+}
+
+fn project_export_affine(
+    transform: [f32; 6],
+    source_authoring: Resolution,
+    source_sampled: Resolution,
+    output_authoring: Resolution,
+    output_sampled: Resolution,
+    source_kind: &str,
+) -> Result<[f32; 6], String> {
+    project_affine_to_sampled_extents(
+        transform,
+        source_authoring,
+        source_sampled,
+        output_authoring,
+        output_sampled,
+    )
+    .ok_or_else(|| format!("{source_kind} export transform geometry is invalid"))
+}
+
 fn lower_export_transition_input<'a>(
+    timeline: &TimelineExportSnapshot,
+    sequence: &mondrian_timeline::sequence::Sequence,
+    resolution: Resolution,
     plan: &'a TimelineTransitionInputPlan,
     resolved: &'a ResolvedExportTransitionInput,
 ) -> Result<TimelineTransitionInput<'a>, String> {
@@ -3138,25 +3217,51 @@ fn lower_export_transition_input<'a>(
         (
             TimelineTransitionInputPlan::Media(media),
             ResolvedExportTransitionInput::Decoded(frame),
-        ) => TimelineTransitionInput::Media(TimelineMediaLayer {
-            frame: &frame.frame,
-            opacity: media.opacity,
-            blend_mode: media.blend_mode,
-            transform: media.transform,
-            effect_graph: media.effect_graph.clone(),
-            frame_seed: media.frame_seed,
-        }),
+        ) => {
+            let transform = project_export_affine(
+                media.transform,
+                frame.source_resolution,
+                decoded_frame_resolution(&frame.frame),
+                sequence.settings.resolution,
+                resolution,
+                "Transition media",
+            )?;
+            TimelineTransitionInput::Media(TimelineMediaLayer {
+                frame: &frame.frame,
+                opacity: media.opacity,
+                blend_mode: media.blend_mode,
+                transform,
+                effect_graph: media.effect_graph.clone(),
+                frame_seed: media.frame_seed,
+            })
+        }
         (
             TimelineTransitionInputPlan::NestedSequence(nested),
             ResolvedExportTransitionInput::Nested(frame),
-        ) => TimelineTransitionInput::Media(TimelineMediaLayer {
-            frame,
-            opacity: nested.opacity,
-            blend_mode: nested.blend_mode,
-            transform: nested.transform,
-            effect_graph: nested.effect_graph.clone(),
-            frame_seed: nested.frame_seed,
-        }),
+        ) => {
+            let source_resolution = timeline
+                .sequences
+                .iter()
+                .find(|candidate| candidate.id == nested.sequence_id)
+                .map(|candidate| candidate.settings.resolution)
+                .ok_or_else(|| format!("嵌套序列不存在: {}", nested.sequence_id))?;
+            let transform = project_export_affine(
+                nested.transform,
+                source_resolution,
+                decoded_frame_resolution(frame),
+                sequence.settings.resolution,
+                resolution,
+                "Transition nested Sequence",
+            )?;
+            TimelineTransitionInput::Media(TimelineMediaLayer {
+                frame,
+                opacity: nested.opacity,
+                blend_mode: nested.blend_mode,
+                transform,
+                effect_graph: nested.effect_graph.clone(),
+                frame_seed: nested.frame_seed,
+            })
+        }
         (
             TimelineTransitionInputPlan::BasicTitle(title),
             ResolvedExportTransitionInput::BasicTitle(resolved),
@@ -3171,14 +3276,24 @@ fn lower_export_transition_input<'a>(
         (
             TimelineTransitionInputPlan::SolidColor(solid),
             ResolvedExportTransitionInput::SolidColor,
-        ) => TimelineTransitionInput::SolidColor(TimelineSolidColorLayer {
-            color: solid.color,
-            opacity: solid.opacity,
-            blend_mode: solid.blend_mode,
-            transform: solid.transform,
-            effect_graph: solid.effect_graph.clone(),
-            frame_seed: solid.frame_seed,
-        }),
+        ) => {
+            let transform = project_export_affine(
+                solid.transform,
+                sequence.settings.resolution,
+                resolution,
+                sequence.settings.resolution,
+                resolution,
+                "Transition solid color",
+            )?;
+            TimelineTransitionInput::SolidColor(TimelineSolidColorLayer {
+                color: solid.color,
+                opacity: solid.opacity,
+                blend_mode: solid.blend_mode,
+                transform,
+                effect_graph: solid.effect_graph.clone(),
+                frame_seed: solid.frame_seed,
+            })
+        }
         _ => {
             return Err("Transition plan and resolved input diverged before compositing".to_owned())
         }
@@ -3237,6 +3352,7 @@ fn decode_video_layer_scaled(
     source_time: TimelineTime,
     width: u32,
     height: u32,
+    source_resolution: Resolution,
 ) -> Result<Arc<DecodedVideoLayer>, String> {
     let request = PreviewDecodeRequest::new(
         path,
@@ -3299,6 +3415,7 @@ fn decode_video_layer_scaled(
         .map_err(|err| format!("asset={asset_id} color transform failed: {err}"))?;
     Ok(Arc::new(DecodedVideoLayer {
         frame: execution.result.frame,
+        source_resolution,
         stage_diagnostics: execution.stage_diagnostics,
     }))
 }
@@ -3513,6 +3630,7 @@ mod tests {
         crate::preset::ExportMediaDependency {
             source_fingerprint: MediaFileFingerprint::capture(path.as_path()),
             path,
+            source_resolution: Some(Resolution { width: 1, height: 1 }),
             audio_components: HashMap::new(),
             detected_color_space,
             interpretation,
@@ -5580,6 +5698,21 @@ mod tests {
         )
         .expect("flatten alpha render");
         assert!(flattened.chunks_exact(4).all(|pixel| pixel[3] == 255));
+    }
+
+    #[test]
+    fn export_projects_authoring_transform_to_delivery_extents() {
+        let projected = project_export_affine(
+            [2.0, 0.0, 0.0, 0.0, 2.0, 0.0],
+            Resolution { width: 1920, height: 1080 },
+            Resolution { width: 1920, height: 1080 },
+            Resolution { width: 3840, height: 2160 },
+            Resolution { width: 1920, height: 1080 },
+            "test media",
+        )
+        .expect("valid export projection");
+
+        assert_eq!(projected, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
     }
 
     #[test]

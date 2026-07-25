@@ -1,11 +1,13 @@
 //! Shared Headless adapters for independent Golden execution slices.
 
 use super::fixture::sha256_file;
+use crate::app::ui_actions::{export_enqueue_action, ExportEnqueuePayload};
 use crate::app::AppState;
 use anyhow::{ensure, Context};
-use mondrian_core::{JobId, ProjectId, SequenceId};
+use mondrian_core::{ExecutionTerminalDisposition, JobId, ProjectId, SequenceId};
 use mondrian_editor_state::{Action, AuthoringSessionId};
-use mondrian_export::queue::ExportJobSnapshot;
+use mondrian_export::preset::{ExportPreset, TimelineExportRange};
+use mondrian_export::queue::{ExportJobSnapshot, JobStatus};
 use serde::{Serialize, Serializer};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -60,6 +62,16 @@ pub(super) struct DurableReopenEvidence {
     pub(super) session_identity_changed: bool,
     pub(super) project_identity_preserved: bool,
     pub(super) project_archive_sha256: String,
+}
+
+/// Terminal evidence for one production export admitted through the App Interface.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct CompletedExportEvidence {
+    pub(super) job_id: JobId,
+    pub(super) generation: u64,
+    pub(super) executed: bool,
+    pub(super) terminal_disposition: ExecutionTerminalDisposition,
+    pub(super) output_path: PathBuf,
 }
 
 /// Remove one project runtime directory only after its `AppState` has dropped.
@@ -309,6 +321,72 @@ pub(super) fn wait_for_export_job(
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// Admit one export through the same product action used by the Window and
+/// require a completed worker execution with a durable output artifact.
+pub(super) fn execute_export_job(
+    state: &mut AppState,
+    preset: ExportPreset,
+    sequence_id: Option<SequenceId>,
+    range: TimelineExportRange,
+    output_path: PathBuf,
+    timeout: Duration,
+) -> anyhow::Result<CompletedExportEvidence> {
+    let before = state
+        .export_jobs_snapshot()
+        .into_iter()
+        .map(|snapshot| snapshot.id)
+        .collect::<BTreeSet<_>>();
+    state.dispatch_action(export_enqueue_action(ExportEnqueuePayload {
+        preset,
+        sequence_id,
+        range,
+        output_path: output_path.clone(),
+    }))?;
+    let created = state
+        .export_jobs_snapshot()
+        .into_iter()
+        .filter(|snapshot| !before.contains(&snapshot.id))
+        .map(|snapshot| snapshot.id)
+        .collect::<Vec<_>>();
+    ensure!(
+        created.len() == 1,
+        "export action admitted {} jobs instead of one",
+        created.len()
+    );
+    let job_id = created[0];
+    let snapshot = wait_for_export_job(state, job_id, timeout)?;
+    ensure!(
+        matches!(snapshot.status, JobStatus::Completed),
+        "export ended as {:?}",
+        snapshot.status
+    );
+    ensure!(
+        snapshot.executed,
+        "export never crossed the worker boundary"
+    );
+    let terminal = snapshot
+        .terminal_evidence
+        .context("completed export has no terminal evidence")?;
+    ensure!(
+        terminal.generation == snapshot.generation
+            && terminal.disposition == ExecutionTerminalDisposition::Completed,
+        "export terminal evidence disagrees with completed queue state"
+    );
+    let output_path = output_path.canonicalize().with_context(|| {
+        format!(
+            "completed export is not present at {}",
+            output_path.display()
+        )
+    })?;
+    Ok(CompletedExportEvidence {
+        job_id,
+        generation: snapshot.generation,
+        executed: snapshot.executed,
+        terminal_disposition: terminal.disposition,
+        output_path,
+    })
 }
 
 pub(super) fn write_report<T: Serialize>(path: &Path, report: &T) -> anyhow::Result<()> {

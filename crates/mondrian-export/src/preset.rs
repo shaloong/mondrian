@@ -488,6 +488,11 @@ pub struct ExportMediaDependency {
     pub path: PathBuf,
     /// Exact source revision that the export is allowed to publish from.
     pub source_fingerprint: MediaFileFingerprint,
+    /// Full-resolution picture extent frozen with the source revision.
+    ///
+    /// Export may decode a delivery-sized sample, but authored Clip transforms
+    /// remain expressed against this source extent.
+    pub source_resolution: Option<mondrian_core::Resolution>,
     /// Frozen physical bindings for the audio Components used by this snapshot.
     #[serde(default)]
     pub audio_components: HashMap<AudioSourceComponentId, AudioSourceSelection>,

@@ -11,7 +11,7 @@ control exists.
   purposes. Fixed files pin bytes globally; generated files pin the recipe and
   are byte-pinned by each run.
 - `tests/validation/golden-project.json` defines the five-minute editing and
-  export workflow. Contract identity `windows-alpha-golden-v4` uses closed
+  export workflow. Contract identity `windows-alpha-golden-v5` uses closed
   schema v3 and fixes exact Sequence raster/timing/color/audio
   values, fixture-role purposes, stable built-in delivery preset identities,
   resolved profile/depth/chroma/range/Alpha expectations, and independently
@@ -73,7 +73,7 @@ cannot satisfy a color golden even when it carries valid CICP tags.
 
 An execution slice is intentionally narrower than the complete Golden Project.
 It passes only if its exact required fixture roles, operations, and content have
-typed postcondition evidence. Golden v4 rejects unknown fields; requirement IDs
+typed postcondition evidence. Golden v5 rejects unknown fields; requirement IDs
 select evidence obligations but cannot substitute for observed author, media,
 delivery, or persistence facts.
 Every slice report explicitly records `complete_golden_project: false`. A
@@ -109,22 +109,17 @@ Inspect the current top-level Golden coverage ledger without generating media:
 
 ```powershell
 cargo test -p mondrian-app --lib `
-  golden_acceptance_plan_reports_current_top_level_blockers -j1 -- `
+  golden_acceptance_plan_is_structurally_complete_without_claiming_execution -j1 -- `
   --nocapture
 ```
 
-The ledger deliberately remains blocked. The AAC role plus Play, accurate
-Seek, Scrub, Overwrite, Ripple, and Split have a real executable slice.
-The generated Rec.709 H.264 role plus Proxy/Original switch and offline Relink
-now have a second real slice. Professional multi-track Insert is assigned and
-executed by the Editorial/Transport slice. Primary Color and explicitly
-domain-bound LUT authoring are assigned to the Visual slice. Autosave recovery
-and nested-Sequence content are assigned to the fixture-free Recovery/Nesting
-slice. The operation and content ledgers therefore have no unplanned
-obligations. HLG Main10 and sRGB
-Alpha picture roles remain unbound to qualifying fixtures, and their associated
-fixture obligations remain the current plan blockers. Export contracts are
-already assigned, but that alone is not a complete product workflow.
+The v5 ledger is structurally complete: every required fixture, operation,
+content item, and export contract is assigned to one of seven executable
+slices. HLG Main10 and sRGB Alpha are bound to deterministic project-owned
+recipes with run-local artifact attestations. This status proves only that the
+plan has no omissions. It does not run a product Interface and therefore keeps
+`complete_golden_project: false`; the coordinated single-Project execution and
+three consecutive passing runs remain separate requirements.
 
 Run the AAC editorial and Transport slice after generating the canonical
 playback audio:
@@ -188,15 +183,16 @@ cargo test -p mondrian-app --lib `
 
 This extends the two-stage gate with AAC Editorial/Transport,
 Proxy/Original+Offline Relink, Generated Delivery, and fixture-free
-Recovery/Nesting. It reuses canonical generated fixtures, creates four more
-stage Sequences, executes two real proxy generations, both typed exports,
+Recovery/Nesting plus Color Media Roundtrip. It reuses canonical generated
+fixtures, creates five more stage Sequences, executes two real proxy
+generations, both typed exports plus the one-frame color roundtrip,
 ordinary media reimports, Precompose, autosave, fresh recovery, recovery-point
 retirement, and a final durable reopen. It requires one Project ID/path,
-exactly six retained Sequences, the same relinked `AssetId`/Clip reference and
+exactly seven retained Sequences, the same relinked `AssetId`/Clip reference and
 replacement path, persisted proxy intent, a closed nested Sequence graph, plus
-reimported `H264High` and `HevcMain10` assets in the reopened Project library.
-The still-missing plan obligations mean this is not yet the top-level Golden
-coordinator and cannot contribute a consecutive complete run.
+reimported `H264High` and `HevcMain10` assets and the retained HLG/Alpha Track
+and Clip identities in the reopened Project library. It is still not the
+top-level Golden coordinator and cannot contribute a consecutive complete run.
 
 Preflight a candidate reference machine before generating large media. The
 machine ID is an operator-owned stable label, not a serial number or an
@@ -226,6 +222,7 @@ Generate the disposable canonical workload media when needed:
 pwsh -File scripts/validation/generate-reference-playback-media.ps1 -Profile All -Force
 pwsh -File scripts/validation/generate-golden-project-media.ps1 -Force
 pwsh -File scripts/validation/generate-golden-editorial-video.ps1 -Force
+pwsh -File scripts/validation/generate-golden-color-reference-media.ps1 -Force
 ```
 
 The Golden generator currently creates a 305-second, 48 kHz stereo PCM S16LE
@@ -243,6 +240,34 @@ project-authored and redistribution-safe, but explicitly has
 `color_reference_eligible: false`: CICP/probe checks qualify codec, source
 interpretation, proxy, and relink behavior only. They do not establish color
 accuracy.
+
+The color-reference generator creates two redistribution-safe, project-owned
+stimuli: one-second 1920×1080 HEVC Main10 HLG patch video with exact
+BT.2020/HLG/non-constant-luminance/limited tags, and one 1920×1080 RGBA PNG
+with an explicit sRGB chunk and straight-Alpha patches. The recipe and semantic
+probe are stable; each FFmpeg build's concrete bytes are attested locally.
+
+Run their product roundtrip slice:
+
+```powershell
+pwsh -File scripts/validation/generate-golden-color-reference-media.ps1 `
+  -OutputRoot target/validation/golden-fixtures/large -Force
+$env:MONDRIAN_GOLDEN_FIXTURE_ROOT = "target/validation/golden-fixtures"
+cargo test -p mondrian-app --lib `
+  golden_color_media_roundtrip_executes_production_interfaces -j1 -- `
+  --ignored --nocapture --test-threads=1
+```
+
+The slice requires first-class `StillImage` import, a zero-rate Media hold,
+two product-authored video Tracks, exact 25-frame trim, and durable reopen. It
+then decodes through the production Preview media Adapter, uses the shared
+float-linear compositor, checks HLG decoded codes plus neutral/chromatic
+invariants, compares sRGB→linear Rec.2020 against an independent analytic
+matrix, and proves RGB behind zero Alpha cannot affect the composite. Finally
+it exports one Rec.709 H.264 frame through the production queue, strictly
+probes and reimports it, and compares sampled Program pixels. This is not an
+independent absolute HLG transfer-function oracle and does not close PQ, Log,
+real-media nesting, the top-level coordinator, or the three-run release gate.
 
 Run the Proxy/Original and Offline Relink slice:
 
@@ -441,13 +466,14 @@ plan on the qualified 16 GiB Windows reference machine and was classified
 `passed-baseline`. Its generated artifacts and evidence bundle remain
 intentionally disposable under `target`; the repository commits the recipes,
 contracts, and this reproducible result record rather than a multi-gigabyte
-machine-specific bundle. The Golden v4 contract resolves PCM, AAC, and Rec.709
-H.264 fixture identities and assigns all three to executable slices.
+machine-specific bundle. The Golden v5 contract resolves PCM, AAC, Rec.709
+H.264, HLG Main10, and sRGB Alpha fixture identities and assigns all five to
+executable slices.
 `foundation-audio-authoring-v1`, `editorial-transport-v1`, and
 `proxy-relink-v1` are real Headless product-workflow gates rather than
-declaration-only checks. HLG Main10 picture and sRGB Alpha still roles remain
-deliberately null until qualifying fixtures and appropriate independent color
-evidence exist. The H.264 fixture is not eligible to close primary-color or LUT
-coverage. Stress coverage
+declaration-only checks. `color-media-roundtrip-v1` adds real file-backed
+color/Alpha execution, while explicitly retaining the independent absolute
+HLG/PQ/Log gap. The H.264 editorial fixture is not eligible to close
+primary-color or LUT coverage. Stress coverage
 also still lacks 4K60 and broader Log/VFR/multichannel/damaged-media fixtures,
 so `Nightly/Release -Scope All` correctly remains blocked.

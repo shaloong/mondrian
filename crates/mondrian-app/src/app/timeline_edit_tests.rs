@@ -887,6 +887,32 @@ fn trim_out_updates_linked_clip() {
 }
 
 #[test]
+fn trim_out_can_extend_a_zero_rate_still_hold() {
+    let mut state = create_state_with_sequence();
+    let tb = state.active_sequence().expect("sequence should exist").time_base();
+    let still = Clip::new_still_image(AssetId::new(), tt(0, tb), tt(25, tb)).expect("still Clip");
+    let still_id = still.id;
+    state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0]
+        .add_clip(still)
+        .expect("add still");
+
+    let changed = state
+        .trim_clips_bulk_to_frame(&[still_id], TrimEdge::Out, 125)
+        .expect("extend still hold");
+
+    assert_eq!(changed, 1);
+    let still = state.active_sequence().expect("sequence").video_tracks[0]
+        .clips
+        .iter()
+        .find(|clip| clip.id == still_id)
+        .expect("still remains");
+    assert_eq!(still.duration, tt(125, tb));
+    assert_eq!(still.source_in, TimelineTime::ZERO);
+    assert_eq!(still.source_out, TimelineTime::ZERO);
+    assert_eq!(still.speed.scale().numerator(), 0);
+}
+
+#[test]
 fn delta_move_expands_a_three_member_link_group_atomically() {
     let mut state = create_state_with_sequence();
     let tb = state.active_sequence().expect("sequence should exist").time_base();

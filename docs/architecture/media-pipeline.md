@@ -1949,8 +1949,11 @@ playback/interactive residency-family transition, or at worker shutdown. The
 top-level media convenience function retains a thread-local context only for
 standalone thumbnail/export/test callers that do not own a production worker;
 `clear_thread_local_preview_decode_session()` exists for those callers and is
-not the production lifecycle mechanism. Idle release is resource policy, not a
-cache-key or generation change.
+not the production worker lifecycle mechanism. Project close also clears any
+such convenience Session opened on the App composition thread; production
+worker contexts still retire through their own acknowledged idle/shutdown
+boundary. Idle release is resource policy, not a cache-key or generation
+change.
 Codec safety policy may narrow these diagnostic overrides. OpenEXR contexts are
 always serial (`None`, one decoder thread): FFmpeg's frame-threaded EXR path can
 hold the single image until EOF and deadlock during codec-context destruction
@@ -1965,8 +1968,10 @@ capture boundary traverses enabled Clips from the selected root Sequence,
 rejects missing and recursive nested references, retains only the reachable
 nested Sequence closure, and resolves each real Asset into one
 `ExportMediaDependency`. That record keeps path, `MediaFileFingerprint`,
-detected color evidence, authored interpretation, and color diagnostics
-together so no independent map can drift from another.
+detected color evidence, authored interpretation, color diagnostics, and the
+full source picture extent together so no independent map can drift from
+another. Audio-only dependencies have no picture extent; any picture plan whose
+frozen dependency lacks one fails before decode.
 
 The Export queue is a dedicated offline service with bounded in-flight work and
 bounded lightweight terminal history. The immutable Project-sized payload is
@@ -2003,7 +2008,17 @@ from the RGBA8 encoded-source upload.
 
 ## Asset Classification
 
-`mondrian-assets` classifies imported files using `MediaInfo`. Audio-only extensions or media without meaningful video streams become `Audio`; media with video becomes `Video`.
+`mondrian-assets` classifies imported files using `MediaInfo`. Audio-only
+extensions or media without meaningful video streams become `Audio`. A
+recognized picture-file extension becomes `StillImage` only when the probe
+proves exactly one picture frame. When container metadata omits its frame count,
+the media probe decodes only until the second frame or EOF under a bounded
+packet budget: exactly one frame reaching EOF is proof, while a second frame,
+budget exhaustion, or decode ambiguity remains `Video`. Incomplete evidence
+therefore cannot silently erase animation. The Asset identity is the routing
+fact. Preview/Thumbnail/Export do not reclassify by extension, and the Timeline
+expresses the actual hold as a zero-rate Media Clip rather than inventing a
+source duration.
 
 Synthetic assets use `MediaInfo::synthetic_adjustment_layer()` and `MediaInfo::synthetic_solid_color()`.
 

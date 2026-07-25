@@ -2,7 +2,8 @@
 //!
 //! 使用 FFmpeg `avformat_open_input` 读取媒体文件的流信息。对已经由
 //! CICP/容器信息识别为 HDR 的视频，额外解码首帧以捕获只存在于
-//! `AVFrameSideData` 的静态/动态 HDR 元数据。
+//! `AVFrameSideData` 的静态/动态 HDR 元数据。图片文件在容器未报告
+//! 帧数时最多解码到第二帧或 EOF，以区分已证明单帧与动画/未知输入。
 
 use crate::decoder::{decoded_video_range_from_ffmpeg, DecodedVideoRange};
 use ffmpeg_next as ffmpeg;
@@ -33,6 +34,34 @@ pub enum VideoCodec {
     Cineform,
     Raw,
     Other(String),
+}
+
+/// Whether a path uses a supported picture-file extension.
+///
+/// This is only a bounded-probe admission hint. It never proves that the file
+/// contains one frame; animated and multi-page formats share several of these
+/// extensions.
+pub fn is_picture_file_extension(path: &Path) -> bool {
+    let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "bmp"
+            | "dpx"
+            | "exr"
+            | "gif"
+            | "heic"
+            | "heif"
+            | "jpeg"
+            | "jpg"
+            | "jxl"
+            | "png"
+            | "tga"
+            | "tif"
+            | "tiff"
+            | "webp"
+    )
 }
 
 /// Codec profile proven by the opened FFmpeg decoder context.
@@ -1062,6 +1091,8 @@ pub struct VideoStreamInfo {
     pub bit_depth: u8,
     pub has_alpha: bool,
     pub avg_bitrate: u64, // bits/s
+    /// Exact frame count when supplied by the stream or proven as one by the
+    /// bounded picture-file decoder probe.
     pub total_frames: Option<u64>,
 }
 
@@ -1333,6 +1364,26 @@ impl MediaInfo {
                     });
                 }
                 _ => {}
+            }
+        }
+
+        if is_picture_file_extension(path) {
+            for video in &mut video_streams {
+                if video.total_frames.is_some() {
+                    continue;
+                }
+                match probe_exactly_one_video_frame(path, video.index) {
+                    Ok(true) => video.total_frames = Some(1),
+                    Ok(false) => {}
+                    Err(reason) => {
+                        tracing::warn!(
+                            "[media-probe] picture frame-count evidence unavailable: path={:?} stream={} reason={}",
+                            path,
+                            video.index,
+                            reason
+                        );
+                    }
+                }
             }
         }
 
@@ -1955,6 +2006,82 @@ fn collect_hdr_metadata_summaries(
         .collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PictureFrameDrain {
+    NeedInput,
+    EndOfStream,
+    MultipleFrames,
+}
+
+fn drain_picture_probe_frames(
+    decoder: &mut ffmpeg::decoder::Video,
+    frame_count: &mut usize,
+) -> Result<PictureFrameDrain, String> {
+    loop {
+        let mut decoded = ffmpeg::util::frame::video::Video::empty();
+        match decoder.receive_frame(&mut decoded) {
+            Ok(()) => {
+                *frame_count = frame_count.saturating_add(1);
+                if *frame_count >= 2 {
+                    return Ok(PictureFrameDrain::MultipleFrames);
+                }
+            }
+            Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::error::EAGAIN => {
+                return Ok(PictureFrameDrain::NeedInput);
+            }
+            Err(ffmpeg::Error::Eof) => return Ok(PictureFrameDrain::EndOfStream),
+            Err(error) => return Err(format!("receive picture frame: {error}")),
+        }
+    }
+}
+
+fn probe_exactly_one_video_frame(path: &Path, stream_index: u32) -> Result<bool, String> {
+    const MAX_TARGET_PACKETS: usize = 512;
+
+    let mut input =
+        ffmpeg::format::input(path).map_err(|error| format!("open picture probe: {error}"))?;
+    let parameters = input
+        .streams()
+        .find(|stream| stream.index() == stream_index as usize)
+        .map(|stream| stream.parameters())
+        .ok_or_else(|| format!("video stream {stream_index} is unavailable"))?;
+    let context = ffmpeg::codec::context::Context::from_parameters(parameters)
+        .map_err(|error| format!("create picture decoder context: {error}"))?;
+    let mut decoder = context
+        .decoder()
+        .video()
+        .map_err(|error| format!("open picture decoder: {error}"))?;
+    let mut frame_count = 0usize;
+    let mut packet_count = 0usize;
+
+    for (stream, packet) in input.packets() {
+        if stream.index() != stream_index as usize {
+            continue;
+        }
+        packet_count = packet_count.saturating_add(1);
+        if packet_count > MAX_TARGET_PACKETS {
+            return Err(format!(
+                "picture probe exceeded {MAX_TARGET_PACKETS} target packets"
+            ));
+        }
+        decoder
+            .send_packet(&packet)
+            .map_err(|error| format!("send picture packet: {error}"))?;
+        match drain_picture_probe_frames(&mut decoder, &mut frame_count)? {
+            PictureFrameDrain::MultipleFrames => return Ok(false),
+            PictureFrameDrain::EndOfStream => return Ok(frame_count == 1),
+            PictureFrameDrain::NeedInput => {}
+        }
+    }
+
+    decoder.send_eof().map_err(|error| format!("flush picture decoder: {error}"))?;
+    match drain_picture_probe_frames(&mut decoder, &mut frame_count)? {
+        PictureFrameDrain::MultipleFrames => Ok(false),
+        PictureFrameDrain::EndOfStream => Ok(frame_count == 1),
+        PictureFrameDrain::NeedInput => Err("picture decoder requested input after EOF".to_owned()),
+    }
+}
+
 fn video_stream_needs_frame_hdr_probe(stream: &VideoStreamInfo) -> bool {
     stream.detected_color_space.is_some_and(ColorSpace::is_hdr)
         || stream.hdr_metadata.iter().any(|metadata| {
@@ -2397,6 +2524,45 @@ fn map_audio_codec(id: ffmpeg::codec::Id) -> AudioCodec {
 mod tests {
     use super::*;
     use ffmpeg::util::color::{Primaries, Space, TransferCharacteristic};
+
+    #[test]
+    fn picture_probe_proves_one_frame_when_png_metadata_omits_count() {
+        const ONE_PIXEL_PNG: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x04, 0x00, 0x00,
+            0x00, 0xB5, 0x1C, 0x0C, 0x02, 0x00, 0x00, 0x00, 0x0B, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0xDA, 0x63, 0x64, 0xF8, 0x0F, 0x00, 0x01, 0x05, 0x01, 0x01, 0x27, 0x18, 0xE3, 0x66,
+            0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let root = tempfile::tempdir().expect("picture probe tempdir");
+        let path = root.path().join("single.png");
+        std::fs::write(&path, ONE_PIXEL_PNG).expect("write PNG fixture");
+
+        let info = MediaInfo::probe(&path).expect("probe PNG");
+
+        assert_eq!(
+            info.primary_video().and_then(|video| video.total_frames),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn picture_probe_rejects_a_two_frame_gif() {
+        const TWO_FRAME_GIF: &[u8] = &[
+            0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x21, 0xF9, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2C,
+            0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00,
+            0x21, 0xF9, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2C, 0x00, 0x00, 0x00, 0x00, 0x01,
+            0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x4C, 0x01, 0x00, 0x3B,
+        ];
+        let root = tempfile::tempdir().expect("picture probe tempdir");
+        let path = root.path().join("animated.gif");
+        std::fs::write(&path, TWO_FRAME_GIF).expect("write GIF fixture");
+
+        let exactly_one = probe_exactly_one_video_frame(&path, 0).expect("probe GIF frames");
+
+        assert!(!exactly_one);
+    }
 
     #[test]
     fn probe_mapping_keeps_unknown_frame_rate_and_pixel_format_unproven() {

@@ -128,6 +128,16 @@ Lower layers cannot depend on higher layers:
   This closes the generated nested/recovery obligation only; it is not evidence
   for real-media nested color, conflict UX, fault injection, or the three-run
   top-level release gate.
+  The color-media slice imports attested project-generated HLG Main10 patches
+  and an sRGB straight-Alpha PNG through the product worker, places them on two
+  ordinary Media tracks (the PNG as an explicit zero-rate still hold), crosses
+  durable reopen, and executes the shared Preview float-linear compositor. It
+  checks decoded codes, independent sRGB-to-linear-Rec.2020 values, HLG
+  neutral/chromatic invariants, transparent-RGB isolation, then exports one
+  Rec.709 H.264 frame through the production queue and reimports it. This is
+  strong short-window media/color/Alpha roundtrip evidence, but it does not
+  claim an independent absolute HLG transfer-function oracle, PQ/Log coverage,
+  real-media nested color, or the complete Golden Project.
 
 The audio dependency direction is one-way:
 

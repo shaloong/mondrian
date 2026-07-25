@@ -109,7 +109,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             )
         })?;
         let asset = match library.get_asset(*asset_id) {
-            Ok(Some(asset)) if asset.kind == AssetKind::Video => asset,
+            Ok(Some(asset)) if matches!(asset.kind, AssetKind::Video | AssetKind::StillImage) => {
+                asset
+            }
             Ok(Some(_)) => {
                 return Err(PreviewUnavailability::blocked(
                     PreviewOutputStage::MediaResolution,

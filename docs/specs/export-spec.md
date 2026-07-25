@@ -26,9 +26,11 @@ with its own intent and validation contract rather than a second branch inside
 Sequences reachable from enabled Clips, the requested range, Project color
 management, and one `ExportMediaDependency` per reachable real media Asset.
 Each media dependency binds the resolved path, `MediaFileFingerprint`, detected
-color evidence, persistent user interpretation, and structured color
-diagnostic in one record. Parallel path/color/interpretation maps are forbidden
-because they permit internally inconsistent snapshots.
+color evidence, persistent user interpretation, structured color diagnostic,
+and optional full source picture extent in one record. The extent is absent
+only for audio-only dependencies; a reachable picture plan without one fails
+closed. Parallel path/color/interpretation/geometry maps are forbidden because
+they permit internally inconsistent snapshots.
 
 Snapshot capture is an App-domain transaction performed before queue admission:
 
@@ -46,6 +48,15 @@ Snapshot capture is an App-domain transaction performed before queue admission:
 
 The snapshot is an execution capture, not a persisted replacement for the
 Project document and not a compatibility boundary between releases.
+
+Authored Clip transforms remain expressed against the frozen source extent and
+the owning Sequence raster. When export decodes at a different sampled size or
+uses a delivery raster override, the renderer projects the affine exactly once
+from authoring extents to sampled extents. The target decode width and height
+are part of cache identity. Media, nested Sequences, generated layers, and
+Transition endpoints use the same projection, so reduced-resolution delivery
+cannot double-apply an auto-fit transform or reuse a frame prepared for another
+extent.
 
 ## Delivery contract and parameter ownership
 

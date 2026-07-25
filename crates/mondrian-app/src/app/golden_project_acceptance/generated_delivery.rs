@@ -2,8 +2,8 @@
 
 use super::fixture::{resolve_fixture, sha256_file, CorpusManifest, FixtureEvidence};
 use super::harness::{
-    ensure_exact_requirement_evidence, fixture_root, new_run_directory, rooted_env_path,
-    wait_for_export_job, wait_for_media_imports, write_report,
+    ensure_exact_requirement_evidence, execute_export_job, fixture_root, new_run_directory,
+    rooted_env_path, wait_for_media_imports, write_report,
 };
 use super::workflow::{GoldenProductWorkflowDriver, GoldenSequenceStageEvidence};
 use super::{
@@ -11,20 +11,19 @@ use super::{
     sequence_settings_from_contract, GoldenExportContract, GoldenProjectContract,
 };
 use crate::app::ui_actions::{
-    assets_create_solid_color_action, export_enqueue_action, inspector_set_clip_opacity_action,
+    assets_create_solid_color_action, inspector_set_clip_opacity_action,
     inspector_set_clip_transform_field_action, timeline_drop_asset_action,
-    timeline_trim_clips_action, AssetsCreateAssetPayload, ExportEnqueuePayload,
-    InspectorClipRefPayload, InspectorClipTransformField, InspectorSetClipOpacityPayload,
+    timeline_trim_clips_action, AssetsCreateAssetPayload, InspectorClipRefPayload,
+    InspectorClipTransformField, InspectorSetClipOpacityPayload,
     InspectorSetClipTransformFieldPayload, TimelineDropAssetPayload, TimelineTrimClipsPayload,
     TimelineTrimPayloadEdge,
 };
 use crate::app::AppState;
 use anyhow::{ensure, Context};
 use mondrian_assets::AssetKind;
-use mondrian_core::{ExecutionTerminalDisposition, FramePosition, JobId, TimelineTime};
+use mondrian_core::{ExecutionTerminalDisposition, FramePosition, TimelineTime};
 use mondrian_editor_state::Action;
 use mondrian_export::preset::TimelineExportRange;
-use mondrian_export::queue::JobStatus;
 use mondrian_export::validator::{probe_export_output, ExportOutputProbe};
 use mondrian_media::info::{AudioCodec, ChannelLayout, PixelFormat, VideoCodec, VideoCodecProfile};
 use serde::Serialize;
@@ -163,21 +162,6 @@ fn new_run_paths(root: &Path) -> anyhow::Result<GoldenRunPaths> {
     })
 }
 
-fn find_new_job_id(state: &AppState, before: &BTreeSet<JobId>) -> anyhow::Result<JobId> {
-    let created = state
-        .export_jobs_snapshot()
-        .into_iter()
-        .filter(|snapshot| !before.contains(&snapshot.id))
-        .map(|snapshot| snapshot.id)
-        .collect::<Vec<_>>();
-    ensure!(
-        created.len() == 1,
-        "export action admitted {} jobs instead of one",
-        created.len()
-    );
-    Ok(created[0])
-}
-
 fn normalized_identity(value: &str) -> String {
     value
         .chars()
@@ -307,40 +291,15 @@ fn export_and_probe(
     duration_error_max_frames: u32,
     audio_sample_rate: u32,
 ) -> anyhow::Result<ExportEvidence> {
-    let before = state.export_jobs_snapshot().into_iter().map(|snapshot| snapshot.id).collect();
-    state.dispatch_action(export_enqueue_action(ExportEnqueuePayload {
-        preset: builtin_preset(&export.builtin_preset_id)?.preset(),
-        sequence_id: state.active_sequence().map(|sequence| sequence.id),
+    let completed = execute_export_job(
+        state,
+        builtin_preset(&export.builtin_preset_id)?.preset(),
+        state.active_sequence().map(|sequence| sequence.id),
         range,
-        output_path: output_path.clone(),
-    }))?;
-    let job_id = find_new_job_id(state, &before)?;
-    let snapshot = wait_for_export_job(state, job_id, EXPORT_TIMEOUT)?;
-    ensure!(
-        matches!(snapshot.status, JobStatus::Completed),
-        "export {} ended as {:?}",
-        export.id,
-        snapshot.status
-    );
-    ensure!(
-        snapshot.executed,
-        "export {} never crossed the worker boundary",
-        export.id
-    );
-    let terminal = snapshot
-        .terminal_evidence
-        .context("completed export has no terminal evidence")?;
-    ensure!(
-        terminal.generation == snapshot.generation
-            && terminal.disposition == ExecutionTerminalDisposition::Completed,
-        "export terminal evidence disagrees with completed queue state"
-    );
-    let output_path = output_path.canonicalize().with_context(|| {
-        format!(
-            "completed export is not present at {}",
-            output_path.display()
-        )
-    })?;
+        output_path,
+        EXPORT_TIMEOUT,
+    )?;
+    let output_path = completed.output_path;
     let probe = probe_export_output(&output_path).map_err(anyhow::Error::msg)?;
     assert_probe_matches_contract(
         &probe,
@@ -352,10 +311,10 @@ fn export_and_probe(
     )?;
     Ok(ExportEvidence {
         export_id: export.id.clone(),
-        job_id: job_id.to_string(),
-        generation: snapshot.generation,
-        executed: snapshot.executed,
-        terminal_disposition: terminal.disposition,
+        job_id: completed.job_id.to_string(),
+        generation: completed.generation,
+        executed: completed.executed,
+        terminal_disposition: completed.terminal_disposition,
         output_sha256: sha256_file(&output_path)?,
         output_path,
         probe,

@@ -571,7 +571,11 @@ pub(super) fn trim_clip_in_track(
             updated.source_in = new_in;
         }
         TrimEdge::Out => {
-            let new_end = target_frame.max(start + 1).min(end);
+            let new_end = if original.speed.scale().numerator() == 0 {
+                target_frame.max(start + 1)
+            } else {
+                target_frame.max(start + 1).min(end)
+            };
             if new_end == end {
                 return Ok(false);
             }

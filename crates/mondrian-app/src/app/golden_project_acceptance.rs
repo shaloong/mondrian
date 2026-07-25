@@ -4,6 +4,7 @@
 //! are deliberately separate so adding later Golden coverage does not create a
 //! second monolithic acceptance harness.
 
+mod color_media_roundtrip;
 mod composed_workflow;
 mod editorial_transport;
 mod fixture;
@@ -545,7 +546,8 @@ fn golden_contract_rejects_unknown_fields() -> anyhow::Result<()> {
 }
 
 #[test]
-fn golden_acceptance_plan_reports_current_top_level_blockers() -> anyhow::Result<()> {
+fn golden_acceptance_plan_is_structurally_complete_without_claiming_execution() -> anyhow::Result<()>
+{
     use plan::{GoldenAcceptancePlan, GoldenAcceptancePlanStatus};
 
     let root = repository_root();
@@ -553,27 +555,15 @@ fn golden_acceptance_plan_reports_current_top_level_blockers() -> anyhow::Result
     let plan = GoldenAcceptancePlan::compile(&contract);
 
     assert_eq!(plan.schema_version, 1);
-    assert_eq!(plan.status, GoldenAcceptancePlanStatus::Blocked);
+    assert_eq!(plan.status, GoldenAcceptancePlanStatus::Complete);
     assert!(!plan.complete_golden_project);
     assert_eq!(plan.required_consecutive_passes, 3);
-    assert_eq!(
-        plan.missing.fixture_roles,
-        ["hlg-main10-picture", "srgb-alpha-still"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
-    );
+    assert!(plan.missing.fixture_roles.is_empty());
     assert!(plan.missing.operations.is_empty());
     assert!(plan.missing.content.is_empty());
     assert!(plan.missing.exports.is_empty());
-    assert_eq!(
-        plan.unassigned_required_fixture_roles,
-        ["hlg-main10-picture", "srgb-alpha-still"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
-    );
-    assert_eq!(plan.slices.len(), 6);
+    assert!(plan.unassigned_required_fixture_roles.is_empty());
+    assert_eq!(plan.slices.len(), 7);
 
     eprintln!(
         "MONDRIAN_GOLDEN_ACCEPTANCE_PLAN_JSON={}",

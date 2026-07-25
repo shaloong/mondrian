@@ -275,6 +275,16 @@ is separately derived through `source_in` and `SpeedMap` and controls only
 media/nested sampling. This prevents placement, source selection, and visual
 processing from becoming three accidental authorities for one property.
 
+A file-backed still is not another `ClipContent` variant. The Asset Library
+classifies the physical source as `StillImage`, while `Clip::new_still_image`
+creates ordinary `Media` content with one explicit zero-rate `SpeedMap` and
+`source_out == source_in`. Its Timeline duration is therefore independent of
+source duration, out-trim may extend it, and every evaluation samples the same
+source instant. Moving, splitting, nesting, effects, Alpha, Preview, and Export
+continue through the normal Media path. A probe that proves multiple picture
+frames remains `Video`; an unknown frame count also fails closed as `Video`.
+Classification never infers single-frame semantics from the filename alone.
+
 `BasicTitle` is a fifth content type, not a synthetic Asset and not an Effect.
 Its closed definition-backed Property Bag owns text, exact requested font
 family/weight/style, font size, working-linear fill, tracking, line height, and

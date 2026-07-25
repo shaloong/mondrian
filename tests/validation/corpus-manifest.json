@@ -154,6 +154,88 @@
       ]
     },
     {
+      "id": "generated-golden-hlg-main10-25fps-v1",
+      "path": "large/golden-hlg-main10-25fps-v1.mp4",
+      "availability": "generated",
+      "sha256": null,
+      "size_bytes": null,
+      "generation": {
+        "recipe_path": "scripts/validation/generate-golden-color-reference-media.ps1",
+        "recipe_sha256": "2a6334dfd92ec91c30d178046d6b2faa8c6e93ffd8fdbc60dd2cfad62a6ea205",
+        "profile": "HlgMain10",
+        "attestation_suffix": ".attestation.json",
+        "artifact_hash_scope": "reference-run"
+      },
+      "provenance": {
+        "source": "Deterministic project-authored HLG encoded RGB patch recipe converted to BT.2020 non-constant-luminance HEVC Main10",
+        "rights_basis": "project-generated-synthetic-stimulus",
+        "redistribution": "permitted"
+      },
+      "media": {
+        "kind": "video",
+        "container": "mp4",
+        "codec": "hevc-main10",
+        "width": 1920,
+        "height": 1080,
+        "frame_rate": "25/1",
+        "frame_rate_mode": "constant",
+        "bit_depth": 10,
+        "primaries": "bt2020",
+        "transfer": "arib-std-b67",
+        "matrix": "bt2020nc",
+        "range": "limited",
+        "minimum_stream_duration_seconds": 0.99,
+        "color_reference_eligible": true
+      },
+      "purposes": [
+        "golden-hlg-main10-picture",
+        "hlg-metadata-interpretation",
+        "source-to-working-color",
+        "preview-export-roundtrip"
+      ]
+    },
+    {
+      "id": "generated-golden-srgb-alpha-still-v1",
+      "path": "large/golden-srgb-alpha-still-v1.png",
+      "availability": "generated",
+      "sha256": null,
+      "size_bytes": null,
+      "generation": {
+        "recipe_path": "scripts/validation/generate-golden-color-reference-media.ps1",
+        "recipe_sha256": "2a6334dfd92ec91c30d178046d6b2faa8c6e93ffd8fdbc60dd2cfad62a6ea205",
+        "profile": "SrgbAlpha",
+        "attestation_suffix": ".attestation.json",
+        "artifact_hash_scope": "reference-run"
+      },
+      "provenance": {
+        "source": "Deterministic project-authored RGBA patch recipe with an explicit PNG sRGB chunk",
+        "rights_basis": "project-generated-synthetic-stimulus",
+        "redistribution": "permitted"
+      },
+      "media": {
+        "kind": "still-image",
+        "container": "png",
+        "codec": "png-rgba",
+        "width": 1920,
+        "height": 1080,
+        "frame_rate": "not-applicable",
+        "frame_rate_mode": "not-applicable",
+        "bit_depth": 8,
+        "primaries": "bt709",
+        "transfer": "iec61966-2-1",
+        "matrix": "gbr",
+        "range": "full",
+        "alpha": "straight",
+        "color_reference_eligible": true
+      },
+      "purposes": [
+        "golden-srgb-alpha-still",
+        "srgb-metadata-interpretation",
+        "straight-alpha-compositing",
+        "preview-export-roundtrip"
+      ]
+    },
+    {
       "id": "generated-golden-pcm-s16-48k-stereo-305s-v1",
       "path": "large/golden-pcm-s16-48k-stereo-305s-v1.mov",
       "availability": "generated",

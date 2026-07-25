@@ -327,6 +327,7 @@ impl AppState {
 
     pub fn close_project(&mut self) {
         self.proxy_generation.bind_project(None);
+        mondrian_media::clear_thread_local_preview_decode_session();
         self.authoring = None;
         self.autosave_in_flight_request = None;
         self.stop();
@@ -355,7 +356,8 @@ impl AppState {
         Ok(())
     }
 
-    pub fn default_adjustment_layer_duration_frames(&self) -> mondrian_core::Result<i64> {
+    /// Resolve the default Timeline span for a visual source without intrinsic duration.
+    pub fn default_visual_placement_duration_frames(&self) -> mondrian_core::Result<i64> {
         let in_frame = self.in_point_frame()?;
         let selection_span = self
             .out_point_frame()?
@@ -369,15 +371,16 @@ impl AppState {
             .active_sequence()
             .map(|seq| seq.settings.frame_rate.to_f64())
             .unwrap_or(25.0);
-        Ok(((DEFAULT_ADJUSTMENT_LAYER_DURATION_SECS * fps).round() as i64).max(1))
+        Ok(((DEFAULT_VISUAL_PLACEMENT_DURATION_SECS * fps).round() as i64).max(1))
     }
 
-    pub fn default_adjustment_layer_drag_duration(&self) -> mondrian_core::Result<Duration> {
+    /// Resolve the drag payload duration for a visual source without intrinsic duration.
+    pub fn default_visual_placement_drag_duration(&self) -> mondrian_core::Result<Duration> {
         let fps = self
             .active_sequence()
             .map(|seq| seq.settings.frame_rate.to_f64())
             .unwrap_or(25.0);
-        let secs = self.default_adjustment_layer_duration_frames()? as f64 / fps.max(1.0);
+        let secs = self.default_visual_placement_duration_frames()? as f64 / fps.max(1.0);
         Ok(Duration::from_secs_f64(secs.max(1.0 / fps.max(1.0))))
     }
 
@@ -594,7 +597,7 @@ impl AppState {
             asset_id,
             asset_name.clone(),
             AssetKind::AdjustmentLayer,
-            self.default_adjustment_layer_drag_duration()?,
+            self.default_visual_placement_drag_duration()?,
             false,
         );
         let clip_id =
@@ -645,7 +648,7 @@ impl AppState {
         let start_frame = timeline_frame
             .or(selection_start)
             .unwrap_or_else(|| self.current_frame().max(0));
-        let default_duration_secs = self.default_adjustment_layer_drag_duration()?.as_secs_f64();
+        let default_duration_secs = self.default_visual_placement_drag_duration()?.as_secs_f64();
 
         let (sequence_id, clip_id) = self.commit_active_sequence_edit("创建纯色层", |seq| {
             let time_base = seq.time_base();
@@ -1453,7 +1456,12 @@ impl AppState {
 
         for (_, asset_id) in candidates {
             match library.get_asset(asset_id) {
-                Ok(Some(asset)) if matches!(asset.kind, mondrian_assets::AssetKind::Video) => {
+                Ok(Some(asset))
+                    if matches!(
+                        asset.kind,
+                        mondrian_assets::AssetKind::Video | mondrian_assets::AssetKind::StillImage
+                    ) =>
+                {
                     return Some(asset.path);
                 }
                 Ok(_) => {}
@@ -1912,7 +1920,10 @@ impl AppState {
 
         if !matches!(
             dragging.kind,
-            AssetKind::Video | AssetKind::AdjustmentLayer | AssetKind::SolidColor
+            AssetKind::Video
+                | AssetKind::StillImage
+                | AssetKind::AdjustmentLayer
+                | AssetKind::SolidColor
         ) {
             return Err(mondrian_core::MondrianError::UnsupportedFormat {
                 format: "仅支持将视频素材或调整图层拖到视频轨".to_string(),
@@ -1920,7 +1931,7 @@ impl AppState {
         }
 
         // Resolve media dimensions for auto-fit before borrowing seq.
-        let media_dim = if dragging.kind == AssetKind::Video {
+        let media_dim = if matches!(dragging.kind, AssetKind::Video | AssetKind::StillImage) {
             self.asset_library()
                 .and_then(|lib| lib.get_asset(dragging.asset_id).ok().flatten())
                 .and_then(|asset| asset.media_info.primary_video().cloned())
@@ -1954,6 +1965,8 @@ impl AppState {
                     start_time,
                     duration,
                 )?
+            } else if dragging.kind == AssetKind::StillImage {
+                Clip::new_still_image(dragging.asset_id, start_time, duration)?
             } else {
                 Clip::new(dragging.asset_id, start_time, duration)?
             };

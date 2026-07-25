@@ -15,11 +15,18 @@ use std::sync::Arc;
 use tracing::info;
 use uuid::Uuid;
 
+/// Persisted Asset Library classification used by product routing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AssetKind {
+    /// Time-varying file-backed picture, optionally with linked audio.
     Video,
+    /// File-backed single-picture source with placement-owned hold duration.
+    StillImage,
+    /// File-backed audio without meaningful picture.
     Audio,
+    /// Sequence-local generated adjustment-layer source.
     AdjustmentLayer,
+    /// Sequence-local generated solid-color source.
     SolidColor,
 }
 
@@ -27,6 +34,7 @@ impl AssetKind {
     fn as_str(&self) -> &'static str {
         match self {
             Self::Video => "video",
+            Self::StillImage => "still_image",
             Self::Audio => "audio",
             Self::AdjustmentLayer => "adjustment_layer",
             Self::SolidColor => "solid_color",
@@ -35,6 +43,7 @@ impl AssetKind {
 
     fn from_str(value: &str) -> Self {
         match value {
+            "still_image" => Self::StillImage,
             "audio" => Self::Audio,
             "adjustment_layer" => Self::AdjustmentLayer,
             "solid_color" => Self::SolidColor,
@@ -1064,11 +1073,23 @@ fn is_audio_only_extension(path: &Path) -> bool {
     )
 }
 
+fn is_proven_single_picture(info: &MediaInfo) -> bool {
+    info.primary_video()
+        .and_then(|video| video.total_frames)
+        .is_some_and(|frames| frames == 1)
+}
+
 fn detect_asset_kind(info: &MediaInfo, path: &Path) -> Result<AssetKind> {
     let force_audio =
         info.has_audio && (is_audio_only_extension(path) || !has_meaningful_video_stream(info));
     if force_audio {
         return Ok(AssetKind::Audio);
+    }
+    if info.has_video
+        && mondrian_media::is_picture_file_extension(path)
+        && is_proven_single_picture(info)
+    {
+        return Ok(AssetKind::StillImage);
     }
     if info.has_video {
         return Ok(AssetKind::Video);
@@ -1235,6 +1256,51 @@ mod tests {
             media_path.canonicalize().expect("canonical path")
         );
         assert_eq!(record.media_info.path, record.path);
+    }
+
+    #[test]
+    fn still_image_extension_has_first_class_asset_identity() {
+        let lib = open_test_library();
+        let media_dir = tempfile::tempdir().expect("media tempdir");
+        let media_path = media_dir.path().join("reference.png");
+        std::fs::write(&media_path, [0u8]).expect("media file");
+        let mut info = lightweight_video_info(&media_path);
+        info.container = "png_pipe".to_owned();
+        info.video_streams[0].codec = VideoCodec::Other("png".to_owned());
+        info.video_streams[0].total_frames = Some(1);
+
+        let asset_id = lib
+            .upsert_media_file_with_info(&media_path, info)
+            .expect("upsert preprobed still");
+
+        let record = lib.get_asset(asset_id).expect("get").expect("asset exists");
+        assert_eq!(record.kind, AssetKind::StillImage);
+        assert!(record.media_info.has_video);
+        assert!(!record.media_info.has_audio);
+    }
+
+    #[test]
+    fn known_multiframe_image_remains_time_varying_video() {
+        let media_path = Path::new("animated.gif");
+        let mut info = lightweight_video_info(media_path);
+        info.video_streams[0].total_frames = Some(12);
+
+        assert_eq!(
+            detect_asset_kind(&info, media_path).expect("classify animated image"),
+            AssetKind::Video
+        );
+    }
+
+    #[test]
+    fn unproven_image_frame_count_fails_closed_as_time_varying_video() {
+        let media_path = Path::new("unproven.webp");
+        let mut info = lightweight_video_info(media_path);
+        info.video_streams[0].total_frames = None;
+
+        assert_eq!(
+            detect_asset_kind(&info, media_path).expect("classify unproven image"),
+            AssetKind::Video
+        );
     }
 
     #[test]
@@ -1702,6 +1768,7 @@ mod tests {
     fn asset_kind_serde_roundtrip() {
         for kind in [
             AssetKind::Video,
+            AssetKind::StillImage,
             AssetKind::Audio,
             AssetKind::AdjustmentLayer,
             AssetKind::SolidColor,

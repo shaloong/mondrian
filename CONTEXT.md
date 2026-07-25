@@ -265,6 +265,14 @@ _Avoid_: Rewriting a time base, floating-point seconds bridge, implicit cross-do
 The consumer-specific frame, shutter-sample, audio-sample, or parameter-event instants at which authored semantics are evaluated.
 _Avoid_: Persisted authoring time base, UI snap setting
 
+**Picture Geometry Projection**:
+The deterministic affine conversion from source and output authoring extents to
+the concrete sampled extents used by one Preview or Export execution. Authored
+Clip transforms never change when decode quality or delivery resolution changes.
+_Avoid_: Applying authoring-space scale directly to a downsampled source,
+delivery-size-dependent author state, decoding one cache entry at multiple
+unstated extents
+
 **Parameter Schema**:
 One versioned definition-stable contract for a parameter's `ParameterId`, value type, definition default, automation capability, unit, numeric or enum constraints, admitted Hold/Linear/Bezier execution semantics, localization message identity, and cache impact. Editor presets such as Auto Bezier and Ease author Bezier handles and are not separate execution semantics. Processor execution capabilities remain on the Processor/Effect Definition and compiled graph.
 _Avoid_: Instance property path as identity, UI-only min/max, duplicated CPU/GPU or color-domain claims
@@ -420,6 +428,15 @@ _Avoid_: Latest filename wins, delete-on-open, stale save completion clearing re
 The one closed payload that identifies a Clip placement as Media, Adjustment Layer, Nested Sequence, Solid Color, or Basic Title and carries only that variant's external references, interpretation data, or generated-source author state.
 _Avoid_: Parallel Clip kind/asset/nested/color/title fields, fake Asset ID for a nested Sequence or generated source
 
+**File-backed Still Asset**:
+An Asset Library picture identity whose probe proves exactly one physical
+picture frame. Its Timeline placement remains ordinary Media content but
+carries a zero-rate source Time Transform, so placement duration is editable
+while every evaluation samples the same source instant.
+_Avoid_: Fabricated video duration, a second still-only Clip payload, repeating
+EOF frames as implicit hold semantics, classifying multi-frame or unknown-frame
+image content as a still
+
 **Clip Visual Author Time**:
 The stable exact Clip-local coordinate used by every Clip-owned visual property: Transform, Opacity, visual Effects, Masks, and generated visual content. Moving a Clip or changing its source selection/speed preserves this coordinate; trimming away the in edge, splitting, or creating a right-hand fragment advances the visible `clip_time_in` by the removed placement duration.
 _Avoid_: Sequence time used directly for Clip properties, source time used as visual automation time, independently chosen time domains per visual subsystem
@@ -507,7 +524,9 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - One **Project Color Environment** privately owns one exact engine value. A Custom OCIO environment must bind every Program Output target used by the future-Sequence template and current Sequences before it can enter an author snapshot; it may retain additional explicit delivery bindings, but one missing or ambiguous required binding rejects the complete candidate rather than producing partial color semantics.
 - `app::preview_media_frame` owns decoded Preview payload residency, lazy CPU working adaptation, frame-local quality/provenance, sampled versus logical geometry, and exact host/decoder reservations. Each frame contains exactly one closed residency payload—working CPU, source-domain CPU/GPU-capable, or native decoder surface—so empty and contradictory combinations are unrepresentable. `app::preview_media_task` constructs it from the concrete decode result; Widget and Window resource types cannot enter it.
 - `app::preview_media_source` is the single Preview source-interpretation boundary. It owns source/proxy fingerprinting, color/range/Alpha interpretation, native-surface classification, proxy-generation intent, and canonical decode geometry; Window code only looks up the `AssetRecord`, dispatches the returned intent, and projects typed outcomes into evidence.
+- A **File-backed Still Asset** and a moving-image Asset both lower through `ClipContent::Media`; only the still constructor authors a zero-rate source hold. Preview, Thumbnail, Transition handle validation, Insert, trim, and Export consume that explicit time mapping instead of inferring stillness from extension at evaluation time.
 - A **Media Decode Target** is one canonical nonnegative source-local **Timeline Time** retained unchanged by the Render Plan, Preview Frame Store key, Broker job, media request, and Export decode cache. Only an explicit media frame-rate override quantizes once onto its declared source Evaluation Grid; nested Sequence consumers project exact child-local time onto the child grid. The FFmpeg Adapter alone lowers the target to stream PTS with checked nearest rounding and the declared stream start PTS. Floating seconds and microsecond keys are not authority.
+- A Timeline Export Snapshot freezes each reachable picture dependency's full source extent together with its source fingerprint. Delivery-sized decode is a sampled representation, not new author geometry: media, nested Sequence, generated source, and Transition endpoint transforms all pass through the same **Picture Geometry Projection**, and the sampled extent is part of decode-cache identity.
 - `app::preview_timeline_execution` owns **Preview Timeline Execution** for Window and Headless consumers. It is the only Preview traversal and nested-composition implementation; Adapters supply typed media readiness, consume its canonical media-demand collection, and may record returned facts but cannot duplicate recursion, child sizing, working-space conversion, or cache identity.
 - `renderer::BasicTitleRasterizer` is the shared Basic Title generation Interface for Preview and Export. Sequence resolution plus the persisted total title-safe margin define layout; exact face resolution/shaping and bounded raster caching remain Session-owned. Preview schedules this work on its bounded title worker, while Export reuses one raster Session for the complete job and nested closure.
 - **Preview Output Unavailability** is exhaustive at every production output boundary: absence of an active output target is `NoContent`; unresolved dependencies and invalid display/color contracts are `Blocked`; an admitted decode, composite, color, or packaging execution error is `Failed`. Empty active root and nested Sequences contribute exact transparent Program pixels rather than becoming unavailable. Any terminal unavailability clears current and pinned stale output; only `Pending` may reuse a same-scope prior frame.

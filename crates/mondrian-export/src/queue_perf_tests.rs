@@ -142,6 +142,7 @@ fn generate_layer(
     (
         Arc::new(DecodedVideoLayer {
             frame: frame.result.frame,
+            source_resolution: Resolution { width, height },
             stage_diagnostics: diagnostics,
         }),
         diagnostics,

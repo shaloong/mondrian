@@ -270,7 +270,7 @@ values observed under a distinct fresh Session after load. Action admission or
 a human-readable status hint alone cannot satisfy a Golden operation.
 
 Golden validation has one UI-independent planning Module. It compiles the
-closed schema-v3 / `windows-alpha-golden-v4` contract into a deterministic
+closed schema-v3 / `windows-alpha-golden-v5` contract into a deterministic
 ledger of required fixture roles,
 operations, content, and exports, then reports every unplanned or unresolved
 obligation. A slice is an independently executable evidence Adapter, not a
@@ -292,11 +292,13 @@ Sequence Revision advance; Project-scoped evidence requires one Generation but
 allows active Sequence change. Durable reopen must replace only the
 process-local Session, preserving Project, path, active Sequence, and saved
 revision. Foundation Audio, Editorial/Transport, Proxy/Relink, Generated
-Delivery, Visual Authoring, and Recovery/Nesting are reusable stages over this
-driver. Their composed gate runs ordinary product Actions and services in six
+Delivery, Visual Authoring, Recovery/Nesting, and Color Media Roundtrip are
+reusable stages over this driver. Their composed gate runs ordinary product
+Actions and services in seven
 dedicated Sequences: PCM authoring; AAC editing/transport; proxy/offline/relink;
 H.264 High and HEVC Main10 delivery/reimport; Transition/Basic Title/curve/
-Primary/LUT authoring; and nested-Sequence autosave recovery.
+Primary/LUT authoring; nested-Sequence autosave recovery; and file-backed
+HLG Main10 plus sRGB Alpha Preview/Export roundtrip.
 
 The Recovery/Nesting stage is fixture-independent. It selects a generated Clip
 through the Timeline Action boundary, dispatches one Precompose Action, and
@@ -306,9 +308,12 @@ through the product recovery Action, and compares parent/child author hashes
 and deterministic execution evidence. The recovered Session must remain dirty
 and the recovery archive authoritative until a covering manual save atomically
 retires it. A final composed reopen must preserve the fixed Project binding,
-all six Sequences, earlier stage content, relinked Asset intent, and both typed
-reimport profiles. Missing qualifying color fixtures and the coordinated
-three-run release classification still prevent top-level completion.
+the six Sequences present at the Recovery boundary, earlier stage content,
+relinked Asset intent, and both typed reimport profiles. The later Color Media
+stage extends that invariant to seven Sequences and retains its file-backed
+Track/Clip identities. Complete
+independent HDR/Log numeric references, the top-level coordinator, and
+coordinated three-run release classification still prevent completion.
 
 ## Playback Tick Ownership
 

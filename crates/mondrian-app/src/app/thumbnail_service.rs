@@ -267,7 +267,7 @@ impl AssetThumbnailService {
 
     /// Resolve or admit the exact thumbnail request without waiting for media work.
     pub fn thumbnail_for_asset(&self, asset: &AssetRecord) -> ThumbnailLookupState {
-        if asset.kind != AssetKind::Video {
+        if !matches!(asset.kind, AssetKind::Video | AssetKind::StillImage) {
             return ThumbnailLookupState::Unavailable;
         }
         let (generation, context) = {

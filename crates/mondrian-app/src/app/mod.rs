@@ -44,7 +44,7 @@ pub(crate) use project_recovery::{discover_crash_recovery_candidates, CrashRecov
 use serde::{Deserialize, Serialize};
 
 const PROJECT_EXTENSION: &str = "mdp";
-const DEFAULT_ADJUSTMENT_LAYER_DURATION_SECS: f64 = 5.0;
+const DEFAULT_VISUAL_PLACEMENT_DURATION_SECS: f64 = 5.0;
 const MAX_STATUS_LOG_ENTRIES: usize = 64;
 const AUDIO_OUTPUT_LAYOUT: AudioChannelLayout = AudioChannelLayout::Stereo;
 const AUDIO_IDLE_WARMUP_CHUNK_MILLIS: u32 = 80;

@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "id": "windows-alpha-golden-v4",
+  "id": "windows-alpha-golden-v5",
   "kind": "golden",
   "timeline": {
     "duration_frames": 7500,
@@ -19,7 +19,7 @@
   "required_fixture_roles": [
     {
       "role": "hlg-main10-picture",
-      "fixture_id": null,
+      "fixture_id": "generated-golden-hlg-main10-25fps-v1",
       "required": true,
       "required_purpose": "golden-hlg-main10-picture"
     },
@@ -31,7 +31,7 @@
     },
     {
       "role": "srgb-alpha-still",
-      "fixture_id": null,
+      "fixture_id": "generated-golden-srgb-alpha-still-v1",
       "required": true,
       "required_purpose": "golden-srgb-alpha-still"
     },
@@ -188,6 +188,20 @@
       "required_content": [
         "nested-sequence"
       ],
+      "required_exports": [],
+      "timeline_window": {
+        "start_frame": 0,
+        "end_frame_exclusive": 25
+      }
+    },
+    {
+      "id": "color-media-roundtrip-v1",
+      "required_fixture_roles": [
+        "hlg-main10-picture",
+        "srgb-alpha-still"
+      ],
+      "required_operations": [],
+      "required_content": [],
       "required_exports": [],
       "timeline_window": {
         "start_frame": 0,

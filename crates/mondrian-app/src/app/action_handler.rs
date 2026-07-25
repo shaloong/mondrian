@@ -1918,17 +1918,23 @@ impl AppState {
             self.set_status_hint(format!("素材准备失败：{reason}"), true);
             MondrianError::WorkflowStepFailed { step_id: "assets_prepare_drag".into(), reason }
         })?;
-        let duration = if asset.media_info.duration > Duration::ZERO
-            && !matches!(asset.kind, AssetKind::AdjustmentLayer)
-        {
+        let duration = if matches!(
+            asset.kind,
+            AssetKind::StillImage | AssetKind::AdjustmentLayer | AssetKind::SolidColor
+        ) {
+            self.default_visual_placement_drag_duration()?
+        } else if asset.media_info.duration > Duration::ZERO {
             asset.media_info.duration
         } else {
-            self.default_adjustment_layer_drag_duration()?
+            self.default_visual_placement_drag_duration()?
         };
         let has_linked_audio = matches!(asset.kind, AssetKind::Video) && asset.media_info.has_audio;
         let lane = match asset.kind {
             AssetKind::Audio => "音频轨",
-            AssetKind::Video | AssetKind::AdjustmentLayer | AssetKind::SolidColor => "视频轨",
+            AssetKind::Video
+            | AssetKind::StillImage
+            | AssetKind::AdjustmentLayer
+            | AssetKind::SolidColor => "视频轨",
         };
         self.begin_drag_asset(
             asset.id,

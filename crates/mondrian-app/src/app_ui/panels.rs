@@ -2888,7 +2888,10 @@ fn asset_grid_asset_context_menu_items(
 }
 
 fn asset_has_file_manager_target(asset: &AssetRecord) -> bool {
-    matches!(asset.kind, AssetKind::Video | AssetKind::Audio)
+    matches!(
+        asset.kind,
+        AssetKind::Video | AssetKind::StillImage | AssetKind::Audio
+    )
 }
 
 fn asset_is_offline(asset: &AssetRecord) -> bool {
@@ -3025,6 +3028,7 @@ fn color_picker_trigger(color: Color) -> ColorPickerTrigger {
 fn asset_kind_badge(kind: &AssetKind) -> &'static str {
     match kind {
         AssetKind::Video => "视频",
+        AssetKind::StillImage => "静帧",
         AssetKind::Audio => "音频",
         AssetKind::AdjustmentLayer => "序列",
         AssetKind::SolidColor => "图片",
@@ -3050,6 +3054,7 @@ fn asset_kind_accent(kind: &AssetKind) -> Color {
     let colors = current_theme().colors.clone();
     match kind {
         AssetKind::Video => colors.media_video,
+        AssetKind::StillImage => colors.media_solid,
         AssetKind::Audio => colors.media_audio,
         AssetKind::AdjustmentLayer => colors.media_adjustment,
         AssetKind::SolidColor => colors.media_solid,
@@ -3059,6 +3064,7 @@ fn asset_kind_accent(kind: &AssetKind) -> Color {
 fn asset_kind_icon(kind: &AssetKind) -> AppIcon {
     match kind {
         AssetKind::Video => AppIcon::Film,
+        AssetKind::StillImage => AppIcon::Rectangle,
         AssetKind::Audio => AppIcon::Music,
         AssetKind::AdjustmentLayer => AppIcon::Grid,
         AssetKind::SolidColor => AppIcon::Rectangle,

@@ -30,6 +30,17 @@ Sequence Adapters consume only `source_time`. Preview and Export invoke this
 same lowering and may differ in scheduling or quality policy, never in time
 interpretation.
 
+Clip transforms are authored against stable source and Sequence picture
+extents, not against whichever decode/output sizes an execution happens to use.
+Preview and Export therefore lower them through the renderer-owned
+`project_affine_to_sampled_extents`: source authoring extent → decoded sampled
+extent and Sequence authoring extent → composite sampled extent. Export freezes
+the full source extent in each file dependency and includes requested decode
+width/height in its cache key. Media, nested Sequence, Solid Color, and both
+Transition endpoints use this same projection; Basic Title uses the equivalent
+cropped-title projection. A 4K-authored clip exported at 1080p must keep the
+same composition, not apply its auto-fit scale a second time.
+
 ## Current Implementation
 
 `mondrian-renderer::timeline_render_plan` evaluates one sequence frame through

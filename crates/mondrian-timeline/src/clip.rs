@@ -397,6 +397,21 @@ impl Clip {
         )
     }
 
+    /// Create a file-backed still placement as a zero-rate source-time hold.
+    ///
+    /// Timeline duration remains independently editable while every evaluation
+    /// samples the same source instant. This avoids inventing a separate visual
+    /// payload algebra for still files while preserving explicit hold semantics.
+    pub fn new_still_image(
+        asset_id: AssetId,
+        position: TimelineTime,
+        duration: TimelineTime,
+    ) -> Result<Self> {
+        let mut clip = Self::new(asset_id, position, duration)?;
+        clip.speed.set_scale(TimeScale::new(0, 1)?);
+        clip.source_out = clip.source_in;
+        Ok(clip)
+    }
     fn with_content(
         content: ClipContent,
         position: TimelineTime,
@@ -955,6 +970,25 @@ mod tests {
 
     fn tt(frame: i64) -> TimelineTime {
         TimelineTime::new(frame, 25).expect("valid test time")
+    }
+
+    #[test]
+    fn still_image_is_an_extensible_zero_rate_media_hold() {
+        let asset_id = AssetId::new();
+        let clip = Clip::new_still_image(asset_id, tt(10), tt(125)).expect("still Clip");
+
+        assert_eq!(clip.media_asset_id(), Some(asset_id));
+        assert_eq!(clip.speed.scale().numerator(), 0);
+        assert_eq!(clip.source_in, TimelineTime::ZERO);
+        assert_eq!(clip.source_out, TimelineTime::ZERO);
+        assert_eq!(
+            clip.timeline_to_source_time(tt(10)).expect("start sample"),
+            TimelineTime::ZERO
+        );
+        assert_eq!(
+            clip.timeline_to_source_time(tt(134)).expect("last visible sample"),
+            TimelineTime::ZERO
+        );
     }
 
     fn exposure_from_graph(effects: &[EffectNode], time: TimelineTime) -> f32 {

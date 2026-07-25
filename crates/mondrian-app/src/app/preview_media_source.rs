@@ -127,7 +127,7 @@ pub(crate) enum PreviewMediaSourceOutcome {
 pub(crate) fn resolve_preview_media_source(
     request: PreviewMediaSourceRequest<'_>,
 ) -> PreviewMediaSourceOutcome {
-    if request.asset.kind != AssetKind::Video {
+    if !matches!(request.asset.kind, AssetKind::Video | AssetKind::StillImage) {
         return unavailable(&request, PreviewMediaSourceUnavailableReason::NotVideo);
     }
     if request.source_time.is_negative() {

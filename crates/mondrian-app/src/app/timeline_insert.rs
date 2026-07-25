@@ -159,6 +159,13 @@ fn validate_asset_targets(
                 ));
             }
         }
+        AssetKind::StillImage => {
+            if payload.video_target_track_id.is_none() || payload.audio_target_track_id.is_some() {
+                return Err(insert_error(
+                    "a still-image Asset requires exactly one video target Track",
+                ));
+            }
+        }
         AssetKind::AdjustmentLayer | AssetKind::SolidColor => {
             if payload.video_target_track_id.is_none() || payload.audio_target_track_id.is_some() {
                 return Err(insert_error(
@@ -177,10 +184,13 @@ fn validate_source_interval(
     duration: TimelineTime,
     frame_seconds: f64,
 ) -> mondrian_core::Result<()> {
-    if matches!(kind, AssetKind::AdjustmentLayer | AssetKind::SolidColor) {
+    if matches!(
+        kind,
+        AssetKind::StillImage | AssetKind::AdjustmentLayer | AssetKind::SolidColor
+    ) {
         if !source_in.is_zero() {
             return Err(insert_error(
-                "generated visual Assets do not admit a non-zero source in",
+                "still and generated visual Assets do not admit a non-zero source in",
             ));
         }
         return Ok(());
@@ -204,6 +214,7 @@ fn create_asset_clip(
 ) -> mondrian_core::Result<Clip> {
     match kind {
         AssetKind::Video => Clip::new(asset_id, position, duration),
+        AssetKind::StillImage => Clip::new_still_image(asset_id, position, duration),
         AssetKind::AdjustmentLayer => Clip::new_adjustment_layer(asset_id, position, duration),
         AssetKind::SolidColor => Clip::new_solid_color(
             asset_id,

@@ -318,6 +318,10 @@ fn resolve_export_media_dependencies(
             ExportMediaDependency {
                 path: asset.path,
                 source_fingerprint,
+                source_resolution: asset
+                    .media_info
+                    .primary_video()
+                    .map(|video| Resolution { width: video.width, height: video.height }),
                 audio_components,
                 detected_color_space,
                 interpretation: asset.interpretation,

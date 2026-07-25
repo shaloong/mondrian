@@ -5831,6 +5831,7 @@ fn export_test_media_dependencies(
                 mondrian_export::preset::ExportMediaDependency {
                     source_fingerprint: MediaFileFingerprint::capture(path.as_path()),
                     path,
+                    source_resolution: Some(Resolution { width: 1, height: 1 }),
                     audio_components: HashMap::new(),
                     detected_color_space: color_spaces.get(&asset_id).copied(),
                     interpretation: interpretations.get(&asset_id).copied().unwrap_or_default(),
