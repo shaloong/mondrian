@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "id": "windows-alpha-golden-v8",
+  "id": "windows-alpha-golden-v9",
   "kind": "golden",
   "hero_sequence": {
     "role": "hero",
@@ -143,7 +143,7 @@
     },
     {
       "id": "generated-delivery-roundtrip-v1",
-      "sequence_role": "isolated-delivery",
+      "sequence_role": "hero",
       "required_fixture_roles": [
         "pcm-audio"
       ],
@@ -161,8 +161,8 @@
         "hevc-main10"
       ],
       "timeline_window": {
-        "start_frame": 0,
-        "end_frame_exclusive": 25
+        "start_frame": 150,
+        "end_frame_exclusive": 175
       }
     },
     {

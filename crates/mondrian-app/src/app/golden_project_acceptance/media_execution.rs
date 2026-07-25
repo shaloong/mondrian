@@ -1,4 +1,4 @@
-//! Shared production media resolution and decode helpers for color evidence.
+//! Shared production media resolution and decode helpers for Golden evidence.
 
 use crate::app::preview_access_mode::{MediaPreviewJob, MediaPreviewRequestPriority};
 use crate::app::preview_hardware_admission::PreviewHardwareDecodeAdmissionState;

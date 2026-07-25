@@ -233,6 +233,8 @@ pub struct ProbedVideoStream {
     pub frame_rate_num: Option<i64>,
     /// Reduced frame-rate denominator.
     pub frame_rate_den: Option<i64>,
+    /// Exact stream-local start/duration timing when ffprobe proves it.
+    pub timing: ProbedStreamTiming,
     /// Exact pixel format.
     pub pixel_format: Option<String>,
     /// Sample depth derived from the exact pixel format.
@@ -262,6 +264,21 @@ pub struct ProbedAudioStream {
     pub channels: Option<u32>,
     /// ffprobe channel-layout identity.
     pub channel_layout: Option<String>,
+    /// Exact stream-local start/duration timing when ffprobe proves it.
+    pub timing: ProbedStreamTiming,
+}
+
+/// Exact ffprobe stream timing expressed in one declared integer time base.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct ProbedStreamTiming {
+    /// First stream timestamp in `time_base` units.
+    pub start_pts: Option<i64>,
+    /// Stream duration in `time_base` units.
+    pub duration_ts: Option<i64>,
+    /// Positive time-base numerator.
+    pub time_base_num: Option<i64>,
+    /// Positive time-base denominator.
+    pub time_base_den: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -310,6 +327,9 @@ struct FfprobeStream {
     r_frame_rate: Option<String>,
     avg_frame_rate: Option<String>,
     duration: Option<String>,
+    start_pts: Option<i64>,
+    duration_ts: Option<i64>,
+    time_base: Option<String>,
     pix_fmt: Option<String>,
     color_range: Option<String>,
     color_space: Option<String>,
@@ -986,6 +1006,7 @@ fn build_output_probe(
                 height: stream.height,
                 frame_rate_num: frame_rate.map(|(num, _)| num),
                 frame_rate_den: frame_rate.map(|(_, den)| den),
+                timing: probed_stream_timing(stream),
                 pixel_format: stream.pix_fmt.clone(),
                 bit_depth: stream.pix_fmt.as_deref().and_then(pixel_format_bit_depth),
                 color_range: stream.color_range.clone(),
@@ -1017,6 +1038,7 @@ fn build_output_probe(
             sample_rate: stream.sample_rate.as_deref().and_then(|raw| raw.parse::<u32>().ok()),
             channels: stream.channels,
             channel_layout: stream.channel_layout.clone(),
+            timing: probed_stream_timing(stream),
         });
     ExportOutputProbe {
         container_format: report.format.as_ref().and_then(|format| format.format_name.clone()),
@@ -1027,6 +1049,16 @@ fn build_output_probe(
         duration_secs: summarize_report(report).duration_secs,
         video,
         audio,
+    }
+}
+
+fn probed_stream_timing(stream: &FfprobeStream) -> ProbedStreamTiming {
+    let time_base = stream.time_base.as_deref().and_then(parse_ratio_i64);
+    ProbedStreamTiming {
+        start_pts: stream.start_pts,
+        duration_ts: stream.duration_ts,
+        time_base_num: time_base.map(|(num, _)| num),
+        time_base_den: time_base.map(|(_, den)| den),
     }
 }
 
@@ -1261,6 +1293,9 @@ mod tests {
                     r_frame_rate: Some("25/1".to_string()),
                     avg_frame_rate: Some("25/1".to_string()),
                     duration: Some("10.0".to_string()),
+                    start_pts: Some(0),
+                    duration_ts: Some(256_000),
+                    time_base: Some("1/25600".to_string()),
                     pix_fmt: Some("yuv420p10le".to_string()),
                     color_range: Some("tv".to_string()),
                     color_space: Some("bt2020nc".to_string()),
@@ -1272,6 +1307,9 @@ mod tests {
                     codec_type: Some("audio".to_string()),
                     codec_name: Some("aac".to_string()),
                     duration: Some("10.0".to_string()),
+                    start_pts: Some(0),
+                    duration_ts: Some(480_000),
+                    time_base: Some("1/48000".to_string()),
                     sample_rate: Some("48000".to_string()),
                     channels: Some(2),
                     channel_layout: Some("stereo".to_string()),
@@ -1349,11 +1387,29 @@ mod tests {
         assert_eq!(video.bit_depth, Some(10));
         assert_eq!(video.frame_rate_num, Some(25));
         assert_eq!(video.frame_rate_den, Some(1));
+        assert_eq!(
+            video.timing,
+            ProbedStreamTiming {
+                start_pts: Some(0),
+                duration_ts: Some(256_000),
+                time_base_num: Some(1),
+                time_base_den: Some(25_600),
+            }
+        );
         let audio = probe.audio.expect("audio evidence");
         assert_eq!(audio.codec_name.as_deref(), Some("aac"));
         assert_eq!(audio.sample_rate, Some(48_000));
         assert_eq!(audio.channels, Some(2));
         assert_eq!(audio.channel_layout.as_deref(), Some("stereo"));
+        assert_eq!(
+            audio.timing,
+            ProbedStreamTiming {
+                start_pts: Some(0),
+                duration_ts: Some(480_000),
+                time_base_num: Some(1),
+                time_base_den: Some(48_000),
+            }
+        );
     }
 
     #[test]

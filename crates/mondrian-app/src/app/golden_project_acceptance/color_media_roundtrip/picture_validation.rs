@@ -1,6 +1,6 @@
 //! Preview execution and independent source-to-working picture checks.
 
-use super::media_execution::{decode_media, rgba8_at, source_rgba, DecodedMedia};
+use super::super::media_execution::{decode_media, rgba8_at, source_rgba, DecodedMedia};
 use super::PREVIEW_RESOLUTION;
 use crate::app::preview_cpu_execution::{
     composite_resolved_preview, composite_resolved_preview_working,

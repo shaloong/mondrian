@@ -170,11 +170,12 @@ fn wait_for_proxy_quiescence(
     }
 }
 
-struct GoldenHeroAuthoringStages {
+struct GoldenHeroStages {
     sequence_id: SequenceId,
     foundation: foundation_audio::GoldenFoundationReport,
     visual: visual_authoring::GoldenVisualReport,
     editorial: editorial_transport::GoldenEditorialReport,
+    delivery: generated_delivery::GoldenDeliveryReport,
 }
 
 fn hero_audio_projection(
@@ -206,11 +207,12 @@ fn hero_visual_projection(
     ))?)
 }
 
-fn execute_hero_authoring_stages(
+fn execute_hero_stages(
     root: &Path,
     contract: &GoldenProjectContract,
     workflow: &mut GoldenProductWorkflowDriver,
-) -> anyhow::Result<GoldenHeroAuthoringStages> {
+    output_directory: &Path,
+) -> anyhow::Result<GoldenHeroStages> {
     let foundation = foundation_audio::execute_foundation_stage(root, contract, workflow)?;
     let foundation_sequence_id = foundation.primary_sequence_id();
     let complete_audio_before_visual = hero_audio_projection(workflow, foundation_sequence_id)?;
@@ -259,11 +261,39 @@ fn execute_hero_authoring_stages(
     visual.verify_retained_authoring(workflow.app())?;
     editorial.verify_retained_authoring(workflow.app())?;
 
-    Ok(GoldenHeroAuthoringStages {
+    let foundation_before_delivery = foundation.capture_audio_anchor(workflow.app())?;
+    let editorial_before_delivery = editorial.capture_authoring_anchor(workflow.app())?;
+    let delivery =
+        generated_delivery::execute_delivery_stage(root, contract, workflow, output_directory)?;
+    let delivery_sequence_id = delivery.primary_sequence_id();
+    workflow.verify_binding()?;
+    ensure!(
+        foundation_sequence_id == delivery_sequence_id
+            && foundation_sequence_id == workflow.hero_sequence_id(),
+        "Delivery did not use the one Hero Sequence"
+    );
+    ensure!(
+        workflow.app().sequences().len() == 1,
+        "Hero Delivery created an undeclared auxiliary Sequence"
+    );
+    ensure!(
+        foundation_before_delivery == foundation.capture_audio_anchor(workflow.app())?,
+        "Delivery changed the Foundation Track-owned audio authoring projection"
+    );
+    ensure!(
+        editorial_before_delivery == editorial.capture_authoring_anchor(workflow.app())?,
+        "Delivery changed the Editorial Track-owned audio authoring projection"
+    );
+    visual.verify_retained_authoring(workflow.app())?;
+    editorial.verify_retained_authoring(workflow.app())?;
+    delivery.verify_retained_authoring(workflow.app())?;
+
+    Ok(GoldenHeroStages {
         sequence_id: foundation_sequence_id,
         foundation,
         visual,
         editorial,
+        delivery,
     })
 }
 
@@ -323,15 +353,16 @@ fn resolve_hero_sequence_id(
 }
 
 #[test]
-#[ignore = "composed Golden stages require canonical PCM/AAC fixtures and a Windows Basic Title font"]
-fn golden_foundation_visual_and_editorial_stages_share_one_hero_sequence() -> anyhow::Result<()> {
+#[ignore = "composed Golden stages require canonical PCM/AAC fixtures, FFmpeg encoders, and a Windows Basic Title font"]
+fn golden_authoring_and_delivery_stages_share_one_hero_sequence() -> anyhow::Result<()> {
     let root = repository_root();
     let (contract, mut run) =
         ComposedRun::create(&root, "Windows Alpha Golden Hero Authoring", false)?;
     let project_id = run.workflow.project_id();
     let project_path = run.workflow.project_path().to_path_buf();
 
-    let stages = execute_hero_authoring_stages(&root, &contract, &mut run.workflow)?;
+    let output_directory = run.directory.clone();
+    let stages = execute_hero_stages(&root, &contract, &mut run.workflow, &output_directory)?;
     ensure!(
         stages.sequence_id == run.workflow.hero_sequence_id()
             && run.workflow.app().sequences().len() == 1,
@@ -371,7 +402,7 @@ fn execute_complete_golden_project(
     let mut stage_reports = BTreeMap::new();
     let mut stage_sequence_ids = BTreeMap::new();
     let mut stage_primary_sequence_ids = BTreeMap::new();
-    let hero = execute_hero_authoring_stages(root, contract, &mut run.workflow)?;
+    let hero = execute_hero_stages(root, contract, &mut run.workflow, &run.directory)?;
     let hero_sequence_id = hero.sequence_id;
     capture_stage(
         &mut stage_reports,
@@ -391,6 +422,12 @@ fn execute_complete_golden_project(
         editorial_transport::EDITORIAL_SLICE_ID,
         &hero.editorial,
     )?;
+    capture_stage(
+        &mut stage_reports,
+        contract,
+        generated_delivery::DELIVERY_SLICE_ID,
+        &hero.delivery,
+    )?;
     stage_sequence_ids.insert(
         foundation_audio::FOUNDATION_SLICE_ID.to_owned(),
         vec![hero_sequence_id],
@@ -413,6 +450,14 @@ fn execute_complete_golden_project(
     );
     stage_primary_sequence_ids.insert(
         editorial_transport::EDITORIAL_SLICE_ID.to_owned(),
+        hero_sequence_id,
+    );
+    stage_sequence_ids.insert(
+        generated_delivery::DELIVERY_SLICE_ID.to_owned(),
+        vec![hero_sequence_id],
+    );
+    stage_primary_sequence_ids.insert(
+        generated_delivery::DELIVERY_SLICE_ID.to_owned(),
         hero_sequence_id,
     );
     let proxy_relink = proxy_relink::execute_proxy_relink_stage(
@@ -461,32 +506,6 @@ fn execute_complete_golden_project(
         .get_asset(proxy_relink_asset_id)?
         .context("relinked asset is absent after proxy/relink stage")?
         .path;
-    let delivery = generated_delivery::execute_delivery_stage(
-        root,
-        contract,
-        &mut run.workflow,
-        &run.directory,
-    )?;
-    capture_stage(
-        &mut stage_reports,
-        contract,
-        generated_delivery::DELIVERY_SLICE_ID,
-        &delivery,
-    )?;
-    let delivery_sequence_id =
-        run.workflow.app().active_sequence().context("delivery Sequence is absent")?.id;
-    ensure!(
-        ![hero_sequence_id, proxy_relink_sequence_id].contains(&delivery_sequence_id),
-        "delivery did not create a distinct stage Sequence"
-    );
-    stage_sequence_ids.insert(
-        generated_delivery::DELIVERY_SLICE_ID.to_owned(),
-        vec![delivery_sequence_id],
-    );
-    stage_primary_sequence_ids.insert(
-        generated_delivery::DELIVERY_SLICE_ID.to_owned(),
-        delivery_sequence_id,
-    );
     let before_recovery_sequence_ids = run
         .workflow
         .app()
@@ -521,12 +540,7 @@ fn execute_complete_golden_project(
         .context("recovery/nesting Sequence is absent")?
         .id;
     ensure!(
-        ![
-            hero_sequence_id,
-            proxy_relink_sequence_id,
-            delivery_sequence_id
-        ]
-        .contains(&recovery_nesting_sequence_id),
+        ![hero_sequence_id, proxy_relink_sequence_id].contains(&recovery_nesting_sequence_id),
         "recovery/nesting did not create a distinct stage Sequence"
     );
     ensure!(
@@ -563,7 +577,6 @@ fn execute_complete_golden_project(
         ![
             hero_sequence_id,
             proxy_relink_sequence_id,
-            delivery_sequence_id,
             recovery_nesting_sequence_id
         ]
         .contains(&color_media_sequence_id),

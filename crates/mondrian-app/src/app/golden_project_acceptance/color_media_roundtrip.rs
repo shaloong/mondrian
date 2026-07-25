@@ -7,7 +7,6 @@
 
 mod authoring;
 mod delivery;
-mod media_execution;
 mod picture_validation;
 
 use super::fixture::{resolve_fixture, CorpusManifest, FixtureEvidence};

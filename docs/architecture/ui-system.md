@@ -283,7 +283,7 @@ values observed under a distinct fresh Session after load. Action admission or
 a human-readable status hint alone cannot satisfy a Golden operation.
 
 Golden validation has one UI-independent planning Module. It compiles the
-closed schema-v4 / `windows-alpha-golden-v8` contract into two deterministic
+closed schema-v4 / `windows-alpha-golden-v9` contract into two deterministic
 ledgers of required fixture roles, operations, content, and exports. The global
 ledger finds work absent from every slice; the Hero ledger independently finds
 work that exists only in isolated diagnostic Sequences. A slice declares one
@@ -318,20 +318,25 @@ allows active Sequence change. Durable reopen must replace only the
 process-local Session, preserving Project, path, active Sequence, and saved
 revision. Foundation Audio, Editorial/Transport, Proxy/Relink, Generated
 Delivery, Visual Authoring, Recovery/Nesting, and Color Media Roundtrip are
-reusable stages over this driver. Foundation Audio, Visual Authoring, and
-Editorial/Transport now run on one Hero Sequence. Visual must preserve the
-complete Hero audio projection. Editorial must preserve the Foundation
-Track-owned audio anchor and the complete visual projection while adding AAC
-placements only to deterministic pristine Tracks. Its Overwrite, targeted
-Split, Ripple Delete, and multi-Track Insert consume typed product outcomes;
-scrub, settled seek, and play complete exact Frame Presentation Tickets through
-the production Preview Runtime. The Headless Adapter attempts GPU execution
-first and records an explicit CPU Raster fallback when a valid effect cannot
-execute on GPU. Proxy/offline/relink, H.264/HEVC delivery, the Recovery/Nesting
-parent plus child, and file-backed HLG/Alpha roundtrip still use five focused
-diagnostic Sequences. The number of execution slices is not a Sequence-count
-invariant because Recovery/Nesting intentionally owns two. Complete acceptance
-remains blocked until those obligations join Hero.
+reusable stages over this driver. Foundation Audio, Visual Authoring,
+Editorial/Transport, and Generated Delivery now run on one Hero Sequence.
+Visual must preserve the complete Hero audio projection. Editorial must
+preserve the Foundation Track-owned audio anchor and the complete visual
+projection while adding AAC placements only to deterministic pristine Tracks.
+Its Overwrite, targeted Split, Ripple Delete, and multi-Track Insert consume
+typed product outcomes; scrub, settled seek, and play complete exact Frame
+Presentation Tickets through the production Preview Runtime. Delivery must
+preserve every earlier scoped author projection, reuse the Foundation PCM
+placement, and author its Solid Color/Trim/Transform/Opacity through typed
+product Interfaces in a nonzero Work Area. After durable reopen it runs the
+production Preview, audio Program Runtime, export queue, output validator,
+media import worker, preview decoder, and bounded audio source reader. The
+Headless Adapter attempts GPU execution first and records an explicit CPU
+Raster fallback when a valid effect cannot execute on GPU. Proxy/offline/relink,
+the Recovery/Nesting parent plus child, and file-backed HLG/Alpha roundtrip
+still use four focused diagnostic Sequences. The number of execution slices is
+not a Sequence-count invariant because Recovery/Nesting intentionally owns two.
+Complete acceptance remains blocked until those obligations join Hero.
 
 Heavy media and GPU execution runs in the dedicated `mondrian-golden` process
 entrypoint, never on a short-lived libtest worker. A terminal top-level report
@@ -355,9 +360,9 @@ through the product recovery Action, and compares parent/child author hashes
 and deterministic execution evidence. The recovered Session must remain dirty
 and the recovery archive authoritative until a covering manual save atomically
 retires it. A final composed reopen must preserve the fixed Project binding,
-the five Sequences present at the Recovery boundary, earlier stage content,
+the four Sequences present at the Recovery boundary, earlier stage content,
 relinked Asset intent, and both typed reimport profiles. The later Color Media
-stage extends that invariant to six Sequences and retains its file-backed
+stage extends that invariant to five Sequences and retains its file-backed
 Track/Clip identities. Earlier eight-Sequence supervised runs remain diagnostic
 history only; new consecutive acceptance runs cannot begin until all primary
 stages share the Hero identity. Qualified release-machine capture and

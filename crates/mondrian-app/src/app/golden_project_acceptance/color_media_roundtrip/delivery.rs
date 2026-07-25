@@ -1,6 +1,6 @@
 //! Production export, strict probe, reimport, and sampled roundtrip evidence.
 
-use super::media_execution::{decode_media, rgba8_at, source_rgba};
+use super::super::media_execution::{decode_media, rgba8_at, source_rgba};
 use super::{EXPORT_TIMEOUT, PREVIEW_RESOLUTION};
 use crate::app::golden_project_acceptance::builtin_preset;
 use crate::app::golden_project_acceptance::fixture::sha256_file;

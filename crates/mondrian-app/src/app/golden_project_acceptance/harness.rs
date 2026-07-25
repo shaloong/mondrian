@@ -7,7 +7,7 @@ use anyhow::{ensure, Context};
 use mondrian_core::{ExecutionTerminalDisposition, JobId, ProjectId, SequenceId};
 use mondrian_editor_state::{Action, AuthoringSessionId};
 use mondrian_export::preset::{ExportPreset, TimelineExportRange};
-use mondrian_export::queue::{ExportJobSnapshot, JobStatus};
+use mondrian_export::queue::{ExportJobDiagnostics, ExportJobSnapshot, JobStatus};
 use serde::{Serialize, Serializer};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -71,6 +71,7 @@ pub(super) struct CompletedExportEvidence {
     pub(super) generation: u64,
     pub(super) executed: bool,
     pub(super) terminal_disposition: ExecutionTerminalDisposition,
+    pub(super) diagnostics: ExportJobDiagnostics,
     pub(super) output_path: PathBuf,
 }
 
@@ -385,6 +386,7 @@ pub(super) fn execute_export_job(
         generation: snapshot.generation,
         executed: snapshot.executed,
         terminal_disposition: terminal.disposition,
+        diagnostics: snapshot.diagnostics,
         output_path,
     })
 }

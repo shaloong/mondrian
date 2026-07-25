@@ -93,6 +93,12 @@ pub(super) fn sha256_file(path: &Path) -> anyhow::Result<String> {
     Ok(hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
+pub(super) fn sha256_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 pub(super) fn resolve_fixture(
     root: &Path,
     fixture_root: &Path,

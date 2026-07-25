@@ -13,6 +13,7 @@ mod foundation_audio;
 mod generated_delivery;
 mod harness;
 mod headless_preview;
+mod media_execution;
 mod plan;
 mod proxy_relink;
 mod recovery_nesting;
@@ -611,7 +612,7 @@ fn golden_acceptance_plan_rejects_obligations_isolated_from_the_hero_sequence() 
     assert!(plan.missing.content.is_empty());
     assert!(plan.missing.exports.is_empty());
     assert!(plan.hero_missing.fixture_roles.contains("hlg-main10-picture"));
-    assert!(plan.hero_missing.operations.contains("export"));
+    assert!(!plan.hero_missing.operations.contains("export"));
     assert!(!plan.hero_missing.fixture_roles.contains("aac-audio"));
     for operation in [
         "play",
@@ -622,6 +623,12 @@ fn golden_acceptance_plan_rejects_obligations_isolated_from_the_hero_sequence() 
         "ripple",
         "split",
     ] {
+        assert!(
+            !plan.hero_missing.operations.contains(operation),
+            "{operation} must be assigned to the Hero Sequence"
+        );
+    }
+    for operation in ["trim", "export", "reimport"] {
         assert!(
             !plan.hero_missing.operations.contains(operation),
             "{operation} must be assigned to the Hero Sequence"
@@ -641,8 +648,14 @@ fn golden_acceptance_plan_rejects_obligations_isolated_from_the_hero_sequence() 
             "{content} must be assigned to the Hero Sequence"
         );
     }
+    for content in ["transform", "opacity"] {
+        assert!(
+            !plan.hero_missing.content.contains(content),
+            "{content} must be assigned to the Hero Sequence"
+        );
+    }
     assert!(plan.hero_missing.content.contains("nested-sequence"));
-    assert!(plan.hero_missing.exports.contains("hevc-main10"));
+    assert!(plan.hero_missing.exports.is_empty());
     assert!(plan.unassigned_required_fixture_roles.is_empty());
     assert_eq!(plan.slices.len(), 7);
 

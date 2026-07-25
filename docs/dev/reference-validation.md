@@ -11,7 +11,7 @@ control exists.
   purposes. Fixed files pin bytes globally; generated files pin the recipe and
   are byte-pinned by each run.
 - `tests/validation/golden-project.json` defines the five-minute editing and
-  export workflow. Contract identity `windows-alpha-golden-v8` uses closed
+  export workflow. Contract identity `windows-alpha-golden-v9` uses closed
   schema v4 and fixes exact Hero Sequence raster/timing/color/audio
   values, fixture-role purposes, stable built-in delivery preset identities,
   resolved profile/depth/chroma/range/Alpha expectations, and independently
@@ -75,7 +75,7 @@ cannot satisfy a color golden even when it carries valid CICP tags.
 
 An execution slice is intentionally narrower than the complete Golden Project.
 It passes only if its exact required fixture roles, operations, and content have
-typed postcondition evidence. Golden v8 rejects unknown fields; requirement IDs
+typed postcondition evidence. Golden v9 rejects unknown fields; requirement IDs
 select evidence obligations but cannot substitute for observed author, media,
 delivery, or persistence facts.
 Every slice report explicitly records `complete_golden_project: false`. A
@@ -115,12 +115,12 @@ cargo test -p mondrian-app --lib `
   --nocapture
 ```
 
-The v8 global ledger is structurally complete: every required fixture,
+The v9 global ledger is structurally complete: every required fixture,
 operation, content item, and export contract is assigned to one of seven
 executable slices. The Hero ledger is intentionally blocked while any of those
 obligations remains on a diagnostic Sequence. Foundation Audio, Visual
-Authoring, and Editorial/Transport are now assigned to Hero; HLG Main10 and
-sRGB Alpha remain bound to
+Authoring, Editorial/Transport, and Generated Delivery are now assigned to
+Hero; HLG Main10 and sRGB Alpha remain bound to
 deterministic project-owned recipes with run-local artifact attestations. The
 plan does not run a product Interface and always keeps
 `complete_golden_project: false`; only the coordinated Hero process described
@@ -143,24 +143,37 @@ Project/path and both Sequences survive while only Session identity changes. It
 is infrastructure evidence, not a Golden operation and therefore does not
 alter the coverage ledger.
 
-After the canonical PCM and AAC fixtures are available, verify that all three
-Hero authoring stages compose without report union:
+After the canonical PCM and AAC fixtures are available, verify that all four
+Hero stages compose without report union:
 
 ```powershell
 $env:MONDRIAN_GOLDEN_FIXTURE_ROOT='target/validation/golden-fixtures'
 cargo test -p mondrian-app --lib `
-  golden_foundation_visual_and_editorial_stages_share_one_hero_sequence `
+  golden_authoring_and_delivery_stages_share_one_hero_sequence `
   -j1 -- --ignored --nocapture --test-threads=1
 ```
 
-The gate runs Foundation Audio, Visual Authoring, and Editorial/Transport on the
-same initial 7,500-frame Hero Sequence and crosses every durable reopen. It
-requires one unchanged Project ID/path and exactly one Sequence. Visual must
-leave the complete Hero audio projection unchanged. Editorial binds only two
-complete pristine audio Tracks, leaves the exact Foundation Track-owned audio
-anchor and complete visual projection unchanged, and authors the AAC workflow
-through typed product outcomes for Drop, Overwrite, targeted Split, Ripple
-Delete, and multi-Track Insert.
+The gate runs Foundation Audio, Visual Authoring, Editorial/Transport, and
+Generated Delivery on the same initial 7,500-frame Hero Sequence and crosses
+every durable reopen. It requires one unchanged Project ID/path and exactly one
+Sequence. Visual must leave the complete Hero audio projection unchanged.
+Editorial binds only two complete pristine audio Tracks, leaves the exact
+Foundation Track-owned audio anchor and complete visual projection unchanged,
+and authors the AAC workflow through typed product outcomes for Drop,
+Overwrite, targeted Split, Ripple Delete, and multi-Track Insert. Delivery
+reuses the Foundation PCM placement instead of importing a duplicate, uses the
+nonzero `150..175` Work Area, and preserves all earlier Track-owned authoring
+while it authors Trim, Transform, and Opacity.
+
+After a distinct durable reopen, Delivery renders an independent Program
+reference, exports both contracted H.264 High/AAC and HEVC Main10/AAC outputs,
+and reimports each through the product media worker. It compares selected
+decoded pixels against the Program reference and an independent Rec.709
+Transform/Opacity oracle. It also renders reference PCM through the production
+audio Program Runtime, decodes each AAC stream through the bounded production
+`AudioSourceReader`, checks channel RMS/peak tolerances and cross-codec
+agreement, and proves A/V start/end boundaries from exact stream-local
+`start_pts`, `duration_ts`, and `time_base`.
 
 Pointer-drag and settled seeks must produce exact stage-local Playback Evidence.
 Each seek and Play must also make a current output usable through the production
@@ -183,14 +196,13 @@ The script validates the contract and fixtures, builds the feature-gated
 `mondrian-golden` executable once, and requests three runs. Before executing
 heavy stages, the Rust planner requires every fixture, operation, content item,
 and export to be assigned to the Hero Sequence role. Foundation Audio, Visual
-Authoring, and Editorial/Transport already share the five-minute primary
-Sequence. Proxy/Relink, Generated Delivery, Recovery/Nesting, and Color Media
+Authoring, Editorial/Transport, and Generated Delivery already share the
+five-minute primary Sequence. Proxy/Relink, Recovery/Nesting, and Color Media
 Roundtrip remain useful focused gates, but the complete command intentionally
-fails closed until they converge. The current Hero gaps are exactly:
-HLG Main10, Rec.709 H.264, and sRGB Alpha fixtures; Trim,
-Proxy/Original, Offline/Relink, Autosave Recovery, Export, and Reimport
-operations; Transform, Opacity, and Nested Sequence content; and H.264/AAC SDR
-plus HEVC Main10 deliveries.
+fails closed until they converge. The current Hero gaps are exactly seven:
+HLG Main10, Rec.709 H.264, and sRGB Alpha fixtures; Proxy/Original Switch,
+Offline Relink, and Autosave Recovery operations; and Nested Sequence content.
+There are no remaining unbound export obligations.
 
 Once the Hero ledger is complete, the Rust coordinator accepts only the exact
 declared slice-report set, requires every slice to retain
@@ -337,29 +349,12 @@ as the M1 Golden exit gate. Foundation report schema v4 additionally records
 the fixed Project ID/path at each lifecycle checkpoint and runs as a reusable
 stage over `GoldenProductWorkflowDriver`.
 
-Run the generated-picture delivery slice during development after placing the
-generated PCM fixture under an untracked fixture root:
-
-```powershell
-pwsh -File scripts/validation/generate-golden-project-media.ps1 `
-  -OutputRoot target/validation/golden-fixtures/large
-$env:MONDRIAN_GOLDEN_FIXTURE_ROOT = "target/validation/golden-fixtures"
-cargo test -p mondrian-app --lib `
-  golden_project_generated_delivery_roundtrip_gate -j1 -- `
-  --ignored --nocapture --test-threads=1
-```
-
-This slice executes a 25-frame work area rather than pretending that generated
-color is a color reference. It proves ordinary Solid Color and PCM authoring,
-exact Trim, Transform and Opacity, H.264 High 8-bit and HEVC Main10 10-bit
-delivery, MP4 mux identity, Rec.709 CICP/range, absence of static HDR metadata,
-48 kHz Stereo AAC, production queue terminal evidence, and reimported typed
-codec/profile/pixel-format facts. It still reports a partial Golden slice:
-its result alone cannot satisfy the color, editing, recovery, or repetition
-obligations. Delivery report schema v4
-records its Project-scoped stage-Sequence creation and the implementation now
-runs over `GoldenProductWorkflowDriver`; the standalone gate is only a
-development wrapper around that reusable stage.
+Generated Delivery deliberately has no isolated-Sequence libtest wrapper.
+During development, run the combined Hero command above so its 25-frame Work
+Area must coexist with Foundation, Visual, and Editorial authoring. This keeps
+its strong codec/profile/pixel-format, Rec.709 signal, AAC, A/V boundary,
+Program-pixel, and audio-roundtrip evidence without allowing a standalone
+sample Sequence to masquerade as programme integration.
 
 Run the fixture-free visual-authoring slice on Windows:
 
@@ -489,13 +484,13 @@ plan on the qualified 16 GiB Windows reference machine and was classified
 `passed-baseline`. Its generated artifacts and evidence bundle remain
 intentionally disposable under `target`; the repository commits the recipes,
 contracts, and this reproducible result record rather than a multi-gigabyte
-machine-specific bundle. The Golden v8 contract resolves PCM, AAC, Rec.709
+machine-specific bundle. The Golden v9 contract resolves PCM, AAC, Rec.709
 H.264, HLG Main10, and sRGB Alpha fixture identities and assigns all five to
 executable slices.
-`foundation-audio-authoring-v1`, `visual-authoring-roundtrip-v1`, and
-`editorial-transport-v1` now share one Hero Sequence; `proxy-relink-v1` remains
-a real focused Headless product-workflow gate rather than a declaration-only
-check.
+`foundation-audio-authoring-v1`, `visual-authoring-roundtrip-v1`,
+`editorial-transport-v1`, and `generated-delivery-roundtrip-v1` now share one
+Hero Sequence; `proxy-relink-v1` remains a real focused Headless
+product-workflow gate rather than a declaration-only check.
 `color-media-roundtrip-v1` adds real file-backed
 color/Alpha execution, while explicitly retaining the independent absolute
 HLG/PQ/Log gap. The H.264 editorial fixture is not eligible to close

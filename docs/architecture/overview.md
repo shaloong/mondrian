@@ -101,11 +101,16 @@ Lower layers cannot depend on higher layers:
   distinct proxy identity and complete a fresh generation. The fixture proves
   codec/proxy/relink semantics only and is forbidden as independent color
   reference evidence.
-  The generated-delivery slice uses the same product Actions to create a
-  Solid Color and PCM placement, trim an exact short work area, author
-  Transform/Opacity, enqueue the stable H.264 High and HEVC Main10 presets,
-  wait for production `Completed` evidence, consume the production typed
-  output probe, and reimport both files through the ordinary media worker.
+  The generated-delivery slice shares the Hero Sequence, reuses the Foundation
+  PCM placement, and uses product Actions to create a Solid Color, trim the
+  exact nonzero `150..175` Work Area, and author Transform/Opacity. After a
+  durable reopen it enqueues the stable H.264 High and HEVC Main10 presets,
+  waits for production `Completed` evidence, consumes exact stream-local
+  PTS/duration/time-base from the typed output probe, and reimports both files
+  through the ordinary media worker. It independently samples Program Output
+  geometry/opacity, decodes the two pictures through the production Preview
+  Adapter, renders reference PCM through the audio Program Runtime, and reads
+  both AAC streams through the bounded production audio-source Adapter.
   Generated picture/audio and reports stay under `target/`; this slice closes
   only its declared obligations and cannot claim the complete Golden Project.
   The fixture-free visual-authoring slice creates two generated Solid Color
@@ -141,8 +146,9 @@ Lower layers cannot depend on higher layers:
   claim an independent absolute HLG transfer-function oracle, PQ/Log coverage,
   real-media nested color, or the complete Golden Project.
   The complete Golden coordinator runs all seven slices through one
-  `GoldenProductWorkflowDriver` and one Project, then verifies the exact eight
-  stage-owned Sequences, quiescent proxy service, relink intent, delivery
+  `GoldenProductWorkflowDriver` and one Project, then verifies the exact five
+  stage-owned Sequences (one Hero plus four diagnostic/child Sequences),
+  quiescent proxy service, relink intent, delivery
   profiles, and serialized author snapshots after a final durable reopen. Only
   this Rust coordinator may emit `complete_golden_project: true`; the external
   PowerShell supervisor validates that typed report for three distinct
