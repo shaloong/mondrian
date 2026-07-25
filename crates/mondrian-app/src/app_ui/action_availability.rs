@@ -18,18 +18,19 @@ use crate::app::ui_actions::{
     SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT,
     SEQUENCE_SWITCH_ACTIVE, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
     TIMELINE_CREATE_BASIC_TITLE, TIMELINE_CREATE_CROSS_DISSOLVE, TIMELINE_INSERT_ASSET,
-    TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
+    TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
     TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
     TIMELINE_SELECT_VIDEO_TRANSITION, TIMELINE_SET_IN_OUT_POINT,
     TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
     TIMELINE_SET_VIDEO_TRANSITION_RANGE, TIMELINE_TRIM_CLIPS,
-    TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
+    TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, TIMELINE_UNLINK_SELECTED_CLIPS,
 };
 use crate::app::AppState;
 use mondrian_core::types::ClipId;
 use mondrian_timeline::clip::Clip;
 use mondrian_timeline::sequence::Sequence;
 use mondrian_timeline::track::Track;
+use mondrian_timeline::{assess_clip_link_edit, ClipLinkEditKind, ClipLinkEditRequest};
 
 /// Whether a shell-dispatched action can produce a useful editor operation for
 /// the supplied application state snapshot.
@@ -90,14 +91,18 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         Action::Custom { namespace, name, payload }
             if namespace == TIMELINE_NAMESPACE && name == TIMELINE_SELECT_CLIP =>
         {
-            parse_payload::<TimelineSelectClipPayload>(payload).is_some_and(|payload| {
-                sequence_has_clip_in_track(
-                    state,
-                    payload.track_id,
-                    payload.is_video_track,
-                    payload.clip_id,
-                )
-            })
+            parse_payload::<TimelineSelectClipPayload>(payload)
+                .is_some_and(|payload| sequence_has_clip(state, payload.clip_id))
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == TIMELINE_NAMESPACE && name == TIMELINE_LINK_SELECTED_CLIPS =>
+        {
+            clip_link_edit_available(state, ClipLinkEditKind::Link)
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == TIMELINE_NAMESPACE && name == TIMELINE_UNLINK_SELECTED_CLIPS =>
+        {
+            clip_link_edit_available(state, ClipLinkEditKind::Unlink)
         }
         Action::Custom { namespace, name, payload }
             if namespace == TIMELINE_NAMESPACE && name == TIMELINE_SELECT_VIDEO_TRANSITION =>
@@ -374,16 +379,26 @@ fn selected_clips_are_editable(state: &AppState) -> bool {
     })
 }
 
-fn sequence_has_clip_in_track(
-    state: &AppState,
-    track_id: TrackId,
-    is_video_track: bool,
-    clip_id: ClipId,
-) -> bool {
+fn sequence_has_clip(state: &AppState, clip_id: ClipId) -> bool {
     state.active_sequence().is_some_and(|sequence| {
-        track_for_ref(sequence, track_id, is_video_track)
-            .is_some_and(|track| track.clips.iter().any(|clip| clip.id == clip_id))
+        sequence
+            .video_tracks
+            .iter()
+            .chain(&sequence.audio_tracks)
+            .flat_map(|track| &track.clips)
+            .any(|clip| clip.id == clip_id)
     })
+}
+
+fn clip_link_edit_available(state: &AppState, kind: ClipLinkEditKind) -> bool {
+    let Some(sequence) = state.active_sequence() else {
+        return false;
+    };
+    let request = ClipLinkEditRequest::new(
+        kind,
+        state.selection.selected_clips.iter().map(|selection| selection.clip_id),
+    );
+    assess_clip_link_edit(sequence, &request).is_ok_and(|assessment| assessment.would_change)
 }
 
 fn sequence_has_track(state: &AppState, track_id: TrackId, is_video_track: bool) -> bool {
@@ -680,9 +695,8 @@ mod tests {
 
         for action in [
             timeline_select_clip_action(TimelineSelectClipPayload {
-                track_id,
-                is_video_track: true,
                 clip_id,
+                mode: crate::app::ui_actions::TimelineClipSelectionModePayload::Replace,
             }),
             timeline_move_clip_action(TimelineMoveClipPayload {
                 target_track_id: track_id,
@@ -734,9 +748,8 @@ mod tests {
 
         for action in [
             timeline_select_clip_action(TimelineSelectClipPayload {
-                track_id: stale_track,
-                is_video_track: true,
                 clip_id: stale_clip,
+                mode: crate::app::ui_actions::TimelineClipSelectionModePayload::Replace,
             }),
             timeline_move_clip_action(TimelineMoveClipPayload {
                 target_track_id: stale_track,

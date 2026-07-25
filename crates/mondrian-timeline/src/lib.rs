@@ -11,6 +11,7 @@
 
 pub mod audio;
 pub mod clip;
+pub mod clip_linking;
 pub mod insert_edit;
 pub mod keyframe;
 pub mod sequence;
@@ -19,6 +20,10 @@ pub mod video_transition;
 
 pub use audio::*;
 pub use clip::{ActiveClip, Clip, ClipKind};
+pub use clip_linking::{
+    apply_clip_link_edit, assess_clip_link_edit, clip_selection_unit, ClipLinkEditAssessment,
+    ClipLinkEditError, ClipLinkEditKind, ClipLinkEditOutcome, ClipLinkEditRequest,
+};
 pub use insert_edit::{
     apply_insert_edit, InsertAutomationPolicy, InsertEditError, InsertEditOutcome,
     InsertEditPlacement, InsertEditRequest, InsertSplitOutcome, InsertTimelineStatePolicy,

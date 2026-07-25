@@ -323,6 +323,16 @@ breaks the synchronization promise, affected fragments leave the group rather
 than retaining a misleading relationship. Singleton groups are compacted after
 structural edits and rejected at the persisted boundary.
 
+Explicit Link/Unlink uses the `clip_linking` Module and stable Clip IDs. Its
+Interface assesses the group-expanded request without mutation and applies it
+to a cloned Sequence before replacing live author state. Linking an existing
+group with unlinked Clips retains that group's identity; merging two or more
+existing groups creates a fresh identity so no input group arbitrarily becomes
+the survivor. Unlinking any member clears its complete group. A locked Track,
+stale Clip ID, insufficient new membership, or final author-validation failure
+rejects the entire operation. A request that would not change membership is
+reported as a no-op and the App must not create an Author Transaction for it.
+
 ### Insert Edit
 
 Professional Insert is a single `InsertEditRequest`, not a collision mode.

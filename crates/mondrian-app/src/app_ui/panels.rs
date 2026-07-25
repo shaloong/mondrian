@@ -19,8 +19,8 @@ use mondrian_core::automation::{
 use mondrian_core::display_labels::color_space_label;
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::types::{
-    AssetId, AudioComponentEditId, AudioSourceComponentId, ClipId, ColorSpace, EffectId, JobId,
-    KeyframeId, Rational, SequenceId, TrackId, VideoTransitionId,
+    AssetId, AudioComponentEditId, AudioSourceComponentId, ClipId, ClipLinkGroupId, ColorSpace,
+    EffectId, JobId, KeyframeId, Rational, SequenceId, TrackId, VideoTransitionId,
 };
 use mondrian_core::{
     Color, FrameRounding, TimeScale, TimelineDisplayContract, TimelineDisplayFormat, TimelineTime,
@@ -68,12 +68,13 @@ use mondrian_ui_widgets::{
     NodeGraphEdge, NodeGraphNode, NodeGraphView, PanelList, PanelListItem, PropertyPanel,
     PropertyPanelOptions, PropertyRow, PropertySection, RasterImage, ScrollView, Slider, TextInput,
     TimelineAssetDrop, TimelineClip, TimelineClipKind, TimelineClipMove, TimelineClipRef,
-    TimelineClipTrim, TimelineCutRef, TimelineEditCommand, TimelineInOutPoint, TimelineSeek,
-    TimelineSeekSource as WidgetTimelineSeekSource, TimelineToolbarIconSlot, TimelineTrack,
-    TimelineTrackControl, TimelineTrackControlIconSlot, TimelineTrackMove, TimelineTrackRef,
-    TimelineTransition, TimelineTransitionRef, TimelineTransitionResize, TimelineTrimEdge,
-    TimelineView, VideoScopesSurface, VideoScopesTextureSet, ViewerCanvasBackground, ViewerControl,
-    ViewerFrameContent, ViewerStatusTone, ViewerSurface, WaveformDisplay,
+    TimelineClipSelectionMode, TimelineClipTrim, TimelineCutRef, TimelineEditCommand,
+    TimelineInOutPoint, TimelineSeek, TimelineSeekSource as WidgetTimelineSeekSource,
+    TimelineToolbarIconSlot, TimelineTrack, TimelineTrackControl, TimelineTrackControlIconSlot,
+    TimelineTrackMove, TimelineTrackRef, TimelineTransition, TimelineTransitionRef,
+    TimelineTransitionResize, TimelineTrimEdge, TimelineView, VideoScopesSurface,
+    VideoScopesTextureSet, ViewerCanvasBackground, ViewerControl, ViewerFrameContent,
+    ViewerStatusTone, ViewerSurface, WaveformDisplay,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -101,13 +102,14 @@ use crate::app::ui_actions::{
     inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
     inspector_set_effect_enabled_action, inspector_set_effect_property_action,
     timeline_add_track_action, timeline_clear_in_out_points_action,
-    timeline_create_cross_dissolve_action, timeline_drop_asset_action, timeline_move_clip_action,
-    timeline_move_track_action, timeline_open_nested_sequence_action,
-    timeline_roll_selected_cut_to_playhead_action, timeline_seek_with_source_action,
-    timeline_select_clip_action, timeline_select_video_transition_action,
-    timeline_set_in_out_point_action, timeline_set_selected_clips_enabled_action,
-    timeline_set_track_control_action, timeline_set_video_transition_range_action,
-    timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
+    timeline_create_cross_dissolve_action, timeline_drop_asset_action,
+    timeline_link_selected_clips_action, timeline_move_clip_action, timeline_move_track_action,
+    timeline_open_nested_sequence_action, timeline_roll_selected_cut_to_playhead_action,
+    timeline_seek_with_source_action, timeline_select_clip_action,
+    timeline_select_video_transition_action, timeline_set_in_out_point_action,
+    timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
+    timeline_set_video_transition_range_action, timeline_trim_clips_action,
+    timeline_trim_selected_clips_to_playhead_action, timeline_unlink_selected_clips_action,
     viewer_set_preview_resolution_scale_action, viewer_set_zoom_scale_action,
     AppShellInputColorPipelineDiagnostics, AppShellInterpretAssetDialogPayload,
     AppShellRelinkAssetDialogPayload, AppShellRelocatePanelPayload,
@@ -128,10 +130,10 @@ use crate::app::ui_actions::{
     InspectorSetClipPropertyPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-    TimelineCreateCrossDissolvePayload, TimelineDropAssetPayload, TimelineInOutPointPayloadKind,
-    TimelineMoveClipPayload, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
-    TimelineSeekSource as AppTimelineSeekSource, TimelineSelectClipPayload,
-    TimelineSelectVideoTransitionPayload, TimelineSetInOutPointPayload,
+    TimelineClipSelectionModePayload, TimelineCreateCrossDissolvePayload, TimelineDropAssetPayload,
+    TimelineInOutPointPayloadKind, TimelineMoveClipPayload, TimelineMoveTrackPayload,
+    TimelineOpenNestedSequencePayload, TimelineSeekSource as AppTimelineSeekSource,
+    TimelineSelectClipPayload, TimelineSelectVideoTransitionPayload, TimelineSetInOutPointPayload,
     TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
     TimelineSetVideoTransitionRangePayload, TimelineTrackControlPayloadKind,
     TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
@@ -1074,6 +1076,7 @@ impl TimelineEditAvailability {
             TimelineEditCommand::EnableSelection | TimelineEditCommand::DisableSelection => {
                 self.set_selected_enabled
             }
+            TimelineEditCommand::LinkSelection | TimelineEditCommand::UnlinkSelection => true,
             TimelineEditCommand::OpenNestedSequence(_) => true,
             TimelineEditCommand::MarkInAtPlayhead => self.mark_in,
             TimelineEditCommand::MarkOutAtPlayhead => self.mark_out,
@@ -1136,6 +1139,16 @@ impl TimelinePanelModel {
         selected_transition: Option<SelectedVideoTransitionRef>,
         state: Option<&AppState>,
     ) -> Self {
+        let mut link_groups = BTreeMap::<ClipLinkGroupId, (usize, bool)>::new();
+        for track in sequence.video_tracks.iter().chain(&sequence.audio_tracks) {
+            for clip in &track.clips {
+                if let Some(group) = clip.link_group {
+                    let entry = link_groups.entry(group).or_insert((0, true));
+                    entry.0 += 1;
+                    entry.1 &= !track.is_locked;
+                }
+            }
+        }
         let video_tracks = sequence.video_tracks.iter().enumerate().rev().map(|(index, track)| {
             let label = format!("V{}", index + 1);
             let mut projection = timeline_track_projection_from_sequence_track(
@@ -1145,6 +1158,7 @@ impl TimelinePanelModel {
                 selected_clips,
                 selected_tracks,
                 library,
+                &link_groups,
             );
             projection.track.label = label;
             let transition_views = timeline_transition_views_for_track(
@@ -1176,6 +1190,7 @@ impl TimelinePanelModel {
                 selected_clips,
                 selected_tracks,
                 library,
+                &link_groups,
             );
             projection.track.label = format!("A{}", index + 1);
             (
@@ -1276,14 +1291,22 @@ impl TimelinePanelModel {
         self.edit_availability.is_none_or(|availability| availability.allows(command))
     }
 
-    fn clip_identity(&self, clip_ref: TimelineClipRef) -> Option<TimelineSelectClipPayload> {
-        let track = *self.track_refs.get(clip_ref.track_index)?;
-        let clip_id = *self.clip_refs.get(clip_ref.track_index)?.get(clip_ref.clip_index)?;
-        Some(TimelineSelectClipPayload {
-            track_id: track.track_id,
-            is_video_track: track.is_video_track,
-            clip_id,
-        })
+    fn clip_identity(
+        &self,
+        clip_ref: TimelineClipRef,
+        mode: TimelineClipSelectionMode,
+    ) -> Option<TimelineSelectClipPayload> {
+        let clip_id = self.clip_id(clip_ref)?;
+        let mode = match mode {
+            TimelineClipSelectionMode::Replace => TimelineClipSelectionModePayload::Replace,
+            TimelineClipSelectionMode::Toggle => TimelineClipSelectionModePayload::Toggle,
+            TimelineClipSelectionMode::Preserve => TimelineClipSelectionModePayload::Preserve,
+        };
+        Some(TimelineSelectClipPayload { clip_id, mode })
+    }
+
+    fn clip_id(&self, clip_ref: TimelineClipRef) -> Option<ClipId> {
+        self.clip_refs.get(clip_ref.track_index)?.get(clip_ref.clip_index).copied()
     }
 
     fn transition_identity(
@@ -1402,21 +1425,22 @@ impl TimelinePanelModel {
     }
 
     fn move_payload(&self, movement: TimelineClipMove) -> Option<TimelineMoveClipPayload> {
-        let clip = self.clip_identity(movement.clip_ref)?;
+        let clip_id = self.clip_id(movement.clip_ref)?;
+        let source = *self.track_refs.get(movement.clip_ref.track_index)?;
         let target = *self.track_refs.get(movement.new_track_index)?;
-        if clip.is_video_track != target.is_video_track {
+        if source.is_video_track != target.is_video_track {
             return None;
         }
         Some(TimelineMoveClipPayload {
             target_track_id: target.track_id,
             is_video_track: target.is_video_track,
-            clip_id: clip.clip_id,
+            clip_id,
             frame: movement.new_start_frame.max(0),
         })
     }
 
     fn trim_payload(&self, trim: TimelineClipTrim) -> Option<TimelineTrimClipsPayload> {
-        let clip = self.clip_identity(trim.clip_ref)?;
+        let clip_id = self.clip_id(trim.clip_ref)?;
         let edge = match trim.edge {
             TimelineTrimEdge::In => TimelineTrimPayloadEdge::In,
             TimelineTrimEdge::Out => TimelineTrimPayloadEdge::Out,
@@ -1425,11 +1449,7 @@ impl TimelinePanelModel {
             TimelineTrimEdge::In => trim.new_start_frame,
             TimelineTrimEdge::Out => trim.new_start_frame + trim.new_duration_frames,
         };
-        Some(TimelineTrimClipsPayload {
-            clip_ids: vec![clip.clip_id],
-            edge,
-            frame: frame.max(0),
-        })
+        Some(TimelineTrimClipsPayload { clip_ids: vec![clip_id], edge, frame: frame.max(0) })
     }
 }
 
@@ -2446,6 +2466,7 @@ fn timeline_track_projection_from_sequence_track(
     selected_clips: &[SelectedClipRef],
     selected_tracks: &[TrackId],
     library: Option<&AssetLibrary>,
+    link_groups: &BTreeMap<ClipLinkGroupId, (usize, bool)>,
 ) -> TimelineTrackProjection {
     let muted = track.is_muted;
     let locked = track.is_locked;
@@ -2461,6 +2482,8 @@ fn timeline_track_projection_from_sequence_track(
             frame_rate,
             selected_clips,
             library,
+            track.is_locked,
+            link_groups,
         ) else {
             continue;
         };
@@ -2572,6 +2595,8 @@ fn timeline_clip_from_sequence_clip(
     frame_rate: Rational,
     selected_clips: &[SelectedClipRef],
     library: Option<&AssetLibrary>,
+    track_locked: bool,
+    link_groups: &BTreeMap<ClipLinkGroupId, (usize, bool)>,
 ) -> Option<TimelineClip> {
     let selected = selected_clips.iter().any(|selection| selection.clip_id == clip.id);
     let label = clip.label.clone().unwrap_or_else(|| default_clip_label(clip));
@@ -2606,6 +2631,11 @@ fn timeline_clip_from_sequence_clip(
         .selected(selected)
         .disabled(clip.is_disabled)
         .nested(clip.is_nested_sequence());
+    view.link_group_editable = !track_locked;
+    if let Some(group) = clip.link_group {
+        let (member_count, editable) = link_groups.get(&group).copied().unwrap_or((2, false));
+        view = view.linked(group, member_count, editable);
+    }
     if let Some(color) = timeline_clip_color(clip, is_video) {
         view = view.with_color(color);
     }
@@ -3779,9 +3809,9 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
         .with_in_out_points(model.in_point_frame, model.out_point_frame)
         .on_clip_select({
             let action_model = action_model.clone();
-            move |clip_ref, _clip| {
+            move |clip_ref, _clip, mode| {
                 action_model
-                    .clip_identity(clip_ref)
+                    .clip_identity(clip_ref, mode)
                     .map(timeline_select_clip_action)
                     .unwrap_or(Action::NoOp)
             }
@@ -3965,6 +3995,8 @@ fn timeline_edit_command_action(
                 enabled: false,
             })
         }
+        TimelineEditCommand::LinkSelection => timeline_link_selected_clips_action(),
+        TimelineEditCommand::UnlinkSelection => timeline_unlink_selected_clips_action(),
         TimelineEditCommand::OpenNestedSequence(clip_ref) => model
             .open_nested_payload(clip_ref)
             .map(timeline_open_nested_sequence_action)
@@ -3978,7 +4010,9 @@ fn timeline_edit_command_action(
 
 fn timeline_edit_command_shortcut_label(command: TimelineEditCommand) -> Option<String> {
     let action = match command {
-        TimelineEditCommand::OpenNestedSequence(_) => return None,
+        TimelineEditCommand::OpenNestedSequence(_)
+        | TimelineEditCommand::LinkSelection
+        | TimelineEditCommand::UnlinkSelection => return None,
         TimelineEditCommand::ClearInOutPoints => return None,
         TimelineEditCommand::TogglePlayback => return Some("Space".to_owned()),
         TimelineEditCommand::CutSelection => Action::Cut,
@@ -5934,9 +5968,8 @@ fn node_graph_clip_action(selection: Option<SelectedClipRef>) -> Action {
     selection
         .map(|selection| {
             timeline_select_clip_action(TimelineSelectClipPayload {
-                track_id: selection.track_id,
-                is_video_track: selection.is_video_track,
                 clip_id: selection.clip_id,
+                mode: TimelineClipSelectionModePayload::Replace,
             })
         })
         .unwrap_or(Action::NoOp)
@@ -8194,7 +8227,10 @@ mod tests {
     fn demo_timeline_model_carries_stable_clip_identity() {
         let model = demo_timeline_model();
         let identity = model
-            .clip_identity(TimelineClipRef { track_index: 1, clip_index: 1 })
+            .clip_identity(
+                TimelineClipRef { track_index: 1, clip_index: 1 },
+                TimelineClipSelectionMode::Replace,
+            )
             .expect("demo overlay clip identity");
         let movement = model
             .move_payload(TimelineClipMove {
@@ -8205,7 +8241,7 @@ mod tests {
             })
             .expect("demo move payload");
 
-        assert!(identity.is_video_track);
+        assert_eq!(identity.mode, TimelineClipSelectionModePayload::Replace);
         assert_eq!(movement.clip_id, identity.clip_id);
         assert_eq!(movement.frame, 120);
         assert_eq!(movement.target_track_id, model.track_refs[2].track_id);
@@ -8235,7 +8271,7 @@ mod tests {
         let model = demo_timeline_model();
         let stale_ref = TimelineClipRef { track_index: usize::MAX, clip_index: 0 };
 
-        assert!(model.clip_identity(stale_ref).is_none());
+        assert!(model.clip_identity(stale_ref, TimelineClipSelectionMode::Replace).is_none());
         assert!(model
             .move_payload(TimelineClipMove {
                 clip_ref: stale_ref,
@@ -8284,7 +8320,10 @@ mod tests {
         assert_eq!(model.tracks[track_index].clips.len(), 1);
         assert_eq!(
             model
-                .clip_identity(TimelineClipRef { track_index, clip_index: 0 })
+                .clip_identity(
+                    TimelineClipRef { track_index, clip_index: 0 },
+                    TimelineClipSelectionMode::Replace,
+                )
                 .expect("visible identity")
                 .clip_id,
             expected_id
@@ -8690,7 +8729,6 @@ mod tests {
         let mut clip = Clip::new(AssetId::new(), tt(0, tb), tt(24, tb)).expect("valid clip");
         clip.is_disabled = true;
         let clip_id = clip.id;
-        let track_id = sequence.video_tracks[0].id;
         sequence.video_tracks[0].add_clip(clip).expect("add clip");
         let display_track_index = video_display_index(&sequence, 0);
         let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
@@ -8736,9 +8774,8 @@ mod tests {
         assert_eq!(name, TIMELINE_SELECT_CLIP);
         let payload: TimelineSelectClipPayload =
             serde_json::from_value(payload.clone()).expect("select payload");
-        assert_eq!(payload.track_id, track_id);
         assert_eq!(payload.clip_id, clip_id);
-        assert!(payload.is_video_track);
+        assert_eq!(payload.mode, TimelineClipSelectionModePayload::Replace);
     }
 
     #[test]
@@ -11725,9 +11762,8 @@ mod tests {
                 assert_eq!(name, TIMELINE_SELECT_CLIP);
                 let payload: TimelineSelectClipPayload =
                     serde_json::from_value(payload).expect("timeline select payload");
-                assert_eq!(payload.track_id, selection.track_id);
-                assert!(payload.is_video_track);
                 assert_eq!(payload.clip_id, selection.clip_id);
+                assert_eq!(payload.mode, TimelineClipSelectionModePayload::Replace);
             }
             other => panic!("expected timeline select action, got {other:?}"),
         }
@@ -11841,9 +11877,8 @@ mod tests {
         assert_eq!(name, TIMELINE_SELECT_CLIP);
         let payload: TimelineSelectClipPayload =
             serde_json::from_value(payload.clone()).expect("timeline select payload");
-        assert_eq!(payload.track_id, selection.track_id);
-        assert!(!payload.is_video_track);
         assert_eq!(payload.clip_id, selection.clip_id);
+        assert_eq!(payload.mode, TimelineClipSelectionModePayload::Replace);
     }
 
     #[test]
@@ -12016,9 +12051,8 @@ mod tests {
         assert_eq!(name, TIMELINE_SELECT_CLIP);
         let payload: TimelineSelectClipPayload =
             serde_json::from_value(payload.clone()).expect("timeline select payload");
-        assert_eq!(payload.track_id, selection.track_id);
-        assert!(payload.is_video_track);
         assert_eq!(payload.clip_id, selection.clip_id);
+        assert_eq!(payload.mode, TimelineClipSelectionModePayload::Replace);
     }
 
     #[test]

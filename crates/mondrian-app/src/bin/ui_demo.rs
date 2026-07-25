@@ -1177,7 +1177,7 @@ fn demo_timeline_panel() -> TimelineView {
         ),
     ])
     .with_playhead(68)
-    .on_clip_select(|clip_ref, clip| demo_timeline_clip_action(clip_ref, &clip.label))
+    .on_clip_select(|clip_ref, clip, _mode| demo_timeline_clip_action(clip_ref, &clip.label))
     .on_clip_move(|movement, clip| {
         demo_action(&format!(
             "timeline.move.{}.{}.track{}->track{}.{}->{}.{}",

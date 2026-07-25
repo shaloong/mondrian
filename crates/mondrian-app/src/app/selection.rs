@@ -1,8 +1,20 @@
 use super::{AnimationKeyframeSelection, AnimationPropertySelection, AppState};
 use mondrian_core::automation::PropertyHost;
 use mondrian_core::types::{ClipId, EffectId, TrackId, VideoTransitionId};
-use mondrian_timeline::sequence::Sequence;
+use mondrian_timeline::{clip_selection_unit, sequence::Sequence};
 use std::collections::{HashMap, HashSet};
+
+/// UI-independent intent for selecting one complete Clip Link Group unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipSelectionMode {
+    /// Replace the current timeline selection.
+    Replace,
+    /// Add an unselected unit or remove an already-complete selected unit.
+    Toggle,
+    /// Keep the current selection when it already contains the target;
+    /// otherwise replace it.
+    Preserve,
+}
 
 /// UI-agnostic reference to a selected clip in the active sequence.
 ///
@@ -95,11 +107,64 @@ impl AppState {
     /// app state. Selecting a clip clears narrower mask and animation
     /// selections, matching desktop editor expectations.
     pub fn select_clip_by_id(&mut self, clip_id: ClipId) -> Option<SelectedClipRef> {
-        let selection = self
-            .active_sequence()
-            .and_then(|sequence| resolve_clip_selection(sequence, clip_id))?;
-        self.replace_clip_selection(vec![selection]);
-        Some(selection)
+        self.select_clip_unit_by_id(clip_id, ClipSelectionMode::Replace)
+    }
+
+    /// Select one complete Clip Link Group unit by stable Clip identity.
+    ///
+    /// A linked Clip is never left partially selected by pointer input. The
+    /// directly targeted Clip remains primary so single-target panels inspect
+    /// what the user clicked while structural commands receive the whole unit.
+    pub fn select_clip_unit_by_id(
+        &mut self,
+        clip_id: ClipId,
+        mode: ClipSelectionMode,
+    ) -> Option<SelectedClipRef> {
+        let sequence = self.active_sequence()?.clone();
+        let primary = resolve_clip_selection(&sequence, clip_id)?;
+        let unit_ids = clip_selection_unit(&sequence, clip_id)?;
+        let mut unit = unit_ids
+            .into_iter()
+            .filter_map(|member| resolve_clip_selection(&sequence, member))
+            .collect::<Vec<_>>();
+        if let Some(primary_index) = unit.iter().position(|selection| selection.clip_id == clip_id)
+        {
+            unit.swap(0, primary_index);
+        }
+
+        let current_ids = self
+            .selection
+            .selected_clips
+            .iter()
+            .map(|selection| selection.clip_id)
+            .collect::<HashSet<_>>();
+        match mode {
+            ClipSelectionMode::Replace => self.replace_clip_selection(unit),
+            ClipSelectionMode::Preserve if current_ids.contains(&clip_id) => {}
+            ClipSelectionMode::Preserve => self.replace_clip_selection(unit),
+            ClipSelectionMode::Toggle
+                if unit.iter().all(|selection| current_ids.contains(&selection.clip_id)) =>
+            {
+                let unit_ids =
+                    unit.iter().map(|selection| selection.clip_id).collect::<HashSet<_>>();
+                let retained = self
+                    .selection
+                    .selected_clips
+                    .iter()
+                    .copied()
+                    .filter(|selection| !unit_ids.contains(&selection.clip_id))
+                    .collect();
+                self.replace_clip_selection(retained);
+            }
+            ClipSelectionMode::Toggle => {
+                let mut combined = self.selection.selected_clips.clone();
+                combined.extend(
+                    unit.into_iter().filter(|selection| !current_ids.contains(&selection.clip_id)),
+                );
+                self.replace_clip_selection(combined);
+            }
+        }
+        Some(primary)
     }
 
     /// Select every clip in the active sequence in visible track order.

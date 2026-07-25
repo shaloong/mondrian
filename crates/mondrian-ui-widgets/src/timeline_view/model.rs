@@ -85,6 +85,10 @@ pub(super) struct TimelineEditCommandContext {
     pub has_out_point: bool,
     pub clip_intersects_playhead: bool,
     pub selected_clip_is_nested: bool,
+    pub selected_clip_count: usize,
+    pub selected_clip_has_link: bool,
+    pub selected_clip_links_editable: bool,
+    pub link_selection_would_change: bool,
 }
 
 pub(super) fn layout_rects(
@@ -766,6 +770,14 @@ pub(super) fn edit_command_has_local_target(
         | TimelineEditCommand::RollSelectedCutToPlayhead
         | TimelineEditCommand::EnableSelection
         | TimelineEditCommand::DisableSelection => context.selected_clip.is_some(),
+        TimelineEditCommand::LinkSelection => {
+            context.selected_clip_count >= 2
+                && context.selected_clip_links_editable
+                && context.link_selection_would_change
+        }
+        TimelineEditCommand::UnlinkSelection => {
+            context.selected_clip_has_link && context.selected_clip_links_editable
+        }
         TimelineEditCommand::OpenNestedSequence(clip_ref) => {
             context.selected_clip == Some(clip_ref) && context.selected_clip_is_nested
         }
@@ -1428,6 +1440,10 @@ mod tests {
             has_out_point: false,
             clip_intersects_playhead: false,
             selected_clip_is_nested: false,
+            selected_clip_count: 0,
+            selected_clip_has_link: false,
+            selected_clip_links_editable: false,
+            link_selection_would_change: false,
         };
 
         assert!(edit_command_has_local_target(
@@ -1494,6 +1510,33 @@ mod tests {
             TimelineEditCommand::ClearInOutPoints,
             selected_clip
         ));
+        assert!(!edit_command_has_local_target(
+            TimelineEditCommand::LinkSelection,
+            selected_clip
+        ));
+        let linked_selection = TimelineEditCommandContext {
+            selected_clip_count: 2,
+            selected_clip_has_link: true,
+            selected_clip_links_editable: true,
+            link_selection_would_change: false,
+            ..selected_clip
+        };
+        assert!(!edit_command_has_local_target(
+            TimelineEditCommand::LinkSelection,
+            linked_selection
+        ));
+        assert!(edit_command_has_local_target(
+            TimelineEditCommand::UnlinkSelection,
+            linked_selection
+        ));
+        assert!(edit_command_has_local_target(
+            TimelineEditCommand::LinkSelection,
+            TimelineEditCommandContext {
+                selected_clip_has_link: false,
+                link_selection_would_change: true,
+                ..linked_selection
+            }
+        ));
     }
 
     #[test]
@@ -1508,6 +1551,10 @@ mod tests {
             has_out_point: false,
             clip_intersects_playhead: false,
             selected_clip_is_nested: true,
+            selected_clip_count: 1,
+            selected_clip_has_link: false,
+            selected_clip_links_editable: true,
+            link_selection_would_change: false,
         };
 
         assert!(edit_command_has_local_target(

@@ -12,7 +12,7 @@ mod transition;
 use mondrian_core::types::AssetId;
 #[cfg(test)]
 use mondrian_core::types::Rational;
-use mondrian_core::{Color, TimelineDisplayContract};
+use mondrian_core::{ClipLinkGroupId, Color, TimelineDisplayContract};
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{
@@ -93,7 +93,8 @@ impl TimelineMetrics {
 }
 
 /// Action factory for clip selection.
-pub type TimelineClipAction = dyn Fn(TimelineClipRef, &TimelineClip) -> Action;
+pub type TimelineClipAction =
+    dyn Fn(TimelineClipRef, &TimelineClip, TimelineClipSelectionMode) -> Action;
 
 /// Action factory for track selection.
 pub type TimelineTrackAction = dyn Fn(TimelineTrackRef, &TimelineTrack) -> Action;
@@ -165,6 +166,17 @@ pub type TimelineInOutPointAction = dyn Fn(TimelineInOutPoint, i64) -> Action;
 pub struct TimelineClipRef {
     pub track_index: usize,
     pub clip_index: usize,
+}
+
+/// Domain-light pointer selection intent for a Clip selection unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineClipSelectionMode {
+    /// Replace the current selection.
+    Replace,
+    /// Add or remove the complete selection unit.
+    Toggle,
+    /// Keep an existing multi-selection when opening a context menu.
+    Preserve,
 }
 
 /// Stable view reference to a track inside the timeline surface.
@@ -315,6 +327,10 @@ pub enum TimelineEditCommand {
     EnableSelection,
     /// Disable the current timeline clip selection.
     DisableSelection,
+    /// Link the current Clip selection into one edit-synchronization group.
+    LinkSelection,
+    /// Remove the current Clip selection from its link groups.
+    UnlinkSelection,
     /// Open one nested sequence clip.
     OpenNestedSequence(TimelineClipRef),
     /// Mark the current playhead frame as the sequence in point.
@@ -454,6 +470,12 @@ pub struct TimelineClip {
     pub selected: bool,
     pub disabled: bool,
     pub nested: bool,
+    /// Sequence-local Clip Link Group identity, when linked.
+    pub link_group: Option<ClipLinkGroupId>,
+    /// Complete member count of `link_group`.
+    pub link_group_size: usize,
+    /// Whether every member of this Clip's selection unit is editable.
+    pub link_group_editable: bool,
     /// Audio source identity for paint-time waveform lookup.
     /// `None` for non-audio or unlinked clips.
     pub asset_id: Option<AssetId>,
@@ -481,6 +503,9 @@ impl TimelineClip {
             selected: false,
             disabled: false,
             nested: false,
+            link_group: None,
+            link_group_size: 1,
+            link_group_editable: true,
             asset_id: None,
             source_revision: 0,
             source_start_secs: 0.0,
@@ -505,6 +530,14 @@ impl TimelineClip {
     /// Mark this clip as selected.
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    /// Attach Sequence-local link-group presentation metadata.
+    pub fn linked(mut self, group: ClipLinkGroupId, member_count: usize, editable: bool) -> Self {
+        self.link_group = Some(group);
+        self.link_group_size = member_count.max(2);
+        self.link_group_editable = editable;
         self
     }
 
@@ -1035,7 +1068,7 @@ impl TimelineView {
     /// Set a dynamic clip-selection action factory.
     pub fn on_clip_select(
         mut self,
-        action: impl Fn(TimelineClipRef, &TimelineClip) -> Action + 'static,
+        action: impl Fn(TimelineClipRef, &TimelineClip, TimelineClipSelectionMode) -> Action + 'static,
     ) -> Self {
         self.on_clip_select = Some(Box::new(action));
         self
@@ -2154,17 +2187,20 @@ impl TimelineView {
     fn select_clip_from_input(
         &mut self,
         clip_ref: TimelineClipRef,
+        mode: TimelineClipSelectionMode,
         ctx: &mut EventContext,
     ) -> EventResult {
         self.selected_track = None;
         self.selected_clip = Some(clip_ref);
         self.selected_transition = None;
         if let Some(clip) = self.clip(clip_ref) {
-            if let Some(action) = clip.select_action.clone() {
-                (ctx.dispatch)(action);
+            if mode == TimelineClipSelectionMode::Replace {
+                if let Some(action) = clip.select_action.clone() {
+                    (ctx.dispatch)(action);
+                }
             }
             if let Some(factory) = &self.on_clip_select {
-                (ctx.dispatch)(factory(clip_ref, clip));
+                (ctx.dispatch)(factory(clip_ref, clip, mode));
             }
         }
         ctx.request_repaint();
@@ -2702,10 +2738,22 @@ impl TimelineView {
     }
 
     fn edit_command_available_from_host(&self, command: TimelineEditCommand) -> bool {
+        if matches!(
+            command,
+            TimelineEditCommand::LinkSelection | TimelineEditCommand::UnlinkSelection
+        ) {
+            return true;
+        }
         self.on_edit_command_available.as_ref().is_none_or(|factory| factory(command))
     }
 
     fn edit_command_context(&self) -> timeline_model::TimelineEditCommandContext {
+        let (
+            selected_clip_count,
+            selected_clip_has_link,
+            selected_clip_links_editable,
+            link_selection_would_change,
+        ) = self.selected_clip_edit_context();
         timeline_model::TimelineEditCommandContext {
             selected_clip: self.selected_clip,
             selected_track: self.selected_track,
@@ -2717,7 +2765,48 @@ impl TimelineView {
                 .selected_clip
                 .and_then(|clip_ref| self.clip(clip_ref))
                 .is_some_and(|clip| clip.nested),
+            selected_clip_count,
+            selected_clip_has_link,
+            selected_clip_links_editable,
+            link_selection_would_change,
         }
+    }
+
+    fn selected_clip_edit_context(&self) -> (usize, bool, bool, bool) {
+        let selected = self
+            .tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .filter(|clip| clip.selected)
+            .collect::<Vec<_>>();
+        let pointed = self.selected_clip.and_then(|clip_ref| self.clip(clip_ref));
+        let use_pointed_unit = pointed.is_some_and(|clip| !clip.selected);
+        if use_pointed_unit || selected.is_empty() {
+            let Some(clip) = pointed else {
+                return (0, false, false, false);
+            };
+            let count = clip.link_group.map_or(1, |_| clip.link_group_size.max(2));
+            return (
+                count,
+                clip.link_group.is_some(),
+                clip.link_group_editable,
+                count >= 2 && clip.link_group.is_none(),
+            );
+        }
+
+        let count = selected.len();
+        let has_link = selected.iter().any(|clip| clip.link_group.is_some());
+        let editable = selected.iter().all(|clip| clip.link_group_editable);
+        let first_group = selected.first().and_then(|clip| clip.link_group);
+        let exactly_one_complete_group = first_group.is_some()
+            && selected.iter().all(|clip| clip.link_group == first_group)
+            && selected.first().is_some_and(|clip| clip.link_group_size == count);
+        (
+            count,
+            has_link,
+            editable,
+            count >= 2 && !exactly_one_complete_group,
+        )
     }
 
     fn track_add_action(&self, kind: TimelineTrackKind) -> Action {
@@ -2785,6 +2874,9 @@ impl TimelineView {
             MenuItem::separator(),
             self.edit_menu_item("启用剪辑", TimelineEditCommand::EnableSelection),
             self.edit_menu_item("禁用剪辑", TimelineEditCommand::DisableSelection),
+            MenuItem::separator(),
+            self.edit_menu_item("链接剪辑", TimelineEditCommand::LinkSelection),
+            self.edit_menu_item("取消链接", TimelineEditCommand::UnlinkSelection),
         ];
         if let Some(clip_ref) = self
             .selected_clip
@@ -2867,6 +2959,9 @@ impl TimelineView {
             MenuItem::separator(),
             self.edit_menu_item("启用所选", TimelineEditCommand::EnableSelection),
             self.edit_menu_item("禁用所选", TimelineEditCommand::DisableSelection),
+            MenuItem::separator(),
+            self.edit_menu_item("链接所选", TimelineEditCommand::LinkSelection),
+            self.edit_menu_item("取消链接所选", TimelineEditCommand::UnlinkSelection),
             MenuItem::separator(),
             self.edit_menu_item("标记入点", TimelineEditCommand::MarkInAtPlayhead),
             self.edit_menu_item("标记出点", TimelineEditCommand::MarkOutAtPlayhead),
@@ -4089,6 +4184,20 @@ impl TimelineView {
             ctx.encoder.draw_rect(outer, color_with_alpha(nested_color, 0.22), 1.5);
             ctx.encoder.draw_rect(inner, color_with_alpha(nested_color, 0.36), 1.5);
         }
+        if clip.link_group.is_some() && rect.width >= 30.0 && rect.height >= 20.0 {
+            let color = color_with_alpha(colors.foreground, if selected { 0.82 } else { 0.58 });
+            let y = rect.y + rect.height - 7.0;
+            let left = rect.x + rect.width - 17.0;
+            let right = left + 6.0;
+            ctx.encoder.draw_rect(Rect::new(left, y - 2.0, 7.0, 4.0), color, 2.0);
+            ctx.encoder.draw_rect(Rect::new(right, y - 2.0, 7.0, 4.0), color, 2.0);
+            ctx.encoder.draw_line(
+                Point::new(left + 5.0, y),
+                Point::new(right + 2.0, y),
+                1.5,
+                fill,
+            );
+        }
         let text_width = rect.width - 20.0;
         let text_clip = rect.inset(6.0, 2.0);
         if text_width > 1.0 && text_clip.width > 1.0 && text_clip.height > 1.0 {
@@ -4554,7 +4663,15 @@ impl Widget for TimelineView {
                     );
                 }
                 if let Some(clip_ref) = self.hit_clip(*position) {
-                    let _ = self.select_clip_from_input(clip_ref, ctx);
+                    let mode =
+                        self.clip(clip_ref).map_or(TimelineClipSelectionMode::Replace, |clip| {
+                            if clip.selected {
+                                TimelineClipSelectionMode::Preserve
+                            } else {
+                                TimelineClipSelectionMode::Replace
+                            }
+                        });
+                    let _ = self.select_clip_from_input(clip_ref, mode, ctx);
                     return self.open_context_menu(*position, self.clip_context_menu_items(), ctx);
                 }
                 if let Some(track_ref) = self.track_header_at(*position) {
@@ -4571,7 +4688,7 @@ impl Widget for TimelineView {
                     );
                 }
             }
-            UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
+            UiEvent::MouseDown { position, button: MouseButton::Left, modifiers } => {
                 if !self.bounds.contains(*position) {
                     return EventResult::Ignored;
                 }
@@ -4722,7 +4839,15 @@ impl Widget for TimelineView {
                     if self.active_tool == TimelineTool::Blade {
                         return self.split_at_pointer_frame(*position, ctx);
                     }
-                    let result = self.select_clip_from_input(clip_ref, ctx);
+                    let mode = if modifiers.ctrl || modifiers.meta {
+                        TimelineClipSelectionMode::Toggle
+                    } else {
+                        TimelineClipSelectionMode::Replace
+                    };
+                    let result = self.select_clip_from_input(clip_ref, mode, ctx);
+                    if mode == TimelineClipSelectionMode::Toggle {
+                        return result;
+                    }
                     if let Some(edge) = self.hit_clip_edge(clip_ref, *position) {
                         self.start_trim_drag(clip_ref, edge);
                     } else {
@@ -5271,7 +5396,7 @@ mod tests {
     fn clicking_clip_selects_and_dispatches_static_and_dynamic_actions() {
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
-        let mut view = timeline().on_clip_select(|clip_ref, _clip| {
+        let mut view = timeline().on_clip_select(|clip_ref, _clip, _mode| {
             if clip_ref.track_index == 0 && clip_ref.clip_index == 0 {
                 Action::CloseProject
             } else {
@@ -5311,6 +5436,50 @@ mod tests {
             &[Action::SaveProject, Action::CloseProject]
         );
         assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn control_click_emits_toggle_selection_without_starting_a_drag() {
+        let actions = RefCell::new(Vec::new());
+        let modes = Rc::new(RefCell::new(Vec::new()));
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let recorded_modes = Rc::clone(&modes);
+        let mut view = timeline().on_clip_select(move |_clip_ref, _clip, mode| {
+            recorded_modes.borrow_mut().push(mode);
+            Action::Copy
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        assert_eq!(
+            view.event(
+                &UiEvent::MouseDown {
+                    position: timeline_content_point(108.0, 42.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::ctrl(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(
+            modes.borrow().as_slice(),
+            &[TimelineClipSelectionMode::Toggle]
+        );
+        assert_eq!(actions.borrow().as_slice(), &[Action::Copy]);
+        assert!(view.clip_drag.is_none());
+        assert!(view.trim_drag.is_none());
     }
 
     #[test]
@@ -8025,6 +8194,9 @@ mod tests {
                 TimelineEditCommand::RollSelectedCutToPlayhead => Action::SaveProject,
                 TimelineEditCommand::EnableSelection => Action::Play,
                 TimelineEditCommand::DisableSelection => Action::Pause,
+                TimelineEditCommand::LinkSelection | TimelineEditCommand::UnlinkSelection => {
+                    Action::NoOp
+                }
                 TimelineEditCommand::OpenNestedSequence(_) => Action::NoOp,
                 TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
                 TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
@@ -8147,6 +8319,9 @@ mod tests {
             TimelineEditCommand::RollSelectedCutToPlayhead => Action::SaveProject,
             TimelineEditCommand::EnableSelection => Action::Play,
             TimelineEditCommand::DisableSelection => Action::Pause,
+            TimelineEditCommand::LinkSelection | TimelineEditCommand::UnlinkSelection => {
+                Action::NoOp
+            }
             TimelineEditCommand::OpenNestedSequence(_) => Action::NoOp,
             TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
             TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
@@ -8238,6 +8413,9 @@ mod tests {
             TimelineEditCommand::RollSelectedCutToPlayhead => Action::SaveProject,
             TimelineEditCommand::EnableSelection => Action::Play,
             TimelineEditCommand::DisableSelection => Action::Pause,
+            TimelineEditCommand::LinkSelection | TimelineEditCommand::UnlinkSelection => {
+                Action::NoOp
+            }
             TimelineEditCommand::OpenNestedSequence(_) => Action::NoOp,
             TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
             TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,

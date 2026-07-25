@@ -34,6 +34,10 @@ pub const TIMELINE_NAMESPACE: &str = "ui.timeline";
 
 /// Action name for selecting a timeline clip.
 pub const TIMELINE_SELECT_CLIP: &str = "select_clip";
+/// Action name for linking the current Clip selection.
+pub const TIMELINE_LINK_SELECTED_CLIPS: &str = "link_selected_clips";
+/// Action name for unlinking the current Clip selection.
+pub const TIMELINE_UNLINK_SELECTED_CLIPS: &str = "unlink_selected_clips";
 /// Action name for selecting a visual Transition.
 pub const TIMELINE_SELECT_VIDEO_TRANSITION: &str = "select_video_transition";
 /// Action name for creating the product-default Cross Dissolve at an edit.
@@ -417,13 +421,22 @@ pub enum TimelineTrimPayloadEdge {
 
 /// Select a clip in the active sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TimelineClipSelectionModePayload {
+    /// Replace the current Clip selection.
+    Replace,
+    /// Toggle the complete Clip selection unit.
+    Toggle,
+    /// Preserve an existing multi-selection for a context command.
+    Preserve,
+}
+
+/// Select a clip in the active sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineSelectClipPayload {
-    /// Track that owns the selected clip.
-    pub track_id: TrackId,
-    /// Whether `track_id` is a video track rather than an audio track.
-    pub is_video_track: bool,
     /// Clip selected by the UI.
     pub clip_id: ClipId,
+    /// Selection-set operation requested by the input Adapter.
+    pub mode: TimelineClipSelectionModePayload,
 }
 
 /// Select one visual Transition in the active Sequence.
@@ -1265,6 +1278,16 @@ pub enum SequenceSettingsTabPayload {
 /// Build an action that selects a clip in the active timeline.
 pub fn timeline_select_clip_action(payload: TimelineSelectClipPayload) -> Action {
     custom_timeline_action(TIMELINE_SELECT_CLIP, payload)
+}
+
+/// Build an action that links the current Clip selection.
+pub fn timeline_link_selected_clips_action() -> Action {
+    custom_timeline_action(TIMELINE_LINK_SELECTED_CLIPS, ())
+}
+
+/// Build an action that unlinks the current Clip selection.
+pub fn timeline_unlink_selected_clips_action() -> Action {
+    custom_timeline_action(TIMELINE_UNLINK_SELECTED_CLIPS, ())
 }
 
 /// Build an action that selects a visual Transition.

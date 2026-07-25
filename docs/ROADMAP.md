@@ -422,7 +422,7 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 ### 编辑手感的最低闭环
 
 - [ ] 巩固 Select、Cut、Move、Trim、Ripple、Roll、Slip、Slide、Insert、Overwrite、Delete 和 snapping 的 UI 可发现性与边界反馈。
-- [ ] 补齐 Lift/Extract、显式 Link/Unlink、Track Targeting；链接片段与锁定/静音/可见状态行为一致。
+- [ ] 补齐 Lift/Extract、显式 Link/Unlink、Track Targeting；链接片段与锁定/静音/可见状态行为一致。显式 Link/Unlink 现已闭合 Sequence-local 集合语义、完整组扩展、多组 fresh-ID 合并、单组 identity 保留、跨轨锁原子拒绝、稳定 ID 选择、Ctrl/Cmd 多选、右键保留选择、单次 Undo/Redo、上下文菜单可发现性与链接标记；仍须完成 Lift/Extract、Track Targeting/Sync-Lock 产品控制，以及 mute/visibility 与链接编辑的完整交互矩阵，因此本项不提前勾选。
 - [ ] 实现可交付的 speed、reverse、freeze frame；复杂 time remap 可延后，但持久化格式现在必须可扩展。
 - [ ] 视频 Transition 作者模型、共享 Preview/Export CPU 执行、产品命令、基础时间线 UI 与 GPU lowering 已闭合：强端点、同轨非重叠、unclamped 双源 demand、媒体/嵌套范围准入、默认拒绝、显式缩短与单次 Undo 均有测试；App 选择只保存稳定 Transition ID；精确相邻且未锁定的视频 cut 可创建约 1 秒居中 Cross Dissolve，Overlay 优先于 Clip 命中，可选择、普通 Delete、拖动两侧范围并显示当前 handle 失败诊断，Ripple Delete 不误用于转场。ID 与视图投影成对产生，预览拖动不修改作者模型，释放时只提交一个类型化事务。Viewer GPU 执行图以普通 Source 为唯一输入准备结构，Cross Dissolve 两端各自完成颜色、变换、透明度与效果后，由专用 working-linear pass 做 coverage-correct 插值；真实 wgpu readback 已逐通道对照 Export/CPU 共用公式，并有独立执行证据。`visual-authoring-roundtrip-v1` 已通过产品创建、单事务、Undo/Redo、保存重开以及 Headless Preview/Export 系数一致性，现与 Foundation Audio 共存于同一 Hero Sequence；但仍只使用无限 handle 的生成源。仍须用真实媒体/嵌套端点、代理/原片和独立视觉 reference 完成扩展验收。绝不读取片段外错误帧或隐式重复边界帧。
 

@@ -224,6 +224,18 @@ right-clicking an exact adjacent unlocked video cut exposes the default Cross
 Dissolve command. Resize preview never mutates the supplied model and commits
 exactly once on pointer release.
 
+Clip pointer selection carries an explicit `Replace`, `Toggle`, or `Preserve`
+intent with one stable Clip ID. The App—not the Widget—resolves current Track
+membership and expands a Clip Link Group into one selection unit. Normal click
+replaces, Ctrl/Cmd-click toggles the complete unit without starting a drag, and
+right-click preserves an existing multi-selection. The directly clicked Clip
+stays primary for single-target panels. Timeline projection includes typed link
+identity, complete member count, and group-wide lock availability so the Widget
+can render a link indicator and disable Link/Unlink menu entries without
+reinterpreting author membership. The semantic Action is selection-scoped; the
+App resolves current stable IDs again, applies one domain edit, and commits one
+Undo step only when membership actually changes.
+
 Targeted Split and global Razor are separate product intents. A targeted Split
 names one stable `ClipId` and returns one typed `SplitClipOutcome`: the requested
 left/right identity mapping plus every synchronized link-group member mapping.

@@ -152,7 +152,8 @@ use proxy_generation::{
     ProxyGenerationService,
 };
 pub use selection::{
-    SelectedClipRef, SelectedEffectRef, SelectedTrackRef, SelectedVideoTransitionRef,
+    ClipSelectionMode, SelectedClipRef, SelectedEffectRef, SelectedTrackRef,
+    SelectedVideoTransitionRef,
 };
 use timeline_editing::*;
 pub use video_transitions::{

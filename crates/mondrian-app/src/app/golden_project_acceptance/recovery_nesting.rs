@@ -648,9 +648,8 @@ pub(super) fn execute_recovery_nesting_stage(
         "recovery/nesting source Clip did not occupy the exact Hero slice window"
     );
     state.dispatch_action(timeline_select_clip_action(TimelineSelectClipPayload {
-        track_id: video_track_id,
-        is_video_track: true,
         clip_id: source_clip_id,
+        mode: crate::app::ui_actions::TimelineClipSelectionModePayload::Replace,
     }))?;
     let ((replacement_clip_id, nested_sequence_id), precompose_step) =
         super::harness::project_author_transition(

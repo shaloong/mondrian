@@ -9,7 +9,7 @@ use crate::app::preview_quality::normalize_preview_resolution_scale;
 use crate::app::proxy_generation::{
     resolve_app_state_proxy_color_contract, ProxyGenerationOrigin, ProxyGenerationRequestOutcome,
 };
-use crate::app::selection::resolve_track_selection;
+use crate::app::selection::{resolve_clip_selection, resolve_track_selection};
 use crate::app::timeline_editing::{
     clip_link_group_member_ids, find_clip, find_clip_mut, find_clip_track_lock, set_clip_disabled,
 };
@@ -31,11 +31,11 @@ use crate::app::ui_actions::{
     InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
     ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
     ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
-    TimelineAddTrackKind, TimelineAddTrackPayload, TimelineCreateCrossDissolvePayload,
-    TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineInsertAssetPayload,
-    TimelineMoveClipPayload, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
-    TimelinePrecomposeSelectionPayload, TimelineSeekPayload, TimelineSelectClipPayload,
-    TimelineSelectVideoTransitionPayload, TimelineSetInOutPointPayload,
+    TimelineAddTrackKind, TimelineAddTrackPayload, TimelineClipSelectionModePayload,
+    TimelineCreateCrossDissolvePayload, TimelineDropAssetPayload, TimelineInOutPointPayloadKind,
+    TimelineInsertAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
+    TimelineOpenNestedSequencePayload, TimelinePrecomposeSelectionPayload, TimelineSeekPayload,
+    TimelineSelectClipPayload, TimelineSelectVideoTransitionPayload, TimelineSetInOutPointPayload,
     TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
     TimelineSetVideoTransitionRangePayload, TimelineTrackControlPayloadKind,
     TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
@@ -57,16 +57,16 @@ use crate::app::ui_actions::{
     SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE,
     SEQUENCE_UPDATE_SETTINGS, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
     TIMELINE_CREATE_BASIC_TITLE, TIMELINE_CREATE_CROSS_DISSOLVE, TIMELINE_DROP_ASSET,
-    TIMELINE_INSERT_ASSET, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
-    TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_PRECOMPOSE_SELECTION,
+    TIMELINE_INSERT_ASSET, TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK,
+    TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_PRECOMPOSE_SELECTION,
     TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
     TIMELINE_SELECT_VIDEO_TRANSITION, TIMELINE_SET_IN_OUT_POINT,
     TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
     TIMELINE_SET_VIDEO_TRANSITION_RANGE, TIMELINE_TRIM_CLIPS,
-    TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, VIEWER_NAMESPACE, VIEWER_SET_CLIP_TRANSFORM,
-    VIEWER_SET_PREVIEW_RESOLUTION_SCALE,
+    TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, TIMELINE_UNLINK_SELECTED_CLIPS, VIEWER_NAMESPACE,
+    VIEWER_SET_CLIP_TRANSFORM, VIEWER_SET_PREVIEW_RESOLUTION_SCALE,
 };
-use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, SelectedClipRef};
+use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, ClipSelectionMode, SelectedClipRef};
 use glam::Vec2;
 use mondrian_assets::library::FolderRecord;
 use mondrian_assets::{AssetKind, AssetLibrary};
@@ -78,6 +78,9 @@ use mondrian_core::types::{AudioComponentEditId, ClipId, EffectId, FramePosition
 use mondrian_core::{FrameRounding, MondrianError, Result, TimelineTime};
 use mondrian_timeline::audio::AudioComponentSource;
 use mondrian_timeline::clip::{Clip, Transform2D, TrimEdge};
+use mondrian_timeline::{
+    apply_clip_link_edit, assess_clip_link_edit, ClipLinkEditKind, ClipLinkEditRequest,
+};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -1162,7 +1165,20 @@ impl AppState {
                     name,
                     payload,
                 )?;
-                self.select_clip_for_action("timeline_select_clip", payload.clip_id)
+                let mode = match payload.mode {
+                    TimelineClipSelectionModePayload::Replace => ClipSelectionMode::Replace,
+                    TimelineClipSelectionModePayload::Toggle => ClipSelectionMode::Toggle,
+                    TimelineClipSelectionModePayload::Preserve => ClipSelectionMode::Preserve,
+                };
+                self.select_clip_unit_by_id(payload.clip_id, mode)
+                    .map(|_| ())
+                    .ok_or_else(|| missing_clip_error("timeline_select_clip", payload.clip_id))
+            }
+            TIMELINE_LINK_SELECTED_CLIPS => {
+                self.edit_selected_clip_links_from_ui(ClipLinkEditKind::Link)
+            }
+            TIMELINE_UNLINK_SELECTED_CLIPS => {
+                self.edit_selected_clip_links_from_ui(ClipLinkEditKind::Unlink)
             }
             TIMELINE_SELECT_VIDEO_TRANSITION => {
                 let payload = parse_ui_payload::<TimelineSelectVideoTransitionPayload>(
@@ -2173,6 +2189,76 @@ impl AppState {
         clip_ids
     }
 
+    fn edit_selected_clip_links_from_ui(&mut self, kind: ClipLinkEditKind) -> Result<()> {
+        let clip_ids = self.selected_clip_ids_for_timeline_action();
+        let primary_clip_id = self.selected_clips().first().map(|selection| selection.clip_id);
+        let request = ClipLinkEditRequest::new(kind, clip_ids);
+        let assessment = self
+            .active_sequence()
+            .ok_or_else(|| missing_sequence_error("timeline_edit_clip_links"))
+            .and_then(|sequence| {
+                assess_clip_link_edit(sequence, &request).map_err(|error| {
+                    MondrianError::WorkflowStepFailed {
+                        step_id: "timeline_edit_clip_links".to_owned(),
+                        reason: error.to_string(),
+                    }
+                })
+            })?;
+        if !assessment.would_change {
+            return Err(MondrianError::ActionNotExecuted {
+                action: match kind {
+                    ClipLinkEditKind::Link => "link_selected_clips",
+                    ClipLinkEditKind::Unlink => "unlink_selected_clips",
+                }
+                .to_owned(),
+                reason: "当前选择不会改变 Clip Link Group".to_owned(),
+            });
+        }
+
+        let description = match kind {
+            ClipLinkEditKind::Link => "链接剪辑",
+            ClipLinkEditKind::Unlink => "取消链接剪辑",
+        };
+        let outcome = self.commit_active_sequence_edit(description, |sequence| {
+            apply_clip_link_edit(sequence, &request).map_err(|error| {
+                MondrianError::WorkflowStepFailed {
+                    step_id: "timeline_edit_clip_links".to_owned(),
+                    reason: error.to_string(),
+                }
+            })
+        })?;
+        let sequence_id = self
+            .active_sequence_id()
+            .ok_or_else(|| missing_sequence_error("timeline_edit_clip_links"))?;
+        let mut selections = self
+            .active_sequence()
+            .map(|sequence| {
+                outcome
+                    .affected_clip_ids
+                    .iter()
+                    .filter_map(|clip_id| resolve_clip_selection(sequence, *clip_id))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if let Some(primary_clip_id) = primary_clip_id {
+            if let Some(index) =
+                selections.iter().position(|selection| selection.clip_id == primary_clip_id)
+            {
+                selections.swap(0, index);
+            }
+        }
+        self.replace_clip_selection(selections);
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+        self.set_status_hint(
+            match kind {
+                ClipLinkEditKind::Link => "已链接所选剪辑",
+                ClipLinkEditKind::Unlink => "已取消所选剪辑链接",
+            },
+            false,
+        );
+        Ok(())
+    }
+
     fn precompose_selection_from_ui(
         &mut self,
         payload: TimelinePrecomposeSelectionPayload,
@@ -3041,35 +3127,36 @@ mod tests {
         sequence_return_to_parent_action, sequence_set_active_default_action,
         sequence_switch_active_action, sequence_update_settings_action, timeline_add_track_action,
         timeline_clear_in_out_points_action, timeline_create_basic_title_action,
-        timeline_drop_asset_action, timeline_insert_asset_action, timeline_move_clip_action,
-        timeline_move_track_action, timeline_open_nested_sequence_action,
-        timeline_roll_selected_cut_to_playhead_action, timeline_seek_action,
-        timeline_seek_with_source_action, timeline_select_clip_action,
+        timeline_drop_asset_action, timeline_insert_asset_action,
+        timeline_link_selected_clips_action, timeline_move_clip_action, timeline_move_track_action,
+        timeline_open_nested_sequence_action, timeline_roll_selected_cut_to_playhead_action,
+        timeline_seek_action, timeline_seek_with_source_action, timeline_select_clip_action,
         timeline_set_in_out_point_action, timeline_set_selected_clips_enabled_action,
         timeline_set_track_control_action, timeline_trim_clips_action,
-        timeline_trim_selected_clips_to_playhead_action, viewer_set_clip_transform_action,
-        viewer_set_preview_resolution_scale_action, AssetsCreateAssetPayload,
-        AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
-        AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
-        AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsPrepareDragPayload,
-        AssetsRebindAudioComponentPayload, AssetsRefreshAudioComponentsPayload,
-        AssetsRelinkAssetPayload, AssetsRenameAssetPayload, AssetsRenameFolderPayload,
-        AssetsSetInterpretationPayload, AssetsSetProxyModePayload, EffectsAddToClipPayload,
-        ExportDraftUpdatePayload, ExportEnqueuePayload, ExportJobTargetPayload,
-        InspectorAudioComponentEditField, InspectorAudioComponentSourcePayload,
-        InspectorClipRefPayload, InspectorClipTransformField, InspectorCurveEditPayload,
-        InspectorCurvePointPayload, InspectorEditClipCurvePayload, InspectorRemoveEffectPayload,
-        InspectorSelectEffectPayload, InspectorSetAudioComponentEditFieldPayload,
-        InspectorSetAudioComponentSourcePayload, InspectorSetClipEnabledPayload,
-        InspectorSetClipOpacityPayload, InspectorSetClipPropertyPayload,
-        InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
-        InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
-        ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
-        ProjectUpdateColorEnvironmentPayload, ProjectUpdateNewSequenceDefaultsPayload,
-        SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineAddTrackKind,
-        TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineInOutPointPayloadKind,
-        TimelineInsertAssetPayload, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
-        TimelineSeekSource, TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
+        timeline_trim_selected_clips_to_playhead_action, timeline_unlink_selected_clips_action,
+        viewer_set_clip_transform_action, viewer_set_preview_resolution_scale_action,
+        AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
+        AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload, AssetsImportFilesPayload,
+        AssetsMoveAssetPayload, AssetsMoveFolderPayload, AssetsMoveSelectionPayload,
+        AssetsPrepareDragPayload, AssetsRebindAudioComponentPayload,
+        AssetsRefreshAudioComponentsPayload, AssetsRelinkAssetPayload, AssetsRenameAssetPayload,
+        AssetsRenameFolderPayload, AssetsSetInterpretationPayload, AssetsSetProxyModePayload,
+        EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
+        ExportJobTargetPayload, InspectorAudioComponentEditField,
+        InspectorAudioComponentSourcePayload, InspectorClipRefPayload, InspectorClipTransformField,
+        InspectorCurveEditPayload, InspectorCurvePointPayload, InspectorEditClipCurvePayload,
+        InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
+        InspectorSetAudioComponentEditFieldPayload, InspectorSetAudioComponentSourcePayload,
+        InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+        InspectorSetClipPropertyPayload, InspectorSetClipTintPayload,
+        InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+        InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
+        ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
+        ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload,
+        SequenceUpdateSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
+        TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineInsertAssetPayload,
+        TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload, TimelineSeekSource,
+        TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
         TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
         TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
         ViewerSetClipTransformPayload, ViewerSetPreviewResolutionScalePayload,
@@ -3454,9 +3541,8 @@ mod tests {
 
         state
             .dispatch_action(timeline_select_clip_action(TimelineSelectClipPayload {
-                track_id,
-                is_video_track: true,
                 clip_id,
+                mode: TimelineClipSelectionModePayload::Replace,
             }))
             .expect("dispatch select");
 
@@ -3469,7 +3555,6 @@ mod tests {
     #[test]
     fn dispatch_timeline_ui_selects_clip_by_authoritative_clip_id() {
         let (mut state, track_id, clip_id) = state_with_two_video_tracks();
-        let stale_track_id = state.active_sequence().expect("sequence").video_tracks[1].id;
         state.selection.selected_mask = Some((MaskId::new(), clip_id, track_id));
         let property = opacity_property_selection(&state, clip_id);
         let keyframe = opacity_keyframe_selection(
@@ -3482,9 +3567,8 @@ mod tests {
 
         state
             .dispatch_action(timeline_select_clip_action(TimelineSelectClipPayload {
-                track_id: stale_track_id,
-                is_video_track: false,
                 clip_id,
+                mode: TimelineClipSelectionModePayload::Replace,
             }))
             .expect("dispatch select");
 
@@ -3495,6 +3579,91 @@ mod tests {
         assert!(state.selection.selected_mask.is_none());
         assert!(state.animation_selection.active_property.is_none());
         assert!(state.animation_selection.selected_keyframes.is_empty());
+    }
+
+    #[test]
+    fn timeline_link_actions_are_group_aware_and_one_undo_step() {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("links");
+        let tb = sequence.time_base();
+        let first = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("first Clip");
+        let first_id = first.id;
+        let second = Clip::new(AssetId::new(), tt(10, tb), tt(10, tb)).expect("second Clip");
+        let second_id = second.id;
+        sequence.video_tracks[0].add_clip(first).expect("add first");
+        sequence.video_tracks[1].add_clip(second).expect("add second");
+        state.test_set_sequence(Some(sequence));
+
+        state
+            .dispatch_action(timeline_select_clip_action(TimelineSelectClipPayload {
+                clip_id: first_id,
+                mode: TimelineClipSelectionModePayload::Replace,
+            }))
+            .expect("select first");
+        state
+            .dispatch_action(timeline_select_clip_action(TimelineSelectClipPayload {
+                clip_id: second_id,
+                mode: TimelineClipSelectionModePayload::Toggle,
+            }))
+            .expect("add second");
+        assert_eq!(state.selected_clips().len(), 2);
+
+        state
+            .dispatch_action(timeline_link_selected_clips_action())
+            .expect("link selection");
+        let linked_group = state
+            .active_sequence()
+            .expect("sequence")
+            .video_tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .find(|clip| clip.id == first_id)
+            .and_then(|clip| clip.link_group)
+            .expect("link group");
+        assert!(state
+            .active_sequence()
+            .expect("sequence")
+            .video_tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .filter(|clip| clip.id == first_id || clip.id == second_id)
+            .all(|clip| clip.link_group == Some(linked_group)));
+
+        state.clear_selection();
+        state
+            .dispatch_action(timeline_select_clip_action(TimelineSelectClipPayload {
+                clip_id: second_id,
+                mode: TimelineClipSelectionModePayload::Replace,
+            }))
+            .expect("select linked member");
+        assert_eq!(
+            state
+                .selected_clips()
+                .iter()
+                .map(|selection| selection.clip_id)
+                .collect::<Vec<_>>(),
+            vec![second_id, first_id]
+        );
+
+        assert!(state.undo_timeline().expect("undo link"));
+        assert!(state
+            .active_sequence()
+            .expect("sequence")
+            .video_tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .all(|clip| clip.link_group.is_none()));
+        assert!(state.redo_timeline().expect("redo link"));
+        state
+            .dispatch_action(timeline_unlink_selected_clips_action())
+            .expect("unlink selection");
+        assert!(state
+            .active_sequence()
+            .expect("sequence")
+            .video_tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .all(|clip| clip.link_group.is_none()));
     }
 
     #[test]
