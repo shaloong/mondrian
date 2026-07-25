@@ -319,7 +319,8 @@ process-local Session, preserving Project, path, active Sequence, and saved
 revision. Foundation Audio, Editorial/Transport, Proxy/Relink, Generated
 Delivery, Visual Authoring, Recovery/Nesting, and Color Media Roundtrip are
 reusable stages over this driver. Foundation Audio, Visual Authoring,
-Editorial/Transport, and Generated Delivery now run on one Hero Sequence.
+Editorial/Transport, Generated Delivery, and Recovery/Nesting now run on one
+Hero Sequence.
 Visual must preserve the complete Hero audio projection. Editorial must
 preserve the Foundation Track-owned audio anchor and the complete visual
 projection while adding AAC placements only to deterministic pristine Tracks.
@@ -332,11 +333,15 @@ product Interfaces in a nonzero Work Area. After durable reopen it runs the
 production Preview, audio Program Runtime, export queue, output validator,
 media import worker, preview decoder, and bounded audio source reader. The
 Headless Adapter attempts GPU execution first and records an explicit CPU
-Raster fallback when a valid effect cannot execute on GPU. Proxy/offline/relink,
-the Recovery/Nesting parent plus child, and file-backed HLG/Alpha roundtrip
-still use four focused diagnostic Sequences. The number of execution slices is
-not a Sequence-count invariant because Recovery/Nesting intentionally owns two.
-Complete acceptance remains blocked until those obligations join Hero.
+Raster fallback when a valid effect cannot execute on GPU. Recovery/Nesting
+adds a dedicated Hero Track in the exact `175..200` window, keeps Hero as its
+primary identity, and owns one auxiliary Nested Composition child. Its
+Autosave recovery and covering manual reopen must preserve the complete Hero
+parent, child, and every earlier scoped anchor. Proxy/offline/relink and the
+file-backed HLG/Alpha roundtrip still use two focused diagnostic Sequences.
+The number of execution slices is not a Sequence-count invariant because a
+Hero slice may own a strongly referenced child. Complete acceptance remains
+blocked until the remaining diagnostic obligations join Hero.
 
 Heavy media and GPU execution runs in the dedicated `mondrian-golden` process
 entrypoint, never on a short-lived libtest worker. A terminal top-level report
@@ -352,17 +357,18 @@ entrypoint after an MSVC/LLVM incremental-link failure; build success must come
 from deterministic non-incremental code generation within the 16 GiB evidence
 machine's bounded peak-memory envelope.
 
-The Recovery/Nesting stage is fixture-independent. It selects a generated Clip
-through the Timeline Action boundary, dispatches one Precompose Action, and
-requires exactly one Project author transaction. It then executes recursive
-Preview and Export frames, publishes an autosave, closes the Session, recovers
-through the product recovery Action, and compares parent/child author hashes
-and deterministic execution evidence. The recovered Session must remain dirty
-and the recovery archive authoritative until a covering manual save atomically
+The Recovery/Nesting stage is fixture-independent. It adds one stage-owned Hero
+Track, trims a generated Clip to `175..200` through the Timeline Action
+boundary, dispatches one Precompose Action, and requires exactly one Project
+author transaction. It then executes recursive Preview and Export frames,
+publishes an autosave, closes the Session, recovers through the product
+recovery Action, and compares complete Hero parent/child author hashes and
+deterministic execution evidence. The recovered Session must remain dirty and
+the recovery archive authoritative until a covering manual save atomically
 retires it. A final composed reopen must preserve the fixed Project binding,
-the four Sequences present at the Recovery boundary, earlier stage content,
+the three Sequences present at the Recovery boundary, earlier stage content,
 relinked Asset intent, and both typed reimport profiles. The later Color Media
-stage extends that invariant to five Sequences and retains its file-backed
+stage extends that invariant to four Sequences and retains its file-backed
 Track/Clip identities. Earlier eight-Sequence supervised runs remain diagnostic
 history only; new consecutive acceptance runs cannot begin until all primary
 stages share the Hero identity. Qualified release-machine capture and

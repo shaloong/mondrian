@@ -25,14 +25,18 @@ use crate::app::preview_timeline_execution::{
 use crate::app::preview_unavailability::{PreviewOutputStage, PreviewUnavailability};
 use crate::app::ui_actions::{
     assets_create_solid_color_action, project_recover_from_autosave_action,
-    timeline_drop_asset_action, timeline_precompose_selection_action, timeline_select_clip_action,
-    AssetsCreateAssetPayload, ProjectRecoverFromAutosavePayload, TimelineDropAssetPayload,
-    TimelinePrecomposeSelectionPayload, TimelineSelectClipPayload,
+    timeline_add_track_action, timeline_drop_asset_action, timeline_precompose_selection_action,
+    timeline_select_clip_action, timeline_trim_clips_action, AssetsCreateAssetPayload,
+    ProjectRecoverFromAutosavePayload, TimelineAddTrackKind, TimelineAddTrackPayload,
+    TimelineDropAssetPayload, TimelinePrecomposeSelectionPayload, TimelineSelectClipPayload,
+    TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
 };
 use crate::app::{discover_crash_recovery_candidates, AppState};
 use anyhow::{ensure, Context};
 use mondrian_assets::AssetKind;
-use mondrian_core::{ClipId, Resolution, SequenceId, TrackId};
+use mondrian_core::{
+    AssetId, ClipId, FramePosition, Resolution, SequenceId, TimelineTime, TrackId,
+};
 use mondrian_export::preset::TimelineExportRange;
 use mondrian_playback::PreviewResolutionScale;
 use mondrian_renderer::{
@@ -75,17 +79,29 @@ pub(super) struct GoldenRecoveryNestingReport {
     execution_after_save_reopen: NestedExecutionEvidence,
 }
 
+impl GoldenRecoveryNestingReport {
+    pub(super) fn primary_sequence_id(&self) -> SequenceId {
+        self.setup.stage.sequence_id()
+    }
+
+    pub(super) fn nested_sequence_id(&self) -> SequenceId {
+        self.setup.nested_sequence_id
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct RecoveryNestingSetupEvidence {
     project_path: PathBuf,
     stage: GoldenSequenceStageEvidence,
-    solid_asset_id: String,
-    video_track_id: String,
-    source_clip_id: String,
-    replacement_clip_id: String,
-    nested_sequence_id: String,
+    solid_asset_id: AssetId,
+    video_track_id: TrackId,
+    source_clip_id: ClipId,
+    replacement_clip_id: ClipId,
+    nested_sequence_id: SequenceId,
     evaluation_frame: i64,
+    add_video_track: AuthorTransitionEvidence,
     drop_step: AuthorTransitionEvidence,
+    trim_to_window: AuthorTransitionEvidence,
 }
 
 #[derive(Debug, Serialize)]
@@ -139,11 +155,14 @@ impl ContentEvidence {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct NestedAuthorEvidence {
-    parent_sequence_id: String,
+    parent_sequence_id: SequenceId,
     parent_revision: u64,
     parent_sha256: String,
-    replacement_clip_id: String,
-    nested_sequence_id: String,
+    parent_track_id: TrackId,
+    replacement_clip_id: ClipId,
+    replacement_position: TimelineTime,
+    replacement_duration: TimelineTime,
+    nested_sequence_id: SequenceId,
     nested_sequence_name: String,
     nested_revision: u64,
     nested_sha256: String,
@@ -244,47 +263,65 @@ fn new_video_clip_after(
 fn nested_author_evidence(
     state: &AppState,
     parent_sequence_id: SequenceId,
+    parent_track_id: TrackId,
     replacement_clip_id: ClipId,
     nested_sequence_id: SequenceId,
+    expected_position: TimelineTime,
+    expected_duration: TimelineTime,
 ) -> anyhow::Result<NestedAuthorEvidence> {
     let parent = state.sequence_by_id(parent_sequence_id).context("parent Sequence is absent")?;
-    let replacement = parent
+    let parent_track = parent
         .video_tracks
         .iter()
-        .flat_map(|track| &track.clips)
+        .find(|track| track.id == parent_track_id)
+        .context("recovery/nesting parent Track is absent")?;
+    let replacement = parent_track
+        .clips
+        .iter()
         .find(|clip| clip.id == replacement_clip_id)
         .context("nested replacement Clip is absent")?;
     ensure!(
         replacement.nested_sequence_id() == Some(nested_sequence_id),
         "replacement Clip no longer targets the expected nested Sequence"
     );
+    ensure!(
+        replacement.position == expected_position
+            && replacement.duration == expected_duration
+            && replacement.source_in == TimelineTime::ZERO
+            && replacement.source_out == expected_duration,
+        "nested replacement Clip left its exact Hero slice window"
+    );
     let nested = state.sequence_by_id(nested_sequence_id).context("nested Sequence is absent")?;
     ensure!(
         nested.role == SequenceRole::NestedComposition,
         "precompose created a non-nested Sequence role"
     );
-    let nested_video_clip_count =
-        nested.video_tracks.iter().map(|track| track.clips.len()).sum::<usize>();
+    let nested_video_clips =
+        nested.video_tracks.iter().flat_map(|track| &track.clips).collect::<Vec<_>>();
+    let nested_video_clip_count = nested_video_clips.len();
     let nested_audio_clip_count =
         nested.audio_tracks.iter().map(|track| track.clips.len()).sum::<usize>();
     ensure!(
         nested_video_clip_count == 1,
         "nested Sequence must retain exactly the selected generated Clip"
     );
+    let nested_video_clip =
+        nested_video_clips.first().context("nested Sequence retained no video Clip")?;
     ensure!(
-        nested
-            .video_tracks
-            .iter()
-            .flat_map(|track| &track.clips)
-            .all(|clip| clip.position == mondrian_core::TimelineTime::ZERO),
-        "precompose did not project selected content onto child-local zero"
+        nested_video_clip.position == TimelineTime::ZERO
+            && nested_video_clip.duration == expected_duration
+            && nested_video_clip.end_position()? == expected_duration,
+        "precompose did not project the exact selected window onto child-local zero"
     );
     Ok(NestedAuthorEvidence {
-        parent_sequence_id: parent.id.to_string(),
+        parent_sequence_id: parent.id,
         parent_revision: parent.revision.get(),
         parent_sha256: sha256_bytes(&serde_json::to_vec(parent)?),
-        replacement_clip_id: replacement.id.to_string(),
-        nested_sequence_id: nested.id.to_string(),
+        parent_track_id,
+        replacement_clip_id: replacement.id,
+        replacement_position: replacement.position,
+        replacement_duration: replacement.duration,
+        nested_sequence_id: nested.id,
         nested_sequence_name: nested.name.clone(),
         nested_revision: nested.revision.get(),
         nested_sha256: sha256_bytes(&serde_json::to_vec(nested)?),
@@ -462,19 +499,52 @@ pub(super) fn execute_recovery_nesting_stage(
         window.start_frame + (window.end_frame_exclusive - window.start_frame) / 2;
     let stage = workflow.bind_slice_primary_sequence(contract, RECOVERY_NESTING_SLICE_ID)?;
     let parent_sequence_id = stage.sequence_id();
+    ensure!(
+        parent_sequence_id == workflow.hero_sequence_id(),
+        "recovery/nesting did not bind the Hero Sequence"
+    );
     let project_path = workflow.project_path().to_path_buf();
     let project_id = workflow.project_id();
     let state = workflow.app_mut();
+    let sequence = state.active_sequence().context("active Sequence is absent")?;
+    let expected_position = TimelineTime::from_frame_position(FramePosition::new(
+        window.start_frame,
+        sequence.time_base(),
+    ))?;
+    let expected_end = TimelineTime::from_frame_position(FramePosition::new(
+        window.end_frame_exclusive,
+        sequence.time_base(),
+    ))?;
+    let expected_duration = expected_end.checked_sub(expected_position)?;
 
     let solid_asset_id = new_solid_asset(state)?;
-    let video_track_id =
-        state.active_sequence().context("active Sequence is absent")?.video_tracks[0].id;
-    let clips_before = state.active_sequence().context("active Sequence is absent")?.video_tracks
-        [0]
-    .clips
-    .iter()
-    .map(|clip| clip.id)
-    .collect::<BTreeSet<_>>();
+    let tracks_before = state
+        .active_sequence()
+        .context("active Sequence is absent")?
+        .video_tracks
+        .iter()
+        .map(|track| track.id)
+        .collect::<BTreeSet<_>>();
+    let add_video_track = dispatch_author_transition(
+        state,
+        "add-recovery-nesting-track",
+        timeline_add_track_action(TimelineAddTrackPayload { kind: TimelineAddTrackKind::Video }),
+    )?;
+    let created_tracks = state
+        .active_sequence()
+        .context("active Sequence is absent")?
+        .video_tracks
+        .iter()
+        .filter(|track| !tracks_before.contains(&track.id))
+        .map(|track| track.id)
+        .collect::<Vec<_>>();
+    ensure!(
+        created_tracks.len() == 1,
+        "recovery/nesting created {} Hero video Tracks instead of one",
+        created_tracks.len()
+    );
+    let video_track_id = created_tracks[0];
+    let clips_before = BTreeSet::new();
     let drop_step = dispatch_author_transition(
         state,
         "drop-recovery-nesting-solid",
@@ -486,6 +556,29 @@ pub(super) fn execute_recovery_nesting_stage(
         }),
     )?;
     let source_clip_id = new_video_clip_after(state, video_track_id, &clips_before)?;
+    let trim_to_window = dispatch_author_transition(
+        state,
+        "trim-recovery-nesting-window",
+        timeline_trim_clips_action(TimelineTrimClipsPayload {
+            clip_ids: vec![source_clip_id],
+            edge: TimelineTrimPayloadEdge::Out,
+            frame: window.end_frame_exclusive,
+        }),
+    )?;
+    let source_clip = state
+        .active_sequence()
+        .context("active Sequence is absent")?
+        .video_tracks
+        .iter()
+        .find(|track| track.id == video_track_id)
+        .and_then(|track| track.clips.iter().find(|clip| clip.id == source_clip_id))
+        .context("trimmed recovery/nesting source Clip is absent")?;
+    ensure!(
+        source_clip.position == expected_position
+            && source_clip.duration == expected_duration
+            && source_clip.end_position()? == expected_end,
+        "recovery/nesting source Clip did not occupy the exact Hero slice window"
+    );
     state.dispatch_action(timeline_select_clip_action(TimelineSelectClipPayload {
         track_id: video_track_id,
         is_video_track: true,
@@ -527,8 +620,11 @@ pub(super) fn execute_recovery_nesting_stage(
     let before_recovery_author = nested_author_evidence(
         state,
         parent_sequence_id,
+        video_track_id,
         replacement_clip_id,
         nested_sequence_id,
+        expected_position,
+        expected_duration,
     )?;
     let execution_before_recovery = execute_nested_frame(state, evaluation_frame)?;
     let before_close = author_checkpoint(state)?;
@@ -577,8 +673,11 @@ pub(super) fn execute_recovery_nesting_stage(
     let after_recovery_author = nested_author_evidence(
         workflow.app(),
         parent_sequence_id,
+        video_track_id,
         replacement_clip_id,
         nested_sequence_id,
+        expected_position,
+        expected_duration,
     )?;
     let execution_after_recovery = execute_nested_frame(workflow.app(), evaluation_frame)?;
     ensure!(
@@ -607,8 +706,11 @@ pub(super) fn execute_recovery_nesting_stage(
     let after_save_reopen_author = nested_author_evidence(
         workflow.app(),
         parent_sequence_id,
+        video_track_id,
         replacement_clip_id,
         nested_sequence_id,
+        expected_position,
+        expected_duration,
     )?;
     let execution_after_save_reopen = execute_nested_frame(workflow.app(), evaluation_frame)?;
     ensure!(
@@ -654,7 +756,7 @@ pub(super) fn execute_recovery_nesting_stage(
     )?;
 
     Ok(GoldenRecoveryNestingReport {
-        schema_version: 2,
+        schema_version: 3,
         profile: RECOVERY_NESTING_SLICE_ID,
         contract_id: contract.id.clone(),
         status: "passed",
@@ -662,13 +764,15 @@ pub(super) fn execute_recovery_nesting_stage(
         setup: RecoveryNestingSetupEvidence {
             project_path,
             stage,
-            solid_asset_id: solid_asset_id.to_string(),
-            video_track_id: video_track_id.to_string(),
-            source_clip_id: source_clip_id.to_string(),
-            replacement_clip_id: replacement_clip_id.to_string(),
-            nested_sequence_id: nested_sequence_id.to_string(),
+            solid_asset_id,
+            video_track_id,
+            source_clip_id,
+            replacement_clip_id,
+            nested_sequence_id,
             evaluation_frame,
+            add_video_track,
             drop_step,
+            trim_to_window,
         },
         operations,
         content,
@@ -731,7 +835,7 @@ fn golden_project_recovery_nesting_roundtrip_gate() -> anyhow::Result<()> {
         }
         Err(error) => {
             let failure = serde_json::json!({
-                "schema_version": 2,
+                "schema_version": 3,
                 "profile": RECOVERY_NESTING_SLICE_ID,
                 "status": "failed",
                 "complete_golden_project": false,

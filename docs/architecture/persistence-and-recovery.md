@@ -142,6 +142,17 @@ warning, not as a false claim that the irreversible Project save failed.
 Conflicts, permission failures, disk-full errors, invalid candidates, and
 failed retirement remain explicit and retryable.
 
+The fixture-free Golden Recovery/Nesting Adapter exercises this boundary on
+the shared Hero Sequence rather than a disposable recovery parent. It authors
+one dedicated Track in the exact `175..200` window, commits Precompose once,
+and treats the resulting Nested Composition Sequence as an auxiliary strong
+child while Hero remains the stage primary. Before autosave, after recovery
+into a distinct dirty Session, and after the covering manual save/reopen, it
+requires identical complete Hero/child hashes, stable typed identities,
+recursive Preview pixels, Export diagnostics, and earlier stage-owned anchors.
+This proves the normal production recovery path; it does not stand in for
+conflict UI or filesystem fault injection.
+
 The runtime directory is initially derived from the Project path and contains
 the extracted library plus recovery state:
 

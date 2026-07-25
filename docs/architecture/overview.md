@@ -125,13 +125,17 @@ Lower layers cannot depend on higher layers:
   retain the same typed semantics, raster signature, and preview pixel hash.
   This is generated regression evidence, not an external visual-quality
   reference and not proof that the complete keyframe UI is finished.
-  The fixture-free recovery/nesting slice drives the formal Timeline
-  Precompose Action, requires one Project transaction, and verifies the closed
-  parent/child Sequence graph under recursive Preview and Export execution. It
-  then publishes a versioned, hashed autosave manifest, closes the original
-  Session, recovers through the ordinary product Action, and requires identical
-  author/pixel evidence. Recovery stays dirty and authoritative until a current
-  manual save publishes an empty manifest before deleting covered archives.
+  The fixture-free recovery/nesting slice reuses the Hero Sequence, creates one
+  stage-owned video Track, trims its generated source to the exact nonoverlap
+  window `175..200`, and drives the formal Timeline Precompose Action as one
+  Project transaction. Hero remains the primary Sequence and the only new
+  Sequence is its strongly referenced nested child. Recursive Preview and
+  Export execute that graph before recovery, after opening a versioned and
+  hashed autosave through the ordinary product Action, and after a covering
+  manual save plus fresh reopen. Complete Hero parent and child hashes, stable
+  identities, earlier stage anchors, and pixel/execution evidence must match.
+  Recovery stays dirty and authoritative until a current manual save publishes
+  an empty manifest before deleting covered archives.
   This closes the generated nested/recovery obligation only; it is not evidence
   for real-media nested color, conflict UX, fault injection, or the three-run
   top-level release gate.
@@ -146,10 +150,10 @@ Lower layers cannot depend on higher layers:
   claim an independent absolute HLG transfer-function oracle, PQ/Log coverage,
   real-media nested color, or the complete Golden Project.
   The complete Golden coordinator runs all seven slices through one
-  `GoldenProductWorkflowDriver` and one Project, then verifies the exact five
-  stage-owned Sequences (one Hero plus four diagnostic/child Sequences),
-  quiescent proxy service, relink intent, delivery
-  profiles, and serialized author snapshots after a final durable reopen. Only
+  `GoldenProductWorkflowDriver` and one Project, then verifies the exact four
+  stage-owned Sequences (one Hero, one nested child, and two diagnostic
+  Sequences), quiescent proxy service, relink intent, delivery profiles, and
+  serialized author snapshots after a final durable reopen. Only
   this Rust coordinator may emit `complete_golden_project: true`; the external
   PowerShell supervisor validates that typed report for three distinct
   run/Project identities and never unions slice reports. Heavy GPU/media work

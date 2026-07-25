@@ -354,7 +354,7 @@ fn resolve_hero_sequence_id(
 
 #[test]
 #[ignore = "composed Golden stages require canonical PCM/AAC fixtures, FFmpeg encoders, and a Windows Basic Title font"]
-fn golden_authoring_and_delivery_stages_share_one_hero_sequence() -> anyhow::Result<()> {
+fn golden_authoring_delivery_and_recovery_share_one_hero_sequence() -> anyhow::Result<()> {
     let root = repository_root();
     let (contract, mut run) =
         ComposedRun::create(&root, "Windows Alpha Golden Hero Authoring", false)?;
@@ -368,11 +368,33 @@ fn golden_authoring_and_delivery_stages_share_one_hero_sequence() -> anyhow::Res
             && run.workflow.app().sequences().len() == 1,
         "focused Hero authoring gate did not retain exactly one Hero Sequence"
     );
+    let foundation_before_recovery = stages.foundation.capture_audio_anchor(run.workflow.app())?;
+    let editorial_before_recovery =
+        stages.editorial.capture_authoring_anchor(run.workflow.app())?;
+    let recovery = recovery_nesting::execute_recovery_nesting_stage(&contract, &mut run.workflow)?;
+    ensure!(
+        recovery.primary_sequence_id() == stages.sequence_id
+            && recovery.nested_sequence_id() != stages.sequence_id
+            && run.workflow.app().active_sequence_id() == Some(stages.sequence_id)
+            && run.workflow.app().sequences().len() == 2,
+        "focused Recovery/Nesting did not keep Hero primary with one nested child"
+    );
+    ensure!(
+        foundation_before_recovery == stages.foundation.capture_audio_anchor(run.workflow.app())?,
+        "focused Recovery/Nesting changed Foundation authoring"
+    );
+    ensure!(
+        editorial_before_recovery
+            == stages.editorial.capture_authoring_anchor(run.workflow.app())?,
+        "focused Recovery/Nesting changed Editorial authoring"
+    );
+    stages.visual.verify_retained_authoring(run.workflow.app())?;
+    stages.delivery.verify_retained_authoring(run.workflow.app())?;
     ensure!(
         run.workflow.project_id() == project_id
             && run.workflow.project_path() == project_path
             && run.workflow.app().project_id() == Some(project_id),
-        "composed stages changed the Golden Project binding"
+        "composed Hero stages changed the Golden Project binding"
     );
     Ok(())
 }
@@ -506,6 +528,10 @@ fn execute_complete_golden_project(
         .get_asset(proxy_relink_asset_id)?
         .context("relinked asset is absent after proxy/relink stage")?
         .path;
+    let foundation_before_recovery = hero.foundation.capture_audio_anchor(run.workflow.app())?;
+    let editorial_before_recovery = hero.editorial.capture_authoring_anchor(run.workflow.app())?;
+    let proxy_sequence_before_recovery =
+        sequence_snapshot(&run.workflow, proxy_relink_sequence_id)?;
     let before_recovery_sequence_ids = run
         .workflow
         .app()
@@ -521,7 +547,9 @@ fn execute_complete_golden_project(
         recovery_nesting::RECOVERY_NESTING_SLICE_ID,
         &recovery_nesting,
     )?;
-    let recovery_sequence_ids = run
+    let recovery_nesting_sequence_id = recovery_nesting.primary_sequence_id();
+    let nested_sequence_id = recovery_nesting.nested_sequence_id();
+    let created_recovery_sequence_ids = run
         .workflow
         .app()
         .sequences()
@@ -530,26 +558,30 @@ fn execute_complete_golden_project(
         .filter(|sequence_id| !before_recovery_sequence_ids.contains(sequence_id))
         .collect::<Vec<_>>();
     ensure!(
-        recovery_sequence_ids.len() == 2,
-        "recovery/nesting must retain one parent and one nested Sequence"
-    );
-    let recovery_nesting_sequence_id = run
-        .workflow
-        .app()
-        .active_sequence()
-        .context("recovery/nesting Sequence is absent")?
-        .id;
-    ensure!(
-        ![hero_sequence_id, proxy_relink_sequence_id].contains(&recovery_nesting_sequence_id),
-        "recovery/nesting did not create a distinct stage Sequence"
+        recovery_nesting_sequence_id == hero_sequence_id
+            && nested_sequence_id != hero_sequence_id
+            && created_recovery_sequence_ids == [nested_sequence_id]
+            && run.workflow.app().active_sequence_id() == Some(hero_sequence_id),
+        "recovery/nesting did not reuse the Hero parent and create exactly one nested child"
     );
     ensure!(
-        recovery_sequence_ids.contains(&recovery_nesting_sequence_id),
-        "recovery/nesting active parent is not owned by the stage"
+        foundation_before_recovery == hero.foundation.capture_audio_anchor(run.workflow.app())?,
+        "Recovery/Nesting changed the Foundation Track-owned audio authoring projection"
+    );
+    ensure!(
+        editorial_before_recovery == hero.editorial.capture_authoring_anchor(run.workflow.app())?,
+        "Recovery/Nesting changed the Editorial Track-owned audio authoring projection"
+    );
+    hero.visual.verify_retained_authoring(run.workflow.app())?;
+    hero.delivery.verify_retained_authoring(run.workflow.app())?;
+    ensure!(
+        sequence_snapshot(&run.workflow, proxy_relink_sequence_id)?
+            == proxy_sequence_before_recovery,
+        "Recovery/Nesting changed the Proxy/Relink diagnostic Sequence"
     );
     stage_sequence_ids.insert(
         recovery_nesting::RECOVERY_NESTING_SLICE_ID.to_owned(),
-        recovery_sequence_ids,
+        vec![hero_sequence_id, nested_sequence_id],
     );
     stage_primary_sequence_ids.insert(
         recovery_nesting::RECOVERY_NESTING_SLICE_ID.to_owned(),
@@ -577,7 +609,7 @@ fn execute_complete_golden_project(
         ![
             hero_sequence_id,
             proxy_relink_sequence_id,
-            recovery_nesting_sequence_id
+            nested_sequence_id
         ]
         .contains(&color_media_sequence_id),
         "color-media did not create a distinct stage Sequence"

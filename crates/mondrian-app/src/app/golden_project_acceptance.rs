@@ -611,7 +611,22 @@ fn golden_acceptance_plan_rejects_obligations_isolated_from_the_hero_sequence() 
     assert!(plan.missing.operations.is_empty());
     assert!(plan.missing.content.is_empty());
     assert!(plan.missing.exports.is_empty());
-    assert!(plan.hero_missing.fixture_roles.contains("hlg-main10-picture"));
+    assert_eq!(
+        plan.hero_missing.fixture_roles,
+        BTreeSet::from([
+            "hlg-main10-picture".to_owned(),
+            "rec709-h264-picture".to_owned(),
+            "srgb-alpha-still".to_owned(),
+        ])
+    );
+    assert_eq!(
+        plan.hero_missing.operations,
+        BTreeSet::from([
+            "offline-relink".to_owned(),
+            "proxy-original-switch".to_owned(),
+        ])
+    );
+    assert!(plan.hero_missing.content.is_empty());
     assert!(!plan.hero_missing.operations.contains("export"));
     assert!(!plan.hero_missing.fixture_roles.contains("aac-audio"));
     for operation in [
@@ -654,7 +669,8 @@ fn golden_acceptance_plan_rejects_obligations_isolated_from_the_hero_sequence() 
             "{content} must be assigned to the Hero Sequence"
         );
     }
-    assert!(plan.hero_missing.content.contains("nested-sequence"));
+    assert!(!plan.hero_missing.operations.contains("autosave-recovery"));
+    assert!(!plan.hero_missing.content.contains("nested-sequence"));
     assert!(plan.hero_missing.exports.is_empty());
     assert!(plan.unassigned_required_fixture_roles.is_empty());
     assert_eq!(plan.slices.len(), 7);

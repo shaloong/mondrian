@@ -190,7 +190,7 @@
     },
     {
       "id": "recovery-nesting-v1",
-      "sequence_role": "isolated-recovery-parent",
+      "sequence_role": "hero",
       "required_fixture_roles": [],
       "required_operations": [
         "autosave-recovery",
@@ -201,8 +201,8 @@
       ],
       "required_exports": [],
       "timeline_window": {
-        "start_frame": 0,
-        "end_frame_exclusive": 25
+        "start_frame": 175,
+        "end_frame_exclusive": 200
       }
     },
     {

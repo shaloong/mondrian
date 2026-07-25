@@ -119,8 +119,8 @@ The v9 global ledger is structurally complete: every required fixture,
 operation, content item, and export contract is assigned to one of seven
 executable slices. The Hero ledger is intentionally blocked while any of those
 obligations remains on a diagnostic Sequence. Foundation Audio, Visual
-Authoring, Editorial/Transport, and Generated Delivery are now assigned to
-Hero; HLG Main10 and sRGB Alpha remain bound to
+Authoring, Editorial/Transport, Generated Delivery, and Recovery/Nesting are
+now assigned to Hero; HLG Main10 and sRGB Alpha remain bound to
 deterministic project-owned recipes with run-local artifact attestations. The
 plan does not run a product Interface and always keeps
 `complete_golden_project: false`; only the coordinated Hero process described
@@ -149,14 +149,16 @@ Hero stages compose without report union:
 ```powershell
 $env:MONDRIAN_GOLDEN_FIXTURE_ROOT='target/validation/golden-fixtures'
 cargo test -p mondrian-app --lib `
-  golden_authoring_and_delivery_stages_share_one_hero_sequence `
+  golden_authoring_delivery_and_recovery_share_one_hero_sequence `
   -j1 -- --ignored --nocapture --test-threads=1
 ```
 
-The gate runs Foundation Audio, Visual Authoring, Editorial/Transport, and
-Generated Delivery on the same initial 7,500-frame Hero Sequence and crosses
-every durable reopen. It requires one unchanged Project ID/path and exactly one
-Sequence. Visual must leave the complete Hero audio projection unchanged.
+The gate runs Foundation Audio, Visual Authoring, Editorial/Transport,
+Generated Delivery, and Recovery/Nesting on the same initial 7,500-frame Hero
+Sequence and crosses every durable reopen. Before Recovery it requires one
+unchanged Project ID/path and exactly one Sequence; Recovery must retain that
+Hero primary and add exactly one nested child. Visual must leave the complete
+Hero audio projection unchanged.
 Editorial binds only two complete pristine audio Tracks, leaves the exact
 Foundation Track-owned audio anchor and complete visual projection unchanged,
 and authors the AAC workflow through typed product outcomes for Drop,
@@ -164,6 +166,9 @@ Overwrite, targeted Split, Ripple Delete, and multi-Track Insert. Delivery
 reuses the Foundation PCM placement instead of importing a duplicate, uses the
 nonzero `150..175` Work Area, and preserves all earlier Track-owned authoring
 while it authors Trim, Transform, and Opacity.
+Recovery must then preserve every earlier scoped anchor while its exact
+`175..200` parent placement, nested child, Autosave recovery, and covering
+manual reopen remain identical.
 
 After a distinct durable reopen, Delivery renders an independent Program
 reference, exports both contracted H.264 High/AAC and HEVC Main10/AAC outputs,
@@ -196,13 +201,14 @@ The script validates the contract and fixtures, builds the feature-gated
 `mondrian-golden` executable once, and requests three runs. Before executing
 heavy stages, the Rust planner requires every fixture, operation, content item,
 and export to be assigned to the Hero Sequence role. Foundation Audio, Visual
-Authoring, Editorial/Transport, and Generated Delivery already share the
-five-minute primary Sequence. Proxy/Relink, Recovery/Nesting, and Color Media
+Authoring, Editorial/Transport, Generated Delivery, and Recovery/Nesting
+already share the five-minute primary Sequence; Recovery owns one auxiliary
+nested child rather than a second primary. Proxy/Relink and Color Media
 Roundtrip remain useful focused gates, but the complete command intentionally
-fails closed until they converge. The current Hero gaps are exactly seven:
-HLG Main10, Rec.709 H.264, and sRGB Alpha fixtures; Proxy/Original Switch,
-Offline Relink, and Autosave Recovery operations; and Nested Sequence content.
-There are no remaining unbound export obligations.
+fails closed until they converge. The current Hero gaps are exactly five:
+HLG Main10, Rec.709 H.264, and sRGB Alpha fixtures plus Proxy/Original Switch
+and Offline Relink operations. There are no remaining unbound content or
+export obligations.
 
 Once the Hero ledger is complete, the Rust coordinator accepts only the exact
 declared slice-report set, requires every slice to retain
@@ -407,8 +413,11 @@ RGBA8 fallback.
 The same dirty author state is published through the production autosave
 worker. Discovery must validate manifest schema, exact child path, archive
 SHA-256, document revision, Project identity, and canonical source identity.
-The test closes the original Session and recovers only through the product
-recovery Action. Parent/child Sequence hashes, nested IDs, Preview pixels, and
+The stage keeps the initial Hero Sequence as its primary identity, adds one
+dedicated video Track, trims the generated source to the exact `175..200`
+window, and creates only one strongly referenced nested child. The test closes
+the original Session and recovers only through the product recovery Action.
+Complete Hero parent/child Sequence hashes, typed IDs, Preview pixels, and
 Export diagnostics must match; opening recovery must not retire its source.
 Only a manual save that covers current author and Asset Library revisions may
 atomically publish an empty manifest and remove the recovery archive. A final
@@ -488,9 +497,10 @@ machine-specific bundle. The Golden v9 contract resolves PCM, AAC, Rec.709
 H.264, HLG Main10, and sRGB Alpha fixture identities and assigns all five to
 executable slices.
 `foundation-audio-authoring-v1`, `visual-authoring-roundtrip-v1`,
-`editorial-transport-v1`, and `generated-delivery-roundtrip-v1` now share one
-Hero Sequence; `proxy-relink-v1` remains a real focused Headless
-product-workflow gate rather than a declaration-only check.
+`editorial-transport-v1`, `generated-delivery-roundtrip-v1`, and
+`recovery-nesting-v1` now share one Hero Sequence; Recovery adds one nested
+child while `proxy-relink-v1` remains a real focused Headless product-workflow
+gate rather than a declaration-only check.
 `color-media-roundtrip-v1` adds real file-backed
 color/Alpha execution, while explicitly retaining the independent absolute
 HLG/PQ/Log gap. The H.264 editorial fixture is not eligible to close
