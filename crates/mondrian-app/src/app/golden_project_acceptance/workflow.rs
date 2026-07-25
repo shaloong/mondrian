@@ -1,10 +1,11 @@
 //! Single-Project product workflow driver for complete Golden execution.
 //!
-//! Golden stages may use different Sequences, but they must never construct
-//! independent Projects and later union their reports. This driver owns one
-//! production `AppState` plus an immutable Project identity/path binding. Stage
-//! adapters use ordinary product actions and are checked at every lifecycle
-//! boundary.
+//! Focused Golden stages may use different diagnostic Sequences, but they must
+//! never construct independent Projects and later union their reports. Complete
+//! acceptance additionally requires every declared obligation to use one Hero
+//! Sequence identity. This driver owns one production `AppState` plus an
+//! immutable Project identity/path binding. Stage adapters use ordinary product
+//! actions and are checked at every lifecycle boundary.
 
 use super::harness::{
     author_checkpoint, durable_save_reopen, project_author_transition, AuthorCheckpoint,

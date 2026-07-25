@@ -9,7 +9,7 @@ use super::{
     sequence_settings_from_contract, visual_authoring, GoldenProjectContract,
 };
 use anyhow::{ensure, Context};
-use mondrian_core::{ProjectColorEnvironment, ProjectSettings, SequenceId};
+use mondrian_core::{FrameRounding, ProjectColorEnvironment, ProjectSettings, SequenceId};
 use mondrian_media::info::VideoCodecProfile;
 use serde::Serialize;
 use serde_json::Value;
@@ -66,7 +66,10 @@ struct GoldenExecutedStage {
 struct GoldenFinalProjectEvidence {
     project_id: mondrian_core::ProjectId,
     project_path: PathBuf,
+    hero_sequence_role: String,
+    hero_sequence_id: SequenceId,
     sequence_ids: BTreeMap<String, Vec<SequenceId>>,
+    primary_sequence_ids: BTreeMap<String, SequenceId>,
     sequence_count: usize,
     asset_count: usize,
     relinked_asset_path: PathBuf,
@@ -239,6 +242,48 @@ fn sequence_snapshot(
     Ok(serde_json::to_value(sequence)?)
 }
 
+fn sequence_content_end_frame(sequence: &mondrian_timeline::Sequence) -> anyhow::Result<i64> {
+    sequence
+        .video_tracks
+        .iter()
+        .chain(&sequence.audio_tracks)
+        .flat_map(|track| &track.clips)
+        .map(|clip| {
+            clip.end_position()?
+                .to_frame_position(sequence.settings.frame_rate, FrameRounding::Nearest)
+                .map(|position| position.frame)
+                .map_err(anyhow::Error::from)
+        })
+        .try_fold(0_i64, |end, candidate| {
+            candidate.map(|candidate| end.max(candidate))
+        })
+}
+
+fn resolve_hero_sequence_id(
+    contract: &GoldenProjectContract,
+    stage_primary_sequence_ids: &BTreeMap<String, SequenceId>,
+) -> anyhow::Result<SequenceId> {
+    let hero_sequence_ids = contract
+        .execution_slices
+        .iter()
+        .filter(|slice| slice.sequence_role == contract.hero_sequence.role)
+        .map(|slice| {
+            stage_primary_sequence_ids.get(&slice.id).copied().with_context(|| {
+                format!("Hero-assigned slice has no primary Sequence: {}", slice.id)
+            })
+        })
+        .collect::<anyhow::Result<BTreeSet<_>>>()?;
+    ensure!(
+        hero_sequence_ids.len() == 1,
+        "Hero-assigned Golden slices used {} primary Sequences instead of one",
+        hero_sequence_ids.len()
+    );
+    hero_sequence_ids
+        .first()
+        .copied()
+        .context("Golden execution produced no Hero Sequence identity")
+}
+
 #[test]
 #[ignore = "composed Golden stages require the canonical PCM fixture and Windows Basic Title font"]
 fn golden_foundation_and_visual_stages_share_one_project() -> anyhow::Result<()> {
@@ -269,10 +314,20 @@ fn execute_complete_golden_project(
         .as_millis()
         .min(u128::from(u64::MAX)) as u64;
     let started = Instant::now();
+    let execution_plan = GoldenAcceptancePlan::compile(contract);
+    ensure!(
+        execution_plan.status == GoldenAcceptancePlanStatus::Complete
+            && !execution_plan.complete_golden_project,
+        "Golden execution plan is blocked because required obligations are not all assigned to \
+         Hero Sequence role `{}`: {:?}",
+        execution_plan.hero_sequence_role,
+        execution_plan.hero_missing
+    );
     let project_id = run.workflow.project_id();
     let project_path = run.workflow.project_path().to_path_buf();
     let mut stage_reports = BTreeMap::new();
     let mut stage_sequence_ids = BTreeMap::new();
+    let mut stage_primary_sequence_ids = BTreeMap::new();
     let (foundation_sequence_id, visual_sequence_id, foundation, visual) =
         execute_foundation_and_visual(root, contract, &mut run.workflow)?;
     capture_stage(
@@ -291,9 +346,17 @@ fn execute_complete_golden_project(
         foundation_audio::FOUNDATION_SLICE_ID.to_owned(),
         vec![foundation_sequence_id],
     );
+    stage_primary_sequence_ids.insert(
+        foundation_audio::FOUNDATION_SLICE_ID.to_owned(),
+        foundation_sequence_id,
+    );
     stage_sequence_ids.insert(
         visual_authoring::VISUAL_SLICE_ID.to_owned(),
         vec![visual_sequence_id],
+    );
+    stage_primary_sequence_ids.insert(
+        visual_authoring::VISUAL_SLICE_ID.to_owned(),
+        visual_sequence_id,
     );
 
     let editorial =
@@ -313,6 +376,10 @@ fn execute_complete_golden_project(
     stage_sequence_ids.insert(
         editorial_transport::EDITORIAL_SLICE_ID.to_owned(),
         vec![editorial_sequence_id],
+    );
+    stage_primary_sequence_ids.insert(
+        editorial_transport::EDITORIAL_SLICE_ID.to_owned(),
+        editorial_sequence_id,
     );
     let proxy_relink = proxy_relink::execute_proxy_relink_stage(
         root,
@@ -344,6 +411,10 @@ fn execute_complete_golden_project(
     stage_sequence_ids.insert(
         proxy_relink::PROXY_RELINK_SLICE_ID.to_owned(),
         vec![proxy_relink_sequence_id],
+    );
+    stage_primary_sequence_ids.insert(
+        proxy_relink::PROXY_RELINK_SLICE_ID.to_owned(),
+        proxy_relink_sequence_id,
     );
     let proxy_relink_asset_id = run
         .workflow
@@ -388,6 +459,10 @@ fn execute_complete_golden_project(
     stage_sequence_ids.insert(
         generated_delivery::DELIVERY_SLICE_ID.to_owned(),
         vec![delivery_sequence_id],
+    );
+    stage_primary_sequence_ids.insert(
+        generated_delivery::DELIVERY_SLICE_ID.to_owned(),
+        delivery_sequence_id,
     );
     let before_recovery_sequence_ids = run
         .workflow
@@ -441,6 +516,10 @@ fn execute_complete_golden_project(
         recovery_nesting::RECOVERY_NESTING_SLICE_ID.to_owned(),
         recovery_sequence_ids,
     );
+    stage_primary_sequence_ids.insert(
+        recovery_nesting::RECOVERY_NESTING_SLICE_ID.to_owned(),
+        recovery_nesting_sequence_id,
+    );
     let color_media = color_media_roundtrip::execute_color_media_stage(
         root,
         contract,
@@ -475,6 +554,19 @@ fn execute_complete_golden_project(
         color_media_roundtrip::COLOR_MEDIA_SLICE_ID.to_owned(),
         vec![color_media_sequence_id],
     );
+    stage_primary_sequence_ids.insert(
+        color_media_roundtrip::COLOR_MEDIA_SLICE_ID.to_owned(),
+        color_media_sequence_id,
+    );
+    let hero_sequence_id = resolve_hero_sequence_id(contract, &stage_primary_sequence_ids)?;
+    ensure!(
+        run.workflow
+            .app()
+            .sequences()
+            .iter()
+            .any(|sequence| sequence.id == hero_sequence_id),
+        "Hero Sequence is absent before final durable reopen"
+    );
     let proxy_diagnostics = wait_for_proxy_quiescence(&mut run.workflow)?;
     let final_sequence_snapshots = run
         .workflow
@@ -483,20 +575,16 @@ fn execute_complete_golden_project(
         .iter()
         .map(|sequence| Ok((sequence.id, serde_json::to_value(sequence)?)))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let expected_sequence_id_count = stage_sequence_ids.values().map(Vec::len).sum::<usize>();
     let expected_sequence_ids = stage_sequence_ids
         .values()
         .flatten()
         .map(ToString::to_string)
         .collect::<BTreeSet<_>>();
+    let expected_sequence_id_count = expected_sequence_ids.len();
     let actual_sequence_ids = final_sequence_snapshots
         .iter()
         .map(|(sequence_id, _)| sequence_id.to_string())
         .collect::<BTreeSet<_>>();
-    ensure!(
-        expected_sequence_ids.len() == expected_sequence_id_count,
-        "Golden stages reused a Sequence identity"
-    );
     ensure!(
         actual_sequence_ids == expected_sequence_ids,
         "final Project Sequence set does not exactly match stage-owned authoring"
@@ -519,6 +607,18 @@ fn execute_complete_golden_project(
             "final durable reopen changed stage Sequence {sequence_id}"
         );
     }
+    let hero_sequence = run
+        .workflow
+        .app()
+        .sequences()
+        .iter()
+        .find(|sequence| sequence.id == hero_sequence_id)
+        .context("final durable reopen lost the Hero Sequence")?;
+    ensure!(
+        sequence_content_end_frame(hero_sequence)? == contract.hero_sequence.duration_frames,
+        "Hero Sequence content boundary does not equal the required {} frames",
+        contract.hero_sequence.duration_frames
+    );
 
     let assets = run
         .workflow
@@ -552,12 +652,6 @@ fn execute_complete_golden_project(
         "final Project library lost the reimported H.264 High or HEVC Main10 deliverable"
     );
 
-    let execution_plan = GoldenAcceptancePlan::compile(contract);
-    ensure!(
-        execution_plan.status == GoldenAcceptancePlanStatus::Complete
-            && !execution_plan.complete_golden_project,
-        "Golden execution plan is not structurally complete"
-    );
     let required_stage_ids = contract
         .execution_slices
         .iter()
@@ -601,7 +695,10 @@ fn execute_complete_golden_project(
         final_project: GoldenFinalProjectEvidence {
             project_id,
             project_path,
+            hero_sequence_role: contract.hero_sequence.role.clone(),
+            hero_sequence_id,
             sequence_ids: stage_sequence_ids,
+            primary_sequence_ids: stage_primary_sequence_ids,
             sequence_count: run.workflow.app().sequences().len(),
             asset_count: assets.len(),
             relinked_asset_path: reopened_proxy_asset.path.clone(),
@@ -674,6 +771,33 @@ fn complete_coordinator_accepts_only_partial_unique_slice_reports() -> anyhow::R
         capture_stage(&mut stages, &contract, slice_id, &overclaim).is_err(),
         "slice report was allowed to claim complete Golden status"
     );
+    Ok(())
+}
+
+#[test]
+fn complete_coordinator_requires_one_primary_hero_sequence_identity() -> anyhow::Result<()> {
+    let mut contract = load_golden_contract(&repository_root())?;
+    for slice in &mut contract.execution_slices {
+        slice.sequence_role.clone_from(&contract.hero_sequence.role);
+    }
+    let shared = SequenceId::new();
+    let mut primary_ids = contract
+        .execution_slices
+        .iter()
+        .map(|slice| (slice.id.clone(), shared))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(resolve_hero_sequence_id(&contract, &primary_ids)?, shared);
+
+    let first_slice = contract.execution_slices.first().context("Golden contract has no slices")?;
+    primary_ids.insert(first_slice.id.clone(), SequenceId::new());
+    let error = resolve_hero_sequence_id(&contract, &primary_ids)
+        .expect_err("multiple primary Hero identities must fail closed");
+    assert!(error.to_string().contains("primary Sequences instead of one"));
+
+    primary_ids.remove(&first_slice.id);
+    let error = resolve_hero_sequence_id(&contract, &primary_ids)
+        .expect_err("missing Hero primary identity must fail closed");
+    assert!(error.to_string().contains("has no primary Sequence"));
     Ok(())
 }
 

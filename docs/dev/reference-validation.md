@@ -11,12 +11,14 @@ control exists.
   purposes. Fixed files pin bytes globally; generated files pin the recipe and
   are byte-pinned by each run.
 - `tests/validation/golden-project.json` defines the five-minute editing and
-  export workflow. Contract identity `windows-alpha-golden-v5` uses closed
-  schema v3 and fixes exact Sequence raster/timing/color/audio
+  export workflow. Contract identity `windows-alpha-golden-v6` uses closed
+  schema v4 and fixes exact Hero Sequence raster/timing/color/audio
   values, fixture-role purposes, stable built-in delivery preset identities,
   resolved profile/depth/chroma/range/Alpha expectations, and independently
-  executable evidence slices. It is the source contract for a generated `.mdp`;
-  hand-written project JSON is not accepted as execution evidence.
+  executable evidence slices. Every slice declares an acceptance Sequence role;
+  global coverage and coverage on the one Hero role are compiled separately.
+  It is the source contract for a generated `.mdp`; hand-written project JSON
+  is not accepted as execution evidence.
 - `tests/validation/stress-project.json` defines the 30–60 minute workload and
   stability thresholds.
 - `tests/validation/windows-alpha-reference.json` defines the reference-machine
@@ -165,11 +167,12 @@ cargo test -p mondrian-app --lib `
 ```
 
 The gate runs Foundation Audio in the initial Sequence, creates the Visual
-Authoring Sequence through the production action, and crosses the visual
-durable reopen. It requires one unchanged Project ID/path, exactly two
-Sequences, the original PCM Clip, and the second Sequence's Transition,
-Basic Title, Primary Color, and LUT stack. It remains partial execution evidence and cannot report
-`complete_golden_project: true`.
+Authoring diagnostic Sequence through the production action, and crosses the
+visual durable reopen. It requires one unchanged Project ID/path, exactly two
+Sequences, the original PCM Clip, and the second Sequence's Transition, Basic
+Title, Primary Color, and LUT stack. It remains partial execution evidence and
+cannot report `complete_golden_project: true`; common Project identity does not
+prove that the two feature sets coexist on one program Sequence.
 
 With production FFmpeg encoders available, run the complete Golden Project
 gate:
@@ -179,21 +182,24 @@ pwsh -File scripts/validation/invoke-complete-golden-project-gate.ps1
 ```
 
 The script validates the contract and fixtures, builds the feature-gated
-`mondrian-golden` executable once, and runs it three times. Each process owns
-one real Project and executes all seven slices: Foundation Audio, Visual
-Authoring, AAC Editorial/Transport, Proxy/Relink, Generated Delivery,
-Recovery/Nesting, and Color Media Roundtrip. Recovery/Nesting owns both a
-parent and child Sequence, so the exact final author set contains eight
-Sequences rather than assuming one Sequence per slice.
+`mondrian-golden` executable once, and requests three runs. Before executing
+heavy stages, the Rust planner requires every fixture, operation, content item,
+and export to be assigned to the Hero Sequence role. The current isolated
+Foundation Audio, Visual Authoring, AAC Editorial/Transport, Proxy/Relink,
+Generated Delivery, Recovery/Nesting, and Color Media Roundtrip implementations
+remain useful focused gates, but the complete command intentionally fails
+closed until they converge on one five-minute primary Sequence.
 
-The Rust coordinator accepts only the exact declared slice-report set, requires
-every slice to retain `complete_golden_project: false`, waits for proxy work to
-quiesce, then performs one final durable reopen and compares every Sequence
-snapshot, Project identity, relink source/proxy intent, and reimported
-`H264High`/`HevcMain10` assets. It alone writes a complete report. The
-PowerShell supervisor validates three complete reports with distinct run and
-Project identities and writes a consecutive aggregate report under
-`target/validation/runs/`.
+Once the Hero ledger is complete, the Rust coordinator accepts only the exact
+declared slice-report set, requires every slice to retain
+`complete_golden_project: false`, and requires all Hero-assigned slices to
+report the same primary `SequenceId`. It waits for proxy work to quiesce,
+performs one final durable reopen, verifies the exact full-duration Hero content
+boundary, and compares every Sequence snapshot, Project identity, relink
+source/proxy intent, and reimported `H264High`/`HevcMain10` assets. It alone may
+write a complete report. The PowerShell supervisor independently verifies the
+Hero identity and may then classify three distinct run/Project identities as a
+consecutive pass under `target/validation/runs/`.
 
 Heavy GPU/media work intentionally runs on a dedicated process main lifetime,
 not a libtest worker. The terminal JSON report is the semantic completion

@@ -204,11 +204,21 @@ foreach ($entry in $manifest.entries) {
 
 $golden = Get-Content -LiteralPath $goldenPath -Raw | ConvertFrom-Json
 $stress = Get-Content -LiteralPath $stressPath -Raw | ConvertFrom-Json
-if ($golden.schema_version -ne 3) {
+if ($golden.schema_version -ne 4) {
     Add-Issue "error" "golden.schema-unsupported" "$($golden.id) has an unsupported Golden Project schema version"
 }
 if ($golden.kind -ne "golden") {
     Add-Issue "error" "golden.bad-kind" "$($golden.id) is not a Golden Project contract"
+}
+$hasGoldenHeroSequence = Has-Property $golden "hero_sequence"
+if (-not $hasGoldenHeroSequence) {
+    Add-Issue "error" "golden.hero-sequence-invalid" "Golden Project must declare one Hero Sequence contract"
+} elseif (
+    [string]::IsNullOrWhiteSpace([string]$golden.hero_sequence.role) -or
+    [int64]$golden.hero_sequence.duration_frames -ne [int64]$golden.timeline.duration_frames -or
+    $golden.hero_sequence.requires_all_obligations -ne $true
+) {
+    Add-Issue "error" "golden.hero-sequence-invalid" "Golden Project must bind every obligation to one full-duration Hero Sequence role"
 }
 if ($stress.schema_version -ne 1) {
     Add-Issue "error" "stress.schema-unsupported" "$($stress.id) has an unsupported Stress Project schema version"
@@ -262,10 +272,16 @@ if (-not (Has-Property $golden "execution_slices") -or @($golden.execution_slice
     }
     foreach ($slice in $golden.execution_slices) {
         $sliceId = [string]$slice.id
-        foreach ($field in @("required_fixture_roles", "required_operations", "required_content", "required_exports")) {
+        foreach ($field in @("sequence_role", "required_fixture_roles", "required_operations", "required_content", "required_exports")) {
             if (-not (Has-Property $slice $field)) {
                 Add-Issue "error" "golden.execution-slice-field-missing" "Golden Project slice '$sliceId' is missing '$field'"
             }
+        }
+        if (
+            -not (Has-Property $slice "sequence_role") -or
+            [string]::IsNullOrWhiteSpace([string]$slice.sequence_role)
+        ) {
+            Add-Issue "error" "golden.execution-slice-sequence-role-invalid" "Golden Project slice '$sliceId' must declare a non-empty Sequence role"
         }
         $sliceRoleNames = if (Has-Property $slice "required_fixture_roles") {
             @($slice.required_fixture_roles | ForEach-Object { [string]$_ })
@@ -306,6 +322,15 @@ if (-not (Has-Property $golden "execution_slices") -or @($golden.execution_slice
             if ($exportId -notin $exportIds) {
                 Add-Issue "error" "golden.execution-slice-export-unknown" "Golden Project slice '$sliceId' references unknown export '$exportId'"
             }
+        }
+    }
+    if ($hasGoldenHeroSequence) {
+        $heroSliceCount = @(
+            $golden.execution_slices |
+                Where-Object { [string]$_.sequence_role -eq [string]$golden.hero_sequence.role }
+        ).Count
+        if ($heroSliceCount -eq 0) {
+            Add-Issue "error" "golden.hero-sequence-unassigned" "Golden Project has no slice assigned to its Hero Sequence role"
         }
     }
 }

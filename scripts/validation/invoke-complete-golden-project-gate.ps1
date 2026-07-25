@@ -47,9 +47,15 @@ function Assert-CompleteGoldenReport(
         $Report.required_consecutive_passes -ne $Contract.acceptance.consecutive_passes -or
         $Report.execution_plan.contract_id -ne $Contract.id -or
         $Report.execution_plan.status -ne "complete" -or
-        $Report.execution_plan.complete_golden_project -ne $false
+        $Report.execution_plan.complete_golden_project -ne $false -or
+        $Report.execution_plan.hero_sequence_role -ne $Contract.hero_sequence.role
     ) {
         throw "Complete Golden report changed the structural execution-plan contract."
+    }
+    foreach ($field in @("fixture_roles", "operations", "content", "exports")) {
+        if (@($Report.execution_plan.hero_missing.$field).Count -ne 0) {
+            throw "Complete Golden report retained Hero Sequence obligations in '$field'."
+        }
     }
 
     $stages = @($Report.stages)
@@ -65,17 +71,37 @@ function Assert-CompleteGoldenReport(
     }
 
     $sequenceProperties = @($Report.final_project.sequence_ids.psobject.Properties)
+    $primarySequenceProperties = @($Report.final_project.primary_sequence_ids.psobject.Properties)
     Assert-ExactStringSet $RequiredSliceIds @($sequenceProperties | ForEach-Object { $_.Name }) "Sequence ownership roles"
+    Assert-ExactStringSet $RequiredSliceIds @($primarySequenceProperties | ForEach-Object { $_.Name }) "Primary Sequence roles"
     $sequenceIds = @(
         $sequenceProperties | ForEach-Object {
             @($_.Value) | ForEach-Object { [string]$_ }
         }
     )
+    $uniqueSequenceIds = @($sequenceIds | Sort-Object -Unique)
     if (
-        $sequenceIds.Count -ne [int]$Report.final_project.sequence_count -or
-        @($sequenceIds | Sort-Object -Unique).Count -ne $sequenceIds.Count
+        $uniqueSequenceIds.Count -ne [int]$Report.final_project.sequence_count
     ) {
-        throw "Final Project Sequence ownership is incomplete or reuses an identity."
+        throw "Final Project Sequence ownership does not cover its exact author set."
+    }
+    if (
+        $Report.final_project.hero_sequence_role -ne $Contract.hero_sequence.role -or
+        [string]::IsNullOrWhiteSpace([string]$Report.final_project.hero_sequence_id) -or
+        [string]$Report.final_project.hero_sequence_id -notin $uniqueSequenceIds
+    ) {
+        throw "Final Project did not retain the declared Hero Sequence identity."
+    }
+    $heroSliceIds = @(
+        $Contract.execution_slices |
+            Where-Object { $_.sequence_role -eq $Contract.hero_sequence.role } |
+            ForEach-Object { [string]$_.id }
+    )
+    foreach ($sliceId in $heroSliceIds) {
+        $primarySequenceId = [string]$Report.final_project.primary_sequence_ids.psobject.Properties[$sliceId].Value
+        if ($primarySequenceId -ne [string]$Report.final_project.hero_sequence_id) {
+            throw "Hero-assigned slice '$sliceId' used a different primary Sequence."
+        }
     }
     if (
         [int]$Report.final_project.proxy_queued -ne 0 -or

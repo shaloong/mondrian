@@ -1,7 +1,12 @@
 {
-  "schema_version": 3,
-  "id": "windows-alpha-golden-v5",
+  "schema_version": 4,
+  "id": "windows-alpha-golden-v6",
   "kind": "golden",
+  "hero_sequence": {
+    "role": "hero",
+    "duration_frames": 7500,
+    "requires_all_obligations": true
+  },
   "timeline": {
     "duration_frames": 7500,
     "frame_rate": "25/1",
@@ -82,6 +87,7 @@
   "execution_slices": [
     {
       "id": "foundation-audio-authoring-v1",
+      "sequence_role": "hero",
       "required_fixture_roles": [
         "pcm-audio"
       ],
@@ -98,6 +104,7 @@
     },
     {
       "id": "editorial-transport-v1",
+      "sequence_role": "isolated-editorial",
       "required_fixture_roles": [
         "aac-audio"
       ],
@@ -119,6 +126,7 @@
     },
     {
       "id": "proxy-relink-v1",
+      "sequence_role": "isolated-proxy-relink",
       "required_fixture_roles": [
         "rec709-h264-picture"
       ],
@@ -135,6 +143,7 @@
     },
     {
       "id": "generated-delivery-roundtrip-v1",
+      "sequence_role": "isolated-delivery",
       "required_fixture_roles": [
         "pcm-audio"
       ],
@@ -158,6 +167,7 @@
     },
     {
       "id": "visual-authoring-roundtrip-v1",
+      "sequence_role": "isolated-visual-authoring",
       "required_fixture_roles": [],
       "required_operations": [
         "undo-redo",
@@ -180,6 +190,7 @@
     },
     {
       "id": "recovery-nesting-v1",
+      "sequence_role": "isolated-recovery-parent",
       "required_fixture_roles": [],
       "required_operations": [
         "autosave-recovery",
@@ -196,6 +207,7 @@
     },
     {
       "id": "color-media-roundtrip-v1",
+      "sequence_role": "isolated-color-media",
       "required_fixture_roles": [
         "hlg-main10-picture",
         "srgb-alpha-still"

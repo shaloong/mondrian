@@ -48,6 +48,7 @@ pub(super) struct GoldenProjectContract {
     pub(super) schema_version: u32,
     pub(super) id: String,
     pub(super) kind: String,
+    pub(super) hero_sequence: GoldenHeroSequenceContract,
     pub(super) timeline: GoldenTimelineContract,
     pub(super) required_fixture_roles: Vec<GoldenFixtureRole>,
     pub(super) required_operations: Vec<String>,
@@ -55,6 +56,16 @@ pub(super) struct GoldenProjectContract {
     pub(super) execution_slices: Vec<GoldenExecutionSlice>,
     exports: Vec<GoldenExportContract>,
     pub(super) acceptance: GoldenAcceptanceContract,
+}
+
+/// Acceptance identity for the one authored Sequence that must carry the
+/// complete five-minute product workflow.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct GoldenHeroSequenceContract {
+    pub(super) role: String,
+    pub(super) duration_frames: i64,
+    pub(super) requires_all_obligations: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,6 +98,7 @@ pub(super) struct GoldenFixtureRole {
 #[serde(deny_unknown_fields)]
 pub(super) struct GoldenExecutionSlice {
     pub(super) id: String,
+    pub(super) sequence_role: String,
     pub(super) required_fixture_roles: Vec<String>,
     pub(super) required_operations: Vec<String>,
     pub(super) required_content: Vec<String>,
@@ -163,7 +175,7 @@ pub(super) fn load_golden_contract(root: &Path) -> anyhow::Result<GoldenProjectC
 
 fn validate_golden_contract(contract: &GoldenProjectContract) -> anyhow::Result<()> {
     ensure!(
-        contract.schema_version == 3,
+        contract.schema_version == 4,
         "unsupported Golden Project schema"
     );
     ensure!(contract.kind == "golden", "contract kind is not golden");
@@ -190,6 +202,18 @@ fn validate_golden_contract(contract: &GoldenProjectContract) -> anyhow::Result<
     ensure!(
         contract.timeline.duration_frames > 0,
         "Golden duration must be positive"
+    );
+    ensure!(
+        !contract.hero_sequence.role.trim().is_empty(),
+        "Golden Hero Sequence role is empty"
+    );
+    ensure!(
+        contract.hero_sequence.duration_frames == contract.timeline.duration_frames,
+        "Golden Hero Sequence duration differs from the complete Timeline contract"
+    );
+    ensure!(
+        contract.hero_sequence.requires_all_obligations,
+        "Golden Hero Sequence must carry every required fixture, operation, content, and export"
     );
 
     ensure_unique(
@@ -242,6 +266,11 @@ fn validate_golden_contract(contract: &GoldenProjectContract) -> anyhow::Result<
     }
     for slice in &contract.execution_slices {
         ensure!(!slice.id.trim().is_empty(), "slice id is empty");
+        ensure!(
+            !slice.sequence_role.trim().is_empty(),
+            "slice {} has an empty Sequence role",
+            slice.id
+        );
         ensure_unique(
             slice.required_fixture_roles.iter().map(String::as_str),
             "slice fixture role",
@@ -288,6 +317,13 @@ fn validate_golden_contract(contract: &GoldenProjectContract) -> anyhow::Result<
             );
         }
     }
+    ensure!(
+        contract
+            .execution_slices
+            .iter()
+            .any(|slice| slice.sequence_role == contract.hero_sequence.role),
+        "Golden contract has no slice assigned to the Hero Sequence role"
+    );
     Ok(())
 }
 
@@ -556,24 +592,38 @@ fn golden_contract_rejects_unknown_fields() -> anyhow::Result<()> {
 }
 
 #[test]
-fn golden_acceptance_plan_is_structurally_complete_without_claiming_execution() -> anyhow::Result<()>
+fn golden_acceptance_plan_rejects_obligations_isolated_from_the_hero_sequence() -> anyhow::Result<()>
 {
     use plan::{GoldenAcceptancePlan, GoldenAcceptancePlanStatus};
 
     let root = repository_root();
-    let contract = load_golden_contract(&root)?;
+    let mut contract = load_golden_contract(&root)?;
     let plan = GoldenAcceptancePlan::compile(&contract);
 
     assert_eq!(plan.schema_version, 1);
-    assert_eq!(plan.status, GoldenAcceptancePlanStatus::Complete);
+    assert_eq!(plan.status, GoldenAcceptancePlanStatus::Blocked);
     assert!(!plan.complete_golden_project);
     assert_eq!(plan.required_consecutive_passes, 3);
     assert!(plan.missing.fixture_roles.is_empty());
     assert!(plan.missing.operations.is_empty());
     assert!(plan.missing.content.is_empty());
     assert!(plan.missing.exports.is_empty());
+    assert!(plan.hero_missing.fixture_roles.contains("hlg-main10-picture"));
+    assert!(plan.hero_missing.operations.contains("export"));
+    assert!(plan.hero_missing.content.contains("basic-title"));
+    assert!(plan.hero_missing.exports.contains("hevc-main10"));
     assert!(plan.unassigned_required_fixture_roles.is_empty());
     assert_eq!(plan.slices.len(), 7);
+
+    for slice in &mut contract.execution_slices {
+        slice.sequence_role.clone_from(&contract.hero_sequence.role);
+    }
+    let converged = GoldenAcceptancePlan::compile(&contract);
+    assert_eq!(converged.status, GoldenAcceptancePlanStatus::Complete);
+    assert!(converged.hero_missing.fixture_roles.is_empty());
+    assert!(converged.hero_missing.operations.is_empty());
+    assert!(converged.hero_missing.content.is_empty());
+    assert!(converged.hero_missing.exports.is_empty());
 
     eprintln!(
         "MONDRIAN_GOLDEN_ACCEPTANCE_PLAN_JSON={}",
