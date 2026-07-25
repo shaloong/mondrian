@@ -14,6 +14,7 @@ use crate::app::preview_viewer_plan::ResolvedPreviewElement;
 use crate::app::AppState;
 use anyhow::{bail, ensure, Context};
 use mondrian_core::{AssetId, WorkingColorSpace};
+use mondrian_media::PreviewDecodeSessionContext;
 use mondrian_playback::PreviewResolutionScale;
 use mondrian_renderer::{
     execute_cpu_output_boundary, RenderOutputColorBoundary, RenderOutputColorBoundaryTarget,
@@ -61,7 +62,11 @@ struct ColorMediaPreviewExecution {
     program_output_rgba: Vec<u8>,
 }
 
-fn execute_preview(state: &AppState, frame: i64) -> anyhow::Result<ColorMediaPreviewExecution> {
+fn execute_preview(
+    state: &AppState,
+    frame: i64,
+    decode_context: &mut PreviewDecodeSessionContext,
+) -> anyhow::Result<ColorMediaPreviewExecution> {
     let sequence = state.active_sequence().context("active Sequence is absent")?;
     let assets = state
         .asset_library()
@@ -76,7 +81,7 @@ fn execute_preview(state: &AppState, frame: i64) -> anyhow::Result<ColorMediaPre
         let outcome = assets
             .get(&request.asset_id)
             .with_context(|| format!("Preview asset is absent: {}", request.asset_id))
-            .and_then(|asset| decode_media(state, &request, asset));
+            .and_then(|asset| decode_media(state, &request, asset, decode_context));
         match outcome {
             Ok(media) => {
                 let frame = media.frame.clone();
@@ -381,8 +386,9 @@ pub(super) fn execute_picture_stage(
     state: &AppState,
     hlg_asset_id: AssetId,
     alpha_asset_id: AssetId,
+    decode_context: &mut PreviewDecodeSessionContext,
 ) -> anyhow::Result<PictureStageResult> {
-    let execution = execute_preview(state, 0)?;
+    let execution = execute_preview(state, 0, decode_context)?;
     let hlg = execution
         .decoded
         .get(&hlg_asset_id)

@@ -7,14 +7,15 @@
 
 use super::harness::{
     author_checkpoint, dispatch_author_transition, ensure_exact_requirement_evidence,
-    new_run_directory, rooted_env_path, write_report, AuthorCheckpoint, AuthorTransitionEvidence,
-    DurableReopenEvidence, ProjectAuthorTransitionEvidence,
+    AuthorCheckpoint, AuthorTransitionEvidence, DurableReopenEvidence,
+    ProjectAuthorTransitionEvidence,
 };
+#[cfg(test)]
+use super::harness::{new_run_directory, rooted_env_path, write_report};
 use super::workflow::{GoldenProductWorkflowDriver, GoldenSequenceStageEvidence};
-use super::{
-    load_golden_contract, repository_root, sequence_settings_from_contract, GoldenExecutionSlice,
-    GoldenProjectContract,
-};
+#[cfg(test)]
+use super::{load_golden_contract, repository_root, sequence_settings_from_contract};
+use super::{GoldenExecutionSlice, GoldenProjectContract};
 use crate::app::exporting::capture_timeline_export_snapshot;
 use crate::app::preview_cpu_execution::composite_resolved_preview;
 use crate::app::preview_timeline_execution::{
@@ -44,12 +45,15 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-const RECOVERY_NESTING_SLICE_ID: &str = "recovery-nesting-v1";
+pub(super) const RECOVERY_NESTING_SLICE_ID: &str = "recovery-nesting-v1";
+#[cfg(test)]
 const RUN_ROOT_ENV: &str = "MONDRIAN_GOLDEN_RECOVERY_NESTING_RUN_ROOT";
+#[cfg(test)]
 const OUTPUT_ENV: &str = "MONDRIAN_GOLDEN_RECOVERY_NESTING_OUTPUT";
 const EXECUTION_RESOLUTION: Resolution = Resolution { width: 320, height: 180 };
 
 #[derive(Debug)]
+#[cfg(test)]
 struct GoldenRunPaths {
     directory: PathBuf,
     project: PathBuf,
@@ -674,6 +678,7 @@ pub(super) fn execute_recovery_nesting_stage(
     })
 }
 
+#[cfg(test)]
 fn new_run_paths(root: &Path) -> anyhow::Result<GoldenRunPaths> {
     let directory = new_run_directory(root, RUN_ROOT_ENV, "golden-recovery-nesting")?;
     let report = rooted_env_path(root, OUTPUT_ENV, || {
@@ -686,6 +691,7 @@ fn new_run_paths(root: &Path) -> anyhow::Result<GoldenRunPaths> {
     })
 }
 
+#[cfg(test)]
 fn execute_recovery_nesting_slice(
     root: &Path,
     paths: &GoldenRunPaths,

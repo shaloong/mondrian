@@ -138,6 +138,14 @@ Lower layers cannot depend on higher layers:
   strong short-window media/color/Alpha roundtrip evidence, but it does not
   claim an independent absolute HLG transfer-function oracle, PQ/Log coverage,
   real-media nested color, or the complete Golden Project.
+  The complete Golden coordinator runs all seven slices through one
+  `GoldenProductWorkflowDriver` and one Project, then verifies the exact eight
+  stage-owned Sequences, quiescent proxy service, relink intent, delivery
+  profiles, and serialized author snapshots after a final durable reopen. Only
+  this Rust coordinator may emit `complete_golden_project: true`; the external
+  PowerShell supervisor validates that typed report for three distinct
+  run/Project identities and never unions slice reports. Heavy GPU/media work
+  owns a dedicated process main lifetime rather than a libtest worker lifetime.
 
 The audio dependency direction is one-way:
 

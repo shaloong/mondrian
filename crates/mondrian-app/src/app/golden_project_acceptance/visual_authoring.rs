@@ -2,14 +2,14 @@
 
 use super::harness::{
     author_transition, dispatch_author_transition, ensure_exact_requirement_evidence,
-    new_run_directory, rooted_env_path, write_report, AuthorTransitionEvidence,
-    DurableReopenEvidence,
+    AuthorTransitionEvidence, DurableReopenEvidence,
 };
+#[cfg(test)]
+use super::harness::{new_run_directory, rooted_env_path, write_report};
 use super::workflow::{GoldenProductWorkflowDriver, GoldenSequenceStageEvidence};
-use super::{
-    load_golden_contract, repository_root, sequence_settings_from_contract, GoldenExecutionSlice,
-    GoldenProjectContract,
-};
+#[cfg(test)]
+use super::{load_golden_contract, repository_root, sequence_settings_from_contract};
+use super::{GoldenExecutionSlice, GoldenProjectContract};
 use crate::app::preview_cpu_execution::composite_resolved_preview;
 use crate::app::preview_timeline_execution::{
     resolve_preview_timeline, PreviewTimelineMediaFrame, PreviewTimelineResolution,
@@ -52,10 +52,14 @@ use mondrian_timeline::sequence::Sequence;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 
-const VISUAL_SLICE_ID: &str = "visual-authoring-roundtrip-v1";
+pub(super) const VISUAL_SLICE_ID: &str = "visual-authoring-roundtrip-v1";
+#[cfg(test)]
 const RUN_ROOT_ENV: &str = "MONDRIAN_GOLDEN_VISUAL_RUN_ROOT";
+#[cfg(test)]
 const OUTPUT_ENV: &str = "MONDRIAN_GOLDEN_VISUAL_OUTPUT";
 const TITLE_TEXT: &str = "Mondrian Golden";
 const PREVIEW_RESOLUTION: Resolution = Resolution { width: 640, height: 360 };
@@ -74,6 +78,7 @@ DOMAIN_MAX 1 1 1\n\
 0.96 0.95 0.94\n";
 
 #[derive(Debug)]
+#[cfg(test)]
 struct GoldenRunPaths {
     directory: PathBuf,
     project: PathBuf,
@@ -233,6 +238,7 @@ struct VisualExecutionEvidence {
     float_linear_composites: u64,
 }
 
+#[cfg(test)]
 fn new_run_paths(root: &Path) -> anyhow::Result<GoldenRunPaths> {
     let directory = new_run_directory(root, RUN_ROOT_ENV, "golden-visual")?;
     let report = rooted_env_path(root, OUTPUT_ENV, || {
@@ -1370,6 +1376,7 @@ pub(super) fn execute_visual_stage(
     })
 }
 
+#[cfg(test)]
 fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<GoldenVisualReport> {
     let contract = load_golden_contract(root)?;
     let settings = sequence_settings_from_contract(&contract.timeline)?;

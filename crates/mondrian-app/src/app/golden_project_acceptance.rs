@@ -32,6 +32,16 @@ use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+/// Execute one complete single-Project Golden run in the dedicated validation
+/// process and return the durable typed report path.
+///
+/// This entrypoint intentionally belongs to the optional `validation` feature:
+/// media, proxy, export, and process-global GPU runtimes must execute under the
+/// process main lifetime rather than a short-lived libtest worker.
+pub fn run_complete_golden_project(output: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    composed_workflow::run_complete_golden_project(output)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct GoldenProjectContract {

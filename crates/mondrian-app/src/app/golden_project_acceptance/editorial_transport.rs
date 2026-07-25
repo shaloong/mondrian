@@ -2,14 +2,15 @@
 
 use super::fixture::{resolve_fixture, CorpusManifest, FixtureEvidence};
 use super::harness::{
-    dispatch_author_transition, ensure_exact_requirement_evidence, fixture_root, new_run_directory,
-    rooted_env_path, wait_for_media_imports, write_report, AuthorTransitionEvidence,
+    dispatch_author_transition, ensure_exact_requirement_evidence, fixture_root,
+    wait_for_media_imports, AuthorTransitionEvidence,
 };
+#[cfg(test)]
+use super::harness::{new_run_directory, rooted_env_path, write_report};
 use super::workflow::{GoldenProductWorkflowDriver, GoldenSequenceStageEvidence};
-use super::{
-    load_golden_contract, load_json, repository_root, sequence_settings_from_contract,
-    GoldenProjectContract,
-};
+#[cfg(test)]
+use super::{load_golden_contract, repository_root, sequence_settings_from_contract};
+use super::{load_json, GoldenProjectContract};
 use crate::app::playback::PlaybackAdvanceStatus;
 use crate::app::ui_actions::{
     timeline_drop_asset_action, timeline_insert_asset_action, timeline_seek_with_source_action,
@@ -29,11 +30,15 @@ use mondrian_timeline::{
 };
 use serde::Serialize;
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::time::Duration;
 
-const EDITORIAL_SLICE_ID: &str = "editorial-transport-v1";
+pub(super) const EDITORIAL_SLICE_ID: &str = "editorial-transport-v1";
+#[cfg(test)]
 const RUN_ROOT_ENV: &str = "MONDRIAN_GOLDEN_EDITORIAL_RUN_ROOT";
+#[cfg(test)]
 const OUTPUT_ENV: &str = "MONDRIAN_GOLDEN_EDITORIAL_OUTPUT";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -159,12 +164,14 @@ enum GoldenRunStatus {
 }
 
 #[derive(Debug)]
+#[cfg(test)]
 struct GoldenRunPaths {
     directory: PathBuf,
     project: PathBuf,
     report: PathBuf,
 }
 
+#[cfg(test)]
 fn new_run_paths(root: &Path) -> anyhow::Result<GoldenRunPaths> {
     let directory = new_run_directory(root, RUN_ROOT_ENV, "golden-editorial")?;
     let report = rooted_env_path(root, OUTPUT_ENV, || {
@@ -621,6 +628,7 @@ pub(super) fn execute_editorial_stage(
     })
 }
 
+#[cfg(test)]
 fn execute_editorial_slice(
     root: &Path,
     paths: &GoldenRunPaths,

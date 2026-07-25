@@ -63,9 +63,26 @@ fn product_default_run_targets_app_ui_main_binary() {
     let bins = manifest_bins(manifest);
     let product_bin = bins.iter().find(|bin| bin.name == "mondrian").expect("mondrian product bin");
     assert_eq!(product_bin.path, "src/main.rs");
+    let golden_bin = bins
+        .iter()
+        .find(|bin| bin.name == "mondrian-golden")
+        .expect("Golden validation bin");
+    assert_eq!(golden_bin.path, "src/bin/mondrian_golden.rs");
+    assert!(
+        manifest.contains(
+            r#"[[bin]]
+name = "mondrian-golden"
+path = "src/bin/mondrian_golden.rs"
+required-features = ["validation"]
+test = false
+bench = false"#,
+        ),
+        "Golden validation must remain feature-gated and outside product/test routes"
+    );
 
     let allowed_bins = [
         "mondrian",
+        "mondrian-golden",
         "ui_demo",
         "ui_color_test",
         "ui_widget_test",

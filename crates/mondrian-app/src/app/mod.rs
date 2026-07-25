@@ -64,8 +64,8 @@ mod audio_rendering;
 mod basic_titles;
 mod clip_clipboard;
 pub(crate) mod exporting;
-#[cfg(test)]
-mod golden_project_acceptance;
+#[cfg(any(test, feature = "validation"))]
+pub mod golden_project_acceptance;
 #[cfg(test)]
 pub(crate) mod headless_viewer_gpu;
 mod media_import;

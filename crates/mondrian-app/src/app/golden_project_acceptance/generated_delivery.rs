@@ -2,14 +2,17 @@
 
 use super::fixture::{resolve_fixture, sha256_file, CorpusManifest, FixtureEvidence};
 use super::harness::{
-    ensure_exact_requirement_evidence, execute_export_job, fixture_root, new_run_directory,
-    rooted_env_path, wait_for_media_imports, write_report,
+    ensure_exact_requirement_evidence, execute_export_job, fixture_root, wait_for_media_imports,
 };
+#[cfg(test)]
+use super::harness::{new_run_directory, rooted_env_path, write_report};
 use super::workflow::{GoldenProductWorkflowDriver, GoldenSequenceStageEvidence};
 use super::{
-    builtin_preset, load_golden_contract, load_json, repository_root,
-    sequence_settings_from_contract, GoldenExportContract, GoldenProjectContract,
+    builtin_preset, load_json, sequence_settings_from_contract, GoldenExportContract,
+    GoldenProjectContract,
 };
+#[cfg(test)]
+use super::{load_golden_contract, repository_root};
 use crate::app::ui_actions::{
     assets_create_solid_color_action, inspector_set_clip_opacity_action,
     inspector_set_clip_transform_field_action, timeline_drop_asset_action,
@@ -31,12 +34,15 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const DELIVERY_SLICE_ID: &str = "generated-delivery-roundtrip-v1";
+pub(super) const DELIVERY_SLICE_ID: &str = "generated-delivery-roundtrip-v1";
+#[cfg(test)]
 const RUN_ROOT_ENV: &str = "MONDRIAN_GOLDEN_DELIVERY_RUN_ROOT";
+#[cfg(test)]
 const OUTPUT_ENV: &str = "MONDRIAN_GOLDEN_DELIVERY_OUTPUT";
 const EXPORT_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Debug)]
+#[cfg(test)]
 struct GoldenRunPaths {
     directory: PathBuf,
     project: PathBuf,
@@ -150,6 +156,7 @@ impl ContentEvidence {
     }
 }
 
+#[cfg(test)]
 fn new_run_paths(root: &Path) -> anyhow::Result<GoldenRunPaths> {
     let directory = new_run_directory(root, RUN_ROOT_ENV, "golden-delivery")?;
     let report = rooted_env_path(root, OUTPUT_ENV, || {
@@ -675,6 +682,7 @@ pub(super) fn execute_delivery_stage(
     })
 }
 
+#[cfg(test)]
 fn execute_delivery_slice(
     root: &Path,
     paths: &GoldenRunPaths,

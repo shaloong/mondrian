@@ -7,10 +7,20 @@ license.workspace    = true
 rust-version.workspace = true
 default-run = "mondrian"
 
+[features]
+validation = []
+
 # Product app UI editor shell.
 [[bin]]
 name = "mondrian"
 path = "src/main.rs"
+
+[[bin]]
+name = "mondrian-golden"
+path = "src/bin/mondrian_golden.rs"
+required-features = ["validation"]
+test = false
+bench = false
 
 # Developer gallery for reusable app UI widgets.
 [[bin]]

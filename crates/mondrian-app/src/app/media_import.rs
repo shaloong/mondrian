@@ -103,7 +103,7 @@ impl AppState {
         changed
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "validation"))]
     /// Number of import batches still waiting for background completion.
     pub(crate) fn pending_media_import_batches(&self) -> usize {
         self.media_import_batches.len()

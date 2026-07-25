@@ -2,15 +2,15 @@
 
 use super::fixture::{resolve_fixture, CorpusManifest, FixtureEvidence};
 use super::harness::{
-    dispatch_author_transition, ensure_exact_requirement_evidence, fixture_root, new_run_directory,
-    rooted_env_path, wait_for_media_imports, write_report, AuthorCheckpoint,
-    AuthorTransitionEvidence,
+    dispatch_author_transition, ensure_exact_requirement_evidence, fixture_root,
+    wait_for_media_imports, AuthorCheckpoint, AuthorTransitionEvidence,
 };
+#[cfg(test)]
+use super::harness::{new_run_directory, rooted_env_path, write_report};
 use super::workflow::{GoldenProductWorkflowDriver, GoldenProjectOpenEvidence};
-use super::{
-    load_golden_contract, load_json, parse_rational, repository_root,
-    sequence_settings_from_contract, GoldenProjectContract,
-};
+#[cfg(test)]
+use super::{load_golden_contract, repository_root};
+use super::{load_json, parse_rational, sequence_settings_from_contract, GoldenProjectContract};
 use crate::app::ui_actions::{
     inspector_set_audio_component_edit_field_action, timeline_drop_asset_action,
     InspectorAudioComponentEditField, InspectorClipRefPayload,
@@ -29,8 +29,10 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-const FOUNDATION_SLICE_ID: &str = "foundation-audio-authoring-v1";
+pub(super) const FOUNDATION_SLICE_ID: &str = "foundation-audio-authoring-v1";
+#[cfg(test)]
 const RUN_ROOT_ENV: &str = "MONDRIAN_GOLDEN_FOUNDATION_RUN_ROOT";
+#[cfg(test)]
 const OUTPUT_ENV: &str = "MONDRIAN_GOLDEN_FOUNDATION_OUTPUT";
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -128,12 +130,14 @@ enum GoldenRunStatus {
 }
 
 #[derive(Debug)]
+#[cfg(test)]
 struct GoldenRunPaths {
     directory: PathBuf,
     project: PathBuf,
     report: PathBuf,
 }
 
+#[cfg(test)]
 fn new_run_paths(root: &Path) -> anyhow::Result<GoldenRunPaths> {
     let directory = new_run_directory(root, RUN_ROOT_ENV, "golden-foundation")?;
     let report = rooted_env_path(root, OUTPUT_ENV, || {
@@ -451,6 +455,7 @@ pub(super) fn execute_foundation_stage(
     })
 }
 
+#[cfg(test)]
 fn execute_foundation_slice(
     root: &Path,
     paths: &GoldenRunPaths,

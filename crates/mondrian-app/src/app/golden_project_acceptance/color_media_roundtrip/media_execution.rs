@@ -5,13 +5,14 @@ use crate::app::preview_hardware_admission::PreviewHardwareDecodeAdmissionState;
 use crate::app::preview_media_source::{
     resolve_preview_media_source, PreviewMediaSourceOutcome, PreviewMediaSourceRequest,
 };
-use crate::app::preview_media_task::decode_media_preview;
+use crate::app::preview_media_task::decode_media_preview_with_context;
 use crate::app::preview_timeline_execution::PreviewTimelineMediaRequest;
 use crate::app::AppState;
 use anyhow::{bail, ensure, Context};
 use mondrian_assets::AssetRecord;
 use mondrian_media::{
-    PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewHardwareDecodeRequest,
+    PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewDecodeSessionContext,
+    PreviewHardwareDecodeRequest,
 };
 use mondrian_renderer::CpuSourceColorFrame;
 use mondrian_timeline::sequence::InputColorResolutionSource;
@@ -27,6 +28,7 @@ pub(super) fn decode_media(
     state: &AppState,
     request: &PreviewTimelineMediaRequest,
     asset: &AssetRecord,
+    decode_context: &mut PreviewDecodeSessionContext,
 ) -> anyhow::Result<DecodedMedia> {
     let proxy_config = state.proxy_config();
     let resolved = match resolve_preview_media_source(PreviewMediaSourceRequest {
@@ -54,7 +56,7 @@ pub(super) fn decode_media(
         resolved.input_color_resolution.source == InputColorResolutionSource::DetectedMetadata,
         "Preview did not use explicit detected color metadata"
     );
-    let result = decode_media_preview(
+    let result = decode_media_preview_with_context(
         MediaPreviewJob {
             key: resolved.key,
             generation: 1,
@@ -69,6 +71,7 @@ pub(super) fn decode_media(
             execution_id: None,
         },
         0,
+        decode_context,
         || false,
     );
     ensure!(!result.canceled, "Preview media decode was canceled");

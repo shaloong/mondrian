@@ -275,14 +275,19 @@ ledger of required fixture roles,
 operations, content, and exports, then reports every unplanned or unresolved
 obligation. A slice is an independently executable evidence Adapter, not a
 top-level run: successful and failed slice reports both carry
-`complete_golden_project: false`. The top-level run coordinator must
-execute all obligations against one Project identity, preserve typed evidence,
-and own consecutive-run classification. PowerShell remains an external process
-supervisor and schema validator; it cannot infer semantic completion from test
-names, process exit, or a union of unrelated projects.
+`complete_golden_project: false`. The Rust top-level coordinator executes every
+declared slice against one Project identity, requires the exact slice report
+set and stage-owned Sequence set, waits for background proxy work to become
+quiescent, and verifies every Sequence snapshot plus asset intent after one
+final durable reopen. It alone may emit one
+`windows-alpha-complete-golden-project` report with
+`complete_golden_project: true`. PowerShell owns only process deadlines,
+schema validation, and consecutive-run classification; it cannot infer
+semantic completion from test names, process exit, or a union of unrelated
+projects.
 
 `GoldenProductWorkflowDriver` is the Headless product composition owner for
-that future coordinator. It creates one real `.mdp`, captures its typed
+that coordinator. It creates one real `.mdp`, captures its typed
 `ProjectId` and path, retains one production `AppState`, and rejects identity
 drift before and after open, stage creation, and durable reopen. Stages may use
 separate Sequences, created through the same product action and Project-level
@@ -294,11 +299,21 @@ process-local Session, preserving Project, path, active Sequence, and saved
 revision. Foundation Audio, Editorial/Transport, Proxy/Relink, Generated
 Delivery, Visual Authoring, Recovery/Nesting, and Color Media Roundtrip are
 reusable stages over this driver. Their composed gate runs ordinary product
-Actions and services in seven
-dedicated Sequences: PCM authoring; AAC editing/transport; proxy/offline/relink;
+Actions and services in eight stage-owned Sequences: PCM authoring; AAC
+editing/transport; proxy/offline/relink;
 H.264 High and HEVC Main10 delivery/reimport; Transition/Basic Title/curve/
-Primary/LUT authoring; nested-Sequence autosave recovery; and file-backed
-HLG Main10 plus sRGB Alpha Preview/Export roundtrip.
+Primary/LUT authoring; parent plus child nested-Sequence autosave recovery; and
+file-backed HLG Main10 plus sRGB Alpha Preview/Export roundtrip. The number of
+execution slices is not a Sequence-count invariant: Recovery/Nesting
+intentionally owns two.
+
+Heavy media and GPU execution runs in the dedicated `mondrian-golden` process
+entrypoint, never on a short-lived libtest worker. A terminal top-level report
+is the semantic completion boundary. The external supervisor grants a bounded
+natural-exit window and may then terminate the child process tree because
+third-party graphics capture DLLs can block Windows process detach after all
+Mondrian work has completed. Missing, malformed, or failing reports remain
+fail-closed; process cleanup cannot create passing evidence.
 
 The Recovery/Nesting stage is fixture-independent. It selects a generated Clip
 through the Timeline Action boundary, dispatches one Precompose Action, and
@@ -308,12 +323,13 @@ through the product recovery Action, and compares parent/child author hashes
 and deterministic execution evidence. The recovered Session must remain dirty
 and the recovery archive authoritative until a covering manual save atomically
 retires it. A final composed reopen must preserve the fixed Project binding,
-the six Sequences present at the Recovery boundary, earlier stage content,
+the seven Sequences present at the Recovery boundary, earlier stage content,
 relinked Asset intent, and both typed reimport profiles. The later Color Media
-stage extends that invariant to seven Sequences and retains its file-backed
-Track/Clip identities. Complete
-independent HDR/Log numeric references, the top-level coordinator, and
-coordinated three-run release classification still prevent completion.
+stage extends that invariant to eight Sequences and retains its file-backed
+Track/Clip identities. The dedicated supervisor has completed three
+consecutive local runs with distinct run and Project identities; qualified
+release-machine capture and independent HDR/Log numeric references remain
+separate acceptance obligations.
 
 ## Playback Tick Ownership
 

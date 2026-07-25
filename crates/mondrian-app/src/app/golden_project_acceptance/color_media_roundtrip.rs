@@ -11,23 +11,26 @@ mod media_execution;
 mod picture_validation;
 
 use super::fixture::{resolve_fixture, CorpusManifest, FixtureEvidence};
-use super::harness::{
-    ensure_exact_requirement_evidence, fixture_root, new_run_directory, rooted_env_path,
-    write_report,
-};
+use super::harness::{ensure_exact_requirement_evidence, fixture_root};
+#[cfg(test)]
+use super::harness::{new_run_directory, rooted_env_path, write_report};
 use super::workflow::GoldenProductWorkflowDriver;
-use super::{
-    load_golden_contract, load_json, repository_root, sequence_settings_from_contract,
-    GoldenProjectContract,
-};
+#[cfg(test)]
+use super::{load_golden_contract, repository_root, sequence_settings_from_contract};
+use super::{load_json, GoldenProjectContract};
 use anyhow::{ensure, Context};
 use mondrian_core::Resolution;
+use mondrian_media::PreviewDecodeSessionContext;
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::time::Duration;
 
-const COLOR_MEDIA_SLICE_ID: &str = "color-media-roundtrip-v1";
+pub(super) const COLOR_MEDIA_SLICE_ID: &str = "color-media-roundtrip-v1";
+#[cfg(test)]
 const RUN_ROOT_ENV: &str = "MONDRIAN_GOLDEN_COLOR_MEDIA_RUN_ROOT";
+#[cfg(test)]
 const OUTPUT_ENV: &str = "MONDRIAN_GOLDEN_COLOR_MEDIA_OUTPUT";
 pub(super) const PREVIEW_RESOLUTION: Resolution = Resolution { width: 1920, height: 1080 };
 pub(super) const EXPORT_TIMEOUT: Duration = Duration::from_secs(600);
@@ -35,6 +38,7 @@ pub(super) const HLG_ROLE: &str = "hlg-main10-picture";
 pub(super) const SRGB_ALPHA_ROLE: &str = "srgb-alpha-still";
 
 #[derive(Debug)]
+#[cfg(test)]
 struct GoldenRunPaths {
     directory: PathBuf,
     project: PathBuf,
@@ -56,6 +60,7 @@ pub(super) struct GoldenColorMediaReport {
     export_roundtrip: delivery::ExportRoundtripEvidence,
 }
 
+#[cfg(test)]
 fn new_run_paths(root: &Path) -> anyhow::Result<GoldenRunPaths> {
     let directory = new_run_directory(root, RUN_ROOT_ENV, "golden-color-media")?;
     let report = rooted_env_path(root, OUTPUT_ENV, || {
@@ -116,16 +121,23 @@ pub(super) fn execute_color_media_stage(
         &alpha_fixture,
         window.end_frame_exclusive,
     )?;
+    // Headless Golden execution owns the same explicit decoder residency
+    // scope as a production Preview worker. Never defer FFmpeg session
+    // teardown to the test thread's TLS destructor.
+    let mut decode_context = PreviewDecodeSessionContext::new();
     let picture = picture_validation::execute_picture_stage(
         workflow.app(),
         authoring.hlg_asset_id,
         authoring.alpha_asset_id,
+        &mut decode_context,
     )?;
     let export_roundtrip = delivery::execute_export_roundtrip(
         workflow.app_mut(),
         output_directory,
         &picture.program_output_rgba,
+        &mut decode_context,
     )?;
+    decode_context.clear();
 
     Ok(GoldenColorMediaReport {
         schema_version: 1,

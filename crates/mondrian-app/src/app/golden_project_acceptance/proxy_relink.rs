@@ -3,14 +3,15 @@
 use super::fixture::{resolve_fixture, sha256_file, CorpusManifest, FixtureEvidence};
 use super::harness::{
     author_checkpoint, author_transition, ensure_exact_requirement_evidence, fixture_root,
-    new_run_directory, project_author_transition, rooted_env_path, wait_for_media_imports,
-    write_report, AuthorCheckpoint, AuthorTransitionEvidence, ProjectAuthorTransitionEvidence,
+    project_author_transition, wait_for_media_imports, AuthorCheckpoint, AuthorTransitionEvidence,
+    ProjectAuthorTransitionEvidence,
 };
+#[cfg(test)]
+use super::harness::{new_run_directory, rooted_env_path, write_report};
 use super::workflow::{GoldenProductWorkflowDriver, GoldenSequenceStageEvidence};
-use super::{
-    load_golden_contract, load_json, repository_root, sequence_settings_from_contract,
-    GoldenProjectContract,
-};
+#[cfg(test)]
+use super::{load_golden_contract, repository_root, sequence_settings_from_contract};
+use super::{load_json, GoldenProjectContract};
 use crate::app::preview_hardware_admission::PreviewHardwareDecodeAdmissionState;
 use crate::app::preview_media_source::{
     resolve_preview_media_source, PreviewMediaDecodePathResolution, PreviewMediaSourceOutcome,
@@ -35,8 +36,10 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-const PROXY_RELINK_SLICE_ID: &str = "proxy-relink-v1";
+pub(super) const PROXY_RELINK_SLICE_ID: &str = "proxy-relink-v1";
+#[cfg(test)]
 const RUN_ROOT_ENV: &str = "MONDRIAN_GOLDEN_PROXY_RELINK_RUN_ROOT";
+#[cfg(test)]
 const OUTPUT_ENV: &str = "MONDRIAN_GOLDEN_PROXY_RELINK_OUTPUT";
 const PROXY_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -145,12 +148,14 @@ pub(super) struct GoldenProxyRelinkReport {
 }
 
 #[derive(Debug)]
+#[cfg(test)]
 struct GoldenRunPaths {
     directory: PathBuf,
     project: PathBuf,
     report: PathBuf,
 }
 
+#[cfg(test)]
 fn new_run_paths(root: &Path) -> anyhow::Result<GoldenRunPaths> {
     let directory = new_run_directory(root, RUN_ROOT_ENV, "golden-proxy-relink")?;
     let report = rooted_env_path(root, OUTPUT_ENV, || {
@@ -647,6 +652,7 @@ pub(super) fn execute_proxy_relink_stage(
     })
 }
 
+#[cfg(test)]
 fn execute_proxy_relink_slice(
     root: &Path,
     paths: &GoldenRunPaths,

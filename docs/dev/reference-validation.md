@@ -118,8 +118,8 @@ content item, and export contract is assigned to one of seven executable
 slices. HLG Main10 and sRGB Alpha are bound to deterministic project-owned
 recipes with run-local artifact attestations. This status proves only that the
 plan has no omissions. It does not run a product Interface and therefore keeps
-`complete_golden_project: false`; the coordinated single-Project execution and
-three consecutive passing runs remain separate requirements.
+`complete_golden_project: false`; only the coordinated single-Project process
+described below can produce complete execution evidence.
 
 Run the AAC editorial and Transport slice after generating the canonical
 playback audio:
@@ -171,28 +171,36 @@ Sequences, the original PCM Clip, and the second Sequence's Transition,
 Basic Title, Primary Color, and LUT stack. It remains partial execution evidence and cannot report
 `complete_golden_project: true`.
 
-With production FFmpeg encoders available, compose every currently executable
-Golden stage in one Project:
+With production FFmpeg encoders available, run the complete Golden Project
+gate:
 
 ```powershell
-$env:MONDRIAN_GOLDEN_FIXTURE_ROOT='target/validation/golden-fixtures'
-cargo test -p mondrian-app --lib `
-  golden_current_stages_share_one_project `
-  -j1 -- --ignored --nocapture --test-threads=1
+pwsh -File scripts/validation/invoke-complete-golden-project-gate.ps1
 ```
 
-This extends the two-stage gate with AAC Editorial/Transport,
-Proxy/Original+Offline Relink, Generated Delivery, and fixture-free
-Recovery/Nesting plus Color Media Roundtrip. It reuses canonical generated
-fixtures, creates five more stage Sequences, executes two real proxy
-generations, both typed exports plus the one-frame color roundtrip,
-ordinary media reimports, Precompose, autosave, fresh recovery, recovery-point
-retirement, and a final durable reopen. It requires one Project ID/path,
-exactly seven retained Sequences, the same relinked `AssetId`/Clip reference and
-replacement path, persisted proxy intent, a closed nested Sequence graph, plus
-reimported `H264High` and `HevcMain10` assets and the retained HLG/Alpha Track
-and Clip identities in the reopened Project library. It is still not the
-top-level Golden coordinator and cannot contribute a consecutive complete run.
+The script validates the contract and fixtures, builds the feature-gated
+`mondrian-golden` executable once, and runs it three times. Each process owns
+one real Project and executes all seven slices: Foundation Audio, Visual
+Authoring, AAC Editorial/Transport, Proxy/Relink, Generated Delivery,
+Recovery/Nesting, and Color Media Roundtrip. Recovery/Nesting owns both a
+parent and child Sequence, so the exact final author set contains eight
+Sequences rather than assuming one Sequence per slice.
+
+The Rust coordinator accepts only the exact declared slice-report set, requires
+every slice to retain `complete_golden_project: false`, waits for proxy work to
+quiesce, then performs one final durable reopen and compares every Sequence
+snapshot, Project identity, relink source/proxy intent, and reimported
+`H264High`/`HevcMain10` assets. It alone writes a complete report. The
+PowerShell supervisor validates three complete reports with distinct run and
+Project identities and writes a consecutive aggregate report under
+`target/validation/runs/`.
+
+Heavy GPU/media work intentionally runs on a dedicated process main lifetime,
+not a libtest worker. The terminal JSON report is the semantic completion
+boundary. After a short natural-exit grace period the supervisor may terminate
+a child blocked by a third-party Windows graphics-hook DLL during process
+detach; missing, malformed, or failing reports still fail closed, and process
+cleanup cannot turn a failure into a pass.
 
 Preflight a candidate reference machine before generating large media. The
 machine ID is an operator-owned stable label, not a serial number or an
@@ -267,7 +275,8 @@ matrix, and proves RGB behind zero Alpha cannot affect the composite. Finally
 it exports one Rec.709 H.264 frame through the production queue, strictly
 probes and reimports it, and compares sampled Program pixels. This is not an
 independent absolute HLG transfer-function oracle and does not close PQ, Log,
-real-media nesting, the top-level coordinator, or the three-run release gate.
+or real-media nesting. Its report remains partial even though the complete
+coordinator consumes it as one of seven required stages.
 
 Run the Proxy/Original and Offline Relink slice:
 
@@ -331,8 +340,8 @@ exact Trim, Transform and Opacity, H.264 High 8-bit and HEVC Main10 10-bit
 delivery, MP4 mux identity, Rec.709 CICP/range, absence of static HDR metadata,
 48 kHz Stereo AAC, production queue terminal evidence, and reimported typed
 codec/profile/pixel-format facts. It still reports a partial Golden slice:
-missing real color-reference roles, the remaining complete playback/workflow
-composition, and three complete consecutive runs remain open. Delivery report schema v4
+its result alone cannot satisfy the color, editing, recovery, or repetition
+obligations. Delivery report schema v4
 records its Project-scoped stage-Sequence creation and the implementation now
 runs over `GoldenProductWorkflowDriver`; the standalone gate is only a
 development wrapper around that reusable stage.
@@ -362,12 +371,11 @@ Windows font is a real dependency, so missing or changed font data fails closed.
 These generated pixels and the generated identity LUT prove
 regression parity only: they do not replace an independent application or
 specification reference, real-media handle coverage, the complete keyframe
-editing UI, or the three-run top-level Golden exit gate. Visual report schema
+editing UI, or any other complete-run stage. Visual report schema
 v7 records the Project-scoped stage-Sequence creation and runs over the same
 `GoldenProductWorkflowDriver` used by Foundation Audio. Its standalone wrapper
-still creates an isolated development run, while the composed gates invoke the
-reusable Foundation, Editorial/Transport, Proxy/Relink, Visual, Delivery, and
-Recovery/Nesting stages against one Project.
+still creates an isolated development run, while the complete coordinator
+invokes every reusable stage against one Project.
 
 Run the fixture-free Recovery/Nesting slice:
 

@@ -16,6 +16,7 @@ use mondrian_core::{AssetId, TimelineTime};
 use mondrian_editor_state::Action;
 use mondrian_export::preset::TimelineExportRange;
 use mondrian_export::validator::{probe_export_output, ExportOutputProbe};
+use mondrian_media::PreviewDecodeSessionContext;
 use mondrian_timeline::sequence::InputColorResolutionSource;
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -61,6 +62,7 @@ pub(super) fn execute_export_roundtrip(
     state: &mut AppState,
     output_directory: &Path,
     program_output_rgba: &[u8],
+    decode_context: &mut PreviewDecodeSessionContext,
 ) -> anyhow::Result<ExportRoundtripEvidence> {
     let preset = builtin_preset("h264-aac-sdr")?.preset();
     let execution = execute_export_job(
@@ -99,7 +101,7 @@ pub(super) fn execute_export_roundtrip(
         target_resolution: PREVIEW_RESOLUTION,
         input_color,
     };
-    let decoded = decode_media(state, &request, &asset)?;
+    let decoded = decode_media(state, &request, &asset, decode_context)?;
     let export_rgba = source_rgba(&decoded.frame)?;
     let samples = [(240, 270), (240, 810), (720, 810), (1200, 810), (1680, 810)];
     let mut max_channel_error = 0;

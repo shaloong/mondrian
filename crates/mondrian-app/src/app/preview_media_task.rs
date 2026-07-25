@@ -439,7 +439,7 @@ pub(crate) fn decode_media_preview(
     decode_media_preview_inner(job, queue_wait_us, None, should_cancel)
 }
 
-fn decode_media_preview_with_context(
+pub(crate) fn decode_media_preview_with_context(
     job: MediaPreviewJob,
     queue_wait_us: u64,
     decode_context: &mut PreviewDecodeSessionContext,
