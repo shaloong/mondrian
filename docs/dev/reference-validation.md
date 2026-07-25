@@ -119,8 +119,8 @@ The v9 global ledger is structurally complete: every required fixture,
 operation, content item, and export contract is assigned to one of seven
 executable slices. The Hero ledger is intentionally blocked while any of those
 obligations remains on a diagnostic Sequence. Foundation Audio, Visual
-Authoring, Editorial/Transport, Generated Delivery, and Recovery/Nesting are
-now assigned to Hero; HLG Main10 and sRGB Alpha remain bound to
+Authoring, Editorial/Transport, Generated Delivery, Proxy/Relink, and
+Recovery/Nesting are now assigned to Hero; HLG Main10 and sRGB Alpha remain bound to
 deterministic project-owned recipes with run-local artifact attestations. The
 plan does not run a product Interface and always keeps
 `complete_golden_project: false`; only the coordinated Hero process described
@@ -143,19 +143,19 @@ Project/path and both Sequences survive while only Session identity changes. It
 is infrastructure evidence, not a Golden operation and therefore does not
 alter the coverage ledger.
 
-After the canonical PCM and AAC fixtures are available, verify that all four
-Hero stages compose without report union:
+After the canonical PCM, AAC, and H.264 fixtures are available, verify that the
+current Hero stages compose without report union:
 
 ```powershell
 $env:MONDRIAN_GOLDEN_FIXTURE_ROOT='target/validation/golden-fixtures'
 cargo test -p mondrian-app --lib `
-  golden_authoring_delivery_and_recovery_share_one_hero_sequence `
+  golden_authoring_proxy_recovery_share_one_hero_sequence `
   -j1 -- --ignored --nocapture --test-threads=1
 ```
 
 The gate runs Foundation Audio, Visual Authoring, Editorial/Transport,
-Generated Delivery, and Recovery/Nesting on the same initial 7,500-frame Hero
-Sequence and crosses every durable reopen. Before Recovery it requires one
+Generated Delivery, Proxy/Relink, and Recovery/Nesting on the same initial
+7,500-frame Hero Sequence and crosses every durable reopen. Before Recovery it requires one
 unchanged Project ID/path and exactly one Sequence; Recovery must retain that
 Hero primary and add exactly one nested child. Visual must leave the complete
 Hero audio projection unchanged.
@@ -166,6 +166,9 @@ Overwrite, targeted Split, Ripple Delete, and multi-Track Insert. Delivery
 reuses the Foundation PCM placement instead of importing a duplicate, uses the
 nonzero `150..175` Work Area, and preserves all earlier Track-owned authoring
 while it authors Trim, Transform, and Opacity.
+Proxy/Relink adds one dedicated video Track, trims the imported H.264 Clip to
+`200..350`, and proves Proxy→Original→Proxy plus offline Relink and replacement
+proxy generation without changing any preceding Track-owned anchor.
 Recovery must then preserve every earlier scoped anchor while its exact
 `175..200` parent placement, nested child, Autosave recovery, and covering
 manual reopen remain identical.
@@ -201,14 +204,13 @@ The script validates the contract and fixtures, builds the feature-gated
 `mondrian-golden` executable once, and requests three runs. Before executing
 heavy stages, the Rust planner requires every fixture, operation, content item,
 and export to be assigned to the Hero Sequence role. Foundation Audio, Visual
-Authoring, Editorial/Transport, Generated Delivery, and Recovery/Nesting
-already share the five-minute primary Sequence; Recovery owns one auxiliary
-nested child rather than a second primary. Proxy/Relink and Color Media
-Roundtrip remain useful focused gates, but the complete command intentionally
-fails closed until they converge. The current Hero gaps are exactly five:
-HLG Main10, Rec.709 H.264, and sRGB Alpha fixtures plus Proxy/Original Switch
-and Offline Relink operations. There are no remaining unbound content or
-export obligations.
+Authoring, Editorial/Transport, Generated Delivery, Proxy/Relink, and
+Recovery/Nesting already share the five-minute primary Sequence; Recovery owns
+one auxiliary nested child rather than a second primary. Color Media Roundtrip
+remains a useful focused gate, but the complete command intentionally fails
+closed until it converges. The current Hero gaps are exactly two: the HLG
+Main10 and sRGB Alpha fixtures. There are no remaining unbound operation,
+content, or export obligations.
 
 Once the Hero ledger is complete, the Rust coordinator accepts only the exact
 declared slice-report set, requires every slice to retain
@@ -323,18 +325,23 @@ cargo test -p mondrian-app --lib `
 ```
 
 The slice copies the attested fixture into two run-local source locations and
-imports the first through the production media worker. Import-driven proxy
+imports the first through the production media worker. The stage reuses the
+Hero Sequence, creates one dedicated video Track, and trims its Clip to the
+exact `200..350` window through ordinary Timeline Actions. Import-driven proxy
 generation must cross a real worker boundary and publish a fresh proxy. Product
 Actions then switch Preview to original, back to the exact same fresh proxy,
 and finally to original again; every switch is exactly one Project author
 transaction and does not revise the Sequence. The run-local source is then
 made offline. Preview must report a structured unavailable source, the ordinary
 Relink Action must advance only the Asset Library revision, publish its reload
-event, and retain the same Asset/Clip identities and authored name. Because
-proxy identity includes the source path and fingerprint contract, the old
-proxy must be ineligible for the replacement path; a second real generation
-must publish a distinct fresh proxy. The report remains a partial slice and
-never claims independent color-reference or complete Golden status.
+event, and retain the same typed Asset/Clip identities and authored name.
+Because proxy identity includes the source path and fingerprint contract, the
+old proxy must be ineligible for the replacement path; a second real generation
+must publish a distinct fresh proxy. Report schema v3 captures the exact
+Track/Clip/Asset projection and project/asset proxy intent so the following
+Recovery stage can prove they survive a new Session and covering reopen. The
+report remains a partial slice and never claims independent color-reference or
+complete Golden status.
 
 Run the first Headless Golden execution slice:
 
@@ -498,9 +505,9 @@ H.264, HLG Main10, and sRGB Alpha fixture identities and assigns all five to
 executable slices.
 `foundation-audio-authoring-v1`, `visual-authoring-roundtrip-v1`,
 `editorial-transport-v1`, `generated-delivery-roundtrip-v1`, and
-`recovery-nesting-v1` now share one Hero Sequence; Recovery adds one nested
-child while `proxy-relink-v1` remains a real focused Headless product-workflow
-gate rather than a declaration-only check.
+`proxy-relink-v1` and `recovery-nesting-v1` now share one Hero Sequence;
+Recovery adds one nested child while Proxy/Relink retains a real focused
+Headless product-workflow gate rather than becoming a declaration-only check.
 `color-media-roundtrip-v1` adds real file-backed
 color/Alpha execution, while explicitly retaining the independent absolute
 HLG/PQ/Log gap. The H.264 editorial fixture is not eligible to close

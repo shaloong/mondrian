@@ -353,8 +353,8 @@ fn resolve_hero_sequence_id(
 }
 
 #[test]
-#[ignore = "composed Golden stages require canonical PCM/AAC fixtures, FFmpeg encoders, and a Windows Basic Title font"]
-fn golden_authoring_delivery_and_recovery_share_one_hero_sequence() -> anyhow::Result<()> {
+#[ignore = "composed Golden stages require canonical PCM/AAC/H.264 fixtures, FFmpeg proxy/export encoders, and a Windows Basic Title font"]
+fn golden_authoring_proxy_recovery_share_one_hero_sequence() -> anyhow::Result<()> {
     let root = repository_root();
     let (contract, mut run) =
         ComposedRun::create(&root, "Windows Alpha Golden Hero Authoring", false)?;
@@ -368,6 +368,31 @@ fn golden_authoring_delivery_and_recovery_share_one_hero_sequence() -> anyhow::R
             && run.workflow.app().sequences().len() == 1,
         "focused Hero authoring gate did not retain exactly one Hero Sequence"
     );
+    let foundation_before_proxy = stages.foundation.capture_audio_anchor(run.workflow.app())?;
+    let editorial_before_proxy = stages.editorial.capture_authoring_anchor(run.workflow.app())?;
+    let proxy = proxy_relink::execute_proxy_relink_stage(
+        &root,
+        &contract,
+        &mut run.workflow,
+        &output_directory,
+    )?;
+    ensure!(
+        proxy.primary_sequence_id() == stages.sequence_id
+            && run.workflow.app().active_sequence_id() == Some(stages.sequence_id)
+            && run.workflow.app().sequences().len() == 1,
+        "focused Proxy/Relink did not reuse the one Hero Sequence"
+    );
+    ensure!(
+        foundation_before_proxy == stages.foundation.capture_audio_anchor(run.workflow.app())?,
+        "focused Proxy/Relink changed Foundation authoring"
+    );
+    ensure!(
+        editorial_before_proxy == stages.editorial.capture_authoring_anchor(run.workflow.app())?,
+        "focused Proxy/Relink changed Editorial authoring"
+    );
+    stages.visual.verify_retained_authoring(run.workflow.app())?;
+    stages.delivery.verify_retained_authoring(run.workflow.app())?;
+    proxy.verify_retained_authoring(run.workflow.app())?;
     let foundation_before_recovery = stages.foundation.capture_audio_anchor(run.workflow.app())?;
     let editorial_before_recovery =
         stages.editorial.capture_authoring_anchor(run.workflow.app())?;
@@ -390,6 +415,7 @@ fn golden_authoring_delivery_and_recovery_share_one_hero_sequence() -> anyhow::R
     );
     stages.visual.verify_retained_authoring(run.workflow.app())?;
     stages.delivery.verify_retained_authoring(run.workflow.app())?;
+    proxy.verify_retained_authoring(run.workflow.app())?;
     ensure!(
         run.workflow.project_id() == project_id
             && run.workflow.project_path() == project_path
@@ -482,6 +508,8 @@ fn execute_complete_golden_project(
         generated_delivery::DELIVERY_SLICE_ID.to_owned(),
         hero_sequence_id,
     );
+    let foundation_before_proxy = hero.foundation.capture_audio_anchor(run.workflow.app())?;
+    let editorial_before_proxy = hero.editorial.capture_authoring_anchor(run.workflow.app())?;
     let proxy_relink = proxy_relink::execute_proxy_relink_stage(
         root,
         contract,
@@ -494,32 +522,33 @@ fn execute_complete_golden_project(
         proxy_relink::PROXY_RELINK_SLICE_ID,
         &proxy_relink,
     )?;
-    let proxy_relink_sequence_id = run
-        .workflow
-        .app()
-        .active_sequence()
-        .context("proxy/relink Sequence is absent")?
-        .id;
+    let proxy_relink_sequence_id = proxy_relink.primary_sequence_id();
     ensure!(
-        proxy_relink_sequence_id != hero_sequence_id,
-        "proxy/relink did not create a distinct stage Sequence"
+        proxy_relink_sequence_id == hero_sequence_id
+            && run.workflow.app().active_sequence_id() == Some(hero_sequence_id)
+            && run.workflow.app().sequences().len() == 1,
+        "proxy/relink did not reuse the one Hero Sequence"
     );
+    ensure!(
+        foundation_before_proxy == hero.foundation.capture_audio_anchor(run.workflow.app())?,
+        "Proxy/Relink changed the Foundation Track-owned audio authoring projection"
+    );
+    ensure!(
+        editorial_before_proxy == hero.editorial.capture_authoring_anchor(run.workflow.app())?,
+        "Proxy/Relink changed the Editorial Track-owned audio authoring projection"
+    );
+    hero.visual.verify_retained_authoring(run.workflow.app())?;
+    hero.delivery.verify_retained_authoring(run.workflow.app())?;
+    proxy_relink.verify_retained_authoring(run.workflow.app())?;
     stage_sequence_ids.insert(
         proxy_relink::PROXY_RELINK_SLICE_ID.to_owned(),
-        vec![proxy_relink_sequence_id],
+        vec![hero_sequence_id],
     );
     stage_primary_sequence_ids.insert(
         proxy_relink::PROXY_RELINK_SLICE_ID.to_owned(),
         proxy_relink_sequence_id,
     );
-    let proxy_relink_asset_id = run
-        .workflow
-        .app()
-        .active_sequence()
-        .and_then(|sequence| sequence.video_tracks.first())
-        .and_then(|track| track.clips.first())
-        .and_then(|clip| clip.library_asset_id())
-        .context("proxy/relink stage retained no media-backed video Clip")?;
+    let proxy_relink_asset_id = proxy_relink.asset_id();
     let proxy_relink_asset_path = run
         .workflow
         .app()
@@ -530,8 +559,6 @@ fn execute_complete_golden_project(
         .path;
     let foundation_before_recovery = hero.foundation.capture_audio_anchor(run.workflow.app())?;
     let editorial_before_recovery = hero.editorial.capture_authoring_anchor(run.workflow.app())?;
-    let proxy_sequence_before_recovery =
-        sequence_snapshot(&run.workflow, proxy_relink_sequence_id)?;
     let before_recovery_sequence_ids = run
         .workflow
         .app()
@@ -574,11 +601,7 @@ fn execute_complete_golden_project(
     );
     hero.visual.verify_retained_authoring(run.workflow.app())?;
     hero.delivery.verify_retained_authoring(run.workflow.app())?;
-    ensure!(
-        sequence_snapshot(&run.workflow, proxy_relink_sequence_id)?
-            == proxy_sequence_before_recovery,
-        "Recovery/Nesting changed the Proxy/Relink diagnostic Sequence"
-    );
+    proxy_relink.verify_retained_authoring(run.workflow.app())?;
     stage_sequence_ids.insert(
         recovery_nesting::RECOVERY_NESTING_SLICE_ID.to_owned(),
         vec![hero_sequence_id, nested_sequence_id],
@@ -606,14 +629,10 @@ fn execute_complete_golden_project(
         .context("color-media Sequence is absent")?
         .id;
     ensure!(
-        ![
-            hero_sequence_id,
-            proxy_relink_sequence_id,
-            nested_sequence_id
-        ]
-        .contains(&color_media_sequence_id),
+        ![hero_sequence_id, nested_sequence_id].contains(&color_media_sequence_id),
         "color-media did not create a distinct stage Sequence"
     );
+    proxy_relink.verify_retained_authoring(run.workflow.app())?;
     stage_sequence_ids.insert(
         color_media_roundtrip::COLOR_MEDIA_SLICE_ID.to_owned(),
         vec![color_media_sequence_id],
@@ -705,6 +724,7 @@ fn execute_complete_golden_project(
             && run.workflow.app().is_asset_proxy_mode(proxy_relink_asset_id),
         "final durable reopen lost relinked source identity or proxy author intent"
     );
+    proxy_relink.verify_retained_authoring(run.workflow.app())?;
     let exported_profiles = assets
         .iter()
         .filter(|asset| {

@@ -319,8 +319,8 @@ process-local Session, preserving Project, path, active Sequence, and saved
 revision. Foundation Audio, Editorial/Transport, Proxy/Relink, Generated
 Delivery, Visual Authoring, Recovery/Nesting, and Color Media Roundtrip are
 reusable stages over this driver. Foundation Audio, Visual Authoring,
-Editorial/Transport, Generated Delivery, and Recovery/Nesting now run on one
-Hero Sequence.
+Editorial/Transport, Generated Delivery, Proxy/Relink, and Recovery/Nesting now
+run on one Hero Sequence.
 Visual must preserve the complete Hero audio projection. Editorial must
 preserve the Foundation Track-owned audio anchor and the complete visual
 projection while adding AAC placements only to deterministic pristine Tracks.
@@ -333,12 +333,16 @@ product Interfaces in a nonzero Work Area. After durable reopen it runs the
 production Preview, audio Program Runtime, export queue, output validator,
 media import worker, preview decoder, and bounded audio source reader. The
 Headless Adapter attempts GPU execution first and records an explicit CPU
-Raster fallback when a valid effect cannot execute on GPU. Recovery/Nesting
-adds a dedicated Hero Track in the exact `175..200` window, keeps Hero as its
-primary identity, and owns one auxiliary Nested Composition child. Its
-Autosave recovery and covering manual reopen must preserve the complete Hero
-parent, child, and every earlier scoped anchor. Proxy/offline/relink and the
-file-backed HLG/Alpha roundtrip still use two focused diagnostic Sequences.
+Raster fallback when a valid effect cannot execute on GPU. Proxy/Relink owns a
+dedicated Hero Track in the exact `200..350` window. Its local evidence binds
+the trimmed Clip, stable Asset identity, relinked record, and proxy intent so a
+later stage can add unrelated Hero authoring without weakening verification.
+Recovery/Nesting adds a dedicated Hero Track in the exact `175..200` window,
+keeps Hero as its primary identity, and owns one auxiliary Nested Composition
+child. Its Autosave recovery and covering manual reopen must preserve the
+complete Hero parent, child, Proxy anchor, and every earlier scoped anchor.
+Only the file-backed HLG/Alpha roundtrip still uses a focused diagnostic
+Sequence.
 The number of execution slices is not a Sequence-count invariant because a
 Hero slice may own a strongly referenced child. Complete acceptance remains
 blocked until the remaining diagnostic obligations join Hero.
@@ -366,9 +370,9 @@ recovery Action, and compares complete Hero parent/child author hashes and
 deterministic execution evidence. The recovered Session must remain dirty and
 the recovery archive authoritative until a covering manual save atomically
 retires it. A final composed reopen must preserve the fixed Project binding,
-the three Sequences present at the Recovery boundary, earlier stage content,
+the two Sequences present at the Recovery boundary, earlier stage content,
 relinked Asset intent, and both typed reimport profiles. The later Color Media
-stage extends that invariant to four Sequences and retains its file-backed
+stage extends that invariant to three Sequences and retains its file-backed
 Track/Clip identities. Earlier eight-Sequence supervised runs remain diagnostic
 history only; new consecutive acceptance runs cannot begin until all primary
 stages share the Hero identity. Qualified release-machine capture and

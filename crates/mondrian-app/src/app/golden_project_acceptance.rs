@@ -615,17 +615,10 @@ fn golden_acceptance_plan_rejects_obligations_isolated_from_the_hero_sequence() 
         plan.hero_missing.fixture_roles,
         BTreeSet::from([
             "hlg-main10-picture".to_owned(),
-            "rec709-h264-picture".to_owned(),
             "srgb-alpha-still".to_owned(),
         ])
     );
-    assert_eq!(
-        plan.hero_missing.operations,
-        BTreeSet::from([
-            "offline-relink".to_owned(),
-            "proxy-original-switch".to_owned(),
-        ])
-    );
+    assert!(plan.hero_missing.operations.is_empty());
     assert!(plan.hero_missing.content.is_empty());
     assert!(!plan.hero_missing.operations.contains("export"));
     assert!(!plan.hero_missing.fixture_roles.contains("aac-audio"));

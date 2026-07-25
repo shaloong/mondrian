@@ -126,7 +126,7 @@
     },
     {
       "id": "proxy-relink-v1",
-      "sequence_role": "isolated-proxy-relink",
+      "sequence_role": "hero",
       "required_fixture_roles": [
         "rec709-h264-picture"
       ],
@@ -137,8 +137,8 @@
       "required_content": [],
       "required_exports": [],
       "timeline_window": {
-        "start_frame": 0,
-        "end_frame_exclusive": 150
+        "start_frame": 200,
+        "end_frame_exclusive": 350
       }
     },
     {

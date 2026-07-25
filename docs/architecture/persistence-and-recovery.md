@@ -150,6 +150,10 @@ child while Hero remains the stage primary. Before autosave, after recovery
 into a distinct dirty Session, and after the covering manual save/reopen, it
 requires identical complete Hero/child hashes, stable typed identities,
 recursive Preview pixels, Export diagnostics, and earlier stage-owned anchors.
+Those anchors include the preceding Proxy/Relink Track and Clip, the relinked
+Asset record, and project/asset proxy intent; recovery cannot pass merely
+because the full Hero Sequence identity survived while its Asset Library state
+drifted.
 This proves the normal production recovery path; it does not stand in for
 conflict UI or filesystem fault injection.
 

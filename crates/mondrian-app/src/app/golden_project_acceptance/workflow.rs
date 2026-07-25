@@ -351,8 +351,19 @@ fn golden_product_workflow_binds_hero_and_diagnostic_sequences_explicitly() -> a
     ));
     assert_eq!(workflow.app().sequences().len(), 1);
 
-    let diagnostic = workflow
+    let proxy = workflow
         .bind_slice_primary_sequence(&contract, super::proxy_relink::PROXY_RELINK_SLICE_ID)?;
+    assert!(matches!(
+        proxy.binding,
+        GoldenSequenceStageBindingEvidence::ExistingHero { switched: false, .. }
+    ));
+    assert_eq!(proxy.sequence_id(), workflow.hero_sequence_id());
+    assert_eq!(workflow.app().sequences().len(), 1);
+
+    let diagnostic = workflow.bind_slice_primary_sequence(
+        &contract,
+        super::color_media_roundtrip::COLOR_MEDIA_SLICE_ID,
+    )?;
     assert!(matches!(
         diagnostic.binding,
         GoldenSequenceStageBindingEvidence::CreatedDiagnostic { .. }

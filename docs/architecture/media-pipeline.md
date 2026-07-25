@@ -1333,6 +1333,15 @@ the stable Asset identity; Relink is an Asset Library transaction, not a
 Sequence edit. Preview re-resolves the live record, observes a missing
 replacement proxy, and may request a fresh artifact through the same service.
 No UI-owned cache invalidation list is required for correctness.
+The Golden Proxy/Relink Adapter exercises that production boundary inside the
+shared Hero Sequence. It owns one dedicated video Track, trims the imported
+H.264 Clip to the exact `200..350` window, waits for both original-source and
+replacement-source proxy attempts to publish terminal completion evidence, and
+captures a Track/Clip/Asset-scoped anchor. Later Autosave recovery and durable
+reopen may add unrelated Hero authoring, but they must retain that exact
+placement, relinked Asset record, project/asset proxy intent, and the distinct
+replacement proxy identity. This is codec/proxy/relink evidence, not an
+independent Rec.709 color reference.
 `ProxyCodec::Auto` selects H.264 High 8-bit only for ordinary 8-bit SDR and
 selects H.265 Main10 for HDR, camera-log, or greater-than-8-bit sources.
 Explicit H.264 requests for high-precision sources fail closed. H.265 Main10

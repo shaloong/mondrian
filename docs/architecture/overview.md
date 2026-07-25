@@ -91,16 +91,19 @@ Lower layers cannot depend on higher layers:
   advance under the Synthetic Clock Master. This closes short Golden workflow
   obligations only; it cannot substitute for the long-form CPAL/GPU/memory/A/V
   acceptance profiles.
-  The proxy/relink slice imports an attested project-generated H.264 source
-  through the same media worker used by the product, waits for the
-  instance-owned proxy service to cross a real FFmpeg worker boundary, and
-  asks the canonical Preview media resolver to prove Proxy → Original → Proxy
-  selection. Its offline Relink step changes only the Asset Library revision,
-  retains `AssetId`, Clip reference, author name, Project Generation, and
-  Sequence Revision, then requires the replacement source path to select a
-  distinct proxy identity and complete a fresh generation. The fixture proves
-  codec/proxy/relink semantics only and is forbidden as independent color
-  reference evidence.
+  The proxy/relink slice reuses the Hero Sequence, owns one dedicated video
+  Track, and trims an attested project-generated H.264 source to the exact
+  nonoverlap window `200..350` through ordinary Timeline Actions. The same
+  media worker used by the product starts the instance-owned proxy service
+  across a real FFmpeg worker boundary, and the canonical Preview media
+  resolver proves Proxy → Original → Proxy selection. Its offline Relink step
+  changes only the Asset Library revision, retains typed Track/Clip/Asset
+  identities, author name, Project Generation, and Sequence Revision, then
+  requires the replacement source path to select a distinct proxy identity
+  and complete a fresh generation. A Track/Clip/Asset-scoped authoring anchor
+  lets later Recovery add another Hero Track while still proving the relinked
+  record and proxy intent did not drift. The fixture proves codec/proxy/relink
+  semantics only and is forbidden as independent color reference evidence.
   The generated-delivery slice shares the Hero Sequence, reuses the Foundation
   PCM placement, and uses product Actions to create a Solid Color, trim the
   exact nonzero `150..175` Work Area, and author Transform/Opacity. After a
@@ -150,9 +153,9 @@ Lower layers cannot depend on higher layers:
   claim an independent absolute HLG transfer-function oracle, PQ/Log coverage,
   real-media nested color, or the complete Golden Project.
   The complete Golden coordinator runs all seven slices through one
-  `GoldenProductWorkflowDriver` and one Project, then verifies the exact four
-  stage-owned Sequences (one Hero, one nested child, and two diagnostic
-  Sequences), quiescent proxy service, relink intent, delivery profiles, and
+  `GoldenProductWorkflowDriver` and one Project, then verifies the exact three
+  stage-owned Sequences (one Hero, one nested child, and one diagnostic
+  Sequence), quiescent proxy service, relink intent, delivery profiles, and
   serialized author snapshots after a final durable reopen. Only
   this Rust coordinator may emit `complete_golden_project: true`; the external
   PowerShell supervisor validates that typed report for three distinct
