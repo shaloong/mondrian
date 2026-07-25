@@ -12,6 +12,7 @@ $VideoFixtureId = "generated-playback-4k25-hevc-main10-rec709-v1"
 $AudioFixtureId = "generated-playback-aac-48k-stereo-v1"
 $VideoFileName = "playback-4k25-hevc-main10-rec709-1812s-v1.mp4"
 $AudioFileName = "playback-aac-48k-stereo-1835s-v1.m4a"
+$RecipePath = "scripts/validation/generate-reference-playback-media.ps1"
 
 function Resolve-RepositoryPath([string]$Path) {
     $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../.."))
@@ -50,7 +51,7 @@ function Write-Attestation(
         fixture_id = $FixtureId
         generated_at_utc = [DateTime]::UtcNow.ToString("o")
         recipe = [ordered]@{
-            path = "scripts/validation/generate-reference-playback-media.ps1"
+            path = $RecipePath
             sha256 = (Get-FileHash -LiteralPath $scriptPath -Algorithm SHA256).Hash.ToLowerInvariant()
         }
         tools = [ordered]@{
@@ -69,6 +70,31 @@ function Write-Attestation(
     Write-Host "Generated $FixtureId"
     Write-Host "  artifact: $ArtifactPath"
     Write-Host "  attestation: $attestationPath"
+}
+
+function Assert-ExistingAttestation(
+    [string]$FixtureId,
+    [string]$ArtifactPath,
+    [string]$RecipeHash
+) {
+    $attestationPath = "$ArtifactPath.attestation.json"
+    if (-not (Test-Path -LiteralPath $attestationPath -PathType Leaf)) {
+        throw "Existing $FixtureId fixture has no attestation. Re-run with -Force."
+    }
+    $attestation = Get-Content -Raw -LiteralPath $attestationPath | ConvertFrom-Json
+    $artifact = Get-Item -LiteralPath $ArtifactPath
+    $artifactHash = (Get-FileHash -LiteralPath $ArtifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if (
+        [int]$attestation.schema_version -ne 1 -or
+        [string]$attestation.fixture_id -ne $FixtureId -or
+        [string]$attestation.recipe.path -ne $RecipePath -or
+        [string]$attestation.recipe.sha256 -ne $RecipeHash -or
+        [string]$attestation.artifact.file_name -ne $artifact.Name -or
+        [int64]$attestation.artifact.size_bytes -ne [int64]$artifact.Length -or
+        [string]$attestation.artifact.sha256 -ne $artifactHash
+    ) {
+        throw "Existing $FixtureId fixture is not attested for the current recipe and artifact. Re-run with -Force."
+    }
 }
 
 function Read-JsonProbe([string]$Ffprobe, [string]$ArtifactPath) {
@@ -102,7 +128,11 @@ function Assert-AudioProbe([object]$Probe) {
     $audio = @($Probe.streams | Where-Object codec_name -eq "aac")
     if ($audio.Count -ne 1) { throw "Generated audio must contain exactly one AAC stream." }
     $stream = $audio[0]
-    if ([int]$stream.sample_rate -ne 48000 -or [int]$stream.channels -ne 2) {
+    if (
+        [int]$stream.sample_rate -ne 48000 -or
+        [int]$stream.channels -ne 2 -or
+        [string]$stream.channel_layout -ne "stereo"
+    ) {
         throw "Generated audio is not 48 kHz stereo."
     }
     if ([double]$stream.duration -lt 1834.9) { throw "Generated audio stream is shorter than 1834.9 seconds." }
@@ -129,7 +159,8 @@ New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
 
 if ($Profile -in @("All", "Video")) {
     $videoPath = Join-Path $outputDirectory $VideoFileName
-    if ($Force -or -not (Test-Path -LiteralPath $videoPath -PathType Leaf)) {
+    $shouldGenerateVideo = $Force -or -not (Test-Path -LiteralPath $videoPath -PathType Leaf)
+    if ($shouldGenerateVideo) {
         $seedPath = Join-Path $outputDirectory ".playback-4k25-hevc-main10-seed.partial.mp4"
         $partialPath = "$videoPath.partial.mp4"
         Remove-Item -LiteralPath $seedPath, $partialPath -Force -ErrorAction SilentlyContinue
@@ -159,12 +190,19 @@ if ($Profile -in @("All", "Video")) {
     }
     $videoProbe = Read-JsonProbe $ffprobe $videoPath
     Assert-VideoProbe $videoProbe
-    Write-Attestation $VideoFixtureId $videoPath $ffmpegVersion $ffprobeVersion $videoProbe
+    if ($shouldGenerateVideo) {
+        Write-Attestation $VideoFixtureId $videoPath $ffmpegVersion $ffprobeVersion $videoProbe
+    } else {
+        $recipeHash = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        Assert-ExistingAttestation $VideoFixtureId $videoPath $recipeHash
+        Write-Host "Reused attested $VideoFixtureId"
+    }
 }
 
 if ($Profile -in @("All", "Audio")) {
     $audioPath = Join-Path $outputDirectory $AudioFileName
-    if ($Force -or -not (Test-Path -LiteralPath $audioPath -PathType Leaf)) {
+    $shouldGenerateAudio = $Force -or -not (Test-Path -LiteralPath $audioPath -PathType Leaf)
+    if ($shouldGenerateAudio) {
         $partialPath = "$audioPath.partial.m4a"
         Remove-Item -LiteralPath $partialPath -Force -ErrorAction SilentlyContinue
         try {
@@ -172,7 +210,8 @@ if ($Profile -in @("All", "Audio")) {
             Invoke-Checked $ffmpeg @(
                 "-hide_banner", "-nostdin", "-loglevel", "warning", "-y",
                 "-f", "lavfi", "-i", $signal, "-vn", "-c:a", "aac", "-b:a", "192k",
-                "-ar", "48000", "-ac", "2", "-movflags", "+faststart", $partialPath
+                "-ar", "48000", "-ac", "2", "-channel_layout", "stereo",
+                "-movflags", "+faststart", $partialPath
             )
             Move-Item -LiteralPath $partialPath -Destination $audioPath -Force
         } finally {
@@ -181,5 +220,11 @@ if ($Profile -in @("All", "Audio")) {
     }
     $audioProbe = Read-JsonProbe $ffprobe $audioPath
     Assert-AudioProbe $audioProbe
-    Write-Attestation $AudioFixtureId $audioPath $ffmpegVersion $ffprobeVersion $audioProbe
+    if ($shouldGenerateAudio) {
+        Write-Attestation $AudioFixtureId $audioPath $ffmpegVersion $ffprobeVersion $audioProbe
+    } else {
+        $recipeHash = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        Assert-ExistingAttestation $AudioFixtureId $audioPath $recipeHash
+        Write-Host "Reused attested $AudioFixtureId"
+    }
 }

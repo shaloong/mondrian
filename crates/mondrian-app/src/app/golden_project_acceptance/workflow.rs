@@ -352,7 +352,7 @@ fn golden_product_workflow_binds_hero_and_diagnostic_sequences_explicitly() -> a
     assert_eq!(workflow.app().sequences().len(), 1);
 
     let diagnostic = workflow
-        .bind_slice_primary_sequence(&contract, super::editorial_transport::EDITORIAL_SLICE_ID)?;
+        .bind_slice_primary_sequence(&contract, super::proxy_relink::PROXY_RELINK_SLICE_ID)?;
     assert!(matches!(
         diagnostic.binding,
         GoldenSequenceStageBindingEvidence::CreatedDiagnostic { .. }
@@ -363,14 +363,14 @@ fn golden_product_workflow_binds_hero_and_diagnostic_sequences_explicitly() -> a
     );
     assert_eq!(workflow.app().sequences().len(), 2);
 
-    let visual = workflow
-        .bind_slice_primary_sequence(&contract, super::visual_authoring::VISUAL_SLICE_ID)?;
-    assert_eq!(visual.sequence_id(), workflow.hero_sequence_id());
+    let editorial = workflow
+        .bind_slice_primary_sequence(&contract, super::editorial_transport::EDITORIAL_SLICE_ID)?;
+    assert_eq!(editorial.sequence_id(), workflow.hero_sequence_id());
     assert!(matches!(
-        visual.binding,
+        editorial.binding,
         GoldenSequenceStageBindingEvidence::ExistingHero { switched: true, .. }
     ));
-    let durability = workflow.durable_save_reopen_for(&visual)?;
+    let durability = workflow.durable_save_reopen_for(&editorial)?;
     assert!(durability.session_identity_changed);
     assert!(durability.project_identity_preserved);
     assert_eq!(workflow.project_id(), project_id);

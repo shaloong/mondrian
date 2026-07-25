@@ -4,6 +4,7 @@
 //! are deliberately separate so adding later Golden coverage does not create a
 //! second monolithic acceptance harness.
 
+mod audio_authoring_evidence;
 mod color_media_roundtrip;
 mod composed_workflow;
 mod editorial_transport;
@@ -11,6 +12,7 @@ mod fixture;
 mod foundation_audio;
 mod generated_delivery;
 mod harness;
+mod headless_preview;
 mod plan;
 mod proxy_relink;
 mod recovery_nesting;
@@ -610,6 +612,21 @@ fn golden_acceptance_plan_rejects_obligations_isolated_from_the_hero_sequence() 
     assert!(plan.missing.exports.is_empty());
     assert!(plan.hero_missing.fixture_roles.contains("hlg-main10-picture"));
     assert!(plan.hero_missing.operations.contains("export"));
+    assert!(!plan.hero_missing.fixture_roles.contains("aac-audio"));
+    for operation in [
+        "play",
+        "accurate-seek",
+        "scrub",
+        "insert",
+        "overwrite",
+        "ripple",
+        "split",
+    ] {
+        assert!(
+            !plan.hero_missing.operations.contains(operation),
+            "{operation} must be assigned to the Hero Sequence"
+        );
+    }
     for content in [
         "primary-color",
         "lut",

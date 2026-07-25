@@ -170,19 +170,50 @@ fn wait_for_proxy_quiescence(
     }
 }
 
-fn execute_foundation_and_visual(
+struct GoldenHeroAuthoringStages {
+    sequence_id: SequenceId,
+    foundation: foundation_audio::GoldenFoundationReport,
+    visual: visual_authoring::GoldenVisualReport,
+    editorial: editorial_transport::GoldenEditorialReport,
+}
+
+fn hero_audio_projection(
+    workflow: &GoldenProductWorkflowDriver,
+    sequence_id: SequenceId,
+) -> anyhow::Result<Value> {
+    let sequence = workflow
+        .app()
+        .sequence_by_id(sequence_id)
+        .context("Hero Sequence is absent for audio projection")?;
+    Ok(serde_json::to_value((
+        &sequence.audio_tracks,
+        &sequence.audio_roles,
+        &sequence.audio_program,
+    ))?)
+}
+
+fn hero_visual_projection(
+    workflow: &GoldenProductWorkflowDriver,
+    sequence_id: SequenceId,
+) -> anyhow::Result<Value> {
+    let sequence = workflow
+        .app()
+        .sequence_by_id(sequence_id)
+        .context("Hero Sequence is absent for visual projection")?;
+    Ok(serde_json::to_value((
+        &sequence.video_tracks,
+        &sequence.video_transitions,
+    ))?)
+}
+
+fn execute_hero_authoring_stages(
     root: &Path,
     contract: &GoldenProjectContract,
     workflow: &mut GoldenProductWorkflowDriver,
-) -> anyhow::Result<(
-    SequenceId,
-    SequenceId,
-    foundation_audio::GoldenFoundationReport,
-    visual_authoring::GoldenVisualReport,
-)> {
+) -> anyhow::Result<GoldenHeroAuthoringStages> {
     let foundation = foundation_audio::execute_foundation_stage(root, contract, workflow)?;
     let foundation_sequence_id = foundation.primary_sequence_id();
-    let foundation_audio_before_visual = foundation.capture_audio_anchor(workflow.app())?;
+    let complete_audio_before_visual = hero_audio_projection(workflow, foundation_sequence_id)?;
 
     let visual = visual_authoring::execute_visual_stage(contract, workflow)?;
     let visual_sequence_id = visual.primary_sequence_id();
@@ -196,18 +227,44 @@ fn execute_foundation_and_visual(
         workflow.app().sequences().len() == 1,
         "foundation and visual stages created an undeclared auxiliary Sequence"
     );
-    let foundation_audio_after_visual = foundation.capture_audio_anchor(workflow.app())?;
     ensure!(
-        foundation_audio_before_visual == foundation_audio_after_visual,
-        "visual authoring changed the Foundation audio Track, Clip, Component Edit, or Audio Program"
+        complete_audio_before_visual == hero_audio_projection(workflow, foundation_sequence_id)?,
+        "visual authoring changed the complete Hero audio author state"
     );
     visual.verify_retained_authoring(workflow.app())?;
-    Ok((
-        foundation_sequence_id,
-        visual_sequence_id,
+
+    let foundation_before_editorial = foundation.capture_audio_anchor(workflow.app())?;
+    let visual_before_editorial = hero_visual_projection(workflow, foundation_sequence_id)?;
+    let editorial = editorial_transport::execute_editorial_stage(root, contract, workflow)?;
+    let editorial_sequence_id = editorial.primary_sequence_id();
+    workflow.verify_binding()?;
+    ensure!(
+        foundation_sequence_id == visual_sequence_id
+            && foundation_sequence_id == editorial_sequence_id
+            && foundation_sequence_id == workflow.hero_sequence_id(),
+        "Foundation, Visual, and Editorial stages did not use the one Hero Sequence"
+    );
+    ensure!(
+        workflow.app().sequences().len() == 1,
+        "Hero authoring stages created an undeclared auxiliary Sequence"
+    );
+    ensure!(
+        foundation_before_editorial == foundation.capture_audio_anchor(workflow.app())?,
+        "Editorial changed the Foundation Track-owned audio authoring projection"
+    );
+    ensure!(
+        visual_before_editorial == hero_visual_projection(workflow, foundation_sequence_id)?,
+        "Editorial changed the complete Hero visual author state"
+    );
+    visual.verify_retained_authoring(workflow.app())?;
+    editorial.verify_retained_authoring(workflow.app())?;
+
+    Ok(GoldenHeroAuthoringStages {
+        sequence_id: foundation_sequence_id,
         foundation,
         visual,
-    ))
+        editorial,
+    })
 }
 
 fn sequence_snapshot(
@@ -266,15 +323,20 @@ fn resolve_hero_sequence_id(
 }
 
 #[test]
-#[ignore = "composed Golden stages require the canonical PCM fixture and Windows Basic Title font"]
-fn golden_foundation_and_visual_stages_share_one_hero_sequence() -> anyhow::Result<()> {
+#[ignore = "composed Golden stages require canonical PCM/AAC fixtures and a Windows Basic Title font"]
+fn golden_foundation_visual_and_editorial_stages_share_one_hero_sequence() -> anyhow::Result<()> {
     let root = repository_root();
     let (contract, mut run) =
-        ComposedRun::create(&root, "Windows Alpha Golden Foundation + Visual", false)?;
+        ComposedRun::create(&root, "Windows Alpha Golden Hero Authoring", false)?;
     let project_id = run.workflow.project_id();
     let project_path = run.workflow.project_path().to_path_buf();
 
-    let _ = execute_foundation_and_visual(&root, &contract, &mut run.workflow)?;
+    let stages = execute_hero_authoring_stages(&root, &contract, &mut run.workflow)?;
+    ensure!(
+        stages.sequence_id == run.workflow.hero_sequence_id()
+            && run.workflow.app().sequences().len() == 1,
+        "focused Hero authoring gate did not retain exactly one Hero Sequence"
+    );
     ensure!(
         run.workflow.project_id() == project_id
             && run.workflow.project_path() == project_path
@@ -309,58 +371,49 @@ fn execute_complete_golden_project(
     let mut stage_reports = BTreeMap::new();
     let mut stage_sequence_ids = BTreeMap::new();
     let mut stage_primary_sequence_ids = BTreeMap::new();
-    let (foundation_sequence_id, visual_sequence_id, foundation, visual) =
-        execute_foundation_and_visual(root, contract, &mut run.workflow)?;
+    let hero = execute_hero_authoring_stages(root, contract, &mut run.workflow)?;
+    let hero_sequence_id = hero.sequence_id;
     capture_stage(
         &mut stage_reports,
         contract,
         foundation_audio::FOUNDATION_SLICE_ID,
-        &foundation,
+        &hero.foundation,
     )?;
     capture_stage(
         &mut stage_reports,
         contract,
         visual_authoring::VISUAL_SLICE_ID,
-        &visual,
+        &hero.visual,
     )?;
-    stage_sequence_ids.insert(
-        foundation_audio::FOUNDATION_SLICE_ID.to_owned(),
-        vec![foundation_sequence_id],
-    );
-    stage_primary_sequence_ids.insert(
-        foundation_audio::FOUNDATION_SLICE_ID.to_owned(),
-        foundation_sequence_id,
-    );
-    stage_sequence_ids.insert(
-        visual_authoring::VISUAL_SLICE_ID.to_owned(),
-        vec![visual_sequence_id],
-    );
-    stage_primary_sequence_ids.insert(
-        visual_authoring::VISUAL_SLICE_ID.to_owned(),
-        visual_sequence_id,
-    );
-
-    let editorial =
-        editorial_transport::execute_editorial_stage(root, contract, &mut run.workflow)?;
     capture_stage(
         &mut stage_reports,
         contract,
         editorial_transport::EDITORIAL_SLICE_ID,
-        &editorial,
+        &hero.editorial,
     )?;
-    let editorial_sequence_id =
-        run.workflow.app().active_sequence().context("editorial Sequence is absent")?.id;
-    ensure!(
-        ![foundation_sequence_id, visual_sequence_id].contains(&editorial_sequence_id),
-        "editorial did not create a distinct stage Sequence"
+    stage_sequence_ids.insert(
+        foundation_audio::FOUNDATION_SLICE_ID.to_owned(),
+        vec![hero_sequence_id],
+    );
+    stage_primary_sequence_ids.insert(
+        foundation_audio::FOUNDATION_SLICE_ID.to_owned(),
+        hero_sequence_id,
+    );
+    stage_sequence_ids.insert(
+        visual_authoring::VISUAL_SLICE_ID.to_owned(),
+        vec![hero_sequence_id],
+    );
+    stage_primary_sequence_ids.insert(
+        visual_authoring::VISUAL_SLICE_ID.to_owned(),
+        hero_sequence_id,
     );
     stage_sequence_ids.insert(
         editorial_transport::EDITORIAL_SLICE_ID.to_owned(),
-        vec![editorial_sequence_id],
+        vec![hero_sequence_id],
     );
     stage_primary_sequence_ids.insert(
         editorial_transport::EDITORIAL_SLICE_ID.to_owned(),
-        editorial_sequence_id,
+        hero_sequence_id,
     );
     let proxy_relink = proxy_relink::execute_proxy_relink_stage(
         root,
@@ -381,12 +434,7 @@ fn execute_complete_golden_project(
         .context("proxy/relink Sequence is absent")?
         .id;
     ensure!(
-        ![
-            foundation_sequence_id,
-            visual_sequence_id,
-            editorial_sequence_id
-        ]
-        .contains(&proxy_relink_sequence_id),
+        proxy_relink_sequence_id != hero_sequence_id,
         "proxy/relink did not create a distinct stage Sequence"
     );
     stage_sequence_ids.insert(
@@ -428,13 +476,7 @@ fn execute_complete_golden_project(
     let delivery_sequence_id =
         run.workflow.app().active_sequence().context("delivery Sequence is absent")?.id;
     ensure!(
-        ![
-            foundation_sequence_id,
-            visual_sequence_id,
-            editorial_sequence_id,
-            proxy_relink_sequence_id
-        ]
-        .contains(&delivery_sequence_id),
+        ![hero_sequence_id, proxy_relink_sequence_id].contains(&delivery_sequence_id),
         "delivery did not create a distinct stage Sequence"
     );
     stage_sequence_ids.insert(
@@ -480,9 +522,7 @@ fn execute_complete_golden_project(
         .id;
     ensure!(
         ![
-            foundation_sequence_id,
-            visual_sequence_id,
-            editorial_sequence_id,
+            hero_sequence_id,
             proxy_relink_sequence_id,
             delivery_sequence_id
         ]
@@ -521,9 +561,7 @@ fn execute_complete_golden_project(
         .id;
     ensure!(
         ![
-            foundation_sequence_id,
-            visual_sequence_id,
-            editorial_sequence_id,
+            hero_sequence_id,
             proxy_relink_sequence_id,
             delivery_sequence_id,
             recovery_nesting_sequence_id
@@ -539,7 +577,12 @@ fn execute_complete_golden_project(
         color_media_roundtrip::COLOR_MEDIA_SLICE_ID.to_owned(),
         color_media_sequence_id,
     );
-    let hero_sequence_id = resolve_hero_sequence_id(contract, &stage_primary_sequence_ids)?;
+    let resolved_hero_sequence_id =
+        resolve_hero_sequence_id(contract, &stage_primary_sequence_ids)?;
+    ensure!(
+        resolved_hero_sequence_id == hero_sequence_id,
+        "compiled Hero identity differs from the executed Hero authoring stages"
+    );
     ensure!(
         run.workflow
             .app()

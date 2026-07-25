@@ -224,6 +224,15 @@ right-clicking an exact adjacent unlocked video cut exposes the default Cross
 Dissolve command. Resize preview never mutates the supplied model and commits
 exactly once on pointer release.
 
+Targeted Split and global Razor are separate product intents. A targeted Split
+names one stable `ClipId` and returns one typed `SplitClipOutcome`: the requested
+left/right identity mapping plus every synchronized link-group member mapping.
+Callers consume that receipt directly; they do not infer new Clips by comparing
+pre/post ID sets. Other Clips that merely intersect the same playhead remain
+unchanged. Global Razor may intentionally traverse every eligible Track, but it
+must invoke the same validated split implementation rather than weakening the
+targeted contract.
+
 Precompose is likewise a semantic Timeline Action, not a Widget-side graph
 rewrite. Its payload carries only the requested nested Sequence name; the App
 resolves the current stable-ID Clip selection, expands complete link groups,
@@ -274,7 +283,7 @@ values observed under a distinct fresh Session after load. Action admission or
 a human-readable status hint alone cannot satisfy a Golden operation.
 
 Golden validation has one UI-independent planning Module. It compiles the
-closed schema-v4 / `windows-alpha-golden-v7` contract into two deterministic
+closed schema-v4 / `windows-alpha-golden-v8` contract into two deterministic
 ledgers of required fixture roles, operations, content, and exports. The global
 ledger finds work absent from every slice; the Hero ledger independently finds
 work that exists only in isolated diagnostic Sequences. A slice declares one
@@ -309,16 +318,20 @@ allows active Sequence change. Durable reopen must replace only the
 process-local Session, preserving Project, path, active Sequence, and saved
 revision. Foundation Audio, Editorial/Transport, Proxy/Relink, Generated
 Delivery, Visual Authoring, Recovery/Nesting, and Color Media Roundtrip are
-reusable stages over this driver. Foundation Audio and Visual Authoring now run
-on one Hero Sequence: the composed gate compares the complete typed Foundation
-audio Track and Audio Program projection before and after Visual authoring, then
-requires the stable Title, Transition, Primary Color, and LUT identities on the
-same Sequence. AAC editing/transport, proxy/offline/relink, H.264/HEVC delivery,
-the Recovery/Nesting parent plus child, and file-backed HLG/Alpha roundtrip still
-use six focused diagnostic Sequences. The number of execution slices is not a
-Sequence-count invariant because Recovery/Nesting intentionally owns two. This
-proves the first real cross-domain Hero composition while complete acceptance
-remains blocked until every other obligation joins it.
+reusable stages over this driver. Foundation Audio, Visual Authoring, and
+Editorial/Transport now run on one Hero Sequence. Visual must preserve the
+complete Hero audio projection. Editorial must preserve the Foundation
+Track-owned audio anchor and the complete visual projection while adding AAC
+placements only to deterministic pristine Tracks. Its Overwrite, targeted
+Split, Ripple Delete, and multi-Track Insert consume typed product outcomes;
+scrub, settled seek, and play complete exact Frame Presentation Tickets through
+the production Preview Runtime. The Headless Adapter attempts GPU execution
+first and records an explicit CPU Raster fallback when a valid effect cannot
+execute on GPU. Proxy/offline/relink, H.264/HEVC delivery, the Recovery/Nesting
+parent plus child, and file-backed HLG/Alpha roundtrip still use five focused
+diagnostic Sequences. The number of execution slices is not a Sequence-count
+invariant because Recovery/Nesting intentionally owns two. Complete acceptance
+remains blocked until those obligations join Hero.
 
 Heavy media and GPU execution runs in the dedicated `mondrian-golden` process
 entrypoint, never on a short-lived libtest worker. A terminal top-level report
@@ -342,9 +355,9 @@ through the product recovery Action, and compares parent/child author hashes
 and deterministic execution evidence. The recovered Session must remain dirty
 and the recovery archive authoritative until a covering manual save atomically
 retires it. A final composed reopen must preserve the fixed Project binding,
-the six Sequences present at the Recovery boundary, earlier stage content,
+the five Sequences present at the Recovery boundary, earlier stage content,
 relinked Asset intent, and both typed reimport profiles. The later Color Media
-stage extends that invariant to seven Sequences and retains its file-backed
+stage extends that invariant to six Sequences and retains its file-backed
 Track/Clip identities. Earlier eight-Sequence supervised runs remain diagnostic
 history only; new consecutive acceptance runs cannot begin until all primary
 stages share the Hero identity. Qualified release-machine capture and
@@ -747,6 +760,16 @@ CPU color/composite execution itself is not Window-owned:
 `app::preview_cpu_execution` returns the final raster, complete execution facts,
 and stage durations. Presentation records those facts into Window diagnostics
 before packaging; a Headless Adapter consumes the same Module directly.
+`app::headless_preview_presentation` is the shared Headless presentation
+coordinator for performance and Golden consumers. It alone orders real GPU
+execution, output registration, GPU completion, exact Frame Presentation Ticket
+consumption, and preroll observation. Golden's shallow waiter additionally uses
+the production presentation arbitrator after an explicit GPU blocker, so a
+validated final CPU Raster can complete the ticket without being reported as a
+GPU execution. Ticket acceptance is proven by consuming the exact pending
+Demand and incrementing Ready evidence; the App completion return value is not
+misread as acceptance because a valid paused seek may consume its ticket
+without changing Transport State.
 The same rule applies while a pause, seek, or exact-still request replaces the
 current frame: `Stale` prefers the last presented external GPU frame for the
 same sequence and output extent, then falls back to the pinned CPU raster. A

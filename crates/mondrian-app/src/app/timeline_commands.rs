@@ -1734,8 +1734,8 @@ impl AppState {
         is_video_track: bool,
         clip_id: ClipId,
         split_frame: i64,
-    ) -> mondrian_core::Result<bool> {
-        let (sequence_id, before, after) = {
+    ) -> mondrian_core::Result<Option<SplitClipOutcome>> {
+        let (sequence_id, before, after, outcome) = {
             let before = self.active_sequence().cloned().ok_or_else(|| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
                     step_id: "split_clip".to_string(),
@@ -1744,22 +1744,22 @@ impl AppState {
             })?;
             let mut after = before.clone();
             let seq = &mut after;
-            let split_done = Self::split_clip_at_frame_internal(
+            let outcome = Self::split_clip_at_frame_internal(
                 seq,
                 track_id,
                 is_video_track,
                 clip_id,
                 split_frame,
             )?;
-            if !split_done {
-                return Ok(false);
-            }
-            (seq.id, before, after)
+            let Some(outcome) = outcome else {
+                return Ok(None);
+            };
+            (seq.id, before, after, outcome)
         };
 
         self.record_sequence_snapshot_command("分割片段", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-        Ok(true)
+        Ok(Some(outcome))
     }
 
     pub fn split_at_playhead(&mut self) -> mondrian_core::Result<usize> {
@@ -1814,7 +1814,9 @@ impl AppState {
                 if !processed.insert(clip_id) {
                     continue;
                 }
-                if Self::split_clip_at_frame_internal(seq, track_id, is_video, clip_id, frame)? {
+                if Self::split_clip_at_frame_internal(seq, track_id, is_video, clip_id, frame)?
+                    .is_some()
+                {
                     split_count += 1;
                 }
             }
@@ -1836,7 +1838,7 @@ impl AppState {
         is_video_track: bool,
         clip_id: ClipId,
         split_frame: i64,
-    ) -> mondrian_core::Result<bool> {
+    ) -> mondrian_core::Result<Option<SplitClipOutcome>> {
         let Some((actual_track_id, actual_is_video, _)) = find_clip_track_lock(seq, clip_id) else {
             return Err(mondrian_core::MondrianError::ClipNotFound {
                 clip_id: clip_id.to_string(),
@@ -1857,24 +1859,34 @@ impl AppState {
         }
 
         let time_base = seq.time_base();
-        let mut right_ids = Vec::new();
-        let mut primary_split = false;
+        let mut split_members = Vec::new();
         for member in members {
             if let Some(result) = split_clip_anywhere(seq, member, split_frame, time_base) {
-                primary_split |= member == clip_id;
-                right_ids.push(result.right_clip_id);
+                split_members.push(SplitClipMemberOutcome {
+                    left_clip_id: member,
+                    right_clip_id: result.right_clip_id,
+                });
             }
         }
-        if right_ids.len() >= 2 {
+        if split_members.len() >= 2 {
             let right_group = ClipLinkGroupId::new();
-            for right_id in right_ids {
-                if let Some(right) = find_clip_mut(seq, right_id) {
+            for member in &split_members {
+                if let Some(right) = find_clip_mut(seq, member.right_clip_id) {
                     right.link_group = Some(right_group);
                 }
             }
         }
         compact_sequence_references(seq);
-        Ok(primary_split)
+        let Some(primary_index) =
+            split_members.iter().position(|member| member.left_clip_id == clip_id)
+        else {
+            return Ok(None);
+        };
+        let primary = split_members.remove(primary_index);
+        Ok(Some(SplitClipOutcome {
+            primary,
+            linked_members: split_members,
+        }))
     }
 
     pub fn begin_drag_asset(

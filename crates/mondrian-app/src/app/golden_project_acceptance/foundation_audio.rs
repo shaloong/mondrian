@@ -1,5 +1,8 @@
 //! First executable Golden slice: PCM Clip authoring and durable reopen.
 
+use super::audio_authoring_evidence::{
+    capture_audio_track_authoring, GoldenAudioTrackAuthoringAnchor,
+};
 use super::fixture::{resolve_fixture, CorpusManifest, FixtureEvidence};
 use super::harness::{
     dispatch_author_transition, ensure_exact_requirement_evidence, fixture_root,
@@ -30,7 +33,6 @@ use mondrian_timeline::audio::{AudioComponentEdit, AudioFade, AudioFadeCurve};
 use mondrian_timeline::clip::Clip;
 use mondrian_timeline::sequence::SequenceSettings;
 use serde::Serialize;
-use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -130,18 +132,6 @@ pub(super) struct GoldenFoundationReport {
     content: Vec<ContentEvidence>,
 }
 
-/// Exact typed audio author projection retained across later Hero stages.
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct GoldenFoundationAudioAnchor {
-    sequence_id: SequenceId,
-    asset_id: AssetId,
-    track_id: TrackId,
-    clip_id: ClipId,
-    edit_id: AudioComponentEditId,
-    track_projection: Value,
-    audio_program_projection: Value,
-}
-
 impl GoldenFoundationReport {
     pub(super) fn primary_sequence_id(&self) -> SequenceId {
         self.setup.stage.sequence_id()
@@ -150,7 +140,7 @@ impl GoldenFoundationReport {
     pub(super) fn capture_audio_anchor(
         &self,
         state: &AppState,
-    ) -> anyhow::Result<GoldenFoundationAudioAnchor> {
+    ) -> anyhow::Result<GoldenAudioTrackAuthoringAnchor> {
         let sequence = state
             .sequence_by_id(self.primary_sequence_id())
             .context("Foundation Hero Sequence is absent")?;
@@ -180,15 +170,7 @@ impl GoldenFoundationReport {
                 .is_some(),
             "Foundation PCM Asset is absent"
         );
-        Ok(GoldenFoundationAudioAnchor {
-            sequence_id: sequence.id,
-            asset_id: self.setup.asset_id,
-            track_id: track.id,
-            clip_id: clip.id,
-            edit_id: self.setup.edit_id,
-            track_projection: serde_json::to_value(track)?,
-            audio_program_projection: serde_json::to_value(&sequence.audio_program)?,
-        })
+        capture_audio_track_authoring(state, sequence.id, &[track.id])
     }
 }
 

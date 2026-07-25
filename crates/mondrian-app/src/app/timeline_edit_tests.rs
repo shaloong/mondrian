@@ -822,7 +822,10 @@ fn move_trim_and_split_preserve_one_clip_local_visual_time_domain() {
         tt(15, tb)
     );
 
-    state.split_clip_at_frame(track_id, true, clip_id, 55).expect("split Clip");
+    state
+        .split_clip_at_frame(track_id, true, clip_id, 55)
+        .expect("split Clip")
+        .expect("split target");
     let sequence = state.active_sequence().expect("sequence");
     let right = sequence.video_tracks[0]
         .clips
@@ -982,7 +985,8 @@ fn razor_rebuilds_both_sides_of_a_three_member_link_group() {
 
     assert!(state
         .split_clip_at_frame(first_track, true, first_id, 10)
-        .expect("linked razor"));
+        .expect("linked razor")
+        .is_some());
     let sequence = state.active_sequence().expect("sequence");
     let members = sequence
         .video_tracks
@@ -1006,6 +1010,73 @@ fn razor_rebuilds_both_sides_of_a_three_member_link_group() {
     assert!(left_groups.iter().next().copied().flatten().is_some());
     assert!(right_groups.iter().next().copied().flatten().is_some());
     assert_ne!(left_groups, right_groups);
+}
+
+#[test]
+fn targeted_split_returns_complete_identity_mapping_without_cutting_other_tracks() {
+    let mut state = create_state_with_sequence();
+    let tb = state.active_sequence().expect("sequence").time_base();
+    let foundation_asset_id = AssetId::new();
+    let editorial_asset_id = AssetId::new();
+    let title =
+        Clip::new_basic_title("Title", "Test Font", tt(0, tb), tt(125, tb)).expect("title Clip");
+    let title_id = title.id;
+    let foundation =
+        Clip::new(foundation_asset_id, tt(0, tb), tt(100, tb)).expect("foundation Clip");
+    let foundation_id = foundation.id;
+    let editorial = Clip::new(editorial_asset_id, tt(25, tb), tt(50, tb)).expect("editorial Clip");
+    let editorial_id = editorial.id;
+    let (foundation_track_id, editorial_track_id) = {
+        let sequence = state.active_sequence_mut_uncommitted().expect("sequence");
+        sequence.video_tracks[1].add_clip(title).expect("title placement");
+        let foundation_track_id = sequence.audio_tracks[0].id;
+        sequence
+            .add_media_audio_clip(
+                foundation_track_id,
+                foundation,
+                AudioSourceComponentId::primary(),
+            )
+            .expect("foundation placement");
+        let editorial_track_id = sequence.audio_tracks[1].id;
+        sequence
+            .add_media_audio_clip(
+                editorial_track_id,
+                editorial,
+                AudioSourceComponentId::primary(),
+            )
+            .expect("editorial placement");
+        (foundation_track_id, editorial_track_id)
+    };
+
+    let outcome = state
+        .split_clip_at_frame(editorial_track_id, false, editorial_id, 50)
+        .expect("targeted split")
+        .expect("splittable target");
+    assert_eq!(outcome.primary().left_clip_id, editorial_id);
+    assert!(outcome.linked_members().is_empty());
+    assert_eq!(outcome.split_member_count(), 1);
+
+    let sequence = state.active_sequence().expect("sequence");
+    assert_eq!(
+        sequence.video_tracks[1].clips.iter().filter(|clip| clip.id == title_id).count(),
+        1
+    );
+    assert_eq!(
+        sequence
+            .audio_tracks
+            .iter()
+            .find(|track| track.id == foundation_track_id)
+            .map(|track| track.clips.iter().filter(|clip| clip.id == foundation_id).count()),
+        Some(1)
+    );
+    assert_eq!(
+        sequence
+            .audio_tracks
+            .iter()
+            .find(|track| track.id == editorial_track_id)
+            .map(|track| track.clips.len()),
+        Some(2)
+    );
 }
 
 #[test]
@@ -1342,7 +1413,8 @@ fn splitting_adjustment_layer_keeps_instance_state_isolated() {
             clip_id,
             20,
         )
-        .expect("split adjustment layer");
+        .expect("split adjustment layer")
+        .expect("split target");
 
     let seq = state.active_sequence().expect("sequence should exist");
     let mut split_clips = seq.video_tracks[0].clips.clone();

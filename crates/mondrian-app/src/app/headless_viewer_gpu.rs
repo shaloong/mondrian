@@ -10,12 +10,12 @@ use std::time::Instant;
 use crate::app::preview_execution::{
     PreviewDecodeExecutionSummary, PreviewGpuFrame, PreviewGpuWorkingInput,
 };
+#[cfg(test)]
+use mondrian_renderer::profile::GpuTimestampSample;
 use mondrian_renderer::{
     native_video_texture_device_features, ocio_lut_filtering_device_features,
     profile::gpu_timestamp_query_device_features,
-    profile::{
-        GpuTimestampQueryRing, GpuTimestampSample, GpuTimestampStageMarker, GpuTimestampToken,
-    },
+    profile::{GpuTimestampQueryRing, GpuTimestampStageMarker, GpuTimestampToken},
     request_adapter_with_native_video_preference, GpuCompositingDiagnostics,
     GpuCompositorTextureBindingDiagnostics, GpuCompositorUniformArenaDiagnostics,
     GpuNativeDecodedFrameImportSupport, GpuViewerSpatialRuntimeDiagnostics,
@@ -194,11 +194,13 @@ impl HeadlessViewerGpuAdapter {
     }
 
     /// Whether a previously completed output can remain visible as stale/repeat.
+    #[cfg(test)]
     pub(crate) fn has_presented_output(&self) -> bool {
         self.current_output_key.is_some()
     }
 
     /// Finish deferred timestamp maps after the measured playback interval.
+    #[cfg(test)]
     pub(crate) fn finish_gpu_timings(
         &mut self,
     ) -> Result<Vec<GpuTimestampSample>, HeadlessViewerGpuError> {
@@ -210,6 +212,7 @@ impl HeadlessViewerGpuAdapter {
     }
 
     /// Samples discarded instead of blocking when every query slot was busy.
+    #[cfg(test)]
     pub(crate) fn discarded_gpu_timings(&self) -> u64 {
         self.timestamp_ring.as_ref().map_or(0, GpuTimestampQueryRing::discarded_samples)
     }

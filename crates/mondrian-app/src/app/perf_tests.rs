@@ -16,10 +16,14 @@ use super::playback_acceptance::{
     PROFESSIONAL_PLAYBACK_DECODE_P95_LIMIT_US, PROFESSIONAL_PLAYBACK_QUEUE_WAIT_P95_LIMIT_US,
     PROFESSIONAL_READY_TIMEOUT_MS, PROFESSIONAL_TOTAL_TIMEOUT_MS,
 };
-use super::playback_preview::{observe_playback_video_preroll, pump_playback_preview};
+use super::playback_preview::pump_playback_preview;
 use super::*;
 #[path = "perf_decode_progress.rs"]
 mod perf_decode_progress;
+use crate::app::headless_preview_presentation::{
+    present_headless_preview_candidate, HeadlessPresentedOutput, HeadlessPreviewCandidate,
+    HeadlessPreviewRuntime,
+};
 use crate::app::headless_viewer_gpu::{
     HeadlessViewerGpuAdapter, HeadlessViewerGpuAdapterInfo, HeadlessViewerGpuExecution,
     HeadlessViewerGpuOutput,
@@ -33,10 +37,10 @@ use crate::app::preview_runtime::{
     PreviewColorHealthVerdict, PreviewDecodeAccessModeProfile, PreviewDecodeAccessModeProfiles,
     PreviewDecodeLatencyBuckets, PreviewDecodePerformanceArea, PreviewDecodePerformanceCheck,
     PreviewDecodePerformanceReport, PreviewDecodePerformanceSeverity,
-    PreviewDecodePerformanceVerdict, PreviewDiagnostics, PreviewProductionRuntime,
-    PreviewRenderPerformanceReport, PreviewRenderPerformanceSeverity,
-    PreviewRenderPerformanceVerdict, PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
-    PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION, PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
+    PreviewDecodePerformanceVerdict, PreviewDiagnostics, PreviewRenderPerformanceReport,
+    PreviewRenderPerformanceSeverity, PreviewRenderPerformanceVerdict,
+    PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US, PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION,
+    PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
 };
 use crate::app::ui_actions::TimelineSeekSource;
 use crate::app::viewer_gpu_output_health::{
@@ -56,8 +60,6 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-type HeadlessPreviewRuntime = PreviewProductionRuntime<HeadlessViewerGpuOutput>;
 
 use mondrian_core::types::Rational;
 use mondrian_effects::{EffectNode, EffectNodeExt};
@@ -3718,48 +3720,20 @@ fn execute_headless_gpu_candidate(
     gpu_adapter: &mut HeadlessViewerGpuAdapter,
     gpu_summary: &mut HeadlessViewerGpuExecutionSummary,
 ) -> anyhow::Result<HeadlessGpuCandidateStatus> {
-    match preview_service.gpu_preview_frame_for_state(state) {
-        crate::app::preview_execution::PreviewGpuFrameState::Ready(frame) => {
-            let execution = match gpu_adapter.execute(&frame) {
-                Ok(execution) => execution,
-                Err(crate::app::headless_viewer_gpu::HeadlessViewerGpuError::Backpressure(_)) => {
-                    return Ok(HeadlessGpuCandidateStatus::Backpressured)
+    match present_headless_preview_candidate(preview_service, state, gpu_adapter)? {
+        HeadlessPreviewCandidate::Ready { output, .. } => {
+            match output {
+                HeadlessPresentedOutput::Gpu(execution) => gpu_summary.record(*execution),
+                HeadlessPresentedOutput::CurrentGpu => {
+                    gpu_summary.record_current_output_presentation();
                 }
-                Err(error) => {
-                    return Err(error)
-                        .context("execute current Viewer frame on the real headless GPU Adapter");
-                }
-            };
-            let output = execution.output.clone();
-            gpu_summary.record(execution);
-            preview_service.register_gpu_output(&frame, output);
-            if let Some(ticket) = frame.presentation_ticket() {
-                state.complete_frame_presentation(ticket, Instant::now());
+                HeadlessPresentedOutput::Transparent | HeadlessPresentedOutput::Raster(_) => {}
             }
-            observe_playback_video_preroll(state, preview_service);
             Ok(HeadlessGpuCandidateStatus::Ready)
         }
-        crate::app::preview_execution::PreviewGpuFrameState::Current => {
-            gpu_summary.record_current_output_presentation();
-            if let Some(ticket) = preview_service.playback_presentation_ticket(state) {
-                state.complete_frame_presentation(ticket, Instant::now());
-            }
-            observe_playback_video_preroll(state, preview_service);
-            Ok(HeadlessGpuCandidateStatus::Ready)
-        }
-        crate::app::preview_execution::PreviewGpuFrameState::Transparent => {
-            if let Some(ticket) = preview_service.playback_presentation_ticket(state) {
-                state.complete_frame_presentation(ticket, Instant::now());
-            }
-            observe_playback_video_preroll(state, preview_service);
-            Ok(HeadlessGpuCandidateStatus::Ready)
-        }
-        crate::app::preview_execution::PreviewGpuFrameState::Loading => {
-            Ok(HeadlessGpuCandidateStatus::Loading)
-        }
-        crate::app::preview_execution::PreviewGpuFrameState::Unavailable(_) => {
-            Ok(HeadlessGpuCandidateStatus::Unavailable)
-        }
+        HeadlessPreviewCandidate::Loading => Ok(HeadlessGpuCandidateStatus::Loading),
+        HeadlessPreviewCandidate::Backpressured => Ok(HeadlessGpuCandidateStatus::Backpressured),
+        HeadlessPreviewCandidate::Unavailable(_) => Ok(HeadlessGpuCandidateStatus::Unavailable),
     }
 }
 

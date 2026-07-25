@@ -42,7 +42,7 @@
       "size_bytes": null,
       "generation": {
         "recipe_path": "scripts/validation/generate-reference-playback-media.ps1",
-        "recipe_sha256": "25bb8b8b0434f56c5e2a251a72e4577e1c5d9607cc237acb23ecfd0358d71818",
+        "recipe_sha256": "b31068ad5eaa984028104491cf21454d156efbe895b4adb88099c578d553bc48",
         "profile": "Video",
         "attestation_suffix": ".attestation.json",
         "artifact_hash_scope": "reference-run"
@@ -84,7 +84,7 @@
       "size_bytes": null,
       "generation": {
         "recipe_path": "scripts/validation/generate-reference-playback-media.ps1",
-        "recipe_sha256": "25bb8b8b0434f56c5e2a251a72e4577e1c5d9607cc237acb23ecfd0358d71818",
+        "recipe_sha256": "b31068ad5eaa984028104491cf21454d156efbe895b4adb88099c578d553bc48",
         "profile": "Audio",
         "attestation_suffix": ".attestation.json",
         "artifact_hash_scope": "reference-run"

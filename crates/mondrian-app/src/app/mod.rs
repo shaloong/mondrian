@@ -49,6 +49,39 @@ const MAX_STATUS_LOG_ENTRIES: usize = 64;
 const AUDIO_OUTPUT_LAYOUT: AudioChannelLayout = AudioChannelLayout::Stereo;
 const AUDIO_IDLE_WARMUP_CHUNK_MILLIS: u32 = 80;
 
+/// One exact left/right identity mapping created by a Clip split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SplitClipMemberOutcome {
+    /// Existing left-hand Clip whose identity is retained.
+    pub left_clip_id: ClipId,
+    /// Newly authored right-hand Clip.
+    pub right_clip_id: ClipId,
+}
+
+/// Complete stable result of one targeted Clip split author transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitClipOutcome {
+    primary: SplitClipMemberOutcome,
+    linked_members: Vec<SplitClipMemberOutcome>,
+}
+
+impl SplitClipOutcome {
+    /// Return the requested Clip's exact left/right identity mapping.
+    pub const fn primary(&self) -> SplitClipMemberOutcome {
+        self.primary
+    }
+
+    /// Return every additional synchronized link-group member mapping.
+    pub fn linked_members(&self) -> &[SplitClipMemberOutcome] {
+        &self.linked_members
+    }
+
+    /// Return the complete number of placements changed by the transaction.
+    pub fn split_member_count(&self) -> usize {
+        1 + self.linked_members.len()
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn tt(frame: i64, time_base: Rational) -> TimelineTime {
     let numerator = frame.checked_mul(time_base.num).expect("test time fits i64");
@@ -66,7 +99,9 @@ mod clip_clipboard;
 pub(crate) mod exporting;
 #[cfg(any(test, feature = "validation"))]
 pub mod golden_project_acceptance;
-#[cfg(test)]
+#[cfg(any(test, feature = "validation"))]
+pub(crate) mod headless_preview_presentation;
+#[cfg(any(test, feature = "validation"))]
 pub(crate) mod headless_viewer_gpu;
 mod media_import;
 pub(crate) mod native_video_import;

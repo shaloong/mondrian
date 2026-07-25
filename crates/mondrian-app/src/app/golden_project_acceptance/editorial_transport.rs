@@ -1,45 +1,46 @@
 //! AAC editorial and Transport Golden slice over production App Interfaces.
 
+use super::audio_authoring_evidence::{
+    capture_audio_track_authoring, GoldenAudioTrackAuthoringAnchor,
+};
 use super::fixture::{resolve_fixture, CorpusManifest, FixtureEvidence};
 use super::harness::{
-    dispatch_author_transition, ensure_exact_requirement_evidence, fixture_root,
-    wait_for_media_imports, AuthorTransitionEvidence,
+    author_transition, dispatch_author_transition, ensure_exact_requirement_evidence, fixture_root,
+    wait_for_media_imports, AuthorTransitionEvidence, DurableReopenEvidence,
 };
-#[cfg(test)]
-use super::harness::{new_run_directory, rooted_env_path, write_report};
+use super::headless_preview::{
+    GoldenHeadlessPreview, GoldenHeadlessViewerEvidence, GoldenViewerPresentationEvidence,
+};
 use super::workflow::{GoldenProductWorkflowDriver, GoldenSequenceStageEvidence};
-#[cfg(test)]
-use super::{load_golden_contract, repository_root, sequence_settings_from_contract};
 use super::{load_json, GoldenProjectContract};
 use crate::app::playback::PlaybackAdvanceStatus;
 use crate::app::ui_actions::{
-    timeline_drop_asset_action, timeline_insert_asset_action, timeline_seek_with_source_action,
-    timeline_trim_clips_action, TimelineDropAssetPayload, TimelineInsertAssetPayload,
-    TimelineSeekSource, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+    assets_prepare_drag_action, timeline_seek_with_source_action, timeline_trim_clips_action,
+    AssetsPrepareDragPayload, TimelineInsertAssetPayload, TimelineSeekSource,
+    TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
 };
 use crate::app::AppState;
 use anyhow::{ensure, Context};
 use mondrian_assets::AssetKind;
-use mondrian_core::{ClipId, FrameRounding, TrackId};
+use mondrian_core::{AssetId, ClipId, FrameRounding, SequenceId, TrackId};
 use mondrian_editor_state::action::SelectionTarget;
 use mondrian_editor_state::Action;
 use mondrian_media::info::{AudioCodec, ChannelLayout};
-use mondrian_playback::{ClockMaster, FrameDeliveryKind};
+use mondrian_playback::ClockMaster;
 use mondrian_timeline::{
+    audio::{
+        AudioChannelStripOutputPort, AudioRouteDestination, AudioRouteSource,
+        AudioTrackMixerChannel,
+    },
     InsertAutomationPolicy, InsertTimelineStatePolicy, InsertTransitionPolicy,
 };
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::Path;
-#[cfg(test)]
-use std::path::PathBuf;
 use std::time::Duration;
 
 pub(super) const EDITORIAL_SLICE_ID: &str = "editorial-transport-v1";
-#[cfg(test)]
-const RUN_ROOT_ENV: &str = "MONDRIAN_GOLDEN_EDITORIAL_RUN_ROOT";
-#[cfg(test)]
-const OUTPUT_ENV: &str = "MONDRIAN_GOLDEN_EDITORIAL_OUTPUT";
+const VIEWER_PRESENTATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 struct ClipRangeObservation {
@@ -53,37 +54,37 @@ enum OperationEvidence {
     #[serde(rename = "insert")]
     Insert {
         author_step: AuthorTransitionEvidence,
-        inserted_clip_id: String,
+        inserted_clip_id: ClipId,
         inserted_range: ClipRangeObservation,
-        ripple_track_ids: Vec<String>,
-        primary_downstream_clip_id: String,
+        ripple_track_ids: Vec<TrackId>,
+        primary_downstream_clip_id: ClipId,
         primary_before: ClipRangeObservation,
         primary_after: ClipRangeObservation,
-        secondary_downstream_clip_id: String,
+        secondary_downstream_clip_id: ClipId,
         secondary_before: ClipRangeObservation,
         secondary_after: ClipRangeObservation,
     },
     #[serde(rename = "overwrite")]
     Overwrite {
         author_step: AuthorTransitionEvidence,
-        retained_left_clip_id: String,
+        retained_left_clip_id: ClipId,
         retained_left_range: ClipRangeObservation,
-        replacement_clip_id: String,
+        replacement_clip_id: ClipId,
         replacement_range: ClipRangeObservation,
     },
     #[serde(rename = "split")]
     Split {
         author_step: AuthorTransitionEvidence,
-        left_clip_id: String,
+        left_clip_id: ClipId,
         left_range: ClipRangeObservation,
-        right_clip_id: String,
+        right_clip_id: ClipId,
         right_range: ClipRangeObservation,
     },
     #[serde(rename = "ripple")]
     Ripple {
         author_step: AuthorTransitionEvidence,
-        removed_clip_id: String,
-        downstream_clip_id: String,
+        removed_clip_id: ClipId,
+        downstream_clip_id: ClipId,
         downstream_before: ClipRangeObservation,
         downstream_after: ClipRangeObservation,
     },
@@ -93,6 +94,7 @@ enum OperationEvidence {
         final_frame: i64,
         ready_deliveries: u64,
         warm_seek_count: u64,
+        presentations: Vec<GoldenViewerPresentationEvidence>,
     },
     #[serde(rename = "accurate-seek")]
     AccurateSeek {
@@ -100,6 +102,7 @@ enum OperationEvidence {
         final_frame: i64,
         ready_deliveries: u64,
         accurate_seek_count: u64,
+        presentation: GoldenViewerPresentationEvidence,
     },
     #[serde(rename = "play")]
     Play {
@@ -108,6 +111,7 @@ enum OperationEvidence {
         frames_advanced: i64,
         clock_master: &'static str,
         synthetic_clock_residency_us: u64,
+        presentation: GoldenViewerPresentationEvidence,
     },
 }
 
@@ -137,9 +141,9 @@ struct ImportedAacObservation {
 #[derive(Debug, Clone, Serialize)]
 struct EditorialSetupEvidence {
     stage: GoldenSequenceStageEvidence,
-    primary_audio_track_id: String,
-    secondary_audio_track_id: String,
-    asset_id: String,
+    primary_audio_track_id: TrackId,
+    secondary_audio_track_id: TrackId,
+    asset_id: AssetId,
     imported_audio: ImportedAacObservation,
     setup_steps: Vec<AuthorTransitionEvidence>,
 }
@@ -155,33 +159,75 @@ pub(super) struct GoldenEditorialReport {
     fixture: FixtureEvidence,
     setup: EditorialSetupEvidence,
     operations: Vec<OperationEvidence>,
+    viewer: GoldenHeadlessViewerEvidence,
+    persistence: DurableReopenEvidence,
+    authoring: GoldenAudioTrackAuthoringAnchor,
+}
+
+impl GoldenEditorialReport {
+    pub(super) fn primary_sequence_id(&self) -> SequenceId {
+        self.setup.stage.sequence_id()
+    }
+
+    pub(super) fn capture_authoring_anchor(
+        &self,
+        state: &AppState,
+    ) -> anyhow::Result<GoldenAudioTrackAuthoringAnchor> {
+        capture_editorial_authoring_anchor(
+            state,
+            self.primary_sequence_id(),
+            self.setup.asset_id,
+            [
+                self.setup.primary_audio_track_id,
+                self.setup.secondary_audio_track_id,
+            ],
+        )
+    }
+
+    pub(super) fn verify_retained_authoring(&self, state: &AppState) -> anyhow::Result<()> {
+        ensure!(
+            self.capture_authoring_anchor(state)? == self.authoring,
+            "Editorial Track-owned audio authoring changed after the stage"
+        );
+        Ok(())
+    }
+}
+
+fn capture_editorial_authoring_anchor(
+    state: &AppState,
+    sequence_id: SequenceId,
+    asset_id: AssetId,
+    track_ids: [TrackId; 2],
+) -> anyhow::Result<GoldenAudioTrackAuthoringAnchor> {
+    let sequence =
+        state.sequence_by_id(sequence_id).context("Editorial Hero Sequence is absent")?;
+    for track_id in track_ids {
+        let track = sequence
+            .audio_tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .with_context(|| format!("Editorial audio Track is absent: {track_id}"))?;
+        ensure!(
+            !track.clips.is_empty()
+                && track.clips.iter().all(|clip| clip.media_asset_id() == Some(asset_id)),
+            "Editorial audio Track changed AAC Asset identity"
+        );
+    }
+    ensure!(
+        state
+            .asset_library()
+            .context("Editorial Asset Library is absent")?
+            .get_asset(asset_id)?
+            .is_some(),
+        "Editorial AAC Asset is absent"
+    );
+    capture_audio_track_authoring(state, sequence.id, &track_ids)
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum GoldenRunStatus {
     Passed,
-}
-
-#[derive(Debug)]
-#[cfg(test)]
-struct GoldenRunPaths {
-    directory: PathBuf,
-    project: PathBuf,
-    report: PathBuf,
-}
-
-#[cfg(test)]
-fn new_run_paths(root: &Path) -> anyhow::Result<GoldenRunPaths> {
-    let directory = new_run_directory(root, RUN_ROOT_ENV, "golden-editorial")?;
-    let report = rooted_env_path(root, OUTPUT_ENV, || {
-        directory.join("golden-editorial-report.json")
-    });
-    Ok(GoldenRunPaths {
-        project: directory.join("windows-alpha-golden-editorial.mdp"),
-        directory,
-        report,
-    })
 }
 
 fn audio_track(state: &AppState, track_id: TrackId) -> anyhow::Result<&mondrian_timeline::Track> {
@@ -216,23 +262,70 @@ fn clip_range(
     Ok(ClipRangeObservation { start_frame, end_frame_exclusive })
 }
 
-fn new_audio_clip_after(
+#[derive(Debug, Clone, Copy)]
+struct EditorialAudioTrackBinding {
+    primary: TrackId,
+    secondary: TrackId,
+}
+
+fn bind_editorial_audio_tracks(
     state: &AppState,
-    track_id: TrackId,
-    before: &BTreeSet<ClipId>,
-) -> anyhow::Result<ClipId> {
-    let created = audio_track(state, track_id)?
-        .clips
+    sequence_id: SequenceId,
+) -> anyhow::Result<EditorialAudioTrackBinding> {
+    let sequence =
+        state.sequence_by_id(sequence_id).context("Editorial Hero Sequence is absent")?;
+    ensure!(
+        state.active_sequence_id() == Some(sequence_id),
+        "Editorial Hero Sequence is not active"
+    );
+    let main_output_id = sequence
+        .audio_program
+        .outputs
+        .first()
+        .context("Editorial Hero has no Program Output")?
+        .id;
+    let default_track_channel = AudioTrackMixerChannel::default();
+    let candidates = sequence
+        .audio_tracks
         .iter()
-        .filter(|clip| !before.contains(&clip.id))
-        .map(|clip| clip.id)
+        .filter(|track| {
+            if track.is_locked || track.is_muted || !track.is_visible || !track.clips.is_empty() {
+                return false;
+            }
+            if sequence.audio_program.track_channels.get(&track.id) != Some(&default_track_channel)
+            {
+                return false;
+            }
+            let routes = sequence
+                .audio_program
+                .routes
+                .iter()
+                .filter(|route| {
+                    matches!(
+                        route.source,
+                        AudioRouteSource::Track { track_id, .. } if track_id == track.id
+                    )
+                })
+                .collect::<Vec<_>>();
+            routes.len() == 1
+                && routes[0].enabled
+                && routes[0].gain_db == 0.0
+                && routes[0].gain_automation.is_none()
+                && routes[0].source
+                    == (AudioRouteSource::Track {
+                        track_id: track.id,
+                        port: AudioChannelStripOutputPort::PostMute,
+                    })
+                && routes[0].destination == AudioRouteDestination::Output(main_output_id)
+        })
+        .map(|track| track.id)
+        .take(2)
         .collect::<Vec<_>>();
     ensure!(
-        created.len() == 1,
-        "timeline placement created {} new audio Clips",
-        created.len()
+        candidates.len() == 2,
+        "Editorial Hero requires two complete pristine audio Tracks"
     );
-    Ok(created[0])
+    Ok(EditorialAudioTrackBinding { primary: candidates[0], secondary: candidates[1] })
 }
 
 fn drop_audio(
@@ -242,22 +335,12 @@ fn drop_audio(
     frame: i64,
     intent: &'static str,
 ) -> anyhow::Result<(ClipId, AuthorTransitionEvidence)> {
-    let before = audio_track(state, track_id)?
-        .clips
-        .iter()
-        .map(|clip| clip.id)
-        .collect::<BTreeSet<_>>();
-    let step = dispatch_author_transition(
-        state,
-        intent,
-        timeline_drop_asset_action(TimelineDropAssetPayload {
-            asset_id,
-            target_track_id: track_id,
-            is_video_track: false,
-            frame,
-        }),
-    )?;
-    Ok((new_audio_clip_after(state, track_id, &before)?, step))
+    state.dispatch_action(assets_prepare_drag_action(AssetsPrepareDragPayload {
+        asset_id,
+    }))?;
+    author_transition(state, intent, |state| {
+        Ok(state.drop_dragging_asset_to_audio_track(track_id, frame)?)
+    })
 }
 
 fn trim_audio_out(
@@ -275,10 +358,6 @@ fn trim_audio_out(
             frame: end_frame_exclusive,
         }),
     )
-}
-
-fn observe_ready_delivery(state: &mut AppState) {
-    let _ = state.observe_viewer_frame_delivery(FrameDeliveryKind::Ready);
 }
 
 pub(super) fn execute_editorial_stage(
@@ -350,22 +429,11 @@ pub(super) fn execute_editorial_stage(
         channel_layout: audio.channel_layout.clone(),
         average_bitrate: audio.avg_bitrate,
     };
-    let track_id = state
-        .active_sequence()
-        .context("editorial Sequence is absent")?
-        .audio_tracks
-        .first()
-        .context("editorial Sequence has no audio Track")?
-        .id;
-    let secondary_track_id = state
-        .active_sequence()
-        .context("editorial Sequence is absent")?
-        .audio_tracks
-        .get(1)
-        .context("editorial Sequence has no secondary audio Track")?
-        .id;
-
+    let track_binding = bind_editorial_audio_tracks(state, stage.sequence_id())?;
+    let track_id = track_binding.primary;
+    let secondary_track_id = track_binding.secondary;
     let mut setup_steps = Vec::new();
+
     let (left_clip_id, left_drop) = drop_audio(state, asset.id, track_id, 0, "drop-left-aac")?;
     setup_steps.push(left_drop);
     setup_steps.push(trim_audio_out(state, left_clip_id, 100, "trim-left-aac")?);
@@ -388,9 +456,9 @@ pub(super) fn execute_editorial_stage(
     );
     let overwrite_evidence = OperationEvidence::Overwrite {
         author_step: overwrite_step,
-        retained_left_clip_id: left_clip_id.to_string(),
+        retained_left_clip_id: left_clip_id,
         retained_left_range,
-        replacement_clip_id: replacement_clip_id.to_string(),
+        replacement_clip_id,
         replacement_range,
     };
 
@@ -405,21 +473,18 @@ pub(super) fn execute_editorial_stage(
     )?);
     let downstream_before = clip_range(state, track_id, downstream_clip_id)?;
 
-    state.dispatch_action(Action::Select(SelectionTarget::Clip(replacement_clip_id)))?;
-    state.seek(50);
-    let split_step =
-        dispatch_author_transition(state, "split-overwrite-aac", Action::SplitClipAtPlayhead)?;
+    let (split_outcome, split_step) = author_transition(state, "split-overwrite-aac", |state| {
+        state
+            .split_clip_at_frame(track_id, false, replacement_clip_id, 50)?
+            .context("targeted AAC Clip was not splittable at frame 50")
+    })?;
+    ensure!(
+        split_outcome.primary().left_clip_id == replacement_clip_id
+            && split_outcome.linked_members().is_empty(),
+        "targeted AAC split changed undeclared linked placements"
+    );
     let replacement_range_after_split = clip_range(state, track_id, replacement_clip_id)?;
-    let right_clip = audio_track(state, track_id)?
-        .clips
-        .iter()
-        .find(|clip| {
-            clip.id != replacement_clip_id
-                && clip_range(state, track_id, clip.id)
-                    .is_ok_and(|range| range.start_frame == 50 && range.end_frame_exclusive == 75)
-        })
-        .context("split did not create the expected right audio Clip")?;
-    let right_clip_id = right_clip.id;
+    let right_clip_id = split_outcome.primary().right_clip_id;
     let right_range = clip_range(state, track_id, right_clip_id)?;
     ensure!(
         replacement_range_after_split
@@ -428,9 +493,9 @@ pub(super) fn execute_editorial_stage(
     );
     let split_evidence = OperationEvidence::Split {
         author_step: split_step,
-        left_clip_id: replacement_clip_id.to_string(),
+        left_clip_id: replacement_clip_id,
         left_range: replacement_range_after_split,
-        right_clip_id: right_clip_id.to_string(),
+        right_clip_id,
         right_range,
     };
 
@@ -453,8 +518,8 @@ pub(super) fn execute_editorial_stage(
     );
     let ripple_evidence = OperationEvidence::Ripple {
         author_step: ripple_step,
-        removed_clip_id: right_clip_id.to_string(),
-        downstream_clip_id: downstream_clip_id.to_string(),
+        removed_clip_id: right_clip_id,
+        downstream_clip_id,
         downstream_before,
         downstream_after,
     };
@@ -476,28 +541,37 @@ pub(super) fn execute_editorial_stage(
     let primary_before_insert = clip_range(state, track_id, downstream_clip_id)?;
     let secondary_before_insert =
         clip_range(state, secondary_track_id, secondary_downstream_clip_id)?;
-    let primary_ids_before_insert = audio_track(state, track_id)?
-        .clips
-        .iter()
-        .map(|clip| clip.id)
-        .collect::<BTreeSet<_>>();
-    let insert_step = dispatch_author_transition(
-        state,
-        "insert-aac-multitrack",
-        timeline_insert_asset_action(TimelineInsertAssetPayload {
-            asset_id: asset.id,
-            insert_frame: 60,
-            source_in_frame: 0,
-            duration_frames: 10,
-            video_target_track_id: None,
-            audio_target_track_id: Some(track_id),
-            ripple_track_ids: vec![track_id, secondary_track_id],
-            automation_policy: InsertAutomationPolicy::FollowEditorialContent,
-            transition_policy: InsertTransitionPolicy::RejectAffected,
-            timeline_state_policy: InsertTimelineStatePolicy::FollowEdit,
-        }),
-    )?;
-    let inserted_clip_id = new_audio_clip_after(state, track_id, &primary_ids_before_insert)?;
+    let (insert_outcome, insert_step) =
+        author_transition(state, "insert-aac-multitrack", |state| {
+            Ok(state.insert_asset_from_ui(TimelineInsertAssetPayload {
+                asset_id: asset.id,
+                insert_frame: 60,
+                source_in_frame: 0,
+                duration_frames: 10,
+                video_target_track_id: None,
+                audio_target_track_id: Some(track_id),
+                ripple_track_ids: vec![track_id, secondary_track_id],
+                automation_policy: InsertAutomationPolicy::FollowEditorialContent,
+                transition_policy: InsertTransitionPolicy::RejectAffected,
+                timeline_state_policy: InsertTimelineStatePolicy::FollowEdit,
+            })?)
+        })?;
+    ensure!(
+        insert_outcome.inserted_clip_ids.len() == 1
+            && insert_outcome.shifted_clip_ids.iter().copied().collect::<BTreeSet<_>>()
+                == [downstream_clip_id, secondary_downstream_clip_id]
+                    .into_iter()
+                    .collect::<BTreeSet<_>>()
+            && insert_outcome.split_clips.is_empty()
+            && insert_outcome.removed_video_transition_ids.is_empty()
+            && insert_outcome.removed_audio_transition_ids.is_empty(),
+        "Insert Edit outcome changed undeclared placements or Transitions"
+    );
+    let inserted_clip_id = insert_outcome
+        .inserted_clip_ids
+        .first()
+        .copied()
+        .context("Insert Edit returned no placed AAC Clip")?;
     let inserted_range = clip_range(state, track_id, inserted_clip_id)?;
     let primary_after_insert = clip_range(state, track_id, downstream_clip_id)?;
     let secondary_after_insert =
@@ -516,61 +590,93 @@ pub(super) fn execute_editorial_stage(
     );
     let insert_evidence = OperationEvidence::Insert {
         author_step: insert_step,
-        inserted_clip_id: inserted_clip_id.to_string(),
+        inserted_clip_id,
         inserted_range,
-        ripple_track_ids: vec![track_id.to_string(), secondary_track_id.to_string()],
-        primary_downstream_clip_id: downstream_clip_id.to_string(),
+        ripple_track_ids: vec![track_id, secondary_track_id],
+        primary_downstream_clip_id: downstream_clip_id,
         primary_before: primary_before_insert,
         primary_after: primary_after_insert,
-        secondary_downstream_clip_id: secondary_downstream_clip_id.to_string(),
+        secondary_downstream_clip_id,
         secondary_before: secondary_before_insert,
         secondary_after: secondary_after_insert,
     };
 
+    let mut viewer = GoldenHeadlessPreview::new()?;
+    let scrub_before = state.playback_evidence_report();
     let target_frames = vec![5, 15, 30];
+    let mut scrub_presentations = Vec::with_capacity(target_frames.len());
     for frame in &target_frames {
         state.dispatch_action(timeline_seek_with_source_action(
             *frame,
             TimelineSeekSource::PointerDrag,
         ))?;
-        observe_ready_delivery(state);
+        scrub_presentations.push(viewer.present_current(state, VIEWER_PRESENTATION_TIMEOUT)?);
     }
     let scrub_report = state.playback_evidence_report();
+    let scrub_ready_deliveries = scrub_report
+        .deliveries
+        .ready
+        .checked_sub(scrub_before.deliveries.ready)
+        .context("scrub ready-delivery counter regressed")?;
+    let warm_seek_count = scrub_report
+        .warm_seek_latency
+        .count
+        .checked_sub(scrub_before.warm_seek_latency.count)
+        .context("warm-seek counter regressed")?;
     ensure!(
         state.current_frame() == 30
-            && scrub_report.warm_seek_latency.count >= target_frames.len() as u64,
-        "pointer-drag seeks did not produce warm scrub evidence"
+            && warm_seek_count == target_frames.len() as u64
+            && scrub_ready_deliveries == target_frames.len() as u64,
+        "pointer-drag seeks did not produce exact stage-local scrub evidence"
     );
     let scrub_evidence = OperationEvidence::Scrub {
         target_frames,
         final_frame: state.current_frame(),
-        ready_deliveries: scrub_report.deliveries.ready,
-        warm_seek_count: scrub_report.warm_seek_latency.count,
+        ready_deliveries: scrub_ready_deliveries,
+        warm_seek_count,
+        presentations: scrub_presentations,
     };
 
     let accurate_target = 40;
+    let accurate_before = state.playback_evidence_report();
     state.dispatch_action(timeline_seek_with_source_action(
         accurate_target,
         TimelineSeekSource::Settled,
     ))?;
-    observe_ready_delivery(state);
+    let accurate_presentation = viewer.present_current(state, VIEWER_PRESENTATION_TIMEOUT)?;
     let accurate_report = state.playback_evidence_report();
+    let accurate_ready_deliveries = accurate_report
+        .deliveries
+        .ready
+        .checked_sub(accurate_before.deliveries.ready)
+        .context("accurate-seek ready-delivery counter regressed")?;
+    let accurate_seek_count = accurate_report
+        .accurate_seek_latency
+        .count
+        .checked_sub(accurate_before.accurate_seek_latency.count)
+        .context("accurate-seek counter regressed")?;
     ensure!(
         state.current_frame() == accurate_target
-            && accurate_report.accurate_seek_latency.count >= 1,
-        "settled seek did not produce accurate-seek evidence"
+            && accurate_seek_count == 1
+            && accurate_ready_deliveries == 1,
+        "settled seek did not produce exact stage-local accurate-seek evidence"
     );
     let accurate_evidence = OperationEvidence::AccurateSeek {
         target_frame: accurate_target,
         final_frame: state.current_frame(),
-        ready_deliveries: accurate_report.deliveries.ready,
-        accurate_seek_count: accurate_report.accurate_seek_latency.count,
+        ready_deliveries: accurate_ready_deliveries,
+        accurate_seek_count,
+        presentation: accurate_presentation,
     };
 
     let play_start = state.current_frame();
+    let play_before = state.playback_evidence_report();
     state.dispatch_action(Action::Play)?;
-    observe_ready_delivery(state);
-    let _ = state.observe_video_preroll(0, 0);
+    let play_presentation = viewer.present_current(state, VIEWER_PRESENTATION_TIMEOUT)?;
+    ensure!(
+        !state.is_playback_priming(),
+        "production Preview preroll did not release the Playback clock anchor"
+    );
     let advance = state.advance_playback_clock(Duration::from_millis(80));
     ensure!(
         advance.status == PlaybackAdvanceStatus::Advanced
@@ -580,16 +686,22 @@ pub(super) fn execute_editorial_stage(
     );
     state.dispatch_action(Action::Pause)?;
     let play_report = state.playback_evidence_report();
+    let synthetic_clock_residency_us = play_report
+        .clock_residency
+        .synthetic_us
+        .checked_sub(play_before.clock_residency.synthetic_us)
+        .context("Synthetic Clock residency counter regressed")?;
     ensure!(
-        play_report.clock_residency.synthetic_us > 0,
-        "playback evidence retained no Synthetic Clock residency"
+        synthetic_clock_residency_us > 0,
+        "playback evidence retained no stage-local Synthetic Clock residency"
     );
     let play_evidence = OperationEvidence::Play {
         start_frame: play_start,
         final_frame: advance.current_frame,
         frames_advanced: advance.frames_advanced,
         clock_master: "synthetic",
-        synthetic_clock_residency_us: play_report.clock_residency.synthetic_us,
+        synthetic_clock_residency_us,
+        presentation: play_presentation,
     };
 
     let operations = vec![
@@ -606,10 +718,27 @@ pub(super) fn execute_editorial_stage(
         operations.iter().map(OperationEvidence::id),
         "operation",
     )?;
+    let viewer = viewer.evidence();
+    ensure!(
+        viewer.presentations == 5
+            && viewer.completed_demands == 5
+            && viewer.gpu_executions
+                + viewer.current_gpu_presentations
+                + viewer.cpu_raster_presentations
+                == 5,
+        "Editorial transport did not present exactly five real Hero Viewer outputs"
+    );
+    let persistence = workflow.durable_save_reopen_for(&stage)?;
     workflow.verify_binding()?;
+    let authoring = capture_editorial_authoring_anchor(
+        workflow.app(),
+        stage.sequence_id(),
+        asset.id,
+        [track_id, secondary_track_id],
+    )?;
 
     Ok(GoldenEditorialReport {
-        schema_version: 2,
+        schema_version: 3,
         profile: EDITORIAL_SLICE_ID,
         contract_id: contract.id.clone(),
         corpus_revision: manifest.corpus_revision,
@@ -618,65 +747,15 @@ pub(super) fn execute_editorial_stage(
         fixture,
         setup: EditorialSetupEvidence {
             stage,
-            primary_audio_track_id: track_id.to_string(),
-            secondary_audio_track_id: secondary_track_id.to_string(),
-            asset_id: asset.id.to_string(),
+            primary_audio_track_id: track_id,
+            secondary_audio_track_id: secondary_track_id,
+            asset_id: asset.id,
             imported_audio,
             setup_steps,
         },
         operations,
+        viewer,
+        persistence,
+        authoring,
     })
-}
-
-#[cfg(test)]
-fn execute_editorial_slice(
-    root: &Path,
-    paths: &GoldenRunPaths,
-) -> anyhow::Result<GoldenEditorialReport> {
-    let contract = load_golden_contract(root)?;
-    let settings = sequence_settings_from_contract(&contract.timeline)?;
-    let mut workflow = GoldenProductWorkflowDriver::create(
-        paths.project.clone(),
-        "Windows Alpha Golden Editorial",
-        settings,
-        mondrian_core::ProjectColorEnvironment::default(),
-        mondrian_core::ProjectSettings::default(),
-    )?;
-    execute_editorial_stage(root, &contract, &mut workflow)
-}
-
-#[test]
-#[ignore = "Golden editorial gate requires the generated canonical AAC fixture"]
-fn golden_project_editorial_transport_gate() -> anyhow::Result<()> {
-    let root = repository_root();
-    let paths = new_run_paths(&root)?;
-    match execute_editorial_slice(&root, &paths) {
-        Ok(report) => {
-            write_report(&paths.report, &report)?;
-            eprintln!(
-                "MONDRIAN_GOLDEN_EDITORIAL_REPORT_JSON={}",
-                serde_json::to_string(&report)?
-            );
-            eprintln!(
-                "MONDRIAN_GOLDEN_EDITORIAL_REPORT_PATH={}",
-                paths.report.display()
-            );
-            eprintln!(
-                "MONDRIAN_GOLDEN_EDITORIAL_RUN_DIRECTORY={}",
-                paths.directory.display()
-            );
-            Ok(())
-        }
-        Err(error) => {
-            let failure = serde_json::json!({
-                "schema_version": 2,
-                "profile": EDITORIAL_SLICE_ID,
-                "status": "failed",
-                "complete_golden_project": false,
-                "error": format!("{error:#}")
-            });
-            write_report(&paths.report, &failure)?;
-            Err(error)
-        }
-    }
 }

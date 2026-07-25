@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "id": "windows-alpha-golden-v7",
+  "id": "windows-alpha-golden-v8",
   "kind": "golden",
   "hero_sequence": {
     "role": "hero",
@@ -104,7 +104,7 @@
     },
     {
       "id": "editorial-transport-v1",
-      "sequence_role": "isolated-editorial",
+      "sequence_role": "hero",
       "required_fixture_roles": [
         "aac-audio"
       ],
