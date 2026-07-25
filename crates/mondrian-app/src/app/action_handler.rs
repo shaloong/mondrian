@@ -37,8 +37,9 @@ use crate::app::ui_actions::{
     TimelineOpenNestedSequencePayload, TimelinePrecomposeSelectionPayload, TimelineSeekPayload,
     TimelineSelectClipPayload, TimelineSelectVideoTransitionPayload, TimelineSetInOutPointPayload,
     TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
-    TimelineSetVideoTransitionRangePayload, TimelineTrackControlPayloadKind,
-    TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
+    TimelineSetTrackTargetingPayload, TimelineSetVideoTransitionRangePayload,
+    TimelineTrackControlPayloadKind, TimelineTrackTargetingControl, TimelineTrimClipsPayload,
+    TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
     ViewerSetClipTransformPayload, ViewerSetPreviewResolutionScalePayload,
     ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
     ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
@@ -57,11 +58,12 @@ use crate::app::ui_actions::{
     SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE,
     SEQUENCE_UPDATE_SETTINGS, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
     TIMELINE_CREATE_BASIC_TITLE, TIMELINE_CREATE_CROSS_DISSOLVE, TIMELINE_DROP_ASSET,
-    TIMELINE_INSERT_ASSET, TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK,
-    TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_PRECOMPOSE_SELECTION,
+    TIMELINE_EXTRACT_RANGE, TIMELINE_INSERT_ASSET, TIMELINE_LIFT_RANGE,
+    TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
+    TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_PRECOMPOSE_SELECTION,
     TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
     TIMELINE_SELECT_VIDEO_TRANSITION, TIMELINE_SET_IN_OUT_POINT,
-    TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
+    TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL, TIMELINE_SET_TRACK_TARGETING,
     TIMELINE_SET_VIDEO_TRANSITION_RANGE, TIMELINE_TRIM_CLIPS,
     TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, TIMELINE_UNLINK_SELECTED_CLIPS, VIEWER_NAMESPACE,
     VIEWER_SET_CLIP_TRANSFORM, VIEWER_SET_PREVIEW_RESOLUTION_SCALE,
@@ -1301,6 +1303,12 @@ impl AppState {
                 self.set_in_out_point_from_ui(payload)
             }
             TIMELINE_CLEAR_IN_OUT_POINTS => self.clear_in_out_points_from_ui(),
+            TIMELINE_LIFT_RANGE => self
+                .apply_timeline_range_edit(mondrian_timeline::RangeEditKind::Lift)
+                .map(|_| ()),
+            TIMELINE_EXTRACT_RANGE => self
+                .apply_timeline_range_edit(mondrian_timeline::RangeEditKind::Extract)
+                .map(|_| ()),
             TIMELINE_SET_SELECTED_CLIPS_ENABLED => {
                 let payload = parse_ui_payload::<TimelineSetSelectedClipsEnabledPayload>(
                     "timeline_ui_action",
@@ -1337,6 +1345,21 @@ impl AppState {
                         payload.is_video_track,
                         payload.enabled,
                     ),
+                }
+            }
+            TIMELINE_SET_TRACK_TARGETING => {
+                let payload = parse_ui_payload::<TimelineSetTrackTargetingPayload>(
+                    "timeline_ui_action",
+                    name,
+                    payload,
+                )?;
+                match payload.control {
+                    TimelineTrackTargetingControl::Target => {
+                        self.set_timeline_track_targeted(payload.track_id, payload.enabled)
+                    }
+                    TimelineTrackTargetingControl::SyncLock => {
+                        self.set_timeline_track_sync_locked(payload.track_id, payload.enabled)
+                    }
                 }
             }
             TIMELINE_ADD_TRACK => {

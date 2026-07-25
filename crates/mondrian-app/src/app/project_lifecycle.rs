@@ -132,6 +132,7 @@ impl AppState {
         }
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let project_id = session.project_id();
+        self.clear_timeline_targeting();
         self.authoring = Some(session);
         self.autosave_in_flight_request = None;
         self.proxy_generation.bind_project(Some(project_id));
@@ -496,6 +497,7 @@ impl AppState {
         let session = AuthoringSession::new_unsaved(document, project_file, runtime_root, library)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let project_id = session.project_id();
+        self.clear_timeline_targeting();
         self.authoring = Some(session);
         self.autosave_in_flight_request = None;
         self.proxy_generation.bind_project(Some(project_id));

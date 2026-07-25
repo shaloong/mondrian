@@ -453,6 +453,14 @@ _Avoid_: Font display name as output fingerprint, platform default fallback, sil
 A Sequence-local set identity shared by two or more Clip placements whose ordinary editorial selection and structural edits are synchronized.
 _Avoid_: Pair pointer, linked-list chain, singleton group, media ownership relation
 
+**Timeline Edit Targeting**:
+Per-open-editor-Session policy keyed by stable Sequence and Track identity. Target decides whether a structural edit cuts Track content; Sync-Lock independently decides whether downstream placements follow a program-time ripple. Both default on, are compiled into explicit command scopes, and are not renderable Sequence author state.
+_Avoid_: Persisted Track flags, selected Track as implicit target, hidden expansion of a command scope, Sync-Lock treated as content selection
+
+**Range Edit**:
+One atomic Lift or Extract over an exact half-open Sequence-time range and explicit content/ripple Track sets. Lift removes intersecting targeted content without changing program time; Extract removes it and closes the interval on its admitted ripple closure.
+_Avoid_: Repeated per-Track deletes, Widget-owned ripple rules, silent cutting of untargeted Sync-Locked content, local PushForward collision mode
+
 **Precompose Action**:
 One Project-scoped Author Transaction that resolves the current stable-ID Clip selection, expands complete link groups, projects selected author content into a new Nested Composition Sequence, and replaces only the represented video/audio placement kinds in the parent.
 _Avoid_: Widget-built child graph, invisible video placement for audio-only content, separately committed child and parent edits, duplicated external Project
@@ -574,6 +582,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - Every non-null **Clip Link Group** has at least two members. Selection and commands expand a selected member to the complete set, validate all locked Tracks and zero-boundary constraints before mutation, and compact broken/singleton membership before commit. Explicit Link retains the sole existing group identity when adding unlinked members, creates a fresh identity when merging multiple groups, and never commits a no-op; Unlink clears every expanded group atomically.
 - A **Video Transition** derives Track membership from its strong Clip endpoints. It persists no parallel Track identity, requires one exact shared cut, and projects its full interval into both source domains without clamping; insufficient source handles fail closed.
 - A professional **Insert Edit** is one atomic Sequence edit over explicit target Tracks and Sync-Lock/ripple scope. Track Targeting and Sync-Lock are editor policy resolved into the request, not renderable Sequence author state. The edit opens one exact interval, splits crossing material, preserves coherent link groups, respects every lock, safely shifts downstream Transitions, explicitly rejects/removes intersected Transitions, and applies an explicit Sequence-time automation/navigation policy. The unrelated local collision mode is named `PushForward` and can never satisfy Insert semantics.
+- One **Range Edit** receives **Timeline Edit Targeting** only as explicit content and ripple Track sets. Lift never ripples. Extract requires every content Track in its ripple set, may shift an untargeted Sync-Locked Track only when the removed interval contains no content there, and otherwise rejects without mutation. Clip/source/local-time fragmentation, complete link-group transforms, Transition disposition, Sequence-time automation ownership closure, playhead/In/Out collapse, author validation, and one Undo receipt are one transaction.
 - **Automation Follows Insert** is ownership-based: a rippled Track and Routes sourced from it follow; a Bus or Program Output follows only when every authored input follows. Clip/Scope-local automation remains in its local domain. Partial aggregate ownership never guesses.
 - A visual Transition author type, definition, or Property Bag is not execution evidence. Product support requires the shared Preview/Export render projection and verified backend path.
 - Undo and Redo restore author content but always advance the **Sequence Author Revision**; restored content can therefore never masquerade as the older live snapshot from which it originated.

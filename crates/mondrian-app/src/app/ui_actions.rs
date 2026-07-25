@@ -58,12 +58,18 @@ pub const TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD: &str = "roll_selected_cut_to_p
 pub const TIMELINE_SET_IN_OUT_POINT: &str = "set_in_out_point";
 /// Action name for clearing active-sequence in/out points.
 pub const TIMELINE_CLEAR_IN_OUT_POINTS: &str = "clear_in_out_points";
+/// Action name for lifting the active In/Out range from targeted Tracks.
+pub const TIMELINE_LIFT_RANGE: &str = "lift_range";
+/// Action name for extracting the active In/Out range from targeted Tracks.
+pub const TIMELINE_EXTRACT_RANGE: &str = "extract_range";
 /// Action name for toggling the current timeline clip selection.
 pub const TIMELINE_SET_SELECTED_CLIPS_ENABLED: &str = "set_selected_clips_enabled";
 /// Action name for seeking the active timeline.
 pub const TIMELINE_SEEK: &str = "seek";
 /// Action name for changing one timeline track header control.
 pub const TIMELINE_SET_TRACK_CONTROL: &str = "set_track_control";
+/// Action name for changing Track Targeting or Sync-Lock session policy.
+pub const TIMELINE_SET_TRACK_TARGETING: &str = "set_track_targeting";
 /// Action name for adding a video or audio timeline track.
 pub const TIMELINE_ADD_TRACK: &str = "add_track";
 /// Action name for reordering one timeline track.
@@ -627,6 +633,26 @@ pub struct TimelineSetTrackControlPayload {
     /// Control being changed.
     pub control: TimelineTrackControlPayloadKind,
     /// New value for that control.
+    pub enabled: bool,
+}
+
+/// Editor-session Track control targeted by the timeline header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TimelineTrackTargetingControl {
+    /// Whether content edits directly affect this Track.
+    Target,
+    /// Whether downstream placements follow ripple edits.
+    SyncLock,
+}
+
+/// Change Track Targeting or Sync-Lock without an author transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineSetTrackTargetingPayload {
+    /// Stable Track identity in the active Sequence.
+    pub track_id: TrackId,
+    /// Session policy being changed.
+    pub control: TimelineTrackTargetingControl,
+    /// New enabled state.
     pub enabled: bool,
 }
 
@@ -1348,6 +1374,16 @@ pub fn timeline_clear_in_out_points_action() -> Action {
     custom_timeline_action(TIMELINE_CLEAR_IN_OUT_POINTS, ())
 }
 
+/// Build an action that lifts the active In/Out range.
+pub fn timeline_lift_range_action() -> Action {
+    custom_timeline_action(TIMELINE_LIFT_RANGE, ())
+}
+
+/// Build an action that extracts the active In/Out range.
+pub fn timeline_extract_range_action() -> Action {
+    custom_timeline_action(TIMELINE_EXTRACT_RANGE, ())
+}
+
 /// Build an action that toggles the current timeline clip selection.
 pub fn timeline_set_selected_clips_enabled_action(
     payload: TimelineSetSelectedClipsEnabledPayload,
@@ -1371,6 +1407,11 @@ pub fn timeline_seek_with_source_action(frame: i64, source: TimelineSeekSource) 
 /// Build an action that changes a timeline track header control.
 pub fn timeline_set_track_control_action(payload: TimelineSetTrackControlPayload) -> Action {
     custom_timeline_action(TIMELINE_SET_TRACK_CONTROL, payload)
+}
+
+/// Build an action that changes Track Targeting or Sync-Lock session policy.
+pub fn timeline_set_track_targeting_action(payload: TimelineSetTrackTargetingPayload) -> Action {
+    custom_timeline_action(TIMELINE_SET_TRACK_TARGETING, payload)
 }
 
 /// Build an action that adds a timeline track.

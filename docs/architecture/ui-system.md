@@ -66,13 +66,38 @@ their time lies exactly on a boundary. Escape cancels widget-local preview
 state and publishes no author mutation.
 
 Timeline Track Targeting and Sync-Lock are editor interaction policy, not
-renderable Sequence fields. A Timeline Adapter snapshots those controls into a
-typed Insert Action containing explicit target Tracks, the complete ripple
-Track set, source interval, and automation/Transition/navigation policies. The
+renderable Sequence fields. `TimelineTargetingState` is keyed by stable
+Sequence/Track identity in the open editor Session and stores only exceptions
+to safe defaults: every current or newly created Track is Target-enabled and
+Sync-Locked unless explicitly disabled. Target decides whether structural
+content edits cut a Track. Sync-Lock independently decides whether downstream
+placements follow a program-time ripple. Deleting Tracks/Sequences, replacing
+the open Project, or closing the Project reconciles or clears stale overrides;
+none of these control changes creates an Author Transaction or marks the
+Project dirty.
+
+The Timeline Track header exposes independent T and S controls for video and
+audio Tracks. Their checked state is projected from `AppState`; Widgets retain
+no competing policy. Typed Actions address a stable `TrackId`, are rejected for
+stale identities, and only update session policy. This state is intentionally
+not yet durable workspace preference: reopen returns to the documented
+default-on policy until a versioned workspace-state owner is introduced.
+
+A Timeline Adapter snapshots the controls into structural requests containing
+explicit content/ripple Track sets and explicit
+automation/Transition/navigation policies. Insert consumes its target
+placements plus ripple set. Lift consumes Target-enabled Tracks and no ripple
+set. Extract consumes Target-enabled Tracks as content and the Target ∪
+Sync-Lock union as ripple. An untargeted Sync-Locked Track may shift only when
+the removed range contains no content on that Track; otherwise the Action is
+disabled and direct execution returns the same typed domain failure. The
 domain operation never reads selected Track, panel focus, or process-global UI
-state. This makes the same Action deterministic in Window, Headless Golden, and
-future scripting adapters. The existing drag collision choice is labeled
-`PushForward`; UI code must not expose it as professional Insert.
+state. This makes the same request deterministic in Window, Headless Golden,
+and future scripting Adapters. Lift and Extract are discoverable in both Clip
+and empty Timeline context menus, use the Sequence In point or zero plus its
+exclusive Out point, and commit through one Author Transaction. The existing
+drag collision choice is labeled `PushForward`; UI code must not expose it as
+professional Insert.
 
 Inspector audio source controls project existing author state rather than own
 it. Each row addresses one stable `AudioComponentEditId`; media choices carry

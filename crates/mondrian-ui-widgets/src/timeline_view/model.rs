@@ -17,10 +17,18 @@ const CLIP_EDGE_WIDTH_RATIO: f32 = 0.35;
 const TRACK_CONTROL_SIZE: f32 = 18.0;
 const TRACK_CONTROL_GAP: f32 = 4.0;
 const TRACK_CONTROL_RIGHT_PADDING: f32 = 8.0;
-const VIDEO_TRACK_CONTROLS: [TimelineTrackControl; 2] =
-    [TimelineTrackControl::Visibility, TimelineTrackControl::Lock];
-const AUDIO_TRACK_CONTROLS: [TimelineTrackControl; 2] =
-    [TimelineTrackControl::Mute, TimelineTrackControl::Lock];
+const VIDEO_TRACK_CONTROLS: [TimelineTrackControl; 4] = [
+    TimelineTrackControl::Target,
+    TimelineTrackControl::SyncLock,
+    TimelineTrackControl::Visibility,
+    TimelineTrackControl::Lock,
+];
+const AUDIO_TRACK_CONTROLS: [TimelineTrackControl; 4] = [
+    TimelineTrackControl::Target,
+    TimelineTrackControl::SyncLock,
+    TimelineTrackControl::Mute,
+    TimelineTrackControl::Lock,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct TimelineLayoutRects {
@@ -306,6 +314,8 @@ pub(super) fn track_control_at(
         track_ref.track_index,
     );
     [
+        TimelineTrackControl::Target,
+        TimelineTrackControl::SyncLock,
         TimelineTrackControl::Visibility,
         TimelineTrackControl::Mute,
         TimelineTrackControl::Lock,
@@ -315,6 +325,8 @@ pub(super) fn track_control_at(
         track_control_rect(
             header,
             &[
+                TimelineTrackControl::Target,
+                TimelineTrackControl::SyncLock,
                 TimelineTrackControl::Visibility,
                 TimelineTrackControl::Mute,
                 TimelineTrackControl::Lock,
@@ -778,6 +790,9 @@ pub(super) fn edit_command_has_local_target(
         TimelineEditCommand::UnlinkSelection => {
             context.selected_clip_has_link && context.selected_clip_links_editable
         }
+        TimelineEditCommand::LiftInOutRange | TimelineEditCommand::ExtractInOutRange => {
+            context.has_out_point
+        }
         TimelineEditCommand::OpenNestedSequence(clip_ref) => {
             context.selected_clip == Some(clip_ref) && context.selected_clip_is_nested
         }
@@ -997,6 +1012,8 @@ mod tests {
         let header = Rect::new(0.0, 50.0, 120.0, 120.0);
         let row = track_header_rect(header, body, 40.0, 20.0, 1);
         let all_controls = [
+            TimelineTrackControl::Target,
+            TimelineTrackControl::SyncLock,
             TimelineTrackControl::Visibility,
             TimelineTrackControl::Mute,
             TimelineTrackControl::Lock,
@@ -1008,6 +1025,11 @@ mod tests {
         let lock =
             track_control_rect(row, &all_controls, TimelineTrackControl::Lock).expect("lock slot");
 
+        let target =
+            track_control_rect(row, &all_controls, TimelineTrackControl::Target).expect("target");
+        let sync = track_control_rect(row, &all_controls, TimelineTrackControl::SyncLock)
+            .expect("Sync-Lock");
+        assert!(target.x < sync.x && sync.x < visibility.x);
         assert!(visibility.x < mute.x && mute.x < lock.x);
         assert_eq!(
             track_control_at(header, body, 40.0, 20.0, 4, lock.center()),
@@ -1026,11 +1048,21 @@ mod tests {
 
         assert_eq!(
             video_controls,
-            [TimelineTrackControl::Visibility, TimelineTrackControl::Lock]
+            [
+                TimelineTrackControl::Target,
+                TimelineTrackControl::SyncLock,
+                TimelineTrackControl::Visibility,
+                TimelineTrackControl::Lock
+            ]
         );
         assert_eq!(
             audio_controls,
-            [TimelineTrackControl::Mute, TimelineTrackControl::Lock]
+            [
+                TimelineTrackControl::Target,
+                TimelineTrackControl::SyncLock,
+                TimelineTrackControl::Mute,
+                TimelineTrackControl::Lock
+            ]
         );
         assert!(track_control_rect(header, video_controls, TimelineTrackControl::Mute).is_none());
         assert!(

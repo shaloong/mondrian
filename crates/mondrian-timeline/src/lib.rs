@@ -11,10 +11,13 @@
 
 pub mod audio;
 pub mod clip;
+mod clip_fragment;
 pub mod clip_linking;
 pub mod insert_edit;
 pub mod keyframe;
+pub mod range_edit;
 pub mod sequence;
+mod sequence_time_edit;
 pub mod track;
 pub mod video_transition;
 
@@ -30,6 +33,11 @@ pub use insert_edit::{
     InsertTransitionPolicy,
 };
 pub use keyframe::{InterpolationType, Keyframe, KeyframeTrack};
+pub use range_edit::{
+    apply_range_edit, assess_range_edit, RangeEditAutomationPolicy, RangeEditError, RangeEditKind,
+    RangeEditOutcome, RangeEditRequest, RangeEditSplitOutcome, RangeEditTimelineStatePolicy,
+    RangeEditTransitionPolicy,
+};
 pub use sequence::{
     AudioChannelLayout, AudioDisplayFormat, EditingMode, FieldOrder, PixelAspectRatio,
     PreviewRenderFormat, Sequence, SequenceCollection, SequencePreset, SequencePreviewSettings,

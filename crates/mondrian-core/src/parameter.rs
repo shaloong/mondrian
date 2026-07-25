@@ -1,6 +1,6 @@
 //! Stable parameter identity and exact-time numeric automation curves.
 
-use crate::{KeyframeId, TimeScale, TimelineTime, TimelineTimeError};
+use crate::{KeyframeId, TimeScale, TimelineTime, TimelineTimeError, TimelineTimeRange};
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use std::{collections::HashSet, fmt};
 
@@ -254,6 +254,32 @@ impl ExactAutomationCurve {
         *self = candidate;
         Ok(())
     }
+
+    /// Remove keys inside one half-open owner-time range and close the gap.
+    ///
+    /// Keys before `range.start` retain their exact time. Keys at or after the
+    /// exclusive range end move earlier by the range duration while preserving
+    /// stable identity, value, interpolation, and handles. The edit validates a
+    /// complete candidate before publication.
+    pub fn extract_time_range(&mut self, range: TimelineTimeRange) -> Result<(), AutomationError> {
+        let end = range.end()?;
+        if range.duration.is_zero() {
+            return Ok(());
+        }
+
+        let mut candidate = self.clone();
+        candidate
+            .keyframes
+            .retain(|keyframe| keyframe.time < range.start || keyframe.time >= end);
+        for keyframe in &mut candidate.keyframes {
+            if keyframe.time >= end {
+                keyframe.time = keyframe.time.checked_sub(range.duration)?;
+            }
+        }
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
 }
 
 /// One validated, immutable interpolation span from an exact automation curve.
@@ -436,6 +462,48 @@ mod tests {
         let same_absolute_time = TimelineTime::new(16_000, 48_000).expect("sample time");
         let partitioned = curve.evaluate(same_absolute_time).expect("partitioned");
         assert!((direct - partitioned).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn exact_curve_extract_uses_half_open_range_and_preserves_survivor_identities() {
+        let id = ParameterId::new("mondrian.test.extract").expect("parameter ID");
+        let mut curve = ExactAutomationCurve::new(id, 0.0).expect("curve");
+        let keys = [0_i64, 10, 20, 30]
+            .into_iter()
+            .map(|time| {
+                ExactAutomationKeyframe::linear(
+                    TimelineTime::new(time, 1).expect("key time"),
+                    time as f64,
+                )
+            })
+            .collect::<Vec<_>>();
+        let first_id = keys[0].id;
+        let removed_id = keys[1].id;
+        let end_id = keys[2].id;
+        let after_id = keys[3].id;
+        for key in keys {
+            curve.set_keyframe(key).expect("key");
+        }
+
+        curve
+            .extract_time_range(
+                TimelineTimeRange::new(
+                    TimelineTime::new(10, 1).expect("start"),
+                    TimelineTime::new(10, 1).expect("duration"),
+                )
+                .expect("range"),
+            )
+            .expect("extract");
+
+        assert_eq!(
+            curve.keyframes.iter().map(|key| (key.id, key.time)).collect::<Vec<_>>(),
+            [
+                (first_id, TimelineTime::new(0, 1).expect("zero")),
+                (end_id, TimelineTime::new(10, 1).expect("shifted end")),
+                (after_id, TimelineTime::new(20, 1).expect("shifted after")),
+            ]
+        );
+        assert!(!curve.keyframes.iter().any(|key| key.id == removed_id));
     }
 
     #[test]

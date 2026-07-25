@@ -103,11 +103,12 @@ use crate::app::ui_actions::{
     inspector_set_effect_enabled_action, inspector_set_effect_property_action,
     timeline_add_track_action, timeline_clear_in_out_points_action,
     timeline_create_cross_dissolve_action, timeline_drop_asset_action,
-    timeline_link_selected_clips_action, timeline_move_clip_action, timeline_move_track_action,
-    timeline_open_nested_sequence_action, timeline_roll_selected_cut_to_playhead_action,
-    timeline_seek_with_source_action, timeline_select_clip_action,
-    timeline_select_video_transition_action, timeline_set_in_out_point_action,
-    timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
+    timeline_extract_range_action, timeline_lift_range_action, timeline_link_selected_clips_action,
+    timeline_move_clip_action, timeline_move_track_action, timeline_open_nested_sequence_action,
+    timeline_roll_selected_cut_to_playhead_action, timeline_seek_with_source_action,
+    timeline_select_clip_action, timeline_select_video_transition_action,
+    timeline_set_in_out_point_action, timeline_set_selected_clips_enabled_action,
+    timeline_set_track_control_action, timeline_set_track_targeting_action,
     timeline_set_video_transition_range_action, timeline_trim_clips_action,
     timeline_trim_selected_clips_to_playhead_action, timeline_unlink_selected_clips_action,
     viewer_set_preview_resolution_scale_action, viewer_set_zoom_scale_action,
@@ -135,8 +136,9 @@ use crate::app::ui_actions::{
     TimelineOpenNestedSequencePayload, TimelineSeekSource as AppTimelineSeekSource,
     TimelineSelectClipPayload, TimelineSelectVideoTransitionPayload, TimelineSetInOutPointPayload,
     TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
-    TimelineSetVideoTransitionRangePayload, TimelineTrackControlPayloadKind,
-    TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
+    TimelineSetTrackTargetingPayload, TimelineSetVideoTransitionRangePayload,
+    TimelineTrackControlPayloadKind, TimelineTrackTargetingControl, TimelineTrimClipsPayload,
+    TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
     ViewerSetPreviewResolutionScalePayload, ViewerSetZoomScalePayload,
 };
 use crate::app::waveform_service::AudioWaveformSource;
@@ -1020,6 +1022,8 @@ struct TimelineEditAvailability {
     mark_in: bool,
     mark_out: bool,
     clear_in_out: bool,
+    lift_range: bool,
+    extract_range: bool,
     toggle_playback: bool,
 }
 
@@ -1057,6 +1061,8 @@ impl TimelineEditAvailability {
             mark_in: app_state_action_enabled(&Action::MarkInAtPlayhead, state),
             mark_out: app_state_action_enabled(&Action::MarkOutAtPlayhead, state),
             clear_in_out: app_state_action_enabled(&timeline_clear_in_out_points_action(), state),
+            lift_range: app_state_action_enabled(&timeline_lift_range_action(), state),
+            extract_range: app_state_action_enabled(&timeline_extract_range_action(), state),
             toggle_playback: app_state_action_enabled(&Action::TogglePlay, state),
         }
     }
@@ -1077,6 +1083,8 @@ impl TimelineEditAvailability {
                 self.set_selected_enabled
             }
             TimelineEditCommand::LinkSelection | TimelineEditCommand::UnlinkSelection => true,
+            TimelineEditCommand::LiftInOutRange => self.lift_range,
+            TimelineEditCommand::ExtractInOutRange => self.extract_range,
             TimelineEditCommand::OpenNestedSequence(_) => true,
             TimelineEditCommand::MarkInAtPlayhead => self.mark_in,
             TimelineEditCommand::MarkOutAtPlayhead => self.mark_out,
@@ -1159,6 +1167,8 @@ impl TimelinePanelModel {
                 selected_tracks,
                 library,
                 &link_groups,
+                state.is_none_or(|state| state.timeline_track_targeted(sequence.id, track.id)),
+                state.is_none_or(|state| state.timeline_track_sync_locked(sequence.id, track.id)),
             );
             projection.track.label = label;
             let transition_views = timeline_transition_views_for_track(
@@ -1191,6 +1201,8 @@ impl TimelinePanelModel {
                 selected_tracks,
                 library,
                 &link_groups,
+                state.is_none_or(|state| state.timeline_track_targeted(sequence.id, track.id)),
+                state.is_none_or(|state| state.timeline_track_sync_locked(sequence.id, track.id)),
             );
             projection.track.label = format!("A{}", index + 1);
             (
@@ -1371,6 +1383,7 @@ impl TimelinePanelModel {
     ) -> Option<TimelineSetTrackControlPayload> {
         let identity = self.track_identity(track_ref)?;
         let (control, enabled) = match control {
+            TimelineTrackControl::Target | TimelineTrackControl::SyncLock => return None,
             TimelineTrackControl::Visibility => {
                 (TimelineTrackControlPayloadKind::Visibility, !track.visible)
             }
@@ -1383,6 +1396,27 @@ impl TimelinePanelModel {
             control,
             enabled,
         })
+    }
+
+    fn track_targeting_payload(
+        &self,
+        control: TimelineTrackControl,
+        track_ref: TimelineTrackRef,
+        track: &TimelineTrack,
+    ) -> Option<TimelineSetTrackTargetingPayload> {
+        let identity = self.track_identity(track_ref)?;
+        let (control, enabled) = match control {
+            TimelineTrackControl::Target => {
+                (TimelineTrackTargetingControl::Target, !track.targeted)
+            }
+            TimelineTrackControl::SyncLock => {
+                (TimelineTrackTargetingControl::SyncLock, !track.sync_locked)
+            }
+            TimelineTrackControl::Visibility
+            | TimelineTrackControl::Mute
+            | TimelineTrackControl::Lock => return None,
+        };
+        Some(TimelineSetTrackTargetingPayload { track_id: identity.track_id, control, enabled })
     }
 
     fn track_move_payload(&self, movement: TimelineTrackMove) -> Option<TimelineMoveTrackPayload> {
@@ -2467,6 +2501,8 @@ fn timeline_track_projection_from_sequence_track(
     selected_tracks: &[TrackId],
     library: Option<&AssetLibrary>,
     link_groups: &BTreeMap<ClipLinkGroupId, (usize, bool)>,
+    targeted: bool,
+    sync_locked: bool,
 ) -> TimelineTrackProjection {
     let muted = track.is_muted;
     let locked = track.is_locked;
@@ -2498,7 +2534,13 @@ fn timeline_track_projection_from_sequence_track(
         TimelineTrack::audio(track.name.clone(), clips)
     };
     TimelineTrackProjection {
-        track: track.selected(selected).visible(visible).muted(muted).locked(locked),
+        track: track
+            .selected(selected)
+            .targeted(targeted)
+            .sync_locked(sync_locked)
+            .visible(visible)
+            .muted(muted)
+            .locked(locked),
         clip_ids,
         nested_sequence_ids,
     }
@@ -3868,10 +3910,20 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
         .on_track_control({
             let action_model = action_model.clone();
             move |control, track_ref, track| {
-                action_model
-                    .track_control_payload(control, track_ref, track)
-                    .map(timeline_set_track_control_action)
-                    .unwrap_or(Action::NoOp)
+                if matches!(
+                    control,
+                    TimelineTrackControl::Target | TimelineTrackControl::SyncLock
+                ) {
+                    action_model
+                        .track_targeting_payload(control, track_ref, track)
+                        .map(timeline_set_track_targeting_action)
+                        .unwrap_or(Action::NoOp)
+                } else {
+                    action_model
+                        .track_control_payload(control, track_ref, track)
+                        .map(timeline_set_track_control_action)
+                        .unwrap_or(Action::NoOp)
+                }
             }
         })
         .on_track_add(|kind| {
@@ -3997,6 +4049,8 @@ fn timeline_edit_command_action(
         }
         TimelineEditCommand::LinkSelection => timeline_link_selected_clips_action(),
         TimelineEditCommand::UnlinkSelection => timeline_unlink_selected_clips_action(),
+        TimelineEditCommand::LiftInOutRange => timeline_lift_range_action(),
+        TimelineEditCommand::ExtractInOutRange => timeline_extract_range_action(),
         TimelineEditCommand::OpenNestedSequence(clip_ref) => model
             .open_nested_payload(clip_ref)
             .map(timeline_open_nested_sequence_action)
@@ -4012,7 +4066,9 @@ fn timeline_edit_command_shortcut_label(command: TimelineEditCommand) -> Option<
     let action = match command {
         TimelineEditCommand::OpenNestedSequence(_)
         | TimelineEditCommand::LinkSelection
-        | TimelineEditCommand::UnlinkSelection => return None,
+        | TimelineEditCommand::UnlinkSelection
+        | TimelineEditCommand::LiftInOutRange
+        | TimelineEditCommand::ExtractInOutRange => return None,
         TimelineEditCommand::ClearInOutPoints => return None,
         TimelineEditCommand::TogglePlayback => return Some("Space".to_owned()),
         TimelineEditCommand::CutSelection => Action::Cut,

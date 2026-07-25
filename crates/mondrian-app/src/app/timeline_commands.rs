@@ -199,6 +199,7 @@ impl AppState {
             after.sequences.active_sequence_id = fallback_id;
         }
         session.commit_project_snapshot("删除序列", before, after)?;
+        self.reconcile_timeline_targeting();
         if active_changed {
             self.stop();
             self.settle_preview_access_source();
@@ -277,6 +278,7 @@ impl AppState {
         if !commit.undo_retained {
             self.set_status_hint("编辑已提交，但超出撤销历史内存预算", true);
         }
+        self.reconcile_timeline_targeting();
         Ok(())
     }
 
@@ -296,6 +298,7 @@ impl AppState {
         if !commit.undo_retained {
             self.set_status_hint("编辑已提交，但超出撤销历史内存预算", true);
         }
+        self.reconcile_timeline_targeting();
         Ok(value)
     }
 
@@ -307,6 +310,7 @@ impl AppState {
         for sequence_id in commit.changed_sequence_ids {
             self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         }
+        self.reconcile_timeline_targeting();
         self.stop();
         self.settle_preview_access_source();
         Ok(true)
@@ -320,6 +324,7 @@ impl AppState {
         for sequence_id in commit.changed_sequence_ids {
             self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         }
+        self.reconcile_timeline_targeting();
         self.stop();
         self.settle_preview_access_source();
         Ok(true)
@@ -329,6 +334,7 @@ impl AppState {
         self.proxy_generation.bind_project(None);
         mondrian_media::clear_thread_local_preview_decode_session();
         self.authoring = None;
+        self.clear_timeline_targeting();
         self.autosave_in_flight_request = None;
         self.stop();
         self.settle_preview_access_source();

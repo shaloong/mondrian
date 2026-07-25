@@ -6,7 +6,7 @@
 use crate::{
     error::{MondrianError, Result},
     types::{AnimationTrackId, AssetId, Color, KeyframeId},
-    ParameterId, TimelineTime,
+    ParameterId, TimelineTime, TimelineTimeRange,
 };
 use glam::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
@@ -1305,6 +1305,34 @@ impl AnimatedProperty {
         Ok(())
     }
 
+    /// Remove keys inside one half-open owner-time range and close the gap.
+    ///
+    /// Keys at or after the exclusive range end move earlier by the exact
+    /// range duration. Stable key identities and interpolation metadata are
+    /// retained, and the complete property validates before publication.
+    pub fn extract_time_range(&mut self, range: TimelineTimeRange) -> Result<()> {
+        let end = range.end()?;
+        if range.duration.is_zero() {
+            return Ok(());
+        }
+
+        let mut candidate = self.clone();
+        for channel in &mut candidate.channels {
+            channel
+                .keyframes
+                .retain(|keyframe| keyframe.time < range.start || keyframe.time >= end);
+            for keyframe in &mut channel.keyframes {
+                if keyframe.time >= end {
+                    keyframe.time = keyframe.time.checked_sub(range.duration)?;
+                }
+            }
+            channel.normalize_keyframes();
+        }
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+
     /// Resolve the exact author time currently owned by a stable keyframe ID.
     pub fn keyframe_time_by_id(&self, keyframe_id: KeyframeId) -> Option<TimelineTime> {
         self.channels
@@ -2185,6 +2213,21 @@ impl PropertyBag {
         Ok(())
     }
 
+    /// Remove one half-open Sequence-time range from every property.
+    ///
+    /// This is the gap-closing counterpart of
+    /// [`Self::shift_keyframes_at_or_after`]. Clip-local property bags must not
+    /// call this method because their coordinate space moves with the Clip.
+    pub fn extract_time_range(&mut self, range: TimelineTimeRange) -> Result<()> {
+        let mut candidate = self.clone();
+        for property in candidate.properties.values_mut() {
+            property.extract_time_range(range)?;
+        }
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+
     /// Fork all property-owner and keyframe identities in this bag.
     pub fn fork_author_identities(&mut self) {
         for property in self.properties.values_mut() {
@@ -2857,6 +2900,41 @@ mod tests {
             .and_then(|value| value.as_f32())
             .expect("evaluate interpolated value");
         assert!((value - 18.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn property_bag_extracts_half_open_range_atomically_across_key_identities() {
+        let mut bag = PropertyBag::default();
+        bag.define(PropertyDescriptor::new(
+            "track.opacity",
+            "Opacity",
+            PropertyValue::Float(1.0),
+        ));
+        let keys = [0_i64, 10, 20, 30]
+            .into_iter()
+            .map(|frame| Keyframe::linear(tt(frame), PropertyValue::Float(frame as f32 / 30.0)))
+            .collect::<Vec<_>>();
+        let first_id = keys[0].id;
+        let removed_id = keys[1].id;
+        let end_id = keys[2].id;
+        let after_id = keys[3].id;
+        for keyframe in keys {
+            bag.apply_mutation(PropertyMutation::SetKeyframe {
+                path: "track.opacity".to_owned(),
+                keyframe,
+            })
+            .expect("seed key");
+        }
+
+        bag.extract_time_range(TimelineTimeRange::new(tt(10), tt(10)).expect("extract range"))
+            .expect("extract");
+
+        let property = bag.property("track.opacity").expect("property");
+        assert_eq!(property.keyframe_time_by_id(first_id), Some(tt(0)));
+        assert!(property.keyframe_time_by_id(removed_id).is_none());
+        assert_eq!(property.keyframe_time_by_id(end_id), Some(tt(10)));
+        assert_eq!(property.keyframe_time_by_id(after_id), Some(tt(20)));
+        assert_eq!(property.keyframe_times(), [tt(0), tt(10), tt(20)]);
     }
 
     #[test]

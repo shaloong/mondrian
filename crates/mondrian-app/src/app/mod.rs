@@ -137,6 +137,8 @@ pub mod thumbnail_service;
 mod timeline_commands;
 mod timeline_editing;
 mod timeline_insert;
+mod timeline_range_edit;
+mod timeline_targeting;
 pub mod ui_actions;
 mod video_transitions;
 pub mod viewer_gpu_output_health;
@@ -313,6 +315,8 @@ pub struct AppState {
     pub dragging_asset: Option<DraggingAsset>,
     /// Unified selection state — single source of truth for all panels.
     pub selection: SelectionState,
+    /// UI-independent per-Sequence Track Targeting and Sync-Lock policy.
+    timeline_targeting: timeline_targeting::TimelineTargetingState,
 
     // 渲染导出队列
     pub(crate) render_queue: Arc<RenderQueue>,
@@ -371,6 +375,7 @@ impl AppState {
             last_timeline_seek_source: TimelineSeekSource::Settled,
             dragging_asset: None,
             selection: SelectionState::default(),
+            timeline_targeting: timeline_targeting::TimelineTargetingState::default(),
             render_queue: RenderQueue::new(),
             export_queue_observed_revision: 0,
             export_draft: TimelineExportDraft::default(),

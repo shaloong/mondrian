@@ -388,6 +388,77 @@ Revision exactly once and is one Undo step. The old local overlap option is
 named `ClipOverlapMode::PushForward`; it is deliberately not presented as
 Insert Edit.
 
+### Lift and Extract Range Edit
+
+Lift and Extract share one UI-independent `RangeEditRequest`. Its Interface
+contains a positive half-open Sequence-time range, an explicit
+`content_tracks` set, an explicit `ripple_tracks` set, and independent
+automation, Transition, and navigation policies. It contains no selection,
+panel, or workspace state. Lift removes only content intersecting the range
+and requires an empty ripple set. Extract removes the same content and closes
+the exact duration on every ripple Track; every content Track must therefore
+also be in the ripple set.
+
+Track Targeting and Sync-Lock remain editor-session policy. The App Adapter
+resolves Target-enabled Tracks into `content_tracks`, and resolves the union of
+Target-enabled and Sync-Locked Tracks into the Extract ripple set. A
+Sync-Locked but untargeted Track may move whole placements at or after the
+range end when its range is empty. If any of its Clips intersects the removed
+range, Extract fails with `ProtectedRippleContent` instead of silently cutting
+untargeted content, leaving a hole, or expanding Targeting. Lift ignores
+Sync-Lock because it does not change program time. Missing Tracks, empty
+content scope, locked participants, or contradictory scopes fail before the
+live Sequence changes.
+
+The `range_edit` Module classifies every Clip relative to the same exact
+half-open interval. Content wholly inside is removed; edge intersections trim;
+a spanning placement is split into two survivors. The left survivor retains
+the original Clip and link identities. The right survivor receives fresh
+placement, audio-edit, visual-property, effect, mask, and keyframe identities,
+advances source/Clip/audio local origins by the removed in-side duration, and
+keeps only the original outer fade. Extract then shifts the right survivor and
+all wholly downstream placements by the exact range duration; Lift leaves
+their Sequence positions unchanged. The shared private `clip_fragment` Module
+owns these placement/local-time rules for Insert, Lift, and Extract so the
+three structural operations cannot develop different split semantics.
+
+Link groups use the same conservative coherence rule as Insert: all members
+must receive one temporal transform class. A partial scope, protected
+Sync-Lock member, or unequal before/inside/edge/downstream outcome rejects the
+whole edit. When every member spans the range, corresponding right fragments
+share one fresh group identity. This preserves ordinary linked picture/audio
+and deliberately fails closed for offset J/L-edge cases whose post-edit link
+meaning is not yet explicit.
+
+Transitions wholly before the range remain fixed. Transitions wholly after an
+Extract move by the exact duration only when both endpoints participate in
+ripple; wholly downstream Lift Transitions stay fixed. A Transition whose
+endpoint or interval is cut is either rejected or explicitly removed according
+to request policy. The same rule applies to Sequence-local Audio Transitions;
+final strong-reference validation prevents a removed Clip or Component Edit
+from leaving a dangling relationship.
+
+`PreserveSequenceTime` leaves Sequence-owned automation untouched.
+`FollowEditorialContent` removes keys in the half-open interval and shifts keys
+at or after its end on every rippled Track. The shared
+`sequence_time_edit` Module then applies the same complete-input ownership
+closure used by Insert to Track channels, Routes, Buses, and Program Output.
+Clip/Component/Scope-local curves are not rewritten because their owner-local
+origin changes with the surviving placement. Automation edits preserve stable
+key identities and validate the complete candidate before publication.
+
+The App executes either operation through one Sequence-scoped Author
+Transaction, prunes stale selection only after commit, seeks to the collapsed
+range start, and reports one Undo step. Availability uses a read-only structural
+assessment over Track scopes, locks, protected intersections, link groups, and
+the same Transition disposition function used by execution; it does not clone
+and trial-edit the complete Sequence during each UI model rebuild. Execution
+then performs the full candidate transform and final automation, audio,
+identity, and strong-reference validation before publication. Window
+enablement therefore catches deterministic structural blockers without putting
+an O(complete author snapshot) clone on the interaction path, while direct and
+Headless callers still receive exact execution failures.
+
 ### Video Transitions
 
 A visual Transition is a Sequence-owned, typed two-input author entity. It has

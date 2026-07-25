@@ -6,17 +6,15 @@
 //! globals or inferring participation from Track order.
 
 use crate::{
-    audio::{
-        AudioChannelStrip, AudioProcessorRack, AudioProgram, AudioRouteDestination,
-        AudioRouteSource, ProgramOutputMainSource,
-    },
     clip::Clip,
+    clip_fragment::split_clip_at,
     sequence::Sequence,
+    sequence_time_edit::{edit_sequence_automation, SequenceTimeEdit},
     track::{Track, TrackType},
 };
 use mondrian_core::{
-    AudioTransitionId, ClipId, ClipLinkGroupId, ExactAutomationCurve, TimelineTime,
-    TimelineTimeRange, TrackId, VideoTransitionId,
+    AudioTransitionId, ClipId, ClipLinkGroupId, TimelineTime, TimelineTimeRange, TrackId,
+    VideoTransitionId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -213,7 +211,12 @@ fn apply_insert_edit_candidate(
     }
 
     if request.automation_policy == InsertAutomationPolicy::FollowEditorialContent {
-        shift_sequence_automation(sequence, request)?;
+        edit_sequence_automation(
+            sequence,
+            &request.ripple_tracks,
+            SequenceTimeEdit::Insert { at: request.at, duration: request.duration },
+        )
+        .map_err(author_state)?;
     }
     if request.timeline_state_policy == InsertTimelineStatePolicy::FollowEdit {
         shift_timeline_state(sequence, request.at, request.duration)?;
@@ -494,7 +497,7 @@ fn open_track_gap(
                 opened.push(shifted);
             }
             TemporalClass::Crossing => {
-                let (left, mut right) = split_clip(clip, at)?;
+                let (left, mut right) = split_clip_at(clip, at).map_err(author_state)?;
                 if let Some(group) = right.link_group {
                     right.link_group = Some(*split_groups.entry(group).or_default());
                 }
@@ -508,185 +511,6 @@ fn open_track_gap(
     }
     opened.sort_unstable_by_key(|clip| clip.position);
     track.clips = opened;
-    Ok(())
-}
-
-fn split_clip(mut clip: Clip, at: TimelineTime) -> Result<(Clip, Clip), InsertEditError> {
-    let split_offset = at.checked_sub(clip.position).map_err(author_state)?;
-    let right_duration = clip
-        .end_position()
-        .and_then(|end| end.checked_sub(at).map_err(Into::into))
-        .map_err(author_state)?;
-    let right_clip_time_in = clip.timeline_to_clip_time(at).map_err(author_state)?;
-    let right_source_in = clip.timeline_to_source_time(at).map_err(author_state)?;
-
-    let mut right = clip.clone();
-    right.fork_placement_identities_for_split(split_offset).map_err(author_state)?;
-    right.position = at;
-    right.duration = right_duration;
-    right.clip_time_in = right_clip_time_in;
-    right.source_in = right_source_in;
-    for edit in &mut right.audio_components {
-        edit.fades.fade_in = None;
-    }
-
-    clip.duration = split_offset;
-    clip.source_out = right_source_in;
-    for edit in &mut clip.audio_components {
-        edit.fades.fade_out = None;
-    }
-    Ok((clip, right))
-}
-
-fn shift_sequence_automation(
-    sequence: &mut Sequence,
-    request: &InsertEditRequest,
-) -> Result<(), InsertEditError> {
-    for track in &mut sequence.video_tracks {
-        if request.ripple_tracks.contains(&track.id) {
-            track
-                .opacity
-                .shift_keyframes_at_or_after(request.at, request.duration)
-                .map_err(author_state)?;
-        }
-    }
-
-    let shifted_audio_tracks = sequence
-        .audio_tracks
-        .iter()
-        .filter(|track| request.ripple_tracks.contains(&track.id))
-        .map(|track| track.id)
-        .collect::<BTreeSet<_>>();
-    shift_audio_program(
-        &mut sequence.audio_program,
-        &shifted_audio_tracks,
-        sequence.audio_tracks.len(),
-        request.at,
-        request.duration,
-    )
-}
-
-fn shift_audio_program(
-    program: &mut AudioProgram,
-    shifted_tracks: &BTreeSet<TrackId>,
-    audio_track_count: usize,
-    boundary: TimelineTime,
-    delta: TimelineTime,
-) -> Result<(), InsertEditError> {
-    for track_id in shifted_tracks {
-        if let Some(channel) = program.track_channels.get_mut(track_id) {
-            shift_channel_strip(&mut channel.strip, boundary, delta)?;
-        }
-    }
-
-    let mut shifted_buses = BTreeSet::new();
-    loop {
-        let mut changed = false;
-        for bus in &program.buses {
-            if shifted_buses.contains(&bus.id) {
-                continue;
-            }
-            let sources = program
-                .routes
-                .iter()
-                .filter(|route| route.destination == AudioRouteDestination::Bus(bus.id))
-                .map(|route| route.source)
-                .collect::<Vec<_>>();
-            if !sources.is_empty()
-                && sources
-                    .iter()
-                    .all(|source| source_follows(*source, shifted_tracks, &shifted_buses))
-            {
-                shifted_buses.insert(bus.id);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-
-    for bus in &mut program.buses {
-        if shifted_buses.contains(&bus.id) {
-            shift_channel_strip(&mut bus.strip, boundary, delta)?;
-        }
-    }
-    for route in &mut program.routes {
-        if source_follows(route.source, shifted_tracks, &shifted_buses) {
-            shift_optional_curve(&mut route.gain_automation, boundary, delta)?;
-        }
-    }
-
-    for output in &mut program.outputs {
-        let follows = match output.main_source {
-            ProgramOutputMainSource::RoutedInputs => {
-                let sources = program
-                    .routes
-                    .iter()
-                    .filter(|route| route.destination == AudioRouteDestination::Output(output.id))
-                    .map(|route| route.source)
-                    .collect::<Vec<_>>();
-                !sources.is_empty()
-                    && sources
-                        .iter()
-                        .all(|source| source_follows(*source, shifted_tracks, &shifted_buses))
-            }
-            ProgramOutputMainSource::SemanticProjection { .. } => {
-                audio_track_count > 0 && shifted_tracks.len() == audio_track_count
-            }
-        };
-        if follows {
-            shift_channel_strip(&mut output.strip, boundary, delta)?;
-        }
-    }
-    Ok(())
-}
-
-fn source_follows(
-    source: AudioRouteSource,
-    shifted_tracks: &BTreeSet<TrackId>,
-    shifted_buses: &BTreeSet<mondrian_core::MixBusId>,
-) -> bool {
-    match source {
-        AudioRouteSource::Track { track_id, .. } => shifted_tracks.contains(&track_id),
-        AudioRouteSource::Bus { bus_id, .. } => shifted_buses.contains(&bus_id),
-    }
-}
-
-fn shift_channel_strip(
-    strip: &mut AudioChannelStrip,
-    boundary: TimelineTime,
-    delta: TimelineTime,
-) -> Result<(), InsertEditError> {
-    shift_optional_curve(&mut strip.fader_automation, boundary, delta)?;
-    shift_rack(&mut strip.pre_fader, boundary, delta)?;
-    shift_rack(&mut strip.post_fader, boundary, delta)
-}
-
-fn shift_rack(
-    rack: &mut AudioProcessorRack,
-    boundary: TimelineTime,
-    delta: TimelineTime,
-) -> Result<(), InsertEditError> {
-    for processor in &mut rack.processors {
-        for parameter in processor.parameters.values_mut() {
-            parameter
-                .automation
-                .shift_keyframes_at_or_after(boundary, delta)
-                .map_err(author_state)?;
-        }
-    }
-    Ok(())
-}
-
-fn shift_optional_curve(
-    curve: &mut Option<ExactAutomationCurve>,
-    boundary: TimelineTime,
-    delta: TimelineTime,
-) -> Result<(), InsertEditError> {
-    if let Some(curve) = curve {
-        curve.shift_keyframes_at_or_after(boundary, delta).map_err(author_state)?;
-    }
     Ok(())
 }
 
@@ -743,8 +567,8 @@ mod tests {
     use super::*;
     use crate::Clip;
     use mondrian_core::{
-        AssetId, AudioSourceComponentId, ExactAutomationKeyframe, FramePosition, Keyframe,
-        ParameterId, PropertyValue, Rational,
+        AssetId, AudioSourceComponentId, ExactAutomationCurve, ExactAutomationKeyframe,
+        FramePosition, Keyframe, ParameterId, PropertyValue, Rational,
     };
 
     fn tt(frame: i64) -> TimelineTime {

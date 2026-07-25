@@ -11,17 +11,18 @@ use crate::app::ui_actions::{
     TimelineCreateCrossDissolvePayload, TimelineInsertAssetPayload, TimelineMoveClipPayload,
     TimelineMoveTrackPayload, TimelineSelectClipPayload, TimelineSelectVideoTransitionPayload,
     TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
-    TimelineSetTrackControlPayload, TimelineSetVideoTransitionRangePayload,
-    TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
-    APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_PROJECT_SETTINGS,
-    APP_SHELL_SAVE_PROJECT_AS_DIALOG, APP_SHELL_SEQUENCE_SETTINGS, SEQUENCE_DELETE,
-    SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT,
-    SEQUENCE_SWITCH_ACTIVE, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
-    TIMELINE_CREATE_BASIC_TITLE, TIMELINE_CREATE_CROSS_DISSOLVE, TIMELINE_INSERT_ASSET,
+    TimelineSetTrackControlPayload, TimelineSetTrackTargetingPayload,
+    TimelineSetVideoTransitionRangePayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+    TimelineTrimSelectedClipsToPlayheadPayload, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
+    APP_SHELL_PROJECT_SETTINGS, APP_SHELL_SAVE_PROJECT_AS_DIALOG, APP_SHELL_SEQUENCE_SETTINGS,
+    SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE, SEQUENCE_RETURN_TO_PARENT,
+    SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE, TIMELINE_ADD_TRACK,
+    TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_CREATE_BASIC_TITLE, TIMELINE_CREATE_CROSS_DISSOLVE,
+    TIMELINE_EXTRACT_RANGE, TIMELINE_INSERT_ASSET, TIMELINE_LIFT_RANGE,
     TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
     TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
     TIMELINE_SELECT_VIDEO_TRANSITION, TIMELINE_SET_IN_OUT_POINT,
-    TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
+    TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL, TIMELINE_SET_TRACK_TARGETING,
     TIMELINE_SET_VIDEO_TRANSITION_RANGE, TIMELINE_TRIM_CLIPS,
     TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, TIMELINE_UNLINK_SELECTED_CLIPS,
 };
@@ -87,6 +88,16 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
             if namespace == TIMELINE_NAMESPACE && name == TIMELINE_CLEAR_IN_OUT_POINTS =>
         {
             sequence_has_in_out_points(state)
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == TIMELINE_NAMESPACE && name == TIMELINE_LIFT_RANGE =>
+        {
+            state.can_apply_timeline_range_edit(mondrian_timeline::RangeEditKind::Lift)
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == TIMELINE_NAMESPACE && name == TIMELINE_EXTRACT_RANGE =>
+        {
+            state.can_apply_timeline_range_edit(mondrian_timeline::RangeEditKind::Extract)
         }
         Action::Custom { namespace, name, payload }
             if namespace == TIMELINE_NAMESPACE && name == TIMELINE_SELECT_CLIP =>
@@ -183,6 +194,12 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
             parse_payload::<TimelineSetTrackControlPayload>(payload).is_some_and(|payload| {
                 sequence_has_track(state, payload.track_id, payload.is_video_track)
             })
+        }
+        Action::Custom { namespace, name, payload }
+            if namespace == TIMELINE_NAMESPACE && name == TIMELINE_SET_TRACK_TARGETING =>
+        {
+            parse_payload::<TimelineSetTrackTargetingPayload>(payload)
+                .is_some_and(|payload| sequence_has_any_track(state, payload.track_id))
         }
         Action::Custom { namespace, name, .. }
             if namespace == TIMELINE_NAMESPACE && name == TIMELINE_ADD_TRACK =>
@@ -408,6 +425,16 @@ fn sequence_has_track(state: &AppState, track_id: TrackId, is_video_track: bool)
         .is_some()
 }
 
+fn sequence_has_any_track(state: &AppState, track_id: TrackId) -> bool {
+    state.active_sequence().is_some_and(|sequence| {
+        sequence
+            .video_tracks
+            .iter()
+            .chain(&sequence.audio_tracks)
+            .any(|track| track.id == track_id)
+    })
+}
+
 fn timeline_move_clip_target_is_available(
     state: &AppState,
     payload: TimelineMoveClipPayload,
@@ -587,16 +614,18 @@ mod tests {
     }
     use crate::app::ui_actions::{
         app_shell_project_settings_action, timeline_add_track_action,
-        timeline_clear_in_out_points_action, timeline_move_clip_action, timeline_move_track_action,
+        timeline_clear_in_out_points_action, timeline_extract_range_action,
+        timeline_lift_range_action, timeline_move_clip_action, timeline_move_track_action,
         timeline_roll_selected_cut_to_playhead_action, timeline_seek_action,
         timeline_select_clip_action, timeline_set_in_out_point_action,
         timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
-        timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
-        TimelineAddTrackKind, TimelineAddTrackPayload, TimelineInOutPointPayloadKind,
-        TimelineMoveClipPayload, TimelineMoveTrackPayload, TimelineSelectClipPayload,
-        TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
-        TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
-        TimelineTrimPayloadEdge,
+        timeline_set_track_targeting_action, timeline_trim_clips_action,
+        timeline_trim_selected_clips_to_playhead_action, TimelineAddTrackKind,
+        TimelineAddTrackPayload, TimelineInOutPointPayloadKind, TimelineMoveClipPayload,
+        TimelineMoveTrackPayload, TimelineSelectClipPayload, TimelineSetInOutPointPayload,
+        TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
+        TimelineSetTrackTargetingPayload, TimelineTrackControlPayloadKind,
+        TimelineTrackTargetingControl, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
     };
     use crate::app::SelectedClipRef;
     use mondrian_core::types::{AssetId, ClipId, TrackId};
@@ -726,6 +755,11 @@ mod tests {
                 control: TimelineTrackControlPayloadKind::Lock,
                 enabled: true,
             }),
+            timeline_set_track_targeting_action(TimelineSetTrackTargetingPayload {
+                track_id,
+                control: TimelineTrackTargetingControl::Target,
+                enabled: false,
+            }),
             timeline_add_track_action(TimelineAddTrackPayload {
                 kind: TimelineAddTrackKind::Video,
             }),
@@ -768,6 +802,11 @@ mod tests {
                 control: TimelineTrackControlPayloadKind::Visibility,
                 enabled: false,
             }),
+            timeline_set_track_targeting_action(TimelineSetTrackTargetingPayload {
+                track_id: stale_track,
+                control: TimelineTrackTargetingControl::SyncLock,
+                enabled: false,
+            }),
             timeline_move_track_action(TimelineMoveTrackPayload {
                 track_id: stale_track,
                 is_video_track: true,
@@ -776,6 +815,46 @@ mod tests {
         ] {
             assert!(!app_state_action_enabled(&action, &state), "{action:?}");
         }
+    }
+
+    #[test]
+    fn range_edit_actions_require_an_admissible_in_out_scope() {
+        let mut state = state_with_selected_clip();
+        let time_base = state.active_sequence().expect("sequence").time_base();
+        {
+            let sequence = state.active_sequence_mut_uncommitted().expect("sequence");
+            sequence.in_point = Some(tt(12, time_base));
+            sequence.out_point = Some(tt(18, time_base));
+        }
+
+        assert!(app_state_action_enabled(
+            &timeline_lift_range_action(),
+            &state
+        ));
+        assert!(app_state_action_enabled(
+            &timeline_extract_range_action(),
+            &state
+        ));
+
+        let track_ids = state
+            .active_sequence()
+            .expect("sequence")
+            .video_tracks
+            .iter()
+            .chain(&state.active_sequence().expect("sequence").audio_tracks)
+            .map(|track| track.id)
+            .collect::<Vec<_>>();
+        for track_id in track_ids {
+            state.set_timeline_track_targeted(track_id, false).expect("untarget");
+        }
+        assert!(!app_state_action_enabled(
+            &timeline_lift_range_action(),
+            &state
+        ));
+        assert!(!app_state_action_enabled(
+            &timeline_extract_range_action(),
+            &state
+        ));
     }
 
     #[test]

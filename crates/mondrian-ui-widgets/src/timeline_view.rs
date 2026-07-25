@@ -208,6 +208,8 @@ pub struct TimelineCutRef {
 /// Track header control rendered by [`TimelineView`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimelineTrackControl {
+    Target,
+    SyncLock,
     Visibility,
     Mute,
     Lock,
@@ -331,6 +333,10 @@ pub enum TimelineEditCommand {
     LinkSelection,
     /// Remove the current Clip selection from its link groups.
     UnlinkSelection,
+    /// Remove content inside the active In/Out range without closing time.
+    LiftInOutRange,
+    /// Remove the active In/Out range and close targeted program time.
+    ExtractInOutRange,
     /// Open one nested sequence clip.
     OpenNestedSequence(TimelineClipRef),
     /// Mark the current playhead frame as the sequence in point.
@@ -663,6 +669,8 @@ pub struct TimelineTrack {
     pub clips: Vec<TimelineClip>,
     pub transitions: Vec<TimelineTransition>,
     pub selected: bool,
+    pub targeted: bool,
+    pub sync_locked: bool,
     pub visible: bool,
     pub muted: bool,
     pub locked: bool,
@@ -694,6 +702,8 @@ impl TimelineTrack {
             clips,
             transitions: Vec::new(),
             selected: false,
+            targeted: true,
+            sync_locked: true,
             visible: true,
             muted: false,
             locked: false,
@@ -710,6 +720,18 @@ impl TimelineTrack {
     /// Mark this track as selected.
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    /// Mark this Track as a direct editorial target.
+    pub fn targeted(mut self, targeted: bool) -> Self {
+        self.targeted = targeted;
+        self
+    }
+
+    /// Mark this Track as following ripple edits.
+    pub fn sync_locked(mut self, sync_locked: bool) -> Self {
+        self.sync_locked = sync_locked;
         self
     }
 
@@ -2877,6 +2899,12 @@ impl TimelineView {
             MenuItem::separator(),
             self.edit_menu_item("链接剪辑", TimelineEditCommand::LinkSelection),
             self.edit_menu_item("取消链接", TimelineEditCommand::UnlinkSelection),
+            MenuItem::separator(),
+            self.edit_menu_item("Lift 入点/出点范围", TimelineEditCommand::LiftInOutRange),
+            self.edit_menu_item(
+                "Extract 入点/出点范围",
+                TimelineEditCommand::ExtractInOutRange,
+            ),
         ];
         if let Some(clip_ref) = self
             .selected_clip
@@ -2962,6 +2990,12 @@ impl TimelineView {
             MenuItem::separator(),
             self.edit_menu_item("链接所选", TimelineEditCommand::LinkSelection),
             self.edit_menu_item("取消链接所选", TimelineEditCommand::UnlinkSelection),
+            MenuItem::separator(),
+            self.edit_menu_item("Lift 入点/出点范围", TimelineEditCommand::LiftInOutRange),
+            self.edit_menu_item(
+                "Extract 入点/出点范围",
+                TimelineEditCommand::ExtractInOutRange,
+            ),
             MenuItem::separator(),
             self.edit_menu_item("标记入点", TimelineEditCommand::MarkInAtPlayhead),
             self.edit_menu_item("标记出点", TimelineEditCommand::MarkOutAtPlayhead),
@@ -3842,6 +3876,8 @@ impl TimelineView {
         };
         let hovered = self.hovered_track_control == Some((track_ref, control));
         let toggled = match control {
+            TimelineTrackControl::Target => track.targeted,
+            TimelineTrackControl::SyncLock => track.sync_locked,
             TimelineTrackControl::Visibility => !track.visible,
             TimelineTrackControl::Mute => track.muted,
             TimelineTrackControl::Lock => track.locked,
@@ -3870,7 +3906,28 @@ impl TimelineView {
         if !track.visible && control != TimelineTrackControl::Visibility {
             icon.a *= 0.52;
         }
+        if matches!(
+            control,
+            TimelineTrackControl::Target | TimelineTrackControl::SyncLock
+        ) {
+            let label = if control == TimelineTrackControl::Target {
+                "T"
+            } else {
+                "S"
+            };
+            let font_size = ctx.theme.typography.metadata.font_size;
+            let text_width = measure_single_line(label, font_size).0;
+            let text_y = centered_text_origin_y(rect, ctx.theme.typography.metadata.line_height);
+            ctx.encoder.draw_text(
+                label,
+                font_size,
+                snap_point(Point::new(rect.x + (rect.width - text_width) * 0.5, text_y)),
+                icon,
+            );
+            return;
+        }
         let slot = match control {
+            TimelineTrackControl::Target | TimelineTrackControl::SyncLock => return,
             TimelineTrackControl::Visibility if track.visible => {
                 TimelineTrackControlIconSlot::VisibilityOn
             }
@@ -3892,6 +3949,7 @@ impl TimelineView {
             return;
         }
         match control {
+            TimelineTrackControl::Target | TimelineTrackControl::SyncLock => {}
             TimelineTrackControl::Visibility => {
                 self.paint_visibility_icon(ctx, rect, icon, !track.visible);
             }
@@ -8197,6 +8255,9 @@ mod tests {
                 TimelineEditCommand::LinkSelection | TimelineEditCommand::UnlinkSelection => {
                     Action::NoOp
                 }
+                TimelineEditCommand::LiftInOutRange | TimelineEditCommand::ExtractInOutRange => {
+                    Action::NoOp
+                }
                 TimelineEditCommand::OpenNestedSequence(_) => Action::NoOp,
                 TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
                 TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
@@ -8322,6 +8383,9 @@ mod tests {
             TimelineEditCommand::LinkSelection | TimelineEditCommand::UnlinkSelection => {
                 Action::NoOp
             }
+            TimelineEditCommand::LiftInOutRange | TimelineEditCommand::ExtractInOutRange => {
+                Action::NoOp
+            }
             TimelineEditCommand::OpenNestedSequence(_) => Action::NoOp,
             TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
             TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
@@ -8416,6 +8480,9 @@ mod tests {
             TimelineEditCommand::LinkSelection | TimelineEditCommand::UnlinkSelection => {
                 Action::NoOp
             }
+            TimelineEditCommand::LiftInOutRange | TimelineEditCommand::ExtractInOutRange => {
+                Action::NoOp
+            }
             TimelineEditCommand::OpenNestedSequence(_) => Action::NoOp,
             TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
             TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
@@ -8435,6 +8502,8 @@ mod tests {
             "启用所选",
             "禁用所选",
             "清除入点/出点",
+            "Lift 入点/出点范围",
+            "Extract 入点/出点范围",
         ] {
             let item = items.iter().find(|item| item.label == label).expect(label);
             assert!(!item.enabled, "{label} should require a local target");
