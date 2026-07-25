@@ -116,6 +116,7 @@ pub(super) fn execute_color_media_stage(
     )?;
     let corpus_revision = manifest.corpus_revision.clone();
     let authoring = authoring::setup_stage(
+        contract,
         workflow,
         &hlg_fixture,
         &alpha_fixture,
@@ -140,7 +141,7 @@ pub(super) fn execute_color_media_stage(
     decode_context.clear();
 
     Ok(GoldenColorMediaReport {
-        schema_version: 1,
+        schema_version: 2,
         profile: "windows-alpha-color-media-roundtrip",
         contract_id: contract.id.clone(),
         corpus_revision,

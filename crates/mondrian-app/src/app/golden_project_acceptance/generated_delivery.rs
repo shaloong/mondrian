@@ -444,7 +444,7 @@ pub(super) fn execute_delivery_stage(
     let manifest: CorpusManifest = load_json(&root.join("tests/validation/corpus-manifest.json"))?;
     let fixture = resolve_fixture(root, &fixture_root(root), contract, &manifest, "pcm-audio")?;
 
-    let stage = workflow.create_sequence_stage("generated-delivery")?;
+    let stage = workflow.bind_slice_primary_sequence(contract, DELIVERY_SLICE_ID)?;
     let state = workflow.app_mut();
     let mut audio_asset = state
         .asset_library()
@@ -658,7 +658,7 @@ pub(super) fn execute_delivery_stage(
     workflow.verify_binding()?;
 
     Ok(GoldenDeliveryReport {
-        schema_version: 4,
+        schema_version: 5,
         profile: DELIVERY_SLICE_ID,
         contract_id: contract.id.clone(),
         corpus_revision: manifest.corpus_revision,
@@ -723,7 +723,7 @@ fn golden_project_generated_delivery_roundtrip_gate() -> anyhow::Result<()> {
         }
         Err(error) => {
             let failure = serde_json::json!({
-                "schema_version": 4,
+                "schema_version": 5,
                 "profile": DELIVERY_SLICE_ID,
                 "status": "failed",
                 "complete_golden_project": false,

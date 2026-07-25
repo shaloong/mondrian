@@ -11,7 +11,7 @@ control exists.
   purposes. Fixed files pin bytes globally; generated files pin the recipe and
   are byte-pinned by each run.
 - `tests/validation/golden-project.json` defines the five-minute editing and
-  export workflow. Contract identity `windows-alpha-golden-v6` uses closed
+  export workflow. Contract identity `windows-alpha-golden-v7` uses closed
   schema v4 and fixes exact Hero Sequence raster/timing/color/audio
   values, fixture-role purposes, stable built-in delivery preset identities,
   resolved profile/depth/chroma/range/Alpha expectations, and independently
@@ -75,7 +75,7 @@ cannot satisfy a color golden even when it carries valid CICP tags.
 
 An execution slice is intentionally narrower than the complete Golden Project.
 It passes only if its exact required fixture roles, operations, and content have
-typed postcondition evidence. Golden v5 rejects unknown fields; requirement IDs
+typed postcondition evidence. Golden v7 rejects unknown fields; requirement IDs
 select evidence obligations but cannot substitute for observed author, media,
 delivery, or persistence facts.
 Every slice report explicitly records `complete_golden_project: false`. A
@@ -111,17 +111,19 @@ Inspect the current top-level Golden coverage ledger without generating media:
 
 ```powershell
 cargo test -p mondrian-app --lib `
-  golden_acceptance_plan_is_structurally_complete_without_claiming_execution -j1 -- `
+  golden_acceptance_plan_rejects_obligations_isolated_from_the_hero_sequence -j1 -- `
   --nocapture
 ```
 
-The v5 ledger is structurally complete: every required fixture, operation,
-content item, and export contract is assigned to one of seven executable
-slices. HLG Main10 and sRGB Alpha are bound to deterministic project-owned
-recipes with run-local artifact attestations. This status proves only that the
-plan has no omissions. It does not run a product Interface and therefore keeps
-`complete_golden_project: false`; only the coordinated single-Project process
-described below can produce complete execution evidence.
+The v7 global ledger is structurally complete: every required fixture,
+operation, content item, and export contract is assigned to one of seven
+executable slices. The Hero ledger is intentionally blocked while any of those
+obligations remains on a diagnostic Sequence. Foundation Audio and Visual
+Authoring are now assigned to Hero; HLG Main10 and sRGB Alpha remain bound to
+deterministic project-owned recipes with run-local artifact attestations. The
+plan does not run a product Interface and always keeps
+`complete_golden_project: false`; only the coordinated Hero process described
+below can produce complete execution evidence.
 
 Run the AAC editorial and Transport slice after generating the canonical
 playback audio:
@@ -144,17 +146,18 @@ Verify the single-Project Headless workflow boundary:
 
 ```powershell
 cargo test -p mondrian-app --lib `
-  golden_product_workflow_preserves_one_project_across_sequences_and_reopen `
+  golden_product_workflow_binds_hero_and_diagnostic_sequences_explicitly `
   -j1
 ```
 
-This ordinary-CI test creates one production project, crosses a fresh open,
-creates a second stage Sequence through the product action, and performs
-durable save/close/reopen. Every checkpoint records typed Project, Session, and
-active Sequence identities plus Generation and Revision. Project/path and both
-Sequences must survive; only Session identity may change. It is infrastructure
-evidence, not a Golden operation and therefore does not alter the coverage
-ledger.
+This ordinary-CI test creates one production Project, crosses a fresh open,
+binds one Hero slice without creating a Sequence, creates one diagnostic
+Sequence through the product authoring Interface, then returns to Hero through
+the product switching action and performs durable save/close/reopen. The
+private binding locks Hero ID, complete settings, and Project Color Environment;
+Project/path and both Sequences survive while only Session identity changes. It
+is infrastructure evidence, not a Golden operation and therefore does not
+alter the coverage ledger.
 
 After the canonical PCM fixture is available, verify that the first two real
 stages compose without report union:
@@ -162,17 +165,18 @@ stages compose without report union:
 ```powershell
 $env:MONDRIAN_GOLDEN_FIXTURE_ROOT='target/validation/golden-fixtures'
 cargo test -p mondrian-app --lib `
-  golden_foundation_and_visual_stages_share_one_project `
+  golden_foundation_and_visual_stages_share_one_hero_sequence `
   -j1 -- --ignored --nocapture --test-threads=1
 ```
 
-The gate runs Foundation Audio in the initial Sequence, creates the Visual
-Authoring diagnostic Sequence through the production action, and crosses the
-visual durable reopen. It requires one unchanged Project ID/path, exactly two
-Sequences, the original PCM Clip, and the second Sequence's Transition, Basic
-Title, Primary Color, and LUT stack. It remains partial execution evidence and
-cannot report `complete_golden_project: true`; common Project identity does not
-prove that the two feature sets coexist on one program Sequence.
+The gate runs Foundation Audio and Visual Authoring on the same initial
+7,500-frame Hero Sequence and crosses both durable reopens. It requires one
+unchanged Project ID/path and exactly one Sequence. Before and after Visual
+authoring it compares the exact typed PCM Asset/Track/Clip/Edit identities plus
+the serialized audio Track and Audio Program projection; it then verifies the
+stable Transition, Basic Title, Primary Color, and LUT identities on that same
+Sequence. It remains partial execution evidence and cannot report
+`complete_golden_project: true` while other obligations remain isolated.
 
 With production FFmpeg encoders available, run the complete Golden Project
 gate:
@@ -184,11 +188,12 @@ pwsh -File scripts/validation/invoke-complete-golden-project-gate.ps1
 The script validates the contract and fixtures, builds the feature-gated
 `mondrian-golden` executable once, and requests three runs. Before executing
 heavy stages, the Rust planner requires every fixture, operation, content item,
-and export to be assigned to the Hero Sequence role. The current isolated
-Foundation Audio, Visual Authoring, AAC Editorial/Transport, Proxy/Relink,
-Generated Delivery, Recovery/Nesting, and Color Media Roundtrip implementations
-remain useful focused gates, but the complete command intentionally fails
-closed until they converge on one five-minute primary Sequence.
+and export to be assigned to the Hero Sequence role. Foundation Audio and
+Visual Authoring already share the five-minute primary Sequence. The current
+isolated AAC Editorial/Transport, Proxy/Relink, Generated Delivery,
+Recovery/Nesting, and Color Media Roundtrip implementations remain useful
+focused gates, but the complete command intentionally fails closed until they
+also converge.
 
 Once the Hero ledger is complete, the Rust coordinator accepts only the exact
 declared slice-report set, requires every slice to retain
@@ -480,12 +485,13 @@ plan on the qualified 16 GiB Windows reference machine and was classified
 `passed-baseline`. Its generated artifacts and evidence bundle remain
 intentionally disposable under `target`; the repository commits the recipes,
 contracts, and this reproducible result record rather than a multi-gigabyte
-machine-specific bundle. The Golden v5 contract resolves PCM, AAC, Rec.709
+machine-specific bundle. The Golden v7 contract resolves PCM, AAC, Rec.709
 H.264, HLG Main10, and sRGB Alpha fixture identities and assigns all five to
 executable slices.
-`foundation-audio-authoring-v1`, `editorial-transport-v1`, and
-`proxy-relink-v1` are real Headless product-workflow gates rather than
-declaration-only checks. `color-media-roundtrip-v1` adds real file-backed
+`foundation-audio-authoring-v1` and `visual-authoring-roundtrip-v1` now share
+one Hero Sequence; `editorial-transport-v1` and `proxy-relink-v1` remain real
+focused Headless product-workflow gates rather than declaration-only checks.
+`color-media-roundtrip-v1` adds real file-backed
 color/Alpha execution, while explicitly retaining the independent absolute
 HLG/PQ/Log gap. The H.264 editorial fixture is not eligible to close
 primary-color or LUT coverage. Stress coverage

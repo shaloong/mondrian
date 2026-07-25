@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "id": "windows-alpha-golden-v6",
+  "id": "windows-alpha-golden-v7",
   "kind": "golden",
   "hero_sequence": {
     "role": "hero",
@@ -167,7 +167,7 @@
     },
     {
       "id": "visual-authoring-roundtrip-v1",
-      "sequence_role": "isolated-visual-authoring",
+      "sequence_role": "hero",
       "required_fixture_roles": [],
       "required_operations": [
         "undo-redo",

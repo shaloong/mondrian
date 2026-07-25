@@ -181,49 +181,30 @@ fn execute_foundation_and_visual(
     visual_authoring::GoldenVisualReport,
 )> {
     let foundation = foundation_audio::execute_foundation_stage(root, contract, workflow)?;
-    let foundation_sequence_id =
-        workflow.app().active_sequence().context("foundation Sequence is absent")?.id;
-    ensure!(
-        workflow.app().active_sequence().is_some_and(|sequence| sequence
-            .audio_tracks
-            .iter()
-            .any(|track| !track.clips.is_empty())),
-        "foundation stage did not retain its authored PCM Clip"
-    );
+    let foundation_sequence_id = foundation.primary_sequence_id();
+    let foundation_audio_before_visual = foundation.capture_audio_anchor(workflow.app())?;
 
     let visual = visual_authoring::execute_visual_stage(contract, workflow)?;
+    let visual_sequence_id = visual.primary_sequence_id();
     workflow.verify_binding()?;
     ensure!(
-        workflow.app().sequences().len() == 2,
-        "foundation and visual stages must occupy exactly two Sequences in one Project"
+        foundation_sequence_id == visual_sequence_id
+            && foundation_sequence_id == workflow.hero_sequence_id(),
+        "foundation and visual stages did not use the one Hero Sequence"
     );
-    let foundation_sequence = workflow
-        .app()
-        .sequences()
-        .iter()
-        .find(|sequence| sequence.id == foundation_sequence_id)
-        .context("visual stage removed the foundation Sequence")?;
     ensure!(
-        foundation_sequence.audio_tracks.iter().any(|track| !track.clips.is_empty()),
-        "visual save/reopen discarded foundation audio authoring"
+        workflow.app().sequences().len() == 1,
+        "foundation and visual stages created an undeclared auxiliary Sequence"
     );
-    let visual_sequence = workflow
-        .app()
-        .active_sequence()
-        .context("visual Sequence is absent after durable reopen")?;
+    let foundation_audio_after_visual = foundation.capture_audio_anchor(workflow.app())?;
     ensure!(
-        visual_sequence.id != foundation_sequence_id
-            && visual_sequence.video_transitions.len() == 1
-            && visual_sequence
-                .video_tracks
-                .iter()
-                .flat_map(|track| &track.clips)
-                .any(|clip| clip.is_basic_title()),
-        "visual stage did not retain its distinct Transition and Basic Title Sequence"
+        foundation_audio_before_visual == foundation_audio_after_visual,
+        "visual authoring changed the Foundation audio Track, Clip, Component Edit, or Audio Program"
     );
+    visual.verify_retained_authoring(workflow.app())?;
     Ok((
         foundation_sequence_id,
-        visual_sequence.id,
+        visual_sequence_id,
         foundation,
         visual,
     ))
@@ -286,7 +267,7 @@ fn resolve_hero_sequence_id(
 
 #[test]
 #[ignore = "composed Golden stages require the canonical PCM fixture and Windows Basic Title font"]
-fn golden_foundation_and_visual_stages_share_one_project() -> anyhow::Result<()> {
+fn golden_foundation_and_visual_stages_share_one_hero_sequence() -> anyhow::Result<()> {
     let root = repository_root();
     let (contract, mut run) =
         ComposedRun::create(&root, "Windows Alpha Golden Foundation + Visual", false)?;

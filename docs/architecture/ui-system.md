@@ -274,7 +274,7 @@ values observed under a distinct fresh Session after load. Action admission or
 a human-readable status hint alone cannot satisfy a Golden operation.
 
 Golden validation has one UI-independent planning Module. It compiles the
-closed schema-v4 / `windows-alpha-golden-v6` contract into two deterministic
+closed schema-v4 / `windows-alpha-golden-v7` contract into two deterministic
 ledgers of required fixture roles, operations, content, and exports. The global
 ledger finds work absent from every slice; the Hero ledger independently finds
 work that exists only in isolated diagnostic Sequences. A slice declares one
@@ -295,29 +295,30 @@ semantic completion from test names, process exit, or a union of isolated
 Sequences.
 
 `GoldenProductWorkflowDriver` is the Headless product composition owner for
-that coordinator. It creates one real `.mdp`, captures its typed
-`ProjectId` and path, retains one production `AppState`, and rejects identity
-drift before and after open, stage creation, and durable reopen. Stages may use
-separate Sequences, created through the same product action and Project-level
-Author Transaction, for focused diagnostic evidence. Such a stage contributes
-nothing to Hero completion until its contract role is `hero` and its runtime
-primary identity is the same Hero `SequenceId`.
+that coordinator. It creates one real `.mdp`, captures its typed `ProjectId`
+and path, and retains one production `AppState`. Its private Hero binding locks
+the initial `SequenceId`, complete `SequenceSettings`, and exact Project Color
+Environment. The slice-binding Interface reuses that identity for a `hero`
+slice, switching through the ordinary product action when necessary; a focused
+diagnostic role instead creates a Sequence through one Project Author
+Transaction. A stage cannot construct binding evidence or infer primary
+identity from whichever Sequence happens to be active.
 Sequence-scoped evidence requires one Generation plus one stable active
 Sequence Revision advance; Project-scoped evidence requires one Generation but
 allows active Sequence change. Durable reopen must replace only the
 process-local Session, preserving Project, path, active Sequence, and saved
 revision. Foundation Audio, Editorial/Transport, Proxy/Relink, Generated
 Delivery, Visual Authoring, Recovery/Nesting, and Color Media Roundtrip are
-reusable stages over this driver. The current implementations run ordinary
-product Actions and services in eight stage-owned diagnostic Sequences: PCM
-authoring; AAC editing/transport; proxy/offline/relink;
-H.264 High and HEVC Main10 delivery/reimport; Transition/Basic Title/curve/
-Primary/LUT authoring; parent plus child nested-Sequence autosave recovery; and
-file-backed HLG Main10 plus sRGB Alpha Preview/Export roundtrip. The number of
-execution slices is not a Sequence-count invariant: Recovery/Nesting
-intentionally owns two. This proves each slice locally and their common Project
-lifecycle, but it is blocked from claiming the five-minute workflow until the
-non-foundation stages operate on the Hero Sequence.
+reusable stages over this driver. Foundation Audio and Visual Authoring now run
+on one Hero Sequence: the composed gate compares the complete typed Foundation
+audio Track and Audio Program projection before and after Visual authoring, then
+requires the stable Title, Transition, Primary Color, and LUT identities on the
+same Sequence. AAC editing/transport, proxy/offline/relink, H.264/HEVC delivery,
+the Recovery/Nesting parent plus child, and file-backed HLG/Alpha roundtrip still
+use six focused diagnostic Sequences. The number of execution slices is not a
+Sequence-count invariant because Recovery/Nesting intentionally owns two. This
+proves the first real cross-domain Hero composition while complete acceptance
+remains blocked until every other obligation joins it.
 
 Heavy media and GPU execution runs in the dedicated `mondrian-golden` process
 entrypoint, never on a short-lived libtest worker. A terminal top-level report
@@ -341,13 +342,13 @@ through the product recovery Action, and compares parent/child author hashes
 and deterministic execution evidence. The recovered Session must remain dirty
 and the recovery archive authoritative until a covering manual save atomically
 retires it. A final composed reopen must preserve the fixed Project binding,
-the seven Sequences present at the Recovery boundary, earlier stage content,
+the six Sequences present at the Recovery boundary, earlier stage content,
 relinked Asset intent, and both typed reimport profiles. The later Color Media
-stage extends that invariant to eight Sequences and retains its file-backed
-Track/Clip identities. The dedicated supervisor has completed three
-consecutive local runs with distinct run and Project identities; qualified
-release-machine capture and independent HDR/Log numeric references remain
-separate acceptance obligations.
+stage extends that invariant to seven Sequences and retains its file-backed
+Track/Clip identities. Earlier eight-Sequence supervised runs remain diagnostic
+history only; new consecutive acceptance runs cannot begin until all primary
+stages share the Hero identity. Qualified release-machine capture and
+independent HDR/Log numeric references remain separate acceptance obligations.
 
 ## Playback Tick Ownership
 

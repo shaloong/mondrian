@@ -7,7 +7,9 @@ use super::harness::{
 };
 #[cfg(test)]
 use super::harness::{new_run_directory, rooted_env_path, write_report};
-use super::workflow::{GoldenProductWorkflowDriver, GoldenProjectOpenEvidence};
+use super::workflow::{
+    GoldenProductWorkflowDriver, GoldenProjectOpenEvidence, GoldenSequenceStageEvidence,
+};
 #[cfg(test)]
 use super::{load_golden_contract, repository_root};
 use super::{load_json, parse_rational, sequence_settings_from_contract, GoldenProjectContract};
@@ -19,13 +21,16 @@ use crate::app::ui_actions::{
 use crate::app::AppState;
 use anyhow::{bail, ensure, Context};
 use mondrian_assets::AssetKind;
-use mondrian_core::{FramePosition, TimelineTime};
+use mondrian_core::{
+    AssetId, AudioComponentEditId, ClipId, FramePosition, SequenceId, TimelineTime, TrackId,
+};
 use mondrian_editor_state::Action;
 use mondrian_media::info::ChannelLayout;
 use mondrian_timeline::audio::{AudioComponentEdit, AudioFade, AudioFadeCurve};
 use mondrian_timeline::clip::Clip;
 use mondrian_timeline::sequence::SequenceSettings;
 use serde::Serialize;
+use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -37,7 +42,7 @@ const OUTPUT_ENV: &str = "MONDRIAN_GOLDEN_FOUNDATION_OUTPUT";
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct AudioEditObservation {
-    edit_id: String,
+    edit_id: AudioComponentEditId,
     enabled: bool,
     volume_db: f64,
     pan: f64,
@@ -93,9 +98,11 @@ struct ContentEvidence {
 #[derive(Debug, Clone, Serialize)]
 struct GoldenSetupEvidence {
     project_path: PathBuf,
-    asset_id: String,
-    clip_id: String,
-    audio_track_id: String,
+    stage: GoldenSequenceStageEvidence,
+    asset_id: AssetId,
+    clip_id: ClipId,
+    audio_track_id: TrackId,
+    edit_id: AudioComponentEditId,
     duration_frames: i64,
     imported_audio: ImportedAudioObservation,
 }
@@ -121,6 +128,68 @@ pub(super) struct GoldenFoundationReport {
     setup: GoldenSetupEvidence,
     operations: Vec<OperationEvidence>,
     content: Vec<ContentEvidence>,
+}
+
+/// Exact typed audio author projection retained across later Hero stages.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct GoldenFoundationAudioAnchor {
+    sequence_id: SequenceId,
+    asset_id: AssetId,
+    track_id: TrackId,
+    clip_id: ClipId,
+    edit_id: AudioComponentEditId,
+    track_projection: Value,
+    audio_program_projection: Value,
+}
+
+impl GoldenFoundationReport {
+    pub(super) fn primary_sequence_id(&self) -> SequenceId {
+        self.setup.stage.sequence_id()
+    }
+
+    pub(super) fn capture_audio_anchor(
+        &self,
+        state: &AppState,
+    ) -> anyhow::Result<GoldenFoundationAudioAnchor> {
+        let sequence = state
+            .sequence_by_id(self.primary_sequence_id())
+            .context("Foundation Hero Sequence is absent")?;
+        let track = sequence
+            .audio_tracks
+            .iter()
+            .find(|track| track.id == self.setup.audio_track_id)
+            .context("Foundation audio Track is absent")?;
+        let clip = track
+            .clips
+            .iter()
+            .find(|clip| clip.id == self.setup.clip_id)
+            .context("Foundation audio Clip is absent")?;
+        ensure!(
+            clip.media_asset_id() == Some(self.setup.asset_id),
+            "Foundation audio Clip changed Asset identity"
+        );
+        ensure!(
+            clip.audio_components.iter().any(|edit| edit.id == self.setup.edit_id),
+            "Foundation audio Component Edit is absent"
+        );
+        ensure!(
+            state
+                .asset_library()
+                .context("Foundation Asset Library is absent")?
+                .get_asset(self.setup.asset_id)?
+                .is_some(),
+            "Foundation PCM Asset is absent"
+        );
+        Ok(GoldenFoundationAudioAnchor {
+            sequence_id: sequence.id,
+            asset_id: self.setup.asset_id,
+            track_id: track.id,
+            clip_id: clip.id,
+            edit_id: self.setup.edit_id,
+            track_projection: serde_json::to_value(track)?,
+            audio_program_projection: serde_json::to_value(&sequence.audio_program)?,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -152,7 +221,7 @@ fn new_run_paths(root: &Path) -> anyhow::Result<GoldenRunPaths> {
 
 fn observe_audio_edit(edit: &AudioComponentEdit) -> AudioEditObservation {
     AudioEditObservation {
-        edit_id: edit.id.to_string(),
+        edit_id: edit.id,
         enabled: edit.enabled,
         volume_db: edit.volume_db,
         pan: edit.pan,
@@ -263,6 +332,7 @@ pub(super) fn execute_foundation_stage(
         duration_frames: contract.timeline.duration_frames,
         settings: opened.settings.clone(),
     };
+    let stage = workflow.bind_slice_primary_sequence(contract, FOUNDATION_SLICE_ID)?;
 
     let state = workflow.app_mut();
     state.dispatch_action(Action::ImportMedia(vec![fixture.path.clone()]))?;
@@ -389,7 +459,7 @@ pub(super) fn execute_foundation_stage(
     let undo_evidence =
         OperationEvidence::UndoRedo { undo_steps, after_undo, redo_steps, after_redo };
 
-    let persistence = workflow.durable_save_reopen()?;
+    let persistence = workflow.durable_save_reopen_for(&stage)?;
     let state = workflow.app();
     let reopened_clip = find_audio_clip(state, clip_id)?.0;
     ensure!(
@@ -435,7 +505,7 @@ pub(super) fn execute_foundation_stage(
     workflow.verify_binding()?;
 
     Ok(GoldenFoundationReport {
-        schema_version: 4,
+        schema_version: 5,
         profile: FOUNDATION_SLICE_ID,
         contract_id: contract.id.clone(),
         corpus_revision: manifest.corpus_revision,
@@ -444,9 +514,11 @@ pub(super) fn execute_foundation_stage(
         fixture,
         setup: GoldenSetupEvidence {
             project_path: workflow.project_path().to_path_buf(),
-            asset_id: asset.id.to_string(),
-            clip_id: clip_id.to_string(),
-            audio_track_id: actual_audio_track_id.to_string(),
+            stage,
+            asset_id: asset.id,
+            clip_id,
+            audio_track_id: actual_audio_track_id,
+            edit_id,
             duration_frames: contract.timeline.duration_frames,
             imported_audio,
         },
@@ -496,7 +568,7 @@ fn golden_project_foundation_audio_authoring_gate() -> anyhow::Result<()> {
         }
         Err(error) => {
             let failure = serde_json::json!({
-                "schema_version": 4,
+                "schema_version": 5,
                 "profile": FOUNDATION_SLICE_ID,
                 "status": "failed",
                 "complete_golden_project": false,

@@ -382,7 +382,7 @@ pub(super) fn execute_proxy_relink_stage(
     )?;
     let (original_path, replacement_path, fixture_hash) =
         copy_fixture_pair(&fixture, output_directory)?;
-    let stage = workflow.create_sequence_stage("proxy-relink")?;
+    let stage = workflow.bind_slice_primary_sequence(contract, PROXY_RELINK_SLICE_ID)?;
     let state = workflow.app_mut();
 
     let import_attempt_floor = latest_proxy_attempt_id(state);
@@ -631,7 +631,7 @@ pub(super) fn execute_proxy_relink_stage(
     workflow.verify_binding()?;
 
     Ok(GoldenProxyRelinkReport {
-        schema_version: 1,
+        schema_version: 2,
         profile: PROXY_RELINK_SLICE_ID,
         contract_id: contract.id.clone(),
         corpus_revision: manifest.corpus_revision,
@@ -697,7 +697,7 @@ fn golden_project_proxy_original_offline_relink_gate() -> anyhow::Result<()> {
         }
         Err(error) => {
             let failure = serde_json::json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "profile": PROXY_RELINK_SLICE_ID,
                 "status": "failed",
                 "complete_golden_project": false,

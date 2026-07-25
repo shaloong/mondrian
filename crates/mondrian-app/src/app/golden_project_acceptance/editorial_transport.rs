@@ -320,7 +320,7 @@ pub(super) fn execute_editorial_stage(
 
     let manifest: CorpusManifest = load_json(&root.join("tests/validation/corpus-manifest.json"))?;
     let fixture = resolve_fixture(root, &fixture_root(root), contract, &manifest, "aac-audio")?;
-    let stage = workflow.create_sequence_stage("editorial-transport")?;
+    let stage = workflow.bind_slice_primary_sequence(contract, EDITORIAL_SLICE_ID)?;
     let state = workflow.app_mut();
     state.dispatch_action(Action::ImportMedia(vec![fixture.path.clone()]))?;
     wait_for_media_imports(state)?;
@@ -609,7 +609,7 @@ pub(super) fn execute_editorial_stage(
     workflow.verify_binding()?;
 
     Ok(GoldenEditorialReport {
-        schema_version: 1,
+        schema_version: 2,
         profile: EDITORIAL_SLICE_ID,
         contract_id: contract.id.clone(),
         corpus_revision: manifest.corpus_revision,
@@ -669,7 +669,7 @@ fn golden_project_editorial_transport_gate() -> anyhow::Result<()> {
         }
         Err(error) => {
             let failure = serde_json::json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "profile": EDITORIAL_SLICE_ID,
                 "status": "failed",
                 "complete_golden_project": false,

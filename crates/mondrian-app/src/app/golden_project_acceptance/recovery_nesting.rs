@@ -460,8 +460,8 @@ pub(super) fn execute_recovery_nesting_stage(
     let window = slice.timeline_window.context("recovery/nesting slice has no timeline window")?;
     let evaluation_frame =
         window.start_frame + (window.end_frame_exclusive - window.start_frame) / 2;
-    let stage = workflow.create_sequence_stage("recovery-nesting")?;
-    let parent_sequence_id = stage.sequence_id;
+    let stage = workflow.bind_slice_primary_sequence(contract, RECOVERY_NESTING_SLICE_ID)?;
+    let parent_sequence_id = stage.sequence_id();
     let project_path = workflow.project_path().to_path_buf();
     let project_id = workflow.project_id();
     let state = workflow.app_mut();
@@ -597,7 +597,7 @@ pub(super) fn execute_recovery_nesting_stage(
         "Opening a recovery point retired recovery authority before manual save"
     );
 
-    let durability = workflow.durable_save_reopen()?;
+    let durability = workflow.durable_save_reopen_for(&stage)?;
     let recovery_candidate_count = recovery_candidates_for(&project_path).len();
     let recovery_archive_removed = !autosave_file.exists();
     ensure!(
@@ -654,7 +654,7 @@ pub(super) fn execute_recovery_nesting_stage(
     )?;
 
     Ok(GoldenRecoveryNestingReport {
-        schema_version: 1,
+        schema_version: 2,
         profile: RECOVERY_NESTING_SLICE_ID,
         contract_id: contract.id.clone(),
         status: "passed",
@@ -731,7 +731,7 @@ fn golden_project_recovery_nesting_roundtrip_gate() -> anyhow::Result<()> {
         }
         Err(error) => {
             let failure = serde_json::json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "profile": RECOVERY_NESTING_SLICE_ID,
                 "status": "failed",
                 "complete_golden_project": false,

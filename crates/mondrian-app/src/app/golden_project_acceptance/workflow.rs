@@ -11,7 +11,10 @@ use super::harness::{
     author_checkpoint, durable_save_reopen, project_author_transition, AuthorCheckpoint,
     DirectoryCleanup, DurableReopenEvidence, ProjectAuthorTransitionEvidence,
 };
-use crate::app::ui_actions::sequence_new_action;
+use super::GoldenProjectContract;
+use crate::app::ui_actions::{
+    sequence_new_action, sequence_switch_active_action, SequenceTargetPayload,
+};
 use crate::app::AppState;
 use anyhow::{ensure, Context};
 use mondrian_core::{ProjectColorEnvironment, ProjectId, ProjectSettings, SequenceId};
@@ -30,12 +33,41 @@ pub(super) struct GoldenProjectOpenEvidence {
     pub project_identity_preserved: bool,
 }
 
-/// Evidence for one Project-scoped Sequence stage creation.
+/// Private proof of the immutable Hero Sequence contract for one workflow.
+struct GoldenHeroSequenceBinding {
+    sequence_id: SequenceId,
+    expected_settings: SequenceSettings,
+    expected_color_environment: ProjectColorEnvironment,
+}
+
+/// How one Golden slice obtained its primary Sequence.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum GoldenSequenceStageBindingEvidence {
+    /// The slice reused the one stable Hero Sequence.
+    ExistingHero {
+        active_before: SequenceId,
+        switched: bool,
+    },
+    /// The slice created a focused diagnostic Sequence through one transaction.
+    CreatedDiagnostic {
+        author_step: ProjectAuthorTransitionEvidence,
+    },
+}
+
+/// Evidence binding one declared Golden slice to its primary Sequence.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GoldenSequenceStageEvidence {
-    pub role: &'static str,
-    pub sequence_id: SequenceId,
-    pub author_step: ProjectAuthorTransitionEvidence,
+    slice_id: String,
+    sequence_role: String,
+    sequence_id: SequenceId,
+    binding: GoldenSequenceStageBindingEvidence,
+}
+
+impl GoldenSequenceStageEvidence {
+    pub(super) const fn sequence_id(&self) -> SequenceId {
+        self.sequence_id
+    }
 }
 
 /// Headless driver over the same product App Interfaces used by the Window.
@@ -45,6 +77,7 @@ pub(super) struct GoldenProductWorkflowDriver {
     _runtime_cleanup: DirectoryCleanup,
     project_id: ProjectId,
     project_path: PathBuf,
+    hero: GoldenHeroSequenceBinding,
 }
 
 impl GoldenProductWorkflowDriver {
@@ -60,11 +93,13 @@ impl GoldenProductWorkflowDriver {
         state.create_new_project_with_settings_at(
             project_path.clone(),
             name,
-            sequence_settings,
-            color_environment,
+            sequence_settings.clone(),
+            color_environment.clone(),
             project_settings,
         )?;
         let project_id = state.project_id().context("created Project has no identity")?;
+        let hero_sequence_id =
+            state.active_sequence().context("created Project has no initial Sequence")?.id;
         let mut runtime_cleanup = DirectoryCleanup::default();
         runtime_cleanup.track(state.project_runtime_dir().map(Path::to_path_buf));
         let driver = Self {
@@ -72,6 +107,11 @@ impl GoldenProductWorkflowDriver {
             _runtime_cleanup: runtime_cleanup,
             project_id,
             project_path,
+            hero: GoldenHeroSequenceBinding {
+                sequence_id: hero_sequence_id,
+                expected_settings: sequence_settings,
+                expected_color_environment: color_environment,
+            },
         };
         driver.verify_binding()?;
         Ok(driver)
@@ -83,6 +123,10 @@ impl GoldenProductWorkflowDriver {
 
     pub(super) fn project_path(&self) -> &Path {
         &self.project_path
+    }
+
+    pub(super) const fn hero_sequence_id(&self) -> SequenceId {
+        self.hero.sequence_id
     }
 
     pub(super) fn app(&self) -> &AppState {
@@ -105,6 +149,16 @@ impl GoldenProductWorkflowDriver {
         ensure!(
             self.state.current_project_path() == Some(self.project_path.as_path()),
             "Golden workflow changed Project path"
+        );
+        ensure!(
+            self.state
+                .sequence_by_id(self.hero.sequence_id)
+                .is_some_and(|sequence| sequence.settings == self.hero.expected_settings),
+            "Golden workflow lost its Hero Sequence"
+        );
+        ensure!(
+            self.state.project_color_environment() == &self.hero.expected_color_environment,
+            "Golden workflow changed the Project Color Environment"
         );
         Ok(())
     }
@@ -147,12 +201,48 @@ impl GoldenProductWorkflowDriver {
         })
     }
 
-    /// Create one stage Sequence through the product action and Project transaction.
-    pub(super) fn create_sequence_stage(
+    /// Bind one declared slice to the primary Sequence required by its role.
+    ///
+    /// Hero slices reuse one stable identity. Focused diagnostic slices create
+    /// an isolated Sequence through the ordinary product authoring Interface.
+    pub(super) fn bind_slice_primary_sequence(
         &mut self,
-        role: &'static str,
+        contract: &GoldenProjectContract,
+        slice_id: &str,
     ) -> anyhow::Result<GoldenSequenceStageEvidence> {
         self.verify_binding()?;
+        let slice = contract
+            .execution_slices
+            .iter()
+            .find(|slice| slice.id == slice_id)
+            .with_context(|| format!("Golden execution slice is absent: {slice_id}"))?;
+        if slice.sequence_role == contract.hero_sequence.role {
+            let active_before = self
+                .state
+                .active_sequence_id()
+                .context("Golden workflow has no active Sequence")?;
+            let switched = active_before != self.hero.sequence_id;
+            if switched {
+                self.state.dispatch_action(sequence_switch_active_action(
+                    SequenceTargetPayload { sequence_id: self.hero.sequence_id },
+                ))?;
+            }
+            self.verify_binding()?;
+            ensure!(
+                self.state.active_sequence_id() == Some(self.hero.sequence_id),
+                "Hero-assigned slice {slice_id} did not activate the Hero Sequence"
+            );
+            return Ok(GoldenSequenceStageEvidence {
+                slice_id: slice.id.clone(),
+                sequence_role: slice.sequence_role.clone(),
+                sequence_id: self.hero.sequence_id,
+                binding: GoldenSequenceStageBindingEvidence::ExistingHero {
+                    active_before,
+                    switched,
+                },
+            });
+        }
+
         let expected_settings = self.state.new_sequence_defaults().clone();
         let before_ids = self
             .state
@@ -185,7 +275,33 @@ impl GoldenProductWorkflowDriver {
             sequence.id == sequence_id && sequence.settings == expected_settings,
             "new Golden stage Sequence differs from the Project template"
         );
-        Ok(GoldenSequenceStageEvidence { role, sequence_id, author_step })
+        Ok(GoldenSequenceStageEvidence {
+            slice_id: slice.id.clone(),
+            sequence_role: slice.sequence_role.clone(),
+            sequence_id,
+            binding: GoldenSequenceStageBindingEvidence::CreatedDiagnostic { author_step },
+        })
+    }
+
+    /// Save and reopen while proving that one slice retains its primary Sequence.
+    pub(super) fn durable_save_reopen_for(
+        &mut self,
+        stage: &GoldenSequenceStageEvidence,
+    ) -> anyhow::Result<DurableReopenEvidence> {
+        self.verify_binding()?;
+        ensure!(
+            self.state.active_sequence_id() == Some(stage.sequence_id),
+            "slice {} is not active before durable reopen",
+            stage.slice_id
+        );
+        let evidence = durable_save_reopen(&mut self.state, &self.project_path)?;
+        self.verify_binding()?;
+        ensure!(
+            self.state.active_sequence_id() == Some(stage.sequence_id),
+            "slice {} changed its primary Sequence across durable reopen",
+            stage.slice_id
+        );
+        Ok(evidence)
     }
 
     /// Save and reopen while retaining the workflow's immutable Project binding.
@@ -198,12 +314,12 @@ impl GoldenProductWorkflowDriver {
 }
 
 #[test]
-fn golden_product_workflow_preserves_one_project_across_sequences_and_reopen() -> anyhow::Result<()>
-{
+fn golden_product_workflow_binds_hero_and_diagnostic_sequences_explicitly() -> anyhow::Result<()> {
     use super::harness::new_run_directory;
-    use super::repository_root;
+    use super::{load_golden_contract, repository_root, sequence_settings_from_contract};
 
     let root = repository_root();
+    let contract = load_golden_contract(&root)?;
     let directory = new_run_directory(
         &root,
         "MONDRIAN_GOLDEN_WORKFLOW_RUN_ROOT",
@@ -213,7 +329,7 @@ fn golden_product_workflow_preserves_one_project_across_sequences_and_reopen() -
     let mut workflow = GoldenProductWorkflowDriver::create(
         project_path.clone(),
         "Single Project Golden Workflow",
-        SequenceSettings::default(),
+        sequence_settings_from_contract(&contract.timeline)?,
         ProjectColorEnvironment::default(),
         ProjectSettings::default(),
     )?;
@@ -225,14 +341,36 @@ fn golden_product_workflow_preserves_one_project_across_sequences_and_reopen() -
     assert_eq!(workflow.project_id(), project_id);
     assert_eq!(workflow.project_path(), project_path);
 
-    let stage = workflow.create_sequence_stage("visual-authoring")?;
+    let hero = workflow
+        .bind_slice_primary_sequence(&contract, super::foundation_audio::FOUNDATION_SLICE_ID)?;
+    assert_eq!(hero.sequence_id(), workflow.hero_sequence_id());
+    assert_eq!(hero.sequence_role, contract.hero_sequence.role);
+    assert!(matches!(
+        hero.binding,
+        GoldenSequenceStageBindingEvidence::ExistingHero { switched: false, .. }
+    ));
+    assert_eq!(workflow.app().sequences().len(), 1);
+
+    let diagnostic = workflow
+        .bind_slice_primary_sequence(&contract, super::editorial_transport::EDITORIAL_SLICE_ID)?;
+    assert!(matches!(
+        diagnostic.binding,
+        GoldenSequenceStageBindingEvidence::CreatedDiagnostic { .. }
+    ));
     assert_eq!(
         workflow.app().active_sequence().map(|sequence| sequence.id),
-        Some(stage.sequence_id)
+        Some(diagnostic.sequence_id())
     );
     assert_eq!(workflow.app().sequences().len(), 2);
 
-    let durability = workflow.durable_save_reopen()?;
+    let visual = workflow
+        .bind_slice_primary_sequence(&contract, super::visual_authoring::VISUAL_SLICE_ID)?;
+    assert_eq!(visual.sequence_id(), workflow.hero_sequence_id());
+    assert!(matches!(
+        visual.binding,
+        GoldenSequenceStageBindingEvidence::ExistingHero { switched: true, .. }
+    ));
+    let durability = workflow.durable_save_reopen_for(&visual)?;
     assert!(durability.session_identity_changed);
     assert!(durability.project_identity_preserved);
     assert_eq!(workflow.project_id(), project_id);

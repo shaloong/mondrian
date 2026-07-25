@@ -1,6 +1,6 @@
 //! Product-authoring setup and durable identity evidence for the color slice.
 
-use super::{HLG_ROLE, SRGB_ALPHA_ROLE};
+use super::{COLOR_MEDIA_SLICE_ID, HLG_ROLE, SRGB_ALPHA_ROLE};
 use crate::app::golden_project_acceptance::fixture::FixtureEvidence;
 use crate::app::golden_project_acceptance::harness::{
     dispatch_author_transition, wait_for_media_imports, AuthorTransitionEvidence,
@@ -9,6 +9,7 @@ use crate::app::golden_project_acceptance::harness::{
 use crate::app::golden_project_acceptance::workflow::{
     GoldenProductWorkflowDriver, GoldenSequenceStageEvidence,
 };
+use crate::app::golden_project_acceptance::GoldenProjectContract;
 use crate::app::ui_actions::{
     timeline_add_track_action, timeline_drop_asset_action, timeline_trim_clips_action,
     TimelineAddTrackKind, TimelineAddTrackPayload, TimelineDropAssetPayload,
@@ -184,12 +185,13 @@ fn find_new_clip(
 }
 
 pub(super) fn setup_stage(
+    contract: &GoldenProjectContract,
     workflow: &mut GoldenProductWorkflowDriver,
     hlg_fixture: &FixtureEvidence,
     alpha_fixture: &FixtureEvidence,
     end_frame_exclusive: i64,
 ) -> anyhow::Result<AuthoringStageResult> {
-    let stage = workflow.create_sequence_stage("color-media-roundtrip")?;
+    let stage = workflow.bind_slice_primary_sequence(contract, COLOR_MEDIA_SLICE_ID)?;
     let state = workflow.app_mut();
     let hlg_asset = import_fixture(state, hlg_fixture)?;
     let alpha_asset = import_fixture(state, alpha_fixture)?;
@@ -299,7 +301,7 @@ pub(super) fn setup_stage(
         }
     }
 
-    let durable_reopen = workflow.durable_save_reopen()?;
+    let durable_reopen = workflow.durable_save_reopen_for(&stage)?;
     workflow.verify_binding()?;
     let sequence = workflow.app().active_sequence().context("reopened Sequence is absent")?;
     ensure!(

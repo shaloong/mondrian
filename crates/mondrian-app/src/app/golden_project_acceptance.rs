@@ -610,7 +610,21 @@ fn golden_acceptance_plan_rejects_obligations_isolated_from_the_hero_sequence() 
     assert!(plan.missing.exports.is_empty());
     assert!(plan.hero_missing.fixture_roles.contains("hlg-main10-picture"));
     assert!(plan.hero_missing.operations.contains("export"));
-    assert!(plan.hero_missing.content.contains("basic-title"));
+    for content in [
+        "primary-color",
+        "lut",
+        "cross-dissolve",
+        "basic-title",
+        "hold-keyframe",
+        "linear-keyframe",
+        "bezier-keyframe",
+    ] {
+        assert!(
+            !plan.hero_missing.content.contains(content),
+            "{content} must be assigned to the Hero Sequence"
+        );
+    }
+    assert!(plan.hero_missing.content.contains("nested-sequence"));
     assert!(plan.hero_missing.exports.contains("hevc-main10"));
     assert!(plan.unassigned_required_fixture_roles.is_empty());
     assert_eq!(plan.slices.len(), 7);

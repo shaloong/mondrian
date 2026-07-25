@@ -37,8 +37,8 @@ use mondrian_core::automation::{
     PropertyMutation, PropertyValue,
 };
 use mondrian_core::{
-    BasicTitle, ClipId, Color, EffectId, EvaluatedBasicTitle, FramePosition, FrameRounding,
-    PropertyHost, Resolution, TimelineTime, TrackId,
+    AssetId, BasicTitle, ClipId, Color, EffectId, EvaluatedBasicTitle, FramePosition,
+    FrameRounding, PropertyHost, Resolution, TimelineTime, TrackId, VideoTransitionId,
 };
 use mondrian_editor_state::Action;
 use mondrian_effects::{EffectNode, EffectType};
@@ -103,12 +103,13 @@ pub(super) struct GoldenVisualReport {
 struct VisualSetupEvidence {
     project_path: PathBuf,
     stage: GoldenSequenceStageEvidence,
-    solid_asset_id: String,
-    video_track_id: String,
-    left_clip_id: String,
-    right_clip_id: String,
-    title_clip_id: String,
-    transition_id: String,
+    solid_asset_id: AssetId,
+    video_track_id: TrackId,
+    title_track_id: TrackId,
+    left_clip_id: ClipId,
+    right_clip_id: ClipId,
+    title_clip_id: ClipId,
+    transition_id: VideoTransitionId,
     start_frame: i64,
     edit_frame: i64,
     end_frame_exclusive: i64,
@@ -142,8 +143,8 @@ impl OperationEvidence {
 enum ContentEvidence {
     PrimaryColor {
         author_steps: Vec<AuthorTransitionEvidence>,
-        clip_id: String,
-        effect_id: String,
+        clip_id: ClipId,
+        effect_id: EffectId,
         working_color_space: &'static str,
         exposure: f32,
         contrast: f32,
@@ -151,8 +152,8 @@ enum ContentEvidence {
     },
     Lut {
         author_steps: Vec<AuthorTransitionEvidence>,
-        clip_id: String,
-        effect_id: String,
+        clip_id: ClipId,
+        effect_id: EffectId,
         processing_space: &'static str,
         resource_path: PathBuf,
         resource_sha256: String,
@@ -163,16 +164,16 @@ enum ContentEvidence {
     },
     CrossDissolve {
         author_step: AuthorTransitionEvidence,
-        transition_id: String,
-        left_clip_id: String,
-        right_clip_id: String,
+        transition_id: VideoTransitionId,
+        left_clip_id: ClipId,
+        right_clip_id: ClipId,
         start_frame: i64,
         end_frame_exclusive: i64,
     },
     BasicTitle {
         create_step: AuthorTransitionEvidence,
         text_step: AuthorTransitionEvidence,
-        clip_id: String,
+        clip_id: ClipId,
         text: String,
         font_family: String,
     },
@@ -209,6 +210,63 @@ impl ContentEvidence {
             Self::LinearKeyframe { .. } => "linear-keyframe",
             Self::BezierKeyframe { .. } => "bezier-keyframe",
         }
+    }
+}
+
+impl GoldenVisualReport {
+    pub(super) fn primary_sequence_id(&self) -> mondrian_core::SequenceId {
+        self.setup.stage.sequence_id()
+    }
+
+    pub(super) fn verify_retained_authoring(&self, state: &AppState) -> anyhow::Result<()> {
+        let sequence = state
+            .sequence_by_id(self.primary_sequence_id())
+            .context("Visual Hero Sequence is absent")?;
+        let (left, left_track) = find_video_clip(sequence, self.setup.left_clip_id)?;
+        let (right, right_track) = find_video_clip(sequence, self.setup.right_clip_id)?;
+        let (title, title_track) = find_video_clip(sequence, self.setup.title_clip_id)?;
+        ensure!(
+            left_track == self.setup.video_track_id
+                && right_track == self.setup.video_track_id
+                && title_track == self.setup.title_track_id
+                && title.is_basic_title(),
+            "Visual Hero Clips changed Track membership or content identity"
+        );
+        let transition = sequence
+            .video_transitions
+            .iter()
+            .find(|transition| transition.id == self.setup.transition_id)
+            .context("Visual Hero Cross Dissolve is absent")?;
+        ensure!(
+            transition.left == left.id && transition.right == right.id,
+            "Visual Hero Cross Dissolve changed its strong endpoints"
+        );
+        let primary_effect_id = self
+            .content
+            .iter()
+            .find_map(|content| match content {
+                ContentEvidence::PrimaryColor { effect_id, .. } => Some(*effect_id),
+                _ => None,
+            })
+            .context("Visual report has no Primary Color evidence")?;
+        let lut_effect_id = self
+            .content
+            .iter()
+            .find_map(|content| match content {
+                ContentEvidence::Lut { effect_id, .. } => Some(*effect_id),
+                _ => None,
+            })
+            .context("Visual report has no LUT evidence")?;
+        ensure!(
+            left.effects
+                .iter()
+                .map(|effect| effect.id)
+                .collect::<Vec<_>>()
+                .windows(2)
+                .any(|pair| pair == [primary_effect_id, lut_effect_id]),
+            "Visual Hero Clip lost the ordered Primary Color/LUT stack"
+        );
+        Ok(())
     }
 }
 
@@ -722,7 +780,7 @@ pub(super) fn execute_visual_stage(
     let slice = visual_slice(&contract.execution_slices)?;
     let window = slice.timeline_window.context("visual slice has no timeline window")?;
     let edit_frame = window.start_frame + (window.end_frame_exclusive - window.start_frame) / 2;
-    let stage = workflow.create_sequence_stage("visual-authoring")?;
+    let stage = workflow.bind_slice_primary_sequence(contract, VISUAL_SLICE_ID)?;
     let lut_path = workflow
         .project_path()
         .parent()
@@ -868,8 +926,8 @@ pub(super) fn execute_visual_stage(
     ];
     let primary_content = ContentEvidence::PrimaryColor {
         author_steps: primary_steps,
-        clip_id: left_clip_id.to_string(),
-        effect_id: primary_effect_id.to_string(),
+        clip_id: left_clip_id,
+        effect_id: primary_effect_id,
         working_color_space: "linear_rec2020",
         exposure: primary_exposure,
         contrast: primary_contrast,
@@ -909,8 +967,8 @@ pub(super) fn execute_visual_stage(
     ];
     let lut_content = ContentEvidence::Lut {
         author_steps: lut_steps,
-        clip_id: left_clip_id.to_string(),
-        effect_id: lut_effect_id.to_string(),
+        clip_id: left_clip_id,
+        effect_id: lut_effect_id,
         processing_space: LUT_PROCESSING_SPACE,
         resource_path: lut_path.clone(),
         resource_sha256: lut_sha256.clone(),
@@ -951,9 +1009,9 @@ pub(super) fn execute_visual_stage(
     let transition_end = frame_of(created_transitions[0].sequence_range.end()?, sequence)?;
     let transition_content = ContentEvidence::CrossDissolve {
         author_step: transition_step,
-        transition_id: transition_id.to_string(),
-        left_clip_id: left_clip_id.to_string(),
-        right_clip_id: right_clip_id.to_string(),
+        transition_id,
+        left_clip_id,
+        right_clip_id,
         start_frame: transition_start,
         end_frame_exclusive: transition_end,
     };
@@ -994,7 +1052,7 @@ pub(super) fn execute_visual_stage(
     let title_content = ContentEvidence::BasicTitle {
         create_step: title_create_step,
         text_step: title_text_step,
-        clip_id: title_clip_id.to_string(),
+        clip_id: title_clip_id,
         text: title.text,
         font_family: title.font_family,
     };
@@ -1221,7 +1279,7 @@ pub(super) fn execute_visual_stage(
     ];
 
     let execution_before_save = execute_visual_frame(state, edit_frame)?;
-    let durability = workflow.durable_save_reopen()?;
+    let durability = workflow.durable_save_reopen_for(&stage)?;
     let state = workflow.app();
     let sequence = state.active_sequence().context("reopened Sequence is absent")?;
     let transition = sequence
@@ -1351,7 +1409,7 @@ pub(super) fn execute_visual_stage(
     )?;
 
     Ok(GoldenVisualReport {
-        schema_version: 7,
+        schema_version: 8,
         profile: VISUAL_SLICE_ID,
         contract_id: contract.id.clone(),
         status: "passed",
@@ -1359,12 +1417,13 @@ pub(super) fn execute_visual_stage(
         setup: VisualSetupEvidence {
             project_path: workflow.project_path().to_path_buf(),
             stage,
-            solid_asset_id: solid_asset_id.to_string(),
-            video_track_id: video_track_id.to_string(),
-            left_clip_id: left_clip_id.to_string(),
-            right_clip_id: right_clip_id.to_string(),
-            title_clip_id: title_clip_id.to_string(),
-            transition_id: transition_id.to_string(),
+            solid_asset_id,
+            video_track_id,
+            title_track_id: title_selection.track_id,
+            left_clip_id,
+            right_clip_id,
+            title_clip_id,
+            transition_id,
             start_frame: window.start_frame,
             edit_frame,
             end_frame_exclusive: window.end_frame_exclusive,
@@ -1414,7 +1473,7 @@ fn golden_project_visual_authoring_roundtrip_gate() -> anyhow::Result<()> {
         }
         Err(error) => {
             let failure = serde_json::json!({
-                "schema_version": 7,
+                "schema_version": 8,
                 "profile": VISUAL_SLICE_ID,
                 "status": "failed",
                 "complete_golden_project": false,
