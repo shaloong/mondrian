@@ -259,7 +259,11 @@ title colors and the ordinary Clip selection/trim/drag model.
 only Actions owned by a concrete product Interface. Shell-only window/layout
 Actions, unknown custom namespaces, and product operations without an
 implementation return a structured failure; they never log and return
-`Ok(())`. Undo/Redo errors cross the same boundary instead of being discarded.
+`Ok(())`. Undo/Redo errors cross the same boundary instead of being discarded,
+and an empty history returns typed `ActionNotExecuted` instead of pretending
+that author state changed. The Window Adapter consults action availability and
+does not dispatch disabled Undo/Redo gestures; direct, Headless, scripting, and
+automation callers retain the fail-closed product contract.
 
 Callers that need acceptance evidence must also verify domain postconditions.
 For example, the Golden audio slice checks the installed `AuthoringSession`,
@@ -314,6 +318,12 @@ natural-exit window and may then terminate the child process tree because
 third-party graphics capture DLLs can block Windows process detach after all
 Mondrian work has completed. Missing, malformed, or failing reports remain
 fail-closed; process cleanup cannot create passing evidence.
+The supervisor and Windows CI build the mixed-feature App/Golden targets with
+Cargo incremental compilation disabled and one Cargo job. A cached
+default-feature App artifact cannot become evidence for the `validation`
+entrypoint after an MSVC/LLVM incremental-link failure; build success must come
+from deterministic non-incremental code generation within the 16 GiB evidence
+machine's bounded peak-memory envelope.
 
 The Recovery/Nesting stage is fixture-independent. It selects a generated Clip
 through the Timeline Action boundary, dispatches one Precompose Action, and

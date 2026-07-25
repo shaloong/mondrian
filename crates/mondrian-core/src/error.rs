@@ -56,6 +56,10 @@ pub enum MondrianError {
     #[error("轨道锁定，无法修改: {track_id}")]
     TrackLocked { track_id: String },
 
+    // ── 应用操作 ──────────────────────────────────────────────────────────────
+    #[error("操作未执行 (action={action}): {reason}")]
+    ActionNotExecuted { action: String, reason: String },
+
     // ── 渲染器 ────────────────────────────────────────────────────────────────
     #[error("GPU 设备初始化失败: {reason}")]
     GpuInitFailed { reason: String },

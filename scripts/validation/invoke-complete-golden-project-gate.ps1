@@ -117,6 +117,7 @@ $buildArguments = @(
     "-p", "mondrian-app",
     "--features", "validation",
     "--bin", "mondrian-golden"
+    "-j", "1"
 )
 New-Item -ItemType Directory -Force -Path $gateWorkRoot | Out-Null
 
@@ -127,6 +128,10 @@ $runEvidence = @()
 $reports = @()
 $oldRunRoot = [Environment]::GetEnvironmentVariable(
     "MONDRIAN_GOLDEN_COMPOSED_RUN_ROOT",
+    "Process"
+)
+$oldCargoIncremental = [Environment]::GetEnvironmentVariable(
+    "CARGO_INCREMENTAL",
     "Process"
 )
 try {
@@ -141,6 +146,11 @@ try {
     }
 
     $failurePhase = "validation-binary-build"
+    [Environment]::SetEnvironmentVariable(
+        "CARGO_INCREMENTAL",
+        "0",
+        "Process"
+    )
     $buildResult = Invoke-BoundedPlaybackGateProcess `
         "cargo" `
         $buildArguments `
@@ -215,6 +225,11 @@ try {
         $oldRunRoot,
         "Process"
     )
+    [Environment]::SetEnvironmentVariable(
+        "CARGO_INCREMENTAL",
+        $oldCargoIncremental,
+        "Process"
+    )
 }
 
 $passed = $null -eq $failureMessage -and $reports.Count -eq $requiredPasses
@@ -231,6 +246,7 @@ $aggregateReport = [ordered]@{
     contract_path = $contractPath
     build = [ordered]@{
         command = "cargo $($buildArguments -join ' ')"
+        incremental = $false
         log_path = $buildLogPath
         elapsed_ms = if ($null -eq $buildResult) { $null } else { [int64]$buildResult.elapsed_ms }
         timed_out = if ($null -eq $buildResult) { $false } else { [bool]$buildResult.timed_out }

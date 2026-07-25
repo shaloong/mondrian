@@ -147,12 +147,24 @@ impl AppState {
 
             // ── 撤销/重做（已有方法）─────────────────────────────────────
             Action::Undo => {
-                let _ = self.undo_timeline()?;
-                Ok(())
+                if self.undo_timeline()? {
+                    Ok(())
+                } else {
+                    Err(MondrianError::ActionNotExecuted {
+                        action: "undo".to_owned(),
+                        reason: "撤销历史为空".to_owned(),
+                    })
+                }
             }
             Action::Redo => {
-                let _ = self.redo_timeline()?;
-                Ok(())
+                if self.redo_timeline()? {
+                    Ok(())
+                } else {
+                    Err(MondrianError::ActionNotExecuted {
+                        action: "redo".to_owned(),
+                        reason: "重做历史为空".to_owned(),
+                    })
+                }
             }
 
             // ── 剪贴板（动画关键帧优先，否则使用 timeline clip clipboard）──
@@ -3307,6 +3319,25 @@ mod tests {
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id }]
         );
         assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_undo_redo_reject_unexecuted_history_intents() {
+        for (action, expected_action, expected_reason) in [
+            (mondrian_editor_state::Action::Undo, "undo", "撤销历史为空"),
+            (mondrian_editor_state::Action::Redo, "redo", "重做历史为空"),
+        ] {
+            let mut state = AppState::new();
+            let error =
+                state.dispatch_action(action).expect_err("empty history must reject the intent");
+            match error {
+                MondrianError::ActionNotExecuted { action, reason } => {
+                    assert_eq!(action, expected_action);
+                    assert_eq!(reason, expected_reason);
+                }
+                other => panic!("expected ActionNotExecuted, got {other:?}"),
+            }
+        }
     }
 
     #[test]

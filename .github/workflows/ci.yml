@@ -241,6 +241,18 @@ jobs:
       - name: 测试
         run: cargo test --workspace --exclude mondrian-app
 
+      - name: 测试完整 App 产品路径 (Windows)
+        if: runner.os == 'Windows'
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo test -p mondrian-app --all-targets -j1
+
+      - name: 编译 Golden 验证入口 (Windows)
+        if: runner.os == 'Windows'
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo build -p mondrian-app --features validation --bin mondrian-golden -j1
+
   # ───────────────────────────────────────────────────────────────────────────
   # 自研 UI 产品门禁（Linux；覆盖 app UI shell、基础图形和组件极端场景）
   # ───────────────────────────────────────────────────────────────────────────

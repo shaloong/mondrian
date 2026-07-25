@@ -106,6 +106,54 @@ bench = false"#,
 }
 
 #[test]
+fn windows_ci_covers_the_complete_app_and_golden_entrypoint() {
+    let workflow = include_str!("../../../.github/workflows/ci.yml");
+    for required in [
+        r#"- name: 测试完整 App 产品路径 (Windows)
+        if: runner.os == 'Windows'
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo test -p mondrian-app --all-targets -j1"#,
+        r#"- name: 编译 Golden 验证入口 (Windows)
+        if: runner.os == 'Windows'
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo build -p mondrian-app --features validation --bin mondrian-golden -j1"#,
+    ] {
+        assert!(
+            workflow.contains(required),
+            "Windows CI must retain required App contract: {required}"
+        );
+    }
+}
+
+#[test]
+fn complete_golden_supervisor_build_is_non_incremental() {
+    let supervisor =
+        include_str!("../../../scripts/validation/invoke-complete-golden-project-gate.ps1");
+    assert!(
+        supervisor.contains(
+            r#"[Environment]::SetEnvironmentVariable(
+        "CARGO_INCREMENTAL",
+        "0",
+        "Process"
+    )"#
+        ),
+        "the complete Golden build must not consume a mixed-feature incremental cache"
+    );
+    assert!(
+        supervisor.contains(
+            r#"[Environment]::SetEnvironmentVariable(
+        "CARGO_INCREMENTAL",
+        $oldCargoIncremental,
+        "Process"
+    )"#
+        ),
+        "the complete Golden supervisor must restore the caller's build environment"
+    );
+}
+
+#[test]
 fn product_main_calls_only_the_app_ui_window_runner() {
     let main_rs = include_str!("../src/main.rs");
 
