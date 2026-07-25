@@ -144,8 +144,10 @@ Lower layers cannot depend on higher layers:
   top-level release gate.
   The color-media slice imports attested project-generated HLG Main10 patches
   and an sRGB straight-Alpha PNG through the product worker, places them on two
-  ordinary Media tracks (the PNG as an explicit zero-rate still hold), crosses
-  durable reopen, and executes the shared Preview float-linear compositor. It
+  adjacent, stage-owned Hero Media tracks in the exact `350..375` window with
+  HLG below Alpha (the PNG is an explicit zero-rate still hold), crosses durable
+  reopen, and executes the shared Preview float-linear compositor from the
+  original rather than a proxy source. It
   checks decoded codes, independent sRGB-to-linear-Rec.2020 values, HLG
   neutral/chromatic invariants, transparent-RGB isolation, then exports one
   Rec.709 H.264 frame through the production queue and reimports it. This is
@@ -153,10 +155,11 @@ Lower layers cannot depend on higher layers:
   claim an independent absolute HLG transfer-function oracle, PQ/Log coverage,
   real-media nested color, or the complete Golden Project.
   The complete Golden coordinator runs all seven slices through one
-  `GoldenProductWorkflowDriver` and one Project, then verifies the exact three
-  stage-owned Sequences (one Hero, one nested child, and one diagnostic
-  Sequence), quiescent proxy service, relink intent, delivery profiles, and
-  serialized author snapshots after a final durable reopen. Only
+  `GoldenProductWorkflowDriver`, one Project, and one Hero primary identity,
+  then verifies the exact two Sequences (Hero plus Recovery's strongly
+  referenced nested child), quiescent proxy service, relink intent, delivery
+  profiles, and stage-owned Track/Clip/Asset anchors after a final durable
+  reopen. Only
   this Rust coordinator may emit `complete_golden_project: true`; the external
   PowerShell supervisor validates that typed report for three distinct
   run/Project identities and never unions slice reports. Heavy GPU/media work

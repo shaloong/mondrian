@@ -372,11 +372,13 @@ the recovery archive authoritative until a covering manual save atomically
 retires it. A final composed reopen must preserve the fixed Project binding,
 the two Sequences present at the Recovery boundary, earlier stage content,
 relinked Asset intent, and both typed reimport profiles. The later Color Media
-stage extends that invariant to three Sequences and retains its file-backed
-Track/Clip identities. Earlier eight-Sequence supervised runs remain diagnostic
-history only; new consecutive acceptance runs cannot begin until all primary
-stages share the Hero identity. Qualified release-machine capture and
-independent HDR/Log numeric references remain separate acceptance obligations.
+stage keeps that count at two, reuses Hero in the `350..375` window, and retains
+its two adjacent file-backed Track/Clip/Asset anchors without changing the
+Recovery parent Track or child. All seven stage primaries now share Hero; the
+supervised run `20260725T172841Z-complete-golden-d631639d` passed three distinct
+run/Project identities. Earlier eight-Sequence runs remain diagnostic history.
+Qualified release-machine capture and independent HDR/Log numeric references
+remain separate acceptance obligations.
 
 ## Playback Tick Ownership
 

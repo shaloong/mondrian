@@ -17,8 +17,9 @@ use super::workflow::GoldenProductWorkflowDriver;
 #[cfg(test)]
 use super::{load_golden_contract, repository_root, sequence_settings_from_contract};
 use super::{load_json, GoldenProjectContract};
+use crate::app::AppState;
 use anyhow::{ensure, Context};
-use mondrian_core::Resolution;
+use mondrian_core::{Resolution, SequenceId};
 use mondrian_media::PreviewDecodeSessionContext;
 use serde::Serialize;
 use std::path::Path;
@@ -59,6 +60,16 @@ pub(super) struct GoldenColorMediaReport {
     export_roundtrip: delivery::ExportRoundtripEvidence,
 }
 
+impl GoldenColorMediaReport {
+    pub(super) fn primary_sequence_id(&self) -> SequenceId {
+        self.setup.primary_sequence_id()
+    }
+
+    pub(super) fn verify_retained_authoring(&self, state: &AppState) -> anyhow::Result<()> {
+        self.setup.verify_retained_authoring(state)
+    }
+}
+
 #[cfg(test)]
 fn new_run_paths(root: &Path) -> anyhow::Result<GoldenRunPaths> {
     let directory = new_run_directory(root, RUN_ROOT_ENV, "golden-color-media")?;
@@ -92,7 +103,7 @@ pub(super) fn execute_color_media_stage(
     );
     let window = slice.timeline_window.context("color-media slice has no timeline window")?;
     ensure!(
-        window.start_frame == 0 && window.end_frame_exclusive == 25,
+        window.start_frame == 350 && window.end_frame_exclusive == 375,
         "color-media slice timeline window drifted"
     );
     ensure_exact_requirement_evidence(
@@ -119,6 +130,7 @@ pub(super) fn execute_color_media_stage(
         workflow,
         &hlg_fixture,
         &alpha_fixture,
+        window.start_frame,
         window.end_frame_exclusive,
     )?;
     // Headless Golden execution owns the same explicit decoder residency
@@ -129,18 +141,20 @@ pub(super) fn execute_color_media_stage(
         workflow.app(),
         authoring.hlg_asset_id,
         authoring.alpha_asset_id,
+        window.start_frame,
         &mut decode_context,
     )?;
     let export_roundtrip = delivery::execute_export_roundtrip(
         workflow.app_mut(),
         output_directory,
         &picture.program_output_rgba,
+        window.start_frame,
         &mut decode_context,
     )?;
     decode_context.clear();
 
     Ok(GoldenColorMediaReport {
-        schema_version: 2,
+        schema_version: 3,
         profile: "windows-alpha-color-media-roundtrip",
         contract_id: contract.id.clone(),
         corpus_revision,

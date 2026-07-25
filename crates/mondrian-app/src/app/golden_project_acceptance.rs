@@ -595,8 +595,7 @@ fn golden_contract_rejects_unknown_fields() -> anyhow::Result<()> {
 }
 
 #[test]
-fn golden_acceptance_plan_rejects_obligations_isolated_from_the_hero_sequence() -> anyhow::Result<()>
-{
+fn golden_acceptance_plan_requires_every_obligation_on_the_hero_sequence() -> anyhow::Result<()> {
     use plan::{GoldenAcceptancePlan, GoldenAcceptancePlanStatus};
 
     let root = repository_root();
@@ -604,79 +603,39 @@ fn golden_acceptance_plan_rejects_obligations_isolated_from_the_hero_sequence() 
     let plan = GoldenAcceptancePlan::compile(&contract);
 
     assert_eq!(plan.schema_version, 1);
-    assert_eq!(plan.status, GoldenAcceptancePlanStatus::Blocked);
+    assert_eq!(plan.status, GoldenAcceptancePlanStatus::Complete);
     assert!(!plan.complete_golden_project);
     assert_eq!(plan.required_consecutive_passes, 3);
     assert!(plan.missing.fixture_roles.is_empty());
     assert!(plan.missing.operations.is_empty());
     assert!(plan.missing.content.is_empty());
     assert!(plan.missing.exports.is_empty());
+    assert!(plan.hero_missing.fixture_roles.is_empty());
+    assert!(plan.hero_missing.operations.is_empty());
+    assert!(plan.hero_missing.content.is_empty());
+    assert!(plan.hero_missing.exports.is_empty());
+    assert!(plan.unassigned_required_fixture_roles.is_empty());
+    assert_eq!(plan.slices.len(), 7);
+
+    let color_slice = contract
+        .execution_slices
+        .iter_mut()
+        .find(|slice| slice.id == color_media_roundtrip::COLOR_MEDIA_SLICE_ID)
+        .context("Color Media slice is absent")?;
+    color_slice.sequence_role = "diagnostic-color-media".to_owned();
+    let isolated = GoldenAcceptancePlan::compile(&contract);
+    assert_eq!(isolated.status, GoldenAcceptancePlanStatus::Blocked);
     assert_eq!(
-        plan.hero_missing.fixture_roles,
+        isolated.hero_missing.fixture_roles,
         BTreeSet::from([
             "hlg-main10-picture".to_owned(),
             "srgb-alpha-still".to_owned(),
         ])
     );
-    assert!(plan.hero_missing.operations.is_empty());
-    assert!(plan.hero_missing.content.is_empty());
-    assert!(!plan.hero_missing.operations.contains("export"));
-    assert!(!plan.hero_missing.fixture_roles.contains("aac-audio"));
-    for operation in [
-        "play",
-        "accurate-seek",
-        "scrub",
-        "insert",
-        "overwrite",
-        "ripple",
-        "split",
-    ] {
-        assert!(
-            !plan.hero_missing.operations.contains(operation),
-            "{operation} must be assigned to the Hero Sequence"
-        );
-    }
-    for operation in ["trim", "export", "reimport"] {
-        assert!(
-            !plan.hero_missing.operations.contains(operation),
-            "{operation} must be assigned to the Hero Sequence"
-        );
-    }
-    for content in [
-        "primary-color",
-        "lut",
-        "cross-dissolve",
-        "basic-title",
-        "hold-keyframe",
-        "linear-keyframe",
-        "bezier-keyframe",
-    ] {
-        assert!(
-            !plan.hero_missing.content.contains(content),
-            "{content} must be assigned to the Hero Sequence"
-        );
-    }
-    for content in ["transform", "opacity"] {
-        assert!(
-            !plan.hero_missing.content.contains(content),
-            "{content} must be assigned to the Hero Sequence"
-        );
-    }
-    assert!(!plan.hero_missing.operations.contains("autosave-recovery"));
-    assert!(!plan.hero_missing.content.contains("nested-sequence"));
-    assert!(plan.hero_missing.exports.is_empty());
-    assert!(plan.unassigned_required_fixture_roles.is_empty());
-    assert_eq!(plan.slices.len(), 7);
-
-    for slice in &mut contract.execution_slices {
-        slice.sequence_role.clone_from(&contract.hero_sequence.role);
-    }
-    let converged = GoldenAcceptancePlan::compile(&contract);
-    assert_eq!(converged.status, GoldenAcceptancePlanStatus::Complete);
-    assert!(converged.hero_missing.fixture_roles.is_empty());
-    assert!(converged.hero_missing.operations.is_empty());
-    assert!(converged.hero_missing.content.is_empty());
-    assert!(converged.hero_missing.exports.is_empty());
+    assert!(isolated.hero_missing.operations.is_empty());
+    assert!(isolated.hero_missing.content.is_empty());
+    assert!(isolated.hero_missing.exports.is_empty());
+    assert!(!isolated.complete_golden_project);
 
     eprintln!(
         "MONDRIAN_GOLDEN_ACCEPTANCE_PLAN_JSON={}",

@@ -319,7 +319,7 @@ fn golden_product_workflow_binds_hero_and_diagnostic_sequences_explicitly() -> a
     use super::{load_golden_contract, repository_root, sequence_settings_from_contract};
 
     let root = repository_root();
-    let contract = load_golden_contract(&root)?;
+    let mut contract = load_golden_contract(&root)?;
     let directory = new_run_directory(
         &root,
         "MONDRIAN_GOLDEN_WORKFLOW_RUN_ROOT",
@@ -360,6 +360,12 @@ fn golden_product_workflow_binds_hero_and_diagnostic_sequences_explicitly() -> a
     assert_eq!(proxy.sequence_id(), workflow.hero_sequence_id());
     assert_eq!(workflow.app().sequences().len(), 1);
 
+    contract
+        .execution_slices
+        .iter_mut()
+        .find(|slice| slice.id == super::color_media_roundtrip::COLOR_MEDIA_SLICE_ID)
+        .context("Color Media slice is absent")?
+        .sequence_role = "diagnostic-color-media".to_owned();
     let diagnostic = workflow.bind_slice_primary_sequence(
         &contract,
         super::color_media_roundtrip::COLOR_MEDIA_SLICE_ID,

@@ -1,7 +1,8 @@
 param(
     [ValidateRange(60, 3600)][int]$ProcessTimeoutSeconds = 600,
     [ValidateRange(0, 60)][int]$NaturalExitGraceSeconds = 5,
-    [string]$RunRoot = "target/validation/runs"
+    [string]$RunRoot = "target/validation/runs",
+    [string]$FixtureRoot = "tests/fixtures"
 )
 
 Set-StrictMode -Version Latest
@@ -126,6 +127,7 @@ function Assert-CompleteGoldenReport(
 }
 
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../.."))
+$fixtureRoot = Resolve-RepositoryPath $FixtureRoot
 $contractPath = Join-Path $repositoryRoot "tests/validation/golden-project.json"
 $contract = Get-Content -LiteralPath $contractPath -Raw | ConvertFrom-Json
 $requiredSliceIds = @($contract.execution_slices | ForEach-Object { [string]$_.id })
@@ -160,12 +162,17 @@ $oldCargoIncremental = [Environment]::GetEnvironmentVariable(
     "CARGO_INCREMENTAL",
     "Process"
 )
+$oldFixtureRoot = [Environment]::GetEnvironmentVariable(
+    "MONDRIAN_GOLDEN_FIXTURE_ROOT",
+    "Process"
+)
 try {
     $failurePhase = "contract-and-fixture-validation"
     $global:LASTEXITCODE = 0
     & (Join-Path $PSScriptRoot "validate-reference-assets.ps1") `
         -Tier Pr `
         -Scope All `
+        -FixtureRoot $fixtureRoot `
         -OutputPath $assetReportPath
     if ($LASTEXITCODE -ne 0) {
         throw "Golden reference validation failed with exit code $LASTEXITCODE."
@@ -193,6 +200,11 @@ try {
     [Environment]::SetEnvironmentVariable(
         "MONDRIAN_GOLDEN_COMPOSED_RUN_ROOT",
         $gateWorkRoot,
+        "Process"
+    )
+    [Environment]::SetEnvironmentVariable(
+        "MONDRIAN_GOLDEN_FIXTURE_ROOT",
+        $fixtureRoot,
         "Process"
     )
     for ($index = 1; $index -le $requiredPasses; $index++) {
@@ -256,6 +268,11 @@ try {
         $oldCargoIncremental,
         "Process"
     )
+    [Environment]::SetEnvironmentVariable(
+        "MONDRIAN_GOLDEN_FIXTURE_ROOT",
+        $oldFixtureRoot,
+        "Process"
+    )
 }
 
 $passed = $null -eq $failureMessage -and $reports.Count -eq $requiredPasses
@@ -270,6 +287,7 @@ $aggregateReport = [ordered]@{
     consecutive_passes = $reports.Count
     started_at_utc = $timestamp
     contract_path = $contractPath
+    fixture_root = $fixtureRoot
     build = [ordered]@{
         command = "cargo $($buildArguments -join ' ')"
         incremental = $false

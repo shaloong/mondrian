@@ -386,9 +386,10 @@ pub(super) fn execute_picture_stage(
     state: &AppState,
     hlg_asset_id: AssetId,
     alpha_asset_id: AssetId,
+    evaluation_frame: i64,
     decode_context: &mut PreviewDecodeSessionContext,
 ) -> anyhow::Result<PictureStageResult> {
-    let execution = execute_preview(state, 0, decode_context)?;
+    let execution = execute_preview(state, evaluation_frame, decode_context)?;
     let hlg = execution
         .decoded
         .get(&hlg_asset_id)
@@ -411,7 +412,7 @@ pub(super) fn execute_picture_stage(
         },
     );
     let preview = PreviewEvidence {
-        frame: 0,
+        frame: evaluation_frame,
         width: PREVIEW_RESOLUTION.width,
         height: PREVIEW_RESOLUTION.height,
         elements: 2,

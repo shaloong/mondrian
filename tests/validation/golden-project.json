@@ -207,7 +207,7 @@
     },
     {
       "id": "color-media-roundtrip-v1",
-      "sequence_role": "isolated-color-media",
+      "sequence_role": "hero",
       "required_fixture_roles": [
         "hlg-main10-picture",
         "srgb-alpha-still"
@@ -216,8 +216,8 @@
       "required_content": [],
       "required_exports": [],
       "timeline_window": {
-        "start_frame": 0,
-        "end_frame_exclusive": 25
+        "start_frame": 350,
+        "end_frame_exclusive": 375
       }
     }
   ],

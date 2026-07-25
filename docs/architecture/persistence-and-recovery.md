@@ -154,6 +154,12 @@ Those anchors include the preceding Proxy/Relink Track and Clip, the relinked
 Asset record, and project/asset proxy intent; recovery cannot pass merely
 because the full Hero Sequence identity survived while its Asset Library state
 drifted.
+The following Color Media stage may add two adjacent Hero Tracks in `350..375`,
+but it must preserve the scoped Recovery parent Track and nested child anchor.
+Its own durable reopen and the final complete-run reopen must in turn retain the
+exact HLG/Alpha Track, Clip, Asset, placement, and canonical hashes. This scoped
+ownership permits legitimate later authoring without weakening recovery
+retention into an ID-only check.
 This proves the normal production recovery path; it does not stand in for
 conflict UI or filesystem fault injection.
 

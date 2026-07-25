@@ -998,7 +998,17 @@ Preview/export parity is protected by frame-level contracts: app preview tests
 compare multilayer preview compositing against the export output boundary with a
 stable RGBA hash, compare the shared preview/export color-health fields for the
 same frame, and compare normalized report verdict/check/root-cause/action
-signatures. A separate camera-log golden begins with encoded Sony
+signatures. The product Color Media Golden uses the shared Hero Sequence rather
+than an isolated color document: its HLG Main10 and sRGB straight-Alpha sources
+occupy two adjacent stage-owned Tracks in the exact `350..375` window, with HLG
+below Alpha. Reference execution explicitly selects the original source, never a
+proxy; the HLG Clip keeps its exact source interval, the PNG keeps a zero-rate
+hold, and durable reopen retains typed Track/Clip/Asset identities plus canonical
+hashes. It proves decoded-code, independent sRGB-to-linear-Rec.2020, Alpha
+isolation, production Preview/Export/reimport, and coexistence with earlier
+authoring. It deliberately does not claim an independent absolute HLG
+transfer-function oracle or close PQ/Log.
+A separate camera-log golden begins with encoded Sony
 S-Log3/S-Gamut3.Cine bytes, exercises the preview lazy input transform into
 Linear Rec.2020, and compares the resulting Standard sRGB frame pixel-for-pixel
 with an independently executed export input/composite/output chain. These app

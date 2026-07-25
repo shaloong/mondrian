@@ -111,17 +111,17 @@ Inspect the current top-level Golden coverage ledger without generating media:
 
 ```powershell
 cargo test -p mondrian-app --lib `
-  golden_acceptance_plan_rejects_obligations_isolated_from_the_hero_sequence -j1 -- `
+  golden_acceptance_plan_requires_every_obligation_on_the_hero_sequence -j1 -- `
   --nocapture
 ```
 
 The v9 global ledger is structurally complete: every required fixture,
 operation, content item, and export contract is assigned to one of seven
-executable slices. The Hero ledger is intentionally blocked while any of those
-obligations remains on a diagnostic Sequence. Foundation Audio, Visual
-Authoring, Editorial/Transport, Generated Delivery, Proxy/Relink, and
-Recovery/Nesting are now assigned to Hero; HLG Main10 and sRGB Alpha remain bound to
-deterministic project-owned recipes with run-local artifact attestations. The
+executable slices, and every slice is assigned to the same Hero role. HLG
+Main10 and sRGB Alpha remain bound to deterministic project-owned recipes with
+run-local artifact attestations, so both the global and Hero ledgers have empty
+missing/unbound sets. The test also mutates Color Media to a diagnostic role in
+memory and requires those two fixtures to reappear as exact Hero blockers. The
 plan does not run a product Interface and always keeps
 `complete_golden_project: false`; only the coordinated Hero process described
 below can produce complete execution evidence.
@@ -135,30 +135,34 @@ cargo test -p mondrian-app --lib `
 ```
 
 This ordinary-CI test creates one production Project, crosses a fresh open,
-binds one Hero slice without creating a Sequence, creates one diagnostic
-Sequence through the product authoring Interface, then returns to Hero through
-the product switching action and performs durable save/close/reopen. The
-private binding locks Hero ID, complete settings, and Project Color Environment;
-Project/path and both Sequences survive while only Session identity changes. It
-is infrastructure evidence, not a Golden operation and therefore does not
-alter the coverage ledger.
+binds one Hero slice without creating a Sequence, then uses an intentionally
+mutated in-memory contract to exercise diagnostic Sequence creation through the
+product authoring Interface. It returns to Hero through the product switching
+action and performs durable save/close/reopen. The private binding locks Hero
+ID, complete settings, and Project Color Environment; Project/path and both
+Sequences survive while only Session identity changes. The canonical v9
+contract does not assign any acceptance slice to that diagnostic role. This is
+infrastructure evidence, not a Golden operation, and does not alter the ledger.
 
-After the canonical PCM, AAC, and H.264 fixtures are available, verify that the
-current Hero stages compose without report union:
+After the canonical PCM, AAC, H.264, HLG, and Alpha fixtures are available,
+verify that every stage composes without report union:
 
 ```powershell
 $env:MONDRIAN_GOLDEN_FIXTURE_ROOT='target/validation/golden-fixtures'
 cargo test -p mondrian-app --lib `
-  golden_authoring_proxy_recovery_share_one_hero_sequence `
+  golden_all_stages_share_one_hero_sequence `
   -j1 -- --ignored --nocapture --test-threads=1
 ```
 
 The gate runs Foundation Audio, Visual Authoring, Editorial/Transport,
-Generated Delivery, Proxy/Relink, and Recovery/Nesting on the same initial
+Generated Delivery, Proxy/Relink, Recovery/Nesting, and Color Media on the same initial
 7,500-frame Hero Sequence and crosses every durable reopen. Before Recovery it requires one
 unchanged Project ID/path and exactly one Sequence; Recovery must retain that
-Hero primary and add exactly one nested child. Visual must leave the complete
-Hero audio projection unchanged.
+Hero primary and add exactly one nested child. Color Media must keep the total
+at exactly two Sequences while adding two adjacent Tracks in `350..375`, with
+HLG below Alpha, exact HLG source mapping, explicit still hold, and
+original-source reference execution. Visual must leave the complete Hero audio
+projection unchanged.
 Editorial binds only two complete pristine audio Tracks, leaves the exact
 Foundation Track-owned audio anchor and complete visual projection unchanged,
 and authors the AAC workflow through typed product outcomes for Drop,
@@ -172,6 +176,8 @@ proxy generation without changing any preceding Track-owned anchor.
 Recovery must then preserve every earlier scoped anchor while its exact
 `175..200` parent placement, nested child, Autosave recovery, and covering
 manual reopen remain identical.
+Color Media and the final reopen must preserve those earlier anchors as well as
+its own exact Track/Clip/Asset placement hashes.
 
 After a distinct durable reopen, Delivery renders an independent Program
 reference, exports both contracted H.264 High/AAC and HEVC Main10/AAC outputs,
@@ -189,39 +195,48 @@ Preview Runtime, consume the exact Frame Presentation Ticket, and record whether
 the output used real Headless GPU execution or the allowed final CPU Raster
 fallback. Basic Title currently exercises the CPU path; it is not reported as
 GPU. Play leaves priming only after Runtime-derived preroll and advances under
-the Synthetic Clock Master. This remains partial execution evidence and cannot
-replace the long CPAL, GPU, cancellation, memory, or A/V drift gates or report
-`complete_golden_project: true` while other obligations remain isolated.
+the Synthetic Clock Master. This focused composition test remains partial
+execution evidence and cannot replace the top-level supervisor, long CPAL, GPU,
+cancellation, memory, or A/V drift gates or report
+`complete_golden_project: true`.
 
 With production FFmpeg encoders available, run the complete Golden Project
 gate:
 
 ```powershell
 pwsh -File scripts/validation/invoke-complete-golden-project-gate.ps1
+# Or select a prepared corpus explicitly:
+pwsh -File scripts/validation/invoke-complete-golden-project-gate.ps1 `
+  -FixtureRoot target/validation/golden-fixtures
 ```
 
 The script validates the contract and fixtures, builds the feature-gated
 `mondrian-golden` executable once, and requests three runs. Before executing
 heavy stages, the Rust planner requires every fixture, operation, content item,
-and export to be assigned to the Hero Sequence role. Foundation Audio, Visual
-Authoring, Editorial/Transport, Generated Delivery, Proxy/Relink, and
-Recovery/Nesting already share the five-minute primary Sequence; Recovery owns
-one auxiliary nested child rather than a second primary. Color Media Roundtrip
-remains a useful focused gate, but the complete command intentionally fails
-closed until it converges. The current Hero gaps are exactly two: the HLG
-Main10 and sRGB Alpha fixtures. There are no remaining unbound operation,
-content, or export obligations.
+and export to be assigned to the Hero Sequence role. All seven stages share the
+five-minute primary Sequence; Recovery owns one auxiliary nested child rather
+than another primary, and Color Media retains that exact two-Sequence project
+shape. There are no remaining global or Hero ledger gaps.
 
-Once the Hero ledger is complete, the Rust coordinator accepts only the exact
+The Rust coordinator accepts only the exact
 declared slice-report set, requires every slice to retain
-`complete_golden_project: false`, and requires all Hero-assigned slices to
+`complete_golden_project: false`, and requires all stages to
 report the same primary `SequenceId`. It waits for proxy work to quiesce,
 performs one final durable reopen, verifies the exact full-duration Hero content
-boundary, and compares every Sequence snapshot, Project identity, relink
-source/proxy intent, and reimported `H264High`/`HevcMain10` assets. It alone may
+boundary, and compares scoped author anchors, every Sequence snapshot, Project
+identity, relink source/proxy intent, Color Media identities, and reimported
+`H264High`/`HevcMain10` assets. It alone may
 write a complete report. The PowerShell supervisor independently verifies the
 Hero identity and may then classify three distinct run/Project identities as a
 consecutive pass under `target/validation/runs/`.
+
+The reproducible local run
+`20260725T172841Z-complete-golden-d631639d` passed `3/3`: each pass used a
+distinct run and Project identity, all seven primary Sequence IDs resolved to
+that pass's Hero, and the final project contained exactly Hero plus one nested
+child. This closes the Golden single-project composition gate only. It does not
+claim qualified release-machine performance, long-duration device/A/V evidence,
+fault injection, or an independent absolute HLG/PQ/Log reference.
 
 Heavy GPU/media work intentionally runs on a dedicated process main lifetime,
 not a libtest worker. The terminal JSON report is the semantic completion
@@ -302,7 +317,10 @@ cargo test -p mondrian-app --lib `
 ```
 
 The slice requires first-class `StillImage` import, a zero-rate Media hold,
-two product-authored video Tracks, exact 25-frame trim, and durable reopen. It
+two directly adjacent product-authored Hero video Tracks, exact placement in
+`350..375`, and durable reopen. HLG is below Alpha; the HLG Clip retains its
+exact source interval, and color-reference execution selects the original source
+rather than a proxy. It
 then decodes through the production Preview media Adapter, uses the shared
 float-linear compositor, checks HLG decoded codes plus neutral/chromatic
 invariants, compares sRGB→linear Rec.2020 against an independent analytic
@@ -504,13 +522,13 @@ machine-specific bundle. The Golden v9 contract resolves PCM, AAC, Rec.709
 H.264, HLG Main10, and sRGB Alpha fixture identities and assigns all five to
 executable slices.
 `foundation-audio-authoring-v1`, `visual-authoring-roundtrip-v1`,
-`editorial-transport-v1`, `generated-delivery-roundtrip-v1`, and
-`proxy-relink-v1` and `recovery-nesting-v1` now share one Hero Sequence;
-Recovery adds one nested child while Proxy/Relink retains a real focused
+`editorial-transport-v1`, `generated-delivery-roundtrip-v1`,
+`proxy-relink-v1`, `recovery-nesting-v1`, and `color-media-roundtrip-v1`
+now share one Hero Sequence. Recovery adds one nested child while Proxy/Relink retains a real focused
 Headless product-workflow gate rather than becoming a declaration-only check.
-`color-media-roundtrip-v1` adds real file-backed
-color/Alpha execution, while explicitly retaining the independent absolute
-HLG/PQ/Log gap. The H.264 editorial fixture is not eligible to close
+Color Media adds real file-backed color/Alpha execution in `350..375`, while
+explicitly retaining the independent absolute HLG/PQ/Log gap. The H.264
+editorial fixture is not eligible to close
 primary-color or LUT coverage. Stress coverage
 also still lacks 4K60 and broader Log/VFR/multichannel/damaged-media fixtures,
 so `Nightly/Release -Scope All` correctly remains blocked.

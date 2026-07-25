@@ -62,14 +62,17 @@ pub(super) fn execute_export_roundtrip(
     state: &mut AppState,
     output_directory: &Path,
     program_output_rgba: &[u8],
+    start_frame: i64,
     decode_context: &mut PreviewDecodeSessionContext,
 ) -> anyhow::Result<ExportRoundtripEvidence> {
     let preset = builtin_preset("h264-aac-sdr")?.preset();
+    let end_frame_exclusive =
+        start_frame.checked_add(1).context("Color Media export frame overflowed")?;
     let execution = execute_export_job(
         state,
         preset,
         state.active_sequence().map(|sequence| sequence.id),
-        TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 1 },
+        TimelineExportRange::WorkArea { start_frame, end_frame_exclusive },
         output_directory.join("color-media-roundtrip-h264.mp4"),
         EXPORT_TIMEOUT,
     )?;

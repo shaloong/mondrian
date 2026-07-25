@@ -353,8 +353,8 @@ fn resolve_hero_sequence_id(
 }
 
 #[test]
-#[ignore = "composed Golden stages require canonical PCM/AAC/H.264 fixtures, FFmpeg proxy/export encoders, and a Windows Basic Title font"]
-fn golden_authoring_proxy_recovery_share_one_hero_sequence() -> anyhow::Result<()> {
+#[ignore = "composed Golden stages require canonical PCM/AAC/H.264/HLG/Alpha fixtures, FFmpeg proxy/export encoders, and a Windows Basic Title font"]
+fn golden_all_stages_share_one_hero_sequence() -> anyhow::Result<()> {
     let root = repository_root();
     let (contract, mut run) =
         ComposedRun::create(&root, "Windows Alpha Golden Hero Authoring", false)?;
@@ -416,6 +416,37 @@ fn golden_authoring_proxy_recovery_share_one_hero_sequence() -> anyhow::Result<(
     stages.visual.verify_retained_authoring(run.workflow.app())?;
     stages.delivery.verify_retained_authoring(run.workflow.app())?;
     proxy.verify_retained_authoring(run.workflow.app())?;
+    let foundation_before_color = stages.foundation.capture_audio_anchor(run.workflow.app())?;
+    let editorial_before_color = stages.editorial.capture_authoring_anchor(run.workflow.app())?;
+    let recovery_before_color = recovery.capture_authoring_anchor(run.workflow.app())?;
+    let color = color_media_roundtrip::execute_color_media_stage(
+        &root,
+        &contract,
+        &mut run.workflow,
+        &output_directory,
+    )?;
+    ensure!(
+        color.primary_sequence_id() == stages.sequence_id
+            && run.workflow.app().active_sequence_id() == Some(stages.sequence_id)
+            && run.workflow.app().sequences().len() == 2,
+        "focused Color Media did not reuse Hero while retaining one nested child"
+    );
+    ensure!(
+        foundation_before_color == stages.foundation.capture_audio_anchor(run.workflow.app())?,
+        "focused Color Media changed Foundation authoring"
+    );
+    ensure!(
+        editorial_before_color == stages.editorial.capture_authoring_anchor(run.workflow.app())?,
+        "focused Color Media changed Editorial authoring"
+    );
+    ensure!(
+        recovery_before_color == recovery.capture_authoring_anchor(run.workflow.app())?,
+        "focused Color Media changed Recovery/Nesting authoring"
+    );
+    stages.visual.verify_retained_authoring(run.workflow.app())?;
+    stages.delivery.verify_retained_authoring(run.workflow.app())?;
+    proxy.verify_retained_authoring(run.workflow.app())?;
+    color.verify_retained_authoring(run.workflow.app())?;
     ensure!(
         run.workflow.project_id() == project_id
             && run.workflow.project_path() == project_path
@@ -610,6 +641,9 @@ fn execute_complete_golden_project(
         recovery_nesting::RECOVERY_NESTING_SLICE_ID.to_owned(),
         recovery_nesting_sequence_id,
     );
+    let foundation_before_color = hero.foundation.capture_audio_anchor(run.workflow.app())?;
+    let editorial_before_color = hero.editorial.capture_authoring_anchor(run.workflow.app())?;
+    let recovery_before_color = recovery_nesting.capture_authoring_anchor(run.workflow.app())?;
     let color_media = color_media_roundtrip::execute_color_media_stage(
         root,
         contract,
@@ -622,20 +656,32 @@ fn execute_complete_golden_project(
         color_media_roundtrip::COLOR_MEDIA_SLICE_ID,
         &color_media,
     )?;
-    let color_media_sequence_id = run
-        .workflow
-        .app()
-        .active_sequence()
-        .context("color-media Sequence is absent")?
-        .id;
+    let color_media_sequence_id = color_media.primary_sequence_id();
     ensure!(
-        ![hero_sequence_id, nested_sequence_id].contains(&color_media_sequence_id),
-        "color-media did not create a distinct stage Sequence"
+        color_media_sequence_id == hero_sequence_id
+            && run.workflow.app().active_sequence_id() == Some(hero_sequence_id)
+            && run.workflow.app().sequences().len() == 2,
+        "Color Media did not reuse Hero while retaining one nested child"
     );
+    ensure!(
+        foundation_before_color == hero.foundation.capture_audio_anchor(run.workflow.app())?,
+        "Color Media changed the Foundation Track-owned audio authoring projection"
+    );
+    ensure!(
+        editorial_before_color == hero.editorial.capture_authoring_anchor(run.workflow.app())?,
+        "Color Media changed the Editorial Track-owned audio authoring projection"
+    );
+    ensure!(
+        recovery_before_color == recovery_nesting.capture_authoring_anchor(run.workflow.app())?,
+        "Color Media changed Recovery/Nesting Track or child authoring"
+    );
+    hero.visual.verify_retained_authoring(run.workflow.app())?;
+    hero.delivery.verify_retained_authoring(run.workflow.app())?;
     proxy_relink.verify_retained_authoring(run.workflow.app())?;
+    color_media.verify_retained_authoring(run.workflow.app())?;
     stage_sequence_ids.insert(
         color_media_roundtrip::COLOR_MEDIA_SLICE_ID.to_owned(),
-        vec![color_media_sequence_id],
+        vec![hero_sequence_id],
     );
     stage_primary_sequence_ids.insert(
         color_media_roundtrip::COLOR_MEDIA_SLICE_ID.to_owned(),
@@ -725,6 +771,11 @@ fn execute_complete_golden_project(
         "final durable reopen lost relinked source identity or proxy author intent"
     );
     proxy_relink.verify_retained_authoring(run.workflow.app())?;
+    ensure!(
+        recovery_before_color == recovery_nesting.capture_authoring_anchor(run.workflow.app())?,
+        "final durable reopen changed Recovery/Nesting Track or child authoring"
+    );
+    color_media.verify_retained_authoring(run.workflow.app())?;
     let exported_profiles = assets
         .iter()
         .filter(|asset| {

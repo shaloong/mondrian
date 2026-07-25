@@ -87,6 +87,31 @@ impl GoldenRecoveryNestingReport {
     pub(super) fn nested_sequence_id(&self) -> SequenceId {
         self.setup.nested_sequence_id
     }
+
+    pub(super) fn capture_authoring_anchor(
+        &self,
+        state: &AppState,
+    ) -> anyhow::Result<GoldenRecoveryAuthoringAnchor> {
+        capture_recovery_authoring_anchor(
+            state,
+            self.primary_sequence_id(),
+            self.setup.video_track_id,
+            self.setup.replacement_clip_id,
+            self.setup.nested_sequence_id,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct GoldenRecoveryAuthoringAnchor {
+    parent_sequence_id: SequenceId,
+    parent_track_id: TrackId,
+    replacement_clip_id: ClipId,
+    nested_sequence_id: SequenceId,
+    replacement_position: TimelineTime,
+    replacement_duration: TimelineTime,
+    parent_track_sha256: String,
+    nested_sequence_sha256: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -205,6 +230,49 @@ fn sha256_file(path: &Path) -> anyhow::Result<String> {
     Ok(sha256_bytes(
         &std::fs::read(path).with_context(|| format!("read {}", path.display()))?,
     ))
+}
+
+fn capture_recovery_authoring_anchor(
+    state: &AppState,
+    parent_sequence_id: SequenceId,
+    parent_track_id: TrackId,
+    replacement_clip_id: ClipId,
+    nested_sequence_id: SequenceId,
+) -> anyhow::Result<GoldenRecoveryAuthoringAnchor> {
+    let parent = state
+        .sequence_by_id(parent_sequence_id)
+        .context("Recovery Hero Sequence is absent")?;
+    let parent_track = parent
+        .video_tracks
+        .iter()
+        .find(|track| track.id == parent_track_id)
+        .context("Recovery parent Track is absent")?;
+    ensure!(
+        parent_track.clips.len() == 1,
+        "Recovery parent Track no longer contains exactly one replacement Clip"
+    );
+    let replacement = parent_track
+        .clips
+        .iter()
+        .find(|clip| clip.id == replacement_clip_id)
+        .context("Recovery nested replacement Clip is absent")?;
+    ensure!(
+        replacement.nested_sequence_id() == Some(nested_sequence_id),
+        "Recovery replacement Clip changed its nested Sequence identity"
+    );
+    let nested = state
+        .sequence_by_id(nested_sequence_id)
+        .context("Recovery nested Sequence is absent")?;
+    Ok(GoldenRecoveryAuthoringAnchor {
+        parent_sequence_id,
+        parent_track_id,
+        replacement_clip_id,
+        nested_sequence_id,
+        replacement_position: replacement.position,
+        replacement_duration: replacement.duration,
+        parent_track_sha256: sha256_bytes(&serde_json::to_vec(parent_track)?),
+        nested_sequence_sha256: sha256_bytes(&serde_json::to_vec(nested)?),
+    })
 }
 
 fn new_solid_asset(state: &mut AppState) -> anyhow::Result<mondrian_core::AssetId> {
