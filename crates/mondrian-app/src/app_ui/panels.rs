@@ -147,6 +147,12 @@ use crate::app::{
 };
 use crate::app_ui::action_availability::app_state_action_enabled;
 use crate::app_ui::icons::AppIcon;
+use crate::app_ui::inspector_source_timing::{
+    inspector_forward_rate_action, inspector_freeze_action, inspector_source_timing_model,
+};
+pub use crate::app_ui::inspector_source_timing::{
+    InspectorSourceTimingMode, InspectorSourceTimingModel,
+};
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 use crate::app_ui::shortcuts::shortcut_label_for_action;
 use crate::app_ui::workspace_layout::AppUiWorkspaceLayout;
@@ -1542,6 +1548,8 @@ pub struct InspectorPanelModel {
     pub out_frame: f32,
     /// Maximum timeline frame used by timing sliders.
     pub max_frame: f32,
+    /// Canonical source-time state for file-backed or nested content.
+    pub source_timing: Option<InspectorSourceTimingModel>,
     /// Preferred color-picker area style for this inspector instance.
     pub tint_area_mode: ColorPickerAreaMode,
     /// Opacity animation projected through stable property/key identities.
@@ -1745,6 +1753,13 @@ impl InspectorPanelModel {
                 })
                 .map(|position| position.frame.max(1) as f32)
                 .unwrap_or(1.0),
+            source_timing: inspector_source_timing_model(
+                state,
+                sequence,
+                resolved_selection,
+                clip,
+                time,
+            ),
             tint_area_mode: ColorPickerAreaMode::Wheel,
             opacity_curve: opacity_curve_model_for_clip(clip, time),
             audio_components: inspector_audio_components(state, clip),
@@ -1786,6 +1801,7 @@ impl InspectorPanelModel {
             in_frame: 0.0,
             out_frame: 1.0,
             max_frame: 1.0,
+            source_timing: None,
             tint_area_mode: ColorPickerAreaMode::Wheel,
             opacity_curve: None,
             audio_components: Vec::new(),
@@ -1813,6 +1829,7 @@ impl InspectorPanelModel {
             in_frame: 0.0,
             out_frame: 96.0,
             max_frame: 240.0,
+            source_timing: None,
             tint_area_mode: ColorPickerAreaMode::Wheel,
             opacity_curve: None,
             audio_components: Vec::new(),
@@ -5550,37 +5567,100 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
             )),
     );
 
-    panel = panel.with_section(
-        PropertySection::new("时间")
-            .with_row(PropertyRow::new(
-                "In",
-                numeric_slider_input_control(
-                    model.in_frame,
-                    0.0,
-                    model.max_frame,
-                    Some(1.0),
-                    0,
-                    can_edit,
-                    move |value| {
-                        inspector_timing_action(selected_clip, TimelineTrimPayloadEdge::In, value)
-                    },
+    let mut timing_section = PropertySection::new("时间")
+        .with_row(PropertyRow::new(
+            "In",
+            numeric_slider_input_control(
+                model.in_frame,
+                0.0,
+                model.max_frame,
+                Some(1.0),
+                0,
+                can_edit,
+                move |value| {
+                    inspector_timing_action(selected_clip, TimelineTrimPayloadEdge::In, value)
+                },
+            ),
+        ))
+        .with_row(PropertyRow::new(
+            "Out",
+            numeric_slider_input_control(
+                model.out_frame,
+                0.0,
+                model.max_frame,
+                Some(1.0),
+                0,
+                can_edit,
+                move |value| {
+                    inspector_timing_action(selected_clip, TimelineTrimPayloadEdge::Out, value)
+                },
+            ),
+        ));
+    if let Some(source_timing) = model.source_timing {
+        match source_timing.mode {
+            InspectorSourceTimingMode::Forward { rate_percent } => {
+                let rate_enabled = can_edit && source_timing.can_set_forward_rate;
+                timing_section = timing_section.with_row(PropertyRow::new(
+                    "速度 (%)",
+                    numeric_slider_input_control_with_hard_range(
+                        rate_percent,
+                        1.0,
+                        400.0,
+                        0.01,
+                        10_000.0,
+                        Some(0.01),
+                        2,
+                        rate_enabled,
+                        move |value| inspector_forward_rate_action(selected_clip, value),
+                    ),
+                ));
+            }
+            InspectorSourceTimingMode::Hold => {
+                timing_section = timing_section.with_row(PropertyRow::new(
+                    "源时间",
+                    Box::new(Label::new("定格").muted()),
+                ));
+                let rate_enabled = can_edit && source_timing.can_set_forward_rate;
+                timing_section = timing_section.with_row(PropertyRow::new(
+                    "恢复速度 (%)",
+                    numeric_slider_input_control_with_hard_range(
+                        100.0,
+                        1.0,
+                        400.0,
+                        0.01,
+                        10_000.0,
+                        Some(0.01),
+                        2,
+                        rate_enabled,
+                        move |value| inspector_forward_rate_action(selected_clip, value),
+                    ),
+                ));
+            }
+            InspectorSourceTimingMode::ReverseUnsupported { rate_percent } => {
+                timing_section = timing_section.with_row(PropertyRow::new(
+                    "源时间",
+                    Box::new(Label::new(format!("反向 {rate_percent:.2}%（暂不可编辑）")).muted()),
+                ));
+            }
+        }
+        if source_timing.supports_picture_hold {
+            let freeze_target = source_timing.freeze_at_playhead;
+            let label = match (source_timing.mode, freeze_target) {
+                (_, None) => "先将播放头移入片段",
+                (InspectorSourceTimingMode::Hold, Some(_)) => "更新为播放头画面",
+                _ => "在播放头创建定格",
+            };
+            timing_section = timing_section.with_row(PropertyRow::new(
+                "定格帧",
+                Box::new(
+                    Button::new(label)
+                        .enabled(can_edit && freeze_target.is_some())
+                        .on_click(inspector_freeze_action(selected_clip, freeze_target)),
                 ),
-            ))
-            .with_row(PropertyRow::new(
-                "Out",
-                numeric_slider_input_control(
-                    model.out_frame,
-                    0.0,
-                    model.max_frame,
-                    Some(1.0),
-                    0,
-                    can_edit,
-                    move |value| {
-                        inspector_timing_action(selected_clip, TimelineTrimPayloadEdge::Out, value)
-                    },
-                ),
-            )),
-    );
+            ));
+        }
+    }
+    panel = panel.with_section(timing_section);
 
     if !model.effects.is_empty() {
         for (index, effect) in model.effects.iter().enumerate() {
@@ -6550,7 +6630,7 @@ mod tests {
     use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::types::AssetId;
-    use mondrian_core::{SmpteCountingMode, TimelineDisplaySettings};
+    use mondrian_core::{FramePosition, SmpteCountingMode, TimelineDisplaySettings};
     use mondrian_effects::EffectNodeExt;
     use mondrian_ui_core::tree::WidgetTreeView;
     use mondrian_ui_core::types::{
@@ -6765,6 +6845,157 @@ mod tests {
     }
 
     #[test]
+    fn inspector_model_projects_exact_forward_rate_and_playhead_hold_target() {
+        let root = unique_temp_dir("inspector-source-timing");
+        let library = AssetLibrary::open(root.join("library")).expect("asset library");
+        let media_path = root.join("retime-source.mp4");
+        std::fs::write(&media_path, [0u8]).expect("media fixture");
+        let media_info = test_video_asset(AssetId::new(), media_path.clone()).media_info;
+        let asset_id = library
+            .upsert_media_file_with_info(&media_path, media_info)
+            .expect("register video Asset");
+        let mut sequence = Sequence::new("Inspector source timing");
+        let time_base = sequence.time_base();
+        let track_id = sequence.video_tracks[0].id;
+        let mut clip =
+            Clip::new(asset_id, TimelineTime::ZERO, tt(12, time_base)).expect("video Clip");
+        clip.set_constant_source_time_map(
+            TimelineTime::ZERO,
+            TimeScale::new(3, 2).expect("exact 150 percent rate"),
+        )
+        .expect("set source-time map");
+        let clip_id = clip.id;
+        sequence.video_tracks[0].add_clip(clip).expect("add video Clip");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.test_set_asset_library(Some(library));
+        state.selection.selected_clips =
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
+        state.seek(4);
+
+        let model = InspectorPanelModel::from_app_state(&state);
+        let source_timing = model.source_timing.expect("source-timing model");
+        assert_eq!(
+            source_timing.mode,
+            InspectorSourceTimingMode::Forward { rate_percent: 150.0 }
+        );
+        assert!(source_timing.can_set_forward_rate);
+        assert!(source_timing.supports_picture_hold);
+        assert_eq!(
+            source_timing.freeze_at_playhead,
+            Some(FramePosition::new(4, time_base))
+        );
+
+        state.active_sequence_mut_uncommitted().expect("active Sequence").video_tracks[0].clips[0]
+            .set_constant_source_time_map(
+                tt(6, time_base),
+                TimeScale::new(0, 1).expect("exact hold"),
+            )
+            .expect("set hold");
+        let held_model = InspectorPanelModel::from_app_state(&state);
+        let held_timing = held_model.source_timing.expect("held source-timing model");
+        assert_eq!(held_timing.mode, InspectorSourceTimingMode::Hold);
+        assert!(held_timing.can_set_forward_rate);
+        assert_eq!(
+            held_timing.freeze_at_playhead,
+            Some(FramePosition::new(4, time_base))
+        );
+
+        state.active_sequence_mut_uncommitted().expect("active Sequence").video_tracks[0].clips[0]
+            .set_constant_source_time_map(tt(12, time_base), TimeScale::NEGATIVE_ONE)
+            .expect("set reverse map fixture");
+        let reverse_model = InspectorPanelModel::from_app_state(&state);
+        let reverse_timing = reverse_model.source_timing.expect("reverse source-timing model");
+        assert_eq!(
+            reverse_timing.mode,
+            InspectorSourceTimingMode::ReverseUnsupported { rate_percent: 100.0 }
+        );
+        assert!(!reverse_timing.can_set_forward_rate);
+        assert!(!reverse_timing.supports_picture_hold);
+        assert_eq!(reverse_timing.freeze_at_playhead, None);
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn inspector_model_does_not_offer_retime_for_known_still_images() {
+        let root = unique_temp_dir("inspector-still-source-timing");
+        let library = AssetLibrary::open(root.join("library")).expect("asset library");
+        let media_path = root.join("still.png");
+        std::fs::write(&media_path, [0u8]).expect("media fixture");
+        let mut media_info = test_video_asset(AssetId::new(), media_path.clone()).media_info;
+        media_info.video_streams[0].total_frames = Some(1);
+        let asset_id = library
+            .upsert_media_file_with_info(&media_path, media_info)
+            .expect("register still Asset");
+        let mut sequence = Sequence::new("Inspector still");
+        let time_base = sequence.time_base();
+        let track_id = sequence.video_tracks[0].id;
+        let clip = Clip::new_still_image(asset_id, TimelineTime::ZERO, tt(25, time_base))
+            .expect("still Clip");
+        let clip_id = clip.id;
+        sequence.video_tracks[0].add_clip(clip).expect("add still Clip");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.test_set_asset_library(Some(library));
+        state.selection.selected_clips =
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
+
+        let model = InspectorPanelModel::from_app_state(&state);
+
+        assert_eq!(model.source_timing, None);
+        drop(state);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn inspector_source_timing_actions_use_exact_typed_author_commands() {
+        let selection = SelectedClipRef {
+            track_id: TrackId::new(),
+            is_video_track: true,
+            clip_id: ClipId::new(),
+        };
+        assert_eq!(
+            inspector_forward_rate_action(Some(selection), 150.0),
+            Action::SetClipForwardRate {
+                clip_id: selection.clip_id,
+                rate: TimeScale::new(3, 2).expect("exact 150 percent rate"),
+                include_linked: true,
+            }
+        );
+        assert_eq!(
+            inspector_forward_rate_action(Some(selection), 33.33),
+            Action::SetClipForwardRate {
+                clip_id: selection.clip_id,
+                rate: TimeScale::new(3_333, 10_000).expect("basis-point rate"),
+                include_linked: true,
+            }
+        );
+        assert_eq!(inspector_forward_rate_action(None, 100.0), Action::NoOp);
+        for invalid in [f32::NAN, f32::INFINITY, -1.0, 0.0, 10_000.01] {
+            assert_eq!(
+                inspector_forward_rate_action(Some(selection), invalid),
+                Action::NoOp
+            );
+        }
+
+        let sequence_time = FramePosition::new(42, Rational::new(1, 25));
+        assert_eq!(
+            inspector_freeze_action(Some(selection), Some(sequence_time)),
+            Action::FreezeVideoClipAt { clip_id: selection.clip_id, sequence_time }
+        );
+        assert_eq!(inspector_freeze_action(Some(selection), None), Action::NoOp);
+        assert_eq!(
+            inspector_freeze_action(
+                Some(SelectedClipRef { is_video_track: false, ..selection }),
+                Some(sequence_time),
+            ),
+            Action::NoOp
+        );
+    }
+
+    #[test]
     fn inspector_model_exposes_basic_title_properties_in_canonical_order() {
         let mut sequence = Sequence::new("Inspector Basic Title");
         let track_id = sequence.video_tracks[0].id;
@@ -6797,6 +7028,7 @@ mod tests {
             mondrian_core::BasicTitle::PROPERTY_PATHS
         );
         assert!(!model.shows_tint);
+        assert_eq!(model.source_timing, None);
         assert_eq!(
             model.clip_properties[0].value,
             PropertyValue::Text("Mondrian".to_owned())
@@ -11659,6 +11891,7 @@ mod tests {
             in_frame: 0.0,
             out_frame: 30.0,
             max_frame: 60.0,
+            source_timing: None,
             tint_area_mode: ColorPickerAreaMode::Wheel,
             opacity_curve: None,
             audio_components: Vec::new(),
@@ -11730,6 +11963,7 @@ mod tests {
             in_frame: 0.0,
             out_frame: 30.0,
             max_frame: 60.0,
+            source_timing: None,
             tint_area_mode: ColorPickerAreaMode::Wheel,
             opacity_curve: None,
             audio_components: Vec::new(),

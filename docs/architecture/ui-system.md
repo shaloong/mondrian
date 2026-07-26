@@ -503,10 +503,26 @@ same-asset relink from presenting stale waveform data.
 Constant retime also enters through typed semantic Actions rather than a panel
 mutating Clip fields. `SetClipForwardRate` carries an exact positive
 `TimeScale` and an explicit link-group policy; `FreezeVideoClipAt` carries one
-Sequence-grid `FramePosition` and never retimes linked audio. A future speed
-dialog or context-menu surface must emit these Actions and derive availability
-from current Track/content state. It cannot synthesize reverse by sending a
-negative rate until direction-aware half-open source sampling exists.
+Sequence-grid `FramePosition` and never retimes linked audio. The Inspector
+projects the canonical source map only for file-backed media and nested
+Sequences. Positive rates use a combined slider/number input; displayed
+percentages are quantized at the Action seam to exact 0.01-percent basis points,
+so `150.00%` becomes `TimeScale(3/2)` rather than a floating-point author value.
+The Inspector applies positive rates to the selected Clip's complete link group
+and offers picture hold only for a video Clip whose dependency is resolved and
+whose playhead lies inside its half-open placement. A held picture may resume at
+an explicit positive rate; linked audio is left at its existing rate by the
+hold itself.
+
+This low-frequency projection is only product availability guidance. The App
+authoring Module remains responsible for resolving current stable membership,
+Track locks, source extents, and Transition handles immediately before atomic
+commit. Known still-image Assets have no speed control: their zero-rate map is
+intrinsic placement semantics, not a user-created freeze frame. Missing
+dependencies disable mutation without hiding the persisted map. Negative maps
+remain visible as a read-only reverse state; the Inspector cannot synthesize or
+edit reverse until direction-aware strict-predecessor sampling exists across
+Preview, audio, and Export.
 
 Asset thumbnails follow the same Window boundary but retain an independent
 execution policy. `AppUiHost` owns one

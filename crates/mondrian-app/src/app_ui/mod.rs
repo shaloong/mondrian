@@ -13,6 +13,7 @@ pub mod commands;
 pub(crate) mod display_probe_impl;
 pub mod host;
 pub mod icons;
+mod inspector_source_timing;
 pub mod interpret_asset_dialog;
 pub mod menu_bar;
 pub mod modal;
