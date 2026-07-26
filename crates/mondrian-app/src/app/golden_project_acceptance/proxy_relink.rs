@@ -8,6 +8,7 @@ use super::harness::{
 };
 #[cfg(test)]
 use super::harness::{new_run_directory, rooted_env_path, write_report};
+use super::retime_media_evidence::{execute_retime_media_evidence, GoldenRetimeMediaEvidence};
 use super::workflow::{GoldenProductWorkflowDriver, GoldenSequenceStageEvidence};
 #[cfg(test)]
 use super::{load_golden_contract, repository_root, sequence_settings_from_contract};
@@ -30,7 +31,8 @@ use mondrian_assets::{AssetKind, AssetRecord};
 use mondrian_core::events::AppEvent;
 use mondrian_core::timeline_data::AlphaInterpretation;
 use mondrian_core::{
-    AssetId, ClipId, ExecutionTerminalDisposition, FramePosition, SequenceId, TimelineTime, TrackId,
+    AssetId, ClipId, ExecutionTerminalDisposition, FramePosition, SequenceId, TimeScale,
+    TimelineTime, TrackId,
 };
 use mondrian_editor_state::Action;
 use mondrian_media::info::{PixelFormat, VideoCodec, VideoCodecProfile};
@@ -87,7 +89,7 @@ struct LibraryRelinkTransitionEvidence {
     reload_event_published: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(tag = "id")]
 enum OperationEvidence {
     #[serde(rename = "proxy-original-switch")]
@@ -115,6 +117,10 @@ enum OperationEvidence {
         replacement_generation: ProxyExecutionEvidence,
         replacement_proxy: ResolvedPathEvidence,
     },
+    #[serde(rename = "constant-retime")]
+    ConstantRetime {
+        evidence: Box<GoldenRetimeMediaEvidence>,
+    },
 }
 
 impl OperationEvidence {
@@ -122,6 +128,7 @@ impl OperationEvidence {
         match self {
             Self::ProxyOriginalSwitch { .. } => "proxy-original-switch",
             Self::OfflineRelink { .. } => "offline-relink",
+            Self::ConstantRetime { .. } => "constant-retime",
         }
     }
 }
@@ -151,6 +158,7 @@ struct GoldenProxyRelinkAuthoringAnchor {
     position: TimelineTime,
     duration: TimelineTime,
     source_origin: TimelineTime,
+    source_scale: TimeScale,
     source_terminal_boundary: TimelineTime,
     project_proxy_enabled: bool,
     asset_proxy_enabled: bool,
@@ -441,6 +449,7 @@ fn capture_proxy_relink_authoring_anchor(
         position: clip.position,
         duration: clip.duration,
         source_origin: clip.source_origin(),
+        source_scale: clip.source_time_scale(),
         source_terminal_boundary: clip.source_terminal_boundary()?,
         project_proxy_enabled: state.project_settings().proxy_enabled,
         asset_proxy_enabled: state.is_asset_proxy_mode(asset_id),
@@ -460,9 +469,10 @@ pub(super) fn execute_proxy_relink_stage(
         .context("proxy/relink Golden execution slice is missing")?;
     ensure!(
         slice.required_fixture_roles == ["rec709-h264-picture"]
-            && slice.required_operations == ["proxy-original-switch", "offline-relink"]
+            && slice.required_operations
+                == ["proxy-original-switch", "offline-relink", "constant-retime"]
             && slice.required_content.is_empty()
-            && slice.required_exports.is_empty(),
+            && slice.required_exports == ["h264-aac-sdr"],
         "proxy/relink slice contract drifted"
     );
     let window = slice.timeline_window.context("proxy/relink slice has no timeline window")?;
@@ -769,7 +779,24 @@ pub(super) fn execute_proxy_relink_stage(
         replacement_generation,
         replacement_proxy,
     };
-    let operations = vec![proxy_switch, offline_relink];
+    let retime = execute_retime_media_evidence(
+        state,
+        contract,
+        output_directory,
+        clip_id,
+        asset.id,
+        window,
+    )?;
+    ensure_exact_requirement_evidence(
+        &slice.required_exports,
+        std::iter::once(retime.export_id()),
+        "export",
+    )?;
+    let operations = vec![
+        proxy_switch,
+        offline_relink,
+        OperationEvidence::ConstantRetime { evidence: Box::new(retime) },
+    ];
     ensure_exact_requirement_evidence(
         &slice.required_operations,
         operations.iter().map(OperationEvidence::id),
@@ -786,7 +813,9 @@ pub(super) fn execute_proxy_relink_stage(
         authoring.position == expected_position
             && authoring.duration == expected_duration
             && authoring.source_origin == TimelineTime::ZERO
-            && authoring.source_terminal_boundary == expected_duration
+            && authoring.source_scale == TimeScale::new(1, 2)?
+            && authoring.source_terminal_boundary
+                == expected_duration.checked_scale(TimeScale::new(1, 2)?)?
             && authoring.project_proxy_enabled
             && authoring.asset_proxy_enabled,
         "Proxy/Relink retained authoring differs from the exact Hero window or proxy intent"
@@ -794,7 +823,7 @@ pub(super) fn execute_proxy_relink_stage(
     workflow.verify_binding()?;
 
     Ok(GoldenProxyRelinkReport {
-        schema_version: 3,
+        schema_version: 4,
         profile: PROXY_RELINK_SLICE_ID,
         contract_id: contract.id.clone(),
         corpus_revision: manifest.corpus_revision,
@@ -836,6 +865,7 @@ fn execute_proxy_relink_slice(
         mondrian_core::ProjectColorEnvironment::default(),
         project_settings,
     )?;
+    super::foundation_audio::execute_foundation_stage(root, &contract, &mut workflow)?;
     execute_proxy_relink_stage(root, &contract, &mut workflow, &paths.directory)
 }
 
@@ -863,7 +893,7 @@ fn golden_project_proxy_original_offline_relink_gate() -> anyhow::Result<()> {
         }
         Err(error) => {
             let failure = serde_json::json!({
-                "schema_version": 3,
+                "schema_version": 4,
                 "profile": PROXY_RELINK_SLICE_ID,
                 "status": "failed",
                 "complete_golden_project": false,

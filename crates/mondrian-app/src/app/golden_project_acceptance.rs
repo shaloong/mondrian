@@ -19,6 +19,7 @@ mod proxy_relink;
 mod recovery_nesting;
 #[cfg(test)]
 mod retime_execution;
+mod retime_media_evidence;
 mod visual_authoring;
 mod workflow;
 
@@ -567,6 +568,25 @@ fn golden_contract_is_closed_and_matches_product_delivery_presets() -> anyhow::R
     let root = repository_root();
     let contract = load_golden_contract(&root)?;
     let settings = sequence_settings_from_contract(&contract.timeline)?;
+    ensure!(
+        contract.id == "windows-alpha-golden-v11"
+            && contract
+                .required_operations
+                .iter()
+                .any(|operation| operation == "constant-retime"),
+        "M1 Golden Project must retain the versioned constant-retime obligation"
+    );
+    let proxy_relink = contract
+        .execution_slices
+        .iter()
+        .find(|slice| slice.id == proxy_relink::PROXY_RELINK_SLICE_ID)
+        .context("M1 Golden Project must retain the Proxy/Relink slice")?;
+    ensure!(
+        proxy_relink.required_operations
+            == ["proxy-original-switch", "offline-relink", "constant-retime"]
+            && proxy_relink.required_exports == ["h264-aac-sdr"],
+        "Proxy/Relink must close constant retime with a real H.264 delivery"
+    );
     ensure!(
         contract.exports.len() == 2,
         "M1 Golden Project must define two delivery gates"

@@ -150,7 +150,8 @@
       "purposes": [
         "golden-rec709-h264-picture",
         "proxy-original-switch",
-        "offline-relink"
+        "offline-relink",
+        "constant-retime"
       ]
     },
     {

@@ -145,7 +145,7 @@ impl OperationEvidence {
 }
 
 #[derive(Debug, Serialize)]
-struct ExportEvidence {
+pub(super) struct ExportEvidence {
     export_id: String,
     job_id: mondrian_core::JobId,
     generation: u64,
@@ -156,6 +156,12 @@ struct ExportEvidence {
     output_sha256: String,
     probe: ExportOutputProbe,
     av_boundaries: AvBoundaryEvidence,
+}
+
+impl ExportEvidence {
+    pub(super) fn output_path(&self) -> &Path {
+        &self.output_path
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -757,7 +763,7 @@ fn validate_av_boundaries(
     })
 }
 
-fn export_and_probe(
+pub(super) fn export_and_probe(
     state: &mut AppState,
     export: &GoldenExportContract,
     output_path: PathBuf,

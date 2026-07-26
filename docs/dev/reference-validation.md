@@ -11,7 +11,7 @@ control exists.
   purposes. Fixed files pin bytes globally; generated files pin the recipe and
   are byte-pinned by each run.
 - `tests/validation/golden-project.json` defines the five-minute editing and
-  export workflow. Contract identity `windows-alpha-golden-v10` uses closed
+  export workflow. Contract identity `windows-alpha-golden-v11` uses closed
   schema v4 and fixes exact Hero Sequence raster/timing/color/audio
   values, fixture-role purposes, stable built-in delivery preset identities,
   resolved profile/depth/chroma/range/Alpha expectations, and independently
@@ -75,7 +75,7 @@ cannot satisfy a color golden even when it carries valid CICP tags.
 
 An execution slice is intentionally narrower than the complete Golden Project.
 It passes only if its exact required fixture roles, operations, and content have
-typed postcondition evidence. Golden v10 rejects unknown fields; requirement IDs
+typed postcondition evidence. Golden v11 rejects unknown fields; requirement IDs
 select evidence obligations but cannot substitute for observed author, media,
 delivery, or persistence facts.
 Every slice report explicitly records `complete_golden_project: false`. A
@@ -115,7 +115,7 @@ cargo test -p mondrian-app --lib `
   --nocapture
 ```
 
-The v10 global ledger is structurally complete: every required fixture,
+The v11 global ledger is structurally complete: every required fixture,
 operation, content item, and export contract is assigned to one of seven
 executable slices, and every slice is assigned to the same Hero role. HLG
 Main10 and sRGB Alpha remain bound to deterministic project-owned recipes with
@@ -140,7 +140,7 @@ mutated in-memory contract to exercise diagnostic Sequence creation through the
 product authoring Interface. It returns to Hero through the product switching
 action and performs durable save/close/reopen. The private binding locks Hero
 ID, complete settings, and Project Color Environment; Project/path and both
-Sequences survive while only Session identity changes. The canonical v10
+Sequences survive while only Session identity changes. The canonical v11
 contract does not assign any acceptance slice to that diagnostic role. This is
 infrastructure evidence, not a Golden operation, and does not alter the ledger.
 
@@ -178,7 +178,15 @@ nonzero `150..175` Work Area, and preserves all earlier Track-owned authoring
 while it authors Trim, Transform, and Opacity.
 Proxy/Relink adds one dedicated video Track, trims the imported H.264 Clip to
 `200..350`, and proves Proxy→Original→Proxy plus offline Relink and replacement
-proxy generation without changing any preceding Track-owned anchor.
+proxy generation without changing any preceding Track-owned anchor. It then
+authors an exact `1/2` source map through the normal product Action. At timeline
+frame 250, Preview and Export plans must both resolve source time 1 second. A
+production Headless Viewer presents the proxy-backed current frame; the
+immutable export snapshot instead renders exact single-frame range `250..251`
+from the relinked original through H.264/AAC. Ordinary reimport/decode must be close to the 50% Program reference
+and materially farther from a separately rendered 100% counterfactual at source
+time 2 seconds. This rejects metadata-only retime, Preview/Export disagreement,
+wrong proxy/original authority, and an encoded output sampled from the old rate.
 Recovery must then preserve every earlier scoped anchor while its exact
 `175..200` parent placement, nested child, Autosave recovery, and covering
 manual reopen remain identical.
@@ -237,15 +245,31 @@ Hero identity and may then classify three distinct run/Project identities as a
 consecutive pass under `target/validation/runs/`.
 
 The reproducible local run
-`20260725T234232Z-complete-golden-42ccff21` passed the current v10 contract
+`20260725T234232Z-complete-golden-42ccff21` passed the preceding v10 contract
 `3/3`: each pass used a distinct run and Project identity, all seven primary
 Sequence IDs resolved to that pass's Hero, and the final project contained
 exactly Hero plus one nested child. The aggregate report SHA-256 is
 `4edaeb0404fad68b813f5592a0533b86788414b3f3142ac88be04e46fb5ca8aa`.
-The preceding v9 run `20260725T172841Z-complete-golden-d631639d` remains
+The current v11 contract adds fixed-corpus constant-retime decode, presentation,
+export, and counterfactual reimport evidence, so the v10 result is now
+historical and cannot satisfy the current three-run release obligation. The
+preceding v9 run `20260725T172841Z-complete-golden-d631639d` likewise remains
 historical composition evidence. No Golden run claims qualified
 release-machine performance, long-duration device/A/V evidence, fault
 injection, or an independent absolute HLG/PQ/Log reference.
+
+The official v11 supervisor run
+`20260726T075954Z-complete-golden-30ffb812` passed `3/3` against the isolated
+Golden fixture root. All passes used distinct run and Project identities, all
+seven primary Sequence IDs resolved to each pass's one Hero, and every final
+Project contained exactly Hero plus one nested child. The aggregate report
+SHA-256 is
+`e596fc2756eada710d84a0873dcd5e13f49c7d33ee35b8c959e6e130465ece4f`.
+Each process emitted and durably published its complete passing report in
+roughly 57–58 seconds, then required the documented five-second process-detach
+recovery; the supervisor recorded `forced_after_terminal_report: true` without
+changing semantic status. This current evidence supersedes v10 for the Golden
+release repetition obligation only.
 
 Heavy GPU/media work intentionally runs on a dedicated process main lifetime,
 not a libtest worker. The terminal JSON report is the semantic completion
@@ -527,14 +551,18 @@ plan on the qualified 16 GiB Windows reference machine and was classified
 `passed-baseline`. Its generated artifacts and evidence bundle remain
 intentionally disposable under `target`; the repository commits the recipes,
 contracts, and this reproducible result record rather than a multi-gigabyte
-machine-specific bundle. The Golden v10 contract resolves PCM, AAC, Rec.709
+machine-specific bundle. The Golden v11 contract resolves PCM, AAC, Rec.709
 H.264, HLG Main10, and sRGB Alpha fixture identities and assigns all five to
 executable slices.
 `foundation-audio-authoring-v1`, `visual-authoring-roundtrip-v1`,
 `editorial-transport-v2`, `generated-delivery-roundtrip-v1`,
 `proxy-relink-v1`, `recovery-nesting-v1`, and `color-media-roundtrip-v1`
-now share one Hero Sequence. Recovery adds one nested child while Proxy/Relink retains a real focused
-Headless product-workflow gate rather than becoming a declaration-only check.
+now share one Hero Sequence. Recovery adds one nested child while Proxy/Relink
+retains a real focused Headless product-workflow gate rather than becoming a
+declaration-only check. The same real H.264 fixture now closes exact 50% source
+mapping through proxy presentation, original-source production export, ordinary
+reimport, and a 100% counterfactual comparison; its manifest purpose is explicit
+and the fixture is still not eligible as a color reference.
 Color Media adds real file-backed color/Alpha execution in `350..375`, while
 explicitly retaining the independent absolute HLG/PQ/Log gap. The H.264
 editorial fixture is not eligible to close

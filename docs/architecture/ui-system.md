@@ -320,7 +320,7 @@ values observed under a distinct fresh Session after load. Action admission or
 a human-readable status hint alone cannot satisfy a Golden operation.
 
 Golden validation has one UI-independent planning Module. It compiles the
-closed schema-v4 / `windows-alpha-golden-v10` contract into two deterministic
+closed schema-v4 / `windows-alpha-golden-v11` contract into two deterministic
 ledgers of required fixture roles, operations, content, and exports. The global
 ledger finds work absent from every slice; the Hero ledger independently finds
 work that exists only in isolated diagnostic Sequences. A slice declares one
@@ -416,16 +416,28 @@ deterministic execution evidence. The recovered Session must remain dirty and
 the recovery archive authoritative until a covering manual save atomically
 retires it. A final composed reopen must preserve the fixed Project binding,
 the two Sequences present at the Recovery boundary, earlier stage content,
-relinked Asset intent, and both typed reimport profiles. The later Color Media
-stage keeps that count at two, reuses Hero in the `350..375` window, and retains
-its two adjacent file-backed Track/Clip/Asset anchors without changing the
-Recovery parent Track or child. All seven stage primaries now share Hero. The
+relinked Asset intent, its exact `1/2` Clip source map, and both typed reimport
+profiles. Proxy/Relink owns the fixed-corpus constant-retime product evidence:
+the Inspector-independent Action advances one author transaction, Preview and
+Export plans must lower the same exact source time, a Headless Viewer presents
+through the production proxy path, and a production H.264/AAC export from the
+immutable original-source snapshot is reimported and compared with both the
+correct Program reference and an incorrect 100% counterfactual. The later Color
+Media stage keeps that count at two, reuses Hero in the `350..375` window, and
+retains its two adjacent file-backed Track/Clip/Asset anchors without changing
+the Recovery parent Track or child. All seven stage primaries now share Hero. The
 supervised run `20260725T172841Z-complete-golden-d631639d` passed three distinct
-run/Project identities under the preceding v9 contract. The current v10
+run/Project identities under the preceding v9 contract. The v10
 supervised run `20260725T234232Z-complete-golden-42ccff21` then passed three
 fresh run/Project identities with Lift/Extract required and observed; its
 aggregate report hash is
 `4edaeb0404fad68b813f5592a0533b86788414b3f3142ac88be04e46fb5ca8aa`.
+It is historical after the v11 constant-retime obligation and cannot satisfy
+the current three-run gate. The official v11 run
+`20260726T075954Z-complete-golden-30ffb812` passed three fresh run/Project
+identities with the fixed-corpus constant-retime evidence required and observed;
+its aggregate report hash is
+`e596fc2756eada710d84a0873dcd5e13f49c7d33ee35b8c959e6e130465ece4f`.
 Earlier eight-Sequence runs remain diagnostic history.
 Qualified release-machine capture and independent HDR/Log numeric references
 remain separate acceptance obligations.

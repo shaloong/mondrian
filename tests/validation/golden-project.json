@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "id": "windows-alpha-golden-v10",
+  "id": "windows-alpha-golden-v11",
   "kind": "golden",
   "hero_sequence": {
     "role": "hero",
@@ -68,6 +68,7 @@
     "undo-redo",
     "proxy-original-switch",
     "offline-relink",
+    "constant-retime",
     "autosave-recovery",
     "save-reopen",
     "export",
@@ -136,10 +137,13 @@
       ],
       "required_operations": [
         "proxy-original-switch",
-        "offline-relink"
+        "offline-relink",
+        "constant-retime"
       ],
       "required_content": [],
-      "required_exports": [],
+      "required_exports": [
+        "h264-aac-sdr"
+      ],
       "timeline_window": {
         "start_frame": 200,
         "end_frame_exclusive": 350

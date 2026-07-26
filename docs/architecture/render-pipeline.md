@@ -809,6 +809,21 @@ deliverables are decoded through the production Preview media Adapter and
 compared at the same coordinates. This remains deterministic Mondrian
 regression evidence; it does not replace the independent external color
 references described below.
+The Golden v11 Proxy/Relink gate adds fixed-corpus retime evidence without a
+second time interpreter. One exact `1/2` Clip source map is lowered by the
+ordinary Preview and Export requests at timeline frame 250; both must demand
+source time 1 second. The gate renders a Program reference from that canonical
+time and a separate 100% counterfactual at source time 2 seconds. It then
+presents the proxy-backed current frame through the production Headless Viewer,
+exports `250..251` from an immutable original-source snapshot through the
+production H.264/AAC queue, and reimports/decodes the published file. The
+encoded raster must remain within the bounded lossy-codec tolerance of the
+correct Program reference and materially farther from the counterfactual. Exact
+source-time equality, proxy/original resolution evidence, decode provenance,
+GPU presentation completion, export terminal disposition, stream boundaries,
+and both pixel distances are retained in one operation report. A metadata-only
+speed change, a parallel Export mapping, or a proxy accidentally used as the
+delivery source therefore fails closed.
 The Color Media Hero gate adds a file-backed proof at frame 350. It imports HLG
 Main10 and sRGB straight-Alpha through production media authoring, evaluates the
 original rather than proxy source on two adjacent Hero Tracks, shares the
