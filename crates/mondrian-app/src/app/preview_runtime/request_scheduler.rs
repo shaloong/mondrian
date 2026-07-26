@@ -1,7 +1,7 @@
 //! Preview prefetch, preroll, adaptive-hint, and Broker-admission Adapter.
 
 use super::*;
-use crate::app::preview_timeline_execution::collect_preview_timeline_media_demands;
+use crate::app::preview_timeline_execution::collect_preview_timeline_media_demands_with_schedules;
 
 const MEDIA_PREVIEW_COLD_ACTIVATION_LOOKAHEAD_US: u64 = 2_000_000;
 const MEDIA_PREVIEW_COLD_ACTIVATION_MAX_FRAMES: i64 = 120;
@@ -104,13 +104,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         if *remaining_prefetch_jobs == 0 {
             return false;
         }
-        let demands = collect_preview_timeline_media_demands(
+        let demands = collect_preview_timeline_media_demands_with_schedules(
             sequence,
             state.sequences(),
             frame,
             Resolution { width: target_width, height: target_height },
             state.playback_preview_resolution_scale(),
             color_context,
+            &self.visual_schedules,
         );
         let Ok(demands) = demands else {
             return false;
@@ -212,13 +213,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         target_height: u32,
         color_context: ProgramColorContext,
     ) -> MediaPrerollFrameReadiness {
-        let Ok(demands) = collect_preview_timeline_media_demands(
+        let Ok(demands) = collect_preview_timeline_media_demands_with_schedules(
             sequence,
             state.sequences(),
             frame,
             Resolution { width: target_width, height: target_height },
             state.playback_preview_resolution_scale(),
             color_context,
+            &self.visual_schedules,
         ) else {
             return MediaPrerollFrameReadiness::required_not_ready();
         };

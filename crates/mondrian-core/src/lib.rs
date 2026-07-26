@@ -26,7 +26,6 @@ pub mod mask_data;
 pub mod ocio;
 pub mod parameter;
 pub mod project;
-pub mod render_graph;
 pub mod timeline_data;
 pub mod timeline_time;
 pub mod title;

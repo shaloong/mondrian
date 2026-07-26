@@ -6,6 +6,7 @@
 //! only immutable Sequence snapshots and a narrow media-frame closure; Window
 //! and Headless Adapters cannot maintain separate recursion or color math.
 
+use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -24,6 +25,7 @@ use mondrian_renderer::{
 use mondrian_timeline::sequence::{
     MediaInputColorContext, ProgramColorContext, Sequence, MAX_NESTED_SEQUENCE_RENDER_DEPTH,
 };
+use mondrian_timeline::PreparedVisualScheduleCache;
 
 use super::preview_cpu_execution::{
     composite_resolved_preview_working, PreviewCpuExecutionDurations,
@@ -139,7 +141,33 @@ pub(crate) fn collect_preview_timeline_media_demands(
     runtime_scale: PreviewResolutionScale,
     color_context: ProgramColorContext,
 ) -> Result<Vec<PreviewTimelineMediaRequest>, PreviewUnavailability> {
-    let graph = PreviewTimelineGraph { root_sequence: sequence, sequences, runtime_scale };
+    let schedules = RefCell::new(PreparedVisualScheduleCache::default());
+    collect_preview_timeline_media_demands_with_schedules(
+        sequence,
+        sequences,
+        frame,
+        target_resolution,
+        runtime_scale,
+        color_context,
+        &schedules,
+    )
+}
+
+pub(crate) fn collect_preview_timeline_media_demands_with_schedules(
+    sequence: &Sequence,
+    sequences: &[Sequence],
+    frame: i64,
+    target_resolution: Resolution,
+    runtime_scale: PreviewResolutionScale,
+    color_context: ProgramColorContext,
+    schedules: &RefCell<PreparedVisualScheduleCache>,
+) -> Result<Vec<PreviewTimelineMediaRequest>, PreviewUnavailability> {
+    let graph = PreviewTimelineGraph {
+        root_sequence: sequence,
+        sequences,
+        runtime_scale,
+        schedules,
+    };
     let mut demands = Vec::new();
     collect_sequence_media_demands(
         graph,
@@ -164,7 +192,37 @@ pub(crate) fn resolve_preview_timeline(
     media_frame: &mut impl FnMut(PreviewTimelineMediaRequest) -> PreviewTimelineMediaFrame,
     title_frame: &mut impl FnMut(PreviewTimelineTitleRequest) -> PreviewTimelineTitleFrame,
 ) -> PreviewTimelineResolution {
-    let graph = PreviewTimelineGraph { root_sequence: sequence, sequences, runtime_scale };
+    let schedules = RefCell::new(PreparedVisualScheduleCache::default());
+    resolve_preview_timeline_with_schedules(
+        sequence,
+        sequences,
+        frame,
+        target_resolution,
+        runtime_scale,
+        color_context,
+        media_frame,
+        title_frame,
+        &schedules,
+    )
+}
+
+pub(crate) fn resolve_preview_timeline_with_schedules(
+    sequence: &Sequence,
+    sequences: &[Sequence],
+    frame: i64,
+    target_resolution: Resolution,
+    runtime_scale: PreviewResolutionScale,
+    color_context: ProgramColorContext,
+    media_frame: &mut impl FnMut(PreviewTimelineMediaRequest) -> PreviewTimelineMediaFrame,
+    title_frame: &mut impl FnMut(PreviewTimelineTitleRequest) -> PreviewTimelineTitleFrame,
+    schedules: &RefCell<PreparedVisualScheduleCache>,
+) -> PreviewTimelineResolution {
+    let graph = PreviewTimelineGraph {
+        root_sequence: sequence,
+        sequences,
+        runtime_scale,
+        schedules,
+    };
     let mut execution =
         PreviewTimelineExecutionContext { graph, media_frame, title_frame, facts: Vec::new() };
     let elements = match resolve_sequence_elements(
@@ -202,6 +260,7 @@ struct PreviewTimelineGraph<'a> {
     root_sequence: &'a Sequence,
     sequences: &'a [Sequence],
     runtime_scale: PreviewResolutionScale,
+    schedules: &'a RefCell<PreparedVisualScheduleCache>,
 }
 
 struct NestedPreviewSequence<'a> {
@@ -216,8 +275,17 @@ impl<'a> PreviewTimelineGraph<'a> {
         sequence: &Sequence,
         frame: i64,
     ) -> Result<TimelineRenderPlan, PreviewUnavailability> {
+        let schedule = self.schedules.borrow_mut().prepare(sequence).map_err(|error| {
+            PreviewUnavailability::blocked(
+                PreviewOutputStage::TimelineEvaluation,
+                format!(
+                    "Sequence {} visual-schedule preparation failed: {error}",
+                    sequence.id
+                ),
+            )
+        })?;
         evaluate_timeline_render_plan(
-            sequence,
+            schedule.as_ref(),
             TimelineEvaluationRequest::preview(
                 frame.max(0),
                 normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale),

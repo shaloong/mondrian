@@ -21,6 +21,7 @@ pub mod sequence;
 mod sequence_time_edit;
 pub mod track;
 pub mod video_transition;
+pub mod visual_schedule;
 
 pub use audio::*;
 pub use clip::{ActiveClip, Clip, ClipKind, ClipSourceTimeMap};
@@ -50,3 +51,8 @@ pub use sequence::{
 };
 pub use track::{Track, TrackType};
 pub use video_transition::{VideoTransition, VideoTransitionSourceDemand, VideoTransitionType};
+pub use visual_schedule::{
+    PreparedVisualSchedule, PreparedVisualScheduleCache, PreparedVisualScheduleCacheDiagnostics,
+    PreparedVisualScheduleDiagnostics, PreparedVisualScheduleQueryDiagnostics,
+    DEFAULT_PREPARED_VISUAL_SCHEDULE_CACHE_CAPACITY,
+};

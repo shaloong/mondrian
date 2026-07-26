@@ -201,6 +201,7 @@ pub struct PreviewProductionRuntime<O: Clone> {
     playback_pressure: Cell<PlaybackPressureState>,
     scheduler: MediaPreviewScheduler,
     title_task: RefCell<PreviewTitleTask>,
+    visual_schedules: RefCell<mondrian_timeline::PreparedVisualScheduleCache>,
     scratch: RefCell<TimelineCompositeScratch>,
     last_color_rejection: RefCell<Option<PreviewColorRejection>>,
     unavailability_evidence: RefCell<PreviewUnavailabilityEvidence>,
@@ -290,6 +291,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             playback_pressure: Cell::new(PlaybackPressureState::default()),
             scheduler,
             title_task: RefCell::new(PreviewTitleTask::default()),
+            visual_schedules: RefCell::new(
+                mondrian_timeline::PreparedVisualScheduleCache::default(),
+            ),
             scratch: RefCell::new(TimelineCompositeScratch::default()),
             last_color_rejection: RefCell::new(None),
             unavailability_evidence: RefCell::new(PreviewUnavailabilityEvidence::default()),

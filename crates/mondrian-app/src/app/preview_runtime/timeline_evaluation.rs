@@ -2,8 +2,9 @@
 
 use super::*;
 use crate::app::preview_timeline_execution::{
-    resolve_preview_timeline, PreviewTimelineExecutionFact, PreviewTimelineMediaRequest,
-    PreviewTimelinePendingDependency, PreviewTimelineResolution, PreviewTimelineTitleRequest,
+    resolve_preview_timeline_with_schedules, PreviewTimelineExecutionFact,
+    PreviewTimelineMediaRequest, PreviewTimelinePendingDependency, PreviewTimelineResolution,
+    PreviewTimelineTitleRequest,
 };
 
 impl<O: Clone> PreviewProductionRuntime<O> {
@@ -20,7 +21,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             |request: PreviewTimelineMediaRequest| self.media_frame_for_plan(state, request);
         let mut title_frame =
             |request: PreviewTimelineTitleRequest| self.title_frame_for_plan(request);
-        let resolution = resolve_preview_timeline(
+        let resolution = resolve_preview_timeline_with_schedules(
             sequence,
             state.sequences(),
             frame,
@@ -29,6 +30,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             color_context,
             &mut media_frame,
             &mut title_frame,
+            &self.visual_schedules,
         );
         match &resolution {
             PreviewTimelineResolution::Ready(resolved) => {

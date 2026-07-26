@@ -5165,9 +5165,9 @@ fn empty_root_timeline_is_a_transparent_presentation_and_breaks_stale_reuse() {
     let (width, height) = preview_dimensions_for_sequence(sequence);
     assert!(service.stale_frame_for_sequence(sequence, width, height).is_some());
 
-    state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0]
-        .clips
-        .clear();
+    let sequence = state.active_sequence_mut_uncommitted().expect("sequence");
+    sequence.video_tracks[0].clips.clear();
+    sequence.revision = sequence.revision.checked_next().expect("test author revision can advance");
     assert!(matches!(
         service.viewer_preview_for_state(&state),
         ViewerPreviewState::Transparent

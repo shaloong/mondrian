@@ -21,7 +21,7 @@ foundation:
 
 ## Crate Responsibilities
 
-- `mondrian-core`: shared value types, strong IDs, project settings, canonical audio signal layouts, color primitives, automation/keyframe data, mask/effect data, timeline render-plan data traits. It must not depend on UI, platform, media, renderer, or app crates.
+- `mondrian-core`: shared value types, strong IDs, project settings, canonical audio signal layouts, color primitives, automation/keyframe data, mask/effect data, and timeline render-plan data traits. It owns no executable Render Graph; visual graph definition/compilation lives only in `mondrian-effects`, and frame-plan evaluation lives in `mondrian-renderer`. It must not depend on UI, platform, media, renderer, or app crates.
 - `mondrian-editor-state`: editor actions and state enums shared by UI and app
   code. It remains UI-toolkit agnostic; exact forward-rate and freeze-frame
   intents carry typed Clip IDs, `TimeScale`, and `FramePosition`, while the App
@@ -40,7 +40,9 @@ foundation:
 - `mondrian-ui-widgets`: reusable controls and editor surfaces. Widgets depend on tokens and action dispatch, not app persistence.
 - `mondrian-app`: product shell, app state, command/action handling, project lifecycle, window/runtime wiring, panel adapters.
 - `mondrian-assets`: SQLite-backed project asset library and virtual asset records.
-- `mondrian-timeline`: sequence/track/clip domain model and editing commands.
+- `mondrian-timeline`: sequence/track/clip domain model, editing commands, and
+  the revision-bound Prepared Visual Schedule used to index immutable visual
+  placement semantics for production execution.
 - `mondrian-media`: FFmpeg probing/decoding plus media source, waveform, proxy,
   cache, Audio Playback, and physical output adapters. It does not interpret
   Timeline audio routing or processor order.

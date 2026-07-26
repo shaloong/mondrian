@@ -528,9 +528,21 @@ shortened range in the same single Undo transaction. Export snapshot capture
 repeats the preflight because relink or child edits can change a recoverable
 external dependency without making the author graph structurally illegal.
 
+`PreparedVisualSchedule` compiles each exact `SequenceId + SequenceRevision`
+into immutable per-Track interval indexes while retaining authored Track and
+Clip order. Preview and Export production Sessions own bounded schedule caches
+and query this representation at exact Timeline Time; they do not scan every
+Clip placement for each frame. Preparation validates all visual Transition
+references and intervals before publication. A failed preparation cannot enter
+the cache, and a revision change cannot reuse or retain an older schedule for
+the same Sequence identity.
+
 `RenderPlanSource::flat_visual_items_at` projects ordinary Clips and explicit
-two-input Transitions as ordered visual items. During the Transition interval,
-one Transition replaces both endpoint placements at that Track stack position.
+two-input Transitions from either the direct Sequence reference Adapter or its
+Prepared Visual Schedule as ordered visual items. The two Implementations must
+remain semantically identical at every half-open interval edge. During the
+Transition interval, one Transition replaces both endpoint placements at that
+Track stack position.
 Both endpoint source times remain unclamped, so Preview/Export either obtain
 the requested handles or fail; neither repeats a boundary frame. Cross Dissolve
 is executed by the shared Preview/Export CPU working compositor. Product
@@ -615,4 +627,11 @@ candidate is then fully validated and atomically committed by
 
 ## Render Projection
 
-Timeline internals are projected into `FlatActiveClip` through `RenderPlanSource`. `mondrian-renderer` consumes that trait and must not depend on `Sequence`, `Track`, or `Clip` internals.
+Timeline internals are projected into `FlatVisualItem` through
+`RenderPlanSource`. `mondrian-renderer` consumes that Interface and must not
+depend on `Sequence`, `Track`, or `Clip` internals. Direct Sequence projection
+is the scalar semantic reference; Preview and Export production paths consume
+the revision-bound Prepared Visual Schedule Implementation. The schedule owns
+selection acceleration only—effect compilation, exact property evaluation,
+media adaptation, compositing, and consumer scheduling remain in their
+existing Modules.

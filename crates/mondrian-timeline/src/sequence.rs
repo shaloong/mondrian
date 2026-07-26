@@ -1558,7 +1558,7 @@ impl Sequence {
     }
 }
 
-fn validate_video_transition(
+pub(crate) fn validate_video_transition(
     video_tracks: &[Track],
     transition: &crate::video_transition::VideoTransition,
 ) -> mondrian_core::Result<()> {
@@ -1657,10 +1657,7 @@ impl mondrian_core::timeline_data::RenderPlanSource for Sequence {
         &self,
         time: TimelineTime,
     ) -> mondrian_core::Result<Vec<mondrian_core::timeline_data::FlatVisualItem>> {
-        use mondrian_core::timeline_data::{
-            FlatTransitionProgress, FlatVideoTransition, FlatVideoTransitionDefinition,
-            FlatVisualItem,
-        };
+        use mondrian_core::timeline_data::FlatVisualItem;
 
         let mut items = Vec::new();
         for (track_index, track) in self.video_tracks.iter().enumerate() {
@@ -1700,28 +1697,15 @@ impl mondrian_core::timeline_data::RenderPlanSource for Sequence {
                             )
                         },
                     )?;
-                let definition = match &transition.transition_type {
-                    crate::video_transition::VideoTransitionType::CrossDissolve => {
-                        FlatVideoTransitionDefinition::CrossDissolve
-                    }
-                    crate::video_transition::VideoTransitionType::Plugin { definition_id } => {
-                        FlatVideoTransitionDefinition::Plugin {
-                            definition_id: definition_id.clone(),
-                        }
-                    }
-                };
-                items.push(FlatVisualItem::Transition(Box::new(FlatVideoTransition {
-                    transition_id: transition.id,
-                    definition,
-                    left: flatten_visual_clip(left, track, track_index, track_opacity, time)?,
-                    right: flatten_visual_clip(right, track, track_index, track_opacity, time)?,
-                    progress: FlatTransitionProgress {
-                        elapsed: time.checked_sub(transition.sequence_range.start)?,
-                        duration: transition.sequence_range.duration,
-                    },
-                    properties: transition.properties.clone(),
-                    params: transition.params.clone(),
-                })));
+                items.push(flatten_visual_transition(
+                    transition,
+                    left,
+                    right,
+                    track,
+                    track_index,
+                    track_opacity,
+                    time,
+                )?);
                 replaced_endpoints = Some((transition.left, transition.right));
             }
 
@@ -1756,7 +1740,7 @@ impl mondrian_core::timeline_data::RenderPlanSource for Sequence {
     }
 }
 
-fn flatten_visual_clip(
+pub(crate) fn flatten_visual_clip(
     clip: &crate::clip::Clip,
     track: &Track,
     track_index: usize,
@@ -1785,6 +1769,41 @@ fn flatten_visual_clip(
         blend_mode: clip.blend_mode.unwrap_or(track.blend_mode),
         track_index,
     })
+}
+
+pub(crate) fn flatten_visual_transition(
+    transition: &crate::video_transition::VideoTransition,
+    left: &crate::clip::Clip,
+    right: &crate::clip::Clip,
+    track: &Track,
+    track_index: usize,
+    track_opacity: f32,
+    time: TimelineTime,
+) -> mondrian_core::Result<mondrian_core::timeline_data::FlatVisualItem> {
+    use mondrian_core::timeline_data::{
+        FlatTransitionProgress, FlatVideoTransition, FlatVideoTransitionDefinition, FlatVisualItem,
+    };
+
+    let definition = match &transition.transition_type {
+        crate::video_transition::VideoTransitionType::CrossDissolve => {
+            FlatVideoTransitionDefinition::CrossDissolve
+        }
+        crate::video_transition::VideoTransitionType::Plugin { definition_id } => {
+            FlatVideoTransitionDefinition::Plugin { definition_id: definition_id.clone() }
+        }
+    };
+    Ok(FlatVisualItem::Transition(Box::new(FlatVideoTransition {
+        transition_id: transition.id,
+        definition,
+        left: flatten_visual_clip(left, track, track_index, track_opacity, time)?,
+        right: flatten_visual_clip(right, track, track_index, track_opacity, time)?,
+        progress: FlatTransitionProgress {
+            elapsed: time.checked_sub(transition.sequence_range.start)?,
+            duration: transition.sequence_range.duration,
+        },
+        properties: transition.properties.clone(),
+        params: transition.params.clone(),
+    })))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

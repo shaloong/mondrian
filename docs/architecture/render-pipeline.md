@@ -4,6 +4,7 @@ The intended render path is shared by preview and export:
 
 ```text
 TimelineEvaluationRequest
+  -> Prepared Visual Schedule query
   -> Timeline Evaluation
   -> FlatVisualItem (Clip or two-input Transition)
   -> TimelineRenderPlan
@@ -31,6 +32,19 @@ same lowering and may differ in scheduling or quality policy, never in time
 interpretation. Timeline lowering obtains `source_time` only through the
 Clip's canonical source-time map; the renderer never reads or reconstructs a
 parallel source range or speed field.
+
+Production evaluation first prepares one immutable visual schedule for the
+exact Sequence identity and author revision. The schedule's interval index
+selects active Clips and Transitions without changing their authored order or
+evaluation semantics. Preview Runtime and Export Visual Render Session each
+own a bounded cache: Preview reuses it across root/nested Viewer evaluation,
+prefetch, and preroll; Export reuses it across root/nested frame rendering.
+Diagnostic traversals consume the same prepared representation through a
+short-lived consumer cache. A revision miss recompiles; successful publication
+evicts older revisions of that Sequence, while preparation failure blocks the
+request and never replaces the last valid entry.
+The direct Sequence `RenderPlanSource` remains the reference Adapter used to
+prove semantic parity, not a second production interpretation.
 
 Clip transforms are authored against stable source and Sequence picture
 extents, not against whichever decode/output sizes an execution happens to use.
@@ -68,6 +82,10 @@ color-space metadata.
 `evaluate_timeline_render_plan(...)` is the render-plan entry point. Callers
 must choose an explicit `TimelineEvaluationRequest` intent so preview, export,
 thumbnail, and analysis paths cannot accidentally share ambiguous defaults.
+Its `RenderPlanSource` Interface deliberately hides whether visual placement
+selection came from the direct reference Adapter or the Prepared Visual
+Schedule; renderer logic therefore cannot reconstruct Timeline indexes or
+cache Sequence internals.
 
 `TimelineRenderPlanElement` variants are:
 

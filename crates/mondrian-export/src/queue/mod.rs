@@ -50,6 +50,7 @@ use mondrian_timeline::sequence::{
     DeliveryBitDepth, InputColorResolutionSourceCounts, ProgramColorContext, ResolvedInputColor,
     SequenceSettings, VideoRange, MAX_NESTED_SEQUENCE_RENDER_DEPTH,
 };
+use mondrian_timeline::PreparedVisualScheduleCache;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufWriter, Write};
@@ -2311,6 +2312,7 @@ struct ResolvedExportTitle {
 #[derive(Default)]
 struct ExportVisualRenderSession {
     title_rasterizer: BasicTitleRasterizer,
+    visual_schedules: PreparedVisualScheduleCache,
 }
 
 /// Frame-scoped execution dependencies shared by root, nested, and Transition
@@ -2350,6 +2352,7 @@ pub fn export_input_color_resolution_counts_for_frame(
     timeline: &TimelineExportSnapshot,
     timeline_frame: i64,
 ) -> Result<InputColorResolutionSourceCounts, String> {
+    let mut visual_schedules = PreparedVisualScheduleCache::default();
     let color_context = timeline
         .sequence
         .settings
@@ -2360,6 +2363,7 @@ pub fn export_input_color_resolution_counts_for_frame(
         timeline_frame,
         color_context,
         0,
+        &mut visual_schedules,
     )
 }
 
@@ -2477,14 +2481,18 @@ fn export_sequence_input_color_resolution_counts(
     timeline_frame: i64,
     color_context: ProgramColorContext,
     depth: usize,
+    visual_schedules: &mut PreparedVisualScheduleCache,
 ) -> Result<InputColorResolutionSourceCounts, String> {
     if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
         return Err("序列嵌套层级过深，已停止统计输入色彩解析以避免循环".to_string());
     }
 
-    let render_plan =
-        evaluate_timeline_render_plan(sequence, TimelineEvaluationRequest::export(timeline_frame))
-            .map_err(|error| error.to_string())?;
+    let schedule = visual_schedules.prepare(sequence).map_err(|error| error.to_string())?;
+    let render_plan = evaluate_timeline_render_plan(
+        schedule.as_ref(),
+        TimelineEvaluationRequest::export(timeline_frame),
+    )
+    .map_err(|error| error.to_string())?;
     let mut counts = InputColorResolutionSourceCounts::default();
     for element in &render_plan.elements {
         match element {
@@ -2523,6 +2531,7 @@ fn export_sequence_input_color_resolution_counts(
                     nested_frame,
                     nested_context,
                     depth + 1,
+                    visual_schedules,
                 )?;
                 counts.accumulate(nested_counts);
             }
@@ -2535,12 +2544,14 @@ fn export_sequence_input_color_resolution_counts(
                     &transition.left,
                     color_context.clone(),
                     depth,
+                    visual_schedules,
                 )?);
                 counts.accumulate(export_transition_input_color_resolution_counts(
                     timeline,
                     &transition.right,
                     color_context.clone(),
                     depth,
+                    visual_schedules,
                 )?);
             }
         }
@@ -2553,6 +2564,7 @@ fn export_transition_input_color_resolution_counts(
     input: &TimelineTransitionInputPlan,
     color_context: ProgramColorContext,
     depth: usize,
+    visual_schedules: &mut PreparedVisualScheduleCache,
 ) -> Result<InputColorResolutionSourceCounts, String> {
     let mut counts = InputColorResolutionSourceCounts::default();
     match input {
@@ -2592,6 +2604,7 @@ fn export_transition_input_color_resolution_counts(
                 frame,
                 nested_context,
                 depth + 1,
+                visual_schedules,
             )?);
         }
     }
@@ -2621,9 +2634,17 @@ fn render_sequence_frame_into(
         }
     }
 
-    let render_plan =
-        evaluate_timeline_render_plan(sequence, TimelineEvaluationRequest::export(timeline_frame))
-            .map_err(|error| error.to_string())?;
+    let schedule = context.visual_session.visual_schedules.prepare(sequence).map_err(|error| {
+        format!(
+            "Sequence {} visual-schedule preparation failed: {error}",
+            sequence.id
+        )
+    })?;
+    let render_plan = evaluate_timeline_render_plan(
+        schedule.as_ref(),
+        TimelineEvaluationRequest::export(timeline_frame),
+    )
+    .map_err(|error| error.to_string())?;
     if render_plan.is_empty() {
         finish_empty_sequence_target(
             &mut target,
