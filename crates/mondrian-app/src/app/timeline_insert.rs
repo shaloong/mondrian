@@ -79,8 +79,7 @@ impl AppState {
                         TimelineTime::ZERO,
                         duration,
                     )?;
-                    clip.source_in = source_in;
-                    clip.source_out = source_in.checked_add(duration)?;
+                    clip.set_source_origin(source_in)?;
                     clip.label = Some(asset.name.clone());
                     clip.link_group = link_group;
                     if let Some(video) = asset.media_info.primary_video() {
@@ -95,8 +94,7 @@ impl AppState {
 
                 if let Some(track_id) = payload.audio_target_track_id {
                     let mut clip = Clip::new(asset.id, TimelineTime::ZERO, duration)?;
-                    clip.source_in = source_in;
-                    clip.source_out = source_in.checked_add(duration)?;
+                    clip.set_source_origin(source_in)?;
                     clip.label = Some(asset.name.clone());
                     clip.link_group = link_group;
                     sequence.attach_default_media_audio_component(

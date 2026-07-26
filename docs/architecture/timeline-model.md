@@ -243,9 +243,10 @@ See [Audio Pipeline](audio-pipeline.md) for the author/compiler boundary.
 ## Clip
 
 `Clip` is one Timeline placement, never an Asset or Sequence definition. It
-owns position/source ranges, a stable `clip_time_in`, transform, speed, visual
-effects, masks, optional link-group membership, blend mode, and placement-local
-audio Component Edits. Its content is one closed `ClipContent` payload:
+owns one placement range, one closed `ClipSourceTimeMap`, a stable
+`clip_time_in`, transform, visual effects, masks, optional link-group
+membership, blend mode, and placement-local audio Component Edits. Its content
+is one closed `ClipContent` payload:
 
 - `Media { asset_id, interpretation }`
 - `AdjustmentLayer { asset_id }`
@@ -268,17 +269,32 @@ Every Clip-owned visual processor uses one exact Clip-local author coordinate:
 Transform, Opacity, visual Effects, Masks, and generated visual content.
 Sequence evaluation maps
 `clip_time = clip_time_in + (sequence_time - position)`. Moving the placement,
-slipping the source, or changing the source Speed Map preserves
+slipping the source, or changing the source time map preserves
 `clip_time_in`; trimming the in edge, splitting, or creating a right-hand
 overwrite fragment advances it by the removed placement duration. Source time
-is separately derived through `source_in` and `SpeedMap` and controls only
-media/nested sampling. This prevents placement, source selection, and visual
-processing from becoming three accidental authorities for one property.
+is separately derived through `ClipSourceTimeMap` and controls only
+media/nested sampling. The current closed `Constant` variant stores exactly a
+`source_origin` and an exact `TimeScale`: positive, negative, and zero scales
+mean forward sampling, reverse sampling, and a hold. The source coordinate at
+the exclusive placement end is always derived as `map(duration)`; no mutable
+`source_out` or parallel speed field is persisted. For reverse sampling,
+`source_origin` is the first sampled coordinate rather than the minimum of an
+interval, and the derived terminal boundary may be earlier. This prevents
+placement, source selection, and visual processing from becoming accidental
+competing authorities.
+
+Future variable time remapping must add a validated closed
+`ClipSourceTimeMap` variant with exact segment ordering, continuity,
+source-boundary, and inverse/ambiguity semantics. Ordinary parameter automation
+cannot stand in for this domain transform, and compatibility fields cannot be
+added beside it. Author transaction validation checks placement, Clip-local,
+and complete source-map arithmetic before a snapshot may commit.
 
 A file-backed still is not another `ClipContent` variant. The Asset Library
 classifies the physical source as `StillImage`, while `Clip::new_still_image`
-creates ordinary `Media` content with one explicit zero-rate `SpeedMap` and
-`source_out == source_in`. Its Timeline duration is therefore independent of
+creates ordinary `Media` content with one explicit zero-rate
+`ClipSourceTimeMap`; its derived terminal boundary equals `source_origin`. Its
+Timeline duration is therefore independent of
 source duration, out-trim may extend it, and every evaluation samples the same
 source instant. Moving, splitting, nesting, effects, Alpha, Preview, and Export
 continue through the normal Media path. A probe that proves multiple picture
@@ -521,8 +537,9 @@ working-space-dependent operation includes the projected identity in its
 compiled graph/cache signature, so changing Sequence settings cannot reuse
 pixels evaluated under the previous coefficients or processing domain.
 
-Transform, speed, blend mode, solid color, masks, and effects are currently
-exposed through `PropertyHost`/`PropertyBag`. Every product definition carries
+Transform, blend mode, solid color, masks, and effects are currently exposed
+through `PropertyHost`/`PropertyBag`; the source-time map is a separate exact
+domain transform rather than parameter automation. Every product definition carries
 a versioned `ParameterSchema` with an address-independent `ParameterId`, value
 type, definition default, automation capability, typed unit,
 numeric/enum/resource, Hold/Linear/Bezier execution semantics, message, and

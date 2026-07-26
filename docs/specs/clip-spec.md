@@ -9,9 +9,8 @@ Every Clip owns:
 
 - stable `ClipId`;
 - one closed `ClipContent` payload;
-- exact rational `position`, `duration`, `clip_time_in`, `source_in`, and
-  `source_out`;
-- exact speed/time mapping;
+- exact rational `position`, `duration`, and `clip_time_in`;
+- one closed exact `ClipSourceTimeMap`;
 - built-in visual Transform and opacity;
 - ordered visual effects and masks;
 - optional `ClipLinkGroupId` membership;
@@ -22,12 +21,16 @@ Timeline coverage is the half-open range `[position, position + duration)`.
 The visible Clip visual-author range is
 `[clip_time_in, clip_time_in + duration)`. Transform, Opacity, visual Effects,
 Masks, and generated visual content all evaluate in this one Clip-local
-domain. Moving the placement, slipping the source, or changing the source Speed
-Map preserves `clip_time_in`; an in-edge Trim, Split, or right-hand overwrite
+domain. Moving the placement, slipping the source, or changing the source time
+map preserves `clip_time_in`; an in-edge Trim, Split, or right-hand overwrite
 fragment advances it by the removed placement duration.
 `timeline_to_source_time()` subtracts placement position, applies the explicit
-time transform, and adds `source_in`. Persisted author coordinates are
-`TimelineTime`; frame numbers are evaluation/display projections only.
+source-time map, and returns the exact source coordinate. The current constant
+variant owns `source_origin` and an exact `TimeScale`; its terminal boundary is
+derived by mapping `duration`, never persisted independently. Positive,
+negative, and zero scales express forward, reverse, and hold semantics.
+Persisted author coordinates are `TimelineTime`; frame numbers are
+evaluation/display projections only.
 
 ## Closed content variants
 
@@ -51,10 +54,10 @@ properties make the author snapshot invalid.
 
 ## Built-in and effect properties
 
-Built-in Transform, opacity, speed, Solid Color, and Basic Title properties are
-not removable. UI may reset or hide them but cannot present them as deletable
-effect instances. Visual effects remain ordered instances with their own stable
-`EffectId` and definition-backed Property Bags.
+Built-in Transform, opacity, source-time mapping, Solid Color, and Basic Title
+state are not removable. UI may reset or hide them but cannot present them as
+deletable effect instances. Visual effects remain ordered instances with their
+own stable `EffectId` and definition-backed Property Bags.
 
 ## Link semantics
 

@@ -138,7 +138,11 @@ materialized its surrounding stock-OCIO passes.
 
 ## Basic Properties
 
-Built-in transform/speed/blend/solid color are clip properties, not removable user effects. The Inspector may present them in an effect-like stack for consistency, but deleting core transform properties is invalid and should be rejected by domain code.
+Built-in transform/blend/solid-color state and the exact Clip source-time map
+are not removable user effects. The Inspector may present them in an
+effect-like stack for consistency, but deleting these core Clip contracts is
+invalid and must be rejected by domain code. Source retiming remains a typed
+time-domain transform, not visual parameter automation.
 
 ## Masks, Mattes, Blend Modes, Adjustment Layers
 

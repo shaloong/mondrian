@@ -195,8 +195,7 @@ mod tests {
     fn source_handle_validation_uses_unclamped_two_input_demands() {
         let left = Clip::new(AssetId::new(), tt(0), tt(10)).expect("left");
         let mut right = Clip::new(AssetId::new(), tt(10), tt(10)).expect("right");
-        right.source_in = tt(5);
-        right.source_out = tt(15);
+        right.set_source_origin(tt(5)).expect("set source origin");
         let transition = VideoTransition::cross_dissolve(
             left.id,
             right.id,

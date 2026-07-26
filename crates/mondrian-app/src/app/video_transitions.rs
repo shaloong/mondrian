@@ -476,10 +476,12 @@ fn source_extent_in_sequence_time(
     clip: &Clip,
     extent: TimelineTimeRange,
 ) -> mondrian_core::Result<Option<TimelineTimeRange>> {
-    if clip.speed.scale().numerator() == 0 {
+    if clip.source_time_scale().numerator() == 0 {
         let end = extent.end()?;
-        return Ok((clip.source_in >= extent.start && clip.source_in < end)
-            .then_some(TimelineTimeRange::new(clip.position, clip.duration)?));
+        return Ok(
+            (clip.source_origin() >= extent.start && clip.source_origin() < end)
+                .then_some(TimelineTimeRange::new(clip.position, clip.duration)?),
+        );
     }
     let first = clip.source_to_timeline_time(extent.start)?;
     let second = clip.source_to_timeline_time(extent.end()?)?;
@@ -574,8 +576,7 @@ mod tests {
     fn handle_admission_rejects_by_default_and_shortens_only_explicitly() {
         let left = Clip::new(AssetId::new(), tt(0), tt(10)).expect("left");
         let mut right = Clip::new(AssetId::new(), tt(10), tt(10)).expect("right");
-        right.source_in = tt(5);
-        right.source_out = tt(15);
+        right.set_source_origin(tt(5)).expect("set source origin");
         let requested = TimelineTimeRange::new(tt(8), tt(4)).expect("requested");
         let left_extent = TimelineTimeRange::new(tt(0), tt(11)).expect("left extent");
         let right_extent = TimelineTimeRange::new(tt(4), tt(20)).expect("right extent");

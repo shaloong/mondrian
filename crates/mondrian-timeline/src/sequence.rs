@@ -2375,8 +2375,7 @@ mod tests {
         let mut seq = Sequence::new("Clip-local animation");
         let tb = seq.time_base();
         let mut clip = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
-        clip.source_in = tt(100, tb);
-        clip.source_out = tt(120, tb);
+        clip.set_source_origin(tt(100, tb)).expect("set source origin");
         clip.apply_property_mutation(PropertyMutation::SetKeyframe {
             path: crate::clip::Transform2D::OPACITY_PATH.to_owned(),
             keyframe: Keyframe::linear(tt(0, tb), PropertyValue::Float(0.0)),

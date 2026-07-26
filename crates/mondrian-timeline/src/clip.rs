@@ -286,45 +286,74 @@ fn blend_mode_from_text(value: &str) -> Result<Option<BlendMode>> {
     })
 }
 
-/// Exact constant source-time scale for a clip placement.
+/// Canonical mapping from Clip-local placement time to source-media time.
 ///
-/// Variable retiming requires a validated piecewise time transform; it must not
-/// be approximated by sampling ordinary parameter automation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpeedMap {
-    scale: TimeScale,
+/// The tagged algebra is the persistence seam for future validated piecewise
+/// retiming. Variable retiming must become another closed variant with an
+/// explicit inverse/ambiguity contract; it must not be approximated by ordinary
+/// parameter automation or parallel source-range fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ClipSourceTimeMap {
+    /// One exact affine mapping for forward speed, reverse speed, or a hold.
+    Constant {
+        /// Source coordinate sampled at Clip-local time zero.
+        source_origin: TimelineTime,
+        /// Exact source-time delta per Clip-local time delta.
+        scale: TimeScale,
+    },
 }
 
-impl SpeedMap {
-    /// Construct an identity time mapping.
-    pub fn new() -> Self {
-        Self { scale: TimeScale::ONE }
+impl ClipSourceTimeMap {
+    /// Construct an identity mapping from the requested source origin.
+    pub const fn identity(source_origin: TimelineTime) -> Self {
+        Self::Constant { source_origin, scale: TimeScale::ONE }
     }
 
-    /// Exact source-time delta per clip-local time delta.
-    pub const fn scale(self) -> TimeScale {
-        self.scale
+    /// Construct one exact constant source-time mapping.
+    pub const fn constant(source_origin: TimelineTime, scale: TimeScale) -> Self {
+        Self::Constant { source_origin, scale }
     }
 
-    /// Replace the constant exact scale.
-    pub fn set_scale(&mut self, scale: TimeScale) {
-        self.scale = scale;
+    /// Source coordinate sampled at Clip-local time zero.
+    pub const fn source_origin(&self) -> TimelineTime {
+        match self {
+            Self::Constant { source_origin, .. } => *source_origin,
+        }
     }
 
-    /// Map one clip-local duration into an exact source-time duration.
-    pub fn map_time(self, local_time: TimelineTime) -> Result<TimelineTime> {
-        local_time
-            .checked_scale(self.scale)
-            .map_err(|error| MondrianError::WorkflowStepFailed {
-                step_id: "clip_speed_map".to_string(),
-                reason: error.to_string(),
-            })
+    /// Exact source-time delta per Clip-local time delta.
+    pub const fn scale(&self) -> TimeScale {
+        match self {
+            Self::Constant { scale, .. } => *scale,
+        }
+    }
+
+    /// Return the same mapping with a different source origin.
+    pub fn with_source_origin(&self, source_origin: TimelineTime) -> Self {
+        match self {
+            Self::Constant { scale, .. } => Self::Constant { source_origin, scale: *scale },
+        }
+    }
+
+    /// Map one Clip-local time into exact source-media time.
+    pub fn map(&self, clip_local_time: TimelineTime) -> Result<TimelineTime> {
+        let source_delta = clip_local_time.checked_scale(self.scale())?;
+        Ok(self.source_origin().checked_add(source_delta)?)
+    }
+
+    /// Invert one exact source coordinate into Clip-local time.
+    ///
+    /// A zero-rate hold has no unique inverse and is rejected.
+    pub fn inverse(&self, source_time: TimelineTime) -> Result<TimelineTime> {
+        let source_delta = source_time.checked_sub(self.source_origin())?;
+        Ok(source_delta.checked_scale(self.scale().reciprocal()?)?)
     }
 }
 
-impl Default for SpeedMap {
+impl Default for ClipSourceTimeMap {
     fn default() -> Self {
-        Self::new()
+        Self::identity(TimelineTime::ZERO)
     }
 }
 
@@ -352,14 +381,12 @@ pub struct Clip {
     /// slips preserve it; an in-edge trim advances it so hidden keyframes are
     /// not silently rebased to the new visible edge.
     pub clip_time_in: TimelineTime,
-    /// 素材内入点
-    pub source_in: TimelineTime,
-    /// 素材内出点（= source_in + duration / speed）
-    pub source_out: TimelineTime,
+    /// Closed source-sampling transform. Source terminal boundaries are derived
+    /// from this mapping and `duration`; no parallel mutable source out-point is
+    /// persisted.
+    source_time_map: ClipSourceTimeMap,
     /// 2D 变换（关键帧）
     pub transform: Transform2D,
-    /// 变速模式
-    pub speed: SpeedMap,
     /// 效果链（实例级，属性路径已按 effect id 做命名空间隔离）
     #[serde(default)]
     pub effects: Vec<EffectNode>,
@@ -408,8 +435,7 @@ impl Clip {
         duration: TimelineTime,
     ) -> Result<Self> {
         let mut clip = Self::new(asset_id, position, duration)?;
-        clip.speed.set_scale(TimeScale::new(0, 1)?);
-        clip.source_out = clip.source_in;
+        clip.set_constant_source_time_map(TimelineTime::ZERO, TimeScale::new(0, 1)?)?;
         Ok(clip)
     }
     fn with_content(
@@ -426,10 +452,8 @@ impl Clip {
             position,
             duration,
             clip_time_in: TimelineTime::ZERO,
-            source_in: TimelineTime::ZERO,
-            source_out: duration,
+            source_time_map: ClipSourceTimeMap::default(),
             transform: Transform2D::identity(),
-            speed: SpeedMap::new(),
             effects: vec![],
             masks: vec![],
             link_group: None,
@@ -560,6 +584,69 @@ impl Clip {
         Ok(self.clip_time_in.checked_add(self.duration)?)
     }
 
+    /// Canonical source-time mapping owned by this placement.
+    pub const fn source_time_map(&self) -> &ClipSourceTimeMap {
+        &self.source_time_map
+    }
+
+    /// Source coordinate sampled at the visible Clip in-edge.
+    ///
+    /// For reverse playback this is the first sampled coordinate, not the
+    /// minimum of a source interval.
+    pub const fn source_origin(&self) -> TimelineTime {
+        self.source_time_map.source_origin()
+    }
+
+    /// Exact source-time delta per Clip-local placement-time delta.
+    pub const fn source_time_scale(&self) -> TimeScale {
+        self.source_time_map.scale()
+    }
+
+    /// Exact source coordinate at the exclusive Clip placement end.
+    ///
+    /// This derived boundary may be before `source_origin` for reverse
+    /// playback and equals it for a zero-rate hold.
+    pub fn source_terminal_boundary(&self) -> Result<TimelineTime> {
+        self.source_time_map.map(self.duration)
+    }
+
+    /// Replace the source coordinate sampled at the visible Clip in-edge.
+    ///
+    /// The candidate is checked against the current duration before commit, so
+    /// arithmetic overflow cannot partially mutate author state.
+    pub fn set_source_origin(&mut self, source_origin: TimelineTime) -> Result<()> {
+        let candidate = self.source_time_map.with_source_origin(source_origin);
+        candidate.map(self.duration)?;
+        self.source_time_map = candidate;
+        Ok(())
+    }
+
+    /// Replace this placement with one exact constant source-time mapping.
+    ///
+    /// Positive, negative, and zero scales represent forward playback,
+    /// reverse playback, and a source hold respectively.
+    pub fn set_constant_source_time_map(
+        &mut self,
+        source_origin: TimelineTime,
+        scale: TimeScale,
+    ) -> Result<()> {
+        let candidate = ClipSourceTimeMap::constant(source_origin, scale);
+        candidate.map(self.duration)?;
+        self.source_time_map = candidate;
+        Ok(())
+    }
+
+    /// Validate Clip time ranges and the complete source mapping.
+    pub fn validate_time_state(&self) -> Result<()> {
+        if self.duration.is_negative() {
+            return Err(mondrian_core::TimelineTimeError::NegativeDuration.into());
+        }
+        self.end_position()?;
+        self.clip_time_out()?;
+        self.source_terminal_boundary()?;
+        Ok(())
+    }
+
     /// 判断给定时间码是否在此 Clip 范围内
     pub fn contains(&self, time: TimelineTime) -> Result<bool> {
         Ok(time >= self.position && time < self.end_position()?)
@@ -567,7 +654,7 @@ impl Clip {
 
     /// Map Sequence-local placement time into stable Clip-local visual time.
     ///
-    /// This mapping deliberately does not include source in/out or SpeedMap:
+    /// This mapping deliberately does not include source sampling:
     /// visual processors are downstream of source sampling and remain attached
     /// to the Clip occurrence when the source is slipped or retimed.
     pub fn timeline_to_clip_time(&self, timeline_time: TimelineTime) -> Result<TimelineTime> {
@@ -584,8 +671,7 @@ impl Clip {
     /// 将时间线时间 → Clip 内本地时间 → 素材源时间
     pub fn timeline_to_source_time(&self, timeline_time: TimelineTime) -> Result<TimelineTime> {
         let local = timeline_time.checked_sub(self.position)?;
-        let source_local = self.speed.map_time(local)?;
-        Ok(self.source_in.checked_add(source_local)?)
+        self.source_time_map.map(local)
     }
 
     /// Map one source-domain time back into this Clip's Sequence placement.
@@ -593,10 +679,9 @@ impl Clip {
     /// This is used by source-handle admission to intersect an authored
     /// Transition range with real media or nested-Sequence extents. A zero-rate
     /// hold has no unique inverse and is rejected; callers handle it as a
-    /// constant sample after checking whether `source_in` exists.
+    /// constant sample after checking whether `source_origin` exists.
     pub fn source_to_timeline_time(&self, source_time: TimelineTime) -> Result<TimelineTime> {
-        let source_local = source_time.checked_sub(self.source_in)?;
-        let local = source_local.checked_scale(self.speed.scale().reciprocal()?)?;
+        let local = self.source_time_map.inverse(source_time)?;
         Ok(self.position.checked_add(local)?)
     }
 
@@ -978,9 +1063,12 @@ mod tests {
         let clip = Clip::new_still_image(asset_id, tt(10), tt(125)).expect("still Clip");
 
         assert_eq!(clip.media_asset_id(), Some(asset_id));
-        assert_eq!(clip.speed.scale().numerator(), 0);
-        assert_eq!(clip.source_in, TimelineTime::ZERO);
-        assert_eq!(clip.source_out, TimelineTime::ZERO);
+        assert_eq!(clip.source_time_scale().numerator(), 0);
+        assert_eq!(clip.source_origin(), TimelineTime::ZERO);
+        assert_eq!(
+            clip.source_terminal_boundary().expect("source terminal"),
+            TimelineTime::ZERO
+        );
         assert_eq!(
             clip.timeline_to_source_time(tt(10)).expect("start sample"),
             TimelineTime::ZERO
@@ -989,6 +1077,39 @@ mod tests {
             clip.timeline_to_source_time(tt(134)).expect("last visible sample"),
             TimelineTime::ZERO
         );
+    }
+
+    #[test]
+    fn source_time_map_is_the_only_persisted_source_sampling_authority() {
+        let mut clip = Clip::new(AssetId::new(), tt(0), tt(20)).expect("valid Clip");
+        clip.set_constant_source_time_map(tt(100), TimeScale::new(-3, 2).expect("reverse scale"))
+            .expect("set source map");
+
+        let value = serde_json::to_value(&clip).expect("serialize Clip");
+        let object = value.as_object().expect("Clip object");
+        assert!(object.contains_key("source_time_map"));
+        assert!(!object.contains_key("source_in"));
+        assert!(!object.contains_key("source_out"));
+        assert!(!object.contains_key("speed"));
+        assert_eq!(
+            clip.source_terminal_boundary().expect("terminal boundary"),
+            tt(70)
+        );
+
+        let reopened: Clip = serde_json::from_value(value).expect("reopen Clip");
+        assert_eq!(reopened.source_time_map(), clip.source_time_map());
+    }
+
+    #[test]
+    fn source_map_overflow_is_rejected_without_partial_mutation() {
+        let mut clip =
+            Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("valid Clip");
+        let before = clip.source_time_map().clone();
+
+        assert!(clip
+            .set_source_origin(TimelineTime::new(i64::MAX, 1).expect("maximum exact time"))
+            .is_err());
+        assert_eq!(clip.source_time_map(), &before);
     }
 
     fn exposure_from_graph(effects: &[EffectNode], time: TimelineTime) -> f32 {
@@ -1013,7 +1134,7 @@ mod tests {
     }
 
     #[test]
-    fn clip_property_mutation_updates_transform_and_exact_speed_scale() {
+    fn clip_transform_and_exact_source_scale_remain_independent() {
         let mut clip = Clip::new(AssetId::new(), tt(0), tt(40)).expect("valid clip");
         clip.apply_property_mutation(PropertyMutation::SetKeyframe {
             path: Transform2D::POSITION_PATH.to_string(),
@@ -1025,7 +1146,11 @@ mod tests {
             keyframe: Keyframe::linear(tt(20), PropertyValue::Vec2(Vec2::new(20.0, 10.0))),
         })
         .expect("set end position");
-        clip.speed.set_scale(TimeScale::new(3, 2).expect("valid exact scale"));
+        clip.set_constant_source_time_map(
+            TimelineTime::ZERO,
+            TimeScale::new(3, 2).expect("valid exact scale"),
+        )
+        .expect("set source map");
 
         let position = clip
             .transform
@@ -1034,7 +1159,10 @@ mod tests {
             .and_then(|value| value.as_vec2())
             .expect("evaluate position");
         assert_eq!(position, Vec2::new(10.0, 5.0));
-        assert_eq!(clip.speed.map_time(tt(10)).expect("map time"), tt(15));
+        assert_eq!(
+            clip.source_time_map().map(tt(10)).expect("map time"),
+            tt(15)
+        );
     }
 
     #[test]
@@ -1134,9 +1262,8 @@ mod tests {
     fn clip_visual_time_is_independent_of_placement_and_source_selection() {
         let mut clip = Clip::new(AssetId::new(), tt(10), tt(20)).expect("valid clip");
         clip.clip_time_in = tt(3);
-        clip.source_in = tt(100);
-        clip.source_out = tt(140);
-        clip.speed.set_scale(TimeScale::new(2, 1).expect("2x speed"));
+        clip.set_constant_source_time_map(tt(100), TimeScale::new(2, 1).expect("2x speed"))
+            .expect("set source map");
 
         assert_eq!(
             clip.timeline_to_clip_time(tt(12)).expect("Clip time"),
@@ -1152,8 +1279,7 @@ mod tests {
         );
 
         clip.position = tt(50);
-        clip.source_in = tt(200);
-        clip.source_out = tt(240);
+        clip.set_source_origin(tt(200)).expect("slip source");
         assert_eq!(
             clip.timeline_to_clip_time(tt(52)).expect("moved Clip time"),
             tt(5)

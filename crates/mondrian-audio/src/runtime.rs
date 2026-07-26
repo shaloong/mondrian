@@ -205,7 +205,7 @@ impl AudioProgramRuntime {
                             depth + 1,
                         )?;
                         if runtime.requires_state_entry()
-                            && contribution.source_time_map.speed.scale().numerator() < 0
+                            && contribution.source_time_map.scale.numerator() < 0
                         {
                             return Err(
                                 AudioRuntimeBuildError::UnsupportedStatefulNestedDirection(

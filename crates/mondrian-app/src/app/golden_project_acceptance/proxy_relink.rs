@@ -150,8 +150,8 @@ struct GoldenProxyRelinkAuthoringAnchor {
     asset_sha256: String,
     position: TimelineTime,
     duration: TimelineTime,
-    source_in: TimelineTime,
-    source_out: TimelineTime,
+    source_origin: TimelineTime,
+    source_terminal_boundary: TimelineTime,
     project_proxy_enabled: bool,
     asset_proxy_enabled: bool,
 }
@@ -440,8 +440,8 @@ fn capture_proxy_relink_authoring_anchor(
         asset_sha256: sha256_bytes(&serde_json::to_vec(&asset)?),
         position: clip.position,
         duration: clip.duration,
-        source_in: clip.source_in,
-        source_out: clip.source_out,
+        source_origin: clip.source_origin(),
+        source_terminal_boundary: clip.source_terminal_boundary()?,
         project_proxy_enabled: state.project_settings().proxy_enabled,
         asset_proxy_enabled: state.is_asset_proxy_mode(asset_id),
     })
@@ -590,8 +590,8 @@ pub(super) fn execute_proxy_relink_stage(
     ensure!(
         placed_clip.position == expected_position
             && placed_clip.duration == expected_duration
-            && placed_clip.source_in == TimelineTime::ZERO
-            && placed_clip.source_out == expected_duration
+            && placed_clip.source_origin() == TimelineTime::ZERO
+            && placed_clip.source_terminal_boundary()? == expected_duration
             && placed_clip.end_position()? == expected_end,
         "Proxy/Relink Clip did not occupy the exact Hero slice window"
     );
@@ -785,8 +785,8 @@ pub(super) fn execute_proxy_relink_stage(
     ensure!(
         authoring.position == expected_position
             && authoring.duration == expected_duration
-            && authoring.source_in == TimelineTime::ZERO
-            && authoring.source_out == expected_duration
+            && authoring.source_origin == TimelineTime::ZERO
+            && authoring.source_terminal_boundary == expected_duration
             && authoring.project_proxy_enabled
             && authoring.asset_proxy_enabled,
         "Proxy/Relink retained authoring differs from the exact Hero window or proxy intent"

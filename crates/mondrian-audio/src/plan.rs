@@ -1,13 +1,12 @@
 use mondrian_core::{
     AudioChannelLayout, AudioComponentEditId, AudioProcessingScopeId, AudioProcessorInstanceId,
-    ExactAutomationCurve, MixBusId, ProgramOutputId, SequenceId, TimelineTime, TimelineTimeRange,
-    TrackId,
+    ExactAutomationCurve, MixBusId, ProgramOutputId, SequenceId, TimeScale, TimelineTime,
+    TimelineTimeRange, TrackId,
 };
 use mondrian_timeline::audio::{
     AudioComponentChannelMapping, AudioFadeCurve, AudioProcessorDefinitionRef,
     AudioProcessorParameter, AudioRouteDestination, AudioRouteSource, AudioTransitionCurve,
 };
-use mondrian_timeline::clip::SpeedMap;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// DSP execution contract selected by one consumer.
@@ -52,9 +51,9 @@ pub struct CompiledSourceTimeMap {
     /// Sequence position of component-local zero.
     pub sequence_start: TimelineTime,
     /// Source-media position corresponding to component-local zero.
-    pub source_in: TimelineTime,
+    pub source_origin: TimelineTime,
     /// Exact source delta per component-local delta.
-    pub speed: SpeedMap,
+    pub scale: TimeScale,
 }
 
 impl CompiledSourceTimeMap {
@@ -64,8 +63,8 @@ impl CompiledSourceTimeMap {
         sequence_time: TimelineTime,
     ) -> Result<TimelineTime, mondrian_core::TimelineTimeError> {
         let local = sequence_time.checked_sub(self.sequence_start)?;
-        let source_local = local.checked_scale(self.speed.scale())?;
-        self.source_in.checked_add(source_local)
+        let source_local = local.checked_scale(self.scale)?;
+        self.source_origin.checked_add(source_local)
     }
 }
 

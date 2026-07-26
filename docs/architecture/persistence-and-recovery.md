@@ -203,11 +203,13 @@ Schema v19 makes the Project color engine/config the single shared engine,
 persists the complete new-Sequence template, keeps each Sequence's Program
 semantics explicit, and places nested color-boundary policy on the nesting
 Clip. Schema v20 makes Clip-local visual author time independent of placement
-and source time. Schema v21 is the current clean Alpha author contract: it
+and source time. Schema v21
 separates closed Sequence `color` and `delivery` structures so working/input/
 Program Output semantics cannot be confused with encoded bit depth, range, HDR
-metadata, or chroma defaults. Every old/future schema and unknown author field
-fails closed during Alpha.
+metadata, or chroma defaults. Schema v22 is the current clean Alpha author
+contract: it replaces redundant Clip source-in/source-out/speed fields with one
+closed exact source-time map and derives the terminal boundary from duration.
+Every old/future schema and unknown author field fails closed during Alpha.
 
 The current fixture in `crates/mondrian-project/tests/fixtures/current` must
 open idempotently, save, reopen, and retain its semantic fingerprint. Dedicated

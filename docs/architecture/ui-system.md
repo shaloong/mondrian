@@ -492,7 +492,9 @@ polls its bounded completion pump, and injects an `AudioWaveformSource` handle
 into the Timeline model. The Widget supplies `AssetId`, a source revision
 derived from the immutable asset record, current file length/modification time,
 and probed primary-audio facts, the visible source interval, and presentation
-width. The handle returns only a
+width. That interval is projected from the Clip's canonical source-time map and
+duration; the panel cannot cache or reconstruct a second source out-point. The
+handle returns only a
 resident envelope or `None`; it cannot expose FFmpeg, worker channels, cache
 mutation, generation state, or failure policy to paint/layout code. Project
 library replacement rotates service generation, and source revision prevents a

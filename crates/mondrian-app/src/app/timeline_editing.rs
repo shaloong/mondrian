@@ -92,18 +92,17 @@ pub(super) fn split_clip_in_track(
     let split_time = author_time_from_frame(split_frame, time_base).ok()?;
     let split_offset = split_time.checked_sub(clip.position).ok()?;
     let new_clip_time_in = clip.timeline_to_clip_time(split_time).ok()?;
-    let new_source_in = clip.timeline_to_source_time(split_time).ok()?;
+    let new_source_origin = clip.timeline_to_source_time(split_time).ok()?;
 
     let mut left = clip.clone();
     left.duration = author_time_from_frame(left_duration, time_base).ok()?;
-    left.source_out = new_source_in;
 
     let mut right = clip;
     right.fork_placement_identities_for_split(split_offset).ok()?;
     right.position = split_time;
     right.duration = author_time_from_frame(right_duration, time_base).ok()?;
     right.clip_time_in = new_clip_time_in;
-    right.source_in = new_source_in;
+    right.set_source_origin(new_source_origin).ok()?;
     right.link_group = None;
 
     track.clips[index] = left;
@@ -171,8 +170,8 @@ pub(super) fn roll_cut_in_track(
         let left_end = author_frame_from_time(left.end_position()?, time_base)?;
         let right_start = author_frame_from_time(right.position, time_base)?;
         if left_end == right_start {
-            let right_source_in = author_frame_from_time(right.source_in, time_base)?;
-            let min_frame_from_source_in = right_start.saturating_sub(right_source_in);
+            let right_source_origin = author_frame_from_time(right.source_origin(), time_base)?;
+            let min_frame_from_source_in = right_start.saturating_sub(right_source_origin);
             let min_frame = (author_frame_from_time(left.position, time_base)? + 1)
                 .max(min_frame_from_source_in);
             let max_frame = author_frame_from_time(right.end_position()?, time_base)? - 1;
@@ -194,8 +193,8 @@ pub(super) fn roll_cut_in_track(
         let left_end = author_frame_from_time(left.end_position()?, time_base)?;
         let right_start = author_frame_from_time(right.position, time_base)?;
         if left_end == right_start {
-            let right_source_in = author_frame_from_time(right.source_in, time_base)?;
-            let min_frame_from_source_in = right_start.saturating_sub(right_source_in);
+            let right_source_origin = author_frame_from_time(right.source_origin(), time_base)?;
+            let min_frame_from_source_in = right_start.saturating_sub(right_source_origin);
             let min_frame = (author_frame_from_time(left.position, time_base)? + 1)
                 .max(min_frame_from_source_in);
             let max_frame = author_frame_from_time(right.end_position()?, time_base)? - 1;
@@ -238,20 +237,18 @@ pub(super) fn roll_cut_in_track(
     }
 
     let new_cut_time = author_time_from_frame(new_cut_frame, time_base)?;
-    let new_left_source_out = left_original.timeline_to_source_time(new_cut_time)?;
     let new_right_clip_time_in = right_original.timeline_to_clip_time(new_cut_time)?;
-    let new_right_source_in = right_original.timeline_to_source_time(new_cut_time)?;
+    let new_right_source_origin = right_original.timeline_to_source_time(new_cut_time)?;
 
     let mut left_updated = left_original;
     left_updated.duration = author_time_from_frame(new_left_duration, time_base)?;
-    left_updated.source_out = new_left_source_out;
 
     let mut right_updated = right_original;
     right_updated.shift_audio_component_in(new_cut_time.checked_sub(right_updated.position)?)?;
     right_updated.position = new_cut_time;
     right_updated.duration = author_time_from_frame(new_right_duration, time_base)?;
     right_updated.clip_time_in = new_right_clip_time_in;
-    right_updated.source_in = new_right_source_in;
+    right_updated.set_source_origin(new_right_source_origin)?;
 
     track.clips[boundary.left_index] = left_updated;
     track.clips[boundary.right_index] = right_updated;
@@ -324,8 +321,8 @@ pub(super) fn slip_clip_in_track(
         });
     }
 
-    let source_span = author_frame_from_time(original.source_out, time_base)?
-        - author_frame_from_time(original.source_in, time_base)?;
+    let source_span = author_frame_from_time(original.source_terminal_boundary()?, time_base)?
+        - author_frame_from_time(original.source_origin(), time_base)?;
     if source_span <= 0 {
         return Err(mondrian_core::MondrianError::WorkflowStepFailed {
             step_id: "slip_clip".to_string(),
@@ -339,17 +336,15 @@ pub(super) fn slip_clip_in_track(
         i64::MAX.saturating_sub(source_span)
     };
 
-    let old_source_in = author_frame_from_time(original.source_in, time_base)?;
+    let old_source_in = author_frame_from_time(original.source_origin(), time_base)?;
     let proposed = old_source_in.saturating_add(delta_frames);
     let new_source_in = proposed.clamp(0, max_source_in);
     if new_source_in == old_source_in {
         return Ok(false);
     }
 
-    let new_source_out = new_source_in.saturating_add(source_span);
     let mut updated = original;
-    updated.source_in = author_time_from_frame(new_source_in, time_base)?;
-    updated.source_out = author_time_from_frame(new_source_out, time_base)?;
+    updated.set_source_origin(author_time_from_frame(new_source_in, time_base)?)?;
     track.clips[clip_index] = updated;
     Ok(true)
 }
@@ -448,9 +443,13 @@ pub(super) fn slide_clip_in_track(
 
     let min_start_from_left = author_frame_from_time(left_original.position, time_base)? + 1;
     let center_duration = author_frame_from_time(center_original.duration, time_base)?;
-    let min_start_from_right_source = right_start
-        .saturating_sub(center_duration)
-        .saturating_sub(author_frame_from_time(right_original.source_in, time_base)?);
+    let min_start_from_right_source =
+        right_start
+            .saturating_sub(center_duration)
+            .saturating_sub(author_frame_from_time(
+                right_original.source_origin(),
+                time_base,
+            )?);
     let min_start = min_start_from_left.max(min_start_from_right_source);
     let max_start =
         author_frame_from_time(right_original.end_position()?, time_base)? - center_duration - 1;
@@ -476,16 +475,13 @@ pub(super) fn slide_clip_in_track(
         });
     }
 
-    let new_left_source_out = left_original
-        .timeline_to_source_time(author_time_from_frame(new_center_start, time_base)?)?;
     let new_right_clip_time_in =
         right_original.timeline_to_clip_time(author_time_from_frame(new_center_end, time_base)?)?;
-    let new_right_source_in = right_original
+    let new_right_source_origin = right_original
         .timeline_to_source_time(author_time_from_frame(new_center_end, time_base)?)?;
 
     let mut left_updated = left_original;
     left_updated.duration = author_time_from_frame(new_left_duration, time_base)?;
-    left_updated.source_out = new_left_source_out;
 
     let mut center_updated = center_original;
     center_updated.position = author_time_from_frame(new_center_start, time_base)?;
@@ -496,7 +492,7 @@ pub(super) fn slide_clip_in_track(
     right_updated.position = right_position;
     right_updated.duration = author_time_from_frame(new_right_duration, time_base)?;
     right_updated.clip_time_in = new_right_clip_time_in;
-    right_updated.source_in = new_right_source_in;
+    right_updated.set_source_origin(new_right_source_origin)?;
 
     track.clips[clip_index - 1] = left_updated;
     track.clips[clip_index] = center_updated;
@@ -568,10 +564,10 @@ pub(super) fn trim_clip_in_track(
             updated.position = new_position;
             updated.duration = author_time_from_frame(end - new_start, time_base)?;
             updated.clip_time_in = new_clip_time_in;
-            updated.source_in = new_in;
+            updated.set_source_origin(new_in)?;
         }
         TrimEdge::Out => {
-            let new_end = if original.speed.scale().numerator() == 0 {
+            let new_end = if original.source_time_scale().numerator() == 0 {
                 target_frame.max(start + 1)
             } else {
                 target_frame.max(start + 1).min(end)
@@ -579,10 +575,7 @@ pub(super) fn trim_clip_in_track(
             if new_end == end {
                 return Ok(false);
             }
-            let new_out =
-                original.timeline_to_source_time(author_time_from_frame(new_end, time_base)?)?;
             updated.duration = author_time_from_frame(new_end - start, time_base)?;
-            updated.source_out = new_out;
         }
     }
 
@@ -773,12 +766,12 @@ pub(super) fn subtract_overwrite_range_from_clip(
         let mut right = clip;
         let new_start = cut_end.max(clip_start);
         let new_clip_time_in = right.timeline_to_clip_time(new_start)?;
-        let new_source_in = right.timeline_to_source_time(new_start)?;
+        let new_source_origin = right.timeline_to_source_time(new_start)?;
         right.shift_audio_component_in(new_start.checked_sub(clip_start)?)?;
         right.position = new_start;
         right.duration = clip_end.checked_sub(new_start)?.max(TimelineTime::ZERO);
         right.clip_time_in = new_clip_time_in;
-        right.source_in = new_source_in;
+        right.set_source_origin(new_source_origin)?;
         right.link_group = None;
         return Ok(if right.duration > TimelineTime::ZERO {
             vec![right]
@@ -790,9 +783,7 @@ pub(super) fn subtract_overwrite_range_from_clip(
     if cut_end >= clip_end {
         let mut left = clip;
         let new_end = cut_start.min(clip_end);
-        let new_source_out = left.timeline_to_source_time(new_end)?;
         left.duration = new_end.checked_sub(clip_start)?.max(TimelineTime::ZERO);
-        left.source_out = new_source_out;
         left.link_group = None;
         return Ok(if left.duration > TimelineTime::ZERO {
             vec![left]
@@ -803,20 +794,18 @@ pub(super) fn subtract_overwrite_range_from_clip(
 
     let mut left = clip.clone();
     let left_new_end = cut_start;
-    let left_new_source_out = left.timeline_to_source_time(left_new_end)?;
     left.duration = left_new_end.checked_sub(clip_start)?.max(TimelineTime::ZERO);
-    left.source_out = left_new_source_out;
     left.link_group = None;
 
     let mut right = clip;
     let right_new_start = cut_end;
     let right_new_clip_time_in = right.timeline_to_clip_time(right_new_start)?;
-    let right_new_source_in = right.timeline_to_source_time(right_new_start)?;
+    let right_new_source_origin = right.timeline_to_source_time(right_new_start)?;
     right.fork_placement_identities_for_split(right_new_start.checked_sub(clip_start)?)?;
     right.position = right_new_start;
     right.duration = clip_end.checked_sub(right_new_start)?.max(TimelineTime::ZERO);
     right.clip_time_in = right_new_clip_time_in;
-    right.source_in = right_new_source_in;
+    right.set_source_origin(right_new_source_origin)?;
     right.link_group = None;
 
     let mut result = Vec::with_capacity(2);

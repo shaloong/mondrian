@@ -40,9 +40,10 @@ cannot acquire authority over Timeline routing.
 
 ### Placement is single-source
 
-An audio Track owns Clips. A Clip owns placement, duration, source in/out,
-exact speed mapping, nested Sequence identity, disabled state, and linkage to
-other Clips. Those are the only persistent placement facts.
+An audio Track owns Clips. A Clip owns placement, duration, one closed exact
+`ClipSourceTimeMap`, nested Sequence identity, disabled state, and linkage to
+other Clips. Source terminal boundaries are derived from that map and duration,
+never persisted independently. Those are the only persistent placement facts.
 
 Each audio Clip owns one or more `AudioComponentEdit` values. An edit contains:
 
@@ -293,7 +294,7 @@ records deterministic origins:
 
 - Component Edit ID and Clip ID;
 - owning Track ID and derived Sequence range;
-- exact source time map from Clip placement/speed/source-in;
+- exact constant source origin/scale lowered from the Clip source-time map;
 - media component or nested public output identity;
 - Processing Scope and exact edit/scope origins;
 - edit automation, fades, and relevant Transitions.

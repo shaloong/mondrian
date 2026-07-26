@@ -836,7 +836,7 @@ fn prepare_source_frames(
 
     let sequence_time = TimelineTime::new(active_start, i64::from(sample_rate.hz()))?;
     let source_time = contribution.semantic.source_time_map.map(sequence_time)?;
-    let scale = contribution.semantic.source_time_map.speed.scale();
+    let scale = contribution.semantic.source_time_map.scale;
     let denominator = i128::from(source_time.denominator())
         .checked_mul(i128::from(scale.denominator()))
         .ok_or(AudioExecutionError::BufferTooLarge)?;

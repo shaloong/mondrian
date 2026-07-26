@@ -450,12 +450,14 @@ pub(super) fn setup_stage(
         );
         if clip_id == alpha_clip_id {
             ensure!(
-                clip.speed.scale().numerator() == 0 && clip.source_out == clip.source_in,
+                clip.source_time_scale().numerator() == 0
+                    && clip.source_terminal_boundary()? == clip.source_origin(),
                 "sRGB still placement is not a zero-rate source hold"
             );
         } else {
             ensure!(
-                clip.source_in == TimelineTime::ZERO && clip.source_out == expected_duration,
+                clip.source_origin() == TimelineTime::ZERO
+                    && clip.source_terminal_boundary()? == expected_duration,
                 "HLG placement did not retain the exact source window"
             );
         }

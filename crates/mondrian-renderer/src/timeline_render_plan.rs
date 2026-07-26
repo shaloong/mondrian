@@ -813,8 +813,7 @@ mod tests {
         let tb = seq.time_base();
         let mut title = Clip::new_basic_title("Mondrian", "Segoe UI", tt(10, tb), tt(20, tb))
             .expect("valid Basic Title");
-        title.source_in = tt(100, tb);
-        title.source_out = tt(120, tb);
+        title.set_source_origin(tt(100, tb)).expect("set source origin");
         for (time, opacity, font_size) in [(tt(0, tb), 0.0, 40.0), (tt(20, tb), 1.0, 80.0)] {
             title
                 .apply_property_mutation(PropertyMutation::SetKeyframe {
@@ -906,7 +905,8 @@ mod tests {
         let mut seq = Sequence::new("render-plan-native-source-time");
         let tb = seq.time_base();
         let mut clip = Clip::new(AssetId::new(), tt(0, tb), tt(30, tb)).expect("valid clip");
-        clip.source_in = TimelineTime::new(1, 7).expect("exact source offset");
+        clip.set_source_origin(TimelineTime::new(1, 7).expect("exact source offset"))
+            .expect("set source origin");
         seq.video_tracks[0].add_clip(clip).expect("add clip");
 
         let plan = analysis_elements(&seq, 15);
@@ -1044,8 +1044,7 @@ mod tests {
 
         let media_asset = AssetId::new();
         let mut media = Clip::new(media_asset, tt(0, tb), tt(30, tb)).expect("valid clip");
-        media.source_in = tt(3, tb);
-        media.source_out = tt(33, tb);
+        media.set_source_origin(tt(3, tb)).expect("set source origin");
         let interpretation = media.media_interpretation_mut().expect("media interpretation");
         interpretation.color_space_override = Some(ColorSpace::Srgb);
         interpretation.pixel_aspect_ratio_override = Some(PixelAspectRatio::Anamorphic2x);
@@ -1067,8 +1066,7 @@ mod tests {
         let mut nested =
             Clip::new_nested_sequence(child_id, tt(5, tb), tt(30, tb), Some("child".to_owned()))
                 .expect("valid nested clip");
-        nested.source_in = tt(20, tb);
-        nested.source_out = tt(50, tb);
+        nested.set_source_origin(tt(20, tb)).expect("set source origin");
         let ClipContent::NestedSequence { color_processing, .. } = &mut nested.content else {
             panic!("expected nested Clip content");
         };
@@ -1137,12 +1135,10 @@ mod tests {
         let time_base = sequence.time_base();
         let mut left =
             Clip::new(AssetId::new(), tt(0, time_base), tt(10, time_base)).expect("left");
-        left.source_in = tt(5, time_base);
-        left.source_out = tt(15, time_base);
+        left.set_source_origin(tt(5, time_base)).expect("set source origin");
         let mut right =
             Clip::new(AssetId::new(), tt(10, time_base), tt(10, time_base)).expect("right");
-        right.source_in = tt(20, time_base);
-        right.source_out = tt(30, time_base);
+        right.set_source_origin(tt(20, time_base)).expect("set source origin");
         let (left_id, right_id) = (left.id, right.id);
         sequence.video_tracks[0].add_clip(left).expect("left placement");
         sequence.video_tracks[0].add_clip(right).expect("right placement");

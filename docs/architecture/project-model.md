@@ -33,7 +33,7 @@ failed save cannot continue under an older Timeline identity.
 for Mondrian Standard, ACES, or Custom OCIO and exposes that exact value through
 its stable interface. Callers cannot construct or mutate a partial environment
 by reaching through a public field. This keeps the top-level Project seam
-available for future environment-wide invariants without changing the v21 JSON
+available for future environment-wide invariants without changing its JSON
 shape. A Sequence never stores, overrides, or inherits another engine.
 `SequenceColorSettings` stores only the working domain, media-input policy, and
 Program Output policy interpreted inside the Project environment.
@@ -155,7 +155,7 @@ is written with that field explicitly.
 
 Archive and document JSON pass through separate version registries before typed
 deserialization. During Alpha there are deliberately no legacy document steps:
-schema v21 is the sole accepted author schema, and older/future versions fail
+schema v22 is the sole accepted author schema, and older/future versions fail
 instead of being guessed. Version 5 introduced the explicit tagged
 `mondrian_standard` / `aces` / `custom_ocio` project contract and makes every
 Mondrian Standard package-identity field mandatory: product ID/version, config
@@ -255,7 +255,16 @@ contains encoded defaults and authored HDR payloads. `ProjectDocument`,
 reject unknown fields, so a forged Sequence engine or inheritance switch cannot
 be silently ignored. Alpha rejects v20 instead of guessing this regrouping.
 
-Current document schema v21 persists canonical rational `TimelineTime` values
+Version 22 replaces the redundant mutable Clip `source_in`/`source_out`/
+`speed` fields with one mandatory tagged `ClipSourceTimeMap`. Its current
+constant-affine variant persists only `source_origin` and exact `TimeScale`;
+the terminal source boundary is derived from Clip duration. Snapshot validation
+rejects negative placement duration and any placement, Clip-local, or
+source-map arithmetic overflow. This removes contradictory source-range states
+while reserving a closed schema seam for a future validated piecewise remap.
+Alpha rejects v21 instead of inferring which redundant field was authoritative.
+
+Current document schema v22 persists canonical rational `TimelineTime` values
 directly and requires the shared visual/audio `ParameterSchema`. It does not
 contain frame-oriented `TimeCode`, `TimeTicks`, descriptor-level duplicate
 defaults/types, editor-preset interpolation capabilities, or compatibility

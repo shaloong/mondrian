@@ -22,7 +22,7 @@ pub mod track;
 pub mod video_transition;
 
 pub use audio::*;
-pub use clip::{ActiveClip, Clip, ClipKind};
+pub use clip::{ActiveClip, Clip, ClipKind, ClipSourceTimeMap};
 pub use clip_linking::{
     apply_clip_link_edit, assess_clip_link_edit, clip_selection_unit, ClipLinkEditAssessment,
     ClipLinkEditError, ClipLinkEditKind, ClipLinkEditOutcome, ClipLinkEditRequest,

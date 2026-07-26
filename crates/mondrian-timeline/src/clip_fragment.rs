@@ -26,20 +26,19 @@ pub(crate) fn split_clip_at(
     let split_offset = at.checked_sub(clip.position)?;
     let right_duration = end.checked_sub(at)?;
     let right_clip_time_in = clip.timeline_to_clip_time(at)?;
-    let right_source_in = clip.timeline_to_source_time(at)?;
+    let right_source_origin = clip.timeline_to_source_time(at)?;
 
     let mut right = clip.clone();
     right.fork_placement_identities_for_split(split_offset)?;
     right.position = at;
     right.duration = right_duration;
     right.clip_time_in = right_clip_time_in;
-    right.source_in = right_source_in;
+    right.set_source_origin(right_source_origin)?;
     for edit in &mut right.audio_components {
         edit.fades.fade_in = None;
     }
 
     clip.duration = split_offset;
-    clip.source_out = right_source_in;
     for edit in &mut clip.audio_components {
         edit.fades.fade_out = None;
     }
@@ -58,12 +57,12 @@ pub(crate) fn trim_clip_in_to(clip: &mut Clip, at: TimelineTime) -> mondrian_cor
     let delta = at.checked_sub(clip.position)?;
     let duration = end.checked_sub(at)?;
     let clip_time_in = clip.timeline_to_clip_time(at)?;
-    let source_in = clip.timeline_to_source_time(at)?;
+    let source_origin = clip.timeline_to_source_time(at)?;
     clip.shift_audio_component_in(delta)?;
     clip.position = at;
     clip.duration = duration;
     clip.clip_time_in = clip_time_in;
-    clip.source_in = source_in;
+    clip.set_source_origin(source_origin)?;
     for edit in &mut clip.audio_components {
         edit.fades.fade_in = None;
     }
@@ -80,7 +79,6 @@ pub(crate) fn trim_clip_out_to(clip: &mut Clip, at: TimelineTime) -> mondrian_co
     }
 
     clip.duration = at.checked_sub(clip.position)?;
-    clip.source_out = clip.timeline_to_source_time(at)?;
     for edit in &mut clip.audio_components {
         edit.fades.fade_out = None;
     }

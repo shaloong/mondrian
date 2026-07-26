@@ -26,7 +26,7 @@ use migration::JsonMigrationRegistry;
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 21;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 22;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 2;
 
@@ -202,8 +202,8 @@ impl ProjectDocument {
                     format!("track '{}' parameter schema is invalid", track.name)
                 })?;
                 for clip in &track.clips {
-                    clip.clip_time_out().with_context(|| {
-                        format!("Clip '{}' visual author-time range is invalid", clip.id)
+                    clip.validate_time_state().with_context(|| {
+                        format!("Clip '{}' author-time mapping is invalid", clip.id)
                     })?;
                     if let Some(title) = clip.content.basic_title() {
                         title.validate_author_state().with_context(|| {

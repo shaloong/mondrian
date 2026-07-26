@@ -28,7 +28,9 @@ media/nested sampling. Transform, Opacity, visual Effect compilation, Masks,
 and Basic Title evaluation consume only `clip_time`; decoder and nested
 Sequence Adapters consume only `source_time`. Preview and Export invoke this
 same lowering and may differ in scheduling or quality policy, never in time
-interpretation.
+interpretation. Timeline lowering obtains `source_time` only through the
+Clip's canonical source-time map; the renderer never reads or reconstructs a
+parallel source range or speed field.
 
 Clip transforms are authored against stable source and Sequence picture
 extents, not against whichever decode/output sizes an execution happens to use.

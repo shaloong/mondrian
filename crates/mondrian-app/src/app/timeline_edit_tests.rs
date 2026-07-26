@@ -675,16 +675,22 @@ fn overwrite_only_removes_intersection_and_keeps_both_sides() {
 
     assert_eq!(left.position, tt(0, tb));
     assert_eq!(left.duration, tt(8, tb));
-    assert_eq!(left.source_in, tt(0, tb));
-    assert_eq!(left.source_out, tt(8, tb));
+    assert_eq!(left.source_origin(), tt(0, tb));
+    assert_eq!(
+        left.source_terminal_boundary().expect("source terminal"),
+        tt(8, tb)
+    );
 
     assert_eq!(moved.position, tt(8, tb));
     assert_eq!(moved.duration, tt(4, tb));
 
     assert_eq!(right.position, tt(12, tb));
     assert_eq!(right.duration, tt(8, tb));
-    assert_eq!(right.source_in, tt(12, tb));
-    assert_eq!(right.source_out, tt(20, tb));
+    assert_eq!(right.source_origin(), tt(12, tb));
+    assert_eq!(
+        right.source_terminal_boundary().expect("source terminal"),
+        tt(20, tb)
+    );
 }
 
 #[test]
@@ -751,7 +757,7 @@ fn trim_in_is_undoable() {
     assert_eq!(trimmed.position, tt(15, tb));
     assert_eq!(trimmed.duration, tt(15, tb));
     assert_eq!(trimmed.clip_time_in, tt(5, tb));
-    assert_eq!(trimmed.source_in, tt(5, tb));
+    assert_eq!(trimmed.source_origin(), tt(5, tb));
     assert_eq!(
         state.authoring_history().and_then(|history| history.undo_description()),
         Some("修剪入点")
@@ -766,7 +772,7 @@ fn trim_in_is_undoable() {
     assert_eq!(restored.position, tt(10, tb));
     assert_eq!(restored.duration, tt(20, tb));
     assert_eq!(restored.clip_time_in, TimelineTime::ZERO);
-    assert_eq!(restored.source_in, tt(0, tb));
+    assert_eq!(restored.source_origin(), tt(0, tb));
 }
 
 #[test]
@@ -885,8 +891,14 @@ fn trim_out_updates_linked_clip() {
 
     assert_eq!(video_after.duration, tt(21, tb));
     assert_eq!(audio_after.duration, tt(21, tb));
-    assert_eq!(video_after.source_out, tt(21, tb));
-    assert_eq!(audio_after.source_out, tt(21, tb));
+    assert_eq!(
+        video_after.source_terminal_boundary().expect("source terminal"),
+        tt(21, tb)
+    );
+    assert_eq!(
+        audio_after.source_terminal_boundary().expect("source terminal"),
+        tt(21, tb)
+    );
 }
 
 #[test]
@@ -910,9 +922,12 @@ fn trim_out_can_extend_a_zero_rate_still_hold() {
         .find(|clip| clip.id == still_id)
         .expect("still remains");
     assert_eq!(still.duration, tt(125, tb));
-    assert_eq!(still.source_in, TimelineTime::ZERO);
-    assert_eq!(still.source_out, TimelineTime::ZERO);
-    assert_eq!(still.speed.scale().numerator(), 0);
+    assert_eq!(still.source_origin(), TimelineTime::ZERO);
+    assert_eq!(
+        still.source_terminal_boundary().expect("source terminal"),
+        TimelineTime::ZERO
+    );
+    assert_eq!(still.source_time_scale().numerator(), 0);
 }
 
 #[test]
@@ -1498,7 +1513,7 @@ fn roll_cut_to_frame_is_undoable() {
     assert_eq!(clip_a_after.duration, tt(25, tb));
     assert_eq!(clip_b_after.position, tt(25, tb));
     assert_eq!(clip_b_after.duration, tt(15, tb));
-    assert_eq!(clip_b_after.source_in, tt(5, tb));
+    assert_eq!(clip_b_after.source_origin(), tt(5, tb));
 
     assert!(state.undo_timeline().expect("undo should succeed"));
     let seq_undo = state.active_sequence().expect("sequence should exist");
@@ -1514,7 +1529,7 @@ fn roll_cut_to_frame_is_undoable() {
         .expect("clip b should exist after undo");
     assert_eq!(clip_a_undo.duration, tt(20, tb));
     assert_eq!(clip_b_undo.position, tt(20, tb));
-    assert_eq!(clip_b_undo.source_in, tt(0, tb));
+    assert_eq!(clip_b_undo.source_origin(), tt(0, tb));
 }
 
 #[test]
@@ -1532,8 +1547,7 @@ fn slip_clip_negative_delta_is_clamped_and_undoable() {
     ));
 
     let mut clip = Clip::new(AssetId::new(), tt(8, tb), tt(20, tb)).expect("valid clip");
-    clip.source_in = tt(10, tb);
-    clip.source_out = tt(30, tb);
+    clip.set_source_origin(tt(10, tb)).expect("set source origin");
     let clip_id = clip.id;
     state
         .active_sequence_mut_uncommitted()
@@ -1558,8 +1572,11 @@ fn slip_clip_negative_delta_is_clamped_and_undoable() {
     assert_eq!(slipped.position, tt(8, tb));
     assert_eq!(slipped.duration, tt(20, tb));
     assert_eq!(slipped.clip_time_in, TimelineTime::ZERO);
-    assert_eq!(slipped.source_in, tt(0, tb));
-    assert_eq!(slipped.source_out, tt(20, tb));
+    assert_eq!(slipped.source_origin(), tt(0, tb));
+    assert_eq!(
+        slipped.source_terminal_boundary().expect("source terminal"),
+        tt(20, tb)
+    );
 
     assert!(state.undo_timeline().expect("undo should succeed"));
     let restored = state.active_sequence().expect("sequence should exist").video_tracks[0]
@@ -1568,8 +1585,11 @@ fn slip_clip_negative_delta_is_clamped_and_undoable() {
         .find(|clip| clip.id == clip_id)
         .expect("clip should exist after undo");
     assert_eq!(restored.clip_time_in, TimelineTime::ZERO);
-    assert_eq!(restored.source_in, tt(10, tb));
-    assert_eq!(restored.source_out, tt(30, tb));
+    assert_eq!(restored.source_origin(), tt(10, tb));
+    assert_eq!(
+        restored.source_terminal_boundary().expect("source terminal"),
+        tt(30, tb)
+    );
 
     state.test_set_asset_library(None);
     let _ = std::fs::remove_dir_all(&library_root);
@@ -1641,7 +1661,7 @@ fn slide_clip_updates_neighbors_and_is_undoable() {
     assert_eq!(clips[1].duration, tt(10, tb));
     assert_eq!(clips[2].position, tt(23, tb));
     assert_eq!(clips[2].duration, tt(7, tb));
-    assert_eq!(clips[2].source_in, tt(3, tb));
+    assert_eq!(clips[2].source_origin(), tt(3, tb));
 
     assert!(state.undo_timeline().expect("undo should succeed"));
     let seq_undo = state.active_sequence().expect("sequence should exist");
@@ -1649,7 +1669,7 @@ fn slide_clip_updates_neighbors_and_is_undoable() {
     assert_eq!(clips_undo[0].duration, tt(10, tb));
     assert_eq!(clips_undo[1].position, tt(10, tb));
     assert_eq!(clips_undo[2].position, tt(20, tb));
-    assert_eq!(clips_undo[2].source_in, tt(0, tb));
+    assert_eq!(clips_undo[2].source_origin(), tt(0, tb));
 }
 
 // ── Cross-track clip movement ──

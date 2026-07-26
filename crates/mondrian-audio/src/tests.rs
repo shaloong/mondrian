@@ -700,8 +700,8 @@ fn session_executes_preallocated_contribution_and_route_compensation_block_invar
 fn prepared_source_schedule_preserves_fractional_forward_retime() {
     let mut sequence = sequence_with_audio_clip();
     let clip = &mut sequence.audio_tracks[0].clips[0];
-    clip.source_in = tt(1, 4);
-    clip.speed.set_scale(TimeScale::new(3, 2).expect("exact forward scale"));
+    clip.set_constant_source_time_map(tt(1, 4), TimeScale::new(3, 2).expect("exact forward scale"))
+        .expect("set source map");
 
     let mut source = RampSource::default();
     let pcm = render_audio(
@@ -719,8 +719,11 @@ fn prepared_source_schedule_preserves_fractional_forward_retime() {
 fn prepared_source_schedule_preserves_fractional_reverse_retime() {
     let mut sequence = sequence_with_audio_clip();
     let clip = &mut sequence.audio_tracks[0].clips[0];
-    clip.source_in = tt(3, 1);
-    clip.speed.set_scale(TimeScale::new(-1, 2).expect("exact reverse scale"));
+    clip.set_constant_source_time_map(
+        tt(3, 1),
+        TimeScale::new(-1, 2).expect("exact reverse scale"),
+    )
+    .expect("set source map");
 
     let mut source = RampSource::default();
     let pcm = render_audio(
@@ -2103,8 +2106,12 @@ fn stateless_nested_runtime_preserves_fractional_reverse_mapping() {
         Some("reversed child".to_owned()),
     )
     .expect("nested clip");
-    nested_clip.source_in = tt(3, 1);
-    nested_clip.speed.set_scale(TimeScale::new(-1, 2).expect("exact reverse scale"));
+    nested_clip
+        .set_constant_source_time_map(
+            tt(3, 1),
+            TimeScale::new(-1, 2).expect("exact reverse scale"),
+        )
+        .expect("set source map");
     root.add_nested_audio_clip(root_track, nested_clip, child_output)
         .expect("nested audio authoring");
 
@@ -2144,8 +2151,9 @@ fn stateful_nested_runtime_replays_forward_mapping_across_child_blocks() {
         Some("retimed child".to_owned()),
     )
     .expect("nested clip");
-    nested_clip.source_in = tt(1, 4);
-    nested_clip.speed.set_scale(TimeScale::new(3, 2).expect("exact forward scale"));
+    nested_clip
+        .set_constant_source_time_map(tt(1, 4), TimeScale::new(3, 2).expect("exact forward scale"))
+        .expect("set source map");
     root.add_nested_audio_clip(root_track, nested_clip, child_output)
         .expect("nested audio authoring");
 
@@ -2204,8 +2212,9 @@ fn stateful_nested_runtime_rejects_reverse_state_evaluation() {
         Some("reversed child".to_owned()),
     )
     .expect("nested clip");
-    nested_clip.source_in = tt(3, 1);
-    nested_clip.speed.set_scale(TimeScale::NEGATIVE_ONE);
+    nested_clip
+        .set_constant_source_time_map(tt(3, 1), TimeScale::NEGATIVE_ONE)
+        .expect("set source map");
     root.add_nested_audio_clip(root_track, nested_clip, child_output)
         .expect("nested audio authoring");
 

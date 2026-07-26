@@ -2688,8 +2688,8 @@ fn timeline_clip_from_sequence_clip(
                     view = view.with_source_identity(
                         record.id,
                         waveform_source_revision(&record),
-                        clip.source_in.to_f64(),
-                        clip.source_out.to_f64(),
+                        clip.source_origin().to_f64(),
+                        clip.source_terminal_boundary().ok()?.to_f64(),
                     );
                 }
             }

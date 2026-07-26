@@ -355,8 +355,8 @@ fn nested_author_evidence(
     ensure!(
         replacement.position == expected_position
             && replacement.duration == expected_duration
-            && replacement.source_in == TimelineTime::ZERO
-            && replacement.source_out == expected_duration,
+            && replacement.source_origin() == TimelineTime::ZERO
+            && replacement.source_terminal_boundary()? == expected_duration,
         "nested replacement Clip left its exact Hero slice window"
     );
     let nested = state.sequence_by_id(nested_sequence_id).context("nested Sequence is absent")?;

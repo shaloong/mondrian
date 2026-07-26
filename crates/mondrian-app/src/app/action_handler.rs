@@ -2936,14 +2936,23 @@ fn source_trim_target_frame(
 ) -> Result<i64> {
     let source_frame_rate = Rational::new(source_time.time_base.den, source_time.time_base.num);
     let source_time = TimelineTime::from_frame_position(source_time)?;
+    let speed = clip.source_time_scale();
+    if speed.numerator() <= 0 {
+        return Err(MondrianError::WorkflowStepFailed {
+            step_id: "trim_clip_source".to_string(),
+            reason: "source trim requires a positive finite speed multiplier".to_string(),
+        });
+    }
+    let source_origin = clip.source_origin();
+    let source_terminal = clip.source_terminal_boundary()?;
     match edge {
-        TrimEdge::In if source_time >= clip.source_out => {
+        TrimEdge::In if source_time >= source_terminal => {
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: "trim_clip_source".to_string(),
                 reason: "source in must be before current source out".to_string(),
             });
         }
-        TrimEdge::Out if source_time <= clip.source_in => {
+        TrimEdge::Out if source_time <= source_origin => {
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: "trim_clip_source".to_string(),
                 reason: "source out must be after current source in".to_string(),
@@ -2952,15 +2961,7 @@ fn source_trim_target_frame(
         _ => {}
     }
 
-    let speed = clip.speed.scale();
-    if speed.numerator() <= 0 {
-        return Err(MondrianError::WorkflowStepFailed {
-            step_id: "trim_clip_source".to_string(),
-            reason: "source trim requires a positive finite speed multiplier".to_string(),
-        });
-    }
-
-    let source_delta = source_time.checked_sub(clip.source_in)?;
+    let source_delta = source_time.checked_sub(source_origin)?;
     let timeline_delta = source_delta.checked_scale(speed.reciprocal()?)?;
     let target = clip.position.checked_add(timeline_delta)?.max(TimelineTime::ZERO);
     target
@@ -4527,7 +4528,7 @@ mod tests {
         assert_eq!(first.duration, tt(25, tb));
         assert_eq!(second.position, tt(35, tb));
         assert_eq!(second.duration, tt(15, tb));
-        assert_eq!(second.source_in, tt(5, tb));
+        assert_eq!(second.source_origin(), tt(5, tb));
     }
 
     #[test]
@@ -4596,7 +4597,7 @@ mod tests {
         let clip = &sequence.video_tracks[0].clips[0];
         assert_eq!(clip.position, tt(15, tb));
         assert_eq!(clip.duration, tt(15, tb));
-        assert_eq!(clip.source_in, tt(5, tb));
+        assert_eq!(clip.source_origin(), tt(5, tb));
         assert!(state.can_undo_action());
     }
 
@@ -4617,7 +4618,10 @@ mod tests {
         let clip = &sequence.video_tracks[0].clips[0];
         assert_eq!(clip.position, tt(10, tb));
         assert_eq!(clip.duration, tt(12, tb));
-        assert_eq!(clip.source_out, tt(12, tb));
+        assert_eq!(
+            clip.source_terminal_boundary().expect("source terminal"),
+            tt(12, tb)
+        );
         assert!(state.can_undo_action());
     }
 

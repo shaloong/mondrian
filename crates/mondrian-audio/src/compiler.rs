@@ -123,8 +123,8 @@ pub fn compile_audio_program(
                     sequence_range,
                     source_time_map: CompiledSourceTimeMap {
                         sequence_start: clip.position,
-                        source_in: clip.source_in,
-                        speed: clip.speed,
+                        source_origin: clip.source_origin(),
+                        scale: clip.source_time_scale(),
                     },
                     source,
                     channel_mapping: edit.channel_mapping.clone(),
