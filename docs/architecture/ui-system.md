@@ -320,7 +320,7 @@ values observed under a distinct fresh Session after load. Action admission or
 a human-readable status hint alone cannot satisfy a Golden operation.
 
 Golden validation has one UI-independent planning Module. It compiles the
-closed schema-v4 / `windows-alpha-golden-v9` contract into two deterministic
+closed schema-v4 / `windows-alpha-golden-v10` contract into two deterministic
 ledgers of required fixture roles, operations, content, and exports. The global
 ledger finds work absent from every slice; the Hero ledger independently finds
 work that exists only in isolated diagnostic Sequences. A slice declares one
@@ -362,8 +362,15 @@ Visual must preserve the complete Hero audio projection. Editorial must
 preserve the Foundation Track-owned audio anchor and the complete visual
 projection while adding AAC placements only to deterministic pristine Tracks.
 Its Overwrite, targeted Split, Ripple Delete, and multi-Track Insert consume
-typed product outcomes; scrub, settled seek, and play complete exact Frame
-Presentation Tickets through the production Preview Runtime. Delivery must
+typed product outcomes. Track Targeting and Sync-Lock are resolved through
+session Actions into one immutable command scope without advancing Author
+Generation or Sequence Revision. Lift consumes only the targeted primary Track
+and preserves program time; Extract consumes the same content Track and closes
+program time on the targeted plus untargeted Sync-Locked editorial Tracks.
+Exact half-open In/Out setup, structural postconditions, and one-step Undo/Redo
+are retained as typed operation evidence. Scrub, settled seek, and play complete
+exact Frame Presentation Tickets through the production Preview Runtime.
+Delivery must
 preserve every earlier scoped author projection, reuse the Foundation PCM
 placement, and author its Solid Color/Trim/Transform/Opacity through typed
 product Interfaces in a nonzero Work Area. After durable reopen it runs the
@@ -378,11 +385,12 @@ Recovery/Nesting adds a dedicated Hero Track in the exact `175..200` window,
 keeps Hero as its primary identity, and owns one auxiliary Nested Composition
 child. Its Autosave recovery and covering manual reopen must preserve the
 complete Hero parent, child, Proxy anchor, and every earlier scoped anchor.
-Only the file-backed HLG/Alpha roundtrip still uses a focused diagnostic
-Sequence.
+The file-backed HLG/Alpha roundtrip also uses Hero while retaining its own
+scoped Track/Clip/Asset anchor.
 The number of execution slices is not a Sequence-count invariant because a
-Hero slice may own a strongly referenced child. Complete acceptance remains
-blocked until the remaining diagnostic obligations join Hero.
+Hero slice may own a strongly referenced child. Every acceptance slice is now
+assigned to Hero; diagnostic Sequences exist only in focused infrastructure
+tests and carry no Golden requirement.
 
 Heavy media and GPU execution runs in the dedicated `mondrian-golden` process
 entrypoint, never on a short-lived libtest worker. A terminal top-level report
@@ -411,9 +419,14 @@ the two Sequences present at the Recovery boundary, earlier stage content,
 relinked Asset intent, and both typed reimport profiles. The later Color Media
 stage keeps that count at two, reuses Hero in the `350..375` window, and retains
 its two adjacent file-backed Track/Clip/Asset anchors without changing the
-Recovery parent Track or child. All seven stage primaries now share Hero; the
+Recovery parent Track or child. All seven stage primaries now share Hero. The
 supervised run `20260725T172841Z-complete-golden-d631639d` passed three distinct
-run/Project identities. Earlier eight-Sequence runs remain diagnostic history.
+run/Project identities under the preceding v9 contract. The current v10
+supervised run `20260725T234232Z-complete-golden-42ccff21` then passed three
+fresh run/Project identities with Lift/Extract required and observed; its
+aggregate report hash is
+`4edaeb0404fad68b813f5592a0533b86788414b3f3142ac88be04e46fb5ca8aa`.
+Earlier eight-Sequence runs remain diagnostic history.
 Qualified release-machine capture and independent HDR/Log numeric references
 remain separate acceptance obligations.
 

@@ -11,7 +11,7 @@ control exists.
   purposes. Fixed files pin bytes globally; generated files pin the recipe and
   are byte-pinned by each run.
 - `tests/validation/golden-project.json` defines the five-minute editing and
-  export workflow. Contract identity `windows-alpha-golden-v9` uses closed
+  export workflow. Contract identity `windows-alpha-golden-v10` uses closed
   schema v4 and fixes exact Hero Sequence raster/timing/color/audio
   values, fixture-role purposes, stable built-in delivery preset identities,
   resolved profile/depth/chroma/range/Alpha expectations, and independently
@@ -75,7 +75,7 @@ cannot satisfy a color golden even when it carries valid CICP tags.
 
 An execution slice is intentionally narrower than the complete Golden Project.
 It passes only if its exact required fixture roles, operations, and content have
-typed postcondition evidence. Golden v9 rejects unknown fields; requirement IDs
+typed postcondition evidence. Golden v10 rejects unknown fields; requirement IDs
 select evidence obligations but cannot substitute for observed author, media,
 delivery, or persistence facts.
 Every slice report explicitly records `complete_golden_project: false`. A
@@ -115,7 +115,7 @@ cargo test -p mondrian-app --lib `
   --nocapture
 ```
 
-The v9 global ledger is structurally complete: every required fixture,
+The v10 global ledger is structurally complete: every required fixture,
 operation, content item, and export contract is assigned to one of seven
 executable slices, and every slice is assigned to the same Hero role. HLG
 Main10 and sRGB Alpha remain bound to deterministic project-owned recipes with
@@ -140,7 +140,7 @@ mutated in-memory contract to exercise diagnostic Sequence creation through the
 product authoring Interface. It returns to Hero through the product switching
 action and performs durable save/close/reopen. The private binding locks Hero
 ID, complete settings, and Project Color Environment; Project/path and both
-Sequences survive while only Session identity changes. The canonical v9
+Sequences survive while only Session identity changes. The canonical v10
 contract does not assign any acceptance slice to that diagnostic role. This is
 infrastructure evidence, not a Golden operation, and does not alter the ledger.
 
@@ -166,7 +166,13 @@ projection unchanged.
 Editorial binds only two complete pristine audio Tracks, leaves the exact
 Foundation Track-owned audio anchor and complete visual projection unchanged,
 and authors the AAC workflow through typed product outcomes for Drop,
-Overwrite, targeted Split, Ripple Delete, and multi-Track Insert. Delivery
+Overwrite, targeted Split, Ripple Delete, and multi-Track Insert. It then
+resolves Track Targeting and Sync-Lock through ordinary session Actions without
+advancing durable author state. Lift removes only the targeted inserted Clip
+without closing program time; Extract trims the targeted primary Track while
+closing exactly five frames on both the primary and the untargeted but
+Sync-Locked secondary Track. Both operations consume exact half-open In/Out
+ranges and prove complete one-step Undo/Redo author roundtrips. Delivery
 reuses the Foundation PCM placement instead of importing a duplicate, uses the
 nonzero `150..175` Work Area, and preserves all earlier Track-owned authoring
 while it authors Trim, Transform, and Opacity.
@@ -231,12 +237,15 @@ Hero identity and may then classify three distinct run/Project identities as a
 consecutive pass under `target/validation/runs/`.
 
 The reproducible local run
-`20260725T172841Z-complete-golden-d631639d` passed `3/3`: each pass used a
-distinct run and Project identity, all seven primary Sequence IDs resolved to
-that pass's Hero, and the final project contained exactly Hero plus one nested
-child. This closes the Golden single-project composition gate only. It does not
-claim qualified release-machine performance, long-duration device/A/V evidence,
-fault injection, or an independent absolute HLG/PQ/Log reference.
+`20260725T234232Z-complete-golden-42ccff21` passed the current v10 contract
+`3/3`: each pass used a distinct run and Project identity, all seven primary
+Sequence IDs resolved to that pass's Hero, and the final project contained
+exactly Hero plus one nested child. The aggregate report SHA-256 is
+`4edaeb0404fad68b813f5592a0533b86788414b3f3142ac88be04e46fb5ca8aa`.
+The preceding v9 run `20260725T172841Z-complete-golden-d631639d` remains
+historical composition evidence. No Golden run claims qualified
+release-machine performance, long-duration device/A/V evidence, fault
+injection, or an independent absolute HLG/PQ/Log reference.
 
 Heavy GPU/media work intentionally runs on a dedicated process main lifetime,
 not a libtest worker. The terminal JSON report is the semantic completion
@@ -518,11 +527,11 @@ plan on the qualified 16 GiB Windows reference machine and was classified
 `passed-baseline`. Its generated artifacts and evidence bundle remain
 intentionally disposable under `target`; the repository commits the recipes,
 contracts, and this reproducible result record rather than a multi-gigabyte
-machine-specific bundle. The Golden v9 contract resolves PCM, AAC, Rec.709
+machine-specific bundle. The Golden v10 contract resolves PCM, AAC, Rec.709
 H.264, HLG Main10, and sRGB Alpha fixture identities and assigns all five to
 executable slices.
 `foundation-audio-authoring-v1`, `visual-authoring-roundtrip-v1`,
-`editorial-transport-v1`, `generated-delivery-roundtrip-v1`,
+`editorial-transport-v2`, `generated-delivery-roundtrip-v1`,
 `proxy-relink-v1`, `recovery-nesting-v1`, and `color-media-roundtrip-v1`
 now share one Hero Sequence. Recovery adds one nested child while Proxy/Relink retains a real focused
 Headless product-workflow gate rather than becoming a declaration-only check.

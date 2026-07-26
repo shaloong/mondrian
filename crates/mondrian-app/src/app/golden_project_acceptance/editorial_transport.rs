@@ -15,8 +15,11 @@ use super::workflow::{GoldenProductWorkflowDriver, GoldenSequenceStageEvidence};
 use super::{load_json, GoldenProjectContract};
 use crate::app::playback::PlaybackAdvanceStatus;
 use crate::app::ui_actions::{
-    assets_prepare_drag_action, timeline_seek_with_source_action, timeline_trim_clips_action,
-    AssetsPrepareDragPayload, TimelineInsertAssetPayload, TimelineSeekSource,
+    assets_prepare_drag_action, timeline_extract_range_action, timeline_lift_range_action,
+    timeline_seek_with_source_action, timeline_set_in_out_point_action,
+    timeline_set_track_targeting_action, timeline_trim_clips_action, AssetsPrepareDragPayload,
+    TimelineInOutPointPayloadKind, TimelineInsertAssetPayload, TimelineSeekSource,
+    TimelineSetInOutPointPayload, TimelineSetTrackTargetingPayload, TimelineTrackTargetingControl,
     TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
 };
 use crate::app::AppState;
@@ -39,13 +42,21 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
-pub(super) const EDITORIAL_SLICE_ID: &str = "editorial-transport-v1";
+pub(super) const EDITORIAL_SLICE_ID: &str = "editorial-transport-v2";
 const VIEWER_PRESENTATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 struct ClipRangeObservation {
     start_frame: i64,
     end_frame_exclusive: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RangeEditScopeEvidence {
+    targeted_track_ids: Vec<TrackId>,
+    ripple_track_ids: Vec<TrackId>,
+    unchanged_author_generation: u64,
+    unchanged_sequence_revision: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -88,6 +99,36 @@ enum OperationEvidence {
         downstream_before: ClipRangeObservation,
         downstream_after: ClipRangeObservation,
     },
+    #[serde(rename = "lift")]
+    Lift {
+        range_setup_steps: Vec<AuthorTransitionEvidence>,
+        author_step: AuthorTransitionEvidence,
+        undo_step: AuthorTransitionEvidence,
+        redo_step: AuthorTransitionEvidence,
+        scope: RangeEditScopeEvidence,
+        removed_clip_id: ClipId,
+        removed_range: ClipRangeObservation,
+        primary_downstream_clip_id: ClipId,
+        downstream_before: ClipRangeObservation,
+        downstream_after: ClipRangeObservation,
+    },
+    #[serde(rename = "extract")]
+    Extract {
+        range_setup_steps: Vec<AuthorTransitionEvidence>,
+        author_step: AuthorTransitionEvidence,
+        undo_step: AuthorTransitionEvidence,
+        redo_step: AuthorTransitionEvidence,
+        scope: RangeEditScopeEvidence,
+        trimmed_clip_id: ClipId,
+        trimmed_before: ClipRangeObservation,
+        trimmed_after: ClipRangeObservation,
+        primary_downstream_clip_id: ClipId,
+        primary_before: ClipRangeObservation,
+        primary_after: ClipRangeObservation,
+        secondary_downstream_clip_id: ClipId,
+        secondary_before: ClipRangeObservation,
+        secondary_after: ClipRangeObservation,
+    },
     #[serde(rename = "scrub")]
     Scrub {
         target_frames: Vec<i64>,
@@ -122,6 +163,8 @@ impl OperationEvidence {
             Self::Overwrite { .. } => "overwrite",
             Self::Split { .. } => "split",
             Self::Ripple { .. } => "ripple",
+            Self::Lift { .. } => "lift",
+            Self::Extract { .. } => "extract",
             Self::Scrub { .. } => "scrub",
             Self::AccurateSeek { .. } => "accurate-seek",
             Self::Play { .. } => "play",
@@ -262,6 +305,128 @@ fn clip_range(
     Ok(ClipRangeObservation { start_frame, end_frame_exclusive })
 }
 
+fn sequence_in_out_range(state: &AppState) -> anyhow::Result<Option<ClipRangeObservation>> {
+    let sequence = state.active_sequence().context("active Sequence is absent")?;
+    match (sequence.in_point, sequence.out_point) {
+        (None, None) => Ok(None),
+        (Some(start), Some(end)) => Ok(Some(ClipRangeObservation {
+            start_frame: start
+                .to_frame_position(sequence.settings.frame_rate, FrameRounding::Nearest)?
+                .frame,
+            end_frame_exclusive: end
+                .to_frame_position(sequence.settings.frame_rate, FrameRounding::Nearest)?
+                .frame,
+        })),
+        _ => anyhow::bail!("active Sequence has only one In/Out endpoint"),
+    }
+}
+
+fn set_in_out_range(
+    state: &mut AppState,
+    range: ClipRangeObservation,
+    in_intent: &'static str,
+    out_intent: &'static str,
+) -> anyhow::Result<Vec<AuthorTransitionEvidence>> {
+    ensure!(
+        sequence_in_out_range(state)?.is_none(),
+        "previous Golden range edit did not consume its In/Out range"
+    );
+    let steps = vec![
+        dispatch_author_transition(
+            state,
+            in_intent,
+            timeline_set_in_out_point_action(TimelineSetInOutPointPayload {
+                point: TimelineInOutPointPayloadKind::In,
+                frame: range.start_frame,
+            }),
+        )?,
+        dispatch_author_transition(
+            state,
+            out_intent,
+            timeline_set_in_out_point_action(TimelineSetInOutPointPayload {
+                point: TimelineInOutPointPayloadKind::Out,
+                frame: range.end_frame_exclusive,
+            }),
+        )?,
+    ];
+    ensure!(
+        sequence_in_out_range(state)? == Some(range),
+        "Golden range setup did not preserve the exact half-open frame range"
+    );
+    Ok(steps)
+}
+
+fn ensure_clip_absent(
+    state: &AppState,
+    track_id: TrackId,
+    clip_id: ClipId,
+    operation: &str,
+) -> anyhow::Result<()> {
+    ensure!(
+        audio_track(state, track_id)?.clips.iter().all(|clip| clip.id != clip_id),
+        "{operation} retained Clip {clip_id}"
+    );
+    Ok(())
+}
+
+fn configure_range_edit_scope(
+    state: &mut AppState,
+    sequence_id: SequenceId,
+    primary_track_id: TrackId,
+    secondary_track_id: TrackId,
+) -> anyhow::Result<RangeEditScopeEvidence> {
+    let sequence =
+        state.sequence_by_id(sequence_id).context("Editorial Hero Sequence is absent")?;
+    let all_track_ids = sequence
+        .video_tracks
+        .iter()
+        .chain(&sequence.audio_tracks)
+        .map(|track| track.id)
+        .collect::<Vec<_>>();
+    let author_generation = state.project_author_generation();
+    let sequence_revision = sequence.revision.get();
+
+    for track_id in all_track_ids {
+        state.dispatch_action(timeline_set_track_targeting_action(
+            TimelineSetTrackTargetingPayload {
+                track_id,
+                control: TimelineTrackTargetingControl::Target,
+                enabled: track_id == primary_track_id,
+            },
+        ))?;
+        state.dispatch_action(timeline_set_track_targeting_action(
+            TimelineSetTrackTargetingPayload {
+                track_id,
+                control: TimelineTrackTargetingControl::SyncLock,
+                enabled: track_id == primary_track_id || track_id == secondary_track_id,
+            },
+        ))?;
+    }
+
+    let sequence =
+        state.sequence_by_id(sequence_id).context("Editorial Hero Sequence is absent")?;
+    let targets = state.timeline_edit_targets(sequence);
+    let expected_content_tracks = BTreeSet::from([primary_track_id]);
+    let expected_ripple_tracks = BTreeSet::from([primary_track_id, secondary_track_id]);
+    ensure!(
+        targets.content_tracks == expected_content_tracks
+            && targets.ripple_tracks == expected_ripple_tracks,
+        "Track Targeting/Sync-Lock did not resolve the exact Golden range-edit scope"
+    );
+    ensure!(
+        state.project_author_generation() == author_generation
+            && sequence.revision.get() == sequence_revision,
+        "Track Targeting/Sync-Lock polluted durable author state"
+    );
+
+    Ok(RangeEditScopeEvidence {
+        targeted_track_ids: targets.content_tracks.into_iter().collect(),
+        ripple_track_ids: targets.ripple_tracks.into_iter().collect(),
+        unchanged_author_generation: author_generation,
+        unchanged_sequence_revision: sequence_revision,
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 struct EditorialAudioTrackBinding {
     primary: TrackId,
@@ -383,7 +548,9 @@ pub(super) fn execute_editorial_stage(
                 "insert",
                 "overwrite",
                 "ripple",
-                "split"
+                "split",
+                "lift",
+                "extract"
             ],
         "editorial slice operation contract drifted"
     );
@@ -601,6 +768,125 @@ pub(super) fn execute_editorial_stage(
         secondary_after: secondary_after_insert,
     };
 
+    let range_edit_scope =
+        configure_range_edit_scope(state, stage.sequence_id(), track_id, secondary_track_id)?;
+
+    let lift_range = ClipRangeObservation { start_frame: 60, end_frame_exclusive: 70 };
+    let lift_downstream_before = clip_range(state, track_id, downstream_clip_id)?;
+    let lift_range_setup_steps =
+        set_in_out_range(state, lift_range, "set-lift-in-aac", "set-lift-out-aac")?;
+    let lift_step =
+        dispatch_author_transition(state, "lift-inserted-aac", timeline_lift_range_action())?;
+    ensure_clip_absent(state, track_id, inserted_clip_id, "Lift")?;
+    let lift_downstream_after = clip_range(state, track_id, downstream_clip_id)?;
+    ensure!(
+        sequence_in_out_range(state)?.is_none()
+            && state.current_frame() == lift_range.start_frame
+            && lift_downstream_before == primary_after_insert
+            && lift_downstream_after == lift_downstream_before,
+        "Lift did not remove only the targeted content while preserving program time"
+    );
+
+    let lift_undo_step = dispatch_author_transition(state, "undo-lift-aac", Action::Undo)?;
+    ensure!(
+        clip_range(state, track_id, inserted_clip_id)? == lift_range
+            && clip_range(state, track_id, downstream_clip_id)? == lift_downstream_before
+            && sequence_in_out_range(state)? == Some(lift_range),
+        "Undo did not restore the complete pre-Lift author state in one step"
+    );
+    let lift_redo_step = dispatch_author_transition(state, "redo-lift-aac", Action::Redo)?;
+    ensure_clip_absent(state, track_id, inserted_clip_id, "Redo Lift")?;
+    ensure!(
+        clip_range(state, track_id, downstream_clip_id)? == lift_downstream_after
+            && sequence_in_out_range(state)?.is_none(),
+        "Redo did not restore the complete post-Lift author state in one step"
+    );
+    let lift_evidence = OperationEvidence::Lift {
+        range_setup_steps: lift_range_setup_steps,
+        author_step: lift_step,
+        undo_step: lift_undo_step,
+        redo_step: lift_redo_step,
+        scope: range_edit_scope.clone(),
+        removed_clip_id: inserted_clip_id,
+        removed_range: lift_range,
+        primary_downstream_clip_id: downstream_clip_id,
+        downstream_before: lift_downstream_before,
+        downstream_after: lift_downstream_after,
+    };
+
+    let extract_range = ClipRangeObservation { start_frame: 45, end_frame_exclusive: 50 };
+    let extract_trimmed_before = clip_range(state, track_id, replacement_clip_id)?;
+    let extract_primary_before = clip_range(state, track_id, downstream_clip_id)?;
+    let extract_secondary_before =
+        clip_range(state, secondary_track_id, secondary_downstream_clip_id)?;
+    let extract_range_setup_steps = set_in_out_range(
+        state,
+        extract_range,
+        "set-extract-in-aac",
+        "set-extract-out-aac",
+    )?;
+    let extract_step = dispatch_author_transition(
+        state,
+        "extract-aac-multitrack",
+        timeline_extract_range_action(),
+    )?;
+    let extract_trimmed_after = clip_range(state, track_id, replacement_clip_id)?;
+    let extract_primary_after = clip_range(state, track_id, downstream_clip_id)?;
+    let extract_secondary_after =
+        clip_range(state, secondary_track_id, secondary_downstream_clip_id)?;
+    ensure!(
+        extract_trimmed_before
+            == (ClipRangeObservation { start_frame: 25, end_frame_exclusive: 50 })
+            && extract_trimmed_after
+                == (ClipRangeObservation { start_frame: 25, end_frame_exclusive: 45 })
+            && extract_primary_before
+                == (ClipRangeObservation { start_frame: 85, end_frame_exclusive: 110 })
+            && extract_primary_after
+                == (ClipRangeObservation { start_frame: 80, end_frame_exclusive: 105 })
+            && extract_secondary_before
+                == (ClipRangeObservation { start_frame: 85, end_frame_exclusive: 110 })
+            && extract_secondary_after
+                == (ClipRangeObservation { start_frame: 80, end_frame_exclusive: 105 })
+            && sequence_in_out_range(state)?.is_none()
+            && state.current_frame() == extract_range.start_frame,
+        "Extract did not trim targeted content and close exactly five frames on Sync-Locked Tracks"
+    );
+
+    let extract_undo_step = dispatch_author_transition(state, "undo-extract-aac", Action::Undo)?;
+    ensure!(
+        clip_range(state, track_id, replacement_clip_id)? == extract_trimmed_before
+            && clip_range(state, track_id, downstream_clip_id)? == extract_primary_before
+            && clip_range(state, secondary_track_id, secondary_downstream_clip_id)?
+                == extract_secondary_before
+            && sequence_in_out_range(state)? == Some(extract_range),
+        "Undo did not restore the complete pre-Extract author state in one step"
+    );
+    let extract_redo_step = dispatch_author_transition(state, "redo-extract-aac", Action::Redo)?;
+    ensure!(
+        clip_range(state, track_id, replacement_clip_id)? == extract_trimmed_after
+            && clip_range(state, track_id, downstream_clip_id)? == extract_primary_after
+            && clip_range(state, secondary_track_id, secondary_downstream_clip_id)?
+                == extract_secondary_after
+            && sequence_in_out_range(state)?.is_none(),
+        "Redo did not restore the complete post-Extract author state in one step"
+    );
+    let extract_evidence = OperationEvidence::Extract {
+        range_setup_steps: extract_range_setup_steps,
+        author_step: extract_step,
+        undo_step: extract_undo_step,
+        redo_step: extract_redo_step,
+        scope: range_edit_scope,
+        trimmed_clip_id: replacement_clip_id,
+        trimmed_before: extract_trimmed_before,
+        trimmed_after: extract_trimmed_after,
+        primary_downstream_clip_id: downstream_clip_id,
+        primary_before: extract_primary_before,
+        primary_after: extract_primary_after,
+        secondary_downstream_clip_id,
+        secondary_before: extract_secondary_before,
+        secondary_after: extract_secondary_after,
+    };
+
     let mut viewer = GoldenHeadlessPreview::new()?;
     let scrub_before = state.playback_evidence_report();
     let target_frames = vec![5, 15, 30];
@@ -712,6 +998,8 @@ pub(super) fn execute_editorial_stage(
         overwrite_evidence,
         ripple_evidence,
         split_evidence,
+        lift_evidence,
+        extract_evidence,
     ];
     ensure_exact_requirement_evidence(
         &slice.required_operations,
@@ -738,7 +1026,7 @@ pub(super) fn execute_editorial_stage(
     )?;
 
     Ok(GoldenEditorialReport {
-        schema_version: 3,
+        schema_version: 4,
         profile: EDITORIAL_SLICE_ID,
         contract_id: contract.id.clone(),
         corpus_revision: manifest.corpus_revision,
