@@ -46,6 +46,42 @@ pub enum VideoTransitionHandleState {
 }
 
 impl AppState {
+    /// Revalidate only Transitions affected by a retime when their current
+    /// external source extents are resolvable.
+    ///
+    /// Unresolved media remains recoverable author intent. A resolved but
+    /// insufficient handle range rejects the author transaction.
+    pub(crate) fn validate_resolved_retimed_transition_handles(
+        &self,
+        sequence: &mondrian_timeline::sequence::Sequence,
+        retimed_clip_ids: &[ClipId],
+    ) -> mondrian_core::Result<()> {
+        let retimed = retimed_clip_ids.iter().copied().collect::<std::collections::HashSet<_>>();
+        for transition in sequence.video_transitions.iter().filter(|transition| {
+            transition.is_enabled
+                && (retimed.contains(&transition.left) || retimed.contains(&transition.right))
+        }) {
+            let (_, _, left, right) =
+                transition_endpoints(sequence, transition.left, transition.right)?;
+            let Ok(left_extent) = self.transition_source_extent(left) else {
+                continue;
+            };
+            let Ok(right_extent) = self.transition_source_extent(right) else {
+                continue;
+            };
+            if !handles_satisfy(transition, left, right, left_extent, right_extent)? {
+                return Err(MondrianError::WorkflowStepFailed {
+                    step_id: "clip_retime_transition_handles".to_owned(),
+                    reason: format!(
+                        "retime would exceed the resolved source handles of Transition {}",
+                        transition.id
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve current source-handle evidence for one authored Transition.
     ///
     /// This observation never repairs author state or changes the Transition

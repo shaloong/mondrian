@@ -541,3 +541,13 @@ editorial fixture is not eligible to close
 primary-color or LUT coverage. Stress coverage
 also still lacks 4K60 and broader Log/VFR/multichannel/damaged-media fixtures,
 so `Nightly/Release -Scope All` correctly remains blocked.
+
+A separate non-ignored Retime Hero seam gate uses the same production
+single-Project workflow driver with internally consistent metadata-only
+video/audio streams. It proves that one linked exact-rate transaction and one
+picture-only hold retain identical source coordinates through Preview and
+Export render-plan lowering, audio semantic compile and dense preparation,
+Undo/Redo, durable `.mdp` publication, and a fresh Authoring Session reopen.
+Because its one-byte source is never decoded or encoded, this gate is not
+evidence of picture, PCM, codec, or delivery correctness; those obligations
+remain with the fixed-corpus executable slices.

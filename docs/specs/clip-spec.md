@@ -32,6 +32,19 @@ negative, and zero scales express forward, reverse, and hold semantics.
 Persisted author coordinates are `TimelineTime`; frame numbers are
 evaluation/display projections only.
 
+The current product constant-retime contract has two closed operations:
+
+- set a strictly positive exact forward rate while preserving placement,
+  Timeline duration, source origin, and Clip-local visual time;
+- freeze a video Clip at the exact source coordinate visible at an in-range
+  Sequence time while preserving its existing duration.
+
+Forward rate may explicitly expand the complete Clip link group and rejects
+any locked member atomically. Freeze frame never modifies linked audio. Reverse
+remains unavailable until negative maps carry strict-predecessor sampling
+through video decode and audio frame lowering; negating a rate alone would
+sample the old exclusive out boundary.
+
 ## Closed content variants
 
 Exactly one variant is present:

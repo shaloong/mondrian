@@ -61,6 +61,17 @@ It cannot contain a Track ID, Sequence range, Clip speed, source range, nested
 Sequence ID, Route, or output. Compilation derives those from the owning
 Track/Clip. This prevents two editable copies of placement from diverging.
 
+The forward-rate product Action may expand a complete linked video/audio Clip
+group and replaces every member's canonical source map in one author
+transaction. Audio compilation then lowers the new positive exact scale through
+the existing dense schedule; placement duration and Component Edit origins do
+not move. Freeze frame is video-only. Audio is never converted to a zero-rate
+single-sample hold as an incidental consequence of a picture operation.
+The focused Retime Hero gate recompiles the persisted linked audio Clip after a
+durable Project reopen, prepares the complete routed Track closure into the
+dense schedule, and checks the exact source coordinate there. Its metadata-only
+source is semantic evidence, not PCM decode or export-audio evidence.
+
 `mondrian-assets` persists one `AssetAudioComponentCatalog` per Asset. Initial
 import assigns `AudioSourceComponentId::primary()` to the stream carrying the
 container default disposition, or the first stream only when no default is

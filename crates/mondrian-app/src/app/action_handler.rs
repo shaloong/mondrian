@@ -196,6 +196,12 @@ impl AppState {
             Action::TrimClipEnd { clip_id, new_source_out } => {
                 self.trim_clip_source_from_action(clip_id, TrimEdge::Out, new_source_out)
             }
+            Action::SetClipForwardRate { clip_id, rate, include_linked } => {
+                self.set_clip_forward_rate_from_action(clip_id, rate, include_linked)
+            }
+            Action::FreezeVideoClipAt { clip_id, sequence_time } => {
+                self.freeze_video_clip_from_action(clip_id, sequence_time)
+            }
 
             // ── 效果（复用 clip-level undoable 命令）──────────────────────
             Action::RemoveEffect { clip_id, effect_id } => {

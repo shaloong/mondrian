@@ -16,6 +16,7 @@ pub mod clip_linking;
 pub mod insert_edit;
 pub mod keyframe;
 pub mod range_edit;
+pub mod retime;
 pub mod sequence;
 mod sequence_time_edit;
 pub mod track;
@@ -37,6 +38,10 @@ pub use range_edit::{
     apply_range_edit, assess_range_edit, RangeEditAutomationPolicy, RangeEditError, RangeEditKind,
     RangeEditOutcome, RangeEditRequest, RangeEditSplitOutcome, RangeEditTimelineStatePolicy,
     RangeEditTransitionPolicy,
+};
+pub use retime::{
+    apply_clip_constant_retime, ClipConstantRetime, ClipConstantRetimeOutcome,
+    ClipConstantRetimeRequest,
 };
 pub use sequence::{
     AudioChannelLayout, AudioDisplayFormat, EditingMode, FieldOrder, PixelAspectRatio,

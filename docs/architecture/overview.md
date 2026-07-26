@@ -22,7 +22,11 @@ foundation:
 ## Crate Responsibilities
 
 - `mondrian-core`: shared value types, strong IDs, project settings, canonical audio signal layouts, color primitives, automation/keyframe data, mask/effect data, timeline render-plan data traits. It must not depend on UI, platform, media, renderer, or app crates.
-- `mondrian-editor-state`: editor actions and state enums shared by UI and app code. It should remain UI-toolkit agnostic.
+- `mondrian-editor-state`: editor actions and state enums shared by UI and app
+  code. It remains UI-toolkit agnostic; exact forward-rate and freeze-frame
+  intents carry typed Clip IDs, `TimeScale`, and `FramePosition`, while the App
+  adapter owns dependency/lock/link-group admission and the Timeline domain
+  owns atomic map replacement.
 - `mondrian-editor-ui`: product-level panel/workspace descriptors. It should define editor UI concepts, not render widgets.
 - `mondrian-platform-core`: platform service traits and native-fact result types. No OS calls.
 - `mondrian-platform`: desktop platform implementations such as clipboard, dialogs, file reveal, eyedropper, display discovery, native video import capability, and current-process memory observation.

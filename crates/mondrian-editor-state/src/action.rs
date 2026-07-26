@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use mondrian_core::{ClipId, EffectId, FramePosition, TrackId};
+use mondrian_core::{ClipId, EffectId, FramePosition, TimeScale, TrackId};
 use serde::{Deserialize, Serialize};
 
 use crate::state::{PanelKind, WorkspacePreset};
@@ -84,6 +84,19 @@ pub enum Action {
     TrimClipEnd {
         clip_id: ClipId,
         new_source_out: FramePosition,
+    },
+    /// Change one Clip and, optionally, its complete link group to an exact
+    /// positive forward playback rate while preserving Timeline duration.
+    SetClipForwardRate {
+        clip_id: ClipId,
+        rate: TimeScale,
+        include_linked: bool,
+    },
+    /// Hold the source picture visible at one Sequence frame for the complete
+    /// existing duration of a video Clip.
+    FreezeVideoClipAt {
+        clip_id: ClipId,
+        sequence_time: FramePosition,
     },
 
     // ═══════════════════════════════════════════════════════════════════
@@ -315,6 +328,22 @@ mod tests {
             new_source_out: test_timecode(),
         };
         assert_eq!(round_trip(&a), a);
+    }
+
+    #[test]
+    fn round_trip_constant_retime_actions() {
+        let rate = Action::SetClipForwardRate {
+            clip_id: test_clip_id(),
+            rate: TimeScale::new(3, 2).expect("exact rate"),
+            include_linked: true,
+        };
+        assert_eq!(round_trip(&rate), rate);
+
+        let hold = Action::FreezeVideoClipAt {
+            clip_id: test_clip_id(),
+            sequence_time: test_timecode(),
+        };
+        assert_eq!(round_trip(&hold), hold);
     }
 
     #[test]

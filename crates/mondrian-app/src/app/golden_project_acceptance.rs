@@ -17,6 +17,8 @@ mod media_execution;
 mod plan;
 mod proxy_relink;
 mod recovery_nesting;
+#[cfg(test)]
+mod retime_execution;
 mod visual_authoring;
 mod workflow;
 

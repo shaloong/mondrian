@@ -500,6 +500,14 @@ mutation, generation state, or failure policy to paint/layout code. Project
 library replacement rotates service generation, and source revision prevents a
 same-asset relink from presenting stale waveform data.
 
+Constant retime also enters through typed semantic Actions rather than a panel
+mutating Clip fields. `SetClipForwardRate` carries an exact positive
+`TimeScale` and an explicit link-group policy; `FreezeVideoClipAt` carries one
+Sequence-grid `FramePosition` and never retimes linked audio. A future speed
+dialog or context-menu surface must emit these Actions and derive availability
+from current Track/content state. It cannot synthesize reverse by sending a
+negative rate until direction-aware half-open source sampling exists.
+
 Asset thumbnails follow the same Window boundary but retain an independent
 execution policy. `AppUiHost` owns one
 `app::thumbnail_service::AssetThumbnailService` through the shallow

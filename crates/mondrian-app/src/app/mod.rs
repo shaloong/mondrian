@@ -96,6 +96,7 @@ mod audio_playback_acceptance;
 mod audio_rendering;
 mod basic_titles;
 mod clip_clipboard;
+mod clip_retime;
 pub(crate) mod exporting;
 #[cfg(any(test, feature = "validation"))]
 pub mod golden_project_acceptance;

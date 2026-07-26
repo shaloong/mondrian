@@ -636,6 +636,16 @@ impl Clip {
         Ok(())
     }
 
+    /// Replace the complete canonical source-time mapping.
+    ///
+    /// The replacement is checked against the current Clip duration before it
+    /// becomes author state.
+    pub fn replace_source_time_map(&mut self, source_time_map: ClipSourceTimeMap) -> Result<()> {
+        source_time_map.map(self.duration)?;
+        self.source_time_map = source_time_map;
+        Ok(())
+    }
+
     /// Validate Clip time ranges and the complete source mapping.
     pub fn validate_time_state(&self) -> Result<()> {
         if self.duration.is_negative() {
