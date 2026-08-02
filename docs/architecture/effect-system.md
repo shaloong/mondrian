@@ -333,9 +333,13 @@ callers materialize any dependency. Preview and Export admit that aggregate
 against their CPU active-working-set grant first. A frozen coverage tile may
 then satisfy any contained execution subregion without another decode, nested
 render, color conversion, title evaluation, or hidden allocation. Missing or
-ambiguous coverage fails closed. Mask/MaskSource remains blocked because its
-current rasterizer does not yet expose exact tile coordinates and cooperative
-cancellation.
+ambiguous coverage fails closed. Mask/MaskSource uses the same exact-region
+contract: `PreparedMaskRaster` binds one evaluated Mask to the complete frame
+extent, validates finite geometry, flattens cubic Path segments once, and
+builds the nearest-segment index once. Every direct or tiled raster uses
+full-canvas pixel centers, bounded row-crossing scratch, and cooperative
+cancellation. The 4,096-point author Path limit prevents valid snapshots from
+creating unbounded preparation or scratch obligations.
 
 The scalar reference consumes the existing `CompiledEffectGraph`; it does not
 introduce another Render Graph. It retains only the exact expanded source tile
@@ -389,11 +393,11 @@ its expanded input tile rather than
 allocating a zero-filled complete-frame buffer, while a complete Preview or
 Export request now automatically uses this bounded scalar tiling when direct
 execution does not fit. Regression references require
-expanded Blur, Vignette, frame-seeded Grain, and a finite-history
+expanded Blur, Vignette, frame-seeded Grain, Mask/MaskSource, and a finite-history
 fan-out/Blend/MultiInput DAG (including coordinate-seeded Dissolve) to equal the
 corresponding full-frame/current-frame reference crop in direct and tiled
-production execution. This does not claim GPU temporal tiling, Mask support,
-history with upstream Effects, future input, or stateful continuity execution.
+production execution. This does not claim GPU temporal tiling, history with
+upstream Effects, future input, or stateful continuity execution.
 
 `TemporalFrameMix` is the finite-history proof Processor. It coverage-correctly
 interpolates the current upstream frame with an exact signed past sample.
@@ -424,10 +428,10 @@ Frame Store value is missing. Nested demands are materialized from the same
 closure node/binding identities; Preview has no second recursive Timeline
 resolver. Only a complete set is frozen and passed to the retained Preview
 Effect Session under that generation's monotonic cancellation token; no
-current/displayed frame can stand in for absent history. Future/unbounded input,
-stateful continuity, animated/effected upstream history, Mask raster execution,
-and heterogeneous temporal execution remain outside the bounded production
-contract.
+current/displayed frame can stand in for absent history. Current-time Masks are
+prepared once and run in this same production contract. Future/unbounded input,
+stateful continuity, animated/effected upstream history, and heterogeneous
+temporal execution remain outside it.
 
 Prepared dependency identity combines the definition-registry revision with
 semantic fingerprints of immutable resources. `.cube` files are parsed,
@@ -612,10 +616,13 @@ structured diagnosis, but it is not registered as selectable or executable.
 
 `Blend`, `Mask`, `MaskSource`, and ordered `MultiInput` nodes use the same float
 working-frame contract. Mask rasterization produces native float coverage rather
-than quantizing through an 8-bit matte. The DAG executor transfers owned buffers
-according to compiled node use counts, clones only for concurrently live branch
-consumers, and recycles consumed buffers. Dissolve combines the frame seed with
-the pixel index and is therefore compiled with a frame-dependent cache policy.
+than quantizing through an 8-bit matte. Its prepared geometry is immutable and
+shared by all tiles of one attempt; retained geometry and worst-case row scratch
+are included in the temporal hard-budget proof. The DAG executor transfers
+owned buffers according to compiled node use counts, clones only for concurrently
+live branch consumers, and recycles consumed buffers. Dissolve combines the
+frame seed with the pixel index and is therefore compiled with a frame-dependent
+cache policy.
 Its opacity is a stochastic gate; accepted pixels perform a full source-over so
 opacity is not multiplied into alpha a second time.
 

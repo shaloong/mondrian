@@ -7,6 +7,7 @@ pub(super) fn temporal_scalar_required_bytes(
     request: &EffectTemporalExecutionRequest,
     temporal_shape: Option<AdmittedTemporalShape>,
     demand: &EffectExecutionDemand,
+    mask_rasters: Option<&PreparedMaskRasterSet>,
 ) -> Result<usize, EffectTemporalExecutionError> {
     let frame_bytes = checked_pixel_count(demand.input_roi().region())
         .and_then(|pixels| pixels.checked_mul(std::mem::size_of::<[f32; 4]>()))
@@ -80,17 +81,19 @@ pub(super) fn temporal_scalar_required_bytes(
                     working.release_frame()?;
                 }
             }
-            EffectGraphNodeKind::Mask { .. } => {
-                return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
-                    node_id: *node_id,
-                    kind: "mask",
-                });
+            EffectGraphNodeKind::Mask { input, mask, .. } => {
+                plan_take_graph_input(*input, &mut live, &mut remaining_uses, &mut working)?;
+                plan_take_graph_input(*mask, &mut live, &mut remaining_uses, &mut working)?;
+                working.release_frame()?;
             }
             EffectGraphNodeKind::MaskSource { .. } => {
-                return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
-                    node_id: *node_id,
-                    kind: "mask_source",
-                });
+                working.reserve_frame()?;
+                let raster = mask_rasters.and_then(|rasters| rasters.get(*node_id)).ok_or(
+                    EffectTemporalExecutionError::InvalidGraphLiveness {
+                        reason: "prepared Mask raster is missing for a MaskSource node",
+                    },
+                )?;
+                working.ensure_transient(raster.max_scratch_bytes())?;
             }
         }
         if !live.insert(*node_id) {
@@ -159,6 +162,7 @@ pub(super) fn plan_temporal_tiles(
     retained_output_bytes: usize,
     tile_budget: usize,
     total_budget: usize,
+    mask_rasters: Option<&PreparedMaskRasterSet>,
 ) -> Result<Vec<EffectPixelRoi>, EffectTemporalExecutionError> {
     let mut pending = vec![output_roi];
     let mut tiles = Vec::new();
@@ -178,8 +182,13 @@ pub(super) fn plan_temporal_tiles(
             tile_request.frame_extent,
             tile_request.output_roi,
         )?;
-        let required =
-            temporal_scalar_required_bytes(compiled, &tile_request, temporal_shape, &demand)?;
+        let required = temporal_scalar_required_bytes(
+            compiled,
+            &tile_request,
+            temporal_shape,
+            &demand,
+            mask_rasters,
+        )?;
         if required <= tile_budget {
             tiles.push(candidate);
             if tiles.len() > MAX_TEMPORAL_SCALAR_TILES {

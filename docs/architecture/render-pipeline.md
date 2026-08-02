@@ -427,8 +427,11 @@ terminal delivery. No CPU rerun is allowed after the prefix starts.
 window and exact-or-conservative input ROI from the same prepared execution
 envelope. `collect_temporal_frame_demands` accepts one closed production
 shape—one Source-fed finite-past mixer followed by a current-time DAG. Unary
-branches may fan out and rejoin through Blend/MultiInput; Mask remains blocked
-until rasterization has exact tile-coordinate and cancellation contracts.
+branches may fan out and rejoin through Blend/MultiInput, and current-time
+Mask/MaskSource nodes are valid PixelLocal stages. Their immutable prepared
+geometry uses global frame coordinates for every region and is shared by direct
+or tiled execution; retained geometry and bounded row scratch are admitted as
+part of the Effect working set.
 `PreparedTemporalFrameSet` is the decode-free provider used by the bounded
 CPU-Float32 scalar reference. Its demand batch carries the checked exact
 Float32 source-coverage byte total. Preview and Export admit that total against
@@ -459,10 +462,10 @@ one retained output. The 4,096-tile hard limit, indivisible-budget failure and
 cancellation all stop before partial publication. Internal tiles are
 attempt-local and never enter the Effect output cache; only the complete frame
 may publish there. Direct and tiled production
-paths have exact pixel-parity and peak-budget tests. This evidence applies only
-to the bounded CPU-Float32 temporal scalar contract; it is not evidence of GPU
-temporal tiling, Mask execution, arbitrary temporal graphs, or stateful
-continuity execution.
+paths have exact pixel-parity and peak-budget tests, including a Path Mask after
+a finite-history fan-out/join DAG. This evidence applies only to the bounded
+CPU-Float32 temporal scalar contract; it is not evidence of GPU temporal tiling,
+arbitrary temporal graphs, or stateful continuity execution.
 
 Export connects this tracer to its job-local decoder and closure-backed nested
 materializer. It resolves every typed demand address first, adapts the result to
@@ -927,6 +930,9 @@ coverage. Solid layers must materialize their float source when they carry an
 effect graph or affine transform, execute that same compiled graph, and then use
 the shared layer sampler; diagnostics must never claim a solid effect is float
 while bypassing its pixel semantics.
+Mask preparation and raster failures retain their typed `MaskRasterError` source
+through renderer diagnostics. Preview classifies this deterministic contract
+failure as blocked rather than a transient retryable execution failure.
 `TimelineCompositeDiagnostics` makes that fallback explicit: preview/export
 callers can see whether a composite stayed on the float/linear path or fell back
 to legacy RGBA8 because of transform or effect support. Blend-mode counters stay

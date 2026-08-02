@@ -14,7 +14,7 @@ use crate::{
     EffectExecutionSession, EffectExecutionSessionConfig, EffectGraphNodeId, EffectGraphNodeKind,
     EffectProcessingBackend, EffectRenderGraph, EffectRenderOp, EffectWorkingPrecision,
 };
-use mondrian_core::{types::BlendMode, Result as MondrianResult};
+use mondrian_core::{types::BlendMode, ExecutionCancellationToken, Result as MondrianResult};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc};
 
@@ -86,6 +86,15 @@ pub enum EffectExecutionError {
     /// current frame.
     #[error("effect operation requires an exact temporal frame provider")]
     TemporalFrameProviderRequired,
+    /// Prepared Mask geometry or raster execution failed.
+    #[error("effect Mask node {node_id:?} failed: {source}")]
+    MaskRasterFailed {
+        /// Mask source node.
+        node_id: EffectGraphNodeId,
+        /// Typed raster failure.
+        #[source]
+        source: crate::MaskRasterError,
+    },
     /// The definition-bound program cannot enter this single-frame executor.
     #[error(transparent)]
     ExecutionContract(#[from] EffectExecutionAdmissionError),
@@ -114,6 +123,13 @@ pub enum EffectFloatExecutionError {
     MissingOutput {
         /// Missing output node id.
         node_id: EffectGraphNodeId,
+    },
+    /// Prepared Mask geometry or raster execution failed.
+    MaskRasterFailed {
+        /// Mask source node.
+        node_id: EffectGraphNodeId,
+        /// Typed raster failure.
+        source: crate::MaskRasterError,
     },
 }
 
@@ -394,17 +410,28 @@ fn execute_effect_graph(
                 outputs.insert(node.id, base_frame);
             }
             EffectGraphNodeKind::MaskSource { ref shape, feather, expansion, opacity } => {
-                let alpha = crate::mask_raster::rasterize_mask_shape(
-                    shape, width, height, *feather, *expansion, *opacity,
-                );
-                // Convert alpha-only buffer to RGBA (white RGB, mask-derived alpha).
-                let mut rgba = vec![0u8; required_len];
-                for (i, &a) in alpha.iter().enumerate() {
-                    rgba[i * 4] = 255;
-                    rgba[i * 4 + 1] = 255;
-                    rgba[i * 4 + 2] = 255;
-                    rgba[i * 4 + 3] = a;
-                }
+                let cancellation = ExecutionCancellationToken::new();
+                let raster = crate::PreparedMaskRaster::prepare(
+                    shape,
+                    crate::EffectFrameExtent::new(width, height),
+                    *feather,
+                    *expansion,
+                    *opacity,
+                    &cancellation,
+                )
+                .map_err(|error| EffectExecutionError::MaskRasterFailed {
+                    node_id: node.id,
+                    source: error,
+                })?;
+                let rgba = raster
+                    .rasterize_rgba_u8(
+                        crate::EffectPixelRoi::new(0, 0, width, height),
+                        &cancellation,
+                    )
+                    .map_err(|error| EffectExecutionError::MaskRasterFailed {
+                        node_id: node.id,
+                        source: error,
+                    })?;
                 outputs.insert(node.id, rgba);
             }
             EffectGraphNodeKind::Mask { input: input_id, mask, invert, mask_op } => {
@@ -786,13 +813,28 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                 outputs.insert(node.id, base_frame);
             }
             EffectGraphNodeKind::MaskSource { shape, feather, expansion, opacity } => {
-                let alpha = crate::mask_raster::rasterize_mask_shape_f32(
-                    shape, width, height, *feather, *expansion, *opacity,
-                );
-                let mut rgba = take_float_execution_buffer(&mut buffer_pool, required_len);
-                for (pixel, alpha) in rgba.iter_mut().zip(alpha) {
-                    *pixel = [1.0, 1.0, 1.0, alpha];
-                }
+                let cancellation = ExecutionCancellationToken::new();
+                let raster = crate::PreparedMaskRaster::prepare(
+                    shape,
+                    crate::EffectFrameExtent::new(width, height),
+                    *feather,
+                    *expansion,
+                    *opacity,
+                    &cancellation,
+                )
+                .map_err(|error| EffectFloatExecutionError::MaskRasterFailed {
+                    node_id: node.id,
+                    source: error,
+                })?;
+                let rgba = raster
+                    .rasterize_rgba_f32(
+                        crate::EffectPixelRoi::new(0, 0, width, height),
+                        &cancellation,
+                    )
+                    .map_err(|error| EffectFloatExecutionError::MaskRasterFailed {
+                        node_id: node.id,
+                        source: error,
+                    })?;
                 outputs.insert(node.id, rgba);
             }
             EffectGraphNodeKind::Mask { input: input_id, mask, invert, mask_op } => {
@@ -1699,21 +1741,38 @@ fn apply_alpha_mask_f32_in_place(
     invert: bool,
     mask_op: crate::mask::MaskOp,
 ) {
+    let result: Result<(), std::convert::Infallible> =
+        apply_alpha_mask_f32_region_controlled(input, mask, invert, mask_op, &mut || Ok(()));
+    debug_assert!(result.is_ok());
+}
+
+pub(crate) fn apply_alpha_mask_f32_region_controlled<E>(
+    input: &mut [[f32; 4]],
+    mask: &[[f32; 4]],
+    invert: bool,
+    mask_op: crate::mask::MaskOp,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
     use crate::mask::MaskOp;
-    for (output, matte) in input.iter_mut().zip(mask) {
-        let matte = if invert {
-            1.0 - matte[3].clamp(0.0, 1.0)
-        } else {
-            matte[3].clamp(0.0, 1.0)
-        };
-        let source_alpha = output[3].clamp(0.0, 1.0);
-        output[3] = match mask_op {
-            MaskOp::Add => source_alpha * matte,
-            MaskOp::Subtract => source_alpha * (1.0 - matte),
-            MaskOp::Intersect => source_alpha.min(matte),
-            MaskOp::Difference => (source_alpha - matte).abs(),
-        };
+    for (input_chunk, mask_chunk) in input.chunks_mut(4_096).zip(mask.chunks(4_096)) {
+        checkpoint()?;
+        for (output, matte) in input_chunk.iter_mut().zip(mask_chunk) {
+            let matte = if invert {
+                1.0 - matte[3].clamp(0.0, 1.0)
+            } else {
+                matte[3].clamp(0.0, 1.0)
+            };
+            let source_alpha = output[3].clamp(0.0, 1.0);
+            output[3] = match mask_op {
+                MaskOp::Add => source_alpha * matte,
+                MaskOp::Subtract => source_alpha * (1.0 - matte),
+                MaskOp::Intersect => source_alpha.min(matte),
+                MaskOp::Difference => (source_alpha - matte).abs(),
+            };
+        }
     }
+    checkpoint()?;
+    Ok(())
 }
 
 #[cfg(test)]

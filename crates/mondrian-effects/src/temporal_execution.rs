@@ -10,8 +10,9 @@ mod schedule;
 use crate::adjustment::{
     apply_render_op_f32_region_controlled, render_op_f32_scratch_frames, EffectRasterRegion,
 };
-use crate::execution::blend_rgba_f32_region_controlled;
+use crate::execution::{apply_alpha_mask_f32_region_controlled, blend_rgba_f32_region_controlled};
 use crate::execution_session::EffectTemporalCachedOutput;
+use crate::mask_raster::PreparedMaskRasterSet;
 use crate::{
     CompiledEffectGraph, EffectExecutionDemand, EffectExecutionDemandError, EffectExecutionSession,
     EffectFrameExtent, EffectGraphNodeId, EffectGraphNodeKind, EffectInputRoi, EffectPixelRoi,
@@ -640,6 +641,13 @@ pub enum EffectTemporalExecutionError {
     /// process address space.
     #[error("effect temporal source coverage byte size overflowed")]
     SourceCoverageSizeOverflow,
+    /// Prepared Mask geometry or region rasterization failed.
+    #[error("effect temporal Mask raster failed: {source}")]
+    MaskRasterFailed {
+        /// Typed Mask preparation/raster reason.
+        #[source]
+        source: crate::MaskRasterError,
+    },
     /// Deterministic tiling would create an operationally unsafe amount of
     /// scheduler metadata and per-tile overhead.
     #[error("effect temporal scalar schedule exceeds the {limit}-tile hard limit")]
@@ -691,9 +699,9 @@ const MAX_TEMPORAL_SCALAR_TILES: usize = 4_096;
 /// temporal operation with upstream Effects would require those Effects to be
 /// evaluated at each history time, while frame-bound parameters are currently
 /// compiled at the output Clip time. Such graphs therefore fail closed instead
-/// of silently applying current parameters to historical frames. Mask nodes
-/// remain blocked until their rasterizer owns exact ROI coordinates and
-/// cooperative cancellation.
+/// of silently applying current parameters to historical frames. Current-time
+/// Mask nodes are admitted through immutable geometry prepared once for the
+/// complete frame extent and rasterized over the exact requested region.
 pub fn collect_temporal_frame_demands(
     compiled: &CompiledEffectGraph,
     request: &EffectTemporalExecutionRequest,
@@ -759,6 +767,64 @@ struct PreparedScalarTemporalRequest {
     demand: EffectExecutionDemand,
     cache_identity: [u8; 32],
     retained_coverage_bytes: usize,
+    mask_rasters: Option<Arc<PreparedMaskRasterSet>>,
+}
+
+impl PreparedScalarTemporalRequest {
+    fn prepare_mask_rasters(
+        mut self,
+        compiled: &CompiledEffectGraph,
+        request: &EffectTemporalExecutionRequest,
+        budget: usize,
+    ) -> Result<Self, EffectTemporalExecutionError> {
+        if self.mask_rasters.is_none() {
+            let mask_bytes = PreparedMaskRasterSet::required_retained_bytes(compiled.graph())
+                .map_err(|error| EffectTemporalExecutionError::MaskRasterFailed {
+                    source: error,
+                })?;
+            let required_bytes = self.retained_coverage_bytes.checked_add(mask_bytes).ok_or(
+                EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                    required_bytes: usize::MAX,
+                    budget_bytes: budget,
+                },
+            )?;
+            if required_bytes > budget {
+                return Err(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                    required_bytes,
+                    budget_bytes: budget,
+                });
+            }
+            let rasters = PreparedMaskRasterSet::prepare(
+                compiled.graph(),
+                request.frame_extent,
+                &request.cancellation,
+            )
+            .map_err(|error| EffectTemporalExecutionError::MaskRasterFailed { source: error })?;
+            if !rasters.is_empty() {
+                if rasters.retained_bytes() > mask_bytes {
+                    return Err(EffectTemporalExecutionError::WorkingSetLedgerMismatch {
+                        expected_bytes: mask_bytes,
+                        actual_bytes: rasters.retained_bytes(),
+                    });
+                }
+                self.mask_rasters = Some(Arc::new(rasters));
+            }
+        }
+        Ok(self)
+    }
+
+    fn mask_rasters(&self) -> Option<&PreparedMaskRasterSet> {
+        self.mask_rasters.as_deref()
+    }
+
+    fn retained_execution_bytes(&self) -> Result<usize, EffectTemporalExecutionError> {
+        self.retained_coverage_bytes
+            .checked_add(self.mask_rasters().map_or(0, PreparedMaskRasterSet::retained_bytes))
+            .ok_or(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                required_bytes: usize::MAX,
+                budget_bytes: usize::MAX,
+            })
+    }
 }
 
 impl EffectExecutionSession {
@@ -781,31 +847,32 @@ impl EffectExecutionSession {
             return Ok(output);
         }
         let budget = self.max_working_bytes();
+        let prepared = prepared.prepare_mask_rasters(compiled, request, budget)?;
         let direct_working_bytes = temporal_scalar_required_bytes(
             compiled,
             request,
             prepared.temporal_shape,
             &prepared.demand,
+            prepared.mask_rasters(),
         )?;
-        let direct_required = prepared
-            .retained_coverage_bytes
-            .checked_add(direct_working_bytes)
-            .ok_or(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+        let retained_execution_bytes = prepared.retained_execution_bytes()?;
+        let direct_required = retained_execution_bytes.checked_add(direct_working_bytes).ok_or(
+            EffectTemporalExecutionError::WorkingSetBudgetExceeded {
                 required_bytes: usize::MAX,
                 budget_bytes: budget,
-            })?;
+            },
+        )?;
         if direct_required <= budget {
-            let retained_coverage_bytes = prepared.retained_coverage_bytes;
             let mut output = self.execute_prepared_temporal_tile_f32(
                 compiled,
                 request,
                 provider,
                 prepared,
-                budget - retained_coverage_bytes,
+                budget - retained_execution_bytes,
                 true,
             )?;
             output.peak_working_bytes =
-                output.peak_working_bytes.saturating_add(retained_coverage_bytes);
+                output.peak_working_bytes.saturating_add(retained_execution_bytes);
             return Ok(output);
         }
 
@@ -834,10 +901,11 @@ impl EffectExecutionSession {
         if let Some(output) = self.cached_or_empty_temporal_output(compiled, request, &prepared)? {
             return Ok(output);
         }
-        let retained_coverage_bytes = prepared.retained_coverage_bytes;
-        let available = budget.checked_sub(retained_coverage_bytes).ok_or(
+        let prepared = prepared.prepare_mask_rasters(compiled, request, budget)?;
+        let retained_execution_bytes = prepared.retained_execution_bytes()?;
+        let available = budget.checked_sub(retained_execution_bytes).ok_or(
             EffectTemporalExecutionError::WorkingSetBudgetExceeded {
-                required_bytes: retained_coverage_bytes,
+                required_bytes: retained_execution_bytes,
                 budget_bytes: budget,
             },
         )?;
@@ -845,7 +913,7 @@ impl EffectExecutionSession {
             compiled, request, provider, prepared, available, true,
         )?;
         output.peak_working_bytes =
-            output.peak_working_bytes.saturating_add(retained_coverage_bytes);
+            output.peak_working_bytes.saturating_add(retained_execution_bytes);
         Ok(output)
     }
 
@@ -881,6 +949,7 @@ impl EffectExecutionSession {
             demand,
             cache_identity,
             retained_coverage_bytes,
+            mask_rasters: None,
         })
     }
 
@@ -936,12 +1005,14 @@ impl EffectExecutionSession {
         working_budget: usize,
         publish_output_cache: bool,
     ) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
+        let mask_rasters = prepared.mask_rasters.clone();
         let mut evaluator = ScalarTemporalEvaluator::new(
             compiled,
             request,
             prepared.demand.input_roi(),
             prepared.demand.exact_halo(),
             prepared.temporal_shape,
+            mask_rasters,
             provider,
             working_budget,
         )?;
@@ -1019,8 +1090,17 @@ impl EffectExecutionSession {
                 budget_bytes: budget,
             },
         )?;
+        let mask_rasters = prepared.mask_rasters.clone();
+        if mask_rasters
+            .as_deref()
+            .is_some_and(|rasters| rasters.extent() != request.frame_extent)
+        {
+            return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
+                reason: "prepared Mask raster extent changed during tiled execution",
+            });
+        }
         let base_resident_bytes = prepared
-            .retained_coverage_bytes
+            .retained_execution_bytes()?
             .checked_add(output_bytes)
             .ok_or(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
                 required_bytes: usize::MAX,
@@ -1041,6 +1121,7 @@ impl EffectExecutionSession {
             base_resident_bytes,
             tile_budget,
             budget,
+            mask_rasters.as_deref(),
         )?;
         let mut assembled = vec![[0.0_f32; 4]; output_pixels];
         let mut provider_requests = 0usize;
@@ -1058,13 +1139,14 @@ impl EffectExecutionSession {
                 output_roi: tile_roi,
                 cancellation: request.cancellation.clone(),
             };
-            let tile_prepared =
+            let mut tile_prepared =
                 self.prepare_temporal_scalar_request(compiled, &tile_request, provider)?;
             if tile_prepared.retained_coverage_bytes != prepared.retained_coverage_bytes {
                 return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
                     reason: "temporal provider coverage changed during one tiled execution",
                 });
             }
+            tile_prepared.mask_rasters = mask_rasters.clone();
             // Internal tiles are one attempt-local implementation detail. They
             // never read or publish output-cache entries: a later cancellation
             // must not leave a partially completed frame represented in the
@@ -1211,13 +1293,10 @@ fn admitted_temporal_shape(
                     });
                 }
             }
-            EffectGraphNodeKind::Blend { .. } | EffectGraphNodeKind::MultiInput { .. } => {}
-            EffectGraphNodeKind::Mask { .. } | EffectGraphNodeKind::MaskSource { .. } => {
-                return Err(EffectTemporalExecutionError::UnsupportedTemporalShape {
-                    reason:
-                        "temporal ROI mask execution requires a coordinate-aware cancellable rasterizer",
-                });
-            }
+            EffectGraphNodeKind::Blend { .. }
+            | EffectGraphNodeKind::MultiInput { .. }
+            | EffectGraphNodeKind::Mask { .. }
+            | EffectGraphNodeKind::MaskSource { .. } => {}
         }
     }
     if source.is_none() {
@@ -1304,6 +1383,7 @@ struct ScalarTemporalEvaluator<'a> {
     raster_region: EffectRasterRegion,
     exact_halo: Option<EffectRoiHalo>,
     temporal_shape: Option<AdmittedTemporalShape>,
+    mask_rasters: Option<Arc<PreparedMaskRasterSet>>,
     provider: &'a mut dyn EffectTemporalFrameProvider,
     outputs: HashMap<EffectGraphNodeId, Vec<[f32; 4]>>,
     remaining_uses: HashMap<EffectGraphNodeId, usize>,
@@ -1318,6 +1398,7 @@ impl<'a> ScalarTemporalEvaluator<'a> {
         input_roi: EffectInputRoi,
         exact_halo: Option<EffectRoiHalo>,
         temporal_shape: Option<AdmittedTemporalShape>,
+        mask_rasters: Option<Arc<PreparedMaskRasterSet>>,
         provider: &'a mut dyn EffectTemporalFrameProvider,
         working_budget: usize,
     ) -> Result<Self, EffectTemporalExecutionError> {
@@ -1348,6 +1429,7 @@ impl<'a> ScalarTemporalEvaluator<'a> {
             ),
             exact_halo,
             temporal_shape,
+            mask_rasters,
             provider,
             outputs: HashMap::with_capacity(compiled.graph().nodes.len()),
             remaining_uses: compiled.node_use_counts().clone(),
@@ -1438,17 +1520,45 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                     self.working.release_frame()?;
                     base
                 }
-                EffectGraphNodeKind::Mask { .. } => {
-                    return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
-                        node_id,
-                        kind: "mask",
-                    });
+                EffectGraphNodeKind::Mask { input, mask, invert, mask_op } => {
+                    let mut output = self.take_graph_input(input)?;
+                    let mask_pixels = self.take_graph_input(mask)?;
+                    if output.len() != mask_pixels.len() {
+                        return Err(EffectTemporalExecutionError::InvalidRoiProjection {
+                            reason: "Mask input and raster do not cover the same region",
+                        });
+                    }
+                    let cancellation = self.request.cancellation.clone();
+                    apply_alpha_mask_f32_region_controlled(
+                        &mut output,
+                        &mask_pixels,
+                        invert,
+                        mask_op,
+                        &mut || temporal_cancellation_checkpoint(&cancellation),
+                    )?;
+                    self.working.release_frame()?;
+                    output
                 }
                 EffectGraphNodeKind::MaskSource { .. } => {
-                    return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
-                        node_id,
-                        kind: "mask_source",
-                    });
+                    let raster = self
+                        .mask_rasters
+                        .as_deref()
+                        .and_then(|rasters| rasters.get(node_id))
+                        .ok_or(EffectTemporalExecutionError::InvalidGraphLiveness {
+                            reason: "prepared Mask raster is missing for a MaskSource node",
+                        })?;
+                    if raster.extent() != self.request.frame_extent {
+                        return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
+                            reason: "prepared Mask raster extent does not match the request",
+                        });
+                    }
+                    self.working.reserve_frame()?;
+                    self.working.ensure_transient(raster.max_scratch_bytes())?;
+                    raster
+                        .rasterize_rgba_f32(self.input_roi.region(), &self.request.cancellation)
+                        .map_err(|error| EffectTemporalExecutionError::MaskRasterFailed {
+                        source: error,
+                    })?
                 }
                 EffectGraphNodeKind::MultiInput { inputs, blend_mode, opacity } => {
                     let Some(first) = inputs.first().copied() else {
@@ -2263,8 +2373,17 @@ mod tests {
     }
 
     #[test]
-    fn temporal_mask_dag_stays_blocked_until_raster_contract_is_tile_safe() {
+    fn temporal_mask_dag_matches_full_frame_reference_in_direct_and_tiled_execution() {
         let offset = TimelineTime::new(1, 2).expect("offset");
+        let mask_shape = crate::mask::MaskShape::Path {
+            points: vec![
+                crate::mask::BezierPoint::new(glam::Vec2::new(0.12, 0.15)),
+                crate::mask::BezierPoint::new(glam::Vec2::new(0.86, 0.2)),
+                crate::mask::BezierPoint::new(glam::Vec2::new(0.72, 0.84)),
+                crate::mask::BezierPoint::new(glam::Vec2::new(0.18, 0.76)),
+            ],
+            closed: true,
+        };
         let graph = bind_graph(
             EffectRenderGraph {
                 nodes: vec![
@@ -2285,16 +2404,10 @@ mod tests {
                     EffectGraphNode {
                         id: EffectGraphNodeId(2),
                         kind: EffectGraphNodeKind::MaskSource {
-                            shape: crate::mask::MaskShape::Rectangle {
-                                x: 0.0,
-                                y: 0.0,
-                                width: 1.0,
-                                height: 1.0,
-                                corner_radius: 0.0,
-                            },
-                            feather: 0.0,
-                            expansion: 0.0,
-                            opacity: 1.0,
+                            shape: mask_shape.clone(),
+                            feather: 2.5,
+                            expansion: 1.0,
+                            opacity: 0.8,
                         },
                     },
                     EffectGraphNode {
@@ -2312,22 +2425,128 @@ mod tests {
             dag_contract(EffectTemporalSpan::Finite(offset)),
         );
         let extent = EffectFrameExtent::new(8, 4);
+        let output_time = TimelineTime::ONE;
+        let partial_roi = EffectPixelRoi::new(2, 1, 3, 2);
         let request = EffectTemporalExecutionRequest::new(
             1,
             EffectExecutionContinuity::Continuous,
-            TimelineTime::ONE,
+            output_time,
             extent,
-            EffectPixelRoi::new(2, 1, 3, 2),
+            partial_roi,
             ExecutionCancellationToken::new(),
         );
+        let demands = collect_temporal_frame_demands(&graph, &request).expect("Mask demands");
+        assert_eq!(demands.requests()[0].input_roi().region(), partial_roi);
 
-        assert!(matches!(
-            collect_temporal_frame_demands(&graph, &request),
-            Err(EffectTemporalExecutionError::UnsupportedTemporalShape {
-                reason:
-                    "temporal ROI mask execution requires a coordinate-aware cancellable rasterizer"
+        let reference_graph = bind_graph(
+            EffectRenderGraph {
+                nodes: vec![
+                    EffectGraphNode {
+                        id: EffectGraphNodeId(0),
+                        kind: EffectGraphNodeKind::Source,
+                    },
+                    EffectGraphNode {
+                        id: EffectGraphNodeId(1),
+                        kind: EffectGraphNodeKind::MaskSource {
+                            shape: mask_shape,
+                            feather: 2.5,
+                            expansion: 1.0,
+                            opacity: 0.8,
+                        },
+                    },
+                    EffectGraphNode {
+                        id: EffectGraphNodeId(2),
+                        kind: EffectGraphNodeKind::Mask {
+                            input: EffectGraphNodeId(0),
+                            mask: EffectGraphNodeId(1),
+                            invert: false,
+                            mask_op: crate::mask::MaskOp::Add,
+                        },
+                    },
+                ],
+                output: Some(EffectGraphNodeId(2)),
+            },
+            dag_contract(EffectTemporalSpan::None),
+        );
+        let past_time = output_time.checked_sub(offset).expect("past time");
+        let mixed = (0..extent.height())
+            .flat_map(|y| {
+                (0..extent.width()).map(move |x| {
+                    let current = GradientProvider::pixel(output_time, x, y);
+                    let past = GradientProvider::pixel(past_time, x, y);
+                    [
+                        (current[0] + past[0]) * 0.5,
+                        (current[1] + past[1]) * 0.5,
+                        (current[2] + past[2]) * 0.5,
+                        1.0,
+                    ]
+                })
             })
+            .collect::<Vec<_>>();
+        let reference = apply_compiled_effect_graph_rgba_f32(
+            &mixed,
+            extent.width(),
+            extent.height(),
+            &reference_graph,
+            0,
+        )
+        .expect("full-frame Mask reference");
+
+        let mut direct_session = EffectExecutionSession::default();
+        let mut direct_provider = GradientProvider::new(extent);
+        let direct = direct_session
+            .execute_temporal_roi_f32(&graph, &request, &mut direct_provider)
+            .expect("direct Mask tile");
+        assert_eq!(
+            direct.tile().pixels(),
+            crop_frame(
+                &reference,
+                extent,
+                partial_roi,
+                &ExecutionCancellationToken::new(),
+            )
+            .expect("reference crop")
+        );
+
+        let full_request = EffectTemporalExecutionRequest::new(
+            2,
+            EffectExecutionContinuity::Continuous,
+            output_time,
+            extent,
+            extent.full_frame_roi(),
+            ExecutionCancellationToken::new(),
+        );
+        let mask_rasters =
+            PreparedMaskRasterSet::prepare(graph.graph(), extent, &full_request.cancellation)
+                .expect("prepared Mask geometry");
+        let insufficient_budget = mask_rasters.retained_bytes() - 1;
+        let mut rejected_session = EffectExecutionSession::new(
+            EffectExecutionSessionConfig::uncached(insufficient_budget),
+        );
+        let mut rejected_provider = GradientProvider::new(extent);
+        assert!(matches!(
+            rejected_session.execute_temporal_f32(
+                &graph,
+                &full_request,
+                &mut rejected_provider,
+            ),
+            Err(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                required_bytes,
+                budget_bytes,
+            }) if required_bytes == mask_rasters.retained_bytes()
+                && budget_bytes == insufficient_budget
         ));
+        let output_bytes = reference.len() * std::mem::size_of::<[f32; 4]>();
+        let budget = mask_rasters.retained_bytes() + output_bytes + 256;
+        let mut tiled_session =
+            EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(budget));
+        let mut tiled_provider = GradientProvider::new(extent);
+        let tiled = tiled_session
+            .execute_temporal_f32(&graph, &full_request, &mut tiled_provider)
+            .expect("tiled Mask execution");
+        assert!(tiled.execution_tiles() > 1);
+        assert!(tiled.peak_working_bytes() <= budget);
+        assert_eq!(tiled.tile().pixels(), reference);
     }
 
     #[test]
@@ -2750,15 +2969,23 @@ mod tests {
         let demand = graph
             .plan_execution_demand(request.output_time, extent, output_roi)
             .expect("full-frame demand");
+        let mask_rasters =
+            PreparedMaskRasterSet::prepare(graph.graph(), extent, &request.cancellation)
+                .expect("empty Mask raster set");
         let source_coverage_bytes = collect_temporal_frame_demands(&graph, &request)
             .expect("demands")
             .coverage_bytes();
         let output_bytes = 3_840 * 2_160 * std::mem::size_of::<[f32; 4]>();
         let base_resident_bytes = source_coverage_bytes + output_bytes;
         let budget = 384 * 1024 * 1024;
-        let direct_working =
-            temporal_scalar_required_bytes(&graph, &request, temporal_shape, &demand)
-                .expect("direct proof");
+        let direct_working = temporal_scalar_required_bytes(
+            &graph,
+            &request,
+            temporal_shape,
+            &demand,
+            Some(&mask_rasters),
+        )
+        .expect("direct proof");
         assert!(base_resident_bytes <= budget);
         assert!(source_coverage_bytes + direct_working > budget);
 
@@ -2770,6 +2997,7 @@ mod tests {
             base_resident_bytes,
             budget - base_resident_bytes,
             budget,
+            Some(&mask_rasters),
         )
         .expect("bounded UHD tile schedule");
         assert_eq!(tiles.len(), 64);

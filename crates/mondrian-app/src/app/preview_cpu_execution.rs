@@ -107,6 +107,9 @@ fn timeline_composite_is_blocked(error: &TimelineCompositeError) -> bool {
             reason: EffectFloatExecutionError::ExecutionContract(_),
         } => true,
         TimelineCompositeError::FloatEffect {
+            reason: EffectFloatExecutionError::MaskRasterFailed { .. },
+        } => true,
+        TimelineCompositeError::FloatEffect {
             reason:
                 EffectFloatExecutionError::InputSizeMismatch { .. }
                 | EffectFloatExecutionError::MissingOutput { .. },
@@ -490,5 +493,26 @@ mod tests {
         assert_eq!(unavailable.stage(), PreviewOutputStage::TimelineComposite);
         assert_eq!(unavailable.code(), "preview.failed.timeline_composite");
         assert!(unavailable.detail().contains("processor panic isolated"));
+    }
+
+    #[test]
+    fn invalid_mask_raster_keeps_blocked_disposition_and_typed_detail() {
+        let error =
+            PreviewCpuExecutionError::TimelineComposite(TimelineCompositeError::FloatEffect {
+                reason: EffectFloatExecutionError::MaskRasterFailed {
+                    node_id: mondrian_effects::EffectGraphNodeId(9),
+                    source: mondrian_effects::MaskRasterError::InvalidGeometry {
+                        reason: "Path control points must be finite",
+                    },
+                },
+            });
+
+        let unavailable = error.unavailability();
+        assert_eq!(
+            unavailable.disposition(),
+            PreviewUnavailabilityDisposition::Blocked
+        );
+        assert_eq!(unavailable.stage(), PreviewOutputStage::TimelineComposite);
+        assert!(unavailable.detail().contains("Path control points must be finite"));
     }
 }

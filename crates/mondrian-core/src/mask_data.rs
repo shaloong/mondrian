@@ -9,6 +9,13 @@ use crate::{AuthoringList, TimelineTime};
 use glam::Vec2;
 use serde::{Deserialize, Serialize};
 
+/// Maximum authored control points in one Mask path.
+///
+/// The limit bounds deterministic flattening, spatial-index construction, and
+/// raster metadata for one immutable Effect program. More complex mattes must
+/// be expressed as multiple typed Masks rather than one unbounded path.
+pub const MAX_MASK_PATH_POINTS: usize = 4_096;
+
 /// Bezier path control point.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct BezierPoint {
@@ -417,11 +424,14 @@ fn validate_shape(mask_id: MaskId, shape: &MaskShape) -> crate::Result<()> {
         MaskShape::Ellipse { center, radii } => {
             center.is_finite() && radii.is_finite() && radii.x >= 0.0 && radii.y >= 0.0
         }
-        MaskShape::Path { points, .. } => points.iter().all(|point| {
-            point.position.is_finite()
-                && point.control_in.is_finite()
-                && point.control_out.is_finite()
-        }),
+        MaskShape::Path { points, .. } => {
+            points.len() <= MAX_MASK_PATH_POINTS
+                && points.iter().all(|point| {
+                    point.position.is_finite()
+                        && point.control_in.is_finite()
+                        && point.control_out.is_finite()
+                })
+        }
     };
     if valid {
         Ok(())
@@ -680,5 +690,19 @@ mod tests {
         } else {
             panic!("expected Rectangle");
         }
+    }
+
+    #[test]
+    fn mask_author_state_rejects_unbounded_path_complexity() {
+        let points = vec![BezierPoint::new(Vec2::ZERO); MAX_MASK_PATH_POINTS + 1];
+        let mask = MaskComponent::new(
+            "oversized".into(),
+            MaskKeyframe {
+                shape: MaskShape::Path { points, closed: true },
+                ..MaskKeyframe::default()
+            },
+        );
+
+        assert!(mask.validate_author_state().is_err());
     }
 }

@@ -8,6 +8,6 @@
 pub use mondrian_core::mask_data::{
     interpolate_shape, shape_label, BezierPoint, MaskComponent, MaskKeyframe, MaskOp, MaskShape,
     MASK_PROP_EXPANSION, MASK_PROP_FEATHER, MASK_PROP_INVERT, MASK_PROP_MASK_OP, MASK_PROP_OPACITY,
-    MASK_PROP_SHAPE,
+    MASK_PROP_SHAPE, MAX_MASK_PATH_POINTS,
 };
 pub use mondrian_core::types::MaskId;

@@ -89,8 +89,10 @@ pub use lut::{
     Lut3D, LutLibrary, LutLibraryEntry, LutPreparationCache, LutPreparationCacheConfig,
     LutPreparationCacheDiagnostics,
 };
-pub use mask::{BezierPoint, MaskComponent, MaskId, MaskKeyframe, MaskOp, MaskShape};
-pub use mask_raster::rasterize_mask_shape;
+pub use mask::{
+    BezierPoint, MaskComponent, MaskId, MaskKeyframe, MaskOp, MaskShape, MAX_MASK_PATH_POINTS,
+};
+pub use mask_raster::{rasterize_mask_shape, MaskRasterError, PreparedMaskRaster};
 pub use plugin_contract::{
     effect_plugin_runtime_status, EffectPluginApiVersion, EffectPluginContract,
     EffectPluginLibraryPolicy, EffectPluginRuntimeFailurePolicy, EffectPluginRuntimeStatus,

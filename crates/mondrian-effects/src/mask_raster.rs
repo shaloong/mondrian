@@ -1,15 +1,366 @@
-//! Mask shape rasterization — converts MaskShape into alpha buffers.
+//! Prepared, region-aware Mask rasterization.
 //!
-//! Uses Signed Distance Field (SDF) evaluation for smooth anti-aliased
-//! edges and natural feather/expansion support.
+//! One immutable preparation validates parameters and flattens Path geometry
+//! once. Full-frame and tiled consumers then share the same normalized canvas
+//! coordinates, cancellation cadence, numerical rules, and spatial index.
 
-use super::mask::{BezierPoint, MaskShape};
+mod path;
+
+use self::path::PreparedPath;
+use super::mask::{MaskShape, MAX_MASK_PATH_POINTS};
+use crate::{
+    EffectFrameExtent, EffectGraphNodeId, EffectGraphNodeKind, EffectPixelRoi, EffectRenderGraph,
+};
 use glam::Vec2;
+use mondrian_core::ExecutionCancellationToken;
+use std::{collections::HashMap, sync::Arc};
 
-/// Rasterize a MaskShape into an alpha buffer at the given resolution.
+const MASK_RASTER_CHECKPOINT_PIXELS: usize = 4_096;
+
+/// Typed failure from Mask geometry preparation or raster execution.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum MaskRasterError {
+    /// The generation or owner canceled preparation/raster work.
+    #[error("mask rasterization was canceled")]
+    Canceled,
+    /// Authored or plugin-emitted geometry is not finite or structurally valid.
+    #[error("mask geometry is invalid: {reason}")]
+    InvalidGeometry {
+        /// Stable failure reason.
+        reason: &'static str,
+    },
+    /// A Path exceeded the deterministic preparation limit.
+    #[error("mask Path contains {actual} points, exceeding the {limit}-point limit")]
+    PathPointLimitExceeded {
+        /// Authored point count.
+        actual: usize,
+        /// Maximum admitted point count.
+        limit: usize,
+    },
+    /// A checked geometry or allocation-size derivation overflowed.
+    #[error("mask geometry size overflowed: {reason}")]
+    GeometrySizeOverflow {
+        /// Stable overflow context.
+        reason: &'static str,
+    },
+    /// The requested region is outside the immutable full-frame extent.
+    #[error("mask raster region is outside its prepared frame extent")]
+    RegionOutsideExtent,
+}
+
+/// Immutable Mask geometry and pixel contract prepared for one full-frame
+/// extent.
 ///
-/// Returns `Vec<u8>` of length `width * height`, where each byte is an
-/// alpha value (0 = transparent, 255 = opaque).
+/// The prepared value may rasterize any contained region. It owns Path
+/// flattening and its nearest-segment acceleration, so tile execution never
+/// repeats topology construction or allocates per pixel.
+#[derive(Debug)]
+pub struct PreparedMaskRaster {
+    extent: EffectFrameExtent,
+    geometry: PreparedMaskGeometry,
+    expansion_scale: f32,
+    feather_scale: f32,
+    opacity: f32,
+    retained_bytes: usize,
+}
+
+/// All reachable MaskSource rasters prepared once for one graph evaluation
+/// extent and shared by direct or tiled scalar execution.
+#[derive(Debug)]
+pub(crate) struct PreparedMaskRasterSet {
+    extent: EffectFrameExtent,
+    rasters: HashMap<EffectGraphNodeId, Arc<PreparedMaskRaster>>,
+    retained_bytes: usize,
+}
+
+impl PreparedMaskRasterSet {
+    pub(crate) fn required_retained_bytes(
+        graph: &EffectRenderGraph,
+    ) -> Result<usize, MaskRasterError> {
+        let mask_count = graph
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.kind, EffectGraphNodeKind::MaskSource { .. }))
+            .count();
+        if mask_count == 0 {
+            return Ok(0);
+        }
+        let mut retained_bytes = mask_set_base_retained_bytes(mask_count)?;
+        for node in &graph.nodes {
+            let EffectGraphNodeKind::MaskSource { shape, .. } = &node.kind else {
+                continue;
+            };
+            retained_bytes = retained_bytes
+                .checked_add(std::mem::size_of::<PreparedMaskRaster>())
+                .ok_or(MaskRasterError::GeometrySizeOverflow {
+                    reason: "Mask raster-set retained byte count overflowed",
+                })?;
+            if let MaskShape::Path { points, closed } = shape {
+                if points.len() > MAX_MASK_PATH_POINTS {
+                    return Err(MaskRasterError::PathPointLimitExceeded {
+                        actual: points.len(),
+                        limit: MAX_MASK_PATH_POINTS,
+                    });
+                }
+                retained_bytes = retained_bytes
+                    .checked_add(PreparedPath::required_retained_bytes(
+                        points.len(),
+                        *closed,
+                    )?)
+                    .ok_or(MaskRasterError::GeometrySizeOverflow {
+                        reason: "Mask Path retained byte count overflowed",
+                    })?;
+            }
+        }
+        Ok(retained_bytes)
+    }
+
+    pub(crate) fn prepare(
+        graph: &EffectRenderGraph,
+        extent: EffectFrameExtent,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<Self, MaskRasterError> {
+        let mask_count = graph
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.kind, EffectGraphNodeKind::MaskSource { .. }))
+            .count();
+        let mut rasters = HashMap::with_capacity(mask_count);
+        let mut retained_bytes = if mask_count == 0 {
+            0
+        } else {
+            mask_set_base_retained_bytes(mask_count)?
+        };
+        for node in &graph.nodes {
+            mask_raster_checkpoint(cancellation)?;
+            let EffectGraphNodeKind::MaskSource { shape, feather, expansion, opacity } = &node.kind
+            else {
+                continue;
+            };
+            let raster = Arc::new(PreparedMaskRaster::prepare(
+                shape,
+                extent,
+                *feather,
+                *expansion,
+                *opacity,
+                cancellation,
+            )?);
+            retained_bytes = retained_bytes.saturating_add(raster.retained_bytes());
+            if rasters.insert(node.id, raster).is_some() {
+                return Err(MaskRasterError::InvalidGeometry {
+                    reason: "Effect graph contains duplicate MaskSource identity",
+                });
+            }
+        }
+        Ok(Self { extent, rasters, retained_bytes })
+    }
+
+    pub(crate) const fn extent(&self) -> EffectFrameExtent {
+        self.extent
+    }
+
+    pub(crate) fn get(&self, node_id: EffectGraphNodeId) -> Option<&PreparedMaskRaster> {
+        self.rasters.get(&node_id).map(Arc::as_ref)
+    }
+
+    pub(crate) const fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.rasters.is_empty()
+    }
+}
+
+fn mask_set_base_retained_bytes(mask_count: usize) -> Result<usize, MaskRasterError> {
+    let per_entry = std::mem::size_of::<EffectGraphNodeId>()
+        .checked_add(std::mem::size_of::<Arc<PreparedMaskRaster>>())
+        .and_then(|bytes| bytes.checked_add(2 * std::mem::size_of::<usize>()))
+        .ok_or(MaskRasterError::GeometrySizeOverflow {
+            reason: "Mask raster-set entry size overflowed",
+        })?;
+    mask_count
+        .checked_mul(per_entry)
+        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<PreparedMaskRasterSet>()))
+        .ok_or(MaskRasterError::GeometrySizeOverflow {
+            reason: "Mask raster-set retained byte count overflowed",
+        })
+}
+
+impl PreparedMaskRaster {
+    /// Validate and prepare one Mask for an immutable output extent.
+    pub fn prepare(
+        shape: &MaskShape,
+        extent: EffectFrameExtent,
+        feather: f32,
+        expansion: f32,
+        opacity: f32,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<Self, MaskRasterError> {
+        mask_raster_checkpoint(cancellation)?;
+        if !feather.is_finite() || !expansion.is_finite() || !opacity.is_finite() {
+            return Err(MaskRasterError::InvalidGeometry {
+                reason: "feather, expansion, and opacity must be finite",
+            });
+        }
+        let geometry = PreparedMaskGeometry::prepare(shape, cancellation)?;
+        let inverse_width = if extent.width() == 0 {
+            0.0
+        } else {
+            1.0 / extent.width() as f32
+        };
+        let inverse_height = if extent.height() == 0 {
+            0.0
+        } else {
+            1.0 / extent.height() as f32
+        };
+        let pixel_scale = inverse_width.max(inverse_height).max(f32::MIN_POSITIVE);
+        let retained_bytes =
+            std::mem::size_of::<Self>().saturating_add(geometry.dynamic_retained_bytes());
+        Ok(Self {
+            extent,
+            geometry,
+            expansion_scale: expansion * pixel_scale,
+            feather_scale: feather.max(0.0) * 0.5 * pixel_scale,
+            opacity: opacity.clamp(0.0, 1.0),
+            retained_bytes,
+        })
+    }
+
+    /// Immutable full-frame coordinate extent.
+    pub const fn extent(&self) -> EffectFrameExtent {
+        self.extent
+    }
+
+    /// Conservative logical bytes retained by prepared geometry and its
+    /// spatial index.
+    pub const fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    /// Maximum temporary row-crossing bytes needed by one raster call.
+    pub fn max_scratch_bytes(&self) -> usize {
+        self.geometry.max_scratch_bytes()
+    }
+
+    /// Rasterize normalized Float32 alpha over one exact contained region.
+    pub fn rasterize_alpha_f32(
+        &self,
+        region: EffectPixelRoi,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<Vec<f32>, MaskRasterError> {
+        self.rasterize_region(region, cancellation, |alpha| alpha)
+    }
+
+    /// Rasterize RGBA Float32 mask pixels over one exact contained region.
+    pub(crate) fn rasterize_rgba_f32(
+        &self,
+        region: EffectPixelRoi,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<Vec<[f32; 4]>, MaskRasterError> {
+        self.rasterize_region(region, cancellation, |alpha| [1.0, 1.0, 1.0, alpha])
+    }
+
+    /// Rasterize RGBA8 Mask pixels for the legacy encoded reference path.
+    pub(crate) fn rasterize_rgba_u8(
+        &self,
+        region: EffectPixelRoi,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<Vec<u8>, MaskRasterError> {
+        let pixel_count = usize::try_from(region.width())
+            .ok()
+            .and_then(|width| {
+                usize::try_from(region.height())
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or(MaskRasterError::GeometrySizeOverflow {
+                reason: "encoded Mask raster byte count exceeds addressable memory",
+            })?;
+        let alpha =
+            self.rasterize_region(region, cancellation, |alpha| (alpha * 255.0).round() as u8)?;
+        let mut rgba = Vec::with_capacity(pixel_count);
+        for value in alpha {
+            rgba.extend_from_slice(&[255, 255, 255, value]);
+        }
+        Ok(rgba)
+    }
+
+    fn rasterize_region<T>(
+        &self,
+        region: EffectPixelRoi,
+        cancellation: &ExecutionCancellationToken,
+        mut map: impl FnMut(f32) -> T,
+    ) -> Result<Vec<T>, MaskRasterError> {
+        validate_region(self.extent, region)?;
+        mask_raster_checkpoint(cancellation)?;
+        let pixel_count = usize::try_from(region.width())
+            .ok()
+            .and_then(|width| {
+                usize::try_from(region.height())
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .ok_or(MaskRasterError::GeometrySizeOverflow {
+                reason: "Mask raster pixel count exceeds addressable memory",
+            })?;
+        let mut output = Vec::with_capacity(pixel_count);
+        if pixel_count == 0 {
+            return Ok(output);
+        }
+
+        let inverse_width = 1.0 / self.extent.width() as f32;
+        let inverse_height = 1.0 / self.extent.height() as f32;
+        let mut row_crossings = Vec::with_capacity(self.geometry.max_row_crossings());
+        let mut since_checkpoint = 0usize;
+        let x_end = region.x().checked_add(region.width()).ok_or(
+            MaskRasterError::GeometrySizeOverflow { reason: "Mask raster x range overflowed" },
+        )?;
+        let y_end = region.y().checked_add(region.height()).ok_or(
+            MaskRasterError::GeometrySizeOverflow { reason: "Mask raster y range overflowed" },
+        )?;
+        for y in region.y()..y_end {
+            mask_raster_checkpoint(cancellation)?;
+            let py = (y as f32 + 0.5) * inverse_height;
+            self.geometry.row_crossings(py, &mut row_crossings);
+            for x in region.x()..x_end {
+                if since_checkpoint >= MASK_RASTER_CHECKPOINT_PIXELS {
+                    mask_raster_checkpoint(cancellation)?;
+                    since_checkpoint = 0;
+                }
+                let px = (x as f32 + 0.5) * inverse_width;
+                let distance = self.geometry.signed_distance(Vec2::new(px, py), &row_crossings);
+                let expanded = distance - self.expansion_scale;
+                let coverage = if self.feather_scale <= 1.0e-8 {
+                    if expanded <= 0.0 {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                } else {
+                    1.0 - smoothstep(-self.feather_scale, self.feather_scale, expanded)
+                };
+                output.push(map((coverage * self.opacity).clamp(0.0, 1.0)));
+                since_checkpoint += 1;
+            }
+        }
+        mask_raster_checkpoint(cancellation)?;
+        if output.len() != pixel_count {
+            return Err(MaskRasterError::GeometrySizeOverflow {
+                reason: "Mask raster output did not match its checked region",
+            });
+        }
+        Ok(output)
+    }
+
+    #[cfg(test)]
+    fn path_segment_count(&self) -> usize {
+        self.geometry.path_segment_count()
+    }
+}
+
+/// Rasterize one complete Mask into encoded alpha bytes.
 pub fn rasterize_mask_shape(
     shape: &MaskShape,
     width: u32,
@@ -17,14 +368,17 @@ pub fn rasterize_mask_shape(
     feather: f32,
     expansion: f32,
     opacity: f32,
-) -> Vec<u8> {
-    rasterize_mask_shape_f32(shape, width, height, feather, expansion, opacity)
-        .into_iter()
-        .map(|alpha| (alpha * 255.0).round() as u8)
-        .collect()
+) -> Result<Vec<u8>, MaskRasterError> {
+    let cancellation = ExecutionCancellationToken::new();
+    let extent = EffectFrameExtent::new(width, height);
+    PreparedMaskRaster::prepare(shape, extent, feather, expansion, opacity, &cancellation)?
+        .rasterize_region(extent.full_frame_roi(), &cancellation, |alpha| {
+            (alpha * 255.0).round() as u8
+        })
 }
 
-/// Rasterize a mask shape directly into normalized float alpha coverage.
+/// Rasterize one complete Mask into normalized Float32 alpha.
+#[cfg(test)]
 pub(crate) fn rasterize_mask_shape_f32(
     shape: &MaskShape,
     width: u32,
@@ -32,230 +386,212 @@ pub(crate) fn rasterize_mask_shape_f32(
     feather: f32,
     expansion: f32,
     opacity: f32,
-) -> Vec<f32> {
-    let w = width.max(1) as usize;
-    let h = height.max(1) as usize;
-    let total = w * h;
-    let mut alpha = vec![0.0; total];
+) -> Result<Vec<f32>, MaskRasterError> {
+    let cancellation = ExecutionCancellationToken::new();
+    let extent = EffectFrameExtent::new(width, height);
+    PreparedMaskRaster::prepare(shape, extent, feather, expansion, opacity, &cancellation)?
+        .rasterize_alpha_f32(extent.full_frame_roi(), &cancellation)
+}
 
-    let opacity = opacity.clamp(0.0, 1.0);
-    if opacity <= 1.0e-6 {
-        return alpha;
-    }
+#[derive(Debug)]
+enum PreparedMaskGeometry {
+    Rectangle {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        corner_radius: f32,
+    },
+    Ellipse {
+        center: Vec2,
+        radii: Vec2,
+    },
+    Path(PreparedPath),
+}
 
-    let inv_w = 1.0 / w as f32;
-    let inv_h = 1.0 / h as f32;
-
-    for y in 0..h {
-        for x in 0..w {
-            // Normalized coordinates [0, 1]
-            let px = (x as f32 + 0.5) * inv_w;
-            let py = (y as f32 + 0.5) * inv_h;
-
-            let dist = shape_sdf(shape, px, py);
-            // Apply expansion: positive expands the shape (pushes edge outward).
-            let expanded = dist - expansion * inv_w.max(inv_h);
-
-            // Apply feather: transition zone around the edge.
-            let feather_px = (feather.max(0.0) * 0.5) * inv_w.max(inv_h).max(1e-6);
-            let a = if feather_px <= 1e-8 {
-                if expanded <= 0.0 {
-                    1.0
-                } else {
-                    0.0
+impl PreparedMaskGeometry {
+    fn prepare(
+        shape: &MaskShape,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<Self, MaskRasterError> {
+        match shape {
+            MaskShape::Rectangle { x, y, width, height, corner_radius } => {
+                if ![*x, *y, *width, *height, *corner_radius].into_iter().all(f32::is_finite)
+                    || *width < 0.0
+                    || *height < 0.0
+                    || *corner_radius < 0.0
+                {
+                    return Err(MaskRasterError::InvalidGeometry {
+                        reason: "Rectangle values must be finite and sizes non-negative",
+                    });
                 }
-            } else {
-                1.0 - smoothstep(-feather_px, feather_px, expanded)
-            };
-
-            alpha[y * w + x] = (a * opacity).clamp(0.0, 1.0);
-        }
-    }
-
-    alpha
-}
-
-/// Signed Distance Field for a MaskShape at normalized coordinates (px, py) in [0, 1].
-/// Negative = inside, positive = outside.
-fn shape_sdf(shape: &MaskShape, px: f32, py: f32) -> f32 {
-    match shape {
-        MaskShape::Rectangle { x, y, width, height, corner_radius } => {
-            rect_sdf(px, py, *x, *y, *width, *height, *corner_radius)
-        }
-        MaskShape::Ellipse { center, radii } => {
-            ellipse_sdf(px, py, center.x, center.y, radii.x, radii.y)
-        }
-        MaskShape::Path { points, closed } => path_sdf(px, py, points, *closed),
-    }
-}
-
-/// SDF for a rounded rectangle.
-fn rect_sdf(px: f32, py: f32, rx: f32, ry: f32, rw: f32, rh: f32, cr: f32) -> f32 {
-    let cx = rx + rw * 0.5;
-    let cy = ry + rh * 0.5;
-    let hw = rw * 0.5;
-    let hh = rh * 0.5;
-
-    let dx = (px - cx).abs() - hw + cr;
-    let dy = (py - cy).abs() - hh + cr;
-
-    let outside = Vec2::new(dx.max(0.0), dy.max(0.0)).length();
-    let inside = dx.max(dy).min(0.0);
-
-    outside + inside - cr
-}
-
-/// SDF for an ellipse with given center and radii.
-fn ellipse_sdf(px: f32, py: f32, cx: f32, cy: f32, rx: f32, ry: f32) -> f32 {
-    let rx = rx.max(1e-8);
-    let ry = ry.max(1e-8);
-    let dx = (px - cx) / rx;
-    let dy = (py - cy) / ry;
-    let len = (dx * dx + dy * dy).sqrt();
-    if len <= 1e-10 {
-        return -1.0;
-    }
-    (len - 1.0) * rx.min(ry)
-}
-
-/// SDF for a Bezier path — subdivide to polyline then compute distance.
-fn path_sdf(px: f32, py: f32, points: &[BezierPoint], closed: bool) -> f32 {
-    if points.is_empty() {
-        return 1.0;
-    }
-    if points.len() == 1 {
-        let dx = px - points[0].position.x;
-        let dy = py - points[0].position.y;
-        return (dx * dx + dy * dy).sqrt();
-    }
-
-    let segments = subdivide_path(points, closed);
-    let mut min_dist = f32::MAX;
-
-    let target = Vec2::new(px, py);
-
-    for seg in &segments {
-        let d = point_to_segment_dist(target, seg.0, seg.1);
-        min_dist = min_dist.min(d);
-    }
-
-    // Determine inside/outside via even-odd winding (only if closed).
-    if closed {
-        let inside = winding_number(target, &segments) % 2 != 0;
-        if inside {
-            -min_dist
-        } else {
-            min_dist
-        }
-    } else {
-        min_dist
-    }
-}
-
-/// Subdivide Bezier curves into line segments.
-fn subdivide_path(points: &[BezierPoint], closed: bool) -> Vec<(Vec2, Vec2)> {
-    let mut segments = Vec::new();
-    let n = points.len();
-    for i in 0..n {
-        let next = if i + 1 < n {
-            i + 1
-        } else if closed {
-            0
-        } else {
-            break;
-        };
-        subdivide_bezier(points[i], points[next], &mut segments);
-    }
-    segments
-}
-
-const BEZIER_SUBDIVISIONS: usize = 8;
-
-/// Subdivide a cubic Bezier segment into line segments.
-fn subdivide_bezier(a: BezierPoint, b: BezierPoint, out: &mut Vec<(Vec2, Vec2)>) {
-    let steps = BEZIER_SUBDIVISIONS;
-    let inv = 1.0 / steps as f32;
-    let mut prev = a.position;
-    for s in 1..=steps {
-        let t = s as f32 * inv;
-        let pt = cubic_bezier(a, b, t);
-        out.push((prev, pt));
-        prev = pt;
-    }
-}
-
-/// Evaluate a cubic Bezier at parameter t in [0, 1].
-fn cubic_bezier(a: BezierPoint, b: BezierPoint, t: f32) -> Vec2 {
-    let t2 = t * t;
-    let t3 = t2 * t;
-    let u = 1.0 - t;
-    let u2 = u * u;
-    let u3 = u2 * u;
-    a.position * u3
-        + (a.position + a.control_out) * (3.0 * u2 * t)
-        + (b.position + b.control_in) * (3.0 * u * t2)
-        + b.position * t3
-}
-
-/// Minimum distance from point to line segment.
-fn point_to_segment_dist(p: Vec2, a: Vec2, b: Vec2) -> f32 {
-    let ab = b - a;
-    let ap = p - a;
-    let len2 = ab.length_squared();
-    if len2 < 1e-10 {
-        return ap.length();
-    }
-    let t = (ap.dot(ab) / len2).clamp(0.0, 1.0);
-    let closest = a + ab * t;
-    (p - closest).length()
-}
-
-/// Compute the winding number of a point relative to a polygon.
-fn winding_number(p: Vec2, segments: &[(Vec2, Vec2)]) -> i32 {
-    let mut wn = 0i32;
-    for &(a, b) in segments {
-        if a.y <= p.y {
-            if b.y > p.y && cross2d(b - a, p - a) > 0.0 {
-                wn += 1;
+                Ok(Self::Rectangle {
+                    x: *x,
+                    y: *y,
+                    width: *width,
+                    height: *height,
+                    corner_radius: *corner_radius,
+                })
             }
-        } else if b.y <= p.y && cross2d(b - a, p - a) < 0.0 {
-            wn -= 1;
+            MaskShape::Ellipse { center, radii } => {
+                if !center.is_finite() || !radii.is_finite() || radii.x < 0.0 || radii.y < 0.0 {
+                    return Err(MaskRasterError::InvalidGeometry {
+                        reason: "Ellipse values must be finite and radii non-negative",
+                    });
+                }
+                Ok(Self::Ellipse { center: *center, radii: *radii })
+            }
+            MaskShape::Path { points, closed } => {
+                if points.len() > MAX_MASK_PATH_POINTS {
+                    return Err(MaskRasterError::PathPointLimitExceeded {
+                        actual: points.len(),
+                        limit: MAX_MASK_PATH_POINTS,
+                    });
+                }
+                if !points.iter().all(|point| {
+                    point.position.is_finite()
+                        && point.control_in.is_finite()
+                        && point.control_out.is_finite()
+                }) {
+                    return Err(MaskRasterError::InvalidGeometry {
+                        reason: "Path control points must be finite",
+                    });
+                }
+                Ok(Self::Path(PreparedPath::prepare(
+                    points,
+                    *closed,
+                    cancellation,
+                )?))
+            }
         }
     }
-    wn
+
+    fn signed_distance(&self, point: Vec2, row_crossings: &[f32]) -> f32 {
+        match self {
+            Self::Rectangle { x, y, width, height, corner_radius } => {
+                rect_sdf(point.x, point.y, *x, *y, *width, *height, *corner_radius)
+            }
+            Self::Ellipse { center, radii } => {
+                ellipse_sdf(point.x, point.y, center.x, center.y, radii.x, radii.y)
+            }
+            Self::Path(path) => path.signed_distance(point, row_crossings),
+        }
+    }
+
+    fn row_crossings(&self, y: f32, output: &mut Vec<f32>) {
+        match self {
+            Self::Path(path) => path.row_crossings(y, output),
+            Self::Rectangle { .. } | Self::Ellipse { .. } => output.clear(),
+        }
+    }
+
+    fn max_row_crossings(&self) -> usize {
+        match self {
+            Self::Path(path) => path.max_row_scratch_bytes() / std::mem::size_of::<f32>(),
+            Self::Rectangle { .. } | Self::Ellipse { .. } => 0,
+        }
+    }
+
+    fn max_scratch_bytes(&self) -> usize {
+        match self {
+            Self::Path(path) => path.max_row_scratch_bytes(),
+            Self::Rectangle { .. } | Self::Ellipse { .. } => 0,
+        }
+    }
+
+    fn dynamic_retained_bytes(&self) -> usize {
+        match self {
+            Self::Path(path) => path.retained_bytes(),
+            Self::Rectangle { .. } | Self::Ellipse { .. } => 0,
+        }
+    }
+
+    #[cfg(test)]
+    fn path_segment_count(&self) -> usize {
+        match self {
+            Self::Path(path) => path.segment_count(),
+            Self::Rectangle { .. } | Self::Ellipse { .. } => 0,
+        }
+    }
 }
 
-fn cross2d(a: Vec2, b: Vec2) -> f32 {
-    a.x * b.y - a.y * b.x
+fn validate_region(
+    extent: EffectFrameExtent,
+    region: EffectPixelRoi,
+) -> Result<(), MaskRasterError> {
+    let right = u64::from(region.x()) + u64::from(region.width());
+    let bottom = u64::from(region.y()) + u64::from(region.height());
+    if right > u64::from(extent.width()) || bottom > u64::from(extent.height()) {
+        return Err(MaskRasterError::RegionOutsideExtent);
+    }
+    Ok(())
 }
 
-/// Smooth Hermite interpolation between edge0 and edge1.
-fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+fn rect_sdf(px: f32, py: f32, x: f32, y: f32, width: f32, height: f32, radius: f32) -> f32 {
+    let center_x = x + width * 0.5;
+    let center_y = y + height * 0.5;
+    let half_width = width * 0.5;
+    let half_height = height * 0.5;
+    let dx = (px - center_x).abs() - half_width + radius;
+    let dy = (py - center_y).abs() - half_height + radius;
+    Vec2::new(dx.max(0.0), dy.max(0.0)).length() + dx.max(dy).min(0.0) - radius
+}
+
+fn ellipse_sdf(px: f32, py: f32, center_x: f32, center_y: f32, rx: f32, ry: f32) -> f32 {
+    let rx = rx.max(1.0e-8);
+    let ry = ry.max(1.0e-8);
+    let dx = (px - center_x) / rx;
+    let dy = (py - center_y) / ry;
+    let length = (dx * dx + dy * dy).sqrt();
+    if length <= 1.0e-10 {
+        -1.0
+    } else {
+        (length - 1.0) * rx.min(ry)
+    }
+}
+
+fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
+    let t = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+pub(crate) fn mask_raster_checkpoint(
+    cancellation: &ExecutionCancellationToken,
+) -> Result<(), MaskRasterError> {
+    if cancellation.is_canceled() {
+        Err(MaskRasterError::Canceled)
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mask::BezierPoint;
 
-    #[test]
-    fn empty_rectangle_produces_full_alpha_inside() {
-        // A rectangle covering the entire [0, 1] area.
-        let shape = MaskShape::Rectangle {
-            x: 0.0,
-            y: 0.0,
-            width: 1.0,
-            height: 1.0,
-            corner_radius: 0.0,
-        };
-        let alpha = rasterize_mask_shape(&shape, 64, 64, 0.0, 0.0, 1.0);
-        // All pixels should be fully opaque (inside the shape).
-        assert!(alpha.iter().all(|&a| a > 200));
+    fn render(
+        shape: &MaskShape,
+        width: u32,
+        height: u32,
+        feather: f32,
+        expansion: f32,
+    ) -> Vec<f32> {
+        rasterize_mask_shape_f32(shape, width, height, feather, expansion, 1.0)
+            .expect("Mask raster")
+    }
+
+    fn crop(full: &[f32], width: usize, roi: EffectPixelRoi) -> Vec<f32> {
+        let mut output = Vec::new();
+        for y in roi.y() as usize..(roi.y() + roi.height()) as usize {
+            let start = y * width + roi.x() as usize;
+            output.extend_from_slice(&full[start..start + roi.width() as usize]);
+        }
+        output
     }
 
     #[test]
-    fn small_rectangle_has_transparent_border() {
+    fn rectangle_feather_expansion_and_opacity_remain_stable() {
         let shape = MaskShape::Rectangle {
             x: 0.25,
             y: 0.25,
@@ -263,131 +599,189 @@ mod tests {
             height: 0.5,
             corner_radius: 0.0,
         };
-        let alpha = rasterize_mask_shape(&shape, 64, 64, 0.0, 0.0, 1.0);
-        // Center should be opaque.
-        let center = alpha[32 * 64 + 32];
-        assert!(center > 200);
-        // Corner should be transparent.
-        let corner = alpha[0];
-        assert!(corner < 50);
-    }
-
-    #[test]
-    fn feather_softens_edge() {
-        let shape = MaskShape::Rectangle {
-            x: 0.25,
-            y: 0.25,
-            width: 0.5,
-            height: 0.5,
-            corner_radius: 0.0,
-        };
-        let hard = rasterize_mask_shape(&shape, 64, 64, 0.0, 0.0, 1.0);
-        let soft = rasterize_mask_shape(&shape, 64, 64, 10.0, 0.0, 1.0);
-        // Hard edge: all pixels are either near opaque or near transparent.
-        let _hard_binary: Vec<_> = hard.iter().map(|&a| a > 128).collect();
-        let _soft_binary: Vec<_> = soft.iter().map(|&a| a > 128).collect();
-        // Feather should smooth the transition — fewer purely binary pixels.
-        let hard_mid = hard.iter().filter(|&&a| a > 30 && a < 220).count();
-        let soft_mid = soft.iter().filter(|&&a| a > 30 && a < 220).count();
+        let hard = render(&shape, 64, 64, 0.0, 0.0);
+        let soft = render(&shape, 64, 64, 10.0, 0.0);
+        let expanded = render(&shape, 64, 64, 0.0, 10.0);
+        assert!(hard[32 * 64 + 32] > 0.99);
+        assert!(hard[0] < 0.01);
+        assert!(soft.iter().filter(|alpha| **alpha > 0.1 && **alpha < 0.9).count() > 0);
         assert!(
-            soft_mid > hard_mid,
-            "feather should create more transitional pixels"
+            expanded.iter().filter(|alpha| **alpha > 0.5).count()
+                > hard.iter().filter(|alpha| **alpha > 0.5).count()
+        );
+
+        let half =
+            rasterize_mask_shape_f32(&shape, 64, 64, 0.0, 0.0, 0.5).expect("half-opacity Mask");
+        assert!((half[32 * 64 + 32] - 0.5).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn every_shape_region_is_bit_exact_with_its_full_frame_crop() {
+        let shapes = [
+            MaskShape::Rectangle {
+                x: 0.18,
+                y: 0.22,
+                width: 0.61,
+                height: 0.47,
+                corner_radius: 0.07,
+            },
+            MaskShape::Ellipse {
+                center: Vec2::new(0.51, 0.46),
+                radii: Vec2::new(0.28, 0.31),
+            },
+            MaskShape::Path {
+                points: vec![
+                    BezierPoint::new(Vec2::new(0.12, 0.18)),
+                    BezierPoint::new(Vec2::new(0.82, 0.25)),
+                    BezierPoint::new(Vec2::new(0.68, 0.84)),
+                    BezierPoint::new(Vec2::new(0.2, 0.72)),
+                ],
+                closed: true,
+            },
+        ];
+        let extent = EffectFrameExtent::new(97, 61);
+        let roi = EffectPixelRoi::new(37, 19, 23, 17);
+        for shape in shapes {
+            let cancellation = ExecutionCancellationToken::new();
+            let prepared =
+                PreparedMaskRaster::prepare(&shape, extent, 7.5, -1.25, 0.73, &cancellation)
+                    .expect("prepared Mask");
+            let full = prepared
+                .rasterize_alpha_f32(extent.full_frame_roi(), &cancellation)
+                .expect("full Mask");
+            let tile = prepared.rasterize_alpha_f32(roi, &cancellation).expect("tile Mask");
+            assert_eq!(tile, crop(&full, extent.width() as usize, roi));
+        }
+    }
+
+    #[test]
+    fn path_is_flattened_once_and_reused_across_regions() {
+        let shape = MaskShape::Path {
+            points: vec![
+                BezierPoint::new(Vec2::new(0.1, 0.1)),
+                BezierPoint::new(Vec2::new(0.9, 0.1)),
+                BezierPoint::new(Vec2::new(0.9, 0.9)),
+                BezierPoint::new(Vec2::new(0.1, 0.9)),
+            ],
+            closed: true,
+        };
+        let cancellation = ExecutionCancellationToken::new();
+        let prepared = PreparedMaskRaster::prepare(
+            &shape,
+            EffectFrameExtent::new(64, 64),
+            0.0,
+            0.0,
+            1.0,
+            &cancellation,
+        )
+        .expect("prepared Path");
+        assert_eq!(prepared.path_segment_count(), 32);
+        let retained = prepared.retained_bytes();
+        prepared
+            .rasterize_alpha_f32(EffectPixelRoi::new(0, 0, 32, 64), &cancellation)
+            .expect("left tile");
+        prepared
+            .rasterize_alpha_f32(EffectPixelRoi::new(32, 0, 32, 64), &cancellation)
+            .expect("right tile");
+        assert_eq!(prepared.path_segment_count(), 32);
+        assert_eq!(prepared.retained_bytes(), retained);
+    }
+
+    #[test]
+    fn raster_set_preflight_matches_prepared_logical_bytes() {
+        let graph = EffectRenderGraph {
+            nodes: vec![crate::EffectGraphNode {
+                id: EffectGraphNodeId(11),
+                kind: EffectGraphNodeKind::MaskSource {
+                    shape: MaskShape::Path {
+                        points: vec![
+                            BezierPoint::new(Vec2::new(0.1, 0.1)),
+                            BezierPoint::new(Vec2::new(0.9, 0.1)),
+                            BezierPoint::new(Vec2::new(0.9, 0.9)),
+                            BezierPoint::new(Vec2::new(0.1, 0.9)),
+                        ],
+                        closed: true,
+                    },
+                    feather: 4.0,
+                    expansion: 2.0,
+                    opacity: 0.8,
+                },
+            }],
+            output: Some(EffectGraphNodeId(11)),
+        };
+        let required =
+            PreparedMaskRasterSet::required_retained_bytes(&graph).expect("preflight bytes");
+        let prepared = PreparedMaskRasterSet::prepare(
+            &graph,
+            EffectFrameExtent::new(1920, 1080),
+            &ExecutionCancellationToken::new(),
+        )
+        .expect("prepared Mask set");
+
+        assert_eq!(prepared.retained_bytes(), required);
+    }
+
+    #[test]
+    fn cancellation_and_invalid_regions_fail_without_partial_success() {
+        let shape = MaskShape::default();
+        let cancellation = ExecutionCancellationToken::new();
+        let prepared = PreparedMaskRaster::prepare(
+            &shape,
+            EffectFrameExtent::new(64, 64),
+            0.0,
+            0.0,
+            1.0,
+            &cancellation,
+        )
+        .expect("prepared Mask");
+        cancellation.cancel();
+        assert_eq!(
+            prepared
+                .rasterize_alpha_f32(EffectPixelRoi::new(0, 0, 64, 64), &cancellation)
+                .expect_err("canceled raster"),
+            MaskRasterError::Canceled
+        );
+        let active = ExecutionCancellationToken::new();
+        assert_eq!(
+            prepared
+                .rasterize_alpha_f32(EffectPixelRoi::new(63, 63, 2, 2), &active)
+                .expect_err("out-of-bounds raster"),
+            MaskRasterError::RegionOutsideExtent
         );
     }
 
     #[test]
-    fn expansion_expands_shape() {
-        let shape = MaskShape::Rectangle {
-            x: 0.25,
-            y: 0.25,
-            width: 0.5,
-            height: 0.5,
-            corner_radius: 0.0,
-        };
-        let normal = rasterize_mask_shape(&shape, 64, 64, 0.0, 0.0, 1.0);
-        // Positive expansion = larger mask.
-        let expanded = rasterize_mask_shape(&shape, 64, 64, 0.0, 10.0, 1.0);
-        let normal_count = normal.iter().filter(|&&a| a > 128).count();
-        let expanded_count = expanded.iter().filter(|&&a| a > 128).count();
-        assert!(
-            expanded_count > normal_count,
-            "expansion should increase visible area"
+    fn empty_extent_is_empty_and_path_limit_fails_closed() {
+        let cancellation = ExecutionCancellationToken::new();
+        let prepared = PreparedMaskRaster::prepare(
+            &MaskShape::default(),
+            EffectFrameExtent::new(0, 0),
+            0.0,
+            0.0,
+            1.0,
+            &cancellation,
+        )
+        .expect("empty Mask");
+        assert!(prepared
+            .rasterize_alpha_f32(EffectPixelRoi::new(0, 0, 0, 0), &cancellation)
+            .expect("empty raster")
+            .is_empty());
+
+        let points = vec![BezierPoint::new(Vec2::ZERO); MAX_MASK_PATH_POINTS + 1];
+        assert_eq!(
+            PreparedMaskRaster::prepare(
+                &MaskShape::Path { points, closed: true },
+                EffectFrameExtent::new(16, 16),
+                0.0,
+                0.0,
+                1.0,
+                &cancellation,
+            )
+            .expect_err("oversized Path"),
+            MaskRasterError::PathPointLimitExceeded {
+                actual: MAX_MASK_PATH_POINTS + 1,
+                limit: MAX_MASK_PATH_POINTS,
+            }
         );
-    }
-
-    #[test]
-    fn opacity_scales_alpha() {
-        let shape = MaskShape::Rectangle {
-            x: 0.0,
-            y: 0.0,
-            width: 1.0,
-            height: 1.0,
-            corner_radius: 0.0,
-        };
-        let full = rasterize_mask_shape(&shape, 32, 32, 0.0, 0.0, 1.0);
-        let half = rasterize_mask_shape(&shape, 32, 32, 0.0, 0.0, 0.5);
-        let full_avg = full.iter().map(|&a| a as f32).sum::<f32>() / full.len() as f32;
-        let half_avg = half.iter().map(|&a| a as f32).sum::<f32>() / half.len() as f32;
-        assert!((half_avg * 2.0 - full_avg).abs() < 10.0);
-    }
-
-    #[test]
-    fn float_raster_preserves_sub_byte_mask_coverage() {
-        let shape = MaskShape::Rectangle {
-            x: 0.0,
-            y: 0.0,
-            width: 1.0,
-            height: 1.0,
-            corner_radius: 0.0,
-        };
-
-        let alpha = rasterize_mask_shape_f32(&shape, 1, 1, 0.0, 0.0, 0.123_456);
-
-        assert_eq!(alpha.len(), 1);
-        assert!((alpha[0] - 0.123_456).abs() <= f32::EPSILON);
-        assert!((alpha[0] * 255.0 - (alpha[0] * 255.0).round()).abs() > 1.0e-3);
-    }
-
-    #[test]
-    fn ellipse_is_round() {
-        let shape = MaskShape::Ellipse {
-            center: Vec2::new(0.5, 0.5),
-            radii: Vec2::new(0.3, 0.3),
-        };
-        let alpha = rasterize_mask_shape(&shape, 64, 64, 0.0, 0.0, 1.0);
-        // Center is inside.
-        assert!(alpha[32 * 64 + 32] > 200);
-        // Far corner is outside.
-        assert!(alpha[0] < 50);
-        // Edges at same radius should have similar alpha.
-        let right = alpha[32 * 64 + 50]; // (0.78, 0.5) — radius ~0.28
-        let bottom = alpha[50 * 64 + 32]; // (0.5, 0.78) — radius ~0.28
-        assert!((right as i32 - bottom as i32).abs() < 20);
-    }
-
-    #[test]
-    fn zero_opacity_returns_all_zeros() {
-        let shape = MaskShape::Rectangle {
-            x: 0.0,
-            y: 0.0,
-            width: 1.0,
-            height: 1.0,
-            corner_radius: 0.0,
-        };
-        let alpha = rasterize_mask_shape(&shape, 32, 32, 0.0, 0.0, 0.0);
-        assert!(alpha.iter().all(|&a| a == 0));
-    }
-
-    #[test]
-    fn degenerate_zero_size_handled() {
-        let shape = MaskShape::Rectangle {
-            x: 0.5,
-            y: 0.5,
-            width: 0.0,
-            height: 0.0,
-            corner_radius: 0.0,
-        };
-        // Should not panic.
-        let _alpha = rasterize_mask_shape(&shape, 1, 1, 0.0, 0.0, 1.0);
     }
 }

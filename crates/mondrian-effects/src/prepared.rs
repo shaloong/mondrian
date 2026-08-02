@@ -866,7 +866,7 @@ fn mask_execution_contract() -> EffectExecutionContract {
         determinism: EffectDeterminism::Deterministic,
         state_model: EffectStateModel::Stateless,
         temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
-        roi_propagation: EffectRoiPropagation::FullFrame,
+        roi_propagation: EffectRoiPropagation::PixelLocal,
         resource_lifetime: EffectResourceLifetime::Frame,
         topology: EffectGraphTopology::GeneralDag,
     }
@@ -877,7 +877,8 @@ mod tests {
     use super::*;
     use crate::{
         register_effect_definition, EffectColorDomainContract, EffectDefinition,
-        EffectGraphBuilder, EffectGraphPreparer, EffectNodeExt, EffectRenderOp,
+        EffectGraphBuilder, EffectGraphPreparer, EffectNodeExt, EffectRenderOp, MaskKeyframe,
+        MaskShape,
     };
     use mondrian_core::{
         automation::{Keyframe, ParameterResourceReference, PropertyValue},
@@ -1014,6 +1015,37 @@ mod tests {
     }
 
     #[test]
+    fn prepared_mask_contract_preserves_exact_partial_roi() {
+        let mask = MaskComponent::new(
+            "subject".to_owned(),
+            MaskKeyframe {
+                shape: MaskShape::Rectangle {
+                    x: 0.2,
+                    y: 0.25,
+                    width: 0.5,
+                    height: 0.4,
+                    corner_radius: 0.05,
+                },
+                feather: 7.0,
+                ..MaskKeyframe::default()
+            },
+        );
+        let program = PreparedEffectProgram::prepare(&[], &[mask], WorkingColorSpace::LinearRec709)
+            .expect("prepare Mask program");
+        let graph = program.evaluate(tt(3)).expect("evaluate Mask graph");
+        let output_roi = crate::EffectPixelRoi::new(17, 9, 23, 11);
+        let demand = graph
+            .plan_execution_demand(tt(3), crate::EffectFrameExtent::new(1920, 1080), output_roi)
+            .expect("plan exact Mask demand");
+
+        assert_eq!(
+            graph.execution_envelope().aggregate().roi_propagation,
+            EffectRoiPropagation::PixelLocal
+        );
+        assert_eq!(demand.input_roi().region(), output_roi);
+    }
+
+    #[test]
     fn conservative_plugin_default_fails_closed() {
         let effect_type = EffectType::Plugin("plugin.prepared.conservative".to_owned());
         register_effect_definition(
@@ -1137,9 +1169,15 @@ mod tests {
         )
         .expect("prepare program");
         assert!(program.has_external_dependencies());
+        let count_after_registry_stable_prepare = prepare_count.load(Ordering::SeqCst);
+        assert!(count_after_registry_stable_prepare >= 1);
         program.evaluate(tt(1)).expect("frame one");
         program.evaluate(tt(2)).expect("frame two");
-        assert_eq!(prepare_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            prepare_count.load(Ordering::SeqCst),
+            count_after_registry_stable_prepare,
+            "frame evaluation must reuse the successfully prepared immutable resource"
+        );
     }
 
     #[test]

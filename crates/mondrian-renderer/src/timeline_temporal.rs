@@ -636,6 +636,7 @@ fn replace_effect_graph(
 mod tests {
     use super::*;
     use crate::evaluate_prepared_visual_program;
+    use mondrian_core::mask_data::{MaskComponent, MaskKeyframe, MaskShape};
     use mondrian_core::timeline_data::{ClipContent, MediaInterpretation};
     use mondrian_core::{BlendMode, ColorSpace, FramePosition, Rational, TimeScale};
     use mondrian_effects::{
@@ -824,6 +825,20 @@ mod tests {
         )
         .expect("Clip");
         clip.add_effect_node(temporal_dag_effect(offset));
+        clip.masks.push(MaskComponent::new(
+            "subject".to_owned(),
+            MaskKeyframe {
+                shape: MaskShape::Rectangle {
+                    x: 0.2,
+                    y: 0.2,
+                    width: 0.6,
+                    height: 0.6,
+                    corner_radius: 0.1,
+                },
+                feather: 1.5,
+                ..MaskKeyframe::default()
+            },
+        ));
         track.add_clip(clip).expect("add Clip");
         sequence.video_tracks.push(track);
 
@@ -857,7 +872,7 @@ mod tests {
             expected_source_coverage
         );
         assert_eq!(batch.source_demands().len(), 2);
-        assert_eq!(batch.graph().graph().nodes.len(), 5);
+        assert_eq!(batch.graph().graph().nodes.len(), 7);
         assert!(batch.graph().node_use_counts().values().any(|uses| *uses == 2));
         assert!(
             prepared.execution_plan().elements.iter().all(|element| match element {
@@ -916,7 +931,7 @@ mod tests {
 
         let output_bytes =
             extent.width() as usize * extent.height() as usize * std::mem::size_of::<[f32; 4]>();
-        let tiled_budget = batch.effect_demands().coverage_bytes() + output_bytes + 64;
+        let tiled_budget = batch.effect_demands().coverage_bytes() + output_bytes + 512;
         let mut tiled_session =
             EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(tiled_budget));
         let mut tiled_provider = frozen;

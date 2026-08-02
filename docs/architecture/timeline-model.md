@@ -925,10 +925,13 @@ ambiguous coverage fails before the graph can observe a partial provider. The
 admitted production graph shape is one Source-fed finite-past mixer followed by
 a current-time unary/fan-out/join DAG. Its Effect Session executes the request
 directly when the proved live set fits, or deterministically tiles and stitches
-the complete output under the same source/output/tile grant. Temporal input
-with an upstream Effect, generated or animated upstream content, Adjustment
-Clip, future/unbounded history, stateful continuity, Mask, or unsupported
-color/ROI semantics is rejected rather than rendered approximately.
+the complete output under the same source/output/tile grant. Current-time Clip
+Masks execute in that graph through one frame-extent-bound prepared raster;
+partial regions retain global Mask coordinates and direct/tiled results are
+bit-identical. Temporal input with an upstream Effect, generated or animated
+upstream content, Adjustment Clip, future/unbounded history, stateful continuity,
+or unsupported color/ROI semantics is rejected rather than rendered
+approximately.
 
 Export connects this first tracer to job-local synchronous media and nested
 resolution, reusing the ordinary input color/alpha preparation and nested
