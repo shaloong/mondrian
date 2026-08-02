@@ -328,19 +328,35 @@ equality before it can implement the provider. Its lookup performs no decode,
 nested rendering, color conversion, or title work.
 
 The scalar reference consumes the existing `CompiledEffectGraph`; it does not
-introduce another Render Graph. It stages the exact expanded source tile in
-full-frame coordinates, evaluates ordinary unary operations with their normal
-global pixel coordinates, and crops only after evaluation. Exact ROI laws
-produce an explicit finite halo. The separable Gaussian implementation keeps
-its sliding sums in Float64 and rounds only when storing Float32 pixels; this
-prevents removed pixels outside an exact halo from leaving Float32 cancellation
-residue and creating a seam against full-frame execution. This is an internal
-numerical-stability rule, not a second working-precision contract.
-`UnknownRequiresFullFrame` remains a
+introduce another Render Graph. It retains only the exact expanded source tile
+and carries a checked raster-region descriptor containing both tile origin and
+complete-frame extent. Coordinate-dependent operations such as Vignette and
+frame-seeded Grain therefore observe the same global pixels as full-frame
+execution instead of silently re-centering or re-seeding at the tile origin.
+Finite-kernel operations evaluate the admitted halo locally and crop only after
+evaluation; an operation whose implementation contract needs the complete
+frame rejects a partial region. Exact ROI laws produce an explicit finite halo.
+The separable Gaussian implementation keeps its sliding sums in Float64 and
+rounds only when storing Float32 pixels; this prevents removed pixels outside
+an exact halo from leaving Float32 cancellation residue and creating a seam
+against full-frame execution. This is an internal numerical-stability rule,
+not a second working-precision contract. `UnknownRequiresFullFrame` remains a
 conservative full-frame request with no exact-halo evidence, so an optimized
-tile backend cannot present fallback as proved tiling. Working-frame staging,
-memoized temporal nodes, the provider tile, and the output crop are admitted
-against one explicit transient byte budget before allocation.
+tile backend cannot present fallback as proved tiling.
+
+Every memoized graph value, output crop, and implementation-owned same-sized
+kernel scratch allocation is included in one Session working-set model. The
+already materialized provider tile is charged as transient residency while the
+executor clones it; every executor-owned allocation is admitted before it is
+created. Gaussian Blur accounts for its separable scratch, Sharpen for the
+simultaneously live blurred result plus Gaussian scratch, and full-frame
+Chromatic Aberration for its replacement buffer. A small exact ROI therefore
+scales with its expanded input tile rather than allocating a zero-filled
+complete-frame buffer, while exceeding the exact byte budget fails before the
+kernel starts. Regression references require expanded Blur,
+Vignette, and frame-seeded Grain tile output to equal the corresponding crop of
+full-frame execution. This proves the scalar executor boundary; it does not
+claim that a complete Preview or Export frame is already split into tiles.
 
 `TemporalFrameMix` is the finite-history proof Processor. It coverage-correctly
 interpolates the current upstream frame with an exact signed past sample.

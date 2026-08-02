@@ -4,7 +4,9 @@
 //! adapters. It consumes [`crate::CompiledEffectGraph`] directly; it does not
 //! introduce a second graph or reinterpret definition contracts.
 
-use crate::adjustment::apply_render_op_f32_controlled;
+use crate::adjustment::{
+    apply_render_op_f32_region_controlled, render_op_f32_scratch_frames, EffectRasterRegion,
+};
 use crate::execution_session::EffectTemporalCachedOutput;
 use crate::{
     CompiledEffectGraph, EffectExecutionDemandError, EffectExecutionSession, EffectFrameExtent,
@@ -553,8 +555,8 @@ pub enum EffectTemporalExecutionError {
     /// Execution was canceled at a cooperative checkpoint.
     #[error("effect temporal execution was canceled")]
     Canceled,
-    /// Full-frame scalar staging and memoization exceeded the explicit Session
-    /// budget before allocation.
+    /// Tile-local scalar staging, kernel scratch, and memoization exceeded the
+    /// explicit Session budget before allocation.
     #[error(
         "effect temporal scalar working set requires {required_bytes} bytes, exceeding the {budget_bytes}-byte budget"
     )]
@@ -563,6 +565,12 @@ pub enum EffectTemporalExecutionError {
         required_bytes: usize,
         /// Session-owned limit.
         budget_bytes: usize,
+    },
+    /// A planned output ROI was not contained by its exact input region.
+    #[error("effect temporal ROI projection is invalid: {reason}")]
+    InvalidRoiProjection {
+        /// Stable internal contract violation.
+        reason: &'static str,
     },
     /// The compiled graph did not produce its declared output.
     #[error("effect temporal graph output is missing")]
@@ -631,12 +639,11 @@ struct AdmittedTemporalShape {
 impl EffectExecutionSession {
     /// Execute a finite-history, stateless CPU Float32 graph for one exact ROI.
     ///
-    /// The scalar reference stages an exact input tile into complete-frame
-    /// coordinates before running ordinary operations, then crops only the
-    /// requested output. This is deliberately conservative in memory but
-    /// prevents local coordinates or artificial tile edges from changing
-    /// Vignette, Grain, Mask, Blur, or other full-coordinate mathematics. A
-    /// future optimized tile Adapter must prove parity against this reference.
+    /// The scalar reference retains only the exact input ROI. Coordinate-aware
+    /// operations still use complete-frame positions, finite-kernel operations
+    /// consume their admitted halo, and full-frame-only operations reject a
+    /// partial region. Kernel scratch and every resident graph value are
+    /// admitted before allocation.
     pub fn execute_temporal_roi_f32(
         &mut self,
         compiled: &CompiledEffectGraph,
@@ -725,9 +732,9 @@ impl EffectExecutionSession {
                 budget_bytes: evaluator.working.budget,
             })?;
         evaluator.working.ensure_transient(output_pixel_bytes)?;
-        let output_pixels = Arc::<[[f32; 4]]>::from(crop_frame(
+        let output_pixels = Arc::<[[f32; 4]]>::from(crop_tile(
             &output,
-            demand.frame_extent(),
+            demand.input_roi().region(),
             demand.output_roi(),
             &request.cancellation,
         )?);
@@ -910,6 +917,7 @@ struct ScalarTemporalEvaluator<'a> {
     compiled: &'a CompiledEffectGraph,
     request: &'a EffectTemporalExecutionRequest,
     input_roi: EffectInputRoi,
+    raster_region: EffectRasterRegion,
     exact_halo: Option<EffectRoiHalo>,
     provider: &'a mut dyn EffectTemporalFrameProvider,
     memo: HashMap<(EffectGraphNodeId, TimelineTime), Arc<[[f32; 4]]>>,
@@ -927,7 +935,8 @@ impl<'a> ScalarTemporalEvaluator<'a> {
         provider: &'a mut dyn EffectTemporalFrameProvider,
         working_budget: usize,
     ) -> Result<Self, EffectTemporalExecutionError> {
-        let frame_bytes = checked_pixel_count(request.frame_extent)
+        let input_region = input_roi.region();
+        let frame_bytes = checked_pixel_count(input_region)
             .and_then(|pixels| pixels.checked_mul(std::mem::size_of::<[f32; 4]>()))
             .ok_or(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
                 required_bytes: usize::MAX,
@@ -943,6 +952,14 @@ impl<'a> ScalarTemporalEvaluator<'a> {
             compiled,
             request,
             input_roi,
+            raster_region: EffectRasterRegion::new(
+                request.frame_extent.width(),
+                request.frame_extent.height(),
+                input_region.x(),
+                input_region.y(),
+                input_region.width(),
+                input_region.height(),
+            ),
             exact_halo,
             provider,
             memo: HashMap::new(),
@@ -980,6 +997,13 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                     let input = self.evaluate(input, time)?;
                     self.working.reserve_frame()?;
                     let mut output = input.as_ref().to_vec();
+                    let scratch_bytes = render_op_f32_scratch_frames(&op)
+                        .checked_mul(self.working.frame_bytes)
+                        .ok_or(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                            required_bytes: usize::MAX,
+                            budget_bytes: self.working.budget,
+                        })?;
+                    self.working.ensure_transient(scratch_bytes)?;
                     let frame_seed = if time == self.request.output_time {
                         self.request.output_frame_seed
                     } else {
@@ -989,10 +1013,9 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                             .unwrap_or_else(|| frame_seed_for_output(time))
                     };
                     let cancellation = self.request.cancellation.clone();
-                    let execution = apply_render_op_f32_controlled(
+                    let execution = apply_render_op_f32_region_controlled(
                         &mut output,
-                        self.request.frame_extent.width(),
-                        self.request.frame_extent.height(),
+                        self.raster_region,
                         &op,
                         frame_seed,
                         &mut || temporal_cancellation_checkpoint(&cancellation),
@@ -1064,16 +1087,7 @@ impl<'a> ScalarTemporalEvaluator<'a> {
         }
         validate_provider_tile(&tile, provider_request)?;
         self.working.reserve_frame_with_transient(tile.byte_len())?;
-        let mut frame = vec![
-            [0.0; 4];
-            checked_pixel_count(self.request.frame_extent).ok_or(
-                EffectTemporalExecutionError::WorkingSetBudgetExceeded {
-                    required_bytes: usize::MAX,
-                    budget_bytes: self.working.budget,
-                },
-            )?
-        ];
-        copy_tile_into_frame(&tile, &mut frame, &self.request.cancellation)?;
+        let frame = clone_tile_pixels(&tile, &self.request.cancellation)?;
         self.frame_seeds.insert(time, tile.frame_seed);
         Ok(Arc::from(frame))
     }
@@ -1287,38 +1301,64 @@ fn clamp_roi(roi: EffectPixelRoi, extent: EffectFrameExtent) -> EffectPixelRoi {
     )
 }
 
-fn copy_tile_into_frame(
+fn clone_tile_pixels(
     tile: &EffectFrameTileF32,
-    frame: &mut [[f32; 4]],
     cancellation: &ExecutionCancellationToken,
-) -> Result<(), EffectTemporalExecutionError> {
-    let frame_width = tile.frame_extent.width() as usize;
-    let tile_width = tile.roi.width() as usize;
-    for row in 0..tile.roi.height() as usize {
+) -> Result<Vec<[f32; 4]>, EffectTemporalExecutionError> {
+    let mut pixels = Vec::with_capacity(tile.pixels.len());
+    for chunk in tile.pixels.chunks(4_096) {
         temporal_cancellation_checkpoint(cancellation)?;
-        let source_start = row * tile_width;
-        let destination_start = (tile.roi.y() as usize + row) * frame_width + tile.roi.x() as usize;
-        frame[destination_start..destination_start + tile_width]
-            .copy_from_slice(&tile.pixels[source_start..source_start + tile_width]);
+        pixels.extend_from_slice(chunk);
     }
-    temporal_cancellation_checkpoint(cancellation)
+    temporal_cancellation_checkpoint(cancellation)?;
+    Ok(pixels)
 }
 
+fn crop_tile(
+    frame: &[[f32; 4]],
+    input_roi: EffectPixelRoi,
+    output_roi: EffectPixelRoi,
+    cancellation: &ExecutionCancellationToken,
+) -> Result<Vec<[f32; 4]>, EffectTemporalExecutionError> {
+    let input_right = u64::from(input_roi.x()) + u64::from(input_roi.width());
+    let input_bottom = u64::from(input_roi.y()) + u64::from(input_roi.height());
+    let output_right = u64::from(output_roi.x()) + u64::from(output_roi.width());
+    let output_bottom = u64::from(output_roi.y()) + u64::from(output_roi.height());
+    if output_roi.x() < input_roi.x()
+        || output_roi.y() < input_roi.y()
+        || output_right > input_right
+        || output_bottom > input_bottom
+    {
+        return Err(EffectTemporalExecutionError::InvalidRoiProjection {
+            reason: "output region is not contained by its planned input region",
+        });
+    }
+    if checked_pixel_count(input_roi) != Some(frame.len()) {
+        return Err(EffectTemporalExecutionError::InvalidRoiProjection {
+            reason: "input pixel buffer does not match its planned region",
+        });
+    }
+    let mut output = Vec::with_capacity(checked_pixel_count(output_roi).unwrap_or(0));
+    let input_width = input_roi.width() as usize;
+    let local_x = (output_roi.x() - input_roi.x()) as usize;
+    let local_y = (output_roi.y() - input_roi.y()) as usize;
+    for row in 0..output_roi.height() as usize {
+        temporal_cancellation_checkpoint(cancellation)?;
+        let start = (local_y + row) * input_width + local_x;
+        output.extend_from_slice(&frame[start..start + output_roi.width() as usize]);
+    }
+    temporal_cancellation_checkpoint(cancellation)?;
+    Ok(output)
+}
+
+#[cfg(test)]
 fn crop_frame(
     frame: &[[f32; 4]],
     extent: EffectFrameExtent,
     roi: EffectPixelRoi,
     cancellation: &ExecutionCancellationToken,
 ) -> Result<Vec<[f32; 4]>, EffectTemporalExecutionError> {
-    let mut output = Vec::with_capacity(checked_pixel_count(roi).unwrap_or(0));
-    let frame_width = extent.width() as usize;
-    for row in 0..roi.height() as usize {
-        temporal_cancellation_checkpoint(cancellation)?;
-        let start = (roi.y() as usize + row) * frame_width + roi.x() as usize;
-        output.extend_from_slice(&frame[start..start + roi.width() as usize]);
-    }
-    temporal_cancellation_checkpoint(cancellation)?;
-    Ok(output)
+    crop_tile(frame, extent.full_frame_roi(), roi, cancellation)
 }
 
 fn temporal_cancellation_checkpoint(
@@ -1787,6 +1827,125 @@ mod tests {
         assert_eq!(halo.top(), 3);
         assert_eq!(halo.right(), 3);
         assert_eq!(halo.bottom(), 3);
+    }
+
+    #[test]
+    fn pixel_local_coordinate_effects_match_full_frame_crop() {
+        let mut contract = temporal_contract(TimelineTime::ZERO, EffectRoiPropagation::PixelLocal);
+        contract.determinism = EffectDeterminism::FrameSeeded;
+        let graph = bind_linear(
+            [
+                crate::EffectRenderOp::Vignette { intensity: 0.72, feather: 0.41 },
+                crate::EffectRenderOp::Grain { amount: 0.37 },
+            ],
+            contract,
+        );
+        let extent = EffectFrameExtent::new(31, 19);
+        let tile_roi = EffectPixelRoi::new(17, 9, 5, 4);
+        let time = TimelineTime::new(11, 24).expect("time");
+        let request = |roi| {
+            EffectTemporalExecutionRequest::new(
+                7,
+                EffectExecutionContinuity::Continuous,
+                time,
+                extent,
+                roi,
+                ExecutionCancellationToken::new(),
+            )
+            .with_output_frame_seed(0x5a17)
+        };
+        let mut tile_provider = GradientProvider::new(extent);
+        let mut full_provider = GradientProvider::new(extent);
+        let mut tile_session = EffectExecutionSession::default();
+        let mut full_session = EffectExecutionSession::default();
+
+        let tile = tile_session
+            .execute_temporal_roi_f32(&graph, &request(tile_roi), &mut tile_provider)
+            .expect("coordinate-aware tile");
+        let full = full_session
+            .execute_temporal_roi_f32(
+                &graph,
+                &request(extent.full_frame_roi()),
+                &mut full_provider,
+            )
+            .expect("full-frame reference");
+
+        assert_eq!(
+            tile.tile().pixels(),
+            crop_frame(
+                full.tile().pixels(),
+                extent,
+                tile_roi,
+                &ExecutionCancellationToken::new(),
+            )
+            .expect("reference crop")
+        );
+    }
+
+    #[test]
+    fn exact_roi_working_set_scales_with_the_input_tile_and_accounts_for_kernel_scratch() {
+        let radius = 2.0;
+        let halo = crate::adjustment::gaussian_blur_input_halo(radius).expect("finite halo");
+        let graph = bind_linear(
+            [crate::EffectRenderOp::GaussianBlur { radius }],
+            temporal_contract(
+                TimelineTime::ZERO,
+                EffectRoiPropagation::Expand { horizontal_pixels: halo, vertical_pixels: halo },
+            ),
+        );
+        let extent = EffectFrameExtent::new(3_840, 2_160);
+        let output_roi = EffectPixelRoi::new(1_000, 700, 8, 8);
+        let input_width = output_roi.width() + halo * 2;
+        let input_height = output_roi.height() + halo * 2;
+        let tile_bytes =
+            input_width as usize * input_height as usize * std::mem::size_of::<[f32; 4]>();
+        let exact_peak = tile_bytes * 3;
+        let request = EffectTemporalExecutionRequest::new(
+            23,
+            EffectExecutionContinuity::Continuous,
+            TimelineTime::ZERO,
+            extent,
+            output_roi,
+            ExecutionCancellationToken::new(),
+        );
+
+        let mut admitted = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_cache_entries: 0,
+            max_cache_bytes: 0,
+            max_working_bytes: exact_peak,
+            max_gpu_plan_entries: 0,
+            max_gpu_plan_bytes: 0,
+        });
+        let mut provider = GradientProvider::new(extent);
+        let output = admitted
+            .execute_temporal_roi_f32(&graph, &request, &mut provider)
+            .expect("tile-sized working budget");
+        assert_eq!(output.peak_working_bytes(), exact_peak);
+        assert!(
+            output.peak_working_bytes()
+                < extent.width() as usize
+                    * extent.height() as usize
+                    * std::mem::size_of::<[f32; 4]>(),
+            "a small ROI must not materialize even one complete 4K working frame"
+        );
+
+        let mut rejected = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_cache_entries: 0,
+            max_cache_bytes: 0,
+            max_working_bytes: exact_peak - 1,
+            max_gpu_plan_entries: 0,
+            max_gpu_plan_bytes: 0,
+        });
+        let mut rejected_provider = GradientProvider::new(extent);
+        assert_eq!(
+            rejected
+                .execute_temporal_roi_f32(&graph, &request, &mut rejected_provider)
+                .expect_err("kernel scratch above the exact budget must be rejected"),
+            EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                required_bytes: exact_peak,
+                budget_bytes: exact_peak - 1,
+            }
+        );
     }
 
     #[test]

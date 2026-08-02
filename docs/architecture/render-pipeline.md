@@ -432,6 +432,18 @@ bounded CPU-Float32 scalar reference. Crossing owner-domain zero is not a
 boundary event. The exact `TimelineClipExecutionRef` and prepared placement
 mapping decide whether a requested source handle exists.
 
+That scalar reference keeps the exact input ROI rather than expanding it into
+a zero-filled complete frame. Its raster-region contract preserves global
+frame coordinates for coordinate-dependent kernels, finite-support kernels
+consume only their implementation-derived halo, and complete-frame-only
+kernels fail closed on a partial region. Resident graph values and concrete
+kernel scratch are admitted against the Effect Session byte budget before the
+executor allocates them; an already materialized provider tile is charged as
+transient residency while it is cloned. Preview and Export use this same
+execution boundary, but their current complete-frame delivery normally
+requests a complete output ROI; the executor's exact tile behavior is not
+evidence of scheduler-level full-frame tiling or GPU temporal execution.
+
 Export connects this tracer to its job-local decoder and closure-backed nested
 materializer. It resolves every typed demand address first, adapts the result to
 straight-alpha parent working pixels, freezes the complete batch, and executes

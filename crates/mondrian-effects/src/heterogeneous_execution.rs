@@ -9,12 +9,12 @@
 //! suffix. Preview/Export scheduling remains outside this Module.
 
 use crate::{
-    adjustment::apply_render_op_f32_controlled, lower_effect_graph_nodes_to_gpu_plan,
-    CompiledEffectGpuPlan, CompiledEffectGraph, EffectColorDomain, EffectExecutionEnvironment,
-    EffectExecutionLane, EffectExecutionLaneId, EffectExecutionModes, EffectExecutionSession,
-    EffectFrameExtent, EffectGpuPlanBlocker, EffectGraphNodeId, EffectGraphNodeKind,
-    EffectProcessingBackend, EffectResourceLifetime, EffectStateModel, EffectTemporalInputExtent,
-    EffectWorkingPrecision,
+    adjustment::{apply_render_op_f32_controlled, render_op_f32_scratch_frames},
+    lower_effect_graph_nodes_to_gpu_plan, CompiledEffectGpuPlan, CompiledEffectGraph,
+    EffectColorDomain, EffectExecutionEnvironment, EffectExecutionLane, EffectExecutionLaneId,
+    EffectExecutionModes, EffectExecutionSession, EffectFrameExtent, EffectGpuPlanBlocker,
+    EffectGraphNodeId, EffectGraphNodeKind, EffectProcessingBackend, EffectResourceLifetime,
+    EffectStateModel, EffectTemporalInputExtent, EffectWorkingPrecision,
 };
 use mondrian_core::WorkingColorSpace;
 use std::{
@@ -2207,19 +2207,13 @@ fn cpu_prefix_working_bytes(
             }
         };
         let owned_frames = match operation {
-            // Gaussian owns the private input in place and allocates one
-            // separable scratch frame. Cancellation discards the private
-            // partially-mutated input, so no publishable copy is retained.
-            crate::EffectRenderOp::GaussianBlur { .. } => 2,
-            // Sharpen must retain the unmodified input while its blurred copy
-            // and the blur scratch are alive.
-            crate::EffectRenderOp::Sharpen { .. } => 3,
-            // The scalar implementation builds one replacement Vec.
-            crate::EffectRenderOp::ChromaticAberration { .. } => 2,
-            crate::EffectRenderOp::ColorAdjust { .. }
+            crate::EffectRenderOp::GaussianBlur { .. }
+            | crate::EffectRenderOp::Sharpen { .. }
+            | crate::EffectRenderOp::ChromaticAberration { .. }
+            | crate::EffectRenderOp::ColorAdjust { .. }
             | crate::EffectRenderOp::Vignette { .. }
             | crate::EffectRenderOp::Grain { .. }
-            | crate::EffectRenderOp::Lut3D { .. } => 1,
+            | crate::EffectRenderOp::Lut3D { .. } => 1 + render_op_f32_scratch_frames(operation),
             crate::EffectRenderOp::TemporalFrameMix { .. }
             | crate::EffectRenderOp::Custom { .. } => {
                 return Err(

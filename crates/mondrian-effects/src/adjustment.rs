@@ -261,6 +261,84 @@ pub(crate) fn apply_render_op_f32(
     }
 }
 
+/// Peak same-sized scratch images owned by the current CPU Float32 kernel in
+/// addition to its caller-owned mutable output.
+///
+/// Keep this beside the dispatcher so every executor admits the concrete
+/// implementation rather than maintaining a parallel memory model.
+pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
+    match op {
+        EffectRenderOp::GaussianBlur { .. } => 1,
+        EffectRenderOp::Sharpen { .. } => 2,
+        EffectRenderOp::ChromaticAberration { .. } => 1,
+        EffectRenderOp::ColorAdjust { .. }
+        | EffectRenderOp::Vignette { .. }
+        | EffectRenderOp::Grain { .. }
+        | EffectRenderOp::TemporalFrameMix { .. }
+        | EffectRenderOp::Lut3D { .. }
+        | EffectRenderOp::Custom { .. } => 0,
+    }
+}
+
+/// One rectangular pixel buffer positioned in a complete frame coordinate
+/// space.
+///
+/// Spatially local Effect execution may retain only this region, but
+/// coordinate-dependent operations must still observe the complete frame's
+/// origin and extent. Construction is crate-private because the execution
+/// planner is responsible for proving containment before pixels are supplied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EffectRasterRegion {
+    frame_width: u32,
+    frame_height: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+impl EffectRasterRegion {
+    pub(crate) const fn full_frame(width: u32, height: u32) -> Self {
+        Self {
+            frame_width: width,
+            frame_height: height,
+            x: 0,
+            y: 0,
+            width,
+            height,
+        }
+    }
+
+    pub(crate) const fn new(
+        frame_width: u32,
+        frame_height: u32,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        Self { frame_width, frame_height, x, y, width, height }
+    }
+
+    const fn is_full_frame(self) -> bool {
+        self.x == 0
+            && self.y == 0
+            && self.width == self.frame_width
+            && self.height == self.frame_height
+    }
+
+    fn is_valid_for(self, pixel_count: usize) -> bool {
+        let right = u64::from(self.x) + u64::from(self.width);
+        let bottom = u64::from(self.y) + u64::from(self.height);
+        let expected = usize::try_from(self.width).ok().and_then(|width| {
+            usize::try_from(self.height).ok().and_then(|height| width.checked_mul(height))
+        });
+        right <= u64::from(self.frame_width)
+            && bottom <= u64::from(self.frame_height)
+            && expected == Some(pixel_count)
+    }
+}
+
 /// Execute one Float32 render operation with caller-owned cooperative
 /// checkpoints.
 ///
@@ -276,7 +354,35 @@ pub(crate) fn apply_render_op_f32_controlled<E>(
     frame_seed: i64,
     checkpoint: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<bool, E> {
+    apply_render_op_f32_region_controlled(
+        working,
+        EffectRasterRegion::full_frame(width, height),
+        op,
+        frame_seed,
+        checkpoint,
+    )
+}
+
+/// Execute one Float32 operation over a retained frame region while preserving
+/// complete-frame coordinate semantics.
+///
+/// Finite-kernel operations may process the admitted halo as a local buffer;
+/// the caller is responsible for cropping away halo-edge values. Operations
+/// whose implementation requires the complete frame fail closed when supplied
+/// a partial region.
+pub(crate) fn apply_render_op_f32_region_controlled<E>(
+    working: &mut Vec<[f32; 4]>,
+    region: EffectRasterRegion,
+    op: &EffectRenderOp,
+    frame_seed: i64,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<bool, E> {
     checkpoint()?;
+    if !region.is_valid_for(working.len()) {
+        return Ok(false);
+    }
+    let width = region.width;
+    let height = region.height;
     match op {
         EffectRenderOp::ColorAdjust {
             exposure,
@@ -329,18 +435,16 @@ pub(crate) fn apply_render_op_f32_controlled<E>(
         EffectRenderOp::Vignette { intensity, feather } => {
             let intensity = intensity.clamp(0.0, 1.0);
             if intensity > 1.0e-4 {
-                apply_vignette_f32_controlled(
-                    working,
-                    width as usize,
-                    height as usize,
-                    intensity,
-                    *feather,
-                    checkpoint,
+                apply_vignette_f32_region_controlled(
+                    working, region, intensity, *feather, checkpoint,
                 )?;
             }
             Ok(true)
         }
         EffectRenderOp::ChromaticAberration { amount } => {
+            if !region.is_full_frame() {
+                return Ok(false);
+            }
             let amount = amount.clamp(0.0, 1.0);
             if amount > 1.0e-4 {
                 *working = apply_chromatic_aberration_f32_controlled(
@@ -356,14 +460,7 @@ pub(crate) fn apply_render_op_f32_controlled<E>(
         EffectRenderOp::Grain { amount } => {
             let amount = amount.clamp(0.0, 1.0);
             if amount > 1.0e-4 {
-                apply_grain_f32_controlled(
-                    working,
-                    width as usize,
-                    height as usize,
-                    amount,
-                    frame_seed,
-                    checkpoint,
-                )?;
+                apply_grain_f32_region_controlled(working, region, amount, frame_seed, checkpoint)?;
             }
             Ok(true)
         }
@@ -928,16 +1025,17 @@ fn apply_unsharp_mask_f32_controlled<E>(
     checkpoint()
 }
 
-fn apply_vignette_f32_controlled<E>(
+fn apply_vignette_f32_region_controlled<E>(
     buffer: &mut [[f32; 4]],
-    width: usize,
-    height: usize,
+    region: EffectRasterRegion,
     intensity: f32,
     feather: f32,
     checkpoint: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<(), E> {
-    let center_x = width.saturating_sub(1) as f32 * 0.5;
-    let center_y = height.saturating_sub(1) as f32 * 0.5;
+    let width = region.width as usize;
+    let height = region.height as usize;
+    let center_x = region.frame_width.saturating_sub(1) as f32 * 0.5;
+    let center_y = region.frame_height.saturating_sub(1) as f32 * 0.5;
     let feather = feather.clamp(0.05, 1.0);
     let inner = 1.0 - feather * 0.85;
 
@@ -948,8 +1046,10 @@ fn apply_vignette_f32_controlled<E>(
             if pixel[3] <= 1.0e-6 {
                 continue;
             }
-            let normalized_x = (x as f32 - center_x) / center_x.max(1.0);
-            let normalized_y = (y as f32 - center_y) / center_y.max(1.0);
+            let frame_x = region.x as f32 + x as f32;
+            let frame_y = region.y as f32 + y as f32;
+            let normalized_x = (frame_x - center_x) / center_x.max(1.0);
+            let normalized_y = (frame_y - center_y) / center_y.max(1.0);
             let distance =
                 (normalized_x * normalized_x + normalized_y * normalized_y).sqrt().min(1.0);
             let gain = 1.0 - smoothstep(inner, 1.0, distance) * intensity;
@@ -1052,14 +1152,15 @@ fn sample_premultiplied_channel_f32(
     }
 }
 
-fn apply_grain_f32_controlled<E>(
+fn apply_grain_f32_region_controlled<E>(
     buffer: &mut [[f32; 4]],
-    width: usize,
-    height: usize,
+    region: EffectRasterRegion,
     amount: f32,
     frame_seed: i64,
     checkpoint: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<(), E> {
+    let width = region.width as usize;
+    let height = region.height as usize;
     for y in 0..height {
         checkpoint()?;
         for x in 0..width {
@@ -1067,7 +1168,8 @@ fn apply_grain_f32_controlled<E>(
             if pixel[3] <= 1.0e-6 {
                 continue;
             }
-            let noise = grain_noise(x as u32, y as u32, frame_seed) * amount * 0.18;
+            let noise =
+                grain_noise(region.x + x as u32, region.y + y as u32, frame_seed) * amount * 0.18;
             pixel[0] += noise;
             pixel[1] += noise;
             pixel[2] += noise;
