@@ -585,6 +585,21 @@ impl<'a> PreviewTimelineGraph<'a> {
                 ),
             )
         })?;
+        self.scratch
+            .borrow()
+            .admit_cpu_active_working_set(
+                prepared.source_coverage_bytes(),
+                TimelineCpuCompositePrecision::Float32,
+            )
+            .map_err(|error| {
+                PreviewUnavailability::blocked(
+                    PreviewOutputStage::TimelineEvaluation,
+                    format!(
+                        "Sequence {} temporal source coverage exceeds the Preview CPU grant: {error}",
+                        program.sequence_id()
+                    ),
+                )
+            })?;
         let (execution_plan, temporal_batches) = prepared.into_parts();
         admit_timeline_render_plan_for_cpu_compositor(&execution_plan).map_err(|error| {
             PreviewUnavailability::blocked(

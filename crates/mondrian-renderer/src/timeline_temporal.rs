@@ -37,7 +37,7 @@ pub struct TimelineTemporalSourceDemand {
     pub source: TimelineTemporalSource,
 }
 
-/// Closed source algebra admitted by the first temporal production tracer.
+/// Closed source algebra admitted by the bounded temporal production contract.
 #[derive(Debug, Clone)]
 pub enum TimelineTemporalSource {
     /// File-backed media at one exact interpreted decode target.
@@ -91,6 +91,7 @@ pub struct TimelineTemporalDemandBatch {
 pub struct PreparedTimelineTemporalExecution {
     execution_plan: TimelineRenderPlan,
     batches: Vec<TimelineTemporalDemandBatch>,
+    source_coverage_bytes: u64,
 }
 
 impl PreparedTimelineTemporalExecution {
@@ -102,6 +103,12 @@ impl PreparedTimelineTemporalExecution {
     /// Exact temporal batches in deterministic render order.
     pub fn batches(&self) -> &[TimelineTemporalDemandBatch] {
         &self.batches
+    }
+
+    /// Exact Float32 source coverage that consumers must admit before
+    /// materializing any temporal dependency.
+    pub const fn source_coverage_bytes(&self) -> u64 {
+        self.source_coverage_bytes
     }
 
     /// Consume the preparation into its two owned products.
@@ -187,6 +194,9 @@ pub enum TimelineTemporalPreparationError {
         /// Number of exact placement matches.
         matches: usize,
     },
+    /// Aggregate Float32 source coverage exceeded the platform address model.
+    #[error("temporal source coverage byte size overflowed")]
+    SourceCoverageSizeOverflow,
 }
 
 /// Collect finite-history demands and remove their already-accounted graphs
@@ -210,6 +220,12 @@ pub fn prepare_timeline_temporal_execution(
         output_roi,
         cancellation,
     )?;
+    let source_coverage_bytes = batches.iter().try_fold(0_u64, |total, batch| {
+        u64::try_from(batch.effect_demands().coverage_bytes())
+            .ok()
+            .and_then(|bytes| total.checked_add(bytes))
+            .ok_or(TimelineTemporalPreparationError::SourceCoverageSizeOverflow)
+    })?;
     let mut execution_plan = plan.clone();
     if !batches.is_empty() {
         let identity = identity_compiled_effect_graph()
@@ -222,7 +238,7 @@ pub fn prepare_timeline_temporal_execution(
             )?;
         }
     }
-    Ok(PreparedTimelineTemporalExecution { execution_plan, batches })
+    Ok(PreparedTimelineTemporalExecution { execution_plan, batches, source_coverage_bytes })
 }
 
 /// Collect all admitted finite-history source batches in deterministic render
@@ -333,7 +349,7 @@ pub fn execute_prepared_timeline_temporal_batch(
     batch: &TimelineTemporalDemandBatch,
     prepared: &mut PreparedTemporalFrameSet,
 ) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
-    session.execute_temporal_roi_f32(&batch.graph, &batch.execution, prepared)
+    session.execute_temporal_f32(&batch.graph, &batch.execution, prepared)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -624,9 +640,10 @@ mod tests {
     use mondrian_core::{BlendMode, ColorSpace, FramePosition, Rational, TimeScale};
     use mondrian_effects::{
         register_effect_definition, EffectColorDomainContract, EffectDefinition, EffectDeterminism,
-        EffectExecutionContract, EffectExecutionModes, EffectGraphTopology, EffectNode,
-        EffectRenderOp, EffectResourceLifetime, EffectRoiPropagation, EffectStateModel,
-        EffectTemporalInputExtent, EffectType,
+        EffectExecutionContract, EffectExecutionModes, EffectExecutionSessionConfig,
+        EffectFrameTileF32, EffectGraphTopology, EffectNode, EffectRenderOp,
+        EffectResourceLifetime, EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
+        EffectTemporalSourceIdentity, EffectType,
     };
     use mondrian_timeline::{Clip, Sequence, Track};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -830,6 +847,15 @@ mod tests {
 
         assert_eq!(prepared.batches().len(), 1);
         let batch = &prepared.batches()[0];
+        let expected_source_coverage = 2
+            * extent.width() as u64
+            * extent.height() as u64
+            * std::mem::size_of::<[f32; 4]>() as u64;
+        assert_eq!(prepared.source_coverage_bytes(), expected_source_coverage);
+        assert_eq!(
+            batch.effect_demands().coverage_bytes() as u64,
+            expected_source_coverage
+        );
         assert_eq!(batch.source_demands().len(), 2);
         assert_eq!(batch.graph().graph().nodes.len(), 5);
         assert!(batch.graph().node_use_counts().values().any(|uses| *uses == 2));
@@ -840,6 +866,69 @@ mod tests {
                 _ => true,
             })
         );
+
+        let resolved = batch
+            .effect_demands()
+            .requests()
+            .iter()
+            .copied()
+            .map(|request| {
+                let roi = request.input_roi().region();
+                let pixels = (roi.y()..roi.y() + roi.height())
+                    .flat_map(|y| {
+                        (roi.x()..roi.x() + roi.width()).map(move |x| {
+                            [
+                                request.time().to_f64() as f32 + x as f32 * 0.01,
+                                y as f32 * 0.02,
+                                (x + y) as f32 * 0.005,
+                                1.0,
+                            ]
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let tile = EffectFrameTileF32::new(
+                    request.time(),
+                    request.frame_extent(),
+                    roi,
+                    request.time().numerator(),
+                    pixels,
+                )
+                .expect("source coverage");
+                (request, tile)
+            })
+            .collect::<Vec<_>>();
+        let frozen = PreparedTemporalFrameSet::prepare(
+            EffectTemporalSourceIdentity::from_complete_semantic_fingerprint([31; 32]),
+            batch.effect_demands().clone(),
+            resolved,
+        )
+        .expect("frozen coverage");
+        let mut direct_session =
+            EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(1024 * 1024));
+        let mut direct_provider = frozen.clone();
+        let direct = execute_prepared_timeline_temporal_batch(
+            &mut direct_session,
+            batch,
+            &mut direct_provider,
+        )
+        .expect("direct production execution");
+        assert_eq!(direct.execution_tiles(), 1);
+
+        let output_bytes =
+            extent.width() as usize * extent.height() as usize * std::mem::size_of::<[f32; 4]>();
+        let tiled_budget = batch.effect_demands().coverage_bytes() + output_bytes + 64;
+        let mut tiled_session =
+            EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(tiled_budget));
+        let mut tiled_provider = frozen;
+        let tiled = execute_prepared_timeline_temporal_batch(
+            &mut tiled_session,
+            batch,
+            &mut tiled_provider,
+        )
+        .expect("tiled production execution");
+        assert!(tiled.execution_tiles() > 1);
+        assert!(tiled.peak_working_bytes() <= tiled_budget);
+        assert_eq!(tiled.tile().pixels(), direct.tile().pixels());
     }
 
     #[test]

@@ -305,8 +305,8 @@ a valid stateful contract merely because these current executors lack a
 continuity Session.
 
 `EffectTemporalFrameProvider` and
-`EffectExecutionSession::execute_temporal_roi_f32` form the exact scalar
-semantic reference for finite-history, stateless CPU-Float32 work. One request
+`EffectExecutionSession::execute_temporal_f32` form the exact budget-aware
+scalar semantic reference for finite-history, stateless CPU-Float32 work. One request
 binds the scheduler generation, continuity evidence, exact Clip visual-domain
 `TimelineTime`, the ordinary Render Plan's deterministic output-frame seed,
 complete frame coordinates, output ROI, and cooperative cancellation. The seed
@@ -314,9 +314,11 @@ is part of cache identity and directly drives the current-time Effect DAG; it
 is never inferred from a retimed source coordinate. The provider identity must
 fingerprint the complete source revision, stream, Clip-to-source or nested
 mapping, color/alpha interpretation, geometry, and any source-generation seed
-grid. Provider responses must match the requested time, extent, ROI, and
-representation exactly; cancellation is checked before and after fetch and
-before cache publication.
+grid. The provider exposes exact retained Float32 coverage bytes and copies a
+requested subregion into executor-owned capacity; it cannot decode, convert,
+recursively evaluate, or allocate at this seam. Cancellation is checked during
+bounded copies, between planned tiles, inside kernels and stitching, and before
+cache publication.
 
 `collect_temporal_frame_demands` walks that same compiled graph without
 fetching pixels. The bounded production tracer admits exactly one
@@ -326,9 +328,14 @@ bypass the mixer; history with upstream Effect values is rejected because the
 compiled upstream parameters are bound at the output Clip time.
 `PreparedTemporalFrameSet` freezes one complete, de-duplicated batch and proves
 generation, request, ROI, extent, and tile equality before it can implement the
-provider. Its lookup performs no decode, nested rendering, color conversion,
-or title work. Mask/MaskSource remains blocked because its current rasterizer
-does not yet expose exact tile coordinates and cooperative cancellation.
+provider. The demand batch computes checked exact Float32 coverage bytes before
+callers materialize any dependency. Preview and Export admit that aggregate
+against their CPU active-working-set grant first. A frozen coverage tile may
+then satisfy any contained execution subregion without another decode, nested
+render, color conversion, title evaluation, or hidden allocation. Missing or
+ambiguous coverage fails closed. Mask/MaskSource remains blocked because its
+current rasterizer does not yet expose exact tile coordinates and cooperative
+cancellation.
 
 The scalar reference consumes the existing `CompiledEffectGraph`; it does not
 introduce another Render Graph. It retains only the exact expanded source tile
@@ -348,26 +355,45 @@ conservative full-frame request with no exact-halo evidence, so an optimized
 tile backend cannot present fallback as proved tiling.
 
 The scalar executor consumes the compiled topological schedule and use counts
-as its sole liveness authority. A last-use value moves into its consumer, a
+as its sole liveness authority. A pure private scheduling Module dry-runs that
+same liveness program before pixel work. A last-use value moves into its consumer, a
 fan-out value is cloned only while another edge remains, and Blend/MultiInput
 releases each joined overlay immediately. It fails if an edge is over- or
 under-consumed, a non-output value survives, or the owned-byte ledger does not
-end with exactly one output. Every live graph value, output crop, possible
-reference-counted publication target, and implementation-owned same-sized
-kernel scratch allocation is included in one Session working-set model. The
-already materialized provider tile is charged as transient residency while the
-executor clones it; every executor-owned allocation is admitted before it is
-created. Gaussian Blur accounts for its separable scratch, Sharpen for the
+end with exactly one output. Every live graph value, final output, and
+implementation-owned same-sized kernel scratch allocation is included in one
+Session working-set model together with the provider's retained source
+coverage. Every executor-owned allocation is admitted before it is created.
+The output `Vec` transfers into shared `Arc<Vec<_>>` ownership without copying
+the pixel allocation; cache publication therefore does not require a hidden
+second output buffer. Gaussian Blur accounts for its separable scratch, Sharpen for the
 simultaneously live blurred result plus
 Gaussian scratch, and full-frame Chromatic Aberration for its replacement
-buffer. A small exact ROI therefore scales with its expanded input tile rather
-than allocating a zero-filled complete-frame buffer, while exceeding the exact
-byte budget fails before the kernel starts. Regression references require
+buffer.
+
+If the requested ROI fits the grant, it executes once. Otherwise the Session
+retains exactly one final output buffer and derives a deterministic recursive
+two-dimensional partition. Each non-overlapping tile is proved against the
+remaining grant from the same graph, ROI law, scratch contract, schedule, and
+use counts; at most 4,096 tiles are admitted. An indivisible tile that still
+does not fit, an unsafe tile-count fan-out, or a full-frame-only operation that
+cannot satisfy a partial request fails during planning before any provider
+copy. Only one tile live set coexists with retained source coverage and the
+final output, and cancellation never publishes a partially stitched frame. A
+tile is attempt-local and can neither read nor publish an output-cache entry;
+only the complete request may populate the Session cache. A planning-only UHD
+gate proves that a two-frame pixel-local temporal request partitions into 64
+`480x270` tiles and peaks at 402,278,400 bytes under the standard 384 MiB
+grant, without allocating test pixels. A small exact ROI therefore scales with
+its expanded input tile rather than
+allocating a zero-filled complete-frame buffer, while a complete Preview or
+Export request now automatically uses this bounded scalar tiling when direct
+execution does not fit. Regression references require
 expanded Blur, Vignette, frame-seeded Grain, and a finite-history
 fan-out/Blend/MultiInput DAG (including coordinate-seeded Dissolve) to equal the
-corresponding full-frame/current-frame reference crop. This proves the scalar
-executor boundary; it does not claim that a complete Preview or Export frame
-is already split into tiles.
+corresponding full-frame/current-frame reference crop in direct and tiled
+production execution. This does not claim GPU temporal tiling, Mask support,
+history with upstream Effects, future input, or stateful continuity execution.
 
 `TemporalFrameMix` is the finite-history proof Processor. It coverage-correctly
 interpolates the current upstream frame with an exact signed past sample.

@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub(crate) struct EffectTemporalCachedOutput {
-    pub(crate) pixels: Arc<[[f32; 4]]>,
+    pub(crate) pixels: Arc<Vec<[f32; 4]>>,
     pub(crate) frame_seed: i64,
 }
 
@@ -33,7 +33,8 @@ pub struct EffectExecutionSessionConfig {
     pub max_cache_entries: usize,
     /// Maximum aggregate pixel/topology logical bytes retained by the Session.
     pub max_cache_bytes: usize,
-    /// Maximum transient bytes admitted by one temporal/ROI scalar execution.
+    /// Maximum active bytes admitted by one temporal/ROI scalar execution,
+    /// including retained source coverage and final output residency.
     pub max_working_bytes: usize,
     /// Maximum GPU lowering plans or deterministic blockers retained by the
     /// Session.
@@ -83,7 +84,7 @@ pub struct EffectExecutionSessionDiagnostics {
     pub max_cache_entries: usize,
     /// Configured aggregate cache byte budget.
     pub max_cache_bytes: usize,
-    /// Configured transient temporal/ROI working-set byte budget.
+    /// Configured temporal/ROI active-working-set byte budget.
     pub max_working_bytes: usize,
     /// Resident dynamic graph topologies.
     pub topology_entries: usize,
@@ -567,20 +568,14 @@ mod tests {
         });
         session.put_temporal_output(
             [1; 32],
-            EffectTemporalCachedOutput {
-                pixels: Arc::from(vec![[0.0; 4]; 2]),
-                frame_seed: 0,
-            },
+            EffectTemporalCachedOutput { pixels: Arc::new(vec![[0.0; 4]; 2]), frame_seed: 0 },
         );
         assert_eq!(session.diagnostics().cache_entries, 1);
         session.bind_generation(1);
         assert_eq!(session.diagnostics().cache_entries, 0);
         session.put_temporal_output(
             [2; 32],
-            EffectTemporalCachedOutput {
-                pixels: Arc::from(vec![[0.0; 4]; 2]),
-                frame_seed: 0,
-            },
+            EffectTemporalCachedOutput { pixels: Arc::new(vec![[0.0; 4]; 2]), frame_seed: 0 },
         );
         session.reconfigure(EffectExecutionSessionConfig {
             max_cache_entries: 0,

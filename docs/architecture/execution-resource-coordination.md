@@ -312,6 +312,17 @@ contract and is not shrunk underneath an in-flight frame. Export uses its
 job-owned Effect Session and must receive an offline job budget at that Seam;
 Preview's grant cannot be borrowed as an implicit cross-domain pool.
 
+Finite-history execution exposes checked Float32 source-coverage bytes before
+materialization. Preview and Export first admit the complete frozen coverage
+against their CPU active-working-set grant; the Effect Session then includes
+that retained coverage, one final output and one proved scalar tile live set in
+its hard per-execution peak. When direct execution does not fit, deterministic
+tiling reduces only the tile live set. It cannot hide source or output
+residency, exceed the 4,096-tile operational cap, or publish a partial result.
+A planning gate fixes the standard-class UHD two-frame case at 64 `480x270`
+tiles and a 402,278,400-byte logical peak under the 384 MiB grant; it does not
+substitute an allocation-free estimate for later process-memory qualification.
+
 The CPU compositor grant also governs recursively materialized nested visual
 outputs. A canonical `PreparedVisualFrameClosure` performs checked conservative
 admission before Preview or Export requests child pixels: it charges one

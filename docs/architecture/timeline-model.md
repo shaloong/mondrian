@@ -918,14 +918,17 @@ range/speed field, holds the current decoded frame as history, or scans
 
 The effects Module collects one exact finite-history demand batch from the same
 `CompiledEffectGraph` that is later executed. A `PreparedTemporalFrameSet`
-freezes a complete, generation-bound set of source tiles before scalar
-execution; missing, duplicate, unexpected, stale-generation, or wrongly sized
-tiles fail before the graph can observe a partial provider. The first admitted
-production graph shape is deliberately narrow:
-`Source -> TemporalFrameMix -> current-time unary tail`. Temporal input with an
-upstream Effect, generated or animated upstream content, Adjustment Clip,
-future/unbounded history, stateful continuity, or unsupported color/ROI
-semantics is rejected rather than rendered approximately.
+freezes a complete, generation-bound set of source coverage before scalar
+execution and reports its exact Float32 byte total before callers materialize
+it. Missing, duplicate, unexpected, stale-generation, wrongly sized, or
+ambiguous coverage fails before the graph can observe a partial provider. The
+admitted production graph shape is one Source-fed finite-past mixer followed by
+a current-time unary/fan-out/join DAG. Its Effect Session executes the request
+directly when the proved live set fits, or deterministically tiles and stitches
+the complete output under the same source/output/tile grant. Temporal input
+with an upstream Effect, generated or animated upstream content, Adjustment
+Clip, future/unbounded history, stateful continuity, Mask, or unsupported
+color/ROI semantics is rejected rather than rendered approximately.
 
 Export connects this first tracer to job-local synchronous media and nested
 resolution, reusing the ordinary input color/alpha preparation and nested

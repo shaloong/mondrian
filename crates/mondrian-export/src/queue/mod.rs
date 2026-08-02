@@ -2740,7 +2740,7 @@ fn prepare_export_temporal_plan(
     resolution: Resolution,
     generation: u64,
     cancellation: &ExecutionCancellationToken,
-) -> Result<(TimelineRenderPlan, Vec<TimelineTemporalDemandBatch>), String> {
+) -> Result<(TimelineRenderPlan, Vec<TimelineTemporalDemandBatch>, u64), String> {
     let extent = EffectFrameExtent::new(resolution.width, resolution.height);
     let prepared = prepare_timeline_temporal_execution(
         program,
@@ -2752,7 +2752,9 @@ fn prepare_export_temporal_plan(
         cancellation.clone(),
     )
     .map_err(|error| format!("export temporal preparation failed closed: {error}"))?;
-    Ok(prepared.into_parts())
+    let source_coverage_bytes = prepared.source_coverage_bytes();
+    let (plan, batches) = prepared.into_parts();
+    Ok((plan, batches, source_coverage_bytes))
 }
 
 fn process_supervision_failure(
@@ -3651,13 +3653,25 @@ fn prepare_export_visual_frame_closure(
                     Vec::new(),
                 ));
             }
-            let (temporal_render_plan, temporal_batches) = prepare_export_temporal_plan(
-                program.as_ref(),
-                &authored_render_plan,
-                resolution,
-                visual_session.effect_execution_generation,
-                cancellation,
-            )?;
+            let (temporal_render_plan, temporal_batches, temporal_source_coverage_bytes) =
+                prepare_export_temporal_plan(
+                    program.as_ref(),
+                    &authored_render_plan,
+                    resolution,
+                    visual_session.effect_execution_generation,
+                    cancellation,
+                )?;
+            visual_session
+                .composite_scratch
+                .admit_cpu_active_working_set(
+                    temporal_source_coverage_bytes,
+                    TimelineCpuCompositePrecision::Float32,
+                )
+                .map_err(|error| {
+                    format!(
+                        "export temporal source coverage exceeds the CPU working-set grant: {error}"
+                    )
+                })?;
             let effect_frame_plan = prepare_export_effect_frame_plan(
                 program.as_ref(),
                 &temporal_render_plan,

@@ -430,9 +430,13 @@ shape—one Source-fed finite-past mixer followed by a current-time DAG. Unary
 branches may fan out and rejoin through Blend/MultiInput; Mask remains blocked
 until rasterization has exact tile-coordinate and cancellation contracts.
 `PreparedTemporalFrameSet` is the decode-free provider used by the bounded
-CPU-Float32 scalar reference. Crossing owner-domain zero is not a boundary
-event. The exact `TimelineClipExecutionRef` and prepared placement mapping
-decide whether a requested source handle exists.
+CPU-Float32 scalar reference. Its demand batch carries the checked exact
+Float32 source-coverage byte total. Preview and Export admit that total against
+their CPU active-working-set grant before materialization; the Effect Session
+then accounts retained coverage in the same execution peak as its own output
+and tile allocations. Crossing owner-domain zero is not a boundary event. The
+exact `TimelineClipExecutionRef` and prepared placement mapping decide whether
+a requested source handle exists.
 
 That scalar reference keeps the exact input ROI rather than expanding it into
 a zero-filled complete frame. Its raster-region contract preserves global
@@ -440,15 +444,25 @@ frame coordinates for coordinate-dependent kernels, finite-support kernels
 consume only their implementation-derived halo, and complete-frame-only
 kernels fail closed on a partial region. The compiled schedule/use counts are
 the liveness authority: last-use values move, fan-out clones only remain while
-needed, and joins release inputs immediately. Resident graph values and
-concrete kernel scratch, output crop, and possible Arc publication target are
-admitted against the Effect Session byte budget before the executor allocates
-them; an already materialized provider tile is charged as transient residency
-while it is cloned. Over/under-consumed edges or a byte-ledger mismatch fail
-closed. Preview and Export use this same
-execution boundary, but their current complete-frame delivery normally
-requests a complete output ROI; the executor's exact tile behavior is not
-evidence of scheduler-level full-frame tiling or GPU temporal execution.
+needed, and joins release inputs immediately. A pure dry-run proves the exact
+scalar live set before pixel work. Resident graph values, concrete kernel
+scratch, retained frozen source coverage, and one final output allocation share
+the Effect Session hard grant. The final `Vec` becomes `Arc<Vec<_>>` without a
+full-frame pixel copy. Over/under-consumed edges or a byte-ledger mismatch fail
+closed.
+
+Preview and Export use this same execution boundary. A complete request that
+does not fit directly is partitioned by the Effect Session into a deterministic
+non-overlapping 2D schedule; each tile reuses the frozen source coverage, is
+proved from the same ROI and liveness contracts, and is stitched only into the
+one retained output. The 4,096-tile hard limit, indivisible-budget failure and
+cancellation all stop before partial publication. Internal tiles are
+attempt-local and never enter the Effect output cache; only the complete frame
+may publish there. Direct and tiled production
+paths have exact pixel-parity and peak-budget tests. This evidence applies only
+to the bounded CPU-Float32 temporal scalar contract; it is not evidence of GPU
+temporal tiling, Mask execution, arbitrary temporal graphs, or stateful
+continuity execution.
 
 Export connects this tracer to its job-local decoder and closure-backed nested
 materializer. It resolves every typed demand address first, adapts the result to
