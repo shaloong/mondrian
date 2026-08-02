@@ -1,13 +1,18 @@
+use crate::dependency::{
+    select_program_window, selected_contribution_source_window, AudioDependencyClosure,
+    DependencyWindow,
+};
 use crate::processor_host::default_processor_resolver;
 use crate::schedule::{resolve_channel_mapping, AudioKernelBackend, AudioPreparationDependencies};
 use crate::{
     compile_audio_program, AudioCompileRequest, AudioContinuityEpoch, AudioExecutionError,
-    AudioPcmSource, AudioProcessorResolver, AudioRenderContract, AudioRenderRequest,
-    AudioRenderSession, AudioStateEntry, CompiledAudioSource, PreparedAudioPlan,
+    AudioPcmSource, AudioProcessorResolver, AudioProgramExecutionDemand, AudioRenderContract,
+    AudioRenderRequest, AudioRenderSession, AudioSessionResourceFootprint, AudioStateEntry,
+    CompiledAudioSource, PreparedAudioPlan,
 };
 use mondrian_core::{
     AssetId, AudioChannelLayout, AudioComponentEditId, AudioSourceComponentId,
-    ExecutionCancellationToken, ProgramOutputId, SequenceId,
+    ExecutionCancellationToken, ProgramOutputId, SequenceId, TimelineTimeRange,
 };
 use mondrian_timeline::{sequence::MAX_NESTED_SEQUENCE_RENDER_DEPTH, Sequence};
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,6 +20,265 @@ use std::sync::Arc;
 
 const NESTED_SOURCE_CACHE_FRAMES: usize = 4_096;
 const MEDIA_SOURCE_CACHE_FRAMES: usize = 4_096;
+const RUNTIME_SOURCE_BINDING_BYTES: usize = 256;
+const NESTED_RUNTIME_BINDING_BYTES: usize = 512;
+
+/// Closure-wide hard admission grant for one Audio Program Runtime.
+///
+/// Per-Session processor/PDC/lookahead limits remain in
+/// [`AudioRenderContract`]. This independent grant prevents a nested Signal
+/// Closure from multiplying those local limits across many mutable
+/// occurrences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioRuntimeResourceGrant {
+    /// Maximum generated mutable Runtime occurrences in the nested closure.
+    pub max_runtime_occurrences: usize,
+    /// Maximum aggregate fixed live Session/source-window residency.
+    pub max_fixed_resident_bytes: usize,
+    /// Maximum aggregate immutable prepared-plan logical bytes.
+    pub max_prepared_logical_bytes: usize,
+}
+
+impl AudioRuntimeResourceGrant {
+    /// Build an explicit closure-wide hard grant.
+    pub const fn new(
+        max_runtime_occurrences: usize,
+        max_fixed_resident_bytes: usize,
+        max_prepared_logical_bytes: usize,
+    ) -> Self {
+        Self {
+            max_runtime_occurrences,
+            max_fixed_resident_bytes,
+            max_prepared_logical_bytes,
+        }
+    }
+
+    const fn unbounded() -> Self {
+        Self::new(usize::MAX, usize::MAX, usize::MAX)
+    }
+}
+
+/// Auditable resource footprint of one fully built nested Audio Runtime.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AudioRuntimeResourceFootprint {
+    /// Generated mutable Runtime occurrences, not unique Sequence identities.
+    pub runtime_occurrences: usize,
+    /// Aggregate fixed live residency.
+    pub fixed_resident_bytes: usize,
+    /// Aggregate immutable prepared-plan logical bytes.
+    pub prepared_logical_bytes: usize,
+    /// Session node/block render scratch.
+    pub render_scratch_bytes: usize,
+    /// Processor-declared private Session state.
+    pub processor_session_bytes: usize,
+    /// PDC delay-line payload.
+    pub compensation_delay_bytes: usize,
+    /// Sample-accurate processor-event storage.
+    pub parameter_event_bytes: usize,
+    /// Runtime-owned media source-window payload.
+    pub media_window_bytes: usize,
+    /// Runtime-owned nested-output window and ordering payload.
+    pub nested_window_bytes: usize,
+}
+
+/// Hard closure resource whose grant was exceeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioRuntimeResourceCategory {
+    /// Generated mutable Runtime occurrence count.
+    RuntimeOccurrences,
+    /// Fixed live Session/source-window residency.
+    FixedResidentBytes,
+    /// Immutable prepared-plan logical bytes.
+    PreparedLogicalBytes,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AudioRuntimeAdmissionLedger {
+    grant: AudioRuntimeResourceGrant,
+    footprint: AudioRuntimeResourceFootprint,
+}
+
+impl AudioRuntimeAdmissionLedger {
+    fn new(grant: AudioRuntimeResourceGrant) -> Self {
+        Self {
+            grant,
+            footprint: AudioRuntimeResourceFootprint::default(),
+        }
+    }
+
+    fn reserve_session(
+        &mut self,
+        sequence_id: SequenceId,
+        output_id: ProgramOutputId,
+        session: AudioSessionResourceFootprint,
+    ) -> Result<(), AudioRuntimeBuildError> {
+        self.reserve(
+            sequence_id,
+            output_id,
+            AudioRuntimeResourceFootprint {
+                runtime_occurrences: 1,
+                fixed_resident_bytes: session.fixed_resident_bytes,
+                prepared_logical_bytes: session.prepared_logical_bytes,
+                render_scratch_bytes: session.render_scratch_bytes,
+                processor_session_bytes: session.processor_session_bytes,
+                compensation_delay_bytes: session.compensation_delay_bytes,
+                parameter_event_bytes: session.parameter_event_bytes,
+                ..AudioRuntimeResourceFootprint::default()
+            },
+        )
+    }
+
+    fn reserve_media_window(
+        &mut self,
+        sequence_id: SequenceId,
+        output_id: ProgramOutputId,
+        bytes: usize,
+    ) -> Result<(), AudioRuntimeBuildError> {
+        let bytes = bytes.checked_add(RUNTIME_SOURCE_BINDING_BYTES).ok_or(
+            AudioRuntimeBuildError::ResourceExtentOverflow {
+                category: AudioRuntimeResourceCategory::FixedResidentBytes,
+                sequence_id,
+                output_id,
+            },
+        )?;
+        self.reserve(
+            sequence_id,
+            output_id,
+            AudioRuntimeResourceFootprint {
+                fixed_resident_bytes: bytes,
+                media_window_bytes: bytes,
+                ..AudioRuntimeResourceFootprint::default()
+            },
+        )
+    }
+
+    fn reserve_nested_window(
+        &mut self,
+        sequence_id: SequenceId,
+        output_id: ProgramOutputId,
+        bytes: usize,
+    ) -> Result<(), AudioRuntimeBuildError> {
+        let bytes = bytes
+            .checked_add(RUNTIME_SOURCE_BINDING_BYTES)
+            .and_then(|bytes| bytes.checked_add(NESTED_RUNTIME_BINDING_BYTES))
+            .ok_or(AudioRuntimeBuildError::ResourceExtentOverflow {
+                category: AudioRuntimeResourceCategory::FixedResidentBytes,
+                sequence_id,
+                output_id,
+            })?;
+        self.reserve(
+            sequence_id,
+            output_id,
+            AudioRuntimeResourceFootprint {
+                fixed_resident_bytes: bytes,
+                nested_window_bytes: bytes,
+                ..AudioRuntimeResourceFootprint::default()
+            },
+        )
+    }
+
+    fn reserve(
+        &mut self,
+        sequence_id: SequenceId,
+        output_id: ProgramOutputId,
+        delta: AudioRuntimeResourceFootprint,
+    ) -> Result<(), AudioRuntimeBuildError> {
+        let next = self.footprint.checked_add(delta).ok_or(
+            AudioRuntimeBuildError::ResourceExtentOverflow {
+                category: AudioRuntimeResourceCategory::FixedResidentBytes,
+                sequence_id,
+                output_id,
+            },
+        )?;
+        for (category, required, granted) in [
+            (
+                AudioRuntimeResourceCategory::RuntimeOccurrences,
+                next.runtime_occurrences,
+                self.grant.max_runtime_occurrences,
+            ),
+            (
+                AudioRuntimeResourceCategory::FixedResidentBytes,
+                next.fixed_resident_bytes,
+                self.grant.max_fixed_resident_bytes,
+            ),
+            (
+                AudioRuntimeResourceCategory::PreparedLogicalBytes,
+                next.prepared_logical_bytes,
+                self.grant.max_prepared_logical_bytes,
+            ),
+        ] {
+            if required > granted {
+                return Err(AudioRuntimeBuildError::ResourceGrantExceeded {
+                    category,
+                    sequence_id,
+                    output_id,
+                    required,
+                    granted,
+                });
+            }
+        }
+        self.footprint = next;
+        Ok(())
+    }
+}
+
+impl AudioRuntimeResourceFootprint {
+    fn checked_add(self, other: Self) -> Option<Self> {
+        Some(Self {
+            runtime_occurrences: self.runtime_occurrences.checked_add(other.runtime_occurrences)?,
+            fixed_resident_bytes: self
+                .fixed_resident_bytes
+                .checked_add(other.fixed_resident_bytes)?,
+            prepared_logical_bytes: self
+                .prepared_logical_bytes
+                .checked_add(other.prepared_logical_bytes)?,
+            render_scratch_bytes: self
+                .render_scratch_bytes
+                .checked_add(other.render_scratch_bytes)?,
+            processor_session_bytes: self
+                .processor_session_bytes
+                .checked_add(other.processor_session_bytes)?,
+            compensation_delay_bytes: self
+                .compensation_delay_bytes
+                .checked_add(other.compensation_delay_bytes)?,
+            parameter_event_bytes: self
+                .parameter_event_bytes
+                .checked_add(other.parameter_event_bytes)?,
+            media_window_bytes: self.media_window_bytes.checked_add(other.media_window_bytes)?,
+            nested_window_bytes: self.nested_window_bytes.checked_add(other.nested_window_bytes)?,
+        })
+    }
+
+    fn difference(self, before: Self) -> Self {
+        Self {
+            runtime_occurrences: self
+                .runtime_occurrences
+                .saturating_sub(before.runtime_occurrences),
+            fixed_resident_bytes: self
+                .fixed_resident_bytes
+                .saturating_sub(before.fixed_resident_bytes),
+            prepared_logical_bytes: self
+                .prepared_logical_bytes
+                .saturating_sub(before.prepared_logical_bytes),
+            render_scratch_bytes: self
+                .render_scratch_bytes
+                .saturating_sub(before.render_scratch_bytes),
+            processor_session_bytes: self
+                .processor_session_bytes
+                .saturating_sub(before.processor_session_bytes),
+            compensation_delay_bytes: self
+                .compensation_delay_bytes
+                .saturating_sub(before.compensation_delay_bytes),
+            parameter_event_bytes: self
+                .parameter_event_bytes
+                .saturating_sub(before.parameter_event_bytes),
+            media_window_bytes: self.media_window_bytes.saturating_sub(before.media_window_bytes),
+            nested_window_bytes: self
+                .nested_window_bytes
+                .saturating_sub(before.nested_window_bytes),
+        }
+    }
+}
 
 /// Consumer-owned decoded PCM exposed at the media/source Adapter Seam.
 pub trait AudioDecodedSource: Send + Sync + 'static {
@@ -69,6 +333,8 @@ pub trait AudioMediaResolver {
 pub struct AudioProgramRuntime {
     session: AudioRenderSession,
     sources: RuntimeSources,
+    execution_demand: AudioProgramExecutionDemand,
+    resource_footprint: AudioRuntimeResourceFootprint,
 }
 
 impl AudioProgramRuntime {
@@ -80,13 +346,34 @@ impl AudioProgramRuntime {
         contract: AudioRenderContract,
         output_id: Option<ProgramOutputId>,
     ) -> Result<Self, AudioRuntimeBuildError> {
-        Self::build_with_processor_resolver(
+        Self::build_with_processor_resolver_and_resource_grant(
             root,
             sequences,
             resolver,
             default_processor_resolver(),
             contract,
             output_id,
+            AudioRuntimeResourceGrant::unbounded(),
+        )
+    }
+
+    /// Build with one closure-wide hard resource grant.
+    pub fn build_with_resource_grant(
+        root: &Sequence,
+        sequences: &[Sequence],
+        resolver: &dyn AudioMediaResolver,
+        contract: AudioRenderContract,
+        output_id: Option<ProgramOutputId>,
+        resource_grant: AudioRuntimeResourceGrant,
+    ) -> Result<Self, AudioRuntimeBuildError> {
+        Self::build_with_processor_resolver_and_resource_grant(
+            root,
+            sequences,
+            resolver,
+            default_processor_resolver(),
+            contract,
+            output_id,
+            resource_grant,
         )
     }
 
@@ -99,6 +386,27 @@ impl AudioProgramRuntime {
         contract: AudioRenderContract,
         output_id: Option<ProgramOutputId>,
     ) -> Result<Self, AudioRuntimeBuildError> {
+        Self::build_with_processor_resolver_and_resource_grant(
+            root,
+            sequences,
+            resolver,
+            processor_resolver,
+            contract,
+            output_id,
+            AudioRuntimeResourceGrant::unbounded(),
+        )
+    }
+
+    /// Build with an explicit processor resolver and closure-wide hard grant.
+    pub fn build_with_processor_resolver_and_resource_grant(
+        root: &Sequence,
+        sequences: &[Sequence],
+        resolver: &dyn AudioMediaResolver,
+        processor_resolver: &dyn AudioProcessorResolver,
+        contract: AudioRenderContract,
+        output_id: Option<ProgramOutputId>,
+        resource_grant: AudioRuntimeResourceGrant,
+    ) -> Result<Self, AudioRuntimeBuildError> {
         if contract.channel_layout != root.settings.audio_channel_layout {
             return Err(AudioRuntimeBuildError::ProgramLayoutMismatch {
                 sequence_id: root.id,
@@ -107,6 +415,7 @@ impl AudioProgramRuntime {
             });
         }
         let mut stack = BTreeSet::new();
+        let mut ledger = AudioRuntimeAdmissionLedger::new(resource_grant);
         Self::build_inner(
             root,
             sequences,
@@ -114,8 +423,92 @@ impl AudioProgramRuntime {
             processor_resolver,
             contract,
             output_id,
+            None,
+            None,
             &mut stack,
             0,
+            &mut ledger,
+        )
+    }
+
+    /// Build only the routed Signal Closure audible in one exact public window.
+    ///
+    /// This is the production seam for selected-range Export. Range selection
+    /// happens after semantic output routing but before media binding and
+    /// nested Runtime construction, so muted and off-range sources
+    /// cannot consume resources or become accidental execution dependencies.
+    pub fn build_for_range_with_resource_grant(
+        root: &Sequence,
+        sequences: &[Sequence],
+        resolver: &dyn AudioMediaResolver,
+        contract: AudioRenderContract,
+        output_id: Option<ProgramOutputId>,
+        range: TimelineTimeRange,
+        resource_grant: AudioRuntimeResourceGrant,
+    ) -> Result<Self, AudioRuntimeBuildError> {
+        if contract.channel_layout != root.settings.audio_channel_layout {
+            return Err(AudioRuntimeBuildError::ProgramLayoutMismatch {
+                sequence_id: root.id,
+                authored: root.settings.audio_channel_layout,
+                prepared: contract.channel_layout,
+            });
+        }
+        let window = DependencyWindow::from_half_open(range).map_err(AudioExecutionError::from)?;
+        let mut stack = BTreeSet::new();
+        let mut ledger = AudioRuntimeAdmissionLedger::new(resource_grant);
+        Self::build_inner(
+            root,
+            sequences,
+            resolver,
+            default_processor_resolver(),
+            contract,
+            output_id,
+            Some(window),
+            None,
+            &mut stack,
+            0,
+            &mut ledger,
+        )
+    }
+
+    /// Build one selected-range Runtime from the exact root and nested semantic
+    /// Programs frozen at an earlier admission boundary.
+    ///
+    /// No Program is recompiled or reselected. The frozen occurrence key
+    /// includes Sequence, public Output, and exact projected dependency window;
+    /// it is deliberately not a coarse Sequence-ID cache.
+    pub fn build_from_precompiled_closure_for_range_with_resource_grant(
+        root: &Sequence,
+        sequences: &[Sequence],
+        resolver: &dyn AudioMediaResolver,
+        contract: AudioRenderContract,
+        output_id: Option<ProgramOutputId>,
+        range: TimelineTimeRange,
+        prepared_closure: &AudioDependencyClosure,
+        resource_grant: AudioRuntimeResourceGrant,
+    ) -> Result<Self, AudioRuntimeBuildError> {
+        if contract.channel_layout != root.settings.audio_channel_layout {
+            return Err(AudioRuntimeBuildError::ProgramLayoutMismatch {
+                sequence_id: root.id,
+                authored: root.settings.audio_channel_layout,
+                prepared: contract.channel_layout,
+            });
+        }
+        let window = DependencyWindow::from_half_open(range).map_err(AudioExecutionError::from)?;
+        let mut stack = BTreeSet::new();
+        let mut ledger = AudioRuntimeAdmissionLedger::new(resource_grant);
+        Self::build_inner(
+            root,
+            sequences,
+            resolver,
+            default_processor_resolver(),
+            contract,
+            output_id,
+            Some(window),
+            Some(prepared_closure),
+            &mut stack,
+            0,
+            &mut ledger,
         )
     }
 
@@ -126,8 +519,11 @@ impl AudioProgramRuntime {
         processor_resolver: &dyn AudioProcessorResolver,
         contract: AudioRenderContract,
         output_id: Option<ProgramOutputId>,
+        selection: Option<DependencyWindow>,
+        prepared_closure: Option<&AudioDependencyClosure>,
         stack: &mut BTreeSet<SequenceId>,
         depth: usize,
+        ledger: &mut AudioRuntimeAdmissionLedger,
     ) -> Result<Self, AudioRuntimeBuildError> {
         if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
             return Err(AudioRuntimeBuildError::NestedDepthExceeded {
@@ -138,14 +534,32 @@ impl AudioProgramRuntime {
         if !stack.insert(sequence.id) {
             return Err(AudioRuntimeBuildError::NestedCycle(sequence.id));
         }
+        let footprint_before = ledger.footprint;
         let result = (|| {
             let output_id = output_id
                 .or_else(|| sequence.audio_program.outputs.first().map(|output| output.id))
                 .ok_or(AudioRuntimeBuildError::MissingProgramOutput(sequence.id))?;
-            let program = Arc::new(compile_audio_program(
-                sequence,
-                AudioCompileRequest::program(output_id),
-            )?);
+            let program = if let Some(prepared_closure) = prepared_closure {
+                let window = selection.ok_or(AudioRuntimeBuildError::MissingPreparedProgram {
+                    sequence_id: sequence.id,
+                    output_id,
+                })?;
+                prepared_closure.program(sequence.id, output_id, window).cloned().ok_or(
+                    AudioRuntimeBuildError::MissingPreparedProgram {
+                        sequence_id: sequence.id,
+                        output_id,
+                    },
+                )?
+            } else {
+                let mut program =
+                    compile_audio_program(sequence, AudioCompileRequest::program(output_id))?;
+                if let Some(window) = selection {
+                    select_program_window(&mut program, window)
+                        .map_err(AudioExecutionError::from)?;
+                }
+                Arc::new(program)
+            };
+            let execution_demand = program.execution_demand();
             let nested_cache_frames =
                 contract.max_block_frames.clamp(1, NESTED_SOURCE_CACHE_FRAMES);
             let mut entries = BTreeMap::new();
@@ -174,14 +588,26 @@ impl AudioProgramRuntime {
                         )?;
                         let cache_frames =
                             contract.max_block_frames.clamp(1, MEDIA_SOURCE_CACHE_FRAMES);
+                        let cache_samples = cache_frames
+                            .checked_mul(resolved.channel_layout.channel_count())
+                            .ok_or(AudioRuntimeBuildError::ResourceExtentOverflow {
+                                category: AudioRuntimeResourceCategory::FixedResidentBytes,
+                                sequence_id: sequence.id,
+                                output_id,
+                            })?;
+                        let cache_bytes = cache_samples
+                            .checked_mul(std::mem::size_of::<f32>())
+                            .ok_or(AudioRuntimeBuildError::ResourceExtentOverflow {
+                                category: AudioRuntimeResourceCategory::FixedResidentBytes,
+                                sequence_id: sequence.id,
+                                output_id,
+                            })?;
+                        ledger.reserve_media_window(sequence.id, output_id, cache_bytes)?;
                         RuntimeSource::Media(MediaRuntimeSource {
                             source: resolved.source,
                             cache_start: i64::MIN,
                             cache_frames,
-                            cache: vec![
-                                0.0;
-                                cache_frames * resolved.channel_layout.channel_count()
-                            ],
+                            cache: vec![0.0; cache_samples],
                             channel_layout: resolved.channel_layout,
                         })
                     }
@@ -194,6 +620,14 @@ impl AudioProgramRuntime {
                             channel_layout: child.settings.audio_channel_layout,
                             ..contract
                         };
+                        let child_selection = match selection {
+                            Some(window) => Some(
+                                selected_contribution_source_window(contribution, window)
+                                    .map_err(AudioExecutionError::from)?
+                                    .ok_or(AudioExecutionError::InvalidPreparedSchedule)?,
+                            ),
+                            None => None,
+                        };
                         let runtime = Self::build_inner(
                             child,
                             sequences,
@@ -201,8 +635,11 @@ impl AudioProgramRuntime {
                             processor_resolver,
                             child_contract,
                             Some(output_id),
+                            child_selection,
+                            prepared_closure,
                             stack,
                             depth + 1,
+                            ledger,
                         )?;
                         if runtime.requires_state_entry()
                             && contribution.source_time_map.scale.numerator() < 0
@@ -227,11 +664,32 @@ impl AudioProgramRuntime {
                             0,
                             runtime.requires_state_entry(),
                         )?;
+                        let cache_samples = nested_cache_frames
+                            .checked_mul(child_contract.channel_count())
+                            .ok_or(AudioRuntimeBuildError::ResourceExtentOverflow {
+                                category: AudioRuntimeResourceCategory::FixedResidentBytes,
+                                sequence_id: sequence.id,
+                                output_id,
+                            })?;
+                        let nested_bytes = cache_samples
+                            .checked_mul(std::mem::size_of::<f32>())
+                            .and_then(|bytes| {
+                                contract
+                                    .max_block_frames
+                                    .checked_mul(std::mem::size_of::<usize>())
+                                    .and_then(|order_bytes| bytes.checked_add(order_bytes))
+                            })
+                            .ok_or(AudioRuntimeBuildError::ResourceExtentOverflow {
+                                category: AudioRuntimeResourceCategory::FixedResidentBytes,
+                                sequence_id: sequence.id,
+                                output_id,
+                            })?;
+                        ledger.reserve_nested_window(sequence.id, output_id, nested_bytes)?;
                         RuntimeSource::Nested(NestedRuntimeSource {
                             runtime: Box::new(runtime),
                             cache_start: i64::MIN,
                             cache_frames: nested_cache_frames,
-                            cache: vec![0.0; nested_cache_frames * child_contract.channel_count()],
+                            cache: vec![0.0; cache_samples],
                             channel_layout: child_contract.channel_layout,
                             next_sample: None,
                             next_epoch: 1,
@@ -249,12 +707,31 @@ impl AudioProgramRuntime {
                 &dependencies,
                 processor_resolver,
             )?);
+            let session_footprint = plan.session_resource_footprint()?;
+            ledger.reserve_session(sequence.id, output_id, session_footprint)?;
+            let session = AudioRenderSession::new(plan)?;
+            let capacity = session.capacity();
+            let realized_compensation_bytes = capacity
+                .compensation_delay_samples
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or(AudioRuntimeBuildError::ResourceExtentOverflow {
+                    category: AudioRuntimeResourceCategory::FixedResidentBytes,
+                    sequence_id: sequence.id,
+                    output_id,
+                })?;
+            if capacity.processor_session_scratch_bytes != session_footprint.processor_session_bytes
+                || realized_compensation_bytes != session_footprint.compensation_delay_bytes
+            {
+                return Err(AudioExecutionError::InvalidPreparedSchedule.into());
+            }
             Ok(Self {
-                session: AudioRenderSession::new(plan)?,
+                session,
                 sources: RuntimeSources {
                     entries,
                     cancellation: ExecutionCancellationToken::new(),
                 },
+                execution_demand,
+                resource_footprint: ledger.footprint.difference(footprint_before),
             })
         })();
         stack.remove(&sequence.id);
@@ -273,6 +750,16 @@ impl AudioProgramRuntime {
     /// Internal lookahead needed to return Timeline-aligned public PCM.
     pub fn public_output_lookahead_frames(&self) -> usize {
         self.session.public_output_lookahead_frames()
+    }
+
+    /// Frozen execution demand of the selected root Program Output.
+    pub const fn execution_demand(&self) -> AudioProgramExecutionDemand {
+        self.execution_demand
+    }
+
+    /// Frozen closure-wide resource evidence for this Runtime occurrence.
+    pub const fn resource_footprint(&self) -> AudioRuntimeResourceFootprint {
+        self.resource_footprint
     }
 
     /// Latest successfully completed root Program Output meter block.
@@ -630,6 +1117,29 @@ pub enum AudioRuntimeBuildError {
     /// Scratch/session preparation failure.
     #[error(transparent)]
     Execution(#[from] AudioExecutionError),
+    /// Conservative allocation-footprint calculation overflowed.
+    #[error(transparent)]
+    ResourceFootprint(#[from] crate::AudioResourceFootprintError),
+    /// The complete nested closure exceeds its frozen hard resource grant.
+    #[error(
+        "audio runtime {category:?} for Sequence {sequence_id} output {output_id} requires {required}, grant is {granted}"
+    )]
+    ResourceGrantExceeded {
+        category: AudioRuntimeResourceCategory,
+        sequence_id: SequenceId,
+        output_id: ProgramOutputId,
+        required: usize,
+        granted: usize,
+    },
+    /// A runtime source/session extent cannot be represented on this target.
+    #[error(
+        "audio runtime {category:?} extent overflowed for Sequence {sequence_id} output {output_id}"
+    )]
+    ResourceExtentOverflow {
+        category: AudioRuntimeResourceCategory,
+        sequence_id: SequenceId,
+        output_id: ProgramOutputId,
+    },
     /// The selected Sequence has no public output.
     #[error("Sequence {0} has no audio Program Output")]
     MissingProgramOutput(SequenceId),
@@ -642,6 +1152,15 @@ pub enum AudioRuntimeBuildError {
         sequence_id: SequenceId,
         authored: AudioChannelLayout,
         prepared: AudioChannelLayout,
+    },
+    /// The frozen selected-range closure has no exact semantic Program for one
+    /// required root or nested occurrence.
+    #[error(
+        "prepared audio closure is missing Sequence {sequence_id} output {output_id} occurrence"
+    )]
+    MissingPreparedProgram {
+        sequence_id: SequenceId,
+        output_id: ProgramOutputId,
     },
     /// A nested author reference cannot be resolved.
     #[error("nested Sequence {0} is unavailable")]

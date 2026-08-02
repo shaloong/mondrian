@@ -40,7 +40,7 @@ cargo build
 - 运行 `cargo clippy --workspace --all-targets --all-features -- -D warnings` 检查代码质量（与 CI 一致）
 - 所有公共 API 必须有文档注释（`///`）
 - 错误处理用 `thiserror` 定义，禁止 `unwrap()`（测试代码除外）
-- 异步函数用 Tokio，同步 CPU 密集用 `rayon`
+- Tokio 只承载明确的异步 I/O；CPU/媒体工作使用领域 Module 自有的有界执行器，并显式传递资源 grant、取消与终态证据，禁止引入全局通用线程池
 
 ## 提交规范（Conventional Commits）
 
@@ -115,20 +115,26 @@ git push origin v0.1.1
 对容易卡顿的路径（项目加载、预览、渲染前准备）建议至少配置一个 smoke 级性能测试，并输出机器可读 JSON，便于 AI 自动定位回退。
 
 ```powershell
-$env:MONDRIAN_PERF_OUTPUT='target/perf/project-lifecycle.jsonl'
+$perfRun = "target/perf/manual-$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"
+New-Item -ItemType Directory -Path $perfRun | Out-Null
+$env:MONDRIAN_PERF_OUTPUT=Join-Path $perfRun 'project-lifecycle.jsonl'
 $env:MONDRIAN_PERF_OPEN_MS='3500'
 $env:MONDRIAN_PERF_SAVE_MS='2500'
-cargo test -p mondrian-app perf_project_lifecycle_smoke -- --ignored --nocapture
+cargo test -p mondrian-app --release -j 2 --lib perf_project_lifecycle_smoke -- --ignored --nocapture --test-threads=1
 
-$env:MONDRIAN_EXPORT_SIM_OUTPUT='target/perf/export-4k60.jsonl'
-cargo test -p mondrian-export export_4k60_simulated_perf -- --ignored --nocapture
+$env:MONDRIAN_PERF_OUTPUT=Join-Path $perfRun 'preview-media.jsonl'
+cargo test -p mondrian-app --release -j 2 --lib preview_media_decode_cache_smoke -- --ignored --nocapture --test-threads=1
 
-$env:MONDRIAN_AUDIO_SIM_OUTPUT='target/perf/audio-mix.jsonl'
-cargo test -p mondrian-media audio_mix_48k_stereo_simulated_perf -- --ignored --nocapture
+$env:MONDRIAN_EXPORT_SIM_OUTPUT=Join-Path $perfRun 'export-1080p2997.jsonl'
+cargo test -p mondrian-export --release -j 2 --lib export_1080p2997_simulated_perf -- --ignored --nocapture --test-threads=1
+
+$env:MONDRIAN_AUDIO_LOAD_MATRIX_OUTPUT=Join-Path $perfRun 'audio-load-matrix.jsonl'
+cargo test -p mondrian-audio --release -j 2 --test load_matrix dense_schedule_multitrack_load_matrix -- --ignored --nocapture --test-threads=1
 ```
 
 - 失败时测试会直接报错并附带 JSON 报告。
-- 成功时也会打印 `MONDRIAN_PERF_JSON=...` 或 `MONDRIAN_EXPORT_SIM_JSON=...`，可被日志系统或 AI 工具抓取。
+- 成功时会打印对应的结构化报告；每个 JSONL smoke 必须使用独立的新文件。
+- 进程返回成功但明确报告 `skipped` 的运行不构成性能证据。
 - 本地开发可放宽阈值，CI 建议使用更严格阈值并固定机器规格。
 
 ### 前后对比流程（性能优化后建议实施）
@@ -142,13 +148,18 @@ powershell -File scripts/perf/run-perf-suite.ps1 -OutputDir target/perf/baseline
 # 2) 在优化后分支跑一轮，保存 current
 powershell -File scripts/perf/run-perf-suite.ps1 -OutputDir target/perf/current
 
-# 3) 自动输出各环节对比（project/preview/export/audio）
-powershell -File scripts/perf/compare-perf.ps1 -BeforeDir target/perf/baseline -AfterDir target/perf/current
+# 3) 严格核对 workload/case 集并以 5% 容差拒绝 project/export 回退
+powershell -File scripts/perf/compare-perf.ps1 -BeforeDir target/perf/baseline -AfterDir target/perf/current -RegressionTolerancePct 5 -FailOnRegression
 ```
 
 ### 样片与 golden fixtures 约定
 
-下载的专业样片请统一放在 `tests/fixtures/` 下，按用途分目录：
+可再分发且许可证清晰的小型 golden fixture 才能进入仓库的
+`tests/fixtures/`。下载的专业样片、本机素材或来源不明的媒体只能放在
+gitignored 的外部验证目录，并通过环境变量或 reference-validation manifest
+引用，禁止提交到 Git 历史。
+
+仓库内可再分发 fixture 按用途分目录：
 
 - `tests/fixtures/color/`：色彩 golden samples、参考帧、HDR/SDR 对照样片
 - `tests/fixtures/lut/`：`.cube` LUT 文件、缓存命中/失效样片

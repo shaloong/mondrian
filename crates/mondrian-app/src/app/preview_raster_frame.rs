@@ -90,10 +90,7 @@ pub(crate) fn preview_raster_presentation_contract(
 
 /// Stable presentation-resource identity for a cacheable Preview raster.
 pub(crate) fn preview_raster_resource_key(output: &PreviewOutputKey) -> String {
-    format!(
-        "preview.raster:{}:{}x{}:{:016x}",
-        output.sequence_id, output.width, output.height, output.plan_signature
-    )
+    format!("preview.raster:{output}")
 }
 
 impl PreviewRasterFrame {

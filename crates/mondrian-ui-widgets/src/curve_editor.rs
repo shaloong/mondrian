@@ -95,7 +95,7 @@ impl CurvePointPolicy {
 }
 
 /// Adapter that maps the current curve points to an editor [`Action`].
-pub type CurveChangeAction = dyn Fn(&[CurvePoint]) -> Action;
+pub type CurveChangeAction = dyn Fn(&[CurvePoint]) -> Option<Action>;
 
 /// One committed control-point edit.
 ///
@@ -113,7 +113,7 @@ pub enum CurveEdit {
 }
 
 /// Adapter that maps one committed point edit to an editor [`Action`].
-pub type CurveEditAction = dyn Fn(CurveEdit) -> Action;
+pub type CurveEditAction = dyn Fn(CurveEdit) -> Option<Action>;
 
 /// Interactive normalized curve editor.
 pub struct CurveEditor {
@@ -192,8 +192,12 @@ impl CurveEditor {
     }
 
     /// Dispatch a value-aware action whenever user input changes curve points.
-    pub fn on_change(mut self, action: impl Fn(&[CurvePoint]) -> Action + 'static) -> Self {
-        self.on_change = Some(Box::new(action));
+    pub fn on_change<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(&[CurvePoint]) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_change = Some(Box::new(move |points| action(points).into()));
         self
     }
 
@@ -202,8 +206,12 @@ impl CurveEditor {
     /// Unlike [`Self::on_change`], pointer drags emit exactly once on release.
     /// Keyboard nudges and deletion are already atomic gestures and emit
     /// immediately.
-    pub fn on_edit(mut self, action: impl Fn(CurveEdit) -> Action + 'static) -> Self {
-        self.on_edit = Some(Box::new(action));
+    pub fn on_edit<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(CurveEdit) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_edit = Some(Box::new(move |edit| action(edit).into()));
         self
     }
 
@@ -336,13 +344,17 @@ impl CurveEditor {
 
     fn dispatch_change(&self, ctx: &mut EventContext) {
         if let Some(action) = &self.on_change {
-            (ctx.dispatch)(action(&self.points));
+            if let Some(action) = action(&self.points) {
+                (ctx.dispatch)(action);
+            }
         }
     }
 
     fn dispatch_edit(&self, edit: CurveEdit, ctx: &mut EventContext) {
         if let Some(action) = &self.on_edit {
-            (ctx.dispatch)(action(edit));
+            if let Some(action) = action(edit) {
+                (ctx.dispatch)(action);
+            }
         }
     }
 

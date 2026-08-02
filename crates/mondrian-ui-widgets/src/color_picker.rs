@@ -107,7 +107,7 @@ pub enum ColorPickerAreaMode {
 }
 
 /// Adapter that maps the current picker color to an editor [`Action`].
-pub type ColorChangeAction = dyn Fn(Color) -> Action;
+pub type ColorChangeAction = dyn Fn(Color) -> Option<Action>;
 
 /// Color picker widget with model tabs and text inputs.
 pub struct ColorPicker {
@@ -194,8 +194,12 @@ impl ColorPicker {
     }
 
     /// Dispatch a value-aware action whenever user input changes the color.
-    pub fn on_change(mut self, action: impl Fn(Color) -> Action + 'static) -> Self {
-        self.on_change = Some(Box::new(action));
+    pub fn on_change<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(Color) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_change = Some(Box::new(move |color| action(color).into()));
         self
     }
 
@@ -539,7 +543,9 @@ impl ColorPicker {
 
     fn dispatch_change(&self, ctx: &mut EventContext) {
         if let Some(action) = &self.on_change {
-            (ctx.dispatch)(action(self.color));
+            if let Some(action) = action(self.color) {
+                (ctx.dispatch)(action);
+            }
         }
     }
 
@@ -1087,7 +1093,11 @@ impl ColorPickerTrigger {
     }
 
     /// Dispatch a value-aware action whenever the embedded picker changes color.
-    pub fn on_change(mut self, action: impl Fn(Color) -> Action + 'static) -> Self {
+    pub fn on_change<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(Color) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
         self.picker = self.picker.on_change(action);
         self
     }

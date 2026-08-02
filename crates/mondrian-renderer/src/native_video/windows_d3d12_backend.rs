@@ -1,5 +1,6 @@
 //! Complete D3D12VA decoder-surface to OCIO working-frame backend.
 
+use super::gpu_timing::NativeVideoImportGpuTimingRuntime;
 use super::windows_adapter::{
     renderer_adapter_dxgi_index, renderer_adapter_luid, NativeVideoAdapterError,
     NativeVideoAdapterLuid,
@@ -11,15 +12,17 @@ use super::windows_d3d12_bridge::{
     D3D12PreparedVideoFrame, D3D12SharedVideoTexture, D3D12SharedVideoTextureError,
 };
 use crate::{
-    ColorFrameResidency, GpuColorFrameResource, GpuColorFrameTextureFormat,
-    GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool, GpuNativeDecodedFrameImportBackend,
-    GpuNativeDecodedFrameImportError, GpuNativeDecodedFrameImportPlan,
-    GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat,
-    GpuNativeDecodedFrameVideoSampling, GpuNativeVideoExtent, GpuNativeYuvDecodePlan,
-    GpuNativeYuvDecoder, GpuNativeYuvPlaneViews, GpuNativeYuvPreparedPass,
-    NativeVideoImportCpuTimings, RenderColorTransformGpuOptions,
-    RenderGpuInputStageRuntimeRecordError, RenderGpuOutputBoundaryRuntime,
-    RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
+    ColorFrameResidency, GpuColorFrameIdAllocationError, GpuColorFrameResource,
+    GpuColorFrameTextureFormat, GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool,
+    GpuNativeDecodedFrameImportBackend, GpuNativeDecodedFrameImportError,
+    GpuNativeDecodedFrameImportPlan, GpuNativeDecodedFrameImportSupport,
+    GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuNativeVideoExtent,
+    GpuNativeYuvDecodePlan, GpuNativeYuvDecoder, GpuNativeYuvPlaneViews, GpuNativeYuvPreparedPass,
+    NativeVideoImportCandidateTimingReceipt, NativeVideoImportCandidateToken,
+    NativeVideoImportCpuTimings, NativeVideoImportGpuTimingDiagnostics,
+    NativeVideoImportGpuTimingPolicy, NativeVideoImportGpuTimingSample,
+    RenderColorTransformGpuOptions, RenderGpuInputStageRuntimeRecordError,
+    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
 };
 use mondrian_core::types::ColorSpace;
 use mondrian_media::{DecodedGpuFrameHandleKind, PreviewNativeDecodedFrame};
@@ -43,6 +46,9 @@ pub enum D3D12NativeVideoImportBackendCreateError {
     /// A zero-sized contract-pool limit could never retain a decoder session.
     #[error("native video contract pool limit must be greater than zero")]
     ZeroContractPoolLimit,
+    /// Renderer frame identity allocation is exhausted.
+    #[error(transparent)]
+    FrameId(#[from] GpuColorFrameIdAllocationError),
 }
 
 /// Resource-pool policy for the Windows native video import backend.
@@ -83,6 +89,7 @@ pub struct D3D12NativeVideoImportBackend {
     options: D3D12NativeVideoImportBackendOptions,
     contract_use_sequence: u64,
     frame_cpu_timings: NativeVideoImportCpuTimings,
+    gpu_timing: NativeVideoImportGpuTimingRuntime,
 }
 
 impl D3D12NativeVideoImportBackend {
@@ -92,11 +99,28 @@ impl D3D12NativeVideoImportBackend {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) -> Result<Self, D3D12NativeVideoImportBackendCreateError> {
-        Self::new_with_options(
+        Self::new_with_gpu_timing_policy(
+            adapter,
+            device,
+            queue,
+            NativeVideoImportGpuTimingPolicy::default(),
+        )
+    }
+
+    /// Create a backend with an explicit native-import timing activation policy.
+    pub fn new_with_gpu_timing_policy(
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        gpu_timing_policy: NativeVideoImportGpuTimingPolicy,
+    ) -> Result<Self, D3D12NativeVideoImportBackendCreateError> {
+        Self::new_with_options_and_resource_pool_and_gpu_timing_policy(
             adapter,
             device,
             queue,
             D3D12NativeVideoImportBackendOptions::default(),
+            Arc::new(GpuColorFrameWgpuResourcePool::default()),
+            gpu_timing_policy,
         )
     }
 
@@ -107,12 +131,13 @@ impl D3D12NativeVideoImportBackend {
         queue: &wgpu::Queue,
         options: D3D12NativeVideoImportBackendOptions,
     ) -> Result<Self, D3D12NativeVideoImportBackendCreateError> {
-        Self::new_with_options_and_resource_pool(
+        Self::new_with_options_and_resource_pool_and_gpu_timing_policy(
             adapter,
             device,
             queue,
             options,
             Arc::new(GpuColorFrameWgpuResourcePool::default()),
+            NativeVideoImportGpuTimingPolicy::default(),
         )
     }
 
@@ -123,12 +148,30 @@ impl D3D12NativeVideoImportBackend {
         queue: &wgpu::Queue,
         resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
     ) -> Result<Self, D3D12NativeVideoImportBackendCreateError> {
-        Self::new_with_options_and_resource_pool(
+        Self::new_with_resource_pool_and_gpu_timing_policy(
+            adapter,
+            device,
+            queue,
+            resource_pool,
+            NativeVideoImportGpuTimingPolicy::default(),
+        )
+    }
+
+    /// Create a shared-resource backend with an explicit timing activation policy.
+    pub fn new_with_resource_pool_and_gpu_timing_policy(
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
+        gpu_timing_policy: NativeVideoImportGpuTimingPolicy,
+    ) -> Result<Self, D3D12NativeVideoImportBackendCreateError> {
+        Self::new_with_options_and_resource_pool_and_gpu_timing_policy(
             adapter,
             device,
             queue,
             D3D12NativeVideoImportBackendOptions::default(),
             resource_pool,
+            gpu_timing_policy,
         )
     }
 
@@ -139,6 +182,25 @@ impl D3D12NativeVideoImportBackend {
         queue: &wgpu::Queue,
         options: D3D12NativeVideoImportBackendOptions,
         resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
+    ) -> Result<Self, D3D12NativeVideoImportBackendCreateError> {
+        Self::new_with_options_and_resource_pool_and_gpu_timing_policy(
+            adapter,
+            device,
+            queue,
+            options,
+            resource_pool,
+            NativeVideoImportGpuTimingPolicy::default(),
+        )
+    }
+
+    /// Create a backend with explicit bridge, resource, and timing policies.
+    pub fn new_with_options_and_resource_pool_and_gpu_timing_policy(
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        options: D3D12NativeVideoImportBackendOptions,
+        resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
+        gpu_timing_policy: NativeVideoImportGpuTimingPolicy,
     ) -> Result<Self, D3D12NativeVideoImportBackendCreateError> {
         if options.max_frames_in_flight_per_contract == 0 {
             return Err(D3D12NativeVideoImportBackendCreateError::ZeroBridgePoolLimit);
@@ -163,11 +225,12 @@ impl D3D12NativeVideoImportBackend {
             queue: queue.clone(),
             support,
             yuv_decoder: GpuNativeYuvDecoder::new(device),
-            color_runtime: RenderGpuOutputBoundaryRuntime::with_resource_pool(resource_pool),
+            color_runtime: RenderGpuOutputBoundaryRuntime::with_resource_pool(resource_pool)?,
             pools: HashMap::new(),
             options,
             contract_use_sequence: 0,
             frame_cpu_timings: NativeVideoImportCpuTimings::default(),
+            gpu_timing: NativeVideoImportGpuTimingRuntime::new(device, queue, gpu_timing_policy),
         })
     }
 
@@ -208,14 +271,41 @@ impl D3D12NativeVideoImportBackend {
         &self.color_runtime
     }
 
-    /// Reset CPU attribution before recording one Viewer candidate.
-    pub fn reset_frame_cpu_timings(&mut self) {
+    /// Begin one explicit Viewer-candidate timing/CPU-attribution scope.
+    pub fn begin_viewer_candidate(&mut self) -> Option<NativeVideoImportCandidateToken> {
         self.frame_cpu_timings = NativeVideoImportCpuTimings::default();
+        self.gpu_timing.begin_candidate()
     }
 
     /// Return accumulated native-import CPU attribution for the current candidate.
     pub fn frame_cpu_timings(&self) -> NativeVideoImportCpuTimings {
         self.frame_cpu_timings
+    }
+
+    /// End the exact Viewer-candidate scope, including failed recordings.
+    ///
+    /// Active timing returns a move-only receipt only for a successful record.
+    pub fn end_viewer_candidate(
+        &mut self,
+        candidate: Option<NativeVideoImportCandidateToken>,
+        viewer_record_succeeded: bool,
+    ) -> Option<NativeVideoImportCandidateTimingReceipt> {
+        self.gpu_timing.end_candidate(candidate, viewer_record_succeeded)
+    }
+
+    /// Collect callbacks after the execution owner has already polled the device.
+    pub fn collect_gpu_timings_after_device_poll(&mut self) {
+        self.gpu_timing.collect_after_device_poll();
+    }
+
+    /// Drain asynchronously completed native-import GPU timing samples.
+    pub fn take_completed_gpu_timings(&mut self) -> Vec<NativeVideoImportGpuTimingSample> {
+        self.gpu_timing.take_completed()
+    }
+
+    /// Return cumulative native-import GPU timing coverage and health.
+    pub fn gpu_timing_diagnostics(&self) -> NativeVideoImportGpuTimingDiagnostics {
+        self.gpu_timing.diagnostics()
     }
 
     fn import_frame(
@@ -241,6 +331,7 @@ impl D3D12NativeVideoImportBackend {
             options,
             contract_use_sequence,
             frame_cpu_timings,
+            gpu_timing,
             ..
         } = self;
         *contract_use_sequence = contract_use_sequence.saturating_add(1);
@@ -310,6 +401,10 @@ impl D3D12NativeVideoImportBackend {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mondrian.native-video.d3d12-import"),
         });
+        let mut gpu_timing_probe = gpu_timing.begin_import(
+            &mut encoder,
+            prepared_native.decode_fence_ready_at_admission(),
+        );
         let pipeline_prepare_us = elapsed_us(pipeline_prepare_started);
 
         let record_result = (|| {
@@ -325,6 +420,7 @@ impl D3D12NativeVideoImportBackend {
                     &encoded_resource,
                 )
                 .map_err(|error| error.to_string())?;
+            gpu_timing.mark_after_yuv(&mut encoder, &mut gpu_timing_probe);
             let yuv_record_us = elapsed_us(yuv_record_started);
             let color_stage_started = Instant::now();
             if color_runtime
@@ -354,6 +450,7 @@ impl D3D12NativeVideoImportBackend {
                     },
                 )
                 .map_err(format_input_stage_error)?;
+            gpu_timing.mark_after_input_color(&mut encoder, &mut gpu_timing_probe);
             let color_stage_us = elapsed_us(color_stage_started);
             let resource_extract_started = Instant::now();
             let working = color_runtime
@@ -378,6 +475,7 @@ impl D3D12NativeVideoImportBackend {
             match record_result {
                 Ok(result) => result,
                 Err(reason) => {
+                    gpu_timing.abandon_before_submit(gpu_timing_probe);
                     restore_encoded_source(color_runtime, entry, plan);
                     return Err(backend_rejected(discard_with_reason(
                         entry,
@@ -387,11 +485,16 @@ impl D3D12NativeVideoImportBackend {
                 }
             };
         entry.encoded_source = Some(encoded_payload);
+        gpu_timing.finish_recording(&mut encoder, &mut gpu_timing_probe);
         let submit_started = Instant::now();
-        entry
+        if let Err(error) = entry
             .bridge
             .submit_renderer_commands(prepared_native, std::iter::once(encoder.finish()))
-            .map_err(native_bridge_import_error)?;
+        {
+            gpu_timing.submission_failed_after_queue(gpu_timing_probe, error.to_string());
+            return Err(native_bridge_import_error(error));
+        }
+        gpu_timing.after_submit(gpu_timing_probe);
         let submit_us = elapsed_us(submit_started);
         frame_cpu_timings.accumulate(NativeVideoImportCpuTimings {
             source_validation_us,
@@ -504,6 +607,11 @@ fn native_bridge_import_error(
                 ),
             }
         }
+        D3D12SharedVideoTextureError::DeviceRemoved => {
+            GpuNativeDecodedFrameImportError::NativeDeviceRemoved {
+                reason: "D3D shared copy fence reported the device-removed sentinel".to_owned(),
+            }
+        }
         error => backend_rejected(error.to_string()),
     }
 }
@@ -515,7 +623,8 @@ fn backend_rejected(reason: String) -> GpuNativeDecodedFrameImportError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct D3D12BridgePoolKey {
     source_device_identity: usize,
-    visible_extent: GpuNativeVideoExtent,
+    source_visible_extent: GpuNativeVideoExtent,
+    materialization_extent: GpuNativeVideoExtent,
     storage_extent: GpuNativeVideoExtent,
     source_texture_format: GpuNativeDecodedFrameTextureFormat,
     source_color_space: ColorSpace,
@@ -531,9 +640,13 @@ impl D3D12BridgePoolKey {
     ) -> Self {
         Self {
             source_device_identity: source.device.as_raw() as usize,
-            visible_extent: GpuNativeVideoExtent {
+            source_visible_extent: GpuNativeVideoExtent {
                 width: source.inspection.visible_width,
                 height: source.inspection.visible_height,
+            },
+            materialization_extent: GpuNativeVideoExtent {
+                width: plan.working_frame.descriptor().width,
+                height: plan.working_frame.descriptor().height,
             },
             storage_extent: GpuNativeVideoExtent {
                 width: source.inspection.storage_width,
@@ -659,6 +772,17 @@ mod tests {
         assert!(matches!(
             error,
             GpuNativeDecodedFrameImportError::BackendRejected { .. }
+        ));
+    }
+
+    #[test]
+    fn device_removed_remains_typed_retirement_proof() {
+        let error = native_bridge_import_error(D3D12SharedVideoTextureError::DeviceRemoved);
+
+        assert!(error.is_native_device_removed());
+        assert!(matches!(
+            error,
+            GpuNativeDecodedFrameImportError::NativeDeviceRemoved { .. }
         ));
     }
 

@@ -13,25 +13,28 @@ use mondrian_assets::{AssetKind, AssetRecord};
 use mondrian_core::timeline_data::AlphaInterpretation;
 use mondrian_core::types::{AssetId, ColorSpace};
 use mondrian_core::{Resolution, TimelineTime};
-use mondrian_media::info::PixelFormat;
 use mondrian_media::{
-    DecodedVideoRange, DecodedVideoRangeContract, MediaFileFingerprint,
-    PreviewHardwareDecodeRequest, ProxyColorContract, ProxyConfig, ProxyGenerator, ProxyStatus,
-    VideoColorDiagnostic,
+    DecodedVideoRangeContract, MediaFileFingerprint, PreviewDecodeGeometry, PreviewDecodeKey,
+    PreviewDecodePayloadRequirement, PreviewDecodeSource, PreviewSourceColorContract,
+    ProxyArtifactManifest, ProxyColorContract, ProxyConfig, ProxyGenerator, ProxyStatus,
+    VideoColorDiagnostic, VideoStreamInfo,
 };
 use mondrian_timeline::sequence::{
     InputColorResolution, MediaInputColorContext, ResolvedInputColor,
 };
 
-use super::preview_access_mode::{MediaPreviewKey, MediaPreviewNativeSurfaceHint};
+use super::preview_access_mode::MediaPreviewKey;
 use super::preview_hardware_admission::PreviewHardwareDecodeAdmissionState;
 
 /// Source/proxy path selected for one Preview media request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PreviewMediaDecodePath {
-    pub(crate) path: PathBuf,
+    /// Exact selected physical source, stream, revision, Alpha, and surface evidence.
+    pub(crate) source: PreviewDecodeSource,
     pub(crate) resolution: PreviewMediaDecodePathResolution,
-    pub(crate) fingerprint: MediaFileFingerprint,
+    /// Current bounded revision evidence for the canonical original source,
+    /// even when [`Self::source`] selects a generated proxy.
+    pub(crate) source_fingerprint: MediaFileFingerprint,
 }
 
 /// Why Preview decoded the source path or an optimized proxy path.
@@ -39,6 +42,9 @@ pub(crate) struct PreviewMediaDecodePath {
 pub(crate) enum PreviewMediaDecodePathResolution {
     Source,
     Proxy,
+    /// A fresh proxy existed but its source-referred color identity did not
+    /// match the exact color contract requested by this Clip occurrence.
+    ProxyColorIncompatible,
     ProxyMissing,
     ProxyStale,
 }
@@ -74,6 +80,8 @@ pub(crate) struct PreviewMediaSourceRequest<'a> {
     pub(crate) proxy_config: &'a ProxyConfig,
     pub(crate) proxy_color: Option<ProxyColorContract>,
     pub(crate) hardware_admission: PreviewHardwareDecodeAdmissionState,
+    /// Bind CPU-addressability into the decoded-frame cache key.
+    pub(crate) cpu_working_required: bool,
 }
 
 /// Canonical media request and side-effect intent produced by resolution.
@@ -98,7 +106,8 @@ pub(crate) struct RejectedPreviewMediaSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UnavailablePreviewMediaSource {
     pub(crate) asset_id: AssetId,
-    pub(crate) path: PathBuf,
+    /// Physical source when the Asset is file-backed.
+    pub(crate) path: Option<PathBuf>,
     pub(crate) reason: PreviewMediaSourceUnavailableReason,
 }
 
@@ -107,12 +116,24 @@ pub(crate) struct UnavailablePreviewMediaSource {
 pub(crate) enum PreviewMediaSourceUnavailableReason {
     #[error("asset is not a video source")]
     NotVideo,
+    #[error("asset has no file-backed media source")]
+    NoFileSource,
+    #[error("asset has no coherent admitted media probe")]
+    SourceProbeUnavailable,
+    #[error("admitted media probe has no video stream")]
+    SourceVideoStreamUnavailable,
+    #[error("admitted video stream has no proven, internally consistent sampling contract")]
+    SourceSamplingUnavailable,
+    #[error("source file revision changed after the admitted media probe")]
+    SourceRevisionChanged,
     #[error("negative source target is invalid: {source_time}")]
     NegativeSourceTime { source_time: TimelineTime },
     #[error("source metadata unavailable: {reason}")]
     SourceMetadataUnavailable { reason: String },
     #[error("proxy path resolution failed: {reason}")]
     ProxyPathResolutionFailed { reason: String },
+    #[error("physical Preview decode contract is invalid: {reason}")]
+    DecodeContractInvalid { reason: String },
 }
 
 /// Exhaustive result of adapting one asset into Preview execution semantics.
@@ -139,24 +160,32 @@ pub(crate) fn resolve_preview_media_source(
         );
     }
 
-    let primary_video = request.asset.media_info.primary_video();
-    let source_has_alpha = primary_video.is_some_and(|video| video.has_alpha);
-    let resolved_path = match resolve_preview_media_decode_path(
-        request.prefer_proxy,
-        source_has_alpha,
-        &request.asset.path,
-        request.proxy_config,
-        request.proxy_color,
-    ) {
-        Ok(path) => path,
-        Err(reason) => return unavailable(&request, reason),
+    let Some(source_path) = request.asset.file_path() else {
+        return unavailable(&request, PreviewMediaSourceUnavailableReason::NoFileSource);
     };
-
-    let detected_color_space = primary_video.and_then(|video| video.detected_color_space);
+    let Some(media_probe) = request.asset.media_probe() else {
+        return unavailable(
+            &request,
+            PreviewMediaSourceUnavailableReason::SourceProbeUnavailable,
+        );
+    };
+    let Some(primary_video) = media_probe.primary_video() else {
+        return unavailable(
+            &request,
+            PreviewMediaSourceUnavailableReason::SourceVideoStreamUnavailable,
+        );
+    };
+    let Some(proven_sampling) = primary_video.proven_sampling() else {
+        return unavailable(
+            &request,
+            PreviewMediaSourceUnavailableReason::SourceSamplingUnavailable,
+        );
+    };
+    let executable_color_space = primary_video.executable_color_space();
     let input_color_resolution = resolve_preview_input_color_space(
         request.color_space_override,
         request.asset.interpretation,
-        detected_color_space,
+        executable_color_space,
         request.input_color,
     );
     let input_color_space = match input_color_resolution.resolved {
@@ -164,53 +193,99 @@ pub(crate) fn resolve_preview_media_source(
         ResolvedInputColor::Data | ResolvedInputColor::Rejected => {
             return PreviewMediaSourceOutcome::ColorRejected(RejectedPreviewMediaSource {
                 asset_id: request.asset.id,
-                path: request.asset.path.clone(),
+                path: source_path.to_path_buf(),
                 input_color_resolution,
-                diagnostic: source_color_diagnostic(request.asset),
+                diagnostic: VideoColorDiagnostic::from_stream(primary_video),
             });
         }
     };
-
-    let native_surface_hint = primary_video.and_then(|video| match video.pixel_format {
-        PixelFormat::Yuv420p | PixelFormat::Nv12 => Some(MediaPreviewNativeSurfaceHint::Nv12),
-        PixelFormat::Yuv420p10le | PixelFormat::P010 => Some(MediaPreviewNativeSurfaceHint::P010),
-        _ => None,
-    });
-    let source_resolution = primary_video.map_or(request.target_resolution, |video| Resolution {
-        width: video.width.max(1),
-        height: video.height.max(1),
-    });
-    let mut key = MediaPreviewKey {
-        asset_id: request.asset.id,
-        path: resolved_path.path,
-        fingerprint: Some(resolved_path.fingerprint),
-        source_time: request.source_time,
-        target_width: request.target_resolution.width,
-        target_height: request.target_resolution.height,
-        source_width: source_resolution.width,
-        source_height: source_resolution.height,
+    let source_color = PreviewSourceColorContract::new(
         input_color_space,
-        input_video_range: DecodedVideoRangeContract::from_interpretation(
+        DecodedVideoRangeContract::from_interpretation(
             request.asset.interpretation.range,
-            primary_video.map_or(DecodedVideoRange::Unknown, |video| video.color_range),
+            primary_video.color_range,
         ),
-        native_surface_hint,
+    );
+    let source_has_alpha = proven_sampling.has_alpha;
+    let resolved_path = match resolve_preview_media_decode_path(
+        request.prefer_proxy,
         source_has_alpha,
+        source_path,
+        primary_video,
+        source_color,
+        request.proxy_config,
+        request.proxy_color,
+    ) {
+        Ok(path) => path,
+        Err(reason) => return unavailable(&request, reason),
+    };
+    if request.asset.source_fingerprint() != Some(resolved_path.source_fingerprint) {
+        return unavailable(
+            &request,
+            PreviewMediaSourceUnavailableReason::SourceRevisionChanged,
+        );
+    }
+    let PreviewMediaDecodePath {
+        source: decode_source,
+        resolution: path_resolution,
+        source_fingerprint,
+    } = resolved_path;
+
+    let source_resolution = Resolution {
+        width: primary_video.width,
+        height: primary_video.height,
+    };
+    let payload_requirement = if request.cpu_working_required {
+        PreviewDecodePayloadRequirement::CpuAddressable
+    } else {
+        PreviewDecodePayloadRequirement::NativeAllowed
+    };
+    let hardware_request = request
+        .hardware_admission
+        .request_for_surface(decode_source.native_surface_hint());
+    let geometry = match PreviewDecodeGeometry::canonical(
+        &decode_source,
+        request.target_resolution,
+        payload_requirement,
+        hardware_request,
+    ) {
+        Ok(geometry) => geometry,
+        Err(error) => {
+            return unavailable(
+                &request,
+                PreviewMediaSourceUnavailableReason::DecodeContractInvalid {
+                    reason: error.to_string(),
+                },
+            );
+        }
+    };
+    let decode =
+        match PreviewDecodeKey::new(decode_source, request.source_time, geometry, source_color) {
+            Ok(decode) => decode,
+            Err(error) => {
+                return unavailable(
+                    &request,
+                    PreviewMediaSourceUnavailableReason::DecodeContractInvalid {
+                        reason: error.to_string(),
+                    },
+                );
+            }
+        };
+    let key = MediaPreviewKey {
+        asset_id: request.asset.id,
+        decode,
+        source_resolution,
         alpha_interpretation: request.alpha_interpretation,
         working_color_space: request.input_color.working_color_space,
         input_tone_map: request.input_color.input_tone_map,
         engine: request.input_color.engine.clone(),
     };
-    canonicalize_media_decode_geometry(&mut key, request.hardware_admission);
 
-    let proxy_generation = proxy_generation_intent(
-        &request,
-        resolved_path.resolution,
-        resolved_path.fingerprint,
-    );
+    let proxy_generation =
+        proxy_generation_intent(&request, source_path, path_resolution, source_fingerprint);
     PreviewMediaSourceOutcome::Ready(ResolvedPreviewMediaSource {
         key,
-        path_resolution: resolved_path.resolution,
+        path_resolution,
         input_color_resolution,
         proxy_generation,
     })
@@ -220,13 +295,13 @@ pub(crate) fn resolve_preview_media_source(
 pub(crate) fn resolve_preview_input_color_space(
     override_color_space: Option<ColorSpace>,
     asset_interpretation: mondrian_core::timeline_data::AssetMediaInterpretation,
-    detected_color_space: Option<ColorSpace>,
+    executable_color_space: Option<ColorSpace>,
     input_color: &MediaInputColorContext,
 ) -> InputColorResolution {
     input_color.missing_metadata_policy.resolve_asset_input_decision(
         override_color_space,
         asset_interpretation,
-        detected_color_space,
+        executable_color_space,
         input_color.working_color_space,
     )
 }
@@ -235,6 +310,8 @@ fn resolve_preview_media_decode_path(
     prefer_proxy: bool,
     source_has_alpha: bool,
     source_path: &Path,
+    primary_video: &VideoStreamInfo,
+    source_color: PreviewSourceColorContract,
     proxy_config: &ProxyConfig,
     proxy_color: Option<ProxyColorContract>,
 ) -> Result<PreviewMediaDecodePath, PreviewMediaSourceUnavailableReason> {
@@ -242,55 +319,115 @@ fn resolve_preview_media_decode_path(
         PreviewMediaSourceUnavailableReason::SourceMetadataUnavailable { reason: error.to_string() }
     })?;
     if !prefer_proxy || source_has_alpha {
-        return Ok(source_decode_path(source_path, source_fingerprint));
+        return source_decode_path(source_path, source_fingerprint, primary_video);
     }
     let Some(proxy_color) = proxy_color else {
-        return Ok(source_decode_path(source_path, source_fingerprint));
+        return source_decode_path(source_path, source_fingerprint, primary_video);
     };
+    if proxy_color.source_color_space() != source_color.color_space
+        || proxy_color.source_range() != source_color.range.baseline()
+    {
+        return source_decode_path_with_resolution(
+            source_path,
+            source_fingerprint,
+            primary_video,
+            PreviewMediaDecodePathResolution::ProxyColorIncompatible,
+        );
+    }
 
     let proxy_generator = ProxyGenerator::new(proxy_config.clone());
     let proxy_path = proxy_generator.proxy_path(source_path, proxy_color).map_err(|error| {
         PreviewMediaSourceUnavailableReason::ProxyPathResolutionFailed { reason: error.to_string() }
     })?;
-    match (
-        proxy_generator.proxy_status(source_path, proxy_color),
-        media_path_fingerprint(&proxy_path),
-    ) {
-        (ProxyStatus::Fresh, Ok(proxy_fingerprint)) => Ok(PreviewMediaDecodePath {
-            path: proxy_path,
-            resolution: PreviewMediaDecodePathResolution::Proxy,
-            fingerprint: proxy_fingerprint,
-        }),
-        (ProxyStatus::Missing, _) => Ok(PreviewMediaDecodePath {
-            path: source_path.to_path_buf(),
-            resolution: PreviewMediaDecodePathResolution::ProxyMissing,
-            fingerprint: source_fingerprint,
-        }),
-        (ProxyStatus::Stale, _) | (_, Err(_)) => Ok(PreviewMediaDecodePath {
-            path: source_path.to_path_buf(),
-            resolution: PreviewMediaDecodePathResolution::ProxyStale,
-            fingerprint: source_fingerprint,
-        }),
+    let proxy_status = proxy_generator
+        .proxy_status_for_source_fingerprint(source_path, source_fingerprint, proxy_color)
+        .map_err(
+            |error| PreviewMediaSourceUnavailableReason::ProxyPathResolutionFailed {
+                reason: error.to_string(),
+            },
+        )?;
+    match (proxy_status, media_path_fingerprint(&proxy_path)) {
+        (ProxyStatus::Fresh, Ok(proxy_fingerprint)) => {
+            let manifest: ProxyArtifactManifest =
+                proxy_generator.expected_manifest(source_path, proxy_color).map_err(|error| {
+                    PreviewMediaSourceUnavailableReason::ProxyPathResolutionFailed {
+                        reason: error.to_string(),
+                    }
+                })?;
+            if manifest.color != proxy_color {
+                return Err(
+                    PreviewMediaSourceUnavailableReason::ProxyPathResolutionFailed {
+                        reason: "fresh proxy manifest color differs from requested proxy identity"
+                            .to_owned(),
+                    },
+                );
+            }
+            let source =
+                PreviewDecodeSource::from_proxy_artifact(proxy_path, proxy_fingerprint, &manifest)
+                    .map_err(decode_contract_unavailable)?;
+            Ok(PreviewMediaDecodePath {
+                source,
+                resolution: PreviewMediaDecodePathResolution::Proxy,
+                source_fingerprint,
+            })
+        }
+        (ProxyStatus::Missing, _) => source_decode_path_with_resolution(
+            source_path,
+            source_fingerprint,
+            primary_video,
+            PreviewMediaDecodePathResolution::ProxyMissing,
+        ),
+        (ProxyStatus::Stale, _) | (_, Err(_)) => source_decode_path_with_resolution(
+            source_path,
+            source_fingerprint,
+            primary_video,
+            PreviewMediaDecodePathResolution::ProxyStale,
+        ),
     }
 }
 
 fn source_decode_path(
     source_path: &Path,
     fingerprint: MediaFileFingerprint,
-) -> PreviewMediaDecodePath {
-    PreviewMediaDecodePath {
-        path: source_path.to_path_buf(),
-        resolution: PreviewMediaDecodePathResolution::Source,
+    primary_video: &VideoStreamInfo,
+) -> Result<PreviewMediaDecodePath, PreviewMediaSourceUnavailableReason> {
+    source_decode_path_with_resolution(
+        source_path,
         fingerprint,
-    }
+        primary_video,
+        PreviewMediaDecodePathResolution::Source,
+    )
+}
+
+fn source_decode_path_with_resolution(
+    source_path: &Path,
+    fingerprint: MediaFileFingerprint,
+    primary_video: &VideoStreamInfo,
+    resolution: PreviewMediaDecodePathResolution,
+) -> Result<PreviewMediaDecodePath, PreviewMediaSourceUnavailableReason> {
+    let source = PreviewDecodeSource::from_probed_stream(source_path, fingerprint, primary_video)
+        .map_err(decode_contract_unavailable)?;
+    Ok(PreviewMediaDecodePath {
+        source,
+        resolution,
+        source_fingerprint: fingerprint,
+    })
 }
 
 fn media_path_fingerprint(path: &Path) -> std::io::Result<MediaFileFingerprint> {
-    std::fs::metadata(path).map(|metadata| MediaFileFingerprint::from_metadata(&metadata))
+    let fingerprint = MediaFileFingerprint::capture(path);
+    if fingerprint.authorizes_reuse() {
+        Ok(fingerprint)
+    } else {
+        Err(std::io::Error::other(
+            "media source lacks complete filesystem revision evidence",
+        ))
+    }
 }
 
 fn proxy_generation_intent(
     request: &PreviewMediaSourceRequest<'_>,
+    source_path: &Path,
     resolution: PreviewMediaDecodePathResolution,
     source_fingerprint: MediaFileFingerprint,
 ) -> Option<PreviewProxyGenerationIntent> {
@@ -312,23 +449,16 @@ fn proxy_generation_intent(
             resolution,
             color,
         },
-        source_path: request.asset.path.clone(),
+        source_path: source_path.to_path_buf(),
         config: request.proxy_config.clone(),
         color,
     })
 }
 
-fn canonicalize_media_decode_geometry(
-    key: &mut MediaPreviewKey,
-    hardware_admission: PreviewHardwareDecodeAdmissionState,
-) {
-    let native_source_decode = !key.source_has_alpha
-        && hardware_admission.request_for_surface(key.native_surface_hint)
-            == PreviewHardwareDecodeRequest::PreferGpuResident;
-    if native_source_decode {
-        key.target_width = key.source_width;
-        key.target_height = key.source_height;
-    }
+fn decode_contract_unavailable(
+    error: mondrian_media::PreviewDecodeContractError,
+) -> PreviewMediaSourceUnavailableReason {
+    PreviewMediaSourceUnavailableReason::DecodeContractInvalid { reason: error.to_string() }
 }
 
 fn unavailable(
@@ -337,34 +467,9 @@ fn unavailable(
 ) -> PreviewMediaSourceOutcome {
     PreviewMediaSourceOutcome::Unavailable(UnavailablePreviewMediaSource {
         asset_id: request.asset.id,
-        path: request.asset.path.clone(),
+        path: request.asset.file_path().map(Path::to_path_buf),
         reason,
     })
-}
-
-fn source_color_diagnostic(asset: &AssetRecord) -> VideoColorDiagnostic {
-    asset
-        .media_info
-        .primary_video()
-        .map(VideoColorDiagnostic::from_stream)
-        .unwrap_or_else(|| VideoColorDiagnostic {
-            detected_color_space: None,
-            color_range: DecodedVideoRange::Unknown,
-            interpretation: mondrian_media::DetectedColorInterpretation {
-                color_space: None,
-                confidence: mondrian_media::VideoColorInterpretationConfidence::None,
-                source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
-                method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
-                evidence: Vec::new(),
-                warnings: Vec::new(),
-                user_overridable: true,
-            },
-            source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
-            method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
-            metadata: None,
-            metadata_hints: Vec::new(),
-            hdr_metadata: Vec::new(),
-        })
 }
 
 #[cfg(test)]

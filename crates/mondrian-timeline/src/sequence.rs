@@ -1,14 +1,19 @@
 //! 序列（时间线）
 
-use crate::{clip::ActiveClip, track::Track};
+use crate::{
+    clip::ActiveClip,
+    track::{Track, TrackType},
+};
 pub use mondrian_core::AudioChannelLayout;
 use mondrian_core::{
-    types::*, DisplayToneMapPolicy, SmpteCountingMode, TimelineDisplayContract,
-    TimelineDisplayFormat, TimelineDisplaySettings, TimelineTime, VideoContentLightMetadata,
-    VideoMasteringDisplayMetadata,
+    types::*, AuthoringFootprint, AuthoringFootprintCollector, AuthoringFootprintError,
+    AuthoringList, AuthoringSnapshot, DisplayToneMapPolicy, ProjectColorEnvironment,
+    SmpteCountingMode, TimelineDisplayContract, TimelineDisplayFormat, TimelineDisplaySettings,
+    TimelineTime, VideoContentLightMetadata, VideoMasteringDisplayMetadata,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// Maximum supported nested-sequence recursion depth for preview, export, and
 /// diagnostics.
@@ -29,6 +34,22 @@ pub enum EditingMode {
     SocialVertical1080p,
 }
 
+impl AuthoringFootprint for EditingMode {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        match self {
+            Self::Custom
+            | Self::Dslr1080p
+            | Self::Dslr720p
+            | Self::Avchd1080p
+            | Self::DigitalCinema4k
+            | Self::SocialVertical1080p => Ok(()),
+        }
+    }
+}
+
 // Re-exported from mondrian_core::timeline_data.
 use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
 pub use mondrian_core::timeline_data::{FieldOrder, PixelAspectRatio};
@@ -40,6 +61,17 @@ pub enum AudioDisplayFormat {
     Milliseconds,
 }
 
+impl AuthoringFootprint for AudioDisplayFormat {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        match self {
+            Self::AudioSamples | Self::Milliseconds => Ok(()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PreviewRenderFormat {
     #[default]
@@ -47,6 +79,17 @@ pub enum PreviewRenderFormat {
     ProResProxy,
     DnxHrLb,
     LosslessRgba,
+}
+
+impl AuthoringFootprint for PreviewRenderFormat {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        match self {
+            Self::IFrameOnly | Self::ProResProxy | Self::DnxHrLb | Self::LosslessRgba => Ok(()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -57,6 +100,16 @@ pub struct SequencePreviewSettings {
     pub resolution_scale: f32,
     #[serde(default = "default_preview_cache_enabled")]
     pub cache_enabled: bool,
+}
+
+impl AuthoringFootprint for SequencePreviewSettings {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self { format, resolution_scale: _, cache_enabled: _ } = self;
+        collector.collect(format)
+    }
 }
 
 impl Default for SequencePreviewSettings {
@@ -84,6 +137,17 @@ pub enum SequenceRole {
     NestedComposition,
 }
 
+impl AuthoringFootprint for SequenceRole {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        match self {
+            Self::Editorial | Self::NestedComposition => Ok(()),
+        }
+    }
+}
+
 /// Program rendering domain independently of the project OCIO engine.
 ///
 /// The project `ColorEngine` is the sole Mondrian Standard / ACES / Custom OCIO
@@ -98,6 +162,17 @@ pub enum ColorWorkflow {
     SceneReferred,
 }
 
+impl AuthoringFootprint for ColorWorkflow {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        match self {
+            Self::DisplayReferred | Self::SceneReferred => Ok(()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum MissingColorMetadataPolicy {
     /// 无标签素材视为 Rec.709（行业默认）。
@@ -105,6 +180,17 @@ pub enum MissingColorMetadataPolicy {
     AssumeRec709,
     /// 无标签素材拒绝导入 / 跳过渲染。
     RejectMedia,
+}
+
+impl AuthoringFootprint for MissingColorMetadataPolicy {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        match self {
+            Self::AssumeRec709 | Self::RejectMedia => Ok(()),
+        }
+    }
 }
 
 /// Source that decided a media input color space.
@@ -257,8 +343,8 @@ pub struct InputColorResolution {
     pub source: InputColorResolutionSource,
     /// Clip/media color-space override supplied by the user.
     pub override_color_space: Option<ColorSpace>,
-    /// Explicitly detected media metadata color space.
-    pub detected_color_space: Option<ColorSpace>,
+    /// Validated metadata identity that was eligible to drive pixels.
+    pub executable_color_space: Option<ColorSpace>,
     /// Missing metadata policy active during the decision.
     pub missing_metadata_policy: MissingColorMetadataPolicy,
     /// Sequence working color space active during the decision.
@@ -277,15 +363,15 @@ pub enum ResolvedInputColor {
 }
 
 impl MissingColorMetadataPolicy {
-    /// 根据策略和检测到的色彩空间，解析有效的输入色彩空间。
+    /// 根据策略和经过验证的可执行元数据，解析有效的输入色彩空间。
     ///
-    /// `detected` 来自媒体探测（FFmpeg 标签），`working` 是序列工作空间。
-    /// 当素材无色彩标签时（`detected == None`），按策略行事。
+    /// `executable_metadata` 来自媒体探测的封闭证据，`working` 是序列工作空间。
+    /// 当素材无可执行色彩身份时，按显式策略行事。
     /// Resolve the effective input color space and retain the decision branch for diagnostics.
     pub fn resolve_input_decision(
         self,
         override_color_space: Option<ColorSpace>,
-        detected: Option<ColorSpace>,
+        executable_metadata: Option<ColorSpace>,
         working: WorkingColorSpace,
     ) -> InputColorResolution {
         if let Some(color_space) = override_color_space {
@@ -293,17 +379,17 @@ impl MissingColorMetadataPolicy {
                 resolved: ResolvedInputColor::Color(color_space),
                 source: InputColorResolutionSource::Override,
                 override_color_space,
-                detected_color_space: detected,
+                executable_color_space: executable_metadata,
                 missing_metadata_policy: self,
                 working_color_space: working,
             };
         }
-        if let Some(color_space) = detected {
+        if let Some(color_space) = executable_metadata {
             return InputColorResolution {
                 resolved: ResolvedInputColor::Color(color_space),
                 source: InputColorResolutionSource::DetectedMetadata,
                 override_color_space,
-                detected_color_space: detected,
+                executable_color_space: executable_metadata,
                 missing_metadata_policy: self,
                 working_color_space: working,
             };
@@ -322,7 +408,7 @@ impl MissingColorMetadataPolicy {
             resolved,
             source,
             override_color_space,
-            detected_color_space: detected,
+            executable_color_space: executable_metadata,
             missing_metadata_policy: self,
             working_color_space: working,
         }
@@ -334,7 +420,7 @@ impl MissingColorMetadataPolicy {
         self,
         clip_override_color_space: Option<ColorSpace>,
         asset_interpretation: AssetMediaInterpretation,
-        detected: Option<ColorSpace>,
+        executable_metadata: Option<ColorSpace>,
         working: WorkingColorSpace,
     ) -> InputColorResolution {
         if asset_interpretation.payload.is_non_color_data() {
@@ -342,18 +428,24 @@ impl MissingColorMetadataPolicy {
                 resolved: ResolvedInputColor::Data,
                 source: InputColorResolutionSource::DataTexture,
                 override_color_space: None,
-                detected_color_space: detected,
+                executable_color_space: executable_metadata,
                 missing_metadata_policy: self,
                 working_color_space: working,
             };
         }
         if clip_override_color_space.is_some() {
-            return self.resolve_input_decision(clip_override_color_space, detected, working);
+            return self.resolve_input_decision(
+                clip_override_color_space,
+                executable_metadata,
+                working,
+            );
         }
         match asset_interpretation.color {
-            MediaColorInterpretation::Auto => self.resolve_input_decision(None, detected, working),
+            MediaColorInterpretation::Auto => {
+                self.resolve_input_decision(None, executable_metadata, working)
+            }
             MediaColorInterpretation::Override { color_space } => {
-                self.resolve_input_decision(Some(color_space), detected, working)
+                self.resolve_input_decision(Some(color_space), executable_metadata, working)
             }
         }
     }
@@ -367,6 +459,17 @@ pub enum VideoRange {
     #[default]
     Full,
     Legal,
+}
+
+impl AuthoringFootprint for VideoRange {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        match self {
+            Self::Full | Self::Legal => Ok(()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -384,6 +487,17 @@ pub enum DeliveryBitDepth {
     Twelve,
 }
 
+impl AuthoringFootprint for DeliveryBitDepth {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        match self {
+            Self::Eight | Self::Ten | Self::Twelve => Ok(()),
+        }
+    }
+}
+
 /// Sequence-owned color authoring.
 ///
 /// This contains working-domain, media-input, and Program Output semantics.
@@ -396,6 +510,17 @@ pub struct SequenceColorSettings {
     pub program_output: ProgramOutputColorSettings,
 }
 
+impl AuthoringFootprint for SequenceColorSettings {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self { working_color_space: _, input, program_output } = self;
+        collector.collect(input)?;
+        collector.collect(program_output)
+    }
+}
+
 /// Default media-input policy for Timeline contributions in one Sequence.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -403,6 +528,16 @@ pub struct SequenceInputColorSettings {
     pub missing_metadata_policy: MissingColorMetadataPolicy,
     #[serde(default)]
     pub auto_tone_map_media: bool,
+}
+
+impl AuthoringFootprint for SequenceInputColorSettings {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self { missing_metadata_policy, auto_tone_map_media: _ } = self;
+        collector.collect(missing_metadata_policy)
+    }
 }
 
 /// Program Output semantics authored by one Sequence.
@@ -413,6 +548,16 @@ pub struct ProgramOutputColorSettings {
     /// Program-output tone-map policy authored for this Sequence.
     pub tone_map_policy: DisplayToneMapPolicy,
     pub color_space: ColorSpace,
+}
+
+impl AuthoringFootprint for ProgramOutputColorSettings {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self { workflow, tone_map_policy: _, color_space: _ } = self;
+        collector.collect(workflow)
+    }
 }
 
 /// Sequence defaults copied into an export target before per-export overrides.
@@ -436,6 +581,24 @@ pub struct SequenceDeliveryDefaults {
     pub hdr_content_light: Option<VideoContentLightMetadata>,
 }
 
+impl AuthoringFootprint for SequenceDeliveryDefaults {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self {
+            video_range,
+            bit_depth,
+            static_hdr_metadata_policy,
+            hdr_mastering_display: _,
+            hdr_content_light: _,
+        } = self;
+        collector.collect(video_range)?;
+        collector.collect(bit_depth)?;
+        collector.collect(static_hdr_metadata_policy)
+    }
+}
+
 /// Sequence-owned default policy for static HDR delivery metadata.
 ///
 /// This policy never means source passthrough. Rendered output may only write
@@ -447,6 +610,17 @@ pub enum StaticHdrMetadataPolicy {
     Omit,
     /// Write the sequence's explicitly authored static HDR values.
     WriteAuthored,
+}
+
+impl AuthoringFootprint for StaticHdrMetadataPolicy {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        match self {
+            Self::Omit | Self::WriteAuthored => Ok(()),
+        }
+    }
 }
 
 impl StaticHdrMetadataPolicy {
@@ -571,6 +745,35 @@ pub struct SequenceSettings {
     /// Title-safe margin as fraction of frame (0.20 = 20% total, 10% per side).
     #[serde(default = "default_title_safe_margin")]
     pub title_safe_margin: f32,
+}
+
+impl AuthoringFootprint for SequenceSettings {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self {
+            editing_mode,
+            resolution: _,
+            frame_rate: _,
+            pixel_aspect_ratio: _,
+            field_order: _,
+            timeline_display: _,
+            audio_sample_rate: _,
+            audio_display_format,
+            audio_channel_layout: _,
+            preview,
+            color,
+            delivery,
+            action_safe_margin: _,
+            title_safe_margin: _,
+        } = self;
+        collector.collect(editing_mode)?;
+        collector.collect(audio_display_format)?;
+        collector.collect(preview)?;
+        collector.collect(color)?;
+        collector.collect(delivery)
+    }
 }
 
 fn default_action_safe_margin() -> f32 {
@@ -895,6 +1098,17 @@ pub struct SequencePreset {
     pub settings: SequenceSettings,
 }
 
+impl AuthoringFootprint for SequencePreset {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self { name, settings } = self;
+        collector.collect(name)?;
+        collector.collect(settings)
+    }
+}
+
 impl SequencePreset {
     pub fn new(name: impl Into<String>, settings: SequenceSettings) -> mondrian_core::Result<Self> {
         let name = name.into();
@@ -910,7 +1124,7 @@ impl SequencePreset {
 }
 
 /// Mondrian 时间线序列
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sequence {
     pub id: SequenceId,
@@ -919,13 +1133,13 @@ pub struct Sequence {
     pub name: String,
     pub role: SequenceRole,
     pub settings: SequenceSettings,
-    pub video_tracks: Vec<Track>,
+    pub video_tracks: AuthoringList<Track>,
     /// Explicit two-input visual Transitions. Endpoint Track membership is
     /// derived from their strong Clip references.
-    pub video_transitions: Vec<crate::video_transition::VideoTransition>,
-    pub audio_tracks: Vec<Track>,
+    pub video_transitions: AuthoringList<crate::video_transition::VideoTransition>,
+    pub audio_tracks: AuthoringList<Track>,
     /// Sequence semantic catalog for audio classification and output projection.
-    pub audio_roles: Vec<crate::audio::AudioRole>,
+    pub audio_roles: AuthoringList<crate::audio::AudioRole>,
     /// Sequence-owned audio processing, routing, transitions, and public outputs.
     pub audio_program: crate::audio::AudioProgram,
     pub playhead: TimelineTime,
@@ -933,14 +1147,266 @@ pub struct Sequence {
     pub out_point: Option<TimelineTime>,
 }
 
+impl AuthoringFootprint for Sequence {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self {
+            id: _,
+            revision: _,
+            name,
+            role,
+            settings,
+            video_tracks,
+            video_transitions,
+            audio_tracks,
+            audio_roles,
+            audio_program,
+            playhead: _,
+            in_point: _,
+            out_point: _,
+        } = self;
+        collector.collect(name)?;
+        collector.collect(role)?;
+        collector.collect(settings)?;
+        collector.collect(video_tracks)?;
+        collector.collect(video_transitions)?;
+        collector.collect(audio_tracks)?;
+        collector.collect(audio_roles)?;
+        collector.collect(audio_program)
+    }
+}
+
+const SEQUENCE_AUTHOR_CONTRACT_CERTIFICATE_VERSION: u32 = 1;
+
+/// Opaque process-local evidence that one exact Sequence snapshot satisfied
+/// the complete author contract in one exact Project color environment.
+///
+/// This certificate is neither persisted nor an alternate author model. It
+/// retains the validated immutable baseline solely so a later replacement can
+/// prove its current-state and context preconditions before reusing unchanged
+/// local-validation evidence.
+#[derive(Debug)]
+pub struct SequenceAuthorContractCertificate {
+    version: u32,
+    baseline: AuthoringSnapshot<Sequence>,
+    color_environment: ProjectColorEnvironment,
+}
+
+impl SequenceAuthorContractCertificate {
+    /// Prove that `current` is the exact validated baseline owned by this
+    /// certificate in the supplied Project color environment.
+    pub fn validate_baseline(
+        &self,
+        current: &Sequence,
+        color_environment: &ProjectColorEnvironment,
+    ) -> mondrian_core::Result<()> {
+        if self.version != SEQUENCE_AUTHOR_CONTRACT_CERTIFICATE_VERSION {
+            return Err(sequence_certificate_error(
+                "Sequence author-contract certificate version is unsupported",
+            ));
+        }
+        if self.color_environment != *color_environment {
+            return Err(sequence_certificate_error(
+                "Sequence author-contract certificate belongs to a different Project color environment",
+            ));
+        }
+        if self.baseline.revision != current.revision {
+            return Err(sequence_certificate_error(format!(
+                "Sequence {} identity/revision no longer matches the certified baseline",
+                current.id
+            )));
+        }
+        if self.baseline.value() != current {
+            return Err(sequence_certificate_error(format!(
+                "Sequence {} author state no longer matches the certified baseline",
+                current.id
+            )));
+        }
+        Ok(())
+    }
+
+    /// Prepare validation evidence for one monotonic replacement.
+    ///
+    /// Identity/link, Transition, and audio-program invariants are always
+    /// revalidated across the complete candidate. Only local Track, Clip,
+    /// Effect, and Mask validators whose exact subtrees remain unchanged may
+    /// reuse the baseline evidence.
+    pub fn prepare_replacement(
+        &self,
+        current: &Sequence,
+        candidate: &Sequence,
+        color_environment: &ProjectColorEnvironment,
+    ) -> mondrian_core::Result<Self> {
+        self.validate_baseline(current, color_environment)?;
+        if candidate.id != current.id {
+            return Err(sequence_certificate_error(format!(
+                "Sequence replacement identity changed from {} to {}",
+                current.id, candidate.id
+            )));
+        }
+        if candidate.revision <= current.revision {
+            return Err(sequence_certificate_error(format!(
+                "Sequence {} replacement revision {} must be newer than certified revision {}",
+                candidate.id,
+                candidate.revision.get(),
+                current.revision.get()
+            )));
+        }
+
+        candidate.validate_author_contract_global(color_environment)?;
+        candidate.validate_changed_local_author_contracts(current)?;
+        Ok(Self::new(candidate, color_environment))
+    }
+
+    fn new(sequence: &Sequence, color_environment: &ProjectColorEnvironment) -> Self {
+        Self {
+            version: SEQUENCE_AUTHOR_CONTRACT_CERTIFICATE_VERSION,
+            baseline: AuthoringSnapshot::new(sequence.clone()),
+            color_environment: color_environment.clone(),
+        }
+    }
+}
+
 impl Sequence {
+    /// Validate one Sequence's complete local author contract.
+    ///
+    /// Collection-wide nested-reference closure is intentionally separate.
+    /// Project open/edit validation and selected-range execution admission use
+    /// this same local seam so neither duplicates Track/Clip schema rules.
+    pub fn validate_author_contract(
+        &self,
+        color_environment: &ProjectColorEnvironment,
+    ) -> mondrian_core::Result<()> {
+        self.validate_author_contract_global(color_environment)?;
+        self.validate_all_local_author_contracts()
+    }
+
+    /// Fully validate this Sequence and retain opaque process-local evidence
+    /// for later copy-on-write replacement validation.
+    pub fn prepare_author_contract_certificate(
+        &self,
+        color_environment: &ProjectColorEnvironment,
+    ) -> mondrian_core::Result<SequenceAuthorContractCertificate> {
+        self.validate_author_contract(color_environment)?;
+        Ok(SequenceAuthorContractCertificate::new(
+            self,
+            color_environment,
+        ))
+    }
+
+    fn validate_author_contract_global(
+        &self,
+        color_environment: &ProjectColorEnvironment,
+    ) -> mondrian_core::Result<()> {
+        if self.revision.get() == 0 {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "validate_sequence_author_contract".to_owned(),
+                reason: format!("Sequence '{}' has invalid author revision zero", self.name),
+            });
+        }
+        self.settings.validate_with_color_environment(color_environment)?;
+        for (tracks, expected_type, role) in [
+            (&self.video_tracks, TrackType::Video, "video"),
+            (&self.audio_tracks, TrackType::Audio, "audio"),
+        ] {
+            if let Some(track) = tracks.iter().find(|track| track.track_type != expected_type) {
+                return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "validate_sequence_author_contract".to_owned(),
+                    reason: format!(
+                        "Sequence {} {role} Track {} declares incompatible type {:?}",
+                        self.id, track.id, track.track_type
+                    ),
+                });
+            }
+        }
+        record_sequence_identity_validation();
+        self.validate_author_identities()?;
+        record_sequence_audio_validation();
+        self.audio_program
+            .validate(
+                &self.audio_tracks,
+                &self.audio_roles,
+                self.settings.audio_channel_layout,
+            )
+            .map_err(|error| mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "validate_audio_program".to_owned(),
+                reason: format!("Sequence {} has invalid audio authoring: {error}", self.id),
+            })?;
+        Ok(())
+    }
+
+    fn validate_all_local_author_contracts(&self) -> mondrian_core::Result<()> {
+        for track in self.video_tracks.iter().chain(&self.audio_tracks) {
+            validate_track_local_author_contract(track, None)?;
+        }
+        Ok(())
+    }
+
+    fn validate_changed_local_author_contracts(&self, current: &Self) -> mondrian_core::Result<()> {
+        validate_changed_track_collection(&current.video_tracks, &self.video_tracks)?;
+        validate_changed_track_collection(&current.audio_tracks, &self.audio_tracks)
+    }
+
+    /// Compare complete authored state while deliberately ignoring only the
+    /// monotonic transaction revision.
+    ///
+    /// Allocation identities are execution evidence, so structurally equal
+    /// COW containers compare equal even when they no longer share storage.
+    pub fn author_state_eq_ignoring_revision(&self, other: &Self) -> bool {
+        let Self {
+            id,
+            revision: _,
+            name,
+            role,
+            settings,
+            video_tracks,
+            video_transitions,
+            audio_tracks,
+            audio_roles,
+            audio_program,
+            playhead,
+            in_point,
+            out_point,
+        } = self;
+        let Self {
+            id: other_id,
+            revision: _,
+            name: other_name,
+            role: other_role,
+            settings: other_settings,
+            video_tracks: other_video_tracks,
+            video_transitions: other_video_transitions,
+            audio_tracks: other_audio_tracks,
+            audio_roles: other_audio_roles,
+            audio_program: other_audio_program,
+            playhead: other_playhead,
+            in_point: other_in_point,
+            out_point: other_out_point,
+        } = other;
+
+        id == other_id
+            && name == other_name
+            && role == other_role
+            && settings == other_settings
+            && video_tracks == other_video_tracks
+            && video_transitions == other_video_transitions
+            && audio_tracks == other_audio_tracks
+            && audio_roles == other_audio_roles
+            && audio_program == other_audio_program
+            && playhead == other_playhead
+            && in_point == other_in_point
+            && out_point == other_out_point
+    }
+
     pub fn new(name: impl Into<String>) -> Self {
         let settings = SequenceSettings::default();
-        let audio_tracks = vec![
+        let audio_tracks = AuthoringList::from(vec![
             Track::new_audio("A1"),
             Track::new_audio("A2"),
             Track::new_audio("A3"),
-        ];
+        ]);
         let audio_program =
             crate::audio::AudioProgram::for_tracks(audio_tracks.iter().map(|track| track.id));
         Self {
@@ -948,14 +1414,14 @@ impl Sequence {
             revision: SequenceRevision::INITIAL,
             name: name.into(),
             role: SequenceRole::Editorial,
-            video_tracks: vec![
+            video_tracks: AuthoringList::from(vec![
                 Track::new_video("V1"),
                 Track::new_video("V2"),
                 Track::new_video("V3"),
-            ],
-            video_transitions: Vec::new(),
+            ]),
+            video_transitions: AuthoringList::new(),
             audio_tracks,
-            audio_roles: Vec::new(),
+            audio_roles: AuthoringList::new(),
             audio_program,
             playhead: TimelineTime::ZERO,
             in_point: None,
@@ -1380,14 +1846,55 @@ impl Sequence {
                 *counts.entry(group).or_default() += 1;
             }
         }
-        for clip in self
+        let singleton_groups = counts
+            .into_iter()
+            .filter_map(|(group, count)| (count == 1).then_some(group))
+            .collect::<HashSet<_>>();
+        if singleton_groups.is_empty() {
+            return;
+        }
+
+        let video_track_indices = self
             .video_tracks
-            .iter_mut()
-            .chain(&mut self.audio_tracks)
-            .flat_map(|track| &mut track.clips)
-        {
-            if clip.link_group.is_some_and(|group| counts.get(&group) == Some(&1)) {
-                clip.link_group = None;
+            .iter()
+            .enumerate()
+            .filter_map(|(index, track)| {
+                track
+                    .clips
+                    .iter()
+                    .any(|clip| {
+                        clip.link_group.is_some_and(|group| singleton_groups.contains(&group))
+                    })
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let audio_track_indices = self
+            .audio_tracks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, track)| {
+                track
+                    .clips
+                    .iter()
+                    .any(|clip| {
+                        clip.link_group.is_some_and(|group| singleton_groups.contains(&group))
+                    })
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+
+        for track_index in video_track_indices {
+            for clip in &mut self.video_tracks[track_index].clips {
+                if clip.link_group.is_some_and(|group| singleton_groups.contains(&group)) {
+                    clip.link_group = None;
+                }
+            }
+        }
+        for track_index in audio_track_indices {
+            for clip in &mut self.audio_tracks[track_index].clips {
+                if clip.link_group.is_some_and(|group| singleton_groups.contains(&group)) {
+                    clip.link_group = None;
+                }
             }
         }
     }
@@ -1396,6 +1903,13 @@ impl Sequence {
     /// longer exist after a structural edit.
     pub fn compact_video_transitions(&mut self) {
         let video_tracks = &self.video_tracks;
+        if self
+            .video_transitions
+            .iter()
+            .all(|transition| validate_video_transition(video_tracks, transition).is_ok())
+        {
+            return;
+        }
         self.video_transitions
             .retain(|transition| validate_video_transition(video_tracks, transition).is_ok());
     }
@@ -1557,6 +2071,193 @@ impl Sequence {
         Ok(())
     }
 }
+
+fn validate_changed_track_collection(
+    current: &AuthoringList<Track>,
+    candidate: &AuthoringList<Track>,
+) -> mondrian_core::Result<()> {
+    if current.shares_allocation_with(candidate) {
+        return Ok(());
+    }
+    for track in candidate {
+        let previous = current.iter().find(|current| current.id == track.id);
+        if previous == Some(track) {
+            continue;
+        }
+        validate_track_local_author_contract(track, previous)?;
+    }
+    Ok(())
+}
+
+fn validate_track_local_author_contract(
+    track: &Track,
+    previous: Option<&Track>,
+) -> mondrian_core::Result<()> {
+    record_track_local_validation();
+    track.validate_author_state()?;
+    if previous.is_none_or(|previous| previous.opacity != track.opacity) {
+        track.opacity.validate().map_err(|error| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "validate_sequence_author_contract".to_owned(),
+                reason: format!("Track {} opacity is invalid: {error}", track.id),
+            }
+        })?;
+    }
+    if previous.is_some_and(|previous| previous.clips.shares_allocation_with(&track.clips)) {
+        return Ok(());
+    }
+    for clip in &track.clips {
+        let previous_clip =
+            previous.and_then(|previous| previous.clips.iter().find(|item| item.id == clip.id));
+        if previous_clip == Some(clip) {
+            continue;
+        }
+        validate_clip_local_author_contract(clip, previous_clip)?;
+    }
+    Ok(())
+}
+
+fn validate_clip_local_author_contract(
+    clip: &crate::clip::Clip,
+    previous: Option<&crate::clip::Clip>,
+) -> mondrian_core::Result<()> {
+    record_clip_local_validation();
+    clip.validate_time_state()?;
+    if let Some(title) = clip.content.basic_title() {
+        title.validate_author_state()?;
+    }
+    clip.transform.to_property_bag().validate().map_err(|error| {
+        mondrian_core::MondrianError::WorkflowStepFailed {
+            step_id: "validate_sequence_author_contract".to_owned(),
+            reason: format!("Clip {} transform schema is invalid: {error}", clip.id),
+        }
+    })?;
+
+    if !previous.is_some_and(|previous| previous.effects.shares_allocation_with(&clip.effects)) {
+        for effect in &clip.effects {
+            let previous_effect = previous
+                .and_then(|previous| previous.effects.iter().find(|item| item.id == effect.id));
+            if previous_effect != Some(effect) {
+                record_effect_local_validation();
+                effect.validate_author_state()?;
+            }
+        }
+    }
+    if !previous.is_some_and(|previous| previous.masks.shares_allocation_with(&clip.masks)) {
+        for mask in &clip.masks {
+            let previous_mask =
+                previous.and_then(|previous| previous.masks.iter().find(|item| item.id == mask.id));
+            if previous_mask != Some(mask) {
+                record_mask_local_validation();
+                mask.validate_author_state()?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn sequence_certificate_error(reason: impl Into<String>) -> mondrian_core::MondrianError {
+    mondrian_core::MondrianError::WorkflowStepFailed {
+        step_id: "validate_sequence_author_contract_certificate".to_owned(),
+        reason: reason.into(),
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SequenceAuthorContractValidationVisits {
+    identity_passes: usize,
+    audio_passes: usize,
+    tracks: usize,
+    clips: usize,
+    effects: usize,
+    masks: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static SEQUENCE_AUTHOR_CONTRACT_VALIDATION_VISITS:
+        std::cell::Cell<SequenceAuthorContractValidationVisits> =
+        const { std::cell::Cell::new(SequenceAuthorContractValidationVisits {
+            identity_passes: 0,
+            audio_passes: 0,
+            tracks: 0,
+            clips: 0,
+            effects: 0,
+            masks: 0,
+        }) };
+}
+
+#[cfg(test)]
+fn update_sequence_author_contract_validation_visits(
+    update: impl FnOnce(&mut SequenceAuthorContractValidationVisits),
+) {
+    SEQUENCE_AUTHOR_CONTRACT_VALIDATION_VISITS.with(|visits| {
+        let mut value = visits.get();
+        update(&mut value);
+        visits.set(value);
+    });
+}
+
+#[cfg(test)]
+fn reset_sequence_author_contract_validation_visits() {
+    SEQUENCE_AUTHOR_CONTRACT_VALIDATION_VISITS.with(|visits| {
+        visits.set(SequenceAuthorContractValidationVisits::default());
+    });
+}
+
+#[cfg(test)]
+fn sequence_author_contract_validation_visits() -> SequenceAuthorContractValidationVisits {
+    SEQUENCE_AUTHOR_CONTRACT_VALIDATION_VISITS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn record_sequence_identity_validation() {
+    update_sequence_author_contract_validation_visits(|visits| visits.identity_passes += 1);
+}
+
+#[cfg(not(test))]
+fn record_sequence_identity_validation() {}
+
+#[cfg(test)]
+fn record_sequence_audio_validation() {
+    update_sequence_author_contract_validation_visits(|visits| visits.audio_passes += 1);
+}
+
+#[cfg(not(test))]
+fn record_sequence_audio_validation() {}
+
+#[cfg(test)]
+fn record_track_local_validation() {
+    update_sequence_author_contract_validation_visits(|visits| visits.tracks += 1);
+}
+
+#[cfg(not(test))]
+fn record_track_local_validation() {}
+
+#[cfg(test)]
+fn record_clip_local_validation() {
+    update_sequence_author_contract_validation_visits(|visits| visits.clips += 1);
+}
+
+#[cfg(not(test))]
+fn record_clip_local_validation() {}
+
+#[cfg(test)]
+fn record_effect_local_validation() {
+    update_sequence_author_contract_validation_visits(|visits| visits.effects += 1);
+}
+
+#[cfg(not(test))]
+fn record_effect_local_validation() {}
+
+#[cfg(test)]
+fn record_mask_local_validation() {
+    update_sequence_author_contract_validation_visits(|visits| visits.masks += 1);
+}
+
+#[cfg(not(test))]
+fn record_mask_local_validation() {}
 
 pub(crate) fn validate_video_transition(
     video_tracks: &[Track],
@@ -1727,6 +2428,14 @@ impl mondrian_core::timeline_data::RenderPlanSource for Sequence {
         Ok(items)
     }
 
+    fn source_sequence_id(&self) -> SequenceId {
+        self.id
+    }
+
+    fn source_sequence_revision(&self) -> SequenceRevision {
+        self.revision
+    }
+
     fn source_time_base(&self) -> mondrian_core::types::Rational {
         Sequence::time_base(self)
     }
@@ -1747,14 +2456,34 @@ pub(crate) fn flatten_visual_clip(
     track_opacity: f32,
     time: TimelineTime,
 ) -> mondrian_core::Result<mondrian_core::timeline_data::FlatActiveClip> {
+    flatten_visual_clip_with_effect_snapshots(
+        clip,
+        track,
+        track_index,
+        track_opacity,
+        time,
+        Arc::from(clip.effects.as_slice()),
+        Arc::from(clip.masks.as_slice()),
+    )
+}
+
+pub(crate) fn flatten_visual_clip_with_effect_snapshots(
+    clip: &crate::clip::Clip,
+    track: &Track,
+    track_index: usize,
+    track_opacity: f32,
+    time: TimelineTime,
+    effects: Arc<[mondrian_core::effect_data::EffectNode]>,
+    masks: Arc<[mondrian_core::mask_data::MaskComponent]>,
+) -> mondrian_core::Result<mondrian_core::timeline_data::FlatActiveClip> {
     let clip_time = clip.timeline_to_clip_time(time)?;
     let matrix = clip.transform.evaluate_matrix(clip_time);
     Ok(mondrian_core::timeline_data::FlatActiveClip {
         clip_id: clip.id,
         content: clip.content.clone(),
         is_disabled: clip.is_disabled,
-        effects: clip.effects.clone(),
-        masks: clip.masks.clone(),
+        effects,
+        masks,
         clip_time,
         source_time: clip.timeline_to_source_time(time)?,
         transform_matrix: [
@@ -1780,8 +2509,28 @@ pub(crate) fn flatten_visual_transition(
     track_opacity: f32,
     time: TimelineTime,
 ) -> mondrian_core::Result<mondrian_core::timeline_data::FlatVisualItem> {
+    flatten_visual_transition_with_effect_snapshots(
+        transition.id,
+        transition.sequence_range,
+        flat_video_transition_definition_snapshot(transition),
+        left,
+        right,
+        track,
+        track_index,
+        track_opacity,
+        time,
+        Arc::from(left.effects.as_slice()),
+        Arc::from(left.masks.as_slice()),
+        Arc::from(right.effects.as_slice()),
+        Arc::from(right.masks.as_slice()),
+    )
+}
+
+pub(crate) fn flat_video_transition_definition_snapshot(
+    transition: &crate::video_transition::VideoTransition,
+) -> Arc<mondrian_core::timeline_data::FlatVideoTransitionDefinitionSnapshot> {
     use mondrian_core::timeline_data::{
-        FlatTransitionProgress, FlatVideoTransition, FlatVideoTransitionDefinition, FlatVisualItem,
+        FlatVideoTransitionDefinition, FlatVideoTransitionDefinitionSnapshot,
     };
 
     let definition = match &transition.transition_type {
@@ -1792,33 +2541,88 @@ pub(crate) fn flatten_visual_transition(
             FlatVideoTransitionDefinition::Plugin { definition_id: definition_id.clone() }
         }
     };
-    Ok(FlatVisualItem::Transition(Box::new(FlatVideoTransition {
-        transition_id: transition.id,
+    Arc::new(FlatVideoTransitionDefinitionSnapshot {
         definition,
-        left: flatten_visual_clip(left, track, track_index, track_opacity, time)?,
-        right: flatten_visual_clip(right, track, track_index, track_opacity, time)?,
-        progress: FlatTransitionProgress {
-            elapsed: time.checked_sub(transition.sequence_range.start)?,
-            duration: transition.sequence_range.duration,
-        },
         properties: transition.properties.clone(),
         params: transition.params.clone(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn flatten_visual_transition_with_effect_snapshots(
+    transition_id: mondrian_core::VideoTransitionId,
+    sequence_range: mondrian_core::TimelineTimeRange,
+    definition: Arc<mondrian_core::timeline_data::FlatVideoTransitionDefinitionSnapshot>,
+    left: &crate::clip::Clip,
+    right: &crate::clip::Clip,
+    track: &Track,
+    track_index: usize,
+    track_opacity: f32,
+    time: TimelineTime,
+    left_effects: Arc<[mondrian_core::effect_data::EffectNode]>,
+    left_masks: Arc<[mondrian_core::mask_data::MaskComponent]>,
+    right_effects: Arc<[mondrian_core::effect_data::EffectNode]>,
+    right_masks: Arc<[mondrian_core::mask_data::MaskComponent]>,
+) -> mondrian_core::Result<mondrian_core::timeline_data::FlatVisualItem> {
+    use mondrian_core::timeline_data::{
+        FlatTransitionProgress, FlatVideoTransition, FlatVisualItem,
+    };
+
+    Ok(FlatVisualItem::Transition(Box::new(FlatVideoTransition {
+        transition_id,
+        definition,
+        left: flatten_visual_clip_with_effect_snapshots(
+            left,
+            track,
+            track_index,
+            track_opacity,
+            time,
+            left_effects,
+            left_masks,
+        )?,
+        right: flatten_visual_clip_with_effect_snapshots(
+            right,
+            track,
+            track_index,
+            track_opacity,
+            time,
+            right_effects,
+            right_masks,
+        )?,
+        progress: FlatTransitionProgress {
+            elapsed: time.checked_sub(sequence_range.start)?,
+            duration: sequence_range.duration,
+        },
     })))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SequenceCollection {
-    pub sequences: Vec<Sequence>,
+    pub sequences: AuthoringList<Sequence>,
     pub default_sequence_id: SequenceId,
     pub active_sequence_id: SequenceId,
+}
+
+impl AuthoringFootprint for SequenceCollection {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self {
+            sequences,
+            default_sequence_id: _,
+            active_sequence_id: _,
+        } = self;
+        collector.collect(sequences)
+    }
 }
 
 impl SequenceCollection {
     pub fn new(default_sequence: Sequence) -> Self {
         let id = default_sequence.id;
         Self {
-            sequences: vec![default_sequence],
+            sequences: AuthoringList::from(vec![default_sequence]),
             default_sequence_id: id,
             active_sequence_id: id,
         }
@@ -1863,130 +2667,29 @@ impl SequenceCollection {
         Ok(())
     }
 
-    pub fn validate_nested_sequences(&self) -> mondrian_core::Result<()> {
-        let sequence_ids: HashSet<SequenceId> = self.sequences.iter().map(|seq| seq.id).collect();
-        if sequence_ids.len() != self.sequences.len() {
-            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
-                step_id: "validate_author_identities".to_owned(),
-                reason: "duplicate Sequence identity in project document".to_owned(),
-            });
-        }
-        for sequence in &self.sequences {
-            sequence.validate_author_identities()?;
-            sequence
-                .audio_program
-                .validate(
-                    &sequence.audio_tracks,
-                    &sequence.audio_roles,
-                    sequence.settings.audio_channel_layout,
-                )
-                .map_err(|error| mondrian_core::MondrianError::WorkflowStepFailed {
-                    step_id: "validate_audio_program".to_owned(),
-                    reason: format!(
-                        "Sequence {} has invalid audio authoring: {error}",
-                        sequence.id
-                    ),
-                })?;
-            for clip in sequence.audio_tracks.iter().flat_map(|track| &track.clips) {
-                for edit in &clip.audio_components {
-                    let crate::audio::AudioComponentSource::NestedOutput { output_id } =
-                        edit.source
-                    else {
-                        continue;
-                    };
-                    let Some(sequence_id) = clip.nested_sequence_id() else {
-                        return Err(mondrian_core::MondrianError::WorkflowStepFailed {
-                            step_id: "validate_audio_program".to_owned(),
-                            reason: format!("nested audio edit {} has no owning Sequence", edit.id),
-                        });
-                    };
-                    let Some(child) = self.sequence(sequence_id) else {
-                        return Err(mondrian_core::MondrianError::WorkflowStepFailed {
-                            step_id: "validate_audio_program".to_owned(),
-                            reason: format!("nested audio Sequence does not exist: {sequence_id}"),
-                        });
-                    };
-                    if !child.audio_program.outputs.iter().any(|output| output.id == output_id) {
-                        return Err(mondrian_core::MondrianError::WorkflowStepFailed {
-                            step_id: "validate_audio_program".to_owned(),
-                            reason: format!("nested audio output does not exist: {output_id}"),
-                        });
-                    }
-                    if let crate::audio::AudioComponentChannelMapping::Explicit(matrix) =
-                        &edit.channel_mapping
-                    {
-                        if matrix.source_layout() != child.settings.audio_channel_layout {
-                            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
-                                step_id: "validate_audio_program".to_owned(),
-                                reason: format!(
-                                    "nested audio edit {} matrix source layout does not match child Sequence {}",
-                                    edit.id, sequence_id
-                                ),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-        let graph = self.nested_sequence_graph();
-        for nested_id in graph.values().flatten() {
-            if !sequence_ids.contains(nested_id) {
-                return Err(mondrian_core::MondrianError::WorkflowStepFailed {
-                    step_id: "validate_nested_sequences".to_string(),
-                    reason: format!("嵌套序列不存在: {nested_id}"),
-                });
-            }
-        }
-        for root in &sequence_ids {
-            let mut visiting = HashSet::new();
-            let mut visited = HashSet::new();
-            if has_cycle(*root, &graph, &mut visiting, &mut visited) {
-                return Err(mondrian_core::MondrianError::WorkflowStepFailed {
-                    step_id: "validate_nested_sequences".to_string(),
-                    reason: format!("检测到序列嵌套循环: {root}"),
-                });
-            }
-        }
-        Ok(())
+    /// Validate collection identities and the cross-Sequence dependency closure.
+    ///
+    /// Each Sequence's local author contract is owned by the caller so a
+    /// complete Project validation does not traverse the same body twice.
+    pub fn validate_dependency_closure(&self) -> mondrian_core::Result<()> {
+        crate::SequenceDependencyCertificate::build(self).map(|_| ())
     }
 
-    fn nested_sequence_graph(&self) -> HashMap<SequenceId, Vec<SequenceId>> {
-        self.sequences
-            .iter()
-            .map(|seq| {
-                let nested = seq
-                    .video_tracks
-                    .iter()
-                    .chain(seq.audio_tracks.iter())
-                    .flat_map(|track| track.clips.iter())
-                    .filter_map(|clip| clip.nested_sequence_id())
-                    .collect();
-                (seq.id, nested)
-            })
-            .collect()
+    /// Validate a prospective replacement's collection-wide dependency closure.
+    ///
+    /// The collection must already be canonical and the caller must validate
+    /// the replacement's local author contract exactly once. Collection
+    /// This general stateless Interface first derives the canonical collection
+    /// index, then evaluates the replacement through the same incremental
+    /// contract used by an `AuthoringSession`. Session hot paths retain that
+    /// index and therefore extract only the replacement body.
+    pub fn validate_dependency_closure_with_replacement(
+        &self,
+        replacement: &Sequence,
+    ) -> mondrian_core::Result<()> {
+        let certificate = crate::SequenceDependencyCertificate::build(self)?;
+        certificate.prepare_replacement(self, replacement).map(|_| ())
     }
-}
-
-fn has_cycle(
-    node: SequenceId,
-    graph: &HashMap<SequenceId, Vec<SequenceId>>,
-    visiting: &mut HashSet<SequenceId>,
-    visited: &mut HashSet<SequenceId>,
-) -> bool {
-    if visited.contains(&node) {
-        return false;
-    }
-    if !visiting.insert(node) {
-        return true;
-    }
-    for child in graph.get(&node).into_iter().flatten() {
-        if has_cycle(*child, graph, visiting, visited) {
-            return true;
-        }
-    }
-    visiting.remove(&node);
-    visited.insert(node);
-    false
 }
 
 fn move_track_in_list(
@@ -2018,10 +2721,21 @@ fn renumber_tracks(tracks: &mut [Track], prefix: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::{
+        AudioChannelStrip, AudioComponentChannelMapping, AudioComponentEdit, AudioMixBus,
+        AudioProcessingScope, AudioProcessorDefinitionRef, AudioProcessorInstance, AudioRole,
+        AudioTransition, AudioTransitionCurve, BUILTIN_GAIN_DEFINITION_ID,
+    };
     use crate::clip::Clip;
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
-    use mondrian_core::effect_data::EffectType;
-    use mondrian_core::DisplayToneMapPolicy;
+    use mondrian_core::effect_data::{EffectNode, EffectType};
+    use mondrian_core::mask_data::{BezierPoint, MaskComponent, MaskKeyframe, MaskShape};
+    use mondrian_core::{
+        AudioChannelMixEntry, AudioChannelMixMatrix, AudioSourceComponentId,
+        AuthoringFootprintCollector, AuthoringSnapshot, DisplayToneMapPolicy, MixBusId,
+        TimelineTimeRange,
+    };
+    use mondrian_effects::EffectNodeExt;
 
     fn pinned_custom_engine(source: OcioConfigSource) -> ColorEngine {
         ColorEngine::CustomOcio {
@@ -2061,6 +2775,366 @@ mod tests {
             .expect("valid test time")
     }
 
+    fn footprint<T: AuthoringFootprint>(
+        root: &AuthoringSnapshot<T>,
+    ) -> mondrian_core::AuthoringFootprintManifest {
+        let mut collector = AuthoringFootprintCollector::new();
+        collector.collect(root).expect("collect authoring footprint");
+        collector.finish()
+    }
+
+    fn populated_authoring_collection() -> SequenceCollection {
+        let mut sequence = Sequence::new("shared authoring");
+        let time_base = sequence.time_base();
+        let scope = AudioProcessingScope::identity();
+        let scope_id = scope.id;
+        sequence.audio_program.add_processing_scope(scope);
+        sequence.audio_program.buses.push(AudioMixBus {
+            id: MixBusId::new(),
+            name: "Stem".to_owned(),
+            strip: AudioChannelStrip::default(),
+        });
+        sequence.audio_roles.push(AudioRole {
+            id: AudioRoleId::new(),
+            parent_id: None,
+            name: "Dialogue".to_owned(),
+            standard_semantic_key: Some("dialogue".to_owned()),
+        });
+
+        let mut left =
+            Clip::new(AssetId::new(), tt(0, time_base), tt(10, time_base)).expect("left Clip");
+        left.effects.push(EffectNode::new(EffectType::GaussianBlur));
+        left.masks.push(MaskComponent::new(
+            "Isolation Mask".to_owned(),
+            MaskKeyframe::default(),
+        ));
+        left.audio_components.push(AudioComponentEdit::media(
+            AudioSourceComponentId::primary(),
+            scope_id,
+        ));
+        let left_id = left.id;
+        let left_audio_id = left.audio_components[0].id;
+
+        let mut right =
+            Clip::new(AssetId::new(), tt(10, time_base), tt(10, time_base)).expect("right Clip");
+        right.audio_components.push(AudioComponentEdit::media(
+            AudioSourceComponentId::primary(),
+            scope_id,
+        ));
+        let right_id = right.id;
+        let right_audio_id = right.audio_components[0].id;
+        sequence.video_tracks[0].add_clip(left).expect("place left Clip");
+        sequence.video_tracks[0].add_clip(right).expect("place right Clip");
+        sequence
+            .video_transitions
+            .push(crate::video_transition::VideoTransition::cross_dissolve(
+                left_id,
+                right_id,
+                TimelineTimeRange::new(tt(8, time_base), tt(4, time_base))
+                    .expect("valid visual Transition range"),
+            ));
+        sequence.audio_program.transitions.push(AudioTransition {
+            id: AudioTransitionId::new(),
+            left: left_audio_id,
+            right: right_audio_id,
+            sequence_range: TimelineTimeRange::new(tt(8, time_base), tt(4, time_base))
+                .expect("valid audio Transition range"),
+            curve: AudioTransitionCurve::EqualPower,
+        });
+        SequenceCollection::new(sequence)
+    }
+
+    fn sequence_with_local_validation_children() -> Sequence {
+        let mut sequence = Sequence::new("certificate");
+        let time_base = sequence.time_base();
+        let mut clip =
+            Clip::new(AssetId::new(), tt(0, time_base), tt(10, time_base)).expect("valid Clip");
+        let mut effect = EffectNode::new(EffectType::GaussianBlur);
+        effect
+            .apply_property_mutation(PropertyMutation::DefineProperty(
+                mondrian_core::automation::PropertyDescriptor::new(
+                    "effect.gaussian_blur.radius",
+                    "Radius",
+                    PropertyValue::Float(8.0),
+                ),
+            ))
+            .expect("define effect property");
+        clip.effects.push(effect);
+        clip.masks.push(MaskComponent::new(
+            "Mask".to_owned(),
+            MaskKeyframe::default(),
+        ));
+        sequence.video_tracks[0].add_clip(clip).expect("place Clip");
+        sequence
+    }
+
+    #[test]
+    fn cloned_authoring_collection_detaches_every_mutated_nested_list() {
+        let original = populated_authoring_collection();
+        let original_json = serde_json::to_vec(&original).expect("serialize original aggregate");
+        let mut candidate = original.clone();
+
+        candidate.sequences.push(Sequence::new("detached sibling"));
+        let sequence = &mut candidate.sequences[0];
+        sequence.video_tracks.push(Track::new_video("V4"));
+        sequence.audio_tracks.pop();
+        sequence.video_transitions.clear();
+        sequence.audio_roles.clear();
+        sequence.audio_program.processing_scopes.clear();
+        sequence.audio_program.transitions.clear();
+        sequence.audio_program.buses.clear();
+        sequence.audio_program.outputs.clear();
+        sequence.audio_program.routes.clear();
+        let clip = &mut sequence.video_tracks[0].clips[0];
+        clip.effects.clear();
+        clip.masks.clear();
+        clip.audio_components.clear();
+        clip.label = Some("candidate only".to_owned());
+
+        assert_eq!(
+            serde_json::to_vec(&original).expect("serialize unchanged original"),
+            original_json
+        );
+        assert_eq!(original.sequences.len(), 1);
+        assert_eq!(original.sequences[0].video_tracks.len(), 3);
+        assert_eq!(original.sequences[0].audio_tracks.len(), 3);
+        assert_eq!(original.sequences[0].video_transitions.len(), 1);
+        assert_eq!(original.sequences[0].audio_roles.len(), 1);
+        assert_eq!(
+            original.sequences[0].video_tracks[0].clips[0].effects.len(),
+            1
+        );
+        assert_eq!(
+            original.sequences[0].video_tracks[0].clips[0].masks.len(),
+            1
+        );
+        assert_eq!(
+            original.sequences[0].video_tracks[0].clips[0].audio_components.len(),
+            1
+        );
+        assert_eq!(
+            original.sequences[0].audio_program.processing_scopes.len(),
+            1
+        );
+        assert_eq!(original.sequences[0].audio_program.transitions.len(), 1);
+        assert_eq!(original.sequences[0].audio_program.buses.len(), 1);
+        assert_eq!(original.sequences[0].audio_program.outputs.len(), 1);
+        assert_eq!(original.sequences[0].audio_program.routes.len(), 3);
+    }
+
+    #[test]
+    fn authoring_lists_preserve_vec_json_bytes_and_aggregate_roundtrip() {
+        fn assert_vec_bytes<T: Serialize>(list: &AuthoringList<T>) {
+            assert_eq!(
+                serde_json::to_vec(list).expect("serialize AuthoringList"),
+                serde_json::to_vec(list.as_slice()).expect("serialize equivalent slice")
+            );
+        }
+
+        let collection = populated_authoring_collection();
+        let sequence = &collection.sequences[0];
+        let track = &sequence.video_tracks[0];
+        let clip = &track.clips[0];
+        assert_vec_bytes(&collection.sequences);
+        assert_vec_bytes(&sequence.video_tracks);
+        assert_vec_bytes(&sequence.video_transitions);
+        assert_vec_bytes(&sequence.audio_tracks);
+        assert_vec_bytes(&sequence.audio_roles);
+        assert_vec_bytes(&track.clips);
+        assert_vec_bytes(&clip.effects);
+        assert_vec_bytes(&clip.masks);
+        assert_vec_bytes(&clip.audio_components);
+        assert_vec_bytes(&sequence.audio_program.processing_scopes);
+        assert_vec_bytes(&sequence.audio_program.transitions);
+        assert_vec_bytes(&sequence.audio_program.buses);
+        assert_vec_bytes(&sequence.audio_program.outputs);
+        assert_vec_bytes(&sequence.audio_program.routes);
+
+        let json = serde_json::to_vec(&collection).expect("serialize aggregate");
+        let restored: SequenceCollection =
+            serde_json::from_slice(&json).expect("deserialize aggregate");
+        assert_eq!(restored, collection);
+        assert_eq!(
+            serde_json::to_vec(&restored).expect("serialize restored aggregate"),
+            json
+        );
+    }
+
+    #[test]
+    fn rich_author_snapshot_footprint_covers_visual_audio_and_opaque_payloads() {
+        let baseline = AuthoringSnapshot::new(SequenceCollection::new(Sequence::new("baseline")));
+        let mut rich = populated_authoring_collection();
+        let sequence = &mut rich.sequences[0];
+        let time_base = sequence.time_base();
+
+        let transition = &mut sequence.video_transitions[0];
+        transition.transition_type = crate::VideoTransitionType::Plugin {
+            definition_id: "com.example.page-curl".to_owned(),
+        };
+        transition.params = serde_json::json!({
+            "nested": {
+                "labels": ["front", "back"],
+                "shader": "page-curl-v4"
+            }
+        });
+
+        let clip = &mut sequence.video_tracks[0].clips[0];
+        clip.effects[0].effect_type = EffectType::Plugin("com.example.glow".to_owned());
+        clip.effects[0].params = serde_json::json!({
+            "kernel": [1.0, 0.5, 0.25],
+            "resource": "project://luts/glow.cube"
+        });
+        clip.masks[0].shape_keyframes[0].1 = MaskShape::Path {
+            points: vec![
+                BezierPoint::new(glam::Vec2::new(0.1, 0.1)),
+                BezierPoint::new(glam::Vec2::new(0.9, 0.9)),
+            ],
+            closed: true,
+        };
+        clip.audio_components[0].channel_mapping = AudioComponentChannelMapping::Explicit(
+            AudioChannelMixMatrix::new(
+                AudioChannelLayout::Stereo,
+                AudioChannelLayout::Stereo,
+                [
+                    AudioChannelMixEntry::new(0, 0, 1.0).expect("left matrix edge"),
+                    AudioChannelMixEntry::new(1, 1, 1.0).expect("right matrix edge"),
+                ],
+            )
+            .expect("explicit matrix"),
+        );
+
+        sequence.video_tracks[1]
+            .add_clip(
+                Clip::new_basic_title(
+                    "A deliberately retained title payload",
+                    "Test Font Family",
+                    tt(30, time_base),
+                    tt(10, time_base),
+                )
+                .expect("Basic Title"),
+            )
+            .expect("place Basic Title");
+
+        let mut vst3 = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        vst3.definition = AudioProcessorDefinitionRef::Vst3 {
+            class_id: "00112233445566778899aabbccddeeff".to_owned(),
+            vendor: Some("Example Audio".to_owned()),
+            schema_version: 4,
+        };
+        vst3.opaque_state = Some(AuthoringList::from(vec![0x5a; 4096]));
+        let audio_track_id = sequence.audio_tracks[0].id;
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&audio_track_id)
+            .expect("audio Track mixer channel")
+            .strip
+            .pre_fader
+            .processors
+            .push(vst3);
+
+        let mut clap = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        clap.definition = AudioProcessorDefinitionRef::Clap {
+            plugin_id: "com.example.clap.saturator".to_owned(),
+            schema_version: 2,
+        };
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&audio_track_id)
+            .expect("audio Track mixer channel")
+            .strip
+            .post_fader
+            .processors
+            .push(clap);
+
+        let rich = AuthoringSnapshot::new(rich);
+        let baseline_manifest = footprint(&baseline);
+        let rich_manifest = footprint(&rich);
+        assert!(rich_manifest.total_bytes() > baseline_manifest.total_bytes() + 4096);
+        assert!(rich_manifest.allocation_count() > baseline_manifest.allocation_count());
+    }
+
+    #[test]
+    fn footprint_deduplicates_shared_roots_and_only_detached_branches_diverge() {
+        let original = populated_authoring_collection();
+        let mut candidate = original.clone();
+        assert!(candidate.sequences.shares_allocation_with(&original.sequences));
+        assert!(candidate.sequences[0]
+            .audio_program
+            .track_channels
+            .shares_allocation_with(&original.sequences[0].audio_program.track_channels));
+
+        candidate.sequences[0].video_tracks[0].clips[0].effects.push(EffectNode::new(
+            EffectType::Plugin("com.example.detached".to_owned()),
+        ));
+
+        assert!(!candidate.sequences.shares_allocation_with(&original.sequences));
+        assert!(!candidate.sequences[0]
+            .video_tracks
+            .shares_allocation_with(&original.sequences[0].video_tracks));
+        assert!(!candidate.sequences[0].video_tracks[0]
+            .clips
+            .shares_allocation_with(&original.sequences[0].video_tracks[0].clips));
+        assert!(!candidate.sequences[0].video_tracks[0].clips[0]
+            .effects
+            .shares_allocation_with(&original.sequences[0].video_tracks[0].clips[0].effects));
+        assert!(candidate.sequences[0]
+            .audio_program
+            .track_channels
+            .shares_allocation_with(&original.sequences[0].audio_program.track_channels));
+
+        let original = AuthoringSnapshot::new(original);
+        let shared = original.clone();
+        let single_manifest = footprint(&original);
+        let mut shared_collector = AuthoringFootprintCollector::new();
+        shared_collector.collect(&original).expect("collect original");
+        shared_collector.collect(&shared).expect("collect shared root");
+        assert_eq!(shared_collector.finish(), single_manifest);
+
+        let detached = AuthoringSnapshot::new(candidate);
+        let mut detached_collector = AuthoringFootprintCollector::new();
+        detached_collector.collect(&original).expect("collect original");
+        detached_collector.collect(&detached).expect("collect detached root");
+        let detached_manifest = detached_collector.finish();
+        assert!(detached_manifest.total_bytes() > single_manifest.total_bytes());
+        assert!(detached_manifest.allocation_count() > single_manifest.allocation_count());
+    }
+
+    #[test]
+    fn structured_sequence_equality_ignores_only_revision() {
+        let original = populated_authoring_collection().sequences[0].clone();
+        let json = serde_json::to_vec(&original).expect("serialize Sequence");
+        let restored: Sequence = serde_json::from_slice(&json).expect("deserialize Sequence");
+        assert_eq!(restored, original);
+        assert!(restored.author_state_eq_ignoring_revision(&original));
+
+        let mut revision_only = original.clone();
+        revision_only.revision = revision_only.revision.checked_next().expect("next revision");
+        assert_ne!(revision_only, original);
+        assert!(revision_only.author_state_eq_ignoring_revision(&original));
+
+        let mut changed = original.clone();
+        changed.name.push_str(" changed");
+        assert!(!changed.author_state_eq_ignoring_revision(&original));
+
+        let mut changed = original.clone();
+        changed.settings.action_safe_margin += 0.01;
+        assert!(!changed.author_state_eq_ignoring_revision(&original));
+
+        let mut changed = original.clone();
+        changed.video_tracks.push(Track::new_video("new video track"));
+        assert!(!changed.author_state_eq_ignoring_revision(&original));
+
+        let mut changed = original.clone();
+        changed.audio_program.outputs[0].name.push_str(" changed");
+        assert!(!changed.author_state_eq_ignoring_revision(&original));
+
+        let mut changed = original;
+        changed.playhead = TimelineTime::ONE;
+        assert!(!changed.author_state_eq_ignoring_revision(&restored));
+    }
+
     #[test]
     fn author_identity_validation_rejects_duplicate_clip_identity_across_tracks() {
         let mut sequence = Sequence::new("identity");
@@ -2086,6 +3160,88 @@ mod tests {
 
         let error = sequence.validate_author_identities().expect_err("singleton group must fail");
         assert!(error.to_string().contains("fewer than two members"));
+    }
+
+    #[test]
+    fn compact_clip_link_groups_detaches_only_the_affected_track() {
+        let mut original = Sequence::new("link compaction locality");
+        let time_base = original.time_base();
+        let mut singleton =
+            Clip::new(AssetId::new(), tt(0, time_base), tt(10, time_base)).expect("singleton");
+        singleton.link_group = Some(ClipLinkGroupId::new());
+        original.video_tracks[0].add_clip(singleton).expect("singleton placement");
+        original.video_tracks[1]
+            .add_clip(
+                Clip::new(AssetId::new(), tt(20, time_base), tt(10, time_base))
+                    .expect("unaffected video"),
+            )
+            .expect("unaffected video placement");
+        original.audio_tracks[0]
+            .add_clip(
+                Clip::new(AssetId::new(), tt(40, time_base), tt(10, time_base))
+                    .expect("unaffected audio"),
+            )
+            .expect("unaffected audio placement");
+
+        let mut compacted = original.clone();
+        compacted.compact_clip_link_groups();
+
+        assert!(!compacted.video_tracks.shares_allocation_with(&original.video_tracks));
+        assert!(!compacted.video_tracks[0]
+            .clips
+            .shares_allocation_with(&original.video_tracks[0].clips));
+        assert!(compacted.video_tracks[1]
+            .clips
+            .shares_allocation_with(&original.video_tracks[1].clips));
+        assert!(compacted.audio_tracks.shares_allocation_with(&original.audio_tracks));
+        assert!(compacted.audio_tracks[0]
+            .clips
+            .shares_allocation_with(&original.audio_tracks[0].clips));
+        assert_eq!(compacted.video_tracks[0].clips[0].link_group, None);
+    }
+
+    #[test]
+    fn no_op_structural_compaction_preserves_clip_and_transition_allocations() {
+        let mut original = Sequence::new("structural compaction locality");
+        let time_base = original.time_base();
+        let left =
+            Clip::new(AssetId::new(), tt(0, time_base), tt(10, time_base)).expect("left Clip");
+        let right =
+            Clip::new(AssetId::new(), tt(10, time_base), tt(10, time_base)).expect("right Clip");
+        let (left_id, right_id) = (left.id, right.id);
+        original.video_tracks[0].add_clip(left).expect("left placement");
+        original.video_tracks[0].add_clip(right).expect("right placement");
+        original.video_transitions.push(crate::VideoTransition::cross_dissolve(
+            left_id,
+            right_id,
+            TimelineTimeRange::new(tt(8, time_base), tt(4, time_base)).expect("Transition range"),
+        ));
+        original.validate_author_identities().expect("valid source Sequence");
+
+        let mut compacted = original.clone();
+        compacted.compact_structural_references();
+
+        assert!(compacted.video_tracks.shares_allocation_with(&original.video_tracks));
+        assert!(compacted.audio_tracks.shares_allocation_with(&original.audio_tracks));
+        for (compacted_track, original_track) in
+            compacted.video_tracks.iter().zip(&original.video_tracks)
+        {
+            assert!(compacted_track.clips.shares_allocation_with(&original_track.clips));
+        }
+        for (compacted_track, original_track) in
+            compacted.audio_tracks.iter().zip(&original.audio_tracks)
+        {
+            assert!(compacted_track.clips.shares_allocation_with(&original_track.clips));
+        }
+        assert!(compacted.video_transitions.shares_allocation_with(&original.video_transitions));
+        assert!(compacted
+            .audio_program
+            .transitions
+            .shares_allocation_with(&original.audio_program.transitions));
+        assert!(compacted
+            .audio_program
+            .processing_scopes
+            .shares_allocation_with(&original.audio_program.processing_scopes));
     }
 
     #[test]
@@ -2159,7 +3315,7 @@ mod tests {
         let time_base = sequence.time_base();
         let mut left =
             Clip::new(AssetId::new(), tt(0, time_base), tt(10, time_base)).expect("left");
-        left.add_effect(EffectType::GaussianBlur);
+        left.add_effect_node(EffectNode::with_defaults(EffectType::GaussianBlur));
         let right = Clip::new(AssetId::new(), tt(10, time_base), tt(10, time_base)).expect("right");
         let left_id = left.id;
         let right_id = right.id;
@@ -2210,7 +3366,7 @@ mod tests {
         collection.sequences.push(sequence);
 
         let error = collection
-            .validate_nested_sequences()
+            .validate_dependency_closure()
             .expect_err("duplicate Sequence identity must fail");
         assert!(error.to_string().contains("duplicate Sequence identity"));
     }
@@ -2243,7 +3399,7 @@ mod tests {
             InputColorResolutionSource::Override
         );
         assert_eq!(
-            override_resolution.detected_color_space,
+            override_resolution.executable_color_space,
             Some(ColorSpace::Srgb)
         );
 
@@ -2699,6 +3855,205 @@ mod tests {
     }
 
     #[test]
+    fn sequence_author_contract_rejects_track_container_type_mismatch() {
+        let mut sequence = Sequence::new("Type mismatch");
+        sequence.video_tracks[0].track_type = TrackType::Audio;
+        let error = sequence
+            .validate_author_contract(&standard_environment())
+            .expect_err("video container may not hold an Audio Track");
+        assert!(error.to_string().contains("declares incompatible type"));
+
+        let mut sequence = Sequence::new("Type mismatch");
+        sequence.audio_tracks[0].track_type = TrackType::Video;
+        let error = sequence
+            .validate_author_contract(&standard_environment())
+            .expect_err("audio container may not hold a Video Track");
+        assert!(error.to_string().contains("declares incompatible type"));
+    }
+
+    #[test]
+    fn incremental_author_contract_visits_only_the_changed_local_spine() {
+        let environment = standard_environment();
+        let sequence = sequence_with_local_validation_children();
+        let certificate = sequence
+            .prepare_author_contract_certificate(&environment)
+            .expect("valid baseline");
+
+        let mut effect_edit = sequence.clone();
+        effect_edit.revision = effect_edit.revision.checked_next().expect("next revision");
+        effect_edit.video_tracks[0].clips[0].effects[0]
+            .apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: "effect.gaussian_blur.radius".to_owned(),
+                keyframe: Keyframe::linear(TimelineTime::ZERO, PropertyValue::Float(12.0)),
+            })
+            .expect("set effect keyframe");
+        reset_sequence_author_contract_validation_visits();
+        let effect_certificate = certificate
+            .prepare_replacement(&sequence, &effect_edit, &environment)
+            .expect("valid effect edit");
+        assert_eq!(
+            sequence_author_contract_validation_visits(),
+            SequenceAuthorContractValidationVisits {
+                identity_passes: 1,
+                audio_passes: 1,
+                tracks: 1,
+                clips: 1,
+                effects: 1,
+                masks: 0,
+            }
+        );
+
+        let mut placement_edit = effect_edit.clone();
+        placement_edit.revision =
+            placement_edit.revision.checked_next().expect("next placement revision");
+        placement_edit.video_tracks[0].clips[0].position = TimelineTime::ONE;
+        reset_sequence_author_contract_validation_visits();
+        effect_certificate
+            .prepare_replacement(&effect_edit, &placement_edit, &environment)
+            .expect("valid placement edit");
+        assert_eq!(
+            sequence_author_contract_validation_visits(),
+            SequenceAuthorContractValidationVisits {
+                identity_passes: 1,
+                audio_passes: 1,
+                tracks: 1,
+                clips: 1,
+                effects: 0,
+                masks: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn detached_equal_author_state_reuses_local_validation_without_allocation_identity() {
+        let environment = standard_environment();
+        let sequence = sequence_with_local_validation_children();
+        let certificate = sequence
+            .prepare_author_contract_certificate(&environment)
+            .expect("valid baseline");
+        let json = serde_json::to_vec(&sequence).expect("serialize baseline");
+        let restored: Sequence = serde_json::from_slice(&json).expect("deserialize baseline");
+        assert!(!restored.video_tracks.shares_allocation_with(&sequence.video_tracks));
+        let mut candidate = restored.clone();
+        candidate.revision = candidate.revision.checked_next().expect("next revision");
+
+        reset_sequence_author_contract_validation_visits();
+        let next = certificate
+            .prepare_replacement(&restored, &candidate, &environment)
+            .expect("structurally exact deserialized baseline remains valid");
+        assert_eq!(
+            sequence_author_contract_validation_visits(),
+            SequenceAuthorContractValidationVisits {
+                identity_passes: 1,
+                audio_passes: 1,
+                ..SequenceAuthorContractValidationVisits::default()
+            }
+        );
+        assert!(next.baseline.video_tracks.shares_allocation_with(&candidate.video_tracks));
+        assert!(next.baseline.audio_tracks.shares_allocation_with(&candidate.audio_tracks));
+    }
+
+    #[test]
+    fn sequence_certificate_rejects_stale_state_revision_and_color_context() {
+        let environment = standard_environment();
+        let sequence = sequence_with_local_validation_children();
+        let certificate = sequence
+            .prepare_author_contract_certificate(&environment)
+            .expect("valid baseline");
+
+        let mut mutated_current = sequence.clone();
+        let clips_allocation = mutated_current.video_tracks[0].clips.allocation_id();
+        mutated_current.name = "same nested allocation, different state".to_owned();
+        assert_eq!(
+            mutated_current.video_tracks[0].clips.allocation_id(),
+            clips_allocation
+        );
+        let mut candidate = mutated_current.clone();
+        candidate.revision = candidate.revision.checked_next().expect("next revision");
+        assert!(certificate
+            .prepare_replacement(&mutated_current, &candidate, &environment)
+            .expect_err("same-ID unique mutation must stale the exact baseline")
+            .to_string()
+            .contains("author state"));
+
+        let mut forged_revision = sequence.clone();
+        forged_revision.name = "forged revision".to_owned();
+        assert!(certificate
+            .prepare_replacement(&sequence, &forged_revision, &environment)
+            .expect_err("non-monotonic revision must fail")
+            .to_string()
+            .contains("must be newer"));
+
+        let other_environment = ProjectColorEnvironment::new(ColorEngine::Aces {
+            preset: mondrian_core::AcesConfigPreset::default(),
+        });
+        let mut valid_revision = sequence.clone();
+        valid_revision.revision =
+            valid_revision.revision.checked_next().expect("next valid revision");
+        assert!(certificate
+            .prepare_replacement(&sequence, &valid_revision, &other_environment)
+            .expect_err("certificate may not cross color environments")
+            .to_string()
+            .contains("different Project color environment"));
+    }
+
+    #[test]
+    fn incremental_and_full_author_contracts_reject_the_same_global_failures() {
+        fn assert_both_reject(base: &Sequence, mut candidate: Sequence) {
+            let environment = standard_environment();
+            let certificate =
+                base.prepare_author_contract_certificate(&environment).expect("valid baseline");
+            candidate.revision = base.revision.checked_next().expect("next revision");
+            assert!(candidate.validate_author_contract(&environment).is_err());
+            assert!(certificate.prepare_replacement(base, &candidate, &environment).is_err());
+        }
+
+        let base = sequence_with_local_validation_children();
+        let mut duplicate_clip = base.clone();
+        let duplicate = duplicate_clip.video_tracks[0].clips[0].clone();
+        duplicate_clip.video_tracks[1]
+            .add_clip(duplicate)
+            .expect("place duplicate Clip identity");
+        assert_both_reject(&base, duplicate_clip);
+
+        let mut singleton_link = base.clone();
+        singleton_link.video_tracks[0].clips[0].link_group = Some(ClipLinkGroupId::new());
+        assert_both_reject(&base, singleton_link);
+
+        let mut duplicate_effect = base.clone();
+        let effect = duplicate_effect.video_tracks[0].clips[0].effects[0].clone();
+        duplicate_effect.video_tracks[0].clips[0].effects.push(effect);
+        assert_both_reject(&base, duplicate_effect);
+
+        let mut duplicate_mask = base.clone();
+        let mask = duplicate_mask.video_tracks[0].clips[0].masks[0].clone();
+        duplicate_mask.video_tracks[0].clips[0].masks.push(mask);
+        assert_both_reject(&base, duplicate_mask);
+
+        let mut invalid_audio = base.clone();
+        invalid_audio.audio_program.outputs[0].id = ProgramOutputId::new();
+        assert_both_reject(&base, invalid_audio);
+
+        let mut transition_base = Sequence::new("Transition baseline");
+        let time_base = transition_base.time_base();
+        let left =
+            Clip::new(AssetId::new(), tt(0, time_base), tt(10, time_base)).expect("left Clip");
+        let right =
+            Clip::new(AssetId::new(), tt(10, time_base), tt(10, time_base)).expect("right Clip");
+        let (left_id, right_id) = (left.id, right.id);
+        transition_base.video_tracks[0].add_clip(left).expect("left placement");
+        transition_base.video_tracks[0].add_clip(right).expect("right placement");
+        transition_base.video_transitions.push(crate::VideoTransition::cross_dissolve(
+            left_id,
+            right_id,
+            TimelineTimeRange::new(tt(8, time_base), tt(4, time_base)).expect("Transition range"),
+        ));
+        let mut invalid_transition = transition_base.clone();
+        invalid_transition.video_tracks[0].clips[1].position = tt(11, time_base);
+        assert_both_reject(&transition_base, invalid_transition);
+    }
+
+    #[test]
     fn sequence_collection_detects_nested_sequence_cycles() {
         let mut parent = Sequence::new("Parent");
         let mut child = Sequence::new("Child");
@@ -2732,7 +4087,183 @@ mod tests {
         let mut collection = SequenceCollection::new(parent);
         collection.add_sequence(child).expect("add child sequence");
 
-        assert!(collection.validate_nested_sequences().is_err());
+        assert!(collection.validate_dependency_closure().is_err());
+    }
+
+    fn deep_nested_collection(length: usize, close_cycle: bool) -> SequenceCollection {
+        assert!(length >= 2);
+        let mut sequences = (0..length)
+            .map(|index| Sequence::new(format!("Nested {index}")))
+            .collect::<Vec<_>>();
+        let sequence_ids = sequences.iter().map(|sequence| sequence.id).collect::<Vec<_>>();
+        for index in 0..length - 1 {
+            let time_base = sequences[index].time_base();
+            sequences[index].video_tracks[0]
+                .add_clip(
+                    Clip::new_nested_sequence(
+                        sequence_ids[index + 1],
+                        TimelineTime::ZERO,
+                        tt(1, time_base),
+                        None,
+                    )
+                    .expect("valid nested placement"),
+                )
+                .expect("place nested Sequence");
+        }
+        if close_cycle {
+            let last = length - 1;
+            let time_base = sequences[last].time_base();
+            sequences[last].video_tracks[0]
+                .add_clip(
+                    Clip::new_nested_sequence(
+                        sequence_ids[0],
+                        TimelineTime::ZERO,
+                        tt(1, time_base),
+                        None,
+                    )
+                    .expect("valid cycle placement"),
+                )
+                .expect("place cycle edge");
+        }
+
+        let first = sequences.remove(0);
+        let mut collection = SequenceCollection::new(first);
+        for sequence in sequences {
+            collection.add_sequence(sequence).expect("unique Sequence");
+        }
+        collection
+    }
+
+    #[test]
+    fn dependency_validation_handles_a_deep_acyclic_chain_without_recursion() {
+        deep_nested_collection(1_024, false)
+            .validate_dependency_closure()
+            .expect("deep acyclic author graph remains valid");
+    }
+
+    #[test]
+    fn dependency_validation_rejects_a_deep_cycle_without_recursion() {
+        let error = deep_nested_collection(1_024, true)
+            .validate_dependency_closure()
+            .expect_err("deep cycle must be rejected");
+        assert!(error.to_string().contains("检测到序列嵌套循环"));
+    }
+
+    #[test]
+    fn replacement_overlay_detects_a_cycle_without_mutating_the_collection() {
+        let mut parent = Sequence::new("Parent");
+        let child = Sequence::new("Child");
+        let parent_id = parent.id;
+        let child_id = child.id;
+        let parent_time_base = parent.time_base();
+        parent.video_tracks[0]
+            .add_clip(
+                Clip::new_nested_sequence(
+                    child_id,
+                    TimelineTime::ZERO,
+                    tt(20, parent_time_base),
+                    Some("Child".to_owned()),
+                )
+                .expect("valid child placement"),
+            )
+            .expect("add child placement");
+        let mut collection = SequenceCollection::new(parent);
+        collection.add_sequence(child.clone()).expect("add child Sequence");
+        collection.validate_dependency_closure().expect("stored collection is acyclic");
+
+        let mut replacement = child;
+        let replacement_time_base = replacement.time_base();
+        replacement.video_tracks[0]
+            .add_clip(
+                Clip::new_nested_sequence(
+                    parent_id,
+                    TimelineTime::ZERO,
+                    tt(20, replacement_time_base),
+                    Some("Parent".to_owned()),
+                )
+                .expect("valid parent placement"),
+            )
+            .expect("add parent placement");
+
+        let error = collection
+            .validate_dependency_closure_with_replacement(&replacement)
+            .expect_err("overlay cycle must be rejected");
+
+        assert!(error.to_string().contains("检测到序列嵌套循环"));
+        collection
+            .validate_dependency_closure()
+            .expect("failed overlay must not mutate stored Sequences");
+    }
+
+    #[test]
+    fn replacement_overlay_revalidates_existing_nested_audio_bindings() {
+        let child = Sequence::new("Child");
+        let child_output = child.audio_program.outputs[0].id;
+        let child_id = child.id;
+        let mut parent = Sequence::new("Parent");
+        let parent_audio_track = parent.audio_tracks[0].id;
+        let nested = Clip::new_nested_sequence(
+            child_id,
+            TimelineTime::ZERO,
+            tt(20, parent.time_base()),
+            Some("Child".to_owned()),
+        )
+        .expect("valid nested audio placement");
+        parent
+            .add_nested_audio_clip(parent_audio_track, nested, child_output)
+            .expect("bind child output");
+        parent.audio_tracks[0].clips[0].audio_components[0].channel_mapping =
+            crate::audio::AudioComponentChannelMapping::Explicit(AudioChannelMixMatrix::identity(
+                AudioChannelLayout::Stereo,
+            ));
+        let mut collection = SequenceCollection::new(parent);
+        collection.add_sequence(child.clone()).expect("add child Sequence");
+        collection
+            .validate_dependency_closure()
+            .expect("initial nested binding is valid");
+
+        let mut output_replacement = child.clone();
+        let replacement_output = ProgramOutputId::new();
+        output_replacement.audio_program.outputs[0].id = replacement_output;
+        for route in &mut output_replacement.audio_program.routes {
+            if route.destination == crate::audio::AudioRouteDestination::Output(child_output) {
+                route.destination = crate::audio::AudioRouteDestination::Output(replacement_output);
+            }
+        }
+        let output_error = collection
+            .validate_dependency_closure_with_replacement(&output_replacement)
+            .expect_err("parent binding to removed public output must fail");
+        assert!(output_error.to_string().contains("nested audio output does not exist"));
+
+        let mut layout_replacement = child;
+        layout_replacement.settings.audio_channel_layout = AudioChannelLayout::Mono;
+        let layout_error = collection
+            .validate_dependency_closure_with_replacement(&layout_replacement)
+            .expect_err("parent matrix authored for the old child layout must fail");
+        assert!(layout_error
+            .to_string()
+            .contains("matrix source layout does not match child Sequence"));
+
+        collection
+            .validate_dependency_closure()
+            .expect("failed overlays must not mutate the canonical binding");
+    }
+
+    #[test]
+    fn replacement_overlay_rejects_an_unknown_sequence_identity() {
+        let collection = SequenceCollection::new(Sequence::new("Stored"));
+        let replacement = Sequence::new("Not in collection");
+
+        let error = collection
+            .validate_dependency_closure_with_replacement(&replacement)
+            .expect_err("unknown replacement identity must fail");
+
+        assert!(error
+            .to_string()
+            .contains("replacement Sequence does not exist in the collection"));
+        collection
+            .validate_dependency_closure()
+            .expect("failed lookup must not mutate the collection");
     }
 
     #[test]

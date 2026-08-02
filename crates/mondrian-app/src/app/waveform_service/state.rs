@@ -7,10 +7,9 @@ use std::time::Duration;
 
 use mondrian_assets::AssetLibrary;
 use mondrian_core::{
-    AssetId, ExecutionCancellationToken, ExecutionDeadlineStatus, ExecutionPriority,
-    ExecutionTerminalDisposition, ExecutionTerminalEvidence,
+    AssetId, AudioSourceSelection, ExecutionCancellationToken, ExecutionDeadlineStatus,
+    ExecutionPriority, ExecutionTerminalDisposition, ExecutionTerminalEvidence,
 };
-use mondrian_media::AudioSourceSelection;
 
 use super::{
     WaveformFailureReason, WaveformTerminalRecord, WAVEFORM_FAILURE_CAPACITY, WAVEFORM_SAMPLE_RATE,
@@ -20,7 +19,7 @@ use super::{
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct WaveformSourceKey {
     pub(super) asset_id: AssetId,
-    pub(super) source_revision: u64,
+    pub(super) selection: AudioSourceSelection,
 }
 
 #[derive(Debug, Clone)]
@@ -47,9 +46,26 @@ pub(super) struct WaveformJob {
     pub(super) key: WaveformSourceKey,
     pub(super) generation: u64,
     pub(super) path: PathBuf,
-    pub(super) selection: AudioSourceSelection,
     pub(super) total_frames: u64,
     pub(super) cancellation: ExecutionCancellationToken,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct WaveformWorkerIdentity {
+    pub(super) key: WaveformSourceKey,
+    pub(super) generation: u64,
+}
+
+impl WaveformJob {
+    pub(super) fn worker_identity(&self) -> WaveformWorkerIdentity {
+        WaveformWorkerIdentity { key: self.key.clone(), generation: self.generation }
+    }
+}
+
+impl WaveformResult {
+    pub(super) fn worker_identity(&self) -> WaveformWorkerIdentity {
+        WaveformWorkerIdentity { key: self.key.clone(), generation: self.generation }
+    }
 }
 
 #[derive(Debug)]
@@ -79,6 +95,11 @@ pub(super) struct WaveformCounters {
 pub(super) struct WaveformState {
     pub(super) generation: u64,
     pub(super) library: Option<Arc<AssetLibrary>>,
+    pub(super) admit_automatic: bool,
+    pub(super) dispatch_enabled: bool,
+    pub(super) aggregate_cache_byte_budget: usize,
+    pub(super) source_cache_byte_budget: usize,
+    pub(super) cached_source_bytes: usize,
     pub(super) sources: HashMap<WaveformSourceKey, WaveformSource>,
     pub(super) source_lru: VecDeque<WaveformSourceKey>,
     pub(super) active_keys: HashMap<AssetId, WaveformSourceKey>,
@@ -92,9 +113,16 @@ pub(super) struct WaveformState {
 
 impl Default for WaveformState {
     fn default() -> Self {
+        let (source_cache_byte_budget, _) =
+            super::waveform_cache_partition(super::WAVEFORM_SOURCE_CACHE_BYTE_BUDGET);
         Self {
             generation: 1,
             library: None,
+            admit_automatic: true,
+            dispatch_enabled: true,
+            aggregate_cache_byte_budget: super::WAVEFORM_SOURCE_CACHE_BYTE_BUDGET,
+            source_cache_byte_budget,
+            cached_source_bytes: 0,
             sources: HashMap::new(),
             source_lru: VecDeque::new(),
             active_keys: HashMap::new(),
@@ -138,6 +166,7 @@ pub(super) fn rotate_waveform_generation(
     state.library = library;
     state.sources.clear();
     state.source_lru.clear();
+    state.cached_source_bytes = 0;
     state.active_keys.clear();
     state.pending.clear();
     state.deferred.clear();
@@ -157,7 +186,8 @@ pub(super) fn retain_failure_locked(
 ) {
     tracing::warn!(
         asset_id = %key.asset_id,
-        source_revision = key.source_revision,
+        source_fingerprint = ?key.selection.source_fingerprint(),
+        stream_index = key.selection.stream_index(),
         reason = ?failure.reason,
         detail = %failure.detail,
         "waveform analysis failed"
@@ -188,7 +218,7 @@ pub(super) fn push_terminal(
             deadline: ExecutionDeadlineStatus::NotApplicable,
         },
         asset_id: key.asset_id,
-        source_revision: key.source_revision,
+        source: key.selection.clone(),
         elapsed,
         failure,
     });

@@ -429,7 +429,7 @@ fn migrate_transitions(
             _ => return Err(InsertEditError::AffectedVideoTransition(transition.id)),
         }
     }
-    sequence.video_transitions = retained_video;
+    sequence.video_transitions = retained_video.into();
 
     let mut removed_audio = Vec::new();
     let mut retained_audio = Vec::with_capacity(sequence.audio_program.transitions.len());
@@ -474,7 +474,7 @@ fn migrate_transitions(
             _ => return Err(InsertEditError::AffectedAudioTransition(transition.id)),
         }
     }
-    sequence.audio_program.transitions = retained_audio;
+    sequence.audio_program.transitions = retained_audio.into();
     Ok((removed_video, removed_audio))
 }
 
@@ -510,7 +510,7 @@ fn open_track_gap(
         }
     }
     opened.sort_unstable_by_key(|clip| clip.position);
-    track.clips = opened;
+    track.clips = opened.into();
     Ok(())
 }
 

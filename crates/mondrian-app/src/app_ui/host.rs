@@ -7,8 +7,10 @@
 use std::cell::{Cell, Ref, RefCell};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
+use mondrian_core::ProjectId;
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_platform::{NativeVideoTextureImportProbeResult, PlatformService};
 use mondrian_renderer::GpuNativeDecodedFrameImportSupport;
@@ -16,12 +18,23 @@ use mondrian_ui_core::types::{Point, Rect};
 use mondrian_ui_core::{TreeWalker, Widget};
 use mondrian_ui_theme::{set_theme_preset, ThemePreset};
 
+use crate::app::execution_resource_coordination::{
+    apply_preview_viewer_gpu_resource_decision, ExecutionDomainDemand,
+    ExternalExecutionResourceDemand, PreviewViewerGpuResourceOwner,
+};
 use crate::app::native_video_import::resolve_playback_hardware_decode_admission;
 use crate::app::playback_preview::{
     observe_playback_video_preroll as observe_preview_preroll, pump_playback_preview,
+    PlaybackPreviewPumpOutcome,
 };
-use crate::app::preview_execution::{PreviewGpuFrame, PreviewGpuFrameState};
-use crate::app::preview_runtime::PreviewColorRejection;
+use crate::app::preview_execution::{
+    PreviewGpuFrame, PreviewGpuFrameState, PreviewGpuHeterogeneousExecution, PreviewOutputKey,
+};
+use crate::app::preview_runtime::{
+    PreviewColorRejection, PreviewPresentationCandidate, PreviewPresentationState,
+    PreviewVisualGpuCompletionDisposition,
+};
+use crate::app::preview_work_notification::PreviewWorkWatch;
 use crate::app::ui_actions::{
     AssetsOpenFolderPayload, PreferencesShortcutPayload, PreferencesShortcutReboundPayload,
     PreferencesThemePayload, PreferencesViewerBackgroundPayload, PreferencesWaveformDisplayPayload,
@@ -37,17 +50,21 @@ use crate::app::ui_actions::{
     ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER,
 };
 use crate::app::waveform_service::AudioWaveformService;
-use crate::app::{discover_crash_recovery_candidates, AppState, CrashRecoveryCandidate};
+use crate::app::{
+    discover_crash_recovery_candidates, AppState, CrashRecoveryCandidate,
+    FramePresentationDisposition, FramePresentationPreflight, FramePresentationPublication,
+};
 use crate::app_ui::action_availability::app_state_action_enabled;
 use crate::app_ui::action_queue::PendingUiActions;
 use crate::app_ui::asset_thumbnails::AssetThumbnailAdapter;
+use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
 use crate::app_ui::pending_close_dialog::PendingCloseDialogAction;
 use crate::app_ui::playback_feedback::ViewerPlaybackFeedback;
 use crate::app_ui::preferences_store::{
     app_ui_preferences_path, load_app_ui_preferences, persist_app_ui_preferences_to,
     AppUiPreferences,
 };
-use crate::app_ui::preview::{WindowPreviewAdapter, WindowPreviewOutputRegistration};
+use crate::app_ui::preview::{viewer_frame_content, WindowPreviewAdapter, WindowPreviewSnapshot};
 use crate::app_ui::shell::{try_resolve_app_shell_action, AppUiAppRoot};
 use crate::app_ui::shortcuts::{
     default_shortcuts, is_known_shortcut_id, AppUiShortcutBinding, AppUiShortcutKey,
@@ -83,6 +100,30 @@ pub enum AppUiMode {
     Workspace,
 }
 
+/// Typed result of one bounded background-task pump.
+///
+/// Repaint authority is intentionally independent from the scheduling hint
+/// that another bounded drain turn is required.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AppUiBackgroundTaskPollOutcome {
+    /// Visible, transport, or full model state changed.
+    pub(crate) repaint_required: bool,
+    /// A bounded completion source still has immediately drainable work.
+    pub(crate) needs_follow_up_poll: bool,
+}
+
+impl AppUiBackgroundTaskPollOutcome {
+    const fn from_changes(full_model_changed: bool, preview: PlaybackPreviewPumpOutcome) -> Self {
+        Self {
+            repaint_required: full_model_changed
+                || preview.visible_change
+                || preview.transport_change
+                || preview.candidate_retry_required,
+            needs_follow_up_poll: preview.needs_follow_up_poll,
+        }
+    }
+}
+
 /// Product-facing app UI session state.
 pub struct AppUiHost {
     startup: AppUiStartupScreen,
@@ -94,12 +135,40 @@ pub struct AppUiHost {
     asset_thumbnails: AssetThumbnailAdapter,
     waveform_service: Arc<AudioWaveformService>,
     preview_service: WindowPreviewAdapter,
+    window_preview_state: RefCell<ViewerPreviewState>,
     playback_feedback: ViewerPlaybackFeedback,
     mode: AppUiMode,
     system_theme_preset: ThemePreset,
     ui_dirty: Cell<bool>,
     preview_dirty: Cell<bool>,
     pending_close_action: Option<PendingCloseAction>,
+}
+
+fn window_preview_state_retains_external_gpu(state: &ViewerPreviewState) -> bool {
+    matches!(
+        state,
+        ViewerPreviewState::Ready(mondrian_ui_widgets::ViewerFrameContent::ExternalTexture(_))
+            | ViewerPreviewState::Stale(mondrian_ui_widgets::ViewerFrameContent::ExternalTexture(
+                _
+            ))
+    )
+}
+
+fn window_preview_state_external_texture_key(state: &ViewerPreviewState) -> Option<&str> {
+    match state {
+        ViewerPreviewState::Ready(mondrian_ui_widgets::ViewerFrameContent::ExternalTexture(
+            frame,
+        ))
+        | ViewerPreviewState::Stale(mondrian_ui_widgets::ViewerFrameContent::ExternalTexture(
+            frame,
+        )) => Some(frame.key.as_str()),
+        ViewerPreviewState::Ready(_)
+        | ViewerPreviewState::Stale(_)
+        | ViewerPreviewState::Transparent
+        | ViewerPreviewState::StaleTransparent
+        | ViewerPreviewState::Loading
+        | ViewerPreviewState::Unavailable(_) => None,
+    }
 }
 
 impl AppUiHost {
@@ -121,15 +190,25 @@ impl AppUiHost {
         let system_theme_preset = ThemePreset::Dark;
         set_theme_preset(preferences.theme_preference.resolve(system_theme_preset));
         let asset_thumbnails = AssetThumbnailAdapter::new();
-        asset_thumbnails.set_color_context(Some(thumbnail_color_context(&app_state)));
+        asset_thumbnails.set_color_context(Some(app_state.thumbnail_color_context()));
         let waveform_service = AudioWaveformService::new();
         waveform_service.set_library(app_state.asset_library_handle());
         let preview_service = WindowPreviewAdapter::new();
+        preview_service.synchronize_transport_intent(app_state.preview_transport_intent());
+        apply_execution_resource_policy(
+            &app_state,
+            &asset_thumbnails,
+            &waveform_service,
+            &preview_service,
+        );
+        let window_preview_state = preview_service.viewer_preview_for_state(&app_state);
+        let window_preview_snapshot =
+            WindowPreviewSnapshot::new(&window_preview_state, &preview_service);
         let root = AppUiAppRoot::from_app_state_with_preferences_thumbnails_and_preview(
             &app_state,
             &preferences,
             Some(&asset_thumbnails),
-            Some(&preview_service),
+            Some(&window_preview_snapshot),
             Some(waveform_service.source()),
         );
         let playback_feedback = root.viewer_playback_feedback();
@@ -154,6 +233,7 @@ impl AppUiHost {
             asset_thumbnails,
             waveform_service,
             preview_service,
+            window_preview_state: RefCell::new(window_preview_state),
             playback_feedback,
             mode,
             system_theme_preset,
@@ -226,7 +306,13 @@ impl AppUiHost {
     /// Build a GPU-output preview candidate for the current app state.
     pub(crate) fn gpu_preview_frame_for_current_state(&self) -> PreviewGpuFrameState {
         let state = self.app_state.borrow();
-        self.preview_service.gpu_preview_frame_for_state(&state)
+        self.preview_service
+            .gpu_preview_frame(state.preview_frame_execution_request(std::time::Instant::now()))
+    }
+
+    /// Clone the UI-independent watch for pollable Preview worker results.
+    pub(crate) fn preview_work_watch(&self) -> PreviewWorkWatch {
+        self.preview_service.work_watch()
     }
 
     /// Synchronize the current display output snapshot into preview scheduling.
@@ -247,26 +333,343 @@ impl AppUiHost {
         self.preview_service.set_playback_hardware_decode_admission(admission);
     }
 
+    /// Apply the latest immutable Preview Viewer projection to its GPU owner.
+    ///
+    /// The low-frequency Host resource-policy Seam already applies the complete
+    /// Preview decision to `preview_service`. This per-frame Seam must not
+    /// reconfigure Preview scheduling or caches.
+    pub(crate) fn apply_preview_execution_resource_decision(
+        &self,
+        runtime: &mut impl PreviewViewerGpuResourceOwner,
+    ) {
+        let decision = self.app_state.borrow().execution_resource_decision();
+        apply_preview_viewer_gpu_resource_decision(runtime, &decision.preview.viewer_gpu);
+    }
+
+    /// Consume an already-expired current demand before the Window builds a
+    /// Viewer candidate.
+    pub(crate) fn preflight_pending_viewer_gpu_presentation(&self) -> bool {
+        let preflight =
+            self.app_state.borrow_mut().preflight_pending_frame_presentation(Instant::now());
+        self.finish_window_presentation_preflight(preflight)
+    }
+
+    /// Recheck the exact ticket carried by a built candidate immediately
+    /// before the Window records GPU commands.
+    pub(crate) fn preflight_viewer_gpu_presentation(
+        &self,
+        ticket: Option<mondrian_playback::FramePresentationTicket>,
+    ) -> bool {
+        let preflight =
+            self.app_state.borrow_mut().preflight_frame_presentation(ticket, Instant::now());
+        self.finish_window_presentation_preflight(preflight)
+    }
+
+    fn finish_window_presentation_preflight(&self, preflight: FramePresentationPreflight) -> bool {
+        match preflight {
+            FramePresentationPreflight::MaySubmit => true,
+            FramePresentationPreflight::DroppedLate(completion) => {
+                self.finish_window_presentation_disposition(
+                    FramePresentationDisposition::DroppedLate(completion),
+                    false,
+                );
+                false
+            }
+            FramePresentationPreflight::LostAuthority => {
+                self.finish_window_presentation_disposition(
+                    FramePresentationDisposition::LostAuthority,
+                    false,
+                );
+                false
+            }
+        }
+    }
+
     /// Advertise a registered GPU preview texture as the viewer frame for its resolved plan.
     pub(crate) fn set_external_viewer_frame(
         &self,
         frame: &PreviewGpuFrame,
         texture_key: impl Into<String>,
         presentation: mondrian_ui_widgets::ViewerExternalTexturePresentation,
-    ) -> bool {
-        let updated =
-            self.preview_service.set_external_viewer_frame(frame, texture_key, presentation);
-        if updated {
-            if let Some(ticket) = frame.presentation_ticket() {
-                let _ = self
-                    .app_state
-                    .borrow_mut()
-                    .complete_frame_presentation(ticket, std::time::Instant::now());
+    ) -> FramePresentationDisposition {
+        let texture_key = texture_key.into();
+        let visible_output = mondrian_ui_widgets::ViewerExternalTextureFrame::new_spatial(
+            texture_key.clone(),
+            presentation,
+        );
+        let visible_changed = Cell::new(false);
+        let disposition = if let Some(visible_output) = visible_output {
+            // Clone the pointer-only payload during preparation. The
+            // authoritative commit below may only move prepared values into
+            // their current-output slots.
+            let registered_output = visible_output.clone();
+            let output_key = frame.output_key.clone();
+            self.app_state.borrow_mut().finalize_frame_presentation(
+                frame.presentation_ticket(),
+                FramePresentationPublication::prepared(|| {
+                    self.preview_service.register_gpu_output(output_key, registered_output);
+                    self.window_preview_state.replace(ViewerPreviewState::Ready(
+                        mondrian_ui_widgets::ViewerFrameContent::ExternalTexture(visible_output),
+                    ));
+                    visible_changed.set(true);
+                }),
+            )
+        } else {
+            self.preview_service.reject_gpu_output_registration();
+            self.app_state.borrow_mut().finalize_frame_presentation(
+                frame.presentation_ticket(),
+                FramePresentationPublication::rejected(),
+            )
+        };
+        self.finish_window_presentation_disposition(disposition, visible_changed.get());
+        disposition
+    }
+
+    /// Complete a candidate that reuses the already published Window output.
+    ///
+    /// The candidate carries the ticket captured when Preview proved that
+    /// retained output exact for the new intent. A stale or missing ticket can
+    /// never be replaced with the demand current at this later seam.
+    pub(crate) fn present_current_viewer_output(
+        &self,
+        candidate: PreviewPresentationCandidate<()>,
+    ) -> FramePresentationDisposition {
+        let visible_changed = Cell::new(false);
+        let disposition = if let Some((next, changed)) = self.prepared_retained_window_preview() {
+            let clear_external_gpu = !window_preview_state_retains_external_gpu(&next);
+            self.app_state.borrow_mut().finalize_frame_presentation(
+                candidate.presentation_ticket(),
+                FramePresentationPublication::prepared(|| {
+                    if clear_external_gpu {
+                        self.preview_service.clear_external_viewer_frame();
+                    }
+                    self.window_preview_state.replace(next);
+                    visible_changed.set(changed);
+                }),
+            )
+        } else {
+            self.app_state.borrow_mut().finalize_frame_presentation(
+                candidate.presentation_ticket(),
+                FramePresentationPublication::rejected(),
+            )
+        };
+        self.finish_window_presentation_disposition(disposition, visible_changed.get());
+        disposition
+    }
+
+    /// Publish a semantic transparent canvas through the same ticket seam as a
+    /// registered texture or CPU raster.
+    pub(crate) fn present_transparent_viewer_output(
+        &self,
+        candidate: PreviewPresentationCandidate<()>,
+    ) -> FramePresentationDisposition {
+        let visible_changed = Cell::new(false);
+        let changed = !matches!(
+            &*self.window_preview_state.borrow(),
+            ViewerPreviewState::Transparent
+        );
+        let disposition = self.app_state.borrow_mut().finalize_frame_presentation(
+            candidate.presentation_ticket(),
+            FramePresentationPublication::prepared(|| {
+                self.preview_service.clear_external_viewer_frame();
+                self.window_preview_state.replace(ViewerPreviewState::Transparent);
+                visible_changed.set(changed);
+            }),
+        );
+        self.finish_window_presentation_disposition(disposition, visible_changed.get());
+        disposition
+    }
+
+    fn prepared_retained_window_preview(&self) -> Option<(ViewerPreviewState, bool)> {
+        let (next, changed) = match &*self.window_preview_state.borrow() {
+            ViewerPreviewState::Ready(frame) => {
+                (Some(ViewerPreviewState::Ready(frame.clone())), false)
             }
-            let _ = self.observe_playback_video_preroll();
+            ViewerPreviewState::Stale(frame) => {
+                (Some(ViewerPreviewState::Ready(frame.clone())), true)
+            }
+            ViewerPreviewState::Transparent => (Some(ViewerPreviewState::Transparent), false),
+            ViewerPreviewState::StaleTransparent => (Some(ViewerPreviewState::Transparent), true),
+            ViewerPreviewState::Loading | ViewerPreviewState::Unavailable(_) => (None, false),
+        };
+        next.map(|next| (next, changed))
+    }
+
+    fn finish_window_presentation_disposition(
+        &self,
+        disposition: FramePresentationDisposition,
+        visible_changed_without_demand: bool,
+    ) {
+        match disposition {
+            FramePresentationDisposition::Presented(_) => {
+                self.preview_service.try_release_settled_transport_media_residency();
+                let _ = self.observe_playback_video_preroll();
+                self.preview_dirty.set(true);
+            }
+            FramePresentationDisposition::NoDemand => {
+                self.preview_service.try_release_settled_transport_media_residency();
+                if visible_changed_without_demand {
+                    self.preview_dirty.set(true);
+                }
+            }
+            FramePresentationDisposition::DroppedLate(_)
+            | FramePresentationDisposition::OutputRejected
+            | FramePresentationDisposition::LostAuthority => {
+                self.mark_window_preview_pending();
+                self.preview_dirty.set(true);
+            }
+        }
+    }
+
+    fn mark_window_preview_pending(&self) {
+        let pending = match &*self.window_preview_state.borrow() {
+            ViewerPreviewState::Ready(frame) | ViewerPreviewState::Stale(frame) => {
+                ViewerPreviewState::Stale(frame.clone())
+            }
+            ViewerPreviewState::Transparent | ViewerPreviewState::StaleTransparent => {
+                ViewerPreviewState::StaleTransparent
+            }
+            ViewerPreviewState::Loading | ViewerPreviewState::Unavailable(_) => {
+                ViewerPreviewState::Loading
+            }
+        };
+        self.window_preview_state.replace(pending);
+    }
+
+    fn admit_window_preview_state(
+        &self,
+        ticket: Option<mondrian_playback::FramePresentationTicket>,
+        next: ViewerPreviewState,
+    ) -> FramePresentationDisposition {
+        let clear_external_gpu = !window_preview_state_retains_external_gpu(&next);
+        let disposition = self.app_state.borrow_mut().finalize_frame_presentation(
+            ticket,
+            FramePresentationPublication::prepared(|| {
+                if clear_external_gpu {
+                    self.preview_service.clear_external_viewer_frame();
+                }
+                self.window_preview_state.replace(next);
+            }),
+        );
+        // This method is called while a Host model refresh is already
+        // projecting `window_preview_state`, so a demand-free replacement is
+        // immediately visible and must not enqueue a second identical refresh.
+        self.finish_window_presentation_disposition(disposition, false);
+        disposition
+    }
+
+    #[cfg(test)]
+    fn admit_window_preview_state_at(
+        &self,
+        ticket: Option<mondrian_playback::FramePresentationTicket>,
+        next: ViewerPreviewState,
+        committed_at: Instant,
+    ) -> FramePresentationDisposition {
+        let clear_external_gpu = !window_preview_state_retains_external_gpu(&next);
+        let disposition = self.app_state.borrow_mut().finalize_frame_presentation_at_for_test(
+            ticket,
+            committed_at,
+            FramePresentationPublication::prepared(|| {
+                if clear_external_gpu {
+                    self.preview_service.clear_external_viewer_frame();
+                }
+                self.window_preview_state.replace(next);
+            }),
+        );
+        self.finish_window_presentation_disposition(disposition, false);
+        disposition
+    }
+
+    /// Evaluate and arbitrate the Window CPU/current-output projection before
+    /// Widget models can observe it.
+    fn refresh_window_preview_state(&self) {
+        {
+            let state = self.app_state.borrow();
+            if state.is_playing() && state.pending_playback_frame_demand_identity().is_none() {
+                return;
+            }
+        }
+        let presentation = {
+            let state = self.app_state.borrow();
+            self.preview_service
+                .presentation(state.preview_frame_execution_request(Instant::now()))
+        };
+        match presentation {
+            PreviewPresentationState::Ready(candidate) => {
+                let ticket = candidate.presentation_ticket();
+                let next = match viewer_frame_content(candidate.into_value()) {
+                    Ok(frame) => ViewerPreviewState::Ready(frame),
+                    Err(reason) => {
+                        let disposition = self.app_state.borrow_mut().finalize_frame_presentation(
+                            ticket,
+                            FramePresentationPublication::rejected(),
+                        );
+                        self.finish_window_presentation_disposition(disposition, false);
+                        self.window_preview_state.replace(ViewerPreviewState::Unavailable(reason));
+                        return;
+                    }
+                };
+                let _ = self.admit_window_preview_state(ticket, next);
+            }
+            PreviewPresentationState::Transparent(candidate) => {
+                let _ = self.admit_window_preview_state(
+                    candidate.presentation_ticket(),
+                    ViewerPreviewState::Transparent,
+                );
+            }
+            PreviewPresentationState::Loading | PreviewPresentationState::Stale(_) => {
+                self.mark_window_preview_pending();
+            }
+            PreviewPresentationState::Unavailable(reason) => {
+                self.window_preview_state.replace(ViewerPreviewState::Unavailable(reason));
+            }
+        }
+    }
+
+    /// Resolve one Broker-owned heterogeneous Viewer candidate after wgpu
+    /// reports actual completion. Exact Late delivery is applied only if its
+    /// demand still owns terminal authority.
+    pub(crate) fn finalize_heterogeneous_viewer_gpu(
+        &self,
+        execution: PreviewGpuHeterogeneousExecution,
+        completed: &mondrian_renderer::ViewerHeterogeneousGpuCompletedBatch,
+    ) -> Result<PreviewVisualGpuCompletionDisposition, String> {
+        let disposition = match self
+            .preview_service
+            .finalize_heterogeneous_gpu_completion(execution, completed)
+        {
+            Ok(disposition) => disposition,
+            Err(error) => {
+                // Evidence rejection queues an exact Failed delivery inside
+                // the runtime; ensure the normal Playback pump is scheduled.
+                self.preview_dirty.set(true);
+                return Err(error.to_string());
+            }
+        };
+        self.observe_visual_gpu_disposition(disposition);
+        Ok(disposition)
+    }
+
+    /// Fail a heterogeneous Viewer candidate that cannot reach actual GPU
+    /// completion. The exact current Playback demand, if any, is consumed once
+    /// at this Window composition seam.
+    pub(crate) fn fail_heterogeneous_viewer_gpu(
+        &self,
+        execution: PreviewGpuHeterogeneousExecution,
+    ) -> PreviewVisualGpuCompletionDisposition {
+        let disposition = self.preview_service.fail_heterogeneous_gpu_execution(execution);
+        self.observe_visual_gpu_disposition(disposition);
+        disposition
+    }
+
+    fn observe_visual_gpu_disposition(&self, disposition: PreviewVisualGpuCompletionDisposition) {
+        if let PreviewVisualGpuCompletionDisposition::TerminalCandidate(candidate) = &disposition {
+            let mut state = self.app_state.borrow_mut();
+            if state.pending_playback_frame_demand_identity() == Some(candidate.identity()) {
+                state.observe_frame_delivery_candidate(*candidate, Instant::now());
+            }
             self.preview_dirty.set(true);
         }
-        updated
     }
 
     fn observe_playback_video_preroll(&self) -> bool {
@@ -277,6 +680,46 @@ impl AppUiHost {
     pub(crate) fn clear_external_viewer_frame(&self) {
         self.preview_service.clear_external_viewer_frame();
         self.preview_dirty.set(true);
+    }
+
+    /// Whether Preview retains the exact semantic Window texture artifact.
+    pub(crate) fn has_external_viewer_frame_artifact(
+        &self,
+        key: &PreviewOutputKey,
+        texture_key: &str,
+    ) -> bool {
+        self.preview_service
+            .has_gpu_output_artifact(key, |output| output.key == texture_key)
+    }
+
+    /// Clear only the exact semantic and visible Window texture artifact.
+    ///
+    /// The renderer registration and the Widget projection are independent
+    /// owners. Once an exact physical texture is revoked, leaving the Widget
+    /// pointed at its key would make the next redraw sample an unregistered
+    /// resource. A same-semantic replacement has a distinct texture key and
+    /// therefore remains untouched.
+    pub(crate) fn clear_external_viewer_frame_for_artifact(
+        &self,
+        key: &PreviewOutputKey,
+        texture_key: &str,
+    ) -> bool {
+        let semantic_cleared = self
+            .preview_service
+            .clear_external_viewer_frame_for_artifact(key, |output| output.key == texture_key);
+        let visible_cleared = {
+            let mut visible = self.window_preview_state.borrow_mut();
+            if window_preview_state_external_texture_key(&visible) == Some(texture_key) {
+                *visible = ViewerPreviewState::Loading;
+                true
+            } else {
+                false
+            }
+        };
+        if semantic_cleared || visible_cleared {
+            self.preview_dirty.set(true);
+        }
+        semantic_cleared || visible_cleared
     }
 
     /// Record a structured GPU output blocker from the window/GPU path.
@@ -363,12 +806,16 @@ impl AppUiHost {
         }
         self.normalize_asset_folder_selection();
         self.asset_thumbnails
-            .set_color_context(Some(thumbnail_color_context(&self.app_state.borrow())));
+            .set_color_context(Some(self.app_state.borrow().thumbnail_color_context()));
+        self.refresh_window_preview_state();
+        let window_preview_state = self.window_preview_state.borrow().clone();
+        let window_preview_snapshot =
+            WindowPreviewSnapshot::new(&window_preview_state, &self.preview_service);
         self.root.refresh_from_app_state_with_preferences_thumbnails_and_preview(
             &self.app_state.borrow(),
             &self.preferences,
             Some(&self.asset_thumbnails),
-            Some(&self.preview_service),
+            Some(&window_preview_snapshot),
             Some(self.waveform_service.source()),
         );
         self.sync_mode_from_app_state(bounds);
@@ -376,18 +823,27 @@ impl AppUiHost {
     }
 
     fn refresh_preview_state_without_rebuild(&mut self) {
+        self.refresh_window_preview_state();
+        let window_preview_state = self.window_preview_state.borrow().clone();
+        let window_preview_snapshot =
+            WindowPreviewSnapshot::new(&window_preview_state, &self.preview_service);
         let state = self.app_state.borrow();
         self.root
-            .refresh_playback_frame_from_app_state(&state, Some(&self.preview_service));
+            .refresh_playback_frame_from_app_state(&state, Some(&window_preview_snapshot));
     }
 
-    /// Poll background host tasks. Returns true when a repaint was requested by
-    /// refreshed model data.
-    pub fn poll_background_tasks(&mut self, bounds: Rect) -> bool {
+    /// Poll background host tasks without conflating repaint and drain policy.
+    pub(crate) fn poll_background_tasks(&mut self, bounds: Rect) -> AppUiBackgroundTaskPollOutcome {
         // Keep the waveform service's library reference in sync with the
         // current app state (e.g. when a new project opens).
         self.waveform_service
             .set_library(self.app_state.borrow().asset_library_handle());
+        apply_execution_resource_policy(
+            &self.app_state.borrow(),
+            &self.asset_thumbnails,
+            &self.waveform_service,
+            &self.preview_service,
+        );
         let project_path_before_persistence =
             self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
         let persistence_changed = self.app_state.borrow_mut().poll_project_persistence();
@@ -404,6 +860,8 @@ impl AppUiHost {
             }
         }
         let media_imports_changed = self.app_state.borrow_mut().poll_media_imports();
+        let media_asset_mutations_changed =
+            self.app_state.borrow_mut().poll_media_asset_mutations();
         let proxy_generation_changed = self.app_state.borrow_mut().poll_proxy_generation();
         let export_queue_changed = self.app_state.borrow_mut().poll_export_queue();
         let thumbnails_changed = self.asset_thumbnails.poll_finished();
@@ -419,52 +877,75 @@ impl AppUiHost {
         }
         let full_model_changed = persistence_changed
             || media_imports_changed
+            || media_asset_mutations_changed
             || proxy_generation_changed
             || export_queue_changed
             || thumbnails_changed
             || waveform_changed;
+        let outcome =
+            AppUiBackgroundTaskPollOutcome::from_changes(full_model_changed, preview_outcome);
         if !full_model_changed {
             if preview_outcome.visible_change {
                 self.refresh_if_dirty(bounds);
             }
-            return transport_model_changed
-                || preview_outcome.visible_change
-                || preview_outcome.needs_follow_up_poll;
+            return outcome;
         }
         self.mark_dirty();
         self.refresh_if_dirty(bounds);
         self.sync_playback_feedback_from_viewer();
-        true
+        outcome
+    }
+
+    /// Earliest monotonic deadline for the next native resource observation.
+    ///
+    /// Window scheduling merges this with UI and playback timers so a fully
+    /// idle editor cannot leave pressure evidence stale indefinitely.
+    pub(crate) fn next_execution_resource_observation_deadline(&self) -> Instant {
+        self.app_state.borrow().next_execution_resource_observation_deadline()
     }
 
     /// Advance active playback and refresh UI models when the visible frame changes.
-    pub fn advance_playback_clock(&mut self, elapsed: Duration, bounds: Rect) -> bool {
+    pub fn advance_playback_clock(&mut self, observed_at: Instant, bounds: Rect) -> bool {
         let playback_changed = {
             let mut state = self.app_state.borrow_mut();
-            let changed = state.advance_playback_clock(elapsed).requires_refresh();
-            state.pump_audio_output();
+            // Audio Device Clock is the authority while available. Apply its
+            // latest coherent callback fact before asking the Engine to derive
+            // a new frame target/deadline; otherwise callback age can mint an
+            // unnecessarily expired demand that a fresh observation is not
+            // allowed to extend.
+            let audio_result = state.pump_audio_output();
+            let changed = state
+                .advance_playback_clock_at(Instant::now().max(observed_at))
+                .requires_refresh();
+            if let Err(error) = audio_result {
+                tracing::error!(%error, "audio output pump failed closed");
+            }
             changed
         };
         if !playback_changed {
             return false;
         }
         {
+            self.refresh_window_preview_state();
+            let window_preview_state = self.window_preview_state.borrow().clone();
+            let window_preview_snapshot =
+                WindowPreviewSnapshot::new(&window_preview_state, &self.preview_service);
             let state = self.app_state.borrow();
             self.root
-                .refresh_playback_frame_from_app_state(&state, Some(&self.preview_service));
+                .refresh_playback_frame_from_app_state(&state, Some(&window_preview_snapshot));
         }
         self.sync_playback_feedback_from_viewer();
         TreeWalker::layout(self.active_root_mut(), bounds);
         true
     }
 
-    /// Delay until the next playback frame should be polled, if playback is running.
-    pub fn playback_next_frame_delay(&self) -> Option<Duration> {
-        self.app_state.borrow().playback_next_frame_delay()
+    /// Delay until Playback next requires a Clock or bounded-priming wake.
+    pub fn playback_next_wake_delay(&self) -> Option<Duration> {
+        self.app_state.borrow().playback_next_wake_delay()
     }
 
-    /// Whether the transport clock is currently advancing.
-    pub(crate) fn is_playback_running(&self) -> bool {
+    /// Whether transport currently requires the Window playback coordinator.
+    pub(crate) fn is_playback_active(&self) -> bool {
         self.app_state.borrow().is_playing()
     }
 
@@ -484,27 +965,14 @@ impl AppUiHost {
     }
 
     fn sync_playback_feedback_from_viewer(&mut self) -> bool {
-        let feedback = self.root.viewer_playback_feedback();
-        let feedback_changed = feedback != self.playback_feedback;
-        self.playback_feedback = feedback;
-        let presentation_ticket = if feedback == ViewerPlaybackFeedback::Ready {
-            let state = self.app_state.borrow();
-            self.preview_service.playback_presentation_ticket(&state)
-        } else {
-            None
-        };
-        let presentation_changed = if let Some(ticket) = presentation_ticket {
-            let changed = self
-                .app_state
-                .borrow_mut()
-                .complete_frame_presentation(ticket, std::time::Instant::now());
-            changed
-        } else {
-            feedback
-                .terminal_delivery()
-                .is_some_and(|kind| self.app_state.borrow_mut().observe_viewer_frame_delivery(kind))
-        };
-        let transport_changed = presentation_changed || self.observe_playback_video_preroll();
+        let raw_feedback = self.root.viewer_playback_feedback();
+        // Ready and Blocked are projections of work already evaluated by
+        // Preview. Payload-free Widget feedback has no demand identity and
+        // must never mint or infer terminal authority for whichever demand is
+        // current now.
+        let feedback_changed = raw_feedback != self.playback_feedback;
+        self.playback_feedback = raw_feedback;
+        let transport_changed = self.observe_playback_video_preroll();
         if transport_changed {
             self.refresh_transport_state_without_preview();
         }
@@ -596,12 +1064,11 @@ impl AppUiHost {
             tracing::debug!(?action, "custom UI action");
             let lightweight_transport_refresh =
                 action_prefers_transport_refresh_without_preview(&action);
-            if action_preempts_preview_work(&action, &self.app_state.borrow()) {
-                self.preview_service.cancel_interactive_work();
-            }
             if let Err(err) = self.dispatch_editor_action(action) {
                 tracing::warn!("custom UI action failed: {err}");
             }
+            let transport_intent = self.app_state.borrow().preview_transport_intent();
+            self.preview_service.synchronize_transport_intent(transport_intent);
             if lightweight_transport_refresh {
                 self.refresh_transport_intent_without_preview();
             } else {
@@ -621,11 +1088,15 @@ impl AppUiHost {
         let next = mode_for_app_state(&self.app_state.borrow());
         if self.mode != next {
             self.mode = next;
+            self.refresh_window_preview_state();
+            let window_preview_state = self.window_preview_state.borrow().clone();
+            let window_preview_snapshot =
+                WindowPreviewSnapshot::new(&window_preview_state, &self.preview_service);
             self.root.refresh_from_app_state_with_preferences_thumbnails_and_preview(
                 &self.app_state.borrow(),
                 &self.preferences,
                 Some(&self.asset_thumbnails),
-                Some(&self.preview_service),
+                Some(&window_preview_snapshot),
                 Some(self.waveform_service.source()),
             );
             TreeWalker::layout(self.active_root_mut(), bounds);
@@ -638,6 +1109,7 @@ impl AppUiHost {
     }
 
     fn refresh_transport_intent_without_preview(&mut self) {
+        self.mark_window_preview_pending();
         let state = self.app_state.borrow();
         self.root.refresh_transport_intent_from_app_state(&state);
     }
@@ -871,11 +1343,15 @@ impl AppUiHost {
                         .borrow_mut()
                         .set_status_hint(format!("Preferences could not be saved: {err}"), true);
                 }
+                self.refresh_window_preview_state();
+                let window_preview_state = self.window_preview_state.borrow().clone();
+                let window_preview_snapshot =
+                    WindowPreviewSnapshot::new(&window_preview_state, &self.preview_service);
                 self.root.refresh_from_app_state_with_preferences_thumbnails_and_preview(
                     &self.app_state.borrow(),
                     &self.preferences,
                     Some(&self.asset_thumbnails),
-                    Some(&self.preview_service),
+                    Some(&window_preview_snapshot),
                     Some(self.waveform_service.source()),
                 );
                 TreeWalker::layout(&mut self.root, bounds);
@@ -900,11 +1376,15 @@ impl AppUiHost {
             Ok(payload) => {
                 let folder_id = self.valid_asset_folder_id(payload.folder_id);
                 self.root.set_asset_folder_id(folder_id);
+                self.refresh_window_preview_state();
+                let window_preview_state = self.window_preview_state.borrow().clone();
+                let window_preview_snapshot =
+                    WindowPreviewSnapshot::new(&window_preview_state, &self.preview_service);
                 self.root.refresh_from_app_state_with_preferences_thumbnails_and_preview(
                     &self.app_state.borrow(),
                     &self.preferences,
                     Some(&self.asset_thumbnails),
-                    Some(&self.preview_service),
+                    Some(&window_preview_snapshot),
                     Some(self.waveform_service.source()),
                 );
                 TreeWalker::layout(&mut self.root, bounds);
@@ -955,7 +1435,7 @@ impl AppUiHost {
         let Some(pending) = close_request_from_action(action) else {
             return false;
         };
-        self.preview_service.cancel_interactive_work();
+        self.preview_service.cancel_all_work_for_lifecycle();
 
         let has_unsaved_changes = self.app_state.borrow().has_unsaved_project_changes();
         if has_unsaved_changes {
@@ -1024,49 +1504,123 @@ impl AppUiHost {
     ) {
         match pending {
             PendingCloseAction::CloseProject => {
-                self.preview_service.cancel_interactive_work();
+                self.preview_service.cancel_all_work_for_lifecycle();
+                self.waveform_service.set_library(None);
                 if let Err(err) = self.dispatch_editor_action(Action::CloseProject) {
                     tracing::warn!("close project failed: {err}");
+                    self.waveform_service
+                        .set_library(self.app_state.borrow().asset_library_handle());
+                    self.app_state
+                        .borrow_mut()
+                        .set_status_hint(format!("关闭项目失败：{err}"), true);
+                    self.mark_dirty();
+                    return;
                 }
                 self.refresh_recovery_candidates();
                 self.mark_dirty();
             }
             PendingCloseAction::QuitApp => {
-                #[cfg(not(test))]
-                super::window::arm_process_exit_watchdog();
-                self.preview_service.shutdown();
+                self.preview_service.cancel_all_work_for_lifecycle();
+                self.waveform_service.set_library(None);
                 if self.app_state.borrow().has_open_project() {
                     if let Err(err) = self.dispatch_editor_action(Action::CloseProject) {
                         tracing::warn!("close project before quit failed: {err}");
+                        self.waveform_service
+                            .set_library(self.app_state.borrow().asset_library_handle());
+                        self.app_state
+                            .borrow_mut()
+                            .set_status_hint(format!("退出前关闭项目失败：{err}"), true);
+                        self.mark_dirty();
+                        return;
                     }
                     self.refresh_recovery_candidates();
                     self.mark_dirty();
                 }
+                self.preview_service.shutdown();
+                #[cfg(not(test))]
+                super::window::arm_process_exit_watchdog();
                 commands.quit = true;
             }
         }
     }
 }
 
-fn thumbnail_color_context(state: &AppState) -> mondrian_timeline::sequence::ProgramColorContext {
-    let environment = state.project_color_environment();
-    let mut context = state.new_sequence_defaults().root_program_color_context(environment);
-    context.output_color_space = mondrian_core::types::ColorSpace::Srgb.into();
-    context.output_tone_map = true;
-    context.output_transform = match environment.engine() {
-        mondrian_core::ColorEngine::MondrianStandard { package } => {
-            mondrian_core::OutputTransformIntent::mondrian_standard_package(*package)
-        }
-        mondrian_core::ColorEngine::Aces { preset } => {
-            mondrian_core::OutputTransformIntent::aces_preset(*preset)
-        }
-        mondrian_core::ColorEngine::CustomOcio { .. } => {
-            mondrian_core::OutputTransformIntent::CustomOcio {
-                output_color_space: mondrian_core::types::ColorSpace::Srgb,
-            }
-        }
-    };
-    context
+fn apply_execution_resource_policy(
+    state: &AppState,
+    thumbnails: &AssetThumbnailAdapter,
+    waveforms: &AudioWaveformService,
+    preview: &WindowPreviewAdapter,
+) {
+    let thumbnail = thumbnails.diagnostics();
+    let waveform = waveforms.diagnostics();
+    let decision = state.coordinate_execution_resource_decision(ExternalExecutionResourceDemand {
+        thumbnail: ExecutionDomainDemand {
+            queued: thumbnail.queued_requests,
+            running: thumbnail.running_requests,
+            user_initiated: 0,
+            terminal_generation: thumbnail
+                .completions
+                .saturating_add(thumbnail.failures)
+                .saturating_add(thumbnail.cancellations)
+                .saturating_add(thumbnail.superseded),
+        },
+        waveform: ExecutionDomainDemand {
+            queued: waveform.queued_sources,
+            running: waveform.running_sources,
+            user_initiated: 0,
+            terminal_generation: waveform
+                .completions
+                .saturating_add(waveform.failures)
+                .saturating_add(waveform.cancellations)
+                .saturating_add(waveform.superseded_completions),
+        },
+    });
+    let closing = decision.heavy_slots.domains_to_close();
+    if closing
+        .contains(crate::app::execution_resource_slots::ExecutionResourceSlotDomain::Thumbnail)
+    {
+        let mut closed = decision.thumbnail;
+        closed.dispatch_enabled = false;
+        thumbnails.apply_resource_decision(&closed);
+        let acknowledged = state.acknowledge_external_execution_resource_domain_closed(
+            &decision,
+            crate::app::execution_resource_slots::ExecutionResourceSlotDomain::Thumbnail,
+        );
+        debug_assert!(
+            acknowledged,
+            "Thumbnail close acknowledgement lost its transition"
+        );
+    }
+    if closing.contains(crate::app::execution_resource_slots::ExecutionResourceSlotDomain::Waveform)
+    {
+        waveforms.set_resource_policy(
+            decision.waveform.automatic_admission_enabled,
+            false,
+            decision.waveform.cache_budget_bytes,
+        );
+        let acknowledged = state.acknowledge_external_execution_resource_domain_closed(
+            &decision,
+            crate::app::execution_resource_slots::ExecutionResourceSlotDomain::Waveform,
+        );
+        debug_assert!(
+            acknowledged,
+            "Waveform close acknowledgement lost its transition"
+        );
+    }
+    state.apply_internal_execution_resource_projection(&decision);
+    thumbnails.apply_resource_decision(&decision.thumbnail);
+    waveforms.set_resource_policy(
+        decision.waveform.automatic_admission_enabled,
+        decision.waveform.dispatch_enabled,
+        decision.waveform.cache_budget_bytes,
+    );
+    preview.apply_resource_decision(&decision.preview);
+    if let Err(error) = mondrian_ui_widgets::vector_icon::configure_vector_icon_raster_cache(
+        decision.ui.vector_icon_cache_entries,
+        decision.ui.vector_icon_cache_bytes,
+    ) {
+        tracing::warn!(%error, "failed to apply bounded vector-icon raster policy");
+    }
 }
 
 fn action_prefers_transport_refresh_without_preview(action: &Action) -> bool {
@@ -1081,13 +1635,6 @@ fn action_prefers_transport_refresh_without_preview(action: &Action) -> bool {
             | Action::GoToStart
             | Action::GoToEnd
     )
-}
-
-fn action_preempts_preview_work(action: &Action, state: &AppState) -> bool {
-    if !action_prefers_transport_refresh_without_preview(action) {
-        return false;
-    }
-    state.is_playing()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1182,8 +1729,7 @@ fn startup_recovery_projects_from_candidates(
                 String::new()
             };
             StartupRecoveryProject {
-                project_file: candidate.project_file.clone(),
-                autosave_file: candidate.autosave_file.clone(),
+                candidate: candidate.clone(),
                 title: recent_project_title(&candidate.project_file),
                 detail: format!(
                     "{}{} · {}",
@@ -1408,27 +1954,85 @@ fn parse_asset_browser_navigation(
 mod tests {
     use super::*;
     use mondrian_assets::AssetLibrary;
-    use mondrian_core::types::{AssetId, ClipId, TrackId};
+    use mondrian_core::types::{AssetId, ClipId, Color, TrackId};
+    use mondrian_core::{FramePosition, TimelineTime};
     use mondrian_editor_state::state::PanelKind;
     use mondrian_editor_state::Action;
     use mondrian_media::PreviewHardwareDecodeRequest;
     use mondrian_platform::{
         ClipboardError, FileFilter, NativeVideoTextureImportProbeResult, NoopPlatformService,
     };
-    use mondrian_timeline::Sequence;
+    use mondrian_timeline::{Clip, Sequence};
     use mondrian_ui_core::tree::TreeWalker;
     use mondrian_ui_core::types::{Modifiers, MouseButton, Point, Rect, SplitDirection};
     use mondrian_ui_core::widget::EventContext;
-    use mondrian_ui_core::{EventRequests, EventResult, UiEvent, Widget};
+    use mondrian_ui_core::{EventRequests, EventResult, RasterImageColorSpace, UiEvent, Widget};
     use mondrian_ui_theme::{current_theme, ThemePreference, ThemePreset};
-    use mondrian_ui_widgets::{ViewerCanvasBackground, WaveformDisplay};
+    use mondrian_ui_widgets::{
+        ViewerCanvasBackground, ViewerExternalTextureFrame, ViewerExternalTexturePresentation,
+        ViewerFrameContent, ViewerFrameImage, WaveformDisplay,
+    };
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::app_ui::preferences_store::{load_app_ui_preferences_from, AppUiPreferences};
     use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use crate::app_ui::workspace_layout::AppUiWorkspaceLayout;
+
+    #[test]
+    fn bounded_background_remainder_requests_poll_without_repaint() {
+        let outcome = AppUiBackgroundTaskPollOutcome::from_changes(
+            false,
+            PlaybackPreviewPumpOutcome {
+                needs_follow_up_poll: true,
+                ..PlaybackPreviewPumpOutcome::default()
+            },
+        );
+
+        assert!(!outcome.repaint_required);
+        assert!(outcome.needs_follow_up_poll);
+    }
+
+    #[test]
+    fn visible_transport_and_full_model_changes_each_require_repaint() {
+        for (full_model_changed, preview) in [
+            (
+                true,
+                PlaybackPreviewPumpOutcome {
+                    needs_follow_up_poll: true,
+                    ..PlaybackPreviewPumpOutcome::default()
+                },
+            ),
+            (
+                false,
+                PlaybackPreviewPumpOutcome {
+                    visible_change: true,
+                    ..PlaybackPreviewPumpOutcome::default()
+                },
+            ),
+            (
+                false,
+                PlaybackPreviewPumpOutcome {
+                    transport_change: true,
+                    ..PlaybackPreviewPumpOutcome::default()
+                },
+            ),
+            (
+                false,
+                PlaybackPreviewPumpOutcome {
+                    candidate_retry_required: true,
+                    ..PlaybackPreviewPumpOutcome::default()
+                },
+            ),
+        ] {
+            assert!(
+                AppUiBackgroundTaskPollOutcome::from_changes(full_model_changed, preview)
+                    .repaint_required
+            );
+        }
+    }
 
     #[test]
     fn host_reports_renderer_native_import_admission_to_preview() {
@@ -1477,6 +2081,46 @@ mod tests {
     struct ProjectDialogPlatform {
         open_paths: Option<Vec<PathBuf>>,
         save_path: Option<PathBuf>,
+    }
+
+    #[derive(Default)]
+    struct RecordingPreviewViewerGpuResourceOwner {
+        grant: Option<mondrian_renderer::ViewerGpuExecutionResourceGrant>,
+        clear_idle_calls: Cell<usize>,
+    }
+
+    #[derive(Clone, Default)]
+    struct ManualPreviewSchedulerClock {
+        now_nanos: Arc<AtomicU64>,
+    }
+
+    impl ManualPreviewSchedulerClock {
+        fn advance(&self, duration: Duration) {
+            let delta = duration.as_nanos().min(u64::MAX as u128) as u64;
+            let current = self.now_nanos.load(Ordering::Acquire);
+            self.now_nanos.store(current.saturating_add(delta), Ordering::Release);
+        }
+    }
+
+    impl mondrian_playback::MonotonicRuntimeClock for ManualPreviewSchedulerClock {
+        fn now(&self) -> mondrian_playback::MonotonicTimestamp {
+            mondrian_playback::MonotonicTimestamp::from_duration(Duration::from_nanos(
+                self.now_nanos.load(Ordering::Acquire),
+            ))
+        }
+    }
+
+    impl PreviewViewerGpuResourceOwner for RecordingPreviewViewerGpuResourceOwner {
+        fn reconfigure_resource_grant(
+            &mut self,
+            grant: mondrian_renderer::ViewerGpuExecutionResourceGrant,
+        ) {
+            self.grant = Some(grant);
+        }
+
+        fn clear_idle_resources(&self) {
+            self.clear_idle_calls.set(self.clear_idle_calls.get().saturating_add(1));
+        }
     }
 
     impl PlatformService for CountingPlatform {
@@ -1599,6 +2243,26 @@ mod tests {
         state
     }
 
+    fn workspace_app_state_with_timed_solid() -> AppState {
+        let mut state = workspace_app_state();
+        let sequence = state.active_sequence_mut_uncommitted().expect("active Sequence");
+        let time_base = sequence.time_base();
+        let duration = TimelineTime::from_frame_position(FramePosition::new(100, time_base))
+            .expect("fixture duration");
+        let mut clip = Clip::new_solid_color(
+            AssetId::new(),
+            Color::from_rgba8(24, 80, 160, 255),
+            TimelineTime::ZERO,
+            duration,
+        )
+        .expect("timed solid fixture");
+        // Disabled author content still gives Playback a real Sequence range
+        // while Viewer evaluation remains the deterministic transparent canvas.
+        clip.is_disabled = true;
+        sequence.video_tracks[0].add_clip(clip).expect("add timed solid fixture");
+        state
+    }
+
     fn workspace_host_without_preview_workers(name: &str) -> AppUiHost {
         let mut host = AppUiHost::new_with_preferences_path(
             workspace_app_state(),
@@ -1607,7 +2271,264 @@ mod tests {
         );
         host.preview_service.shutdown();
         host.preview_service = WindowPreviewAdapter::new_without_workers_for_test();
+        let transport_intent = host.app_state.borrow().preview_transport_intent();
+        host.preview_service.synchronize_transport_intent(transport_intent);
         host
+    }
+
+    fn test_window_raster(key: &str) -> ViewerPreviewState {
+        ViewerPreviewState::Ready(ViewerFrameContent::Raster(
+            ViewerFrameImage::new(key, 1, 1, RasterImageColorSpace::Srgb, vec![0, 0, 0, 255])
+                .expect("valid test raster"),
+        ))
+    }
+
+    fn seed_window_gpu_output(host: &AppUiHost) {
+        let key = crate::app::preview_execution::PreviewOutputKey::new(
+            mondrian_core::types::SequenceId::new(),
+            1,
+            1,
+            crate::app::preview_execution::PreviewSemanticIdentity::from_test_fingerprint([7; 32]),
+        );
+        let output = ViewerExternalTextureFrame::new_spatial(
+            "seeded-window-gpu",
+            ViewerExternalTexturePresentation::full_frame(1, 1).expect("valid seeded presentation"),
+        )
+        .expect("valid seeded external frame");
+        host.preview_service.register_gpu_output(key, output);
+        assert!(host.preview_service.has_retained_gpu_output());
+    }
+
+    #[test]
+    fn exact_gpu_artifact_revocation_clears_its_visible_widget_projection() {
+        let host = workspace_host_without_preview_workers("exact-gpu-artifact-revocation");
+        let key = crate::app::preview_execution::PreviewOutputKey::new(
+            mondrian_core::types::SequenceId::new(),
+            1,
+            1,
+            crate::app::preview_execution::PreviewSemanticIdentity::from_test_fingerprint([8; 32]),
+        );
+        let output = ViewerExternalTextureFrame::new_spatial(
+            "window-gpu:submission:7",
+            ViewerExternalTexturePresentation::full_frame(1, 1)
+                .expect("valid external presentation"),
+        )
+        .expect("valid external frame");
+        host.preview_service.register_gpu_output(key.clone(), output.clone());
+        host.window_preview_state.replace(ViewerPreviewState::Ready(
+            ViewerFrameContent::ExternalTexture(output),
+        ));
+
+        assert!(
+            !host.clear_external_viewer_frame_for_artifact(&key, "window-gpu:submission:older"),
+            "a different physical submission must not revoke the current artifact"
+        );
+        assert!(matches!(
+            &*host.window_preview_state.borrow(),
+            ViewerPreviewState::Ready(ViewerFrameContent::ExternalTexture(frame))
+                if frame.key == "window-gpu:submission:7"
+        ));
+
+        assert!(host.clear_external_viewer_frame_for_artifact(&key, "window-gpu:submission:7"));
+        assert!(!host.preview_service.has_retained_gpu_output());
+        assert!(matches!(
+            &*host.window_preview_state.borrow(),
+            ViewerPreviewState::Loading
+        ));
+    }
+
+    #[test]
+    fn paused_untimed_current_output_completes_through_window_presentation_authority() {
+        let host = workspace_host_without_preview_workers("paused-current-authority");
+        let ticket = {
+            let mut state = host.app_state.borrow_mut();
+            state.set_playback_frame_running(4);
+            state.pause().expect("pause");
+            state
+                .playback_frame_presentation_ticket(
+                    mondrian_playback::FramePresentationQuality::Ready,
+                )
+                .expect("paused current demand")
+        };
+        assert_eq!(ticket.deadline(), None);
+        seed_window_gpu_output(&host);
+        host.window_preview_state.replace(test_window_raster("retained-current"));
+
+        let disposition =
+            host.present_current_viewer_output(PreviewPresentationCandidate::new((), Some(ticket)));
+
+        assert!(matches!(
+            disposition,
+            FramePresentationDisposition::Presented(completion)
+                if completion.delivery().kind()
+                    == mondrian_playback::FrameDeliveryKind::Ready
+        ));
+        assert!(
+            host.app_state.borrow().pending_playback_frame_demand_identity().is_none(),
+            "the paused untimed demand must not remain permanently Loading"
+        );
+        assert!(matches!(
+            &*host.window_preview_state.borrow(),
+            ViewerPreviewState::Ready(_)
+        ));
+        assert!(!host.preview_service.has_retained_gpu_output());
+    }
+
+    #[test]
+    fn transparent_canvas_completes_its_bound_window_demand() {
+        let host = workspace_host_without_preview_workers("transparent-authority");
+        let ticket = {
+            let mut state = host.app_state.borrow_mut();
+            state.set_playback_frame_running(4);
+            state.pause().expect("pause");
+            state
+                .playback_frame_presentation_ticket(
+                    mondrian_playback::FramePresentationQuality::Ready,
+                )
+                .expect("transparent demand")
+        };
+        seed_window_gpu_output(&host);
+
+        let disposition = host
+            .present_transparent_viewer_output(PreviewPresentationCandidate::new((), Some(ticket)));
+
+        assert!(matches!(
+            disposition,
+            FramePresentationDisposition::Presented(completion)
+                if completion.delivery().kind()
+                    == mondrian_playback::FrameDeliveryKind::Ready
+        ));
+        assert!(matches!(
+            &*host.window_preview_state.borrow(),
+            ViewerPreviewState::Transparent
+        ));
+        assert!(host.app_state.borrow().pending_playback_frame_demand_identity().is_none());
+        assert!(!host.preview_service.has_retained_gpu_output());
+    }
+
+    #[test]
+    fn superseded_window_candidate_cannot_complete_the_replacement_demand() {
+        let host = workspace_host_without_preview_workers("superseded-candidate");
+        let ticket_a = {
+            let mut state = host.app_state.borrow_mut();
+            state.set_playback_frame_running(4);
+            state
+                .playback_frame_presentation_ticket(
+                    mondrian_playback::FramePresentationQuality::Ready,
+                )
+                .expect("candidate A demand")
+        };
+        let replacement_identity = {
+            let mut state = host.app_state.borrow_mut();
+            state.set_playback_frame_running(7);
+            state.pending_playback_frame_demand_identity().expect("replacement demand B")
+        };
+        host.window_preview_state.replace(test_window_raster("candidate-a"));
+
+        let disposition = host
+            .present_current_viewer_output(PreviewPresentationCandidate::new((), Some(ticket_a)));
+
+        assert_eq!(disposition, FramePresentationDisposition::LostAuthority);
+        assert_eq!(
+            host.app_state.borrow().pending_playback_frame_demand_identity(),
+            Some(replacement_identity)
+        );
+        assert!(matches!(
+            &*host.window_preview_state.borrow(),
+            ViewerPreviewState::Stale(_)
+        ));
+        assert_eq!(
+            host.app_state.borrow().playback_evidence_report().deliveries.ready,
+            0
+        );
+    }
+
+    #[test]
+    fn late_window_raster_never_replaces_the_authorized_output() {
+        let host = workspace_host_without_preview_workers("late-raster");
+        let ticket = {
+            let mut state = host.app_state.borrow_mut();
+            state.set_playback_frame_running(4);
+            state
+                .playback_frame_presentation_ticket(
+                    mondrian_playback::FramePresentationQuality::Ready,
+                )
+                .expect("timed raster demand")
+        };
+        host.window_preview_state.replace(test_window_raster("authorized-old"));
+        let late = test_window_raster("late-new");
+
+        let disposition = host.admit_window_preview_state_at(
+            Some(ticket),
+            late,
+            Instant::now() + Duration::from_secs(10),
+        );
+
+        assert!(matches!(
+            disposition,
+            FramePresentationDisposition::DroppedLate(completion)
+                if completion.delivery().kind()
+                    == mondrian_playback::FrameDeliveryKind::Late
+        ));
+        let ViewerPreviewState::Stale(ViewerFrameContent::Raster(frame)) =
+            &*host.window_preview_state.borrow()
+        else {
+            panic!("the previously authorized raster must remain stale-visible");
+        };
+        assert_eq!(frame.key, "authorized-old");
+        assert_eq!(
+            host.app_state.borrow().playback_evidence_report().deliveries.late,
+            1
+        );
+    }
+
+    #[test]
+    fn repeated_demand_free_current_output_does_not_self_schedule_preview_refresh() {
+        let host = workspace_host_without_preview_workers("demand-free-current-idempotence");
+        {
+            let mut state = host.app_state.borrow_mut();
+            if let Some(ticket) = state.playback_frame_presentation_ticket(
+                mondrian_playback::FramePresentationQuality::Ready,
+            ) {
+                assert!(
+                    state.complete_frame_presentation(ticket, Instant::now()).is_some(),
+                    "fixture demand must be settled before testing demand-free publication"
+                );
+            }
+        }
+        host.window_preview_state.replace(test_window_raster("already-current"));
+        host.preview_dirty.set(false);
+
+        for _ in 0..2 {
+            let disposition =
+                host.present_current_viewer_output(PreviewPresentationCandidate::new((), None));
+            assert_eq!(disposition, FramePresentationDisposition::NoDemand);
+            assert!(
+                !host.preview_dirty.get(),
+                "an idempotent Current projection must not create a repaint loop"
+            );
+        }
+    }
+
+    #[test]
+    fn per_frame_viewer_projection_does_not_reapply_preview_runtime_policy() {
+        let host = workspace_host_without_preview_workers("viewer-resource-owner-boundary");
+        let before = host.preview_service.diagnostics().resource_decision_applications;
+        let expected = host.app_state.borrow().execution_resource_decision().preview.viewer_gpu;
+        let mut owner = RecordingPreviewViewerGpuResourceOwner::default();
+
+        host.apply_preview_execution_resource_decision(&mut owner);
+
+        assert_eq!(owner.grant, Some(expected.grant));
+        assert_eq!(
+            owner.clear_idle_calls.get(),
+            usize::from(expected.clear_idle)
+        );
+        assert_eq!(
+            host.preview_service.diagnostics().resource_decision_applications,
+            before,
+            "per-frame Viewer projection must not reconfigure Preview scheduling or caches"
+        );
     }
 
     fn poll_host_background_tasks_until_imports_idle(host: &mut AppUiHost) {
@@ -1746,7 +2667,12 @@ mod tests {
 
     fn cleanup_project_file(project_file: &Path) {
         let _ = std::fs::remove_file(project_file);
-        let _ = std::fs::remove_dir_all(project_runtime_root_for_test(project_file));
+        let runtime_roots =
+            crate::app::project_runtime::project_runtime_roots_for_path_for_test(project_file)
+                .unwrap_or_default();
+        for runtime_root in runtime_roots {
+            let _ = std::fs::remove_dir_all(runtime_root);
+        }
     }
 
     fn write_minimal_wav(path: &Path) {
@@ -1862,19 +2788,6 @@ mod tests {
         );
     }
 
-    fn project_runtime_root_for_test(project_file: &Path) -> PathBuf {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let stem = project_file.file_stem().and_then(|s| s.to_str()).unwrap_or("project");
-        let mut hasher = DefaultHasher::new();
-        project_file.to_string_lossy().hash(&mut hasher);
-        let hash = hasher.finish();
-        std::env::temp_dir()
-            .join("mondrian-runtime")
-            .join(format!("mondrian_{stem}_{hash:x}"))
-    }
-
     #[test]
     fn host_builds_root_from_initial_app_state() {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
@@ -1892,7 +2805,6 @@ mod tests {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let project_file = temp_preferences_path("startup-project").with_extension("mdp");
         let preferences_path = temp_preferences_path("startup-project-preferences");
-        let runtime_root = project_runtime_root_for_test(&project_file);
         let platform = StartupProjectPlatform { project_file: project_file.clone() };
         let mut host = AppUiHost::new_with_preferences_path(
             AppState::new(),
@@ -1931,6 +2843,15 @@ mod tests {
             load_app_ui_preferences_from(&preferences_path).recent_projects,
             vec![project_file.clone()]
         );
+        let runtime_root = host
+            .app_state()
+            .authoring
+            .as_ref()
+            .expect("created Project Session")
+            .runtime_root()
+            .to_path_buf();
+        host.app_state.borrow_mut().close_project().expect("close created Project");
+        drop(host);
 
         let _ = std::fs::remove_file(project_file);
         let _ = std::fs::remove_file(preferences_path);
@@ -2002,7 +2923,6 @@ mod tests {
     fn transport_action_while_preview_pending_cancels_obsolete_work() {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let mut host = workspace_host_without_preview_workers("transport-cancel-preview-work");
-        host.app_state.borrow_mut().play();
         host.preview_service.seed_pending_preview_work_for_test();
         let before_render_requests = host.preview_service.diagnostics().render_requests;
         assert_eq!(
@@ -2015,7 +2935,7 @@ mod tests {
         );
 
         let pending = PendingUiActions::default();
-        pending.push(Action::TogglePlay);
+        pending.push(Action::Play);
         let commands = host.drain_pending_actions(
             &pending,
             Rect::new(0.0, 0.0, 1280.0, 720.0),
@@ -2023,7 +2943,7 @@ mod tests {
         );
 
         assert_eq!(commands, AppUiShellCommands::default());
-        assert!(!host.app_state().is_playing());
+        assert!(host.app_state().is_playing());
         let diagnostics = host.preview_service.diagnostics();
         assert_eq!(diagnostics.interactive_cancel_requests, 1);
         assert_eq!(diagnostics.interactive_cancel_scheduler_requests, 1);
@@ -2033,7 +2953,29 @@ mod tests {
         assert_eq!(diagnostics.worker_queue.queued_jobs, 0);
         assert_eq!(
             diagnostics.render_requests, before_render_requests,
-            "transport escape must not synchronously request preview while canceling stale work"
+            "transport synchronization must not synchronously request Preview while retiring stale work"
+        );
+    }
+
+    #[test]
+    fn ordinary_action_does_not_request_transport_family_cancellation() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = workspace_host_without_preview_workers("ordinary-action-preview-work");
+        host.preview_service.seed_pending_preview_work_for_test();
+
+        let pending = PendingUiActions::default();
+        pending.push(Action::DeselectAll);
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, AppUiShellCommands::default());
+        assert_eq!(
+            host.preview_service.diagnostics().interactive_cancel_requests,
+            0,
+            "Window action routing must not infer Preview cancellation from an ordinary Action"
         );
     }
 
@@ -2056,14 +2998,14 @@ mod tests {
             AppUiPreferences::default(),
             temp_preferences_path("buffering-preview-free-refresh"),
         );
-        host.app_state.borrow_mut().play();
+        host.app_state.borrow_mut().play().expect("play");
         {
             let state = host.app_state.borrow();
             host.root.refresh_playback_frame_from_app_state(&state, Some(&LoadingPreview));
         }
         let before_render_requests = host.preview_service.diagnostics().render_requests;
 
-        assert!(host.sync_playback_feedback_from_viewer());
+        let _ = host.sync_playback_feedback_from_viewer();
 
         assert!(host.app_state.borrow().is_playing());
         assert_eq!(host.playback_feedback, ViewerPlaybackFeedback::Loading);
@@ -2097,7 +3039,7 @@ mod tests {
             AppUiPreferences::default(),
             temp_preferences_path("buffering-defer-gpu-prepare"),
         );
-        host.app_state.borrow_mut().play();
+        host.app_state.borrow_mut().play().expect("play");
         {
             let state = host.app_state.borrow();
             assert!(host.root.refresh_playback_frame_from_app_state(&state, Some(&LoadingPreview)));
@@ -2123,14 +3065,97 @@ mod tests {
     }
 
     #[test]
+    fn payload_free_ready_feedback_cannot_mint_presentation_authority() {
+        struct TransparentPreview;
+
+        impl crate::app_ui::panels::ViewerPreviewSource for TransparentPreview {
+            fn viewer_preview_for_state(
+                &self,
+                _state: &AppState,
+            ) -> crate::app_ui::panels::ViewerPreviewState {
+                crate::app_ui::panels::ViewerPreviewState::Transparent
+            }
+        }
+
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut host = AppUiHost::new_with_preferences_path(
+            workspace_app_state(),
+            AppUiPreferences::default(),
+            temp_preferences_path("late-ready-feedback"),
+        );
+        host.app_state.borrow_mut().set_playback_frame_running(0);
+        let pending_identity = host
+            .app_state
+            .borrow()
+            .pending_playback_frame_demand_identity()
+            .expect("pending presentation demand");
+        {
+            let state = host.app_state.borrow();
+            host.root
+                .refresh_playback_frame_from_app_state(&state, Some(&TransparentPreview));
+        }
+        assert_eq!(
+            host.root.viewer_playback_feedback(),
+            ViewerPlaybackFeedback::Ready
+        );
+
+        let _ = host.sync_playback_feedback_from_viewer();
+
+        assert_eq!(host.playback_feedback, ViewerPlaybackFeedback::Ready);
+        let state = host.app_state.borrow();
+        assert_eq!(
+            state.pending_playback_frame_demand_identity(),
+            Some(pending_identity),
+            "Widget Ready feedback must not attach itself to the current demand"
+        );
+        let evidence = state.playback_evidence_report();
+        assert_eq!(evidence.deliveries.ready, 0);
+        assert_eq!(evidence.deliveries.late, 0);
+        assert_eq!(evidence.deliveries.rejected, 0);
+    }
+
+    #[test]
     fn poll_background_tasks_expires_stalled_delivery_without_holding_transport() {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
-        let mut host = workspace_host_without_preview_workers("buffering-stall-release");
+        let scheduler_clock = ManualPreviewSchedulerClock::default();
+        let mut host = AppUiHost::new_with_preferences_path(
+            workspace_app_state_with_timed_solid(),
+            AppUiPreferences::default(),
+            temp_preferences_path("buffering-stall-release"),
+        );
+        host.preview_service.shutdown();
+        host.preview_service =
+            WindowPreviewAdapter::new_without_workers_with_scheduler_clock_for_test(
+                scheduler_clock.clone(),
+            );
+        host.preview_service
+            .synchronize_transport_intent(host.app_state.borrow().preview_transport_intent());
         let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
         // Construction may leave unrelated startup services with one visible
         // completion. Drain that work before measuring the stall-release path.
         let _ = host.poll_background_tasks(bounds);
-        host.app_state.borrow_mut().play();
+        {
+            let mut state = host.app_state.borrow_mut();
+            state.play().expect("play");
+            // Establish a running demand rather than injecting against the
+            // priming demand. A correct transparent/solid presentation may
+            // consume priming before stalled media expiry, and the superseded
+            // identity must not retain terminal-delivery authority.
+            assert!(
+                !state.observe_viewer_frame_delivery(mondrian_playback::FrameDeliveryKind::Ready)
+            );
+            assert!(state.observe_video_preroll(0, 0));
+            assert!(
+                state.advance_playback_clock(Duration::from_millis(100)).requires_refresh(),
+                "timed fixture must advance to a fresh running demand"
+            );
+        }
+        // The normal Play path synchronizes Preview to the new Playback Epoch
+        // before current-frame work is admitted. This test injects Scheduler
+        // work directly, so establish that same boundary through the typed
+        // transport-intent seam.
+        host.preview_service
+            .synchronize_transport_intent(host.app_state.borrow().preview_transport_intent());
         let demand_identity = host
             .app_state
             .borrow()
@@ -2139,10 +3164,15 @@ mod tests {
         host.preview_service
             .seed_pending_playback_current_preview_work_for_test(demand_identity);
         let before_render_requests = host.preview_service.diagnostics().render_requests;
+        assert_eq!(
+            host.app_state.borrow().pending_playback_frame_demand_identity(),
+            Some(demand_identity),
+            "fixture must preserve terminal authority after Scheduler admission"
+        );
+        scheduler_clock
+            .advance(crate::app::preview_runtime::playback_buffering_stall_timeout_for_test());
 
-        std::thread::sleep(Duration::from_millis(275));
-
-        assert!(host.poll_background_tasks(bounds));
+        assert!(host.poll_background_tasks(bounds).repaint_required);
         assert!(host.app_state.borrow().is_playing());
         assert!(!host.should_defer_gpu_preview_prepare_for_interaction());
         let diagnostics = host.preview_service.diagnostics();
@@ -2152,6 +3182,39 @@ mod tests {
         assert_eq!(
             diagnostics.render_requests, before_render_requests,
             "stalled buffering release must not synchronously request preview"
+        );
+    }
+
+    #[test]
+    fn window_visual_terminal_consumes_the_exact_playback_demand_once() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let host = workspace_host_without_preview_workers("visual-terminal-exact-once");
+        host.app_state.borrow_mut().play().expect("play");
+        let identity = host
+            .app_state
+            .borrow()
+            .pending_playback_frame_demand_identity()
+            .expect("playing state has pending demand");
+        let before = host.app_state.borrow().playback_evidence_report().deliveries.failed;
+        let disposition = PreviewVisualGpuCompletionDisposition::TerminalCandidate(
+            mondrian_playback::FrameDeliveryCandidate::for_demand(
+                identity,
+                mondrian_playback::FrameDeliveryKind::Failed,
+            ),
+        );
+
+        host.observe_visual_gpu_disposition(disposition);
+        assert_eq!(
+            host.app_state.borrow().playback_evidence_report().deliveries.failed,
+            before + 1
+        );
+
+        // A duplicate callback or queued copy no longer owns the pending
+        // demand and therefore cannot increment terminal evidence twice.
+        host.observe_visual_gpu_disposition(disposition);
+        assert_eq!(
+            host.app_state.borrow().playback_evidence_report().deliveries.failed,
+            before + 1
         );
     }
 
@@ -2324,6 +3387,10 @@ mod tests {
         let autosave_file = autosave_state
             .write_autosave_snapshot(2, 7)
             .expect("autosave snapshot should write");
+        let candidate = discover_crash_recovery_candidates()
+            .into_iter()
+            .find(|candidate| candidate.autosave_file == autosave_file)
+            .expect("exact recovery candidate");
         drop(autosave_state);
         let preferences_path = temp_preferences_path("recover-host-preferences");
         let mut host = AppUiHost::new_with_preferences_path(
@@ -2334,10 +3401,7 @@ mod tests {
         let pending = PendingUiActions::default();
 
         pending.push(crate::app::ui_actions::app_shell_recover_project_action(
-            crate::app::ui_actions::ProjectRecoverFromAutosavePayload {
-                project_file: project_file.clone(),
-                autosave_file,
-            },
+            crate::app::ui_actions::ProjectRecoverFromAutosavePayload { candidate },
         ));
         let commands = host.drain_pending_actions(
             &pending,
@@ -2391,8 +3455,14 @@ mod tests {
         let project_file = PathBuf::from("E:/projects/recover.mdp");
         let autosave_file = PathBuf::from("E:/runtime/autosave/project.autosave.mdp");
         let candidates = vec![CrashRecoveryCandidate {
+            project_id: ProjectId::new(),
+            runtime_root: PathBuf::from("E:/runtime"),
             project_file: project_file.clone(),
             autosave_file: autosave_file.clone(),
+            author_generation: 7,
+            asset_library_revision: 3,
+            document_revision: 11,
+            archive_sha256: "0".repeat(64),
             saved_at_unix_ms: 0,
             total_snapshots: 2,
         }];
@@ -2400,8 +3470,8 @@ mod tests {
         let rows = startup_recovery_projects_from_candidates(&candidates);
 
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].project_file, project_file);
-        assert_eq!(rows[0].autosave_file, autosave_file);
+        assert_eq!(rows[0].candidate.project_file, project_file);
+        assert_eq!(rows[0].candidate.autosave_file, autosave_file);
         assert_eq!(rows[0].title, "recover");
         assert!(rows[0].detail.contains("2 个恢复点"));
     }
@@ -2511,7 +3581,7 @@ mod tests {
         let mut host = AppUiHost::new(AppState::new());
         let pending = PendingUiActions::default();
 
-        pending.push(Action::NoOp);
+        pending.push(Action::DeselectAll);
         let commands = host.drain_pending_actions(
             &pending,
             Rect::new(0.0, 0.0, 1280.0, 720.0),
@@ -2691,6 +3761,31 @@ mod tests {
         assert_eq!(commands, AppUiShellCommands::default());
         assert!(!host.app_state().has_open_project());
         assert!(!host.root.has_pending_close_dialog());
+    }
+
+    #[test]
+    fn host_does_not_quit_when_project_persistence_cannot_quiesce() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut state = saved_workspace_app_state("quit-quiescence-failure");
+        state.save_project_file().expect("establish clean baseline");
+        let project_file =
+            state.authoring.as_ref().expect("open project").project_file().to_path_buf();
+        state.test_poison_project_persistence_admission();
+        let mut host = AppUiHost::new(state);
+        let pending = PendingUiActions::default();
+
+        pending.push(crate::app::ui_actions::app_shell_quit_action());
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert!(!commands.quit);
+        assert!(host.app_state().has_open_project());
+        assert!(host.app_state().status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
+        drop(host);
+        cleanup_project_file(&project_file);
     }
 
     #[test]
@@ -3155,6 +4250,85 @@ mod tests {
             .status_hint
             .as_ref()
             .is_some_and(|(message, is_error)| !*is_error && message.contains("已导入 1")));
+
+        let _ = std::fs::remove_dir_all(library_root);
+        let _ = std::fs::remove_dir_all(media_root);
+    }
+
+    #[test]
+    fn host_background_poll_commits_prepared_asset_relink() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let library_root = temp_asset_library_dir("asset-relink-poll-library");
+        let media_root = temp_asset_library_dir("asset-relink-poll-media");
+        std::fs::create_dir_all(&media_root).expect("media root");
+        let original_path = media_root.join("original.wav");
+        let replacement_path = media_root.join("replacement.wav");
+        write_minimal_wav(&original_path);
+        write_minimal_wav(&replacement_path);
+        let library = AssetLibrary::open(library_root.clone()).expect("open asset library");
+        let mut state = workspace_app_state();
+        state.test_set_asset_library(Some(library));
+        state
+            .start_media_import_batch(vec![original_path], None)
+            .expect("admit original import");
+        let mut host = AppUiHost::new(state);
+        poll_host_background_tasks_until_imports_idle(&mut host);
+        let asset_id = host
+            .app_state()
+            .asset_library()
+            .expect("library")
+            .list_assets()
+            .expect("list assets")[0]
+            .id;
+
+        host.app_state
+            .borrow_mut()
+            .dispatch_action(crate::app::ui_actions::assets_relink_asset_action(
+                crate::app::ui_actions::AssetsRelinkAssetPayload {
+                    asset_id,
+                    path: replacement_path.clone(),
+                },
+            ))
+            .expect("admit relink");
+        assert_eq!(
+            host.app_state().media_asset_mutation_diagnostics().outstanding,
+            1
+        );
+
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut terminal_poll_requested_refresh = false;
+        while host.app_state().media_asset_mutation_diagnostics().outstanding > 0 {
+            let outcome = host.poll_background_tasks(bounds);
+            if host.app_state().media_asset_mutation_diagnostics().outstanding == 0 {
+                terminal_poll_requested_refresh = outcome.repaint_required;
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for host Asset relink completion"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(terminal_poll_requested_refresh);
+        let asset = host
+            .app_state()
+            .asset_library()
+            .expect("library")
+            .get_asset(asset_id)
+            .expect("query asset")
+            .expect("asset");
+        let stored_path = asset.file_path().expect("file-backed Asset path");
+        assert_eq!(
+            stored_path.canonicalize().expect("canonical stored path"),
+            replacement_path.canonicalize().expect("canonical replacement path")
+        );
+        let diagnostics = host.app_state().media_asset_mutation_diagnostics();
+        assert_eq!(
+            diagnostics.terminals.last().expect("terminal").evidence.disposition,
+            mondrian_core::ExecutionTerminalDisposition::Completed
+        );
 
         let _ = std::fs::remove_dir_all(library_root);
         let _ = std::fs::remove_dir_all(media_root);

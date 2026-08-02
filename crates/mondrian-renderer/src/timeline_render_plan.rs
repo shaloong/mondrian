@@ -2,14 +2,16 @@ use mondrian_core::{
     timeline_data::{
         AlphaInterpretation, ClipContent, FieldOrder, FlatActiveClip, FlatVideoTransition,
         FlatVideoTransitionDefinition, FlatVisualItem, NestedColorProcessing, PixelAspectRatio,
-        RenderPlanSource,
+        RenderPlanSource, TimelineClipEndpointContext, TimelineClipExecutionRef,
     },
     types::{AssetId, BlendMode, Color, ColorSpace, FramePosition, Rational, SequenceId},
     ColorEncodingSpec, EvaluatedBasicTitle, FrameRounding, MondrianError, Result, TimelineTime,
     WorkingColorSpace,
 };
-use mondrian_effects::CompiledEffectGraph;
+use mondrian_effects::{CompiledEffectGraph, EffectExecutionSession};
 use std::sync::Arc;
+
+use crate::prepared_visual_program::PreparedVisualProgram;
 
 /// Why a sequence is being evaluated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,8 +96,12 @@ impl TimelineRenderSettings {
 /// A request to evaluate one sequence frame into a render plan.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TimelineEvaluationRequest {
-    /// Timeline frame in the source sequence time base.
-    pub timeline_frame: i64,
+    /// Exact Sequence-local frame position.
+    ///
+    /// Evaluation rejects a negative frame or a time base that is not exactly
+    /// the source Sequence's Evaluation Grid. The renderer never clamps this
+    /// value or silently substitutes the source grid.
+    pub position: FramePosition,
     /// Caller intent.
     pub intent: TimelineRenderIntent,
     /// Execution settings for the request.
@@ -104,27 +110,27 @@ pub struct TimelineEvaluationRequest {
 
 impl TimelineEvaluationRequest {
     /// Build a preview evaluation request.
-    pub fn preview(timeline_frame: i64, resolution_scale: f32) -> Self {
+    pub fn preview(position: FramePosition, resolution_scale: f32) -> Self {
         Self {
-            timeline_frame,
+            position,
             intent: TimelineRenderIntent::Preview,
             settings: TimelineRenderSettings::preview(resolution_scale),
         }
     }
 
     /// Build an export evaluation request.
-    pub fn export(timeline_frame: i64) -> Self {
+    pub fn export(position: FramePosition) -> Self {
         Self {
-            timeline_frame,
+            position,
             intent: TimelineRenderIntent::Export,
             settings: TimelineRenderSettings::export(),
         }
     }
 
     /// Build an analysis evaluation request.
-    pub fn analysis(timeline_frame: i64) -> Self {
+    pub fn analysis(position: FramePosition) -> Self {
         Self {
-            timeline_frame,
+            position,
             intent: TimelineRenderIntent::Analysis,
             settings: TimelineRenderSettings::analysis(),
         }
@@ -147,10 +153,8 @@ pub struct TimelineEvaluationDiagnostics {
 /// A complete evaluation result for one sequence frame.
 #[derive(Debug, Clone)]
 pub struct TimelineRenderPlan {
-    /// Frame requested by the caller, clamped only where execution requires it.
-    pub timeline_frame: i64,
-    /// Source sequence time base.
-    pub time_base: Rational,
+    /// Exact nonnegative Sequence-local position evaluated by this plan.
+    pub position: FramePosition,
     /// Caller intent.
     pub intent: TimelineRenderIntent,
     /// Execution settings.
@@ -175,11 +179,16 @@ impl TimelineRenderPlan {
 
 #[derive(Debug, Clone)]
 pub struct TimelineMediaPlan {
+    /// Exact prepared placement and endpoint identity.
+    pub placement: TimelineClipExecutionRef,
     pub asset_id: AssetId,
     pub color_space_override: Option<ColorSpace>,
     pub pixel_aspect_ratio_override: Option<PixelAspectRatio>,
     pub field_order_override: Option<FieldOrder>,
     pub alpha_interpretation: AlphaInterpretation,
+    /// Optional authored interpretation grid used for every current or
+    /// historical decode target.
+    pub frame_rate_override: Option<Rational>,
     /// Exact source-domain decode target after any explicit interpretation grid.
     pub source_time: TimelineTime,
     pub opacity: f32,
@@ -193,6 +202,9 @@ pub struct TimelineMediaPlan {
 
 #[derive(Debug, Clone)]
 pub struct TimelineAdjustmentPlan {
+    /// Exact prepared placement identity. Temporal Adjustment execution is
+    /// currently rejected because it has no single source value.
+    pub placement: TimelineClipExecutionRef,
     pub effect_graph: Arc<CompiledEffectGraph>,
     pub opacity: f32,
     pub blend_mode: BlendMode,
@@ -201,6 +213,8 @@ pub struct TimelineAdjustmentPlan {
 
 #[derive(Debug, Clone)]
 pub struct TimelineSolidColorPlan {
+    /// Exact prepared placement and endpoint identity.
+    pub placement: TimelineClipExecutionRef,
     pub color: Color,
     pub opacity: f32,
     pub blend_mode: BlendMode,
@@ -212,6 +226,8 @@ pub struct TimelineSolidColorPlan {
 /// Evaluated sequence-local Basic Title source.
 #[derive(Debug, Clone)]
 pub struct TimelineBasicTitlePlan {
+    /// Exact prepared placement and endpoint identity.
+    pub placement: TimelineClipExecutionRef,
     /// Typed title semantics evaluated at the Clip's exact visual author time.
     pub title: EvaluatedBasicTitle,
     /// Clip opacity evaluated at the same author time.
@@ -228,6 +244,8 @@ pub struct TimelineBasicTitlePlan {
 
 #[derive(Debug, Clone)]
 pub struct TimelineNestedSequencePlan {
+    /// Exact prepared parent placement and endpoint identity.
+    pub placement: TimelineClipExecutionRef,
     pub sequence_id: SequenceId,
     /// Exact child-Sequence-local source time; consumers resolve the child grid.
     pub source_time: TimelineTime,
@@ -257,6 +275,9 @@ pub enum TimelineTransitionInputPlan {
 /// Scene-linear, coverage-correct Cross Dissolve plan.
 #[derive(Debug, Clone)]
 pub struct TimelineCrossDissolvePlan {
+    /// Stable author Transition identity retained for historical endpoint
+    /// sampling.
+    pub transition_id: mondrian_core::VideoTransitionId,
     /// Earlier editorial endpoint after Clip-local evaluation.
     pub left: TimelineTransitionInputPlan,
     /// Later editorial endpoint after Clip-local evaluation.
@@ -273,7 +294,7 @@ pub enum TimelineRenderPlanElement {
     BasicTitle(TimelineBasicTitlePlan),
     NestedSequence(TimelineNestedSequencePlan),
     /// A two-input operation occupying one position in the Track stack.
-    CrossDissolve(TimelineCrossDissolvePlan),
+    CrossDissolve(Box<TimelineCrossDissolvePlan>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -295,7 +316,8 @@ pub struct TimelineColorDiagnostic {
     pub source_time: TimelineTime,
 }
 
-pub fn collect_timeline_color_diagnostics(
+#[cfg(test)]
+pub(crate) fn collect_timeline_color_diagnostics(
     source: &dyn RenderPlanSource,
     timeline_frame: i64,
     working_color_space: WorkingColorSpace,
@@ -312,7 +334,8 @@ pub fn collect_timeline_color_diagnostics(
 }
 
 /// Collect color diagnostics and attach the caller's resolved OCIO display/view.
-pub fn collect_timeline_color_diagnostics_with_display_view(
+#[cfg(test)]
+pub(crate) fn collect_timeline_color_diagnostics_with_display_view(
     source: &dyn RenderPlanSource,
     timeline_frame: i64,
     working_color_space: WorkingColorSpace,
@@ -320,46 +343,51 @@ pub fn collect_timeline_color_diagnostics_with_display_view(
     ocio_display: Option<&str>,
     ocio_view: Option<&str>,
 ) -> Result<Vec<TimelineColorDiagnostic>> {
-    Ok(
-        evaluate_timeline_render_plan(source, TimelineEvaluationRequest::analysis(timeline_frame))?
-            .elements
-            .into_iter()
-            .flat_map(|element| {
-                let mut diagnostics = Vec::with_capacity(2);
-                match element {
-                    TimelineRenderPlanElement::Media(media) => {
+    Ok(evaluate_timeline_render_plan(
+        source,
+        TimelineEvaluationRequest::analysis(FramePosition::new(
+            timeline_frame,
+            source.source_time_base(),
+        )),
+    )?
+    .elements
+    .into_iter()
+    .flat_map(|element| {
+        let mut diagnostics = Vec::with_capacity(2);
+        match element {
+            TimelineRenderPlanElement::Media(media) => {
+                diagnostics.push(timeline_media_color_diagnostic(
+                    &media,
+                    working_color_space,
+                    output_color_space,
+                    ocio_display,
+                    ocio_view,
+                ))
+            }
+            TimelineRenderPlanElement::CrossDissolve(transition) => {
+                for input in [transition.left, transition.right] {
+                    if let TimelineTransitionInputPlan::Media(media) = input {
                         diagnostics.push(timeline_media_color_diagnostic(
                             &media,
                             working_color_space,
                             output_color_space,
                             ocio_display,
                             ocio_view,
-                        ))
+                        ));
                     }
-                    TimelineRenderPlanElement::CrossDissolve(transition) => {
-                        for input in [transition.left, transition.right] {
-                            if let TimelineTransitionInputPlan::Media(media) = input {
-                                diagnostics.push(timeline_media_color_diagnostic(
-                                    &media,
-                                    working_color_space,
-                                    output_color_space,
-                                    ocio_display,
-                                    ocio_view,
-                                ));
-                            }
-                        }
-                    }
-                    TimelineRenderPlanElement::Adjustment(_)
-                    | TimelineRenderPlanElement::SolidColor(_)
-                    | TimelineRenderPlanElement::BasicTitle(_)
-                    | TimelineRenderPlanElement::NestedSequence(_) => {}
                 }
-                diagnostics
-            })
-            .collect(),
-    )
+            }
+            TimelineRenderPlanElement::Adjustment(_)
+            | TimelineRenderPlanElement::SolidColor(_)
+            | TimelineRenderPlanElement::BasicTitle(_)
+            | TimelineRenderPlanElement::NestedSequence(_) => {}
+        }
+        diagnostics
+    })
+    .collect())
 }
 
+#[cfg(test)]
 fn timeline_media_color_diagnostic(
     media: &TimelineMediaPlan,
     working_color_space: WorkingColorSpace,
@@ -385,14 +413,132 @@ fn timeline_media_color_diagnostic(
 }
 
 /// Evaluate one timeline frame into a typed render plan and diagnostics.
-pub fn evaluate_timeline_render_plan(
+#[cfg(test)]
+pub(crate) fn evaluate_timeline_render_plan(
     source: &dyn RenderPlanSource,
     request: TimelineEvaluationRequest,
 ) -> Result<TimelineRenderPlan> {
-    let time_base = source.source_time_base();
-    let timeline_frame = request.timeline_frame.max(0);
-    let current = FramePosition::new(timeline_frame, time_base);
-    let current_time = TimelineTime::from_frame_position(current)?;
+    let mut effects = DirectClipEffectResolver {
+        working_color_space: source.source_working_color_space(),
+    };
+    evaluate_timeline_render_plan_with_effects(source, request, &mut effects)
+}
+
+/// Evaluate one frame through a revision-bound visual program without retaining
+/// dynamic topology.
+///
+/// This remains a scalar/reference path for tests and diagnostics. Production
+/// Preview and Export use [`evaluate_prepared_visual_program_with_session`] so
+/// every reusable execution resource remains inside an explicit owner Session.
+pub fn evaluate_prepared_visual_program(
+    program: &PreparedVisualProgram,
+    request: TimelineEvaluationRequest,
+) -> Result<TimelineRenderPlan> {
+    let mut effects = PreparedClipEffectResolver { program };
+    evaluate_timeline_render_plan_with_effects(program.schedule(), request, &mut effects)
+}
+
+/// Evaluate one prepared visual frame while retaining dynamic Effect topology
+/// only in the caller's explicit execution Session.
+///
+/// Production Preview and Export must use this entry point through their
+/// owner-scoped compositor scratch. [`evaluate_prepared_visual_program`] is the
+/// uncached scalar/reference entry point.
+pub fn evaluate_prepared_visual_program_with_session(
+    program: &PreparedVisualProgram,
+    request: TimelineEvaluationRequest,
+    session: &mut EffectExecutionSession,
+) -> Result<TimelineRenderPlan> {
+    let mut effects = SessionPreparedClipEffectResolver { program, session };
+    evaluate_timeline_render_plan_with_effects(program.schedule(), request, &mut effects)
+}
+
+trait ClipEffectResolver {
+    fn evaluate(&mut self, clip: &FlatActiveClip) -> Result<Arc<CompiledEffectGraph>>;
+
+    fn admit_transition(&mut self, transition: &FlatVideoTransition) -> Result<()>;
+}
+
+#[cfg(test)]
+struct DirectClipEffectResolver {
+    working_color_space: WorkingColorSpace,
+}
+
+#[cfg(test)]
+impl ClipEffectResolver for DirectClipEffectResolver {
+    fn evaluate(&mut self, clip: &FlatActiveClip) -> Result<Arc<CompiledEffectGraph>> {
+        mondrian_effects::compile_clip_effect_graph(
+            &clip.effects,
+            &clip.masks,
+            clip.clip_time,
+            self.working_color_space,
+        )
+        .map_err(|error| MondrianError::EffectGraphEvaluationFailed { reason: error.to_string() })
+    }
+
+    fn admit_transition(&mut self, transition: &FlatVideoTransition) -> Result<()> {
+        validate_flat_transition_definition(transition)
+    }
+}
+
+struct PreparedClipEffectResolver<'a> {
+    program: &'a PreparedVisualProgram,
+}
+
+impl ClipEffectResolver for PreparedClipEffectResolver<'_> {
+    fn evaluate(&mut self, clip: &FlatActiveClip) -> Result<Arc<CompiledEffectGraph>> {
+        self.program.evaluate_clip_effects(clip.clip_id, clip.clip_time)
+    }
+
+    fn admit_transition(&mut self, transition: &FlatVideoTransition) -> Result<()> {
+        self.program.ensure_transition_ready(transition.transition_id)
+    }
+}
+
+struct SessionPreparedClipEffectResolver<'a> {
+    program: &'a PreparedVisualProgram,
+    session: &'a mut EffectExecutionSession,
+}
+
+impl ClipEffectResolver for SessionPreparedClipEffectResolver<'_> {
+    fn evaluate(&mut self, clip: &FlatActiveClip) -> Result<Arc<CompiledEffectGraph>> {
+        self.program
+            .evaluate_clip_effects_with_session(clip.clip_id, clip.clip_time, self.session)
+    }
+
+    fn admit_transition(&mut self, transition: &FlatVideoTransition) -> Result<()> {
+        self.program.ensure_transition_ready(transition.transition_id)
+    }
+}
+
+fn evaluate_timeline_render_plan_with_effects(
+    source: &dyn RenderPlanSource,
+    request: TimelineEvaluationRequest,
+    effects: &mut dyn ClipEffectResolver,
+) -> Result<TimelineRenderPlan> {
+    let expected_time_base = source.source_time_base();
+    if request.position.time_base != expected_time_base {
+        return Err(MondrianError::WorkflowStepFailed {
+            step_id: "evaluate_timeline_render_plan".to_owned(),
+            reason: format!(
+                "evaluation position grid {} does not match Sequence {} grid {}",
+                request.position.time_base,
+                source.source_sequence_id(),
+                expected_time_base
+            ),
+        });
+    }
+    if request.position.frame < 0 {
+        return Err(MondrianError::WorkflowStepFailed {
+            step_id: "evaluate_timeline_render_plan".to_owned(),
+            reason: format!(
+                "evaluation position frame {} is negative for Sequence {}",
+                request.position.frame,
+                source.source_sequence_id()
+            ),
+        });
+    }
+    let current_time = TimelineTime::from_frame_position(request.position)?;
     let active = source.flat_visual_items_at(current_time)?;
     let mut diagnostics = TimelineEvaluationDiagnostics {
         active_visual_items: active.len(),
@@ -403,9 +549,14 @@ pub fn evaluate_timeline_render_plan(
     for item in active {
         match item {
             FlatVisualItem::Clip(clip) => {
-                if let Some(element) =
-                    compile_flat_clip(clip, source, timeline_frame, &mut diagnostics)?
-                {
+                if let Some(element) = compile_flat_clip(
+                    clip,
+                    TimelineClipEndpointContext::Ordinary,
+                    source,
+                    request.position.frame,
+                    &mut diagnostics,
+                    effects,
+                )? {
                     elements.push(element);
                 }
             }
@@ -413,8 +564,9 @@ pub fn evaluate_timeline_render_plan(
                 elements.push(compile_transition(
                     *transition,
                     source,
-                    timeline_frame,
+                    request.position.frame,
                     &mut diagnostics,
+                    effects,
                 )?);
             }
         }
@@ -423,8 +575,7 @@ pub fn evaluate_timeline_render_plan(
     diagnostics.emitted_elements = elements.len();
 
     Ok(TimelineRenderPlan {
-        timeline_frame,
-        time_base,
+        position: request.position,
         intent: request.intent,
         settings: request.settings,
         elements,
@@ -437,24 +588,31 @@ fn compile_transition(
     source: &dyn RenderPlanSource,
     timeline_frame: i64,
     diagnostics: &mut TimelineEvaluationDiagnostics,
+    effects: &mut dyn ClipEffectResolver,
 ) -> Result<TimelineRenderPlanElement> {
-    match transition.definition {
+    effects.admit_transition(&transition)?;
+    match &transition.definition.definition {
         FlatVideoTransitionDefinition::CrossDissolve => {
-            if transition.properties.iter().next().is_some()
-                || transition.params.as_object().is_none_or(|params| !params.is_empty())
-            {
-                return Err(MondrianError::WorkflowStepFailed {
-                    step_id: "compile_video_transition".to_owned(),
-                    reason: format!(
-                        "Cross Dissolve {} carries unsupported definition state",
-                        transition.transition_id
-                    ),
-                });
-            }
-            let left =
-                compile_transition_input(transition.left, source, timeline_frame, diagnostics)?;
-            let right =
-                compile_transition_input(transition.right, source, timeline_frame, diagnostics)?;
+            let left = compile_transition_input(
+                transition.left,
+                TimelineClipEndpointContext::TransitionLeft {
+                    transition_id: transition.transition_id,
+                },
+                source,
+                timeline_frame,
+                diagnostics,
+                effects,
+            )?;
+            let right = compile_transition_input(
+                transition.right,
+                TimelineClipEndpointContext::TransitionRight {
+                    transition_id: transition.transition_id,
+                },
+                source,
+                timeline_frame,
+                diagnostics,
+                effects,
+            )?;
             let progress = transition.progress.normalized().ok_or_else(|| {
                 MondrianError::WorkflowStepFailed {
                     step_id: "compile_video_transition".to_owned(),
@@ -464,10 +622,47 @@ fn compile_transition(
                     ),
                 }
             })?;
-            Ok(TimelineRenderPlanElement::CrossDissolve(
-                TimelineCrossDissolvePlan { left, right, progress },
-            ))
+            Ok(TimelineRenderPlanElement::CrossDissolve(Box::new(
+                TimelineCrossDissolvePlan {
+                    transition_id: transition.transition_id,
+                    left,
+                    right,
+                    progress,
+                },
+            )))
         }
+        FlatVideoTransitionDefinition::Plugin { definition_id } => {
+            Err(MondrianError::WorkflowStepFailed {
+                step_id: "compile_video_transition".to_owned(),
+                reason: format!(
+                    "video Transition {} requires unavailable definition `{definition_id}`",
+                    transition.transition_id
+                ),
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+fn validate_flat_transition_definition(transition: &FlatVideoTransition) -> Result<()> {
+    match &transition.definition.definition {
+        FlatVideoTransitionDefinition::CrossDissolve
+            if transition.definition.properties.iter().next().is_none()
+                && transition
+                    .definition
+                    .params
+                    .as_object()
+                    .is_some_and(|params| params.is_empty()) =>
+        {
+            Ok(())
+        }
+        FlatVideoTransitionDefinition::CrossDissolve => Err(MondrianError::WorkflowStepFailed {
+            step_id: "compile_video_transition".to_owned(),
+            reason: format!(
+                "Cross Dissolve {} carries unsupported definition state",
+                transition.transition_id
+            ),
+        }),
         FlatVideoTransitionDefinition::Plugin { definition_id } => {
             Err(MondrianError::WorkflowStepFailed {
                 step_id: "compile_video_transition".to_owned(),
@@ -482,19 +677,19 @@ fn compile_transition(
 
 fn compile_transition_input(
     clip: FlatActiveClip,
+    endpoint: TimelineClipEndpointContext,
     source: &dyn RenderPlanSource,
     timeline_frame: i64,
     diagnostics: &mut TimelineEvaluationDiagnostics,
+    effects: &mut dyn ClipEffectResolver,
 ) -> Result<TimelineTransitionInputPlan> {
     if clip.is_disabled || clip.opacity.clamp(0.0, 1.0) <= 0.0 {
         return Ok(TimelineTransitionInputPlan::Transparent);
     }
-    let element =
-        compile_flat_clip(clip, source, timeline_frame, diagnostics)?.ok_or_else(|| {
-            MondrianError::WorkflowStepFailed {
-                step_id: "compile_video_transition".to_owned(),
-                reason: "Transition endpoint did not produce a visual input".to_owned(),
-            }
+    let element = compile_flat_clip(clip, endpoint, source, timeline_frame, diagnostics, effects)?
+        .ok_or_else(|| MondrianError::WorkflowStepFailed {
+            step_id: "compile_video_transition".to_owned(),
+            reason: "Transition endpoint did not produce a visual input".to_owned(),
         })?;
     match element {
         TimelineRenderPlanElement::Media(media) => Ok(TimelineTransitionInputPlan::Media(media)),
@@ -517,9 +712,11 @@ fn compile_transition_input(
 
 fn compile_flat_clip(
     ac: FlatActiveClip,
+    endpoint: TimelineClipEndpointContext,
     source: &dyn RenderPlanSource,
     timeline_frame: i64,
     diagnostics: &mut TimelineEvaluationDiagnostics,
+    effects: &mut dyn ClipEffectResolver,
 ) -> Result<Option<TimelineRenderPlanElement>> {
     let opacity = ac.opacity.clamp(0.0, 1.0);
     if ac.is_disabled || opacity <= 0.0 {
@@ -527,17 +724,19 @@ fn compile_flat_clip(
         return Ok(None);
     }
 
-    let effect_graph = mondrian_effects::compile_clip_effect_graph(
-        &ac.effects,
-        &ac.masks,
-        ac.clip_time,
-        source.source_working_color_space(),
-    )
-    .map_err(|error| MondrianError::EffectGraphEvaluationFailed { reason: error.to_string() })?;
-    let frame_seed = timeline_frame.max(0);
+    let effect_graph = effects.evaluate(&ac)?;
+    let frame_seed = timeline_frame;
+    let placement = TimelineClipExecutionRef {
+        sequence_id: source.source_sequence_id(),
+        sequence_revision: source.source_sequence_revision(),
+        clip_id: ac.clip_id,
+        clip_time: ac.clip_time,
+        endpoint,
+    };
     Ok(Some(match ac.content {
         ClipContent::NestedSequence { sequence_id, color_processing } => {
             TimelineRenderPlanElement::NestedSequence(TimelineNestedSequencePlan {
+                placement,
                 sequence_id,
                 source_time: ac.source_time,
                 color_processing,
@@ -550,6 +749,7 @@ fn compile_flat_clip(
         }
         ClipContent::AdjustmentLayer { .. } => {
             TimelineRenderPlanElement::Adjustment(TimelineAdjustmentPlan {
+                placement,
                 effect_graph,
                 opacity,
                 blend_mode: ac.blend_mode,
@@ -558,6 +758,7 @@ fn compile_flat_clip(
         }
         ClipContent::SolidColor { color, .. } => {
             TimelineRenderPlanElement::SolidColor(TimelineSolidColorPlan {
+                placement,
                 color,
                 opacity,
                 blend_mode: ac.blend_mode,
@@ -569,6 +770,7 @@ fn compile_flat_clip(
         ClipContent::BasicTitle { title } => {
             let title = title.evaluate(ac.clip_time)?;
             TimelineRenderPlanElement::BasicTitle(TimelineBasicTitlePlan {
+                placement,
                 title,
                 opacity,
                 blend_mode: ac.blend_mode,
@@ -590,11 +792,13 @@ fn compile_flat_clip(
                 interpretation.pixel_aspect_ratio_override,
             );
             TimelineRenderPlanElement::Media(TimelineMediaPlan {
+                placement,
                 asset_id,
                 color_space_override: interpretation.color_space_override,
                 pixel_aspect_ratio_override: interpretation.pixel_aspect_ratio_override,
                 field_order_override: interpretation.field_order_override,
                 alpha_interpretation: interpretation.alpha,
+                frame_rate_override: interpretation.frame_rate_override,
                 source_time,
                 opacity,
                 blend_mode: ac.blend_mode,
@@ -689,20 +893,28 @@ mod tests {
             .expect("valid test time")
     }
 
+    fn fp(frame: i64, time_base: Rational) -> FramePosition {
+        FramePosition::new(frame, time_base)
+    }
+
     fn analysis_elements(
         source: &dyn RenderPlanSource,
         timeline_frame: i64,
     ) -> Vec<TimelineRenderPlanElement> {
-        evaluate_timeline_render_plan(source, TimelineEvaluationRequest::analysis(timeline_frame))
-            .expect("evaluate timeline")
-            .elements
+        evaluate_timeline_render_plan(
+            source,
+            TimelineEvaluationRequest::analysis(fp(timeline_frame, source.source_time_base())),
+        )
+        .expect("evaluate timeline")
+        .elements
     }
 
     #[test]
     fn evaluation_request_preview_carries_interactive_contract() {
-        let request = TimelineEvaluationRequest::preview(42, 0.5);
+        let position = fp(42, Rational::new(1, 24));
+        let request = TimelineEvaluationRequest::preview(position, 0.5);
 
-        assert_eq!(request.timeline_frame, 42);
+        assert_eq!(request.position, position);
         assert_eq!(request.intent, TimelineRenderIntent::Preview);
         assert_eq!(request.settings.quality, TimelineRenderQuality::Interactive);
         assert_eq!(
@@ -715,7 +927,7 @@ mod tests {
 
     #[test]
     fn evaluation_request_export_disallows_frame_drop() {
-        let request = TimelineEvaluationRequest::export(12);
+        let request = TimelineEvaluationRequest::export(fp(12, Rational::new(1001, 30_000)));
 
         assert_eq!(request.intent, TimelineRenderIntent::Export);
         assert_eq!(request.settings.quality, TimelineRenderQuality::Final);
@@ -725,6 +937,34 @@ mod tests {
         );
         assert!(!request.settings.allow_frame_drop);
         assert_eq!(request.settings.resolution_scale, 1.0);
+    }
+
+    #[test]
+    fn evaluation_rejects_a_position_on_a_different_grid() {
+        let sequence = Sequence::new("wrong evaluation grid");
+        let equivalent_but_not_identical =
+            Rational::new(sequence.time_base().num * 2, sequence.time_base().den * 2);
+
+        let error = evaluate_timeline_render_plan(
+            &sequence,
+            TimelineEvaluationRequest::analysis(fp(0, equivalent_but_not_identical)),
+        )
+        .expect_err("the request grid must match exactly");
+
+        assert!(error.to_string().contains("does not match"));
+    }
+
+    #[test]
+    fn evaluation_rejects_a_negative_frame_instead_of_clamping_it() {
+        let sequence = Sequence::new("negative evaluation position");
+
+        let error = evaluate_timeline_render_plan(
+            &sequence,
+            TimelineEvaluationRequest::analysis(fp(-1, sequence.time_base())),
+        )
+        .expect_err("negative evaluation must fail closed");
+
+        assert!(error.to_string().contains("negative"));
     }
 
     #[test]
@@ -830,11 +1070,14 @@ mod tests {
         }
         seq.video_tracks[0].add_clip(title).expect("add title");
 
-        let preview =
-            evaluate_timeline_render_plan(&seq, TimelineEvaluationRequest::preview(20, 0.5))
-                .expect("preview plan");
-        let export = evaluate_timeline_render_plan(&seq, TimelineEvaluationRequest::export(20))
-            .expect("export plan");
+        let preview = evaluate_timeline_render_plan(
+            &seq,
+            TimelineEvaluationRequest::preview(fp(20, tb), 0.5),
+        )
+        .expect("preview plan");
+        let export =
+            evaluate_timeline_render_plan(&seq, TimelineEvaluationRequest::export(fp(20, tb)))
+                .expect("export plan");
         assert_eq!(
             preview_semantic_signature(&preview),
             preview_semantic_signature(&export)
@@ -1037,7 +1280,8 @@ mod tests {
             Track::new_video("V2"),
             Track::new_video("V3"),
             Track::new_video("V4"),
-        ];
+        ]
+        .into();
         seq.video_tracks[1].blend_mode = BlendMode::Screen;
         seq.video_tracks[3].blend_mode = BlendMode::Multiply;
         let tb = seq.time_base();
@@ -1077,14 +1321,16 @@ mod tests {
             .expect("valid adjustment clip");
         seq.video_tracks[3].add_clip(adjustment).expect("add adjustment");
 
-        let preview =
-            evaluate_timeline_render_plan(&seq, TimelineEvaluationRequest::preview(12, 0.25))
-                .expect("preview plan");
-        let export = evaluate_timeline_render_plan(&seq, TimelineEvaluationRequest::export(12))
-            .expect("export plan");
+        let preview = evaluate_timeline_render_plan(
+            &seq,
+            TimelineEvaluationRequest::preview(fp(12, tb), 0.25),
+        )
+        .expect("preview plan");
+        let export =
+            evaluate_timeline_render_plan(&seq, TimelineEvaluationRequest::export(fp(12, tb)))
+                .expect("export plan");
 
-        assert_eq!(preview.timeline_frame, export.timeline_frame);
-        assert_eq!(preview.time_base, export.time_base);
+        assert_eq!(preview.position, export.position);
         assert_ne!(preview.intent, export.intent);
         assert_ne!(preview.settings, export.settings);
         assert_eq!(preview.diagnostics, export.diagnostics);
@@ -1118,10 +1364,11 @@ mod tests {
         .expect("valid solid clip");
         seq.video_tracks[1].add_clip(visible).expect("add visible");
 
-        let plan = evaluate_timeline_render_plan(&seq, TimelineEvaluationRequest::preview(4, 0.5))
-            .expect("preview plan");
+        let plan =
+            evaluate_timeline_render_plan(&seq, TimelineEvaluationRequest::preview(fp(4, tb), 0.5))
+                .expect("preview plan");
 
-        assert_eq!(plan.timeline_frame, 4);
+        assert_eq!(plan.position, fp(4, tb));
         assert_eq!(plan.intent, TimelineRenderIntent::Preview);
         assert_eq!(plan.diagnostics.active_visual_items, 2);
         assert_eq!(plan.diagnostics.emitted_elements, 1);
@@ -1150,8 +1397,11 @@ mod tests {
         ));
         sequence.validate_author_identities().expect("valid author graph");
 
-        let plan = evaluate_timeline_render_plan(&sequence, TimelineEvaluationRequest::export(10))
-            .expect("transition plan");
+        let plan = evaluate_timeline_render_plan(
+            &sequence,
+            TimelineEvaluationRequest::export(fp(10, time_base)),
+        )
+        .expect("transition plan");
         assert_eq!(plan.diagnostics.active_visual_items, 1);
         assert_eq!(plan.len(), 1);
         let TimelineRenderPlanElement::CrossDissolve(transition) = &plan.elements[0] else {
@@ -1167,8 +1417,11 @@ mod tests {
         assert_eq!(left.source_time, tt(15, time_base));
         assert_eq!(right.source_time, tt(20, time_base));
 
-        let start = evaluate_timeline_render_plan(&sequence, TimelineEvaluationRequest::export(8))
-            .expect("transition start plan");
+        let start = evaluate_timeline_render_plan(
+            &sequence,
+            TimelineEvaluationRequest::export(fp(8, time_base)),
+        )
+        .expect("transition start plan");
         let TimelineRenderPlanElement::CrossDissolve(start) = &start.elements[0] else {
             panic!("expected Cross Dissolve at start");
         };
@@ -1199,9 +1452,11 @@ mod tests {
         };
         sequence.video_transitions.push(transition);
 
-        let error =
-            evaluate_timeline_render_plan(&sequence, TimelineEvaluationRequest::preview(10, 1.0))
-                .expect_err("missing plugin must not substitute Cross Dissolve");
+        let error = evaluate_timeline_render_plan(
+            &sequence,
+            TimelineEvaluationRequest::preview(fp(10, time_base), 1.0),
+        )
+        .expect_err("missing plugin must not substitute Cross Dissolve");
         assert!(error.to_string().contains("unavailable definition"));
     }
 

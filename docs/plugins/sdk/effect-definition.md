@@ -36,36 +36,34 @@ pub enum EffectType {
 
 ```rust
 impl EffectType {
-    pub fn key(&self) -> &str;
+    pub fn key(&self) -> String;
     pub fn display_name(&self) -> &str;
 }
 ```
 
-- 内置类型返回内置 key（如 `"basic_correction"`）
-- `Plugin(key)` 返回 `key.as_str()`
+- 内置类型返回带命名空间的 key（如 `"builtin.basic_correction"`）
+- `Plugin(key)` 返回该持久化 key 的副本
 
-## EffectCapabilities
+`EffectType::WhiteBalance` 等类型可以存在于作者模型中，但当前并非每个内置类型都有
+可执行 Definition。尤其是 White Balance 目前是 **modeled-only / execution
+unavailable**；没有可供插件构图使用的 `WhiteBalance` 渲染算子。启用但不可执行的
+效果必须返回结构化错误，不能伪装成 identity。
 
-```rust
-pub struct EffectCapabilities {
-    pub supports_render_graph: bool,
-    pub supports_branching_render_graph: bool,
-    pub supports_render_plan_fallback: bool,
-    pub supports_custom_render_processor: bool,
-    pub supports_cache_key_contract: bool,
-    pub supports_legacy_parameter_evaluation: bool,
-}
-```
+## EffectExecutionContract
 
-能力由 builder 方法自动设置，不需要手动填充：
+插件不能靠若干松散布尔值声明“支持 CPU/GPU”。每个 Definition 必须提供一份完整、
+可验证的 `EffectExecutionContract`，其中包括：
 
-| Builder 方法 | 设置的能力 |
-|-------------|----------|
-| `with_evaluator(...)` | `supports_legacy_parameter_evaluation` |
-| `with_graph_builder(...)` | `supports_render_graph` |
-| `with_branching_graph_builder(...)` | `supports_render_graph` + `supports_branching_render_graph` |
-| `with_render_builder(...)` | `supports_render_plan_fallback` |
-| `with_custom_render_backend(...)` | `supports_render_graph` + `supports_render_plan_fallback` + `supports_custom_render_processor` + (`supports_cache_key_contract` 如果有 cache_key_builder) |
+- 精确的 `(processing backend, sample representation)` 组合；
+- determinism、连续状态与前后帧需求；
+- ROI 扩张、资源生命周期和最大图拓扑。
+
+`EffectExecutionModes::CPU_F32` 只代表 CPU Float32，不会与其他 backend 或 precision
+自动组成笛卡尔积。插件默认使用
+`EffectExecutionContract::CONSERVATIVE_PLUGIN_DEFAULT`：不准入任何 backend，并保守声明
+unbounded temporal、stateful、full-frame 和 continuity-session 义务。插件只有显式调用
+`with_execution_contract(...)` 且 emitted graph 反证该声明不比真实实现乐观后，才能进入
+prepared execution。
 
 ## EffectDefinition
 
@@ -83,11 +81,13 @@ impl EffectDefinition {
         key: impl Into<String>,
         display_name: impl Into<String>,
         default_properties: PropertyBag,
+        color_domain_contract: EffectColorDomainContract,
     ) -> Self;
 }
 ```
 
-通常不直接调用此函数，而是通过 `EffectPluginDefinitionBuilder`。
+通常不直接调用此函数，而是通过
+`EffectPluginDefinitionBuilder::new(key, display_name, color_domain_contract)`。
 
 ### Builder 方法
 
@@ -99,23 +99,22 @@ impl EffectDefinition {
     /// 批量添加属性定义
     pub fn with_properties(mut self, properties: PropertyBag) -> Self;
 
-    /// 设置求值器（旧路径，不推荐新插件使用）
-    pub fn with_evaluator(mut self, evaluator: EffectEvaluator) -> Self;
-
     /// 设置线性图构建器
     pub fn with_graph_builder(mut self, graph_builder: EffectGraphBuilder) -> Self;
 
     /// 设置分支图构建器
     pub fn with_branching_graph_builder(mut self, graph_builder: EffectGraphBuilder) -> Self;
 
-    /// 设置渲染计划构建器（旧路径）
-    pub fn with_render_builder(mut self, render_builder: EffectRenderBuilder) -> Self;
+    /// 准备一次不可变资源，再绑定逐帧图求值器
+    pub fn with_prepared_graph_builder(
+        mut self,
+        graph_preparer: EffectGraphPreparer,
+    ) -> Self;
 
-    /// 设置自定义渲染处理器（简化版，无显式 cache_key）
-    pub fn with_custom_render_processor(
-        self,
-        params_builder: EffectRenderParamsBuilder,
-        processor: CustomEffectRenderProcessor,
+    /// 声明完整的执行合同；插件默认合同不会准入任何 backend
+    pub fn with_execution_contract(
+        mut self,
+        execution_contract: EffectExecutionContract,
     ) -> Self;
 
     /// 设置自定义渲染后端（完整版）
@@ -132,6 +131,56 @@ impl EffectDefinition {
 }
 ```
 
+上面是低层 Definition 能力；插件作者必须通过
+`EffectPluginDefinitionBuilder::with_custom_render_backend(...)` 进入自定义处理路径。
+高层插件 builder 没有简化版 custom-processor 方法，也不允许随后手工追加未绑定的
+Custom op。该 staged RGBA8 ABI 只实现 `EffectExecutionModes::CPU_U8`；Definition
+不能把它声明成 CPU Float32 或 GPU。
+
+### Prepared resource Interface
+
+需要在逐帧求值前绑定不可变资源的 Definition 使用
+`with_prepared_graph_builder(...)`。Preparer 的第三个参数是借用的
+`EffectPreparationContext`：
+
+```rust
+pub type EffectGraphPreparer = Arc<
+    dyn for<'a> Fn(
+            &EffectNode,
+            WorkingColorSpace,
+            EffectPreparationContext<'a>,
+        ) -> Result<PreparedEffectEvaluator, EffectGraphBuildError>
+        + Send
+        + Sync,
+>;
+
+impl EffectPreparationContext<'_> {
+    pub fn prepare_cube_lut(
+        self,
+        path: &Path,
+    ) -> mondrian_core::Result<Arc<PreparedLut3D>>;
+}
+```
+
+该 context 只在低频 Program preparation 期间有效；不能把 context 或其 cache
+owner 捕获进求值器。Preparer 应捕获返回的不可变 `Arc`，并在
+`PreparedEffectEvaluator` 上声明依赖和驻留量：
+
+```rust
+Ok(PreparedEffectEvaluator::new(frame_evaluator)
+    .with_retained_resource_bytes(prepared_lut.retained_bytes_estimate())
+    .with_dependency(EffectResourceDependency::CubeLut {
+        path,
+        semantic_fingerprint: *prepared_lut.semantic_fingerprint(),
+    }))
+```
+
+Preview 与每个 Export attempt 使用不同的 owner-scoped bounded cache；插件不得建立
+process-global LUT cache，也不得用 path、mtime、size 或短时间窗口冒充内容 revision。
+`with_retained_resource_bytes(...)` 是 Program cache 的保守 logical charge，不是
+allocator、GPU memory、Working Set 或 RSS 测量。当前 context 只提供 `.cube` LUT
+preparation；其他外部资源在有类型化 preparation/revalidation Interface 前必须失败关闭。
+
 ### 访问器
 
 ```rust
@@ -142,14 +191,14 @@ impl EffectDefinition {
     /// 面向用户的显示名称
     pub fn display_name(&self) -> &str;
 
-    /// 能力声明
-    pub fn capabilities(&self) -> EffectCapabilities;
+    /// 完整执行合同
+    pub fn execution_contract(&self) -> EffectExecutionContract;
 
-    /// 是否支持视觉求值（渲染图可用 且 插件在特效库中可见）
+    /// 输入/输出处理域合同
+    pub fn color_domain_contract(&self) -> EffectColorDomainContract;
+
+    /// 是否具有求值器、非空执行模式、无序列状态且插件健康可见
     pub fn supports_visual_evaluation(&self) -> bool;
-
-    /// 是否支持旧式参数求值
-    pub fn supports_legacy_parameter_evaluation(&self) -> bool;
 
     /// 插件契约（仅插件特效有）
     pub fn plugin_contract(&self) -> Option<&EffectPluginContract>;
@@ -174,24 +223,43 @@ pub struct EffectNode {
 
 ```rust
 impl EffectNode {
-    /// 创建新实例，自动从 EffectDefinition 加载默认属性
+    /// 创建仅含类型和空 PropertyBag 的纯作者数据
     pub fn new(effect_type: EffectType) -> Self;
 }
 ```
+
+需要从当前已注册 Definition 实例化规范默认参数时，应导入
+`EffectNodeExt` 并调用 `EffectNode::with_defaults(effect_type)`。不要把
+`EffectNode::new` 误当成 Definition factory。
 
 ### 属性访问
 
 ```rust
 impl EffectNode {
     /// 按路径求值属性（返回当前时间下的值，考虑关键帧插值）
-    pub fn evaluate_property(&self, path: &str, time: TimeCode) -> Option<PropertyValue>;
+    pub fn evaluate_property(&self, path: &str, time: TimelineTime) -> Option<PropertyValue>;
 
-    /// 按后缀求值 f32 属性（便利方法）
-    /// 查找 path 以 suffix 结尾的第一个属性，求值为 f32，失败时返回 fallback
-    pub fn evaluate_f32_by_suffix(&self, suffix: &str, time: TimeCode, fallback: f32) -> f32;
+    /// 按 Definition-stable 参数身份求值
+    pub fn evaluate_parameter(
+        &self,
+        parameter_id: &ParameterId,
+        time: TimelineTime,
+    ) -> Option<PropertyValue>;
 
-    /// 按后缀设置静态值
-    pub fn set_static_value_by_suffix(&mut self, suffix: &str, value: PropertyValue) -> Result<()>;
+    /// 按稳定参数身份求值 f32，类型不符或不存在时返回 fallback
+    pub fn evaluate_f32_parameter(
+        &self,
+        parameter_id: &ParameterId,
+        time: TimelineTime,
+        fallback: f32,
+    ) -> f32;
+
+    /// 按稳定参数身份设置静态值
+    pub fn set_static_value_by_parameter(
+        &mut self,
+        parameter_id: &ParameterId,
+        value: PropertyValue,
+    ) -> mondrian_core::Result<()>;
 
     /// 定义属性
     pub fn define_property(&mut self, descriptor: PropertyDescriptor);
@@ -201,34 +269,43 @@ impl EffectNode {
 }
 ```
 
-### 渲染求值
+执行路径不由 `EffectNode` 自己解释。调用方通过 `PreparedEffectStack` /
+`PreparedEffectProgram` 绑定 Definition、资源、工作色彩空间和执行合同，再按帧求值；
+插件只提供 Definition builder。
+
+## PropertyValue
 
 ```rust
-impl EffectNode {
-    /// 执行参数求值，结果写入 output
-    pub fn evaluate_into(&self, context: EffectEvalContext, output: &mut EffectStackEvaluation);
-
-    /// 执行渲染计划构建，结果追加到 plan
-    pub fn evaluate_render_into(&self, context: EffectEvalContext, plan: &mut EffectRenderPlan);
-
-    /// 执行图构建，结果写入 graph
-    pub fn evaluate_graph_into(
-        &self,
-        context: EffectEvalContext,
-        graph: &mut EffectGraphBuilderState,
-    );
+pub enum PropertyValue {
+    Bool(bool),
+    Int(i64),
+    Float(f32),
+    Double(f64),
+    Vec2(glam::Vec2),
+    Vec3(glam::Vec3),
+    Color(mondrian_core::Color),
+    Vec4([f32; 4]),
+    Enum(String),
+    Resource(ParameterResourceReference),
+    Text(String),
 }
 ```
+
+资源必须使用类型化 `ParameterResourceReference`，普通文本使用 `Text`；不存在把路径、
+URL 和任意文本混在一起的 String 变体。产品 Definition 必须用
+`PropertyDescriptor::with_parameter_id(...)` 绑定稳定 `ParameterId`。
 
 ## EffectEvalContext
 
 ```rust
 pub struct EffectEvalContext {
-    pub time: TimeCode,
+    pub time: TimelineTime,
+    pub working_color_space: WorkingColorSpace,
 }
 ```
 
-求值上下文，携带当前帧时间。在 graph builder 和 evaluator 中使用。
+求值上下文携带当前帧的精确作者时间，以及该 Sequence 的 scene-linear 工作色彩空间。
+颜色算子不得隐式假定 BT.709。
 
 ## EffectRenderOp
 
@@ -236,22 +313,35 @@ pub struct EffectEvalContext {
 
 ```rust
 pub enum EffectRenderOp {
-    ColorAdjust { exposure: f32, contrast: f32, saturation: f32 },
-    WhiteBalance { temperature: f32, tint: f32 },
+    ColorAdjust {
+        exposure: f32,
+        contrast: f32,
+        saturation: f32,
+        working_color_space: WorkingColorSpace,
+    },
     GaussianBlur { radius: f32 },
     Sharpen { amount: f32 },
     Vignette { intensity: f32, feather: f32 },
     ChromaticAberration { amount: f32 },
     Grain { amount: f32 },
-    Custom {
-        key: String,
-        params: serde_json::Value,
-        cache_key: Option<String>,
-        cache_policy: EffectCachePolicy,
+    TemporalFrameMix {
+        past_offset: TimelineTime,
+        mix: f32,
     },
+    Lut3D { lut: Arc<PreparedLut3D>, intensity: f32 },
+    // Custom 是编译器内部承载已绑定 processor 的公开 IR 形状；
+    // 插件作者不得直接构造。
 }
 ```
 
+自定义 CPU RGBA8 处理必须通过
+`EffectPluginDefinitionBuilder::with_custom_render_backend(...)` 绑定。直接构造 raw
+`EffectRenderOp::Custom`（尤其是令 processor 为空）会在编译时失败关闭，也绕过了
+Definition revision 与 processor identity。
+
+`TemporalFrameMix` 需要精确声明有限历史窗口，并由 temporal executor 提供当前帧和
+`time - past_offset`；单帧执行器不会静默降级。`Lut3D` 只接受 preparation 阶段产生的
+不可变 `PreparedLut3D`，不能在逐帧构图时读取文件。
 ### 方法
 
 ```rust
@@ -278,14 +368,17 @@ impl EffectRenderOp {
 pub enum EffectCachePolicy {
     Deterministic,    // 相同输入 → 相同输出
     FrameDependent,   // 依赖 frame seed 或时间噪声
+    Uncacheable,      // 不能承诺跨调用复现；不得建立可复用输出 key
 }
 ```
 
 ## 注册函数
 
 ```rust
-/// 注册特效定义到全局注册表
-pub fn register_effect_definition(definition: EffectDefinition);
+/// 校验后注册；非法参数 schema 或执行合同不会进入全局注册表
+pub fn register_effect_definition(
+    definition: EffectDefinition,
+) -> Result<(), EffectDefinitionError>;
 
 /// 按类型查找特效定义
 pub fn effect_definition(effect_type: &EffectType) -> Option<Arc<EffectDefinition>>;
@@ -301,6 +394,7 @@ pub fn effect_library_types() -> Vec<EffectType>;
 pub fn build_effect_render_graph(
     effects: &[EffectNode],
     time: TimelineTime,
+    working_color_space: WorkingColorSpace,
 ) -> Result<EffectRenderGraph, EffectGraphBuildError>;
 
 /// 构图、注入 Clip Mask 并编译为可执行图
@@ -308,6 +402,7 @@ pub fn compile_clip_effect_graph(
     effects: &[EffectNode],
     masks: &[MaskComponent],
     time: TimelineTime,
+    working_color_space: WorkingColorSpace,
 ) -> Result<Arc<CompiledEffectGraph>, EffectGraphBuildError>;
 ```
 

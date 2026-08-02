@@ -43,11 +43,12 @@ function Invoke-PlaybackGate([object]$GateContract, [object]$Fixture, [string]$R
     $artifactPath = Resolve-RepositoryPath (Join-Path "tests/fixtures" ([string]$Fixture.path))
     $reportPath = Join-Path $RunDirectory "$($GateContract.id)-report.jsonl"
     $logPath = Join-Path $RunDirectory "$($GateContract.id)-cargo.log"
+    $testBuildLogPath = Join-Path $RunDirectory "$($GateContract.id)-test-build.log"
     $workerBuildLogPath = Join-Path $RunDirectory "$($GateContract.id)-demux-worker-build.log"
     $decodeProgressRequired = $null -ne $GateContract.PSObject.Properties["decode_progress_required"] -and $GateContract.decode_progress_required -eq $true
     $decodeProgressEnvironment = if ($null -eq $GateContract.PSObject.Properties["decode_progress_environment"]) { $null } else { [string]$GateContract.decode_progress_environment }
     $decodeProgressPath = if ([string]::IsNullOrWhiteSpace($decodeProgressEnvironment)) { $null } else { Join-Path $RunDirectory "$($GateContract.id)-decode-progress.jsonl" }
-    $pathsToRemove = @($reportPath, $logPath, $workerBuildLogPath)
+    $pathsToRemove = @($reportPath, $logPath, $testBuildLogPath, $workerBuildLogPath)
     if ($null -ne $decodeProgressPath) { $pathsToRemove += $decodeProgressPath }
     Remove-Item -LiteralPath $pathsToRemove -Force -ErrorAction SilentlyContinue
 
@@ -58,6 +59,7 @@ function Invoke-PlaybackGate([object]$GateContract, [object]$Fixture, [string]$R
     $demuxWorkerRequired = $null -ne $GateContract.PSObject.Properties["packaged_demux_worker_required"] -and $GateContract.packaged_demux_worker_required -eq $true
     $demuxWorkerPath = $null
     $workerBuildResult = $null
+    $testBuildResult = $null
     try {
         [Environment]::SetEnvironmentVariable([string]$GateContract.media_environment, $artifactPath, "Process")
         [Environment]::SetEnvironmentVariable("MONDRIAN_PERF_OUTPUT", $reportPath, "Process")
@@ -65,8 +67,8 @@ function Invoke-PlaybackGate([object]$GateContract, [object]$Fixture, [string]$R
             [Environment]::SetEnvironmentVariable($decodeProgressEnvironment, $decodeProgressPath, "Process")
         }
         if ($demuxWorkerRequired) {
-            $workerBuildArguments = @("build", "-p", "mondrian-app", "--release", "--bin", "mondrian")
-            $workerBuildResult = Invoke-BoundedPlaybackGateProcess "cargo" $workerBuildArguments $script:repositoryRoot ([int]$GateContract.process_timeout_seconds) $workerBuildLogPath
+            $workerBuildArguments = @("build", "-p", "mondrian-app", "--release", "--features", "validation", "--bin", "mondrian")
+            $workerBuildResult = Invoke-BoundedPlaybackGateProcess "cargo" $workerBuildArguments $script:repositoryRoot ([int]$GateContract.build_timeout_seconds) $workerBuildLogPath
             if ($workerBuildResult.timed_out -or $workerBuildResult.exit_code -ne 0) {
                 throw "Packaged Preview demux worker build failed or timed out."
             }
@@ -77,8 +79,16 @@ function Invoke-PlaybackGate([object]$GateContract, [object]$Fixture, [string]$R
             }
             [Environment]::SetEnvironmentVariable("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH", $demuxWorkerPath, "Process")
         }
+        $testBuildArguments = @(
+            "test", "-p", "mondrian-app", "--release", "--features", "validation", "--no-run",
+            [string]$GateContract.cargo_test
+        )
+        $testBuildResult = Invoke-BoundedPlaybackGateProcess "cargo" $testBuildArguments $script:repositoryRoot ([int]$GateContract.build_timeout_seconds) $testBuildLogPath
+        if ($testBuildResult.timed_out -or $testBuildResult.exit_code -ne 0) {
+            throw "Playback gate test build failed or timed out."
+        }
         $cargoArguments = @(
-            "test", "-p", "mondrian-app", "--release", [string]$GateContract.cargo_test,
+            "test", "-p", "mondrian-app", "--release", "--features", "validation", [string]$GateContract.cargo_test,
             "--", "--ignored", "--nocapture", "--test-threads=1"
         )
         $processResult = Invoke-BoundedPlaybackGateProcess "cargo" $cargoArguments $script:repositoryRoot ([int]$GateContract.process_timeout_seconds) $logPath
@@ -114,7 +124,7 @@ function Invoke-PlaybackGate([object]$GateContract, [object]$Fixture, [string]$R
             attestation_path = $attestationPath
             attestation_sha256 = (Get-FileHash -LiteralPath $attestationPath -Algorithm SHA256).Hash.ToLowerInvariant()
         }
-        command = if ($demuxWorkerRequired) { "cargo build -p mondrian-app --release --bin mondrian; cargo $($cargoArguments -join ' ')" } else { "cargo $($cargoArguments -join ' ')" }
+        command = if ($demuxWorkerRequired) { "cargo build -p mondrian-app --release --features validation --bin mondrian; cargo $($testBuildArguments -join ' '); cargo $($cargoArguments -join ' ')" } else { "cargo $($testBuildArguments -join ' '); cargo $($cargoArguments -join ' ')" }
         cargo_exit_code = $exitCode
         process_timeout_seconds = [int]$GateContract.process_timeout_seconds
         process_elapsed_ms = [int64]$processResult.elapsed_ms
@@ -134,6 +144,13 @@ function Invoke-PlaybackGate([object]$GateContract, [object]$Fixture, [string]$R
             build_log_path = if ($demuxWorkerRequired) { $workerBuildLogPath } else { $null }
             build_elapsed_ms = if ($null -eq $workerBuildResult) { $null } else { [int64]$workerBuildResult.elapsed_ms }
         }
+        test_build = [ordered]@{
+            timeout_seconds = [int]$GateContract.build_timeout_seconds
+            exit_code = [int]$testBuildResult.exit_code
+            timed_out = [bool]$testBuildResult.timed_out
+            elapsed_ms = [int64]$testBuildResult.elapsed_ms
+            log_path = $testBuildLogPath
+        }
         report_read_error = $reportReadError
         expected_report_profile = [string]$GateContract.expected_report_profile
         observed_report_profile = $profileObserved
@@ -149,13 +166,16 @@ $machineProfilePath = Join-Path $repositoryRoot "tests/validation/windows-alpha-
 $plan = Get-Content -LiteralPath $planPath -Raw | ConvertFrom-Json
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $machineProfile = Get-Content -LiteralPath $machineProfilePath -Raw | ConvertFrom-Json
-if ($plan.schema_version -ne 3) { throw "Unsupported playback reference gate plan schema." }
+if ($plan.schema_version -ne 4) { throw "Unsupported playback reference gate plan schema." }
 if ($manifest.schema_version -ne 2) { throw "Unsupported corpus manifest schema." }
 if ($machineProfile.id -ne $plan.machine_profile) { throw "Playback plan and machine profile disagree." }
 $baselineMemoryClass = [string]$plan.baseline_machine_requirements.memory_class
 $diagnosticWaivableMachineIssueCodes = @($plan.diagnostic_execution.waivable_machine_issue_codes | ForEach-Object { [string]$_ })
 if ($plan.diagnostic_execution.explicit_unqualified_machine_opt_in_required -ne $true) {
     throw "Playback plan must require explicit opt-in for unqualified-machine diagnostics."
+}
+if ($plan.baseline_acceptance.bounded_gate_build_required -ne $true) {
+    throw "Playback plan must require a separately bounded gate test build."
 }
 
 $selectedGateIds = @(switch ($Gate) {
@@ -166,6 +186,9 @@ $selectedGateIds = @(switch ($Gate) {
 $selectedGates = @($plan.gates | Where-Object { $_.id -in $selectedGateIds })
 if ($selectedGates.Count -ne $selectedGateIds.Count) { throw "Playback plan does not define every selected gate." }
 foreach ($gateContract in $selectedGates) {
+    if ([int]$gateContract.build_timeout_seconds -le 0) {
+        throw "Gate '$($gateContract.id)' must define a positive build timeout."
+    }
     if ([int]$gateContract.process_timeout_seconds -le 0) {
         throw "Gate '$($gateContract.id)' must define a positive external process timeout."
     }
@@ -278,7 +301,7 @@ $baselineEligible = $null -eq $failureMessage -and $preflightPassed -and $allGat
 $status = if ($null -ne $failureMessage) { "failed" } elseif (-not $allGatesPassed) { "failed" } elseif ($baselineEligible) { "passed-baseline" } else { "passed-diagnostic" }
 $machineValidationIssueCodes = if ($null -eq $machineValidation) { @() } else { @($machineValidation.issues | ForEach-Object { [string]$_.code }) }
 $evidence = [ordered]@{
-    schema_version = 3
+    schema_version = 4
     run_id = $runId
     plan = [ordered]@{
         id = $plan.id

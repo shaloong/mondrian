@@ -12,15 +12,16 @@ use super::demux_protocol_ffi::{
 use super::MediaFileFingerprint;
 use ffmpeg::codec::packet::{Mut as PacketMut, Ref as PacketRef};
 use ffmpeg_next as ffmpeg;
+use mondrian_core::{MediaFileChangeStamp, MediaFileObjectIdentity};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::slice;
 
-const PROTOCOL_MAGIC: [u8; 8] = *b"MDPDMX02";
-const REQUEST_MAGIC: [u8; 8] = *b"MDPDMXR2";
-pub(super) const PROTOCOL_VERSION: u32 = 2;
+const PROTOCOL_MAGIC: [u8; 8] = *b"MDPDMX04";
+const REQUEST_MAGIC: [u8; 8] = *b"MDPDMXR4";
+pub(super) const PROTOCOL_VERSION: u32 = 4;
 const BUILD_IDENTITY: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
 const MESSAGE_OPEN_PHASE: u8 = 1;
@@ -54,6 +55,7 @@ pub(super) struct DemuxWorkerRequest {
     pub nonce: [u8; 16],
     pub path: PathBuf,
     pub source_revision: MediaFileFingerprint,
+    pub video_stream_index: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,7 +166,9 @@ pub(super) fn write_worker_request(
     nonce: [u8; 16],
     path: &Path,
     source_revision: MediaFileFingerprint,
+    video_stream_index: Option<u32>,
 ) -> io::Result<()> {
+    validate_media_file_revision(source_revision)?;
     writer.write_all(&REQUEST_MAGIC)?;
     write_runtime_contract(writer, nonce)?;
     let (encoding, path_bytes) = encode_native_path(path.as_os_str())?;
@@ -172,7 +176,10 @@ pub(super) fn write_worker_request(
     write_bounded_bytes(writer, &path_bytes, MAX_PATH_BYTES, "media path")?;
     write_optional_u64(writer, source_revision.len)?;
     write_optional_u64(writer, source_revision.modified_secs)?;
-    write_optional_u32(writer, source_revision.modified_nanos)
+    write_optional_u32(writer, source_revision.modified_nanos)?;
+    write_media_file_object_identity(writer, source_revision.object_identity)?;
+    write_media_file_change_stamp(writer, source_revision.change_stamp)?;
+    write_optional_u32(writer, video_stream_index)
 }
 
 pub(super) fn read_worker_request(reader: &mut impl Read) -> io::Result<DemuxWorkerRequest> {
@@ -192,13 +199,116 @@ pub(super) fn read_worker_request(reader: &mut impl Read) -> io::Result<DemuxWor
         len: read_optional_u64(reader, "source byte length")?,
         modified_secs: read_optional_u64(reader, "source modified seconds")?,
         modified_nanos: read_optional_u32(reader, "source modified nanoseconds")?,
+        object_identity: read_media_file_object_identity(reader)?,
+        change_stamp: read_media_file_change_stamp(reader)?,
     };
     if source_revision.modified_nanos.is_some_and(|nanos| nanos >= 1_000_000_000) {
         return Err(invalid_data(
             "source modified nanoseconds must be below one second",
         ));
     }
-    Ok(DemuxWorkerRequest { nonce, path, source_revision })
+    validate_media_file_revision(source_revision)?;
+    let video_stream_index = read_optional_u32(reader, "video stream index")?;
+    Ok(DemuxWorkerRequest { nonce, path, source_revision, video_stream_index })
+}
+
+fn validate_media_file_revision(source_revision: MediaFileFingerprint) -> io::Result<()> {
+    if !source_revision.authorizes_reuse() {
+        return Err(invalid_data(
+            "Preview demux request requires complete filesystem revision evidence",
+        ));
+    }
+    if let Some(MediaFileChangeStamp::Unix { nanoseconds, .. }) = source_revision.change_stamp {
+        if !(0..1_000_000_000).contains(&nanoseconds) {
+            return Err(invalid_data(
+                "Unix media change nanoseconds must be below one second",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn write_media_file_object_identity(
+    writer: &mut impl Write,
+    identity: Option<MediaFileObjectIdentity>,
+) -> io::Result<()> {
+    match identity {
+        None => writer.write_all(&[0]),
+        Some(MediaFileObjectIdentity::Windows { volume_serial_number, file_id }) => {
+            writer.write_all(&[1])?;
+            write_u64(writer, volume_serial_number)?;
+            writer.write_all(&file_id)
+        }
+        Some(MediaFileObjectIdentity::Unix { device, inode }) => {
+            writer.write_all(&[2])?;
+            write_u64(writer, device)?;
+            write_u64(writer, inode)
+        }
+    }
+}
+
+fn read_media_file_object_identity(
+    reader: &mut impl Read,
+) -> io::Result<Option<MediaFileObjectIdentity>> {
+    let mut kind = [0_u8; 1];
+    reader.read_exact(&mut kind)?;
+    match kind[0] {
+        0 => Ok(None),
+        1 => {
+            let volume_serial_number = read_u64(reader)?;
+            let mut file_id = [0_u8; 16];
+            reader.read_exact(&mut file_id)?;
+            Ok(Some(MediaFileObjectIdentity::Windows {
+                volume_serial_number,
+                file_id,
+            }))
+        }
+        2 => Ok(Some(MediaFileObjectIdentity::Unix {
+            device: read_u64(reader)?,
+            inode: read_u64(reader)?,
+        })),
+        value => Err(invalid_data(format!(
+            "unknown media file object identity kind {value}"
+        ))),
+    }
+}
+
+fn write_media_file_change_stamp(
+    writer: &mut impl Write,
+    stamp: Option<MediaFileChangeStamp>,
+) -> io::Result<()> {
+    match stamp {
+        None => writer.write_all(&[0]),
+        Some(MediaFileChangeStamp::WindowsFileTime(value)) => {
+            writer.write_all(&[1])?;
+            write_i64(writer, value)
+        }
+        Some(MediaFileChangeStamp::Unix { seconds, nanoseconds }) => {
+            writer.write_all(&[2])?;
+            write_i64(writer, seconds)?;
+            write_i64(writer, nanoseconds)
+        }
+    }
+}
+
+fn read_media_file_change_stamp(
+    reader: &mut impl Read,
+) -> io::Result<Option<MediaFileChangeStamp>> {
+    let mut kind = [0_u8; 1];
+    reader.read_exact(&mut kind)?;
+    match kind[0] {
+        0 => Ok(None),
+        1 => Ok(Some(MediaFileChangeStamp::WindowsFileTime(read_i64(
+            reader,
+        )?))),
+        2 => Ok(Some(MediaFileChangeStamp::Unix {
+            seconds: read_i64(reader)?,
+            nanoseconds: read_i64(reader)?,
+        })),
+        value => Err(invalid_data(format!(
+            "unknown media file change stamp kind {value}"
+        ))),
+    }
 }
 
 pub(super) fn write_worker_command(
@@ -1314,14 +1424,21 @@ mod tests {
             len: Some(123_456),
             modified_secs: Some(987),
             modified_nanos: Some(654_321),
+            object_identity: Some(MediaFileObjectIdentity::Windows {
+                volume_serial_number: 42,
+                file_id: [7; 16],
+            }),
+            change_stamp: Some(MediaFileChangeStamp::WindowsFileTime(987_654_321)),
         };
         let mut bytes = Vec::new();
-        write_worker_request(&mut bytes, TEST_NONCE, path, source_revision).expect("write request");
+        write_worker_request(&mut bytes, TEST_NONCE, path, source_revision, Some(7))
+            .expect("write request");
 
         let request = read_worker_request(&mut Cursor::new(bytes)).expect("read request");
         assert_eq!(request.nonce, TEST_NONCE);
         assert_eq!(request.path, path);
         assert_eq!(request.source_revision, source_revision);
+        assert_eq!(request.video_stream_index, Some(7));
     }
 
     #[test]

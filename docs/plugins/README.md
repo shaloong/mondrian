@@ -47,33 +47,51 @@
 
 ```rust
 use mondrian_effects::{
-    EffectPluginDefinitionBuilder, EffectRenderOp, EffectType,
-    register_effect_definition,
-    EffectPluginContract,
+    register_effect_definition, EffectColorDomainContract, EffectDeterminism,
+    EffectExecutionContract, EffectExecutionModes, EffectGraphTopology,
+    EffectPluginContract, EffectPluginDefinitionBuilder, EffectRenderOp,
+    EffectResourceLifetime, EffectRoiPropagation, EffectStateModel,
+    EffectTemporalInputExtent, EffectType,
 };
 use mondrian_core::automation::{PropertyDescriptor, PropertyValue};
 
 let plugin_type = EffectType::Plugin("plugin.example.hello".to_string());
+let amount_id = plugin_type
+    .parameter_id("amount")
+    .expect("static parameter ID");
 
-let definition = EffectPluginDefinitionBuilder::new(plugin_type.key(), "Hello")
+let definition = EffectPluginDefinitionBuilder::new(
+    plugin_type.key(),
+    "Hello",
+    EffectColorDomainContract::SCENE_LINEAR,
+)
+    .with_execution_contract(EffectExecutionContract {
+        execution_modes: EffectExecutionModes::CPU_F32,
+        determinism: EffectDeterminism::Deterministic,
+        state_model: EffectStateModel::Stateless,
+        temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+        roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+        resource_lifetime: EffectResourceLifetime::Frame,
+        topology: EffectGraphTopology::LinearChain,
+    })
     .with_plugin_contract(EffectPluginContract::new("1.0.0"))
     .property(PropertyDescriptor::new(
         "plugin.example.hello.amount",
         "Amount",
         PropertyValue::Float(0.5),
-    ))
-    .with_graph(|effect, context, graph| {
-        let amount = effect.evaluate_f32_by_suffix(
-            "plugin.example.hello.amount", context.time, 0.5
-        );
+    ).with_parameter_id(amount_id.clone()))
+    .with_graph(move |effect, context, graph| {
+        let amount = effect.evaluate_f32_parameter(&amount_id, context.time, 0.5);
         graph.apply(EffectRenderOp::GaussianBlur { radius: amount * 10.0 });
     })
     .build();
 
-register_effect_definition(definition);
+register_effect_definition(definition)?;
 ```
+
+注册返回 `Result`；不要忽略非法参数 schema、执行合同或重复语义造成的失败。
 
 ## 相关文档
 
-- [效果系统架构](../architecture/effects-system.md) —— 内部架构概述
-- [渲染器架构](../architecture/renderer.md) —— 渲染管线设计
+- [效果系统架构](../architecture/effect-system.md) —— 内部架构概述
+- [渲染管线架构](../architecture/render-pipeline.md) —— 渲染管线设计

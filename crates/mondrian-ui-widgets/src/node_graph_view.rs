@@ -139,7 +139,7 @@ impl NodeGraphEdge {
 }
 
 /// Adapter that maps a selected node id to an editor [`Action`].
-pub type NodeGraphSelectAction = dyn Fn(&str) -> Action;
+pub type NodeGraphSelectAction = dyn Fn(&str) -> Option<Action>;
 
 /// Compact directed graph view for editor panels.
 pub struct NodeGraphView {
@@ -228,8 +228,12 @@ impl NodeGraphView {
     }
 
     /// Dispatch an action when the user selects a node.
-    pub fn on_select(mut self, action: impl Fn(&str) -> Action + 'static) -> Self {
-        self.on_select = Some(Box::new(action));
+    pub fn on_select<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(&str) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_select = Some(Box::new(move |node_id| action(node_id).into()));
         self
     }
 
@@ -270,7 +274,9 @@ impl NodeGraphView {
         };
         self.selected_node_id = Some(node.id.clone());
         if let Some(on_select) = &self.on_select {
-            (ctx.dispatch)(on_select(&node.id));
+            if let Some(action) = on_select(&node.id) {
+                (ctx.dispatch)(action);
+            }
         }
         ctx.request_repaint();
         EventResult::Handled

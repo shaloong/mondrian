@@ -15,7 +15,7 @@ use crate::paint::{centered_text_origin_y, paint_focus_ring};
 use crate::text_metrics::measure_single_line;
 
 /// Adapter that maps the current checkbox state to an editor [`Action`].
-pub type CheckboxChangeAction = dyn Fn(bool) -> Action;
+pub type CheckboxChangeAction = dyn Fn(bool) -> Option<Action>;
 
 /// Checkbox Widget —— 可切换的勾选框
 pub struct Checkbox {
@@ -93,8 +93,12 @@ impl Checkbox {
     }
 
     /// Dispatch a value-aware action whenever the checkbox toggles.
-    pub fn on_change(mut self, action: impl Fn(bool) -> Action + 'static) -> Self {
-        self.on_change = Some(Box::new(action));
+    pub fn on_change<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(bool) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_change = Some(Box::new(move |checked| action(checked).into()));
         self
     }
 
@@ -136,7 +140,9 @@ impl Checkbox {
             (ctx.dispatch)(action.clone());
         }
         if let Some(action) = &self.on_change {
-            (ctx.dispatch)(action(self.checked));
+            if let Some(action) = action(self.checked) {
+                (ctx.dispatch)(action);
+            }
         }
         ctx.request_repaint();
     }

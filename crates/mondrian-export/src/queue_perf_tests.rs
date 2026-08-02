@@ -1,12 +1,15 @@
 use super::*;
 use mondrian_core::types::{BlendMode, ColorEngine, ColorSpace};
 use mondrian_core::WorkingColorSpace;
-use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
+use mondrian_effects::{
+    blend_rgba_f32_pixel_seeded, compile_reference_effect_graph, EffectRenderPlan,
+};
 use mondrian_renderer::{
     composite_timeline_elements_color_frame_with_diagnostics, execute_cpu_input_stage,
-    CpuEncodedColorFrame, RenderColorStageDiagnostics, RenderInputTransform,
-    TimelineCompositeDiagnostics, TimelineCompositeElement, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineEffectColorRuntime, TimelineMediaLayer,
+    CpuColorFrame, CpuEncodedColorFrame, RenderColorStageDiagnostics, RenderInputTransform,
+    TimelineCompositeDiagnostics, TimelineCompositeElement, TimelineCompositeExecutionDiagnostics,
+    TimelineCompositeOptions, TimelineCompositeScratch, TimelineEffectColorRuntime,
+    TimelineMediaLayer,
 };
 use serde::Serialize;
 use std::cmp;
@@ -43,6 +46,11 @@ struct ExportPerfSimReport {
     fps_max_threshold: f64,
     passthrough_frames: usize,
     passthrough_ratio_pct: f64,
+    passthrough_execution_proven: bool,
+    fused_first_two_frames: usize,
+    fused_first_two_ratio_pct: f64,
+    fused_first_two_execution_proven: bool,
+    pixel_oracle_proven: bool,
     color_stage_plans: u64,
     color_stage_total_stages: u64,
     color_stage_cpu_input_stages: u64,
@@ -143,6 +151,9 @@ fn generate_layer(
         Arc::new(DecodedVideoLayer {
             frame: frame.result.frame,
             source_resolution: Resolution { width, height },
+            source_fingerprint: MediaFileFingerprint::default(),
+            video_stream_index: 0,
+            decode_diagnostics: None,
             stage_diagnostics: diagnostics,
         }),
         diagnostics,
@@ -176,8 +187,13 @@ fn compose_frame_layers_with_diagnostics(
     height: u32,
     layers: &[(Arc<DecodedVideoLayer>, f32)],
     frame_idx: u64,
-) -> TimelineCompositeDiagnostics {
-    let mut scratch = TimelineCompositeScratch::default();
+    identity_effect_graph: &Arc<mondrian_effects::CompiledEffectGraph>,
+    scratch: &mut TimelineCompositeScratch,
+) -> (
+    TimelineCompositeDiagnostics,
+    TimelineCompositeExecutionDiagnostics,
+    [[f32; 4]; 3],
+) {
     let elements = layers
         .iter()
         .map(|(layer, opacity)| {
@@ -186,13 +202,12 @@ fn compose_frame_layers_with_diagnostics(
                 opacity: *opacity,
                 blend_mode: BlendMode::Normal,
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                effect_graph: get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
-                    .expect("compile identity graph"),
+                effect_graph: Arc::clone(identity_effect_graph),
                 frame_seed: frame_idx as i64,
             })
         })
         .collect::<Vec<_>>();
-    composite_timeline_elements_color_frame_with_diagnostics(
+    let output = composite_timeline_elements_color_frame_with_diagnostics(
         width,
         height,
         &elements,
@@ -201,10 +216,60 @@ fn compose_frame_layers_with_diagnostics(
             &ColorEngine::mondrian_standard(),
             WorkingColorSpace::LinearRec709,
         ),
-        &mut scratch,
+        scratch,
     )
-    .expect("composite export simulation frame")
-    .diagnostics
+    .expect("composite export simulation frame");
+    // This gate measures real pixel execution, not just diagnostic control
+    // flow. Keep the complete typed output observable across release LTO, then
+    // retain three deterministic pixels for the canonical oracle outside the
+    // compositor.
+    std::hint::black_box(&output.frame);
+    let pixel_probe = sampled_working_pixels(&output.frame);
+    (output.diagnostics, output.execution, pixel_probe)
+}
+
+fn sampled_working_pixels(frame: &CpuColorFrame) -> [[f32; 4]; 3] {
+    let pixels = &frame.rgba_f32().data;
+    assert!(
+        !pixels.is_empty(),
+        "export performance output must contain pixels"
+    );
+    [
+        pixels[0],
+        pixels[pixels.len() / 2],
+        pixels[pixels.len() - 1],
+    ]
+}
+
+fn canonical_frame_layer_probe(
+    layers: &[(Arc<DecodedVideoLayer>, f32)],
+    pattern: OpacityPattern,
+) -> [[f32; 4]; 3] {
+    let first = layers.first().expect("export performance frame has a layer");
+    let pixels = &first.0.frame.rgba_f32().data;
+    assert!(
+        !pixels.is_empty(),
+        "export performance source must contain pixels"
+    );
+    let indices = [0, pixels.len() / 2, pixels.len() - 1];
+    indices.map(|index| match pattern {
+        OpacityPattern::Passthrough => first.0.frame.rgba_f32().data[index],
+        OpacityPattern::Blend => {
+            layers.iter().fold([0.0, 0.0, 0.0, 0.0], |base, (layer, opacity)| {
+                let source = layer.frame.rgba_f32().data[index];
+                blend_rgba_f32_pixel_seeded(base, source, *opacity, BlendMode::Normal, index as u32)
+            })
+        }
+    })
+}
+
+fn pixel_probe_matches(actual: [[f32; 4]; 3], expected: [[f32; 4]; 3]) -> bool {
+    actual.iter().zip(expected).all(|(actual, expected)| {
+        actual
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| (*actual - expected).abs() <= 1.0e-6)
+    })
 }
 
 fn run_export_render_simulation(
@@ -256,29 +321,50 @@ fn run_export_render_simulation_with_report(
     }
 
     let mut passthrough_frames = 0usize;
+    let mut fused_first_two_frames = 0usize;
+    let mut pixel_oracle_proven = true;
     let mut color_diagnostics = ExportJobColorDiagnostics::default();
+    // Production Export compiles Effect programs once per immutable snapshot
+    // and retains one bounded working set for the job. The performance gate
+    // must measure frame execution, not per-frame graph compilation or fresh
+    // scratch allocation that production never performs.
+    let identity_effect_graph = compile_reference_effect_graph(&EffectRenderPlan::default())
+        .expect("compile identity graph");
+    let mut composite_scratch = TimelineCompositeScratch::default();
     let pattern_name = match pattern {
         OpacityPattern::Blend => "blend",
         OpacityPattern::Passthrough => "passthrough",
     };
 
     let first_frame_layers = build_frame_layers(&layers, 0, pattern);
-    let first_frame_passthrough = first_frame_layers.len() == 1
-        && first_frame_layers[0].1 >= 0.999
-        && first_frame_layers[0].0.frame.descriptor().width == width
-        && first_frame_layers[0].0.frame.descriptor().height == height;
     let first_started = Instant::now();
-    let first_composite_diagnostics =
-        compose_frame_layers_with_diagnostics(width, height, &first_frame_layers, 0);
+    let (first_composite_diagnostics, first_execution_diagnostics, first_pixel_probe) =
+        compose_frame_layers_with_diagnostics(
+            width,
+            height,
+            &first_frame_layers,
+            0,
+            &identity_effect_graph,
+            &mut composite_scratch,
+        );
     let first_frame_ms = first_started.elapsed().as_millis();
+    pixel_oracle_proven &= pixel_probe_matches(
+        first_pixel_probe,
+        canonical_frame_layer_probe(&first_frame_layers, pattern),
+    );
     color_diagnostics.record_frame_diagnostics(
         InputColorResolutionSourceCounts::default(),
         color_stage_diagnostics,
         first_composite_diagnostics,
     );
-    if first_frame_passthrough {
-        passthrough_frames += 1;
-    }
+    passthrough_frames = passthrough_frames.saturating_add(
+        usize::try_from(first_execution_diagnostics.zero_copy_identity_passthroughs)
+            .unwrap_or(usize::MAX),
+    );
+    fused_first_two_frames = fused_first_two_frames.saturating_add(
+        usize::try_from(first_execution_diagnostics.fused_first_two_full_frame_normal_blends)
+            .unwrap_or(usize::MAX),
+    );
 
     let mut frame_samples_ms = Vec::with_capacity(sim_frames);
     let mut effective_timeline_ms = 0.0f64;
@@ -286,24 +372,35 @@ fn run_export_render_simulation_with_report(
 
     for frame in 0..sim_frames as u64 {
         let frame_layers = build_frame_layers(&layers, frame + 1, pattern);
-        let frame_passthrough = frame_layers.len() == 1
-            && frame_layers[0].1 >= 0.999
-            && frame_layers[0].0.frame.descriptor().width == width
-            && frame_layers[0].0.frame.descriptor().height == height;
-
         let started = Instant::now();
-        let composite_diagnostics =
-            compose_frame_layers_with_diagnostics(width, height, &frame_layers, frame + 1);
+        let (composite_diagnostics, execution_diagnostics, pixel_probe) =
+            compose_frame_layers_with_diagnostics(
+                width,
+                height,
+                &frame_layers,
+                frame + 1,
+                &identity_effect_graph,
+                &mut composite_scratch,
+            );
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        pixel_oracle_proven &= pixel_probe_matches(
+            pixel_probe,
+            canonical_frame_layer_probe(&frame_layers, pattern),
+        );
         color_diagnostics.record_frame_diagnostics(
             InputColorResolutionSourceCounts::default(),
             RenderColorStageDiagnostics::default(),
             composite_diagnostics,
         );
 
-        if frame_passthrough {
-            passthrough_frames += 1;
-        }
+        passthrough_frames = passthrough_frames.saturating_add(
+            usize::try_from(execution_diagnostics.zero_copy_identity_passthroughs)
+                .unwrap_or(usize::MAX),
+        );
+        fused_first_two_frames = fused_first_two_frames.saturating_add(
+            usize::try_from(execution_diagnostics.fused_first_two_full_frame_normal_blends)
+                .unwrap_or(usize::MAX),
+        );
         frame_samples_ms.push(elapsed_ms.round().max(0.0) as u128);
         if elapsed_ms > frame_budget_ms {
             missed_budget_frames += 1;
@@ -331,11 +428,24 @@ fn run_export_render_simulation_with_report(
     } else {
         0.0
     };
+    let passthrough_execution_proven =
+        !matches!(pattern, OpacityPattern::Passthrough) || passthrough_frames == simulated_total;
+    let fused_first_two_ratio_pct = if simulated_total > 0 {
+        fused_first_two_frames as f64 * 100.0 / simulated_total as f64
+    } else {
+        0.0
+    };
+    let fused_first_two_execution_proven = !matches!(pattern, OpacityPattern::Blend)
+        || layer_count < 2
+        || fused_first_two_frames == simulated_total;
 
     const FPS_EPSILON: f64 = 0.001;
     let passed = first_frame_ms <= first_frame_threshold_ms
         && achieved_fps + FPS_EPSILON >= fps_min_threshold
         && achieved_fps <= fps_max_threshold + FPS_EPSILON
+        && passthrough_execution_proven
+        && fused_first_two_execution_proven
+        && pixel_oracle_proven
         && color_report.verdict != ExportColorHealthVerdict::Fail;
 
     Ok(ExportPerfSimReport {
@@ -358,6 +468,11 @@ fn run_export_render_simulation_with_report(
         fps_max_threshold,
         passthrough_frames,
         passthrough_ratio_pct,
+        passthrough_execution_proven,
+        fused_first_two_frames,
+        fused_first_two_ratio_pct,
+        fused_first_two_execution_proven,
+        pixel_oracle_proven,
         color_stage_plans: layer_count as u64,
         color_stage_total_stages: color_stage_diagnostics.total_stages,
         color_stage_cpu_input_stages: color_stage_diagnostics.cpu_input_stages,
@@ -444,6 +559,9 @@ fn export_perf_sim_report_includes_color_report() {
     assert!(report.color_report.summary.gpu_path_ready);
     assert!(report.color_report.root_causes.is_empty());
     assert!(report.color_report.actions.is_empty());
+    assert_eq!(report.fused_first_two_frames, 0);
+    assert!(report.fused_first_two_execution_proven);
+    assert!(report.pixel_oracle_proven);
     assert!(report.passed);
 
     let report_json = serde_json::to_value(&report).expect("serialize report");
@@ -465,6 +583,28 @@ fn export_perf_sim_report_includes_color_report() {
         report_json["color_report"]["summary"]["legacy_breakdown"]["media_transform"],
         0
     );
+}
+
+#[test]
+fn export_perf_sim_report_proves_fusion_and_canonical_pixels_independently() {
+    let report = run_export_render_simulation_with_report(
+        "export-fusion-evidence-test",
+        8,
+        4,
+        30.0,
+        2,
+        2,
+        1_000,
+        1.0,
+        60.0,
+        OpacityPattern::Blend,
+    )
+    .expect("export fusion evidence report");
+
+    assert_eq!(report.fused_first_two_frames, 3);
+    assert!(report.fused_first_two_execution_proven);
+    assert!(report.pixel_oracle_proven);
+    assert!(report.passed);
 }
 
 #[test]
@@ -533,16 +673,21 @@ fn export_1080p2997_simulated_perf() -> Result<(), Box<dyn std::error::Error>> {
 fn export_4k60_simulated_perf() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = perf_lock().lock().expect("export perf lock poisoned");
 
-    let width = env_u128("MONDRIAN_EXPORT_SIM_4K_WIDTH", 3840).clamp(640, 7680) as u32;
-    let height = env_u128("MONDRIAN_EXPORT_SIM_4K_HEIGHT", 2160).clamp(360, 4320) as u32;
-    let target_fps = env_f64("MONDRIAN_EXPORT_SIM_4K_TARGET_FPS", 60.0).clamp(1.0, 240.0);
+    // This is a named qualification gate, so workload identity is fixed.
+    // Frame count may be raised for a longer observation, while thresholds may
+    // only be tightened. A lighter resolution, single layer, lower target
+    // rate, or looser budget must use a differently named diagnostic scenario.
+    let width = 3840u32;
+    let height = 2160u32;
+    let target_fps = 60.0;
     let sim_frames = env_usize("MONDRIAN_EXPORT_SIM_4K_FRAMES", 120).clamp(16, 1200);
-    let layer_count = env_usize("MONDRIAN_EXPORT_SIM_4K_LAYERS", 2).clamp(1, 8);
+    let layer_count = 2;
 
-    let first_frame_threshold_ms = env_u128("MONDRIAN_EXPORT_SIM_4K_TTFF_MS", 3_000);
-    let fps_min_threshold = env_f64("MONDRIAN_EXPORT_SIM_4K_FPS_MIN", 12.0);
-    let fps_max_threshold =
-        env_f64("MONDRIAN_EXPORT_SIM_4K_FPS_MAX", target_fps).max(fps_min_threshold);
+    let first_frame_threshold_ms = env_u128("MONDRIAN_EXPORT_SIM_4K_TTFF_MS", 3_000).min(3_000);
+    let fps_min_threshold = env_f64("MONDRIAN_EXPORT_SIM_4K_FPS_MIN", 12.0).max(12.0);
+    let fps_max_threshold = env_f64("MONDRIAN_EXPORT_SIM_4K_FPS_MAX", target_fps)
+        .min(target_fps)
+        .max(fps_min_threshold);
 
     run_and_report_scenario(
         "export-4k60-simulated",

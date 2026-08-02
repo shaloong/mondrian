@@ -895,6 +895,16 @@ mod tests {
     }
 
     #[test]
+    fn menu_item_without_action_is_inert() {
+        let item = MenuItem::new("Unavailable", None);
+
+        assert!(!item.enabled);
+        assert!(!item.is_activatable());
+        assert!(!item.has_command());
+        assert!(item.action().is_none());
+    }
+
+    #[test]
     fn dropdown_updates_checked_state_for_matching_action() {
         let mut d = Dropdown::new(
             "View",

@@ -149,7 +149,7 @@ fn normalize_single_line_input(input: &str) -> Cow<'_, str> {
 }
 
 /// Adapter that maps the current input value to an editor [`Action`].
-pub type TextInputChangeAction = dyn Fn(&str) -> Action;
+pub type TextInputChangeAction = dyn Fn(&str) -> Option<Action>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EmptyTextCommitPolicy {
@@ -248,8 +248,12 @@ impl TextInput {
     }
 
     /// Dispatch an action whenever user input changes the committed text.
-    pub fn on_change(mut self, action: impl Fn(&str) -> Action + 'static) -> Self {
-        self.on_change = Some(Box::new(action));
+    pub fn on_change<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(&str) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_change = Some(Box::new(move |text| action(text).into()));
         self
     }
 
@@ -408,7 +412,9 @@ impl TextInput {
 
     fn dispatch_change(&self, ctx: &mut EventContext) {
         if let Some(factory) = &self.on_change {
-            (ctx.dispatch)(factory(self.edit.text()));
+            if let Some(action) = factory(self.edit.text()) {
+                (ctx.dispatch)(action);
+            }
         }
     }
 

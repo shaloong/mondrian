@@ -8,10 +8,15 @@ use super::playback_acceptance::{
     evaluate_process_memory_gate, PreviewProcessMemoryEvidenceReport,
     PreviewProcessMemoryGateReport, PROFESSIONAL_MIN_OBSERVED_DURATION_US,
 };
+#[cfg(feature = "validation")]
+use mondrian_media::MediaInfo;
 use mondrian_media::{
-    AudioPlaybackSnapshot, AudioPlaybackState, AudioSourceCacheDiagnostics, MediaInfo,
+    AudioPlaybackSnapshot, AudioPlaybackState, AudioSourceCacheDiagnostics,
+    RealtimeAudioOutputLossReason,
 };
-use mondrian_playback::{PlaybackEvidenceReport, PlaybackLatencySummary};
+use mondrian_playback::{
+    PlaybackClockPhaseErrorSummary, PlaybackEvidenceReport, PLAYBACK_EVIDENCE_SCHEMA_VERSION,
+};
 use serde::Serialize;
 
 const OUTPUT_SAMPLE_RATE: u32 = 48_000;
@@ -19,8 +24,11 @@ const OUTPUT_CHANNELS: u8 = 2;
 const MAX_CALLBACK_TIMELINE_DIVERGENCE_FLOOR_US: u64 = 100_000;
 const MAX_CALLBACK_CLOCK_RATE_ERROR_PPM: u64 = 1_000;
 const MAX_CALLBACK_AGE_US: u64 = 100_000;
-const MAX_DELIVERY_CLOCK_DRIFT_US: u64 = 20_000;
-const MAX_SYNTHETIC_STARTUP_US: u64 = 5_000_000;
+const MAX_DELIVERY_PHASE_ERROR_US: u64 = 20_000;
+const MAX_SYNTHETIC_FALLBACK_US: u64 = 1_000_000;
+const MAX_RECOVERY_HANDOFF_US: u64 = 5_000_000;
+const MAX_RECOVERY_SYNTHETIC_RESIDENCY_US: u64 = MAX_RECOVERY_HANDOFF_US;
+const MIN_STABLE_CLOCK_RESIDENCY_US: u64 = 1_000_000;
 const MIN_VIDEO_READY_BASIS_POINTS: u64 = 9_950;
 const MAX_AUDIO_WINDOW_DECODE_US: u64 = 460_000;
 
@@ -34,6 +42,7 @@ pub(crate) struct AudioPlaybackMediaProbeReport {
 }
 
 impl AudioPlaybackMediaProbeReport {
+    #[cfg(feature = "validation")]
     pub(crate) fn from_media_info(media_info: &MediaInfo) -> anyhow::Result<Self> {
         let audio = media_info
             .primary_audio()
@@ -82,14 +91,48 @@ impl AudioPlaybackMediaProbeReport {
 
 pub(crate) struct ProfessionalAudioPlaybackObservation<'a> {
     pub(crate) media: &'a AudioPlaybackMediaProbeReport,
-    pub(crate) qualified_stream_generation: u64,
+    pub(crate) recovery: ProfessionalAudioRecoveryObservation,
     pub(crate) audio: AudioPlaybackSnapshot,
     pub(crate) source_cache: AudioSourceCacheDiagnostics,
     pub(crate) playback_evidence: &'a PlaybackEvidenceReport,
     pub(crate) process_memory: &'a PreviewProcessMemoryEvidenceReport,
-    pub(crate) video_ready_samples: u64,
-    pub(crate) video_total_samples: u64,
+    pub(crate) video_readiness: ProfessionalVideoReadinessObservation,
     pub(crate) gpu_presented_frames: u64,
+}
+
+/// Exhaustive classification of sampled current-frame Viewer outcomes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ProfessionalVideoReadinessObservation {
+    pub(crate) ready: u64,
+    pub(crate) loading: u64,
+    pub(crate) stale: u64,
+    pub(crate) unavailable: u64,
+    pub(crate) missed_deadline: u64,
+}
+
+impl ProfessionalVideoReadinessObservation {
+    fn total(self) -> u64 {
+        self.ready
+            .saturating_add(self.loading)
+            .saturating_add(self.stale)
+            .saturating_add(self.unavailable)
+            .saturating_add(self.missed_deadline)
+    }
+}
+
+/// Monotonic and lifecycle facts surrounding the validation-only device recycle.
+///
+/// The retained Audio Playback lifecycle is the authority for what happened;
+/// these durations only bind its milestones to the request's monotonic instant.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ProfessionalAudioRecoveryObservation {
+    pub(crate) initial_audio: AudioPlaybackSnapshot,
+    pub(crate) initial_audio_device_stable_us: u64,
+    pub(crate) request_to_loss_us: Option<u64>,
+    pub(crate) request_to_synthetic_us: Option<u64>,
+    pub(crate) request_to_reopen_us: Option<u64>,
+    pub(crate) request_to_recovered_us: Option<u64>,
+    pub(crate) final_audio_device_stable_us: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -109,8 +152,22 @@ pub(crate) struct ProfessionalAudioPlaybackGateReport {
     audio_device_residency_us: u64,
     synthetic_residency_us: u64,
     output_state: &'static str,
-    qualified_stream_generation: u64,
+    initial_stream_generation: Option<u64>,
     final_stream_generation: Option<u64>,
+    request_to_loss_us: Option<u64>,
+    request_to_synthetic_us: Option<u64>,
+    request_to_reopen_us: Option<u64>,
+    request_to_recovered_us: Option<u64>,
+    initial_audio_device_stable_us: u64,
+    final_audio_device_stable_us: u64,
+    lifecycle_opened_delta: Option<u64>,
+    lifecycle_lost_delta: Option<u64>,
+    lifecycle_controlled_recycle_delta: Option<u64>,
+    lifecycle_backend_loss_delta: Option<u64>,
+    lifecycle_deactivation_failed_delta: Option<u64>,
+    frozen_loss_generation: Option<u64>,
+    frozen_loss_anchor_sample: Option<i64>,
+    frozen_loss_anchor_rate: Option<u32>,
     output_sample_rate: Option<u32>,
     output_channels: Option<u8>,
     active_callback_consumed_frames: u64,
@@ -120,8 +177,15 @@ pub(crate) struct ProfessionalAudioPlaybackGateReport {
     output_underrun_frames: u64,
     render_substitutions: u64,
     underrun_recoveries: u64,
-    delivery_clock_drift: PlaybackLatencySummary,
+    audio_device_delivery_phase: PlaybackClockPhaseErrorSummary,
+    synthetic_delivery_phase: PlaybackClockPhaseErrorSummary,
+    unproven_presentable_deliveries: u64,
+    phase_not_applicable_deliveries: u64,
     video_ready_samples: u64,
+    video_loading_samples: u64,
+    video_stale_samples: u64,
+    video_unavailable_samples: u64,
+    video_missed_deadline_samples: u64,
     video_total_samples: u64,
     video_ready_basis_points: u64,
     gpu_presented_frames: u64,
@@ -138,8 +202,40 @@ pub(crate) fn evaluate_professional_audio_playback(
     let evidence = observation.playback_evidence;
     let audio = observation.audio;
     let output = audio.output;
+    let recovery = observation.recovery;
+    let initial_audio = recovery.initial_audio;
+    let initial_output = initial_audio.output;
+    let initial_stream_generation = initial_output.map(|output| output.stream_generation);
+    let final_stream_generation = output.map(|output| output.stream_generation);
+    let initial_lifecycle = initial_audio.output_lifecycle;
+    let final_lifecycle = audio.output_lifecycle;
+    let opened_delta =
+        checked_counter_delta(final_lifecycle.opened_count, initial_lifecycle.opened_count);
+    let lost_delta =
+        checked_counter_delta(final_lifecycle.lost_count, initial_lifecycle.lost_count);
+    let controlled_recycle_delta = checked_counter_delta(
+        final_lifecycle.controlled_recycle_count,
+        initial_lifecycle.controlled_recycle_count,
+    );
+    let backend_loss_delta = checked_counter_delta(
+        final_lifecycle.backend_loss_count,
+        initial_lifecycle.backend_loss_count,
+    );
+    let deactivation_failed_delta = checked_counter_delta(
+        final_lifecycle.deactivation_failed_count,
+        initial_lifecycle.deactivation_failed_count,
+    );
+    let frozen_loss = final_lifecycle.last_loss;
     let process_memory = evaluate_process_memory_gate(observation.process_memory);
 
+    require(
+        &mut failures,
+        evidence.schema_version == PLAYBACK_EVIDENCE_SCHEMA_VERSION,
+        "playback_evidence_schema_mismatch",
+        PLAYBACK_EVIDENCE_SCHEMA_VERSION.to_string(),
+        evidence.schema_version.to_string(),
+        "versioned Playback Evidence report",
+    );
     require(
         &mut failures,
         evidence.observed_duration_us >= PROFESSIONAL_MIN_OBSERVED_DURATION_US,
@@ -148,35 +244,163 @@ pub(crate) fn evaluate_professional_audio_playback(
         format!("{} us", evidence.observed_duration_us),
         "bounded Playback Evidence residency",
     );
-    let required_audio_residency =
-        evidence.observed_duration_us.saturating_sub(MAX_SYNTHETIC_STARTUP_US);
+    let required_audio_residency = evidence
+        .observed_duration_us
+        .saturating_sub(MAX_RECOVERY_SYNTHETIC_RESIDENCY_US);
     require(
         &mut failures,
         evidence.clock_residency.audio_device_us >= required_audio_residency,
         "audio_device_clock_residency_below_minimum",
         format!("at least {required_audio_residency} us"),
         format!("{} us", evidence.clock_residency.audio_device_us),
-        "Playback Clock Master residency after bounded startup",
+        "Playback Clock Master residency outside the bounded controlled-recovery interval",
     );
     require(
         &mut failures,
-        evidence.clock_residency.synthetic_us <= MAX_SYNTHETIC_STARTUP_US,
-        "synthetic_clock_residency_above_startup_limit",
-        format!("at most {MAX_SYNTHETIC_STARTUP_US} us"),
+        evidence.clock_residency.synthetic_us > 0
+            && evidence.clock_residency.synthetic_us <= MAX_RECOVERY_SYNTHETIC_RESIDENCY_US,
+        "synthetic_clock_residency_outside_recovery_limit",
+        format!("one or more and at most {MAX_RECOVERY_SYNTHETIC_RESIDENCY_US} us"),
         format!("{} us", evidence.clock_residency.synthetic_us),
-        "Synthetic Clock Master is fallback/startup authority, not normal audio playback authority",
+        "Synthetic Clock Master residency during controlled device recovery",
     );
     require(
         &mut failures,
-        evidence.delivery_clock_drift.count > 0
-            && evidence.delivery_clock_drift.max_us <= MAX_DELIVERY_CLOCK_DRIFT_US,
-        "av_delivery_clock_drift_above_limit",
-        format!("one or more samples and max at most {MAX_DELIVERY_CLOCK_DRIFT_US} us"),
+        evidence.clock_residency.none_us == 0,
+        "missing_clock_master_residency_observed",
+        "zero time without an authoritative Clock Master",
+        format!("{} us", evidence.clock_residency.none_us),
+        "Audio Device to Synthetic to Audio Device Clock handoff",
+    );
+    require_phase_evidence(
+        &mut failures,
+        "audio_device",
+        evidence.delivery_phase_error.audio_device,
+        true,
+    );
+    require_phase_evidence(
+        &mut failures,
+        "synthetic",
+        evidence.delivery_phase_error.synthetic,
+        true,
+    );
+    require(
+        &mut failures,
+        evidence.delivery_phase_error.unproven_presentable == 0,
+        "unproven_presentable_delivery_phase",
+        "zero running presentable deliveries without proven Clock phase",
+        evidence.delivery_phase_error.unproven_presentable.to_string(),
+        "completion-time Engine Frame Delivery application evidence",
+    );
+
+    require(
+        &mut failures,
+        initial_audio.state == AudioPlaybackState::Active
+            && initial_output.is_some_and(|output| {
+                output.active && !output.stream_failed && output.active_callback_consumed_frames > 0
+            }),
+        "initial_audio_device_not_qualified",
+        "healthy active real callback consumption before recycle",
+        format!("state={:?}, output={initial_output:?}", initial_audio.state),
+        "initial production Audio Playback snapshot after stable qualification",
+    );
+    require(
+        &mut failures,
+        recovery.initial_audio_device_stable_us >= MIN_STABLE_CLOCK_RESIDENCY_US,
+        "initial_audio_device_stability_too_short",
+        format!("at least {MIN_STABLE_CLOCK_RESIDENCY_US} us"),
+        format!("{} us", recovery.initial_audio_device_stable_us),
+        "pre-recycle Audio Device Clock Master/Active stability interval",
+    );
+    require(
+        &mut failures,
+        recovery.final_audio_device_stable_us >= MIN_STABLE_CLOCK_RESIDENCY_US,
+        "final_audio_device_stability_too_short",
+        format!("at least {MIN_STABLE_CLOCK_RESIDENCY_US} us"),
+        format!("{} us", recovery.final_audio_device_stable_us),
+        "post-recovery Audio Device Clock Master/Active stability interval",
+    );
+    require_recovery_latency(
+        &mut failures,
+        "controlled_recycle_loss",
+        recovery.request_to_loss_us,
+        MAX_RECOVERY_HANDOFF_US,
+    );
+    require_recovery_latency(
+        &mut failures,
+        "synthetic_clock_fallback",
+        recovery.request_to_synthetic_us,
+        MAX_SYNTHETIC_FALLBACK_US,
+    );
+    require_recovery_latency(
+        &mut failures,
+        "replacement_stream_open",
+        recovery.request_to_reopen_us,
+        MAX_RECOVERY_HANDOFF_US,
+    );
+    require_recovery_latency(
+        &mut failures,
+        "audio_device_phase_handoff",
+        recovery.request_to_recovered_us,
+        MAX_RECOVERY_HANDOFF_US,
+    );
+    require(
+        &mut failures,
+        opened_delta == Some(1) && lost_delta == Some(1) && controlled_recycle_delta == Some(1),
+        "controlled_recycle_lifecycle_delta_mismatch",
+        "exactly one opened, lost, and controlled-recycle lifecycle transition",
         format!(
-            "count={}, max={} us",
-            evidence.delivery_clock_drift.count, evidence.delivery_clock_drift.max_us
+            "opened={opened_delta:?}, lost={lost_delta:?}, controlled={controlled_recycle_delta:?}"
         ),
-        "accepted presentation target versus authoritative playback clock",
+        "retained Audio Playback output lifecycle counters",
+    );
+    require(
+        &mut failures,
+        backend_loss_delta == Some(0) && deactivation_failed_delta == Some(0),
+        "unexpected_audio_output_loss_observed",
+        "zero backend-loss and deactivation-failure transitions",
+        format!(
+            "backend={backend_loss_delta:?}, deactivation_failed={deactivation_failed_delta:?}"
+        ),
+        "retained Audio Playback output lifecycle counters",
+    );
+    require(
+        &mut failures,
+        initial_stream_generation.zip(final_stream_generation).is_some_and(
+            |(initial, final_generation)| {
+                final_generation > initial
+                    && final_lifecycle.last_lost_generation == Some(initial)
+                    && final_lifecycle.last_opened_generation == Some(final_generation)
+            },
+        ),
+        "audio_output_generation_recovery_mismatch",
+        "newer terminal generation with initial generation lost and terminal generation opened",
+        format!(
+            "initial={initial_stream_generation:?}, final={final_stream_generation:?}, last_lost={:?}, last_opened={:?}",
+            final_lifecycle.last_lost_generation, final_lifecycle.last_opened_generation
+        ),
+        "concrete stream generation and retained lifecycle lineage",
+    );
+    let frozen_loss_valid = frozen_loss.zip(initial_output).is_some_and(|(loss, initial)| {
+        loss.reason == RealtimeAudioOutputLossReason::ControlledRecycle
+            && loss.final_output.stream_generation == initial.stream_generation
+            && loss.final_output.sample_rate == initial.sample_rate
+            && loss.final_output.channels == initial.channels
+            && loss.final_output.callback_count >= initial.callback_count
+            && loss.final_output.active_callback_consumed_frames
+                >= initial.active_callback_consumed_frames
+            && !loss.final_output.active
+            && loss
+                .final_media_anchor
+                .is_some_and(|anchor| anchor.rate().hz() == OUTPUT_SAMPLE_RATE)
+    });
+    require(
+        &mut failures,
+        frozen_loss_valid,
+        "controlled_recycle_frozen_loss_invalid",
+        "post-drop inactive snapshot and exact 48 kHz media anchor for the initial generation",
+        format!("{frozen_loss:?}"),
+        "retained post-drop Audio Playback loss snapshot",
     );
     require(
         &mut failures,
@@ -190,12 +414,16 @@ pub(crate) fn evaluate_professional_audio_playback(
     );
     require(
         &mut failures,
-        evidence.audio_underrun_recoveries == 0 && audio.underrun_recovery_count == 0,
+        evidence.audio_underrun_frames == 0
+            && evidence.audio_underrun_recoveries == 0
+            && audio.underrun_recovery_count == 0,
         "audio_underrun_recovery_observed",
         "zero sustained-underrun recovery cycles",
         format!(
-            "evidence={}, runtime={}",
-            evidence.audio_underrun_recoveries, audio.underrun_recovery_count
+            "frames={}, evidence_recoveries={}, runtime_recoveries={}",
+            evidence.audio_underrun_frames,
+            evidence.audio_underrun_recoveries,
+            audio.underrun_recovery_count
         ),
         "Playback Evidence and Audio Playback lifecycle",
     );
@@ -209,11 +437,14 @@ pub(crate) fn evaluate_professional_audio_playback(
     );
     require(
         &mut failures,
-        audio.render_substitution_count == 0,
-        "audio_render_substitution_observed",
-        "zero exact-duration silence substitutions",
-        audio.render_substitution_count.to_string(),
-        "production Audio Playback render completions",
+        audio.render_substitution_count == 0 && audio.render_generation_recovery_count == 0,
+        "audio_render_failure_observed",
+        "zero exact-duration silence substitutions and render-generation recoveries",
+        format!(
+            "substitutions={}, generation_recoveries={}",
+            audio.render_substitution_count, audio.render_generation_recovery_count
+        ),
+        "production Audio Playback render lifecycle",
     );
 
     let mut callback_consumed_frames = 0;
@@ -246,11 +477,11 @@ pub(crate) fn evaluate_professional_audio_playback(
             .unwrap_or(u64::MAX);
         require(
             &mut failures,
-            output.stream_generation == observation.qualified_stream_generation,
-            "audio_stream_generation_changed",
-            observation.qualified_stream_generation.to_string(),
+            Some(output.stream_generation) == final_stream_generation,
+            "terminal_audio_stream_generation_mismatch",
+            format!("{final_stream_generation:?}"),
             output.stream_generation.to_string(),
-            "qualified and terminal CPAL stream generations",
+            "terminal Audio Playback and concrete CPAL stream generations",
         );
         require(
             &mut failures,
@@ -323,18 +554,16 @@ pub(crate) fn evaluate_professional_audio_playback(
         );
     }
 
-    let ready_basis_points = basis_points(
-        observation.video_ready_samples,
-        observation.video_total_samples,
-    );
+    let video_total_samples = observation.video_readiness.total();
+    let ready_basis_points = basis_points(observation.video_readiness.ready, video_total_samples);
     require(
         &mut failures,
-        observation.video_total_samples > 0 && ready_basis_points >= MIN_VIDEO_READY_BASIS_POINTS,
+        video_total_samples > 0 && ready_basis_points >= MIN_VIDEO_READY_BASIS_POINTS,
         "video_readiness_below_minimum",
         format!("at least {MIN_VIDEO_READY_BASIS_POINTS} basis points"),
         format!(
             "{} basis points from {}/{} samples",
-            ready_basis_points, observation.video_ready_samples, observation.video_total_samples
+            ready_basis_points, observation.video_readiness.ready, video_total_samples
         ),
         "headless Viewer current-frame readiness",
     );
@@ -350,10 +579,16 @@ pub(crate) fn evaluate_professional_audio_playback(
     let cache = observation.source_cache;
     require(
         &mut failures,
-        cache.reserved_bytes <= cache.byte_budget,
+        cache.reserved_bytes <= cache.byte_budget && cache.entries <= cache.entry_capacity,
         "audio_source_cache_budget_exceeded",
-        format!("at most {} bytes", cache.byte_budget),
-        format!("{} bytes", cache.reserved_bytes),
+        format!(
+            "at most {} bytes and {} entries",
+            cache.byte_budget, cache.entry_capacity
+        ),
+        format!(
+            "{} bytes and {} entries",
+            cache.reserved_bytes, cache.entries
+        ),
         "global weighted decoded-source LRU",
     );
     require(
@@ -382,12 +617,15 @@ pub(crate) fn evaluate_professional_audio_playback(
         &mut failures,
         cache.decoder_session_capacity > 0
             && cache.decoder_sessions <= cache.decoder_session_capacity
-            && cache.decoder_peak_sessions <= cache.decoder_session_capacity,
+            && cache.decoder_sessions_above_capacity == 0,
         "audio_decoder_session_budget_exceeded",
-        "resident and peak session slots within a non-zero configured capacity",
+        "resident session slots converged within the current non-zero configured capacity",
         format!(
-            "resident={}, peak={}, capacity={}",
-            cache.decoder_sessions, cache.decoder_peak_sessions, cache.decoder_session_capacity
+            "resident={}, historical_peak={}, capacity={}, above_capacity={}",
+            cache.decoder_sessions,
+            cache.decoder_peak_sessions,
+            cache.decoder_session_capacity,
+            cache.decoder_sessions_above_capacity
         ),
         "persistent audio decoder session pool",
     );
@@ -421,23 +659,41 @@ pub(crate) fn evaluate_professional_audio_playback(
     if !process_memory.passed() {
         push_failure(
             &mut failures,
-            "whole_process_memory_gate_failed",
-            "whole_process_private_commit_v1 passes",
+            "product_process_tree_memory_gate_failed",
+            "product_process_tree_private_commit_v2 passes",
             "failed",
-            "fixed-cadence native process-memory evidence",
+            "fixed-cadence complete Mondrian process-tree memory evidence",
         );
     }
 
     ProfessionalAudioPlaybackGateReport {
-        profile: "cpal_av_48khz_30min_v1",
+        profile: "cpal_av_48khz_30min_recovery_v2",
         media: observation.media.clone(),
         required_observed_duration_us: PROFESSIONAL_MIN_OBSERVED_DURATION_US,
         observed_duration_us: evidence.observed_duration_us,
         audio_device_residency_us: evidence.clock_residency.audio_device_us,
         synthetic_residency_us: evidence.clock_residency.synthetic_us,
         output_state: audio_state_name(audio.state),
-        qualified_stream_generation: observation.qualified_stream_generation,
-        final_stream_generation: output.map(|output| output.stream_generation),
+        initial_stream_generation,
+        final_stream_generation,
+        request_to_loss_us: recovery.request_to_loss_us,
+        request_to_synthetic_us: recovery.request_to_synthetic_us,
+        request_to_reopen_us: recovery.request_to_reopen_us,
+        request_to_recovered_us: recovery.request_to_recovered_us,
+        initial_audio_device_stable_us: recovery.initial_audio_device_stable_us,
+        final_audio_device_stable_us: recovery.final_audio_device_stable_us,
+        lifecycle_opened_delta: opened_delta,
+        lifecycle_lost_delta: lost_delta,
+        lifecycle_controlled_recycle_delta: controlled_recycle_delta,
+        lifecycle_backend_loss_delta: backend_loss_delta,
+        lifecycle_deactivation_failed_delta: deactivation_failed_delta,
+        frozen_loss_generation: frozen_loss.map(|loss| loss.final_output.stream_generation),
+        frozen_loss_anchor_sample: frozen_loss
+            .and_then(|loss| loss.final_media_anchor)
+            .map(|anchor| anchor.sample()),
+        frozen_loss_anchor_rate: frozen_loss
+            .and_then(|loss| loss.final_media_anchor)
+            .map(|anchor| anchor.rate().hz()),
         output_sample_rate: output.map(|output| output.sample_rate),
         output_channels: output.map(|output| output.channels),
         active_callback_consumed_frames: callback_consumed_frames,
@@ -447,9 +703,16 @@ pub(crate) fn evaluate_professional_audio_playback(
         output_underrun_frames,
         render_substitutions: audio.render_substitution_count,
         underrun_recoveries: audio.underrun_recovery_count,
-        delivery_clock_drift: evidence.delivery_clock_drift,
-        video_ready_samples: observation.video_ready_samples,
-        video_total_samples: observation.video_total_samples,
+        audio_device_delivery_phase: evidence.delivery_phase_error.audio_device,
+        synthetic_delivery_phase: evidence.delivery_phase_error.synthetic,
+        unproven_presentable_deliveries: evidence.delivery_phase_error.unproven_presentable,
+        phase_not_applicable_deliveries: evidence.delivery_phase_error.phase_not_applicable,
+        video_ready_samples: observation.video_readiness.ready,
+        video_loading_samples: observation.video_readiness.loading,
+        video_stale_samples: observation.video_readiness.stale,
+        video_unavailable_samples: observation.video_readiness.unavailable,
+        video_missed_deadline_samples: observation.video_readiness.missed_deadline,
+        video_total_samples,
         video_ready_basis_points: ready_basis_points,
         gpu_presented_frames: observation.gpu_presented_frames,
         source_cache: cache,
@@ -459,8 +722,79 @@ pub(crate) fn evaluate_professional_audio_playback(
     }
 }
 
+fn checked_counter_delta(final_value: u64, initial_value: u64) -> Option<u64> {
+    final_value.checked_sub(initial_value)
+}
+
+fn require_recovery_latency(
+    failures: &mut Vec<AudioPlaybackAcceptanceFailure>,
+    milestone: &'static str,
+    observed_us: Option<u64>,
+    limit_us: u64,
+) {
+    require(
+        failures,
+        observed_us.is_some_and(|value| value <= limit_us),
+        match milestone {
+            "controlled_recycle_loss" => "controlled_recycle_loss_latency_exceeded",
+            "synthetic_clock_fallback" => "synthetic_clock_fallback_latency_exceeded",
+            "replacement_stream_open" => "replacement_stream_open_latency_exceeded",
+            "audio_device_phase_handoff" => "audio_device_phase_handoff_latency_exceeded",
+            _ => "unknown_recovery_milestone",
+        },
+        format!("observed and at most {limit_us} us"),
+        observed_us.map_or_else(|| "missing".to_owned(), |value| format!("{value} us")),
+        format!("monotonic duration from the exact-current recycle request to {milestone}"),
+    );
+}
+
+fn require_phase_evidence(
+    failures: &mut Vec<AudioPlaybackAcceptanceFailure>,
+    master: &'static str,
+    summary: PlaybackClockPhaseErrorSummary,
+    samples_required: bool,
+) {
+    let counts_complete = summary.point_error.count == summary.uncertainty.count
+        && summary.point_error.count == summary.proven_error.count
+        && summary.point_error.sampled_count == summary.uncertainty.sampled_count
+        && summary.point_error.sampled_count == summary.proven_error.sampled_count;
+    require(
+        failures,
+        counts_complete && (!samples_required || summary.proven_error.count > 0),
+        match master {
+            "audio_device" => "audio_device_delivery_phase_evidence_missing",
+            "synthetic" => "synthetic_delivery_phase_evidence_missing",
+            _ => "unknown_delivery_phase_master",
+        },
+        if samples_required {
+            "one or more complete point/uncertainty/proven phase samples"
+        } else {
+            "complete point/uncertainty/proven phase accounting"
+        },
+        format!("{summary:?}"),
+        format!("accepted presentable deliveries under {master} Clock Master"),
+    );
+    require(
+        failures,
+        summary.proven_error.max_us <= MAX_DELIVERY_PHASE_ERROR_US
+            && summary.proven_error.max_us >= summary.point_error.max_us
+            && summary.proven_error.max_us >= summary.uncertainty.max_us,
+        match master {
+            "audio_device" => "audio_device_delivery_phase_error_above_limit",
+            "synthetic" => "synthetic_delivery_phase_error_above_limit",
+            _ => "unknown_delivery_phase_limit",
+        },
+        format!(
+            "conservative proven max at most {MAX_DELIVERY_PHASE_ERROR_US} us and not below either component"
+        ),
+        format!("{summary:?}"),
+        format!("point plus uncertainty phase bound under {master} Clock Master"),
+    );
+}
+
 fn audio_state_name(state: AudioPlaybackState) -> &'static str {
     match state {
+        AudioPlaybackState::ExecutionUnavailable => "ExecutionUnavailable",
         AudioPlaybackState::DeviceUnavailable => "DeviceUnavailable",
         AudioPlaybackState::Idle => "Idle",
         AudioPlaybackState::WaitingForSource => "WaitingForSource",
@@ -510,47 +844,210 @@ fn push_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_core::{FramePosition, Rational};
+    use mondrian_core::{AudioSamplePosition, AudioSampleRate};
     use mondrian_media::audio::RealtimeAudioOutputSnapshot;
+    use mondrian_media::{AudioOutputLifecycleDiagnostics, AudioOutputLossSnapshot};
     use mondrian_platform::{ProcessMemoryProbeBackend, ProcessMemoryProbeResult};
     use mondrian_playback::{
-        ClockMaster, MonotonicTimestamp, PlaybackClockResidency, PlaybackDeliveryCounts,
-        PlaybackEvidenceCollector, PlaybackEvidenceReport, PlaybackStateResidency,
-        PlaybackTimelineBinding,
+        PlaybackClockResidency, PlaybackDeliveryCounts, PlaybackDeliveryPhaseErrorReport,
+        PlaybackEvidenceReport, PlaybackLatencySummary, PlaybackStateResidency,
     };
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
-    fn passing_audio_snapshot() -> AudioPlaybackSnapshot {
+    fn output_snapshot(
+        stream_generation: u64,
+        active_duration: Duration,
+    ) -> RealtimeAudioOutputSnapshot {
+        let active_frames = active_duration.as_secs().saturating_mul(u64::from(OUTPUT_SAMPLE_RATE));
+        RealtimeAudioOutputSnapshot {
+            captured_at: Instant::now(),
+            stream_generation,
+            sample_rate: OUTPUT_SAMPLE_RATE,
+            channels: OUTPUT_CHANNELS,
+            callback_consumed_frames: active_frames,
+            active_callback_consumed_frames: active_frames,
+            active_duration: Some(active_duration),
+            callback_count: active_duration.as_secs().saturating_mul(100),
+            underrun_frames: 0,
+            last_callback_frames: 480,
+            last_callback_playback_delay: Some(Duration::from_millis(10)),
+            last_callback_age: Some(Duration::from_millis(1)),
+            buffered_frames: 9_600,
+            stream_failed: false,
+            active: true,
+        }
+    }
+
+    fn initial_audio_snapshot() -> AudioPlaybackSnapshot {
         AudioPlaybackSnapshot {
             generation: 7,
             in_flight: 0,
-            next_start_sample: 86_500_000,
-            media_anchor: None,
+            next_start_sample: 48_000,
+            media_anchor: Some(sample_position(0)),
             activation_preroll_satisfied: true,
             state: AudioPlaybackState::Active,
-            output: Some(RealtimeAudioOutputSnapshot {
-                stream_generation: 11,
-                sample_rate: OUTPUT_SAMPLE_RATE,
-                channels: OUTPUT_CHANNELS,
-                callback_consumed_frames: 86_400_000,
-                active_callback_consumed_frames: 86_400_000,
-                active_duration: Some(Duration::from_secs(30 * 60)),
-                callback_count: 180_000,
-                underrun_frames: 0,
-                last_callback_frames: 480,
-                last_callback_playback_delay: Some(Duration::from_millis(10)),
-                last_callback_age: Some(Duration::from_millis(1)),
-                buffered_frames: 9_600,
-                stream_failed: false,
-                active: true,
-            }),
+            output: Some(output_snapshot(11, Duration::from_secs(1))),
             render_substitution_count: 0,
             render_generation_recovery_count: 0,
             stale_completion_count: 0,
             canceled_render_count: 0,
             active_interval_underrun_frames: 0,
             underrun_recovery_count: 0,
+            output_lifecycle: AudioOutputLifecycleDiagnostics {
+                opened_count: 1,
+                last_opened_generation: Some(11),
+                ..AudioOutputLifecycleDiagnostics::default()
+            },
         }
+    }
+
+    fn passing_audio_snapshot() -> AudioPlaybackSnapshot {
+        let initial = initial_audio_snapshot();
+        let mut frozen_output = initial.output.expect("initial output");
+        frozen_output.callback_consumed_frames += 480;
+        frozen_output.active_callback_consumed_frames += 480;
+        frozen_output.callback_count += 1;
+        frozen_output.active = false;
+        AudioPlaybackSnapshot {
+            generation: 9,
+            in_flight: 0,
+            next_start_sample: 86_500_000,
+            media_anchor: Some(sample_position(48_000)),
+            activation_preroll_satisfied: true,
+            state: AudioPlaybackState::Active,
+            output: Some(output_snapshot(12, Duration::from_secs(30 * 60))),
+            render_substitution_count: 0,
+            render_generation_recovery_count: 0,
+            stale_completion_count: 0,
+            canceled_render_count: 1,
+            active_interval_underrun_frames: 0,
+            underrun_recovery_count: 0,
+            output_lifecycle: AudioOutputLifecycleDiagnostics {
+                opened_count: 2,
+                lost_count: 1,
+                controlled_recycle_count: 1,
+                backend_loss_count: 0,
+                deactivation_failed_count: 0,
+                last_opened_generation: Some(12),
+                last_lost_generation: Some(11),
+                last_loss: Some(AudioOutputLossSnapshot {
+                    reason: RealtimeAudioOutputLossReason::ControlledRecycle,
+                    final_output: frozen_output,
+                    final_media_anchor: Some(sample_position(48_000)),
+                }),
+            },
+        }
+    }
+
+    fn sample_position(sample: i64) -> AudioSamplePosition {
+        AudioSamplePosition::new(
+            sample,
+            AudioSampleRate::new(OUTPUT_SAMPLE_RATE).expect("sample rate"),
+        )
+    }
+
+    fn latency(count: u64, max_us: u64) -> PlaybackLatencySummary {
+        PlaybackLatencySummary {
+            count,
+            sampled_count: count.min(4_096),
+            p50_us: max_us / 4,
+            p95_us: max_us / 2,
+            p99_us: max_us,
+            max_us,
+        }
+    }
+
+    fn phase_summary(
+        count: u64,
+        point_us: u64,
+        uncertainty_us: u64,
+    ) -> PlaybackClockPhaseErrorSummary {
+        PlaybackClockPhaseErrorSummary {
+            point_error: latency(count, point_us),
+            uncertainty: latency(count, uncertainty_us),
+            proven_error: latency(count, point_us + uncertainty_us),
+        }
+    }
+
+    fn passing_playback_evidence() -> PlaybackEvidenceReport {
+        PlaybackEvidenceReport {
+            schema_version: PLAYBACK_EVIDENCE_SCHEMA_VERSION,
+            first_epoch: Some(1),
+            latest_epoch: Some(1),
+            observed_duration_us: PROFESSIONAL_MIN_OBSERVED_DURATION_US + 500_000,
+            snapshot_count: 54_000,
+            demand_count: 54_000,
+            superseded_demand_count: 0,
+            seek_superseded_count: 0,
+            clock_residency: PlaybackClockResidency {
+                audio_device_us: PROFESSIONAL_MIN_OBSERVED_DURATION_US,
+                synthetic_us: 500_000,
+                none_us: 0,
+            },
+            state_residency: PlaybackStateResidency {
+                playing_us: PROFESSIONAL_MIN_OBSERVED_DURATION_US + 500_000,
+                ..PlaybackStateResidency::default()
+            },
+            clock_frame_advances: Default::default(),
+            deliveries: PlaybackDeliveryCounts {
+                ready: 54_000,
+                ..PlaybackDeliveryCounts::default()
+            },
+            demand_latency: PlaybackLatencySummary::default(),
+            warm_seek_latency: PlaybackLatencySummary::default(),
+            accurate_seek_latency: PlaybackLatencySummary::default(),
+            delivery_phase_error: PlaybackDeliveryPhaseErrorReport {
+                audio_device: phase_summary(53_980, 4_000, 1_000),
+                synthetic: phase_summary(20, 8_000, 2_000),
+                unproven_presentable: 0,
+                phase_not_applicable: 3,
+            },
+            audio_underrun_frames: 0,
+            audio_underrun_recoveries: 0,
+            retained_event_count: 0,
+            evicted_event_count: 0,
+            events: Vec::new(),
+        }
+    }
+
+    fn passing_recovery() -> ProfessionalAudioRecoveryObservation {
+        ProfessionalAudioRecoveryObservation {
+            initial_audio: initial_audio_snapshot(),
+            initial_audio_device_stable_us: MIN_STABLE_CLOCK_RESIDENCY_US,
+            request_to_loss_us: Some(10_000),
+            request_to_synthetic_us: Some(15_000),
+            request_to_reopen_us: Some(100_000),
+            request_to_recovered_us: Some(400_000),
+            final_audio_device_stable_us: MIN_STABLE_CLOCK_RESIDENCY_US,
+        }
+    }
+
+    fn evaluate_core_contract(
+        recovery: ProfessionalAudioRecoveryObservation,
+        audio: AudioPlaybackSnapshot,
+        evidence: &PlaybackEvidenceReport,
+    ) -> ProfessionalAudioPlaybackGateReport {
+        let media = AudioPlaybackMediaProbeReport {
+            source: "test",
+            duration_us: PROFESSIONAL_MIN_OBSERVED_DURATION_US,
+            audio_stream_duration_us: Some(PROFESSIONAL_MIN_OBSERVED_DURATION_US),
+            source_sample_rate: OUTPUT_SAMPLE_RATE,
+            source_channels: OUTPUT_CHANNELS,
+        };
+        let memory = PreviewProcessMemoryEvidenceReport::default();
+        evaluate_professional_audio_playback(ProfessionalAudioPlaybackObservation {
+            media: &media,
+            recovery,
+            audio,
+            source_cache: AudioSourceCacheDiagnostics::default(),
+            playback_evidence: evidence,
+            process_memory: &memory,
+            video_readiness: ProfessionalVideoReadinessObservation {
+                ready: 1,
+                ..ProfessionalVideoReadinessObservation::default()
+            },
+            gpu_presented_frames: 1,
+        })
     }
 
     #[test]
@@ -570,50 +1067,15 @@ mod tests {
 
     #[test]
     fn accepts_complete_production_path_evidence() {
-        let evidence = PlaybackEvidenceReport {
-            schema_version: 2,
-            first_epoch: Some(1),
-            latest_epoch: Some(1),
-            observed_duration_us: PROFESSIONAL_MIN_OBSERVED_DURATION_US,
-            snapshot_count: 54_000,
-            demand_count: 54_000,
-            superseded_demand_count: 0,
-            seek_superseded_count: 0,
-            clock_residency: PlaybackClockResidency {
-                audio_device_us: PROFESSIONAL_MIN_OBSERVED_DURATION_US,
-                synthetic_us: 0,
-                none_us: 0,
-            },
-            state_residency: PlaybackStateResidency {
-                playing_us: PROFESSIONAL_MIN_OBSERVED_DURATION_US,
-                ..PlaybackStateResidency::default()
-            },
-            deliveries: PlaybackDeliveryCounts {
-                ready: 54_000,
-                ..PlaybackDeliveryCounts::default()
-            },
-            demand_latency: PlaybackLatencySummary::default(),
-            warm_seek_latency: PlaybackLatencySummary::default(),
-            accurate_seek_latency: PlaybackLatencySummary::default(),
-            delivery_clock_drift: PlaybackLatencySummary {
-                count: 54_000,
-                sampled_count: 4_096,
-                p50_us: 1_000,
-                p95_us: 4_000,
-                p99_us: 8_000,
-                max_us: 10_000,
-            },
-            audio_underrun_frames: 0,
-            audio_underrun_recoveries: 0,
-            retained_event_count: 0,
-            evicted_event_count: 0,
-            events: Vec::new(),
-        };
+        let evidence = passing_playback_evidence();
         let mut memory_collector =
             super::super::playback_acceptance::PreviewProcessMemoryEvidenceCollector::default();
         let memory_sample = || {
             ProcessMemoryProbeResult::observed(
-                ProcessMemoryProbeBackend::WindowsProcessStatus,
+                mondrian_platform::ProcessMemoryScope::ProductProcessTree,
+                ProcessMemoryProbeBackend::WindowsToolhelpProcessTree,
+                3,
+                1,
                 512 * 1024 * 1024,
                 384 * 1024 * 1024,
                 512 * 1024 * 1024,
@@ -633,7 +1095,7 @@ mod tests {
         };
         let report = evaluate_professional_audio_playback(ProfessionalAudioPlaybackObservation {
             media: &media,
-            qualified_stream_generation: 11,
+            recovery: passing_recovery(),
             audio: passing_audio_snapshot(),
             source_cache: AudioSourceCacheDiagnostics {
                 entries: 2,
@@ -648,6 +1110,10 @@ mod tests {
                 decode_total_duration_us: 18_000_000,
                 decode_max_duration_us: 950_000,
                 evictions: 178,
+                budget_reconfigurations: 0,
+                budget_trim_events: 0,
+                budget_trimmed_entries: 0,
+                budget_trimmed_bytes: 0,
                 oversize_windows: 0,
                 in_flight_decodes: 0,
                 peak_in_flight_decodes: 1,
@@ -658,6 +1124,9 @@ mod tests {
                 decoder_sequential_reuses: 179,
                 decoder_random_seek_restarts: 0,
                 decoder_session_evictions: 0,
+                decoder_capacity_reconfigurations: 0,
+                decoder_capacity_trim_evictions: 0,
+                decoder_sessions_above_capacity: 0,
                 decoder_cancellations: 0,
                 decoder_cold_window_max_duration_us: 950_000,
                 decoder_sequential_window_max_duration_us: 80_000,
@@ -665,8 +1134,11 @@ mod tests {
             },
             playback_evidence: &evidence,
             process_memory: &memory,
-            video_ready_samples: 53_900,
-            video_total_samples: 54_000,
+            video_readiness: ProfessionalVideoReadinessObservation {
+                ready: 53_900,
+                stale: 100,
+                ..ProfessionalVideoReadinessObservation::default()
+            },
             gpu_presented_frames: 54_000,
         });
         assert!(report.passed, "{:?}", report.failures);
@@ -674,34 +1146,8 @@ mod tests {
 
     #[test]
     fn rejects_fake_or_incomplete_output_evidence() {
-        let mut collector = PlaybackEvidenceCollector::default();
-        let mut engine = mondrian_playback::PlaybackEngine::default();
-        let time_base = Rational::new(1_001, 30_000);
-        engine
-            .play_timeline(
-                PlaybackTimelineBinding::new(None, 1, time_base, 60_000).expect("binding"),
-                FramePosition::new(0, time_base),
-                MonotonicTimestamp::ZERO,
-            )
-            .expect("play");
-        engine
-            .complete_priming(ClockMaster::AudioDevice, MonotonicTimestamp::ZERO)
-            .expect("prime");
-        collector
-            .observe_snapshot(
-                MonotonicTimestamp::ZERO,
-                engine.snapshot(),
-                engine.frame_demand(),
-            )
-            .expect("initial evidence");
-        collector
-            .observe_snapshot(
-                MonotonicTimestamp::from_duration(Duration::from_secs(30 * 60)),
-                engine.snapshot(),
-                engine.frame_demand(),
-            )
-            .expect("terminal evidence");
-        let evidence = collector.report();
+        let mut evidence = passing_playback_evidence();
+        evidence.delivery_phase_error.synthetic = PlaybackClockPhaseErrorSummary::default();
         let memory = PreviewProcessMemoryEvidenceReport::default();
         let media = AudioPlaybackMediaProbeReport {
             source: "test",
@@ -715,20 +1161,54 @@ mod tests {
         audio.render_substitution_count = 1;
         let report = evaluate_professional_audio_playback(ProfessionalAudioPlaybackObservation {
             media: &media,
-            qualified_stream_generation: 11,
+            recovery: passing_recovery(),
             audio,
             source_cache: AudioSourceCacheDiagnostics::default(),
             playback_evidence: &evidence,
             process_memory: &memory,
-            video_ready_samples: 0,
-            video_total_samples: 0,
+            video_readiness: ProfessionalVideoReadinessObservation::default(),
             gpu_presented_frames: 0,
         });
         let codes: Vec<_> = report.failures.iter().map(|failure| failure.code).collect();
         assert!(codes.contains(&"audio_output_snapshot_missing"));
-        assert!(codes.contains(&"audio_render_substitution_observed"));
+        assert!(codes.contains(&"audio_render_failure_observed"));
+        assert!(codes.contains(&"synthetic_delivery_phase_evidence_missing"));
         assert!(codes.contains(&"video_readiness_below_minimum"));
-        assert!(codes.contains(&"whole_process_memory_gate_failed"));
+        assert!(codes.contains(&"product_process_tree_memory_gate_failed"));
         assert!(!report.passed);
+    }
+
+    #[test]
+    fn rejects_extra_loss_or_generation_reuse() {
+        let mut initial = initial_audio_snapshot();
+        initial.output_lifecycle.lost_count = 1;
+        let mut recovery = passing_recovery();
+        recovery.initial_audio = initial;
+        let mut audio = passing_audio_snapshot();
+        audio.output_lifecycle.backend_loss_count = 1;
+        audio.output_lifecycle.opened_count = 3;
+        audio.output.as_mut().expect("output").stream_generation = 11;
+        let evidence = passing_playback_evidence();
+        let report = evaluate_core_contract(recovery, audio, &evidence);
+        let codes: Vec<_> = report.failures.iter().map(|failure| failure.code).collect();
+        assert!(codes.contains(&"controlled_recycle_lifecycle_delta_mismatch"));
+        assert!(codes.contains(&"unexpected_audio_output_loss_observed"));
+        assert!(codes.contains(&"audio_output_generation_recovery_mismatch"));
+    }
+
+    #[test]
+    fn rejects_slow_handoff_unproven_phase_and_phase_bound() {
+        let mut recovery = passing_recovery();
+        recovery.request_to_synthetic_us = Some(MAX_SYNTHETIC_FALLBACK_US + 1);
+        recovery.request_to_recovered_us = Some(MAX_RECOVERY_HANDOFF_US + 1);
+        let mut evidence = passing_playback_evidence();
+        evidence.delivery_phase_error.unproven_presentable = 1;
+        evidence.delivery_phase_error.audio_device = phase_summary(10, 19_000, 2_000);
+        let report = evaluate_core_contract(recovery, passing_audio_snapshot(), &evidence);
+        let codes: Vec<_> = report.failures.iter().map(|failure| failure.code).collect();
+        assert!(codes.contains(&"synthetic_clock_fallback_latency_exceeded"));
+        assert!(codes.contains(&"audio_device_phase_handoff_latency_exceeded"));
+        assert!(codes.contains(&"unproven_presentable_delivery_phase"));
+        assert!(codes.contains(&"audio_device_delivery_phase_error_above_limit"));
     }
 }

@@ -9,7 +9,8 @@
 use crate::color_frame::GpuColorFrameBindGroupCacheKey;
 use crate::{
     ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
-    GpuColorFrameAllocationPlan, GpuColorFrameHandle, GpuColorFrameIdAllocator,
+    GpuColorFrameAllocationPlan, GpuColorFrameBindGroupCacheKeyAllocationError,
+    GpuColorFrameHandle, GpuColorFrameIdAllocationError, GpuColorFrameIdAllocator,
     GpuColorFrameResource, GpuColorFrameResourceTable, GpuColorFrameTextureFormat,
     GpuColorFrameUploadPlan, GpuColorFrameUploader, GpuColorFrameWgpuResource,
     GpuColorFrameWgpuResourcePool,
@@ -482,8 +483,8 @@ pub enum GpuCompositeError {
         /// Exact domain that the external pass sequence must materialize.
         domain: EffectColorDomain,
     },
-    /// A standalone point pass was given a scene, data, or alpha domain.
-    #[error("GPU point-effect pass requires an RGB effect intermediate, got {domain:?}")]
+    /// A standalone point pass was given a non-RGB data or alpha domain.
+    #[error("GPU point-effect pass requires an RGB frame, got {domain:?}")]
     PointEffectRequiresRgbIntermediate {
         /// Unsupported plan domain.
         domain: EffectColorDomain,
@@ -508,6 +509,9 @@ pub enum GpuCompositeError {
         /// Fixed slot capacity.
         capacity: u32,
     },
+    /// Renderer frame identity allocation is exhausted.
+    #[error(transparent)]
+    FrameId(#[from] GpuColorFrameIdAllocationError),
     /// A renderer frame handle could not be created.
     #[error("GPU composite output handle error: {0}")]
     OutputHandle(#[from] crate::GpuColorFrameHandleError),
@@ -578,7 +582,11 @@ struct GpuEffectUniform {
 
 impl GpuFrameCompositor {
     /// Create a GPU working-space compositor runtime for a wgpu device.
-    pub fn new(device: &wgpu::Device) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+    ) -> Result<Self, GpuColorFrameBindGroupCacheKeyAllocationError> {
+        let layer_texture_cache_key = GpuColorFrameBindGroupCacheKey::allocate()?;
+        let accum_texture_cache_key = GpuColorFrameBindGroupCacheKey::allocate()?;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mondrian_gpu_working_compositor_shader"),
             source: wgpu::ShaderSource::Wgsl(GPU_COMPOSITOR_SHADER.into()),
@@ -722,9 +730,7 @@ impl GpuFrameCompositor {
                 resource: wgpu::BindingResource::TextureView(&procedural_dummy_view),
             }],
         });
-        let layer_texture_cache_key = GpuColorFrameBindGroupCacheKey::allocate();
-        let accum_texture_cache_key = GpuColorFrameBindGroupCacheKey::allocate();
-        Self {
+        Ok(Self {
             pipeline,
             layer_texture_layout,
             accum_texture_layout,
@@ -745,7 +751,7 @@ impl GpuFrameCompositor {
             sampler,
             procedural_layer_bind_group,
             procedural_accum_bind_group,
-        }
+        })
     }
 
     /// Reset frame-local uniform slots after the caller has ordered submission.
@@ -839,7 +845,7 @@ impl GpuFrameCompositor {
                     uploaded_cpu_layers = true;
                     let descriptor = frame.descriptor();
                     let upload = GpuColorFrameUploadPlan::from_cpu_color_frame(
-                        ids.allocate(),
+                        ids.allocate()?,
                         frame,
                         GpuColorFrameTextureFormat::Rgba32Float,
                         format!("gpu-composite-layer-{index}"),
@@ -1392,25 +1398,45 @@ fn validate_point_effect_input(
 ) -> Result<(), GpuCompositeError> {
     let actual = input.descriptor();
     require_straight_compatible_alpha(actual.alpha)?;
-    let (color_space, encoding) = match plan.processing_domain() {
+    let (color_space, domain, encoding) = match plan.processing_domain() {
+        EffectColorDomain::SceneLinearRgb => {
+            let Some(working_color_space) = actual.color_space.working() else {
+                return Err(GpuCompositeError::PointEffectDescriptorMismatch {
+                    expected: ColorFrameDescriptor {
+                        color_space: mondrian_core::WorkingColorSpace::LinearRec709.into(),
+                        domain: ColorFrameDomain::Working,
+                        encoding: ColorFrameEncoding::LinearFloat,
+                        ..actual
+                    },
+                    actual,
+                });
+            };
+            (
+                working_color_space.into(),
+                ColorFrameDomain::Working,
+                ColorFrameEncoding::LinearFloat,
+            )
+        }
         EffectColorDomain::LogPerceptualRgb { color_space }
-        | EffectColorDomain::DisplayEncodedRgb { color_space } => {
-            (color_space, ColorFrameEncoding::EncodedFloat)
-        }
-        EffectColorDomain::DisplayLinearRgb { color_space } => {
-            (color_space, ColorFrameEncoding::LinearFloat)
-        }
-        domain @ (EffectColorDomain::SceneLinearRgb
-        | EffectColorDomain::Data
-        | EffectColorDomain::AlphaMask) => {
+        | EffectColorDomain::DisplayEncodedRgb { color_space } => (
+            color_space.into(),
+            ColorFrameDomain::Effect,
+            ColorFrameEncoding::EncodedFloat,
+        ),
+        EffectColorDomain::DisplayLinearRgb { color_space } => (
+            color_space.into(),
+            ColorFrameDomain::Effect,
+            ColorFrameEncoding::LinearFloat,
+        ),
+        domain @ (EffectColorDomain::Data | EffectColorDomain::AlphaMask) => {
             return Err(GpuCompositeError::PointEffectRequiresRgbIntermediate { domain });
         }
     };
     let expected = ColorFrameDescriptor {
         width: actual.width,
         height: actual.height,
-        color_space: color_space.into(),
-        domain: ColorFrameDomain::Effect,
+        color_space,
+        domain,
         encoding,
         residency: ColorFrameResidency::Gpu,
         alpha: actual.alpha,
@@ -1630,7 +1656,7 @@ fn create_working_resource(
     resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
 ) -> Result<GpuColorFrameResource<GpuColorFrameWgpuResource>, GpuCompositeError> {
     let handle = GpuColorFrameHandle::new(
-        ids.allocate(),
+        ids.allocate()?,
         descriptor,
         GpuColorFrameTextureFormat::Rgba32Float,
         label,
@@ -1819,7 +1845,7 @@ mod tests {
     #[test]
     fn gpu_effect_uniforms_preserve_plan_order_and_parameters() {
         use mondrian_effects::{
-            get_or_compile_scheduled_render_graph, lower_effect_graph_to_gpu_plan,
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan,
             EffectGraphBuilderState, EffectRenderOp,
         };
 
@@ -1831,7 +1857,7 @@ mod tests {
             working_color_space: WorkingColorSpace::LinearRec2020,
         });
         builder.append_unary(EffectRenderOp::Vignette { intensity: 0.7, feather: 0.4 });
-        let graph = get_or_compile_scheduled_render_graph(builder.finish()).expect("valid graph");
+        let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
         let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point chain");
 
         let uniforms = effect_uniforms(Some(&plan));
@@ -1870,13 +1896,13 @@ mod tests {
     #[test]
     fn working_compositor_rejects_effect_plan_declared_in_external_color_domain() {
         use mondrian_effects::{
-            compile_scheduled_effect_graph_in_domain, lower_effect_graph_to_gpu_plan,
+            compile_reference_effect_graph_in_domain, lower_effect_graph_to_gpu_plan,
             EffectColorDomain, EffectColorDomainContract, EffectRenderOp, EffectRenderPlan,
         };
 
         let domain =
             EffectColorDomain::DisplayEncodedRgb { color_space: mondrian_core::ColorSpace::Rec709 };
-        let graph = compile_scheduled_effect_graph_in_domain(
+        let graph = compile_reference_effect_graph_in_domain(
             &EffectRenderPlan {
                 ops: vec![EffectRenderOp::ColorAdjust {
                     exposure: 0.25,
@@ -1913,13 +1939,13 @@ mod tests {
     #[test]
     fn point_effect_pass_accepts_matching_display_encoded_intermediate() {
         use mondrian_effects::{
-            compile_scheduled_effect_graph_in_domain, lower_effect_graph_to_gpu_plan,
+            compile_reference_effect_graph_in_domain, lower_effect_graph_to_gpu_plan,
             EffectColorDomain, EffectColorDomainContract, EffectRenderOp, EffectRenderPlan,
         };
 
         let domain =
             EffectColorDomain::DisplayEncodedRgb { color_space: mondrian_core::ColorSpace::Rec709 };
-        let graph = compile_scheduled_effect_graph_in_domain(
+        let graph = compile_reference_effect_graph_in_domain(
             &EffectRenderPlan {
                 ops: vec![EffectRenderOp::ColorAdjust {
                     exposure: 0.25,
@@ -1989,7 +2015,7 @@ mod tests {
         };
         use mondrian_effects::{
             apply_compiled_effect_graph_pass_rgba_f32, apply_compiled_effect_graph_rgba_f32,
-            get_or_compile_scheduled_render_graph, lower_effect_graph_to_gpu_plan,
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan,
             EffectGraphBuilderState, EffectRenderOp,
         };
 
@@ -2023,7 +2049,7 @@ mod tests {
         });
         builder.append_unary(EffectRenderOp::Vignette { intensity: 0.45, feather: 0.7 });
         builder.append_unary(EffectRenderOp::Grain { amount: 0.1 });
-        let graph = get_or_compile_scheduled_render_graph(builder.finish()).expect("valid graph");
+        let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
         let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effects");
         let expected =
             apply_compiled_effect_graph_rgba_f32(&frame.rgba_f32().data, 4, 4, &graph, 23)
@@ -2090,7 +2116,7 @@ mod tests {
     #[tokio::test]
     async fn affine_procedural_solid_matches_cpu_float_effect_reference() {
         use mondrian_effects::{
-            apply_compiled_effect_graph_rgba_f32, get_or_compile_scheduled_render_graph,
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
             lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp,
         };
 
@@ -2101,8 +2127,8 @@ mod tests {
         let color = Color { r: 1.25, g: -0.125, b: 0.375, a: 0.625 };
         let mut builder = EffectGraphBuilderState::new();
         builder.append_unary(EffectRenderOp::Vignette { intensity: 0.55, feather: 0.65 });
-        let graph = get_or_compile_scheduled_render_graph(builder.finish())
-            .expect("valid procedural-solid graph");
+        let graph =
+            compile_reference_render_graph(builder.finish()).expect("valid procedural-solid graph");
         let plan = lower_effect_graph_to_gpu_plan(&graph).expect("GPU vignette plan");
         let effected_source = apply_compiled_effect_graph_rgba_f32(
             &vec![[color.r, color.g, color.b, color.a]; 16],
@@ -2148,8 +2174,8 @@ mod tests {
             return;
         };
         let color = Color { r: 1.25, g: -0.125, b: 0.375, a: 0.625 };
-        let compositor = GpuFrameCompositor::new(&context.device);
-        let mut ids = GpuColorFrameIdAllocator::new(950);
+        let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
+        let mut ids = GpuColorFrameIdAllocator::new(950).expect("frame id allocator");
         let mut table = GpuColorFrameResourceTable::new();
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("solid-source-materialization"),
@@ -2224,8 +2250,8 @@ mod tests {
         let left_color = Color { r: 1.2, g: -0.1, b: 0.35, a: 0.25 };
         let right_color = Color { r: 0.05, g: 0.8, b: 1.4, a: 0.75 };
         let progress = 0.4;
-        let compositor = GpuFrameCompositor::new(&context.device);
-        let mut ids = GpuColorFrameIdAllocator::new(960);
+        let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
+        let mut ids = GpuColorFrameIdAllocator::new(960).expect("frame id allocator");
         let mut table = GpuColorFrameResourceTable::new();
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("cross-dissolve-parity"),
@@ -2336,8 +2362,8 @@ mod tests {
             eprintln!("skipping compositor uniform arena test: no GPU adapter available");
             return;
         };
-        let compositor = GpuFrameCompositor::new(&context.device);
-        let mut ids = GpuColorFrameIdAllocator::new(975);
+        let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
+        let mut ids = GpuColorFrameIdAllocator::new(975).expect("frame id allocator");
         let mut table = GpuColorFrameResourceTable::new();
 
         for frame in 0..2 {
@@ -2391,7 +2417,7 @@ mod tests {
         ) -> [GpuColorFrameHandle; 2] {
             ["binding-cache-input-a", "binding-cache-input-b"].map(|label| {
                 let handle = GpuColorFrameHandle::new(
-                    ids.allocate(),
+                    ids.allocate().expect("input frame id"),
                     descriptor,
                     GpuColorFrameTextureFormat::Rgba32Float,
                     label,
@@ -2403,8 +2429,8 @@ mod tests {
             })
         }
 
-        let compositor = GpuFrameCompositor::new(&context.device);
-        let mut ids = GpuColorFrameIdAllocator::new(1_025);
+        let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
+        let mut ids = GpuColorFrameIdAllocator::new(1_025).expect("frame id allocator");
         let mut table = GpuColorFrameResourceTable::new();
         let pool = GpuColorFrameWgpuResourcePool::default();
         let descriptor = ColorFrameDescriptor {
@@ -2480,7 +2506,7 @@ mod tests {
     #[tokio::test]
     async fn standalone_effect_domain_point_pass_matches_numeric_reference() {
         use mondrian_effects::{
-            compile_scheduled_effect_graph_in_domain, lower_effect_graph_to_gpu_plan,
+            compile_reference_effect_graph_in_domain, lower_effect_graph_to_gpu_plan,
             EffectColorDomain, EffectColorDomainContract, EffectRenderOp, EffectRenderPlan,
         };
 
@@ -2490,7 +2516,7 @@ mod tests {
         };
         let domain =
             EffectColorDomain::DisplayEncodedRgb { color_space: mondrian_core::ColorSpace::Rec709 };
-        let graph = compile_scheduled_effect_graph_in_domain(
+        let graph = compile_reference_effect_graph_in_domain(
             &EffectRenderPlan {
                 ops: vec![EffectRenderOp::ColorAdjust {
                     exposure: 1.0,
@@ -2546,8 +2572,8 @@ mod tests {
             },
             wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
         );
-        let compositor = GpuFrameCompositor::new(&context.device);
-        let mut ids = GpuColorFrameIdAllocator::new(901);
+        let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
+        let mut ids = GpuColorFrameIdAllocator::new(901).expect("frame id allocator");
         let mut table = GpuColorFrameResourceTable::new();
         table.insert(input_resource).expect("insert effect input");
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -2616,8 +2642,8 @@ mod tests {
         context: &crate::GpuContext,
         layers: &[GpuCompositeLayer<'_>],
     ) -> Vec<[f32; 4]> {
-        let compositor = GpuFrameCompositor::new(&context.device);
-        let mut ids = GpuColorFrameIdAllocator::default();
+        let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
+        let mut ids = GpuColorFrameIdAllocator::new(1).expect("frame id allocator");
         let mut table = GpuColorFrameResourceTable::new();
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mondrian-test-gpu-point-effect-parity"),

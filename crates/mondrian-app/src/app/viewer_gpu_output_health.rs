@@ -1780,8 +1780,8 @@ pub struct ViewerGpuOutputColorRejectionSummary {
     pub source: String,
     /// Override color space, when present.
     pub override_color_space: Option<String>,
-    /// Detected media color space, when present.
-    pub detected_color_space: Option<String>,
+    /// Validated metadata identity that was eligible to drive pixels.
+    pub executable_color_space: Option<String>,
     /// Sequence working color space.
     pub working_color_space: String,
     /// Compact human-readable diagnostic summary.
@@ -3215,8 +3215,8 @@ mod tests {
     #[test]
     fn budget_replays_viewer_color_rejections_into_media_issue_summary() {
         let jsonl = r#"
-{"health":{"status":"Waiting"},"last_color_rejection":{"asset_id":"asset-a","path":"E:/media/missing.mov","missing_metadata_policy":"RejectMedia","source":"MissingPolicyRejectMedia","override_color_space":null,"detected_color_space":null,"working_color_space":"Rec2020","diagnostic_summary":"source=MissingMetadata,warnings=missing_cicp","diagnostic_issue_summary":{"detected_color_space":null,"confidence":"None","source":"MissingMetadata","method":"MissingMetadata","has_raw_cicp_metadata":false,"metadata_hint_count":0,"evidence_count":0,"warning_count":1,"multiple_metadata_hints":0,"ignored_metadata_hints":0,"metadata_hint_overrides_cicp_tags":0,"lower_priority_metadata_hints":0,"ignored_lower_priority_metadata_hints":0,"partial_cicp_tags":0,"missing_cicp_tags":1,"unsupported_cicp_tags":0,"decoder_unavailable":0,"hdr_side_data_count":0,"has_mastering_display_metadata":false,"has_content_light_metadata":false,"has_dynamic_hdr10_plus":false,"has_dolby_vision_config":false,"has_icc_profile":false,"has_user_visible_warnings":true}}}
-{"health":{"status":"Ready"},"last_color_rejection":{"asset_id":"asset-b","path":"E:/media/offline.mov","missing_metadata_policy":"RejectMedia","source":"MissingPolicyRejectMedia","override_color_space":null,"detected_color_space":null,"working_color_space":"Rec2020","diagnostic_summary":"source=DecoderUnavailable,warnings=decoder_unavailable","diagnostic_issue_summary":{"detected_color_space":null,"confidence":"None","source":"DecoderUnavailable","method":"DecoderUnavailable","has_raw_cicp_metadata":false,"metadata_hint_count":0,"evidence_count":1,"warning_count":1,"multiple_metadata_hints":0,"ignored_metadata_hints":0,"metadata_hint_overrides_cicp_tags":0,"lower_priority_metadata_hints":0,"ignored_lower_priority_metadata_hints":0,"partial_cicp_tags":0,"missing_cicp_tags":0,"unsupported_cicp_tags":0,"decoder_unavailable":1,"hdr_side_data_count":0,"has_mastering_display_metadata":false,"has_content_light_metadata":false,"has_dynamic_hdr10_plus":false,"has_dolby_vision_config":false,"has_icc_profile":false,"has_user_visible_warnings":true}}}
+{"health":{"status":"Waiting"},"last_color_rejection":{"asset_id":"asset-a","path":"E:/media/missing.mov","missing_metadata_policy":"RejectMedia","source":"MissingPolicyRejectMedia","override_color_space":null,"executable_color_space":null,"working_color_space":"Rec2020","diagnostic_summary":"source=MissingMetadata,warnings=missing_cicp","diagnostic_issue_summary":{"executable_color_space":null,"confidence":"None","source":"MissingMetadata","method":"MissingMetadata","has_raw_cicp_metadata":false,"metadata_hint_count":0,"evidence_count":0,"warning_count":1,"multiple_metadata_hints":0,"ignored_metadata_hints":0,"metadata_hint_overrides_cicp_tags":0,"lower_priority_metadata_hints":0,"ignored_lower_priority_metadata_hints":0,"partial_cicp_tags":0,"missing_cicp_tags":1,"unsupported_cicp_tags":0,"decoder_unavailable":0,"hdr_side_data_count":0,"has_mastering_display_metadata":false,"has_content_light_metadata":false,"has_dynamic_hdr10_plus":false,"has_dolby_vision_config":false,"has_icc_profile":false,"has_user_visible_warnings":true}}}
+{"health":{"status":"Ready"},"last_color_rejection":{"asset_id":"asset-b","path":"E:/media/offline.mov","missing_metadata_policy":"RejectMedia","source":"MissingPolicyRejectMedia","override_color_space":null,"executable_color_space":null,"working_color_space":"Rec2020","diagnostic_summary":"source=DecoderUnavailable,warnings=decoder_unavailable","diagnostic_issue_summary":{"executable_color_space":null,"confidence":"None","source":"DecoderUnavailable","method":"DecoderUnavailable","has_raw_cicp_metadata":false,"metadata_hint_count":0,"evidence_count":1,"warning_count":1,"multiple_metadata_hints":0,"ignored_metadata_hints":0,"metadata_hint_overrides_cicp_tags":0,"lower_priority_metadata_hints":0,"ignored_lower_priority_metadata_hints":0,"partial_cicp_tags":0,"missing_cicp_tags":0,"unsupported_cicp_tags":0,"decoder_unavailable":1,"hdr_side_data_count":0,"has_mastering_display_metadata":false,"has_content_light_metadata":false,"has_dynamic_hdr10_plus":false,"has_dolby_vision_config":false,"has_icc_profile":false,"has_user_visible_warnings":true}}}
 "#;
         let budget = ViewerGpuOutputBudget {
             min_ready: 1,
@@ -3253,12 +3253,12 @@ mod tests {
                 missing_metadata_policy: "RejectMedia".to_owned(),
                 source: "MissingPolicyRejectMedia".to_owned(),
                 override_color_space: None,
-                detected_color_space: None,
+                executable_color_space: None,
                 working_color_space: "Rec2020".to_owned(),
                 diagnostic_summary: "source=DecoderUnavailable,warnings=decoder_unavailable"
                     .to_owned(),
                 diagnostic_issue_summary: VideoColorDiagnosticIssueSummary {
-                    detected_color_space: None,
+                    executable_color_space: None,
                     confidence: mondrian_media::VideoColorInterpretationConfidence::None,
                     source: mondrian_media::VideoColorSpaceSource::DecoderUnavailable,
                     method: mondrian_media::VideoColorDetectionMethod::DecoderUnavailable,
@@ -3327,7 +3327,7 @@ mod tests {
     #[test]
     fn budget_fails_color_rejection_threshold() {
         let jsonl = r#"
-{"health":{"status":"Ready"},"last_color_rejection":{"asset_id":"asset-a","path":"E:/media/missing.mov","missing_metadata_policy":"RejectMedia","source":"MissingPolicyRejectMedia","override_color_space":null,"detected_color_space":null,"working_color_space":"Rec2020","diagnostic_summary":"source=MissingMetadata,warnings=missing_cicp","diagnostic_issue_summary":{"detected_color_space":null,"confidence":"None","source":"MissingMetadata","method":"MissingMetadata","has_raw_cicp_metadata":false,"metadata_hint_count":0,"evidence_count":0,"warning_count":1,"multiple_metadata_hints":0,"ignored_metadata_hints":0,"metadata_hint_overrides_cicp_tags":0,"lower_priority_metadata_hints":0,"ignored_lower_priority_metadata_hints":0,"partial_cicp_tags":0,"missing_cicp_tags":1,"unsupported_cicp_tags":0,"decoder_unavailable":0,"hdr_side_data_count":0,"has_mastering_display_metadata":false,"has_content_light_metadata":false,"has_dynamic_hdr10_plus":false,"has_dolby_vision_config":false,"has_icc_profile":false,"has_user_visible_warnings":true}}}
+{"health":{"status":"Ready"},"last_color_rejection":{"asset_id":"asset-a","path":"E:/media/missing.mov","missing_metadata_policy":"RejectMedia","source":"MissingPolicyRejectMedia","override_color_space":null,"executable_color_space":null,"working_color_space":"Rec2020","diagnostic_summary":"source=MissingMetadata,warnings=missing_cicp","diagnostic_issue_summary":{"executable_color_space":null,"confidence":"None","source":"MissingMetadata","method":"MissingMetadata","has_raw_cicp_metadata":false,"metadata_hint_count":0,"evidence_count":0,"warning_count":1,"multiple_metadata_hints":0,"ignored_metadata_hints":0,"metadata_hint_overrides_cicp_tags":0,"lower_priority_metadata_hints":0,"ignored_lower_priority_metadata_hints":0,"partial_cicp_tags":0,"missing_cicp_tags":1,"unsupported_cicp_tags":0,"decoder_unavailable":0,"hdr_side_data_count":0,"has_mastering_display_metadata":false,"has_content_light_metadata":false,"has_dynamic_hdr10_plus":false,"has_dolby_vision_config":false,"has_icc_profile":false,"has_user_visible_warnings":true}}}
 "#;
         let budget = ViewerGpuOutputBudget {
             max_color_rejections: 0,

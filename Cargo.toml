@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/mondrian-storage",
     "crates/mondrian-core",
     "crates/mondrian-media",
     "crates/mondrian-timeline",
@@ -38,6 +39,7 @@ rust-version  = "1.92"
 # ── 全局共享依赖（各 crate 通过 workspace = true 引用）──────────────────────────
 [workspace.dependencies]
 # ---- 内部 crate ----
+mondrian-storage  = { path = "crates/mondrian-storage" }
 mondrian-core     = { path = "crates/mondrian-core" }
 mondrian-media    = { path = "crates/mondrian-media" }
 mondrian-timeline = { path = "crates/mondrian-timeline" }
@@ -98,7 +100,6 @@ usvg             = { version = "0.45", default-features = false }
 crossbeam-channel = "0.5"
 crossbeam-queue = "0.3"
 parking_lot       = "0.12"
-rayon             = "1"
 dashmap           = "6"
 pulp              = "0.22"
 
@@ -117,11 +118,16 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_LibraryLoader",
     "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
+    "Win32_Storage_FileSystem",
     "Win32_UI_ColorSystem",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
 windows = { version = "0.62", features = [

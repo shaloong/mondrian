@@ -1,9 +1,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
-use std::{collections::hash_map::DefaultHasher, hash::Hash, hash::Hasher};
 use std::{fs, path::Path, path::PathBuf};
 
 use mondrian_assets::{AssetKind, AssetLibrary};
@@ -20,7 +18,7 @@ use mondrian_core::{
     AudioChannelLayout, AudioSamplePosition, AudioSampleRate, AudioSampleRounding,
     DisplayManagementPolicy, FrameRounding, ProjectId, ProjectSettings, TimelineTime,
 };
-use mondrian_editor_state::{AuthoringSession, AuthoringSessionId};
+use mondrian_editor_state::{AuthoringSession, AuthoringSessionId, SequenceNavigationIntent};
 use mondrian_effects::{
     EffectNode, EffectNodeExt, EffectType, MaskComponent, MaskId, MaskKeyframe, MaskShape,
 };
@@ -28,26 +26,32 @@ use mondrian_export::queue::RenderQueue;
 use mondrian_media::audio::{AudioBuffer, RealtimeAudioOutputSnapshot};
 use mondrian_media::{
     AudioPcmContinuity, AudioPcmContinuityModel, AudioPcmRenderGeneration, AudioPcmRenderRequest,
-    AudioPcmRenderer, AudioPlayback, AudioPlaybackEvent, AudioPlaybackMode, AudioPlaybackSnapshot,
-    AudioSourceCache, AudioSourceCacheDiagnostics,
+    AudioPcmRenderer, AudioPlayback, AudioPlaybackError, AudioPlaybackEvent, AudioPlaybackMode,
+    AudioPlaybackPoll, AudioPlaybackSnapshot, AudioSourceCache, AudioSourceCacheDiagnostics,
 };
 use mondrian_playback::{
     AudioClockObservationGrade, AudioDeviceClockObservation, AudioDeviceClockState, ClockMaster,
-    FrameDelivery, FrameDeliveryKind, FramePresentationQuality, FramePresentationTicket,
-    MonotonicTimestamp, PlaybackEngine, PlaybackEvidenceCollector, PlaybackEvidenceReport,
-    PlaybackSeekKind, PreviewResolutionScale, TransportState, VideoPrerollObservation,
+    FrameDelivery, FrameDeliveryCandidate, FrameDeliveryKind, FrameDemandIdentity,
+    FramePresentationQuality, FramePresentationTicket, MonotonicTimestamp, PlaybackEngine,
+    PlaybackEvidenceCollector, PlaybackEvidenceReport, PlaybackSeekKind, PreviewResolutionScale,
+    TransportState, VideoPrerollObservation,
 };
 use mondrian_timeline::clip::{Clip, TrimEdge};
-use mondrian_timeline::sequence::{Sequence, SequenceCollection, SequenceSettings};
-use project_persistence::{ProjectPersistencePurpose, ProjectPersistenceService};
-pub(crate) use project_recovery::{discover_crash_recovery_candidates, CrashRecoveryCandidate};
+use mondrian_timeline::sequence::{
+    ProgramColorContext, Sequence, SequenceCollection, SequenceSettings,
+};
+use project_persistence::{
+    AutosaveArchiveDestination, ManualProjectFileDestination, ProjectPersistencePurpose,
+    ProjectPersistenceService,
+};
+pub(crate) use project_recovery::discover_crash_recovery_candidates;
+pub use project_recovery::CrashRecoveryCandidate;
 use serde::{Deserialize, Serialize};
 
 const PROJECT_EXTENSION: &str = "mdp";
 const DEFAULT_VISUAL_PLACEMENT_DURATION_SECS: f64 = 5.0;
 const MAX_STATUS_LOG_ENTRIES: usize = 64;
 const AUDIO_OUTPUT_LAYOUT: AudioChannelLayout = AudioChannelLayout::Stereo;
-const AUDIO_IDLE_WARMUP_CHUNK_MILLIS: u32 = 80;
 
 /// One exact left/right identity mapping created by a Clip split.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,12 +95,15 @@ pub(crate) fn tt(frame: i64, time_base: Rational) -> TimelineTime {
 mod action_handler;
 mod animation_authoring;
 mod animation_state;
+mod audio_idle_warmup;
 #[cfg(test)]
 mod audio_playback_acceptance;
 mod audio_rendering;
 mod basic_titles;
 mod clip_clipboard;
 mod clip_retime;
+pub(crate) mod execution_resource_coordination;
+pub(crate) mod execution_resource_slots;
 pub(crate) mod exporting;
 #[cfg(any(test, feature = "validation"))]
 pub mod golden_project_acceptance;
@@ -104,9 +111,15 @@ pub mod golden_project_acceptance;
 pub(crate) mod headless_preview_presentation;
 #[cfg(any(test, feature = "validation"))]
 pub(crate) mod headless_viewer_gpu;
+pub mod media_asset_mutation;
 mod media_import;
 pub(crate) mod native_video_import;
 mod playback;
+pub(crate) mod viewer_gpu_device_progress;
+pub(crate) mod viewer_gpu_submission;
+pub(crate) use playback::{
+    FramePresentationDisposition, FramePresentationPreflight, FramePresentationPublication,
+};
 #[cfg(test)]
 mod playback_acceptance;
 pub(crate) mod playback_preview;
@@ -115,6 +128,7 @@ pub(crate) mod preview_cpu_execution;
 pub(crate) mod preview_decode_residency;
 pub(crate) mod preview_display_contract;
 pub(crate) mod preview_execution;
+mod preview_execution_input;
 pub(crate) mod preview_frame_store;
 pub(crate) mod preview_gpu_output_blocker;
 pub(crate) mod preview_hardware_admission;
@@ -129,11 +143,18 @@ pub(crate) mod preview_timeline_execution;
 pub(crate) mod preview_title_task;
 pub mod preview_unavailability;
 pub(crate) mod preview_viewer_plan;
+pub(crate) mod preview_visual_dependencies;
+pub(crate) mod preview_visual_execution_task;
+pub(crate) mod preview_work_notification;
+pub mod product_action;
+mod project_library_generation;
 mod project_lifecycle;
 mod project_persistence;
 mod project_recovery;
+pub(crate) mod project_runtime;
 pub mod proxy_generation;
 mod selection;
+mod single_worker_activity;
 pub mod thumbnail_service;
 mod timeline_commands;
 mod timeline_editing;
@@ -147,9 +168,21 @@ pub(crate) mod viewer_gpu_output_residency;
 pub mod waveform_service;
 
 use self::ui_actions::TimelineSeekSource;
+use audio_idle_warmup::{
+    AudioIdleWarmupAuthorBinding, AudioIdleWarmupDemand, AudioIdleWarmupService,
+    AudioIdleWarmupSubmitOutcome, AUDIO_IDLE_WARMUP_CHUNK_MILLIS,
+};
+pub use audio_idle_warmup::{
+    AudioIdleWarmupDiagnostics, AudioIdleWarmupRequestIdentity, AudioIdleWarmupTerminal,
+};
 use audio_rendering::*;
+use execution_resource_coordination::ExecutionResourceCoordinator;
+pub use execution_resource_coordination::ExecutionResourcePressure;
 use exporting::TimelineExportDraft;
-use media_import::*;
+pub use media_import::{
+    MediaImportBatchId, MediaImportDiagnostics, MediaImportFailureReason, MediaImportTerminalRecord,
+};
+use media_import::{MediaImportExecution, PendingMediaImportBatch};
 use proxy_generation::{
     ProxyGenerationDiagnostics, ProxyGenerationOrigin, ProxyGenerationRequestOutcome,
     ProxyGenerationService,
@@ -286,8 +319,32 @@ pub struct AppState {
     /// Sole mutable authority for the open Project document, asset library,
     /// navigation, author generations, and project-wide Undo/Redo.
     pub(crate) authoring: Option<AuthoringSession>,
+    /// Kernel-backed exclusive authority for the open Project runtime.
+    ///
+    /// Background persistence requests clone this same lease; Project
+    /// identity and runtime mutation authority never travel as a bare path.
+    project_runtime_lease: Option<Arc<project_runtime::ProjectRuntimeLease>>,
+    /// Immutable library directories awaiting the final external
+    /// `Arc<AssetLibrary>` release before owner-authorized collection.
+    retired_project_libraries: Vec<project_library_generation::RetiredProjectLibraryGeneration>,
     /// UI-independent single-writer durable archive publisher.
     project_persistence: ProjectPersistenceService,
+    /// Latest admitted canonical manual-save destination for the open Session.
+    ///
+    /// This may lead `AuthoringSession::project_file` while Save As is in
+    /// flight. Completions must match it before changing the durable baseline,
+    /// canonical path, or Recovery Authority.
+    manual_project_file_destination: Option<ManualProjectFileDestination>,
+    /// Latest manual completion applied for its exact destination binding.
+    ///
+    /// This is delivery-order evidence, not a second authoring baseline. The
+    /// Session remains sole authority for generation and Asset Library
+    /// coverage; this receipt only proves that equal baseline state came from
+    /// this worker lifetime rather than from opening an already-saved file.
+    manual_project_file_applied_request: Option<(
+        ManualProjectFileDestination,
+        project_persistence::ProjectPersistenceRequestId,
+    )>,
     /// Event-loop time of the latest admitted autosave request.
     autosave_last_requested_at: Instant,
     /// Snapshot identity currently being written as a recovery point.
@@ -303,12 +360,11 @@ pub struct AppState {
     playback_evidence: PlaybackEvidenceCollector,
     /// High-water mark preventing evidence from regressing between event-loop ticks.
     playback_evidence_now: MonotonicTimestamp,
-    /// App-adapter monotonic origin advanced only by event-loop elapsed time.
-    playback_now: MonotonicTimestamp,
-    /// Wall-clock anchor corresponding exactly to `playback_presentation_time_anchor`.
-    playback_presentation_wall_anchor: Instant,
-    /// Playback timestamp paired with the presentation wall-clock anchor.
-    playback_presentation_time_anchor: MonotonicTimestamp,
+    /// Process-monotonic observation instant corresponding exactly to
+    /// `playback_observation_time_anchor`.
+    playback_observation_instant_anchor: Instant,
+    /// Playback Engine timestamp paired with the observation instant anchor.
+    playback_observation_time_anchor: MonotonicTimestamp,
     /// Most recent timeline seek interaction source used by preview access-mode selection.
     pub last_timeline_seek_source: TimelineSeekSource,
 
@@ -321,8 +377,11 @@ pub struct AppState {
 
     // 渲染导出队列
     pub(crate) render_queue: Arc<RenderQueue>,
-    /// Last export queue revision consumed by the app event-loop Adapter.
-    export_queue_observed_revision: u64,
+    /// Product-level immutable execution resource decisions. Domain Modules
+    /// retain their own queues, workers, cancellation, and terminal evidence.
+    execution_resources: Arc<ExecutionResourceCoordinator>,
+    /// Last export job-snapshot revision consumed by the app event-loop Adapter.
+    export_jobs_observed_revision: u64,
     /// UI-stable timeline export draft shared by app UI export panels.
     pub export_draft: TimelineExportDraft,
 
@@ -340,45 +399,54 @@ pub struct AppState {
     // 代理策略
     pub auto_proxy_enabled: bool,
     proxy_generation: ProxyGenerationService,
+    /// Last terminal publication consumed by the serialized App Adapter.
+    ///
+    /// Attempt IDs cannot serve as this cursor because concurrent attempts may
+    /// publish out of admission order.
+    proxy_terminal_observed_sequence: u64,
 
     // 音频时钟与 A/V 同步
     pub audio_sample_rate: u32,
-    audio_playback: AudioPlayback,
+    audio_playback: playback::AppAudioPlayback,
     pub audio_source_cache: Arc<AudioSourceCache>,
-    audio_idle_warmup_last: Option<std::time::Instant>,
+    audio_idle_warmup: AudioIdleWarmupService,
+    audio_idle_warmup_terminal_cursor: u64,
 
-    media_import_tx: mpsc::Sender<MediaImportResult>,
-    media_import_rx: mpsc::Receiver<MediaImportResult>,
-    next_media_import_batch_id: u64,
+    media_import: MediaImportExecution,
     media_import_batches: HashMap<u64, PendingMediaImportBatch>,
+    /// Ordered two-phase execution for relink and audio Component mutations.
+    media_asset_mutations: media_asset_mutation::MediaAssetMutationExecution,
 }
 
 impl AppState {
     pub fn new() -> Self {
         let audio_sample_rate = 48_000;
         let audio_source_cache = Arc::new(AudioSourceCache::new(audio_sample_rate));
-        let (media_import_tx, media_import_rx) = mpsc::channel::<MediaImportResult>();
-        let playback_presentation_wall_anchor = Instant::now();
+        let playback_observation_instant_anchor = Instant::now();
 
         Self {
             event_bus: EventBus::new(),
             authoring: None,
+            project_runtime_lease: None,
+            retired_project_libraries: Vec::new(),
             project_persistence: ProjectPersistenceService::new(),
+            manual_project_file_destination: None,
+            manual_project_file_applied_request: None,
             autosave_last_requested_at: Instant::now(),
             autosave_in_flight_request: None,
             viewer_display_management: DisplayManagementPolicy::default(),
             playback_engine: PlaybackEngine::default(),
             playback_evidence: PlaybackEvidenceCollector::default(),
             playback_evidence_now: MonotonicTimestamp::ZERO,
-            playback_now: MonotonicTimestamp::ZERO,
-            playback_presentation_wall_anchor,
-            playback_presentation_time_anchor: MonotonicTimestamp::ZERO,
+            playback_observation_instant_anchor,
+            playback_observation_time_anchor: MonotonicTimestamp::ZERO,
             last_timeline_seek_source: TimelineSeekSource::Settled,
             dragging_asset: None,
             selection: SelectionState::default(),
             timeline_targeting: timeline_targeting::TimelineTargetingState::default(),
             render_queue: RenderQueue::new(),
-            export_queue_observed_revision: 0,
+            execution_resources: ExecutionResourceCoordinator::new(Default::default()),
+            export_jobs_observed_revision: 0,
             export_draft: TimelineExportDraft::default(),
             status_hint: None,
             status_log: Vec::new(),
@@ -388,14 +456,15 @@ impl AppState {
             active_clipboard_kind: None,
             auto_proxy_enabled: false,
             proxy_generation: ProxyGenerationService::new(),
+            proxy_terminal_observed_sequence: 0,
             audio_sample_rate,
-            audio_playback: AudioPlayback::product_default(),
+            audio_playback: playback::AppAudioPlayback::product_default(audio_sample_rate),
             audio_source_cache,
-            audio_idle_warmup_last: None,
-            media_import_tx,
-            media_import_rx,
-            next_media_import_batch_id: 1,
+            audio_idle_warmup: AudioIdleWarmupService::new(),
+            audio_idle_warmup_terminal_cursor: 0,
+            media_import: MediaImportExecution::new(),
             media_import_batches: HashMap::new(),
+            media_asset_mutations: media_asset_mutation::MediaAssetMutationExecution::new(),
         }
     }
 
@@ -501,6 +570,32 @@ impl AppState {
             .unwrap_or_else(|| CLOSED_PROJECT_DEFAULTS.get_or_init(SequenceSettings::default))
     }
 
+    /// Resolve the Project-owned color policy for source-library thumbnails.
+    ///
+    /// Thumbnails use the future-Sequence template for source interpretation,
+    /// but always publish an sRGB display raster. Window Adapters consume this
+    /// value and never interpret the Project color engine themselves.
+    pub(crate) fn thumbnail_color_context(&self) -> ProgramColorContext {
+        let environment = self.project_color_environment();
+        let mut context = self.new_sequence_defaults().root_program_color_context(environment);
+        context.output_color_space = mondrian_core::types::ColorSpace::Srgb.into();
+        context.output_tone_map = true;
+        context.output_transform = match environment.engine() {
+            mondrian_core::ColorEngine::MondrianStandard { package } => {
+                mondrian_core::OutputTransformIntent::mondrian_standard_package(*package)
+            }
+            mondrian_core::ColorEngine::Aces { preset } => {
+                mondrian_core::OutputTransformIntent::aces_preset(*preset)
+            }
+            mondrian_core::ColorEngine::CustomOcio { .. } => {
+                mondrian_core::OutputTransformIntent::CustomOcio {
+                    output_color_space: mondrian_core::types::ColorSpace::Srgb,
+                }
+            }
+        };
+        context
+    }
+
     /// Machine-local Viewer display policy used by Window and Headless Adapters.
     pub fn viewer_display_management(&self) -> &DisplayManagementPolicy {
         &self.viewer_display_management
@@ -549,7 +644,7 @@ impl AppState {
         static EMPTY: OnceLock<BTreeSet<AssetId>> = OnceLock::new();
         self.authoring
             .as_ref()
-            .map(|session| &session.document().proxy_mode_assets)
+            .map(|session| session.document().proxy_mode_assets.as_set())
             .unwrap_or_else(|| EMPTY.get_or_init(BTreeSet::new))
     }
 
@@ -566,7 +661,9 @@ impl AppState {
         color: mondrian_media::ProxyColorContract,
         origin: ProxyGenerationOrigin,
     ) -> ProxyGenerationRequestOutcome {
-        self.proxy_generation.request(asset_id, source_path, config, color, origin)
+        let outcome = self.proxy_generation.request(asset_id, source_path, config, color, origin);
+        let _ = self.refresh_internal_execution_resource_decision();
+        outcome
     }
 
     #[cfg(test)]
@@ -578,14 +675,14 @@ impl AppState {
             std::process::id(),
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::create_dir_all(root.join("library")).expect("create test fixture root");
+        std::fs::create_dir_all(&root).expect("create test fixture root");
         root
     }
 
     #[cfg(test)]
-    fn test_default_authoring_session() -> AuthoringSession {
+    fn test_default_authoring_session(
+    ) -> (AuthoringSession, Arc<project_runtime::ProjectRuntimeLease>) {
         let root = Self::test_fixture_root();
-        let library = AssetLibrary::open(root.join("library")).expect("open test asset library");
         let sequence = Sequence::new("__mondrian_test_fixture__");
         let document = mondrian_project::ProjectDocument::new(
             "Test Project",
@@ -594,14 +691,31 @@ impl AppState {
             SequenceSettings::default(),
             ProjectSettings::default(),
         );
-        AuthoringSession::new_unsaved(document, root.join("project.mdp"), root, library)
-            .expect("create test authoring session")
+        let project_file = root.join("project.mdp");
+        let runtime_lease = project_runtime::claim_project_runtime_lease_for_test(
+            &root.join("runtime-roots"),
+            &project_file,
+            document.project_id,
+        )
+        .expect("claim test Project runtime owner");
+        let runtime_root = runtime_lease.runtime_root().to_path_buf();
+        let library =
+            AssetLibrary::open(runtime_root.join("library")).expect("open test asset library");
+        (
+            AuthoringSession::new_unsaved(document, project_file, runtime_root, library)
+                .expect("create test authoring session"),
+            runtime_lease,
+        )
     }
 
     #[cfg(test)]
     fn test_ensure_authoring(&mut self) -> &mut AuthoringSession {
         if self.authoring.is_none() {
-            self.authoring = Some(Self::test_default_authoring_session());
+            let (session, runtime_lease) = Self::test_default_authoring_session();
+            self.authoring = Some(session);
+            self.project_runtime_lease = Some(runtime_lease);
+            self.manual_project_file_destination = None;
+            self.manual_project_file_applied_request = None;
         }
         self.authoring.as_mut().expect("test authoring session")
     }
@@ -632,7 +746,14 @@ impl AppState {
     #[cfg(test)]
     pub(crate) fn test_set_sequence(&mut self, sequence: Option<Sequence>) {
         let Some(sequence) = sequence else {
+            self.media_import.bind_project(None);
+            self.media_import_batches.clear();
+            self.media_asset_mutations.bind_project(None);
             self.authoring = None;
+            self.project_runtime_lease = None;
+            self.manual_project_file_destination = None;
+            self.manual_project_file_applied_request = None;
+            self.synchronize_audio_idle_warmup_binding();
             return;
         };
         let sequence = Self::test_normalize_sequence(sequence);
@@ -682,7 +803,7 @@ impl AppState {
             "test Sequence collection cannot be empty"
         );
         let fallback = sequences[0].id;
-        document.sequences.sequences = sequences;
+        document.sequences.sequences = sequences.into();
         if document.sequences.sequence(document.sequences.active_sequence_id).is_none() {
             document.sequences.active_sequence_id = fallback;
         }
@@ -713,15 +834,15 @@ impl AppState {
         let target = session.document().sequences.active_sequence_id;
         if let Some(first) = stack.first().copied() {
             session
-                .switch_active_sequence(first, false)
+                .switch_active_sequence(first, SequenceNavigationIntent::ReplaceRoot)
                 .expect("valid test navigation Sequence");
             for sequence_id in stack.iter().copied().skip(1) {
                 session
-                    .switch_active_sequence(sequence_id, true)
+                    .switch_active_sequence(sequence_id, SequenceNavigationIntent::EnterNested)
                     .expect("valid test navigation Sequence");
             }
             session
-                .switch_active_sequence(target, true)
+                .switch_active_sequence(target, SequenceNavigationIntent::EnterNested)
                 .expect("restore test active Sequence");
         }
     }
@@ -737,61 +858,78 @@ impl AppState {
     #[cfg(test)]
     pub(crate) fn test_set_asset_library(&mut self, library: Option<Arc<AssetLibrary>>) {
         let Some(library) = library else {
+            self.media_import.bind_project(None);
+            self.media_import_batches.clear();
+            self.media_asset_mutations.bind_project(None);
             self.authoring = None;
+            self.project_runtime_lease = None;
+            self.manual_project_file_destination = None;
+            self.manual_project_file_applied_request = None;
+            self.synchronize_audio_idle_warmup_binding();
             return;
         };
-        let existing = self.authoring.take();
-        let (document, project_file, runtime_root) = existing
-            .as_ref()
-            .map(|session| {
-                (
-                    session.document().clone(),
-                    session.project_file().to_path_buf(),
-                    session.runtime_root().to_path_buf(),
-                )
-            })
-            .unwrap_or_else(|| {
-                let root = Self::test_fixture_root();
-                let sequence = Sequence::new("__mondrian_test_fixture__");
-                (
-                    mondrian_project::ProjectDocument::new(
-                        "Test Project",
-                        SequenceCollection::new(sequence),
-                        mondrian_core::ProjectColorEnvironment::default(),
-                        SequenceSettings::default(),
-                        ProjectSettings::default(),
-                    ),
-                    root.join("project.mdp"),
-                    root,
-                )
-            });
+        let existing = self.authoring.take().unwrap_or_else(|| {
+            let (session, runtime_lease) = Self::test_default_authoring_session();
+            self.project_runtime_lease = Some(runtime_lease);
+            session
+        });
+        let (document, project_file, runtime_root) = (
+            existing.document().clone(),
+            existing.project_file().to_path_buf(),
+            existing.runtime_root().to_path_buf(),
+        );
         self.authoring = Some(
             AuthoringSession::open_saved(document, project_file, runtime_root, library)
                 .expect("replace test asset library"),
         );
+        self.manual_project_file_destination = None;
+        self.manual_project_file_applied_request = None;
+        self.synchronize_audio_idle_warmup_binding();
+        self.media_import.bind_project(self.project_id());
+        self.media_import_batches.clear();
+        self.media_asset_mutations.bind_project(self.project_id());
     }
 
     #[cfg(test)]
     pub(crate) fn test_set_project_path(&mut self, project_file: PathBuf) {
-        let existing = self.authoring.take().unwrap_or_else(Self::test_default_authoring_session);
+        let existing = self.authoring.take().unwrap_or_else(|| {
+            let (session, runtime_lease) = Self::test_default_authoring_session();
+            self.project_runtime_lease = Some(runtime_lease);
+            session
+        });
         let document = existing.document().clone();
-        let runtime_root = existing.runtime_root().to_path_buf();
         let library = existing.asset_library().clone();
+        let runtime_base = Self::test_fixture_root();
+        let runtime_lease = project_runtime::claim_project_runtime_lease_for_test(
+            &runtime_base.join("runtime-roots"),
+            &project_file,
+            document.project_id,
+        )
+        .expect("claim replacement Project runtime owner");
+        let runtime_root = runtime_lease.runtime_root().to_path_buf();
         self.authoring = Some(
             AuthoringSession::open_saved(document, project_file, runtime_root, library)
                 .expect("replace test project path"),
         );
+        self.project_runtime_lease = Some(runtime_lease);
+        self.manual_project_file_destination = None;
+        self.manual_project_file_applied_request = None;
+        self.synchronize_audio_idle_warmup_binding();
     }
 
     #[cfg(test)]
     pub(crate) fn test_advance_project_generation(&mut self) {
-        let session = self.test_ensure_authoring();
-        let before = session.document().clone();
-        let mut after = before.clone();
-        after.meta.description.push('x');
-        session
-            .commit_project_snapshot("advance test generation", before, after)
-            .expect("advance test author generation");
+        {
+            let session = self.test_ensure_authoring();
+            let before = session.document().clone();
+            let mut after = before.clone();
+            after.meta.description.push('x');
+            session
+                .commit_project_snapshot("advance test generation", before, after)
+                .expect("advance test author generation")
+                .expect("generation-advancing commit");
+        }
+        self.synchronize_audio_idle_warmup_binding();
     }
     #[cfg(test)]
     pub(crate) fn test_project_settings_mut(&mut self) -> &mut ProjectSettings {
@@ -819,16 +957,31 @@ impl AppState {
         if !self.proxy_generation.poll_finished() {
             return false;
         }
-        let terminal = self.proxy_generation.diagnostics().terminal_records.last().cloned();
-        if let Some(terminal) = terminal {
+        let terminal_delta = self
+            .proxy_generation
+            .terminal_delta_after(self.proxy_terminal_observed_sequence);
+        if terminal_delta.retention_gap {
+            tracing::warn!(
+                target: "mondrian::proxy",
+                observed_terminal_sequence = self.proxy_terminal_observed_sequence,
+                next_terminal_sequence = terminal_delta.next_cursor,
+                retained_terminal_records = terminal_delta.records.len(),
+                "proxy terminal consumer crossed the bounded evidence retention window"
+            );
+        }
+        self.proxy_terminal_observed_sequence = terminal_delta.next_cursor;
+        let current_generation = terminal_delta.generation;
+        for terminal in terminal_delta.records {
             if terminal.evidence.disposition == mondrian_core::ExecutionTerminalDisposition::Failed
                 && terminal.executed
+                && terminal.evidence.generation == current_generation
             {
                 if let Some(detail) = terminal.failure_detail {
                     self.set_status_hint(format!("代理生成失败：{detail}"), true);
                 }
             }
         }
+        let _ = self.refresh_internal_execution_resource_decision();
         true
     }
 
@@ -861,9 +1014,17 @@ impl AppState {
     }
 
     pub fn set_asset_proxy_mode(&mut self, asset_id: AssetId, enabled: bool) {
-        if let Some(session) = self.authoring.as_mut() {
-            if let Err(error) = session.set_asset_proxy_mode(asset_id, enabled) {
-                self.set_status_hint(format!("切换代理模式失败：{error}"), true);
+        if let Some(result) = self
+            .authoring
+            .as_mut()
+            .map(|session| session.set_asset_proxy_mode(asset_id, enabled))
+        {
+            match result {
+                Ok(Some(commit)) => self.consume_authoring_commit(commit),
+                Ok(None) => {}
+                Err(error) => {
+                    self.set_status_hint(format!("切换代理模式失败：{error}"), true);
+                }
             }
         }
     }
@@ -932,6 +1093,28 @@ mod status_log_tests {
     }
 }
 
+#[cfg(test)]
+mod color_policy_tests {
+    use super::*;
+
+    #[test]
+    fn thumbnail_color_policy_is_resolved_by_app_state_for_srgb_publication() {
+        let state = AppState::new();
+
+        let context = state.thumbnail_color_context();
+
+        assert_eq!(
+            context.output_color_space.color(),
+            Some(mondrian_core::types::ColorSpace::Srgb)
+        );
+        assert!(context.output_tone_map);
+        assert_eq!(
+            context.output_transform,
+            mondrian_core::OutputTransformIntent::mondrian_standard()
+        );
+    }
+}
+
 fn audio_idle_warmup_enabled() -> bool {
     static AUDIO_IDLE_WARMUP: OnceLock<bool> = OnceLock::new();
     *AUDIO_IDLE_WARMUP.get_or_init(|| {
@@ -975,36 +1158,6 @@ fn unix_now_ms() -> u64 {
         Ok(d) => d.as_millis() as u64,
         Err(_) => 0,
     }
-}
-
-fn collect_files_by_name(
-    root: &Path,
-    index: &mut HashMap<String, Vec<PathBuf>>,
-) -> mondrian_core::Result<()> {
-    if !root.exists() {
-        return Ok(());
-    }
-
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let path = entry.path();
-
-        if file_type.is_dir() {
-            collect_files_by_name(path.as_path(), index)?;
-            continue;
-        }
-
-        if !file_type.is_file() {
-            continue;
-        }
-
-        if let Some(name) = path.file_name().and_then(|v| v.to_str()) {
-            index.entry(name.to_ascii_lowercase()).or_default().push(path);
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

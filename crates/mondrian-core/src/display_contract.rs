@@ -28,6 +28,7 @@
 
 use crate::types::ColorSpace;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 // ── Display identification ───────────────────────────────────────────────────
 
@@ -533,6 +534,53 @@ pub struct DisplayOutputWarning {
     pub description: String,
 }
 
+/// Full identity of every display field that can affect pixels or admission.
+///
+/// The compact diagnostic projection is deliberately not an equality key.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DisplayOutputIdentity([u8; 32]);
+
+impl std::fmt::Debug for DisplayOutputIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DisplayOutputIdentity({:02x?})", &self.0[..8])
+    }
+}
+
+impl DisplayOutputIdentity {
+    /// Borrow the complete display contract identity.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Compact diagnostic projection. Never use this value for equality.
+    pub fn diagnostic_key(self) -> u64 {
+        let mut bytes = [0_u8; 8];
+        bytes.copy_from_slice(&self.0[..8]);
+        u64::from_le_bytes(bytes)
+    }
+}
+
+#[derive(Serialize)]
+struct DisplayOutputIdentityPayload<'a> {
+    display_id: &'a DisplayId,
+    platform: DisplayPlatform,
+    scale_factor: ScaleFactorPpm,
+    surface_format: &'a str,
+    surface_color_space: &'a str,
+    surface_hdr_mode: &'a str,
+    supported_surface_color_spaces: &'a [String],
+    requested_viewer_mode: &'a str,
+    requested_output_color_space: &'a str,
+    resolved_output_color_space: &'a str,
+    ocio_display: &'a Option<String>,
+    ocio_view: &'a Option<String>,
+    monitor_profile_status: &'a MonitorProfileStatus,
+    hdr_status: &'a HdrStatus,
+    validation_status: DisplayValidationStatus,
+    warnings: &'a [DisplayOutputWarning],
+    blockers: &'a [DisplayOutputBlocker],
+}
+
 impl DisplayOutputSnapshot {
     /// Whether the display output contract is valid (no blockers).
     pub fn is_valid(&self) -> bool {
@@ -553,25 +601,40 @@ impl DisplayOutputSnapshot {
         )
     }
 
-    /// Compute a deterministic hash for cache invalidation.
-    pub fn contract_generation(&self) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        self.display_id.hash(&mut hasher);
-        self.scale_factor.hash(&mut hasher);
-        self.surface_format.hash(&mut hasher);
-        self.surface_color_space.hash(&mut hasher);
-        self.surface_hdr_mode.hash(&mut hasher);
-        self.requested_viewer_mode.hash(&mut hasher);
-        self.requested_output_color_space.hash(&mut hasher);
-        self.resolved_output_color_space.hash(&mut hasher);
-        self.ocio_display.hash(&mut hasher);
-        self.ocio_view.hash(&mut hasher);
-        self.monitor_profile_status.hash(&mut hasher);
-        self.hdr_status.hash(&mut hasher);
-        hasher.finish()
+    /// Compute the full canonical identity used for invalidation and reuse.
+    pub fn contract_identity(&self) -> DisplayOutputIdentity {
+        let payload = DisplayOutputIdentityPayload {
+            display_id: &self.display_id,
+            platform: self.platform,
+            scale_factor: self.scale_factor,
+            surface_format: &self.surface_format,
+            surface_color_space: &self.surface_color_space,
+            surface_hdr_mode: &self.surface_hdr_mode,
+            supported_surface_color_spaces: &self.supported_surface_color_spaces,
+            requested_viewer_mode: &self.requested_viewer_mode,
+            requested_output_color_space: &self.requested_output_color_space,
+            resolved_output_color_space: &self.resolved_output_color_space,
+            ocio_display: &self.ocio_display,
+            ocio_view: &self.ocio_view,
+            monitor_profile_status: &self.monitor_profile_status,
+            hdr_status: &self.hdr_status,
+            validation_status: self.validation_status,
+            warnings: &self.warnings,
+            blockers: &self.blockers,
+        };
+        let canonical_json = match serde_json::to_vec(&payload) {
+            Ok(payload) => payload,
+            Err(error) => {
+                unreachable!("DisplayOutputIdentityPayload serialization is infallible: {error}")
+            }
+        };
+        let domain = b"mondrian.display-output-contract.v1";
+        let mut digest = Sha256::new();
+        digest.update((domain.len() as u64).to_le_bytes());
+        digest.update(domain);
+        digest.update((canonical_json.len() as u64).to_le_bytes());
+        digest.update(canonical_json);
+        DisplayOutputIdentity(digest.finalize().into())
     }
 }
 
@@ -618,43 +681,43 @@ mod tests {
     }
 
     #[test]
-    fn contract_generation_changes_with_display_id() {
+    fn contract_identity_changes_with_display_id() {
         let a = sdr_pass_snapshot();
         let mut b = sdr_pass_snapshot();
         b.display_id.name = Some("Different Monitor".to_owned());
-        assert_ne!(a.contract_generation(), b.contract_generation());
+        assert_ne!(a.contract_identity(), b.contract_identity());
     }
 
     #[test]
-    fn contract_generation_changes_with_surface_format() {
+    fn contract_identity_changes_with_surface_format() {
         let a = sdr_pass_snapshot();
         let mut b = sdr_pass_snapshot();
         b.surface_format = "Rgba16Float".to_owned();
-        assert_ne!(a.contract_generation(), b.contract_generation());
+        assert_ne!(a.contract_identity(), b.contract_identity());
     }
 
     #[test]
-    fn contract_generation_changes_with_scale_factor() {
+    fn contract_identity_changes_with_scale_factor() {
         let a = sdr_pass_snapshot();
         let mut b = sdr_pass_snapshot();
         b.scale_factor = ScaleFactorPpm::from_f64(2.0);
-        assert_ne!(a.contract_generation(), b.contract_generation());
+        assert_ne!(a.contract_identity(), b.contract_identity());
     }
 
     #[test]
-    fn contract_generation_changes_with_viewer_mode() {
+    fn contract_identity_changes_with_viewer_mode() {
         let a = sdr_pass_snapshot();
         let mut b = sdr_pass_snapshot();
         b.requested_viewer_mode = "HdrPq".to_owned();
-        assert_ne!(a.contract_generation(), b.contract_generation());
+        assert_ne!(a.contract_identity(), b.contract_identity());
     }
 
     #[test]
-    fn contract_generation_changes_with_ocio_view() {
+    fn contract_identity_changes_with_ocio_view() {
         let a = sdr_pass_snapshot();
         let mut b = sdr_pass_snapshot();
         b.ocio_view = Some("Filmic".to_owned());
-        assert_ne!(a.contract_generation(), b.contract_generation());
+        assert_ne!(a.contract_identity(), b.contract_identity());
     }
 
     #[test]
@@ -707,13 +770,37 @@ mod tests {
         };
 
         assert!(!first.has_unknown_capabilities());
-        assert_ne!(first.contract_generation(), second.contract_generation());
+        assert_ne!(first.contract_identity(), second.contract_identity());
         let json = serde_json::to_string(&first).expect("serialize calibrated snapshot");
         assert_eq!(
             serde_json::from_str::<DisplayOutputSnapshot>(&json)
                 .expect("deserialize calibrated snapshot"),
             first
         );
+    }
+
+    #[test]
+    fn compact_diagnostic_collision_does_not_authorize_display_reuse() {
+        let first = DisplayOutputIdentity([0_u8; 32]);
+        let mut second_bytes = [0_u8; 32];
+        second_bytes[31] = 1;
+        let second = DisplayOutputIdentity(second_bytes);
+
+        assert_eq!(first.diagnostic_key(), second.diagnostic_key());
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn contract_identity_includes_admission_state() {
+        let first = sdr_pass_snapshot();
+        let mut second = first.clone();
+        second.validation_status = DisplayValidationStatus::Warn;
+        second.warnings.push(DisplayOutputWarning {
+            code: "test-warning".to_owned(),
+            description: "changed admission evidence".to_owned(),
+        });
+
+        assert_ne!(first.contract_identity(), second.contract_identity());
     }
 
     #[test]

@@ -44,7 +44,8 @@
 
 - [ ] 使用 `Plugin("plugin.<author>.<name>")` 作为 `EffectType`
 - [ ] 显式声明 `EffectPluginContract`
-- [ ] 显式声明 `EffectCapabilities`（通过 builder 方法自动推导）
+- [ ] 显式声明 `EffectColorDomainContract` 与完整 `EffectExecutionContract`
+- [ ] 只声明真实实现的精确 backend/representation 组合、temporal/ROI/state/lifetime
 - [ ] 参数 key 遵循 `{plugin_key}.{param}` 命名惯例
 - [ ] 参数有合理的默认值和范围
 - [ ] 图逻辑在参数不足以产生可见效果时提前 return（退化为 identity）
@@ -53,21 +54,21 @@
 
 - [ ] 优先用 `apply` / `blend_current` / `mask_current` 等 DSL 方法
 - [ ] 分支效果用 `blend_current` 而非手写 blend node
-- [ ] 不在 graph builder 中执行耗时操作（文件 I/O、网络请求等应在 processor 中）
+- [ ] graph builder、cache-key builder 和 processor 都不执行文件或网络 I/O
 - [ ] 不在 graph builder 中依赖全局可变状态
 
 ### 自定义渲染
 
 - [ ] 在 `buffer` 上做原地处理，不分配新的超大缓冲区
 - [ ] `Ok(())` 才表示成功，半成品不写回
-- [ ] 依赖外部资源时提供稳定 `cache_key`
+- [ ] 只对已绑定、不可变且有精确 revision 的资源提供稳定 `cache_key`
 - [ ] 正确处理 width/height 和 RGBA 步长（`buffer.len() == width * height * 4`）
 
 ### 缓存与性能
 
 - [ ] deterministic 效果声明 `Deterministic`
 - [ ] frame-dependent 效果明确标为 `FrameDependent`
-- [ ] 外部资源相关特效提供 `cache_key`
+- [ ] 外部资源 key 包含内容/revision 身份，而不是 path 或 URL
 - [ ] 大型自定义效果尽量把稳定子步骤拆出来
 
 ### 版本与容错
@@ -113,7 +114,11 @@ cache_key 必须在相同语义下产生相同值。
 
 ```rust
 // 反模式
-let def = EffectPluginDefinitionBuilder::new("plugin.example.everything", "Everything")
+let def = EffectPluginDefinitionBuilder::new(
+    "plugin.example.everything",
+    "Everything",
+    EffectColorDomainContract::SCENE_LINEAR,
+)
     .with_graph(|...| {
         // 根据某个参数切换完全不相关的处理逻辑
         if mode == "blur" {
@@ -149,7 +154,7 @@ Arc::new(|buffer, width, height, params, frame_seed| {
 
 应该先全部计算到临时缓冲区，确认全部成功后再写回。或者利用运行时提供的 staged buffer 保证——处理器在独立 buffer 上执行，失败时结果自动丢弃。
 
-### 3.6 在 graph builder 中做文件 I/O
+### 3.6 在逐帧执行闭包中做文件 I/O
 
 ```rust
 // 反模式
@@ -159,7 +164,11 @@ Arc::new(|buffer, width, height, params, frame_seed| {
 })
 ```
 
-Graph builder 在每帧渲染时都可能被调用。文件 I/O 应放在 custom render processor 中，并配合 cache_key 确保只在必要时重新读取。
+Graph builder、cache-key builder 和 custom processor 都可能位于逐帧执行路径，三者
+均不得负责文件或网络 I/O。资源必须在执行路径之外解析为不可变 payload，并用稳定
+内容/revision 身份绑定。当前高层插件 SDK 对作者可选外部资源尚无完整
+preparation/revalidation Interface；这类实例在该边界落地前必须失败关闭，不能把 I/O
+挪到 processor、用 path-only key 或把缺失资源当 identity。
 
 ## 4. 代码审查自检清单
 

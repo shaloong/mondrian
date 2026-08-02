@@ -1,28 +1,31 @@
+use super::decode_session::{external_exact_frame_is_publishable, finalize_preview_decode_outcome};
 use super::{
-    apply_preview_codec_threading_policy, clear_global_preview_frame_cache,
-    clear_thread_local_preview_decode_session, convert_decoded_to_rgba,
-    decode_preview_frame_cancellable, decoded_native_surface_format_from_software_format,
-    decoded_surface_format_from_pixel, decoded_video_sampling_from_frame, duration_us,
-    exact_seek_non_reference_discard_until_pts, forward_decode_work_units,
-    materialize_decoded_frame, preview_cache_get, preview_cache_put_with_fingerprint,
-    preview_create_rgba_scaler, preview_decode_interrupt_callback,
+    apply_preview_codec_threading_policy, clear_thread_local_preview_decode_session,
+    convert_decoded_to_rgba, decode_preview_frame_cancellable,
+    decoded_native_surface_format_from_software_format, decoded_surface_format_from_pixel,
+    decoded_temporal_candidate_within_selection_distance, decoded_video_sampling_from_frame,
+    duration_us, exact_seek_non_reference_discard_until_pts, forward_decode_work_units,
+    materialize_decoded_frame, preview_create_rgba_scaler, preview_decode_interrupt_callback,
     preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, preview_hardware_extra_frames,
-    preview_seek_index_cache_get, preview_seek_index_cache_put, resolve_cpu_rgba_contract,
-    run_external_decode_command_cancellable, temporal_selection_is_approximate,
-    DecodedRgbaFrameContract, FfmpegAvD3D12VaFrame, FfmpegAvD3D12VaSyncContext,
-    FfmpegNativeDecodedFrameResource, FfmpegNativeDecodedFrameResourceError, MediaFileFingerprint,
-    PreviewDecodeAccessMode, PreviewDecodeAccessPolicy, PreviewDecodeAdaptiveHints,
-    PreviewDecodeBackend, PreviewDecodeCancellation, PreviewDecodeCancellationCheckpoint,
-    PreviewDecodeCancellationSource, PreviewDecodeDiagnostics, PreviewDecodeExecutionObserver,
-    PreviewDecodeExecutionPath, PreviewDecodeExecutionStage, PreviewDecodeInterruptState,
-    PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
-    PreviewDecodeSessionContext, PreviewDecodeStageDurations, PreviewDecodeThreadingConfig,
-    PreviewDecodeThreadingKind, PreviewDecodedFramePayload, PreviewHardwareDecodeBlocker,
+    resolve_cpu_rgba_contract, run_external_decode_command_cancellable,
+    select_decoded_temporal_candidate, temporal_selection_is_approximate, DecodedRgbaFrameContract,
+    DecodedTemporalCandidate, DecodedTemporalExtent, FfmpegAvD3D12VaFrame,
+    FfmpegAvD3D12VaSyncContext, FfmpegNativeDecodedFrameResource,
+    FfmpegNativeDecodedFrameResourceError, MediaFileChangeStamp, MediaFileFingerprint,
+    MediaFileObjectIdentity, PreviewDecodeAccessMode, PreviewDecodeAccessPolicy,
+    PreviewDecodeAdaptiveHints, PreviewDecodeBackend, PreviewDecodeCancellation,
+    PreviewDecodeCancellationCheckpoint, PreviewDecodeCancellationSource, PreviewDecodeDiagnostics,
+    PreviewDecodeExecutionObserver, PreviewDecodeExecutionPath, PreviewDecodeExecutionStage,
+    PreviewDecodeInterruptState, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest,
+    PreviewDecodeSeekStrategy, PreviewDecodeSessionContext, PreviewDecodeSessionDisposition,
+    PreviewDecodeStageDurations, PreviewDecodeThreadingConfig, PreviewDecodeThreadingKind,
+    PreviewDecodedFramePayload, PreviewHardwareDecodeBlocker,
     PreviewHardwareDecodeCpuTransferStatus, PreviewHardwareDecodeDecision,
     PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest, PreviewNativeDecodeFallback,
     PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
     PreviewNativeDecodedFrameResource, PreviewPlaybackRing, PreviewScrubAdaptiveClass,
-    PreviewSeekIndex, PreviewSeekIndexDiagnostics, PreviewSeekIndexSource, PreviewSeekResolution,
+    PreviewSeekIndex, PreviewSeekIndexCache, PreviewSeekIndexCachePolicy,
+    PreviewSeekIndexDiagnostics, PreviewSeekIndexSource, PreviewSeekResolution,
     PreviewSourceColorContract, RgbaFrame, PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES,
     PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES, PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
     PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES,
@@ -37,18 +40,36 @@ use crate::decoder::{
 };
 use ffmpeg_next as ffmpeg;
 use mondrian_core::types::ColorSpace;
-use mondrian_core::TimelineTime;
+use mondrian_core::{MondrianError, TimelineTime};
 use serde::Serialize;
 use std::any::Any;
 use std::ffi::c_void;
-use std::net::TcpListener;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc};
-use std::thread;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+fn synthetic_file_fingerprint(
+    len: u64,
+    modified_secs: u64,
+    modified_nanos: u32,
+) -> MediaFileFingerprint {
+    MediaFileFingerprint {
+        len: Some(len),
+        modified_secs: Some(modified_secs),
+        modified_nanos: Some(modified_nanos),
+        object_identity: Some(MediaFileObjectIdentity::Unix {
+            device: 1,
+            inode: len ^ modified_secs,
+        }),
+        change_stamp: Some(MediaFileChangeStamp::Unix {
+            seconds: modified_secs as i64,
+            nanoseconds: i64::from(modified_nanos),
+        }),
+    }
+}
 
 #[test]
 fn gpu_resident_decode_reserves_external_hardware_frame_leases() {
@@ -71,47 +92,178 @@ fn gpu_resident_decode_reserves_external_hardware_frame_leases() {
 }
 
 #[test]
-fn exact_decode_accepts_container_pts_quantization_within_frame_tolerance() {
-    let policy =
-        PreviewDecodeAccessPolicy::for_access_mode(PreviewDecodeAccessMode::PlaybackCursor);
+fn decoded_temporal_extent_is_end_exclusive_and_unknown_is_point_only() {
+    let extent = DecodedTemporalExtent::from_duration(1_000, 40);
+    assert!(extent.covers(1_000));
+    assert!(extent.covers(1_039));
+    assert!(!extent.covers(1_040));
 
+    let unknown = DecodedTemporalExtent::point(2_000);
+    assert!(unknown.covers(2_000));
+    assert!(!unknown.covers(2_001));
+    assert!(!temporal_selection_is_approximate(2_000, Some(unknown)));
+    assert!(temporal_selection_is_approximate(2_001, Some(unknown)));
+    assert!(!temporal_selection_is_approximate(2_001, None));
+
+    let mut unproven_diagnostics =
+        PreviewDecodeDiagnostics::new(PreviewDecodePath::InProcessFfmpegCpuRgba);
+    unproven_diagnostics.selected_pts = Some(3_000);
+    unproven_diagnostics.selected_duration_pts = Some(40);
+    let unproven = DecodedTemporalExtent::from_diagnostics(unproven_diagnostics)
+        .expect("selected PTS must retain point evidence");
+    assert_eq!(unproven.source, super::PreviewTemporalExtentSource::Unknown);
+    assert!(!unproven.covers(3_001));
+}
+
+#[test]
+fn real_concat_duration_selects_covering_before_even_when_successor_is_nearer() {
+    let before = DecodedTemporalExtent::from_duration(735_560_143, 55_882);
+    let after = DecodedTemporalExtent::from_duration(735_616_025, 20_020);
+
+    for requested_pts in [735_574_840, 735_594_860] {
+        for access_mode in [
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+        ] {
+            let selected = select_decoded_temporal_candidate(
+                requested_pts,
+                access_mode,
+                Some(before),
+                Some(after),
+            )
+            .expect("covering temporal candidate");
+            assert_eq!(selected, (DecodedTemporalCandidate::Before, before));
+            assert!(!temporal_selection_is_approximate(
+                requested_pts,
+                Some(selected.1)
+            ));
+        }
+    }
+    assert!(
+        after.distance_to(735_594_860) < before.distance_to(735_594_860),
+        "fixture must prove nearest-PTS selection would choose the wrong future frame"
+    );
+}
+
+#[test]
+fn successor_boundary_proves_unknown_before_extent_without_claiming_a_gap() {
+    let before = DecodedTemporalExtent::point(10_000);
+    let after = DecodedTemporalExtent::point(10_040);
+    let selected = select_decoded_temporal_candidate(
+        10_039,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        Some(before),
+        Some(after),
+    )
+    .expect("successor-proven temporal candidate");
+
+    assert_eq!(selected.0, DecodedTemporalCandidate::Before);
+    assert_eq!(selected.1.duration_pts, Some(40));
+    assert!(selected.1.covers(10_039));
+    assert!(!selected.1.covers(10_040));
+}
+
+#[test]
+fn successor_boundary_overrides_an_overlapping_declared_duration() {
+    let before = DecodedTemporalExtent::from_duration(100, 100);
+    let after = DecodedTemporalExtent::from_duration(140, 20);
+
+    let before_selection = select_decoded_temporal_candidate(
+        139,
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+        Some(before),
+        Some(after),
+    )
+    .expect("pre-successor request must select the predecessor");
+    assert_eq!(before_selection.0, DecodedTemporalCandidate::Before);
+    assert_eq!(before_selection.1.end_pts(), Some(140));
+
+    let after_selection = select_decoded_temporal_candidate(
+        150,
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+        Some(before),
+        Some(after),
+    )
+    .expect("post-successor request must select the successor");
+    assert_eq!(after_selection.0, DecodedTemporalCandidate::After);
     assert!(!temporal_selection_is_approximate(
-        667,
-        Some(672),
-        336,
-        policy
-    ));
-    assert!(!temporal_selection_is_approximate(
-        667,
-        Some(667),
-        336,
-        policy
-    ));
-    assert!(!temporal_selection_is_approximate(667, None, 336, policy));
-    assert!(temporal_selection_is_approximate(
-        667,
-        Some(1_004),
-        336,
-        policy
+        150,
+        Some(after_selection.1)
     ));
 }
 
 #[test]
-fn keyframe_only_decode_reports_any_non_exact_temporal_selection() {
-    let policy = PreviewDecodeAccessPolicy::for_access_mode(PreviewDecodeAccessMode::ScrubCursor);
+fn long_successor_proven_vfr_extent_is_not_rejected_by_nominal_distance() {
+    let before = DecodedTemporalExtent::point(100);
+    let after = DecodedTemporalExtent::point(1_000);
+    let selected = select_decoded_temporal_candidate(
+        900,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        Some(before),
+        Some(after),
+    )
+    .expect("successor must prove the long VFR hold");
 
-    assert!(policy.keyframe_only);
+    assert_eq!(selected.0, DecodedTemporalCandidate::Before);
+    assert!(selected.1.covers(900));
+    assert!(
+        decoded_temporal_candidate_within_selection_distance(selected.1, 900, 80),
+        "a proven covering interval must not be constrained by a nominal-frame distance"
+    );
+}
+
+#[test]
+fn positive_frame_duration_is_mode_independent_without_a_successor() {
+    let frame_extent = DecodedTemporalExtent::from_duration(100, 100);
+
+    for access_mode in [
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeAccessMode::ScrubCursor,
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+    ] {
+        let selected =
+            select_decoded_temporal_candidate(150, access_mode, Some(frame_extent), None)
+                .expect("positive frame duration must cover independently of access policy");
+
+        assert_eq!(selected.0, DecodedTemporalCandidate::Before);
+        assert_eq!(selected.1, frame_extent);
+        assert!(!temporal_selection_is_approximate(150, Some(selected.1)));
+    }
+}
+
+#[test]
+fn exact_access_rejects_a_true_gap_while_scrub_may_choose_nearest_degraded() {
+    let before = DecodedTemporalExtent::from_duration(100, 5);
+    let after = DecodedTemporalExtent::from_duration(120, 5);
+    let requested_pts = 118;
+
+    for access_mode in [
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+    ] {
+        let selected = select_decoded_temporal_candidate(
+            requested_pts,
+            access_mode,
+            Some(before),
+            Some(after),
+        );
+        assert!(
+            selected.is_none(),
+            "exact access cannot publish an uncovered frame"
+        );
+    }
+
+    let scrub = select_decoded_temporal_candidate(
+        requested_pts,
+        PreviewDecodeAccessMode::ScrubCursor,
+        Some(before),
+        Some(after),
+    )
+    .expect("nearest scrub candidate");
+    assert_eq!(scrub.0, DecodedTemporalCandidate::After);
     assert!(temporal_selection_is_approximate(
-        667,
-        Some(672),
-        336,
-        policy
-    ));
-    assert!(!temporal_selection_is_approximate(
-        667,
-        Some(667),
-        336,
-        policy
+        requested_pts,
+        Some(scrub.1)
     ));
 }
 
@@ -426,10 +578,9 @@ fn hardware_decode_plan_can_prefer_cpu_transfer_without_requiring_native_residen
         PreviewHardwareDecodeRequest::PreferHardwareDecode
     );
     if plan.ffmpeg_codec_config.ffmpeg_codec_config_available {
-        assert_eq!(
-            plan.ffmpeg_device_context.device_create_attempted,
-            plan.ffmpeg_device_context.ffmpeg_device_type_available
-        );
+        assert!(!plan.ffmpeg_device_context.device_create_attempted);
+        assert!(!plan.ffmpeg_device_context.device_context_created);
+        assert!(plan.ffmpeg_device_context.reason.contains("owning decode Session"));
     }
 }
 
@@ -449,10 +600,9 @@ fn hardware_decode_plan_configures_required_gpu_without_cpu_transfer_fallback() 
     );
     assert!(!plan.allows_cpu_transfer_fallback());
     if plan.ffmpeg_codec_config.ffmpeg_codec_config_available {
-        assert_eq!(
-            plan.ffmpeg_device_context.device_create_attempted,
-            plan.ffmpeg_device_context.ffmpeg_device_type_available
-        );
+        assert!(!plan.ffmpeg_device_context.device_create_attempted);
+        assert!(!plan.ffmpeg_device_context.device_context_created);
+        assert!(plan.ffmpeg_device_context.reason.contains("owning decode Session"));
     }
 }
 
@@ -467,6 +617,34 @@ fn hardware_decode_plan_supports_interactive_access_modes() {
             access_mode,
             PreviewDecodeBackend::Auto,
         ));
+    }
+}
+
+#[test]
+fn hardware_decode_plan_advances_to_the_next_static_candidate_after_session_failure() {
+    let mut plan = PreviewHardwareDecodePlan::resolve(
+        PreviewHardwareDecodeRequest::PreferHardwareDecode,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeBackend::Auto,
+        ffmpeg::codec::Id::H264,
+        None,
+    );
+    let first = plan.probe.candidate_backend;
+    plan.mark_device_context_setup_failed(crate::decoder::HwAccelDeviceContextProbe::deferred(
+        first.unwrap_or(HwAccelBackend::None),
+        true,
+        "test first-backend failure",
+    ));
+
+    if plan.advance_hardware_candidate(
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeBackend::Auto,
+    ) {
+        assert_ne!(plan.probe.candidate_backend, first);
+        assert_eq!(
+            plan.hardware_cpu_transfer_status,
+            PreviewHardwareDecodeCpuTransferStatus::NotAttempted
+        );
     }
 }
 
@@ -643,11 +821,7 @@ fn preview_decode_access_mode_names_and_defaults_are_stable() {
 #[test]
 fn preview_decode_rgba_request_preserves_explicit_contract_fields() {
     let path = PathBuf::from("E:/media/source.mov");
-    let fingerprint = MediaFileFingerprint {
-        len: Some(10),
-        modified_secs: Some(20),
-        modified_nanos: Some(30),
-    };
+    let fingerprint = synthetic_file_fingerprint(10, 20, 30);
     let request = PreviewDecodeRequest::new(
         path.as_path(),
         TimelineTime::new(5, 4).expect("exact source time"),
@@ -766,17 +940,6 @@ fn preview_decode_access_policy_budget_exhaustion_is_inclusive() {
         .forward_decode_budget_exhausted(scrub.forward_decode_budget_frames.saturating_sub(1)));
     assert!(scrub.forward_decode_budget_exhausted(scrub.forward_decode_budget_frames));
     assert!(scrub.forward_decode_budget_exhausted(scrub.forward_decode_budget_frames + 1));
-}
-
-#[test]
-fn only_scrub_accepts_first_decoded_frame_inside_evidenced_gop_radius() {
-    let scrub = PreviewDecodeAccessPolicy::for_access_mode(PreviewDecodeAccessMode::ScrubCursor);
-    let still =
-        PreviewDecodeAccessPolicy::for_access_mode(PreviewDecodeAccessMode::RandomAccessStillFrame);
-
-    assert!(scrub.accepts_first_decoded_approximation(1_900, 2_000, 100));
-    assert!(!scrub.accepts_first_decoded_approximation(1_899, 2_000, 100));
-    assert!(!still.accepts_first_decoded_approximation(1_900, 2_000, 100));
 }
 
 #[test]
@@ -905,6 +1068,10 @@ fn preview_decode_access_policy_forward_reuse_is_mode_specific() {
         frame_duration,
         false
     ));
+    assert!(
+        !playback.can_continue_forward(last_pts, last_pts, frame_duration, false),
+        "an exact target equal to the decoder cursor requires retained-frame reuse or a fresh seek"
+    );
     assert!(!still.can_continue_forward(last_pts, last_pts, frame_duration, false));
     assert!(!playback.can_continue_forward(
         last_pts,
@@ -975,18 +1142,16 @@ fn preview_seek_index_can_be_seeded_from_probe_keyframes() {
 #[test]
 fn preview_seek_index_cache_is_keyed_by_path_fingerprint_and_stream() {
     let path = Path::new("cache-keyed-video.mov");
-    let fingerprint = MediaFileFingerprint {
-        len: Some(10),
-        modified_secs: Some(20),
-        modified_nanos: Some(30),
-    };
+    let fingerprint = synthetic_file_fingerprint(10, 20, 30);
+    let cache = PreviewSeekIndexCache::default();
 
-    preview_seek_index_cache_put(path, fingerprint, 1, &[300, 100, 300]);
+    cache.put(path, fingerprint, 1, &[300, 100, 300]);
 
-    assert!(preview_seek_index_cache_get(path, fingerprint, 0).is_none());
-    assert!(preview_seek_index_cache_get(Path::new("other-video.mov"), fingerprint, 1).is_none());
+    assert!(cache.get(path, fingerprint, 0).is_none());
+    assert!(cache.get(Path::new("other-video.mov"), fingerprint, 1).is_none());
 
-    let index = preview_seek_index_cache_get(path, fingerprint, 1)
+    let index = cache
+        .get(path, fingerprint, 1)
         .expect("probe-backed seek index should round-trip through cache");
     assert_eq!(index.keyframe_at_or_before(250), Some(100));
     assert_eq!(index.keyframe_at_or_before(400), Some(300));
@@ -999,6 +1164,59 @@ fn preview_seek_index_cache_is_keyed_by_path_fingerprint_and_stream() {
             source: PreviewSeekIndexSource::ProbeBacked,
         }
     );
+}
+
+#[test]
+fn preview_seek_index_cache_trims_online_by_lru_entry_and_anchor_budgets() {
+    let first_path = Path::new("first.mov");
+    let second_path = Path::new("second.mov");
+    let first_fingerprint = synthetic_file_fingerprint(11, 21, 31);
+    let second_fingerprint = synthetic_file_fingerprint(12, 22, 32);
+    let cache =
+        PreviewSeekIndexCache::new(PreviewSeekIndexCachePolicy::new(4, usize::MAX, usize::MAX));
+
+    cache.put(first_path, first_fingerprint, 0, &[10, 20]);
+    cache.put(second_path, second_fingerprint, 0, &[30, 40]);
+    assert!(cache.get(first_path, first_fingerprint, 0).is_some());
+
+    let initial_revision = cache.diagnostics().policy_revision;
+    let trimmed_policy = PreviewSeekIndexCachePolicy::new(1, usize::MAX, usize::MAX);
+    cache.reconfigure(trimmed_policy);
+    assert_eq!(cache.diagnostics().entries, 1);
+    assert!(cache.get(first_path, first_fingerprint, 0).is_some());
+    assert!(cache.get(second_path, second_fingerprint, 0).is_none());
+    assert_eq!(cache.diagnostics().policy_revision, initial_revision + 1);
+
+    cache.reconfigure(trimmed_policy);
+    assert_eq!(cache.diagnostics().policy_revision, initial_revision + 1);
+
+    let anchor_bounded =
+        PreviewSeekIndexCache::new(PreviewSeekIndexCachePolicy::new(4, 3, usize::MAX));
+    anchor_bounded.put(first_path, first_fingerprint, 0, &[10, 20]);
+    anchor_bounded.put(second_path, second_fingerprint, 0, &[30, 40]);
+    let diagnostics = anchor_bounded.diagnostics();
+    assert_eq!(diagnostics.entries, 1);
+    assert_eq!(diagnostics.retained_anchors, 2);
+    assert_eq!(diagnostics.evictions, 1);
+}
+
+#[test]
+fn preview_seek_index_cache_rejects_oversize_entries_and_shares_one_owner() {
+    let path = Path::new("shared.mov");
+    let fingerprint = synthetic_file_fingerprint(13, 23, 33);
+    let cache = PreviewSeekIndexCache::default();
+    let shared = cache.clone();
+
+    cache.put(path, fingerprint, 0, &[10]);
+    assert!(shared.get(path, fingerprint, 0).is_some());
+    assert_eq!(cache.diagnostics().hits, 1);
+
+    let byte_bounded = PreviewSeekIndexCache::new(PreviewSeekIndexCachePolicy::new(4, 4, 1));
+    byte_bounded.put(path, fingerprint, 0, &[10]);
+    assert!(byte_bounded.get(path, fingerprint, 0).is_none());
+    let diagnostics = byte_bounded.diagnostics();
+    assert_eq!(diagnostics.entries, 0);
+    assert_eq!(diagnostics.rejected_entries, 1);
 }
 
 #[test]
@@ -1161,19 +1379,17 @@ fn cpu_rgba_contract_uses_explicit_bt2020_matrix_and_limited_range() {
 }
 
 #[test]
-fn cpu_rgba_contract_falls_back_only_to_explicit_source_facts() {
+fn cpu_rgba_contract_rejects_yuv_without_explicit_matrix_evidence() {
     let frame =
         ffmpeg::util::frame::video::Video::new(ffmpeg::util::format::pixel::Pixel::YUV420P, 16, 16);
 
-    let contract = resolve_cpu_rgba_contract(
+    let error = resolve_cpu_rgba_contract(
         &frame,
         PreviewSourceColorContract::automatic(ColorSpace::Rec709, DecodedVideoRange::Limited),
         Path::new("untagged-rec709.mov"),
     )
-    .expect("explicit app contract must resolve missing frame tags");
-
-    assert_eq!(contract.applied_matrix, DecodedVideoMatrix::Bt709);
-    assert_eq!(contract.applied_range, DecodedVideoRange::Limited);
+    .expect_err("RGB color identity must not synthesize a missing YUV matrix");
+    assert!(error.to_string().contains("YUV matrix is unspecified"));
 
     let mut tagged_yuv = frame;
     tagged_yuv.set_color_space(ffmpeg::util::color::Space::BT709);
@@ -1184,6 +1400,16 @@ fn cpu_rgba_contract_falls_back_only_to_explicit_source_facts() {
     )
     .expect("decoded YUV matrix remains authoritative for an RGB-defined source space");
     assert_eq!(srgb_contract.applied_matrix, DecodedVideoMatrix::Bt709);
+
+    let mut rgb_matrix_yuv = tagged_yuv;
+    rgb_matrix_yuv.set_color_space(ffmpeg::util::color::Space::RGB);
+    let error = resolve_cpu_rgba_contract(
+        &rgb_matrix_yuv,
+        PreviewSourceColorContract::automatic(ColorSpace::Rec709, DecodedVideoRange::Limited),
+        Path::new("yuv-with-rgb-matrix.mov"),
+    )
+    .expect_err("YUV sampling cannot execute with RGB/GBR matrix metadata");
+    assert!(error.to_string().contains("cannot use RGB/GBR matrix"));
 }
 
 #[test]
@@ -1342,7 +1568,8 @@ fn rgba_frame_diagnostics_record_cpu_residency_and_cache_hits() {
         test_rgba_contract(),
         PreviewDecodePath::InProcessFfmpegCpuRgba,
     )
-    .with_elapsed(std::time::Duration::from_micros(42));
+    .with_elapsed(std::time::Duration::from_micros(42))
+    .with_temporal_selection(24_000, Some(DecodedTemporalExtent::point(18_000)));
 
     assert_eq!(
         frame.diagnostics.path,
@@ -1352,7 +1579,10 @@ fn rgba_frame_diagnostics_record_cpu_residency_and_cache_hits() {
     assert!(!frame.diagnostics.cache_hit);
     assert!(!frame.diagnostics.external_process);
     assert!(frame.diagnostics.cpu_resident);
-    assert!(!frame.diagnostics.session_reused);
+    assert_eq!(
+        frame.diagnostics.session_disposition,
+        PreviewDecodeSessionDisposition::Unspecified
+    );
     assert!(!frame.diagnostics.forward_reused);
     assert!(!frame.diagnostics.seek_index_available);
     assert_eq!(frame.diagnostics.seek_index_keyframes, 0);
@@ -1375,37 +1605,17 @@ fn rgba_frame_diagnostics_record_cpu_residency_and_cache_hits() {
     assert_eq!(frame.diagnostics.forward_reuse_frame_window, 0);
     assert_eq!(frame.diagnostics.forward_decode_budget_frames, 0);
     assert_eq!(frame.diagnostics.any_seek_window_ms, 0);
-    let reused = frame.clone().with_session_reused(true).with_forward_reused(true);
-    assert!(reused.diagnostics.session_reused);
+    let reused = frame
+        .clone()
+        .with_session_disposition(PreviewDecodeSessionDisposition::Reused)
+        .with_forward_reused(true);
+    assert_eq!(
+        reused.diagnostics.session_disposition,
+        PreviewDecodeSessionDisposition::Reused
+    );
     assert!(reused.diagnostics.forward_reused);
 
-    let cached = frame.into_cache_hit(
-        std::time::Duration::from_micros(3),
-        PreviewDecodeAccessMode::PlaybackCursor,
-    );
-    assert_eq!(cached.diagnostics.path, PreviewDecodePath::PreviewCacheHit);
-    assert_eq!(cached.diagnostics.elapsed_us, 3);
-    assert!(cached.diagnostics.cache_hit);
-    assert!(cached.diagnostics.cpu_resident);
-    assert_eq!(
-        cached.diagnostics.access_mode,
-        PreviewDecodeAccessMode::PlaybackCursor
-    );
-    assert_eq!(
-        cached.diagnostics.seek_strategy,
-        PreviewDecodeSeekStrategy::KeyframeBefore
-    );
-    assert_eq!(
-        cached.diagnostics.forward_reuse_frame_window,
-        PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES
-    );
-    assert_eq!(
-        cached.diagnostics.forward_decode_budget_frames,
-        PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES as u32
-    );
-    assert_eq!(cached.diagnostics.any_seek_window_ms, 0);
-
-    let ring_hit = cached.into_playback_ring_hit(std::time::Duration::from_micros(2));
+    let ring_hit = frame.into_playback_ring_hit(std::time::Duration::from_micros(2));
     assert_eq!(
         ring_hit.diagnostics.path,
         PreviewDecodePath::PlaybackSessionRingHit
@@ -1413,6 +1623,10 @@ fn rgba_frame_diagnostics_record_cpu_residency_and_cache_hits() {
     assert_eq!(ring_hit.diagnostics.elapsed_us, 2);
     assert!(ring_hit.diagnostics.cache_hit);
     assert!(ring_hit.diagnostics.cpu_resident);
+    assert_eq!(
+        ring_hit.diagnostics.session_disposition,
+        PreviewDecodeSessionDisposition::BypassedCache
+    );
     assert_eq!(
         ring_hit.diagnostics.access_mode,
         PreviewDecodeAccessMode::PlaybackCursor
@@ -1426,10 +1640,22 @@ fn rgba_frame_diagnostics_record_cpu_residency_and_cache_hits() {
         PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES as u32
     );
     assert_eq!(ring_hit.diagnostics.any_seek_window_ms, 0);
+    assert_eq!(ring_hit.diagnostics.requested_pts, Some(24_000));
+    assert_eq!(ring_hit.diagnostics.selected_pts, Some(18_000));
+    assert!(ring_hit.diagnostics.temporal_approximation);
+
+    let rebound = PreviewDecodedFramePayload::CpuRgba(ring_hit)
+        .with_temporal_selection(18_000, Some(DecodedTemporalExtent::point(18_000)));
+    let PreviewDecodedFramePayload::CpuRgba(rebound) = rebound else {
+        panic!("RGBA cache payload changed kind");
+    };
+    assert_eq!(rebound.diagnostics.requested_pts, Some(18_000));
+    assert_eq!(rebound.diagnostics.selected_pts, Some(18_000));
+    assert!(!rebound.diagnostics.temporal_approximation);
 }
 
 #[test]
-fn hardware_execution_provenance_survives_cache_and_playback_ring_reuse() {
+fn hardware_execution_provenance_survives_playback_ring_reuse() {
     let mut frame = RgbaFrame::new(
         2,
         1,
@@ -1450,21 +1676,14 @@ fn hardware_execution_provenance_survives_cache_and_playback_ring_reuse() {
     };
     assert_eq!(frame.decode_execution, expected);
 
-    let cached = frame.into_cache_hit(
-        std::time::Duration::from_micros(3),
-        PreviewDecodeAccessMode::PlaybackCursor,
-    );
-    assert_eq!(cached.decode_execution, expected);
-    assert!(!cached.diagnostics.hardware_decode_cpu_transfer_observed);
-
-    let ring_hit = cached.into_playback_ring_hit(std::time::Duration::from_micros(2));
+    let ring_hit = frame.into_playback_ring_hit(std::time::Duration::from_micros(2));
     assert_eq!(ring_hit.decode_execution, expected);
     assert!(!ring_hit.diagnostics.hardware_decode_cpu_transfer_observed);
 }
 
 #[test]
-fn playback_session_ring_uses_strict_tolerance_and_lru_capacity() {
-    let mut ring = PreviewPlaybackRing::new(2);
+fn playback_session_ring_uses_exact_temporal_extents_and_lru_capacity() {
+    let mut ring = PreviewPlaybackRing::new(2, 8);
     let frame_a = RgbaFrame::new(
         1,
         1,
@@ -1487,28 +1706,63 @@ fn playback_session_ring_uses_strict_tolerance_and_lru_capacity() {
         PreviewDecodePath::InProcessFfmpegCpuRgba,
     );
 
-    ring.put(100, frame_a.clone());
-    ring.put(110, frame_b.clone());
+    assert!(ring.put(
+        DecodedTemporalExtent::from_duration(100, 4),
+        frame_a.clone()
+    ));
+    assert!(ring.put(
+        DecodedTemporalExtent::from_duration(110, 10),
+        frame_b.clone()
+    ));
 
-    let PreviewDecodedFramePayload::CpuRgba(hit) = ring.get(103, 3).expect("within tolerance")
+    let (hit_extent, PreviewDecodedFramePayload::CpuRgba(hit)) =
+        ring.get(103).expect("inside the cached presentation interval")
     else {
         panic!("RGBA ring entry changed payload kind");
     };
+    assert_eq!(hit_extent, DecodedTemporalExtent::from_duration(100, 4));
     assert_eq!(hit.rgba(), frame_a.rgba());
-    assert!(ring.get(104, 3).is_none());
+    assert!(ring.get(104).is_none());
 
-    ring.put(120, frame_c.clone());
+    assert!(ring.put(
+        DecodedTemporalExtent::from_duration(120, 10),
+        frame_c.clone()
+    ));
 
-    assert!(ring.get(110, 1).is_none());
-    let PreviewDecodedFramePayload::CpuRgba(recent) = ring.get(100, 1).expect("recently used")
+    assert!(ring.get(110).is_none());
+    let (_, PreviewDecodedFramePayload::CpuRgba(recent)) = ring.get(100).expect("recently used")
     else {
         panic!("recent RGBA ring entry changed payload kind");
     };
     assert_eq!(recent.rgba(), frame_a.rgba());
-    let PreviewDecodedFramePayload::CpuRgba(newest) = ring.get(120, 1).expect("newest") else {
+    let (_, PreviewDecodedFramePayload::CpuRgba(newest)) = ring.get(120).expect("newest") else {
         panic!("newest RGBA ring entry changed payload kind");
     };
     assert_eq!(newest.rgba(), frame_c.rgba());
+}
+
+#[test]
+fn playback_session_ring_rejects_oversize_frames_and_evicts_by_bytes() {
+    let mut ring = PreviewPlaybackRing::new(8, 12);
+    let frame = |value, bytes| {
+        RgbaFrame::new(
+            (bytes / 4) as u32,
+            1,
+            vec![value; bytes],
+            test_rgba_contract(),
+            PreviewDecodePath::InProcessFfmpegCpuRgba,
+        )
+    };
+
+    assert!(ring.put(DecodedTemporalExtent::from_duration(10, 1), frame(1, 8)));
+    assert!(ring.put(DecodedTemporalExtent::from_duration(20, 1), frame(2, 8)));
+    assert_eq!(ring.reserved_bytes(), 8);
+    assert!(ring.get(10).is_none());
+    assert!(ring.get(20).is_some());
+
+    assert!(!ring.put(DecodedTemporalExtent::from_duration(30, 1), frame(3, 16)));
+    assert_eq!(ring.reserved_bytes(), 8);
+    assert!(ring.get(30).is_none());
 }
 
 #[test]
@@ -1843,7 +2097,6 @@ fn scene_linear_ffmpeg_float_frame_preserves_extended_range_rgba() {
     )
     .expect("scene-linear float frame should materialize without RGBA8 quantization");
 
-    let cached_payload = payload.clone();
     let PreviewDecodedFramePayload::CpuFloat(frame) = payload else {
         panic!("scene-linear FFmpeg float output must remain CPU float");
     };
@@ -1852,22 +2105,6 @@ fn scene_linear_ffmpeg_float_frame_preserves_extended_range_rgba() {
         frame.diagnostics.decoded_frame_residency,
         DecodedFrameResidency::CpuFloat
     );
-
-    clear_global_preview_frame_cache();
-    let path = PathBuf::from("synthetic-linear.exr");
-    let fingerprint = MediaFileFingerprint {
-        len: Some(128),
-        modified_secs: Some(1),
-        modified_nanos: Some(2),
-    };
-    cached_payload.cache_cpu_frame(&path, fingerprint, 2, 1, 7);
-    let hit = preview_cache_get(&path, fingerprint, test_linear_source_color(), 2, 1, 7, 1)
-        .expect("float preview should enter the shared frame cache");
-    let PreviewDecodedFramePayload::CpuFloat(cached) = hit.frame else {
-        panic!("float preview cache changed payload kind");
-    };
-    assert_eq!(cached.rgba(), pixels.as_flattened());
-    clear_global_preview_frame_cache();
 }
 
 #[test]
@@ -1907,8 +2144,7 @@ fn gpu_required_software_frame_fails_closed() {
 }
 
 #[test]
-fn explicit_d3d11_nv12_frame_materializes_native_without_cpu_cache() {
-    clear_global_preview_frame_cache();
+fn explicit_d3d11_nv12_frame_materializes_native_without_cpu_payload() {
     let decoded = synthetic_d3d11_frame(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NV12);
     let mut plan = PreviewHardwareDecodePlan::resolve(
         PreviewHardwareDecodeRequest::Auto,
@@ -1948,15 +2184,6 @@ fn explicit_d3d11_nv12_frame_materializes_native_without_cpu_cache() {
         PreviewHardwareDecodeDecision::GpuResidentNative
     );
     assert_eq!(plan.native_decode_fallback, None);
-
-    let path = PathBuf::from("synthetic-d3d11");
-    let fingerprint = MediaFileFingerprint {
-        len: None,
-        modified_secs: None,
-        modified_nanos: None,
-    };
-    payload.cache_cpu_frame(&path, fingerprint, 960, 540, 42);
-    assert!(preview_cache_get(&path, fingerprint, test_source_color(), 960, 540, 42, 1).is_none());
 }
 
 #[test]
@@ -2148,65 +2375,6 @@ fn cancellable_preview_decode_returns_canceled_before_opening_missing_file() {
 }
 
 #[test]
-fn ffmpeg_input_open_interrupts_a_blocked_http_read() {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind local stall server");
-    let address = listener.local_addr().expect("stall server address");
-    let (accepted_tx, accepted_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let server = thread::spawn(move || {
-        let (stream, _) = listener.accept().expect("accept FFmpeg HTTP connection");
-        accepted_tx.send(()).expect("publish accepted connection");
-        let _stream = stream;
-        let _ = release_rx.recv_timeout(Duration::from_secs(5));
-    });
-
-    let canceled = Arc::new(AtomicBool::new(false));
-    let worker_canceled = Arc::clone(&canceled);
-    let url = PathBuf::from(format!("http://{address}/blocked-open.mp4"));
-    let (outcome_tx, outcome_rx) = mpsc::channel();
-    let worker = thread::spawn(move || {
-        let request = PreviewDecodeRequest::new(
-            url.as_path(),
-            TimelineTime::ZERO,
-            PreviewDecodeAccessMode::PlaybackCursor,
-            test_source_color(),
-        )
-        .with_fingerprint(MediaFileFingerprint::default())
-        .with_max_size(Some(320), Some(180));
-        let outcome = decode_preview_frame_cancellable(request, move || {
-            worker_canceled.load(Ordering::Acquire)
-        });
-        let _ = outcome_tx.send(outcome);
-    });
-
-    accepted_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("FFmpeg must enter the controlled blocking read");
-    let requested_at = Instant::now();
-    canceled.store(true, Ordering::Release);
-    let outcome = outcome_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("FFmpeg interrupt callback must stop blocked input open")
-        .expect("blocked input cancellation must not become a media failure");
-    let return_latency = requested_at.elapsed();
-
-    let _ = release_tx.send(());
-    worker.join().expect("decode worker must return");
-    server.join().expect("stall server must return");
-    assert_eq!(
-        match outcome {
-            PreviewDecodeOutcome::Canceled(cancellation) => cancellation,
-            other => panic!("expected cancellation, got {other:?}"),
-        },
-        PreviewDecodeCancellation::ffmpeg_interrupt(PreviewDecodeCancellationCheckpoint::InputOpen,)
-    );
-    assert!(
-        return_latency <= Duration::from_millis(500),
-        "blocked input open returned too late after cancellation: {return_latency:?}"
-    );
-}
-
-#[test]
 fn format_interrupt_callback_uses_only_the_active_request_probe() {
     let observer = PreviewDecodeExecutionObserver::new();
     let state = Arc::new(PreviewDecodeInterruptState::with_execution_observer(
@@ -2243,7 +2411,6 @@ fn playback_session_drains_reordered_frames_between_sequential_requests() {
     let root = tempfile::tempdir().expect("tempdir");
     let path = root.path().join("h264-bframes.mp4");
     std::fs::write(&path, FIXTURE).expect("write synthetic H.264 fixture");
-    clear_global_preview_frame_cache();
     clear_thread_local_preview_decode_session();
 
     let mut decoded_pixels = Vec::new();
@@ -2261,10 +2428,12 @@ fn playback_session_drains_reordered_frames_between_sequential_requests() {
             panic!("CPU playback fixture must return an RGBA frame");
         };
         if index > 5 {
-            assert!(
-                frame.diagnostics.session_reused,
-                "sequential playback requests must exercise one decoder session"
-            );
+            let expected = if frame.diagnostics.path == PreviewDecodePath::PlaybackSessionRingHit {
+                PreviewDecodeSessionDisposition::BypassedCache
+            } else {
+                PreviewDecodeSessionDisposition::Reused
+            };
+            assert_eq!(frame.diagnostics.session_disposition, expected);
         }
         decoded_pixels.push(frame.rgba().to_vec());
     }
@@ -2274,7 +2443,45 @@ fn playback_session_drains_reordered_frames_between_sequential_requests() {
         "the moving fixture must produce distinct decoded frames"
     );
     clear_thread_local_preview_decode_session();
-    clear_global_preview_frame_cache();
+}
+
+#[test]
+fn exact_random_access_decodes_stream_start_with_negative_dts_preroll() {
+    const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("h264-bframes-start.mp4");
+    std::fs::write(&path, FIXTURE).expect("write synthetic H.264 fixture");
+    let mut context = PreviewDecodeSessionContext::new();
+    let fingerprint = MediaFileFingerprint::capture(&path);
+    for frame_index in [0, 1] {
+        let request = PreviewDecodeRequest::new(
+            path.as_path(),
+            TimelineTime::new(frame_index, 25).expect("exact source time"),
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            test_source_color(),
+        )
+        .with_max_size(Some(16), Some(16))
+        .with_video_stream_index(0)
+        .with_fingerprint(fingerprint);
+
+        let outcome = context
+            .decode_cancellable(request, || false)
+            .unwrap_or_else(|error| panic!("exact frame {frame_index} must decode: {error}"));
+        let PreviewDecodeOutcome::Frame(frame) = outcome else {
+            panic!("CPU exact fixture must return an RGBA frame");
+        };
+        assert_eq!(frame.diagnostics.requested_pts, Some(frame_index * 512));
+        assert_eq!(frame.diagnostics.selected_pts, Some(frame_index * 512));
+        assert!(!frame.diagnostics.temporal_approximation);
+        assert_eq!(
+            frame.diagnostics.session_disposition,
+            if frame_index > 0 {
+                PreviewDecodeSessionDisposition::Reused
+            } else {
+                PreviewDecodeSessionDisposition::Opened
+            }
+        );
+    }
 }
 
 #[test]
@@ -2320,8 +2527,9 @@ fn isolated_demux_worker_reuses_each_access_mode_session_across_requests() {
     };
     assert_eq!((second_frame.width, second_frame.height), (64, 64));
     assert!(second_frame.diagnostics.seek_performed);
-    assert!(
-        second_frame.diagnostics.session_reused,
+    assert_eq!(
+        second_frame.diagnostics.session_disposition,
+        PreviewDecodeSessionDisposition::Reused,
         "isolated demux and codec state must be reused across exact requests"
     );
 
@@ -2344,8 +2552,14 @@ fn isolated_demux_worker_reuses_each_access_mode_session_across_requests() {
                 panic!("software access-mode decode must return an RGBA frame");
             };
             if request_index == 1 {
-                assert!(
-                    frame.diagnostics.session_reused,
+                let expected =
+                    if frame.diagnostics.path == PreviewDecodePath::PlaybackSessionRingHit {
+                        PreviewDecodeSessionDisposition::BypassedCache
+                    } else {
+                        PreviewDecodeSessionDisposition::Reused
+                    };
+                assert_eq!(
+                    frame.diagnostics.session_disposition, expected,
                     "{access_mode:?} must reuse its isolated demux/codec session"
                 );
             }
@@ -2493,12 +2707,146 @@ fn isolated_demux_worker_rejects_stale_source_revision_before_publication() {
     let error = context
         .decode_cancellable(request, || false)
         .expect_err("stale source revision must fail before packet publication");
-    assert!(error.to_string().contains("source revision changed"));
+    assert!(matches!(
+        error,
+        MondrianError::MediaSourceRevisionChanged { .. }
+    ));
     let evidence = observer.snapshot().isolated_demux;
-    assert_eq!(evidence.session_launches, 1);
-    assert_eq!(evidence.failure_terminations, 1);
-    assert_eq!(evidence.reaped_sessions(), 1);
+    assert_eq!(evidence.session_launches, 0);
+    assert_eq!(evidence.failure_terminations, 0);
+    assert_eq!(evidence.reaped_sessions(), 0);
     assert_eq!(evidence.active_sessions, 0);
+}
+
+#[test]
+fn preview_decode_rejects_replaced_source_against_caller_revision() {
+    const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("replaced-before-preview-open.mp4");
+    std::fs::write(&path, FIXTURE).expect("write synthetic H.264 fixture");
+    let admitted = MediaFileFingerprint::capture(&path);
+    let replacement = root.path().join("same-length-replacement.mp4");
+    std::fs::write(&replacement, FIXTURE).expect("write same-length replacement");
+    std::fs::remove_file(&path).expect("unlink admitted source");
+    std::fs::rename(&replacement, &path).expect("install same-length replacement");
+    let request = PreviewDecodeRequest::new(
+        path.as_path(),
+        TimelineTime::ZERO,
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+        test_source_color(),
+    )
+    .with_fingerprint(admitted);
+
+    let error = decode_preview_frame_cancellable(request, || false)
+        .expect_err("replaced source must fail before Preview input publication");
+    let MondrianError::MediaSourceRevisionChanged { path: rejected_path, expected, actual } = error
+    else {
+        panic!("expected typed source-revision failure");
+    };
+    assert_eq!(rejected_path, path.display().to_string());
+    assert_eq!(*expected, admitted);
+    assert_ne!(*actual, admitted);
+    assert!(actual.authorizes_reuse());
+    assert_eq!(actual.len, admitted.len);
+}
+
+#[test]
+fn preview_decode_revalidates_revision_after_frame_materialization() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("replaced-before-result-publication.mov");
+    std::fs::write(&path, b"old-frame").expect("write admitted source");
+    let admitted = MediaFileFingerprint::capture(&path);
+    let replacement = root.path().join("same-length-result-replacement.mov");
+    std::fs::write(&replacement, b"new-frame").expect("write same-length replacement");
+    std::fs::remove_file(&path).expect("unlink admitted source");
+    std::fs::rename(&replacement, &path).expect("install same-length replacement");
+    let frame = RgbaFrame::new(
+        1,
+        1,
+        vec![0, 0, 0, 255],
+        DecodedRgbaFrameContract::source_encoded(
+            test_source_color(),
+            DecodedVideoMatrix::Bt709,
+            DecodedVideoRange::Limited,
+        ),
+        PreviewDecodePath::InProcessFfmpegCpuRgba,
+    );
+
+    let error =
+        finalize_preview_decode_outcome(&path, admitted, PreviewDecodeOutcome::Frame(frame))
+            .expect_err("post-materialization replacement must fail before result publication");
+    assert!(matches!(
+        error,
+        MondrianError::MediaSourceRevisionChanged { .. }
+    ));
+}
+
+#[test]
+fn finalizer_rejects_exact_frames_without_proven_temporal_selection() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("unproven-external-still.mov");
+    std::fs::write(&path, b"stable-source").expect("write stable source");
+    let fingerprint = MediaFileFingerprint::capture(&path);
+    let frame = RgbaFrame::new(
+        1,
+        1,
+        vec![0, 0, 0, 255],
+        test_rgba_contract(),
+        PreviewDecodePath::ExternalFfmpegCpuRgba,
+    )
+    .with_access_mode(PreviewDecodeAccessMode::RandomAccessStillFrame);
+
+    assert!(
+        !external_exact_frame_is_publishable(&path, &frame)
+            .expect("unproven external output should be discarded, not fail fallback"),
+        "external rawvideo without PTS/extent must continue to the in-process exact decoder"
+    );
+
+    let error =
+        finalize_preview_decode_outcome(&path, fingerprint, PreviewDecodeOutcome::Frame(frame))
+            .expect_err("an exact backend without PTS/extent evidence must fail closed");
+    assert!(matches!(
+        error,
+        MondrianError::DecodeTemporalMismatch { requested_pts: None, selected_pts: None, .. }
+    ));
+}
+
+#[test]
+fn finalizer_accepts_exact_interval_coverage_and_rejects_a_true_gap() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("temporal-contract.mov");
+    std::fs::write(&path, b"stable-source").expect("write stable source");
+    let fingerprint = MediaFileFingerprint::capture(&path);
+    let frame = || {
+        RgbaFrame::new(
+            1,
+            1,
+            vec![0, 0, 0, 255],
+            test_rgba_contract(),
+            PreviewDecodePath::InProcessFfmpegCpuRgba,
+        )
+        .with_access_mode(PreviewDecodeAccessMode::RandomAccessStillFrame)
+    };
+
+    let covered =
+        frame().with_temporal_selection(118, Some(DecodedTemporalExtent::from_duration(100, 20)));
+    finalize_preview_decode_outcome(&path, fingerprint, PreviewDecodeOutcome::Frame(covered))
+        .expect("an interior point in [start, end) is exact");
+
+    let gap =
+        frame().with_temporal_selection(118, Some(DecodedTemporalExtent::from_duration(100, 5)));
+    let error =
+        finalize_preview_decode_outcome(&path, fingerprint, PreviewDecodeOutcome::Frame(gap))
+            .expect_err("an exact request in a true presentation gap must fail closed");
+    assert!(matches!(
+        error,
+        MondrianError::DecodeTemporalMismatch {
+            requested_pts: Some(118),
+            selected_pts: Some(100),
+            selected_duration_pts: Some(5),
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -2549,6 +2897,12 @@ fn canceled_codec_work_forces_seek_before_session_reuse() {
         codec_cancellation.is_some(),
         "test probe must reach a codec-phase cancellation"
     );
+    let codec_cancellation = codec_cancellation.expect("codec cancellation evidence");
+    assert_eq!(
+        codec_cancellation.session_disposition,
+        PreviewDecodeSessionDisposition::Reused
+    );
+    assert_eq!(codec_cancellation.session_open_us, 0);
 
     let recovered = context
         .decode_cancellable(request(9), || false)
@@ -2561,7 +2915,10 @@ fn canceled_codec_work_forces_seek_before_session_reuse() {
             panic!("recovery decode unexpectedly canceled: {cancellation:?}")
         }
     };
-    assert!(diagnostics.session_reused);
+    assert_eq!(
+        diagnostics.session_disposition,
+        PreviewDecodeSessionDisposition::Reused
+    );
     assert!(
         diagnostics.seek_performed,
         "a canceled codec position must never continue as forward-reusable state"
@@ -2582,99 +2939,9 @@ fn preview_file_fingerprint_changes_when_file_is_replaced() {
 }
 
 #[test]
-fn incomplete_preview_fingerprint_never_authorizes_cache_reuse() {
-    clear_global_preview_frame_cache();
-    let path = PathBuf::from("unknown-source-revision.mp4");
+fn incomplete_preview_fingerprint_never_authorizes_residency_reuse() {
     let fingerprint = MediaFileFingerprint::default();
     assert!(!fingerprint.authorizes_reuse());
-    let frame = RgbaFrame::new(
-        2,
-        1,
-        vec![1, 2, 3, 4, 5, 6, 7, 8],
-        test_rgba_contract(),
-        PreviewDecodePath::InProcessFfmpegCpuRgba,
-    );
-    preview_cache_put_with_fingerprint(&path, fingerprint, 2, 1, 100, frame);
-    assert!(preview_cache_get(&path, fingerprint, test_source_color(), 2, 1, 100, 1).is_none());
-}
-
-#[test]
-fn preview_frame_cache_is_keyed_by_file_fingerprint() {
-    clear_global_preview_frame_cache();
-    let path = PathBuf::from("same-proxy-path.mp4");
-    let old_fingerprint = MediaFileFingerprint {
-        len: Some(3),
-        modified_secs: Some(1),
-        modified_nanos: Some(0),
-    };
-    let new_fingerprint = MediaFileFingerprint {
-        len: Some(15),
-        modified_secs: Some(2),
-        modified_nanos: Some(0),
-    };
-    let frame = RgbaFrame::new(
-        2,
-        1,
-        vec![1, 2, 3, 4, 5, 6, 7, 8],
-        test_rgba_contract(),
-        PreviewDecodePath::InProcessFfmpegCpuRgba,
-    );
-
-    preview_cache_put_with_fingerprint(&path, old_fingerprint, 2, 1, 100, frame);
-
-    assert!(preview_cache_get(&path, new_fingerprint, test_source_color(), 2, 1, 100, 1).is_none());
-    assert!(preview_cache_get(&path, old_fingerprint, test_source_color(), 2, 1, 100, 1).is_some());
-    clear_global_preview_frame_cache();
-}
-
-#[test]
-fn preview_frame_cache_respects_strict_pts_tolerance() {
-    clear_global_preview_frame_cache();
-    let path = PathBuf::from("strict-cache-window.mp4");
-    let fingerprint = MediaFileFingerprint {
-        len: Some(3),
-        modified_secs: Some(1),
-        modified_nanos: Some(0),
-    };
-    let frame = RgbaFrame::new(
-        2,
-        1,
-        vec![1, 2, 3, 4, 5, 6, 7, 8],
-        test_rgba_contract(),
-        PreviewDecodePath::InProcessFfmpegCpuRgba,
-    );
-
-    preview_cache_put_with_fingerprint(&path, fingerprint, 2, 1, 100, frame);
-
-    assert!(preview_cache_get(&path, fingerprint, test_source_color(), 2, 1, 105, 5).is_some());
-    assert!(preview_cache_get(&path, fingerprint, test_source_color(), 2, 1, 106, 5).is_none());
-    clear_global_preview_frame_cache();
-}
-
-#[test]
-fn preview_frame_cache_isolated_by_applied_source_color_contract() {
-    clear_global_preview_frame_cache();
-    let path = PathBuf::from("same-frame-different-color.mov");
-    let fingerprint = MediaFileFingerprint {
-        len: Some(8),
-        modified_secs: Some(3),
-        modified_nanos: Some(0),
-    };
-    let rec709 = test_source_color();
-    let frame = RgbaFrame::new(
-        2,
-        1,
-        vec![16, 16, 16, 255, 235, 235, 235, 255],
-        test_rgba_contract(),
-        PreviewDecodePath::InProcessFfmpegCpuRgba,
-    );
-    preview_cache_put_with_fingerprint(&path, fingerprint, 2, 1, 100, frame);
-
-    let rec2020 =
-        PreviewSourceColorContract::automatic(ColorSpace::Rec2020, DecodedVideoRange::Limited);
-    assert!(preview_cache_get(&path, fingerprint, rec709, 2, 1, 100, 1).is_some());
-    assert!(preview_cache_get(&path, fingerprint, rec2020, 2, 1, 100, 1).is_none());
-    clear_global_preview_frame_cache();
 }
 
 fn test_packet(pts: Option<i64>, dts: Option<i64>, key: bool) -> ffmpeg::Packet {

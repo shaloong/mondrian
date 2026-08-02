@@ -1,16 +1,15 @@
 //! Product adapter for constant Clip playback rate and picture holds.
 
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use mondrian_assets::AssetKind;
-use mondrian_core::{
-    events::AppEvent, timeline_data::ClipContent, ClipId, MondrianError, TimeScale, TimelineTime,
-};
+use mondrian_core::{timeline_data::ClipContent, ClipId, MondrianError, TimeScale, TimelineTime};
 use mondrian_timeline::{
     apply_clip_constant_retime, ClipConstantRetime, ClipConstantRetimeRequest, Sequence,
 };
 
 use super::timeline_editing::{clip_link_group_member_ids, find_clip, find_clip_track_lock};
+use super::video_transitions::validate_retimed_transition_handles_with_extents;
 use super::AppState;
 
 impl AppState {
@@ -29,32 +28,50 @@ impl AppState {
                 "forward playback rate must be a strictly positive exact ratio",
             ));
         }
-        let before = self.active_sequence().cloned().ok_or_else(no_active_sequence)?;
+        let before = self.active_sequence().ok_or_else(no_active_sequence)?;
         let clip_ids = if include_linked {
-            clip_link_group_member_ids(&before, clip_id)
+            clip_link_group_member_ids(before, clip_id)
         } else {
-            find_clip(&before, clip_id)
+            find_clip(before, clip_id)
                 .map(|_| vec![clip_id])
                 .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?
         };
-        validate_retime_content(&before, &clip_ids, false)?;
-
-        let mut after = before.clone();
-        let outcome = apply_clip_constant_retime(
-            &mut after,
-            &ClipConstantRetimeRequest {
-                clip_ids,
-                retime: ClipConstantRetime::ForwardRate { rate },
-            },
-        )?;
-        if outcome.changed_clip_ids.is_empty() {
-            return Ok(());
+        validate_retime_content(before, &clip_ids, false)?;
+        let sequence_id = before.id;
+        let source_extents = self.resolved_retime_source_extents(before, &clip_ids)?;
+        let transition_extents =
+            self.resolved_retimed_transition_source_extents(before, &clip_ids)?;
+        // Retime invalidates current media/audio execution. A failed stop must
+        // reject the author transaction instead of leaving old transport bound
+        // to newly retimed content.
+        self.stop()?;
+        let changed =
+            self.commit_sequence_edit(sequence_id, "调整片段播放速率", move |sequence| {
+                let outcome = apply_clip_constant_retime(
+                    sequence,
+                    &ClipConstantRetimeRequest {
+                        clip_ids,
+                        retime: ClipConstantRetime::ForwardRate { rate },
+                    },
+                )?;
+                if outcome.changed_clip_ids.is_empty() {
+                    return Ok(false);
+                }
+                validate_retimed_clip_extents(
+                    sequence,
+                    &outcome.changed_clip_ids,
+                    &source_extents,
+                )?;
+                validate_retimed_transition_handles_with_extents(
+                    sequence,
+                    &outcome.changed_clip_ids,
+                    &transition_extents,
+                )?;
+                Ok(true)
+            })?;
+        if changed {
+            self.settle_preview_access_source();
         }
-        self.validate_retimed_clip_extents(&after, &outcome.changed_clip_ids)?;
-        self.validate_resolved_retimed_transition_handles(&after, &outcome.changed_clip_ids)?;
-        let sequence_id = after.id;
-        self.record_sequence_snapshot_command("调整片段播放速率", before, after)?;
-        self.finish_retime_commit(sequence_id);
         Ok(())
     }
 
@@ -67,74 +84,70 @@ impl AppState {
         clip_id: ClipId,
         sequence_time: mondrian_core::FramePosition,
     ) -> mondrian_core::Result<()> {
-        let before = self.active_sequence().cloned().ok_or_else(no_active_sequence)?;
-        let (_, is_video, _) = find_clip_track_lock(&before, clip_id)
+        let before = self.active_sequence().ok_or_else(no_active_sequence)?;
+        let (_, is_video, _) = find_clip_track_lock(before, clip_id)
             .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
         if !is_video {
             return Err(retime_error(
                 "freeze frame requires a Clip on a video Track",
             ));
         }
-        validate_retime_content(&before, &[clip_id], true)?;
+        validate_retime_content(before, &[clip_id], true)?;
         if sequence_time.time_base != before.time_base() {
             return Err(retime_error(
                 "freeze-frame position must use the active Sequence time base",
             ));
         }
         let sequence_time = TimelineTime::from_frame_position(sequence_time)?;
-
-        let mut after = before.clone();
-        let outcome = apply_clip_constant_retime(
-            &mut after,
-            &ClipConstantRetimeRequest {
-                clip_ids: vec![clip_id],
-                retime: ClipConstantRetime::HoldAtSequenceTime { sequence_time },
-            },
-        )?;
-        if outcome.changed_clip_ids.is_empty() {
-            return Ok(());
+        let sequence_id = before.id;
+        let source_extents = self.resolved_retime_source_extents(before, &[clip_id])?;
+        let transition_extents =
+            self.resolved_retimed_transition_source_extents(before, &[clip_id])?;
+        self.stop()?;
+        let changed =
+            self.commit_sequence_edit(sequence_id, "创建定格帧", move |sequence| {
+                let outcome = apply_clip_constant_retime(
+                    sequence,
+                    &ClipConstantRetimeRequest {
+                        clip_ids: vec![clip_id],
+                        retime: ClipConstantRetime::HoldAtSequenceTime { sequence_time },
+                    },
+                )?;
+                if outcome.changed_clip_ids.is_empty() {
+                    return Ok(false);
+                }
+                validate_retimed_clip_extents(
+                    sequence,
+                    &outcome.changed_clip_ids,
+                    &source_extents,
+                )?;
+                validate_retimed_transition_handles_with_extents(
+                    sequence,
+                    &outcome.changed_clip_ids,
+                    &transition_extents,
+                )?;
+                Ok(true)
+            })?;
+        if changed {
+            self.settle_preview_access_source();
         }
-        self.validate_retimed_clip_extents(&after, &outcome.changed_clip_ids)?;
-        self.validate_resolved_retimed_transition_handles(&after, &outcome.changed_clip_ids)?;
-        let sequence_id = after.id;
-        self.record_sequence_snapshot_command("创建定格帧", before, after)?;
-        self.finish_retime_commit(sequence_id);
         Ok(())
     }
 
-    fn validate_retimed_clip_extents(
+    fn resolved_retime_source_extents(
         &self,
         sequence: &Sequence,
         clip_ids: &[ClipId],
-    ) -> mondrian_core::Result<()> {
+    ) -> mondrian_core::Result<HashMap<ClipId, TimelineTime>> {
+        let mut extents = HashMap::with_capacity(clip_ids.len());
         for clip_id in clip_ids {
             let clip = find_clip(sequence, *clip_id)
                 .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
             let (_, is_video, _) = find_clip_track_lock(sequence, *clip_id)
                 .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
-            let extent = self.known_retime_source_duration(clip, is_video)?;
-            let origin = clip.source_origin();
-            if origin.is_negative() {
-                return Err(retime_error(format!(
-                    "Clip {} source origin is before the source extent",
-                    clip.id
-                )));
-            }
-            if clip.source_time_scale().numerator() == 0 {
-                if origin >= extent {
-                    return Err(retime_error(format!(
-                        "Clip {} hold sample is outside the source extent",
-                        clip.id
-                    )));
-                }
-            } else if clip.source_terminal_boundary()? > extent {
-                return Err(retime_error(format!(
-                    "Clip {} forward retime exceeds the source extent",
-                    clip.id
-                )));
-            }
+            extents.insert(*clip_id, self.known_retime_source_duration(clip, is_video)?);
         }
-        Ok(())
+        Ok(extents)
     }
 
     fn known_retime_source_duration(
@@ -166,17 +179,20 @@ impl AppState {
                         clip.id
                     )));
                 }
+                let media_probe = asset.media_probe().ok_or_else(|| {
+                    retime_error(format!(
+                        "Asset {asset_id} has no coherent media probe for retime validation"
+                    ))
+                })?;
                 let stream_duration = if is_video {
-                    asset.media_info.primary_video().and_then(|stream| stream.duration)
+                    media_probe.primary_video().and_then(|stream| stream.duration)
                 } else {
-                    asset.media_info.primary_audio().and_then(|stream| stream.duration)
+                    media_probe.primary_audio().and_then(|stream| stream.duration)
                 };
                 duration_to_timeline_time(
-                    stream_duration.filter(|duration| !duration.is_zero()).or((!asset
-                        .media_info
-                        .duration
-                        .is_zero())
-                    .then_some(asset.media_info.duration)),
+                    stream_duration
+                        .filter(|duration| !duration.is_zero())
+                        .or((!media_probe.duration.is_zero()).then_some(media_probe.duration)),
                 )
             }
             ClipContent::SolidColor { .. }
@@ -187,12 +203,42 @@ impl AppState {
             ))),
         }
     }
+}
 
-    fn finish_retime_commit(&mut self, sequence_id: mondrian_core::SequenceId) {
-        self.stop();
-        self.settle_preview_access_source();
-        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+fn validate_retimed_clip_extents(
+    sequence: &Sequence,
+    clip_ids: &[ClipId],
+    source_extents: &HashMap<ClipId, TimelineTime>,
+) -> mondrian_core::Result<()> {
+    for clip_id in clip_ids {
+        let clip = find_clip(sequence, *clip_id)
+            .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
+        let extent = source_extents
+            .get(clip_id)
+            .copied()
+            .ok_or_else(|| retime_error(format!("Clip {clip_id} has no captured source extent")))?;
+        let origin = clip.source_origin();
+        if origin.is_negative() {
+            return Err(retime_error(format!(
+                "Clip {} source origin is before the source extent",
+                clip.id
+            )));
+        }
+        if clip.source_time_scale().numerator() == 0 {
+            if origin >= extent {
+                return Err(retime_error(format!(
+                    "Clip {} hold sample is outside the source extent",
+                    clip.id
+                )));
+            }
+        } else if clip.source_terminal_boundary()? > extent {
+            return Err(retime_error(format!(
+                "Clip {} forward retime exceeds the source extent",
+                clip.id
+            )));
+        }
     }
+    Ok(())
 }
 
 fn validate_retime_content(
@@ -509,65 +555,74 @@ mod tests {
         let library = AssetLibrary::open(root.join("library")).expect("asset library");
         let path = root.join("source.mov");
         std::fs::write(&path, [0u8]).expect("media fixture");
-        let asset_id = library
-            .upsert_media_file_with_info(
-                &path,
-                MediaInfo {
-                    path: path.clone(),
-                    duration: Duration::from_secs(2),
-                    file_size: 1,
-                    container: "mov".to_owned(),
-                    video_streams: vec![VideoStreamInfo {
-                        index: 0,
-                        codec: VideoCodec::H264,
-                        duration: Some(Duration::from_secs(2)),
-                        codec_profile: VideoCodecProfile::H264High,
-                        width: 1920,
-                        height: 1080,
-                        frame_rate: Rational::FPS_25,
-                        frame_rate_proven: true,
-                        pixel_format: PixelFormat::Yuv420p,
-                        pixel_format_proven: true,
-                        color_range: DecodedVideoRange::Limited,
-                        detected_color_space: Some(ColorSpace::Rec709),
-                        color_interpretation: DetectedColorInterpretation {
-                            color_space: Some(ColorSpace::Rec709),
-                            confidence: VideoColorInterpretationConfidence::High,
-                            source: VideoColorSpaceSource::Metadata,
-                            method: VideoColorDetectionMethod::CicpTags,
-                            evidence: Vec::new(),
-                            warnings: Vec::new(),
-                            user_overridable: true,
-                        },
-                        color_space_source: VideoColorSpaceSource::Metadata,
-                        color_detection_method: VideoColorDetectionMethod::CicpTags,
-                        color_metadata: None,
-                        color_metadata_hints: Vec::new(),
-                        hdr_metadata: Vec::new(),
-                        bit_depth: 8,
-                        has_alpha: false,
-                        avg_bitrate: 8_000_000,
-                        total_frames: Some(50),
-                    }],
-                    audio_streams: vec![AudioStreamInfo {
-                        index: 1,
-                        stream_id: Some(1),
-                        language: None,
-                        title: None,
-                        is_default: true,
-                        codec: AudioCodec::Pcm { bit_depth: 24 },
-                        duration: Some(Duration::from_secs(2)),
-                        sample_rate: 48_000,
-                        channels: 2,
-                        channel_layout: ChannelLayout::Stereo,
-                        bit_depth: 24,
-                        avg_bitrate: 2_304_000,
-                    }],
-                    has_video: true,
-                    has_audio: true,
-                },
-            )
-            .expect("register media Asset");
+        let path = std::fs::canonicalize(path).expect("canonical media fixture");
+        let fingerprint = mondrian_media::MediaFileFingerprint::capture(&path);
+        let candidate = mondrian_assets::AssetMediaProbeCandidate::new(
+            path.clone(),
+            fingerprint,
+            MediaInfo {
+                duration: Duration::from_secs(2),
+                file_size: 1,
+                container: "mov".to_owned(),
+                video_streams: vec![VideoStreamInfo {
+                    index: 0,
+                    codec: VideoCodec::H264,
+                    duration: Some(Duration::from_secs(2)),
+                    codec_profile: VideoCodecProfile::H264High,
+                    width: 1920,
+                    height: 1080,
+                    frame_rate: Rational::FPS_25,
+                    frame_rate_proven: true,
+                    pixel_format: PixelFormat::Yuv420p,
+                    pixel_format_proven: true,
+                    color_range: DecodedVideoRange::Limited,
+                    color_interpretation: DetectedColorInterpretation {
+                        candidate_color_space: Some(ColorSpace::Rec709),
+                        confidence: VideoColorInterpretationConfidence::High,
+                        source: VideoColorSpaceSource::Metadata,
+                        method: VideoColorDetectionMethod::MetadataHint,
+                        evidence: vec![
+                            mondrian_media::VideoColorInterpretationEvidence::MetadataHint {
+                                scope: mondrian_media::VideoColorMetadataHintScope::Stream,
+                                key: "source_color_space".to_owned(),
+                                value: "Rec709".to_owned(),
+                                detected_color_space: ColorSpace::Rec709,
+                                authority: mondrian_media::VideoColorMetadataHintAuthority::SourceDeclaration(
+                                    mondrian_media::VideoColorMetadataDeclaration::SourceColorSpace,
+                                ),
+                            },
+                        ],
+                        warnings: Vec::new(),
+                        user_overridable: true,
+                    },
+                    color_metadata: None,
+                    color_metadata_hints: Vec::new(),
+                    hdr_metadata: Vec::new(),
+                    bit_depth: 8,
+                    has_alpha: false,
+                    avg_bitrate: 8_000_000,
+                    total_frames: Some(50),
+                }],
+                audio_streams: vec![AudioStreamInfo {
+                    index: 1,
+                    stream_id: Some(1),
+                    language: None,
+                    title: None,
+                    is_default: true,
+                    codec: AudioCodec::Pcm { bit_depth: 24 },
+                    duration: Some(Duration::from_secs(2)),
+                    sample_rate: 48_000,
+                    channels: 2,
+                    channel_layout: ChannelLayout::Stereo,
+                    bit_depth: 24,
+                    avg_bitrate: 2_304_000,
+                }],
+                has_video: true,
+                has_audio: true,
+            },
+        )
+        .expect("valid media probe candidate");
+        let asset_id = library.commit_media_probe(candidate, None).expect("register media Asset");
         (root, library, asset_id)
     }
 }

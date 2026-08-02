@@ -188,6 +188,27 @@ pub struct CompiledAudioProgram {
     pub(crate) routes: Vec<CompiledRoute>,
 }
 
+/// Whether one compiled Program Output can be omitted without changing PCM.
+///
+/// This evidence is deliberately conservative across the processor Adapter
+/// Seam. An active processor may retain a tail or generate signal from silent
+/// input, and the current processor Interface publishes no silence-preservation
+/// proof, so its presence requires canonical execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioProgramExecutionDemand {
+    /// The selected Signal Closure is proven to produce only exact silence.
+    ProvenSilent,
+    /// The selected Signal Closure must be prepared and executed.
+    RequiresExecution,
+}
+
+impl AudioProgramExecutionDemand {
+    /// Whether the canonical Program Output Runtime must execute.
+    pub const fn requires_execution(self) -> bool {
+        matches!(self, Self::RequiresExecution)
+    }
+}
+
 impl CompiledAudioProgram {
     /// Public output produced by this Signal Closure.
     pub fn output_id(&self) -> ProgramOutputId {
@@ -197,6 +218,32 @@ impl CompiledAudioProgram {
     /// Generated contributions and their deterministic author origins.
     pub fn contributions(&self) -> &[CompiledAudioContribution] {
         &self.contributions
+    }
+
+    /// Derive conservative execution demand from the selected Signal Closure.
+    ///
+    /// Disabled sources and mute-gated `PostMute` paths have already been
+    /// removed by compilation. Any remaining source Contribution or active
+    /// processor can affect the public output. This is the only semantic
+    /// evidence consumers may use to replace execution with exact silence.
+    pub fn execution_demand(&self) -> AudioProgramExecutionDemand {
+        let has_processors =
+            self.processing_scopes.values().any(|scope| !scope.rack.processors.is_empty())
+                || self.track_channels.values().any(|channel| {
+                    !channel.strip.pre_fader.processors.is_empty()
+                        || !channel.strip.post_fader.processors.is_empty()
+                })
+                || self.buses.values().any(|strip| {
+                    !strip.pre_fader.processors.is_empty()
+                        || !strip.post_fader.processors.is_empty()
+                })
+                || !self.output.pre_fader.processors.is_empty()
+                || !self.output.post_fader.processors.is_empty();
+        if self.contributions.is_empty() && !has_processors {
+            AudioProgramExecutionDemand::ProvenSilent
+        } else {
+            AudioProgramExecutionDemand::RequiresExecution
+        }
     }
 }
 

@@ -1,14 +1,15 @@
 use super::*;
 use mondrian_audio::{
     AudioContinuityEpoch, AudioDecodedSource, AudioKernelBackend, AudioMediaResolver,
-    AudioProcessingMode, AudioProgramRuntime, AudioRenderContract, AudioRenderRequest,
-    AudioStateEntry, PreparedAudioChannelMixer, ResolvedAudioSource,
+    AudioProcessingMode, AudioProgramExecutionDemand, AudioProgramRuntime, AudioRenderContract,
+    AudioRenderRequest, AudioRuntimeResourceGrant, AudioStateEntry, PreparedAudioChannelMixer,
+    ResolvedAudioSource,
 };
 use mondrian_core::{
     AudioChannelLayout, AudioChannelMixMatrix, AudioSourceComponentId, ExecutionCancellationToken,
     ProgramOutputId,
 };
-use mondrian_media::AudioSourceReader;
+use mondrian_media::{AudioSourceReader, AudioSourceSelection};
 use parking_lot::Mutex;
 
 const MAX_AUDIO_RENDER_BLOCK_FRAMES: usize = 16_384;
@@ -35,6 +36,7 @@ impl TimelineAudioPcmRenderer {
         sequences: Vec<Sequence>,
         library: Arc<AssetLibrary>,
         source_cache: Arc<AudioSourceCache>,
+        runtime_grant: AudioRuntimeResourceGrant,
         sample_rate: u32,
         channel_layout: AudioChannelLayout,
     ) -> mondrian_core::Result<Self> {
@@ -52,12 +54,13 @@ impl TimelineAudioPcmRenderer {
                 AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
         };
         let resolver = PlaybackMediaResolver { library, source_cache };
-        let runtime = AudioProgramRuntime::build(
+        let runtime = AudioProgramRuntime::build_with_resource_grant(
             &sequence,
             &sequences,
             &resolver,
             contract,
             None::<ProgramOutputId>,
+            runtime_grant,
         )
         .map_err(|error| audio_render_error("timeline_audio_prepare", error.to_string()))?;
         let continuity_model = if runtime.requires_state_entry() {
@@ -91,6 +94,11 @@ impl TimelineAudioPcmRenderer {
             program_channel_layout,
             delivery_mixer,
         })
+    }
+
+    /// Compiler-owned evidence for replacing this Program Output with silence.
+    pub(super) fn execution_demand(&self) -> AudioProgramExecutionDemand {
+        self.state.lock().runtime.execution_demand()
     }
 }
 
@@ -248,20 +256,29 @@ impl AudioMediaResolver for PlaybackMediaResolver {
             .get_asset(asset_id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("Asset {asset_id} is unavailable"))?;
-        let current_fingerprint = mondrian_media::MediaFileFingerprint::capture(&asset.path);
-        let selection = asset
+        let path = asset
+            .file_path()
+            .ok_or_else(|| format!("Asset {asset_id} is not a file-backed audio source"))?;
+        let media_probe = asset.media_probe().ok_or_else(|| {
+            format!("Asset {asset_id} has no coherent media probe for audio execution")
+        })?;
+        let source_fingerprint = asset.source_fingerprint().ok_or_else(|| {
+            format!("Asset {asset_id} has no admitted source revision for audio execution")
+        })?;
+        let stream = asset
             .audio_components
-            .resolve_current_selection(component_id, &asset.media_info, current_fingerprint)
+            .resolve_current(component_id, media_probe, source_fingerprint)
             .map_err(|error| {
                 format!(
                     "failed to bind audio Component {component_id} for Asset {asset_id}: {error}"
                 )
             })?;
-        let source = self.source_cache.open(asset.path.as_path(), selection).map_err(|error| {
+        let selection = AudioSourceSelection::from_stream(stream, source_fingerprint);
+        let source = self.source_cache.open(path, selection).map_err(|error| {
             format!(
                 "failed to open bounded audio source {} at {}: {error}",
                 asset.id,
-                asset.path.display()
+                path.display()
             )
         })?;
         Ok(ResolvedAudioSource::new(
@@ -301,6 +318,10 @@ fn audio_render_error(
 mod tests {
     use super::*;
 
+    fn test_runtime_grant() -> AudioRuntimeResourceGrant {
+        AudioRuntimeResourceGrant::new(64, 512 * 1024 * 1024, 128 * 1024 * 1024)
+    }
+
     #[test]
     fn timeline_pcm_adapter_requires_one_entry_and_exact_generation_continuation() {
         let root = std::env::temp_dir().join(format!(
@@ -313,6 +334,7 @@ mod tests {
             Vec::new(),
             AssetLibrary::open(root.clone()).expect("asset library"),
             Arc::new(AudioSourceCache::new(48_000)),
+            test_runtime_grant(),
             48_000,
             AudioChannelLayout::Stereo,
         )
@@ -382,6 +404,7 @@ mod tests {
             Vec::new(),
             AssetLibrary::open(root.clone()).expect("asset library"),
             Arc::new(AudioSourceCache::new(48_000)),
+            test_runtime_grant(),
             48_000,
             AudioChannelLayout::Stereo,
         )

@@ -1,58 +1,7 @@
 //! Explicit standard-layout selection and FFmpeg channel-map lowering.
 
-use crate::{
-    info::{AudioStreamInfo, ChannelLayout},
-    MediaFileFingerprint,
-};
 use mondrian_core::AudioChannelLayout;
-use serde::{Deserialize, Serialize};
-
-/// One explicitly selected physical audio stream and its probed semantic layout.
-///
-/// This is an Adapter value, not author state. Asset Component catalogs own
-/// stable logical identity and produce a selection only after their persisted
-/// stream signature matches current probe evidence.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct AudioSourceSelection {
-    stream_index: u32,
-    source_layout: ChannelLayout,
-    source_fingerprint: MediaFileFingerprint,
-}
-
-impl AudioSourceSelection {
-    /// Create a physical selection from explicit probe or fixture evidence.
-    pub const fn new(
-        stream_index: u32,
-        source_layout: ChannelLayout,
-        source_fingerprint: MediaFileFingerprint,
-    ) -> Self {
-        Self { stream_index, source_layout, source_fingerprint }
-    }
-
-    /// Capture an execution selection from one already-validated stream probe.
-    pub fn from_stream(stream: &AudioStreamInfo, source_fingerprint: MediaFileFingerprint) -> Self {
-        Self::new(
-            stream.index,
-            stream.channel_layout.clone(),
-            source_fingerprint,
-        )
-    }
-
-    /// Absolute container stream index used by FFmpeg `-map 0:<index>`.
-    pub const fn stream_index(&self) -> u32 {
-        self.stream_index
-    }
-
-    /// Exact native semantic layout observed during probe.
-    pub const fn source_layout(&self) -> &ChannelLayout {
-        &self.source_layout
-    }
-
-    /// File revision whose probe evidence authorized this selection.
-    pub const fn source_fingerprint(&self) -> MediaFileFingerprint {
-        self.source_fingerprint
-    }
-}
+pub use mondrian_core::AudioSourceSelection;
 
 /// Lower an exact native layout to an ordinal FFmpeg identity `pan` filter.
 ///

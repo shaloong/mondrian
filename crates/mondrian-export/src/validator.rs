@@ -3,13 +3,21 @@ use crate::preset::{
     VideoCodecConfig,
 };
 use mondrian_core::{
-    AudioChannelLayout, VideoContentLightMetadata, VideoHdrChromaticity, VideoHdrRational,
-    VideoMasteringDisplayLuminance, VideoMasteringDisplayMetadata, VideoMasteringDisplayPrimaries,
+    AudioChannelLayout, ExecutionCancellationToken, VideoContentLightMetadata,
+    VideoHdrChromaticity, VideoHdrRational, VideoMasteringDisplayLuminance,
+    VideoMasteringDisplayMetadata, VideoMasteringDisplayPrimaries,
 };
+use mondrian_media::{run_supervised_command, SupervisedProcessPolicy, SupervisedStreamCapture};
 use mondrian_timeline::sequence::DeliveryBitDepth;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::Command;
+use std::time::{Duration, Instant};
+
+const FFPROBE_DEADLINE: Duration = Duration::from_secs(30);
+const FFPROBE_REPORT_STDOUT_LIMIT: usize = 16 * 1024 * 1024;
+const FFPROBE_FRAME_STDOUT_LIMIT: usize = 4 * 1024 * 1024;
+const FFPROBE_STDERR_TAIL_LIMIT: usize = 64 * 1024;
 
 /// Exact stream and duration contract that a finished export must prove.
 #[derive(Debug, Clone)]
@@ -414,13 +422,27 @@ pub fn validate_export_output(
     output_path: &Path,
     expectations: &ExportValidationExpectations,
 ) -> Result<ExportOutputProbe, String> {
+    validate_export_output_cancellable(
+        output_path,
+        expectations,
+        &ExecutionCancellationToken::new(),
+    )
+}
+
+/// Validate a finished export while retaining cancellation authority through
+/// every bounded FFprobe process.
+pub fn validate_export_output_cancellable(
+    output_path: &Path,
+    expectations: &ExportValidationExpectations,
+    cancellation: &ExecutionCancellationToken,
+) -> Result<ExportOutputProbe, String> {
     let metadata = std::fs::metadata(output_path)
         .map_err(|err| format!("读取导出文件失败 {}: {}", output_path.display(), err))?;
     if metadata.len() == 0 {
         return Err(format!("导出文件大小为 0: {}", output_path.display()));
     }
 
-    let report = ffprobe_report(output_path)?;
+    let report = ffprobe_report(output_path, cancellation)?;
     validate_report(&report, expectations)?;
 
     let expected_static_hdr = match &expectations.video {
@@ -433,7 +455,10 @@ pub fn validate_export_output(
     {
         None
     } else {
-        Some(ffprobe_first_video_frame_side_data(output_path)?)
+        Some(ffprobe_first_video_frame_side_data(
+            output_path,
+            cancellation,
+        )?)
     };
     match (expected_static_hdr, side_data.as_deref()) {
         (None | Some(ExpectedStaticHdrMetadata::Unspecified), _) => {}
@@ -454,32 +479,43 @@ pub fn validate_export_output(
 /// expectation. Video outputs must expose a decodable first frame so HDR
 /// metadata presence cannot silently remain unknown.
 pub fn probe_export_output(path: &Path) -> Result<ExportOutputProbe, String> {
-    let report = ffprobe_report(path)?;
+    let cancellation = ExecutionCancellationToken::new();
+    let report = ffprobe_report(path, &cancellation)?;
     let has_video = report
         .streams
         .iter()
         .any(|stream| stream.codec_type.as_deref() == Some("video"));
-    let side_data = has_video.then(|| ffprobe_first_video_frame_side_data(path)).transpose()?;
+    let side_data = has_video
+        .then(|| ffprobe_first_video_frame_side_data(path, &cancellation))
+        .transpose()?;
     Ok(build_output_probe(&report, side_data.as_deref()))
 }
 
 /// Probe only stream presence and duration for lightweight media admission.
 pub fn probe_media_summary(path: &Path) -> Result<MediaStreamSummary, String> {
-    let report = ffprobe_report(path)?;
+    let report = ffprobe_report(path, &ExecutionCancellationToken::new())?;
     Ok(summarize_report(&report))
 }
 
-fn ffprobe_report(path: &Path) -> Result<FfprobeReport, String> {
-    let output = Command::new("ffprobe")
+fn ffprobe_report(
+    path: &Path,
+    cancellation: &ExecutionCancellationToken,
+) -> Result<FfprobeReport, String> {
+    let mut command = Command::new("ffprobe");
+    command
         .arg("-v")
         .arg("error")
         .arg("-show_streams")
         .arg("-show_format")
         .arg("-print_format")
         .arg("json")
-        .arg(path)
-        .output()
-        .map_err(|err| format!("启动 ffprobe 失败: {}", err))?;
+        .arg(path);
+    let output = run_bounded_ffprobe(
+        &mut command,
+        FFPROBE_REPORT_STDOUT_LIMIT,
+        cancellation,
+        "stream report",
+    )?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -494,8 +530,12 @@ fn ffprobe_report(path: &Path) -> Result<FfprobeReport, String> {
         .map_err(|err| format!("解析 ffprobe 结果失败: {}", err))
 }
 
-fn ffprobe_first_video_frame_side_data(path: &Path) -> Result<Vec<FfprobeFrameSideData>, String> {
-    let output = Command::new("ffprobe")
+fn ffprobe_first_video_frame_side_data(
+    path: &Path,
+    cancellation: &ExecutionCancellationToken,
+) -> Result<Vec<FfprobeFrameSideData>, String> {
+    let mut command = Command::new("ffprobe");
+    command
         .arg("-v")
         .arg("error")
         .arg("-select_streams")
@@ -507,9 +547,13 @@ fn ffprobe_first_video_frame_side_data(path: &Path) -> Result<Vec<FfprobeFrameSi
         .arg("frame=side_data_list")
         .arg("-print_format")
         .arg("json")
-        .arg(path)
-        .output()
-        .map_err(|err| format!("启动 ffprobe HDR metadata 校验失败: {err}"))?;
+        .arg(path);
+    let output = run_bounded_ffprobe(
+        &mut command,
+        FFPROBE_FRAME_STDOUT_LIMIT,
+        cancellation,
+        "first-frame HDR metadata",
+    )?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -528,6 +572,23 @@ fn ffprobe_first_video_frame_side_data(path: &Path) -> Result<Vec<FfprobeFrameSi
         .next()
         .map(|frame| frame.side_data_list)
         .ok_or_else(|| "ffprobe 未能解码导出视频的首帧，无法校验静态 HDR metadata".to_string())
+}
+
+fn run_bounded_ffprobe(
+    command: &mut Command,
+    stdout_limit: usize,
+    cancellation: &ExecutionCancellationToken,
+    operation: &str,
+) -> Result<mondrian_media::SupervisedProcessOutput, String> {
+    let policy = SupervisedProcessPolicy {
+        pipe_stdin: false,
+        stdout: SupervisedStreamCapture::Head { limit_bytes: stdout_limit, reject_excess: true },
+        stderr: SupervisedStreamCapture::Tail { limit_bytes: FFPROBE_STDERR_TAIL_LIMIT },
+        deadline: Some(Instant::now() + FFPROBE_DEADLINE),
+        ..SupervisedProcessPolicy::default()
+    };
+    run_supervised_command(command, None, policy, cancellation)
+        .map_err(|error| format!("ffprobe {operation} process failed: {error}"))
 }
 
 fn validate_report(

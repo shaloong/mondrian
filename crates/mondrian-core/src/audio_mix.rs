@@ -116,6 +116,26 @@ pub struct AudioChannelMixMatrix {
     entries: Vec<AudioChannelMixEntry>,
 }
 
+impl crate::AuthoringFootprint for AudioChannelMixEntry {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self { source_channel: _, destination_channel: _, gain: _ } = self;
+        Ok(())
+    }
+}
+
+impl crate::AuthoringFootprint for AudioChannelMixMatrix {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self { source_layout: _, destination_layout: _, entries } = self;
+        collector.collect(entries)
+    }
+}
+
 #[derive(Deserialize)]
 struct SerializedAudioChannelMixMatrix {
     source_layout: AudioChannelLayout,

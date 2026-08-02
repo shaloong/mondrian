@@ -3,7 +3,7 @@ use mondrian_core::{
     AssetId, AudioChannelLayout, AudioChannelMixEntry, AudioChannelMixMatrix, AudioChannelPosition,
     AudioComponentEditId, AudioSourceComponentId, AutomationSegmentInterpolation,
     ExactAutomationCurve, ExactAutomationKeyframe, ExactBezierHandle, ExecutionCancellationToken,
-    ParameterId, TimeScale, TimelineTime,
+    ParameterId, TimeScale, TimelineTime, TimelineTimeRange,
 };
 use mondrian_timeline::audio::{
     AudioChannelStripOutputPort, AudioComponentChannelMapping, AudioFade, AudioFadeCurve,
@@ -13,8 +13,7 @@ use mondrian_timeline::audio::{
     ROUTE_GAIN_DB_PARAMETER_ID, SAMPLE_DELAY_FRAMES_PARAMETER_ID,
 };
 use mondrian_timeline::{Clip, Sequence};
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
 struct RampSource {
@@ -240,6 +239,29 @@ impl AudioMediaResolver for RampResolver {
     }
 }
 
+#[derive(Default)]
+struct RecordingResolver {
+    resolved_assets: Mutex<Vec<AssetId>>,
+}
+
+impl AudioMediaResolver for RecordingResolver {
+    fn resolve(
+        &self,
+        asset_id: AssetId,
+        _component_id: AudioSourceComponentId,
+        _sample_rate: u32,
+    ) -> Result<ResolvedAudioSource, String> {
+        self.resolved_assets
+            .lock()
+            .map_err(|_| "recording resolver lock poisoned".to_owned())?
+            .push(asset_id);
+        Ok(ResolvedAudioSource::new(
+            AudioChannelLayout::Mono,
+            Arc::new(RampDecodedSource),
+        ))
+    }
+}
+
 struct StereoRampDecodedSource;
 
 impl AudioDecodedSource for StereoRampDecodedSource {
@@ -363,7 +385,7 @@ fn sequence_with_parallel_hosted_delay() -> Sequence {
             schema_version: 1,
         },
         bypassed: false,
-        parameters: BTreeMap::new(),
+        parameters: Default::default(),
         opaque_state: None,
     })
 }
@@ -1142,9 +1164,18 @@ fn scalar_reference_and_runtime_vectorized_schedule_are_pcm_equivalent() {
 }
 
 #[test]
-fn track_mute_zeros_post_mute_route_without_reinterpreting_the_graph() {
+fn track_mute_closes_post_mute_path_before_dependency_binding() {
     let mut sequence = sequence_with_audio_clip();
     sequence.audio_tracks[0].is_muted = true;
+    let output = sequence.audio_program.outputs[0].id;
+    let compiled =
+        compile_audio_program(&sequence, AudioCompileRequest::program(output)).expect("compiled");
+    assert_eq!(
+        compiled.execution_demand(),
+        AudioProgramExecutionDemand::ProvenSilent
+    );
+    assert!(compiled.contributions().is_empty());
+
     let mut source = RampSource::default();
     let pcm = render_audio(
         prepared(&sequence, 4),
@@ -1153,12 +1184,151 @@ fn track_mute_zeros_post_mute_route_without_reinterpreting_the_graph() {
     )
     .expect("muted render");
     assert_eq!(pcm, vec![0.0; 4]);
+    assert_eq!(source.block_reads, 0);
+}
+
+#[test]
+fn audio_track_visibility_does_not_gate_the_program_signal() {
+    let mut sequence = sequence_with_audio_clip();
+    sequence.audio_tracks[0].is_visible = false;
+    let output = sequence.audio_program.outputs[0].id;
+    let compiled =
+        compile_audio_program(&sequence, AudioCompileRequest::program(output)).expect("compiled");
+    assert_eq!(
+        compiled.execution_demand(),
+        AudioProgramExecutionDemand::RequiresExecution
+    );
+    assert_eq!(compiled.contributions().len(), 1);
+
+    let mut source = RampSource::default();
+    let pcm = render_audio(
+        prepared(&sequence, 4),
+        &mut source,
+        AudioRenderRequest { start_sample: 0, frames: 4 },
+    )
+    .expect("visibility-independent render");
+    assert_eq!(pcm, vec![1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(source.block_reads, 1);
+}
+
+#[test]
+fn muted_track_pre_mute_sends_retain_the_source_execution_branch() {
+    for port in [
+        AudioChannelStripOutputPort::PreFader,
+        AudioChannelStripOutputPort::PostFaderPreMute,
+    ] {
+        let mut sequence = sequence_with_audio_clip();
+        sequence.audio_tracks[0].is_muted = true;
+        let track_id = sequence.audio_tracks[0].id;
+        sequence.audio_program.routes[0].source = AudioRouteSource::Track { track_id, port };
+        let output = sequence.audio_program.outputs[0].id;
+        let compiled = compile_audio_program(&sequence, AudioCompileRequest::program(output))
+            .expect("compiled pre-mute send");
+        assert_eq!(
+            compiled.execution_demand(),
+            AudioProgramExecutionDemand::RequiresExecution
+        );
+        assert_eq!(compiled.contributions().len(), 1);
+
+        let mut source = RampSource::default();
+        let pcm = render_audio(
+            prepared(&sequence, 4),
+            &mut source,
+            AudioRenderRequest { start_sample: 0, frames: 4 },
+        )
+        .expect("pre-mute send render");
+        assert_eq!(pcm, vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(source.block_reads, 1);
+    }
+}
+
+#[test]
+fn selected_bus_processor_prevents_unprepared_silence_substitution() {
+    let mut sequence = Sequence::new("generator-capable Bus");
+    sequence.settings.audio_channel_layout = AudioChannelLayout::Mono;
+    let output_id = sequence.audio_program.outputs[0].id;
+    let bus_id = mondrian_core::MixBusId::new();
+    let mut strip = mondrian_timeline::AudioChannelStrip::default();
+    strip.pre_fader.processors.push(AudioProcessorInstance {
+        id: mondrian_core::AudioProcessorInstanceId::new(),
+        definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
+            plugin_id: "test.mondrian.generator-capable".to_owned(),
+            schema_version: 1,
+        },
+        bypassed: false,
+        parameters: Default::default(),
+        opaque_state: None,
+    });
+    sequence.audio_program.buses.push(AudioMixBus {
+        id: bus_id,
+        name: "Generator-capable Bus".to_owned(),
+        strip,
+    });
+    sequence.audio_program.routes.push(AudioRoute::new(
+        AudioRouteSource::Bus {
+            bus_id,
+            port: AudioChannelStripOutputPort::PreFader,
+        },
+        AudioRouteDestination::Output(output_id),
+    ));
+
+    let compiled = compile_audio_program(&sequence, AudioCompileRequest::program(output_id))
+        .expect("compiled selected Bus");
+    assert!(compiled.contributions().is_empty());
+    assert_eq!(
+        compiled.execution_demand(),
+        AudioProgramExecutionDemand::RequiresExecution
+    );
+}
+
+#[test]
+fn pre_fader_tap_does_not_retain_an_unreachable_post_fader_processor() {
+    let mut sequence = Sequence::new("pre-fader-only Bus");
+    sequence.settings.audio_channel_layout = AudioChannelLayout::Mono;
+    let output_id = sequence.audio_program.outputs[0].id;
+    let bus_id = mondrian_core::MixBusId::new();
+    let mut strip = mondrian_timeline::AudioChannelStrip::default();
+    strip.post_fader.processors.push(AudioProcessorInstance {
+        id: mondrian_core::AudioProcessorInstanceId::new(),
+        definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
+            plugin_id: "test.mondrian.unreachable-generator".to_owned(),
+            schema_version: 1,
+        },
+        bypassed: false,
+        parameters: Default::default(),
+        opaque_state: None,
+    });
+    sequence.audio_program.buses.push(AudioMixBus {
+        id: bus_id,
+        name: "Pre-fader-only Bus".to_owned(),
+        strip,
+    });
+    sequence.audio_program.routes.push(AudioRoute::new(
+        AudioRouteSource::Bus {
+            bus_id,
+            port: AudioChannelStripOutputPort::PreFader,
+        },
+        AudioRouteDestination::Output(output_id),
+    ));
+
+    let compiled = compile_audio_program(&sequence, AudioCompileRequest::program(output_id))
+        .expect("compiled pre-fader-only Bus");
+    assert_eq!(
+        compiled.execution_demand(),
+        AudioProgramExecutionDemand::ProvenSilent
+    );
 }
 
 #[test]
 fn unresolved_plugin_survives_semantic_ir_and_fails_at_preparation() {
     let mut sequence = sequence_with_audio_clip();
     let track_id = sequence.audio_tracks[0].id;
+    let mut authored_processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+    authored_processor.definition = mondrian_timeline::AudioProcessorDefinitionRef::Clap {
+        plugin_id: "com.example.effect".to_owned(),
+        schema_version: 1,
+    };
+    authored_processor.opaque_state = Some(vec![1, 2, 3].into());
     sequence
         .audio_program
         .track_channels
@@ -1167,19 +1337,25 @@ fn unresolved_plugin_survives_semantic_ir_and_fails_at_preparation() {
         .strip
         .pre_fader
         .processors
-        .push(AudioProcessorInstance {
-            id: mondrian_core::AudioProcessorInstanceId::new(),
-            definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
-                plugin_id: "com.example.effect".to_owned(),
-                schema_version: 1,
-            },
-            bypassed: false,
-            parameters: BTreeMap::new(),
-            opaque_state: Some(vec![1, 2, 3]),
-        });
+        .push(authored_processor);
     let output = sequence.audio_program.outputs[0].id;
     let compiled = compile_audio_program(&sequence, AudioCompileRequest::program(output))
         .expect("semantic compilation preserves unresolved plugin intent");
+    let authored_processor = &mut sequence
+        .audio_program
+        .track_channels
+        .get_mut(&track_id)
+        .expect("author Track channel")
+        .strip
+        .pre_fader
+        .processors[0];
+    authored_processor.opaque_state.as_mut().expect("author opaque state").push(4);
+    authored_processor
+        .parameters
+        .get_mut(&ParameterId::new_static(GAIN_DB_PARAMETER_ID))
+        .expect("author gain parameter")
+        .automation
+        .default_value = 6.0;
     let processor = &compiled
         .track_channels
         .get(&track_id)
@@ -1195,6 +1371,12 @@ fn unresolved_plugin_survives_semantic_ir_and_fails_at_preparation() {
     assert_eq!(
         processor.opaque_state.as_deref(),
         Some([1, 2, 3].as_slice())
+    );
+    assert_eq!(
+        processor.parameters[&ParameterId::new_static(GAIN_DB_PARAMETER_ID)]
+            .automation
+            .default_value,
+        0.0
     );
 
     let error = PreparedAudioPlan::prepare(
@@ -1589,7 +1771,7 @@ fn algorithmic_latency_preserves_signal_time_for_every_downstream_automation_sta
             schema_version: 1,
         },
         bypassed: false,
-        parameters: BTreeMap::new(),
+        parameters: Default::default(),
         opaque_state: None,
     });
     let mut gain = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
@@ -1929,6 +2111,178 @@ fn nested_public_output_uses_an_independent_recursive_session() {
         .render_into(AudioRenderRequest { start_sample: 0, frames: 4 }, &mut pcm)
         .expect("nested render");
     assert_eq!(pcm, vec![1.0, 2.0, 3.0, 4.0]);
+}
+
+#[test]
+fn range_scoped_runtime_binds_only_audible_intersecting_sources() {
+    let mut sequence = Sequence::new("range-scoped Runtime");
+    sequence.settings.audio_channel_layout = AudioChannelLayout::Mono;
+    let track_id = sequence.audio_tracks[0].id;
+    let selected_asset = AssetId::new();
+    let off_range_asset = AssetId::new();
+    sequence
+        .add_media_audio_clip(
+            track_id,
+            Clip::new(selected_asset, tt(0, 1), tt(4, 1)).expect("selected Clip"),
+            AudioSourceComponentId::primary(),
+        )
+        .expect("selected audio");
+    sequence
+        .add_media_audio_clip(
+            track_id,
+            Clip::new(off_range_asset, tt(10, 1), tt(4, 1)).expect("off-range Clip"),
+            AudioSourceComponentId::primary(),
+        )
+        .expect("off-range audio");
+    let resolver = RecordingResolver::default();
+    let contract = AudioRenderContract {
+        sample_rate: 2,
+        channel_layout: AudioChannelLayout::Mono,
+        max_block_frames: 8,
+        processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+        public_output_lookahead_budget_frames:
+            AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+        compensation_delay_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+    };
+    let mut runtime = AudioProgramRuntime::build_for_range_with_resource_grant(
+        &sequence,
+        &[],
+        &resolver,
+        contract,
+        None,
+        TimelineTimeRange::new(tt(0, 1), tt(4, 1)).expect("selection"),
+        AudioRuntimeResourceGrant::new(8, 64 * 1024 * 1024, 64 * 1024 * 1024),
+    )
+    .expect("range-scoped Runtime");
+
+    assert_eq!(
+        resolver.resolved_assets.lock().expect("recorded sources").as_slice(),
+        &[selected_asset]
+    );
+    let mut pcm = [0.0; 4];
+    runtime
+        .render_into(AudioRenderRequest { start_sample: 0, frames: 4 }, &mut pcm)
+        .expect("selected render");
+    assert_eq!(pcm, [1.0, 2.0, 3.0, 4.0]);
+}
+
+#[test]
+fn whole_program_runtime_does_not_bind_a_mute_gated_post_mute_source() {
+    let mut sequence = sequence_with_audio_clip();
+    sequence.audio_tracks[0].is_muted = true;
+    let resolver = RecordingResolver::default();
+    let contract = AudioRenderContract {
+        sample_rate: 2,
+        channel_layout: AudioChannelLayout::Mono,
+        max_block_frames: 8,
+        processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+        public_output_lookahead_budget_frames:
+            AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+        compensation_delay_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+    };
+    let mut runtime = AudioProgramRuntime::build(&sequence, &[], &resolver, contract, None)
+        .expect("mute-gated Runtime");
+
+    assert_eq!(
+        runtime.execution_demand(),
+        AudioProgramExecutionDemand::ProvenSilent
+    );
+    assert!(resolver.resolved_assets.lock().expect("recorded sources").is_empty());
+    let mut pcm = [1.0; 4];
+    runtime
+        .render_into(AudioRenderRequest { start_sample: 0, frames: 4 }, &mut pcm)
+        .expect("silent Runtime");
+    assert_eq!(pcm, [0.0; 4]);
+}
+
+#[test]
+fn repeated_nested_sequence_placements_consume_distinct_runtime_occurrences() {
+    let child = sequence_with_audio_clip();
+    let child_output = child.audio_program.outputs[0].id;
+    let mut root = Sequence::new("repeated child");
+    root.settings.audio_channel_layout = AudioChannelLayout::Mono;
+    let root_track = root.audio_tracks[0].id;
+    for start in [TimelineTime::ZERO, tt(4, 1)] {
+        let nested = Clip::new_nested_sequence(
+            child.id,
+            start,
+            tt(4, 1),
+            Some("child occurrence".to_owned()),
+        )
+        .expect("nested Clip");
+        root.add_nested_audio_clip(root_track, nested, child_output)
+            .expect("nested authoring");
+    }
+    let contract = AudioRenderContract {
+        sample_rate: 2,
+        channel_layout: AudioChannelLayout::Mono,
+        max_block_frames: 8,
+        processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+        public_output_lookahead_budget_frames:
+            AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+        compensation_delay_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+    };
+    let baseline = AudioProgramRuntime::build(
+        &root,
+        std::slice::from_ref(&child),
+        &RampResolver,
+        contract,
+        None,
+    )
+    .expect("baseline Runtime");
+    let footprint = baseline.resource_footprint();
+    assert_eq!(footprint.runtime_occurrences, 3);
+    assert!(footprint.fixed_resident_bytes > 0);
+    assert!(footprint.prepared_logical_bytes > 0);
+
+    let error = match AudioProgramRuntime::build_with_resource_grant(
+        &root,
+        std::slice::from_ref(&child),
+        &RampResolver,
+        contract,
+        None,
+        AudioRuntimeResourceGrant::new(
+            2,
+            footprint.fixed_resident_bytes,
+            footprint.prepared_logical_bytes,
+        ),
+    ) {
+        Ok(_) => panic!("two occurrence slots cannot admit two placements plus the root"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        AudioRuntimeBuildError::ResourceGrantExceeded {
+            category: AudioRuntimeResourceCategory::RuntimeOccurrences,
+            required: 3,
+            granted: 2,
+            ..
+        }
+    ));
+
+    let exact = AudioProgramRuntime::build_with_resource_grant(
+        &root,
+        &[child],
+        &RampResolver,
+        contract,
+        None,
+        AudioRuntimeResourceGrant::new(
+            footprint.runtime_occurrences,
+            footprint.fixed_resident_bytes,
+            footprint.prepared_logical_bytes,
+        ),
+    )
+    .expect("exact closure grant");
+    assert_eq!(exact.resource_footprint(), footprint);
 }
 
 #[test]

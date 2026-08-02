@@ -1,6 +1,12 @@
 # GPU-Native Renderer
 
-This document describes the target direction. The codebase is currently transitional: `FrameCompositor` and UI rendering are GPU-backed, but timeline compositing/effects still have CPU RGBA paths.
+This document describes the production GPU direction. Timeline compositing has
+one typed CPU/GPU family: scalar CPU paths remain correctness references and
+reported fallbacks, while GPU work enters through renderer-owned ColorFrame,
+`GpuFrameCompositor`, and Viewer/Export execution Sessions. The removed
+untyped RGBA8 `RenderPipeline`/`FrameCompositor` prototypes are not alternate
+production paths. UI rendering remains independently owned by
+`mondrian-ui-renderer`.
 
 The working compositor clears its accumulation target to transparent black.
 Opaque viewer or export backgrounds are explicit downstream presentation or
@@ -28,7 +34,7 @@ GPU owns frame -> display/export consume GPU result -> readback only at explicit
 - bind group layouts
 - texture pools
 - staging buffers for explicit readback
-- render graph resource lifetime
+- renderer execution-Session resource and pass lifetime
 - diagnostics/profiling hooks
 
 UI code may use `mondrian-ui-renderer`; timeline/video rendering should stay in `mondrian-renderer`.
@@ -44,6 +50,31 @@ UI code may use `mondrian-ui-renderer`; timeline/video rendering should stay in 
   `ColorFrameDescriptor`, renderer resource id, texture format, and diagnostic
   label; it does not expose CPU pixels or claim ownership of a concrete wgpu
   object outside the renderer resource table.
+
+The texture pool is an idle-residency optimization, not authority to allocate
+an unbounded active frame. `ViewerGpuExecutionRuntime` separately holds a
+`ViewerGpuExecutionResourceGrant` with a pressure-sensitive idle pool and a
+pressure-stable active texture byte/count limit. Before recording,
+`estimate_viewer_gpu_active_working_set()` lowers the complete Viewer request
+into checked per-stage demand. It includes source upload; the renderer-owned
+native bridge, encoded-RGB, and working outputs; heterogeneous GPU plan peak
+residency; Effect-domain intermediates; Cross Dissolve branches;
+Adjustment/composite accumulators; the exact spatial pyramid; Program
+Output/scopes; monitor output; and display-calibration output plus its RGBA32F
+3D LUT. The media-owned decoder surface remains charged to the Frame Store's
+native-resource grant. An idle-pool hit still counts as active while checked
+out; a heterogeneous sub-grant does not replace the enclosing Viewer grant;
+and returning an intermediate to the idle pool does not authorize the next
+frame.
+
+If bytes or resource count exceed the active grant, recording returns
+`ViewerGpuExecutionError::ActiveWorkingSet` before any texture creation.
+Renderer code cannot lower format precision, skip stages, or invoke a hidden
+CPU path to satisfy the grant. Public estimate and runtime diagnostics make
+the rejection reproducible without constructing a wgpu device. The estimate
+uses logical texel bytes; driver padding, swapchain allocations, persistent
+pipeline/OCIO resources, decoded CPU caches, and presentation ownership remain
+separate resource contracts.
 
 ## Native Decoded Frame Import
 
@@ -66,6 +97,13 @@ concrete backend reports readiness and support for that handle/format, the plan
 allocates a renderer-owned linear `Working` frame handle; the imported decoder
 surface remains a backend object consumed by the native sampling/input transform
 pass.
+The request-only native estimate reserves up to twice the visible NV12/P010
+texel bytes for codec-aligned bridge storage. D3D12 descriptor validation
+rejects a decoder storage extent above that same 2:1 pixel envelope before a
+bridge pool can grow. This paired estimate/validation rule makes padding
+bounded without teaching the pure Viewer estimator to inspect platform
+handles. The already-created decoder surface is governed by media residency,
+not counted again as a renderer-owned texture.
 Native YCbCr conversion and OCIO input conversion remain two explicit renderer
 passes with one color contract. `GpuNativeYuvDecoder` samples the native luma
 and chroma plane views into a renderer-owned `Rgba16Float` source frame whose
@@ -184,6 +222,14 @@ the source and shared destination, copies the resource, returns both to
 `COMMON`, and signals `copy_ready`. The renderer queue waits on `copy_ready`,
 transitions `COMMON -> RESOURCE`, and only then exposes the plane views. The
 renderer submit is followed by `RESOURCE -> COMMON` and `renderer_complete`.
+The decoder source keeps a distinct short residency lease until a non-blocking
+`copy_ready` fence query proves completion. If `GetCompletedValue` returns
+D3D's `u64::MAX` device-removed sentinel, that sentinel is a second explicit
+physical terminal: the bridge clears only the source guarded by that removed
+device and preserves typed
+`GpuNativeDecodedFrameImportError::NativeDeviceRemoved` evidence through the
+backend/runtime. It is not flattened to `BackendRejected`. No other query,
+string error, wgpu loss, timeout, or teardown request releases that source.
 Fence values are strictly
 monotonic, command allocators are reset only after completion, busy entries fail
 without a CPU wait, and any partially submitted failure permanently poisons the
@@ -197,6 +243,10 @@ presentation adapters can keep the last completed output visible and let the
 scheduler retry or discard the obsolete candidate. Capability mismatches,
 protocol violations, and device errors remain terminal structured failures;
 backpressure must never trigger a surprise CPU transfer or an unbounded pool.
+Retirement callers may accept only successful copy-fence progress or the typed
+native-device-removed terminal as source-release proof; ordinary backend errors
+remain fail-closed. This native proof is independent of the Viewer wgpu
+generation terminal and its work-done callback.
 Decoder device identities are also bounded: the backend retains at most eight
 source-contract pools and evicts the least-recently-used pool only after every
 bridge fence in it has completed. This prevents playback/interactive session
@@ -210,6 +260,70 @@ undocumented resource-state assumption. Production-path real-media gates must
 prove decoded D3D12VA/P010 residency, native import execution, GPU timestamp
 coverage, absence of readback/fallback, and bounded pool reuse; one-off machine
 diagnostic tests are removed after that evidence is collected.
+
+Native-import GPU attribution is independent from the semantically fixed
+Viewer suffix timer because the bridge submits its YUV/input-color prefix
+before the caller-owned Viewer command buffer. Timestamp capability and
+activation are separate: the default
+`NativeVideoImportGpuTimingPolicy::Disabled` allocates nothing even on a
+capable device; an evidence owner must explicitly select `Enabled { capacity }`
+within the hard `1..=256` slot range. An activated D3D12 backend owns that
+bounded asynchronous ring with exactly three ordered points:
+post-acquire/start, after YUV-to-encoded-RGB, and after the source-to-working
+input color stage. Every completed sample carries both a backend-runtime-local
+Viewer-candidate token and import token, plus an optional lock-free observation
+of whether the decoder fence was already complete before the queue
+wait/copy/acquire chain. A report spanning multiple renderer runtimes must add
+its own execution-session identity instead of treating either token as
+process-global. The two reported deltas are
+`yuv_decode_marker_bracket_us` and
+`input_color_marker_bracket_us`; they must never be inferred from CPU recording
+time or the later Viewer suffix.
+Because the start counter is written in the wgpu import command buffer, these
+deltas intentionally exclude decoder execution, the decoder-device copy,
+queue-wait latency, and the raw acquire transition that orders that command
+buffer. Each bracket can still contain implicit barriers, scheduler gaps, and
+backend command placement/reordering within its marker boundaries; neither
+field claims pure shader time. The optional fence-ready fact helps classify
+upstream readiness but is not a duration measurement.
+The execution owner polls the device for its own lifecycle reasons;
+`ViewerGpuExecutionRuntime` only exposes a collect-after-device-poll seam that
+performs `try_recv`/mapped-readback work and never initiates polling. Cumulative
+diagnostics separate `capability_supported`, `activated`, and
+`inactive_reason`, then report `samples`/`pending`/`missing`/`dropped`. Those
+accounting categories are disjoint and sum to valid-output imports.
+Here `submitted_imports` means imports that returned a valid renderer working
+frame. A bridge failure after ambiguous queue acceptance is excluded even
+though the GPU may have accepted its command buffer; timing diagnostics are
+usable-output coverage, not an inventory of all possible GPU work.
+Ring exhaustion drops only telemetry, and disabled policy, unsupported
+timestamp features, or a readback/runtime failure leave timing inactive without
+failing, waiting, spinning, or changing the rendered frame. Ambiguous failure
+after queue submission disables and retires the whole timing lifecycle instead
+of recycling possibly in-flight query resources.
+Viewer recording captures its candidate token locally at entry, carries that
+exact value through every import, and ends the candidate scope on every ordinary
+`Ok`/`Err` return. When timing is active, a successful
+`ViewerGpuExecutionRecord` owns one move-only
+`NativeVideoImportCandidateTimingReceipt`; the presentation Adapter may move it
+out exactly once with `take_native_video_import_timing_receipt`. Its
+`submitted_imports` is produced only by terminal probe consumption inside that
+exact candidate scope and satisfies
+`submitted_imports = scheduled_samples + missing_samples + dropped_samples`.
+`scheduled_samples` means asynchronous readback was successfully registered,
+not that a hardware sample has completed. A successful active candidate with no
+native imports therefore returns an explicit all-zero receipt. Disabled or
+unsupported timing returns no receipt, and a failed Viewer record suppresses
+its receipt even if an earlier import already scheduled a sample.
+
+A completed sample from such a failed candidate retains its original token and
+remains deliberately unmatched, so report validation can classify it instead
+of attaching it to a later frame. An internal renderer panic is not converted
+into recoverable timing evidence; the outer panic-isolation seam must drop and
+rebuild that renderer runtime. If a caller nevertheless starts another
+candidate while a prior scope remains active, timing fails closed and disables
+itself rather than rebinding later imports to the new token.
+
 The media layer's FFmpeg hardware codec config probe is also only planning
 evidence. It can prove that the linked FFmpeg decoder advertises a backend
 config for H.264/HEVC/etc., but it does not create an OS device, expose a
@@ -227,7 +341,9 @@ Viewer GPU output telemetry now preserves decoder residency and payload
 sampling facts through both renderer-owned source contracts. `ViewerGpuMediaSource`
 carries CPU RGBA source pixels plus decoder diagnostics for the GPU OCIO upload
 path; `ViewerGpuNativeSource` carries a native decoder surface contract
-without CPU pixels. It retains the complete media-owned
+without CPU pixels. It also carries the exact aspect-fitted materialization
+extent resolved from the Preview request, distinct from the physical native
+surface extent. It retains the complete media-owned
 `PreviewNativeDecodedFrame`, including the opaque process-local handle token,
 instead of flattening the payload into diagnostic facts; this preserves the
 resource identity and lifetime required by the renderer import backend. Both
@@ -314,7 +430,10 @@ Typed two-input visual Transitions are not decomposed into ordinary GPU layers.
 `ViewerGpuExecutionLayer::CrossDissolve` owns two
 `ViewerGpuTransitionInput` branches, and every non-transparent branch reuses
 the same `ViewerGpuSourceLayer` preparation contract as an ordinary Timeline
-source. Each branch therefore completes source color conversion, affine
+source. The complete two-branch payload has one boxed owner so the ordinary
+Source/Adjustment enum variants do not inherit both endpoints' inline size;
+this indirection changes storage only, not endpoint identity or execution.
+Each branch therefore completes source color conversion, affine
 transform, Clip opacity and effect-domain processing before a dedicated
 working-linear pass interpolates premultiplied coverage and restores the public
 straight-alpha contract. Transparent endpoints reduce to one correctly
@@ -324,10 +443,11 @@ shader with the Export/CPU reference formula. An ordinary source-over opacity
 pair remains an invalid lowering.
 
 The first native subset is a bounded single-source chain of ColorAdjust,
-WhiteBalance, Vignette, and deterministic Grain. Unsupported topology, spatial
-sampling, LUT resources, and custom operations remain explicit lowering
-blockers until dedicated renderer graph passes provide their resource and alpha
-contracts.
+Vignette, and deterministic Grain. White Balance has authoring/schema support
+but no executable GPU lowering and therefore cannot enter the effect library as
+visually supported. Unsupported topology, spatial sampling, LUT resources, and
+custom operations remain explicit lowering blockers until dedicated renderer
+graph passes provide their resource and alpha contracts.
 
 Non-scene-linear point plans carry their exact `EffectColorDomain` into the
 renderer. `RenderEffectColorDomainGpuPlanner` resolves that declaration into a
@@ -464,11 +584,14 @@ the cached binding lives on `GpuColorFrameWgpuResource`, an exact-contract pool
 hit remains warm even though the new frame handle has a different ID, while a
 pool eviction drops both texture and binding together.
 
-GPU shader extraction keys include the core OCIO config revision in addition
-to engine, endpoints/view, language, and the extracted processor cache ID.
-Immutable Mondrian/ACES packages use revision zero; mutable Custom OCIO
-path/environment sources use the selected config generation, matching the CPU
-processor cache invalidation contract.
+GPU shader extraction keys include the exact `ColorEngine`, endpoints/view,
+language, extracted processor cache ID, and the core OCIO cache-revision field.
+Immutable Mondrian/ACES packages and validated Custom engines currently use
+revision zero because their complete package/config/resource/processor digests
+are already part of `ColorEngine`; changed Custom bytes produce a different
+engine key. The process-global OCIO selection generation is operational reload
+evidence and never participates in shader-cache equality, matching the CPU
+Processor Session contract.
 
 `viewer_spatial.rs` owns Viewer-only crop and resize processing. Its typed plan
 accepts and produces only GPU-resident `Working + LinearFloat + Rgba32Float`
@@ -529,7 +652,7 @@ texture extents, or empty LUT payloads before backend layout planning begins.
 It is not a fake resource allocation layer; concrete `wgpu::ShaderModule`,
 `wgpu::Texture`, `wgpu::BindGroupLayout`, `wgpu::BindGroup`, and pipeline
 objects must still be created by the backend compiler/upload layer before
-the render graph records a native pass.
+the Viewer or Export renderer execution Session records a native pass.
 
 `OcioGpuWgpuBackendPrepRuntime` is the renderer-owned pure-preparation runtime
 for this path. It owns the resource-layout cache and wrapper Naga artifact
@@ -599,10 +722,11 @@ alone still does not make the color pass executable.
 Monitor ICC calibration uses a separate typed processor after OCIO display/view
 output. `GpuDisplayCalibrationPlan` accepts only an encoded float frame in the
 same standard source space used to build `DisplayCalibrationLut3d`, and produces
-a `Device(calibration_key)` / `DeviceFloat` frame. The full ICC fingerprint is
-retained by the LUT and pass binding while the non-authoritative compact key
-avoids inflating every hot `GpuColorFrameHandle`; it cannot authorize a cache
-hit or pass. The backend uploads the cube as RGBA32F and
+a `Device(calibration_key)` / `DeviceFloat` frame. That calibration key is the
+complete 32-byte ICC identity and is carried through the frame descriptor and
+every `GpuColorFrameHandle`; LUT and pass bindings retain complete sampled-LUT
+identity as well. The derived `u64` diagnostic projection cannot authorize
+equality, a cache hit, or a pass. The backend uploads the cube as RGBA32F and
 performs explicit trilinear interpolation with
 `textureLoad`; this avoids requiring `FLOAT32_FILTERABLE` and keeps CPU/GPU
 sampling rules identical. Real-wgpu tests read back the pass and compare it
@@ -721,11 +845,16 @@ partially materialized stage when a contract conflict exists.
 When the source stage shape includes `ReadbackToCpu`, the resource plan keeps
 the matching `GpuColorFrameReadbackPlan` and exposes renderer-owned helpers to
 resolve the output frame from `GpuColorFrameResourceTable` and record the copy.
-`RenderGpuOutputBoundaryRuntime` is the app/export owner for this path's
-long-lived renderer state. It combines the OCIO shader cache, pure backend prep
-runtime, concrete backend-object runtime, GPU color frame id allocator, and
+`RenderGpuOutputBoundaryRuntime` owns this path's state for exactly one
+execution owner. The Window Viewer retains it for one live GPU Session. Each
+Export attempt constructs a different runtime inside its job-local visual
+Session, reuses it only across that attempt's frames, applies attempt-local
+backoff after failure, and releases it at the terminal gate. It combines the
+OCIO shader cache, pure backend prep runtime, concrete backend-object runtime,
+GPU color frame id allocator, and
 `GpuColorFrameResourceTable<GpuColorFrameWgpuResource>` so callers do not split
-those contracts across unrelated services.
+those contracts across unrelated services or accidentally create process-wide
+Viewer/Export residency.
 `RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_owned_backend(...)`
 is the app/export-facing entry point that plans the boundary, prepares or reuses
 the static/backend OCIO objects, derives the resource plan, materializes the
@@ -919,7 +1048,7 @@ contract, native blockers, transform diagnostics, and explicit CPU
 upload/readback boundary flags. This is the only place color-transform
 scheduling should ask whether a GPU OCIO path is ready; CPU execution remains
 the correctness executor until the plan reports no native blockers and the
-render graph owns GPU-resident frame handles.
+renderer execution Session owns GPU-resident frame handles.
 
 `RenderColorStagePlanner` is the scheduling layer above CPU and GPU color
 executors. It emits an ordered `RenderColorStagePlan` containing CPU transform,

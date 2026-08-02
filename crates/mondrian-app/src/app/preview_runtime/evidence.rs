@@ -20,6 +20,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let mut decode_access_mode_profiles = self.metrics.decode_access_mode_profiles.get();
         decode_access_mode_profiles.apply_cancellation(decode_cancellation);
         PreviewDiagnostics {
+            resource_decision_applications: self.metrics.resource_decision_applications.get(),
+            visual_program_cache: self.visual_programs.borrow().diagnostics(),
+            future_media_window: self.future_media_window.borrow().diagnostics(),
+            visual_execution_health_failed: self.visual_execution_health_failed.get(),
             render_requests: self.metrics.render_requests.get(),
             ready_frames: self.metrics.ready_frames.get(),
             loading_frames: self.metrics.loading_frames.get(),
@@ -88,10 +92,26 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             media_cache_hits: self.metrics.media_cache_hits.get(),
             media_cache_misses: self.metrics.media_cache_misses.get(),
             media_failure_hits: self.metrics.media_failure_hits.get(),
+            last_current_media_admission: self.last_current_media_admission.get(),
+            preview_execution_generation: self.execution.borrow().generation(),
+            media_existing_work_waiters: self.media_existing_work_waiters.borrow().len(),
+            media_existing_work_retry_pending: self.media_existing_work_retry_pending.get(),
+            media_existing_work_waiter_registrations: self
+                .media_existing_work_waiter_registrations
+                .get(),
+            media_existing_work_retry_acknowledgements: self
+                .media_existing_work_retry_acknowledgements
+                .get(),
+            last_gpu_loading_reason: self.last_gpu_loading_reason.get(),
             decode_cpu_budget: self.decode_cpu_budget,
             decode_worker_count: self.decode_worker_count,
+            media_worker_health_failed: self.media_worker_health_failed.get(),
             decode_worker_execution,
             decode_residency_revision: decode_residency.revision,
+            decode_residency_actionable_retry_revision: decode_residency.actionable_retry_revision,
+            decode_residency_observed_retry_revision: self
+                .observed_decode_residency_retry_revision
+                .get(),
             decode_residency_family: decode_residency.active_family.map(|family| match family {
                 PreviewDecodeResidencyFamily::Playback => "playback",
                 PreviewDecodeResidencyFamily::Interactive => "interactive",
@@ -135,13 +155,21 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             decode_canceled_total_duration_us: cancellation.execution.total_us,
             decode_canceled_max_duration_us: cancellation.execution.max_us,
             decode_canceled_last_duration_us: cancellation.execution.last_us,
-            decode_cancel_observation_samples: cancellation.request_to_checkpoint.samples,
-            decode_cancel_observation_total_us: cancellation.request_to_checkpoint.total_us,
-            decode_cancel_observation_max_us: cancellation.request_to_checkpoint.max_us,
-            decode_cancel_observation_last_us: cancellation.request_to_checkpoint.last_us,
-            decode_canceled_return_latency_total_us: cancellation.checkpoint_to_return.total_us,
-            decode_canceled_return_latency_max_us: cancellation.checkpoint_to_return.max_us,
-            decode_canceled_return_latency_last_us: cancellation.checkpoint_to_return.last_us,
+            decode_cancel_observation_samples: cancellation.request_to_logical_cancellation.samples,
+            decode_cancel_observation_total_us: cancellation
+                .request_to_logical_cancellation
+                .total_us,
+            decode_cancel_observation_max_us: cancellation.request_to_logical_cancellation.max_us,
+            decode_cancel_observation_last_us: cancellation.request_to_logical_cancellation.last_us,
+            decode_canceled_return_latency_total_us: cancellation
+                .logical_cancellation_to_return
+                .total_us,
+            decode_canceled_return_latency_max_us: cancellation
+                .logical_cancellation_to_return
+                .max_us,
+            decode_canceled_return_latency_last_us: cancellation
+                .logical_cancellation_to_return
+                .last_us,
             decode_in_process_cpu_frames: self.metrics.decode_in_process_cpu_frames.get(),
             decode_external_ffmpeg_cpu_rgba_frames: self
                 .metrics
@@ -166,6 +194,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             decode_queue_wait_last_us: self.metrics.decode_queue_wait_last_us.get(),
             decode_current_queue_wait_max_us: self.metrics.decode_current_queue_wait_max_us.get(),
             decode_prefetch_queue_wait_max_us: self.metrics.decode_prefetch_queue_wait_max_us.get(),
+            decode_expired_queue_wait: self.metrics.decode_expired_queue_wait.get(),
             decode_seeked_frames: self.metrics.decode_seeked_frames.get(),
             decode_decoded_frame_count: self.metrics.decode_decoded_frame_count.get(),
             decode_max_decoded_frame_count: self.metrics.decode_max_decoded_frame_count.get(),
@@ -225,22 +254,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             playback_schedule: self.playback_schedule_diagnostics(),
             viewer_frame_cache_hits: self.metrics.viewer_frame_cache_hits.get(),
             viewer_frame_cache_misses: self.metrics.viewer_frame_cache_misses.get(),
-            viewer_frame_cache_entries: frame_store.viewer_entries,
-            media_cache_entries: frame_store.media_entries,
-            media_failure_entries: frame_store.failure_entries,
-            media_cache_reserved_bytes: frame_store.media_reserved_bytes,
-            media_cache_byte_budget: frame_store.media_byte_budget,
-            media_cache_resource_units: frame_store.media_resource_units,
-            media_cache_resource_unit_budget: frame_store.media_resource_unit_budget,
-            media_cache_evictions: frame_store.media_evictions,
-            media_cache_oversize_rejections: frame_store.media_oversize_rejections,
-            viewer_frame_cache_reserved_bytes: frame_store.viewer_reserved_bytes,
-            viewer_frame_cache_byte_budget: frame_store.viewer_byte_budget,
-            viewer_frame_cache_evictions: frame_store.viewer_evictions,
-            viewer_frame_cache_oversize_rejections: frame_store.viewer_oversize_rejections,
-            pinned_viewer_frame_bytes: frame_store.pinned_viewer_bytes,
-            pinned_media_frame_bytes: frame_store.pinned_media_bytes,
-            media_failure_evictions: frame_store.failure_evictions,
+            frame_store,
             color_input_transform_calls: self.metrics.color_input_transform_calls.get(),
             color_input_transform_pixels: self.metrics.color_input_transform_pixels.get(),
             color_output_transform_calls: self.metrics.color_output_transform_calls.get(),
@@ -490,8 +504,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             }
             PreviewDecodePath::PlaybackSessionRingHit => {
                 bump(&self.metrics.decode_playback_session_ring_hit_frames);
-            }
-            PreviewDecodePath::PreviewCacheHit => {
                 bump(&self.metrics.decode_cache_hit_frames);
             }
         }
@@ -580,28 +592,33 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         &self,
         access_mode: PreviewDecodeAccessMode,
         reason: Option<MediaPreviewCancelReason>,
-        decode_cancellation: Option<mondrian_media::PreviewDecodeCancellation>,
+        concrete_media_checkpoint: Option<mondrian_media::PreviewDecodeCancellation>,
         elapsed_us: u64,
-        observed_elapsed_us: Option<u64>,
-        request_to_observed_us: Option<u64>,
+        logical_cancellation_observed: Option<LogicalCancellationObserved>,
         owns_pending_playback_demand: bool,
     ) {
         let reason = reason.unwrap_or(MediaPreviewCancelReason::Unknown);
         if reason == MediaPreviewCancelReason::PlaybackDeadline && owns_pending_playback_demand {
             self.record_playback_current_late_drop(1);
         }
-        if let Some(decode_cancellation) = decode_cancellation {
+        if let Some(concrete_media_checkpoint) = concrete_media_checkpoint {
             let mut evidence = self.metrics.decode_cancellation_checkpoints.get();
-            evidence.observe(decode_cancellation);
+            evidence.observe(concrete_media_checkpoint);
             self.metrics.decode_cancellation_checkpoints.set(evidence);
+            let mut profiles = self.metrics.decode_access_mode_profiles.get();
+            profiles.record_session_cancellation(access_mode, concrete_media_checkpoint);
+            self.metrics.decode_access_mode_profiles.set(profiles);
         }
         self.metrics.decode_cancellation.borrow_mut().observe(
             mondrian_playback::FrameCancellationObservation {
                 work_class: media_preview_frame_work_class(access_mode),
                 cause: reason.playback_cause(),
                 execution_duration: Duration::from_micros(elapsed_us),
-                execution_to_checkpoint: observed_elapsed_us.map(Duration::from_micros),
-                request_to_checkpoint: request_to_observed_us.map(Duration::from_micros),
+                execution_to_logical_cancellation: logical_cancellation_observed
+                    .map(|observation| Duration::from_micros(observation.execution_elapsed_us)),
+                request_to_logical_cancellation: logical_cancellation_observed
+                    .and_then(|observation| observation.request_elapsed_us)
+                    .map(Duration::from_micros),
             },
         );
     }
@@ -620,7 +637,11 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             MediaPreviewFailureReason::ForwardDecodeBudgetExhausted => {
                 bump(&self.metrics.decode_budget_exhausted_failures);
             }
-            MediaPreviewFailureReason::DecodeError => {}
+            MediaPreviewFailureReason::DecodeError
+            | MediaPreviewFailureReason::TemporalMismatch
+            | MediaPreviewFailureReason::WorkerPanicked
+            | MediaPreviewFailureReason::ResidencyContractViolation
+            | MediaPreviewFailureReason::ResidencyCapacityRejected => {}
         }
         let mut access_mode_profiles = self.metrics.decode_access_mode_profiles.get();
         access_mode_profiles.record_failure(access_mode, reason);
@@ -652,6 +673,21 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         }
         let mut access_mode_profiles = self.metrics.decode_access_mode_profiles.get();
         access_mode_profiles.record_queue_wait(access_mode, queue_wait_us);
+        self.metrics.decode_access_mode_profiles.set(access_mode_profiles);
+    }
+
+    pub(super) fn record_expired_preview_decode_queue_wait(
+        &self,
+        priority: MediaPreviewRequestPriority,
+        access_mode: PreviewDecodeAccessMode,
+        queue_wait_us: u64,
+    ) {
+        let mut expired = self.metrics.decode_expired_queue_wait.get();
+        expired.record(priority, queue_wait_us);
+        self.metrics.decode_expired_queue_wait.set(expired);
+
+        let mut access_mode_profiles = self.metrics.decode_access_mode_profiles.get();
+        access_mode_profiles.record_expired_queue_wait(priority, access_mode, queue_wait_us);
         self.metrics.decode_access_mode_profiles.set(access_mode_profiles);
     }
 

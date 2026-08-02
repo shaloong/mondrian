@@ -8,12 +8,23 @@
 use super::*;
 
 impl<O: Clone> PreviewProductionRuntime<O> {
-    pub(crate) fn presentation_for_state(&self, state: &AppState) -> PreviewPresentationState<O> {
+    pub(crate) fn presentation(
+        &self,
+        request: PreviewFrameExecutionRequest<'_>,
+    ) -> PreviewPresentationState<O> {
+        if self.media_existing_work_retry_pending.replace(false) {
+            bump(&self.media_existing_work_retry_acknowledgements);
+        }
+        let snapshot = request.snapshot();
+        let proxy_demands = request.proxy_demands();
+        let transport = snapshot.transport();
+        let running_without_demand = transport.is_playing() && transport.demand().is_none();
         bump(&self.metrics.render_requests);
-        self.observe_transport_activity(state.is_playing());
+        self.synchronize_visual_program_authoring_session(snapshot);
+        self.synchronize_transport_intent(transport.intent());
         self.execution.borrow_mut().set_pending(false);
         self.last_color_rejection.replace(None);
-        let Some(sequence) = state.active_sequence() else {
+        let Some(authoring) = snapshot.authoring() else {
             self.invalidate_preview_generation();
             self.scheduler.prune_obsolete();
             return self.observe_preview_state(PreviewPresentationState::Unavailable(
@@ -23,12 +34,22 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 ),
             ));
         };
-        let frame = state.current_frame().max(0);
-        let (width, height) = preview_dimensions_for_state(state, sequence);
+        let Some(sequence) = authoring.active_sequence() else {
+            self.invalidate_preview_generation();
+            self.scheduler.prune_obsolete();
+            return self.observe_preview_state(PreviewPresentationState::Unavailable(
+                PreviewUnavailability::no_content(
+                    PreviewOutputStage::Project,
+                    "no active Sequence",
+                ),
+            ));
+        };
+        let frame = transport.current_frame().max(0);
+        let (width, height) = preview_dimensions_for_snapshot(snapshot, sequence);
         let display_snapshot = self.display_snapshot.borrow();
         let display_color_space = match preview_display_color_space(
             sequence,
-            state.viewer_display_management(),
+            snapshot.viewer_display(),
             display_snapshot.as_ref(),
         ) {
             Ok(color_space) => color_space,
@@ -44,26 +65,38 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             }
         };
         let color_context =
-            sequence.settings.root_program_color_context(state.project_color_environment());
-        self.activate_preview_generation(ViewerPreviewGenerationKey::from_state(
-            state,
+            sequence.settings.root_program_color_context(authoring.color_environment());
+        self.activate_preview_generation(ViewerPreviewGenerationKey::from_snapshot(
+            snapshot,
             sequence,
             frame,
             width,
             height,
             display_color_space,
-            display_snapshot.as_ref().map(DisplayOutputSnapshot::contract_generation),
+            display_snapshot.as_ref().map(DisplayOutputSnapshot::contract_identity),
         ));
         let render_started_at = Instant::now();
         let resolve_started_at = Instant::now();
-        let resolved = self.resolve_timeline(state, sequence, frame, width, height, color_context);
+        let resolved = self.resolve_timeline(
+            snapshot,
+            proxy_demands,
+            sequence,
+            frame,
+            width,
+            height,
+            color_context,
+        );
         let mut render_stage_durations = PreviewRenderStageDurations {
             resolve_us: app_duration_us(resolve_started_at.elapsed()),
             ..PreviewRenderStageDurations::default()
         };
         let preview_state = match resolved {
             PreviewTimelineResolution::Ready(resolved) => {
-                let resolved = resolved.plan;
+                let mut resolved = resolved.plan;
+                if !resolved.cache_reusable {
+                    let execution_nonce = self.execution.borrow_mut().issue_candidate_id();
+                    resolved.cache_key = resolved.cache_key.with_execution_nonce(execution_nonce);
+                }
                 self.execution.borrow_mut().set_presentation_quality(
                     resolved_preview_presentation_quality(&resolved.elements),
                 );
@@ -72,18 +105,23 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 // remains display-independent because CPU packaging already
                 // records its concrete presentation color space.
                 let external_cache_key = resolved
-                    .color_context
-                    .output_color_space
-                    .color()
-                    .and_then(|program_output_color_space| {
-                        RenderMonitorAdaptation::new(
-                            program_output_color_space,
-                            display_color_space,
-                            resolved.color_context.engine.clone(),
+                    .cache_reusable
+                    .then(|| {
+                        resolved.color_context.output_color_space.color().and_then(
+                            |program_output_color_space| {
+                                RenderMonitorAdaptation::new(
+                                    program_output_color_space,
+                                    display_color_space,
+                                    resolved.color_context.engine.clone(),
+                                )
+                                .ok()
+                                .map(|adaptation| {
+                                    resolved.cache_key.with_monitor_adaptation(&adaptation)
+                                })
+                            },
                         )
-                        .ok()
-                        .map(|adaptation| resolved.cache_key.with_monitor_adaptation(&adaptation))
-                    });
+                    })
+                    .flatten();
                 if let Some(frame) = external_cache_key
                     .as_ref()
                     .and_then(|cache_key| self.registered_gpu_output_for_key(cache_key))
@@ -95,24 +133,44 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         app_duration_us(render_started_at.elapsed()),
                         render_stage_durations,
                     );
-                    PreviewPresentationState::Ready(PreviewPresentationContent::Gpu(frame))
-                } else if let Some(frame) = self.cached_viewer_frame(&resolved.cache_key) {
+                    PreviewPresentationState::Ready(PreviewPresentationCandidate::new(
+                        PreviewPresentationContent::Gpu(frame),
+                        self.playback_presentation_ticket(snapshot),
+                    ))
+                } else if let Some(frame) = resolved
+                    .cache_reusable
+                    .then(|| self.cached_viewer_frame(&resolved.cache_key))
+                    .flatten()
+                {
                     render_stage_durations.final_cache_lookup_us =
                         app_duration_us(final_cache_lookup_started_at.elapsed());
                     self.record_render_stage_durations(
                         app_duration_us(render_started_at.elapsed()),
                         render_stage_durations,
                     );
-                    self.frame_store.borrow_mut().pin_viewer_frame(ScopedPreviewRasterFrame {
-                        sequence_id: sequence.id,
-                        width,
-                        height,
-                        frame: frame.clone(),
-                    });
-                    PreviewPresentationState::Ready(PreviewPresentationContent::Raster(frame))
-                } else if state.is_playing()
-                    && preview_elements_require_deferred_composite(&resolved.elements)
-                {
+                    if running_without_demand {
+                        self.stale_viewer_content_for_sequence(sequence, width, height)
+                            .map(PreviewPresentationState::Stale)
+                            .unwrap_or(PreviewPresentationState::Loading)
+                    } else {
+                        self.frame_store.borrow_mut().pin_viewer_frame(ScopedPreviewRasterFrame {
+                            sequence_id: sequence.id,
+                            width,
+                            height,
+                            frame: frame.clone(),
+                        });
+                        PreviewPresentationState::Ready(PreviewPresentationCandidate::new(
+                            PreviewPresentationContent::Raster(frame),
+                            self.playback_presentation_ticket(snapshot),
+                        ))
+                    }
+                } else if transport.is_playing() {
+                    // Playback presentation is a read/projection seam on the
+                    // UI thread. A cache miss must be executed by the GPU
+                    // candidate path (or a future bounded fallback worker),
+                    // never by an inline full-frame CPU composite. This rule
+                    // applies equally to media and generated-only plans:
+                    // source kind cannot become UI scheduling authority.
                     render_stage_durations.final_cache_lookup_us =
                         app_duration_us(final_cache_lookup_started_at.elapsed());
                     self.record_render_stage_durations(
@@ -172,9 +230,11 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         output.rgba,
                     ) {
                         Ok(frame) => {
-                            self.frame_store
-                                .borrow_mut()
-                                .insert_viewer_frame(resolved.cache_key, frame.clone());
+                            if resolved.cache_reusable {
+                                self.frame_store
+                                    .borrow_mut()
+                                    .insert_viewer_frame(resolved.cache_key, frame.clone());
+                            }
                             render_stage_durations.frame_packaging_us =
                                 app_duration_us(frame_packaging_started_at.elapsed());
                             self.record_render_stage_durations(
@@ -189,8 +249,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                                     frame: frame.clone(),
                                 },
                             );
-                            PreviewPresentationState::Ready(PreviewPresentationContent::Raster(
-                                frame,
+                            PreviewPresentationState::Ready(PreviewPresentationCandidate::new(
+                                PreviewPresentationContent::Raster(frame),
+                                self.playback_presentation_ticket(snapshot),
                             ))
                         }
                         Err(error) => {
@@ -210,14 +271,26 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 self.execution
                     .borrow_mut()
                     .set_presentation_quality(mondrian_playback::FramePresentationQuality::Ready);
-                PreviewPresentationState::Transparent
+                if running_without_demand {
+                    self.stale_viewer_content_for_sequence(sequence, width, height)
+                        .map(PreviewPresentationState::Stale)
+                        .unwrap_or(PreviewPresentationState::Loading)
+                } else {
+                    PreviewPresentationState::Transparent(PreviewPresentationCandidate::new(
+                        (),
+                        self.playback_presentation_ticket(snapshot),
+                    ))
+                }
             }
             PreviewTimelineResolution::Unavailable { reason } => {
                 PreviewPresentationState::Unavailable(reason)
             }
         };
-        self.schedule_media_prefetches(state, sequence, frame, width, height);
+        self.schedule_media_prefetches(snapshot, proxy_demands, sequence, frame, width, height);
         self.scheduler.prune_obsolete();
+        if matches!(&preview_state, PreviewPresentationState::Loading) {
+            self.publish_existing_work_retry_if_actionable();
+        }
         self.observe_preview_state(preview_state)
     }
 
@@ -254,7 +327,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     ) -> PreviewPresentationState<O> {
         if matches!(
             state,
-            PreviewPresentationState::Transparent | PreviewPresentationState::Unavailable(_)
+            PreviewPresentationState::Transparent(_) | PreviewPresentationState::Unavailable(_)
         ) {
             self.clear_terminal_viewer_state();
         }
@@ -265,7 +338,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     fn record_preview_state(&self, state: &PreviewPresentationState<O>) {
         match state {
             PreviewPresentationState::Ready(_) => bump(&self.metrics.ready_frames),
-            PreviewPresentationState::Transparent => bump(&self.metrics.ready_frames),
+            PreviewPresentationState::Transparent(_) => bump(&self.metrics.ready_frames),
             PreviewPresentationState::Loading => bump(&self.metrics.loading_frames),
             PreviewPresentationState::Stale(_) => bump(&self.metrics.stale_frames),
             PreviewPresentationState::Unavailable(reason) => {

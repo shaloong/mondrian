@@ -5,17 +5,16 @@
 //! render plans, interpret color, or convert frames.
 
 use std::cell::Cell;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::app::ui_actions::TimelineSeekSource;
 use mondrian_core::timeline_data::AlphaInterpretation;
-use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};
-use mondrian_core::{TimelineTime, WorkingColorSpace};
+use mondrian_core::types::{AssetId, ColorEngine};
+use mondrian_core::{Resolution, TimelineTime, WorkingColorSpace};
 use mondrian_media::{
-    preview_decode_cpu_budget, DecodedVideoRangeContract, HwAccelDeviceSelector,
-    MediaFileFingerprint, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints,
-    PreviewHardwareDecodeRequest,
+    preview_decode_cpu_budget, HwAccelDeviceSelector, PreviewDecodeAccessMode,
+    PreviewDecodeAdaptiveHints, PreviewDecodeAlphaPresence, PreviewDecodeGeometry,
+    PreviewDecodeKey, PreviewHardwareDecodeRequest, PreviewNativeSurfaceHint,
 };
 
 pub(crate) const MEDIA_PREVIEW_JOB_QUEUE_CAPACITY: usize = 48;
@@ -24,35 +23,101 @@ pub(crate) const MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT: Duration = Duration:
 const MEDIA_PREVIEW_MAX_DECODE_WORKERS: usize = 2;
 const MEDIA_PREVIEW_MAX_PENDING_REQUESTS: usize = MEDIA_PREVIEW_JOB_QUEUE_CAPACITY;
 
-/// Decoder-native surface family inferred from probed source bit depth/layout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum MediaPreviewNativeSurfaceHint {
-    Nv12,
-    P010,
-}
-
 /// Stable identity for one decoded media preview request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct MediaPreviewKey {
     pub(crate) asset_id: AssetId,
-    pub(crate) path: PathBuf,
-    pub(crate) fingerprint: Option<MediaFileFingerprint>,
-    /// Exact source-local decode target and part of cache identity.
-    pub(crate) source_time: TimelineTime,
-    pub(crate) target_width: u32,
-    pub(crate) target_height: u32,
-    /// Full-resolution source width represented by the decoded sample.
-    pub(crate) source_width: u32,
-    /// Full-resolution source height represented by the decoded sample.
-    pub(crate) source_height: u32,
-    pub(crate) input_color_space: ColorSpace,
-    pub(crate) input_video_range: DecodedVideoRangeContract,
-    pub(crate) native_surface_hint: Option<MediaPreviewNativeSurfaceHint>,
-    pub(crate) source_has_alpha: bool,
+    /// Sole physical decode identity and geometry contract.
+    pub(crate) decode: PreviewDecodeKey,
+    /// Full-resolution logical Asset extent represented by the decoded sample.
+    ///
+    /// This remains App semantics because a selected proxy may have a smaller
+    /// physical raster while representing the original Asset's full logical
+    /// extent on the Timeline.
+    pub(crate) source_resolution: Resolution,
+    /// Author interpretation applied after physical decode.
     pub(crate) alpha_interpretation: AlphaInterpretation,
     pub(crate) working_color_space: WorkingColorSpace,
     pub(crate) input_tone_map: bool,
     pub(crate) engine: ColorEngine,
+}
+
+impl MediaPreviewKey {
+    /// Exact media-source-local decode target.
+    pub(crate) const fn source_time(&self) -> TimelineTime {
+        self.decode.source_time()
+    }
+
+    /// Physical native-surface family proved by the selected source contract.
+    pub(crate) const fn native_surface_hint(&self) -> Option<PreviewNativeSurfaceHint> {
+        self.decode.source().native_surface_hint()
+    }
+
+    /// Whether the selected physical source proves that it carries Alpha.
+    pub(crate) const fn source_has_alpha(&self) -> bool {
+        matches!(
+            self.decode.source().alpha_presence(),
+            PreviewDecodeAlphaPresence::Present
+        )
+    }
+
+    /// Conservative decoded extent used for App-owned residency admission.
+    pub(crate) const fn residency_resolution(&self) -> Resolution {
+        match self.decode.geometry() {
+            PreviewDecodeGeometry::FitWithin(resolution) => resolution,
+            PreviewDecodeGeometry::NativeSource { .. } => self.source_resolution,
+        }
+    }
+
+    /// Build one exact CPU-addressable key for App unit tests.
+    #[cfg(test)]
+    pub(crate) fn test_cpu(
+        mut path: std::path::PathBuf,
+        fingerprint: mondrian_media::MediaFileFingerprint,
+        source_time: TimelineTime,
+        resolution: Resolution,
+        source_color: mondrian_media::PreviewSourceColorContract,
+    ) -> Self {
+        if !path.is_absolute() {
+            path = std::env::temp_dir().join(path);
+        }
+        let source =
+            mondrian_media::PreviewDecodeSource::from_frozen_cpu_stream(path, fingerprint, 0)
+                .expect("complete synthetic Preview source");
+        let decode = PreviewDecodeKey::new(
+            source,
+            source_time,
+            PreviewDecodeGeometry::FitWithin(resolution),
+            source_color,
+        )
+        .expect("valid synthetic Preview decode key");
+        Self {
+            asset_id: AssetId::new(),
+            decode,
+            source_resolution: resolution,
+            alpha_interpretation: AlphaInterpretation::Straight,
+            working_color_space: WorkingColorSpace::LinearRec709,
+            input_tone_map: false,
+            engine: ColorEngine::mondrian_standard(),
+        }
+    }
+
+    /// Build complete deterministic filesystem revision evidence for App tests.
+    #[cfg(test)]
+    pub(crate) const fn test_fingerprint(seed: u64) -> mondrian_media::MediaFileFingerprint {
+        mondrian_media::MediaFileFingerprint {
+            len: Some(seed.saturating_add(1)),
+            modified_secs: Some(seed.saturating_add(2)),
+            modified_nanos: Some((seed as u32).wrapping_add(3)),
+            object_identity: Some(mondrian_media::MediaFileObjectIdentity::Windows {
+                volume_serial_number: seed.saturating_add(4),
+                file_id: [seed as u8; 16],
+            }),
+            change_stamp: Some(mondrian_media::MediaFileChangeStamp::WindowsFileTime(
+                (seed as i64).wrapping_add(5),
+            )),
+        }
+    }
 }
 
 /// Media Adapter over the Playback Module's semantic latest-wins scheduler.
@@ -67,6 +132,7 @@ pub(crate) struct ExpiredMediaPreviewRequest {
     pub(crate) key: MediaPreviewKey,
     pub(crate) access_mode: PreviewDecodeAccessMode,
     pub(crate) demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
+    pub(crate) removed_queued_work: usize,
 }
 
 /// Preview decode request priority used by scheduler admission and job queues.
@@ -74,6 +140,39 @@ pub(crate) struct ExpiredMediaPreviewRequest {
 pub(crate) enum MediaPreviewRequestPriority {
     Prefetch,
     Current,
+}
+
+/// Complete visibility and physical-residency intent for one media request.
+///
+/// Keeping the exact current Viewer demand inside this type prevents App
+/// scheduling from constructing a `Current` Broker request without the
+/// corresponding Frame Store working-set authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MediaPreviewRequestIntent {
+    /// Speculative work that may use only optional cache capacity.
+    Prefetch,
+    /// Visible work attributed to one exact current Viewer working set.
+    Current(mondrian_playback::MediaWorkDemandId),
+}
+
+impl MediaPreviewRequestIntent {
+    /// Derive the Broker priority from the same complete request intent.
+    pub(crate) const fn priority(self) -> MediaPreviewRequestPriority {
+        match self {
+            Self::Prefetch => MediaPreviewRequestPriority::Prefetch,
+            Self::Current(_) => MediaPreviewRequestPriority::Current,
+        }
+    }
+
+    /// Lower the App request into playback-owned physical admission semantics.
+    pub(crate) const fn media_work_intent(self) -> mondrian_playback::MediaWorkReservationIntent {
+        match self {
+            Self::Prefetch => mondrian_playback::MediaWorkReservationIntent::Prefetch,
+            Self::Current(demand_id) => {
+                mondrian_playback::MediaWorkReservationIntent::Current(demand_id)
+            }
+        }
+    }
 }
 
 /// App-owned reason why concrete preview execution observed cancellation.
@@ -135,18 +234,46 @@ pub(crate) fn media_preview_cancel_reason_from_execution(
                 MediaPreviewCancelReason::Unknown
             }
         }
+        mondrian_playback::FrameExecutionCancellation::ExecutionBudgetExpired { .. } => {
+            if priority == MediaPreviewRequestPriority::Prefetch
+                && access_mode == PreviewDecodeAccessMode::PlaybackCursor
+            {
+                MediaPreviewCancelReason::PrefetchDeadline
+            } else {
+                MediaPreviewCancelReason::Unknown
+            }
+        }
     }
 }
 
-/// Resolve cancellation at a cooperative decoder checkpoint.
-pub(crate) fn media_preview_cancel_reason_at_checkpoint(
+/// Map a Broker-proved queued deadline expiry into media-domain evidence.
+///
+/// In-flight `FinishForLocality` policy is irrelevant before execution starts:
+/// the `FrameWorkReceive::Expired` disposition already proves that this queued
+/// presentation opportunity crossed its deadline.
+pub(crate) fn media_preview_queued_expiration_reason(
+    priority: MediaPreviewRequestPriority,
+    access_mode: PreviewDecodeAccessMode,
+) -> MediaPreviewCancelReason {
+    if priority == MediaPreviewRequestPriority::Prefetch {
+        MediaPreviewCancelReason::PrefetchDeadline
+    } else if access_mode == PreviewDecodeAccessMode::PlaybackCursor {
+        MediaPreviewCancelReason::PlaybackDeadline
+    } else {
+        MediaPreviewCancelReason::Unknown
+    }
+}
+
+/// Exercise cancellation resolution at one test-owned logical observation.
+#[cfg(test)]
+pub(crate) fn media_preview_cancel_reason_at_logical_observation(
     scheduler_cancellation: Option<mondrian_playback::FrameExecutionCancellation>,
     priority: MediaPreviewRequestPriority,
     access_mode: PreviewDecodeAccessMode,
     elapsed: Duration,
     deadline_at: Option<Instant>,
 ) -> Option<MediaPreviewCancelReason> {
-    media_preview_cancel_reason(
+    media_preview_cancel_reason_for_test_observation(
         scheduler_cancellation,
         priority,
         access_mode,
@@ -156,7 +283,8 @@ pub(crate) fn media_preview_cancel_reason_at_checkpoint(
 }
 
 /// Resolve Broker-owned or bounded speculative cancellation without UI state.
-pub(crate) fn media_preview_cancel_reason(
+#[cfg(test)]
+pub(crate) fn media_preview_cancel_reason_for_test_observation(
     scheduler_cancellation: Option<mondrian_playback::FrameExecutionCancellation>,
     priority: MediaPreviewRequestPriority,
     access_mode: PreviewDecodeAccessMode,
@@ -180,8 +308,9 @@ pub(crate) fn media_preview_cancel_reason(
     None
 }
 
-/// Attribute request-to-checkpoint latency to the original authority instant.
-pub(crate) fn media_preview_cancel_request_to_observed_us(
+/// Attribute request-to-logical-observation latency to the original authority instant.
+#[cfg(test)]
+pub(crate) fn media_preview_cancel_request_to_logical_observation_us(
     reason: MediaPreviewCancelReason,
     scheduler_cancellation: Option<mondrian_playback::FrameExecutionCancellation>,
     decode_started_at: Instant,
@@ -224,9 +353,31 @@ pub(crate) enum MediaPreviewRequestStatus {
         generation_changed: bool,
     },
     ReusedInFlight,
+    DroppedObsoleteGeneration,
     DroppedBackpressure,
     DroppedInvalidAccessMode,
     Closed,
+}
+
+impl MediaPreviewRequestStatus {
+    pub(crate) const fn reused_existing_work(&self) -> bool {
+        match self {
+            Self::UpdatedQueued { .. } | Self::ReusedInFlight => true,
+            #[cfg(test)]
+            Self::AlreadyPending { .. } => true,
+            _ => false,
+        }
+    }
+}
+
+/// Exact Broker binding whose pre-existing physical owner a current Viewer
+/// candidate is waiting on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MediaPreviewExistingWorkBinding {
+    pub(crate) generation: u64,
+    pub(crate) access_mode: PreviewDecodeAccessMode,
+    pub(crate) resource_scope: mondrian_playback::FrameWorkResourceScope,
+    pub(crate) demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
 }
 
 /// Freshness classification for a completed decode result.
@@ -240,6 +391,7 @@ pub(crate) enum MediaPreviewCompletionStatus {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct MediaPreviewCompletionResolution {
     pub(crate) status: MediaPreviewCompletionStatus,
+    pub(crate) binding_generation: Option<u64>,
     pub(crate) demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
     pub(crate) deadline_status: mondrian_playback::FrameWorkDeadlineStatus,
 }
@@ -259,6 +411,8 @@ impl MediaPreviewCompletionStatus {
 pub struct MediaPreviewSchedulerDiagnostics {
     /// Latest render generation observed by the scheduler.
     pub latest_generation: u64,
+    /// Playback demand whose unstarted current work owns queue authority.
+    pub active_playback_demand: Option<mondrian_playback::FrameDemandIdentity>,
     /// Playback runtime-clock regression episodes rejected by the Frame Work Broker.
     pub clock_regressions: u64,
     /// Requests currently waiting to decode or complete.
@@ -306,6 +460,8 @@ pub struct MediaPreviewSchedulerDiagnostics {
     pub canceled_requests: u64,
     /// Obsolete pending requests removed during generation pruning.
     pub pruned_obsolete_requests: u64,
+    /// Older unstarted playback-current jobs superseded by a newer demand.
+    pub superseded_queued_playback_current: u64,
     /// Pending prefetch requests removed so a current-frame request can run.
     pub evicted_prefetch_requests: u64,
     /// Pending still-frame requests removed so real-time current work can run.
@@ -328,6 +484,8 @@ pub(crate) struct MediaPreviewJob {
     pub(crate) demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
     /// Broker execution lease, assigned only when a worker dequeues the job.
     pub(crate) execution_id: Option<mondrian_playback::FrameExecutionId>,
+    /// Move-only physical decode-attempt charge carried through Broker ownership.
+    pub(crate) residency_work: Option<mondrian_playback::MediaWorkResourceLease>,
 }
 
 type MediaPreviewWorkBroker =
@@ -507,7 +665,10 @@ impl MediaPreviewJobQueueSender {
     #[cfg(test)]
     pub(crate) fn enqueue(&self, mut job: MediaPreviewJob) -> MediaPreviewJobEnqueueStatus {
         job.execution_id = None;
-        map_enqueue_submission(self.broker.submit(frame_work_request(job)))
+        map_enqueue_submission(self.broker.submit(frame_work_request(
+            job,
+            mondrian_playback::FrameWorkResourceScope::Shared,
+        )))
     }
 
     #[cfg(test)]
@@ -531,7 +692,7 @@ impl MediaPreviewJobQueueSender {
         if !self.broker.has_pending_key(key) {
             return MediaPreviewJobPromoteStatus::default();
         }
-        match self.broker.submit(frame_work_request(MediaPreviewJob {
+        let job = MediaPreviewJob {
             key: key.clone(),
             generation,
             priority,
@@ -543,8 +704,13 @@ impl MediaPreviewJobQueueSender {
             deadline_at,
             demand_identity,
             execution_id: None,
-        })) {
-            mondrian_playback::FrameWorkSubmission::UpdatedQueued {
+            residency_work: None,
+        };
+        match self.broker.bind_existing(frame_work_binding_request(
+            &job,
+            mondrian_playback::FrameWorkResourceScope::Shared,
+        )) {
+            mondrian_playback::FrameWorkBindingSubmission::UpdatedQueued {
                 priority_promoted,
                 work_class_changed,
                 generation_changed,
@@ -553,12 +719,6 @@ impl MediaPreviewJobQueueSender {
                 priority_promoted,
                 access_mode_changed: work_class_changed,
                 generation_changed,
-            },
-            mondrian_playback::FrameWorkSubmission::Queued { .. } => MediaPreviewJobPromoteStatus {
-                updated: true,
-                priority_promoted: true,
-                access_mode_changed: true,
-                generation_changed: true,
             },
             _ => MediaPreviewJobPromoteStatus::default(),
         }
@@ -635,23 +795,69 @@ impl MediaPreviewJobQueueReceiver {
 
 fn frame_work_request(
     job: MediaPreviewJob,
+    resource_scope: mondrian_playback::FrameWorkResourceScope,
 ) -> mondrian_playback::FrameWorkRequest<MediaPreviewKey, Instant, MediaPreviewJob> {
-    let deadline = job.deadline_at.map(|deadline_at| {
-        let sampled_at = Instant::now();
-        mondrian_playback::FrameWorkDeadline::from_remaining(
-            deadline_at,
-            deadline_at.saturating_duration_since(sampled_at),
-        )
-    });
     mondrian_playback::FrameWorkRequest {
         key: job.key.clone(),
         generation: job.generation,
         priority: frame_work_priority(job.priority),
         work_class: media_preview_frame_work_class(job.access_mode),
+        resource_scope,
         demand_identity: job.demand_identity,
-        deadline,
+        deadline: frame_work_deadline(job.deadline_at),
+        in_flight_deadline_policy: media_preview_in_flight_deadline_policy(&job),
+        execution_cancellation_budget: media_preview_execution_cancellation_budget(&job),
         payload: job,
     }
+}
+
+fn frame_work_binding_request(
+    job: &MediaPreviewJob,
+    resource_scope: mondrian_playback::FrameWorkResourceScope,
+) -> mondrian_playback::FrameWorkBindingRequest<MediaPreviewKey, Instant> {
+    mondrian_playback::FrameWorkBindingRequest {
+        key: job.key.clone(),
+        generation: job.generation,
+        priority: frame_work_priority(job.priority),
+        work_class: media_preview_frame_work_class(job.access_mode),
+        resource_scope,
+        demand_identity: job.demand_identity,
+        deadline: frame_work_deadline(job.deadline_at),
+        in_flight_deadline_policy: media_preview_in_flight_deadline_policy(job),
+        execution_cancellation_budget: media_preview_execution_cancellation_budget(job),
+    }
+}
+
+fn frame_work_deadline(
+    deadline_at: Option<Instant>,
+) -> Option<mondrian_playback::FrameWorkDeadline<Instant>> {
+    deadline_at.map(|deadline_at| {
+        let sampled_at = Instant::now();
+        mondrian_playback::FrameWorkDeadline::from_remaining(
+            deadline_at,
+            deadline_at.saturating_duration_since(sampled_at),
+        )
+    })
+}
+
+fn media_preview_in_flight_deadline_policy(
+    job: &MediaPreviewJob,
+) -> mondrian_playback::FrameInFlightDeadlinePolicy {
+    if job.priority == MediaPreviewRequestPriority::Current
+        && job.access_mode == PreviewDecodeAccessMode::PlaybackCursor
+    {
+        mondrian_playback::FrameInFlightDeadlinePolicy::FinishForLocality
+    } else {
+        mondrian_playback::FrameInFlightDeadlinePolicy::Cancel
+    }
+}
+
+fn media_preview_execution_cancellation_budget(job: &MediaPreviewJob) -> Option<Duration> {
+    (job.priority == MediaPreviewRequestPriority::Prefetch
+        && job.access_mode == PreviewDecodeAccessMode::PlaybackCursor)
+        .then_some(Duration::from_micros(
+            MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US,
+        ))
 }
 
 fn media_preview_job_from_execution(
@@ -683,7 +889,8 @@ fn map_enqueue_submission(
         | mondrian_playback::FrameWorkSubmission::ReusedInFlight => {
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         }
-        mondrian_playback::FrameWorkSubmission::DroppedBackpressure => {
+        mondrian_playback::FrameWorkSubmission::DroppedObsoleteGeneration
+        | mondrian_playback::FrameWorkSubmission::DroppedBackpressure => {
             MediaPreviewJobEnqueueStatus::DroppedFull
         }
         mondrian_playback::FrameWorkSubmission::DroppedInvalidClass => {
@@ -837,6 +1044,21 @@ impl MediaPreviewScheduler {
         }
     }
 
+    #[cfg(test)]
+    /// Build the production scheduler with a deterministic test clock.
+    pub(crate) fn with_clock_for_test<C>(clock: C) -> Self
+    where
+        C: mondrian_playback::MonotonicRuntimeClock,
+    {
+        Self {
+            broker: MediaPreviewWorkBroker::new_with_clock(
+                MEDIA_PREVIEW_MAX_PENDING_REQUESTS,
+                MEDIA_PREVIEW_JOB_QUEUE_CAPACITY,
+                clock,
+            ),
+        }
+    }
+
     pub(crate) fn job_queue(&self) -> (MediaPreviewJobQueueSender, MediaPreviewJobQueueReceiver) {
         (
             MediaPreviewJobQueueSender { broker: self.broker.clone() },
@@ -847,13 +1069,22 @@ impl MediaPreviewScheduler {
         )
     }
 
+    /// Close admission and wake every worker waiting on this scheduler.
+    pub(crate) fn close(&self) {
+        self.broker.close();
+    }
+
     pub(crate) fn begin_generation(&self) -> u64 {
         self.broker.begin_generation()
     }
 
-    pub(crate) fn submit_job(&self, mut job: MediaPreviewJob) -> MediaPreviewRequestStatus {
+    pub(crate) fn submit_job(
+        &self,
+        mut job: MediaPreviewJob,
+        resource_scope: mondrian_playback::FrameWorkResourceScope,
+    ) -> MediaPreviewRequestStatus {
         job.execution_id = None;
-        match self.broker.submit(frame_work_request(job)) {
+        match self.broker.submit(frame_work_request(job, resource_scope)) {
             mondrian_playback::FrameWorkSubmission::Queued { evicted_prefetch, evicted_still } => {
                 MediaPreviewRequestStatus::Scheduled {
                     evicted_prefetch: evicted_prefetch.map(Box::new),
@@ -872,6 +1103,9 @@ impl MediaPreviewScheduler {
             mondrian_playback::FrameWorkSubmission::ReusedInFlight => {
                 MediaPreviewRequestStatus::ReusedInFlight
             }
+            mondrian_playback::FrameWorkSubmission::DroppedObsoleteGeneration => {
+                MediaPreviewRequestStatus::DroppedObsoleteGeneration
+            }
             mondrian_playback::FrameWorkSubmission::DroppedBackpressure => {
                 MediaPreviewRequestStatus::DroppedBackpressure
             }
@@ -880,6 +1114,57 @@ impl MediaPreviewScheduler {
             }
             mondrian_playback::FrameWorkSubmission::Closed => MediaPreviewRequestStatus::Closed,
         }
+    }
+
+    /// Rebind already-owned work without manufacturing another physical lease.
+    ///
+    /// `None` means no same-key, same-scope queued payload or compatible
+    /// execution exists; the caller must acquire a new physical reservation
+    /// before using [`Self::submit_job`].
+    pub(crate) fn bind_existing_job(
+        &self,
+        job: &MediaPreviewJob,
+        resource_scope: mondrian_playback::FrameWorkResourceScope,
+    ) -> Option<MediaPreviewRequestStatus> {
+        match self.broker.bind_existing(frame_work_binding_request(job, resource_scope)) {
+            mondrian_playback::FrameWorkBindingSubmission::UpdatedQueued {
+                priority_promoted,
+                work_class_changed,
+                generation_changed,
+            } => Some(MediaPreviewRequestStatus::UpdatedQueued {
+                priority_promoted,
+                access_mode_changed: work_class_changed,
+                generation_changed,
+            }),
+            mondrian_playback::FrameWorkBindingSubmission::ReusedInFlight => {
+                Some(MediaPreviewRequestStatus::ReusedInFlight)
+            }
+            mondrian_playback::FrameWorkBindingSubmission::NeedsPayload => None,
+            mondrian_playback::FrameWorkBindingSubmission::DroppedObsoleteGeneration => {
+                Some(MediaPreviewRequestStatus::DroppedObsoleteGeneration)
+            }
+            mondrian_playback::FrameWorkBindingSubmission::DroppedInvalidClass => {
+                Some(MediaPreviewRequestStatus::DroppedInvalidAccessMode)
+            }
+            mondrian_playback::FrameWorkBindingSubmission::Closed => {
+                Some(MediaPreviewRequestStatus::Closed)
+            }
+        }
+    }
+
+    /// Observe the exact queued/in-flight owner accepted by a prior rebind.
+    pub(crate) fn existing_work_binding_has_owner(
+        &self,
+        key: &MediaPreviewKey,
+        binding: MediaPreviewExistingWorkBinding,
+    ) -> bool {
+        self.broker.binding_has_execution_owner(
+            key,
+            binding.generation,
+            media_preview_frame_work_class(binding.access_mode),
+            binding.resource_scope,
+            binding.demand_identity,
+        )
     }
 
     #[cfg(test)]
@@ -922,19 +1207,23 @@ impl MediaPreviewScheduler {
         demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
         deadline_at: Option<Instant>,
     ) -> MediaPreviewRequestStatus {
-        let status = self.submit_job(MediaPreviewJob {
-            key,
-            generation,
-            priority,
-            access_mode,
-            adaptive_hints: PreviewDecodeAdaptiveHints::default(),
-            hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
-            hardware_decode_device_selector: None,
-            enqueued_at: Instant::now(),
-            deadline_at,
-            demand_identity,
-            execution_id: None,
-        });
+        let status = self.submit_job(
+            MediaPreviewJob {
+                key,
+                generation,
+                priority,
+                access_mode,
+                adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+                hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+                hardware_decode_device_selector: None,
+                enqueued_at: Instant::now(),
+                deadline_at,
+                demand_identity,
+                execution_id: None,
+                residency_work: None,
+            },
+            mondrian_playback::FrameWorkResourceScope::Shared,
+        );
         match status {
             MediaPreviewRequestStatus::UpdatedQueued { access_mode_changed, .. } => {
                 MediaPreviewRequestStatus::AlreadyPending { access_mode_changed }
@@ -961,6 +1250,14 @@ impl MediaPreviewScheduler {
         self.broker.execution_cancellation_evidence(id)
     }
 
+    pub(crate) fn wait_for_execution_terminal_state(
+        &self,
+        id: mondrian_playback::FrameExecutionId,
+        timeout: Duration,
+    ) -> mondrian_playback::FrameExecutionWaitStatus {
+        self.broker.wait_for_execution_terminal_state(id, timeout)
+    }
+
     pub(crate) fn mark_execution_completed(&self, id: mondrian_playback::FrameExecutionId) -> bool {
         self.broker.mark_execution_completed(id)
     }
@@ -975,6 +1272,7 @@ impl MediaPreviewScheduler {
             key,
             self.diagnostics().latest_generation,
             media_preview_frame_work_class(access_mode),
+            mondrian_playback::FrameWorkResourceScope::Shared,
         )
     }
 
@@ -985,13 +1283,21 @@ impl MediaPreviewScheduler {
         generation: u64,
         access_mode: PreviewDecodeAccessMode,
     ) -> bool {
-        self.broker
-            .key_current(key, generation, media_preview_frame_work_class(access_mode))
+        self.broker.key_current(
+            key,
+            generation,
+            media_preview_frame_work_class(access_mode),
+            mondrian_playback::FrameWorkResourceScope::Shared,
+        )
     }
 
     #[cfg(test)]
     pub(crate) fn has_pending_current_request_other_than(&self, key: &MediaPreviewKey) -> bool {
-        self.broker.has_other_current_key(key, false)
+        self.broker.has_other_current_key(
+            key,
+            mondrian_playback::FrameWorkResourceScope::Shared,
+            false,
+        )
     }
 
     #[cfg(test)]
@@ -999,7 +1305,11 @@ impl MediaPreviewScheduler {
         &self,
         key: &MediaPreviewKey,
     ) -> bool {
-        self.broker.has_other_current_key(key, true)
+        self.broker.has_other_current_key(
+            key,
+            mondrian_playback::FrameWorkResourceScope::Shared,
+            true,
+        )
     }
 
     #[cfg(test)]
@@ -1015,6 +1325,7 @@ impl MediaPreviewScheduler {
                     key.clone(),
                     result_generation,
                     media_preview_frame_work_class(access_mode),
+                    mondrian_playback::FrameWorkResourceScope::Shared,
                     None,
                     true,
                 )
@@ -1028,9 +1339,11 @@ impl MediaPreviewScheduler {
         reusable: bool,
     ) -> MediaPreviewCompletionResolution {
         let resolution = self.broker.resolve_execution(id, reusable);
+        let binding = resolution.binding;
         MediaPreviewCompletionResolution {
             status: map_completion(resolution.completion),
-            demand_identity: resolution.binding.and_then(|binding| binding.demand_identity),
+            binding_generation: binding.map(|binding| binding.generation),
+            demand_identity: binding.and_then(|binding| binding.demand_identity),
             deadline_status: resolution.deadline,
         }
     }
@@ -1047,18 +1360,26 @@ impl MediaPreviewScheduler {
             key.clone(),
             generation,
             media_preview_frame_work_class(access_mode),
+            mondrian_playback::FrameWorkResourceScope::Shared,
             demand_identity,
             reusable,
         );
+        let binding = resolution.binding;
         MediaPreviewCompletionResolution {
             status: map_completion(resolution.completion),
-            demand_identity: resolution.binding.and_then(|binding| binding.demand_identity),
+            binding_generation: binding.map(|binding| binding.generation),
+            demand_identity: binding.and_then(|binding| binding.demand_identity),
             deadline_status: resolution.deadline,
         }
     }
 
     pub(crate) fn abandon_execution(&self, id: mondrian_playback::FrameExecutionId) {
         self.broker.abandon_execution(id);
+    }
+
+    /// Fail one exact execution through the Broker's terminal cleanup path.
+    pub(crate) fn fail_execution(&self, id: mondrian_playback::FrameExecutionId) {
+        let _ = self.broker.fail_execution(id);
     }
 
     #[cfg(test)]
@@ -1077,6 +1398,7 @@ impl MediaPreviewScheduler {
                 key: request.key,
                 access_mode: preview_access_mode(request.binding.work_class),
                 demand_identity: request.binding.demand_identity,
+                removed_queued_work: request.removed_queued_work,
             })
             .collect()
     }
@@ -1086,7 +1408,10 @@ impl MediaPreviewScheduler {
         &self,
         protected_key: &MediaPreviewKey,
     ) -> Vec<MediaPreviewKey> {
-        self.broker.pending_still_except(protected_key)
+        self.broker.pending_still_except(
+            protected_key,
+            mondrian_playback::FrameWorkResourceScope::Shared,
+        )
     }
 
     #[cfg(test)]
@@ -1094,7 +1419,8 @@ impl MediaPreviewScheduler {
         &self,
         key: &MediaPreviewKey,
     ) -> bool {
-        self.broker.cancel_preempted_still(key)
+        self.broker
+            .cancel_preempted_still(key, mondrian_playback::FrameWorkResourceScope::Shared)
     }
 
     pub(crate) fn cancel_all(&self) -> (u64, usize) {
@@ -1105,10 +1431,18 @@ impl MediaPreviewScheduler {
         self.broker.prune_obsolete()
     }
 
+    pub(crate) fn synchronize_playback_current_demand(
+        &self,
+        active: mondrian_playback::FrameDemandIdentity,
+    ) -> usize {
+        self.broker.synchronize_playback_current_demand(active)
+    }
+
     pub(crate) fn diagnostics(&self) -> MediaPreviewSchedulerDiagnostics {
         let state = self.broker.diagnostics();
         MediaPreviewSchedulerDiagnostics {
             latest_generation: state.latest_generation,
+            active_playback_demand: state.active_playback_demand,
             clock_regressions: state.clock_regressions,
             pending_requests: state.pending_requests,
             scheduled_requests: state.submitted_queued,
@@ -1139,6 +1473,7 @@ impl MediaPreviewScheduler {
             completed_stale_obsolete_generation: state.completed_stale_obsolete,
             canceled_requests: state.canceled_requests,
             pruned_obsolete_requests: state.pruned_queued,
+            superseded_queued_playback_current: state.superseded_queued_playback_current,
             evicted_prefetch_requests: state.evicted_prefetch,
             evicted_still_requests: state.evicted_still,
         }
@@ -1152,6 +1487,25 @@ impl MediaPreviewScheduler {
     #[cfg(test)]
     pub(crate) fn has_pending_key(&self, key: &MediaPreviewKey) -> bool {
         self.broker.has_pending_key(key)
+    }
+
+    pub(crate) fn pending_keys(&self) -> Vec<MediaPreviewKey> {
+        self.broker.pending_keys()
+    }
+
+    /// Reclaim one queued speculative request for visible current work.
+    ///
+    /// The Broker never returns an in-flight key from this Interface.
+    pub(crate) fn cancel_one_queued_prefetch(&self) -> Option<MediaPreviewKey> {
+        self.broker.cancel_one_queued_prefetch()
+    }
+
+    /// Request cooperative cancellation from one live speculative execution.
+    ///
+    /// Its Broker lease and media residency charge remain owned until the
+    /// worker returns and the ordinary completion path consumes the result.
+    pub(crate) fn request_one_in_flight_prefetch_preemption(&self) -> bool {
+        self.broker.request_one_in_flight_prefetch_preemption()
     }
 
     #[cfg(test)]
@@ -1198,6 +1552,7 @@ pub(crate) fn media_preview_frame_work_class(
     }
 }
 
+#[cfg(test)]
 fn duration_us(duration: Duration) -> u64 {
     duration.as_micros().min(u128::from(u64::MAX)) as u64
 }

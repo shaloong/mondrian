@@ -8,17 +8,24 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::app::preview_execution::{
-    PreviewGpuFrame, PreviewGpuFrameState, PreviewGpuWorkingInput,
+    PreviewGpuFrame, PreviewGpuFrameState, PreviewGpuHeterogeneousExecution, PreviewGpuWorkingInput,
 };
 use crate::app::preview_gpu_output_blocker::{
     PreviewGpuOutputBlocker, PreviewGpuOutputBlockerBreakdown,
 };
-use crate::app::preview_runtime::PreviewColorRejection;
+use crate::app::preview_runtime::{PreviewColorRejection, PreviewVisualGpuCompletionDisposition};
+use crate::app::preview_work_notification::{PreviewWorkRevision, PreviewWorkWatch};
 use crate::app::ui_actions::app_shell_quit_action;
+use crate::app::viewer_gpu_device_progress::{
+    ViewerGpuDeviceGenerationMember, ViewerGpuDeviceGenerationRetirement,
+    ViewerGpuDeviceGenerationTerminal, ViewerGpuDeviceProgressObservation,
+    ViewerGpuDeviceProgressOwner, ViewerGpuDeviceProgressReserveError, ViewerGpuDeviceProgressWake,
+};
 use crate::app::viewer_gpu_output_health::{
     classify_viewer_gpu_output_health,
     ViewerGpuOutputAttemptOutcome as AppUiViewerGpuOutputOutcome,
@@ -31,9 +38,16 @@ use crate::app::viewer_gpu_output_residency::{
     executed_viewer_gpu_output_residency as preview_gpu_composite_frame_residency,
     ViewerGpuOutputFrameResidency as AppUiViewerGpuOutputFrameResidency,
 };
-use crate::app::AppState;
+use crate::app::viewer_gpu_submission::{
+    ViewerGpuCompletedSubmission, ViewerGpuSubmissionAdmissionError, ViewerGpuSubmissionId,
+    ViewerGpuSubmissionLifecycle, ViewerGpuSubmissionPoll, ViewerGpuSubmissionQuarantine,
+    ViewerGpuSubmissionQuarantineReason,
+};
+use crate::app::{AppState, FramePresentationDisposition};
 use crate::app_ui::action_queue::PendingUiActions;
-use crate::app_ui::host::{AppUiHost, AppUiMode, AppUiShellCommands};
+use crate::app_ui::host::{
+    AppUiBackgroundTaskPollOutcome, AppUiHost, AppUiMode, AppUiShellCommands,
+};
 use crate::app_ui::rendering::{
     AppUiBackendEvent, AppUiFramePressure, AppUiFrameRenderer, AppUiRenderDiagnosticReporter,
 };
@@ -58,7 +72,8 @@ use mondrian_renderer::{
     RenderGpuOutputBoundaryRuntimeRecordError, RenderGpuOutputRuntimeDiagnosticsReport,
     RenderGpuOutputStageDiagnosticsReport, RenderGpuOutputStageResourcePlanError,
     RenderOutputColorBoundaryTarget, ViewerGpuExecutionError, ViewerGpuExecutionRequest,
-    ViewerGpuExecutionRuntime, ViewerGpuOutputPrecision, ViewerSourceRect,
+    ViewerGpuExecutionRuntime, ViewerGpuOutputPrecision, ViewerGpuPresentationOutputLease,
+    ViewerHeterogeneousGpuCompletedBatch, ViewerSourceRect,
 };
 use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutManager, ShortcutScope};
@@ -71,6 +86,80 @@ use mondrian_ui_tooltip::TooltipManagerImpl;
 use mondrian_ui_widgets::ViewerExternalTexturePresentation;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
+
+fn control_flow_wake_no_later_than(
+    current: winit::event_loop::ControlFlow,
+    deadline: Instant,
+) -> winit::event_loop::ControlFlow {
+    use winit::event_loop::ControlFlow;
+
+    match current {
+        ControlFlow::Poll => ControlFlow::Poll,
+        ControlFlow::Wait => ControlFlow::WaitUntil(deadline),
+        ControlFlow::WaitUntil(existing) => ControlFlow::WaitUntil(existing.min(deadline)),
+    }
+}
+
+fn queue_preview_work_event(pending: &AtomicBool, send: impl FnOnce() -> bool) -> bool {
+    if pending
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
+    let mut reset = PendingEventResetOnDrop::new(pending);
+    if !send() {
+        return false;
+    }
+    reset.disarm();
+    true
+}
+
+struct PendingEventResetOnDrop<'a> {
+    pending: &'a AtomicBool,
+    armed: bool,
+}
+
+impl<'a> PendingEventResetOnDrop<'a> {
+    const fn new(pending: &'a AtomicBool) -> Self {
+        Self { pending, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingEventResetOnDrop<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.pending.store(false, Ordering::Release);
+        }
+    }
+}
+
+fn rearm_preview_work_event(
+    pending: &AtomicBool,
+    drain_target_revision: PreviewWorkRevision,
+    watch: &PreviewWorkWatch,
+    send: impl FnOnce() -> bool,
+) -> bool {
+    // Publishers retain the pending bit throughout the bounded drain, so a
+    // completion burst cannot enqueue one native event per result. Clear only
+    // after sampling what that drain could have observed.
+    pending.store(false, Ordering::Release);
+    if watch.revision() != drain_target_revision {
+        return queue_preview_work_event(pending, send);
+    }
+    false
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewerHeterogeneousCompletionPoll {
+    Idle,
+    Pending,
+    TerminalChange,
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Main
@@ -86,11 +175,18 @@ const WORKSPACE_MIN_HEIGHT: f32 = 600.0;
 const APP_UI_DISPLAY_CONTRACT_REFRESH_HISTORY_LIMIT: usize = 8;
 const APP_UI_EVENT_LOOP_SLOW_STAGE_BUDGET_US: u64 = 50_000;
 const APP_UI_BUFFERING_INTERACTIVE_WAKE_DELAY: Duration = Duration::from_millis(16);
+const VIEWER_HETEROGENEOUS_COMPLETION_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppUiWindowRole {
     Startup,
     Workspace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppUiUserEvent {
+    PreviewWorkAvailable,
+    ViewerGpuCompletionAvailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -236,7 +332,7 @@ struct DisplaySnapshotDiagnostics {
     blocker_count: u64,
     blocker_codes: Vec<String>,
     warning_count: u64,
-    contract_generation: u64,
+    contract_diagnostic_key: u64,
 }
 
 impl DisplaySnapshotDiagnostics {
@@ -258,7 +354,7 @@ impl DisplaySnapshotDiagnostics {
             blocker_count: snapshot.blockers.len() as u64,
             blocker_codes: snapshot.blockers.iter().map(|b| b.code().to_owned()).collect(),
             warning_count: snapshot.warnings.len() as u64,
-            contract_generation: snapshot.contract_generation(),
+            contract_diagnostic_key: snapshot.contract_identity().diagnostic_key(),
         }
     }
 }
@@ -1058,6 +1154,9 @@ impl AppUiEventLoopTelemetry {
 }
 
 struct AppUiWindowSession {
+    // Move-only generation members are transferred to the non-UI progress
+    // domain by `Drop`; the Window thread never joins or cancels GPU work.
+    viewer_gpu_device_progress: ViewerGpuDeviceGenerationMember<ViewerGpuDeviceProgressOwner>,
     role: AppUiWindowRole,
     window: Arc<winit::window::Window>,
     surface: wgpu::Surface<'static>,
@@ -1069,9 +1168,15 @@ struct AppUiWindowSession {
     display_management_policy: mondrian_core::color_models::DisplayManagementPolicy,
     native_video_import_probe: NativeVideoTextureImportProbeResult,
     frame_renderer: AppUiFrameRenderer,
+    renderer_device: wgpu::Device,
     renderer_queue: wgpu::Queue,
-    viewer_gpu_execution: ViewerGpuExecutionRuntime,
+    viewer_gpu_execution: ViewerGpuDeviceGenerationMember<ViewerGpuExecutionRuntime>,
     viewer_gpu_presentation: WindowViewerGpuPresentationState,
+    viewer_gpu_submissions: ViewerGpuSubmissionLifecycle<
+        WindowViewerGpuSubmissionOwner,
+        ViewerHeterogeneousGpuCompletedBatch,
+    >,
+    viewer_gpu_deferred_cleanup: WindowViewerGpuDeferredCleanup,
     program_scopes_registered: bool,
     program_scopes_refresh_requested: bool,
     viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry,
@@ -1083,25 +1188,105 @@ struct AppUiWindowSession {
     current_bounds: std::cell::Cell<Rect>,
     modifiers_state: Modifiers,
     pending_initial_redraw: bool,
-    last_playback_tick: Instant,
-    playback_was_running: bool,
     event_loop_telemetry: AppUiEventLoopTelemetry,
+    playback_thread_scheduling: mondrian_platform::PlaybackThreadScheduling,
+}
+
+fn synchronize_playback_thread_scheduling(host: &AppUiHost, session: &mut AppUiWindowSession) {
+    if let Err(error) = session.playback_thread_scheduling.synchronize(host.is_playback_active()) {
+        tracing::warn!(%error, "native playback thread scheduling unavailable");
+    }
+}
+
+fn poll_window_background_tasks(
+    host: &mut AppUiHost,
+    session: &mut AppUiWindowSession,
+) -> AppUiBackgroundTaskPollOutcome {
+    let poll_started = Instant::now();
+    let outcome = host.poll_background_tasks(session.current_bounds.get());
+    // A submitted heterogeneous batch may still reference every allocation
+    // owned by this runtime. Product-policy trim/reconfigure decisions remain
+    // pending until exact GPU completion retires that batch.
+    if !session.viewer_gpu_submissions.is_occupied() {
+        host.apply_preview_execution_resource_decision(&mut *session.viewer_gpu_execution);
+    }
+    session.event_loop_telemetry.record_stage_duration(
+        AppUiEventLoopStage::PollBackgroundTasks,
+        poll_started.elapsed(),
+    );
+    outcome
+}
+
+/// Window-owned state retained from queue submission through actual GPU
+/// completion.
+///
+/// The complete frame remains here because its media-protection leases are the
+/// Frame Store's native-resource ledger authority. A renderer-retained AVFrame
+/// protects the physical decoder object but cannot replace those leases.
+struct WindowViewerGpuSubmissionOwner {
+    frame: Box<PreviewGpuFrame>,
+    terminal: Option<PreviewGpuHeterogeneousExecution>,
+    texture_key: ExternalTextureKey,
+    texture_registered: bool,
+    output_lease: Option<ViewerGpuPresentationOutputLease>,
+    presentation: ViewerExternalTexturePresentation,
+    stage_diagnostics: RenderColorStageDiagnostics,
+    program_scopes: Option<mondrian_renderer::GpuProgramScopesRecord>,
+    program_scopes_requested: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum WindowViewerGpuDeferredCleanup {
+    #[default]
+    None,
+    ClearFrameResources,
+    Reset,
+}
+
+/// Exact Window registration and physical renderer owner currently visible.
+struct WindowViewerGpuPublishedOutput {
+    submission_id: ViewerGpuSubmissionId,
+    output_key: crate::app::preview_execution::PreviewOutputKey,
+    texture_key: ExternalTextureKey,
+    _output_lease: ViewerGpuPresentationOutputLease,
 }
 
 /// Window-only ownership of the texture registration currently published by the Viewer.
 #[derive(Default)]
 struct WindowViewerGpuPresentationState {
-    registered_texture_key: Option<ExternalTextureKey>,
+    published_output: Option<WindowViewerGpuPublishedOutput>,
     presentation: Option<ViewerExternalTexturePresentation>,
 }
 
 impl WindowViewerGpuPresentationState {
-    fn take_registration(&mut self) -> Option<ExternalTextureKey> {
-        self.registered_texture_key.take()
+    fn published_output(&self) -> Option<&WindowViewerGpuPublishedOutput> {
+        self.published_output.as_ref()
     }
 
-    fn replace_registration(&mut self, key: ExternalTextureKey) -> Option<ExternalTextureKey> {
-        self.registered_texture_key.replace(key)
+    fn replace_published_output(
+        &mut self,
+        output: WindowViewerGpuPublishedOutput,
+    ) -> Option<WindowViewerGpuPublishedOutput> {
+        self.published_output.replace(output)
+    }
+
+    fn take_published_output(&mut self) -> Option<WindowViewerGpuPublishedOutput> {
+        self.published_output.take()
+    }
+
+    fn take_published_output_for_submission(
+        &mut self,
+        submission_id: ViewerGpuSubmissionId,
+    ) -> Option<WindowViewerGpuPublishedOutput> {
+        if self
+            .published_output
+            .as_ref()
+            .is_some_and(|output| output.submission_id == submission_id)
+        {
+            self.published_output.take()
+        } else {
+            None
+        }
     }
 
     fn presentation(&self) -> Option<ViewerExternalTexturePresentation> {
@@ -1116,9 +1301,121 @@ impl WindowViewerGpuPresentationState {
         self.presentation.take().is_some()
     }
 
-    fn clear(&mut self) -> Option<ExternalTextureKey> {
+    fn clear(&mut self) -> Option<WindowViewerGpuPublishedOutput> {
         self.presentation = None;
-        self.registered_texture_key.take()
+        self.published_output.take()
+    }
+}
+
+struct WindowViewerGpuGenerationRetirement {
+    runtime: ViewerGpuExecutionRuntime,
+    lifecycle: ViewerGpuSubmissionLifecycle<
+        WindowViewerGpuSubmissionOwner,
+        ViewerHeterogeneousGpuCompletedBatch,
+    >,
+    _presentation: WindowViewerGpuPresentationState,
+    _renderer_device: wgpu::Device,
+    _renderer_queue: wgpu::Queue,
+    _deferred_cleanup: WindowViewerGpuDeferredCleanup,
+    _completed_submission: Option<
+        ViewerGpuCompletedSubmission<
+            WindowViewerGpuSubmissionOwner,
+            ViewerHeterogeneousGpuCompletedBatch,
+        >,
+    >,
+    _lost_submission_owner: Option<WindowViewerGpuSubmissionOwner>,
+    native_retirement_error_logged: bool,
+    native_device_removed_logged: bool,
+}
+
+impl ViewerGpuDeviceGenerationRetirement for WindowViewerGpuGenerationRetirement {
+    fn label(&self) -> &'static str {
+        "Window Viewer GPU device generation"
+    }
+
+    fn poll_retirement(&mut self, terminal: Option<&ViewerGpuDeviceGenerationTerminal>) -> bool {
+        let native_progress_proved = match self.runtime.retire_completed_native_import_sources() {
+            Ok(_) => true,
+            Err(error) if error.is_native_device_removed() => {
+                if !self.native_device_removed_logged {
+                    tracing::warn!(
+                        %error,
+                        "Window Viewer GPU retirement accepted typed native device-removal proof"
+                    );
+                    self.native_device_removed_logged = true;
+                }
+                true
+            }
+            Err(error) => {
+                if !self.native_retirement_error_logged {
+                    tracing::error!(
+                        %error,
+                        "Window Viewer GPU retirement could not prove native copy-fence progress"
+                    );
+                    self.native_retirement_error_logged = true;
+                }
+                false
+            }
+        };
+        let native_copy_ready =
+            native_progress_proved && self.runtime.native_import_retained_source_count() == 0;
+
+        if self._completed_submission.is_none() && self._lost_submission_owner.is_none() {
+            match self.lifecycle.poll(Instant::now()) {
+                ViewerGpuSubmissionPoll::Completed(completed) => {
+                    self._completed_submission = Some(completed);
+                }
+                ViewerGpuSubmissionPoll::Idle
+                | ViewerGpuSubmissionPoll::Pending { .. }
+                | ViewerGpuSubmissionPoll::QuarantineStarted(_) => {}
+            }
+        }
+
+        // Actual wgpu loss is safe terminal evidence for wgpu work only. The
+        // independent D3D decoder-copy fence above must still be ready before
+        // the media/lifecycle owner can move out of the callback slot.
+        if native_copy_ready
+            && terminal.is_some_and(ViewerGpuDeviceGenerationTerminal::wgpu_work_is_terminal)
+            && self.lifecycle.is_occupied()
+        {
+            self._lost_submission_owner = self.lifecycle.retire_owner_after_wgpu_device_loss();
+        }
+
+        native_copy_ready && !self.lifecycle.is_occupied()
+    }
+}
+
+impl Drop for AppUiWindowSession {
+    fn drop(&mut self) {
+        let Some(progress) = self.viewer_gpu_device_progress.take() else {
+            // A replacement shell has not yet received the shared generation;
+            // its freshly-created, idle runtime may drop normally.
+            return;
+        };
+        let Some(runtime) = self.viewer_gpu_execution.take() else {
+            tracing::error!(
+                "Window Viewer GPU teardown lost its execution runtime; retaining progress authority indefinitely"
+            );
+            std::mem::forget(progress);
+            return;
+        };
+        let lifecycle = std::mem::replace(
+            &mut self.viewer_gpu_submissions,
+            ViewerGpuSubmissionLifecycle::new(),
+        );
+        let retirement = WindowViewerGpuGenerationRetirement {
+            runtime,
+            lifecycle,
+            _presentation: std::mem::take(&mut self.viewer_gpu_presentation),
+            _renderer_device: self.renderer_device.clone(),
+            _renderer_queue: self.renderer_queue.clone(),
+            _deferred_cleanup: std::mem::take(&mut self.viewer_gpu_deferred_cleanup),
+            _completed_submission: None,
+            _lost_submission_owner: None,
+            native_retirement_error_logged: false,
+            native_device_removed_logged: false,
+        };
+        progress.retire_device_generation(retirement);
     }
 }
 
@@ -1131,7 +1428,8 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Mondrian app UI starting");
 
     use winit::event_loop::EventLoop;
-    let event_loop = EventLoop::new()?;
+    let event_loop = EventLoop::<AppUiUserEvent>::with_user_event().build()?;
+    let preview_work_event_proxy = event_loop.create_proxy();
     let startup_window =
         Arc::new(event_loop.create_window(window_attributes_for_role(AppUiWindowRole::Startup))?);
 
@@ -1174,8 +1472,26 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
         ..wgpu::DeviceDescriptor::default()
     };
     let (device, queue) = pollster::block_on(adapter.request_device(&device_descriptor))?;
+    // Install the sole lost callback immediately after device creation, before
+    // any runtime, renderer, or queue consumer can expose this generation.
+    let viewer_gpu_completion_event_proxy = preview_work_event_proxy.clone();
+    let viewer_gpu_progress_wake = ViewerGpuDeviceProgressWake::new(move || {
+        let _ = viewer_gpu_completion_event_proxy
+            .send_event(AppUiUserEvent::ViewerGpuCompletionAvailable);
+    });
+    let viewer_gpu_device_progress =
+        ViewerGpuDeviceProgressOwner::new(&device, viewer_gpu_progress_wake)?;
 
     let mut host = AppUiHost::new(AppState::new());
+    let preview_work_watch = host.preview_work_watch();
+    let preview_work_event_pending = Arc::new(AtomicBool::new(false));
+    let worker_event_pending = Arc::clone(&preview_work_event_pending);
+    let worker_event_proxy = preview_work_event_proxy.clone();
+    preview_work_watch.install_waker(move || {
+        queue_preview_work_event(&worker_event_pending, || {
+            worker_event_proxy.send_event(AppUiUserEvent::PreviewWorkAvailable).is_ok()
+        });
+    });
     let mut session = AppUiWindowSession::from_window_and_surface(
         AppUiWindowRole::Startup,
         startup_window,
@@ -1184,6 +1500,7 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
         &device,
         &queue,
         &mut host,
+        Some(viewer_gpu_device_progress),
     )?;
     let _ = host.set_system_theme_preset(winit_theme_to_theme_preset(session.window.theme()));
     let pending_actions = PendingUiActions::default();
@@ -1205,6 +1522,50 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
         let dispatch_action = |action| pending_actions.push(action);
 
         match event {
+            Event::UserEvent(AppUiUserEvent::PreviewWorkAvailable) => {
+                let drain_target_revision = preview_work_watch.revision();
+                let background_tasks =
+                    poll_window_background_tasks(&mut host, &mut session);
+                rearm_preview_work_event(
+                    &preview_work_event_pending,
+                    drain_target_revision,
+                    &preview_work_watch,
+                    || {
+                        preview_work_event_proxy
+                            .send_event(AppUiUserEvent::PreviewWorkAvailable)
+                            .is_ok()
+                    },
+                );
+                if background_tasks.repaint_required {
+                    sync_window_session_role(
+                        &mut host,
+                        elwt,
+                        &instance,
+                        &adapter,
+                        &device,
+                        &mut session,
+                    );
+                    session.window.request_redraw();
+                }
+                if background_tasks.needs_follow_up_poll {
+                    elwt.set_control_flow(ControlFlow::Poll);
+                }
+            }
+            Event::UserEvent(AppUiUserEvent::ViewerGpuCompletionAvailable) => {
+                if poll_viewer_heterogeneous_completion(&device, &mut session, &host)
+                    == ViewerHeterogeneousCompletionPoll::TerminalChange
+                {
+                    sync_window_session_role(
+                        &mut host,
+                        elwt,
+                        &instance,
+                        &adapter,
+                        &device,
+                        &mut session,
+                    );
+                    session.window.request_redraw();
+                }
+            }
             Event::WindowEvent { window_id, event } if window_id == session.window.id() => {
                 match event {
                     WindowEvent::CloseRequested => {
@@ -1326,7 +1687,12 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             &mut session,
                         );
                         let prepare_started = Instant::now();
-                        prepare_viewer_gpu_preview(&device, &queue, &mut session, &host);
+                        prepare_viewer_gpu_preview(
+                            &device,
+                            &queue,
+                            &mut session,
+                            &host,
+                        );
                         session.event_loop_telemetry.record_stage_duration(
                             AppUiEventLoopStage::PrepareViewerGpuPreview,
                             prepare_started.elapsed(),
@@ -1631,34 +1997,24 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             Event::AboutToWait => {
+                synchronize_playback_thread_scheduling(&host, &mut session);
                 session
                     .ui_runtime
                     .drive_timers(&session.window, &mut session.router, elwt);
                 let playback_now = Instant::now();
-                let playback_is_running = host.is_playback_running();
-                let playback_elapsed = continuous_playback_elapsed(
-                    session.last_playback_tick,
-                    playback_now,
-                    session.playback_was_running,
-                    playback_is_running,
-                );
-                session.last_playback_tick = playback_now;
                 let playback_clock_started = Instant::now();
-                let playback_changed =
-                    host.advance_playback_clock(playback_elapsed, session.current_bounds.get());
-                session.playback_was_running = host.is_playback_running();
+                let playback_changed = host.advance_playback_clock(
+                    playback_now,
+                    session.current_bounds.get(),
+                );
+                synchronize_playback_thread_scheduling(&host, &mut session);
                 session.event_loop_telemetry.record_stage_duration(
                     AppUiEventLoopStage::AdvancePlaybackClock,
                     playback_clock_started.elapsed(),
                 );
-                let poll_started = Instant::now();
-                let background_tasks_changed =
-                    host.poll_background_tasks(session.current_bounds.get());
-                session.event_loop_telemetry.record_stage_duration(
-                    AppUiEventLoopStage::PollBackgroundTasks,
-                    poll_started.elapsed(),
-                );
-                if playback_changed || background_tasks_changed {
+                let background_tasks =
+                    poll_window_background_tasks(&mut host, &mut session);
+                if playback_changed || background_tasks.repaint_required {
                     sync_window_session_role(
                         &mut host,
                         elwt,
@@ -1669,11 +2025,35 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     session.window.request_redraw();
                 }
-                if background_tasks_changed {
+                if background_tasks.needs_follow_up_poll {
                     elwt.set_control_flow(ControlFlow::Poll);
                 }
-                if let Some(delay) = host.playback_next_frame_delay() {
-                    elwt.set_control_flow(ControlFlow::WaitUntil(
+                let heterogeneous_completion = drive_viewer_heterogeneous_completion(
+                    &device,
+                    &mut session,
+                    &host,
+                    Instant::now(),
+                );
+                if heterogeneous_completion.redraw_required {
+                    sync_window_session_role(
+                        &mut host,
+                        elwt,
+                        &instance,
+                        &adapter,
+                        &device,
+                        &mut session,
+                    );
+                    session.window.request_redraw();
+                }
+                if let Some(next_wake) = heterogeneous_completion.next_wake {
+                    elwt.set_control_flow(control_flow_wake_no_later_than(
+                        elwt.control_flow(),
+                        next_wake,
+                    ));
+                }
+                if let Some(delay) = host.playback_next_wake_delay() {
+                    elwt.set_control_flow(control_flow_wake_no_later_than(
+                        elwt.control_flow(),
                         Instant::now() + app_ui_interactive_playback_wake_delay(&host, delay),
                     ));
                 }
@@ -1703,6 +2083,10 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                     session.window.request_redraw();
                     elwt.set_control_flow(ControlFlow::Poll);
                 }
+                elwt.set_control_flow(control_flow_wake_no_later_than(
+                    elwt.control_flow(),
+                    host.next_execution_resource_observation_deadline(),
+                ));
             }
             _ => {}
         }
@@ -2898,16 +3282,455 @@ fn app_ui_interactive_playback_wake_delay(host: &AppUiHost, delay: Duration) -> 
     }
 }
 
-fn continuous_playback_elapsed(
-    previous_tick: Instant,
-    current_tick: Instant,
-    was_running: bool,
-    is_running: bool,
-) -> Duration {
-    if was_running && is_running {
-        current_tick.saturating_duration_since(previous_tick)
+/// Drive the exact in-flight heterogeneous Viewer completion and discard any
+/// late callbacks from previously abandoned submissions.
+///
+/// Returns `true` while an exact candidate is still in flight, in which case
+/// the caller must not clear renderer frame resources or issue another Viewer
+/// submission.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ViewerHeterogeneousCompletionDrive {
+    redraw_required: bool,
+    next_wake: Option<Instant>,
+}
+
+fn defer_viewer_gpu_cleanup(
+    session: &mut AppUiWindowSession,
+    requested: WindowViewerGpuDeferredCleanup,
+) {
+    session.viewer_gpu_deferred_cleanup = match (session.viewer_gpu_deferred_cleanup, requested) {
+        (WindowViewerGpuDeferredCleanup::Reset, _) | (_, WindowViewerGpuDeferredCleanup::Reset) => {
+            WindowViewerGpuDeferredCleanup::Reset
+        }
+        (WindowViewerGpuDeferredCleanup::ClearFrameResources, _)
+        | (_, WindowViewerGpuDeferredCleanup::ClearFrameResources) => {
+            WindowViewerGpuDeferredCleanup::ClearFrameResources
+        }
+        _ => WindowViewerGpuDeferredCleanup::None,
+    };
+}
+
+fn apply_deferred_viewer_gpu_cleanup(session: &mut AppUiWindowSession) {
+    if session.viewer_gpu_submissions.is_occupied() {
+        return;
+    }
+    match std::mem::take(&mut session.viewer_gpu_deferred_cleanup) {
+        WindowViewerGpuDeferredCleanup::None => {}
+        WindowViewerGpuDeferredCleanup::ClearFrameResources => {
+            session.viewer_gpu_execution.clear_frame_resources();
+        }
+        WindowViewerGpuDeferredCleanup::Reset => session.viewer_gpu_execution.reset(),
+    }
+}
+
+fn retire_window_viewer_gpu_registration(
+    session: &mut AppUiWindowSession,
+    _host: &AppUiHost,
+    owner: &mut WindowViewerGpuSubmissionOwner,
+) {
+    if owner.texture_registered {
+        owner.texture_registered = false;
+        session.frame_renderer.unregister_external_texture(&owner.texture_key);
+    }
+}
+
+fn retire_window_published_gpu_output(session: &mut AppUiWindowSession, host: &AppUiHost) -> bool {
+    let Some(published) = session.viewer_gpu_presentation.take_published_output() else {
+        return false;
+    };
+    session.frame_renderer.unregister_external_texture(&published.texture_key);
+    let _ = host.clear_external_viewer_frame_for_artifact(
+        &published.output_key,
+        published.texture_key.as_str(),
+    );
+    drop(published);
+    true
+}
+
+fn begin_window_viewer_gpu_quarantine(
+    session: &mut AppUiWindowSession,
+    host: &AppUiHost,
+    quarantine: ViewerGpuSubmissionQuarantine,
+    cleanup: WindowViewerGpuDeferredCleanup,
+) {
+    if let Some(published) = session
+        .viewer_gpu_presentation
+        .take_published_output_for_submission(quarantine.submission_id)
+    {
+        session.frame_renderer.unregister_external_texture(&published.texture_key);
+        let _ = host.clear_external_viewer_frame_for_artifact(
+            &published.output_key,
+            published.texture_key.as_str(),
+        );
+        drop(published);
+    }
+    if let Some(owner) = session.viewer_gpu_submissions.owner_mut(quarantine.submission_id) {
+        if owner.texture_registered {
+            owner.texture_registered = false;
+            session.frame_renderer.unregister_external_texture(&owner.texture_key);
+        }
+        if let Some(terminal) = owner.terminal.take() {
+            let _ = host.fail_heterogeneous_viewer_gpu(terminal);
+        }
+    }
+    defer_viewer_gpu_cleanup(session, cleanup);
+    tracing::warn!(
+        submission_id = quarantine.submission_id.get(),
+        reason = ?quarantine.reason,
+        "Viewer GPU submission entered retirement-only quarantine"
+    );
+}
+
+fn publish_completed_window_viewer_gpu_owner(
+    session: &mut AppUiWindowSession,
+    host: &AppUiHost,
+    submission_id: ViewerGpuSubmissionId,
+    owner: &mut WindowViewerGpuSubmissionOwner,
+) -> bool {
+    if let Some(terminal) = session.viewer_gpu_device_progress.generation_terminal() {
+        tracing::warn!(
+            submission_id = submission_id.get(),
+            reason = terminal.reason,
+            "completed Window Viewer output was not published from a terminal device generation"
+        );
+        retire_window_viewer_gpu_registration(session, host, owner);
+        return false;
+    }
+    if !owner.texture_registered {
+        tracing::error!(
+            submission_id = submission_id.get(),
+            "completed Window publication has no registered texture artifact"
+        );
+        return false;
+    }
+    let Some(output_lease) = owner.output_lease.take() else {
+        tracing::error!(
+            submission_id = submission_id.get(),
+            "completed Window publication has no physical output lease"
+        );
+        retire_window_viewer_gpu_registration(session, host, owner);
+        return false;
+    };
+    let disposition = host.set_external_viewer_frame(
+        &owner.frame,
+        owner.texture_key.as_str().to_owned(),
+        owner.presentation,
+    );
+    if let Some(terminal) = session.viewer_gpu_device_progress.generation_terminal() {
+        let _ = host.clear_external_viewer_frame_for_artifact(
+            &owner.frame.output_key,
+            owner.texture_key.as_str(),
+        );
+        retire_window_viewer_gpu_registration(session, host, owner);
+        drop(output_lease);
+        tracing::warn!(
+            submission_id = submission_id.get(),
+            reason = terminal.reason,
+            "completed Window Viewer publication raced a terminal device generation and was revoked"
+        );
+        return false;
+    }
+    match disposition {
+        FramePresentationDisposition::Presented(_) | FramePresentationDisposition::NoDemand => {
+            let next = WindowViewerGpuPublishedOutput {
+                submission_id,
+                output_key: owner.frame.output_key.clone(),
+                texture_key: owner.texture_key.clone(),
+                _output_lease: output_lease,
+            };
+            let previous = session.viewer_gpu_presentation.replace_published_output(next);
+            owner.texture_registered = false;
+            if let Some(previous) = previous {
+                session.frame_renderer.unregister_external_texture(&previous.texture_key);
+                drop(previous);
+            }
+            session
+                .viewer_gpu_output_telemetry
+                .record_registered_frame(owner.stage_diagnostics);
+            true
+        }
+        FramePresentationDisposition::DroppedLate(_) => {
+            retire_window_viewer_gpu_registration(session, host, owner);
+            drop(output_lease);
+            false
+        }
+        FramePresentationDisposition::OutputRejected
+        | FramePresentationDisposition::LostAuthority => {
+            session
+                .viewer_gpu_output_telemetry
+                .record_rejected_external_frame(owner.stage_diagnostics);
+            retire_window_viewer_gpu_registration(session, host, owner);
+            drop(output_lease);
+            false
+        }
+    }
+}
+
+fn poll_viewer_heterogeneous_completion(
+    device: &wgpu::Device,
+    session: &mut AppUiWindowSession,
+    host: &AppUiHost,
+) -> ViewerHeterogeneousCompletionPoll {
+    let now = Instant::now();
+    let mut observation_time = now;
+    let mut device_failure = None;
+    let mut callback_barrier_observed = false;
+    while let Some(observation) = session.viewer_gpu_device_progress.try_observe() {
+        match observation {
+            ViewerGpuDeviceProgressObservation::WaitSatisfied { submission_id, observed_at } => {
+                // Callback retirement can open the next slot before this
+                // non-authoritative observation is drained. Never let the old
+                // physical identity affect a replacement lifecycle.
+                if session.viewer_gpu_submissions.current_submission_id() == Some(submission_id) {
+                    observation_time = observation_time.max(observed_at);
+                    callback_barrier_observed = true;
+                }
+            }
+            ViewerGpuDeviceProgressObservation::RendererCleanupSatisfied { .. } => {
+                // The wake opens a retry opportunity; this cleanup barrier has
+                // no semantic completion or lifecycle-deadline authority.
+            }
+            ViewerGpuDeviceProgressObservation::DevicePollFailed {
+                submission_id,
+                reason,
+                observed_at,
+            } => {
+                observation_time = observation_time.max(observed_at);
+                device_failure = Some((Some(submission_id), reason));
+            }
+        }
+    }
+    // The callback-installed terminal is authoritative even with no active
+    // submission and even if a work-done observation arrived from the same
+    // `Device::poll`. This also drives revocation of an ordinary current slot.
+    if let Some(terminal) = session.viewer_gpu_device_progress.generation_terminal() {
+        observation_time = observation_time.max(terminal.observed_at);
+        device_failure = Some((terminal.submission_id, terminal.reason));
+    }
+    let mut submission_poll = if callback_barrier_observed {
+        session.viewer_gpu_submissions.poll(observation_time)
     } else {
-        Duration::ZERO
+        session.viewer_gpu_submissions.poll_deadline_only(observation_time)
+    };
+    if let ViewerGpuSubmissionPoll::Completed(completed) = &mut submission_poll {
+        if let Some((failed_submission_id, error)) = device_failure {
+            let failure_context =
+                window_viewer_gpu_generation_failure_context(failed_submission_id);
+            if completed.quarantine_reason.is_none() {
+                completed.quarantine_reason =
+                    Some(ViewerGpuSubmissionQuarantineReason::DevicePollFailed(
+                        format!("device generation terminal {failure_context}: {error}"),
+                    ));
+            }
+            host.record_preview_gpu_output_blocker(
+                &PreviewGpuOutputBlocker::CpuFallbackRequested {
+                    reason: format!(
+                        "Viewer GPU device generation failed {failure_context} while completing submission {}; GPU output remains disabled until the generation is rebuilt: {error}",
+                        completed.submission_id.get()
+                    ),
+                },
+            );
+            unregister_program_scopes_textures(session);
+            if !retire_window_published_gpu_output(session, host) {
+                host.clear_external_viewer_frame();
+            }
+        }
+        return resolve_window_viewer_gpu_submission_poll(session, host, device, submission_poll);
+    }
+    if let ViewerGpuSubmissionPoll::Pending { submission_id, .. } = &submission_poll {
+        if let Some((failed_submission_id, error)) = device_failure {
+            let failure_context =
+                window_viewer_gpu_generation_failure_context(failed_submission_id);
+            let generation_reason = format!(
+                "device generation terminal {failure_context} while submission {} remained active: {error}",
+                submission_id.get()
+            );
+            if let Some(quarantine) = session
+                .viewer_gpu_submissions
+                .quarantine_after_device_failure(generation_reason)
+            {
+                let fallback_reason = format!(
+                    "Viewer GPU device generation failed while driving submission {}; GPU output remains disabled until the generation is rebuilt: {error}",
+                    quarantine.submission_id.get()
+                );
+                host.record_preview_gpu_output_blocker(
+                    &PreviewGpuOutputBlocker::CpuFallbackRequested { reason: fallback_reason },
+                );
+                begin_window_viewer_gpu_quarantine(
+                    session,
+                    host,
+                    quarantine,
+                    WindowViewerGpuDeferredCleanup::Reset,
+                );
+                unregister_program_scopes_textures(session);
+                if !retire_window_published_gpu_output(session, host) {
+                    host.clear_external_viewer_frame();
+                }
+                return ViewerHeterogeneousCompletionPoll::TerminalChange;
+            }
+        }
+    } else if let Some((failed_submission_id, error)) = device_failure {
+        let failure_context = window_viewer_gpu_generation_failure_context(failed_submission_id);
+        host.record_preview_gpu_output_blocker(
+            &PreviewGpuOutputBlocker::CpuFallbackRequested {
+                reason: format!(
+                    "Viewer GPU device generation failed {failure_context}; GPU output remains disabled until the generation is rebuilt: {error}"
+                ),
+            },
+        );
+        unregister_program_scopes_textures(session);
+        if !retire_window_published_gpu_output(session, host) {
+            host.clear_external_viewer_frame();
+        }
+    }
+    resolve_window_viewer_gpu_submission_poll(session, host, device, submission_poll)
+}
+
+fn window_viewer_gpu_generation_failure_context(
+    submission_id: Option<ViewerGpuSubmissionId>,
+) -> String {
+    submission_id.map_or_else(
+        || "outside an active Viewer submission".to_owned(),
+        |submission_id| format!("after submission {}", submission_id.get()),
+    )
+}
+
+fn resolve_window_viewer_gpu_submission_poll(
+    session: &mut AppUiWindowSession,
+    host: &AppUiHost,
+    device: &wgpu::Device,
+    poll: ViewerGpuSubmissionPoll<
+        WindowViewerGpuSubmissionOwner,
+        ViewerHeterogeneousGpuCompletedBatch,
+    >,
+) -> ViewerHeterogeneousCompletionPoll {
+    match poll {
+        ViewerGpuSubmissionPoll::Idle => {
+            apply_deferred_viewer_gpu_cleanup(session);
+            ViewerHeterogeneousCompletionPoll::Idle
+        }
+        ViewerGpuSubmissionPoll::Pending { .. } => ViewerHeterogeneousCompletionPoll::Pending,
+        ViewerGpuSubmissionPoll::QuarantineStarted(quarantine) => {
+            host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
+                feature: "heterogeneous_viewer_gpu_completion_timeout".to_owned(),
+                reason: format!(
+                    "Viewer GPU submission {} exceeded its non-renewing {:?} completion deadline",
+                    quarantine.submission_id.get(),
+                    VIEWER_HETEROGENEOUS_COMPLETION_TIMEOUT,
+                ),
+            });
+            begin_window_viewer_gpu_quarantine(
+                session,
+                host,
+                quarantine,
+                WindowViewerGpuDeferredCleanup::ClearFrameResources,
+            );
+            ViewerHeterogeneousCompletionPoll::TerminalChange
+        }
+        ViewerGpuSubmissionPoll::Completed(completed) => {
+            complete_window_viewer_gpu_submission(session, host, device, completed);
+            apply_deferred_viewer_gpu_cleanup(session);
+            ViewerHeterogeneousCompletionPoll::TerminalChange
+        }
+    }
+}
+
+fn complete_window_viewer_gpu_submission(
+    session: &mut AppUiWindowSession,
+    host: &AppUiHost,
+    device: &wgpu::Device,
+    completed: ViewerGpuCompletedSubmission<
+        WindowViewerGpuSubmissionOwner,
+        ViewerHeterogeneousGpuCompletedBatch,
+    >,
+) {
+    let ViewerGpuCompletedSubmission {
+        submission_id,
+        mut owner,
+        completion,
+        mut quarantine_reason,
+        ..
+    } = completed;
+    if let Some(terminal) = session.viewer_gpu_device_progress.generation_terminal() {
+        quarantine_reason.get_or_insert_with(|| {
+            ViewerGpuSubmissionQuarantineReason::DevicePollFailed(format!(
+                "device generation terminal {}: {}",
+                window_viewer_gpu_generation_failure_context(terminal.submission_id),
+                terminal.reason
+            ))
+        });
+    }
+    if quarantine_reason.is_some() {
+        if let Some(published) = session
+            .viewer_gpu_presentation
+            .take_published_output_for_submission(submission_id)
+        {
+            session.frame_renderer.unregister_external_texture(&published.texture_key);
+            let _ = host.clear_external_viewer_frame_for_artifact(
+                &published.output_key,
+                published.texture_key.as_str(),
+            );
+            drop(published);
+        }
+        retire_window_viewer_gpu_registration(session, host, &mut owner);
+        if let Some(terminal) = owner.terminal.take() {
+            let _ = host.fail_heterogeneous_viewer_gpu(terminal);
+        }
+        return;
+    }
+    let Some(terminal) = owner.terminal.take() else {
+        // Ordinary publication is queue-ordered. Its lease already moved into
+        // the current physical slot on success; this callback only retires the
+        // submitted frame/media owner.
+        retire_window_viewer_gpu_registration(session, host, &mut owner);
+        return;
+    };
+    match host.finalize_heterogeneous_viewer_gpu(terminal, &completion) {
+        Ok(PreviewVisualGpuCompletionDisposition::PublishCurrent) => {
+            if let Some(scopes) = owner.program_scopes.as_ref() {
+                if let Err(error) = register_program_scopes_textures(session, device, scopes) {
+                    unregister_program_scopes_textures(session);
+                    session.program_scopes_refresh_requested = true;
+                    tracing::warn!(%error, "heterogeneous GPU scope registration failed");
+                }
+            } else {
+                unregister_program_scopes_textures(session);
+                session.program_scopes_refresh_requested = owner.program_scopes_requested;
+            }
+            let _ =
+                publish_completed_window_viewer_gpu_owner(session, host, submission_id, &mut owner);
+        }
+        Ok(
+            PreviewVisualGpuCompletionDisposition::Release
+            | PreviewVisualGpuCompletionDisposition::TerminalCandidate(_),
+        ) => retire_window_viewer_gpu_registration(session, host, &mut owner),
+        Err(error) => {
+            retire_window_viewer_gpu_registration(session, host, &mut owner);
+            host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
+                feature: "heterogeneous_viewer_gpu_evidence".to_owned(),
+                reason: error.clone(),
+            });
+            tracing::warn!("heterogeneous Viewer completion evidence rejected: {error}");
+        }
+    }
+}
+
+fn drive_viewer_heterogeneous_completion(
+    device: &wgpu::Device,
+    session: &mut AppUiWindowSession,
+    host: &AppUiHost,
+    now: Instant,
+) -> ViewerHeterogeneousCompletionDrive {
+    let poll = poll_viewer_heterogeneous_completion(device, session, host);
+    ViewerHeterogeneousCompletionDrive {
+        redraw_required: poll == ViewerHeterogeneousCompletionPoll::TerminalChange,
+        next_wake: session.viewer_gpu_submissions.next_wake().map(|wake| wake.max(now)),
+    }
+}
+
+fn fail_viewer_gpu_frame(host: &AppUiHost, frame: &mut PreviewGpuFrame) {
+    if let Some(execution) = frame.take_heterogeneous_gpu_execution() {
+        let _ = host.fail_heterogeneous_viewer_gpu(execution);
     }
 }
 
@@ -2927,6 +3750,36 @@ fn prepare_viewer_gpu_preview(
         }};
     }
 
+    let _ = poll_viewer_heterogeneous_completion(device, session, host);
+    if let Some(terminal) = session.viewer_gpu_device_progress.generation_terminal() {
+        unregister_program_scopes_textures(session);
+        if !retire_window_published_gpu_output(session, host) {
+            host.clear_external_viewer_frame();
+        }
+        host.record_preview_gpu_output_blocker(
+            &PreviewGpuOutputBlocker::CpuFallbackRequested {
+                reason: format!(
+                    "Window Viewer GPU device generation is terminal; publication remains disabled until rebuild: {}",
+                    terminal.reason
+                ),
+            },
+        );
+        finish_prepare!();
+    }
+    if session.viewer_gpu_submissions.is_occupied() {
+        session
+            .viewer_gpu_output_telemetry
+            .record_prepare_duration(prepare_started.elapsed());
+        return;
+    }
+    if !host.preflight_pending_viewer_gpu_presentation() {
+        session
+            .viewer_gpu_output_telemetry
+            .record_prepare_duration(prepare_started.elapsed());
+        return;
+    }
+    host.apply_preview_execution_resource_decision(&mut *session.viewer_gpu_execution);
+
     // Native import copies decoder surfaces into renderer-owned textures. The
     // source must live through that GPU copy, but retaining it until the next
     // decoded frame creates a circular wait when the decoder pool is bounded.
@@ -2939,7 +3792,9 @@ fn prepare_viewer_gpu_preview(
             reason: error.to_string(),
         });
         tracing::warn!("native video source retirement failed: {error}");
-        host.clear_external_viewer_frame();
+        if !retire_window_published_gpu_output(session, host) {
+            host.clear_external_viewer_frame();
+        }
         finish_prepare!();
     }
 
@@ -2979,9 +3834,35 @@ fn prepare_viewer_gpu_preview(
         host.clear_external_viewer_frame();
         session.program_scopes_refresh_requested = true;
     }
-    let frame = match host.gpu_preview_frame_for_current_state() {
+    let mut frame = match host.gpu_preview_frame_for_current_state() {
         PreviewGpuFrameState::Ready(frame) => frame,
-        PreviewGpuFrameState::Current => {
+        PreviewGpuFrameState::Current(candidate) => {
+            let physical_is_exact =
+                session.viewer_gpu_presentation.published_output().is_some_and(|physical| {
+                    host.has_external_viewer_frame_artifact(
+                        &physical.output_key,
+                        physical.texture_key.as_str(),
+                    )
+                });
+            if physical_is_exact
+                && session.viewer_gpu_device_progress.generation_terminal().is_none()
+            {
+                let _ = host.present_current_viewer_output(candidate);
+            } else {
+                if let Some(previous) = session.viewer_gpu_presentation.take_published_output() {
+                    session.frame_renderer.unregister_external_texture(&previous.texture_key);
+                    let _ = host.clear_external_viewer_frame_for_artifact(
+                        &previous.output_key,
+                        previous.texture_key.as_str(),
+                    );
+                    drop(previous);
+                } else {
+                    host.clear_external_viewer_frame();
+                }
+                tracing::warn!(
+                    "semantic Viewer output reported Current without an exact Window physical slot"
+                );
+            }
             session.viewer_gpu_output_telemetry.record_preview_candidate_state(
                 AppUiViewerGpuOutputPreviewCandidateState::Current,
                 None,
@@ -2989,7 +3870,17 @@ fn prepare_viewer_gpu_preview(
             session.viewer_gpu_output_telemetry.record_current_skip();
             finish_prepare!();
         }
-        PreviewGpuFrameState::Transparent => {
+        PreviewGpuFrameState::Transparent(candidate) => {
+            let disposition = host.present_transparent_viewer_output(candidate);
+            if matches!(
+                disposition,
+                FramePresentationDisposition::Presented(_) | FramePresentationDisposition::NoDemand
+            ) {
+                if let Some(previous) = session.viewer_gpu_presentation.take_published_output() {
+                    session.frame_renderer.unregister_external_texture(&previous.texture_key);
+                    drop(previous);
+                }
+            }
             unregister_program_scopes_textures(session);
             session.program_scopes_refresh_requested = program_scopes_requested;
             session.viewer_gpu_output_telemetry.record_preview_candidate_state(
@@ -3024,7 +3915,10 @@ fn prepare_viewer_gpu_preview(
             finish_prepare!();
         }
     };
-    let Some(texture_key) = ExternalTextureKey::new(format!(
+    if !host.preflight_viewer_gpu_presentation(frame.presentation_ticket()) {
+        finish_prepare!();
+    }
+    let Some(texture_key_base) = ExternalTextureKey::new(format!(
         "{}:{}",
         frame.external_texture_key(),
         presentation_geometry.presentation.key_suffix()
@@ -3035,6 +3929,7 @@ fn prepare_viewer_gpu_preview(
             frame = frame.frame,
             "viewer GPU preview produced an invalid external texture key"
         );
+        fail_viewer_gpu_frame(host, &mut frame);
         host.clear_external_viewer_frame();
         finish_prepare!();
     };
@@ -3042,7 +3937,7 @@ fn prepare_viewer_gpu_preview(
         declared_viewer_gpu_output_residency(&frame, session.native_video_import_probe.clone());
     session.viewer_gpu_output_telemetry.record_frame_context(
         &frame,
-        texture_key.as_str().to_owned(),
+        texture_key_base.as_str().to_owned(),
         declared_residency,
     );
     session.viewer_gpu_output_telemetry.record_preview_candidate_state(
@@ -3092,6 +3987,7 @@ fn prepare_viewer_gpu_preview(
                 );
             }
             unregister_program_scopes_textures(session);
+            fail_viewer_gpu_frame(host, &mut frame);
             host.clear_external_viewer_frame();
             finish_prepare!();
         }
@@ -3147,15 +4043,62 @@ fn prepare_viewer_gpu_preview(
             blocker = ?blocker,
             "viewer GPU preview output boundary blocked by display output contract"
         );
+        fail_viewer_gpu_frame(host, &mut frame);
         host.clear_external_viewer_frame();
         finish_prepare!();
     }
 
+    // Progress capacity is part of submission admission, not fallible
+    // post-submit bookkeeping. Once `Queue::submit` returns, committing its
+    // exact index through this move-only permit cannot reject the batch.
+    let progress_permit = match session.viewer_gpu_device_progress.reserve_submission() {
+        Ok(permit) => permit,
+        Err(ViewerGpuDeviceProgressReserveError::Backpressured) => finish_prepare!(),
+        Err(error) => {
+            let reason = format!(
+                "Window Viewer GPU output is unavailable until the device generation is rebuilt: {error}"
+            );
+            fail_viewer_gpu_frame(host, &mut frame);
+            unregister_program_scopes_textures(session);
+            if !retire_window_published_gpu_output(session, host) {
+                host.clear_external_viewer_frame();
+            }
+            host.record_preview_gpu_output_blocker(
+                &PreviewGpuOutputBlocker::CpuFallbackRequested { reason: reason.clone() },
+            );
+            tracing::error!(%reason, "Window Viewer entered explicit CPU fallback");
+            finish_prepare!();
+        }
+    };
+    let completion_signal = progress_permit.completion_signal();
+    let reservation = match session.viewer_gpu_submissions.reserve() {
+        Ok(reservation) => reservation,
+        Err(ViewerGpuSubmissionAdmissionError::Backpressured) => finish_prepare!(),
+        Err(ViewerGpuSubmissionAdmissionError::IdentityExhausted) => {
+            fail_viewer_gpu_frame(host, &mut frame);
+            host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
+                feature: "viewer_gpu_submission_identity".to_owned(),
+                reason: "Viewer GPU submission identity space is exhausted".to_owned(),
+            });
+            finish_prepare!();
+        }
+    };
+    let submission_id = reservation.submission_id();
+    let Some(texture_key) = ExternalTextureKey::new(format!(
+        "{}:submission:{}",
+        texture_key_base.as_str(),
+        submission_id.get()
+    )) else {
+        fail_viewer_gpu_frame(host, &mut frame);
+        host.clear_external_viewer_frame();
+        finish_prepare!();
+    };
     session.viewer_gpu_execution.clear_frame_resources();
 
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("app_ui_viewer_gpu_preview_output_encoder"),
     });
+    let heterogeneous_inputs = frame.take_heterogeneous_gpu_inputs();
     let layers = match &frame.working_input {
         PreviewGpuWorkingInput::GpuComposite { layers } => layers,
     };
@@ -3175,6 +4118,7 @@ fn prepare_viewer_gpu_preview(
                     frame = frame.frame,
                     "viewer GPU preview display calibration proof failed: {error}"
                 );
+                fail_viewer_gpu_frame(host, &mut frame);
                 host.clear_external_viewer_frame();
                 finish_prepare!();
             }
@@ -3187,7 +4131,7 @@ fn prepare_viewer_gpu_preview(
         display_calibration.is_some(),
     );
     let source_rect = presentation_geometry.presentation.normalized_source_rect();
-    let record = match session.viewer_gpu_execution.record(
+    let mut record = match session.viewer_gpu_execution.record(
         device,
         queue,
         &mut encoder,
@@ -3198,6 +4142,7 @@ fn prepare_viewer_gpu_preview(
             height: frame.height,
             working_color_space: frame.working_color_space,
             layers,
+            heterogeneous_inputs,
             program_output_boundary: &frame.program_output_boundary,
             monitor_adaptation: &frame.monitor_adaptation,
             source_rect: ViewerSourceRect {
@@ -3228,6 +4173,7 @@ fn prepare_viewer_gpu_preview(
         Ok(record) => record,
         Err(error) => {
             if let ViewerGpuExecutionError::Backpressure(reason) = &error {
+                progress_permit.drive_renderer_cleanup(submission_id);
                 tracing::debug!(
                     sequence_id = %frame.sequence_id,
                     frame = frame.frame,
@@ -3238,6 +4184,7 @@ fn prepare_viewer_gpu_preview(
                 );
                 finish_prepare!();
             }
+            fail_viewer_gpu_frame(host, &mut frame);
             match &error {
                 ViewerGpuExecutionError::WorkingComposite(composite_error) => {
                     host.record_preview_gpu_compositing(
@@ -3245,7 +4192,7 @@ fn prepare_viewer_gpu_preview(
                             cpu_fallback_composites: 1,
                             cpu_composited_pixels: u64::from(frame.width)
                                 .saturating_mul(u64::from(frame.height)),
-                            first_blocker: match composite_error {
+                            first_blocker: match composite_error.as_ref() {
                                 mondrian_renderer::RenderGpuCompositeGraphRecordError::Composite(
                                     mondrian_renderer::GpuCompositeError::Blocked { reason },
                                 ) => {
@@ -3267,7 +4214,7 @@ fn prepare_viewer_gpu_preview(
                             breakdown,
                             ..
                         },
-                    ) = boundary_error
+                    ) = boundary_error.as_ref()
                     {
                         host.record_preview_gpu_output_blocker_breakdown(
                             PreviewGpuOutputBlockerBreakdown::from_renderer_breakdown(*breakdown),
@@ -3322,85 +4269,331 @@ fn prepare_viewer_gpu_preview(
             reason: reason.clone(),
         });
     }
-    if let Some(scopes) = record.program_scopes.as_ref() {
-        if let Err(error) = register_program_scopes_textures(session, device, scopes) {
-            unregister_program_scopes_textures(session);
-            session.program_scopes_refresh_requested = true;
-            tracing::warn!(
-                sequence_id = %frame.sequence_id,
-                frame = frame.frame,
-                %error,
-                "GPU Program Output scope texture registration failed"
-            );
-        }
-    } else {
+    let heterogeneous_recorded = record.heterogeneous_continuation_count() != 0;
+    let stage_diagnostics = record.stage_diagnostics;
+    if let Some(terminal) = session.viewer_gpu_device_progress.generation_terminal() {
+        let reason = format!(
+            "Window Viewer GPU device generation became terminal before queue submission: {}",
+            terminal.reason
+        );
+        drop(record);
+        drop(encoder);
+        drop(progress_permit);
+        fail_viewer_gpu_frame(host, &mut frame);
         unregister_program_scopes_textures(session);
-        session.program_scopes_refresh_requested = program_scopes_requested;
+        if !retire_window_published_gpu_output(session, host) {
+            host.clear_external_viewer_frame();
+        }
+        host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::CpuFallbackRequested {
+            reason: reason.clone(),
+        });
+        tracing::error!(%reason, "Window Viewer rejected terminal-generation submission");
+        finish_prepare!();
     }
-    let output_resource = match session.viewer_gpu_execution.output_texture_view(&record) {
-        Ok(resource) => resource,
+    let submission_index = queue.submit(std::iter::once(encoder.finish()));
+    let heterogeneous_submission = record.assert_adapter_submission(submission_index.clone());
+    let output_lease = match session.viewer_gpu_execution.take_presentation_output(&mut record) {
+        Ok(lease) => lease,
         Err(error) => {
             session.viewer_gpu_output_telemetry.record_missing_output_texture();
-            tracing::warn!(
+            tracing::error!(
                 sequence_id = %frame.sequence_id,
                 frame = frame.frame,
-                "viewer GPU preview output texture missing from runtime: {error}"
+                "submitted Viewer GPU output could not transfer its physical lease: {error}"
             );
+            let terminal = frame.take_heterogeneous_gpu_execution();
+            let submitted_at = Instant::now();
+            let completion_deadline = submitted_at
+                .checked_add(VIEWER_HETEROGENEOUS_COMPLETION_TIMEOUT)
+                .unwrap_or(submitted_at);
+            let owner = WindowViewerGpuSubmissionOwner {
+                frame,
+                terminal,
+                texture_key,
+                texture_registered: false,
+                output_lease: None,
+                presentation: presentation_geometry.presentation,
+                stage_diagnostics: record.stage_diagnostics,
+                program_scopes: record.program_scopes.take(),
+                program_scopes_requested,
+            };
+            reservation.commit(
+                owner,
+                completion_deadline,
+                move |callback| {
+                    heterogeneous_submission.register_completion_callback(queue, callback);
+                },
+                move || {
+                    completion_signal.mark_observed();
+                },
+            );
+            progress_permit.commit(submission_id, submission_index);
+            if let Some(quarantine) =
+                session.viewer_gpu_submissions.quarantine_after_authority_revocation(format!(
+                    "submitted Viewer output lease transfer failed: {error}"
+                ))
+            {
+                begin_window_viewer_gpu_quarantine(
+                    session,
+                    host,
+                    quarantine,
+                    WindowViewerGpuDeferredCleanup::ClearFrameResources,
+                );
+            }
             finish_prepare!();
         }
     };
-    let registration = session
-        .frame_renderer
-        .register_external_texture_view(
-            device,
-            texture_key.clone(),
-            &output_resource,
-            ExternalTextureTransfer::SrgbSurfaceCodeValuesOpaque,
-        )
-        .map_err(|error| error.to_string());
+    let authority_error = if heterogeneous_recorded && !frame.has_heterogeneous_gpu_execution() {
+        Some("renderer recorded a heterogeneous continuation without a visual Broker lease")
+    } else if !heterogeneous_recorded && frame.has_heterogeneous_gpu_execution() {
+        Some("visual Broker lease produced no renderer GPU continuation")
+    } else {
+        None
+    };
+    let terminal = if heterogeneous_recorded {
+        frame.take_heterogeneous_gpu_execution()
+    } else {
+        None
+    };
+    let submitted_at = Instant::now();
+    let completion_deadline = submitted_at
+        .checked_add(VIEWER_HETEROGENEOUS_COMPLETION_TIMEOUT)
+        .unwrap_or(submitted_at);
+    let owner = WindowViewerGpuSubmissionOwner {
+        frame,
+        terminal,
+        texture_key,
+        texture_registered: false,
+        output_lease: Some(output_lease),
+        presentation: presentation_geometry.presentation,
+        stage_diagnostics,
+        program_scopes: record.program_scopes.take(),
+        program_scopes_requested,
+    };
+    reservation.commit(
+        owner,
+        completion_deadline,
+        move |callback| {
+            heterogeneous_submission.register_completion_callback(queue, callback);
+        },
+        move || {
+            completion_signal.mark_observed();
+        },
+    );
+    progress_permit.commit(submission_id, submission_index);
 
-    if let Err(err) = registration {
-        unregister_program_scopes_textures(session);
-        session.program_scopes_refresh_requested = program_scopes_requested;
-        session
-            .viewer_gpu_output_telemetry
-            .record_rejected_external_frame(record.stage_diagnostics);
+    let registration = {
+        let owner = session.viewer_gpu_submissions.owner(submission_id);
+        owner
+            .and_then(|owner| owner.output_lease.as_ref())
+            .ok_or_else(|| "submitted Window output lease is missing".to_owned())
+            .and_then(|lease| {
+                session
+                    .frame_renderer
+                    .register_external_texture_view(
+                        device,
+                        owner
+                            .map(|owner| owner.texture_key.clone())
+                            .ok_or_else(|| "submitted Window owner is missing".to_owned())?,
+                        lease.texture_view(),
+                        ExternalTextureTransfer::SrgbSurfaceCodeValuesOpaque,
+                    )
+                    .map_err(|error| error.to_string())
+            })
+    };
+    if let Err(error) = registration {
         host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
             feature: "viewer_encoded_code_value_presentation".to_owned(),
-            reason: err.to_string(),
+            reason: error.clone(),
         });
-        tracing::warn!(
-            sequence_id = %frame.sequence_id,
-            frame = frame.frame,
-            surface_format = ?session.display_output_contract.surface_color.format,
-            "viewer GPU preview external texture registration failed: {err}"
-        );
+        if let Some(quarantine) =
+            session.viewer_gpu_submissions.quarantine_after_authority_revocation(format!(
+                "Window texture registration failed: {error}"
+            ))
+        {
+            begin_window_viewer_gpu_quarantine(
+                session,
+                host,
+                quarantine,
+                WindowViewerGpuDeferredCleanup::ClearFrameResources,
+            );
+        }
         finish_prepare!();
     }
-    queue.submit(std::iter::once(encoder.finish()));
-    let stage_diagnostics = record.stage_diagnostics;
-    if host.set_external_viewer_frame(
-        &frame,
-        texture_key.as_str().to_owned(),
-        presentation_geometry.presentation,
-    ) {
-        session.viewer_gpu_output_telemetry.record_registered_frame(stage_diagnostics);
-        if let Some(previous) =
-            session.viewer_gpu_presentation.replace_registration(texture_key.clone())
-        {
-            if previous != texture_key {
-                session.frame_renderer.unregister_external_texture(&previous);
-            }
-        }
-    } else {
-        session
-            .viewer_gpu_output_telemetry
-            .record_rejected_external_frame(stage_diagnostics);
-        session.frame_renderer.unregister_external_texture(&texture_key);
+    if let Some(owner) = session.viewer_gpu_submissions.owner_mut(submission_id) {
+        owner.texture_registered = true;
     }
+    if let Some(reason) = authority_error {
+        host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
+            feature: "heterogeneous_viewer_gpu_lease".to_owned(),
+            reason: reason.to_owned(),
+        });
+        if let Some(quarantine) = session
+            .viewer_gpu_submissions
+            .quarantine_after_authority_revocation(reason.to_owned())
+        {
+            begin_window_viewer_gpu_quarantine(
+                session,
+                host,
+                quarantine,
+                WindowViewerGpuDeferredCleanup::ClearFrameResources,
+            );
+        }
+        finish_prepare!();
+    }
+    if heterogeneous_recorded {
+        finish_prepare!();
+    }
+    register_ordinary_window_program_scopes(session, device, submission_id);
+    publish_ordinary_window_viewer_gpu_submission(session, host, submission_id);
     session
         .viewer_gpu_output_telemetry
         .record_prepare_duration(prepare_started.elapsed());
+}
+
+fn register_ordinary_window_program_scopes(
+    session: &mut AppUiWindowSession,
+    device: &wgpu::Device,
+    submission_id: ViewerGpuSubmissionId,
+) {
+    let scopes = session
+        .viewer_gpu_submissions
+        .owner_mut(submission_id)
+        .and_then(|owner| owner.program_scopes.take());
+    if let Some(scopes) = scopes {
+        if let Err(error) = register_program_scopes_textures(session, device, &scopes) {
+            unregister_program_scopes_textures(session);
+            session.program_scopes_refresh_requested = true;
+            tracing::warn!(%error, "ordinary GPU Program Output scope registration failed");
+        }
+    } else {
+        unregister_program_scopes_textures(session);
+        let requested = session
+            .viewer_gpu_submissions
+            .owner(submission_id)
+            .is_some_and(|owner| owner.program_scopes_requested);
+        session.program_scopes_refresh_requested = requested;
+    }
+}
+
+fn publish_ordinary_window_viewer_gpu_submission(
+    session: &mut AppUiWindowSession,
+    host: &AppUiHost,
+    submission_id: ViewerGpuSubmissionId,
+) {
+    if let Some(terminal) = session.viewer_gpu_device_progress.generation_terminal() {
+        tracing::warn!(
+            submission_id = submission_id.get(),
+            reason = terminal.reason,
+            "ordinary Window Viewer output was not published from a terminal device generation"
+        );
+        return;
+    }
+    let Some((output_key, texture_key, presentation, output_lease)) =
+        session.viewer_gpu_submissions.owner_mut(submission_id).and_then(|owner| {
+            if !owner.texture_registered {
+                return None;
+            }
+            Some((
+                owner.frame.output_key.clone(),
+                owner.texture_key.clone(),
+                owner.presentation,
+                owner.output_lease.take()?,
+            ))
+        })
+    else {
+        tracing::error!(
+            submission_id = submission_id.get(),
+            "ordinary Window publication requires a registered texture and physical output lease"
+        );
+        return;
+    };
+    let disposition = {
+        let Some(owner) = session.viewer_gpu_submissions.owner(submission_id) else {
+            tracing::error!(
+                submission_id = submission_id.get(),
+                "ordinary Window publication lost its submission owner"
+            );
+            session.frame_renderer.unregister_external_texture(&texture_key);
+            drop(output_lease);
+            return;
+        };
+        host.set_external_viewer_frame(&owner.frame, texture_key.as_str().to_owned(), presentation)
+    };
+    if let Some(terminal) = session.viewer_gpu_device_progress.generation_terminal() {
+        let _ = host.clear_external_viewer_frame_for_artifact(&output_key, texture_key.as_str());
+        if let Some(owner) = session.viewer_gpu_submissions.owner_mut(submission_id) {
+            if owner.texture_registered {
+                owner.texture_registered = false;
+                session.frame_renderer.unregister_external_texture(&owner.texture_key);
+            }
+        }
+        drop(output_lease);
+        tracing::warn!(
+            submission_id = submission_id.get(),
+            reason = terminal.reason,
+            "ordinary Window Viewer publication raced a terminal device generation and was revoked"
+        );
+        return;
+    }
+    match disposition {
+        FramePresentationDisposition::Presented(_) | FramePresentationDisposition::NoDemand => {
+            if let Some(owner) = session.viewer_gpu_submissions.owner_mut(submission_id) {
+                owner.texture_registered = false;
+            } else {
+                // The lifecycle cannot concurrently remove an owner on the
+                // Window event thread. Fail closed if that invariant is ever
+                // violated after the semantic commit.
+                let _ = host
+                    .clear_external_viewer_frame_for_artifact(&output_key, texture_key.as_str());
+                session.frame_renderer.unregister_external_texture(&texture_key);
+                drop(output_lease);
+                tracing::error!(
+                    submission_id = submission_id.get(),
+                    "ordinary Window owner disappeared after presentation commit"
+                );
+                return;
+            }
+            let next = WindowViewerGpuPublishedOutput {
+                submission_id,
+                output_key,
+                texture_key,
+                _output_lease: output_lease,
+            };
+            let previous = session.viewer_gpu_presentation.replace_published_output(next);
+            if let Some(previous) = previous {
+                session.frame_renderer.unregister_external_texture(&previous.texture_key);
+                drop(previous);
+            }
+            if let Some(owner) = session.viewer_gpu_submissions.owner(submission_id) {
+                session
+                    .viewer_gpu_output_telemetry
+                    .record_registered_frame(owner.stage_diagnostics);
+            }
+        }
+        FramePresentationDisposition::DroppedLate(_) => {
+            if let Some(owner) = session.viewer_gpu_submissions.owner_mut(submission_id) {
+                if owner.texture_registered {
+                    owner.texture_registered = false;
+                    session.frame_renderer.unregister_external_texture(&owner.texture_key);
+                }
+            }
+            drop(output_lease);
+        }
+        FramePresentationDisposition::OutputRejected
+        | FramePresentationDisposition::LostAuthority => {
+            if let Some(owner) = session.viewer_gpu_submissions.owner_mut(submission_id) {
+                session
+                    .viewer_gpu_output_telemetry
+                    .record_rejected_external_frame(owner.stage_diagnostics);
+                if owner.texture_registered {
+                    owner.texture_registered = false;
+                    session.frame_renderer.unregister_external_texture(&owner.texture_key);
+                }
+            }
+            drop(output_lease);
+        }
+    }
 }
 
 fn viewer_program_scopes_request(
@@ -3427,15 +4620,41 @@ fn synchronize_viewer_spatial_presentation(
 }
 
 fn clear_viewer_spatial_presentation(session: &mut AppUiWindowSession, host: &AppUiHost) {
+    let cleanup_deferred = cancel_viewer_gpu_submission(
+        session,
+        host,
+        WindowViewerGpuDeferredCleanup::ClearFrameResources,
+    );
     let had_presentation = session.viewer_gpu_presentation.take_presentation();
-    if let Some(previous) = session.viewer_gpu_presentation.take_registration() {
-        session.frame_renderer.unregister_external_texture(&previous);
+    if let Some(previous) = session.viewer_gpu_presentation.take_published_output() {
+        session.frame_renderer.unregister_external_texture(&previous.texture_key);
+        let _ = host.clear_external_viewer_frame_for_artifact(
+            &previous.output_key,
+            previous.texture_key.as_str(),
+        );
+        drop(previous);
     }
-    session.viewer_gpu_execution.clear_frame_resources();
+    if !cleanup_deferred {
+        session.viewer_gpu_execution.clear_frame_resources();
+    }
     unregister_program_scopes_textures(session);
     if had_presentation {
         host.clear_external_viewer_frame();
     }
+}
+
+fn cancel_viewer_gpu_submission(
+    session: &mut AppUiWindowSession,
+    host: &AppUiHost,
+    deferred_cleanup: WindowViewerGpuDeferredCleanup,
+) -> bool {
+    let Some(quarantine) = session.viewer_gpu_submissions.quarantine_after_authority_revocation(
+        format!("Window Viewer cleanup requested: {deferred_cleanup:?}"),
+    ) else {
+        return false;
+    };
+    begin_window_viewer_gpu_quarantine(session, host, quarantine, deferred_cleanup);
+    true
 }
 
 fn register_program_scopes_textures(
@@ -3498,8 +4717,8 @@ fn validate_display_calibration_proof(
         mondrian_core::display_contract::MonitorProfileStatus::ManagedIccCalibration {
             source_color_space,
             profile_fingerprint,
-        } if source_color_space == calibration.source_color_space
-            && profile_fingerprint == calibration.profile_fingerprint =>
+        } if source_color_space == calibration.source_color_space()
+            && profile_fingerprint == calibration.profile_fingerprint() =>
         {
             Ok(())
         }
@@ -3722,8 +4941,8 @@ fn refresh_display_output_contract(
         host.record_preview_gpu_output_blocker(blocker);
     }
 
-    let previous_generation = session.display_snapshot.as_ref().map(|s| s.contract_generation());
-    let new_generation = snapshot.contract_generation();
+    let previous_identity = session.display_snapshot.as_ref().map(|s| s.contract_identity());
+    let new_identity = snapshot.contract_identity();
 
     session.display_snapshot = Some(snapshot);
     session.display_calibration = display_resolution.calibration;
@@ -3740,6 +4959,13 @@ fn refresh_display_output_contract(
     session.display_output_contract = next;
     session.config.format = session.display_output_contract.surface_color.format;
     session.config.color_space = session.display_output_contract.surface_color.color_space;
+    let contract_changed = previous_identity != Some(new_identity);
+    if contract_changed {
+        // Revoke semantic and physical authority through the old renderer
+        // before replacing its registration table. An in-flight owner keeps
+        // the execution Reset deferred until its exact callback retires.
+        invalidate_display_dependent_gpu_preview(session, host);
+    }
     if renderer_rebuilt {
         session.surface.configure(device, &session.config);
         session.frame_renderer = AppUiFrameRenderer::new(device, session.config.format);
@@ -3749,17 +4975,12 @@ fn refresh_display_output_contract(
         );
     }
 
-    let generation_changed = previous_generation != Some(new_generation);
-    if generation_changed {
-        invalidate_display_dependent_gpu_preview(session, host);
-    }
-
     tracing::info!(
         ?reason,
         renderer_rebuilt,
-        generation_changed,
-        previous_generation = ?previous_generation,
-        new_generation,
+        contract_changed,
+        previous_identity = ?previous_identity,
+        new_identity = ?new_identity,
         display_target = ?session.display_output_contract.display_target,
         surface_format = ?session.display_output_contract.surface_color.format,
         surface_color_space = ?session.display_output_contract.surface_color.color_space,
@@ -3770,11 +4991,20 @@ fn refresh_display_output_contract(
 }
 
 fn invalidate_display_dependent_gpu_preview(session: &mut AppUiWindowSession, host: &AppUiHost) {
+    let cleanup_deferred =
+        cancel_viewer_gpu_submission(session, host, WindowViewerGpuDeferredCleanup::Reset);
     if let Some(previous) = session.viewer_gpu_presentation.clear() {
-        session.frame_renderer.unregister_external_texture(&previous);
+        session.frame_renderer.unregister_external_texture(&previous.texture_key);
+        let _ = host.clear_external_viewer_frame_for_artifact(
+            &previous.output_key,
+            previous.texture_key.as_str(),
+        );
+        drop(previous);
     }
     unregister_program_scopes_textures(session);
-    session.viewer_gpu_execution.reset();
+    if !cleanup_deferred {
+        session.viewer_gpu_execution.reset();
+    }
     host.clear_external_viewer_frame();
     host.mark_dirty();
 }
@@ -3788,6 +5018,7 @@ impl AppUiWindowSession {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         host: &mut AppUiHost,
+        viewer_gpu_device_progress: Option<ViewerGpuDeviceProgressOwner>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         apply_window_corner_preference(&window, window_corner_preference_for_role(role));
 
@@ -3839,7 +5070,12 @@ impl AppUiWindowSession {
         host.set_display_output_snapshot(Some(&initial_snapshot));
 
         let frame_renderer = AppUiFrameRenderer::new(device, config.format);
-        let viewer_gpu_execution = ViewerGpuExecutionRuntime::new(adapter, device, queue);
+        let viewer_gpu_execution = ViewerGpuExecutionRuntime::new(adapter, device, queue)?;
+        let viewer_gpu_device_progress = match viewer_gpu_device_progress {
+            Some(progress) => ViewerGpuDeviceGenerationMember::new(progress),
+            None => ViewerGpuDeviceGenerationMember::empty(),
+        };
+        let viewer_gpu_submissions = ViewerGpuSubmissionLifecycle::new();
         let native_video_import_probe = SystemPlatformService.native_video_texture_import();
         host.set_native_decoded_frame_import_support(
             viewer_gpu_execution.native_import_support(),
@@ -3847,6 +5083,7 @@ impl AppUiWindowSession {
         );
 
         Ok(Self {
+            viewer_gpu_device_progress,
             role,
             window,
             surface,
@@ -3858,9 +5095,12 @@ impl AppUiWindowSession {
             display_management_policy,
             native_video_import_probe,
             frame_renderer,
+            renderer_device: device.clone(),
             renderer_queue: queue.clone(),
-            viewer_gpu_execution,
+            viewer_gpu_execution: ViewerGpuDeviceGenerationMember::new(viewer_gpu_execution),
             viewer_gpu_presentation: WindowViewerGpuPresentationState::default(),
+            viewer_gpu_submissions,
+            viewer_gpu_deferred_cleanup: WindowViewerGpuDeferredCleanup::None,
             program_scopes_registered: false,
             program_scopes_refresh_requested: false,
             viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry::default(),
@@ -3875,9 +5115,8 @@ impl AppUiWindowSession {
             current_bounds: std::cell::Cell::new(bounds),
             modifiers_state: Modifiers::none(),
             pending_initial_redraw: true,
-            last_playback_tick: Instant::now(),
-            playback_was_running: false,
             event_loop_telemetry: AppUiEventLoopTelemetry::default(),
+            playback_thread_scheduling: mondrian_platform::PlaybackThreadScheduling::default(),
         })
     }
 }
@@ -3990,19 +5229,54 @@ fn replace_window_session(
     session: &mut AppUiWindowSession,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let old_role = session.role;
+    // Native-window replacement does not replace the wgpu device generation.
+    // Revoke publication authority now, but keep every submitted media/GPU
+    // owner resident until its exact callback arrives.
+    clear_viewer_spatial_presentation(session, host);
     session.window.set_visible(false);
 
     let window = Arc::new(elwt.create_window(window_attributes_for_role(role))?);
     let surface = instance.create_surface(window.clone())?;
     let queue = session.renderer_queue.clone();
-    let next_session = AppUiWindowSession::from_window_and_surface(
-        role, window, surface, adapter, device, &queue, host,
+    let mut next_session = AppUiWindowSession::from_window_and_surface(
+        role, window, surface, adapter, device, &queue, host, None,
     )?;
+    handoff_window_viewer_gpu_device_generation(
+        &mut session.viewer_gpu_device_progress,
+        &mut next_session.viewer_gpu_device_progress,
+        &mut session.viewer_gpu_execution,
+        &mut next_session.viewer_gpu_execution,
+        &mut session.viewer_gpu_submissions,
+        &mut next_session.viewer_gpu_submissions,
+        &mut session.viewer_gpu_deferred_cleanup,
+        &mut next_session.viewer_gpu_deferred_cleanup,
+    );
     tracing::info!(?old_role, ?role, "app UI native window replaced");
     next_session.window.set_visible(true);
     next_session.window.request_redraw();
     *session = next_session;
     Ok(())
+}
+
+fn handoff_window_viewer_gpu_device_generation<P, E, O, C>(
+    retiring_progress: &mut P,
+    replacement_progress: &mut P,
+    retiring_execution: &mut E,
+    replacement_execution: &mut E,
+    retiring_submissions: &mut ViewerGpuSubmissionLifecycle<O, C>,
+    replacement_submissions: &mut ViewerGpuSubmissionLifecycle<O, C>,
+    retiring_cleanup: &mut WindowViewerGpuDeferredCleanup,
+    replacement_cleanup: &mut WindowViewerGpuDeferredCleanup,
+) {
+    // The surface/window generation is replaceable; the device-progress
+    // worker, execution runtime, callback receiver, retained owners, and their
+    // pending cleanup form one indivisible device-generation authority. In
+    // particular, an in-flight owner may still protect native decoder
+    // resources allocated by the retiring execution runtime.
+    std::mem::swap(retiring_progress, replacement_progress);
+    std::mem::swap(retiring_execution, replacement_execution);
+    std::mem::swap(retiring_submissions, replacement_submissions);
+    std::mem::swap(retiring_cleanup, replacement_cleanup);
 }
 
 fn window_role_for_mode(mode: AppUiMode) -> AppUiWindowRole {
@@ -4252,6 +5526,7 @@ mod platform_window_chrome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::preview_work_notification::preview_work_notification_channel;
     use crate::app::viewer_gpu_output_residency::{
         ViewerGpuOutputDecodeResidency as AppUiViewerGpuOutputDecodeResidency,
         ViewerGpuOutputInputTransformPath as AppUiViewerGpuOutputInputTransformPath,
@@ -4268,6 +5543,172 @@ mod tests {
     };
     use mondrian_ui_core::widget::{EventContext, PaintContext};
     use mondrian_ui_core::Widget;
+    use std::sync::Mutex;
+
+    #[test]
+    fn delayed_viewer_callback_survives_native_window_replacement() {
+        type CompletionCallback = Box<dyn FnOnce(u64) + Send + 'static>;
+
+        let now = Instant::now();
+        let callback = Arc::new(Mutex::new(None::<CompletionCallback>));
+        let mut retiring_progress = "active-device-generation".to_owned();
+        let mut replacement_progress = "unused-replacement-worker".to_owned();
+        let mut retiring_execution = "retained-frame-resource-runtime".to_owned();
+        let mut replacement_execution = "unused-replacement-runtime".to_owned();
+        let mut retiring_submissions = ViewerGpuSubmissionLifecycle::<String, u64>::new();
+        let mut replacement_submissions = ViewerGpuSubmissionLifecycle::<String, u64>::new();
+        let mut retiring_cleanup = WindowViewerGpuDeferredCleanup::Reset;
+        let mut replacement_cleanup = WindowViewerGpuDeferredCleanup::None;
+
+        let reservation = retiring_submissions.reserve().expect("reserve old Window submission");
+        let submission_id = reservation.submission_id();
+        let callback_slot = Arc::clone(&callback);
+        reservation.commit(
+            "retained-media-owner".to_owned(),
+            now + Duration::from_secs(1),
+            move |registered| {
+                *callback_slot.lock().expect("callback slot") = Some(registered);
+            },
+            || {},
+        );
+
+        handoff_window_viewer_gpu_device_generation(
+            &mut retiring_progress,
+            &mut replacement_progress,
+            &mut retiring_execution,
+            &mut replacement_execution,
+            &mut retiring_submissions,
+            &mut replacement_submissions,
+            &mut retiring_cleanup,
+            &mut replacement_cleanup,
+        );
+
+        assert_eq!(replacement_progress, "active-device-generation");
+        assert_eq!(replacement_execution, "retained-frame-resource-runtime");
+        assert_eq!(replacement_cleanup, WindowViewerGpuDeferredCleanup::Reset);
+        assert!(matches!(
+            retiring_submissions.poll(now),
+            ViewerGpuSubmissionPoll::Idle
+        ));
+        callback.lock().expect("callback slot").take().expect("registered callback")(73);
+        let completed = match replacement_submissions.poll(now) {
+            ViewerGpuSubmissionPoll::Completed(completed) => completed,
+            _ => panic!("replacement must retain the exact in-flight lifecycle"),
+        };
+        assert_eq!(completed.submission_id, submission_id);
+        assert_eq!(completed.owner, "retained-media-owner");
+        assert_eq!(completed.completion, 73);
+    }
+
+    #[test]
+    fn preview_completion_burst_queues_one_native_event_until_consumed() {
+        let (notifier, watch) = preview_work_notification_channel();
+        let pending = Arc::new(AtomicBool::new(false));
+        let queued = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let callback_pending = Arc::clone(&pending);
+        let callback_queued = Arc::clone(&queued);
+        watch.install_waker(move || {
+            queue_preview_work_event(&callback_pending, || {
+                callback_queued.fetch_add(1, Ordering::AcqRel);
+                true
+            });
+        });
+
+        for _ in 0..128 {
+            notifier.result_became_pollable();
+        }
+
+        assert!(pending.load(Ordering::Acquire));
+        assert_eq!(queued.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn publication_during_bounded_drain_is_requeued_after_rearm() {
+        let (notifier, watch) = preview_work_notification_channel();
+        let pending = Arc::new(AtomicBool::new(false));
+        let queued = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let callback_pending = Arc::clone(&pending);
+        let callback_queued = Arc::clone(&queued);
+        watch.install_waker(move || {
+            queue_preview_work_event(&callback_pending, || {
+                callback_queued.fetch_add(1, Ordering::AcqRel);
+                true
+            });
+        });
+        let drain_target_revision = watch.revision();
+
+        // The publisher observes an already queued event and intentionally
+        // coalesces. Rearm must compare revisions after clearing that bit.
+        notifier.result_became_pollable();
+        assert_eq!(queued.load(Ordering::Acquire), 1);
+        let rearm_queued = Arc::clone(&queued);
+        assert!(rearm_preview_work_event(
+            &pending,
+            drain_target_revision,
+            &watch,
+            move || {
+                rearm_queued.fetch_add(1, Ordering::AcqRel);
+                true
+            }
+        ));
+        assert!(pending.load(Ordering::Acquire));
+        assert_eq!(queued.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn panicking_native_event_send_restores_the_coalescing_bit() {
+        let pending = AtomicBool::new(false);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            queue_preview_work_event(&pending, || panic!("test native event send panic"));
+        }));
+
+        assert!(panic.is_err());
+        assert!(!pending.load(Ordering::Acquire));
+        assert!(queue_preview_work_event(&pending, || true));
+    }
+
+    #[test]
+    fn resource_deadline_never_downgrades_polling() {
+        let deadline = Instant::now() + Duration::from_secs(1);
+
+        assert_eq!(
+            control_flow_wake_no_later_than(winit::event_loop::ControlFlow::Poll, deadline),
+            winit::event_loop::ControlFlow::Poll
+        );
+    }
+
+    #[test]
+    fn resource_deadline_arms_an_idle_event_loop() {
+        let deadline = Instant::now() + Duration::from_secs(1);
+
+        assert_eq!(
+            control_flow_wake_no_later_than(winit::event_loop::ControlFlow::Wait, deadline),
+            winit::event_loop::ControlFlow::WaitUntil(deadline)
+        );
+    }
+
+    #[test]
+    fn resource_deadline_preserves_the_earliest_wakeup() {
+        let now = Instant::now();
+        let earlier = now + Duration::from_millis(100);
+        let later = now + Duration::from_secs(1);
+
+        assert_eq!(
+            control_flow_wake_no_later_than(
+                winit::event_loop::ControlFlow::WaitUntil(earlier),
+                later,
+            ),
+            winit::event_loop::ControlFlow::WaitUntil(earlier)
+        );
+        assert_eq!(
+            control_flow_wake_no_later_than(
+                winit::event_loop::ControlFlow::WaitUntil(later),
+                earlier,
+            ),
+            winit::event_loop::ControlFlow::WaitUntil(earlier)
+        );
+    }
 
     #[test]
     fn changing_only_the_color_engine_refreshes_display_management() {
@@ -4293,36 +5734,6 @@ mod tests {
             .expect("visible request");
         assert_eq!(visible.signal_color_space(), ColorSpace::Rec709);
         assert_eq!(visible.waveform_mode(), WaveformMode::Luma);
-    }
-
-    #[test]
-    fn playback_clock_discards_idle_time_when_transport_starts_or_resumes() {
-        let previous_tick = Instant::now();
-        let current_tick = previous_tick + Duration::from_secs(30);
-
-        assert_eq!(
-            continuous_playback_elapsed(previous_tick, current_tick, false, true),
-            Duration::ZERO
-        );
-        assert_eq!(
-            continuous_playback_elapsed(previous_tick, current_tick, true, true),
-            Duration::from_secs(30)
-        );
-        assert_eq!(
-            continuous_playback_elapsed(previous_tick, current_tick, true, false),
-            Duration::ZERO
-        );
-    }
-
-    #[test]
-    fn viewer_registration_swap_retains_previous_until_commit() {
-        let first = ExternalTextureKey::new("viewer:first").expect("valid first key");
-        let second = ExternalTextureKey::new("viewer:second").expect("valid second key");
-        let mut state = WindowViewerGpuPresentationState::default();
-
-        assert_eq!(state.replace_registration(first.clone()), None);
-        assert_eq!(state.replace_registration(second.clone()), Some(first));
-        assert_eq!(state.take_registration(), Some(second));
     }
 
     #[test]
@@ -6069,11 +7480,11 @@ mod tests {
             source:
                 mondrian_timeline::sequence::InputColorResolutionSource::MissingPolicyRejectMedia,
             override_color_space: None,
-            detected_color_space: None,
+            executable_color_space: None,
             working_color_space: WorkingColorSpace::LinearRec2020,
             diagnostic_summary: "source=MissingMetadata,warnings=missing_cicp".to_string(),
             diagnostic_issue_summary: mondrian_media::VideoColorDiagnosticIssueSummary {
-                detected_color_space: None,
+                executable_color_space: None,
                 source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
                 method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
                 confidence: mondrian_media::VideoColorInterpretationConfidence::None,

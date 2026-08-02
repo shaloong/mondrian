@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-const SESSION_CAPACITY: usize = 8;
+const DEFAULT_SESSION_CAPACITY: usize = 2;
 const EXACT_SEEK_PREROLL_SECONDS: i64 = 10;
 const PUMP_CHUNK_BYTES: usize = 64 * 1024;
 const PUMP_LOOKAHEAD_CHUNKS: usize = 2;
@@ -25,30 +25,50 @@ const CANCELLATION_POLL: Duration = Duration::from_millis(5);
 /// Product decoder that reuses one bounded FFmpeg stream per active source contract.
 pub(super) struct PersistentFfmpegAudioWindowDecoder {
     state: Mutex<DecoderState>,
-    session_capacity: usize,
 }
 
 impl Default for PersistentFfmpegAudioWindowDecoder {
     fn default() -> Self {
         Self {
-            state: Mutex::new(DecoderState::default()),
-            session_capacity: SESSION_CAPACITY,
+            state: Mutex::new(DecoderState::new(DEFAULT_SESSION_CAPACITY)),
         }
     }
 }
 
-#[derive(Default)]
 struct DecoderState {
+    session_capacity: usize,
     entries: VecDeque<DecoderEntry>,
     peak_sessions: usize,
     session_opens: u64,
     sequential_reuses: u64,
     random_seek_restarts: u64,
     session_evictions: u64,
+    capacity_reconfigurations: u64,
+    capacity_trim_evictions: u64,
     cancellations: u64,
     cold_window_max_duration_us: u64,
     sequential_window_max_duration_us: u64,
     random_seek_window_max_duration_us: u64,
+}
+
+impl DecoderState {
+    fn new(session_capacity: usize) -> Self {
+        Self {
+            session_capacity: session_capacity.max(1),
+            entries: VecDeque::new(),
+            peak_sessions: 0,
+            session_opens: 0,
+            sequential_reuses: 0,
+            random_seek_restarts: 0,
+            session_evictions: 0,
+            capacity_reconfigurations: 0,
+            capacity_trim_evictions: 0,
+            cancellations: 0,
+            cold_window_max_duration_us: 0,
+            sequential_window_max_duration_us: 0,
+            random_seek_window_max_duration_us: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,6 +160,8 @@ impl AudioWindowDecoder for PersistentFfmpegAudioWindowDecoder {
         if failed {
             self.remove_slot(&slot);
         }
+        drop(slot);
+        self.converge_capacity();
 
         self.record_window(kind, opened, started.elapsed(), cancellation.is_canceled());
         result
@@ -149,21 +171,50 @@ impl AudioWindowDecoder for PersistentFfmpegAudioWindowDecoder {
         let state = self.state.lock();
         AudioWindowDecoderDiagnostics {
             sessions: state.entries.len(),
-            session_capacity: self.session_capacity,
+            session_capacity: state.session_capacity,
             peak_sessions: state.peak_sessions,
             session_opens: state.session_opens,
             sequential_reuses: state.sequential_reuses,
             random_seek_restarts: state.random_seek_restarts,
             session_evictions: state.session_evictions,
+            capacity_reconfigurations: state.capacity_reconfigurations,
+            capacity_trim_evictions: state.capacity_trim_evictions,
+            sessions_above_capacity: state.entries.len().saturating_sub(state.session_capacity),
             cancellations: state.cancellations,
             cold_window_max_duration_us: state.cold_window_max_duration_us,
             sequential_window_max_duration_us: state.sequential_window_max_duration_us,
             random_seek_window_max_duration_us: state.random_seek_window_max_duration_us,
         }
     }
+
+    fn reconfigure_session_capacity(&self, session_capacity: usize) {
+        let session_capacity = session_capacity.max(1);
+        let evicted = {
+            let mut state = self.state.lock();
+            if state.session_capacity == session_capacity {
+                VecDeque::new()
+            } else {
+                state.session_capacity = session_capacity;
+                state.capacity_reconfigurations = state.capacity_reconfigurations.saturating_add(1);
+                trim_idle_sessions_to_capacity(&mut state)
+            }
+        };
+        terminate_entries(evicted);
+    }
 }
 
 impl PersistentFfmpegAudioWindowDecoder {
+    pub(super) fn with_capacity(session_capacity: usize) -> Self {
+        Self {
+            state: Mutex::new(DecoderState::new(session_capacity)),
+        }
+    }
+
+    fn converge_capacity(&self) {
+        let evicted = trim_decoder_capacity(&self.state);
+        terminate_entries(evicted);
+    }
+
     fn record_window(&self, kind: WindowKind, opened: bool, duration: Duration, canceled: bool) {
         let duration_us = duration.as_micros().min(u64::MAX as u128) as u64;
         let mut state = self.state.lock();
@@ -208,36 +259,50 @@ impl PersistentFfmpegAudioWindowDecoder {
             let mut evicted = None;
             let selected = {
                 let mut state = self.state.lock();
+                let trimmed = trim_idle_sessions_to_capacity(&mut state);
+                if !trimmed.is_empty() {
+                    evicted = Some(trimmed);
+                }
                 if let Some(index) = state.entries.iter().position(|entry| entry.key == key) {
                     state.entries.remove(index).map(|entry| {
                         let slot = Arc::clone(&entry.slot);
                         state.entries.push_front(entry);
                         slot
                     })
-                } else if state.entries.len() < self.session_capacity {
+                } else if state.entries.len() < state.session_capacity {
                     let slot = Arc::new(Mutex::new(None));
                     state
                         .entries
                         .push_front(DecoderEntry { key: key.clone(), slot: Arc::clone(&slot) });
                     state.peak_sessions = state.peak_sessions.max(state.entries.len());
                     Some(slot)
-                } else if let Some(index) =
-                    state.entries.iter().rposition(|entry| Arc::strong_count(&entry.slot) == 1)
-                {
-                    evicted = state.entries.remove(index);
-                    state.session_evictions = state.session_evictions.saturating_add(1);
-                    let slot = Arc::new(Mutex::new(None));
-                    state
-                        .entries
-                        .push_front(DecoderEntry { key: key.clone(), slot: Arc::clone(&slot) });
-                    Some(slot)
+                } else if state.entries.len() == state.session_capacity {
+                    if let Some(index) =
+                        state.entries.iter().rposition(|entry| Arc::strong_count(&entry.slot) == 1)
+                    {
+                        let displaced = state.entries.remove(index);
+                        if let Some(displaced) = displaced {
+                            match evicted.as_mut() {
+                                Some(entries) => entries.push_back(displaced),
+                                None => evicted = Some(VecDeque::from([displaced])),
+                            }
+                        }
+                        state.session_evictions = state.session_evictions.saturating_add(1);
+                        let slot = Arc::new(Mutex::new(None));
+                        state
+                            .entries
+                            .push_front(DecoderEntry { key: key.clone(), slot: Arc::clone(&slot) });
+                        Some(slot)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
             };
 
-            if let Some(entry) = evicted {
-                terminate_entry(entry);
+            if let Some(entries) = evicted {
+                terminate_entries(entries);
             }
             if let Some(slot) = selected {
                 return Ok(slot);
@@ -262,6 +327,29 @@ impl PersistentFfmpegAudioWindowDecoder {
             std::thread::sleep(CANCELLATION_POLL);
         }
     }
+}
+
+fn trim_decoder_capacity(state: &Mutex<DecoderState>) -> VecDeque<DecoderEntry> {
+    trim_idle_sessions_to_capacity(&mut state.lock())
+}
+
+fn trim_idle_sessions_to_capacity(state: &mut DecoderState) -> VecDeque<DecoderEntry> {
+    let mut evicted = VecDeque::new();
+    while state.entries.len() > state.session_capacity {
+        let Some(index) =
+            state.entries.iter().rposition(|entry| Arc::strong_count(&entry.slot) == 1)
+        else {
+            break;
+        };
+        if let Some(entry) = state.entries.remove(index) {
+            evicted.push_back(entry);
+        }
+    }
+    if !evicted.is_empty() {
+        state.capacity_trim_evictions =
+            state.capacity_trim_evictions.saturating_add(evicted.len() as u64);
+    }
+    evicted
 }
 
 impl Drop for PersistentFfmpegAudioWindowDecoder {
@@ -664,6 +752,40 @@ fn hide_child_window(_command: &mut Command) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::info::ChannelLayout;
+    use mondrian_core::MediaFileFingerprint;
+    use std::path::PathBuf;
+
+    fn test_session_key(index: u32) -> SessionKey {
+        SessionKey {
+            source: AudioSourceIdentity {
+                path: PathBuf::from(format!("session-{index}.wav")),
+                len: 1,
+                modified_secs: Some(1),
+                modified_nanos: Some(1),
+                selection: super::super::AudioSourceSelection::new(
+                    index,
+                    ChannelLayout::Stereo,
+                    MediaFileFingerprint::default(),
+                ),
+                channel_layout: AudioChannelLayout::Stereo,
+            },
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Stereo,
+        }
+    }
+
+    fn decoder_with_empty_sessions(count: usize) -> PersistentFfmpegAudioWindowDecoder {
+        let mut state = DecoderState::new(count.max(1));
+        for index in 0..count {
+            state.entries.push_back(DecoderEntry {
+                key: test_session_key(index as u32),
+                slot: Arc::new(Mutex::new(None)),
+            });
+        }
+        state.peak_sessions = count;
+        PersistentFfmpegAudioWindowDecoder { state: Mutex::new(state) }
+    }
 
     #[test]
     fn stderr_tail_is_strictly_bounded_and_keeps_the_latest_bytes() {
@@ -695,5 +817,51 @@ mod tests {
     fn ffmpeg_stream_map_uses_the_absolute_container_index() {
         assert_eq!(ffmpeg_stream_map(0), "0:0");
         assert_eq!(ffmpeg_stream_map(7), "0:7");
+    }
+
+    #[test]
+    fn online_session_capacity_reduction_terminates_idle_lru_immediately() {
+        let decoder = decoder_with_empty_sessions(4);
+
+        decoder.reconfigure_session_capacity(2);
+
+        let state = decoder.state.lock();
+        assert_eq!(state.session_capacity, 2);
+        assert_eq!(state.entries.len(), 2);
+        assert_eq!(state.entries[0].key, test_session_key(0));
+        assert_eq!(state.entries[1].key, test_session_key(1));
+        assert_eq!(state.capacity_reconfigurations, 1);
+        assert_eq!(state.capacity_trim_evictions, 2);
+    }
+
+    #[test]
+    fn busy_sessions_converge_after_capacity_reduction_without_forced_termination() {
+        let decoder = decoder_with_empty_sessions(3);
+        let (first_busy, second_busy, third_busy) = {
+            let state = decoder.state.lock();
+            (
+                Arc::clone(&state.entries[0].slot),
+                Arc::clone(&state.entries[1].slot),
+                Arc::clone(&state.entries[2].slot),
+            )
+        };
+
+        decoder.reconfigure_session_capacity(1);
+        let busy = decoder.diagnostics();
+        assert_eq!(busy.sessions, 3);
+        assert_eq!(busy.session_capacity, 1);
+        assert_eq!(busy.sessions_above_capacity, 2);
+        assert_eq!(busy.capacity_trim_evictions, 0);
+
+        drop(second_busy);
+        drop(third_busy);
+        decoder.converge_capacity();
+
+        let converged = decoder.diagnostics();
+        assert_eq!(converged.sessions, 1);
+        assert_eq!(converged.sessions_above_capacity, 0);
+        assert_eq!(converged.capacity_trim_evictions, 2);
+        assert_eq!(decoder.state.lock().entries[0].key, test_session_key(0));
+        drop(first_busy);
     }
 }

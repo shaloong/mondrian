@@ -5,7 +5,12 @@ edition.workspace    = true
 authors.workspace    = true
 license.workspace    = true
 
+[features]
+default = []
+validation = []
+
 [dependencies]
+mondrian-storage = { workspace = true }
 mondrian-core = { workspace = true }
 
 # FFmpeg 绑定（需要系统安装 FFmpeg 8.x+）
@@ -21,7 +26,6 @@ async-trait = { workspace = true }
 futures = { workspace = true }
 
 # 并发
-rayon          = { workspace = true }
 parking_lot    = { workspace = true }
 crossbeam-channel = { workspace = true }
 crossbeam-queue = { workspace = true }

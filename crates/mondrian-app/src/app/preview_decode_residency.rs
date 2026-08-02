@@ -10,6 +10,7 @@ use std::sync::{Mutex, MutexGuard};
 use mondrian_media::PreviewDecodeAccessMode;
 
 use super::preview_access_mode::MediaPreviewWorkerLane;
+use super::preview_work_notification::PreviewWorkNotifier;
 
 const WORKER_ANY: u8 = 1 << 0;
 const WORKER_PLAYBACK: u8 = 1 << 1;
@@ -52,6 +53,7 @@ impl PreviewDecodeResidencyDirective {
 #[derive(Debug, Clone, Copy)]
 struct PreviewDecodeResidencyState {
     revision: u64,
+    actionable_retry_revision: u64,
     active_family: Option<PreviewDecodeResidencyFamily>,
     worker_mask: u8,
     required_ack_mask: u8,
@@ -63,6 +65,7 @@ struct PreviewDecodeResidencyState {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct PreviewDecodeResidencyDiagnostics {
     pub(crate) revision: u64,
+    pub(crate) actionable_retry_revision: u64,
     pub(crate) active_family: Option<PreviewDecodeResidencyFamily>,
     pub(crate) transitions: u64,
     pub(crate) blocked_admissions: u64,
@@ -73,13 +76,19 @@ pub(crate) struct PreviewDecodeResidencyDiagnostics {
 /// Synchronizes worker-local decoder destruction with cross-family admission.
 pub(crate) struct PreviewDecodeResidencyCoordinator {
     state: Mutex<PreviewDecodeResidencyState>,
+    work_notifier: PreviewWorkNotifier,
 }
 
 impl PreviewDecodeResidencyCoordinator {
-    pub(crate) const fn new() -> Self {
+    pub(crate) fn new() -> Self {
+        Self::new_with_notifier(PreviewWorkNotifier::default())
+    }
+
+    pub(crate) fn new_with_notifier(work_notifier: PreviewWorkNotifier) -> Self {
         Self {
             state: Mutex::new(PreviewDecodeResidencyState {
                 revision: 0,
+                actionable_retry_revision: 0,
                 active_family: None,
                 worker_mask: 0,
                 required_ack_mask: 0,
@@ -87,6 +96,7 @@ impl PreviewDecodeResidencyCoordinator {
                 transitions: 0,
                 blocked_admissions: 0,
             }),
+            work_notifier,
         }
     }
 
@@ -99,10 +109,21 @@ impl PreviewDecodeResidencyCoordinator {
     /// Remove a worker whose thread could not be constructed.
     pub(crate) fn unregister_worker(&self, lane: MediaPreviewWorkerLane) {
         let bit = worker_lane_bit(lane);
-        let mut state = lock_state(&self.state);
-        state.worker_mask &= !bit;
-        state.required_ack_mask &= !bit;
-        state.acknowledged_mask &= !bit;
+        let retry_became_actionable = {
+            let mut state = lock_state(&self.state);
+            let was_blocked = retirement_barrier_blocked(&state);
+            state.worker_mask &= !bit;
+            state.required_ack_mask &= !bit;
+            state.acknowledged_mask &= !bit;
+            let retry_became_actionable = was_blocked && !retirement_barrier_blocked(&state);
+            if retry_became_actionable {
+                state.actionable_retry_revision = state.actionable_retry_revision.saturating_add(1);
+            }
+            retry_became_actionable
+        };
+        if retry_became_actionable {
+            self.work_notifier.retry_became_actionable();
+        }
     }
 
     /// Publish a new residency family. Returns whether workers must be woken.
@@ -125,6 +146,15 @@ impl PreviewDecodeResidencyCoordinator {
         lock_state(&self.state).revision
     }
 
+    /// Return the monotonic edge revision for completed retirement barriers.
+    ///
+    /// Consumers compare this revision with their own last projection. It is
+    /// retry authority only; decoded payloads and terminal facts remain on
+    /// their typed result transports.
+    pub(crate) fn actionable_retry_revision(&self) -> u64 {
+        lock_state(&self.state).actionable_retry_revision
+    }
+
     /// Return the next directive when a worker has not observed the revision.
     pub(crate) fn worker_directive(
         &self,
@@ -140,28 +170,43 @@ impl PreviewDecodeResidencyCoordinator {
 
     /// Confirm that one worker destroyed its context for the current revision.
     pub(crate) fn acknowledge_retirement(&self, lane: MediaPreviewWorkerLane, revision: u64) {
-        let mut state = lock_state(&self.state);
-        if state.revision == revision {
-            state.acknowledged_mask |= worker_lane_bit(lane) & state.required_ack_mask;
+        let retry_became_actionable = {
+            let mut state = lock_state(&self.state);
+            let was_blocked = retirement_barrier_blocked(&state);
+            if state.revision == revision {
+                state.acknowledged_mask |= worker_lane_bit(lane) & state.required_ack_mask;
+            }
+            let retry_became_actionable = was_blocked && !retirement_barrier_blocked(&state);
+            if retry_became_actionable {
+                state.actionable_retry_revision = state.actionable_retry_revision.saturating_add(1);
+            }
+            retry_became_actionable
+        };
+        if retry_became_actionable {
+            self.work_notifier.retry_became_actionable();
         }
     }
 
     /// Return whether the selected family may create or reuse decoder state.
     pub(crate) fn admits(&self, access_mode: PreviewDecodeAccessMode) -> bool {
         let mut state = lock_state(&self.state);
-        let admitted = state.active_family.is_none_or(|family| {
-            family == PreviewDecodeResidencyFamily::for_access_mode(access_mode)
-        }) && state.acknowledged_mask == state.required_ack_mask;
+        let admitted = residency_state_admits(&state, access_mode);
         if !admitted {
             state.blocked_admissions = state.blocked_admissions.saturating_add(1);
         }
         admitted
     }
 
+    /// Observe admission without recording a new request attempt.
+    pub(crate) fn admission_ready(&self, access_mode: PreviewDecodeAccessMode) -> bool {
+        residency_state_admits(&lock_state(&self.state), access_mode)
+    }
+
     pub(crate) fn diagnostics(&self) -> PreviewDecodeResidencyDiagnostics {
         let state = lock_state(&self.state);
         PreviewDecodeResidencyDiagnostics {
             revision: state.revision,
+            actionable_retry_revision: state.actionable_retry_revision,
             active_family: state.active_family,
             transitions: state.transitions,
             blocked_admissions: state.blocked_admissions,
@@ -197,6 +242,20 @@ fn lock_state(
     state: &Mutex<PreviewDecodeResidencyState>,
 ) -> MutexGuard<'_, PreviewDecodeResidencyState> {
     state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+const fn retirement_barrier_blocked(state: &PreviewDecodeResidencyState) -> bool {
+    state.acknowledged_mask != state.required_ack_mask
+}
+
+fn residency_state_admits(
+    state: &PreviewDecodeResidencyState,
+    access_mode: PreviewDecodeAccessMode,
+) -> bool {
+    state
+        .active_family
+        .is_none_or(|family| family == PreviewDecodeResidencyFamily::for_access_mode(access_mode))
+        && !retirement_barrier_blocked(state)
 }
 
 #[cfg(test)]
@@ -247,5 +306,39 @@ mod tests {
             .expect("current directive");
         coordinator.acknowledge_retirement(MediaPreviewWorkerLane::Any, current.revision());
         assert!(coordinator.admits(PreviewDecodeAccessMode::RandomAccessStillFrame));
+    }
+
+    #[test]
+    fn final_required_retirement_ack_publishes_one_retry_edge() {
+        let notifier = PreviewWorkNotifier::default();
+        let watch = notifier.watch();
+        let coordinator = PreviewDecodeResidencyCoordinator::new_with_notifier(notifier);
+        coordinator.register_worker(MediaPreviewWorkerLane::Any);
+        coordinator.register_worker(MediaPreviewWorkerLane::Playback);
+        assert!(coordinator.activate(PreviewDecodeResidencyFamily::Interactive));
+        let revision = coordinator.revision();
+        let before = watch.revision();
+
+        coordinator.acknowledge_retirement(MediaPreviewWorkerLane::Any, revision);
+        assert_eq!(
+            watch.revision(),
+            before,
+            "a partial retirement barrier must not create a speculative retry"
+        );
+
+        coordinator.acknowledge_retirement(MediaPreviewWorkerLane::Playback, revision);
+        let completed = watch.revision();
+        assert_ne!(
+            completed, before,
+            "the aggregate retirement transition must wake a deferred demand"
+        );
+
+        coordinator.acknowledge_retirement(MediaPreviewWorkerLane::Playback, revision);
+        coordinator.acknowledge_retirement(MediaPreviewWorkerLane::Any, revision - 1);
+        assert_eq!(
+            watch.revision(),
+            completed,
+            "duplicate and stale acknowledgements must not manufacture wakeups"
+        );
     }
 }

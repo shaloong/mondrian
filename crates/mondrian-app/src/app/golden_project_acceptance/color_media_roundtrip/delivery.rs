@@ -103,6 +103,7 @@ pub(super) fn execute_export_roundtrip(
         source_time: TimelineTime::ZERO,
         target_resolution: PREVIEW_RESOLUTION,
         input_color,
+        cpu_working_required: false,
     };
     let decoded = decode_media(state, &request, &asset, decode_context)?;
     let export_rgba = source_rgba(&decoded.frame)?;

@@ -4,6 +4,8 @@
 //! launch-time presentation and emits shell actions; project lifecycle work
 //! stays in `AppUiHost` / `AppState`.
 
+#[cfg(test)]
+use mondrian_core::ProjectId;
 use mondrian_core::{Color, MondrianError, Result};
 use mondrian_editor_state::Action;
 use mondrian_platform::PlatformService;
@@ -23,6 +25,7 @@ use crate::app::ui_actions::{
     APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
     APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_SELECT_CUSTOM_OCIO_CONFIG,
 };
+use crate::app::CrashRecoveryCandidate;
 use crate::app_ui::icons::AppIcon;
 use crate::app_ui::modal::ShellModal;
 use crate::app_ui::new_project_dialog::{default_project_file_name, AppUiNewProjectDraft};
@@ -72,10 +75,8 @@ pub struct StartupRecentProject {
 /// One autosave recovery row shown on the app UI startup surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartupRecoveryProject {
-    /// Original project file represented by the autosave snapshot.
-    pub project_file: PathBuf,
-    /// Autosave snapshot archive to recover.
-    pub autosave_file: PathBuf,
+    /// Exact recovery candidate revalidated when the row is activated.
+    pub candidate: CrashRecoveryCandidate,
     /// Primary row label.
     pub title: String,
     /// Secondary row label with age/snapshot metadata.
@@ -269,8 +270,7 @@ impl AppUiStartupScreen {
                     return;
                 };
                 app_shell_recover_project_action(ProjectRecoverFromAutosavePayload {
-                    project_file: project.project_file.clone(),
-                    autosave_file: project.autosave_file.clone(),
+                    candidate: project.candidate.clone(),
                 })
             }
             StartupHit::Close => app_shell_quit_action(),
@@ -1104,9 +1104,20 @@ mod tests {
         let mut screen = AppUiStartupScreen::new();
         let project_file = PathBuf::from("E:/projects/recover.mdp");
         let autosave_file = PathBuf::from("E:/runtime/autosave/project.autosave.mdp");
-        screen.set_recovery_projects(vec![StartupRecoveryProject {
+        let candidate = CrashRecoveryCandidate {
+            project_id: ProjectId::new(),
+            runtime_root: PathBuf::from("E:/runtime"),
             project_file: project_file.clone(),
             autosave_file: autosave_file.clone(),
+            author_generation: 5,
+            asset_library_revision: 2,
+            document_revision: 9,
+            archive_sha256: "a".repeat(64),
+            saved_at_unix_ms: 17,
+            total_snapshots: 2,
+        };
+        screen.set_recovery_projects(vec![StartupRecoveryProject {
+            candidate: candidate.clone(),
             title: "recover".to_owned(),
             detail: "刚刚，共 2 个恢复点".to_owned(),
         }]);
@@ -1128,8 +1139,7 @@ mod tests {
         assert_eq!(name, APP_SHELL_RECOVER_PROJECT);
         let payload: ProjectRecoverFromAutosavePayload =
             serde_json::from_value(payload.clone()).expect("recovery payload");
-        assert_eq!(payload.project_file, project_file);
-        assert_eq!(payload.autosave_file, autosave_file);
+        assert_eq!(payload.candidate, candidate);
     }
 
     #[test]

@@ -42,7 +42,7 @@ struct ImportedVideoEvidence {
     height: u32,
     frame_rate: String,
     has_alpha: bool,
-    detected_color_space: ColorSpace,
+    executable_color_space: ColorSpace,
     color_confidence: VideoColorInterpretationConfidence,
     color_detection_method: VideoColorDetectionMethod,
     range: DecodedVideoRange,
@@ -113,7 +113,7 @@ fn import_fixture(state: &mut AppState, fixture: &FixtureEvidence) -> anyhow::Re
         .context("Asset Library is absent")?
         .list_assets()?
         .into_iter()
-        .find(|asset| asset.path == fixture.path)
+        .find(|asset| asset.file_path() == Some(fixture.path.as_path()))
     {
         return Ok(asset);
     }
@@ -124,7 +124,7 @@ fn import_fixture(state: &mut AppState, fixture: &FixtureEvidence) -> anyhow::Re
         .context("Asset Library is absent after import")?
         .list_assets()?
         .into_iter()
-        .find(|asset| asset.path == fixture.path)
+        .find(|asset| asset.file_path() == Some(fixture.path.as_path()))
         .with_context(|| format!("imported fixture is absent: {}", fixture.path.display()))
 }
 
@@ -142,7 +142,8 @@ fn validate_import(
         "{role} did not import with the expected picture-media kind"
     );
     let video = asset
-        .media_info
+        .media_probe()
+        .context("imported picture has no coherent media probe")?
         .primary_video()
         .context("imported picture has no video stream")?;
     let expected_color = match role {
@@ -153,9 +154,9 @@ fn validate_import(
     ensure!(
         video.width == 1920
             && video.height == 1080
-            && video.detected_color_space == Some(expected_color)
+            && video.executable_color_space() == Some(expected_color)
             && video.color_interpretation.confidence == VideoColorInterpretationConfidence::High
-            && video.color_detection_method == VideoColorDetectionMethod::CicpTags,
+            && video.color_interpretation.method == VideoColorDetectionMethod::CicpTags,
         "{role} import metadata differs from the fixture contract"
     );
     match role {
@@ -192,9 +193,9 @@ fn validate_import(
         height: video.height,
         frame_rate: video.frame_rate.to_string(),
         has_alpha: video.has_alpha,
-        detected_color_space: expected_color,
+        executable_color_space: expected_color,
         color_confidence: video.color_interpretation.confidence,
-        color_detection_method: video.color_detection_method,
+        color_detection_method: video.color_interpretation.method,
         range: video.color_range,
     })
 }

@@ -1,14 +1,15 @@
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
-use mondrian_assets::{AssetKind, AssetRecord};
-use mondrian_core::timeline_data::AssetMediaInterpretation;
+use crate::app::single_worker_activity::SingleWorkerActivity;
+use mondrian_assets::{AssetKind, AssetLibrary, AssetMediaProbeCandidate, AssetRecord};
 use mondrian_core::{AssetId, ColorEngine, ColorSpace, OutputTransformIntent, Rational};
 use mondrian_media::info::{PixelFormat, VideoCodec};
 use mondrian_media::{
     DecodedVideoRange, DecodedVideoRangeContract, DetectedColorInterpretation, MediaInfo,
-    VideoColorDetectionMethod, VideoColorInterpretationConfidence, VideoColorSpaceSource,
+    VideoColorDetectionMethod, VideoColorInterpretationConfidence,
+    VideoColorInterpretationEvidence, VideoColorMetadataHintScope, VideoColorSpaceSource,
     VideoStreamInfo,
 };
 use mondrian_timeline::sequence::{MissingColorMetadataPolicy, SequenceSettings};
@@ -24,6 +25,7 @@ fn color_context() -> ProgramColorContext {
 
 fn color_contract() -> ThumbnailColorContract {
     ThumbnailColorContract {
+        video_stream_index: 0,
         source_color_space: ColorSpace::Rec709,
         source_range: DecodedVideoRangeContract::Automatic {
             probed_range: DecodedVideoRange::Limited,
@@ -41,6 +43,14 @@ fn fingerprint(seed: u64) -> MediaFileFingerprint {
         len: Some(seed),
         modified_secs: Some(seed),
         modified_nanos: Some(seed as u32),
+        object_identity: Some(mondrian_core::MediaFileObjectIdentity::Unix {
+            device: 1,
+            inode: seed,
+        }),
+        change_stamp: Some(mondrian_core::MediaFileChangeStamp::Unix {
+            seconds: seed as i64,
+            nanoseconds: i64::from(seed as u32),
+        }),
     }
 }
 
@@ -71,6 +81,8 @@ fn isolated_service() -> AssetThumbnailService {
         state: Mutex::new(ThumbnailState::default()),
         jobs: job_tx,
         results: Mutex::new(result_rx),
+        dispatch_gate: ThumbnailDispatchGate::new(),
+        worker_activity: Arc::new(SingleWorkerActivity::default()),
     }
 }
 
@@ -82,8 +94,25 @@ fn service_with_result_transport() -> (AssetThumbnailService, mpsc::SyncSender<T
             state: Mutex::new(ThumbnailState::default()),
             jobs: job_tx,
             results: Mutex::new(result_rx),
+            dispatch_gate: ThumbnailDispatchGate::new(),
+            worker_activity: Arc::new(SingleWorkerActivity::default()),
         },
         result_tx,
+    )
+}
+
+fn service_with_job_transport() -> (AssetThumbnailService, mpsc::Receiver<ThumbnailJob>) {
+    let (job_tx, job_rx) = mpsc::sync_channel(2);
+    let (_result_tx, result_rx) = mpsc::sync_channel(1);
+    (
+        AssetThumbnailService {
+            state: Mutex::new(ThumbnailState::default()),
+            jobs: job_tx,
+            results: Mutex::new(result_rx),
+            dispatch_gate: ThumbnailDispatchGate::new(),
+            worker_activity: Arc::new(SingleWorkerActivity::default()),
+        },
+        job_rx,
     )
 }
 
@@ -94,10 +123,8 @@ fn mark_pending(service: &AssetThumbnailService, key: &ThumbnailRequestKey, gene
     state.active.insert(key.asset_id, key.clone());
 }
 
-fn video_asset(path: PathBuf) -> AssetRecord {
-    let mut media_info = MediaInfo::synthetic_solid_color();
-    media_info.has_video = true;
-    media_info.video_streams.push(VideoStreamInfo {
+fn video_media_info(file_size: u64) -> MediaInfo {
+    let video = VideoStreamInfo {
         index: 0,
         codec: VideoCodec::H264,
         duration: Some(Duration::from_secs(1)),
@@ -109,18 +136,23 @@ fn video_asset(path: PathBuf) -> AssetRecord {
         pixel_format: PixelFormat::Yuv420p,
         pixel_format_proven: true,
         color_range: DecodedVideoRange::Limited,
-        detected_color_space: Some(ColorSpace::Rec709),
         color_interpretation: DetectedColorInterpretation {
-            color_space: Some(ColorSpace::Rec709),
+            candidate_color_space: Some(ColorSpace::Rec709),
             confidence: VideoColorInterpretationConfidence::High,
             source: VideoColorSpaceSource::Metadata,
-            method: VideoColorDetectionMethod::CicpTags,
-            evidence: Vec::new(),
+            method: VideoColorDetectionMethod::MetadataHint,
+            evidence: vec![VideoColorInterpretationEvidence::MetadataHint {
+                scope: VideoColorMetadataHintScope::Stream,
+                key: "source_color_space".to_owned(),
+                value: "Rec709".to_owned(),
+                detected_color_space: ColorSpace::Rec709,
+                authority: mondrian_media::VideoColorMetadataHintAuthority::SourceDeclaration(
+                    mondrian_media::VideoColorMetadataDeclaration::SourceColorSpace,
+                ),
+            }],
             warnings: Vec::new(),
             user_overridable: true,
         },
-        color_space_source: VideoColorSpaceSource::Metadata,
-        color_detection_method: VideoColorDetectionMethod::CicpTags,
         color_metadata: None,
         color_metadata_hints: Vec::new(),
         hdr_metadata: Vec::new(),
@@ -128,27 +160,56 @@ fn video_asset(path: PathBuf) -> AssetRecord {
         has_alpha: false,
         avg_bitrate: 10_000_000,
         total_frames: Some(24),
-    });
-    AssetRecord {
-        id: AssetId::new(),
-        name: "missing".to_owned(),
-        kind: AssetKind::Video,
-        path,
-        source: None,
-        folder_id: None,
-        interpretation: AssetMediaInterpretation::default(),
-        audio_components: Default::default(),
-        media_info,
-        created_at: String::new(),
-        updated_at: String::new(),
+    };
+    MediaInfo {
+        duration: Duration::from_secs(1),
+        file_size,
+        container: "test".to_owned(),
+        video_streams: vec![video],
+        audio_streams: Vec::new(),
+        has_video: true,
+        has_audio: false,
     }
 }
 
-fn missing_video_asset() -> AssetRecord {
-    video_asset(PathBuf::from(format!(
-        "definitely-missing-thumbnail-source-{}.mov",
+fn video_asset_with_probe(path: PathBuf, configure: impl FnOnce(&mut MediaInfo)) -> AssetRecord {
+    let path = path.canonicalize().expect("canonical thumbnail fixture");
+    let fingerprint = MediaFileFingerprint::capture(&path);
+    let mut media_info = video_media_info(fingerprint.len.expect("fixture file size"));
+    configure(&mut media_info);
+    let library_root = path
+        .parent()
+        .expect("thumbnail fixture parent")
+        .join(format!("thumbnail-asset-library-{}", AssetId::new()));
+    let library = AssetLibrary::open(library_root.clone()).expect("fixture Asset Library");
+    let candidate =
+        AssetMediaProbeCandidate::new(path, fingerprint, media_info).expect("media candidate");
+    let asset_id = library.commit_media_probe(candidate, None).expect("register Asset");
+    let asset = library.get_asset(asset_id).expect("read fixture Asset").expect("fixture Asset");
+    drop(library);
+    let _ = std::fs::remove_dir_all(library_root);
+    asset
+}
+
+fn video_asset(path: PathBuf) -> AssetRecord {
+    video_asset_with_probe(path, |_| {})
+}
+
+fn missing_video_asset_with_probe(configure: impl FnOnce(&mut MediaInfo)) -> AssetRecord {
+    let root = std::env::temp_dir().join(format!(
+        "mondrian-missing-thumbnail-source-{}",
         AssetId::new()
-    )))
+    ));
+    std::fs::create_dir_all(&root).expect("create thumbnail fixture root");
+    let path = root.join("missing.mov");
+    std::fs::write(&path, b"fixture").expect("write thumbnail fixture");
+    let asset = video_asset_with_probe(path, configure);
+    std::fs::remove_dir_all(root).expect("retire thumbnail fixture");
+    asset
+}
+
+fn missing_video_asset() -> AssetRecord {
+    missing_video_asset_with_probe(|_| {})
 }
 
 #[test]
@@ -190,6 +251,139 @@ fn non_video_assets_never_enter_thumbnail_admission() {
 }
 
 #[test]
+fn resource_policy_pauses_deferred_dispatch_trims_cache_and_resumes() {
+    let (service, jobs) = service_with_job_transport();
+    let asset_id = AssetId::new();
+    let request_key = key(asset_id, 700);
+    {
+        let mut state = service.state.lock();
+        state.cache.insert(
+            asset_id,
+            ThumbnailCacheEntry { key: request_key.clone(), frame: frame(7) },
+        );
+        state.cache_lru.push_front(asset_id);
+        state.cached_bytes = 4;
+        let cancellation = ExecutionCancellationToken::new();
+        state.pending.insert(
+            request_key.clone(),
+            PendingThumbnail { generation: 1, cancellation: cancellation.clone() },
+        );
+        state
+            .deferred
+            .push_back(ThumbnailJob { key: request_key, generation: 1, cancellation });
+    }
+
+    service.set_resource_policy(false, false, 1);
+    assert!(matches!(jobs.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    let paused = service.diagnostics();
+    assert!(!paused.automatic_admission_enabled);
+    assert!(!paused.dispatch_enabled);
+    assert_eq!(paused.cached_entries, 0);
+
+    service.set_resource_policy(true, true, THUMBNAIL_CACHE_BYTE_BUDGET);
+    assert!(jobs.recv_timeout(Duration::from_millis(100)).is_ok());
+    let resumed = service.diagnostics();
+    assert!(resumed.automatic_admission_enabled);
+    assert!(resumed.dispatch_enabled);
+}
+
+#[test]
+fn diagnostics_distinguish_queued_running_and_awaiting_publication() {
+    let service = isolated_service();
+    let request = key(AssetId::new(), 401);
+    mark_pending(&service, &request, 1);
+    let identity = ThumbnailWorkerIdentity { key: request.clone(), generation: 1 };
+    let mut lease = service.worker_activity.begin(identity);
+
+    let waiting = service.diagnostics();
+    assert_eq!(
+        waiting.worker_phase,
+        ThumbnailWorkerPhase::WaitingForDispatch
+    );
+    assert_eq!(waiting.queued_requests, 1);
+    assert_eq!(waiting.running_requests, 0);
+
+    lease.mark_running();
+    let running = service.diagnostics();
+    assert_eq!(running.worker_phase, ThumbnailWorkerPhase::Running);
+    assert_eq!(running.queued_requests, 0);
+    assert_eq!(running.running_requests, 1);
+
+    lease.finish_for_publication();
+    lease.commit_publication();
+    let awaiting = service.diagnostics();
+    assert_eq!(awaiting.worker_phase, ThumbnailWorkerPhase::Idle);
+    assert_eq!(awaiting.queued_requests, 0);
+    assert_eq!(awaiting.running_requests, 0);
+    assert_eq!(awaiting.awaiting_publication, 1);
+
+    assert!(service.publish(ThumbnailResult {
+        key: request,
+        generation: 1,
+        result: Ok(frame(401)),
+        elapsed: Duration::ZERO,
+    }));
+    assert_eq!(service.diagnostics().awaiting_publication, 0);
+}
+
+#[test]
+fn generation_rotation_keeps_obsolete_physical_work_visible_without_owning_new_demand() {
+    let service = isolated_service();
+    let obsolete = key(AssetId::new(), 410);
+    mark_pending(&service, &obsolete, 1);
+    let mut obsolete_lease = service
+        .worker_activity
+        .begin(ThumbnailWorkerIdentity { key: obsolete, generation: 1 });
+    obsolete_lease.mark_running();
+
+    service.set_color_context(Some(color_context()));
+    let current = key(AssetId::new(), 411);
+    mark_pending(&service, &current, 2);
+
+    let diagnostics = service.diagnostics();
+    assert_eq!(diagnostics.generation, 2);
+    assert_eq!(diagnostics.running_requests, 1);
+    assert_eq!(diagnostics.queued_requests, 1);
+    assert_eq!(diagnostics.awaiting_publication, 0);
+}
+
+#[test]
+fn dispatch_gate_holds_already_transported_work_until_resume() {
+    let service = AssetThumbnailService::new();
+    let request_key = key(AssetId::new(), 701);
+    mark_pending(&service, &request_key, 1);
+    service.set_resource_policy(false, false, THUMBNAIL_CACHE_BYTE_BUDGET);
+    service
+        .jobs
+        .try_send(ThumbnailJob {
+            key: request_key,
+            generation: 1,
+            cancellation: ExecutionCancellationToken::new(),
+        })
+        .expect("transport one paused thumbnail");
+
+    std::thread::sleep(Duration::from_millis(20));
+    assert!(matches!(
+        service.results.lock().try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+
+    service.set_resource_policy(true, true, THUMBNAIL_CACHE_BYTE_BUDGET);
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        service.poll_finished();
+        if service.diagnostics().pending_requests == 0 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "thumbnail gate did not resume transported work"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
 fn color_contract_rejections_and_range_authority_remain_distinct() {
     let mut asset = missing_video_asset();
     let context = color_context();
@@ -202,8 +396,14 @@ fn color_contract_rejections_and_range_authority_remain_distinct() {
         ThumbnailFailureReason::NonColorDataUnsupported
     );
 
-    asset.interpretation = AssetMediaInterpretation::default();
-    asset.media_info.video_streams[0].detected_color_space = None;
+    let asset = missing_video_asset_with_probe(|probe| {
+        let interpretation = &mut probe.video_streams[0].color_interpretation;
+        interpretation.candidate_color_space = None;
+        interpretation.confidence = VideoColorInterpretationConfidence::None;
+        interpretation.source = VideoColorSpaceSource::MissingMetadata;
+        interpretation.method = VideoColorDetectionMethod::MissingMetadata;
+        interpretation.evidence.clear();
+    });
     let mut rejecting_context = context.clone();
     rejecting_context.missing_metadata_policy = MissingColorMetadataPolicy::RejectMedia;
     assert_eq!(
@@ -213,8 +413,9 @@ fn color_contract_rejections_and_range_authority_remain_distinct() {
         ThumbnailFailureReason::InputColorRejected
     );
 
-    asset.media_info.video_streams[0].detected_color_space = Some(ColorSpace::Rec709);
-    asset.media_info.video_streams[0].color_range = DecodedVideoRange::Unknown;
+    let mut asset = missing_video_asset_with_probe(|probe| {
+        probe.video_streams[0].color_range = DecodedVideoRange::Unknown;
+    });
     assert_eq!(
         ThumbnailColorContract::resolve(&asset, &context)
             .expect("unknown probe range remains frame-resolvable")
@@ -243,7 +444,9 @@ fn color_contract_rejections_and_range_authority_remain_distinct() {
         ThumbnailFailureReason::InternalOutputIdentity
     );
 
-    asset.media_info.video_streams.clear();
+    let asset = missing_video_asset_with_probe(|probe| {
+        probe.video_streams.clear();
+    });
     assert_eq!(
         ThumbnailColorContract::resolve(&asset, &context)
             .expect_err("missing primary stream contract")
@@ -291,8 +494,9 @@ fn raster_resource_identity_includes_extent_source_revision_and_color_contract()
         generation: 1,
         cancellation: ExecutionCancellationToken::new(),
     };
-    let base = thumbnail_key(&job, 320, 180);
-    assert!(base.starts_with(&format!("asset-thumb:{asset_id}:320x180:len42:mtime42-42")));
+    let base = thumbnail_key(&job, 320, 180).expect("base raster identity");
+    assert!(base.starts_with("asset-thumb:"));
+    assert_eq!(base.len(), "asset-thumb:".len() + 64);
     let mut changed_color = job.key.clone();
     changed_color.color.source_color_space = ColorSpace::Rec2100Pq;
     let changed_job = ThumbnailJob {
@@ -300,7 +504,27 @@ fn raster_resource_identity_includes_extent_source_revision_and_color_contract()
         generation: 1,
         cancellation: ExecutionCancellationToken::new(),
     };
-    assert_ne!(base, thumbnail_key(&changed_job, 320, 180));
+    assert_ne!(
+        base,
+        thumbnail_key(&changed_job, 320, 180).expect("changed color identity")
+    );
+
+    let mut changed_revision = job.key.clone();
+    changed_revision.fingerprint.object_identity =
+        Some(mondrian_core::MediaFileObjectIdentity::Unix { device: 1, inode: 9_999 });
+    let changed_revision_job = ThumbnailJob {
+        key: changed_revision,
+        generation: 1,
+        cancellation: ExecutionCancellationToken::new(),
+    };
+    assert_ne!(
+        base,
+        thumbnail_key(&changed_revision_job, 320, 180).expect("changed source-revision identity")
+    );
+    assert_ne!(
+        base,
+        thumbnail_key(&job, 160, 90).expect("changed extent identity")
+    );
 }
 
 #[test]

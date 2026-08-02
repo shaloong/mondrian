@@ -1,15 +1,20 @@
 # Display Management — Architecture
 
 Display management bridges OS monitor/surface capabilities, user policy, OCIO
-display/view resolution, and the GPU preview/export output boundary. Both
-preview and export consume the same **Display Output Contract** — only
-scheduling differs, not color interpretation.
+display/view resolution, and the GPU Preview presentation boundary.
+`DisplayOutputSnapshot` is machine-local Preview evidence; Export never
+consumes it. Preview and Export share the Project/Sequence Program Output
+interpretation and renderer color-boundary semantics, then diverge: Preview
+adds monitor/surface adaptation, while Export consumes only the immutable
+`ExportColorTarget` and delivery contract.
 
 ## Design Principles
 
-1. **One pipeline, OCIO is the engine.** Media Metadata / User Override →
-   Mondrian Color Interpretation → OCIO ColorSpace / DisplayView resolution →
-   Render Graph → Preview / Export / Cache.
+1. **One Program Output, explicit presentation fork.** Media Metadata / User
+   Override → Mondrian Color Interpretation → OCIO input/working/rendering
+   transforms → Program Output. Preview then applies machine-local monitor and
+   surface adaptation; Export applies its explicit delivery target. Neither
+   path may reinterpret the other path's contract.
 
 2. **Display management must be real, not plausible.** Unknown monitor / ICC /
    HDR state is never silently treated as Rec.709 / sRGB / Standard.
@@ -25,12 +30,12 @@ scheduling differs, not color interpretation.
    change, scale factor change, and surface reconfiguration all trigger a full
    contract re-resolve.
 
-## Display Output Contract v2
+## Preview Display Output Contract v2
 
 ### DisplayOutputSnapshot
 
-The canonical type that both preview and export consume. Defined in
-`mondrian-core::display_contract`.
+The canonical machine-local snapshot consumed only by Preview presentation.
+Defined in `mondrian-core::display_contract`.
 
 ```
 DisplayOutputSnapshot {
@@ -55,11 +60,15 @@ DisplayOutputSnapshot {
 }
 ```
 
-The snapshot's `ocio_display`/`ocio_view` fields are resolved surface-validation
-evidence, not the execution state stored in `ProgramColorContext`. Production
-preview/export execution uses the context's typed `OutputTransformIntent` and
-the shared renderer boundary resolver; this prevents display probing and render
-scheduling from becoming competing color-science authorities.
+The snapshot's `ocio_display`/`ocio_view` fields are resolved
+surface-validation evidence, not the execution state stored in
+`ProgramColorContext`. Production Preview first resolves the context's typed
+`OutputTransformIntent` through the shared renderer Program Output boundary,
+then applies this snapshot's monitor/surface contract. Export resolves the same
+Program Output or an explicit `ExportColorTarget` without reading display ID,
+ICC profile, desktop HDR state, swapchain format, or any other field in this
+snapshot. This prevents machine-local display probing from becoming an Export
+color-science authority.
 
 ### MonitorProfileStatus
 
@@ -217,7 +226,9 @@ The display contract produces structured diagnostics for:
 ## Current State (Alpha)
 
 ### Supported
-- SDR preview/export with managed color spaces (Rec.709, sRGB, Display P3 via OCIO)
+- SDR Program Output in Rec.709, sRGB, and Display P3 via OCIO, with
+  Preview-only monitor/surface adaptation and independently contracted Export
+  delivery
 - Display contract refresh on resize, scale factor change, window move
 - Surface format selection with color space capability matching
 - Structured blocker taxonomy with health report integration

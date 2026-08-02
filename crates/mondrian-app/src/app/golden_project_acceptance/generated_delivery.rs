@@ -904,6 +904,7 @@ fn render_program_audio_reference(
         state.sequences().to_vec(),
         state.asset_library_handle().context("Asset Library is absent")?,
         std::sync::Arc::clone(&state.audio_source_cache),
+        state.execution_resource_decision().audio.runtime_grant,
         sample_rate,
         AudioChannelLayout::Stereo,
     )?;
@@ -926,9 +927,10 @@ fn decode_delivery_audio(
     reference: AudioSignalEvidence,
     work_area_start: TimelineTime,
 ) -> anyhow::Result<AudioRoundtripEvidence> {
+    let media_probe =
+        asset.media_probe().context("reimported delivery has no coherent media probe")?;
     let rate = AudioSampleRate::new(
-        asset
-            .media_info
+        media_probe
             .primary_audio()
             .context("reimported delivery has no primary audio stream")?
             .sample_rate,
@@ -947,16 +949,20 @@ fn decode_delivery_audio(
         source_start_sample >= 0,
         "delivery audio analysis starts before the exported Work Area"
     );
-    let current_fingerprint = mondrian_media::MediaFileFingerprint::capture(&asset.path);
-    let selection = asset
+    let path = asset
+        .file_path()
+        .context("reimported delivery is not a file-backed audio source")?;
+    let current_fingerprint = mondrian_media::MediaFileFingerprint::capture(path);
+    let stream = asset
         .audio_components
-        .resolve_current_selection(
+        .resolve_current(
             mondrian_core::AudioSourceComponentId::primary(),
-            &asset.media_info,
+            media_probe,
             current_fingerprint,
         )
         .context("reimported delivery audio Component binding is not executable")?;
-    let reader = state.audio_source_cache.open(&asset.path, selection)?;
+    let selection = mondrian_media::AudioSourceSelection::from_stream(stream, current_fingerprint);
+    let reader = state.audio_source_cache.open(path, selection)?;
     ensure!(
         reader.channel_layout() == AudioChannelLayout::Stereo,
         "reimported delivery reader did not retain Stereo layout"
@@ -1030,14 +1036,16 @@ fn reimport_export(
         imported.len()
     );
     let asset = &imported[0];
+    let media_probe =
+        asset.media_probe().context("reimported asset has no coherent media probe")?;
     ensure!(
         asset.kind == AssetKind::Video
-            && asset.path == evidence.output_path
-            && asset.media_info.container.split(',').any(|identity| identity.trim() == "mp4"),
+            && asset.file_path() == Some(evidence.output_path.as_path())
+            && media_probe.container.split(',').any(|identity| identity.trim() == "mp4"),
         "reimport did not retain the finished deliverable identity"
     );
-    let video = asset.media_info.primary_video().context("reimported asset has no video")?;
-    let audio = asset.media_info.primary_audio().context("reimported asset has no audio")?;
+    let video = media_probe.primary_video().context("reimported asset has no video")?;
+    let audio = media_probe.primary_audio().context("reimported asset has no audio")?;
     let expected_codec_profile = match (
         expected.expected_delivery.video_codec.as_str(),
         expected.expected_delivery.video_profile.as_str(),
@@ -1091,6 +1099,7 @@ fn reimport_export(
         source_time: TimelineTime::ZERO,
         target_resolution: reference.resolution,
         input_color,
+        cpu_working_required: false,
     };
     let decoded = decode_media(state, &request, asset, decode_context)?;
     let decoded_rgba = source_rgba(&decoded.frame)?;
@@ -1140,7 +1149,7 @@ fn reimport_export(
     Ok(ReimportEvidence {
         export_id: evidence.export_id.clone(),
         asset_id: asset.id,
-        container: asset.media_info.container.clone(),
+        container: media_probe.container.clone(),
         video_codec: video.codec.clone(),
         video_profile: video.codec_profile,
         width: video.width,
@@ -1190,7 +1199,7 @@ pub(super) fn execute_delivery_stage(
         .context("Asset Library is absent")?
         .list_assets()?
         .into_iter()
-        .find(|asset| asset.path == fixture.path)
+        .find(|asset| asset.file_path() == Some(fixture.path.as_path()))
         .context("Hero delivery requires the Foundation PCM Asset")?;
     ensure!(
         audio_asset.kind == AssetKind::Audio,

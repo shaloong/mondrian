@@ -8,7 +8,7 @@ license.workspace    = true
 [dependencies]
 mondrian-core     = { workspace = true }
 uuid       = { workspace = true }
-serde      = { workspace = true }
+serde      = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 thiserror  = { workspace = true }
 glam       = { workspace = true }

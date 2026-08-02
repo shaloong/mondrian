@@ -90,33 +90,39 @@ struct LibraryRelinkTransitionEvidence {
 }
 
 #[derive(Debug, Serialize)]
+struct ProxyOriginalSwitchEvidence {
+    initial_generation: ProxyExecutionEvidence,
+    proxy_before: ResolvedPathEvidence,
+    disable_proxy: ProjectAuthorTransitionEvidence,
+    original: ResolvedPathEvidence,
+    enable_proxy: ProjectAuthorTransitionEvidence,
+    proxy_after: ResolvedPathEvidence,
+    return_to_original: ProjectAuthorTransitionEvidence,
+}
+
+#[derive(Debug, Serialize)]
+struct OfflineRelinkEvidence {
+    unavailable_source_path: PathBuf,
+    unavailable_reason: String,
+    relink: LibraryRelinkTransitionEvidence,
+    retained_asset_id: AssetId,
+    retained_clip_id: ClipId,
+    replacement_source: ResolvedPathEvidence,
+    prior_source_proxy_path: PathBuf,
+    replacement_proxy_path: PathBuf,
+    replacement_proxy_was_missing: bool,
+    enable_relinked_proxy: ProjectAuthorTransitionEvidence,
+    replacement_generation: ProxyExecutionEvidence,
+    replacement_proxy: ResolvedPathEvidence,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(tag = "id")]
 enum OperationEvidence {
     #[serde(rename = "proxy-original-switch")]
-    ProxyOriginalSwitch {
-        initial_generation: ProxyExecutionEvidence,
-        proxy_before: ResolvedPathEvidence,
-        disable_proxy: ProjectAuthorTransitionEvidence,
-        original: ResolvedPathEvidence,
-        enable_proxy: ProjectAuthorTransitionEvidence,
-        proxy_after: ResolvedPathEvidence,
-        return_to_original: ProjectAuthorTransitionEvidence,
-    },
+    ProxyOriginalSwitch(Box<ProxyOriginalSwitchEvidence>),
     #[serde(rename = "offline-relink")]
-    OfflineRelink {
-        unavailable_source_path: PathBuf,
-        unavailable_reason: String,
-        relink: LibraryRelinkTransitionEvidence,
-        retained_asset_id: AssetId,
-        retained_clip_id: ClipId,
-        replacement_source: ResolvedPathEvidence,
-        prior_source_proxy_path: PathBuf,
-        replacement_proxy_path: PathBuf,
-        replacement_proxy_was_missing: bool,
-        enable_relinked_proxy: ProjectAuthorTransitionEvidence,
-        replacement_generation: ProxyExecutionEvidence,
-        replacement_proxy: ResolvedPathEvidence,
-    },
+    OfflineRelink(Box<OfflineRelinkEvidence>),
     #[serde(rename = "constant-retime")]
     ConstantRetime {
         evidence: Box<GoldenRetimeMediaEvidence>,
@@ -126,8 +132,8 @@ enum OperationEvidence {
 impl OperationEvidence {
     const fn id(&self) -> &'static str {
         match self {
-            Self::ProxyOriginalSwitch { .. } => "proxy-original-switch",
-            Self::OfflineRelink { .. } => "offline-relink",
+            Self::ProxyOriginalSwitch(_) => "proxy-original-switch",
+            Self::OfflineRelink(_) => "offline-relink",
             Self::ConstantRetime { .. } => "constant-retime",
         }
     }
@@ -234,6 +240,7 @@ fn path_resolution_label(resolution: PreviewMediaDecodePathResolution) -> &'stat
     match resolution {
         PreviewMediaDecodePathResolution::Source => "source",
         PreviewMediaDecodePathResolution::Proxy => "proxy",
+        PreviewMediaDecodePathResolution::ProxyColorIncompatible => "proxy_color_incompatible",
         PreviewMediaDecodePathResolution::ProxyMissing => "proxy_missing",
         PreviewMediaDecodePathResolution::ProxyStale => "proxy_stale",
     }
@@ -264,15 +271,17 @@ fn resolve_media_path(
         proxy_config: &proxy_config,
         proxy_color,
         hardware_admission: PreviewHardwareDecodeAdmissionState::default(),
+        cpu_working_required: false,
     });
     let PreviewMediaSourceOutcome::Ready(resolved) = outcome else {
         anyhow::bail!("product Preview media resolution did not produce a decode path");
     };
+    let decode_source = resolved.key.decode.source();
     Ok(ResolvedPathEvidence {
-        path_sha256: sha256_file(&resolved.key.path)?,
-        path: resolved.key.path,
+        path_sha256: sha256_file(decode_source.path())?,
+        path: decode_source.path().to_path_buf(),
         resolution: path_resolution_label(resolved.path_resolution),
-        fingerprint: resolved.key.fingerprint.context("resolved media path has no fingerprint")?,
+        fingerprint: decode_source.fingerprint(),
     })
 }
 
@@ -295,6 +304,7 @@ fn resolve_unavailable_reason(state: &AppState, asset: &AssetRecord) -> anyhow::
         proxy_config: &proxy_config,
         proxy_color: None,
         hardware_admission: PreviewHardwareDecodeAdmissionState::default(),
+        cpu_working_required: false,
     });
     let PreviewMediaSourceOutcome::Unavailable(unavailable) = outcome else {
         anyhow::bail!("offline original did not become explicitly unavailable");
@@ -538,13 +548,17 @@ pub(super) fn execute_proxy_relink_stage(
         .context("Asset Library is absent after H.264 import")?
         .list_assets()?
         .into_iter()
-        .find(|asset| asset.path == original_path)
+        .find(|asset| asset.file_path() == Some(original_path.as_path()))
         .context("run-local H.264 import is absent")?;
     ensure!(
         asset.kind == AssetKind::Video && state.is_asset_proxy_mode(asset.id),
         "H.264 import did not enter the enabled project proxy workflow"
     );
-    let video = asset.media_info.primary_video().context("H.264 fixture has no video stream")?;
+    let video = asset
+        .media_probe()
+        .context("H.264 fixture has no coherent media probe")?
+        .primary_video()
+        .context("H.264 fixture has no video stream")?;
     ensure!(
         video.codec == VideoCodec::H264
             && video.codec_profile == VideoCodecProfile::H264High
@@ -553,7 +567,7 @@ pub(super) fn execute_proxy_relink_stage(
             && video.width == 1920
             && video.height == 1080
             && video.frame_rate == mondrian_core::Rational::FPS_25
-            && video.detected_color_space == Some(mondrian_core::ColorSpace::Rec709)
+            && video.executable_color_space() == Some(mondrian_core::ColorSpace::Rec709)
             && video.color_range == DecodedVideoRange::Limited,
         "imported H.264 media differs from the editorial fixture contract"
     );
@@ -657,15 +671,16 @@ pub(super) fn execute_proxy_relink_stage(
             }))?;
             Ok(())
         })?;
-    let proxy_switch = OperationEvidence::ProxyOriginalSwitch {
-        initial_generation,
-        proxy_before,
-        disable_proxy,
-        original,
-        enable_proxy,
-        proxy_after,
-        return_to_original,
-    };
+    let proxy_switch =
+        OperationEvidence::ProxyOriginalSwitch(Box::new(ProxyOriginalSwitchEvidence {
+            initial_generation,
+            proxy_before,
+            disable_proxy,
+            original,
+            enable_proxy,
+            proxy_after,
+            return_to_original,
+        }));
 
     let offline_path = original_path.with_extension("offline.mp4");
     std::fs::rename(&original_path, &offline_path)?;
@@ -702,7 +717,7 @@ pub(super) fn execute_proxy_relink_stage(
     let relinked_asset = asset_by_id(state, asset.id)?;
     ensure!(
         relinked_asset.id == asset.id
-            && relinked_asset.path == replacement_path
+            && relinked_asset.file_path() == Some(replacement_path.as_path())
             && relinked_asset.name == asset.name
             && !state.is_asset_proxy_mode(asset.id),
         "offline relink changed asset identity/name or proxy author intent"
@@ -759,7 +774,7 @@ pub(super) fn execute_proxy_relink_stage(
         "relinked proxy generation did not publish the replacement source artifact"
     );
 
-    let offline_relink = OperationEvidence::OfflineRelink {
+    let offline_relink = OperationEvidence::OfflineRelink(Box::new(OfflineRelinkEvidence {
         unavailable_source_path: original_path,
         unavailable_reason,
         relink: LibraryRelinkTransitionEvidence {
@@ -778,7 +793,7 @@ pub(super) fn execute_proxy_relink_stage(
         enable_relinked_proxy,
         replacement_generation,
         replacement_proxy,
-    };
+    }));
     let retime = execute_retime_media_evidence(
         state,
         contract,

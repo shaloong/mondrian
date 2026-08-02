@@ -44,8 +44,8 @@ mod component_visual_tests;
 mod test_utils;
 
 pub use asset_grid::{
-    AssetGrid, AssetGridAction, AssetGridBadge, AssetGridBadgeTone, AssetGridItem, AssetGridState,
-    AssetGridThumbnailStatus,
+    AssetGrid, AssetGridAction, AssetGridBadge, AssetGridBadgeTone, AssetGridDropOutcome,
+    AssetGridItem, AssetGridState, AssetGridThumbnailStatus,
 };
 pub use button::Button;
 pub use checkbox::Checkbox;

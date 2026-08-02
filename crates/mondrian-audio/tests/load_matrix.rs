@@ -12,7 +12,9 @@ use mondrian_timeline::audio::{
     AudioRouteSource,
 };
 use mondrian_timeline::{Clip, Sequence};
+use std::fs::{File, OpenOptions};
 use std::hint::black_box;
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -49,6 +51,7 @@ impl AudioPcmSource for DeterministicSource {
 #[test]
 #[ignore = "fixed-reference-machine dense schedule scalar/SIMD multitrack load matrix"]
 fn dense_schedule_multitrack_load_matrix() {
+    let mut report_file = create_load_matrix_report();
     for (track_count, bus_count) in [(1_usize, 0_usize), (8, 2), (32, 8), (64, 16)] {
         let sequence = multitrack_sequence(track_count, bus_count);
         for block_frames in [64_usize, 256, 1024] {
@@ -79,8 +82,8 @@ fn dense_schedule_multitrack_load_matrix() {
             let vectorized_p99 = percentile(&vectorized_us, 99);
             let scalar_deadline_misses = deadline_misses(&scalar_us, deadline_us);
             let vectorized_deadline_misses = deadline_misses(&vectorized_us, deadline_us);
-            println!(
-                "MONDRIAN_AUDIO_LOAD_MATRIX={{\"profile\":\"dense_schedule_v2\",\"tracks\":{track_count},\"buses\":{bus_count},\"routes\":{expected_routes},\"block_frames\":{block_frames},\"sample_rate\":{SAMPLE_RATE},\"channels\":{CHANNELS},\"iterations\":{ITERATIONS},\"deadline_us\":{deadline_us},\"scalar_p50_us\":{},\"scalar_p95_us\":{},\"scalar_p99_us\":{scalar_p99},\"scalar_max_us\":{},\"scalar_deadline_misses\":{scalar_deadline_misses},\"vectorized_p50_us\":{},\"vectorized_p95_us\":{},\"vectorized_p99_us\":{vectorized_p99},\"vectorized_max_us\":{},\"vectorized_deadline_misses\":{vectorized_deadline_misses},\"scratch_slots\":{}}}",
+            let report = format!(
+                "{{\"profile\":\"dense_schedule_v2\",\"tracks\":{track_count},\"buses\":{bus_count},\"routes\":{expected_routes},\"block_frames\":{block_frames},\"sample_rate\":{SAMPLE_RATE},\"channels\":{CHANNELS},\"iterations\":{ITERATIONS},\"deadline_us\":{deadline_us},\"scalar_p50_us\":{},\"scalar_p95_us\":{},\"scalar_p99_us\":{scalar_p99},\"scalar_max_us\":{},\"scalar_deadline_misses\":{scalar_deadline_misses},\"vectorized_p50_us\":{},\"vectorized_p95_us\":{},\"vectorized_p99_us\":{vectorized_p99},\"vectorized_max_us\":{},\"vectorized_deadline_misses\":{vectorized_deadline_misses},\"scratch_slots\":{}}}",
                 percentile(&scalar_us, 50),
                 percentile(&scalar_us, 95),
                 scalar_us.last().copied().unwrap_or_default(),
@@ -89,12 +92,38 @@ fn dense_schedule_multitrack_load_matrix() {
                 vectorized_us.last().copied().unwrap_or_default(),
                 scratch_slot_count
             );
+            println!("MONDRIAN_AUDIO_LOAD_MATRIX={report}");
+            if let Some(file) = report_file.as_mut() {
+                writeln!(file, "{report}").expect("write Audio load-matrix report");
+            }
             assert!(
                 vectorized_p99 <= deadline_us,
                 "dense schedule missed realtime deadline: tracks={track_count}, block={block_frames}, p99={vectorized_p99} us, deadline={deadline_us} us"
             );
         }
     }
+    if let Some(file) = report_file {
+        file.sync_all().expect("flush Audio load-matrix report");
+    }
+}
+
+fn create_load_matrix_report() -> Option<File> {
+    let path = std::env::var_os("MONDRIAN_AUDIO_LOAD_MATRIX_OUTPUT")?;
+    let path = std::path::PathBuf::from(path);
+    assert!(
+        !path.as_os_str().is_empty(),
+        "Audio load-matrix report path is empty"
+    );
+    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).expect("create Audio load-matrix report directory");
+    }
+    Some(
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .expect("create fresh Audio load-matrix report"),
+    )
 }
 
 #[test]

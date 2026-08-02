@@ -8,11 +8,10 @@ authoritative Playback Snapshot plus bounded work directives. UI, Viewer,
 decode, renderer, and audio adapters execute directives; none of them may
 independently advance, pause, buffer, or end transport.
 
-This design is the active production boundary. The former distributed
-transport ownership across `AppState`, `app::playback`, `app_ui::host`, and
-`app_ui::preview` has been removed: those modules now adapt commands,
-observations, media execution, and presentation around the shared Engine and
-Preview Production Runtime.
+This is the production boundary. `AppState`, application playback modules, and
+Window/Headless UI code adapt commands, observations, media execution, and
+presentation around the shared Engine and Preview Production Runtime; none
+retains independent transport authority.
 
 ## Goals
 
@@ -26,7 +25,7 @@ Preview Production Runtime.
 - Stable reservations for rational rate and reverse direction without claiming
   those modes are implemented.
 
-## Non-goals for the first implementation
+## Excluded capabilities
 
 - Reverse decode, J/K/L, variable-rate audio, optical flow, or frame blending.
 - Automatic proxy selection or persistent project-setting mutation.
@@ -43,11 +42,11 @@ Preview Production Runtime.
 | Frame Work Broker | bounded semantic admission, queued transport, worker-lane-bound execution leases, latest generation, current/prefetch priority, still preemption, lowered deadlines, first-close timestamp, completion stamps, cancellation, freshness, and class/priority/lane evidence | codec payload interpretation, Clock Master or transport state |
 | Monotonic Runtime Clock | process-local lifecycle-age, expiration, and evidence timestamp sampling | Playback Session advancement, authored/media time, wall-clock identity |
 | Frame Cancellation Evidence | exact all-run cause/timing aggregates and the shared cancellation acceptance policy | cancellation authority, codec checkpoints, UI presentation |
-| Preview Frame Store | ready/stale/in-flight identity, source revision, color contract, memory budgets | deadline policy or proxy selection |
-| Playback Preview Pump | one pending-demand sample, ordered completion/expiration delivery application, current-epoch video-preroll observation, Window/Headless-neutral pump outcome | decode/render implementation, Widget refresh, GPU resources |
+| Preview Frame Store | physical decoded-media allocation ledger, optional decoded/final-raster residency, exact-current demand protection, current/stale Viewer pin, count/byte/native-resource grants, failure memory | request priority, pending/in-flight scheduling, deadline policy, proxy selection, media/color interpretation, Widget payloads |
+| Playback Preview Pump | one pending-demand sample, ordered completion/expiration delivery application, exact-current-demand video-preroll observation, Window/Headless-neutral pump outcome | decode/render implementation, Widget refresh, GPU resources |
 | Preview Execution Coordinator | complete generation binding, pending state, executed presentation quality, candidate identity, exact registered output | timeline interpretation, codec payloads, GPU resources, Widget state |
 | Preview Output Unavailability | `NoContent`/`Blocked`/`Failed` disposition, owning production stage, stable code, bounded aggregate evidence | scheduler policy, renderer error details, localized UI wording |
-| Presentation Adapter | GPU import/composite/display, Viewer handoff, presentation evidence | timeline advancement |
+| Presentation Adapter | output registration, Viewer handoff, exact presentation-ticket completion, presentation evidence | timeline advancement, GPU color/composite interpretation, scheduler state |
 | Playback Evidence | immutable events, aggregates, reports | policy decisions |
 
 `AppState` owns the Playback Engine as project runtime state. It exposes a
@@ -68,12 +67,6 @@ or UI conditionals. Its public Interface remains limited to transport commands,
 observations, snapshots, Frame Demands/Deliveries, presentation tickets,
 semantic scheduling classes, and bounded scheduling evidence. Concrete media
 keys remain opaque generic Adapter values.
-
-White-box tests live in adjacent module files (`playback_engine/tests.rs`,
-`work_broker/tests.rs`, and the App Adapter's `preview_access_mode/tests.rs`).
-The production files therefore retain cohesive Engine/Broker/Adapter
-Implementations without carrying thousands of lines of test fixtures; this is
-source organization only and does not add another runtime Interface.
 
 ## Runtime flow
 
@@ -131,8 +124,8 @@ not mutate it; they return observations tagged with the session epoch.
 
 ## Core model
 
-The eventual Rust names may change during implementation, but the semantic
-Interface is fixed by this document.
+Concrete Rust names may evolve, but the semantic Interface is fixed by this
+document.
 
 ### Playback Session
 
@@ -176,8 +169,24 @@ binding and the transport transition atomically. One user Play or Seek intent
 rotates exactly one epoch: the Adapter must not compose a public timeline reset,
 seek, and play sequence. A seek received during Priming, Playing, or Recovering
 preserves play intent and publishes the new bounded Priming demand immediately;
-a paused or stopped seek publishes one untimed demand. Binding and position time
-bases must match or the complete transition fails without partial mutation.
+a paused or stopped seek publishes one untimed demand. Pausing an active
+transport also atomically supersedes its current deadline-bound demand with an
+untimed demand for the authoritative pause position, so a delayed still-frame
+presentation cannot be misclassified against the obsolete realtime deadline.
+Binding and position time bases must match or the complete transition fails
+without partial mutation.
+Every public transport operation returns a typed result; dispatch through the
+ordinary `Action` envelope and the closed `TimelineProductAction` algebra
+preserves that result. Before publishing a new Engine snapshot, the App Adapter
+must finish every fallible Sequence binding, duration, audio-program
+preparation, and exact audio-anchor validation. The Engine itself evaluates a
+candidate Session and installs it only after all checked phase, deadline,
+Epoch, and demand-identity arithmetic succeeds. A rejected Play, Pause, Stop,
+or Seek therefore cannot report success, rotate transport identity, change the
+audio generation, or update UI transport state. Authoring commands that require
+transport to stop perform that fallible stop before their author transaction;
+runtime reconciliation after an already committed author transaction is
+explicitly best-effort and may never relabel the author commit as failed.
 The project document's successful-save revision is not accepted as this value:
 draft edits, failed saves, Undo, and Redo must still rotate semantic identity.
 
@@ -191,6 +200,18 @@ draft edits, failed saves, Undo, and Redo must still rotate semantic identity.
 
 Observations with an old epoch or policy revision are recorded as stale and
 cannot alter the current session.
+
+The Engine's accepted-observation timestamp is the sole monotonic high-water
+mark for Playback execution. App process-monotonic projection, audio snapshots,
+presentation completion, preroll, and Evidence all read or advance that one
+value; Evidence is never a secondary clock authority. An Adapter must validate
+epoch, generation, or demand identity before the Engine accepts its timestamp,
+so rejected stale work cannot advance time. After an accepted observation the
+App reanchors its one observation-instant-to-Playback projection when that
+observation establishes a transport clock anchor. There is no second App
+timestamp accumulator. A later event-loop tick maps its absolute instant from
+the new anchor, so time before an intervening Viewer, audio, or preroll
+observation cannot be counted again.
 
 ## Transport state machine
 
@@ -249,14 +270,19 @@ observation:
   producing fresh callback evidence, but has not reported loss or failure;
 - `Unavailable`: no sufficiently monotonic or stream-correlated observation.
 
-Both usable grades must carry stream generation, sample rate, integer consumed
-frames, observation timestamp, latency estimate, monotonicity status, and
-uncertainty. Reports preserve the grade. A callback estimate may drive Alpha
-playback only when its uncertainty remains inside the configured A/V budget; it
+Both usable grades must carry stream generation, sample rate, an exact
+`AudioSamplePosition` media anchor on that same rate, integer consumed frames,
+observation timestamp, latency estimate, monotonicity status, and uncertainty.
+Rate/anchor mismatch, a negative realtime anchor, or unrepresentable position
+fails before Engine state changes. Reports preserve the grade. A callback
+estimate may drive Alpha playback only when its uncertainty remains inside the
+configured A/V budget; it
 must never be reported as an exact hardware position. `Uncertain` preserves an
 already-active Audio Device Clock Master for at most the versioned one-second
-grace interval without inventing new consumed samples. Fresh qualified evidence
-resumes the same interval; expiry selects Synthetic Clock Master continuously.
+grace interval. The consumed-frame fact remains unchanged while the phase is
+projected at nominal rate and its conservative uncertainty grows by callback
+age. Fresh qualified evidence resumes the same interval; expiry selects
+Synthetic Clock Master continuously.
 `Unavailable` selects Synthetic Clock Master immediately because explicit
 device loss/failure is not uncertainty.
 
@@ -275,8 +301,11 @@ gate instead of reusing callback consumption accumulated against an old anchor.
 
 - A healthy audio stream with reliable consumed-sample evidence selects Audio
   Device Clock Master.
-- No audio tracks may use Synthetic Clock Master directly rather than opening a
-  meaningless silent device stream.
+- A selected Program Output whose compiler-owned
+  `AudioProgramExecutionDemand` is `ProvenSilent` uses Synthetic Clock Master
+  directly rather than opening a meaningless silent device stream. Track
+  presence or mute is never substituted for that evidence because a pre-mute
+  send, Bus processor, tail, or generator may still require execution.
 - Device open failure, loss, or an invalid sample position switches to
   Synthetic Clock Master immediately and without discontinuity. A merely stale
   callback first enters bounded `Uncertain`; only sustained uncertainty switches
@@ -296,7 +325,8 @@ Synthetic → Audio requires:
 2. output stream running;
 3. minimum PCM preroll queued;
 4. at least one reliable consumed-sample observation;
-5. phase error within the hard handoff budget.
+5. absolute point phase error plus its uncertainty upper bound within the hard
+   handoff budget.
 
 Phase qualification compares the audio candidate with the continuous
 Synthetic Clock position at the observation timestamp, not with the published
@@ -305,20 +335,35 @@ integer video-frame start. The latter is quantized by as much as one frame
 the handoff budget is smaller. Published video position remains frame-based;
 only the cross-clock qualification reference preserves subframe monotonic time.
 
-Small phase error is removed by bounded audio resampling/slew. Error outside the
-hard budget keeps Synthetic Master active and reprimes audio; it must not jump
-the timeline or duplicate/drop an arbitrary video interval.
+Handoff preserves monotonic Timeline Time and records signed point error,
+uncertainty, and their conservative sum. Sample-duration upper bounds use ceil
+or an exact checked rational comparison; floor conversion may not admit a value
+one nanosecond beyond policy.
+An accepted error may remain within the versioned hard budget until a
+separately specified bounded correction Adapter exists. Error outside that
+budget keeps Synthetic Master active and reprimes audio. No path may jump
+Timeline Time, duplicate or drop an arbitrary video interval, or claim
+resampling/slew without an explicit ratio, duration, audibility, and evidence
+contract.
 
 ### Event-loop clock boundary
 
-The winit adapter samples its wall clock on every `AboutToWait`, including while
-transport is stopped or paused. An elapsed interval is forwarded to the
-Playback Engine only when transport was running at both ends of that interval.
-The first tick after Play or Resume therefore carries zero elapsed time; idle
-wall time before the command is never charged to the new playback session.
-Audio-device observations remain authoritative after handoff, while this rule
-also keeps the Synthetic Clock Master continuous during device absence,
-preroll, and recovery.
+The winit Adapter samples one absolute process-monotonic `Instant` on every
+`AboutToWait` and forwards only that value. Window code owns no elapsed
+accumulator, running-at-both-ends test, or Playback timestamp. `AppState` maps
+the instant through its one checked observation projection, takes the maximum
+with the Playback Engine's accepted high-water, ticks the Engine, and reanchors
+the projection to the same instant and resulting high-water. Mapping fails
+closed on a regressing instant or overflow. Saturating timestamp addition is
+reserved for diagnostics or explicitly saturating budget aggregation; it
+cannot create transport, deadline, or presentation authority.
+
+Play, Pause, Stop, and Seek sample and reanchor this projection at their command
+instant. Play/Resume therefore excludes preceding idle time; Pause/Stop/Seek
+first account for the final running interval without relying on a later UI
+tick. Audio-device observations remain authoritative after handoff, while the
+same projection keeps the Synthetic Clock Master continuous during device
+absence, preroll, and recovery.
 
 ### Time representation
 
@@ -327,6 +372,11 @@ preroll, and recovery.
 - Monotonic duration is runtime-only and never persisted.
 - Video scheduling resolves a Frame Position/evaluation instant; audio
   scheduling resolves an integer sample position carrying its sample rate.
+- Realtime audio prepare/reprime asks the Engine to lower the authoritative
+  phase at one explicit Playback Epoch and monotonic timestamp directly to an
+  `AudioSamplePosition` using nearest-sample rounding. It never round-trips
+  through the published integer video frame. While Audio Device is master, the
+  requested sample rate must equal its active anchor rate.
 - Conversion uses checked rational arithmetic at seams. Floating point may be
   used for filters/metrics but is not the authoritative accumulated position.
 
@@ -348,14 +398,36 @@ Each demand includes:
 - cancellation token scoped to epoch/demand.
 
 The Engine emits demands based on clock position plus a bounded lookahead.
-Prefetch is advisory, playback-only, slack-only, and cannot displace visible
-current-frame work.
+Priming owns its independent `priming_limit`. Once Running, the current Frame
+Demand deadline is the earlier of (a) the target frame's next exact media-frame
+boundary and (b) the last instant permitted by the product's conservative
+video-presentation phase budget. The latter uses
+`abs(clock_phase - target_pts) + clock_uncertainty`; between Audio Device
+observations both extrapolated point phase and callback-age uncertainty grow,
+while Synthetic Clock has zero uncertainty. A mid-frame or tardy host tick
+therefore receives only the remaining proven budget, never `now + one frame`.
+The App may cap a distant wake for responsiveness but must preserve zero and
+sub-millisecond remaining durations exactly; rounding them up to a nominal UI
+timer quantum would knowingly sleep past the Engine's phase deadline.
+Reissuing the same target for a quality revision or Clock Master handoff may
+conservatively retain an earlier deadline but can never renew it. The same
+pending deadline participates in the Engine's next-wake result, so a scheduler
+cannot sleep until the successor frame boundary after phase authority has
+expired. Paused and natural-end demands remain untimed. Prefetch is advisory,
+playback-only, slack-only, and cannot displace visible current-frame work.
+
 When either Synthetic or Audio Device Clock Master reaches natural end, the
 Engine invalidates the prior realtime demand and publishes a new untimed demand
 for the exact final frame before settling in `Ended`. It must never clear a
 terminal marker while retaining the old demand identity: that would revive an
 already presented frame and allow redundant timeout work to emit a second
 terminal delivery.
+An explicit `Pause` is also an output-settlement command. If the exact
+Paused/Ended untimed demand already terminated without leaving a presentable
+output, the Engine issues one fresh untimed demand for the same coordinate.
+It reuses a still-pending exact demand and never creates an autonomous retry
+loop; only a new command or another authoritative transport transition can
+establish new presentation authority.
 
 ## Frame request scheduling
 
@@ -378,16 +450,26 @@ interprets only:
 
 - `FrameWorkClass::{Playback, Interactive, Still}`;
 - `FrameWorkPriority::{Current, Prefetch}`;
+- `FrameInFlightDeadlinePolicy::{Cancel, FinishForLocality}`;
+- an optional in-flight cancellation budget measured from execution dequeue;
+- `FrameWorkResourceScope::{Shared, Media(MediaWorkReservationIntent)}`;
 - a monotonically increasing latest-wins generation;
 - an optional opaque `FrameDemandIdentity` carried for terminal reporting;
 - a strict nonzero pending-request budget.
 
 The Module stores and returns `D` but never compares it directly. Admission
 also carries the remaining duration sampled beside `D`; the Broker lowers that
-duration once into its own Monotonic Runtime Clock for dequeue, cancellation,
-and completion decisions. Each pending entry owns one atomic
+duration once into its own Monotonic Runtime Clock. Every deadline still owns
+queued expiry and completion-time `OnTime`/`Missed` classification. The typed
+in-flight policy independently decides whether that same instant requests
+cooperative cancellation from a lease that already started. Each pending entry owns one atomic
 `FrameRequestBinding<D>` containing generation, priority, semantic class,
-Frame Demand identity, and deadline.
+physical-resource scope, Frame Demand identity, and deadline. Resource scope is
+not a cache-key substitute: it proves that a queued payload or in-flight lease
+already owns the exact kind of physical reservation required by the binding.
+The separate execution budget is carried by submit and payload-free rebind
+contracts, lowered from the lease's original dequeue instant, and requests
+cancellation regardless of presentation-deadline locality policy.
 
 Only playback-class work may prefetch. Current work may evict prefetch; realtime
 current work may additionally evict deterministic still work; still work cannot
@@ -396,22 +478,107 @@ does not rotate generation: the frame belongs to the opaque request key, while
 generation identifies a seek/restart or interpretation discontinuity. Starting a newer generation makes older work
 ineligible, but late results are still classified explicitly as `CacheOnly` or
 `Stale` rather than being allowed to mutate visible state. Cancellation and
-expiration remove pending ownership synchronously; an already executing Adapter
-must still poll `execution_cancellation` cooperatively and resolve its execution
-lease before publication.
+expiration remove pending ownership synchronously. Ordinary cancellation
+invalidates a matching execution lease; stalled-presentation expiration instead
+may detach a same-generation `FinishForLocality` lease from publication
+authority while retaining its decoder-locality obligation. An already executing
+Adapter must still poll `execution_cancellation` cooperatively and resolve its
+execution lease before any result handling.
+
+Submission distinguishes `DroppedObsoleteGeneration` from
+`DroppedBackpressure`. The former has no admitted owner and therefore cannot be
+projected as pending work or wait for a completion that will never exist. The
+latter means the bounded pending/queue window is occupied by admitted work; an
+Adapter may defer only while that existing owner has a completion, cancellation,
+or lifecycle retry edge. Obsolete-generation diagnostics are not counted as
+capacity backpressure.
+
+An Adapter that has not yet acquired a move-only payload calls the Broker's
+payload-free `bind_existing` seam first. It may update only same-key,
+same-resource-scope queued work while retaining the original payload, or rebind
+a compatible in-flight lease. A missing or different scope returns
+`NeedsPayload` without changing Broker state; only then may the Adapter acquire
+physical capacity and call `submit`. This ordering prevents repeated UI
+evaluation from charging the same current demand twice and prevents metadata
+promotion from silently dropping a queued physical lease. If a newly acquired
+payload loses a later ordinary submit race, move/drop semantics release or
+replace that exact lease.
+
+Physical decoded-media capacity preemption is deliberately two-step. A Current
+reservation first cancels at most one queued Prefetch payload, whose move-only
+work lease is released by that removal, and retries admission. If no queued
+Prefetch exists, the Adapter may ask the Broker to mark at most one
+not-yet-completed, not-already-preempted in-flight Prefetch for cooperative
+preemption. That request never removes its pending/in-flight registry entry and
+never releases its physical charge early. The worker observes the typed
+cancellation through the persistent logical observer, returns or drops its
+payload, publishes normal completion availability, and only then may one pending
+current candidate retry. Any concrete codec checkpoint is recorded separately
+by the media Adapter.
+Repeated polls cannot repeatedly count or preempt the same lease, completed work
+is left for the completion pump, and neither path busy-waits on capacity.
+
+`Cancel` is the conservative default and remains mandatory for speculative,
+interactive, Still, heterogeneous visual, shutdown, and superseded work.
+`FinishForLocality` suppresses `DeadlineExpired` for an already-running lease
+and permits stalled-demand expiry to detach that exact same-generation attempt
+from presentation. Detachment is permanent: the expired demand is terminal, a
+later same-key demand cannot adopt the attempt, and its resolution has no
+binding and is at most `CacheOnly`. Close, generation advance, explicit key
+cancellation, Prefetch/Still preemption, queue expiry, and exact late evidence
+remain authoritative. The media Adapter selects it only for
+`Current + PlaybackCursor`: crossing one frame's presentation deadline must
+drop that presentation opportunity, not destroy the worker-owned demux/codec
+Session needed by the next sequential frame.
+
+Expiration evidence reports actual removed queued payloads separately from
+retained in-flight locality attempts. App diagnostics count only the former as
+queue cancellation. A detached, deadline-missed completion may preserve decoder
+Session locality but cannot publish or enter the Preview Frame Store.
 
 The Broker timestamps pending admission, execution-lease start, and invalidation under that
 same lifecycle lock. `execution_cancellation_evidence` atomically classifies broker
-closure, supersession, current-over-prefetch preemption, and
-realtime-over-still preemption, and carries both the corresponding invalidation or
+closure, supersession, current-over-prefetch preemption,
+realtime-over-still preemption, and deadline expiry when the lease policy is
+`Cancel`, plus execution-budget expiry; it carries both the corresponding invalidation or
 competing-request age and the lease age from the same clock sample. Starting a generation, canceling/expiring a binding,
 changing semantic class, eviction, and completion-driven binding removal all
-refresh this state. A compatible same-key request that rebinds in-flight work
+refresh this state. `ReusedInFlight` requires a real locked-registry attempt
+with exact generation, demand identity, key, and class. A cross-binding request
+queues a bounded fallback; a reusable old completion atomically consumes the
+new binding and removes that fallback, while non-reusable completion or failure
+leaves it self-progressing. Beginning a generation immediately prunes older
+pending/queued fallback work but retains in-flight leases for cancellation or a
+later explicitly queued rebound. A compatible same-key request that rebinds in-flight work
 clears the temporary invalidation timestamp, so latest-wins reuse is not
 mislabeled as cancellation. Adapters may translate the generic disposition and
 monotonic age into domain-specific diagnostics, but cannot reconstruct policy
 from separate freshness, competing-work, or timestamp queries. The Broker does
-not own codec-specific reasons or performance budgets.
+not own codec-specific reasons.
+
+Cancellation acceptance measures two non-overlapping intervals from the same
+execution: authority request to `LogicalCancellationObserved`, then that
+logical observation to worker return. Product policy requires the first
+interval to be at most 5 ms for every work class, the second to be at most
+50 ms for Playback and Interactive work, and at most 500 ms for deterministic
+Still work. The bounds are inclusive. Total execution lifetime remains
+diagnostic because work completed before cancellation authority existed cannot
+be charged as cancellation latency. A logical observation is scheduler
+evidence only; the media Adapter must separately report a concrete codec/demux
+checkpoint, and publication remains forbidden until the execution lease has
+returned and resolved.
+
+`wait_for_execution_terminal_state` waits under the same lifecycle lock and
+Condvar for `Canceled`, `Completed`, `Missing`, or caller-bounded `Timeout`.
+Submit/rebind, cancellation, completion, removal, and close publish through
+that condition variable, so an execution observer cannot lose a wake between
+checking the predicate and sleeping.
+
+Failure has the same atomic terminal-authority rule as successful completion.
+An old or preempted execution may publish a failure only when
+`fail_execution` consumes its exact latest binding. A queued or already
+dequeued fallback for the newer binding is preserved; the old failure produces
+no terminal evidence and cannot overwrite generation-scoped failure memory.
 
 Completion resolves against the latest binding in the same lock operation that
 removes pending ownership. A reusable result for the same opaque key may adopt
@@ -433,13 +600,19 @@ diagnostics derive in-flight priority, class, lane residency, and cross-lane
 invariant evidence from the same locked registry. The App Adapter may rename
 those fields for its report schema, but cannot reconstruct worker activity with
 atomics or access-mode conditionals.
-Every current work class retains semantic lane affinity. Playback runs on
+Every current work class normally retains semantic lane affinity. Playback runs on
 Playback/Any, scrub on Interactive/NonPlayback/Any, and exact still work on
 Still/NonPlayback/Any. This prevents one request stream from cold-opening a
 decoder/device session on each idle worker and prevents deterministic still
 decode from occupying the realtime playback lane. Parallelism remains
 available through lanes whose declared acceptance spans the class rather than
-through implicit cross-lane stealing. The current App deliberately instantiates
+through implicit cross-lane stealing. One bounded failover is explicit: when a
+live Playback-lane execution already has authoritative cancellation evidence,
+an idle NonPlayback lane may dequeue one `Current + Playback` replacement.
+That authorized replacement outranks ordinary Interactive and Still current
+backlog so sustained non-playback demand cannot starve playback recovery. It may
+never take Playback Prefetch, never admits a second live cross-lane replacement,
+and does not release the old execution's resource lease. The current App deliberately instantiates
 only Playback plus shared NonPlayback workers (or one Any worker on a constrained
 CPU); dedicated Interactive and Still lanes remain capabilities of the generic
 Broker, not additional production decoder pools.
@@ -476,6 +649,22 @@ admission/completion semantics for both Adapter shapes. This is a structural
 test seam, not evidence that licensed 4K Main10 or 30-minute reference-machine
 gates have passed.
 
+Heterogeneous Preview visual work uses an independent bounded
+`FrameWorkBroker` instance rather than a UI task queue or an extension of media
+decode ownership. Its opaque key is the complete semantic visual fingerprint;
+generation, Playback epoch, demand identity, class, priority, and lowered
+deadline remain explicit. A dedicated serial worker executes only the atomic
+CPU-prefix batch. Success returns the move-only execution lease with the pixel
+result instead of completing it, so the same Broker authority crosses App
+polling, Viewer recording, queue submission, and actual GPU completion.
+Renderer failure or panic consumes only the latest compatible terminal binding;
+deadline expiration becomes `Late` for the exact current Playback demand;
+supersession releases the old attempt without consuming a newer binding.
+Window completion callbacks are correlated by `FrameExecutionId`, and Headless
+retains the exact submitted owner until its callback is observed. Both
+therefore resolve at most one terminal outcome through the same visual Broker
+lifecycle.
+
 ## Frame Delivery
 
 Terminal outcomes are:
@@ -493,25 +682,100 @@ Terminal outcomes are:
 - `Canceled`: superseded epoch, demand, or latest-wins request.
 - `Failed`: execution error not classified as a policy blocker.
 
-The compact `FrameDelivery` carries only the exact demand identity and terminal
-kind. Source time, completion time, decode/import/render/presentation path,
-source fingerprint, color contract, reason, and stage durations remain in the
-owning media/Viewer execution diagnostics and are correlated by demand and
-candidate identity; they are not duplicated into the Engine command payload.
+`FrameDeliveryCandidate` carries only exact demand identity and proposed
+terminal kind before completion. Terminal `FrameDelivery` additionally binds
+the one real `completed_at`; no Adapter may submit a delivery and timestamp as
+separate arguments. Source time, decode/import/render/presentation path, source
+fingerprint, color contract, reason, and stage durations remain in the owning
+media/Viewer diagnostics and are correlated by demand and candidate identity;
+they are not duplicated into the Engine command payload.
 
 `FramePresentationTicket` is the Playback Module's opaque Interface for final
-presentation. It binds the exact demand identity, authoritative
-optional `MonotonicTimestamp` deadline, and an allowed quality of Ready or
-Degraded. CPU, Window GPU, and headless GPU Adapters call `complete_at` with
-their actual completion timestamp; only this Module classifies timed work as
-Ready/Degraded versus Late. An untimed paused-seek ticket cannot become Late,
-but its exact identity is still invalidated by the next demand. Adapters never
-compare or reconstruct deadlines themselves.
+presentation. It binds the exact demand identity, authoritative optional
+`MonotonicTimestamp` deadline, and an allowed quality of Ready or Degraded. CPU,
+Window GPU, and headless GPU Adapters call `complete_at` with their actual
+completion timestamp; only this Module classifies timed work as Ready/Degraded
+versus Late. An untimed paused-seek ticket cannot become Late, but its exact
+identity is still invalidated by the next demand. Adapters never compare or
+reconstruct deadlines themselves.
 The App presentation Adapter does compare the opaque ticket identity with the
 Engine's currently pending demand before submitting completion. A GPU result
 that finishes after supersession is silently retired: it is neither evidence
 for the new demand nor a rejected terminal delivery. This identity guard does
 not interpret the deadline or manufacture an outcome.
+
+Engine application returns one non-cloneable `FrameDeliveryApplication`. Only
+the Engine can construct it, and its private fields bind the submitted terminal
+delivery, acceptance, post-application snapshot, exact accepted target, and
+the optional `PlaybackClockPhaseObservation` sampled at the delivery's same
+`completed_at`. A rejected stale application has no target or phase and cannot
+advance Engine time. Presentation Adapters must not infer acceptance from
+snapshot mutation or secondary Evidence counters: a paused seek can accept a
+delivery without changing public transport state, and an allowed software or
+quality fallback remains `Degraded`. Headless and Window consumers may treat
+accepted `Ready` and allowed `Degraded` as presentable; `Late` remains
+non-presentable for the current demand.
+
+Output publication and ticket completion cross one UI-independent App
+coordination seam. The Adapter must finish every fallible or potentially
+blocking preparation first, then hand the seam a typed
+`FramePresentationPublication` carrying only a bounded, infallible visibility
+commit. The seam itself samples the monotonic runtime clock at that commit boundary, maps it
+once to Playback time, and rechecks the complete ticket identity and deadline.
+A `Late` ticket is consumed without running the commit; a stale ticket or
+rejected preparation drops the receipt without promoting output. For an exact
+`Ready`/`Degraded` ticket, terminal Playback acceptance and the prepared
+visibility commit form one synchronous transaction with no fallible operation
+between them and therefore require no best-effort rollback. Sampling before
+preparation, publishing through a boolean callback, or registering output and
+then trying to repair failed evidence are prohibited. A missing ticket is
+publishable only when the Engine truly has no active demand. A terminal
+delivery consumes presentation authority but does not make the still-active
+demand disappear, so an unregistered no-ticket retry cannot overwrite Viewer
+output after `Late`, `Failed`, `Canceled`, or `Blocked`. A missing or stale
+ticket while an active demand exists is lost authority. The typed result is
+`Presented`, `NoDemand`, `DroppedLate`, `OutputRejected`, or `LostAuthority`;
+Window and Headless Adapters may not collapse it to a boolean. While transport
+is running after a terminal non-presentable delivery, Preview may retain an
+already published exact output but must return Loading for any unregistered
+no-ticket retry until the Engine issues another demand.
+
+A bounded Headless observation must close the exact sampled demand, not merely
+wait for `Ready`. If preflight or completion consumes that demand as `Late`,
+the gate records a non-ready terminal sample and applies its unchanged quality
+threshold; it must not wait for an impossible no-ticket retry or relabel the
+sample as ready. Initial/preroll and paused-still probes still require an exact
+usable output. During startup priming, however, the Adapter must keep advancing
+the authoritative Clock: expiry of the bounded priming hold permits frame
+skips and a later exact-current output, rather than freezing the expired frame
+zero demand forever.
+
+Headless readiness uses one candidate rule in startup, realtime, paused-still,
+and validation paths. Ordinary queue-ordered publication is usable when its
+exact semantic binding and physical output binding both remain current; the
+later GPU callback retires the move-only owner and supplies completion
+evidence. Consuming the carried demand changes `Some(identity)` to `None` and
+is covered only by the same satisfied epoch/quality/frame binding. It cannot
+cover a new demand, Epoch, quality revision, coordinate, or missing physical
+output.
+
+Every presentable Preview result carries the ticket captured by the same
+evaluation that produced it. This includes a new GPU output, a CPU raster, an
+already-current registered output, and the semantic transparent canvas.
+Window and Headless consumers finalize that carried ticket through the same App
+coordination seam; they may not resample `pending_frame_demand` after the result
+crosses an Adapter boundary. Window keeps one admitted visible-output state:
+Loading, a superseded candidate, and a Late completion preserve that state only
+as stale and cannot replace it. Transparent output follows the same
+ready/stale lifecycle even though it has no texture payload.
+
+Widget `Ready`, `Blocked`, and other payload-free lifecycle values are
+post-admission projections only. They contain no demand identity and therefore
+cannot mint, rebind, or consume a terminal delivery during later UI feedback
+synchronization. A policy blocker may consume a demand only at a typed Preview
+or execution seam that still carries the exact identity; otherwise it remains
+diagnostic while the authoritative demand is left for exact completion,
+expiration, or supersession.
 
 Terminal authority ends as soon as the Engine accepts one delivery. Preview
 Adapters may attach an identity or deadline only from `pending_frame_demand`,
@@ -657,14 +921,28 @@ magic constants embedded in UI code:
 | recovery pressure entry | at least 8 late/failed current deliveries in the latest 12 | excludes canceled old epochs |
 | resolution ladder | `1`, `1/2`, `1/4` | spatial scale only, working/color semantics unchanged |
 | healthy recovery exit | 2 continuous seconds with ≥95% on-time current deliveries | ascend one ladder step at a time |
-| audio observation invalidity | 100 ms or explicit device error | hand off to Synthetic Master |
+| audio callback uncertainty | at most 1 s for an already-active Audio Device Master | retain the consumed-frame fact, project phase at nominal rate while growing uncertainty by callback age, then hand off continuously to Synthetic; explicit device loss/failure hands off immediately |
 
 Current-frame presentation and media lookahead are independent observations.
 The Engine records the terminal current Frame Delivery exactly once, while the
-Preview Adapter reports a bounded `VideoPrerollObservation` containing ready
-and available future media-frame counts for the same Playback Epoch. Neither
+Preview Adapter reports a bounded `VideoPrerollObservation` containing the
+exact current `FrameDemandIdentity` plus ready and physically preservable
+future media-frame counts. Neither
 signal can release `Priming` alone. The required lookahead is
-`min(policy.minimum_video_preroll_frames, available_media_frames)`, so a frame
+`min(policy.minimum_video_preroll_frames, preservable_media_frames)`, where the
+second value is the complete immediate future media-bearing prefix proved able
+to coexist within the Adapter's physical resource and work-admission grants.
+Both observation interfaces carry the monotonic instant at which their fact
+became available. The Engine validates the complete demand identity, including
+Epoch, quality revision, demand sequence, and target, before accepting that
+timestamp, so a late callback from a retired demand cannot move
+the current Session's monotonic high-water mark. Whichever independent
+observation satisfies the second priming condition supplies the Synthetic
+Clock reanchor. Startup work therefore consumes no playback phase: for example,
+if the second condition arrives at 17 ms on a 25 fps Sequence, the next frame
+boundary is 57 ms, and fractional rates retain the same exact rational boundary
+with nanosecond ceiling at the runtime seam.
+Thus a frame
 at the end of a sequence, a pure-audio sequence, or an immediate procedural
 frame does not acquire an artificial delay. A consumed current demand remains
 visible to Playback Evidence but cannot issue another Presentation Ticket.
@@ -685,14 +963,26 @@ the Playback Engine and the production Preview Adapter. One pump turn:
 2. asks the Adapter for bounded completion and stalled-current expiration facts
    bound to that identity;
 3. applies every exact terminal Frame Delivery through `AppState`;
-4. only then samples current-epoch video lookahead and submits one
+4. only then captures a fresh borrowed `PreviewExecutionSnapshot`, derives the
+   narrow `PreviewVideoPrerollRequest` carrying the Engine's exact active
+   demand identity, samples its video lookahead, samples one wall instant after
+   that readiness calculation has formed its fact, and submits one timestamped
    `VideoPrerollObservation`;
 5. returns visible-change, transport-change, and follow-up-poll facts without
    performing Widget refresh or GPU presentation.
 
 This order prevents completion and expiration from binding against different
-demand samples, and prevents a terminal delivery from being followed by
-preroll for the demand it just consumed. `AppUiHost` decides only how the pump
+demand samples. The preroll request cannot reuse the poll-time transport
+snapshot: a terminal delivery may have stopped transport, rotated its Epoch,
+or replaced its demand. A presentable terminal delivery during Priming is the
+deliberate exception: it consumes the Presentation Ticket while the same active
+demand remains the identity of the independent future-lookahead condition.
+The fresh request therefore carries `frame_demand`, not
+`pending_frame_demand`; the Engine rejects it unless that full identity is
+still current. The frame-producing request similarly
+captures position, Transport State, Epoch, runtime quality scale, seek source,
+Frame Demand identity, and its once-lowered Adapter deadline as one immutable
+turn. `AppUiHost` decides only how the pump
 outcome affects layout/repaint. The real Headless GPU gate drives the same pump
 and therefore cannot maintain a test-only Delivery or preroll policy. The
 sampled transport activity also prevents an idle-residency release from using
@@ -704,10 +994,12 @@ complete output key and GPU execution contract consumed by both Window and
 Headless Adapters, and atomically coordinates generation binding, pending state,
 executed quality, candidate IDs, and exact registered-output reuse. Cache
 residency/eviction remains in the playback-owned `PreviewFrameStore`; GPU/color
-mathematics remain renderer-owned. Canonical timeline traversal, nested Sequence
-lookup/depth, per-Sequence runtime sizing, nested working-space composition,
-typed media readiness, and mandatory ready-plan identity live in the
-UI-independent `app::preview_timeline_execution` Module. The Window
+mathematics remain renderer-owned. Renderer `PreparedVisualFrameClosure` is the
+sole authority for nested time, lookup/cycle/depth, per-Sequence runtime sizing,
+color context, Transition/temporal bindings, and instance paths. The
+UI-independent `app::preview_timeline_execution` Module only materializes those
+typed nodes into nested working-space output, typed media readiness, execution
+facts, and mandatory ready-plan identity. The Window
 `preview::timeline_evaluation` file is only an Adapter that supplies media
 outcomes and records returned execution facts. Prefetch, preroll, and input-color
 evidence consume the same Module's read-only media-demand collection instead of
@@ -726,7 +1018,13 @@ Deterministic Headless fault sequences cover a seek that retires an in-flight
 presentation, queued cancellation racing the replacement demand, delayed or
 dropped GPU presentation, Audio Device Clock reacquisition, explicit device
 loss, and continuous Synthetic fallback. Losing old-epoch facts are retired
-before Evidence; only the current demand can consume terminal authority.
+before Evidence; only the current demand can consume terminal authority. A
+real isolated-demux cancellation probe first establishes the settled output,
+retires any queue-published GPU submission, observes Preview work quiescence,
+and releases the preceding decoder-family residency. Otherwise the next native
+decode may correctly wait for a still-owned output or session lease, and the
+probe would be measuring resource backpressure instead of its declared
+Seek/PacketRead cancellation seam.
 
 All thresholds live in one Playback Policy value, appear in evidence, and may be
 tuned by measured reference-machine data. Tests must pass an explicit policy;
@@ -737,8 +1035,10 @@ environment variables cannot silently redefine product semantics.
 Clock time is converted to the exact sequence frame using rational arithmetic
 and the sequence's defined frame-boundary rule. When several frame boundaries
 are crossed between event-loop ticks, the Engine demands the newest required
-frame and records intermediate frames as clock-driven drops; it does not enqueue
-obsolete current-frame work merely to preserve a one-request-per-frame count.
+frame; Playback Evidence records a one-frame advance separately from a
+multi-frame observation and counts every skipped intermediate target. The
+Engine does not enqueue obsolete current-frame work merely to preserve a
+one-request-per-frame count.
 
 Display refresh cadence is an observation, not timeline time. A 24 fps sequence
 on a 60 Hz display may present a frame more than once. A 60 fps sequence on a
@@ -788,8 +1088,11 @@ callback counters remain evidence.
 
 ## Scheduling and backpressure
 
-- One bounded current-demand slot per session; newer current demand supersedes
-  older unstarted work.
+- One active Playback current-demand identity per session; the same demand may
+  own every media key in a multi-layer frame, while a newer demand atomically
+  removes all older unstarted `Current/Playback` payloads across keys. An older
+  in-flight execution may finish for decoder locality, but it no longer owns
+  presentation or failure-publication authority.
 - Prefetch has a separately bounded budget and is discarded first.
 - Worker completion polling has both count and wall-time budgets; its producer
   transport holds at most eight queued results plus one pending publisher per
@@ -811,6 +1114,7 @@ Playback Evidence is event-derived and versioned. Minimum events:
 
 - session/state/epoch transition;
 - Clock Master selection and handoff;
+- single-frame Clock Master advancement and skipped intermediate frame targets;
 - Frame Demand admitted/rejected/canceled;
 - Frame Delivery terminal outcome;
 - video deadline drop and stale presentation;
@@ -820,8 +1124,8 @@ Playback Evidence is event-derived and versioned. Minimum events:
 
 Reports must include p50/p95/p99 queue/decode/render/delivery latency, dropped
 and stale frames, consecutive pressure, effective preview scale, Clock Master
-residency, handoff phase error, audio underruns, A/V drift, cache budgets, and
-reason-code counts. Preview reports additionally include the fixed Playback and
+residency, uncertainty-inclusive handoff phase error, audio underruns,
+per-master delivery phase error, cache budgets, and reason-code counts. Preview reports additionally include the fixed Playback and
 NonPlayback worker execution-progress snapshots so an outstanding Broker lease
 can be attributed to the exact media Adapter call without reading UI state or
 parsing logs. A progress snapshot is diagnostic evidence only: quiescence still
@@ -829,75 +1133,279 @@ requires the Broker lease to return and all native-output leases to retire.
 Logging alone is not evidence.
 
 `PlaybackEvidenceCollector` is the shared bounded Interface for production UI
-and headless/perf Adapters. Schema v2 retains at most 4,096 detailed tail events
-and a deterministic 4,096-sample whole-run reservoir per latency/drift metric.
+and headless/perf Adapters. It consumes only Engine-created
+`FrameDeliveryApplication`; callers cannot separately supply acceptance,
+snapshot, target, or timestamp. Every fallible timestamp/phase calculation is
+preflighted before collector mutation. Schema v4 retains at most 4,096 detailed
+tail events and a deterministic 4,096-sample whole-run reservoir per
+latency/phase-error metric.
 Each metric separately keeps its exact population count and exact all-run
 maximum; p50/p95/p99 are explicitly reservoir estimates. Clock Master and
-Transport State residency, delivery counts, superseded demand/seek totals, and
-underrun totals are streaming aggregates and do not depend on retained detail.
+Transport State residency, single/multi-frame advancement and skipped-target
+counts, delivery counts, superseded demand/seek totals, and underrun totals are
+streaming aggregates and do not depend on retained detail.
 Detailed-event eviction is expected bounded retention, remains reported, and is
 not reclassified as observation loss. A gate may use the exact maximum, a
 declared reservoir percentile, or aggregate counters, but cannot infer failure
 merely because old diagnostic events were intentionally evicted.
 
+For an accepted `Ready` or `Degraded` delivery, the exact target PTS and active
+Clock phase use the same checked floor-nanosecond grid. Evidence records
+`point_error = abs(phase - target)` and
+`proven_error = point_error + uncertainty`, partitioned into Audio Device and
+Synthetic summaries. Audio uncertainty includes its callback estimate plus age
+since the last reliable observation; Synthetic uncertainty is zero within its
+model. Presentable phase evidence is explicitly tri-state. A `Playing` or
+`Recovering` delivery that should have a running Clock phase but lacks one
+increments `unproven_presentable`. A Paused, Stopped, Ended, or otherwise
+non-running still/seek delivery without a phase increments
+`phase_not_applicable`; it does not contaminate the running-interval gate.
+Nanosecond thresholds are compared before report quantization, and microsecond
+reports use ceil, so 20,000,001 ns is 20,001 us and cannot pass a 20 ms gate.
+The real Windows 4K playback gate declares a 20 ms whole-run P95 contract for
+both Synthetic and Audio Device delivery phase, alongside independent zero
+missed-opportunity, zero skipped-frame, and zero unproven-delivery invariants.
+It reports exact maxima but does not treat one non-real-time OS preemption as
+sustained cadence failure. Deterministic accelerated clock tests and the
+Audio-Master handoff contract retain their stricter maximum-error assertions.
+
 The accelerated headless continuity gate drives the public Engine and Evidence
 Interfaces for 30 minutes of exact 48 kHz callback time against a 30000/1001
 video grid. It completes current Frame Demands, injects one Audio Device to
-Synthetic to Audio Device transition, and requires zero delivery-clock drift,
-no underrun recovery, exact final rational position, and fixed evidence
-residency despite more than 100,000 detailed-event evictions. This proves clock,
-demand, and bounded-aggregation semantics; it does not prove CPAL hardware,
-codec/GPU throughput, operating-system callback jitter, or reference-machine
-memory behavior.
+Synthetic to Audio Device transition, and requires non-empty Audio Device phase
+evidence, zero unproven or not-applicable delivery inside that continuous
+interval, proven phase error within 20 ms, no underrun recovery, exact final
+rational position, and fixed evidence residency despite more than 100,000
+detailed-event evictions. This proves clock, demand, and bounded-aggregation
+semantics; it does not prove CPAL hardware, codec/GPU throughput,
+operating-system callback jitter, or reference-machine memory behavior.
 
 `PreviewFrameStore<MK, M, VK, V, S>` is the Playback Module's payload-opaque CPU
-storage Interface. It owns decoded-media payloads, final Viewer payloads,
-remembered failures, the explicitly pinned current/stale Viewer payload, and an
-oversize current-media pin. Adapters supply stable keys, exact byte
-reservations, and an equality-comparable Viewer presentation scope; the Module
-does not import media, renderer, UI, or wall-clock types. Media entries
-have a 96-entry cap, a 384 MiB pixel-payload budget, and an independent
-decoder/GPU resource-lease budget; the generic Store default is four units,
-while the App composition root raises it to the eight-frame maximum bounded
-prefetch window. The 250 ms target is fully represented through 30 fps; at
-higher frame rates the speculative horizon is capped (about 133 ms at 60 fps)
-to preserve decoder DPB/import headroom. Viewer raster
-entries have a 48-entry cap and a 192 MiB payload budget; failure memory has a
-192-key cap. A media reservation includes current linear-float pixels, encoded
-source pixels, and the possible lazy working-frame allocation, so a deferred
+storage and physical-allocation-ledger Interface. It owns decoded-media and
+final Viewer residency, remembered terminal failures, and the explicitly pinned
+current/stale Viewer raster. Adapters supply stable opaque keys, conservative
+pre-work reservations, measured post-work charges, and an equality-comparable
+Viewer presentation scope; the Module does not import media, renderer, UI, or
+clock types. The generic standalone `PreviewFrameStoreConfig::default` is
+96 optional media entries/384 MiB/four native resource units, one exact-current
+demand grant of 16 entries/1 GiB/eight native resource units, 48 Viewer
+entries/192 MiB, and 192 remembered failures. Those values are
+fallback/reference defaults, not a fixed product budget.
+
+Every admitted Broker attempt receives an independent move-only
+`MediaWorkResourceLease`, including concurrent attempts for the same semantic
+key. That lease follows the job through Broker queue, in-flight worker,
+completion channel, and foreground result consumption. Replacement,
+cancellation, queue rejection, stale completion, worker failure, or dropped
+result releases only that physical attempt through RAII; no semantic-key
+reconciliation may decrement the ledger. Successful Store admission validates
+the measured charge and consumes the work lease into one cloneable
+`MediaFrameResourceLease`. Store ownership and all external frame clones then
+share one allocation identity until the last owner drops. The Adapter strips
+lease/protection fields from the cached media payload itself, so Store-exclusive
+ownership is observable and evictable. A late same-key completion preserves the
+already resident allocation instead of replacing an object that a visual
+candidate may still use.
+
+The App therefore performs exact same-key/same-`MediaWorkReservationIntent`
+rebinding before requesting this lease. Independent charging remains mandatory
+for genuinely new attempts or a different demand scope; it is not permission
+to double-charge an already queued or compatible in-flight producer.
+
+Reservation accepts the complete
+`MediaWorkReservationIntent::{Current(MediaWorkDemandId), Prefetch}` rather
+than a priority plus optional identity, so a Current request without exact
+working-set authority is unrepresentable. Admission separately reports
+`RejectedCurrentDemandGrant` and `RejectedAggregateCapacity`. The first is
+permanent for the unchanged exact Viewer closure. The second says only that
+other physical ownership currently fills the aggregate ledger; the App may
+project it as pending only when it can identify an admitted owner or lifecycle
+transition that will publish a retry edge. Otherwise it is a typed aggregate
+resource blocker.
+
+Decoded-media policy has three distinct limits:
+
+- the **optional residency limit** bounds trim-responsive Prefetch/cache
+  entries, host bytes, and native resource units;
+- the untrimmed **current-per-demand limit** bounds the unique allocations in
+  one exact typed Viewer closure;
+- the **aggregate hard limit** is the component-wise maximum of those two
+  limits, not their sum, and bounds all Store, external, queued, in-flight, and
+  unconsumed-completion ownership across every demand.
+
+A Current completion that fits the aggregate and its exact demand but not the
+optional LRU enters a bounded multi-key current-working-set overflow LRU. It is
+not an unbounded oversize pin. `MediaFrameProtectionLease` counts each
+allocation at most once for a demand even when the guard is cloned, and keeps
+that input charged through asynchronous CPU-prefix, GPU candidate, and
+presentation handoff. A seventeenth distinct input therefore cannot enter a
+16-entry demand by multiplying guard clones, while multiple demand identities
+cannot bypass the aggregate hard limit. Protection or measured-completion
+refusal is a typed resource blocker; it must not be converted into a source
+decode failure, remembered in terminal decode-failure state, or retried as an
+`AlreadyResident` loop.
+
+Production Window and Headless Preview always apply the current immutable App
+resource decision. Before pressure trimming, the below-minimum, 8 GiB,
+16 GiB, and 32 GiB-or-larger classes respectively receive media
+entry/byte/native-unit limits of 24/96 MiB/4, 48/192 MiB/6,
+96/384 MiB/8, and 128/512 MiB/12, plus Viewer entry/byte limits of
+12/48 MiB, 24/96 MiB, 48/192 MiB, and 64/256 MiB. Unknown capacity uses the
+conservative 8 GiB policy while remaining distinct evidence. Their exact-current
+per-demand grants are respectively 4/256 MiB/4, 8/512 MiB/8,
+16/1 GiB/16, and 24/2 GiB/24. Speculative and Aggressive pressure trim divides
+only optional cache counts, bytes, and native units. It never reduces an
+in-progress correctness grant or the 192-key failure bound.
+
+The maximum temporal prefetch candidate depth remains eight frames; byte and
+native-unit admission may shorten it. The 250 ms target is fully represented
+through 30 fps; at higher frame rates the speculative horizon is capped (about
+133 ms at 60 fps) to preserve decoder DPB/import headroom. A media reservation
+includes current linear-float pixels, encoded source pixels, and the possible
+lazy working-frame allocation, so a deferred
 color transform cannot silently grow beyond its admitted reservation. One
 payload larger than its budget remains usable for the current delivery through
-the current-media pin but is not admitted to the LRU; an oversize prefetch is
-discarded rather than pinned. Both cases produce structured rejection evidence.
+the bounded current-working-set overflow only when it fits both the exact-demand
+and aggregate grants. A Prefetch that exceeds optional policy is discarded.
+Before speculative scheduling, the Store projects typed entry/byte/resource
+headroom after subtracting physical non-releasable ownership and treating each
+Store-exclusive LRU allocation as releasable. Prefetch and preroll consume this
+through one near-to-far future-media prefix planner. That planner retains a
+short-lived clone of every accepted nearer resident allocation while it
+recomputes headroom and transfers planned missing work into Broker ownership;
+the clone's physical allocation lease makes that resident non-releasable for
+the complete planning/admission transaction. Pending Broker work is already
+charged and is not reserved a second time. A media-bearing frame advances the
+available prefix only when its complete prepared visual dependency closure is
+resident, pending, or admitted. At most one deterministically ordered partial
+frontier may be warmed, and no farther frame may bypass it. Actual Store
+admission remains authoritative.
 
-The non-evictable current/stale raster and oversize current-media frame are
-reported separately from their evictable caches. Project/sequence cancellation
-clears media, Viewer, failure, and pinned state through one Interface. External
-real-media gates fail when either cache exceeds its byte budget, either pin
-exceeds its corresponding budget, or an oversize payload was rejected.
-Renderer-owned GPU texture tables remain a separate Module and are not falsely
-counted as CPU storage.
-The resource-unit budget is intentionally independent of CPU bytes: an FFmpeg
-native decoder surface can reserve zero host pixel bytes while still exhausting
-the decoder pool. App payload adapters charge one unit for each retained native
-surface and zero for CPU frames. LRU eviction enforces count, byte, and resource
-budgets together, and diagnostics expose both current resource units and the
-configured limit.
+The planner separates immutable future-frame lowering from physical admission.
+One small bounded sliding window retains the canonical prepared media closure
+and its fully lowered immutable decode keys, reservations, and hardware request
+contract. Its identity includes the open Authoring Session and Author
+Generation, root Sequence identity/revision, Effect Registry revision, runtime
+scale, target extent, complete Program Color Context, Asset Library revision,
+Proxy configuration, and the coherent renderer/platform hardware-admission
+observation. An identity change clears the complete window; lifecycle and
+hardware-admission edges also clear it eagerly. Sequential playback therefore
+evaluates and lowers at most the newly entered frame after the initial window
+instead of rebuilding every overlapping frame (`N + window`, not
+`N * window`). A seek may reuse only an exact frame under that complete
+identity.
+
+The cached value contains no resident/pending/failure observation, allocation
+guard, Broker ownership, retry state, or resource headroom. Those facts are
+re-read for every planner pass and remain authoritative. Proxy artifact
+arrival has no independent durable revision; a retained future key is instead
+bound to its complete immutable file fingerprint, revalidates that filesystem
+revision during every planning turn, and has both bounded entry count and
+bounded reuse. Revalidation uses a turn-local memo keyed only by physical path:
+all retained frame contracts for the same file share one live observation
+within that turn, while the next turn must open and observe the file again.
+Partial observations never authorize reuse. The window exposes cumulative
+production evidence for reusable hits, semantic evaluations, media lowerings,
+identity invalidations, and live source-fingerprint observations so performance
+claims cannot hide repeated filesystem work. It can remain a correct
+original-source optimization miss or fail closed on object drift, while
+current-frame source resolution remains fresh and can immediately select the
+new proxy. It can never authorize pixels from an unproved replacement.
+
+`PreviewFrameStoreConfig` is a persistent runtime policy, not merely a
+construction default. `reconfigure` replaces media count, byte, and
+native-resource-unit limits, Viewer count and byte limits, and failure
+retention, then immediately
+evicts Store-exclusive ordinary/overflow LRU allocations against the prospective
+limits before installing the policy. Thus a transient trim cannot create a
+false overcommit transition. External frames, live work, and protected
+candidates are never revoked; if they make the new policy irreducible, aggregate
+and per-demand overcommit state/events remain explicit until their real owners
+drop. High-water marks begin a new policy epoch after that atomic trim. All
+later admission uses the new limits until another configuration arrives.
+`PreviewProductionRuntime` applies the same decision to Window and Headless
+paths. A stronger decoder-residency trim is a separate operation and cannot be
+approximated by a transient cache clear.
+
+Diagnostics separately expose optional residency, current overflow, outstanding
+work, protected ownership, physical aggregate/high-water, per-demand
+high-water, both limits, admission rejections, and overcommit transitions.
+Current media admission also retains its last exhaustive result, keeping
+decoder-family retirement, aggregate physical capacity, and Scheduler/realtime
+execution pressure distinct instead of collapsing them into generic Loading.
+Qualification requires optional residency within trim policy, aggregate and
+per-demand high-water within their own grants, no overcommit event, and no
+outstanding work lease. Renderer-owned import tables, bridges, textures, and
+presentation resources remain a separate Module and need their own evidence.
+Native resource units are intentionally independent of host bytes: an FFmpeg
+surface can reserve zero host pixels while still retaining a decoder pool.
+Adapters charge one unit per retained native surface and zero for ordinary CPU
+frames.
 
 One retained native `AVFrame` may keep its decoder's complete hardware-surface
 pool resident, so entry/byte/resource-unit limits are necessary but not a
 transport-idle release boundary. Once transport is stopped, Broker
 pending/queued/in-flight work is zero, the current intent is not pending, and a
 final registered GPU Viewer output has been proved for the active Preview
-generation, the Production Runtime clears media payloads and the oversize media
-pin while preserving that Viewer output, its stale-presentation pin, and
-terminal-failure memory. The release also advances the worker-owned decoder
+generation, the Production Runtime clears Store-owned ordinary and
+current-working-set overflow residency while preserving that Viewer output, its
+stale-presentation pin, and terminal-failure memory. External frame/protection
+leases remain charged until their holders retire. The release also advances the worker-owned decoder
 residency revision; each worker clears its explicitly owned
 `PreviewDecodeSessionContext` before returning to `Idle`. Acceptance polls the
 worker stage, active-helper count, and launch-to-post-reap accounting rather
 than sleeping for an assumed timeout. Together these two ownership releases let
 the driver surface pool disappear without blanking the paused Viewer. Any
 active or unresolved work makes the release fail closed.
+
+The Headless lifecycle converges this condition in ownership order: establish
+the exact stopped-frame Viewer output, retire its exact GPU submission and
+move-only presentation/media-protection owners, wait for Preview
+pending/queued/in-flight work to reach zero, then request decoder-residency
+release and observe worker/session reap. Releasing before output establishment
+or GPU retirement is an ordering error; weakening the release predicate is not
+an allowed recovery. Qualification consumes the final settled Runtime snapshot:
+its counters and high-water marks retain the continuous-window evidence, while
+its instantaneous Broker, worker, and helper fields alone prove post-stress
+ownership closure. A mid-window helper snapshot must never be relabeled as
+post-stress lifecycle evidence.
+
+Headless realtime validation waits against absolute monotonic deadlines. On
+Windows it uses a thread-local high-resolution waitable timer for a bounded
+1 ms poll after checking the shared Preview work revision; it does not depend
+on the commonly 15.6 ms-quantized condition-variable timeout and does not
+change the process-wide timer period. A raced work notification can therefore
+add at most one poll interval, while deadline cadence remains precise enough
+to enforce the half-frame presentation-phase contract. Other platforms retain
+the same revision predicate and bounded wait Interface.
+
+The concrete product Window coordinator and the Headless realtime validation
+coordinator share one platform scheduling seam. During active playback on
+Windows, their owning thread joins the MMCSS `Playback` task at critical relative
+priority; Pause/Stop/End and owner destruction revert the thread-local
+registration. Activation failure is explicit (a product warning and a
+fail-closed Windows realtime gate), while an unimplemented platform reports
+`Unsupported` and continues under the portable scheduler contract. This seam
+does not elevate decode/analysis workers, alter process priority, or change the
+system timer period, so resource arbitration and bounded domain queues remain
+authoritative.
+
+Each coordinator turn applies the newest coherent Audio Device callback
+observation before advancing the video Clock and deriving a new Frame Demand.
+This ordering is part of the Clock-Master contract: deriving the demand first
+would charge callback age that was already resolved by a queued observation,
+mint an artificially early deadline, and then retain it under the correct
+no-deadline-renewal rule. The post-pump transport tick uses a newly sampled
+monotonic instant and still runs after a pump error, because a fail-closed audio
+event may already have handed authority continuously to Synthetic Clock.
+
+Long-run acceptance telemetry obeys the same realtime boundary. Native
+product-process-tree memory samples are captured by a dedicated evidence
+worker on a fixed monotonic cadence and accumulated only after the measured
+playback window closes. Transport advancement, audio pumping, Preview result
+draining, and Viewer submission therefore never execute Tool Help enumeration
+or per-process memory queries inline. A separate post-stress sample may run
+synchronously only after realtime playback and GPU ownership have settled.
 
 The worker/session retirement boundary owns codec, DPB, hardware-frames context,
 and native surface-pool destruction; it does not own the physical decoder
@@ -912,11 +1420,20 @@ GPU output publication and Broker lease retirement are separate observable
 events. Publication may therefore attempt this release while the worker lease
 is still completing. Before a stopped Preview binds a different generation,
 the Production Runtime retries the release while the previous output is still
-exact and can prove that its decoded sources are no longer needed. This is the
+exact and can prove that its decoded sources are no longer needed. Typed
+transport synchronization performs the same retry before retiring a
+stopped-to-stopped discontinuity, because that retirement otherwise
+invalidates the proof before Viewer generation binding runs. A play/pause
+family transition, or any discontinuity without an exact output, only cancels
+obsolete work and retains independently reusable CPU media frames. This is the
 last safe point: after rotation the retained output is stale by definition and
 must not authorize source-residency decisions. The retry remains non-blocking
 and fail-closed when any old work is actually still queued or in flight. Once
-the source lease is released, a compatible Interactive decoder may apply the
+an active candidate is denied by this retirement barrier, the Runtime records
+its exact access family and rechecks the barrier before consuming one retry
+edge. A final worker acknowledgement that races ahead of waiter registration
+therefore remains actionable; an acknowledgement without a denied candidate
+does not manufacture work. Once the source lease is released, a compatible Interactive decoder may apply the
 current seek/flush policy for the new generation only when its packet-source
 execution family also matches; decoder reuse does not grant the old media frame
 publication authority or make canceled partial output cacheable.
@@ -933,9 +1450,9 @@ mode still selects independent scrub versus exact precision and seek policy on
 every request; session sharing does not relax exact-Still correctness.
 A released session may cross from Scrub to exact only when its packet-source
 execution family, conservative source revision, and codec/output contract also
-match. Production Scrub and exact now use the same reusable isolated demux
+match. Production Scrub and exact use the same reusable isolated demux
 family. The worker still waits for the final output lease before seek/flush,
-but a successful exact request is no longer a historical reason to destroy a
+and a successful exact request alone does not authorize destruction of a
 healthy codec/DPB/frames context. Teardown occurs for a changed contract,
 poisoned helper, residency-family retirement, idle retirement, or shutdown.
 This preserves one native surface pool without opening an alternating pool
@@ -956,10 +1473,12 @@ output and reusable renderer bridge resources resident while returning decoder
 surfaces early enough for the next exact seek.
 
 The exact-output shortcut is generation-safe rather than cache-presence based.
-The Preview generation includes Sequence identity/revision, Project document
-revision, playback epoch or stopped frame, output extent, seek intent, effective
-display color identity, display-contract generation, and OCIO configuration
-generation. `PreviewExecutionCoordinator` records which generation proved the
+The Preview generation includes Sequence identity/revision, Project Author
+Generation, playback epoch or stopped frame, output extent, seek intent, the
+exact resolved Project engine plus Sequence Program Color Context, effective
+display color identity, and display-contract generation. Process-global OCIO
+reload generation is operational evidence and is not part of semantic output
+equality. `PreviewExecutionCoordinator` records which generation proved the
 registered output. A generation rotation retains the old output only as stale;
 only full output-key resolution or a newly registered presentation promotes it
 to exact. Repeated stopped-Viewer queries may therefore reuse the already
@@ -968,20 +1487,22 @@ seek, or transport discontinuity must re-evaluate and cannot revive stale
 media semantics.
 
 `app::preview_frame_store::PreviewFrameStoreAdapter` is the sole Frame Store
-policy Adapter inside the Preview Production Runtime. It computes the reservation for
-`MediaPreviewFrame`, admits the validated
-UI-independent `PreviewRasterFrame` by its exact encoded byte size, aligns
-native-resource residency with the configured maximum prefetch window, and
+policy Adapter inside the Preview Production Runtime. It computes exact
+`MediaPreviewFrame` host-byte/native-resource reservations, admits the validated
+UI-independent `PreviewRasterFrame` by its exact encoded byte size, and
 constructs the `(SequenceId, width, height)` presentation scope. All residency
-and failure state lives in the playback-owned Module. It never stores a Widget
-payload. `app::preview_raster_frame` owns RGBA8 validation, encoded color
+and failure state lives in the playback-owned Module. Decoded media with absent
+or incomplete source revision evidence is never admitted. Entry count, host
+bytes, and decoder-resource units remain independent budgets; the prefetch
+window consumes those budgets but does not define or inflate them. The Store
+never contains a Widget payload. `app::preview_raster_frame` owns RGBA8 validation, encoded color
 identity, stable presentation-resource naming, and the CPU raster output
 contract. The Window presentation Adapter alone maps that value to
 `ViewerFrameImage`, reusing the same `Arc<[u8]>`; a headless Adapter can consume
 the application contract directly and must instantiate the same Store Interface
 rather than reproduce cache policy.
 
-Viewer execution now has one renderer-owned Interface and Implementation.
+Viewer execution has exactly one renderer-owned Interface and Implementation.
 `ViewerGpuExecutionRequest` supplies working-space layers, the exact output
 boundary, crop, output extent, and optional proven calibration;
 `ViewerGpuExecutionRuntime` owns native import, input transforms, compositing,
@@ -990,15 +1511,83 @@ lifetime. App preview planning produces `ViewerGpuExecutionLayer` directly.
 There are no App-named compatibility aliases or App-local execution wrapper.
 The Window Adapter separately owns only UI texture registration and published
 presentation identity. The UI-independent App Headless Adapter owns the real
-no-Surface device, full-frame spatial request, submission, and GPU completion
-wait; it cannot import Widget geometry or Window publication contracts. Both
-Adapters call the renderer Interface directly.
+no-Surface device, full-frame spatial request, asynchronous submission
+lifecycle, and exact completion observation; it cannot import Widget geometry
+or Window publication contracts. Both Adapters call the renderer Interface
+directly.
+
+The product policy gives the 8 GiB and 16 GiB classes pressure-stable Viewer
+active grants of 768 MiB/64 textures and 2 GiB/96 textures respectively. A
+pure policy assertion proves both grants cover the renderer's conservative
+steady-state identity path for UHD P010 Main10 input, Float16 Program Output,
+and the capacity-one current-output replacement reserve. This is a correctness
+floor, not an 8 GiB realtime-4K promise; monitor conversion, calibration,
+scopes, transitions, spatial filtering, and non-identity Effects enter their
+larger explicit working-set contracts and may require quality/proxy fallback.
+
 Frame-scoped renderer resources clear through one Interface while pipelines and
 device capability state remain resident. On device/display invalidation, the
 Window Adapter first unregisters its external texture and then resets renderer
-execution resources. Window completion means registration plus ordered queue
-submission, not a GPU fence or surface present; headless completion waits for
-the submitted GPU work and claims no UI publication. Renderer/platform native
+execution resources. For an ordinary complete-GPU Viewer candidate, Window
+completion still means registration plus ordered queue submission, not a GPU
+fence or surface present; Headless uses the same queue-ordered usability rule
+and retains the submitted owner until its later callback. A heterogeneous
+candidate is stricter because its visual Broker lease is still active: Window
+and Headless publication both wait for the exact queue-completion callback and
+completed-batch validation. A Headless completion deadline revokes publication
+authority without releasing the submitted owner; the capacity-one lifecycle
+quarantines it until the exact late callback retires its frame and
+media-protection leases. Headless Preview state retains only cloneable semantic
+output metadata; the Adapter alone owns the move-only presentation lease.
+Successful ordinary publication moves that lease synchronously from the
+submission owner to the current physical slot, while heterogeneous publication
+moves it only after callback/Broker validation. `Current` and queued-Ready reuse
+requires the exact semantic key and unique submission resource key on both
+sides. Timeout, cancellation, and late completion may clear Preview metadata
+only after exact submission identity removed that same physical artifact;
+same-semantic replacement is never clear authority. Accepted Transparent and
+CPU Raster presentation clear the physical GPU slot in the same publication
+commit. Once a presentable publication has consumed its Frame Demand, later
+Headless probes may observe the already-published output without inventing a
+replacement ticket, but only through a read-only predicate that requires both
+the active Preview generation and the Adapter's unique physical resource key.
+This observation cannot reactivate a stale generation, schedule work, or run a
+publication callback; every new artifact still requires preflight and the
+exact pending ticket. A later callback that proves only a stale, released, or terminal GPU
+artifact must explicitly reopen one reconciliation of the current Headless
+consumer intent; it cannot preserve an `Attempted` binding as though that
+artifact had satisfied the current output, and it cannot relabel the artifact
+`Ready`. Aggregate media pressure is transient only while the Scheduler or
+worker Broker still exposes queued, executing, or completed-but-unconsumed work
+that will publish a retry edge. The Runtime records one generation-scoped
+current-candidate waiter and consumes it on either a result that releases
+physical work ownership or settlement of every observable Scheduler/Broker
+owner (including queued cancellation); this preserves exactly one
+reconciliation edge even if generic candidate-pending state retired
+concurrently. A background or canceled completion with no such waiter cannot
+retry an unrelated pending Viewer intent; presentation-current results use
+their `visible_change` edge, and exact reused work uses the separate binding
+below. An external lease with no observable owner remains a typed
+Blocked result rather than an unbounded Pending state. Rebinding required media
+to existing queued or in-flight work uses a separate exact waiter set keyed by
+media identity and the complete generation/class/resource-scope/demand
+binding. A Timeline candidate may request multiple media inputs, so this is not
+a single global bit. Broker state is the level predicate: unrelated work cannot
+keep a waiter alive, and an orphaned pending binding is not an execution owner.
+The Frame Work Broker enforces the stronger invariant under its lifecycle lock:
+every retained pending binding has at least one exact queued payload or
+compatible in-flight lease. Completion, failure, and abandonment remove the
+last owner and its binding atomically, but preserve the binding when a real
+queued/in-flight fallback exists.
+If candidate-local Prefetch planning cancels or supersedes a rebound owner after
+Timeline evaluation, the Runtime publishes a payload-free work revision while
+retaining the waiter; the next ordinary completion poll consumes it into one
+candidate-retry request. That request is level-triggered until Window or
+Headless actually enters candidate evaluation and acknowledges it; merely
+polling work cannot lose retry authority during a same-turn Transport change.
+Generation rotation, invalidation, and transport retirement clear all such
+waiters and retained requests. Headless otherwise claims no UI publication.
+Renderer/platform native
 decode admission is consumed by both Adapters and remains separate from media
 decode capability probes.
 
@@ -1024,6 +1613,8 @@ decode capability probes.
 - epoch invalidation across seek/project/timeline revision;
 - fake Audio/Synthetic clocks including jitter and backward observations;
 - device loss continuity and Synthetic → Audio controlled handoff;
+- 19,999,999/20,000,000/20,000,001 ns phase thresholds, callback uncertainty,
+  59.94 target lowering, arithmetic overflow, and transactional rejection;
 - priming timeout, late frames, stale frame, recovery hysteresis;
 - no automatic proxy/color/project mutation;
 - rational frame/sample conversion at 23.976/24/25/29.97/50/59.94;
@@ -1040,662 +1631,17 @@ decode capability probes.
 
 ### Reference-machine gates
 
-- 30 minutes continuous playback with absolute A/V drift ≤20 ms while Audio
-  Master is valid;
+- 30 minutes continuous playback with non-empty Audio Device phase evidence,
+  zero running-interval unproven presentable delivery, and maximum
+  uncertainty-inclusive phase error ≤20 ms while Audio Master is valid;
+- paused/still seek deliveries retain `phase_not_applicable` diagnostics without
+  failing the running-interval phase gate;
 - injected device loss: timeline discontinuity ≤1 ms at Synthetic handoff, no
   backward time, controls remain responsive;
 - recovery handoff produces bounded phase evidence and no visible timeline jump;
 - 100 cross-region seeks with latest epoch only;
-- sustained 4K/Long-GOP pressure reaches bounded memory and reports drops;
+- sustained 4K/Long-GOP pressure reaches bounded
+  `product_process_tree_private_commit_v2` memory and reports drops; every
+  cadence sample covers the App plus demux/FFmpeg descendants with complete
+  scope/count/inventory evidence, so current-process-only data fails closed;
 - Golden/Stress Project runs use real media and structured evidence.
-
-## Historical implementation sequence
-
-This section records how the current boundary was reached; Phases 0–5 are not
-open migration tasks and must not be used to justify compatibility authorities.
-Only Phase 6 remains deferred.
-
-### Phase 0 — Characterize
-
-Pin existing play/pause/seek/end, buffering escape hatch, audio output, scheduler,
-and diagnostics behavior with characterization tests. No semantic refactor yet.
-
-### Phase 1 — Pure Playback Engine
-
-Introduce the headless state machine, exact anchors, Synthetic Clock Master,
-commands/observations/snapshots, invariants, and fake-clock tests. Adapt existing
-`AppState` methods to delegate while retaining current workers.
-
-### Phase 2 — Frame Delivery seam
-
-Replace `preview_waiting` feedback with typed Frame Deliveries. Move deadline,
-drop, Priming, and Recovering decisions into the Engine. Use the UI-independent
-Preview Production Runtime as the shared Adapter composition root.
-
-### Phase 3 — Audio Playback Engine
-
-Move device/worker/buffer/generation fields out of `AppState`. Add consumed
-sample evidence, device-loss detection, Synthetic fallback, preroll, and
-controlled handoff.
-
-### Phase 4 — Preview deepening
-
-Consolidate frame-work scheduling in the Frame Work Broker; keep Frame Store,
-Evidence, scheduling, and result pumping in `app::preview_runtime` by behavioral
-ownership, not file size. The
-Playback Preview Pump is extracted and Window/Headless duplicate orchestration
-is deleted. Canonical Timeline/nested execution, media-source resolution,
-resolved Viewer planning, and concrete media execution have UI-independent App
-Modules. Asset-library/proxy-dispatch adaptation, application presentation
-arbitration, and immutable diagnostics belong to the production Runtime;
-`app_ui::preview` only converts its output into Window Widget models.
-The concrete media worker, cooperative cancellation, result publication,
-bounded shutdown, and FFmpeg Adapter are isolated in the UI-independent
-`app::preview_media_task` deep Module. Its structured task result is the only
-Window/Headless consumption seam; there is no second decoder loop or UI-owned
-cancellation authority. `app::preview_runtime::presentation` selects exact registered
-GPU output, raster-cache hits, same-scope stale reuse, deferred playback
-composites, and the CPU output boundary. It owns no generation, candidate,
-cache-residency, scheduling, or transport authority. Retain one public request
-seam into media and continue moving only behavior with clear ownership.
-Timeline evaluation, media resolution/decode, CPU/GPU execution, raster
-packaging, and final presentation carry one typed Preview Output Unavailability
-contract without collapsing it to `Option`, unit state, or an error string.
-An empty active root, absence of an active root, correctness/dependency
-blockers, and admitted execution failures remain distinct through Window,
-Headless, diagnostics, and performance evidence. Empty active root and nested
-Sequences lower to transparent content; absence of an active root remains
-typed `NoContent`;
-every terminal unavailable result clears current/pinned stale eligibility, while
-only pending work may reuse a same-scope prior output.
-Production Runtime regressions live beside `app::preview_runtime`. Media worker failure, cancellation, queue
-deadline, execution-lease settlement, and shutdown behavior live with
-`app::preview_media_task`, where they run without a Window or Widget.
-
-### Phase 5 — Realtime policy
-
-Enable deadline-based drops and temporary-resolution recovery on the reference
-machine. Preserve explicit proxy recommendation and fail-closed color policy.
-
-### Phase 6 — Advanced transport
-
-Only after forward `1x` gates pass, implement signed rational rate, reverse/J-K-L,
-loop playback, variable-rate audio, and corresponding cache/decode policies.
-
-Each phase must leave the product runnable, update or explicitly version evidence
-schemas when semantics change, and delete superseded state rather than maintaining
-compatibility authorities during Alpha.
-
-## Current integration status
-
-Phases 0–5 are integrated in the production architecture; Phase 6 remains
-explicitly deferred. Phase 5 still lacks release-grade fixed-corpus,
-multi-driver, and device-matrix evidence, which is a verification gap rather
-than permission for a second transport or scheduling authority. The pure Engine now owns
-the app's transport position/state, Synthetic Clock Master, epoch invalidation,
-exact rational clock advancement, stale-delivery rejection, and bounded
-temporary-resolution recovery policy. `AppState` projects current frame and
-running state from the Engine; the former app-local `PlaybackState`, frame
-accumulator, reached-end flag, and misleading audio/video-master diagnostic have
-been removed.
-
-`app_ui::playback_feedback` now keeps payload-free Viewer lifecycle separate
-from exact Frame Presentation Tickets. Loading and Stale remain non-terminal,
-Blocked remains a distinct correctness terminal, and a Ready lifecycle has no
-transport authority without a ticket. Duplicate terminal delivery identities
-cannot mutate recovery twice. The former
-Viewer-owned `playback_buffering` state and its audio mute/clock hold have been
-removed. Window redraw may still defer duplicate GPU candidate preparation while
-Loading, but that presentation guard has no transport authority.
-
-The texture-free transparent lifecycle is Ready under the same rule: it clears
-obsolete texture/stale residency, becomes visible through the Viewer canvas,
-and completes transport only through the exact current ticket. Transport-only
-UI refreshes retain the installed frame/transparent lifecycle and update only
-playhead and transport chrome; they never rebuild the Viewer with an absent
-Preview source.
-
-The production Preview Runtime now preserves typed `NoContent`, `Blocked`, or
-`Failed` output reasons and their owning stage across Timeline traversal, source
-resolution, decode, color/composite execution, GPU lowering, raster packaging,
-and final presentation. Window projects that contract without reclassification;
-Headless and render-performance evidence consume the same bounded counters and
-stage breakdown. Preview render evidence schema v2 fails closed on blocked or
-failed outputs but does not treat the expected absence of an active output
-target as an execution failure.
-
-The ordinary forward buffer remains a bounded 250 ms / eight-frame maximum so
-native decoder surfaces cannot grow with Timeline rate. When that window is
-entirely blank, scheduling may additionally admit the first media-bearing frame
-at the nearest visible root media activation within two seconds (capped at 120
-frames). This is one cold-start activation request, not a larger steady frame
-buffer; it keeps the same Playback Epoch/generation, current-over-prefetch
-priority, queue budget, and cancellation rules.
-
-`app::playback_preview` now owns the production result-to-Playback pump used by
-both `AppUiHost` and the real Headless GPU harness. The Preview Adapter returns
-only bounded work/preroll facts; it no longer exposes completion, expiration,
-and preroll operations for each consumer to compose independently. Window code
-retains repaint/layout policy, while Delivery ordering and Transport mutation
-are shared and covered by UI-free tests.
-
-The Engine now emits a Frame Demand containing epoch, quality revision, demand
-sequence, sequence/timeline revision, exact target, preview scale, and an
-optional monotonic deadline. Paused seek emits an untimed current-frame demand;
-playback/priming emits a timed demand. Its opaque Adapter identity projects epoch, quality revision, demand
-sequence, and target frame. Preview workers consume an absolute wall projection
-of the demand deadline instead of independently reconstructing frame duration.
-Same-epoch completions for a superseded demand are rejected before target
-validation.
-
-Playback-current preview jobs carry the opaque identity projection (`epoch`,
-quality revision, demand sequence, target frame) through queue, worker, result,
-and app polling. Media workers do not interpret playback policy. Polling returns
-exact terminal deliveries only for Late or Failed frame work. Decode-job
-cancellation remains broker/media evidence and does not masquerade as a frame
-presentation for an identity that latest-wins scheduling may already have
-replaced. A successful Ready/Degraded decode is staged as nonterminal readiness; its classification is
-attached as a Frame Presentation Ticket to the exact GPU candidate or CPU
-presentation and terminates the demand only after that Adapter produces a usable
-output. The ticket's final completion timestamp, not decode completion, decides
-whether the result is Ready/Degraded or Late. The Playback Engine
-performs the final identity check, so an old candidate cannot terminate a newer
-demand. Media generation remains a decode/cache cancellation mechanism and is
-not a substitute for Playback Session identity. Payload-free Viewer lifecycle
-feedback cannot synthesize Ready without this exact presentation identity.
-Scheduler pending state retains the same identity until completion or
-expiration. A stall expiration returns that stored identity and never asks the
-host to synthesize a delivery from whichever demand is current at poll time.
-Scrub expiration is capacity/cancellation evidence, not a playback Late Frame
-Delivery.
-
-Phase 4 now uses one `FrameWorkBroker` in `mondrian-playback`. It atomically owns
-semantic class validation, pending and queued capacity, generation invalidation,
-current-over-prefetch and realtime-over-still preemption, worker-lane dequeue,
-in-flight execution leases, deadline dequeue, completion freshness,
-cancellation/expiration, and stable diagnostics. `app::preview_access_mode` is
-the UI-independent application Adapter that owns the media key, explicit access
-intent, bounded job transport, worker-lane mapping, and wall-deadline projection.
-Thumbnail, Viewer, frame-store, and scheduler-policy code depend on this module;
-it has no dependency back on `app_ui`. The
-former `FrameRequestScheduler` and App-local Condvar queue authorities were
-deleted rather than retained as compatibility paths. App-local worker-activity
-atomics were also deleted: windowed reports and Headless verification share the
-Broker diagnostics Interface for execution-lane residency.
-
-`app::preview_scheduler_policy` owns the corresponding pure decision boundary:
-Frame Demand deadline completion, real decode execution quality, bounded
-frame-rate-derived prefetch depth, frame-local hardware recovery signals,
-consecutive-late pressure, and timestamped scrub adaptation. Moving it out of
-`app_ui` prevents a Viewer Adapter from redefining Ready/Degraded/Late,
-hardware-fallback, or decode-strategy semantics.
-
-Time-sensitive Broker transitions use the `MonotonicRuntimeClock` Interface.
-Production adapts Rust's monotonic `Instant`; Headless tests inject an exact
-manual clock. The Broker samples it under the lifecycle lock exactly once per
-atomic operation, so every mutation in that operation observes one instant and
-concurrent lock-acquisition order cannot manufacture a regression. An Adapter
-must therefore be non-blocking and may not perform I/O or re-enter the Broker.
-If a sample still moves backward, the Broker clamps it to the last observation,
-increments structured regression evidence, and every preview/professional gate
-fails closed. This runtime clock measures lifecycle intervals only: it is not a
-Clock Master, Timeline Time, device-consumption clock, or displayed position.
-
-Worker cancellation now crosses that same Interface as atomic
-`FrameExecutionCancellationEvidence`: disposition, request age, and execution-
-lease age share one Broker-clock sample. `app::preview_access_mode` is the
-single application lowering point from that evidence plus request
-priority/access mode into media cancellation reason, Playback work class, and
-request-to-checkpoint attribution. It combines Broker evidence only with the
-separate steady-state prefetch decode budget; the concrete worker polls this
-policy, while `app::preview_runtime` only records and projects its result. Absolute
-Frame Work Deadline comparison is not repeated in the App. The Broker evaluates deadline, generation invalidation,
-preemption, and closure together and returns authoritative request and lease ages, so
-one cause cannot hide slower observation of an earlier cause. The first close
-records an immutable Broker-clock instant; repeated close cannot renew it.
-App worker-stop flags remain lifecycle signals only and cannot timestamp or
-classify cancellation.
-
-`FrameCancellationEvidenceCollector` is the single aggregation Module after
-that seam. The App media Adapter records one completed observation containing
-semantic work class, authoritative cause, total execution-lease lifetime,
-lease-start-to-first-checkpoint, and request-to-first-checkpoint. Codec-function
-entry is intentionally not an execution origin because dequeue and cancellation
-can occur before it. The Module
-derives checkpoint-to-return, preserves exact all-run counts/maxima, and
-partitions Playback, Interactive, and Still without App-local counter families.
-`FrameCancellationPolicy` is shared by windowed diagnostics, Headless tests,
-and professional acceptance: request-to-checkpoint is at most 5 ms; Playback
-and Interactive checkpoint-to-return are at most 50 ms; deterministic Still is
-at most 500 ms. Unknown causes, missing request/checkpoint attribution, and
-impossible timestamp ordering fail closed.
-Total execution lifetime remains diagnostic because work performed before the
-authority request is not cancellation latency.
-
-Frame completion now resolves an atomic Frame Request Binding. The App Adapter
-submits an absolute wall deadline together with the remaining duration sampled
-immediately before admission. The Broker lowers that duration into its own
-Monotonic Runtime Clock without interpreting the absolute value. Rebinding the
-same in-flight key refreshes the latest demand identity and lowered deadline.
-Before a worker attempts its bounded result-channel publication, it stamps
-completion in the Broker exactly once; a later UI poll atomically resolves
-freshness against the latest binding while deadline status remains tied to
-worker return. A full queue cannot retain unbounded decoder surfaces. Shutdown
-abandons the unpublishable execution; a transport-family retirement resolves
-the completed binding as non-reusable and drops its payload before the worker
-acknowledges codec retirement. Canceled old work cannot remove a newer binding,
-and main-thread load cannot turn an on-time decode into false Late evidence.
-
-The playback-owned `PreviewFrameStore` now also contains the CPU residency
-Implementation formerly local to App UI. Count and byte budgets, LRU eviction,
-failure retention, current/stale Viewer pinning, and the oversize-current media
-exception therefore have one test surface for both windowed and headless
-Adapters. App UI retains only payload sizing and presentation-scope mapping.
-
-The app Clock Adapter maintains a wall-`Instant` to Playback
-`MonotonicTimestamp` mapping. Worker deadlines are projected as one absolute
-wall deadline at the actual sampling instant. Immediately before Broker
-admission the Adapter pairs that value with its then-current remaining duration;
-the Broker lowers it once, so queueing cannot renew time or ask UI code to
-compare clocks. Presentation completion uses the same
-mapping, and Playback Evidence records that completion timestamp behind a
-monotonic high-water mark. Demand latency therefore includes final CPU/GPU
-presentation work rather than stopping at decode readiness.
-Before play, pause, stop, or seek mutates the transport, the App Adapter advances
-its runtime timestamp to that high-water mark. A paused GPU presentation can
-therefore never make the next playback epoch begin with a partly expired
-preroll deadline.
-
-Play and running seek now remain in bounded Priming. Ready or allowed Degraded
-delivery starts Synthetic Master immediately; after the 500 ms policy deadline,
-Synthetic Master starts at the deadline anchor and catches up to the current
-monotonic time without adding another priming interval of drift.
-
-The CPAL Audio Playback Adapter now publishes a typed
-`CallbackConsumptionEstimate`: stream generation, active-interval callback
-frames, sample rate, callback age/quantum, estimated latency, uncertainty,
-underrun frames, and stream failure. The callback counters are atomic and PCM
-uses a fixed-capacity lock-free queue, so the realtime callback no longer takes
-the former contended `Mutex<VecDeque<_>>`. The Audio Playback Module requires
-120 ms PCM preroll,
-a callback no older than 100 ms, and at least one active-interval callback
-before offering Audio Device Master. The Engine accepts callback estimates only
-within its versioned 50 ms uncertainty budget. This admits common host callback
-quanta such as 1024 samples at 44.1/48 kHz while still rejecting stale or
-coarsely buffered observations. The Engine anchors the first qualified
-observation without a position jump, advances exact callback observations from
-integer sample deltas, and interpolates the continuous audio phase from the
-monotonic interval between callbacks. Stream failure, stale evidence, excessive
-uncertainty, an impossible consumed-sample slope, or decreasing sample position
-hands off continuously to Synthetic Master. A stale callback from an otherwise
-healthy active stream instead enters `Uncertain`: the Engine preserves the
-existing Audio Device Master for one second, accepts a fresh observation from
-the same interval without reprime, and falls back continuously only when the
-grace expires. Explicit stream failure/device loss remains immediately
-`Unavailable`; repeated unavailable observations while already Synthetic do
-not reanchor or freeze transport.
-
-The grade remains explicitly `CallbackConsumptionEstimate`, not exact hardware
-`DevicePosition`. The former app-owned `AudioClock`/`AudioRenderCursor` no
-longer participates in realtime scheduling and cannot be exposed as Clock
-Master evidence.
-
-Device open/reopen now sits behind a non-blocking media Module. Because CPAL
-streams are `!Send`, a named device thread retains each concrete stream and
-publishes only its lock-free handle. Open failures retry from 250 ms to a 5 s
-ceiling while Synthetic Master continues. Every new generation invalidates old
-audio render work, clears queued PCM, remains inactive through 120 ms preroll,
-and only then offers callback evidence.
-
-Synthetic-to-Audio qualification is phase-controlled. An observation carries
-the exact media `TimelineTime` at active-consumption frame zero; the Engine compares
-latency-adjusted integer consumption with the continuous active Clock Master
-phase at the same monotonic timestamp. Error beyond the independent versioned
-20 ms handoff budget records `PhaseRejected`, keeps Synthetic authoritative
-without reanchoring, and asks the app Adapter to reprime. Accepted/rejected
-generation and signed phase error are immutable snapshot evidence. Small-error
-resampling/slew and backend-native hardware position remain Phase 3 work.
-
-The same Audio Playback Module now owns the PCM render worker, current
-generation, integer-sample next-window position, bounded in-flight admission,
-460 ms steady sequential high watermark, and preroll activation. `AppState` supplies only an
-immutable timeline `AudioPcmRenderer` Adapter and consumes snapshots/events. A
-headless fake output plus fake PCM renderer exercise the same Interface,
-including exact window order, preroll activation, malformed-buffer silence
-substitution, synchronous cancellation of queued old work, and rejection of the
-at-most-one executing completion from an invalidated generation.
-Environment variables no longer alter realtime audio watermark semantics.
-
-Generation invalidation now has one cancellation authority in addition to its
-publication check. Audio Playback cancels a monotonic core token before creating
-the next generation; executing work observes that token through timeline DSP,
-nested audio, decoded-source, and media-window seams. Unit tests hold a render
-and a source decode in flight, reprime/cancel them, require observation within
-50 ms, and verify canceled work creates no cache entry or remembered failure.
-Generation comparison still rejects a completion even if a faulty Adapter
-ignores cancellation; cancellation responsiveness and publication safety are
-independent invariants.
-
-The product `AudioPcmRenderer` and Export now bind the same block-oriented
-`AudioDecodedSource` Interface. `mondrian-audio` keeps only an aligned
-4,096-frame hot window; `mondrian-media` owns ten-second FFmpeg decode windows
-in a cross-source 128-entry/256 MiB weighted LRU keyed by file fingerprint.
-The cache key's output contract includes sample rate and semantic layout, and
-PCM buffer validation compares the complete layout before publication.
-This removes whole-file PCM residency from playback and makes arbitrary seek
-memory independent of source duration. The concrete media Adapter now owns at
-most eight persistent FFmpeg child Sessions with bounded stdout look-ahead and
-stderr retention. Sequential windows reuse one continuous decode stream;
-non-contiguous misses restart only that source revision/output contract.
-Generation cancellation is observed while waiting for output and performs
-kill/wait/join. The PCM cache single-flights identical misses. Cold-open,
-steady-sequential, and random-restart latency remain separate evidence classes;
-the physical-device 30-minute gate is still required.
-
-The physical-device gate is now an implemented, ignored reference-machine
-Adapter rather than an unwritten requirement. `cpal_av_48khz_30min_v1` runs the
-ordinary App transport for real wall time, consumes the production bounded
-audio source through a concrete CPAL stream, completes a generated video layer
-through the real headless Viewer GPU Adapter, and evaluates the shared Playback
-Evidence plus native process-memory facts. It fails on a changed CPAL stream
-generation, stale/failed callback, non-48 kHz stereo output, callback cadence
-rate error above 1,000 ppm after a 100 ms minimum allowance, any PCM silence
-substitution, any underrun recovery,
-delivery-clock drift above 20 ms, less than 99.5% current video readiness,
-source-window decode failure/oversize, missing/broken Session-pool or sequential-
-reuse evidence, steady sequential latency above 460 ms, cache budget
-overflow, or failure of `whole_process_private_commit_v1`. CPAL callback
-consumption is explicitly OS-output evidence, not acoustic loopback evidence.
-Before beginning the observation, the Adapter requires the same healthy CPAL
-stream, fresh callbacks, Audio Device Clock Master, and Active Audio Playback to
-remain qualified for one continuous second. A bounded 30-second tail may extend
-wall execution only until both Playback Evidence and the current uninterrupted
-callback interval each cover the required 30 minutes; it does not reduce either
-threshold. Whether that tail succeeds or expires, evaluation writes the full
-structured report rather than discarding the terminal snapshot behind an early
-assertion.
-On 2026-07-18 the full gate passed once on the local Windows development
-machine: 86,474,752 callback-consumed frames over one 48 kHz stereo stream,
-168,926 callbacks, 53,964/53,964 current-video Ready samples, 107,924 completed
-headless GPU presentations, zero underrun/substitution/recovery, zero delivery-
-clock drift, and zero rejected/failed/blocked terminal deliveries. Source-cache
-residency was 264,960,000 of 268,435,456 bytes, the maximum steady sequential
-ten-second decode was 79,973 us, settled Private Commit growth was 90,004,849
-bytes, and the post-stress sample did not grow. This is local development
-evidence, not a checked-in fixed-reference baseline or acoustic loopback.
-Container duration alone cannot admit this run: the media probe must prove the
-primary audio stream itself spans the complete observation, so automatic
-post-EOF silence cannot masquerade as long-source evidence.
-The local short CPAL/A/V smoke has reached the production stream and headless
-presentation path with zero underrun and zero observed delivery-clock drift.
-Its earlier ~1.02 s process-per-window miss was a cold-path observation that
-motivated persistent Session reuse. It neither proves nor disproves the new
-steady-sequential bound; only the complete reference-machine run can close the
-gate.
-
-Audio transport permission is now explicit. Priming renders into the bounded
-queue under `AudioPlaybackMode::Preroll` without enabling consumption;
-Playing/Recovering switches to `Consume` and activates that same generation.
-This removes the former path where a slow video first frame allowed audio to
-consume during Priming and then triggered a phase-rejected reprime/PCM clear.
-
-Underrun recovery is now sample-budgeted inside Audio Playback. An isolated
-callback shortage emits evidence and preserves Audio Device Master. Missing
-frames accumulated to 20 ms in one active interval trigger a final valid device
-position observation followed at the same monotonic timestamp by an unavailable
-observation, so Synthetic handoff includes all consumed device time. Output then
-re-enters explicit Recovering/preroll state with a new render generation; video
-lateness and Viewer state remain unrelated to this decision.
-
-The app now feeds the collector after transport, clock, demand, delivery, seek,
-and underrun observations and exposes one serializable report. The real-media
-continuous playback harness uses one Play plus monotonic Engine ticks and sends
-exact deadline/failure worker deliveries and presentation deliveries through
-the same Adapter ordering as the production Host. CPU/GPU Ready presentation
-can close cache-hit outcomes, Viewer Blocked closes correctness outcomes, and
-Viewer Stale remains nonterminal. The harness no
-longer fakes continuous playback by seeking and restarting every frame.
-External-media gates consume the same report and fail on delivery-clock drift
-above 20 ms, any sustained-underrun recovery, or fewer than 90% current Ready
-samples even when stale frames keep 95% of samples
-visible. The headless harness now pre-rolls and executes only through the real
-GPU Adapter; it no longer invokes the CPU raster Viewer in parallel. For every
-fresh output, the Adapter retains the exact submission index and waits until
-that submission completes before it marks the output presentable or completes
-the Frame Presentation Ticket. Cached outputs may reuse only an output whose
-original submission was already observed complete. Its report contains both
-the count of completion-observed fresh outputs and per-output GPU completion
-latency, cache reuse, color-stage evidence, explicit fallback reasons, and the
-distinct extents actually submitted to the shared runtime. External gates fail
-when real GPU execution coverage or exact completion coverage is missing,
-playback GPU completion p95 exceeds one frame interval, a readback appears, or
-a GPU blocker is reported. Pre-roll pipeline warm-up is reported separately
-and cannot contaminate the steady-playback p95.
-The professional 4K HEVC Main10 gate now has a fail-closed input and execution
-contract (`uhd_hevc_main10_hardware_1x_v5`). It uses real FFmpeg decoder
-profile/format/rate evidence, primary-video stream duration and any declared
-frame count rather than container duration alone, the probed
-rational cadence, frame-local decode provenance carried through caches and
-prefetch, the exact Viewer candidate, and a completed headless GPU submission.
-The same gate consumes the media worker's isolated-demux lifecycle evidence:
-configuration or launch alone is insufficient. At least one validated helper
-must complete Seek and packet Read commands across more than one decode request;
-after terminal stress at least one helper must close cleanly, every launch must
-have exactly one post-reap terminal class, no helper may remain active, and
-protocol/process/FFmpeg failure or forced close fails the profile. Cancellation
-termination remains a reported fact and is evaluated with the separate
-Broker-owned cancellation timing evidence rather than being inferred from a
-missing process.
-The ignored
-`preview_media_professional_4k_hevc_main10_isolated_demux_qualification_gate`
-is the bounded prerequisite for investing in that long run. It uses the same
-generated 30-minute source contract but plays only 25 real-cadence frames,
-performs cross-region and latest-wins seeks, observes a live helper Seek or
-PacketRead, supersedes it, and requires Broker cancellation, a concrete media
-checkpoint, recovery-frame GPU presentation, complete helper reaping, P010
-hardware provenance, queue quiescence, and Frame Store budgets in the
-versioned `uhd_hevc_main10_isolated_demux_qualification_v1` report. Local I/O
-may finish the observed call just before generation rotation, so the real gate
-does not invent a mandatory helper kill; if termination occurs, its checkpoint
-must agree. Packaged synthetic tests deterministically prove in-call kill/reap
-for InputOpen, StreamInfo, Seek, and PacketRead. This short qualification does
-not satisfy 30-minute cadence, memory plateau, or fixed-machine acceptance.
-Its Adapter derives a non-overridable minimum frame count from 30 minutes and
-the probed rational cadence, uses Playback Evidence's bounded whole-run
-aggregates, pauses transport, completes 50 approximate warm plus 50 exact
-cross-region seeks through the same GPU presentation path, and then schedules a
-100-seek latest-wins burst. The gate
-requires warm p95 at or below 200 ms, accurate p95 at or below 500 ms, at least
-99 superseded-seek observations, zero temporally approximate frames from the
-deterministic accurate-seek access mode, no rejected old terminal delivery, and
-zero Broker pending/queued/in-flight residency after the burst. After every
-decoder worker reaches `Idle`, helpers have zero active processes and complete
-post-reap lifecycle accounting, and media-only Frame Store release succeeds,
-the same report must also show
-zero retained media entries/resource units/pin before its post-stress process
-memory sample; a still-usable final Viewer output remains presentation evidence.
-The same Adapter takes a native whole-process memory sample at a fixed one-second
-cadence. `mondrian-platform-core::ProcessMemoryProbe` defines the OS-neutral
-fact boundary and the Windows implementation uses `GetProcessMemoryInfo`.
-Private Commit is the acceptance metric; current/peak Working Set remains
-diagnostic because OS paging is not application ownership. The versioned
-`whole_process_private_commit_v1` profile requires at least 240 valid samples
-in both minutes 5–10 and minutes 25–30, no incomplete/native-probe samples, a
-4 GiB absolute Private Commit high-water limit, and no more than 256 MiB growth
-from the early settled-window average to the final-window average. After each
-gate's declared terminal stress reaches verified worker quiescence (the 4K
-video profile uses 50 warm seeks, 50 accurate seeks, and a 100-request
-latest-wins burst), one further sample must remain within the same
-absolute cap and within 256 MiB of the final playback average. The collector
-stores scalar counts/sums/high-water facts only; duration cannot make evidence
-memory grow. Unsupported platform probes fail the professional contract rather
-than reporting zero. These are initial reference-profile thresholds and may be
-changed only by a reviewed profile revision backed by reference-machine data.
-The report projects playback-owned cancellation evidence separately for
-Playback, Interactive, and Still work and the professional gate evaluates the
-same shared policy directly. Realtime cancellation is not allowed to hide a
-slower deterministic still decoder. Any Broker runtime-clock regression also
-fails the gate because clamped timing remains diagnosable but is not valid proof.
-In-process FFmpeg sessions now keep
-the request probe installed as an `AVIOInterruptCB` across open, stream-info,
-seek, and packet I/O; the optional external still backend kills and reaps its
-child while draining both pipes. Each canceled decode returns a typed first
-observation containing its execution checkpoint and whether ordinary
-cooperation or the FFmpeg I/O callback yielded. The production Preview worker
-preserves that fact beside, but never in place of, the Broker-owned cause and
-request/checkpoint/return timing. Runtime and professional reports aggregate
-the concrete checkpoint/source facts without reconstructing them from FFmpeg
-errors. A loopback HTTP stall regression drives the real media Interface and
-the production worker through blocked input-open cancellation; fixed-machine
-stream-info, seek, packet-I/O, and driver-stall measurements remain separate
-acceptance obligations. The product gate evaluates each class against its
-fixed return budget rather than deriving a threshold from UI slow-frame
-settings.
-Steady playback is evaluated by p95 plus at least 99.5% current-frame readiness;
-the slowest single decode remains explicit diagnostic evidence but one
-session-open outlier cannot independently fail a 30-minute run whose sustained
-distribution and presentation hit rate pass.
-The deterministic rules and versioned structured failure codes live in the
-deep, UI-independent `app::playback_acceptance` Module; the perf harness is an
-Adapter that projects UI execution diagnostics into acceptance evidence and
-collects real probe, playback, and completed-presentation observations. The
-professional profile fixes cadence, 30-minute coverage, timeouts, decode/queue
-latency, visibility, readiness, and hardware-execution thresholds; developer
-environment variables apply only to non-professional smoke runs and cannot
-weaken these values.
-It cannot pass from filename labels, hardware candidates/device contexts, or
-PlaybackCursor aggregates containing speculative prefetch. The canonical
-corpus now contains a project-authored recipe for a disposable 1812-second
-4K25 HEVC Main10 Long-GOP code-pattern artifact and a separate 1835-second
-48 kHz stereo AAC artifact. These are workload fixtures only: the video
-declares its limited-range Rec.709 code contract but is explicitly ineligible
-for color-reference purposes. Generated identity consists of the pinned recipe
-plus semantic probe contract; the concrete encoder-dependent bytes are
-attested and hashed inside each reference run rather than pretending to be
-stable across FFmpeg/x265 builds.
-
-`windows-playback-m0-v3` is the machine-readable execution contract joining
-the two professional gates to those fixture purposes and expected report
-profiles. The validation runner captures an operator-assigned opaque machine
-ID (never a hardware serial), validates the Windows machine class, records
-code/corpus/recipe/artifact hashes, executes the release-profile Video and CPAL
-A/V gates, and writes one evidence bundle. Each gate is launched by a separate
-Reference Playback Gate Supervisor with a plan-owned wall deadline, asynchronous
-stdout/stderr draining, and full descendant-process-tree termination. The Video
-gate also samples a cloneable read-only worker-progress watch into sparse JSONL;
-every transition and five-second heartbeat is flushed independently of the
-blocked test thread. The journal is diagnostic evidence only: it cannot cancel,
-retire, restart, or declare completion for a media execution lease. A timeout
-therefore preserves the last observable FFmpeg/media stage but always fails the
-gate, including when no normal report can be written.
-
-The clean `ed73f1e` Video diagnostic
-`20260721T213615Z-local-windows-dev-01-a6c50a4e` completed all 44,994 real-cadence
-D3D12VA P010 Playback frames, then failed its first cross-region exact Viewer
-request after 30 seconds. Broker evidence showed cancellation requested for one
-in-flight NonPlayback lease, while the media cancellation fact remained absent.
-The independent journal
-proved the Playback worker retired normally and the NonPlayback worker remained
-in `PacketRead` for the complete timeout. This replaces the earlier coarse
-“codec” hypothesis with a concrete `av_read_frame` call-family observation; it
-still does not distinguish an unpolled interrupt, a stale cancellation probe,
-or an ignored callback result. Callback poll/cancel sequences are therefore now
-part of the same progress Interface and the compressed endurance Adapter can
-write the same schema-v2 journal before another real-cadence run is justified.
-
-The follow-up clean `2eeefd3` Video diagnostic
-`20260721T230356Z-local-windows-dev-01-0153581d` removed that ambiguity: all
-44,994 cadence Playback frames again completed through D3D12VA P010, and the
-first cross-region exact request remained in `PacketRead` while the callback
-was polled at least 641 times and returned cancellation at least 596 times for
-that request. `av_read_frame` still did not return. Callback installation and
-correct probe binding therefore cannot provide a recoverable execution lease;
-only process isolation can retire this class of format work honestly.
-
-Production Playback, Scrub, and Exact now isolate open, stream discovery, seek,
-and packet read in one bounded packaged helper per decode Session while keeping
-codec/DPB/hardware surfaces in the parent Preview worker. The helper serves
-strictly ordered, single-in-flight `seek/read/close` commands and survives
-successful frame requests and EOF; it is not spawned per frame and never
-switches sources. Parent cancellation disconnects IPC, terminates and reaps it,
-poisons the packet source, and records `IsolatedDemuxTermination` at the actual
-Seek or PacketRead checkpoint instead of forging an `FfmpegIoInterrupt` return.
-Because that source can never resume, the worker retires the complete paired
-packet-source/codec Session immediately; the normal recoverable-cancellation
-codec flush is skipped instead of mutating hardware decode state immediately
-before unavoidable teardown.
-The response queue has capacity one and every serialized allocation has an
-independent hard cap, so this recovery path does not scale memory with media
-duration and remains compatible with the 8 GiB correctness class. Synthetic
-H.264/B-frame short gates prove per-mode reuse plus
-InputOpen/StreamInfo/Seek/PacketRead cancellation. The real Main10 short
-qualification exercises cross-region seek, real cancellation and post-cancel
-GPU recovery through the same production path. The complete Video gate then
-proves real Main10 pause/seek/close/quit, long-run cadence, and memory evidence
-on a qualified machine; neither proof may substitute for the other.
-
-Only the complete two-gate set on a qualified `standard-playback` machine
-(16 GiB installed memory or higher), with a clean unchanged Git revision and
-passing structured reports, is baseline-eligible. The wider product support
-floor is 8 GiB: that class must remain correct, bounded, and capable of explicit
-quality/proxy fallback, but need not meet native 4K Main10 real-time thresholds.
-A below-baseline memory class may continue only through an explicit,
-contract-listed diagnostic override; missing execution prerequisites such as
-GPU/toolchain identity still fail closed, and an override can never produce
-baseline evidence. A qualifying fixed-machine result establishes the M0
-baseline. Broader driver/display and audio-device coverage remains
-required before release-level professional playback acceptance can be claimed.
-
-The clean `c484c47` reference run
-`20260722T065141Z-local-windows-dev-01-f4fc3eff` completed the whole
-`windows-playback-m0-v3` plan on the 16 GiB `standard-playback` Windows machine
-without changing revision. The Video gate presented 45,129 frames through the
-headless GPU Adapter, recorded 44,999 current Ready and two Stale cadence
-observations, and retained D3D12VA P010 provenance with no fallback or
-readback. Its Playback helper had one launch, one cross-request-reused Session,
-and one clean post-reap terminal; the NonPlayback path handled 104 seeks over
-two cleanly reaped Sessions, with zero failed, forced, or active helpers at
-quiescence. Peak Private Commit was about 1.37 GiB and the post-stress sample
-was about 1.23 GiB. The companion CPAL gate retained Audio Device Clock Master
-for about 1799.994 seconds, used a continuous Synthetic Clock Master for about
-32.6 ms, recorded zero underrun/recovery/render substitution and zero sampled
-delivery-clock drift, and converged at about 0.77 GiB Private Commit. The
-runner reported `passed-baseline` only after both reports, machine/asset
-validation, artifact and recipe hashes, clean-tree state, and unchanged Git
-revision agreed. The generated media and run bundle remain disposable local
-evidence under `target`; recipes and acceptance contracts, not multi-gigabyte
-artifacts or reports, are repository inputs.
-
-On 2026-07-18, a 2.88-second decoder-proven 3840×2160 25 fps HEVC Main10 HLG
-sample completed the external continuous-playback smoke on an NVIDIA RTX 3050
-Laptop GPU: 60/60 current frames were Ready, all 60 media layers used retained
-D3D12VA P010 hardware surfaces, all 60 Viewer composites remained native GPU
-work, and upload/readback/fallback counts were zero. GPU execution p95 was about
-1.8 ms and the real-media gate passed. This proves the short production
-decode→native-import→GPU-presentation path on that machine; it does not satisfy
-the 30-minute duration, repeated seek, physical audio-device, driver-matrix, or
-bounded whole-process-memory acceptance run. The source was an unverified-rights
-local download used only by an ignored manual diagnostic. It is not a canonical
-fixture and cannot support release or professional acceptance evidence.
-
-Later the same day, an unverified-rights local 30m39s 3840×2160 59.94 fps HEVC
-Main10 HDR10 source completed the full video v4 Adapter: 107,894 cadence frames,
-107,850 current Ready observations and 44 stale-visible observations, 100
-completed seeks plus latest-wins supersession, zero unavailable/invalid terminal
-facts, complete GPU timestamp evidence, maximum request-to-checkpoint
-cancellation latency of about 2.14 ms, and passing Private Commit plateau plus
-post-idle convergence. This closes the combined long-run contract on that one
-development machine only. The source and report remain local and cannot become
-canonical release evidence.
-
-The generated-media gate additionally requires execution—not merely policy
-state—when at least two pressure thresholds of requested-but-unengaged hardware
-decode are observed: Playback Evidence must contain the corresponding Degraded
-deliveries, and the headless GPU report must contain exact Full, Half, and
-Quarter extents. This prevents a recovery state transition from passing while
-decode/composite work remains at the original size.
-
-The generated playback fixture declares limited-range BT.709 primaries,
-transfer, and matrix metadata. A fixture without a quantization range must fail
-the same closed color-contract boundary as user media; the harness must never
-obtain a passing frame from an implicit swscale range guess.

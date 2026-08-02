@@ -44,8 +44,8 @@ use mondrian_editor_state::Action;
 use mondrian_effects::{EffectNode, EffectType};
 use mondrian_playback::PreviewResolutionScale;
 use mondrian_renderer::{
-    evaluate_timeline_render_plan, BasicTitleRasterizer, TimelineCompositeScratch,
-    TimelineEvaluationRequest, TimelineRenderPlanElement,
+    evaluate_prepared_visual_program, BasicTitleRasterizer, PreparedVisualProgram,
+    TimelineCompositeScratch, TimelineEvaluationRequest, TimelineRenderPlanElement,
 };
 use mondrian_timeline::clip::Clip;
 use mondrian_timeline::sequence::Sequence;
@@ -290,7 +290,7 @@ struct VisualExecutionEvidence {
     export_elements: usize,
     cross_dissolve_progress: f32,
     left_effect_graph_signature: u64,
-    title_raster_signatures: Vec<u64>,
+    title_raster_identities: Vec<String>,
     title: EvaluatedTitleEvidence,
     rgba_sha256: String,
     float_linear_composites: u64,
@@ -611,7 +611,7 @@ fn export_transition_input_effect_signature(
 ) -> anyhow::Result<u64> {
     match input {
         mondrian_renderer::TimelineTransitionInputPlan::SolidColor(layer) => {
-            Ok(layer.effect_graph.signature_hash)
+            Ok(layer.effect_graph.signature_hash())
         }
         other => bail!("visual Golden expected a Solid Color transition input, got {other:?}"),
     }
@@ -621,7 +621,9 @@ fn preview_transition_input_effect_signature(
     input: &ResolvedPreviewTransitionInput,
 ) -> anyhow::Result<u64> {
     match input {
-        ResolvedPreviewTransitionInput::SolidColor(layer) => Ok(layer.effect_graph.signature_hash),
+        ResolvedPreviewTransitionInput::SolidColor(layer) => {
+            Ok(layer.effect_graph.signature_hash())
+        }
         _ => bail!("visual Golden expected a resolved Solid Color transition input"),
     }
 }
@@ -630,8 +632,11 @@ fn execute_visual_frame(state: &AppState, frame: i64) -> anyhow::Result<VisualEx
     let sequence = state.active_sequence().context("active Sequence is absent")?;
     let color_context =
         sequence.settings.root_program_color_context(state.project_color_environment());
-    let export_plan =
-        evaluate_timeline_render_plan(sequence, TimelineEvaluationRequest::export(frame))?;
+    let program = PreparedVisualProgram::prepare(sequence)?;
+    let export_plan = evaluate_prepared_visual_program(
+        &program,
+        TimelineEvaluationRequest::export(FramePosition::new(frame, sequence.time_base())),
+    )?;
     let export_transition = export_plan
         .elements
         .iter()
@@ -652,7 +657,7 @@ fn execute_visual_frame(state: &AppState, frame: i64) -> anyhow::Result<VisualEx
         export_transition_input_effect_signature(&export_transition.left)?;
 
     let mut rasterizer = BasicTitleRasterizer::new();
-    let mut raster_signatures = Vec::new();
+    let mut raster_identities = Vec::new();
     let mut preview_title = None;
     let mut media_frame = |_request| PreviewTimelineMediaFrame::Unavailable {
         reason: PreviewUnavailability::blocked(
@@ -671,7 +676,7 @@ fn execute_visual_frame(state: &AppState, frame: i64) -> anyhow::Result<VisualEx
                 request.working_color_space,
             ) {
                 Ok(frame) => {
-                    raster_signatures.push(frame.signature);
+                    raster_identities.push(frame.identity().to_string());
                     PreviewTimelineTitleFrame::Ready(frame)
                 }
                 Err(error) => PreviewTimelineTitleFrame::Unavailable {
@@ -766,7 +771,7 @@ fn execute_visual_frame(state: &AppState, frame: i64) -> anyhow::Result<VisualEx
         export_elements: export_plan.elements.len(),
         cross_dissolve_progress: preview_progress,
         left_effect_graph_signature: export_left_effect_signature,
-        title_raster_signatures: raster_signatures,
+        title_raster_identities: raster_identities,
         title: title_evidence(&preview_title),
         rgba_sha256: sha256_bytes(&output.rgba),
         float_linear_composites: output.composite_diagnostics.float_linear_composites,

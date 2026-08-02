@@ -14,9 +14,9 @@ use mondrian_export::preset::TimelineExportRange;
 use mondrian_media::{PreviewDecodeSessionContext, VideoCodecProfile};
 use mondrian_playback::PreviewResolutionScale;
 use mondrian_renderer::{
-    evaluate_timeline_render_plan, execute_cpu_output_boundary, CpuColorFrame,
-    RenderOutputColorBoundary, RenderOutputColorBoundaryTarget, TimelineCompositeScratch,
-    TimelineEvaluationRequest, TimelineRenderPlanElement,
+    evaluate_prepared_visual_program, execute_cpu_output_boundary, CpuColorFrame,
+    PreparedVisualProgram, RenderOutputColorBoundary, RenderOutputColorBoundaryTarget,
+    TimelineCompositeScratch, TimelineEvaluationRequest, TimelineRenderPlanElement,
 };
 use mondrian_timeline::{Clip, Sequence};
 use serde::Serialize;
@@ -150,12 +150,12 @@ pub(super) fn execute_retime_media_evidence(
     let preview_source_time = plan_source_time(
         &sequence,
         asset_id,
-        TimelineEvaluationRequest::preview(sample_frame, 1.0),
+        TimelineEvaluationRequest::preview(FramePosition::new(sample_frame, time_base), 1.0),
     )?;
     let export_source_time = plan_source_time(
         &sequence,
         asset_id,
-        TimelineEvaluationRequest::export(sample_frame),
+        TimelineEvaluationRequest::export(FramePosition::new(sample_frame, time_base)),
     )?;
     ensure!(
         preview_source_time == expected_source_time && export_source_time == expected_source_time,
@@ -209,7 +209,7 @@ pub(super) fn execute_retime_media_evidence(
     );
     decode_context.clear();
 
-    state.seek(sample_frame);
+    state.seek(sample_frame)?;
     let mut viewer = GoldenHeadlessPreview::new()?;
     let presentation = viewer.present_current(state, VIEWER_PRESENTATION_TIMEOUT)?;
     let viewer_evidence = viewer.evidence();
@@ -261,7 +261,8 @@ fn plan_source_time(
     asset_id: AssetId,
     request: TimelineEvaluationRequest,
 ) -> anyhow::Result<TimelineTime> {
-    let plan = evaluate_timeline_render_plan(sequence, request)?;
+    let program = PreparedVisualProgram::prepare(sequence)?;
+    let plan = evaluate_prepared_visual_program(&program, request)?;
     let media = plan
         .elements
         .iter()
@@ -473,12 +474,13 @@ fn reimport_and_compare(
     );
     let asset = &imported[0];
     let video = asset
-        .media_info
+        .media_probe()
+        .context("retime reimport has no coherent media probe")?
         .primary_video()
         .context("retime reimport has no video stream")?;
     ensure!(
         asset.kind == AssetKind::Video
-            && asset.path == export.output_path()
+            && asset.file_path() == Some(export.output_path())
             && video.codec == mondrian_media::info::VideoCodec::H264
             && video.codec_profile == VideoCodecProfile::H264High
             && video.width == expected.resolution.width
@@ -498,6 +500,7 @@ fn reimport_and_compare(
         source_time: TimelineTime::ZERO,
         target_resolution: expected.resolution,
         input_color,
+        cpu_working_required: false,
     };
     let mut decode_context = PreviewDecodeSessionContext::new();
     let decoded = decode_media(state, &request, asset, &mut decode_context)?;

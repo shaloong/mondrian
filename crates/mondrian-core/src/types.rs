@@ -34,6 +34,16 @@ macro_rules! define_id {
                 write!(f, "{}", self.0)
             }
         }
+
+        impl crate::AuthoringFootprint for $name {
+            fn collect_authoring_footprint(
+                &self,
+                _collector: &mut crate::AuthoringFootprintCollector,
+            ) -> Result<(), crate::AuthoringFootprintError> {
+                let Self(_) = self;
+                Ok(())
+            }
+        }
     };
 }
 
@@ -185,21 +195,26 @@ impl fmt::Display for Rational {
     }
 }
 
-/// 帧精确时间码
+/// Integer coordinate on one explicit frame-evaluation grid.
 ///
-/// 内部以帧数 + 时间基（帧率的倒数）表示：
+/// This is a transient UI/evaluation coordinate, not canonical persisted author
+/// time and not SMPTE display timecode. It stores a frame index plus the
+/// reciprocal frame rate:
 /// `seconds = frame * time_base = frame * (1 / fps)`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct FramePosition {
-    /// 帧编号（可为负数，用于 offset）
+    /// Frame index; negative values are valid only for explicitly signed domains.
     pub frame: i64,
-    /// 时间基 = 1/fps，例如 25fps → Rational{1, 25}
+    /// Seconds per frame, for example 25 fps is `Rational { num: 1, den: 25 }`.
     pub time_base: Rational,
 }
 
 impl FramePosition {
-    pub const ZERO: Self = Self { frame: 0, time_base: Rational::FPS_25 };
-
+    /// Construct a coordinate without inventing or validating its owner grid.
+    ///
+    /// Domain adapters must validate the time base and lower through
+    /// [`TimelineTime`](crate::TimelineTime) before using the value as author
+    /// time.
     pub fn new(frame: i64, time_base: Rational) -> Self {
         Self { frame, time_base }
     }
@@ -1456,4 +1471,121 @@ pub enum AssetSource {
 pub enum GeneratedAssetKind {
     SolidColor,
     AdjustmentLayer,
+}
+
+impl crate::AuthoringFootprint for CustomOcioRoleIdentity {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> Result<(), crate::AuthoringFootprintError> {
+        let Self { role, color_space } = self;
+        collector.collect(role)?;
+        collector.collect(color_space)
+    }
+}
+
+impl crate::AuthoringFootprint for CustomOcioLookIdentity {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> Result<(), crate::AuthoringFootprintError> {
+        match self {
+            Self::DisplayView { looks } => collector.collect(looks),
+            Self::None => Ok(()),
+        }
+    }
+}
+
+impl crate::AuthoringFootprint for CustomOcioOutputIdentity {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> Result<(), crate::AuthoringFootprintError> {
+        let Self {
+            output_color_space: _,
+            display,
+            view,
+            display_color_space,
+            look,
+        } = self;
+        collector.collect(display)?;
+        collector.collect(view)?;
+        collector.collect(display_color_space)?;
+        collector.collect(look)
+    }
+}
+
+impl crate::AuthoringFootprint for CustomOcioDynamicPropertyIdentity {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> Result<(), crate::AuthoringFootprintError> {
+        let Self { property, value } = self;
+        collector.collect(property)?;
+        collector.collect(value)
+    }
+}
+
+impl crate::AuthoringFootprint for CustomOcioProjectIdentity {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> Result<(), crate::AuthoringFootprintError> {
+        let Self {
+            source,
+            config_sha256,
+            resolved_cache_id,
+            processor_graph_sha256,
+            working_space,
+            outputs,
+            roles,
+            dynamic_properties,
+        } = self;
+        collector.collect(source)?;
+        collector.collect(config_sha256)?;
+        collector.collect(resolved_cache_id)?;
+        collector.collect(processor_graph_sha256)?;
+        collector.collect(working_space)?;
+        collector.collect(outputs)?;
+        collector.collect(roles)?;
+        collector.collect(dynamic_properties)
+    }
+}
+
+impl crate::AuthoringFootprint for ColorEngine {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> Result<(), crate::AuthoringFootprintError> {
+        match self {
+            Self::CustomOcio { identity } => collector.collect(identity),
+            Self::MondrianStandard { package: _ } | Self::Aces { preset: _ } => Ok(()),
+        }
+    }
+}
+
+impl crate::AuthoringFootprint for OcioConfigSource {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> Result<(), crate::AuthoringFootprintError> {
+        match self {
+            Self::Builtin { name } => collector.collect(name),
+            Self::Path { path } => collector.collect(path),
+            Self::MondrianStandard { package: _ } | Self::Environment => Ok(()),
+        }
+    }
+}
+
+impl crate::AuthoringFootprint for AssetSource {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> Result<(), crate::AuthoringFootprintError> {
+        match self {
+            Self::File(path) => collector.collect(path),
+            Self::Remote(url) => collector.collect(url),
+            Self::Generated(_) => Ok(()),
+        }
+    }
 }

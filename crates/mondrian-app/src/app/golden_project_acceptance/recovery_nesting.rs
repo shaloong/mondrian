@@ -40,8 +40,9 @@ use mondrian_core::{
 use mondrian_export::preset::TimelineExportRange;
 use mondrian_playback::PreviewResolutionScale;
 use mondrian_renderer::{
-    evaluate_timeline_render_plan, RenderColorStageDiagnostics, TimelineCompositeDiagnostics,
-    TimelineCompositeScratch, TimelineEvaluationRequest, TimelineRenderPlanElement,
+    evaluate_prepared_visual_program, PreparedVisualProgram, RenderColorStageDiagnostics,
+    TimelineCompositeDiagnostics, TimelineCompositeScratch, TimelineEvaluationRequest,
+    TimelineRenderPlanElement,
 };
 use mondrian_timeline::sequence::SequenceRole;
 use serde::Serialize;
@@ -400,7 +401,11 @@ fn nested_author_evidence(
 
 fn execute_nested_frame(state: &AppState, frame: i64) -> anyhow::Result<NestedExecutionEvidence> {
     let sequence = state.active_sequence().context("active Sequence is absent")?;
-    let sequences = state.export_sequences_snapshot();
+    // The prepared visual closure accepts the root inside `sequences` only
+    // when both roles borrow the exact same immutable snapshot. Cloning the
+    // complete collection here would fabricate a second root snapshot with
+    // the same durable identity, which correctly fails closed as ambiguous.
+    let sequences = state.sequences();
     let color_context =
         sequence.settings.root_program_color_context(state.project_color_environment());
     let mut media_frame = |_request| PreviewTimelineMediaFrame::Unavailable {
@@ -417,7 +422,7 @@ fn execute_nested_frame(state: &AppState, frame: i64) -> anyhow::Result<NestedEx
     };
     let resolved = match resolve_preview_timeline(
         sequence,
-        &sequences,
+        sequences,
         frame,
         EXECUTION_RESOLUTION,
         PreviewResolutionScale::Full,
@@ -467,8 +472,11 @@ fn execute_nested_frame(state: &AppState, frame: i64) -> anyhow::Result<NestedEx
         "Preview did not execute exactly one float-linear nested composite"
     );
 
-    let root_plan =
-        evaluate_timeline_render_plan(sequence, TimelineEvaluationRequest::export(frame))?;
+    let root_program = PreparedVisualProgram::prepare(sequence)?;
+    let root_plan = evaluate_prepared_visual_program(
+        &root_program,
+        TimelineEvaluationRequest::export(FramePosition::new(frame, sequence.time_base())),
+    )?;
     let nested_plans = root_plan
         .elements
         .iter()
@@ -492,9 +500,13 @@ fn execute_nested_frame(state: &AppState, frame: i64) -> anyhow::Result<NestedEx
             mondrian_core::FrameRounding::Floor,
         )?
         .frame;
-    let child_plan = evaluate_timeline_render_plan(
-        nested_sequence,
-        TimelineEvaluationRequest::export(nested_frame),
+    let child_program = PreparedVisualProgram::prepare(nested_sequence)?;
+    let child_plan = evaluate_prepared_visual_program(
+        &child_program,
+        TimelineEvaluationRequest::export(FramePosition::new(
+            nested_frame,
+            nested_sequence.time_base(),
+        )),
     )?;
     let export_child_solid_elements = child_plan
         .elements
@@ -509,8 +521,9 @@ fn execute_nested_frame(state: &AppState, frame: i64) -> anyhow::Result<NestedEx
     let export_snapshot = capture_timeline_export_snapshot(
         state,
         sequence.clone(),
-        sequences,
+        sequences.to_vec(),
         TimelineExportRange::EntireSequence,
+        false,
     )
     .map_err(anyhow::Error::msg)?;
     let export_composite = mondrian_export::queue::export_composite_diagnostics_for_frame(
@@ -706,19 +719,17 @@ pub(super) fn execute_recovery_nesting_stage(
         candidates.len() == 1 && candidates[0].autosave_file == autosave_file,
         "published autosave is not the exact canonical recovery candidate"
     );
-    let candidate_saved_at = candidates[0].saved_at_unix_ms;
-    let candidate_snapshot_count = candidates[0].total_snapshots;
+    let candidate = candidates[0].clone();
+    let candidate_saved_at = candidate.saved_at_unix_ms;
+    let candidate_snapshot_count = candidate.total_snapshots;
 
-    state.close_project();
+    state.close_project()?;
     ensure!(
         state.authoring_session_id().is_none(),
         "crash simulation retained the original Authoring Session"
     );
     state.dispatch_action(project_recover_from_autosave_action(
-        ProjectRecoverFromAutosavePayload {
-            project_file: project_path.clone(),
-            autosave_file: autosave_file.clone(),
-        },
+        ProjectRecoverFromAutosavePayload { candidate },
     ))?;
     workflow.verify_binding()?;
     let recovered_session = author_checkpoint(workflow.app())?;

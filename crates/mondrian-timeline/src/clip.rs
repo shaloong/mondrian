@@ -11,6 +11,7 @@ use mondrian_core::{
     effect_data::{EffectNode, EffectType},
     mask_data::MaskComponent,
     types::*,
+    AuthoringFootprint, AuthoringFootprintCollector, AuthoringFootprintError, AuthoringList,
     MondrianError, ParameterId, Result, TimeScale, TimelineTime,
 };
 use serde::{Deserialize, Serialize};
@@ -25,9 +26,19 @@ pub enum TrimEdge {
 }
 
 /// 2D 变换（位置 / 缩放 / 旋转 / 锚点 / 不透明度），所有属性可关键帧动画
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Transform2D {
     properties: PropertyBag,
+}
+
+impl AuthoringFootprint for Transform2D {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> std::result::Result<(), AuthoringFootprintError> {
+        let Self { properties } = self;
+        collector.collect(properties)
+    }
 }
 
 impl Transform2D {
@@ -357,13 +368,24 @@ impl Default for ClipSourceTimeMap {
     }
 }
 
+impl AuthoringFootprint for ClipSourceTimeMap {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut AuthoringFootprintCollector,
+    ) -> std::result::Result<(), AuthoringFootprintError> {
+        match self {
+            Self::Constant { source_origin: _, scale: _ } => Ok(()),
+        }
+    }
+}
+
 /// 时间线片段语义 — re-exported from mondrian_core::timeline_data.
 pub use mondrian_core::timeline_data::{
     AlphaInterpretation, ClipContent, ClipKind, MediaInterpretation, NestedColorProcessing,
 };
 
 /// 时间线上的一个剪辑片段
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Clip {
     pub id: ClipId,
@@ -389,10 +411,10 @@ pub struct Clip {
     pub transform: Transform2D,
     /// 效果链（实例级，属性路径已按 effect id 做命名空间隔离）
     #[serde(default)]
-    pub effects: Vec<EffectNode>,
+    pub effects: AuthoringList<EffectNode>,
     /// 蒙版列表（按顺序叠加渲染）
     #[serde(default)]
-    pub masks: Vec<MaskComponent>,
+    pub masks: AuthoringList<MaskComponent>,
     /// Optional Sequence-local edit-synchronization group. Every member with
     /// the same identity participates in linked selection/edit operations.
     #[serde(default)]
@@ -400,13 +422,44 @@ pub struct Clip {
     /// Placement-local audio authoring. Track membership and temporal placement
     /// remain owned exclusively by the containing Track and this Clip.
     #[serde(default)]
-    pub audio_components: Vec<AudioComponentEdit>,
+    pub audio_components: AuthoringList<AudioComponentEdit>,
     /// 是否禁用
     pub is_disabled: bool,
     /// 混合模式（覆盖轨道设置）
     pub blend_mode: Option<BlendMode>,
     /// 显示标签（可选）
     pub label: Option<String>,
+}
+
+impl AuthoringFootprint for Clip {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> std::result::Result<(), AuthoringFootprintError> {
+        let Self {
+            id: _,
+            content,
+            position: _,
+            duration: _,
+            clip_time_in: _,
+            source_time_map,
+            transform,
+            effects,
+            masks,
+            link_group: _,
+            audio_components,
+            is_disabled: _,
+            blend_mode: _,
+            label,
+        } = self;
+        collector.collect(content)?;
+        collector.collect(source_time_map)?;
+        collector.collect(transform)?;
+        collector.collect(effects)?;
+        collector.collect(masks)?;
+        collector.collect(audio_components)?;
+        collector.collect(label)
+    }
 }
 
 impl Clip {
@@ -454,10 +507,10 @@ impl Clip {
             clip_time_in: TimelineTime::ZERO,
             source_time_map: ClipSourceTimeMap::default(),
             transform: Transform2D::identity(),
-            effects: vec![],
-            masks: vec![],
+            effects: AuthoringList::new(),
+            masks: AuthoringList::new(),
             link_group: None,
-            audio_components: Vec::new(),
+            audio_components: AuthoringList::new(),
             is_disabled: false,
             blend_mode: None,
             label: None,
@@ -765,17 +818,18 @@ impl Clip {
         Ok(())
     }
 
-    pub fn add_effect(&mut self, effect_type: EffectType) -> EffectId {
-        self.insert_effect_at(self.effects.len(), effect_type)
-    }
-
-    /// Add a pre-built effect node. The caller is responsible for populating
-    /// default properties (see `EffectNodeExt::with_defaults()` in `mondrian-effects`).
+    /// Add a definition-bound effect node.
+    ///
+    /// Product authoring must construct the node from its registered definition
+    /// (see `EffectNodeExt::with_defaults()` in `mondrian-effects`) before
+    /// crossing this Timeline-owned insertion boundary. Timeline deliberately
+    /// cannot synthesize effect parameters because it does not own or depend on
+    /// the executable effect registry.
     pub fn add_effect_node(&mut self, effect: EffectNode) -> EffectId {
         self.insert_effect_node_at(self.effects.len(), effect)
     }
 
-    /// Insert a pre-built effect node at the given index.
+    /// Insert a definition-bound effect node at the given index.
     pub fn insert_effect_node_at(&mut self, index: usize, mut effect: EffectNode) -> EffectId {
         let label = self.next_effect_group_label(&effect.effect_type);
         effect.instantiate_for_clip(label);
@@ -783,11 +837,6 @@ impl Clip {
         let idx = index.min(self.effects.len());
         self.effects.insert(idx, effect);
         effect_id
-    }
-
-    pub fn insert_effect_at(&mut self, index: usize, effect_type: EffectType) -> EffectId {
-        let effect = EffectNode::new(effect_type);
-        self.insert_effect_node_at(index, effect)
     }
 
     pub fn effect_enabled(&self, effect_id: EffectId) -> Option<bool> {

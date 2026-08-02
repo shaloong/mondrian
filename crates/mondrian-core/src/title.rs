@@ -431,6 +431,16 @@ fn title_error(reason: impl Into<String>) -> MondrianError {
     }
 }
 
+impl crate::AuthoringFootprint for BasicTitle {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self { properties } = self;
+        collector.collect(properties)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

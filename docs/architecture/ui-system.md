@@ -134,6 +134,22 @@ system-font, memory-mapped-font, and raster-image features. `VectorIcon`
 normalizes this subset into retained meshes and an optional cached raster; the
 app favicon uses the same path-only rasterizer.
 
+Every SVG document receives one domain-separated, length-framed SHA-256 source
+identity over its exact bytes. That complete 32-byte value—not a caller label
+or a projected standard-library hash—is the authority for static parse reuse,
+raster reuse, and renderer-atlas draw keys. A bundled icon's caller-supplied
+`id` remains diagnostic only: reusing that label for different SVG bytes must
+parse, rasterize, and upload a distinct icon, while identical bytes may safely
+share work across labels.
+
+Raster reuse is a process-level UI resource, not an unbounded static memo.
+`mondrian-ui-widgets` retains an exact source-and-size LRU with both entry and
+RGBA-byte limits (128 entries and 32 MiB by default). Reconfiguration trims
+synchronously, zero disables retention, and an individual raster larger than
+the byte grant is returned to the caller without entering the cache. Parsed
+geometry for bundled `include_str!` artwork remains a finite static-product
+set; dynamically supplied SVGs do not enter that static parse map.
+
 Adding an unsupported SVG feature requires an explicit capability decision,
 new adversarial parsing/raster tests, and a dependency review. It must not
 silently widen every UI process's parser surface. Timeline titles and imported
@@ -299,6 +315,26 @@ existing unlocked tracks are occupied, and commits placement plus any new
 Track as one Undo transaction. Timeline presentation uses dedicated semantic
 title colors and the ordinary Clip selection/trim/drag model.
 
+## Authoring Commit Consumption
+
+Every successful Sequence or Project transaction returns one
+`AuthoringCommit`. The App authoring Module consumes that receipt through one
+deep adapter: it reports an explicitly unretained Undo command and the
+resulting snapshot-history barrier, expands
+Project-wide changes to the conservative current Sequence set, publishes
+exactly one canonical `TimelineModified` invalidation for each affected
+Sequence, and reconciles active Sequence/Track/Clip targeting after structural
+changes. Project settings, Sequence collection edits, proxy-mode intent,
+Undo/Redo, and ordinary Timeline edits cross the same adapter. Callers may still
+publish operation-specific facts such as `ClipAdded`, but they do not repeat
+cache invalidation or navigation repair.
+
+This keeps `AuthoringSession` authoritative for transaction success and the App
+authoring Module authoritative for post-commit product effects. Window
+Adapters, panels, and individual command implementations may not reinterpret
+`project_wide`, ignore `undo_retained`, or construct a second changed-Sequence
+set. Headless and Window execution therefore observe the same receipt semantics.
+
 ## Semantic Action Completion
 
 `Action` is an intent envelope, not proof that work happened. `AppState` accepts
@@ -310,6 +346,56 @@ and an empty history returns typed `ActionNotExecuted` instead of pretending
 that author state changed. The Window Adapter consults action availability and
 does not dispatch disabled Undo/Redo gestures; direct, Headless, scripting, and
 automation callers retain the fail-closed product contract.
+
+The `Action::Seek` and `Action::MoveClipToTrack` variants retain the complete
+input `FramePosition`. The App-owned Action Adapter checked-converts its time
+base to exact Sequence-local time and performs one documented nearest-frame
+lowering on the active Sequence evaluation grid. It never reads only `frame`,
+and malformed or negative positions cannot reach Playback or an author
+transaction. Source trim uses the Clip's exact source-to-Sequence mapping before
+that same lowering Seam; it cannot reinterpret a source-grid frame number as a
+Sequence-grid frame.
+
+The serializable `Action` algebra contains only real semantic intents. A
+disabled control, stale view projection, invalid transient value, or gesture
+that forms no command remains inside the Widget Adapter as `None`; it never
+crosses the App dispatch boundary as a synthetic no-op. Widget-local protocols
+may use a more precise result only when `None` is insufficient. In particular,
+Asset Grid item drops distinguish `Unhandled` (allow grid fallback), `Consumed`
+(stop fallback without a command), and `Dispatch(Action)`. That tri-state is
+local input-routing state, not a second product Action hierarchy.
+
+Inside each migrated App slice, product meaning is carried by the closed
+`ProductAction` algebra. `Action::Custom` remains the external Widget,
+scripting, and plugin transport Seam; it must not become a second product-domain
+model. The current high-frequency Timeline slice covers Clip selection, Clip
+movement, bulk trim, and seek. Its production constructors lower typed
+operations into the external envelope, and one App-owned codec is the only
+Implementation allowed to inspect their namespace, name, or JSON payload. A
+recognized name with an invalid payload fails closed before legacy routing; an
+unknown name remains untouched for another owning Adapter. Dispatch for this
+slice then matches the typed algebra and no longer repeats string or payload
+interpretation. This is a bounded migration, not a claim that every App Action
+already belongs to `ProductAction`.
+
+The same slice exposes one read-only `TimelineInteractionProjection`. Its Track
+lock, Clip membership, placement range, and Sequence time-base facts are
+private; the stable UI Interface is only `allows(&TimelineProductAction)`.
+Window and panel Adapters therefore cannot reconstruct admission by traversing
+`AuthoringSession`, `Sequence`, `Track`, or `Clip`, and cannot observe playback
+or execution internals through this projection. Admission remains guidance:
+the App-owned authoring or transport Interface revalidates authoritative state
+at dispatch. Unmigrated custom Actions retain their current Adapters until an
+independently verifiable typed slice replaces them; this decision does not
+justify a parallel full action hierarchy.
+
+Product Action constructors preserve the caller's complete intent, including
+invalid values needed for authoritative rejection; they never clamp a negative
+seek to zero or otherwise turn malformed input into a different successful
+command. Likewise, an availability query may disable a Widget but cannot
+replace dispatch validation or its precise structured error. For example, Cut
+against a locked Track returns `TrackLocked` before changing the clipboard,
+while an actually empty selection returns `ActionNotExecuted`.
 
 Callers that need acceptance evidence must also verify domain postconditions.
 For example, the Golden audio slice checks the installed `AuthoringSession`,
@@ -445,13 +531,16 @@ remain separate acceptance obligations.
 ## Playback Tick Ownership
 
 The winit host may wake the application while playback is running, but playback
-state transitions belong to `AppState`. Window code passes elapsed time into
-`AppState::advance_playback_clock(...)` and only reacts to the returned refresh
-contract.
+state transitions belong to `AppState`. Window code passes one absolute
+process-monotonic observation into `AppState::advance_playback_clock_at(...)`
+and only reacts to the returned refresh contract. It owns no transport-running
+edge detector or elapsed-time accumulator.
 
 Playback frame advancement must:
 
-- keep sub-frame elapsed time in an app-owned accumulator
+- project each absolute observation from one App-owned Engine-time anchor
+- reanchor that projection after accepted Viewer/audio/preroll observations so
+  an event-loop tick cannot count an overlapping interval twice
 - use the configured clock role for frame targeting
 - pause on the last content frame and mark natural end-of-playback separately
   from user pause/seek
@@ -491,6 +580,26 @@ narrow presentation refresh domain. They set `preview_dirty`, never the global
 `ui_dirty` model-rebuild flag. Media import, project, preferences, workspace,
 and other author-facing changes retain the full model path.
 
+The Window host owns one admitted Viewer presentation snapshot, separate from
+the Widget model. Preview candidates for GPU texture, CPU raster, retained
+current output, and transparent canvas carry the exact Playback presentation
+ticket sampled with their evaluation. The host publishes the candidate into
+that snapshot only inside the shared presentation-arbitration callback; Late,
+registration rejection, or lost authority keeps the prior admitted output
+visible as stale. A later root projection borrows this snapshot and cannot
+re-evaluate Preview or attach the candidate to a newer demand. Widget
+`Ready`/`Blocked` feedback is display state only and has no terminal Playback
+authority. Headless presentation consumes the same ticketed candidate contract,
+so Window behavior is not a second interpretation.
+
+Execution resource policy is not author or presentation state. Dispatch
+closure, grant publication, cooperative yield, and other diagnostics-only
+changes in Proxy, Media Import, existing-Asset mutation, or Export must not make
+their App polling Adapters report a product-model change. A realtime Preview
+stall expiration updates Transport controls through the preview-free narrow
+path and emits terminal evidence, but it does not synchronously request another
+Preview candidate. The next normal production turn may admit a new demand.
+
 The titlebar, menu bar, and their child trigger Widgets are persistent for the
 Window Session. A full model projection updates their title, command
 availability, checked state, and shortcut labels in place; it does not replace
@@ -501,15 +610,18 @@ must not depend on Preview readiness or redraw cadence.
 Timeline audio waveforms are not a Widget or Window execution feature.
 `AppUiHost` owns one UI-independent `AudioWaveformService` composition instance,
 polls its bounded completion pump, and injects an `AudioWaveformSource` handle
-into the Timeline model. The Widget supplies `AssetId`, a source revision
-derived from the immutable asset record, current file length/modification time,
-and probed primary-audio facts, the visible source interval, and presentation
-width. That interval is projected from the Clip's canonical source-time map and
-duration; the panel cannot cache or reconstruct a second source out-point. The
-handle returns only a
+into the Timeline model. The Timeline lookup supplies `AssetId`, an
+already-resolved `AudioSourceSelection`, the visible source interval, and
+presentation width. The selection carries the complete filesystem revision,
+absolute physical stream index, and native layout; the execution Module builds
+its exact `AssetId + AudioSourceSelection` key. Widget code never derives a
+parallel `u64` revision from file metadata or probe display fields. The interval
+is projected from the Clip's canonical source-time map and duration; the panel
+cannot cache or reconstruct a second source out-point. The handle returns only a
 resident envelope or `None`; it cannot expose FFmpeg, worker channels, cache
 mutation, generation state, or failure policy to paint/layout code. Project
-library replacement rotates service generation, and source revision prevents a
+Library Generation/Session binding change rotates service generation,
+and source revision prevents a
 same-asset relink from presenting stale waveform data.
 
 Constant retime also enters through typed semantic Actions rather than a panel
@@ -543,9 +655,12 @@ execution policy. `AppUiHost` owns one
 receives `Loading`, structured failure, or a resident image. The service—not
 the panel—owns source/color identity, deterministic still decode, bounded
 admission and transport, generation cancellation, weighted raster LRU, failure
-memory, and terminal diagnostics. The adapter converts the validated sRGB
-`ThumbnailRasterFrame` to `RasterImage` without copying its `Arc<[u8]>` and
-cannot manufacture a second cache or scheduling rule.
+memory, and terminal diagnostics. It constructs the full typed request identity
+from `AssetId`, path, complete `MediaFileFingerprint`, and the resolved
+thumbnail color contract; UI code never invents a file-revision hash. The
+adapter converts the validated sRGB `ThumbnailRasterFrame` to `RasterImage`
+without copying its `Arc<[u8]>` and cannot manufacture a second cache or
+scheduling rule.
 
 `app::preview_runtime::PreviewProductionRuntime` owns media preview scheduling.
 `WindowPreviewAdapter` is only its Window output specialization. Each viewer preview request
@@ -553,6 +668,58 @@ starts a monotonic generation, and background media jobs check that their key is
 still requested by the latest generation before decoding. Completed stale jobs
 may warm the cache, but they do not force a UI refresh for an older playback
 frame.
+The App composition root captures one borrowed immutable
+`PreviewExecutionSnapshot` for every frame-producing call. It contains only the
+exact open Authoring Session identity and generation, the canonical
+`SequenceCollection`, Project Color Environment, Asset Library and resolved
+proxy-selection policy, machine-local Viewer policy, and one coherently sampled
+transport position/state/Epoch/quality scale/Frame Demand. A realtime Adapter
+deadline is lowered once at that same sampling instant. The Runtime and all of
+its production submodules receive this snapshot rather than `AppState`, may not
+retain it, and cannot create a second timeline, Playback, Project, or display
+authority. `PreviewFrameExecutionRequest` carries Proxy demand command authority
+through a separate narrow `PreviewProxyDemandSink`; immutable facts never hide
+an execution command or concrete Proxy Generation implementation.
+Window and Headless presentation share the App-owned typed publication
+arbitrator. It preflights the exact Frame Presentation Ticket at one sampled
+instant, consumes `Late` without invoking output publication, and publishes
+`Ready`/allowed `Degraded` before consuming the same ticket at that same
+instant. Failed external-texture registration leaves the demand pending.
+`Presented`, `NoDemand`, `DroppedLate`, `OutputRejected`, and `LostAuthority`
+remain distinct through Window telemetry and Headless gates; a dropped-late
+texture is released but is not mislabeled as registration failure. New GPU
+output, retained-current output, CPU raster, and semantic transparent canvas
+each carry the ticket captured by their own evaluation; Window never resamples
+the current demand after a candidate crosses the Adapter. Payload-free
+`Ready`/`Blocked` Widget feedback is only a post-admission projection and has no
+terminal authority. Window retains one admitted visible state, demotes it to
+stale after any unpublished disposition, and makes a repeated demand-free
+Current projection idempotent so it cannot self-schedule a repaint loop. A
+running transport with no pending demand may repeat an already published exact
+output, but Preview cannot manufacture a new no-ticket candidate after a
+terminal non-presentable delivery.
+The Runtime also binds prepared visual programs to the process-local
+`AuthoringSessionId` of the current open Project. Sequence and Effect revisions
+authorize reuse only inside that Open lifetime: closing, reopening, or replacing
+the Authoring Session atomically rotates the renderer cache scope, clears its
+residency, cancels queued/in-flight Preview work, and invalidates final Viewer
+output. Durable Project/Sequence/Track/Clip IDs may recur after reopen and must
+never authorize process-local execution reuse by themselves. Lifecycle
+cancellation performs the same cache-scope rotation even when the next Session
+is not known yet. Inside one Open lifetime, the monotonic author generation
+selects one `PreparedVisualProgramBinding` set. Current Viewer evaluation,
+forward prefetch, preroll, and cold media-range lookahead share it; only a new
+generation, Effect-registry revision, dependency refresh, resource
+reconfiguration, or scope rotation may repeat full author fingerprinting and
+Program preparation. This policy lives in the deep Preview Runtime Module; Window,
+Headless, prefetch, and preroll Adapters do not maintain parallel invalidation
+rules.
+Test builds may attach the renderer-owned validation trace to the exact
+prepared Preview closure before materialization. This is observation only: it
+cannot alter scheduling, pending state, media resolution, nesting, temporal
+execution, or cache identity. Preview/Export parity gates compare this ledger
+and the real working composite against Export's validation Adapter rather than
+maintaining a test-only Timeline walker.
 The same production runtime owns one bounded Basic Title task. The Timeline
 evaluator emits a complete generated-title request including evaluated author
 state, Sequence resolution, persisted title-safe margin, target resolution, and
@@ -567,7 +734,9 @@ permanent "preparing" state under repeated UI refreshes.
 Proxy generation is an `AppState`-owned service, not an action-handler or
 Window detail. Import, manual proxy-mode toggles, and preview playback pressure
 submit typed origins to the same instance-owned `app::proxy_generation`
-Module. The Preview Adapter does not retain its own request set: exact dedupe,
+Module. Preview emits a complete demand only through the narrow command Sink and
+does not receive or retain `AppState` or the concrete Proxy service. The Preview
+Adapter does not retain its own request set: exact dedupe,
 queued priority promotion, retained failure, and project generation belong to
 the service. Background polling observes one completion revision and refreshes
 models so a newly fresh proxy can replace source fallback; no Widget owns a
@@ -585,6 +754,11 @@ observation. They may project structured phases, truthful units, failures, and
 color diagnostics; they cannot clone the heavy Timeline payload, mutate status,
 invent progress, or infer completion from file existence. Headless execution
 uses the same queue/evidence Interface rather than a Window-specific path.
+The queue's complete diagnostics token and retained-jobs token are distinct
+equality-only observations. Resource grant, dispatch, and yield changes advance
+only diagnostics; they cannot dirty the editor tree or trigger Preview work.
+The jobs token advances whenever the public `ExportJobSnapshot` collection
+changes, including bounded progress and job diagnostics.
 
 The export panel obtains delivery readiness from
 `mondrian_export::resolve_export_delivery`, the same pure Interface enforced by
@@ -625,13 +799,15 @@ nested Clip placement, not in Sequence Settings, because it describes that
 parent-to-child edge.
 
 Media preview frames are held in a bounded LRU cache keyed by asset identity,
-media file fingerprint (file length plus modification timestamp), source
-frame/time, target preview dimensions, input color interpretation, target
-working color space, media-input tone-map policy, and color engine. Program
-Output and monitor-adaptation tone mapping are excluded. A media frame decoded
-for one working-space contract must never be reused for another viewer/export
-color contract, and same-path media/proxy replacements must not reuse stale app
-cache entries when the file fingerprint changes. Preview path resolution should
+the complete media file fingerprint (filesystem object identity and change
+generation together with length/mtime evidence), source frame/time, target
+preview dimensions, input color interpretation, target working color space,
+media-input tone-map policy, and color engine. The fingerprint is a
+conservative revision token, not a content digest. Program Output and
+monitor-adaptation tone mapping are excluded. A media frame decoded for one
+working-space contract must never be reused for another viewer/export color
+contract, and same-path media/proxy replacements must not reuse stale app cache
+entries when the file fingerprint changes. Preview path resolution should
 capture source/proxy freshness and the resolved file fingerprint in one
 metadata probe path, so playback does not repeatedly stat the same source and
 proxy only to build a cache key.
@@ -828,6 +1004,144 @@ diagnostic bookkeeping. Project close cancels queued and in-flight preview work,
 clears preview caches/failure caches, and leaves workers alive for the next
 project. Application quit additionally closes the preview worker queue and must
 not perform a workspace-to-startup native-window role sync on the way out.
+
+Preview worker progress is event-driven through one UI-independent,
+payload-free work watch owned by `PreviewProductionRuntime`. Media decode,
+heterogeneous visual execution, Basic Title raster, and external visual
+dependency workers advance the same monotonic revision after their domain-owned
+result channel accepts a pollable result. The decoder-residency coordinator
+also advances it exactly once when all required retirement acknowledgements
+change a blocked admission into an actionable retry, and an RAII worker-exit
+guard advances it on normal exit or unwind so terminal channel health is
+observable while paused. Result channels and authoritative coordination/health
+state remain the sole payload, retry, and terminal authority; the revision
+cannot identify a result, prove freshness, complete a Frame Demand, or replace
+the bounded Preview pump, and `EventBus` is not used as a high-frequency queue.
+The Window Adapter maps the watch to one typed winit `UserEvent`. An atomic
+pending bit coalesces an arbitrary completion burst into one native wake and
+remains armed through the bounded pump. Rearming compares the revision sampled
+before the pump with the current revision after clearing the bit, so a
+publication racing the drain cannot be lost; bounded-pump backlog separately
+returns `needs_follow_up_poll` and forces another event-loop turn. Host polling
+returns typed repaint, candidate-retry, and follow-up facts: an immediate
+bounded remainder sets `ControlFlow::Poll` without itself requesting a
+whole-window redraw. A merely Pending asynchronous Title/Preview task never
+busy-polls because its eventual channel publication owns the next watch edge.
+Every Window Viewer GPU submission—ordinary native import as well as a
+heterogeneous CPU-prefix/GPU-tail batch—has one exact completion owner.
+The complete `PreviewGpuFrame` remains in that owner through actual queue
+completion, so Frame Store media-protection leases cannot retire merely because
+the renderer retained a physical decoder handle. The move-only renderer output
+lease likewise remains either in that submitted owner or in the separate
+Window current-physical slot; Preview retains only cloneable presentation
+metadata. Every Window registration has a submission-qualified texture key.
+`Current`, replacement, timeout, cancellation, and late-callback cleanup must
+therefore match the complete `(PreviewOutputKey, texture_key)` artifact. A
+semantic key alone is never publication authority, because a replacement may
+resolve the same pixels through a different physical submission. Revoking that
+exact artifact also replaces an exact matching Ready/Stale Widget projection
+with `Loading` in the same Window turn before its renderer registration is no
+longer usable; a different submission-qualified texture key is left untouched.
+
+`app::viewer_gpu_device_progress` is the sole native device-progress Module for
+both Window and Headless Viewer Adapters. The Adapter reserves a move-only
+progress permit before fallible recording and lifecycle admission. Its bounded
+capacity is therefore part of admission, never fallible bookkeeping performed
+after `Queue::submit`. Once submit returns, the Adapter installs the retained
+owner and exact queue callback, then infallibly commits the matching wgpu
+`SubmissionIndex` through the permit. The callback owns a separate cleanup
+ticket captured before submit.
+
+The dedicated non-UI worker first issues bounded eight-millisecond
+`PollType::Wait` calls for that exact index. A wait timeout means “continue
+driving this submission”; it is neither semantic completion nor a renewed
+publication deadline. `WaitSucceeded` is likewise non-authoritative: if the
+shared queue bound the callback conservatively to later work, the worker
+continues bounded latest-submission waits until the exact callback marks its
+cleanup ticket. Only that callback may stage typed completion in
+`ViewerGpuSubmissionLifecycle`, but it never wakes an Adapter directly. wgpu
+may invoke work-done before device-lost in the same `Device::poll`, so the
+worker re-reads shared generation health after poll returns and emits a
+post-poll barrier only for a healthy callback. Until that barrier arrives,
+Adapter polling observes deadlines/quarantine without consuming the staged
+notice. The worker's shared panic-isolated wake Seam maps to one typed Window event;
+Headless maps it to the Preview work revision. Neither product event loop owns
+a second `Device::poll` policy for Viewer-submission completion or requests
+whole-window redraw merely to make progress. Renderer-owned optional timestamp
+polls carry no Viewer lifecycle authority. If recording reports bounded
+backpressure before the final Viewer submit, the Adapter converts its reserved
+permit into a typed renderer-cleanup barrier; the same worker drives latest
+renderer-internal queue work and wakes one retry, instead of issuing an
+unindexed Viewer completion poll on the UI/Headless thread.
+The lifecycle and renderer-resource grant remain capacity one; the two progress
+permits cover callback/worker handoff and cleanup only, not a second publishable
+frame slot.
+
+A unique `set_device_lost_callback` is installed immediately after
+`request_device`, before any runtime or queue consumer. It can terminalize an
+idle generation without a submission identity. A non-timeout native wait error
+also terminalizes the complete device generation, rejects every later permit,
+and preserves the first typed terminal; a later loss strengthens release
+semantics without rewriting first-cause diagnostics. Explicit `Destroyed` and
+unexpected loss remain distinct typed causes. Headless
+returns that terminal to its caller. Window revokes all output from that device
+generation and enters explicit CPU fallback until a device rebuild; an already
+submitted owner remains in retirement-only quarantine until its callback or
+actual wgpu terminal makes wgpu release safe. Every publication seam checks
+generation health, including ordinary queue-ordered publication, and an idle
+terminal revokes the generation's already-current physical artifact. Replacing only the native Window/surface
+does not create a new device generation: the progress worker, callback
+lifecycle, retained media/GPU owner, terminal state, and deferred cleanup move
+to the replacement session together. A delayed callback can therefore retire
+the old Window submission without publishing into the new Window generation.
+
+One non-renewing five-second lifecycle deadline revokes publication authority
+but does not free submitted resources. Timeout/cancellation enters
+non-reusable quarantine and defers runtime clear/reset; the device worker keeps
+performing bounded waits solely to retire physical ownership. A late exact
+callback retires only its quarantined resources, applies deferred
+cleanup, and may request one retry; it can never publish. Explicit Adapter
+teardown stops admission and transfers one complete retirement envelope to the
+existing FIFO progress worker in O(1); the Window/UI and Headless caller never
+joins, polls, or cancels submitted work. The non-UI reaper retains device/queue
+handles, execution runtime, callback lifecycle, current output lease, timestamp
+state, deferred cleanup, and native/media owners until exact completion or a
+safe typed terminal. Native D3D copy-ready fences remain independent: wgpu loss
+is not decoder-source release proof, while the typed D3D device-removed
+sentinel is. Other native errors retain resources fail-closed. Generation
+admission is reserved at creation and has a hard process-wide
+active-plus-retiring bound of four. Panic/disconnect quarantine retains that
+token with the envelope, preventing repeated rebuild from accumulating
+unbounded workers or leaked owners. Quarantining a same-semantic heterogeneous replacement
+does not clear an older current artifact; only a physical slot carrying the
+quarantined submission identity is revoked. Accepted Transparent/CPU output,
+display invalidation, and terminal Window cleanup retire semantic metadata,
+texture registration, and the move-only physical lease together. If work-done
+and device-lost occur in one poll, the terminal wins; the staged callback
+remains cleanup evidence and cannot publish. Headless
+Adapters observe or wait for the same revision edge, but bound every wait by
+the earlier of their next Clock Master tick and presentation deadline.
+Headless bounded-pump backlog bypasses that wait and immediately performs the
+next drain; a candidate-only retry fact is sufficient to rebuild an unchanged
+Loading intent after a completion releases capacity. The performance and
+Golden presentation callers also pass one non-renewing outer monotonic deadline
+through the Headless presentation coordinator into one capacity-one GPU
+submission lifecycle. Ordinary complete-GPU output may become usable after its
+queue-ordered publication, while heterogeneous output waits for exact callback
+validation. Reaching the non-renewing lifecycle deadline is terminal for
+publication authority rather than trapping or renewing the outer timeout loop:
+the owner enters quarantine with its visual terminal authority and every Frame
+Store media-protection lease intact. A bounded native wait timeout alone never
+causes that transition. Its exact late callback is retirement-only and cannot
+publish. Headless Preview stores only cloneable output metadata; its
+Adapter owns the move-only renderer output lease in either the exact submitted
+owner or the separate current physical slot. Every accepted physical artifact
+has a submission-qualified resource key. `Current`, queued Ready, timeout
+cleanup, and late callback cleanup compare the complete
+`(PreviewOutputKey, resource_key)` artifact, so an older callback can never
+erase or validate a same-semantic replacement. Accepted Transparent and CPU
+Raster outputs clear the physical slot together with semantic GPU metadata.
+
 `PreviewProductionRuntime::diagnostics()` exposes an immutable observation snapshot;
 the sibling `app::preview_runtime::diagnostics` Module exclusively owns its typed
 decode/render/color evidence models and fail-closed report construction. The
@@ -861,6 +1175,10 @@ second output-selection policy. Raster cache and stale pinning retain the
 UI-independent `PreviewRasterFrame`; the shallow `app_ui::preview` Window
 Adapter performs the only conversion to `ViewerFrameImage` and shares the
 existing pixel allocation.
+External GPU texture publication has no second `app_ui::preview` registration
+Interface. The Window Host's ticketed presentation commit is the sole product
+Seam; unit-test setup may register prepared payloads only through test-local
+helpers that are absent from validation and product builds.
 CPU color/composite execution itself is not Window-owned:
 `app::preview_cpu_execution` returns the final raster, complete execution facts,
 and stage durations. Presentation records those facts into Window diagnostics
@@ -871,10 +1189,11 @@ execution, output registration, GPU completion, exact Frame Presentation Ticket
 consumption, and preroll observation. Golden's shallow waiter additionally uses
 the production presentation arbitrator after an explicit GPU blocker, so a
 validated final CPU Raster can complete the ticket without being reported as a
-GPU execution. Ticket acceptance is proven by consuming the exact pending
-Demand and incrementing Ready evidence; the App completion return value is not
-misread as acceptance because a valid paused seek may consume its ticket
-without changing Transport State.
+GPU execution. Ticket acceptance is proven only by the typed `Presented`
+disposition carrying the exact pending Demand identity and an authoritative
+`Ready` or explicitly allowed `Degraded` delivery. Its independent
+`transport_changed` fact may be false for a valid paused seek and therefore
+cannot stand in for presentation acceptance.
 The same rule applies while a pause, seek, or exact-still request replaces the
 current frame: `Stale` prefers the last presented external GPU frame for the
 same sequence and output extent, then falls back to the pinned CPU raster. A
@@ -891,15 +1210,20 @@ and final raster packaging. Perf tooling should use both reports before
 assigning a slow frame to codec, cache, color, composite, or viewer packaging
 work. Final raster viewer keys must be derived from the resolved render-plan
 identity, not by hashing full RGBA payloads; large preview frames should not pay
-an extra O(width * height) CPU scan just to name an atlas entry.
+an extra O(width * height) CPU scan just to name an atlas entry. Generated-title
+sources use the renderer's typed request-plus-font identity, and nested
+Sequences use their resolved child-plan identity with explicit non-reusability
+propagation; neither path scans completed working pixels for naming.
 Asset thumbnail raster keys follow the same identity rule without weakening
-color correctness: they hash the resolved source, working, output, display/view,
-tone-map, engine, and OCIO-generation contract alongside asset path and file
-fingerprint. The app-owned worker performs color transforms before
-`RasterImage` construction and only the latest active request for an asset may
-publish a completion. Color-context changes clear visible cache state and
-invalidate request ownership so stale asynchronous results cannot overwrite a
-new display contract.
+color correctness: the execution cache compares the complete typed source,
+working, output, display/view, tone-map, engine, and OCIO-generation contract
+alongside Asset identity, path, and complete file revision. An opaque
+presentation resource label may be projected from that identity for the image
+atlas, but it is never revision interpretation or cache authority. The
+app-owned worker performs color transforms before `RasterImage` construction
+and only the latest active request for an asset may publish a completion.
+Color-context changes clear visible cache state and invalidate request ownership
+so stale asynchronous results cannot overwrite a new display contract.
 
 UI raster images are typed presentation payloads. `RasterImage`,
 `DrawCommandEncoder::draw_raster_image`, and `DrawCommand::RasterImage` carry
@@ -931,9 +1255,13 @@ refreshes, sequential-frame preview readiness, and a GPU preview candidate probe
 as an ignored/manual perf probe.
 `preview_media_continuous_playback_smoke` uses the same generated media path to
 simulate a 30fps playback window and records `Ready`/`Loading`/`Stale`/
-`Unavailable` counts plus a GPU preview candidate probe, with the contract that
-steady playback keeps a current or stale frame visible instead of falling
-through to an unavailable viewer.
+`Unavailable` counts. Its post-window GPU candidate probe explicitly settles
+transport, then drives the production Headless execution, GPU completion,
+output-registration, presentation-ticket, and preroll path to a usable output
+before releasing decoder residency. It never uses the Window presentation
+projection to manufacture a synchronous CPU raster. Steady playback must keep a
+current or stale frame visible instead of falling through to an unavailable
+viewer.
 The external-media variant treats current-frame readiness as a basis-point
 contract (99.50% by default), requires complete hardware timestamp coverage for
 every newly rendered frame, and reports hardware GPU, CPU record/submit,

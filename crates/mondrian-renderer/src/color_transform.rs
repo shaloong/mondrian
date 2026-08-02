@@ -7,7 +7,8 @@ use crate::{
 };
 use mondrian_core::{
     types::{ColorEngine, ColorSpace},
-    GpuLanguage, OcioColorSpaceIdentity, WorkingColorSpace, WorkingRgbaF32Frame,
+    GpuLanguage, OcioColorSpaceIdentity, OcioCpuProcessorCacheDiagnostics, OcioCpuProcessorSession,
+    WorkingColorSpace, WorkingRgbaF32Frame,
 };
 
 /// Backend used to execute a render color transform.
@@ -485,6 +486,71 @@ impl RenderColorTransform {
     }
 }
 
+/// Owner-scoped OCIO CPU execution resources for one renderer worker or job.
+///
+/// The opaque OCIO processors remain immutable after construction, but their
+/// residency belongs to the Preview, Export, Thumbnail, or other concrete
+/// execution owner. This Session is deliberately not `Send`; create and use it
+/// on the thread that owns the surrounding execution Session.
+pub struct RenderCpuColorExecutionSession {
+    ocio_processors: OcioCpuProcessorSession,
+}
+
+impl Default for RenderCpuColorExecutionSession {
+    fn default() -> Self {
+        Self::new(32)
+    }
+}
+
+impl RenderCpuColorExecutionSession {
+    /// Create a Session with a processor-resource-unit limit.
+    ///
+    /// Zero disables processor retention and selects the uncached reference
+    /// path while preserving exactly the same transform semantics.
+    pub fn new(processor_capacity: usize) -> Self {
+        Self {
+            ocio_processors: OcioCpuProcessorSession::new(processor_capacity),
+        }
+    }
+
+    /// Apply a new processor residency limit and release existing processors.
+    pub fn reconfigure(&mut self, processor_capacity: usize) {
+        self.ocio_processors.reconfigure(processor_capacity);
+    }
+
+    /// Release every retained processor owned by this Session.
+    pub fn clear(&mut self) {
+        self.ocio_processors.clear();
+    }
+
+    /// Return bounded processor reuse and residency evidence.
+    pub fn diagnostics(&self) -> OcioCpuProcessorCacheDiagnostics {
+        self.ocio_processors.diagnostics()
+    }
+
+    pub(crate) fn convert_identity_float_for_renderer(
+        &mut self,
+        engine: &ColorEngine,
+        data: &mut [f32],
+        src: OcioColorSpaceIdentity,
+        dst: OcioColorSpaceIdentity,
+    ) -> Result<(), String> {
+        self.ocio_processors.convert_identity_float(engine, data, src, dst)
+    }
+
+    fn display_transform_identity_float(
+        &mut self,
+        engine: &ColorEngine,
+        data: &mut [f32],
+        src: OcioColorSpaceIdentity,
+        display: &str,
+        view: &str,
+    ) -> Result<(), String> {
+        self.ocio_processors
+            .display_transform_identity_float(engine, data, src, display, view)
+    }
+}
+
 /// Execute renderer color transforms for CPU-resident frames.
 pub struct CpuColorTransformExecutor;
 
@@ -496,6 +562,16 @@ impl CpuColorTransformExecutor {
         frame: &LinearFloatSource,
         transform: &RenderInputTransform,
     ) -> Result<RenderInputTransformResult, RenderColorTransformError> {
+        let mut session = RenderCpuColorExecutionSession::new(0);
+        Self::input_to_working_float_with_session(frame, transform, &mut session)
+    }
+
+    /// Apply a source/import float transform through an explicit execution Session.
+    pub fn input_to_working_float_with_session(
+        frame: &LinearFloatSource,
+        transform: &RenderInputTransform,
+        session: &mut RenderCpuColorExecutionSession,
+    ) -> Result<RenderInputTransformResult, RenderColorTransformError> {
         let descriptor = frame.descriptor();
         if descriptor.domain != ColorFrameDomain::Source {
             return Err(RenderColorTransformError::UnsupportedInputDomain {
@@ -504,10 +580,10 @@ impl CpuColorTransformExecutor {
         }
         require_straight_compatible_color_alpha(descriptor)?;
         if descriptor.encoding != ColorFrameEncoding::LinearFloat {
-            return Err(RenderColorTransformError::ExecutionFailed {
-                direction: RenderColorTransformDirection::InputToWorking,
-                input: descriptor,
-                output: ColorFrameDescriptor {
+            return Err(RenderColorTransformError::execution_failed(
+                RenderColorTransformDirection::InputToWorking,
+                descriptor,
+                ColorFrameDescriptor {
                     width: descriptor.width,
                     height: descriptor.height,
                     color_space: transform.working_color_space.into(),
@@ -516,8 +592,8 @@ impl CpuColorTransformExecutor {
                     residency: ColorFrameResidency::Cpu,
                     alpha: crate::ColorFrameAlpha::StraightCoverage,
                 },
-                reason: "LinearFloatSource must have LinearFloat encoding".to_string(),
-            });
+                "LinearFloatSource must have LinearFloat encoding",
+            ));
         }
 
         let output_descriptor = ColorFrameDescriptor {
@@ -535,27 +611,28 @@ impl CpuColorTransformExecutor {
             ColorFrameSpace::Color(source) => OcioColorSpaceIdentity::Color(source),
             ColorFrameSpace::Working(source) => OcioColorSpaceIdentity::Working(source),
             ColorFrameSpace::Device(_) => {
-                return Err(RenderColorTransformError::ExecutionFailed {
-                    direction: RenderColorTransformDirection::InputToWorking,
-                    input: descriptor,
-                    output: output_descriptor,
-                    reason: "linear source frame cannot carry a monitor-device identity"
-                        .to_string(),
-                });
+                return Err(RenderColorTransformError::execution_failed(
+                    RenderColorTransformDirection::InputToWorking,
+                    descriptor,
+                    output_descriptor,
+                    "linear source frame cannot carry a monitor-device identity",
+                ));
             }
         };
-        transform
-            .engine
-            .convert_identity_float(
+        session
+            .convert_identity_float_for_renderer(
+                &transform.engine,
                 &mut data,
                 source_identity,
                 transform.working_color_space.into(),
             )
-            .map_err(|reason| RenderColorTransformError::ExecutionFailed {
-                direction: RenderColorTransformDirection::InputToWorking,
-                input: descriptor,
-                output: output_descriptor,
-                reason,
+            .map_err(|reason| {
+                RenderColorTransformError::execution_failed(
+                    RenderColorTransformDirection::InputToWorking,
+                    descriptor,
+                    output_descriptor,
+                    reason,
+                )
             })?;
 
         // Re-pack flat f32 into the typed working-frame payload.
@@ -584,6 +661,16 @@ impl CpuColorTransformExecutor {
         frame: &CpuEncodedColorFrame,
         transform: &RenderInputTransform,
     ) -> Result<RenderInputTransformResult, RenderColorTransformError> {
+        let mut session = RenderCpuColorExecutionSession::new(0);
+        Self::input_to_working_with_session(frame, transform, &mut session)
+    }
+
+    /// Apply a source/import transform through an explicit execution Session.
+    pub fn input_to_working_with_session(
+        frame: &CpuEncodedColorFrame,
+        transform: &RenderInputTransform,
+        session: &mut RenderCpuColorExecutionSession,
+    ) -> Result<RenderInputTransformResult, RenderColorTransformError> {
         let descriptor = frame.descriptor();
         if descriptor.domain != ColorFrameDomain::Source {
             return Err(RenderColorTransformError::UnsupportedInputDomain {
@@ -602,31 +689,32 @@ impl CpuColorTransformExecutor {
         };
 
         let source = descriptor.color_space.color().ok_or_else(|| {
-            RenderColorTransformError::ExecutionFailed {
-                direction: RenderColorTransformDirection::InputToWorking,
-                input: descriptor,
-                output: output_descriptor,
-                reason: "encoded input frame is missing an encoded color-space identity"
-                    .to_string(),
-            }
+            RenderColorTransformError::execution_failed(
+                RenderColorTransformDirection::InputToWorking,
+                descriptor,
+                output_descriptor,
+                "encoded input frame is missing an encoded color-space identity",
+            )
         })?;
         let mut flat = frame
             .rgba()
             .chunks_exact(4)
             .flat_map(|pixel| pixel.iter().map(|channel| *channel as f32 / 255.0))
             .collect::<Vec<_>>();
-        transform
-            .engine
-            .convert_identity_float(
+        session
+            .convert_identity_float_for_renderer(
+                &transform.engine,
                 &mut flat,
                 OcioColorSpaceIdentity::Color(source),
                 OcioColorSpaceIdentity::Working(transform.working_color_space),
             )
-            .map_err(|reason| RenderColorTransformError::ExecutionFailed {
-                direction: RenderColorTransformDirection::InputToWorking,
-                input: descriptor,
-                output: output_descriptor,
-                reason,
+            .map_err(|reason| {
+                RenderColorTransformError::execution_failed(
+                    RenderColorTransformDirection::InputToWorking,
+                    descriptor,
+                    output_descriptor,
+                    reason,
+                )
             })?;
 
         let pixels = flat
@@ -656,6 +744,16 @@ impl CpuColorTransformExecutor {
         frame: &CpuColorFrame,
         transform: &RenderColorTransform,
     ) -> Result<RenderOutputTransformResult, RenderColorTransformError> {
+        let mut session = RenderCpuColorExecutionSession::new(0);
+        Self::transform_with_session(frame, transform, &mut session)
+    }
+
+    /// Apply a working-to-output transform through an explicit execution Session.
+    pub fn transform_with_session(
+        frame: &CpuColorFrame,
+        transform: &RenderColorTransform,
+        session: &mut RenderCpuColorExecutionSession,
+    ) -> Result<RenderOutputTransformResult, RenderColorTransformError> {
         let descriptor = frame.descriptor();
         if descriptor.domain != ColorFrameDomain::Working {
             return Err(RenderColorTransformError::UnsupportedInputDomain {
@@ -673,7 +771,7 @@ impl CpuColorTransformExecutor {
             alpha: crate::ColorFrameAlpha::StraightCoverage,
         };
 
-        let encoded_float = Self::transform_float(frame, transform)?;
+        let encoded_float = Self::transform_float_with_session(frame, transform, session)?;
         let rgba = encoded_float
             .frame
             .rgba_f32()
@@ -714,6 +812,16 @@ impl CpuColorTransformExecutor {
         frame: &CpuColorFrame,
         transform: &RenderColorTransform,
     ) -> Result<RenderOutputTransformFloatResult, RenderColorTransformError> {
+        let mut session = RenderCpuColorExecutionSession::new(0);
+        Self::transform_float_with_session(frame, transform, &mut session)
+    }
+
+    /// Apply a float working-to-output transform through an explicit execution Session.
+    pub fn transform_float_with_session(
+        frame: &CpuColorFrame,
+        transform: &RenderColorTransform,
+        session: &mut RenderCpuColorExecutionSession,
+    ) -> Result<RenderOutputTransformFloatResult, RenderColorTransformError> {
         let descriptor = frame.descriptor();
         if descriptor.domain != ColorFrameDomain::Working {
             return Err(RenderColorTransformError::UnsupportedInputDomain {
@@ -732,50 +840,55 @@ impl CpuColorTransformExecutor {
             alpha: crate::ColorFrameAlpha::StraightCoverage,
         };
 
-        // Flatten borrowed typed pixels into the contiguous f32 buffer OCIO expects.
-        let mut flat = flatten_rgba_f32_pixels(&frame.rgba_f32().data);
+        // Clone once into the owned output payload, then expose that contiguous
+        // array storage to OCIO. Flattening into Vec<f32> and repacking into a
+        // second Vec<[f32; 4]> doubled full-frame allocation/copy traffic on
+        // every Preview and Export output boundary.
+        let mut pixels = frame.rgba_f32().data.clone();
+        let flat = pixels.as_flattened_mut();
         let working = descriptor.color_space.working().ok_or_else(|| {
-            RenderColorTransformError::ExecutionFailed {
-                direction: RenderColorTransformDirection::WorkingToOutput,
-                input: descriptor,
-                output: output_descriptor,
-                reason: "working frame is missing a working-space identity".to_string(),
-            }
+            RenderColorTransformError::execution_failed(
+                RenderColorTransformDirection::WorkingToOutput,
+                descriptor,
+                output_descriptor,
+                "working frame is missing a working-space identity",
+            )
         })?;
         if let Some(display_view) = &transform.display_view {
-            transform
-                .engine
+            session
                 .display_transform_identity_float(
-                    &mut flat,
+                    &transform.engine,
+                    flat,
                     working.into(),
                     &display_view.display,
                     &display_view.view,
                 )
-                .map_err(|reason| RenderColorTransformError::ExecutionFailed {
-                    direction: RenderColorTransformDirection::WorkingToOutput,
-                    input: descriptor,
-                    output: output_descriptor,
-                    reason,
+                .map_err(|reason| {
+                    RenderColorTransformError::execution_failed(
+                        RenderColorTransformDirection::WorkingToOutput,
+                        descriptor,
+                        output_descriptor,
+                        reason,
+                    )
                 })?;
         } else {
-            transform
-                .engine
-                .convert_identity_float(
-                    &mut flat,
+            session
+                .convert_identity_float_for_renderer(
+                    &transform.engine,
+                    flat,
                     working.into(),
                     transform.output_color_space.into(),
                 )
-                .map_err(|reason| RenderColorTransformError::ExecutionFailed {
-                    direction: RenderColorTransformDirection::WorkingToOutput,
-                    input: descriptor,
-                    output: output_descriptor,
-                    reason,
+                .map_err(|reason| {
+                    RenderColorTransformError::execution_failed(
+                        RenderColorTransformDirection::WorkingToOutput,
+                        descriptor,
+                        output_descriptor,
+                        reason,
+                    )
                 })?;
         }
 
-        // Re-pack flat f32 into Vec<[f32; 4]>.
-        let pixels: Vec<[f32; 4]> =
-            flat.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
         let out_frame = CpuEncodedFloatColorFrame::new(
             EncodedRgbaF32Frame {
                 width: descriptor.width,
@@ -803,6 +916,31 @@ impl CpuColorTransformExecutor {
         frame: &CpuEncodedFloatColorFrame,
         adaptation: &RenderMonitorAdaptation,
     ) -> Result<RenderOutputTransformFloatResult, RenderColorTransformError> {
+        let mut session = RenderCpuColorExecutionSession::new(0);
+        Self::monitor_adaptation_float_with_session(frame, adaptation, &mut session)
+    }
+
+    /// Apply preview monitor adaptation through an explicit execution Session.
+    pub fn monitor_adaptation_float_with_session(
+        frame: &CpuEncodedFloatColorFrame,
+        adaptation: &RenderMonitorAdaptation,
+        session: &mut RenderCpuColorExecutionSession,
+    ) -> Result<RenderOutputTransformFloatResult, RenderColorTransformError> {
+        Self::monitor_adaptation_float_owned_with_session(frame.clone(), adaptation, session)
+    }
+
+    /// Consume an encoded Program Output frame and apply monitor adaptation
+    /// in its uniquely owned pixel buffer whenever possible.
+    ///
+    /// Presentation-only callers that do not need to retain Program Output
+    /// pixels use this route to avoid allocating a second full-frame float
+    /// raster. The borrowed Interface above retains its value semantics by
+    /// cloning the shared wrapper before delegating here.
+    pub fn monitor_adaptation_float_owned_with_session(
+        frame: CpuEncodedFloatColorFrame,
+        adaptation: &RenderMonitorAdaptation,
+        session: &mut RenderCpuColorExecutionSession,
+    ) -> Result<RenderOutputTransformFloatResult, RenderColorTransformError> {
         let descriptor = frame.descriptor();
         require_straight_compatible_color_alpha(descriptor)?;
         let output_descriptor = ColorFrameDescriptor {
@@ -823,57 +961,52 @@ impl CpuColorTransformExecutor {
             });
         }
         if descriptor.encoding != ColorFrameEncoding::EncodedFloat {
-            return Err(RenderColorTransformError::ExecutionFailed {
-                direction: RenderColorTransformDirection::Intermediate,
-                input: descriptor,
-                output: output_descriptor,
-                reason: "CPU monitor adaptation requires encoded-float input".to_owned(),
-            });
+            return Err(RenderColorTransformError::execution_failed(
+                RenderColorTransformDirection::Intermediate,
+                descriptor,
+                output_descriptor,
+                "CPU monitor adaptation requires encoded-float input",
+            ));
         }
         let source = descriptor.color_space.color().ok_or_else(|| {
-            RenderColorTransformError::ExecutionFailed {
-                direction: RenderColorTransformDirection::Intermediate,
-                input: descriptor,
-                output: output_descriptor,
-                reason: "CPU monitor adaptation input has no encoded color identity".to_owned(),
-            }
+            RenderColorTransformError::execution_failed(
+                RenderColorTransformDirection::Intermediate,
+                descriptor,
+                output_descriptor,
+                "CPU monitor adaptation input has no encoded color identity",
+            )
         })?;
         if source != adaptation.program_output_color_space {
-            return Err(RenderColorTransformError::ExecutionFailed {
-                direction: RenderColorTransformDirection::Intermediate,
-                input: descriptor,
-                output: output_descriptor,
-                reason: format!(
+            return Err(RenderColorTransformError::execution_failed(
+                RenderColorTransformDirection::Intermediate,
+                descriptor,
+                output_descriptor,
+                format!(
                     "Program Output {source:?} does not match monitor adaptation input {:?}",
                     adaptation.program_output_color_space
                 ),
-            });
+            ));
         }
 
-        let mut flat = flatten_rgba_f32_pixels(&frame.rgba_f32().data);
-        adaptation
-            .engine
-            .convert_identity_float(
-                &mut flat,
+        let mut encoded = frame.into_rgba_f32();
+        let flat = encoded.data.as_flattened_mut();
+        session
+            .convert_identity_float_for_renderer(
+                &adaptation.engine,
+                flat,
                 OcioColorSpaceIdentity::Color(source),
                 OcioColorSpaceIdentity::Color(adaptation.monitor_color_space),
             )
-            .map_err(|reason| RenderColorTransformError::ExecutionFailed {
-                direction: RenderColorTransformDirection::Intermediate,
-                input: descriptor,
-                output: output_descriptor,
-                reason,
+            .map_err(|reason| {
+                RenderColorTransformError::execution_failed(
+                    RenderColorTransformDirection::Intermediate,
+                    descriptor,
+                    output_descriptor,
+                    reason,
+                )
             })?;
-        let pixels = flat.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
-        let frame = CpuEncodedFloatColorFrame::new(
-            EncodedRgbaF32Frame {
-                width: descriptor.width,
-                height: descriptor.height,
-                data: pixels,
-                color_space: adaptation.monitor_color_space,
-            },
-            ColorFrameDomain::Display,
-        );
+        encoded.color_space = adaptation.monitor_color_space;
+        let frame = CpuEncodedFloatColorFrame::new(encoded, ColorFrameDomain::Display);
         Ok(RenderOutputTransformFloatResult {
             frame,
             diagnostics: RenderColorTransformDiagnostics {
@@ -888,6 +1021,7 @@ impl CpuColorTransformExecutor {
     }
 }
 
+#[cfg(test)]
 fn flatten_rgba_f32_pixels(pixels: &[[f32; 4]]) -> Vec<f32> {
     let mut flat = Vec::with_capacity(pixels.len().saturating_mul(4));
     for pixel in pixels {
@@ -929,12 +1063,12 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
         };
         let working = transform.working_color_space;
         let source = input.color_space.color().ok_or_else(|| {
-            RenderColorTransformError::ExecutionFailed {
-                direction: RenderColorTransformDirection::InputToWorking,
+            RenderColorTransformError::execution_failed(
+                RenderColorTransformDirection::InputToWorking,
                 input,
                 output,
-                reason: "GPU input frame is missing an external color-space identity".to_string(),
-            }
+                "GPU input frame is missing an external color-space identity",
+            )
         })?;
         let request = OcioGpuShaderRequest::ColorSpace {
             engine: transform.engine.clone(),
@@ -981,12 +1115,12 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
             alpha: crate::ColorFrameAlpha::StraightCoverage,
         };
         let working = input.color_space.working().ok_or_else(|| {
-            RenderColorTransformError::ExecutionFailed {
-                direction: RenderColorTransformDirection::WorkingToOutput,
+            RenderColorTransformError::execution_failed(
+                RenderColorTransformDirection::WorkingToOutput,
                 input,
                 output,
-                reason: "GPU output frame is missing a working-space identity".to_string(),
-            }
+                "GPU output frame is missing a working-space identity",
+            )
         })?;
         let request = if let Some(display_view) = &transform.display_view {
             OcioGpuShaderRequest::DisplayView {
@@ -1023,12 +1157,12 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
     ) -> Result<RenderColorTransformGpuPlan, RenderColorTransformError> {
         require_straight_compatible_color_alpha(input)?;
         let source_identity = frame_space_identity(input.color_space).ok_or_else(|| {
-            RenderColorTransformError::ExecutionFailed {
-                direction: RenderColorTransformDirection::Intermediate,
+            RenderColorTransformError::execution_failed(
+                RenderColorTransformDirection::Intermediate,
                 input,
-                output: input,
-                reason: "GPU intermediate cannot use a monitor-device identity".to_string(),
-            }
+                input,
+                "GPU intermediate cannot use a monitor-device identity",
+            )
         })?;
         let output = ColorFrameDescriptor {
             width: input.width,
@@ -1105,6 +1239,24 @@ pub(crate) fn require_straight_compatible_color_alpha(
     }
 }
 
+/// Structured diagnostics retained for a failed color-transform execution.
+///
+/// The pair of exact frame descriptors is intentionally preserved rather than
+/// projected into strings. It is boxed by [`RenderColorTransformError`] because
+/// calibration identities make the pair too large for every successful
+/// `Result` value to carry inline.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RenderColorTransformExecutionFailure {
+    /// Logical transform direction.
+    pub direction: RenderColorTransformDirection,
+    /// Input frame descriptor.
+    pub input: ColorFrameDescriptor,
+    /// Intended output frame descriptor.
+    pub output: ColorFrameDescriptor,
+    /// Backend diagnostic reason.
+    pub reason: String,
+}
+
 /// Error returned by render color transform execution.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RenderColorTransformError {
@@ -1127,20 +1279,17 @@ pub enum RenderColorTransformError {
         alpha: crate::ColorFrameAlpha,
     },
     /// The selected color engine failed.
-    #[error("render color transform failed ({direction:?}, {input:?} -> {output:?}): {reason}")]
-    ExecutionFailed {
-        /// Logical transform direction.
-        direction: RenderColorTransformDirection,
-        /// Input frame descriptor.
-        input: ColorFrameDescriptor,
-        /// Intended output frame descriptor.
-        output: ColorFrameDescriptor,
-        /// Backend diagnostic reason.
-        reason: String,
-    },
+    #[error(
+        "render color transform failed ({:?}, {:?} -> {:?}): {}",
+        .0.direction,
+        .0.input,
+        .0.output,
+        .0.reason
+    )]
+    ExecutionFailed(Box<RenderColorTransformExecutionFailure>),
     /// GPU shader planning failed before native execution could be scheduled.
     #[error("render GPU color transform planning failed: {0}")]
-    GpuPlanningFailed(#[from] OcioGpuShaderError),
+    GpuPlanningFailed(#[source] Box<OcioGpuShaderError>),
     /// GPU planning was requested without an OCIO GPU shader cache.
     #[error("render GPU color transform planning requested without a GPU planner")]
     GpuPlannerUnavailable,
@@ -1161,6 +1310,28 @@ pub enum RenderColorTransformError {
     /// A camera/display transfer space was selected as a linear working space.
     #[error("invalid render working color space: {0}")]
     InvalidWorkingColorSpace(#[from] mondrian_core::InvalidWorkingColorSpace),
+}
+
+impl From<OcioGpuShaderError> for RenderColorTransformError {
+    fn from(error: OcioGpuShaderError) -> Self {
+        Self::GpuPlanningFailed(Box::new(error))
+    }
+}
+
+impl RenderColorTransformError {
+    pub(crate) fn execution_failed(
+        direction: RenderColorTransformDirection,
+        input: ColorFrameDescriptor,
+        output: ColorFrameDescriptor,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self::ExecutionFailed(Box::new(RenderColorTransformExecutionFailure {
+            direction,
+            input,
+            output,
+            reason: reason.into(),
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -1289,6 +1460,38 @@ mod tests {
     }
 
     #[test]
+    fn explicit_cpu_color_session_reuses_processor_without_changing_pixels() {
+        let source =
+            CpuEncodedColorFrame::source_rgba8(1, 1, ColorSpace::Rec709, vec![128, 64, 32, 255]);
+        let transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut session = RenderCpuColorExecutionSession::new(4);
+
+        let first = CpuColorTransformExecutor::input_to_working_with_session(
+            &source,
+            &transform,
+            &mut session,
+        )
+        .expect("first input transform");
+        let after_first = session.diagnostics();
+        let second = CpuColorTransformExecutor::input_to_working_with_session(
+            &source,
+            &transform,
+            &mut session,
+        )
+        .expect("second input transform");
+        let after_second = session.diagnostics();
+
+        assert_eq!(first.frame, second.frame);
+        assert!(after_first.misses >= 1);
+        assert!(after_second.hits > after_first.hits);
+        assert_eq!(after_second.entries, 1);
+    }
+
+    #[test]
     fn input_transform_failure_carries_boundary_descriptors() {
         let source = CpuEncodedColorFrame::source_rgba8(
             2,
@@ -1310,13 +1513,19 @@ mod tests {
             .expect_err("missing explicit OCIO source must fail");
 
         match err {
-            RenderColorTransformError::ExecutionFailed { direction, input, output, reason } => {
-                assert_eq!(direction, RenderColorTransformDirection::InputToWorking);
-                assert_eq!(input, source.descriptor());
-                assert_eq!(output.domain, ColorFrameDomain::Working);
-                assert_eq!(output.color_space, WorkingColorSpace::LinearRec709.into());
-                assert_eq!(output.pixel_count(), 2);
-                assert!(reason.contains("OCIO config file not found"));
+            RenderColorTransformError::ExecutionFailed(failure) => {
+                assert_eq!(
+                    failure.direction,
+                    RenderColorTransformDirection::InputToWorking
+                );
+                assert_eq!(failure.input, source.descriptor());
+                assert_eq!(failure.output.domain, ColorFrameDomain::Working);
+                assert_eq!(
+                    failure.output.color_space,
+                    WorkingColorSpace::LinearRec709.into()
+                );
+                assert_eq!(failure.output.pixel_count(), 2);
+                assert!(failure.reason.contains("OCIO config file not found"));
             }
             other => panic!("unexpected error: {other:?}"),
         }
@@ -1344,14 +1553,17 @@ mod tests {
             .expect_err("missing explicit OCIO source must fail");
 
         match err {
-            RenderColorTransformError::ExecutionFailed { direction, input, output, reason } => {
-                assert_eq!(direction, RenderColorTransformDirection::WorkingToOutput);
-                assert_eq!(input, source.descriptor());
-                assert_eq!(output.domain, ColorFrameDomain::Export);
-                assert_eq!(output.color_space, ColorSpace::Srgb.into());
-                assert_eq!(output.encoding, ColorFrameEncoding::EncodedFloat);
-                assert_eq!(output.pixel_count(), 4);
-                assert!(reason.contains("OCIO config file not found"));
+            RenderColorTransformError::ExecutionFailed(failure) => {
+                assert_eq!(
+                    failure.direction,
+                    RenderColorTransformDirection::WorkingToOutput
+                );
+                assert_eq!(failure.input, source.descriptor());
+                assert_eq!(failure.output.domain, ColorFrameDomain::Export);
+                assert_eq!(failure.output.color_space, ColorSpace::Srgb.into());
+                assert_eq!(failure.output.encoding, ColorFrameEncoding::EncodedFloat);
+                assert_eq!(failure.output.pixel_count(), 4);
+                assert!(failure.reason.contains("OCIO config file not found"));
             }
             other => panic!("unexpected error: {other:?}"),
         }

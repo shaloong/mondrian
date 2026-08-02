@@ -15,14 +15,13 @@ use mondrian_effects::{
     EffectFloatUnsupportedReason,
 };
 use mondrian_renderer::{
-    composite_timeline_elements_color_frame_with_diagnostics,
-    execute_cpu_program_monitor_boundary_rgba8, CpuColorFrame, RenderColorStageDiagnostics,
-    RenderColorTransformDiagnostics, RenderColorTransformError, RenderMonitorAdaptation,
-    RenderMonitorAdaptationError, RenderOutputColorBoundary, TimelineAdjustmentLayer,
-    TimelineCompositeDiagnostics, TimelineCompositeElement, TimelineCompositeError,
-    TimelineCompositeOptions, TimelineCompositeScratch, TimelineCrossDissolveLayer,
-    TimelineEffectColorRuntime, TimelineMediaLayer, TimelineSolidColorLayer,
-    TimelineTransitionInput,
+    composite_timeline_elements_color_frame_with_diagnostics, CpuColorFrame,
+    RenderColorStageDiagnostics, RenderColorTransformDiagnostics, RenderColorTransformError,
+    RenderMonitorAdaptation, RenderMonitorAdaptationError, RenderOutputColorBoundary,
+    TimelineAdjustmentLayer, TimelineCompositeDiagnostics, TimelineCompositeElement,
+    TimelineCompositeError, TimelineCompositeOptions, TimelineCompositeScratch,
+    TimelineCrossDissolveLayer, TimelineEffectColorRuntime, TimelineMediaLayer,
+    TimelineSolidColorLayer, TimelineTransitionInput,
 };
 use mondrian_timeline::sequence::ProgramColorContext;
 
@@ -90,6 +89,7 @@ impl PreviewCpuExecutionError {
 fn timeline_composite_is_blocked(error: &TimelineCompositeError) -> bool {
     match error {
         TimelineCompositeError::EffectDomainBlocked { .. } => true,
+        TimelineCompositeError::FinalExportRequiresFloatWorkingComposite { .. } => true,
         TimelineCompositeError::EncodedEffect(error) => matches!(
             error,
             EffectExecutionError::ColorDomainConversionRequired { .. }
@@ -104,10 +104,16 @@ fn timeline_composite_is_blocked(error: &TimelineCompositeError) -> bool {
             EffectFloatUnsupportedReason::ColorDomainTransitionFailed { .. }
         ),
         TimelineCompositeError::FloatEffect {
+            reason: EffectFloatExecutionError::ExecutionContract(_),
+        } => true,
+        TimelineCompositeError::FloatEffect {
             reason:
                 EffectFloatExecutionError::InputSizeMismatch { .. }
                 | EffectFloatExecutionError::MissingOutput { .. },
         } => false,
+        TimelineCompositeError::MediaFrameContractMismatch { .. }
+        | TimelineCompositeError::MediaFrameStorageLengthMismatch { .. } => false,
+        TimelineCompositeError::CpuWorkingSet(_) => false,
     }
 }
 
@@ -198,7 +204,7 @@ pub(crate) fn composite_resolved_preview_working(
                 effect_graph,
                 frame_seed,
             } => {
-                let working = frame.working_frame()?;
+                let working = frame.working_frame_with_session(scratch.color_execution_mut())?;
                 if let Some(diagnostics) = working.color_diagnostics {
                     input_color_diagnostics.push(diagnostics);
                 }
@@ -220,12 +226,14 @@ pub(crate) fn composite_resolved_preview_working(
                     &mut working_frames,
                     &mut input_color_diagnostics,
                     &mut input_color_stage_diagnostics,
+                    scratch.color_execution_mut(),
                 )?;
                 let right = prepare_transition_input(
                     right,
                     &mut working_frames,
                     &mut input_color_diagnostics,
                     &mut input_color_stage_diagnostics,
+                    scratch.color_execution_mut(),
                 )?;
                 working_elements.push(PreviewWorkingElement::CrossDissolve {
                     left,
@@ -298,6 +306,7 @@ fn prepare_transition_input(
     working_frames: &mut Vec<CpuColorFrame>,
     input_color_diagnostics: &mut Vec<RenderColorTransformDiagnostics>,
     input_color_stage_diagnostics: &mut RenderColorStageDiagnostics,
+    color_session: &mut mondrian_renderer::RenderCpuColorExecutionSession,
 ) -> Result<PreviewWorkingTransitionInput, PreviewCpuExecutionError> {
     Ok(match input {
         ResolvedPreviewTransitionInput::Transparent => PreviewWorkingTransitionInput::Transparent,
@@ -312,7 +321,7 @@ fn prepare_transition_input(
             effect_graph,
             frame_seed,
         } => {
-            let working = frame.working_frame()?;
+            let working = frame.working_frame_with_session(color_session)?;
             if let Some(diagnostics) = working.color_diagnostics {
                 input_color_diagnostics.push(diagnostics);
             }
@@ -394,24 +403,29 @@ pub(crate) fn composite_resolved_preview(
         ColorSpace::Srgb,
         color_context.engine.clone(),
     )?;
-    execute_cpu_program_monitor_boundary_rgba8(&composite.frame, &boundary, &adaptation)
-        .map(|output| {
-            execution_durations.cpu_output_boundary_us =
-                duration_us(output_boundary_started_at.elapsed());
-            PreviewCompositeOutput {
-                rgba: output.rgba,
-                composite_diagnostics: composite.composite_diagnostics,
-                input_color_diagnostics: composite.input_color_diagnostics,
-                input_color_stage_diagnostics: composite.input_color_stage_diagnostics,
-                color_diagnostics: output.program_output.color_diagnostics,
-                monitor_color_diagnostics: output.monitor_color_diagnostics,
-                color_stage_diagnostics: output.stage_diagnostics,
-                execution_durations,
-            }
-        })
-        .map_err(|source| PreviewCpuExecutionError::FinalColorTransform {
-            source: std::sync::Arc::new(source),
-        })
+    mondrian_renderer::execute_cpu_program_monitor_presentation_rgba8_with_session(
+        &composite.frame,
+        &boundary,
+        &adaptation,
+        scratch.color_execution_mut(),
+    )
+    .map(|output| {
+        execution_durations.cpu_output_boundary_us =
+            duration_us(output_boundary_started_at.elapsed());
+        PreviewCompositeOutput {
+            rgba: output.rgba,
+            composite_diagnostics: composite.composite_diagnostics,
+            input_color_diagnostics: composite.input_color_diagnostics,
+            input_color_stage_diagnostics: composite.input_color_stage_diagnostics,
+            color_diagnostics: output.program_color_diagnostics,
+            monitor_color_diagnostics: output.monitor_color_diagnostics,
+            color_stage_diagnostics: output.stage_diagnostics,
+            execution_durations,
+        }
+    })
+    .map_err(|source| PreviewCpuExecutionError::FinalColorTransform {
+        source: std::sync::Arc::new(source),
+    })
 }
 
 fn duration_us(duration: Duration) -> u64 {
@@ -441,6 +455,22 @@ mod tests {
         assert_eq!(unavailable.stage(), PreviewOutputStage::TimelineComposite);
         assert_eq!(unavailable.code(), "preview.blocked.timeline_composite");
         assert!(unavailable.detail().contains("effect color domain is blocked"));
+    }
+
+    #[test]
+    fn final_only_precision_rejection_fails_closed_if_projected_by_preview() {
+        let error = PreviewCpuExecutionError::TimelineComposite(
+            TimelineCompositeError::FinalExportRequiresFloatWorkingComposite { effect_graphs: 1 },
+        );
+
+        let unavailable = error.unavailability();
+        assert_eq!(
+            unavailable.disposition(),
+            PreviewUnavailabilityDisposition::Blocked
+        );
+        assert_eq!(unavailable.stage(), PreviewOutputStage::TimelineComposite);
+        assert_eq!(unavailable.code(), "preview.blocked.timeline_composite");
+        assert!(unavailable.detail().contains("Float32 working composite"));
     }
 
     #[test]

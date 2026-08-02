@@ -19,10 +19,20 @@ Project save/open issues usually involve:
 - `.mdp` ZIP entries
 - `project.json` serde shape
 - runtime library extraction
-- `library/index.db`
+- `library-generation-<uuid>/index.db` (live runtime; archive-only path remains
+  `library/index.db`)
 - autosave manifest normalization
 
-Inspect the runtime root under `temp/mondrian-runtime/`.
+Inspect the recovery-bearing runtime root under the stable per-user state
+namespace:
+
+- Windows: `%LOCALAPPDATA%/Mondrian/state/project-runtime-v4/`
+- macOS: `~/Library/Application Support/Mondrian/state/project-runtime-v4/`
+- other Unix: `$XDG_STATE_HOME/mondrian/project-runtime-v4/`, falling back to
+  `~/.local/state/mondrian/project-runtime-v4/`
+
+`library-generation-<uuid>/` is explicitly ephemeral; `autosave/` and its
+manifest are recovery authority and must not be treated as disposable cache.
 
 ## Media
 

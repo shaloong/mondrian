@@ -194,6 +194,35 @@ pub struct PreparedAudioScheduleSummary {
     pub requires_state_entry: bool,
 }
 
+/// Conservative immutable/fixed allocation evidence for one prepared Session.
+///
+/// The byte values are logical admission sizes, not allocator telemetry. They
+/// deliberately include every preallocated sample/event payload plus stable
+/// conservative weights for the immutable prepared graph.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AudioSessionResourceFootprint {
+    /// Immutable prepared-plan logical bytes.
+    pub prepared_logical_bytes: usize,
+    /// Total fixed bytes retained by one live Session.
+    pub fixed_resident_bytes: usize,
+    /// Node buffers and block-local reusable render scratch.
+    pub render_scratch_bytes: usize,
+    /// Processor-declared private Session state.
+    pub processor_session_bytes: usize,
+    /// Interleaved PDC delay-line samples.
+    pub compensation_delay_bytes: usize,
+    /// Preallocated sample-accurate parameter-event storage.
+    pub parameter_event_bytes: usize,
+}
+
+/// Failure to calculate a conservative resource footprint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum AudioResourceFootprintError {
+    /// A validated extent cannot be represented by this target architecture.
+    #[error("audio resource footprint exceeds the supported address range")]
+    ExtentOverflow,
+}
+
 /// Immutable context-specific plan. Mutable buffers and processor instances do not live here.
 #[derive(Debug, Clone)]
 pub struct PreparedAudioPlan {
@@ -284,6 +313,16 @@ impl PreparedAudioPlan {
         self.schedule.summary
     }
 
+    /// Calculate the allocation envelope before constructing a mutable Session.
+    ///
+    /// This is used by closure-wide admission so nested Sessions cannot each
+    /// consume an independent copy of the per-Session Render Contract budget.
+    pub fn session_resource_footprint(
+        &self,
+    ) -> Result<AudioSessionResourceFootprint, AudioResourceFootprintError> {
+        session_resource_footprint(self.contract, self.schedule.summary)
+    }
+
     /// Internal lookahead needed to return Timeline-aligned public PCM.
     pub fn public_output_lookahead_frames(&self) -> usize {
         self.schedule.summary.public_output_lookahead_frames
@@ -293,6 +332,113 @@ impl PreparedAudioPlan {
     pub fn requires_state_entry(&self) -> bool {
         self.schedule.summary.requires_state_entry
     }
+}
+
+fn session_resource_footprint(
+    contract: AudioRenderContract,
+    summary: PreparedAudioScheduleSummary,
+) -> Result<AudioSessionResourceFootprint, AudioResourceFootprintError> {
+    const PREPARED_BASE_BYTES: usize = 4 * 1024;
+    const PREPARED_NODE_BYTES: usize = 2 * 1024;
+    const PREPARED_ROUTE_BYTES: usize = 512;
+    const PREPARED_CONTRIBUTION_BYTES: usize = 4 * 1024;
+    const PREPARED_PROCESSOR_BYTES: usize = 4 * 1024;
+    const PREPARED_AUTOMATION_CURVE_BYTES: usize = 512;
+    const PREPARED_AUTOMATION_SPAN_BYTES: usize = 64;
+    const PREPARED_TRANSITION_BYTES: usize = 512;
+    const PROCESSOR_INSTANCE_METADATA_BYTES: usize = 256;
+    const METER_CHANNEL_STATE_BYTES: usize = 64;
+    const SESSION_BASE_BYTES: usize = 4 * 1024;
+
+    let prepared_logical_bytes = checked_sum([
+        PREPARED_BASE_BYTES,
+        checked_product([summary.node_count, PREPARED_NODE_BYTES])?,
+        checked_product([summary.route_count, PREPARED_ROUTE_BYTES])?,
+        checked_product([summary.contribution_count, PREPARED_CONTRIBUTION_BYTES])?,
+        checked_product([summary.processor_occurrence_count, PREPARED_PROCESSOR_BYTES])?,
+        checked_product([
+            summary.automation_curve_count,
+            PREPARED_AUTOMATION_CURVE_BYTES,
+        ])?,
+        checked_product([
+            summary.automation_event_span_count,
+            PREPARED_AUTOMATION_SPAN_BYTES,
+        ])?,
+        checked_product([summary.transition_binding_count, PREPARED_TRANSITION_BYTES])?,
+    ])?;
+
+    let channels = contract.channel_count();
+    let block_samples = checked_product([contract.max_block_frames, channels])?;
+    let node_buffers = checked_product([
+        summary.scratch_slot_count,
+        block_samples,
+        4,
+        std::mem::size_of::<f32>(),
+    ])?;
+    let source_frames = checked_product([contract.max_block_frames, std::mem::size_of::<i64>()])?;
+    let source_pcm = checked_product([
+        contract.max_block_frames,
+        summary.maximum_source_channels,
+        std::mem::size_of::<f32>(),
+    ])?;
+    let reusable_pcm = checked_product([block_samples, 5, std::mem::size_of::<f32>()])?;
+    let gain_parameter_lanes =
+        checked_product([contract.max_block_frames, 2, std::mem::size_of::<f64>()])?;
+    let render_scratch_bytes = checked_sum([
+        node_buffers,
+        source_frames,
+        source_pcm,
+        reusable_pcm,
+        gain_parameter_lanes,
+    ])?;
+    let compensation_delay_bytes = checked_product([
+        summary.compensation_delay_samples,
+        std::mem::size_of::<f32>(),
+    ])?;
+    let parameter_event_bytes = checked_sum([
+        checked_product([
+            summary.maximum_parameter_events_per_block,
+            std::mem::size_of::<crate::AudioParameterEvent>(),
+        ])?,
+        checked_product([
+            summary.processor_parameter_lane_count,
+            std::mem::size_of::<Range<usize>>(),
+        ])?,
+    ])?;
+    let fixed_resident_bytes = checked_sum([
+        SESSION_BASE_BYTES,
+        render_scratch_bytes,
+        summary.processor_session_scratch_bytes,
+        compensation_delay_bytes,
+        parameter_event_bytes,
+        checked_product([
+            summary.processor_occurrence_count,
+            PROCESSOR_INSTANCE_METADATA_BYTES,
+        ])?,
+        checked_product([channels, METER_CHANNEL_STATE_BYTES])?,
+    ])?;
+    Ok(AudioSessionResourceFootprint {
+        prepared_logical_bytes,
+        fixed_resident_bytes,
+        render_scratch_bytes,
+        processor_session_bytes: summary.processor_session_scratch_bytes,
+        compensation_delay_bytes,
+        parameter_event_bytes,
+    })
+}
+
+fn checked_product<const N: usize>(
+    factors: [usize; N],
+) -> Result<usize, AudioResourceFootprintError> {
+    factors.into_iter().try_fold(1_usize, |product, factor| {
+        product.checked_mul(factor).ok_or(AudioResourceFootprintError::ExtentOverflow)
+    })
+}
+
+fn checked_sum<const N: usize>(values: [usize; N]) -> Result<usize, AudioResourceFootprintError> {
+    values.into_iter().try_fold(0_usize, |sum, value| {
+        sum.checked_add(value).ok_or(AudioResourceFootprintError::ExtentOverflow)
+    })
 }
 
 #[derive(Debug, Clone)]

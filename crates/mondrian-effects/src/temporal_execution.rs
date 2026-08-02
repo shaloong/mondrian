@@ -1,0 +1,1851 @@
+//! Exact finite-history and ROI execution over the one compiled Effect IR.
+//!
+//! This Module is the scalar semantic reference for future tiled CPU/SIMD/GPU
+//! adapters. It consumes [`crate::CompiledEffectGraph`] directly; it does not
+//! introduce a second graph or reinterpret definition contracts.
+
+use crate::adjustment::apply_render_op_f32_controlled;
+use crate::execution_session::EffectTemporalCachedOutput;
+use crate::{
+    CompiledEffectGraph, EffectExecutionDemandError, EffectExecutionSession, EffectFrameExtent,
+    EffectGraphNodeId, EffectGraphNodeKind, EffectInputRoi, EffectPixelRoi,
+    EffectProcessingBackend, EffectResourceLifetime, EffectRoiHalo, EffectStateModel,
+    EffectTemporalBoundary, EffectTemporalSpan, EffectWorkingPrecision,
+};
+use mondrian_core::{ExecutionCancellationToken, TimelineTime};
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+/// Complete immutable identity of the source adapter and every time/pixel
+/// mapping it exposes to one Effect program.
+///
+/// The fingerprint must cover the source revision, physical stream,
+/// Clip-to-source or nested-Sequence mapping, color/alpha interpretation,
+/// geometry, and frame-seed grid. A path, durable entity ID, or truncated hash
+/// is not sufficient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EffectTemporalSourceIdentity([u8; 32]);
+
+impl EffectTemporalSourceIdentity {
+    /// Bind one complete canonical semantic fingerprint.
+    pub const fn from_complete_semantic_fingerprint(fingerprint: [u8; 32]) -> Self {
+        Self(fingerprint)
+    }
+
+    /// Complete provider identity.
+    pub const fn semantic_fingerprint(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+/// Whether the request continues ordinary evaluation or follows a scheduler
+/// discontinuity.
+///
+/// This fact is evidence, not a processor-owned rule key. Finite-history
+/// stateless execution is random-access in either case. Stateful contracts
+/// remain fail-closed until an ordered Effect continuity Session exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EffectExecutionContinuity {
+    /// Ordinary evaluation in the same scheduler run.
+    Continuous,
+    /// Seek, source switch, graph change, or other discontinuous re-entry.
+    Discontinuous,
+}
+
+/// One exact temporal/ROI output request.
+#[derive(Debug, Clone)]
+pub struct EffectTemporalExecutionRequest {
+    generation: u64,
+    continuity: EffectExecutionContinuity,
+    output_time: TimelineTime,
+    output_frame_seed: i64,
+    frame_extent: EffectFrameExtent,
+    output_roi: EffectPixelRoi,
+    cancellation: ExecutionCancellationToken,
+}
+
+impl EffectTemporalExecutionRequest {
+    /// Construct a request bound to one immutable scheduler generation.
+    pub fn new(
+        generation: u64,
+        continuity: EffectExecutionContinuity,
+        output_time: TimelineTime,
+        frame_extent: EffectFrameExtent,
+        output_roi: EffectPixelRoi,
+        cancellation: ExecutionCancellationToken,
+    ) -> Self {
+        Self {
+            generation,
+            continuity,
+            output_time,
+            output_frame_seed: frame_seed_for_output(output_time),
+            frame_extent,
+            output_roi,
+            cancellation,
+        }
+    }
+
+    /// Bind the exact deterministic seed used by current-time unary Effects.
+    ///
+    /// Timeline execution supplies the same seed carried by its ordinary
+    /// single-frame render plan. Source tiles cannot infer this value from a
+    /// retimed Clip coordinate.
+    pub const fn with_output_frame_seed(mut self, output_frame_seed: i64) -> Self {
+        self.output_frame_seed = output_frame_seed;
+        self
+    }
+
+    /// Scheduler generation that owns every provider request and cache entry.
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Continuity evidence supplied by the scheduler.
+    pub const fn continuity(&self) -> EffectExecutionContinuity {
+        self.continuity
+    }
+
+    /// Exact Clip visual-author-domain output time.
+    pub const fn output_time(&self) -> TimelineTime {
+        self.output_time
+    }
+
+    /// Deterministic seed for Effects evaluated at `output_time`.
+    pub const fn output_frame_seed(&self) -> i64 {
+        self.output_frame_seed
+    }
+
+    /// Complete frame coordinate extent.
+    pub const fn frame_extent(&self) -> EffectFrameExtent {
+        self.frame_extent
+    }
+
+    /// Requested half-open output region.
+    pub const fn output_roi(&self) -> EffectPixelRoi {
+        self.output_roi
+    }
+
+    /// Monotonic cancellation authority for this generation.
+    pub const fn cancellation(&self) -> &ExecutionCancellationToken {
+        &self.cancellation
+    }
+}
+
+/// One source request emitted by the scalar temporal executor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EffectTemporalFrameRequest {
+    generation: u64,
+    time: TimelineTime,
+    frame_extent: EffectFrameExtent,
+    input_roi: EffectInputRoi,
+    exact_halo: Option<EffectRoiHalo>,
+    precision: EffectWorkingPrecision,
+}
+
+/// Immutable, exact source-demand set collected from one compiled Effect graph.
+///
+/// This is the boundary between low-frequency graph evaluation and concrete
+/// media work. Preview may schedule every request asynchronously; Export may
+/// resolve the same requests synchronously inside its job. Neither consumer is
+/// allowed to ask the scalar executor to decode while it is walking the graph.
+#[derive(Debug, Clone)]
+pub struct EffectTemporalFrameDemandBatch {
+    generation: u64,
+    requests: Arc<[EffectTemporalFrameRequest]>,
+}
+
+impl EffectTemporalFrameDemandBatch {
+    /// Scheduler generation that owns every request in this frozen batch.
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Exact, de-duplicated requests in deterministic evaluation order.
+    pub fn requests(&self) -> &[EffectTemporalFrameRequest] {
+        &self.requests
+    }
+
+    /// Whether this batch has no pixel dependency.
+    pub fn is_empty(&self) -> bool {
+        self.requests.is_empty()
+    }
+}
+
+impl EffectTemporalFrameRequest {
+    /// Owning scheduler generation.
+    pub const fn generation(self) -> u64 {
+        self.generation
+    }
+
+    /// Exact Clip-domain source instant requested by the graph.
+    pub const fn time(self) -> TimelineTime {
+        self.time
+    }
+
+    /// Complete coordinate extent shared by every tile.
+    pub const fn frame_extent(self) -> EffectFrameExtent {
+        self.frame_extent
+    }
+
+    /// Concrete required source region and strength of its ROI evidence.
+    pub const fn input_roi(self) -> EffectInputRoi {
+        self.input_roi
+    }
+
+    /// Exact finite halo, or `None` for an unknown conservative full-frame
+    /// request.
+    pub const fn exact_halo(self) -> Option<EffectRoiHalo> {
+        self.exact_halo
+    }
+
+    /// Exact requested working representation.
+    pub const fn precision(self) -> EffectWorkingPrecision {
+        self.precision
+    }
+}
+
+/// Immutable Float32 tile returned by an Effect temporal source Adapter.
+#[derive(Debug, Clone)]
+pub struct EffectFrameTileF32 {
+    time: TimelineTime,
+    frame_extent: EffectFrameExtent,
+    roi: EffectPixelRoi,
+    frame_seed: i64,
+    pixels: Arc<[[f32; 4]]>,
+}
+
+impl EffectFrameTileF32 {
+    /// Validate and retain one exact source tile.
+    pub fn new(
+        time: TimelineTime,
+        frame_extent: EffectFrameExtent,
+        roi: EffectPixelRoi,
+        frame_seed: i64,
+        pixels: impl Into<Arc<[[f32; 4]]>>,
+    ) -> Result<Self, EffectTemporalFrameProviderError> {
+        let pixels = pixels.into();
+        let expected =
+            checked_pixel_count(roi).ok_or(EffectTemporalFrameProviderError::InvalidTile {
+                reason: "tile pixel count overflowed addressable memory".to_owned(),
+            })?;
+        if pixels.len() != expected {
+            return Err(EffectTemporalFrameProviderError::InvalidTile {
+                reason: format!(
+                    "tile contains {} pixels but ROI requires {expected}",
+                    pixels.len()
+                ),
+            });
+        }
+        if roi != clamp_roi(roi, frame_extent) {
+            return Err(EffectTemporalFrameProviderError::InvalidTile {
+                reason: "tile ROI exceeds the complete frame extent".to_owned(),
+            });
+        }
+        Ok(Self { time, frame_extent, roi, frame_seed, pixels })
+    }
+
+    /// Exact source time.
+    pub const fn time(&self) -> TimelineTime {
+        self.time
+    }
+
+    /// Complete source coordinate extent.
+    pub const fn frame_extent(&self) -> EffectFrameExtent {
+        self.frame_extent
+    }
+
+    /// Half-open source region represented by `pixels`.
+    pub const fn roi(&self) -> EffectPixelRoi {
+        self.roi
+    }
+
+    /// Deterministic frame seed for this exact evaluation instant.
+    pub const fn frame_seed(&self) -> i64 {
+        self.frame_seed
+    }
+
+    /// Straight-alpha scene-linear Float32 pixels in row-major order.
+    pub fn pixels(&self) -> &[[f32; 4]] {
+        &self.pixels
+    }
+
+    fn byte_len(&self) -> usize {
+        self.pixels.len().saturating_mul(std::mem::size_of::<[f32; 4]>())
+    }
+}
+
+/// Failure returned by a concrete temporal source Adapter.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum EffectTemporalFrameProviderError {
+    /// The owning execution generation was canceled.
+    #[error("effect temporal frame request was canceled")]
+    Canceled,
+    /// Source decode, nested evaluation, or another recoverable dependency
+    /// could not provide the exact request.
+    #[error("effect temporal frame provider failed: {reason}")]
+    Unavailable {
+        /// Adapter-owned failure reason.
+        reason: String,
+    },
+    /// The Adapter returned a malformed or mismatched tile.
+    #[error("effect temporal frame provider returned an invalid tile: {reason}")]
+    InvalidTile {
+        /// Exact contract violation.
+        reason: String,
+    },
+}
+
+/// Adapter that resolves Clip-domain frame requests to exact source or nested
+/// Sequence pixels.
+pub trait EffectTemporalFrameProvider {
+    /// Complete immutable source/mapping identity used by cache admission.
+    fn source_identity(&self) -> EffectTemporalSourceIdentity;
+
+    /// Fetch exactly the requested region and Float32 representation.
+    ///
+    /// Implementations must observe `cancellation` before publishing success.
+    /// A canceled result may not populate a decode or Effect cache.
+    fn fetch_frame(
+        &mut self,
+        request: EffectTemporalFrameRequest,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<EffectFrameTileF32, EffectTemporalFrameProviderError>;
+}
+
+/// A fully resolved immutable temporal batch.
+///
+/// Construction proves that each graph demand has exactly one matching tile
+/// and that no unrequested tile entered the set. `fetch_frame` is consequently
+/// a bounded lookup only: it performs no decode, nested evaluation, title
+/// rasterization, color conversion, or other hidden work.
+#[derive(Debug, Clone)]
+pub struct PreparedTemporalFrameSet {
+    source_identity: EffectTemporalSourceIdentity,
+    generation: u64,
+    requests: Arc<[EffectTemporalFrameRequest]>,
+    frames: HashMap<EffectTemporalFrameRequest, EffectFrameTileF32>,
+}
+
+impl PreparedTemporalFrameSet {
+    /// Freeze one completely resolved demand batch.
+    pub fn prepare(
+        source_identity: EffectTemporalSourceIdentity,
+        batch: EffectTemporalFrameDemandBatch,
+        resolved: impl IntoIterator<Item = (EffectTemporalFrameRequest, EffectFrameTileF32)>,
+    ) -> Result<Self, PreparedTemporalFrameSetError> {
+        let expected = batch.requests.iter().copied().collect::<HashSet<_>>();
+        let mut frames = HashMap::with_capacity(expected.len());
+        for (request, tile) in resolved {
+            if request.generation != batch.generation {
+                return Err(PreparedTemporalFrameSetError::GenerationMismatch {
+                    expected: batch.generation,
+                    actual: request.generation,
+                });
+            }
+            if !expected.contains(&request) {
+                return Err(PreparedTemporalFrameSetError::UnexpectedRequest { request });
+            }
+            validate_provider_tile(&tile, request).map_err(|error| {
+                PreparedTemporalFrameSetError::InvalidTile { request, reason: error.to_string() }
+            })?;
+            if frames.insert(request, tile).is_some() {
+                return Err(PreparedTemporalFrameSetError::DuplicateRequest { request });
+            }
+        }
+        if let Some(request) =
+            batch.requests.iter().copied().find(|request| !frames.contains_key(request))
+        {
+            return Err(PreparedTemporalFrameSetError::MissingRequest { request });
+        }
+        Ok(Self {
+            source_identity,
+            generation: batch.generation,
+            requests: batch.requests,
+            frames,
+        })
+    }
+
+    /// Scheduler generation bound to this immutable set.
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Exact requests proven complete by construction.
+    pub fn requests(&self) -> &[EffectTemporalFrameRequest] {
+        &self.requests
+    }
+
+    /// Number of retained source tiles.
+    pub fn len(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// Whether no source tile is retained.
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+}
+
+impl EffectTemporalFrameProvider for PreparedTemporalFrameSet {
+    fn source_identity(&self) -> EffectTemporalSourceIdentity {
+        self.source_identity
+    }
+
+    fn fetch_frame(
+        &mut self,
+        request: EffectTemporalFrameRequest,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<EffectFrameTileF32, EffectTemporalFrameProviderError> {
+        if cancellation.is_canceled() {
+            return Err(EffectTemporalFrameProviderError::Canceled);
+        }
+        if request.generation != self.generation {
+            return Err(EffectTemporalFrameProviderError::Unavailable {
+                reason: format!(
+                    "prepared temporal set belongs to generation {}, not {}",
+                    self.generation, request.generation
+                ),
+            });
+        }
+        self.frames.get(&request).cloned().ok_or_else(|| {
+            EffectTemporalFrameProviderError::Unavailable {
+                reason: format!(
+                    "prepared temporal set does not contain exact request at {} / {}",
+                    request.time.numerator(),
+                    request.time.denominator()
+                ),
+            }
+        })
+    }
+}
+
+/// Invalid or incomplete input while freezing a temporal frame set.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PreparedTemporalFrameSetError {
+    /// A resolved request belongs to another scheduler generation.
+    #[error("temporal frame generation mismatch: expected {expected}, received {actual}")]
+    GenerationMismatch {
+        /// Batch generation.
+        expected: u64,
+        /// Resolved request generation.
+        actual: u64,
+    },
+    /// The adapter returned a request the compiled graph never demanded.
+    #[error("temporal frame set contains an unrequested dependency: {request:?}")]
+    UnexpectedRequest {
+        /// Unexpected exact request.
+        request: EffectTemporalFrameRequest,
+    },
+    /// The adapter returned the same exact request more than once.
+    #[error("temporal frame set contains duplicate dependency: {request:?}")]
+    DuplicateRequest {
+        /// Duplicated exact request.
+        request: EffectTemporalFrameRequest,
+    },
+    /// A graph demand was not resolved.
+    #[error("temporal frame set is missing dependency: {request:?}")]
+    MissingRequest {
+        /// Missing exact request.
+        request: EffectTemporalFrameRequest,
+    },
+    /// A resolved tile did not exactly satisfy its request.
+    #[error("invalid tile for temporal request {request:?}: {reason}")]
+    InvalidTile {
+        /// Request the tile claimed to satisfy.
+        request: EffectTemporalFrameRequest,
+        /// Exact validation failure.
+        reason: String,
+    },
+}
+
+/// One completed exact ROI execution.
+#[derive(Debug, Clone)]
+pub struct EffectTemporalExecutionOutput {
+    tile: EffectFrameTileF32,
+    cache_identity: [u8; 32],
+    provider_requests: usize,
+    peak_working_bytes: usize,
+}
+
+impl EffectTemporalExecutionOutput {
+    /// Requested output tile.
+    pub const fn tile(&self) -> &EffectFrameTileF32 {
+        &self.tile
+    }
+
+    /// Complete versioned identity used for Session-local cache lookup.
+    pub const fn cache_identity(&self) -> [u8; 32] {
+        self.cache_identity
+    }
+
+    /// Number of exact provider fetches performed (zero on a cache hit).
+    pub const fn provider_requests(&self) -> usize {
+        self.provider_requests
+    }
+
+    /// Peak scalar working bytes admitted for this execution.
+    pub const fn peak_working_bytes(&self) -> usize {
+        self.peak_working_bytes
+    }
+}
+
+/// Why exact temporal/ROI scalar execution failed closed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum EffectTemporalExecutionError {
+    /// Demand planning could not represent the exact request.
+    #[error(transparent)]
+    Demand(#[from] EffectExecutionDemandError),
+    /// One definition stage does not admit CPU Float32.
+    #[error("effect stage {stage_index} does not admit CPU Float32 temporal execution")]
+    ExecutionModeNotAdmitted {
+        /// First incompatible definition stage.
+        stage_index: usize,
+    },
+    /// Ordered mutable state requires a future continuity Session.
+    #[error("stateful effect execution requires an ordered continuity session")]
+    StatefulUnsupported,
+    /// Continuity-owned resources cannot enter a random-access execution.
+    #[error("effect execution requires continuity-session resource ownership")]
+    ContinuityResourceUnsupported,
+    /// Unbounded temporal input cannot be materialized by a bounded request.
+    #[error("effect execution has unbounded temporal input")]
+    UnboundedTemporalInput,
+    /// The first production tracer admits past-only history. Future input
+    /// needs scheduler look-ahead and is deliberately not approximated.
+    #[error("effect execution requires future temporal input")]
+    FutureTemporalInputUnsupported,
+    /// A temporal graph did not match the first exact production shape:
+    /// Source -> one finite-history mixer -> current-time unary tail.
+    #[error("temporal graph is outside the admitted production tracer: {reason}")]
+    UnsupportedTemporalShape {
+        /// Stable fail-closed explanation.
+        reason: &'static str,
+    },
+    /// Mixed RGB processing domains require a renderer-owned temporal color
+    /// Adapter that is not yet provided by this scalar reference.
+    #[error("temporal scalar execution requires unresolved color-domain processing")]
+    ColorDomainUnsupported,
+    /// The current scalar reference intentionally supports one source and
+    /// unary chain; another graph node must gain an exact value-aware lowering.
+    #[error("temporal scalar execution does not support graph node {node_id:?} ({kind})")]
+    UnsupportedGraphNode {
+        /// Unsupported compiled node.
+        node_id: EffectGraphNodeId,
+        /// Stable node-kind label.
+        kind: &'static str,
+    },
+    /// A non-temporal unary operation lacks a Float32 scalar implementation.
+    #[error("temporal scalar execution does not support render operation `{op}`")]
+    UnsupportedRenderOperation {
+        /// Stable operation label.
+        op: &'static str,
+    },
+    /// A finite-history operation carried invalid runtime values.
+    #[error("invalid temporal frame mix: {reason}")]
+    InvalidTemporalOperation {
+        /// Exact invalid value or arithmetic reason.
+        reason: &'static str,
+    },
+    /// A concrete source or nested Sequence Adapter failed.
+    #[error(transparent)]
+    Provider(#[from] EffectTemporalFrameProviderError),
+    /// Execution was canceled at a cooperative checkpoint.
+    #[error("effect temporal execution was canceled")]
+    Canceled,
+    /// Full-frame scalar staging and memoization exceeded the explicit Session
+    /// budget before allocation.
+    #[error(
+        "effect temporal scalar working set requires {required_bytes} bytes, exceeding the {budget_bytes}-byte budget"
+    )]
+    WorkingSetBudgetExceeded {
+        /// Bytes required at the rejected checkpoint.
+        required_bytes: usize,
+        /// Session-owned limit.
+        budget_bytes: usize,
+    },
+    /// The compiled graph did not produce its declared output.
+    #[error("effect temporal graph output is missing")]
+    MissingGraphOutput,
+}
+
+/// Collect every source frame required by the first finite-history production
+/// tracer without fetching any pixels.
+///
+/// The admitted graph is deliberately narrow and mathematically closed:
+/// `Source -> TemporalFrameMix -> zero or more current-time unary operations`.
+/// A temporal operation with upstream Effects would require those Effects to be
+/// evaluated at each history time, while frame-bound parameters are currently
+/// compiled at the output Clip time. Such graphs therefore fail closed instead
+/// of silently applying current parameters to historical frames.
+pub fn collect_temporal_frame_demands(
+    compiled: &CompiledEffectGraph,
+    request: &EffectTemporalExecutionRequest,
+) -> Result<EffectTemporalFrameDemandBatch, EffectTemporalExecutionError> {
+    if request.cancellation.is_canceled() {
+        return Err(EffectTemporalExecutionError::Canceled);
+    }
+    admit_temporal_scalar(compiled)?;
+    if compiled.domain_plan().requires_conversion() || !compiled.domain_plan().blockers.is_empty() {
+        return Err(EffectTemporalExecutionError::ColorDomainUnsupported);
+    }
+    let shape = admitted_temporal_shape(compiled)?.ok_or(
+        EffectTemporalExecutionError::UnsupportedTemporalShape {
+            reason: "graph has no finite-history operation",
+        },
+    )?;
+    let demand = compiled.plan_execution_demand(
+        request.output_time,
+        request.frame_extent,
+        request.output_roi,
+    )?;
+    ensure_bounded_temporal_window(demand.temporal_window())?;
+    let past_time = temporal_past_time(request.output_time, shape.past_offset)?;
+    let mut times = Vec::with_capacity(2);
+    times.push(request.output_time);
+    if past_time != request.output_time {
+        times.push(past_time);
+    }
+    let requests = times
+        .into_iter()
+        .map(|time| EffectTemporalFrameRequest {
+            generation: request.generation,
+            time,
+            frame_extent: demand.frame_extent(),
+            input_roi: demand.input_roi(),
+            exact_halo: demand.exact_halo(),
+            precision: EffectWorkingPrecision::Float32,
+        })
+        .collect::<Vec<_>>();
+    Ok(EffectTemporalFrameDemandBatch {
+        generation: request.generation,
+        requests: requests.into(),
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AdmittedTemporalShape {
+    past_offset: TimelineTime,
+}
+
+impl EffectExecutionSession {
+    /// Execute a finite-history, stateless CPU Float32 graph for one exact ROI.
+    ///
+    /// The scalar reference stages an exact input tile into complete-frame
+    /// coordinates before running ordinary operations, then crops only the
+    /// requested output. This is deliberately conservative in memory but
+    /// prevents local coordinates or artificial tile edges from changing
+    /// Vignette, Grain, Mask, Blur, or other full-coordinate mathematics. A
+    /// future optimized tile Adapter must prove parity against this reference.
+    pub fn execute_temporal_roi_f32(
+        &mut self,
+        compiled: &CompiledEffectGraph,
+        request: &EffectTemporalExecutionRequest,
+        provider: &mut dyn EffectTemporalFrameProvider,
+    ) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
+        if request.cancellation.is_canceled() {
+            return Err(EffectTemporalExecutionError::Canceled);
+        }
+        admit_temporal_scalar(compiled)?;
+        if compiled.domain_plan().requires_conversion()
+            || !compiled.domain_plan().blockers.is_empty()
+        {
+            return Err(EffectTemporalExecutionError::ColorDomainUnsupported);
+        }
+        if graph_contains_temporal_operation(compiled) {
+            admitted_temporal_shape(compiled)?.ok_or(
+                EffectTemporalExecutionError::UnsupportedTemporalShape {
+                    reason: "graph has no finite-history operation",
+                },
+            )?;
+        }
+        self.bind_generation(request.generation);
+        let demand = compiled.plan_execution_demand(
+            request.output_time,
+            request.frame_extent,
+            request.output_roi,
+        )?;
+        ensure_bounded_temporal_window(demand.temporal_window())?;
+        let source_identity = provider.source_identity();
+        let cache_identity =
+            temporal_cache_identity(compiled, request, demand.input_roi(), source_identity);
+        if compiled.output_cache_enabled() {
+            if let Some(cached) = self.get_temporal_output(&cache_identity) {
+                let tile = EffectFrameTileF32::new(
+                    request.output_time,
+                    demand.frame_extent(),
+                    demand.output_roi(),
+                    cached.frame_seed,
+                    cached.pixels,
+                )?;
+                return Ok(EffectTemporalExecutionOutput {
+                    tile,
+                    cache_identity,
+                    provider_requests: 0,
+                    peak_working_bytes: 0,
+                });
+            }
+        }
+        if demand.output_roi().is_empty() || demand.frame_extent().is_empty() {
+            let tile = EffectFrameTileF32::new(
+                request.output_time,
+                demand.frame_extent(),
+                demand.output_roi(),
+                frame_seed_for_output(request.output_time),
+                Arc::<[[f32; 4]]>::from([]),
+            )?;
+            return Ok(EffectTemporalExecutionOutput {
+                tile,
+                cache_identity,
+                provider_requests: 0,
+                peak_working_bytes: 0,
+            });
+        }
+
+        let mut evaluator = ScalarTemporalEvaluator::new(
+            compiled,
+            request,
+            demand.input_roi(),
+            demand.exact_halo(),
+            provider,
+            self.max_working_bytes(),
+        )?;
+        let output_id = compiled
+            .graph()
+            .output
+            .ok_or(EffectTemporalExecutionError::MissingGraphOutput)?;
+        let output = evaluator.evaluate(output_id, request.output_time)?;
+        if request.cancellation.is_canceled() {
+            return Err(EffectTemporalExecutionError::Canceled);
+        }
+        let output_pixel_bytes = checked_pixel_count(demand.output_roi())
+            .and_then(|pixels| pixels.checked_mul(std::mem::size_of::<[f32; 4]>()))
+            .ok_or(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                required_bytes: usize::MAX,
+                budget_bytes: evaluator.working.budget,
+            })?;
+        evaluator.working.ensure_transient(output_pixel_bytes)?;
+        let output_pixels = Arc::<[[f32; 4]]>::from(crop_frame(
+            &output,
+            demand.frame_extent(),
+            demand.output_roi(),
+            &request.cancellation,
+        )?);
+        let output_seed = request.output_frame_seed;
+        let provider_requests = evaluator.provider_requests;
+        let peak_working_bytes = evaluator.working.peak;
+        drop(output);
+        drop(evaluator);
+        if compiled.output_cache_enabled() && !request.cancellation.is_canceled() {
+            self.put_temporal_output(
+                cache_identity,
+                EffectTemporalCachedOutput {
+                    pixels: Arc::clone(&output_pixels),
+                    frame_seed: output_seed,
+                },
+            );
+        }
+        let tile = EffectFrameTileF32::new(
+            request.output_time,
+            demand.frame_extent(),
+            demand.output_roi(),
+            output_seed,
+            output_pixels,
+        )?;
+        Ok(EffectTemporalExecutionOutput {
+            tile,
+            cache_identity,
+            provider_requests,
+            peak_working_bytes,
+        })
+    }
+}
+
+fn admit_temporal_scalar(
+    compiled: &CompiledEffectGraph,
+) -> Result<(), EffectTemporalExecutionError> {
+    for (stage_index, contract) in compiled.execution_envelope().stages().iter().enumerate() {
+        if !contract.execution_modes.contains(
+            EffectProcessingBackend::Cpu,
+            EffectWorkingPrecision::Float32,
+        ) {
+            return Err(EffectTemporalExecutionError::ExecutionModeNotAdmitted { stage_index });
+        }
+    }
+    let aggregate = compiled.execution_envelope().aggregate();
+    if aggregate.state_model != EffectStateModel::Stateless {
+        return Err(EffectTemporalExecutionError::StatefulUnsupported);
+    }
+    if aggregate.resource_lifetime == EffectResourceLifetime::ContinuitySession {
+        return Err(EffectTemporalExecutionError::ContinuityResourceUnsupported);
+    }
+    if matches!(aggregate.temporal_input.past, EffectTemporalSpan::Unbounded)
+        || matches!(
+            aggregate.temporal_input.future,
+            EffectTemporalSpan::Unbounded
+        )
+    {
+        return Err(EffectTemporalExecutionError::UnboundedTemporalInput);
+    }
+    if !matches!(aggregate.temporal_input.future, EffectTemporalSpan::None) {
+        return Err(EffectTemporalExecutionError::FutureTemporalInputUnsupported);
+    }
+    Ok(())
+}
+
+fn graph_contains_temporal_operation(compiled: &CompiledEffectGraph) -> bool {
+    compiled.graph().nodes.iter().any(|node| {
+        matches!(
+            &node.kind,
+            EffectGraphNodeKind::UnaryEffect {
+                op: crate::EffectRenderOp::TemporalFrameMix { .. },
+                ..
+            } | EffectGraphNodeKind::DomainEffect {
+                op: crate::EffectRenderOp::TemporalFrameMix { .. },
+                ..
+            }
+        )
+    })
+}
+
+fn admitted_temporal_shape(
+    compiled: &CompiledEffectGraph,
+) -> Result<Option<AdmittedTemporalShape>, EffectTemporalExecutionError> {
+    let mut cursor = compiled
+        .graph()
+        .output
+        .ok_or(EffectTemporalExecutionError::MissingGraphOutput)?;
+    let mut temporal = None;
+    let mut visited = HashSet::new();
+    loop {
+        if !visited.insert(cursor) {
+            return Err(EffectTemporalExecutionError::UnsupportedTemporalShape {
+                reason: "graph contains a cycle",
+            });
+        }
+        let node = compiled.graph().node(cursor).ok_or(
+            EffectTemporalExecutionError::UnsupportedGraphNode { node_id: cursor, kind: "missing" },
+        )?;
+        match &node.kind {
+            EffectGraphNodeKind::Source => break,
+            EffectGraphNodeKind::UnaryEffect { input, op }
+            | EffectGraphNodeKind::DomainEffect { input, op, .. } => {
+                if let crate::EffectRenderOp::TemporalFrameMix { past_offset, mix } = op {
+                    if temporal.is_some() {
+                        return Err(EffectTemporalExecutionError::UnsupportedTemporalShape {
+                            reason: "more than one temporal operation is reachable",
+                        });
+                    }
+                    validate_temporal_mix(*past_offset, *mix)?;
+                    let input_node = compiled.graph().node(*input).ok_or(
+                        EffectTemporalExecutionError::UnsupportedGraphNode {
+                            node_id: *input,
+                            kind: "missing",
+                        },
+                    )?;
+                    if !matches!(&input_node.kind, EffectGraphNodeKind::Source) {
+                        return Err(EffectTemporalExecutionError::UnsupportedTemporalShape {
+                            reason:
+                                "temporal input has upstream Effects or another derived graph value",
+                        });
+                    }
+                    temporal = Some(AdmittedTemporalShape { past_offset: *past_offset });
+                }
+                cursor = *input;
+            }
+            EffectGraphNodeKind::Blend { .. }
+            | EffectGraphNodeKind::Mask { .. }
+            | EffectGraphNodeKind::MaskSource { .. }
+            | EffectGraphNodeKind::MultiInput { .. } => {
+                return Err(EffectTemporalExecutionError::UnsupportedTemporalShape {
+                    reason: "first temporal tracer requires one linear unary chain",
+                });
+            }
+        }
+    }
+    Ok(temporal)
+}
+
+fn validate_temporal_mix(
+    past_offset: TimelineTime,
+    mix: f32,
+) -> Result<(), EffectTemporalExecutionError> {
+    if past_offset.is_negative() {
+        return Err(EffectTemporalExecutionError::InvalidTemporalOperation {
+            reason: "past offset is negative",
+        });
+    }
+    if !mix.is_finite() || !(0.0..=1.0).contains(&mix) {
+        return Err(EffectTemporalExecutionError::InvalidTemporalOperation {
+            reason: "mix must be finite and within [0, 1]",
+        });
+    }
+    Ok(())
+}
+
+fn temporal_past_time(
+    time: TimelineTime,
+    past_offset: TimelineTime,
+) -> Result<TimelineTime, EffectTemporalExecutionError> {
+    validate_temporal_mix(past_offset, 0.0)?;
+    time.checked_sub(past_offset).map_err(|_| {
+        EffectTemporalExecutionError::InvalidTemporalOperation {
+            reason: "past sample arithmetic overflowed",
+        }
+    })
+}
+
+fn ensure_bounded_temporal_window(
+    window: crate::EffectTemporalWindow,
+) -> Result<(), EffectTemporalExecutionError> {
+    if matches!(window.earliest(), EffectTemporalBoundary::Unbounded)
+        || matches!(window.latest(), EffectTemporalBoundary::Unbounded)
+    {
+        return Err(EffectTemporalExecutionError::UnboundedTemporalInput);
+    }
+    Ok(())
+}
+
+struct ScalarTemporalEvaluator<'a> {
+    compiled: &'a CompiledEffectGraph,
+    request: &'a EffectTemporalExecutionRequest,
+    input_roi: EffectInputRoi,
+    exact_halo: Option<EffectRoiHalo>,
+    provider: &'a mut dyn EffectTemporalFrameProvider,
+    memo: HashMap<(EffectGraphNodeId, TimelineTime), Arc<[[f32; 4]]>>,
+    frame_seeds: HashMap<TimelineTime, i64>,
+    provider_requests: usize,
+    working: ScalarWorkingSet,
+}
+
+impl<'a> ScalarTemporalEvaluator<'a> {
+    fn new(
+        compiled: &'a CompiledEffectGraph,
+        request: &'a EffectTemporalExecutionRequest,
+        input_roi: EffectInputRoi,
+        exact_halo: Option<EffectRoiHalo>,
+        provider: &'a mut dyn EffectTemporalFrameProvider,
+        working_budget: usize,
+    ) -> Result<Self, EffectTemporalExecutionError> {
+        let frame_bytes = checked_pixel_count(request.frame_extent)
+            .and_then(|pixels| pixels.checked_mul(std::mem::size_of::<[f32; 4]>()))
+            .ok_or(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                required_bytes: usize::MAX,
+                budget_bytes: working_budget,
+            })?;
+        if frame_bytes > working_budget {
+            return Err(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                required_bytes: frame_bytes,
+                budget_bytes: working_budget,
+            });
+        }
+        Ok(Self {
+            compiled,
+            request,
+            input_roi,
+            exact_halo,
+            provider,
+            memo: HashMap::new(),
+            frame_seeds: HashMap::new(),
+            provider_requests: 0,
+            working: ScalarWorkingSet::new(working_budget, frame_bytes),
+        })
+    }
+
+    fn evaluate(
+        &mut self,
+        node_id: EffectGraphNodeId,
+        time: TimelineTime,
+    ) -> Result<Arc<[[f32; 4]]>, EffectTemporalExecutionError> {
+        if self.request.cancellation.is_canceled() {
+            return Err(EffectTemporalExecutionError::Canceled);
+        }
+        if let Some(cached) = self.memo.get(&(node_id, time)) {
+            return Ok(Arc::clone(cached));
+        }
+        let node = self
+            .compiled
+            .graph()
+            .node(node_id)
+            .ok_or(EffectTemporalExecutionError::UnsupportedGraphNode { node_id, kind: "missing" })?
+            .clone();
+        let output = match node.kind {
+            EffectGraphNodeKind::Source => self.fetch_source(time)?,
+            EffectGraphNodeKind::UnaryEffect { input, op }
+            | EffectGraphNodeKind::DomainEffect { input, op, .. } => match op {
+                crate::EffectRenderOp::TemporalFrameMix { past_offset, mix } => {
+                    self.temporal_mix(input, time, past_offset, mix)?
+                }
+                op => {
+                    let input = self.evaluate(input, time)?;
+                    self.working.reserve_frame()?;
+                    let mut output = input.as_ref().to_vec();
+                    let frame_seed = if time == self.request.output_time {
+                        self.request.output_frame_seed
+                    } else {
+                        self.frame_seeds
+                            .get(&time)
+                            .copied()
+                            .unwrap_or_else(|| frame_seed_for_output(time))
+                    };
+                    let cancellation = self.request.cancellation.clone();
+                    let execution = apply_render_op_f32_controlled(
+                        &mut output,
+                        self.request.frame_extent.width(),
+                        self.request.frame_extent.height(),
+                        &op,
+                        frame_seed,
+                        &mut || temporal_cancellation_checkpoint(&cancellation),
+                    );
+                    match execution {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            self.working.release_frame();
+                            return Err(EffectTemporalExecutionError::UnsupportedRenderOperation {
+                                op: render_op_name(&op),
+                            });
+                        }
+                        Err(error) => {
+                            self.working.release_frame();
+                            return Err(error);
+                        }
+                    }
+                    Arc::from(output)
+                }
+            },
+            EffectGraphNodeKind::Blend { .. } => {
+                return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
+                    node_id,
+                    kind: "blend",
+                });
+            }
+            EffectGraphNodeKind::Mask { .. } => {
+                return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
+                    node_id,
+                    kind: "mask",
+                });
+            }
+            EffectGraphNodeKind::MaskSource { .. } => {
+                return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
+                    node_id,
+                    kind: "mask_source",
+                });
+            }
+            EffectGraphNodeKind::MultiInput { .. } => {
+                return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
+                    node_id,
+                    kind: "multi_input",
+                });
+            }
+        };
+        self.memo.insert((node_id, time), Arc::clone(&output));
+        Ok(output)
+    }
+
+    fn fetch_source(
+        &mut self,
+        time: TimelineTime,
+    ) -> Result<Arc<[[f32; 4]]>, EffectTemporalExecutionError> {
+        if self.request.cancellation.is_canceled() {
+            return Err(EffectTemporalExecutionError::Canceled);
+        }
+        let provider_request = EffectTemporalFrameRequest {
+            generation: self.request.generation,
+            time,
+            frame_extent: self.request.frame_extent,
+            input_roi: self.input_roi,
+            exact_halo: self.exact_halo,
+            precision: EffectWorkingPrecision::Float32,
+        };
+        let tile = self.provider.fetch_frame(provider_request, &self.request.cancellation)?;
+        self.provider_requests = self.provider_requests.saturating_add(1);
+        if self.request.cancellation.is_canceled() {
+            return Err(EffectTemporalExecutionError::Canceled);
+        }
+        validate_provider_tile(&tile, provider_request)?;
+        self.working.reserve_frame_with_transient(tile.byte_len())?;
+        let mut frame = vec![
+            [0.0; 4];
+            checked_pixel_count(self.request.frame_extent).ok_or(
+                EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                    required_bytes: usize::MAX,
+                    budget_bytes: self.working.budget,
+                },
+            )?
+        ];
+        copy_tile_into_frame(&tile, &mut frame, &self.request.cancellation)?;
+        self.frame_seeds.insert(time, tile.frame_seed);
+        Ok(Arc::from(frame))
+    }
+
+    fn temporal_mix(
+        &mut self,
+        input_id: EffectGraphNodeId,
+        time: TimelineTime,
+        past_offset: TimelineTime,
+        mix: f32,
+    ) -> Result<Arc<[[f32; 4]]>, EffectTemporalExecutionError> {
+        validate_temporal_mix(past_offset, mix)?;
+        let past_time = temporal_past_time(time, past_offset)?;
+        let current = self.evaluate(input_id, time)?;
+        let past = self.evaluate(input_id, past_time)?;
+        self.working.reserve_frame()?;
+        let output = mix_temporal_frames_controlled(&current, &past, mix, &mut || {
+            temporal_cancellation_checkpoint(&self.request.cancellation)
+        })?;
+        Ok(Arc::from(output))
+    }
+}
+
+struct ScalarWorkingSet {
+    budget: usize,
+    frame_bytes: usize,
+    resident: usize,
+    peak: usize,
+}
+
+impl ScalarWorkingSet {
+    const fn new(budget: usize, frame_bytes: usize) -> Self {
+        Self { budget, frame_bytes, resident: 0, peak: 0 }
+    }
+
+    fn reserve_frame(&mut self) -> Result<(), EffectTemporalExecutionError> {
+        let required = self.resident.checked_add(self.frame_bytes).ok_or(
+            EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                required_bytes: usize::MAX,
+                budget_bytes: self.budget,
+            },
+        )?;
+        if required > self.budget {
+            return Err(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                required_bytes: required,
+                budget_bytes: self.budget,
+            });
+        }
+        self.resident = required;
+        self.peak = self.peak.max(required);
+        Ok(())
+    }
+
+    fn reserve_frame_with_transient(
+        &mut self,
+        transient_bytes: usize,
+    ) -> Result<(), EffectTemporalExecutionError> {
+        let required = self
+            .resident
+            .checked_add(transient_bytes)
+            .and_then(|bytes| bytes.checked_add(self.frame_bytes))
+            .ok_or(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                required_bytes: usize::MAX,
+                budget_bytes: self.budget,
+            })?;
+        if required > self.budget {
+            return Err(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                required_bytes: required,
+                budget_bytes: self.budget,
+            });
+        }
+        self.resident = self.resident.saturating_add(self.frame_bytes);
+        self.peak = self.peak.max(required);
+        Ok(())
+    }
+
+    fn release_frame(&mut self) {
+        self.resident = self.resident.saturating_sub(self.frame_bytes);
+    }
+
+    fn ensure_transient(&mut self, bytes: usize) -> Result<(), EffectTemporalExecutionError> {
+        let required = self.resident.checked_add(bytes).ok_or(
+            EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                required_bytes: usize::MAX,
+                budget_bytes: self.budget,
+            },
+        )?;
+        if required > self.budget {
+            return Err(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                required_bytes: required,
+                budget_bytes: self.budget,
+            });
+        }
+        self.peak = self.peak.max(required);
+        Ok(())
+    }
+}
+
+fn validate_provider_tile(
+    tile: &EffectFrameTileF32,
+    request: EffectTemporalFrameRequest,
+) -> Result<(), EffectTemporalFrameProviderError> {
+    if tile.time != request.time {
+        return Err(EffectTemporalFrameProviderError::InvalidTile {
+            reason: "tile time does not match the exact request".to_owned(),
+        });
+    }
+    if tile.frame_extent != request.frame_extent {
+        return Err(EffectTemporalFrameProviderError::InvalidTile {
+            reason: "tile frame extent does not match the exact request".to_owned(),
+        });
+    }
+    if tile.roi != request.input_roi.region() {
+        return Err(EffectTemporalFrameProviderError::InvalidTile {
+            reason: "tile ROI does not match the exact request".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn temporal_cache_identity(
+    compiled: &CompiledEffectGraph,
+    request: &EffectTemporalExecutionRequest,
+    input_roi: EffectInputRoi,
+    source_identity: EffectTemporalSourceIdentity,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mondrian.effect-temporal-roi-execution.v2");
+    hasher.update(compiled.semantic_fingerprint());
+    hasher.update(source_identity.semantic_fingerprint());
+    hasher.update(request.generation.to_le_bytes());
+    hash_time(&mut hasher, request.output_time);
+    hasher.update(request.output_frame_seed.to_le_bytes());
+    hasher.update(request.frame_extent.width().to_le_bytes());
+    hasher.update(request.frame_extent.height().to_le_bytes());
+    hash_roi(&mut hasher, request.output_roi);
+    match input_roi {
+        EffectInputRoi::Exact(roi) => {
+            hasher.update([0]);
+            hash_roi(&mut hasher, roi);
+        }
+        EffectInputRoi::ExactFullFrame(roi) => {
+            hasher.update([1]);
+            hash_roi(&mut hasher, roi);
+        }
+        EffectInputRoi::UnknownConservativeFullFrame(roi) => {
+            hasher.update([2]);
+            hash_roi(&mut hasher, roi);
+        }
+    }
+    hasher.update([match request.continuity {
+        EffectExecutionContinuity::Continuous => 0,
+        EffectExecutionContinuity::Discontinuous => 1,
+    }]);
+    hasher.finalize().into()
+}
+
+fn hash_time(hasher: &mut Sha256, time: TimelineTime) {
+    hasher.update(time.numerator().to_le_bytes());
+    hasher.update(time.denominator().to_le_bytes());
+}
+
+fn hash_roi(hasher: &mut Sha256, roi: EffectPixelRoi) {
+    hasher.update(roi.x().to_le_bytes());
+    hasher.update(roi.y().to_le_bytes());
+    hasher.update(roi.width().to_le_bytes());
+    hasher.update(roi.height().to_le_bytes());
+}
+
+fn checked_pixel_count(extent: impl PixelExtent + Copy) -> Option<usize> {
+    usize::try_from(extent.width())
+        .ok()?
+        .checked_mul(usize::try_from(extent.height()).ok()?)
+}
+
+trait PixelExtent {
+    fn width(self) -> u32;
+    fn height(self) -> u32;
+}
+
+impl PixelExtent for EffectFrameExtent {
+    fn width(self) -> u32 {
+        self.width()
+    }
+
+    fn height(self) -> u32 {
+        self.height()
+    }
+}
+
+impl PixelExtent for EffectPixelRoi {
+    fn width(self) -> u32 {
+        self.width()
+    }
+
+    fn height(self) -> u32 {
+        self.height()
+    }
+}
+
+fn clamp_roi(roi: EffectPixelRoi, extent: EffectFrameExtent) -> EffectPixelRoi {
+    let x = roi.x().min(extent.width());
+    let y = roi.y().min(extent.height());
+    let right = (u64::from(roi.x()) + u64::from(roi.width())).min(u64::from(extent.width()));
+    let bottom = (u64::from(roi.y()) + u64::from(roi.height())).min(u64::from(extent.height()));
+    EffectPixelRoi::new(
+        x,
+        y,
+        u32::try_from(right.saturating_sub(u64::from(x))).unwrap_or(u32::MAX),
+        u32::try_from(bottom.saturating_sub(u64::from(y))).unwrap_or(u32::MAX),
+    )
+}
+
+fn copy_tile_into_frame(
+    tile: &EffectFrameTileF32,
+    frame: &mut [[f32; 4]],
+    cancellation: &ExecutionCancellationToken,
+) -> Result<(), EffectTemporalExecutionError> {
+    let frame_width = tile.frame_extent.width() as usize;
+    let tile_width = tile.roi.width() as usize;
+    for row in 0..tile.roi.height() as usize {
+        temporal_cancellation_checkpoint(cancellation)?;
+        let source_start = row * tile_width;
+        let destination_start = (tile.roi.y() as usize + row) * frame_width + tile.roi.x() as usize;
+        frame[destination_start..destination_start + tile_width]
+            .copy_from_slice(&tile.pixels[source_start..source_start + tile_width]);
+    }
+    temporal_cancellation_checkpoint(cancellation)
+}
+
+fn crop_frame(
+    frame: &[[f32; 4]],
+    extent: EffectFrameExtent,
+    roi: EffectPixelRoi,
+    cancellation: &ExecutionCancellationToken,
+) -> Result<Vec<[f32; 4]>, EffectTemporalExecutionError> {
+    let mut output = Vec::with_capacity(checked_pixel_count(roi).unwrap_or(0));
+    let frame_width = extent.width() as usize;
+    for row in 0..roi.height() as usize {
+        temporal_cancellation_checkpoint(cancellation)?;
+        let start = (roi.y() as usize + row) * frame_width + roi.x() as usize;
+        output.extend_from_slice(&frame[start..start + roi.width() as usize]);
+    }
+    temporal_cancellation_checkpoint(cancellation)?;
+    Ok(output)
+}
+
+fn temporal_cancellation_checkpoint(
+    cancellation: &ExecutionCancellationToken,
+) -> Result<(), EffectTemporalExecutionError> {
+    if cancellation.is_canceled() {
+        Err(EffectTemporalExecutionError::Canceled)
+    } else {
+        Ok(())
+    }
+}
+
+fn mix_straight_rgba(current: [f32; 4], past: [f32; 4], mix: f32) -> [f32; 4] {
+    let current_alpha = current[3].clamp(0.0, 1.0);
+    let past_alpha = past[3].clamp(0.0, 1.0);
+    let inverse = 1.0 - mix;
+    let alpha = current_alpha.mul_add(inverse, past_alpha * mix);
+    if alpha <= f32::EPSILON {
+        return [0.0, 0.0, 0.0, 0.0];
+    }
+    [
+        (current[0] * current_alpha * inverse + past[0] * past_alpha * mix) / alpha,
+        (current[1] * current_alpha * inverse + past[1] * past_alpha * mix) / alpha,
+        (current[2] * current_alpha * inverse + past[2] * past_alpha * mix) / alpha,
+        alpha,
+    ]
+}
+
+fn mix_temporal_frames_controlled<E>(
+    current: &[[f32; 4]],
+    past: &[[f32; 4]],
+    mix: f32,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Vec<[f32; 4]>, E> {
+    let mut output = Vec::with_capacity(current.len().min(past.len()));
+    for (current_chunk, past_chunk) in current.chunks(4_096).zip(past.chunks(4_096)) {
+        checkpoint()?;
+        output.extend(
+            current_chunk
+                .iter()
+                .zip(past_chunk)
+                .map(|(current, past)| mix_straight_rgba(*current, *past, mix)),
+        );
+    }
+    checkpoint()?;
+    Ok(output)
+}
+
+fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
+    match op {
+        crate::EffectRenderOp::ColorAdjust { .. } => "color_adjust",
+        crate::EffectRenderOp::GaussianBlur { .. } => "gaussian_blur",
+        crate::EffectRenderOp::Sharpen { .. } => "sharpen",
+        crate::EffectRenderOp::Vignette { .. } => "vignette",
+        crate::EffectRenderOp::ChromaticAberration { .. } => "chromatic_aberration",
+        crate::EffectRenderOp::Grain { .. } => "grain",
+        crate::EffectRenderOp::TemporalFrameMix { .. } => "temporal_frame_mix",
+        crate::EffectRenderOp::Lut3D { .. } => "lut3d",
+        crate::EffectRenderOp::Custom { .. } => "custom",
+    }
+}
+
+fn frame_seed_for_output(time: TimelineTime) -> i64 {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mondrian.effect-frame-seed-fallback.v1");
+    hash_time(&mut hasher, time);
+    let digest = hasher.finalize();
+    i64::from_le_bytes([
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
+    ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        prepare_effect_graph_topology, EffectDeterminism, EffectExecutionContract,
+        EffectExecutionEnvelope, EffectExecutionModes, EffectExecutionSessionConfig,
+        EffectGraphBuilderState, EffectGraphTopology, EffectResourceLifetime, EffectRoiPropagation,
+        EffectTemporalInputExtent,
+    };
+
+    #[test]
+    fn temporal_mix_checks_cancellation_at_fixed_pixel_chunks() {
+        let current = vec![[1.0, 0.0, 0.0, 1.0]; 8_193];
+        let past = vec![[0.0, 0.0, 1.0, 1.0]; 8_193];
+        let mut checkpoints = 0_u32;
+        let result = mix_temporal_frames_controlled(&current, &past, 0.5, &mut || {
+            checkpoints = checkpoints.saturating_add(1);
+            if checkpoints == 2 {
+                Err(EffectTemporalExecutionError::Canceled)
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(result, Err(EffectTemporalExecutionError::Canceled));
+        assert_eq!(
+            checkpoints, 2,
+            "8,193 pixels must cross a 4,096-pixel checkpoint boundary"
+        );
+    }
+
+    struct GradientProvider {
+        identity: EffectTemporalSourceIdentity,
+        extent: EffectFrameExtent,
+        requests: Vec<EffectTemporalFrameRequest>,
+    }
+
+    impl GradientProvider {
+        fn new(extent: EffectFrameExtent) -> Self {
+            Self {
+                identity: EffectTemporalSourceIdentity::from_complete_semantic_fingerprint([7; 32]),
+                extent,
+                requests: Vec::new(),
+            }
+        }
+
+        fn pixel(time: TimelineTime, x: u32, y: u32) -> [f32; 4] {
+            [
+                time.to_f64() as f32 + x as f32 * 0.1,
+                y as f32 * 0.2,
+                (x + y) as f32 * 0.05,
+                1.0,
+            ]
+        }
+    }
+
+    impl EffectTemporalFrameProvider for GradientProvider {
+        fn source_identity(&self) -> EffectTemporalSourceIdentity {
+            self.identity
+        }
+
+        fn fetch_frame(
+            &mut self,
+            request: EffectTemporalFrameRequest,
+            cancellation: &ExecutionCancellationToken,
+        ) -> Result<EffectFrameTileF32, EffectTemporalFrameProviderError> {
+            if cancellation.is_canceled() {
+                return Err(EffectTemporalFrameProviderError::Canceled);
+            }
+            assert_eq!(request.frame_extent(), self.extent);
+            let roi = request.input_roi().region();
+            let mut pixels = Vec::new();
+            for y in roi.y()..roi.y() + roi.height() {
+                for x in roi.x()..roi.x() + roi.width() {
+                    pixels.push(Self::pixel(request.time(), x, y));
+                }
+            }
+            self.requests.push(request);
+            EffectFrameTileF32::new(
+                request.time(),
+                request.frame_extent(),
+                roi,
+                request.time().numerator(),
+                Arc::<[[f32; 4]]>::from(pixels),
+            )
+        }
+    }
+
+    fn bind_linear(
+        ops: impl IntoIterator<Item = crate::EffectRenderOp>,
+        contract: EffectExecutionContract,
+    ) -> Arc<CompiledEffectGraph> {
+        let mut builder = EffectGraphBuilderState::new();
+        for op in ops {
+            builder.append_unary(op);
+        }
+        let graph = builder.finish();
+        let topology = prepare_effect_graph_topology(&graph).expect("valid topology");
+        let source = EffectGraphNodeId(0);
+        let output = graph.output.expect("linear graph output");
+        let emitted_nodes = graph
+            .nodes
+            .iter()
+            .filter_map(|node| (node.id != source).then_some(node.id))
+            .collect::<Vec<_>>();
+        topology
+            .bind_with_execution_bindings(
+                graph,
+                EffectExecutionEnvelope::new(contract, Arc::from([contract])),
+                Arc::from([crate::graph::CompiledEffectStageBinding::new(
+                    0,
+                    contract,
+                    source,
+                    output,
+                    emitted_nodes,
+                )]),
+            )
+            .expect("bound graph")
+    }
+
+    fn temporal_contract(
+        past: TimelineTime,
+        roi_propagation: EffectRoiPropagation,
+    ) -> EffectExecutionContract {
+        EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            determinism: EffectDeterminism::Deterministic,
+            state_model: EffectStateModel::Stateless,
+            temporal_input: EffectTemporalInputExtent {
+                past: EffectTemporalSpan::Finite(past),
+                future: EffectTemporalSpan::None,
+            },
+            roi_propagation,
+            resource_lifetime: EffectResourceLifetime::Frame,
+            topology: EffectGraphTopology::LinearChain,
+        }
+    }
+
+    #[test]
+    fn finite_history_processor_fetches_exact_signed_owner_domain_times() {
+        let offset = TimelineTime::new(1, 2).expect("offset");
+        let graph = bind_linear(
+            [crate::EffectRenderOp::TemporalFrameMix { past_offset: offset, mix: 0.25 }],
+            temporal_contract(offset, EffectRoiPropagation::PixelLocal),
+        );
+        let extent = EffectFrameExtent::new(4, 2);
+        let mut provider = GradientProvider::new(extent);
+        let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_cache_entries: 4,
+            max_cache_bytes: 1024 * 1024,
+            max_working_bytes: 1024 * 1024,
+            max_gpu_plan_entries: 0,
+            max_gpu_plan_bytes: 0,
+        });
+        let request = EffectTemporalExecutionRequest::new(
+            9,
+            EffectExecutionContinuity::Discontinuous,
+            TimelineTime::new(1, 4).expect("time"),
+            extent,
+            EffectPixelRoi::new(1, 0, 2, 1),
+            ExecutionCancellationToken::new(),
+        );
+        let output = session
+            .execute_temporal_roi_f32(&graph, &request, &mut provider)
+            .expect("temporal output");
+        assert_eq!(provider.requests.len(), 2);
+        assert_eq!(
+            provider.requests[0].time(),
+            TimelineTime::new(1, 4).expect("time")
+        );
+        assert_eq!(
+            provider.requests[1].time(),
+            TimelineTime::new(-1, 4).expect("signed past time")
+        );
+        let current = GradientProvider::pixel(request.output_time(), 1, 0);
+        let past =
+            GradientProvider::pixel(TimelineTime::new(-1, 4).expect("signed past time"), 1, 0);
+        assert_eq!(
+            output.tile().pixels()[0],
+            mix_straight_rgba(current, past, 0.25)
+        );
+    }
+
+    #[test]
+    fn frozen_batch_collects_once_and_is_the_only_execution_provider() {
+        let offset = TimelineTime::new(1, 2).expect("offset");
+        let graph = bind_linear(
+            [
+                crate::EffectRenderOp::TemporalFrameMix { past_offset: offset, mix: 0.25 },
+                crate::EffectRenderOp::ColorAdjust {
+                    exposure: 0.0,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
+                },
+            ],
+            temporal_contract(offset, EffectRoiPropagation::PixelLocal),
+        );
+        let extent = EffectFrameExtent::new(4, 2);
+        let request = EffectTemporalExecutionRequest::new(
+            19,
+            EffectExecutionContinuity::Discontinuous,
+            TimelineTime::new(3, 2).expect("time"),
+            extent,
+            extent.full_frame_roi(),
+            ExecutionCancellationToken::new(),
+        )
+        .with_output_frame_seed(1234);
+        let batch = collect_temporal_frame_demands(&graph, &request).expect("collect demands");
+        assert_eq!(batch.generation(), 19);
+        assert_eq!(
+            batch.requests().iter().map(|request| request.time()).collect::<Vec<_>>(),
+            vec![TimelineTime::new(3, 2).expect("time"), TimelineTime::ONE]
+        );
+
+        let identity = EffectTemporalSourceIdentity::from_complete_semantic_fingerprint([11; 32]);
+        let resolved = batch
+            .requests()
+            .iter()
+            .copied()
+            .map(|demand| {
+                let roi = demand.input_roi().region();
+                let pixels = (0..checked_pixel_count(roi).expect("pixel count"))
+                    .map(|_| [demand.time().to_f64() as f32, 0.0, 0.0, 1.0])
+                    .collect::<Vec<_>>();
+                let tile = EffectFrameTileF32::new(
+                    demand.time(),
+                    demand.frame_extent(),
+                    roi,
+                    demand.time().numerator(),
+                    Arc::<[[f32; 4]]>::from(pixels),
+                )
+                .expect("tile");
+                (demand, tile)
+            })
+            .collect::<Vec<_>>();
+        let mut frozen =
+            PreparedTemporalFrameSet::prepare(identity, batch, resolved).expect("freeze batch");
+        let mut session = EffectExecutionSession::default();
+        let output = session
+            .execute_temporal_roi_f32(&graph, &request, &mut frozen)
+            .expect("execute only from frozen frames");
+        assert_eq!(output.provider_requests(), 2);
+        assert_eq!(frozen.len(), 2);
+        assert_eq!(output.tile().frame_seed(), 1234);
+        assert_eq!(output.tile().pixels()[0], [1.375, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn demand_collection_rejects_effects_before_temporal_mix() {
+        let offset = TimelineTime::new(1, 2).expect("offset");
+        let graph = bind_linear(
+            [
+                crate::EffectRenderOp::ColorAdjust {
+                    exposure: 0.0,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
+                },
+                crate::EffectRenderOp::TemporalFrameMix { past_offset: offset, mix: 0.5 },
+            ],
+            temporal_contract(offset, EffectRoiPropagation::PixelLocal),
+        );
+        let extent = EffectFrameExtent::new(2, 2);
+        let request = EffectTemporalExecutionRequest::new(
+            1,
+            EffectExecutionContinuity::Continuous,
+            TimelineTime::ONE,
+            extent,
+            extent.full_frame_roi(),
+            ExecutionCancellationToken::new(),
+        );
+        assert!(matches!(
+            collect_temporal_frame_demands(&graph, &request),
+            Err(EffectTemporalExecutionError::UnsupportedTemporalShape { .. })
+        ));
+    }
+
+    #[test]
+    fn frozen_batch_rejects_missing_and_stale_generation_tiles() {
+        let offset = TimelineTime::new(1, 2).expect("offset");
+        let graph = bind_linear(
+            [crate::EffectRenderOp::TemporalFrameMix { past_offset: offset, mix: 0.5 }],
+            temporal_contract(offset, EffectRoiPropagation::PixelLocal),
+        );
+        let extent = EffectFrameExtent::new(2, 2);
+        let request = EffectTemporalExecutionRequest::new(
+            3,
+            EffectExecutionContinuity::Continuous,
+            TimelineTime::ONE,
+            extent,
+            extent.full_frame_roi(),
+            ExecutionCancellationToken::new(),
+        );
+        let batch = collect_temporal_frame_demands(&graph, &request).expect("batch");
+        assert!(matches!(
+            PreparedTemporalFrameSet::prepare(
+                EffectTemporalSourceIdentity::from_complete_semantic_fingerprint([4; 32]),
+                batch.clone(),
+                [],
+            ),
+            Err(PreparedTemporalFrameSetError::MissingRequest { .. })
+        ));
+
+        let mut stale = batch.requests()[0];
+        stale.generation = 2;
+        let roi = stale.input_roi().region();
+        let tile = EffectFrameTileF32::new(
+            stale.time(),
+            stale.frame_extent(),
+            roi,
+            0,
+            vec![[0.0; 4]; checked_pixel_count(roi).expect("pixel count")],
+        )
+        .expect("tile");
+        assert!(matches!(
+            PreparedTemporalFrameSet::prepare(
+                EffectTemporalSourceIdentity::from_complete_semantic_fingerprint([4; 32]),
+                batch,
+                [(stale, tile)],
+            ),
+            Err(PreparedTemporalFrameSetError::GenerationMismatch { expected: 3, actual: 2 })
+        ));
+    }
+
+    #[test]
+    fn expanded_roi_scalar_reference_matches_full_frame_blur_crop() {
+        let radius = 2.0;
+        let contract = temporal_contract(
+            TimelineTime::ZERO,
+            EffectRoiPropagation::Expand { horizontal_pixels: 3, vertical_pixels: 3 },
+        );
+        let graph = bind_linear([crate::EffectRenderOp::GaussianBlur { radius }], contract);
+        let extent = EffectFrameExtent::new(16, 12);
+        let time = TimelineTime::new(3, 2).expect("time");
+        let mut tiled_provider = GradientProvider::new(extent);
+        let mut full_provider = GradientProvider::new(extent);
+        let mut tiled_session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_cache_entries: 0,
+            max_cache_bytes: 0,
+            max_working_bytes: 8 * 1024 * 1024,
+            max_gpu_plan_entries: 0,
+            max_gpu_plan_bytes: 0,
+        });
+        let mut full_session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_cache_entries: 0,
+            max_cache_bytes: 0,
+            max_working_bytes: 8 * 1024 * 1024,
+            max_gpu_plan_entries: 0,
+            max_gpu_plan_bytes: 0,
+        });
+        let tile_roi = EffectPixelRoi::new(6, 4, 3, 3);
+        let tiled = tiled_session
+            .execute_temporal_roi_f32(
+                &graph,
+                &EffectTemporalExecutionRequest::new(
+                    1,
+                    EffectExecutionContinuity::Continuous,
+                    time,
+                    extent,
+                    tile_roi,
+                    ExecutionCancellationToken::new(),
+                ),
+                &mut tiled_provider,
+            )
+            .expect("tile");
+        let full = full_session
+            .execute_temporal_roi_f32(
+                &graph,
+                &EffectTemporalExecutionRequest::new(
+                    1,
+                    EffectExecutionContinuity::Continuous,
+                    time,
+                    extent,
+                    extent.full_frame_roi(),
+                    ExecutionCancellationToken::new(),
+                ),
+                &mut full_provider,
+            )
+            .expect("full");
+        assert_eq!(
+            tiled.tile().pixels(),
+            crop_frame(
+                full.tile().pixels(),
+                extent,
+                tile_roi,
+                &ExecutionCancellationToken::new(),
+            )
+            .expect("reference crop")
+        );
+        let halo = tiled_provider.requests[0]
+            .exact_halo()
+            .expect("Gaussian blur must expose its exact finite halo");
+        assert_eq!(halo.left(), 3);
+        assert_eq!(halo.top(), 3);
+        assert_eq!(halo.right(), 3);
+        assert_eq!(halo.bottom(), 3);
+    }
+
+    #[test]
+    fn cancellation_and_generation_rotation_never_reuse_old_output() {
+        let graph = bind_linear(
+            [crate::EffectRenderOp::GaussianBlur { radius: 2.0 }],
+            temporal_contract(
+                TimelineTime::ZERO,
+                EffectRoiPropagation::Expand { horizontal_pixels: 3, vertical_pixels: 3 },
+            ),
+        );
+        let extent = EffectFrameExtent::new(2, 2);
+        let mut provider = GradientProvider::new(extent);
+        let mut session = EffectExecutionSession::default();
+        let canceled = ExecutionCancellationToken::new();
+        canceled.cancel();
+        let canceled_request = EffectTemporalExecutionRequest::new(
+            1,
+            EffectExecutionContinuity::Continuous,
+            TimelineTime::ZERO,
+            extent,
+            extent.full_frame_roi(),
+            canceled,
+        );
+        assert!(matches!(
+            session.execute_temporal_roi_f32(&graph, &canceled_request, &mut provider),
+            Err(EffectTemporalExecutionError::Canceled)
+        ));
+        assert_eq!(session.diagnostics().generation, None);
+        assert!(provider.requests.is_empty());
+
+        let first = EffectTemporalExecutionRequest::new(
+            1,
+            EffectExecutionContinuity::Continuous,
+            TimelineTime::ZERO,
+            extent,
+            extent.full_frame_roi(),
+            ExecutionCancellationToken::new(),
+        );
+        session
+            .execute_temporal_roi_f32(&graph, &first, &mut provider)
+            .expect("first generation");
+        let first_request_count = provider.requests.len();
+        session
+            .execute_temporal_roi_f32(&graph, &first, &mut provider)
+            .expect("same-generation cache");
+        assert_eq!(provider.requests.len(), first_request_count);
+
+        let second = EffectTemporalExecutionRequest::new(
+            2,
+            EffectExecutionContinuity::Discontinuous,
+            TimelineTime::ZERO,
+            extent,
+            extent.full_frame_roi(),
+            ExecutionCancellationToken::new(),
+        );
+        session
+            .execute_temporal_roi_f32(&graph, &second, &mut provider)
+            .expect("new generation");
+        assert!(provider.requests.len() > first_request_count);
+    }
+}

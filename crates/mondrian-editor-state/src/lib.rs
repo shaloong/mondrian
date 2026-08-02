@@ -21,4 +21,5 @@ pub use history::{
 };
 pub use session::{
     AuthorGeneration, AuthoringCommit, AuthoringSession, AuthoringSessionId, AuthoringSnapshot,
+    SequenceNavigationIntent,
 };

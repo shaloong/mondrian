@@ -1,4 +1,7 @@
-use crate::color_frame::{GpuColorFrameBindGroupCacheKey, GpuColorFrameWgpuResource};
+use crate::color_frame::{
+    GpuColorFrameBindGroupCacheKey, GpuColorFrameBindGroupCacheKeyAllocationError,
+    GpuColorFrameWgpuResource,
+};
 use lru::LruCache;
 #[cfg(test)]
 use mondrian_core::ColorSpace;
@@ -10,12 +13,133 @@ use mondrian_core::{
     MONDRIAN_OCIO_GPU_FUNCTION_NAME, MONDRIAN_OCIO_GPU_PIXEL_NAME,
     MONDRIAN_OCIO_GPU_RESOURCE_PREFIX,
 };
+use sha2::{Digest, Sha256};
 use std::borrow::Cow;
-use std::collections::{hash_map::DefaultHasher, BTreeSet};
+use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+/// Full, domain-separated identity used to authorize OCIO GPU cache reuse.
+///
+/// Public `u64` keys in the OCIO contracts are retained as compact diagnostics.
+/// They are never sufficient for cache equality: every production cache below
+/// uses this complete identity as its `Eq` key.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct OcioGpuCanonicalIdentity([u8; 32]);
+
+impl std::fmt::Debug for OcioGpuCanonicalIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "OcioGpuCanonicalIdentity({:02x?})", &self.0[..8])
+    }
+}
+
+impl OcioGpuCanonicalIdentity {
+    fn for_hash<T>(domain: &'static [u8], value: &T) -> Self
+    where
+        T: Hash + ?Sized,
+    {
+        let mut hasher = CanonicalSha256Hasher::new(domain);
+        value.hash(&mut hasher);
+        hasher.finalize()
+    }
+
+    fn diagnostic_key(self) -> u64 {
+        let mut diagnostic = [0u8; 8];
+        diagnostic.copy_from_slice(&self.0[..8]);
+        u64::from_le_bytes(diagnostic)
+    }
+}
+
+/// `Hash` sink with stable integer encoding and a SHA-256 result.
+///
+/// Cache identities are process-local implementation contracts rather than a
+/// persisted file format, but fixed-width little-endian writes keep the byte
+/// stream deterministic across supported targets and avoid relying on
+/// `DefaultHasher`'s truncated output.
+struct CanonicalSha256Hasher {
+    digest: Sha256,
+}
+
+impl CanonicalSha256Hasher {
+    fn new(domain: &'static [u8]) -> Self {
+        let mut digest = Sha256::new();
+        digest.update(b"mondrian.ocio-gpu.cache-identity.v1");
+        digest.update((domain.len() as u64).to_le_bytes());
+        digest.update(domain);
+        Self { digest }
+    }
+
+    fn finalize(self) -> OcioGpuCanonicalIdentity {
+        let digest = self.digest.finalize();
+        let mut identity = [0u8; 32];
+        identity.copy_from_slice(&digest);
+        OcioGpuCanonicalIdentity(identity)
+    }
+}
+
+impl Hasher for CanonicalSha256Hasher {
+    fn finish(&self) -> u64 {
+        let digest = self.digest.clone().finalize();
+        let mut diagnostic = [0u8; 8];
+        diagnostic.copy_from_slice(&digest[..8]);
+        u64::from_le_bytes(diagnostic)
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.digest.update((bytes.len() as u64).to_le_bytes());
+        self.digest.update(bytes);
+    }
+
+    fn write_u8(&mut self, value: u8) {
+        self.write(&value.to_le_bytes());
+    }
+
+    fn write_u16(&mut self, value: u16) {
+        self.write(&value.to_le_bytes());
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        self.write(&value.to_le_bytes());
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.write(&value.to_le_bytes());
+    }
+
+    fn write_u128(&mut self, value: u128) {
+        self.write(&value.to_le_bytes());
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.write(&(value as u64).to_le_bytes());
+    }
+
+    fn write_i8(&mut self, value: i8) {
+        self.write(&value.to_le_bytes());
+    }
+
+    fn write_i16(&mut self, value: i16) {
+        self.write(&value.to_le_bytes());
+    }
+
+    fn write_i32(&mut self, value: i32) {
+        self.write(&value.to_le_bytes());
+    }
+
+    fn write_i64(&mut self, value: i64) {
+        self.write(&value.to_le_bytes());
+    }
+
+    fn write_i128(&mut self, value: i128) {
+        self.write(&value.to_le_bytes());
+    }
+
+    fn write_isize(&mut self, value: isize) {
+        self.write(&(value as i64).to_le_bytes());
+    }
+}
 
 /// Shader stage used when translating OCIO GPU shader text for wgpu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -122,7 +246,7 @@ impl OcioGpuShaderRequest {
 pub struct OcioGpuShaderPlan {
     /// Original request used to produce this plan.
     pub request: OcioGpuShaderRequest,
-    /// Stable cache key derived from the request and OCIO processor cache id.
+    /// Compact diagnostic projection of the request and processor identity.
     pub cache_key: u64,
     /// OCIO processor cache id, when exposed by OCIO.
     pub processor_cache_id: Option<String>,
@@ -139,12 +263,27 @@ pub struct OcioGpuShaderPlan {
     bundle: Arc<OcioGpuShaderBundle>,
     binding_contract: Arc<OcioGpuBindingContract>,
     binding_contract_hash: u64,
+    bundle_identity: OcioGpuCanonicalIdentity,
 }
 
 impl OcioGpuShaderPlan {
     /// Borrow the full OCIO shader bundle.
     pub fn bundle(&self) -> &OcioGpuShaderBundle {
         &self.bundle
+    }
+
+    fn canonical_identity(&self) -> OcioGpuCanonicalIdentity {
+        OcioGpuCanonicalIdentity::for_hash(
+            b"shader-plan",
+            &(
+                &self.request,
+                self.bundle_identity,
+                self.shader_len,
+                self.texture_2d_count,
+                self.texture_3d_count,
+                self.uniform_count,
+            ),
+        )
     }
 }
 
@@ -294,6 +433,8 @@ pub struct OcioGpuWgpuWrapperLinkPlan {
     pub blockers: Vec<OcioGpuWgpuWrapperLinkBlocker>,
     /// Stable hash of the link plan.
     pub link_hash: u64,
+    resource_identity: OcioGpuCanonicalIdentity,
+    shader_plan_identity: OcioGpuCanonicalIdentity,
 }
 
 impl OcioGpuWgpuWrapperLinkPlan {
@@ -319,6 +460,8 @@ impl OcioGpuWgpuWrapperLinkPlan {
             shader_contract,
             blockers,
             link_hash,
+            resource_identity: resource_layout_cache_identity(resources),
+            shader_plan_identity: shader_plan.canonical_identity(),
         }
     }
 
@@ -338,6 +481,8 @@ pub enum OcioGpuWgpuWrapperShaderArtifactError {
     },
     /// The shader plan does not match the wrapper link plan's shader hash.
     ShaderHashMismatch { expected: u64, actual: u64 },
+    /// The shader plan differs from the full shader identity bound by the link plan.
+    ShaderIdentityMismatch,
     /// The OCIO generated program could not be lowered into wgpu-compatible GLSL.
     SourceLoweringFailed { reason: String },
 }
@@ -371,6 +516,9 @@ pub struct OcioGpuWgpuWrapperShaderSourceArtifact {
     pub output_location: u32,
     /// Non-fatal diagnostics recorded while generating the artifact.
     pub diagnostics: Vec<OcioGpuShaderDiagnostic>,
+    resource_identity: OcioGpuCanonicalIdentity,
+    shader_plan_identity: OcioGpuCanonicalIdentity,
+    canonical_identity: OcioGpuCanonicalIdentity,
 }
 
 impl OcioGpuWgpuWrapperShaderSourceArtifact {
@@ -390,11 +538,19 @@ impl OcioGpuWgpuWrapperShaderSourceArtifact {
                 actual: shader_plan.shader_hash,
             });
         }
+        if shader_plan.canonical_identity() != link_plan.shader_plan_identity {
+            return Err(OcioGpuWgpuWrapperShaderArtifactError::ShaderIdentityMismatch);
+        }
 
         let sources = build_wrapper_shader_sources(shader_plan, link_plan)?;
         let vertex_source_hash = hash_value(&sources.vertex_source);
         let fragment_source_hash = hash_value(&sources.fragment_source);
         let source_hash = hash_value(&(vertex_source_hash, fragment_source_hash));
+        let canonical_identity = wrapper_source_identity(
+            &sources.vertex_source,
+            &sources.fragment_source,
+            &link_plan.shader_contract,
+        );
         Ok(Self {
             resource_key: link_plan.resource_key,
             link_hash: link_plan.link_hash,
@@ -409,6 +565,9 @@ impl OcioGpuWgpuWrapperShaderSourceArtifact {
             fragment_entry_point: link_plan.shader_contract.fragment_entry_point.clone(),
             output_location: link_plan.shader_contract.output_location,
             diagnostics: Vec::new(),
+            resource_identity: link_plan.resource_identity,
+            shader_plan_identity: link_plan.shader_plan_identity,
+            canonical_identity,
         })
     }
 }
@@ -422,8 +581,12 @@ pub enum OcioGpuWgpuWrapperShaderModuleArtifactError {
     PipelineLayoutResourceKeyMismatch { expected: u64, actual: u64 },
     /// The render descriptor belongs to a different resource key.
     RenderDescriptorResourceKeyMismatch { expected: u64, actual: u64 },
+    /// Source, pipeline layout, and render descriptor do not share one full resource identity.
+    ResourceIdentityMismatch,
     /// The render descriptor does not reference the provided pipeline layout.
     PipelineLayoutHashMismatch { expected: u64, actual: u64 },
+    /// Render descriptor and pipeline layout differ despite a compact hash match.
+    PipelineLayoutIdentityMismatch,
     /// The wrapper vertex entry point differs from the render descriptor contract.
     VertexEntryPointMismatch { expected: String, actual: String },
     /// The wrapper fragment entry point differs from the render descriptor contract.
@@ -455,12 +618,16 @@ pub struct OcioGpuWgpuWrapperShaderModuleArtifact {
     pub render_descriptor_hash: u64,
     /// Output target format bound to this module artifact.
     pub output_format: OcioGpuWgpuColorTargetFormat,
-    /// Stable cache key for this wrapper module artifact.
+    /// Compact diagnostic projection of this wrapper module artifact.
     pub module_key: u64,
     /// Validated fullscreen vertex shader module.
     pub vertex: OcioGpuNagaShaderStageArtifact,
     /// Validated fragment shader module that calls the OCIO-generated function.
     pub fragment: OcioGpuNagaShaderStageArtifact,
+    resource_identity: OcioGpuCanonicalIdentity,
+    pipeline_layout_identity: OcioGpuCanonicalIdentity,
+    render_descriptor_identity: OcioGpuCanonicalIdentity,
+    canonical_identity: OcioGpuCanonicalIdentity,
 }
 
 impl OcioGpuWgpuWrapperShaderModuleArtifact {
@@ -470,8 +637,9 @@ impl OcioGpuWgpuWrapperShaderModuleArtifact {
         pipeline_layout: &OcioGpuWgpuPipelineLayoutPlan,
         render_descriptor: &OcioGpuWgpuRenderPipelineDescriptorPlan,
     ) -> Result<Self, OcioGpuWgpuWrapperShaderModuleArtifactError> {
-        let module_key =
+        let canonical_identity =
             wrapper_shader_module_artifact_key(source, pipeline_layout, render_descriptor)?;
+        let module_key = canonical_identity.diagnostic_key();
         let vertex = translate_naga_shader_stage(
             GpuLanguage::Glsl4_0,
             OcioGpuShaderTargetLanguage::NagaIr,
@@ -503,6 +671,10 @@ impl OcioGpuWgpuWrapperShaderModuleArtifact {
             module_key,
             vertex,
             fragment,
+            resource_identity: source.resource_identity,
+            pipeline_layout_identity: pipeline_layout.canonical_identity,
+            render_descriptor_identity: render_descriptor.canonical_identity,
+            canonical_identity,
         })
     }
 }
@@ -522,7 +694,7 @@ pub struct OcioGpuWgpuWrapperShaderModuleArtifactCacheDiagnostics {
 
 /// Bounded cache for stage-split wrapper shader Naga artifacts.
 pub struct OcioGpuWgpuWrapperShaderModuleArtifactCache {
-    entries: LruCache<u64, Arc<OcioGpuWgpuWrapperShaderModuleArtifact>>,
+    entries: LruCache<OcioGpuCanonicalIdentity, Arc<OcioGpuWgpuWrapperShaderModuleArtifact>>,
     hits: u64,
     misses: u64,
     failures: u64,
@@ -641,6 +813,7 @@ pub struct OcioGpuTranslatedShader {
     pub diagnostics: Vec<OcioGpuShaderDiagnostic>,
     /// Number of entry points visible after translation.
     pub entry_point_count: usize,
+    canonical_identity: OcioGpuCanonicalIdentity,
 }
 
 /// One validated Naga shader stage produced from generated GPU source.
@@ -1138,6 +1311,7 @@ impl OcioGpuShaderTranslator {
             request,
             &plan.bundle().shader_text,
             binding_contract_for_plan(plan),
+            shader_translation_identity(plan, self.target_language, self.stage),
         )
     }
 }
@@ -1151,7 +1325,7 @@ impl Default for OcioGpuShaderTranslator {
 /// Bounded cache for OCIO shader translation results.
 pub struct OcioGpuShaderTranslationCache {
     translator: OcioGpuShaderTranslator,
-    entries: LruCache<u64, Arc<OcioGpuTranslatedShader>>,
+    entries: LruCache<OcioGpuCanonicalIdentity, Arc<OcioGpuTranslatedShader>>,
     hits: u64,
     misses: u64,
     failures: u64,
@@ -1174,14 +1348,11 @@ impl OcioGpuShaderTranslationCache {
         &mut self,
         plan: &OcioGpuShaderPlan,
     ) -> Result<Arc<OcioGpuTranslatedShader>, OcioGpuShaderTranslationError> {
-        let request = OcioGpuShaderTranslationRequest {
-            source_language: plan.request.language(),
-            target_language: self.translator.target_language,
-            stage: self.translator.stage,
-            source_shader_hash: plan.shader_hash,
-            binding_contract_hash: binding_contract_for_plan(plan).stable_hash(),
-        };
-        let key = hash_value(&request);
+        let key = shader_translation_identity(
+            plan,
+            self.translator.target_language,
+            self.translator.stage,
+        );
         if let Some(hit) = self.entries.get(&key) {
             self.hits = self.hits.saturating_add(1);
             return Ok(Arc::clone(hit));
@@ -1275,7 +1446,7 @@ pub struct OcioGpuFullscreenWrapperContract {
 /// It does not claim those resources have already been created.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OcioGpuWgpuResourcePlan {
-    /// Stable key for caching pipeline/resource layout preparation.
+    /// Compact diagnostic handle shared by this resource-plan family.
     pub resource_key: u64,
     /// Shader hash this resource contract belongs to.
     pub shader_hash: u64,
@@ -1303,6 +1474,7 @@ pub struct OcioGpuWgpuResourcePlan {
     pub bind_groups: u32,
     /// Stable signature for a future wgpu pipeline layout.
     pub pipeline_layout_hash: u64,
+    shader_plan_identity: OcioGpuCanonicalIdentity,
 }
 
 impl OcioGpuWgpuResourcePlan {
@@ -1360,6 +1532,7 @@ impl OcioGpuWgpuResourcePlan {
             bind_group_entries,
             bind_groups,
             pipeline_layout_hash,
+            shader_plan_identity: shader_plan.canonical_identity(),
         })
     }
 
@@ -1412,6 +1585,10 @@ impl OcioGpuWgpuResourcePlan {
             bind_group_entries: 0,
             bind_groups: 0,
             pipeline_layout_hash: 0,
+            shader_plan_identity: OcioGpuCanonicalIdentity::for_hash(
+                b"blocked-empty-shader-plan",
+                &(),
+            ),
         }
     }
 }
@@ -1429,6 +1606,8 @@ pub struct OcioGpuWgpuBindingLayoutPlan {
     pub sampler_policy: OcioGpuWgpuSamplerBindingPolicy,
     /// Stable hash of the ordered entries.
     pub layout_hash: u64,
+    resource_identity: OcioGpuCanonicalIdentity,
+    canonical_identity: OcioGpuCanonicalIdentity,
 }
 
 impl OcioGpuWgpuBindingLayoutPlan {
@@ -1483,12 +1662,24 @@ impl OcioGpuWgpuBindingLayoutPlan {
         entries.sort_by_key(|entry| entry.binding);
         validate_unique_bindings(&entries)?;
         let layout_hash = hash_binding_layout(&entries);
+        let resource_identity = resource_layout_cache_identity(plan);
+        let canonical_identity = OcioGpuCanonicalIdentity::for_hash(
+            b"binding-layout-plan",
+            &(
+                resource_identity,
+                plan.binding_contract.descriptor_set_index,
+                &entries,
+                &sampler_policy,
+            ),
+        );
         Ok(Self {
             resource_key: plan.resource_key,
             bind_group: plan.binding_contract.descriptor_set_index,
             entries,
             sampler_policy,
             layout_hash,
+            resource_identity,
+            canonical_identity,
         })
     }
 }
@@ -1842,6 +2033,11 @@ pub struct OcioGpuWgpuBindResourcePlan {
     pub ocio_entries: Vec<OcioGpuWgpuBindResourceEntry>,
     /// Stable hash of all bind-resource entries and wrapper bindings.
     pub plan_hash: u64,
+    resource_identity: OcioGpuCanonicalIdentity,
+    lut_payload_identity: OcioGpuCanonicalIdentity,
+    uniform_payload_identity: Option<OcioGpuCanonicalIdentity>,
+    ocio_layout_identity: OcioGpuCanonicalIdentity,
+    canonical_identity: OcioGpuCanonicalIdentity,
 }
 
 impl OcioGpuWgpuBindResourcePlan {
@@ -1857,18 +2053,34 @@ impl OcioGpuWgpuBindResourcePlan {
                 actual: packed_luts.resource_key,
             });
         }
+        let resource_identity = resource_layout_cache_identity(resources);
+        if resource_identity != packed_luts.resource_identity
+            || resources.shader_plan_identity != packed_luts.shader_plan_identity
+        {
+            return Err(OcioGpuWgpuBindResourcePlanError::LutResourceIdentityMismatch);
+        }
         let binding_layout = resources
             .binding_layout_plan()
             .map_err(OcioGpuWgpuBindResourcePlanError::BindingLayout)?;
         let sampler_policy = &binding_layout.sampler_policy;
 
         let mut ocio_entries = Vec::new();
+        let uniform_payload_identity = if resources.uniform_buffers > 0 {
+            packed_uniform.map(OcioGpuWgpuPackedUniformBuffer::payload_identity)
+        } else {
+            None
+        };
         if resources.uniform_buffers > 0 {
             let uniform =
                 packed_uniform.ok_or(OcioGpuWgpuBindResourcePlanError::MissingUniformBuffer {
                     binding: resources.binding_contract.uniform_buffer_binding,
                 })?;
             validate_uniform_bind_resource(resources, uniform)?;
+            if resource_identity != uniform.resource_identity
+                || resources.shader_plan_identity != uniform.shader_plan_identity
+            {
+                return Err(OcioGpuWgpuBindResourcePlanError::UniformResourceIdentityMismatch);
+            }
             ocio_entries.push(OcioGpuWgpuBindResourceEntry {
                 binding: uniform.binding,
                 resource: OcioGpuWgpuBindResource::UniformBuffer {
@@ -1978,6 +2190,18 @@ impl OcioGpuWgpuBindResourcePlan {
             ocio_layout_hash,
             &ocio_entries,
         );
+        let lut_payload_identity = packed_luts.payload_identity();
+        let canonical_identity = OcioGpuCanonicalIdentity::for_hash(
+            b"bind-resource-plan",
+            &(
+                resource_identity,
+                binding_layout.canonical_identity,
+                lut_payload_identity,
+                uniform_payload_identity,
+                &wrapper_layout,
+                &ocio_entries,
+            ),
+        );
         Ok(Self {
             resource_key: resources.resource_key,
             ocio_bind_group: resources.binding_contract.descriptor_set_index,
@@ -1986,6 +2210,11 @@ impl OcioGpuWgpuBindResourcePlan {
             wrapper_layout,
             ocio_entries,
             plan_hash,
+            resource_identity,
+            lut_payload_identity,
+            uniform_payload_identity,
+            ocio_layout_identity: binding_layout.canonical_identity,
+            canonical_identity,
         })
     }
 }
@@ -2100,8 +2329,12 @@ pub enum OcioGpuWgpuBindResourcePlanError {
     BindingLayout(OcioGpuWgpuBindingLayoutPlanError),
     /// Packed LUT resources belong to a different shader/resource plan.
     LutResourceKeyMismatch { expected: u64, actual: u64 },
+    /// Packed LUT resources do not share the full resource/shader identity.
+    LutResourceIdentityMismatch,
     /// Packed uniform resources belong to a different shader/resource plan.
     UniformResourceKeyMismatch { expected: u64, actual: u64 },
+    /// Packed uniform resources do not share the full resource/shader identity.
+    UniformResourceIdentityMismatch,
     /// The resource contract requires a uniform buffer but none was supplied.
     MissingUniformBuffer { binding: u32 },
     /// A uniform buffer was supplied for a resource contract that has none.
@@ -2110,6 +2343,8 @@ pub enum OcioGpuWgpuBindResourcePlanError {
     UniformBindingMismatch { expected: u32, actual: u32 },
     /// Packed uniform buffer byte length does not match OCIO's contract.
     UniformByteLengthMismatch { expected: usize, actual: usize },
+    /// Packed uniform bytes changed after their full identity was established.
+    UniformPackedBytesIdentityMismatch,
     /// Packed LUT count does not match OCIO's contract.
     TextureCountMismatch {
         /// Texture dimension being validated.
@@ -2156,19 +2391,13 @@ pub enum OcioGpuWgpuTextureContractMismatch {
     },
     /// Source OCIO values hash mismatch.
     SourceValuesHash { expected: u64, actual: u64 },
+    /// Packed bytes changed after their full content identity was established.
+    PackedBytesIdentity,
     /// Packed texture dimension mismatch.
     PackedDimension {
         expected: OcioGpuWgpuLutTextureDimension,
         actual: OcioGpuWgpuLutTextureDimension,
     },
-}
-
-/// Wrapper input resources borrowed while creating the fullscreen wrapper bind group.
-pub struct OcioGpuWgpuWrapperInputResources<'a> {
-    /// GPU view for the input frame texture.
-    pub input_texture_view: &'a wgpu::TextureView,
-    /// Sampler used to read the input frame.
-    pub input_sampler: &'a wgpu::Sampler,
 }
 
 /// Concrete OCIO resource bind group created from validated uploaded resources.
@@ -2185,18 +2414,17 @@ pub struct OcioGpuWgpuOcioBindGroup {
     pub layout: wgpu::BindGroupLayout,
     /// Concrete wgpu bind group.
     pub bind_group: wgpu::BindGroup,
+    resource_identity: OcioGpuCanonicalIdentity,
+    layout_identity: OcioGpuCanonicalIdentity,
+    canonical_identity: OcioGpuCanonicalIdentity,
 }
 
 /// Concrete wrapper input bind group for the fullscreen OCIO pass.
-pub struct OcioGpuWgpuWrapperBindGroup {
-    /// Wrapper bind group index.
-    pub bind_group_index: u32,
-    /// Hash of the wrapper bind-group layout.
-    pub layout_hash: u64,
-    /// Concrete wgpu bind-group layout.
-    pub layout: wgpu::BindGroupLayout,
-    /// Concrete wgpu bind group.
-    pub bind_group: wgpu::BindGroup,
+pub(crate) struct OcioGpuWgpuWrapperBindGroup {
+    pub(crate) bind_group_index: u32,
+    pub(crate) layout_hash: u64,
+    pub(crate) bind_group: wgpu::BindGroup,
+    layout_identity: OcioGpuCanonicalIdentity,
 }
 
 /// Pure pipeline-layout contract for an OCIO fullscreen color pass.
@@ -2212,6 +2440,10 @@ pub struct OcioGpuWgpuPipelineLayoutPlan {
     pub bind_groups: Vec<OcioGpuWgpuPipelineBindGroupSlot>,
     /// Stable hash of this pipeline-layout plan.
     pub layout_hash: u64,
+    resource_identity: OcioGpuCanonicalIdentity,
+    ocio_layout_identity: OcioGpuCanonicalIdentity,
+    wrapper_layout_identity: OcioGpuCanonicalIdentity,
+    canonical_identity: OcioGpuCanonicalIdentity,
 }
 
 impl OcioGpuWgpuPipelineLayoutPlan {
@@ -2244,12 +2476,31 @@ impl OcioGpuWgpuPipelineLayoutPlan {
             wrapper_layout_descriptor.layout_hash,
             &bind_groups,
         );
+        let canonical_identity = OcioGpuCanonicalIdentity::for_hash(
+            b"pipeline-layout-plan",
+            &(
+                resource_layout_cache_identity(resources),
+                &ocio_layout_descriptor.bind_group,
+                &ocio_layout_descriptor.label,
+                &ocio_layout_descriptor.entries,
+                &wrapper_layout_descriptor.bind_group,
+                &wrapper_layout_descriptor.label,
+                &wrapper_layout_descriptor.entries,
+                &bind_groups,
+            ),
+        );
         Self {
             resource_key: resources.resource_key,
             ocio_layout_hash: ocio_layout_descriptor.layout_hash,
             wrapper_layout_hash: wrapper_layout_descriptor.layout_hash,
             bind_groups,
             layout_hash,
+            resource_identity: resource_layout_cache_identity(resources),
+            ocio_layout_identity: bind_group_layout_descriptor_identity(&ocio_layout_descriptor),
+            wrapper_layout_identity: bind_group_layout_descriptor_identity(
+                &wrapper_layout_descriptor,
+            ),
+            canonical_identity,
         }
     }
 }
@@ -2282,6 +2533,8 @@ pub struct OcioGpuWgpuPipelineLayout {
     pub layout_hash: u64,
     /// Concrete wgpu pipeline layout.
     pub pipeline_layout: wgpu::PipelineLayout,
+    resource_identity: OcioGpuCanonicalIdentity,
+    canonical_identity: OcioGpuCanonicalIdentity,
 }
 
 /// Error returned when a concrete pipeline layout cannot satisfy the contract.
@@ -2289,10 +2542,16 @@ pub struct OcioGpuWgpuPipelineLayout {
 pub enum OcioGpuWgpuPipelineLayoutError {
     /// The OCIO bind group belongs to a different resource plan.
     ResourceKeyMismatch { expected: u64, actual: u64 },
+    /// The OCIO bind group belongs to a different full resource contract.
+    ResourceIdentityMismatch,
     /// The OCIO bind-group layout hash does not match the plan.
     OcioLayoutHashMismatch { expected: u64, actual: u64 },
+    /// The OCIO bind-group layout differs despite a compact hash match.
+    OcioLayoutIdentityMismatch,
     /// The wrapper bind-group layout hash does not match the plan.
     WrapperLayoutHashMismatch { expected: u64, actual: u64 },
+    /// The wrapper bind-group layout differs despite a compact hash match.
+    WrapperLayoutIdentityMismatch,
     /// A bind group index cannot be represented by the backend layout vector.
     BindGroupIndexOverflow { bind_group: u32 },
 }
@@ -2301,52 +2560,12 @@ pub enum OcioGpuWgpuPipelineLayoutError {
 pub struct OcioGpuWgpuPipelineLayoutPreparer;
 
 impl OcioGpuWgpuPipelineLayoutPreparer {
-    /// Create a concrete wgpu pipeline layout from prepared OCIO/wrapper bind groups.
-    pub fn prepare(
-        device: &wgpu::Device,
-        plan: &OcioGpuWgpuPipelineLayoutPlan,
-        ocio_bind_group: &OcioGpuWgpuOcioBindGroup,
-        wrapper_bind_group: &OcioGpuWgpuWrapperBindGroup,
-    ) -> Result<OcioGpuWgpuPipelineLayout, OcioGpuWgpuPipelineLayoutError> {
-        if plan.resource_key != ocio_bind_group.resource_key {
-            return Err(OcioGpuWgpuPipelineLayoutError::ResourceKeyMismatch {
-                expected: plan.resource_key,
-                actual: ocio_bind_group.resource_key,
-            });
-        }
-        if plan.ocio_layout_hash != ocio_bind_group.layout_hash {
-            return Err(OcioGpuWgpuPipelineLayoutError::OcioLayoutHashMismatch {
-                expected: plan.ocio_layout_hash,
-                actual: ocio_bind_group.layout_hash,
-            });
-        }
-        if plan.wrapper_layout_hash != wrapper_bind_group.layout_hash {
-            return Err(OcioGpuWgpuPipelineLayoutError::WrapperLayoutHashMismatch {
-                expected: plan.wrapper_layout_hash,
-                actual: wrapper_bind_group.layout_hash,
-            });
-        }
-
-        let bind_group_layouts =
-            pipeline_layout_bind_group_layouts(plan, ocio_bind_group, wrapper_bind_group)?;
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("ocio_fullscreen_pipeline_layout"),
-            immediate_size: 0,
-            bind_group_layouts: &bind_group_layouts,
-        });
-        Ok(OcioGpuWgpuPipelineLayout {
-            resource_key: plan.resource_key,
-            layout_hash: plan.layout_hash,
-            pipeline_layout,
-        })
-    }
-
-    /// Create a concrete wgpu pipeline layout from stable prepared layouts.
-    pub fn prepare_with_wrapper_layout(
+    fn prepare_with_wrapper_layout(
         device: &wgpu::Device,
         plan: &OcioGpuWgpuPipelineLayoutPlan,
         ocio_bind_group: &OcioGpuWgpuOcioBindGroup,
         wrapper_layout_hash: u64,
+        wrapper_layout_identity: OcioGpuCanonicalIdentity,
         wrapper_layout: &wgpu::BindGroupLayout,
     ) -> Result<OcioGpuWgpuPipelineLayout, OcioGpuWgpuPipelineLayoutError> {
         if plan.resource_key != ocio_bind_group.resource_key {
@@ -2355,17 +2574,26 @@ impl OcioGpuWgpuPipelineLayoutPreparer {
                 actual: ocio_bind_group.resource_key,
             });
         }
+        if plan.resource_identity != ocio_bind_group.resource_identity {
+            return Err(OcioGpuWgpuPipelineLayoutError::ResourceIdentityMismatch);
+        }
         if plan.ocio_layout_hash != ocio_bind_group.layout_hash {
             return Err(OcioGpuWgpuPipelineLayoutError::OcioLayoutHashMismatch {
                 expected: plan.ocio_layout_hash,
                 actual: ocio_bind_group.layout_hash,
             });
         }
+        if plan.ocio_layout_identity != ocio_bind_group.layout_identity {
+            return Err(OcioGpuWgpuPipelineLayoutError::OcioLayoutIdentityMismatch);
+        }
         if plan.wrapper_layout_hash != wrapper_layout_hash {
             return Err(OcioGpuWgpuPipelineLayoutError::WrapperLayoutHashMismatch {
                 expected: plan.wrapper_layout_hash,
                 actual: wrapper_layout_hash,
             });
+        }
+        if plan.wrapper_layout_identity != wrapper_layout_identity {
+            return Err(OcioGpuWgpuPipelineLayoutError::WrapperLayoutIdentityMismatch);
         }
 
         let bind_group_layouts = pipeline_layout_bind_group_layouts_from_wrapper_layout(
@@ -2382,6 +2610,8 @@ impl OcioGpuWgpuPipelineLayoutPreparer {
             resource_key: plan.resource_key,
             layout_hash: plan.layout_hash,
             pipeline_layout,
+            resource_identity: plan.resource_identity,
+            canonical_identity: plan.canonical_identity,
         })
     }
 }
@@ -2472,6 +2702,9 @@ pub struct OcioGpuWgpuRenderPipelineDescriptorPlan {
     pub output_format: OcioGpuWgpuColorTargetFormat,
     /// Stable hash of this render-pipeline descriptor plan.
     pub descriptor_hash: u64,
+    resource_identity: OcioGpuCanonicalIdentity,
+    pipeline_layout_identity: OcioGpuCanonicalIdentity,
+    canonical_identity: OcioGpuCanonicalIdentity,
 }
 
 impl OcioGpuWgpuRenderPipelineDescriptorPlan {
@@ -2489,12 +2722,24 @@ impl OcioGpuWgpuRenderPipelineDescriptorPlan {
             &wrapper_link.shader_contract,
             output_format,
         );
+        let canonical_identity = OcioGpuCanonicalIdentity::for_hash(
+            b"render-pipeline-descriptor",
+            &(
+                resource_layout_cache_identity(resources),
+                pipeline_layout.canonical_identity,
+                &wrapper_link.shader_contract,
+                output_format,
+            ),
+        );
         Self {
             resource_key: resources.resource_key,
             pipeline_layout_hash: pipeline_layout.layout_hash,
             shader_contract: wrapper_link.shader_contract.clone(),
             output_format,
             descriptor_hash,
+            resource_identity: resource_layout_cache_identity(resources),
+            pipeline_layout_identity: pipeline_layout.canonical_identity,
+            canonical_identity,
         }
     }
 
@@ -2526,8 +2771,18 @@ impl OcioGpuWgpuRenderPipelineDescriptorPlan {
 pub enum OcioGpuWgpuBindGroupError {
     /// Uploaded LUT resources belong to a different resource plan.
     LutResourceKeyMismatch { expected: u64, actual: u64 },
+    /// Uploaded LUT resources differ in their full resource identity.
+    LutResourceIdentityMismatch,
+    /// Uploaded LUT bytes differ from the validated packed payload.
+    LutPayloadIdentityMismatch,
     /// Uploaded uniform resources belong to a different resource plan.
     UniformResourceKeyMismatch { expected: u64, actual: u64 },
+    /// Uploaded uniform resources differ in their full resource identity.
+    UniformResourceIdentityMismatch,
+    /// Uploaded uniform bytes differ from the validated packed payload.
+    UniformPayloadIdentityMismatch,
+    /// The bind-group layout differs from the validated bind-resource plan.
+    LayoutIdentityMismatch,
     /// The uploaded uniform buffer required by the bind-resource plan is missing.
     MissingUploadedUniformBuffer { binding: u32 },
     /// The bind-resource plan did not contain an entry required by the layout.
@@ -2609,6 +2864,12 @@ impl OcioGpuWgpuBindGroupPreparer {
                 actual: uploaded_luts.resource_key,
             });
         }
+        if bind_resource_plan.resource_identity != uploaded_luts.resource_identity {
+            return Err(OcioGpuWgpuBindGroupError::LutResourceIdentityMismatch);
+        }
+        if bind_resource_plan.lut_payload_identity != uploaded_luts.payload_identity {
+            return Err(OcioGpuWgpuBindGroupError::LutPayloadIdentityMismatch);
+        }
         if let Some(uniform) = uploaded_uniform {
             if bind_resource_plan.resource_key != uniform.resource_key {
                 return Err(OcioGpuWgpuBindGroupError::UniformResourceKeyMismatch {
@@ -2616,9 +2877,21 @@ impl OcioGpuWgpuBindGroupPreparer {
                     actual: uniform.resource_key,
                 });
             }
+            if bind_resource_plan.resource_identity != uniform.resource_identity {
+                return Err(OcioGpuWgpuBindGroupError::UniformResourceIdentityMismatch);
+            }
+            if bind_resource_plan.uniform_payload_identity != Some(uniform.payload_identity) {
+                return Err(OcioGpuWgpuBindGroupError::UniformPayloadIdentityMismatch);
+            }
         }
 
         let descriptor = OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_ocio_resources(layout_plan);
+        if bind_resource_plan.resource_identity != layout_plan.resource_identity
+            || bind_resource_plan.ocio_layout_identity != layout_plan.canonical_identity
+        {
+            return Err(OcioGpuWgpuBindGroupError::LayoutIdentityMismatch);
+        }
+        let layout_identity = bind_group_layout_descriptor_identity(&descriptor);
         let layout = descriptor.create_bind_group_layout(device);
         let entries = layout_plan
             .entries
@@ -2632,6 +2905,14 @@ impl OcioGpuWgpuBindGroupPreparer {
             layout: &layout,
             entries: &entries,
         });
+        let canonical_identity = OcioGpuCanonicalIdentity::for_hash(
+            b"concrete-ocio-bind-group",
+            &(
+                bind_resource_plan.resource_identity,
+                bind_resource_plan.canonical_identity,
+                layout_identity,
+            ),
+        );
         Ok(OcioGpuWgpuOcioBindGroup {
             bind_group_index: layout_plan.bind_group,
             resource_key: bind_resource_plan.resource_key,
@@ -2639,34 +2920,19 @@ impl OcioGpuWgpuBindGroupPreparer {
             layout_hash: descriptor.layout_hash,
             layout,
             bind_group,
+            resource_identity: bind_resource_plan.resource_identity,
+            layout_identity,
+            canonical_identity,
         })
     }
 
-    /// Create the concrete fullscreen wrapper input bind group.
-    pub fn prepare_wrapper_bind_group(
-        device: &wgpu::Device,
-        wrapper_layout: &OcioGpuWgpuWrapperBindingPlan,
-        input: OcioGpuWgpuWrapperInputResources<'_>,
-    ) -> OcioGpuWgpuWrapperBindGroup {
-        let descriptor =
-            OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_wrapper_input(wrapper_layout);
-        let layout = descriptor.create_bind_group_layout(device);
-        Self::prepare_wrapper_bind_group_with_layout(
-            device,
-            wrapper_layout,
-            descriptor.layout_hash,
-            &layout,
-            input,
-        )
-    }
-
-    /// Create the concrete fullscreen wrapper input bind group from a stable layout.
-    pub fn prepare_wrapper_bind_group_with_layout(
+    fn prepare_wrapper_bind_group_with_layout(
         device: &wgpu::Device,
         wrapper_layout: &OcioGpuWgpuWrapperBindingPlan,
         layout_hash: u64,
         layout: &wgpu::BindGroupLayout,
-        input: OcioGpuWgpuWrapperInputResources<'_>,
+        input_texture_view: &wgpu::TextureView,
+        input_sampler: &wgpu::Sampler,
     ) -> OcioGpuWgpuWrapperBindGroup {
         let entries = wrapper_layout
             .entries
@@ -2674,11 +2940,11 @@ impl OcioGpuWgpuBindGroupPreparer {
             .map(|entry| match entry.resource {
                 OcioGpuWgpuWrapperBindingResource::InputFrameTexture => wgpu::BindGroupEntry {
                     binding: entry.binding,
-                    resource: wgpu::BindingResource::TextureView(input.input_texture_view),
+                    resource: wgpu::BindingResource::TextureView(input_texture_view),
                 },
                 OcioGpuWgpuWrapperBindingResource::InputFrameSampler => wgpu::BindGroupEntry {
                     binding: entry.binding,
-                    resource: wgpu::BindingResource::Sampler(input.input_sampler),
+                    resource: wgpu::BindingResource::Sampler(input_sampler),
                 },
             })
             .collect::<Vec<_>>();
@@ -2687,11 +2953,13 @@ impl OcioGpuWgpuBindGroupPreparer {
             layout,
             entries: &entries,
         });
+        let descriptor =
+            OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_wrapper_input(wrapper_layout);
         OcioGpuWgpuWrapperBindGroup {
             bind_group_index: wrapper_layout.bind_group,
             layout_hash,
-            layout: layout.clone(),
             bind_group,
+            layout_identity: bind_group_layout_descriptor_identity(&descriptor),
         }
     }
 }
@@ -2759,9 +3027,11 @@ pub struct OcioGpuWgpuLutUploadPlan {
     /// Stable resource key this upload plan belongs to.
     pub resource_key: u64,
     /// OCIO 1D/2D LUT texture payloads copied as-is.
-    pub textures_2d: Vec<OcioGpuWgpuTexture2DUpload>,
+    textures_2d: Vec<OcioGpuWgpuTexture2DUpload>,
     /// OCIO 3D LUT texture payloads copied as-is.
-    pub textures_3d: Vec<OcioGpuWgpuTexture3DUpload>,
+    textures_3d: Vec<OcioGpuWgpuTexture3DUpload>,
+    resource_identity: OcioGpuCanonicalIdentity,
+    shader_plan_identity: OcioGpuCanonicalIdentity,
 }
 
 /// Upload payload for an OCIO 1D/2D LUT texture.
@@ -2786,9 +3056,9 @@ pub struct OcioGpuWgpuTexture2DUpload {
     /// Logical texture height.
     pub height: u32,
     /// Stable hash of the copied LUT values.
-    pub values_hash: u64,
+    values_hash: u64,
     /// Flattened texel payload copied from OCIO as-is.
-    pub values: Vec<f32>,
+    values: Vec<f32>,
 }
 
 /// Upload payload for an OCIO 3D LUT texture.
@@ -2807,9 +3077,9 @@ pub struct OcioGpuWgpuTexture3DUpload {
     /// Cube edge length.
     pub edge_len: u32,
     /// Stable hash of the copied LUT values.
-    pub values_hash: u64,
+    values_hash: u64,
     /// Flattened texel payload copied from OCIO as-is.
-    pub values: Vec<f32>,
+    values: Vec<f32>,
 }
 
 impl OcioGpuWgpuLutUploadPlan {
@@ -2855,6 +3125,8 @@ impl OcioGpuWgpuLutUploadPlan {
             resource_key: resources.resource_key,
             textures_2d,
             textures_3d,
+            resource_identity: resource_layout_cache_identity(resources),
+            shader_plan_identity: shader_plan.canonical_identity(),
         }
     }
 
@@ -2876,6 +3148,8 @@ impl OcioGpuWgpuLutUploadPlan {
             resource_key: self.resource_key,
             textures_2d,
             textures_3d,
+            resource_identity: self.resource_identity,
+            shader_plan_identity: self.shader_plan_identity,
         })
     }
 }
@@ -2886,9 +3160,21 @@ pub struct OcioGpuWgpuPackedLutUploadPlan {
     /// Stable resource key this packed upload plan belongs to.
     pub resource_key: u64,
     /// Packed 1D/2D LUT textures.
-    pub textures_2d: Vec<OcioGpuWgpuPackedLutTexture>,
+    textures_2d: Vec<OcioGpuWgpuPackedLutTexture>,
     /// Packed 3D LUT textures.
-    pub textures_3d: Vec<OcioGpuWgpuPackedLutTexture>,
+    textures_3d: Vec<OcioGpuWgpuPackedLutTexture>,
+    resource_identity: OcioGpuCanonicalIdentity,
+    shader_plan_identity: OcioGpuCanonicalIdentity,
+}
+
+impl OcioGpuWgpuPackedLutUploadPlan {
+    fn payload_identity(&self) -> OcioGpuCanonicalIdentity {
+        lut_payload_identity(
+            self.shader_plan_identity,
+            self.textures_2d.iter().map(OcioGpuWgpuPackedLutTexture::canonical_identity),
+            self.textures_3d.iter().map(OcioGpuWgpuPackedLutTexture::canonical_identity),
+        )
+    }
 }
 
 /// Texture format selected for an OCIO LUT upload.
@@ -2990,7 +3276,9 @@ pub struct OcioGpuWgpuPackedLutTexture {
     /// Hash of the packed upload bytes.
     pub packed_bytes_hash: u64,
     /// Packed texture bytes.
-    pub bytes: Vec<u8>,
+    bytes: Vec<u8>,
+    source_values_identity: OcioGpuCanonicalIdentity,
+    packed_bytes_identity: OcioGpuCanonicalIdentity,
 }
 
 impl OcioGpuWgpuPackedLutTexture {
@@ -3049,6 +3337,7 @@ impl OcioGpuWgpuPackedLutTexture {
             OcioGpuWgpuLutTextureDimension::D2,
             extent,
             upload.values_hash,
+            f32_values_identity(&upload.values),
             bytes,
         ))
     }
@@ -3088,6 +3377,7 @@ impl OcioGpuWgpuPackedLutTexture {
             OcioGpuWgpuLutTextureDimension::D3,
             extent,
             upload.values_hash,
+            f32_values_identity(&upload.values),
             pack_rgb_values_as_rgba32(&upload.values),
         ))
     }
@@ -3102,11 +3392,13 @@ impl OcioGpuWgpuPackedLutTexture {
         dimension: OcioGpuWgpuLutTextureDimension,
         extent: OcioGpuWgpuLutTextureExtent,
         source_values_hash: u64,
+        source_values_identity: OcioGpuCanonicalIdentity,
         bytes: Vec<u8>,
     ) -> Self {
         let bytes_per_row = extent.width.saturating_mul(format.bytes_per_texel());
         let rows_per_image = extent.height;
         let packed_bytes_hash = hash_bytes(&bytes);
+        let packed_bytes_identity = bytes_identity(&bytes);
         Self {
             index,
             texture_name,
@@ -3121,7 +3413,29 @@ impl OcioGpuWgpuPackedLutTexture {
             source_values_hash,
             packed_bytes_hash,
             bytes,
+            source_values_identity,
+            packed_bytes_identity,
         }
+    }
+
+    fn canonical_identity(&self) -> OcioGpuCanonicalIdentity {
+        OcioGpuCanonicalIdentity::for_hash(
+            b"packed-lut-texture",
+            &(
+                self.index,
+                &self.texture_name,
+                &self.sampler_name,
+                self.binding_index,
+                self.interpolation,
+                self.format,
+                self.dimension,
+                self.extent,
+                self.bytes_per_row,
+                self.rows_per_image,
+                self.source_values_identity,
+                bytes_identity(&self.bytes),
+            ),
+        )
     }
 }
 
@@ -3155,6 +3469,11 @@ pub enum OcioGpuWgpuLutUploadError {
         /// Expected number of `f32` values.
         expected: usize,
     },
+    /// Packed bytes or row metadata no longer match the validated texture extent.
+    PackedByteLayoutMismatch {
+        /// Resource with a detached packed payload.
+        resource: OcioGpuWgpuLutUploadResource,
+    },
 }
 
 /// Uploaded OCIO LUT texture resources owned by wgpu.
@@ -3183,6 +3502,7 @@ pub struct OcioGpuWgpuUploadedLutTexture {
     pub view: wgpu::TextureView,
     /// Sampler matching the OCIO interpolation policy.
     pub sampler: wgpu::Sampler,
+    canonical_identity: OcioGpuCanonicalIdentity,
 }
 
 /// Uploaded OCIO LUT resources for a shader plan.
@@ -3193,6 +3513,8 @@ pub struct OcioGpuWgpuUploadedLuts {
     pub textures_2d: Vec<OcioGpuWgpuUploadedLutTexture>,
     /// Uploaded 3D LUT textures.
     pub textures_3d: Vec<OcioGpuWgpuUploadedLutTexture>,
+    resource_identity: OcioGpuCanonicalIdentity,
+    payload_identity: OcioGpuCanonicalIdentity,
 }
 
 /// Uniform buffer payload plan for an OCIO shader.
@@ -3205,7 +3527,9 @@ pub struct OcioGpuWgpuUniformUploadPlan {
     /// OCIO-reported uniform buffer size in bytes.
     pub buffer_size: usize,
     /// Uniform metadata and values copied from OCIO.
-    pub uniforms: Vec<OcioGpuWgpuUniformUpload>,
+    uniforms: Vec<OcioGpuWgpuUniformUpload>,
+    resource_identity: OcioGpuCanonicalIdentity,
+    shader_plan_identity: OcioGpuCanonicalIdentity,
 }
 
 /// Upload payload for one OCIO uniform.
@@ -3222,9 +3546,9 @@ pub struct OcioGpuWgpuUniformUpload {
     /// Logical scalar count.
     pub value_count: usize,
     /// Stable hash of the copied uniform payload.
-    pub value_hash: u64,
+    value_hash: u64,
     /// Typed uniform payload.
-    pub value: OcioGpuUniformValue,
+    value: OcioGpuUniformValue,
 }
 
 impl OcioGpuWgpuUniformUploadPlan {
@@ -3252,6 +3576,8 @@ impl OcioGpuWgpuUniformUploadPlan {
             binding: resources.binding_contract.uniform_buffer_binding,
             buffer_size: resources.binding_contract.uniform_buffer_size,
             uniforms,
+            resource_identity: resource_layout_cache_identity(resources),
+            shader_plan_identity: shader_plan.canonical_identity(),
         }
     }
 
@@ -3304,12 +3630,16 @@ impl OcioGpuWgpuUniformUploadPlan {
             }
             bytes[uniform.buffer_offset..end].copy_from_slice(&uniform_bytes);
         }
+        let packed_bytes_identity = bytes_identity(&bytes);
         Ok(OcioGpuWgpuPackedUniformBuffer {
             resource_key: self.resource_key,
             binding: self.binding,
             byte_len: bytes.len(),
             bytes_hash: hash_bytes(&bytes),
             bytes,
+            resource_identity: self.resource_identity,
+            shader_plan_identity: self.shader_plan_identity,
+            packed_bytes_identity,
         })
     }
 }
@@ -3326,7 +3656,24 @@ pub struct OcioGpuWgpuPackedUniformBuffer {
     /// Stable hash of packed bytes.
     pub bytes_hash: u64,
     /// Packed buffer bytes.
-    pub bytes: Vec<u8>,
+    bytes: Vec<u8>,
+    resource_identity: OcioGpuCanonicalIdentity,
+    shader_plan_identity: OcioGpuCanonicalIdentity,
+    packed_bytes_identity: OcioGpuCanonicalIdentity,
+}
+
+impl OcioGpuWgpuPackedUniformBuffer {
+    fn payload_identity(&self) -> OcioGpuCanonicalIdentity {
+        OcioGpuCanonicalIdentity::for_hash(
+            b"packed-uniform-buffer",
+            &(
+                self.shader_plan_identity,
+                self.binding,
+                self.byte_len,
+                bytes_identity(&self.bytes),
+            ),
+        )
+    }
 }
 
 /// Uploaded OCIO uniform buffer.
@@ -3341,6 +3688,8 @@ pub struct OcioGpuWgpuUploadedUniformBuffer {
     pub bytes_hash: u64,
     /// Uploaded wgpu buffer.
     pub buffer: wgpu::Buffer,
+    resource_identity: OcioGpuCanonicalIdentity,
+    payload_identity: OcioGpuCanonicalIdentity,
 }
 
 /// Resource identifier for uniform upload errors.
@@ -3387,6 +3736,10 @@ pub enum OcioGpuWgpuUniformUploadError {
         /// Uniform buffer length in bytes.
         buffer_size: usize,
     },
+    /// Packed byte length no longer matches the declared uniform buffer length.
+    PackedByteLengthMismatch { expected: usize, actual: usize },
+    /// Packed bytes changed after their full content identity was established.
+    PackedContentIdentityMismatch,
 }
 
 /// Stateless uploader for OCIO uniform buffers.
@@ -3399,16 +3752,17 @@ impl OcioGpuWgpuUniformUploader {
         plan: &OcioGpuWgpuUniformUploadPlan,
     ) -> Result<Option<OcioGpuWgpuUploadedUniformBuffer>, OcioGpuWgpuUniformUploadError> {
         let packed = plan.pack_buffer()?;
-        Ok(Self::upload_packed(device, &packed))
+        Self::upload_packed(device, &packed)
     }
 
     /// Upload an already packed OCIO uniform buffer.
     pub fn upload_packed(
         device: &wgpu::Device,
         packed: &OcioGpuWgpuPackedUniformBuffer,
-    ) -> Option<OcioGpuWgpuUploadedUniformBuffer> {
+    ) -> Result<Option<OcioGpuWgpuUploadedUniformBuffer>, OcioGpuWgpuUniformUploadError> {
+        validate_packed_uniform_upload(packed)?;
         if packed.bytes.is_empty() {
-            return None;
+            return Ok(None);
         }
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ocio_uniform_buffer"),
@@ -3422,14 +3776,31 @@ impl OcioGpuWgpuUniformUploader {
             .expect("OCIO LUT upload mapped range")
             .copy_from_slice(&packed.bytes);
         buffer.unmap();
-        Some(OcioGpuWgpuUploadedUniformBuffer {
+        Ok(Some(OcioGpuWgpuUploadedUniformBuffer {
             resource_key: packed.resource_key,
             binding: packed.binding,
-            byte_len: packed.byte_len,
-            bytes_hash: packed.bytes_hash,
+            byte_len: packed.bytes.len(),
+            bytes_hash: hash_bytes(&packed.bytes),
             buffer,
-        })
+            resource_identity: packed.resource_identity,
+            payload_identity: packed.payload_identity(),
+        }))
     }
+}
+
+fn validate_packed_uniform_upload(
+    packed: &OcioGpuWgpuPackedUniformBuffer,
+) -> Result<(), OcioGpuWgpuUniformUploadError> {
+    if packed.byte_len != packed.bytes.len() {
+        return Err(OcioGpuWgpuUniformUploadError::PackedByteLengthMismatch {
+            expected: packed.byte_len,
+            actual: packed.bytes.len(),
+        });
+    }
+    if packed.packed_bytes_identity != bytes_identity(&packed.bytes) {
+        return Err(OcioGpuWgpuUniformUploadError::PackedContentIdentityMismatch);
+    }
+    Ok(())
 }
 
 /// Stateless uploader for OCIO LUT texture payloads.
@@ -3452,27 +3823,44 @@ impl OcioGpuWgpuLutUploader {
         queue: &wgpu::Queue,
         packed: &OcioGpuWgpuPackedLutUploadPlan,
     ) -> Result<OcioGpuWgpuUploadedLuts, OcioGpuWgpuLutUploadError> {
+        for texture in &packed.textures_2d {
+            validate_packed_lut_texture(texture)?;
+        }
+        for texture in &packed.textures_3d {
+            validate_packed_lut_texture(texture)?;
+        }
         let textures_2d = packed
             .textures_2d
             .iter()
             .map(|texture| upload_lut_texture(device, queue, texture))
-            .collect();
+            .collect::<Vec<_>>();
         let textures_3d = packed
             .textures_3d
             .iter()
             .map(|texture| upload_lut_texture(device, queue, texture))
-            .collect();
+            .collect::<Vec<_>>();
+        let payload_identity = lut_payload_identity(
+            packed.shader_plan_identity,
+            textures_2d
+                .iter()
+                .map(|texture: &OcioGpuWgpuUploadedLutTexture| texture.canonical_identity),
+            textures_3d
+                .iter()
+                .map(|texture: &OcioGpuWgpuUploadedLutTexture| texture.canonical_identity),
+        );
         Ok(OcioGpuWgpuUploadedLuts {
             resource_key: packed.resource_key,
             textures_2d,
             textures_3d,
+            resource_identity: packed.resource_identity,
+            payload_identity,
         })
     }
 }
 
 /// Bounded cache for renderer backend resource-layout preparation.
 pub struct OcioGpuWgpuResourceCache {
-    entries: LruCache<u64, Arc<OcioGpuWgpuPreparedResources>>,
+    entries: LruCache<OcioGpuCanonicalIdentity, Arc<OcioGpuWgpuPreparedResources>>,
     hits: u64,
     misses: u64,
 }
@@ -3492,7 +3880,8 @@ impl OcioGpuWgpuResourceCache {
         &mut self,
         resources: OcioGpuWgpuResourcePlan,
     ) -> Result<Arc<OcioGpuWgpuPreparedResources>, OcioGpuWgpuBindingLayoutPlanError> {
-        if let Some(hit) = self.entries.get(&resources.resource_key) {
+        let cache_identity = resource_layout_cache_identity(&resources);
+        if let Some(hit) = self.entries.get(&cache_identity) {
             self.hits = self.hits.saturating_add(1);
             return Ok(Arc::clone(hit));
         }
@@ -3502,7 +3891,7 @@ impl OcioGpuWgpuResourceCache {
             binding_layout: resources.binding_layout_plan()?,
             resources,
         });
-        self.entries.put(prepared.resources.resource_key, Arc::clone(&prepared));
+        self.entries.put(cache_identity, Arc::clone(&prepared));
         Ok(prepared)
     }
 
@@ -3553,6 +3942,7 @@ pub struct OcioGpuWgpuPreparedStaticPipeline {
     pub wrapper_module_artifact: Arc<OcioGpuWgpuWrapperShaderModuleArtifact>,
     /// Render-pipeline descriptor contract for the fullscreen pass.
     pub render_descriptor: OcioGpuWgpuRenderPipelineDescriptorPlan,
+    canonical_identity: OcioGpuCanonicalIdentity,
 }
 
 /// Error returned while preparing pure OCIO GPU backend contracts.
@@ -3591,9 +3981,7 @@ pub struct OcioGpuWgpuBackendPrepRuntime {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct StaticPipelineCacheKey {
-    shader_cache_key: u64,
-    shader_hash: u64,
-    binding_contract_hash: u64,
+    shader_plan: OcioGpuCanonicalIdentity,
     output_format: OcioGpuWgpuColorTargetFormat,
 }
 
@@ -3652,6 +4040,7 @@ impl OcioGpuWgpuBackendPrepRuntime {
             wrapper_source,
             wrapper_module_artifact,
             render_descriptor,
+            canonical_identity: static_pipeline_cache_identity(cache_key),
         });
         self.static_pipelines.put(cache_key, Arc::clone(&prepared));
         Ok(prepared)
@@ -3709,12 +4098,10 @@ pub struct OcioGpuWgpuBackendPrepRuntimeDiagnostics {
 
 /// Prepared stable wrapper input layout for an OCIO fullscreen pass.
 pub struct OcioGpuWgpuPreparedWrapperInputLayout {
-    /// Wrapper bind group index.
-    pub bind_group: u32,
-    /// Stable hash of the wrapper layout descriptor.
-    pub layout_hash: u64,
-    /// Concrete wgpu bind-group layout reused for per-frame wrapper bind groups.
-    pub layout: wgpu::BindGroupLayout,
+    pub(crate) layout_hash: u64,
+    pub(crate) layout: wgpu::BindGroupLayout,
+    wrapper_binding: OcioGpuWgpuWrapperBindingPlan,
+    layout_identity: OcioGpuCanonicalIdentity,
     binding_cache_key: GpuColorFrameBindGroupCacheKey,
     bind_group_creations: AtomicU64,
     cache_hits: AtomicU64,
@@ -3730,41 +4117,31 @@ pub struct OcioGpuWgpuWrapperInputBindingCacheDiagnostics {
 }
 
 impl OcioGpuWgpuPreparedWrapperInputLayout {
-    /// Create a per-frame wrapper input bind group using this stable layout.
-    pub fn prepare_bind_group(
+    pub(crate) fn matches_wrapper_binding(
         &self,
-        device: &wgpu::Device,
         wrapper_binding: &OcioGpuWgpuWrapperBindingPlan,
-        input: OcioGpuWgpuWrapperInputResources<'_>,
-    ) -> OcioGpuWgpuWrapperBindGroup {
-        OcioGpuWgpuBindGroupPreparer::prepare_wrapper_bind_group_with_layout(
-            device,
-            wrapper_binding,
-            self.layout_hash,
-            &self.layout,
-            input,
-        )
+    ) -> bool {
+        self.wrapper_binding == *wrapper_binding
+            && self.layout_identity
+                == bind_group_layout_descriptor_identity(
+                    &OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_wrapper_input(wrapper_binding),
+                )
     }
 
-    /// Prepare or reuse the wrapper binding cached with a pooled GPU frame resource.
-    pub fn prepare_cached_bind_group(
+    pub(crate) fn prepare_cached_bind_group(
         &self,
         device: &wgpu::Device,
-        wrapper_binding: &OcioGpuWgpuWrapperBindingPlan,
         input: &GpuColorFrameWgpuResource,
     ) -> OcioGpuWgpuWrapperBindGroup {
         let (bind_group, cache_hit) =
             input.cached_bind_group(self.binding_cache_key, |texture_view| {
-                let resources = OcioGpuWgpuWrapperInputResources {
-                    input_texture_view: texture_view,
-                    input_sampler: &input.sampler,
-                };
                 OcioGpuWgpuBindGroupPreparer::prepare_wrapper_bind_group_with_layout(
                     device,
-                    wrapper_binding,
+                    &self.wrapper_binding,
                     self.layout_hash,
                     &self.layout,
-                    resources,
+                    texture_view,
+                    &input.sampler,
                 )
                 .bind_group
             });
@@ -3774,10 +4151,10 @@ impl OcioGpuWgpuPreparedWrapperInputLayout {
             self.bind_group_creations.fetch_add(1, Ordering::Relaxed);
         }
         OcioGpuWgpuWrapperBindGroup {
-            bind_group_index: wrapper_binding.bind_group,
+            bind_group_index: self.wrapper_binding.bind_group,
             layout_hash: self.layout_hash,
-            layout: self.layout.clone(),
             bind_group,
+            layout_identity: self.layout_identity,
         }
     }
 
@@ -3792,7 +4169,7 @@ impl OcioGpuWgpuPreparedWrapperInputLayout {
 
 /// Concrete backend objects prepared for a static OCIO fullscreen pipeline.
 pub struct OcioGpuWgpuPreparedBackendObjects {
-    /// Stable cache key for this object bundle.
+    /// Compact diagnostic projection of this object bundle's cache identity.
     pub cache_key: u64,
     /// Stable resource key shared by all prepared objects.
     pub resource_key: u64,
@@ -3836,6 +4213,8 @@ pub enum OcioGpuWgpuBackendObjectError {
     RenderPipeline(OcioGpuWgpuRenderPipelineError),
     /// Render-pass node creation failed contract validation.
     RenderPass(OcioGpuWgpuRenderPassError),
+    /// The device-scoped wrapper bind-group cache identity space is exhausted.
+    FrameBindingCacheKey(GpuColorFrameBindGroupCacheKeyAllocationError),
 }
 
 impl std::fmt::Display for OcioGpuWgpuBackendObjectError {
@@ -3848,7 +4227,7 @@ impl std::error::Error for OcioGpuWgpuBackendObjectError {}
 
 /// Renderer-owned runtime for concrete OCIO GPU backend object preparation.
 pub struct OcioGpuWgpuBackendObjectRuntime {
-    objects: LruCache<u64, Arc<OcioGpuWgpuPreparedBackendObjects>>,
+    objects: LruCache<OcioGpuCanonicalIdentity, Arc<OcioGpuWgpuPreparedBackendObjects>>,
     wrapper_modules: OcioGpuWgpuWrapperShaderModuleCache,
     render_pipelines: OcioGpuWgpuRenderPipelineCache,
     hits: u64,
@@ -3891,7 +4270,7 @@ impl OcioGpuWgpuBackendObjectRuntime {
         {
             return Err(OcioGpuWgpuBackendObjectError::Float32FilteringUnsupported);
         }
-        let cache_key = backend_object_cache_key(static_pipeline);
+        let cache_key = backend_object_cache_key(shader_plan, static_pipeline);
         if let Some(hit) = self.objects.get(&cache_key) {
             self.hits = self.hits.saturating_add(1);
             return Ok(Arc::clone(hit));
@@ -3923,7 +4302,7 @@ impl OcioGpuWgpuBackendObjectRuntime {
         queue: &wgpu::Queue,
         shader_plan: &OcioGpuShaderPlan,
         static_pipeline: &OcioGpuWgpuPreparedStaticPipeline,
-        cache_key: u64,
+        cache_identity: OcioGpuCanonicalIdentity,
     ) -> Result<OcioGpuWgpuPreparedBackendObjects, OcioGpuWgpuBackendObjectError> {
         let resources = &static_pipeline.resources.resources;
         let lut_upload_plan = OcioGpuWgpuLutUploadPlan::for_shader_plan(shader_plan, resources);
@@ -3938,7 +4317,8 @@ impl OcioGpuWgpuBackendObjectRuntime {
         let packed_uniform = uniform_upload_plan
             .pack_buffer()
             .map_err(OcioGpuWgpuBackendObjectError::UniformUpload)?;
-        let uploaded_uniform = OcioGpuWgpuUniformUploader::upload_packed(device, &packed_uniform);
+        let uploaded_uniform = OcioGpuWgpuUniformUploader::upload_packed(device, &packed_uniform)
+            .map_err(OcioGpuWgpuBackendObjectError::UniformUpload)?;
 
         let bind_resource_plan = OcioGpuWgpuBindResourcePlan::from_packed_resources(
             resources,
@@ -3964,10 +4344,12 @@ impl OcioGpuWgpuBackendObjectRuntime {
         );
         let wrapper_layout = wrapper_descriptor.create_bind_group_layout(device);
         let wrapper_input_layout = OcioGpuWgpuPreparedWrapperInputLayout {
-            bind_group: static_pipeline.wrapper_binding.bind_group,
             layout_hash: wrapper_descriptor.layout_hash,
             layout: wrapper_layout,
-            binding_cache_key: GpuColorFrameBindGroupCacheKey::allocate(),
+            wrapper_binding: static_pipeline.wrapper_binding.clone(),
+            layout_identity: bind_group_layout_descriptor_identity(&wrapper_descriptor),
+            binding_cache_key: GpuColorFrameBindGroupCacheKey::allocate()
+                .map_err(OcioGpuWgpuBackendObjectError::FrameBindingCacheKey)?,
             bind_group_creations: AtomicU64::new(0),
             cache_hits: AtomicU64::new(0),
         };
@@ -3977,6 +4359,7 @@ impl OcioGpuWgpuBackendObjectRuntime {
             &static_pipeline.pipeline_layout,
             &ocio_bind_group,
             wrapper_input_layout.layout_hash,
+            wrapper_input_layout.layout_identity,
             &wrapper_input_layout.layout,
         )
         .map_err(OcioGpuWgpuBackendObjectError::PipelineLayout)?;
@@ -3995,12 +4378,13 @@ impl OcioGpuWgpuBackendObjectRuntime {
             &render_pipeline,
             &ocio_bind_group,
             wrapper_input_layout.layout_hash,
+            wrapper_input_layout.layout_identity,
             static_pipeline.render_descriptor.output_format,
         )
         .map_err(OcioGpuWgpuBackendObjectError::RenderPass)?;
 
         Ok(OcioGpuWgpuPreparedBackendObjects {
-            cache_key,
+            cache_key: cache_identity.diagnostic_key(),
             resource_key: resources.resource_key,
             bind_resource_plan,
             uploaded_luts,
@@ -4065,7 +4449,7 @@ pub struct OcioGpuWgpuBackendObjectRuntimeDiagnostics {
 
 /// Cached wgpu shader module produced from a validated Naga OCIO shader.
 pub struct OcioGpuWgpuShaderModule {
-    /// Stable cache key for this backend shader module.
+    /// Compact diagnostic projection of this backend shader module identity.
     pub cache_key: u64,
     /// Source shader hash this module was created from.
     pub shader_hash: u64,
@@ -4111,7 +4495,7 @@ pub struct OcioGpuWgpuShaderModuleCacheDiagnostics {
 
 /// Bounded cache for creating backend shader modules from Naga IR.
 pub struct OcioGpuWgpuShaderModuleCache {
-    entries: LruCache<u64, Arc<OcioGpuWgpuShaderModule>>,
+    entries: LruCache<OcioGpuCanonicalIdentity, Arc<OcioGpuWgpuShaderModule>>,
     hits: u64,
     misses: u64,
     validation_failures: u64,
@@ -4153,7 +4537,7 @@ impl OcioGpuWgpuShaderModuleCache {
             source: wgpu::ShaderSource::Naga(Cow::Owned(translated.naga_module.clone())),
         });
         let module = Arc::new(OcioGpuWgpuShaderModule {
-            cache_key,
+            cache_key: cache_key.diagnostic_key(),
             shader_hash: resources.shader_hash,
             binding_contract_hash: resources.binding_contract_hash,
             shader_module,
@@ -4181,7 +4565,7 @@ impl Default for OcioGpuWgpuShaderModuleCache {
 
 /// Concrete wgpu shader modules for a validated OCIO fullscreen wrapper.
 pub struct OcioGpuWgpuWrapperShaderModules {
-    /// Stable cache key for these backend shader modules.
+    /// Compact diagnostic projection of these backend shader modules.
     pub cache_key: u64,
     /// Stable resource key this wrapper belongs to.
     pub resource_key: u64,
@@ -4197,6 +4581,10 @@ pub struct OcioGpuWgpuWrapperShaderModules {
     pub vertex_module: wgpu::ShaderModule,
     /// Backend fragment shader module that calls the OCIO-generated function.
     pub fragment_module: wgpu::ShaderModule,
+    resource_identity: OcioGpuCanonicalIdentity,
+    pipeline_layout_identity: OcioGpuCanonicalIdentity,
+    render_descriptor_identity: OcioGpuCanonicalIdentity,
+    canonical_identity: OcioGpuCanonicalIdentity,
 }
 
 /// Point-in-time wrapper wgpu shader-module cache diagnostics.
@@ -4212,7 +4600,7 @@ pub struct OcioGpuWgpuWrapperShaderModuleCacheDiagnostics {
 
 /// Bounded cache for concrete wgpu shader modules built from wrapper Naga artifacts.
 pub struct OcioGpuWgpuWrapperShaderModuleCache {
-    entries: LruCache<u64, Arc<OcioGpuWgpuWrapperShaderModules>>,
+    entries: LruCache<OcioGpuCanonicalIdentity, Arc<OcioGpuWgpuWrapperShaderModules>>,
     hits: u64,
     misses: u64,
 }
@@ -4249,7 +4637,7 @@ impl OcioGpuWgpuWrapperShaderModuleCache {
             source: wgpu::ShaderSource::Naga(Cow::Owned(artifact.fragment.naga_module.clone())),
         });
         let modules = Arc::new(OcioGpuWgpuWrapperShaderModules {
-            cache_key,
+            cache_key: cache_key.diagnostic_key(),
             resource_key: artifact.resource_key,
             module_key: artifact.module_key,
             source_hash: artifact.source_hash,
@@ -4257,6 +4645,10 @@ impl OcioGpuWgpuWrapperShaderModuleCache {
             render_descriptor_hash: artifact.render_descriptor_hash,
             vertex_module,
             fragment_module,
+            resource_identity: artifact.resource_identity,
+            pipeline_layout_identity: artifact.pipeline_layout_identity,
+            render_descriptor_identity: artifact.render_descriptor_identity,
+            canonical_identity: artifact.canonical_identity,
         });
         self.entries.put(cache_key, Arc::clone(&modules));
         modules
@@ -4280,7 +4672,7 @@ impl Default for OcioGpuWgpuWrapperShaderModuleCache {
 
 /// Concrete wgpu render pipeline for an OCIO fullscreen color pass.
 pub struct OcioGpuWgpuRenderPipeline {
-    /// Stable cache key for this backend render pipeline.
+    /// Compact diagnostic projection of this backend render pipeline identity.
     pub cache_key: u64,
     /// Stable resource key this render pipeline belongs to.
     pub resource_key: u64,
@@ -4292,6 +4684,8 @@ pub struct OcioGpuWgpuRenderPipeline {
     pub module_key: u64,
     /// Concrete wgpu render pipeline.
     pub render_pipeline: wgpu::RenderPipeline,
+    resource_identity: OcioGpuCanonicalIdentity,
+    canonical_identity: OcioGpuCanonicalIdentity,
 }
 
 /// Error returned before creating an OCIO fullscreen render pipeline.
@@ -4301,12 +4695,18 @@ pub enum OcioGpuWgpuRenderPipelineError {
     PipelineLayoutResourceKeyMismatch { expected: u64, actual: u64 },
     /// The wrapper shader modules belong to a different resource key.
     ShaderModuleResourceKeyMismatch { expected: u64, actual: u64 },
+    /// Descriptor, layout, and shader modules do not share one full resource identity.
+    ResourceIdentityMismatch,
     /// The concrete pipeline layout hash does not match the descriptor plan.
     PipelineLayoutHashMismatch { expected: u64, actual: u64 },
     /// The wrapper shader modules were built for a different pipeline layout.
     ShaderModulePipelineLayoutHashMismatch { expected: u64, actual: u64 },
+    /// Descriptor, layout, and shader modules do not share one full layout identity.
+    PipelineLayoutIdentityMismatch,
     /// The wrapper shader modules were built for a different render descriptor.
     ShaderModuleRenderDescriptorHashMismatch { expected: u64, actual: u64 },
+    /// Shader modules were produced for a different full render descriptor.
+    RenderDescriptorIdentityMismatch,
 }
 
 /// Point-in-time OCIO render pipeline cache diagnostics.
@@ -4324,7 +4724,7 @@ pub struct OcioGpuWgpuRenderPipelineCacheDiagnostics {
 
 /// Bounded cache for concrete OCIO fullscreen render pipelines.
 pub struct OcioGpuWgpuRenderPipelineCache {
-    entries: LruCache<u64, Arc<OcioGpuWgpuRenderPipeline>>,
+    entries: LruCache<OcioGpuCanonicalIdentity, Arc<OcioGpuWgpuRenderPipeline>>,
     hits: u64,
     misses: u64,
     validation_failures: u64,
@@ -4351,14 +4751,16 @@ impl OcioGpuWgpuRenderPipelineCache {
     ) -> Result<Arc<OcioGpuWgpuRenderPipeline>, OcioGpuWgpuRenderPipelineError> {
         let cache_key = match render_pipeline_cache_key(
             descriptor,
-            pipeline_layout.resource_key,
-            pipeline_layout.layout_hash,
+            OcioGpuWgpuPipelineLayoutKeyMetadata::from(pipeline_layout),
             OcioGpuWgpuWrapperShaderModuleKeyMetadata {
                 resource_key: modules.resource_key,
                 pipeline_layout_hash: modules.pipeline_layout_hash,
                 render_descriptor_hash: modules.render_descriptor_hash,
-                cache_key: modules.cache_key,
-                module_key: modules.module_key,
+                canonical_identity: modules.canonical_identity,
+                pipeline_layout_identity: pipeline_layout.canonical_identity,
+                resource_identity: modules.resource_identity,
+                module_pipeline_layout_identity: modules.pipeline_layout_identity,
+                render_descriptor_identity: modules.render_descriptor_identity,
             },
         ) {
             Ok(cache_key) => cache_key,
@@ -4397,12 +4799,14 @@ impl OcioGpuWgpuRenderPipelineCache {
             multisample: wgpu::MultisampleState::default(),
         });
         let pipeline = Arc::new(OcioGpuWgpuRenderPipeline {
-            cache_key,
+            cache_key: cache_key.diagnostic_key(),
             resource_key: descriptor.resource_key,
             descriptor_hash: descriptor.descriptor_hash,
             pipeline_layout_hash: pipeline_layout.layout_hash,
             module_key: modules.module_key,
             render_pipeline,
+            resource_identity: descriptor.resource_identity,
+            canonical_identity: cache_key,
         });
         self.entries.put(cache_key, Arc::clone(&pipeline));
         Ok(pipeline)
@@ -4426,7 +4830,7 @@ impl Default for OcioGpuWgpuRenderPipelineCache {
 }
 
 /// Render target borrowed while recording an OCIO fullscreen pass.
-pub struct OcioGpuWgpuRenderPassTarget<'a> {
+pub(crate) struct OcioGpuWgpuRenderPassTarget<'a> {
     /// Stable resource key this target belongs to.
     pub resource_key: u64,
     /// Output color target format.
@@ -4435,6 +4839,24 @@ pub struct OcioGpuWgpuRenderPassTarget<'a> {
     pub view: &'a wgpu::TextureView,
     /// Load operation for the target attachment.
     pub load_op: wgpu::LoadOp<wgpu::Color>,
+    resource_identity: OcioGpuCanonicalIdentity,
+}
+
+impl<'a> OcioGpuWgpuRenderPassTarget<'a> {
+    pub(crate) fn for_plan(
+        plan: &OcioGpuWgpuRenderPassNodePlan,
+        output_format: OcioGpuWgpuColorTargetFormat,
+        view: &'a wgpu::TextureView,
+        load_op: wgpu::LoadOp<wgpu::Color>,
+    ) -> Self {
+        Self {
+            resource_key: plan.resource_key,
+            output_format,
+            view,
+            load_op,
+            resource_identity: plan.resource_identity,
+        }
+    }
 }
 
 /// Pure render-pass node contract for an OCIO fullscreen color pass.
@@ -4456,47 +4878,36 @@ pub struct OcioGpuWgpuRenderPassNodePlan {
     pub vertex_count: u32,
     /// Stable hash of this render-pass node.
     pub node_hash: u64,
+    resource_identity: OcioGpuCanonicalIdentity,
+    pipeline_identity: OcioGpuCanonicalIdentity,
+    ocio_bind_group_identity: OcioGpuCanonicalIdentity,
+    wrapper_layout_identity: OcioGpuCanonicalIdentity,
+    canonical_identity: OcioGpuCanonicalIdentity,
 }
 
 impl OcioGpuWgpuRenderPassNodePlan {
-    /// Build a render-pass node plan from validated backend objects.
-    pub fn for_pipeline_and_bind_groups(
-        pipeline: &OcioGpuWgpuRenderPipeline,
-        ocio_bind_group: &OcioGpuWgpuOcioBindGroup,
-        wrapper_bind_group: &OcioGpuWgpuWrapperBindGroup,
-        output_format: OcioGpuWgpuColorTargetFormat,
-    ) -> Result<Self, OcioGpuWgpuRenderPassError> {
-        let metadata = OcioGpuWgpuRenderPipelineMetadata {
-            resource_key: pipeline.resource_key,
-            cache_key: pipeline.cache_key,
-            descriptor_hash: pipeline.descriptor_hash,
-        };
-        Self::for_pipeline_metadata_and_bind_groups(
-            metadata,
-            ocio_bind_group.resource_key,
-            ocio_bind_group.layout_hash,
-            wrapper_bind_group.layout_hash,
-            output_format,
-        )
-    }
-
-    /// Build a render-pass node plan from a pipeline, OCIO bind group, and stable wrapper layout.
-    pub fn for_pipeline_and_wrapper_layout(
+    fn for_pipeline_and_wrapper_layout(
         pipeline: &OcioGpuWgpuRenderPipeline,
         ocio_bind_group: &OcioGpuWgpuOcioBindGroup,
         wrapper_layout_hash: u64,
+        wrapper_layout_identity: OcioGpuCanonicalIdentity,
         output_format: OcioGpuWgpuColorTargetFormat,
     ) -> Result<Self, OcioGpuWgpuRenderPassError> {
         let metadata = OcioGpuWgpuRenderPipelineMetadata {
             resource_key: pipeline.resource_key,
             cache_key: pipeline.cache_key,
             descriptor_hash: pipeline.descriptor_hash,
+            resource_identity: pipeline.resource_identity,
+            canonical_identity: pipeline.canonical_identity,
         };
         Self::for_pipeline_metadata_and_bind_groups(
             metadata,
             ocio_bind_group.resource_key,
             ocio_bind_group.layout_hash,
+            ocio_bind_group.resource_identity,
+            ocio_bind_group.canonical_identity,
             wrapper_layout_hash,
+            wrapper_layout_identity,
             output_format,
         )
     }
@@ -4505,14 +4916,20 @@ impl OcioGpuWgpuRenderPassNodePlan {
         pipeline: OcioGpuWgpuRenderPipelineMetadata,
         ocio_bind_group_resource_key: u64,
         ocio_layout_hash: u64,
+        ocio_resource_identity: OcioGpuCanonicalIdentity,
+        ocio_bind_group_identity: OcioGpuCanonicalIdentity,
         wrapper_layout_hash: u64,
+        wrapper_layout_identity: OcioGpuCanonicalIdentity,
         output_format: OcioGpuWgpuColorTargetFormat,
     ) -> Result<Self, OcioGpuWgpuRenderPassError> {
-        let node_hash = render_pass_node_hash(
+        let canonical_identity = render_pass_node_identity(
             pipeline,
             ocio_bind_group_resource_key,
+            ocio_resource_identity,
+            ocio_bind_group_identity,
             ocio_layout_hash,
             wrapper_layout_hash,
+            wrapper_layout_identity,
             output_format,
         )?;
         Ok(Self {
@@ -4523,8 +4940,69 @@ impl OcioGpuWgpuRenderPassNodePlan {
             wrapper_layout_hash,
             output_format,
             vertex_count: 4,
-            node_hash,
+            node_hash: canonical_identity.diagnostic_key(),
+            resource_identity: pipeline.resource_identity,
+            pipeline_identity: pipeline.canonical_identity,
+            ocio_bind_group_identity,
+            wrapper_layout_identity,
+            canonical_identity,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_contract(
+        resource_key: u64,
+        render_pipeline_cache_key: u64,
+        render_descriptor_hash: u64,
+        ocio_layout_hash: u64,
+        wrapper_layout_hash: u64,
+        output_format: OcioGpuWgpuColorTargetFormat,
+    ) -> Self {
+        let resource_identity = OcioGpuCanonicalIdentity::for_hash(b"test-resource", &resource_key);
+        let pipeline_identity = OcioGpuCanonicalIdentity::for_hash(
+            b"test-pipeline",
+            &(
+                resource_identity,
+                render_pipeline_cache_key,
+                render_descriptor_hash,
+            ),
+        );
+        let ocio_bind_group_identity =
+            OcioGpuCanonicalIdentity::for_hash(b"test-ocio-bind-group", &ocio_layout_hash);
+        let wrapper_layout_identity =
+            OcioGpuCanonicalIdentity::for_hash(b"test-wrapper-layout", &wrapper_layout_hash);
+        let canonical_identity = render_pass_node_identity(
+            OcioGpuWgpuRenderPipelineMetadata {
+                resource_key,
+                cache_key: render_pipeline_cache_key,
+                descriptor_hash: render_descriptor_hash,
+                resource_identity,
+                canonical_identity: pipeline_identity,
+            },
+            resource_key,
+            resource_identity,
+            ocio_bind_group_identity,
+            ocio_layout_hash,
+            wrapper_layout_hash,
+            wrapper_layout_identity,
+            output_format,
+        )
+        .expect("test render-pass contract is internally consistent");
+        Self {
+            resource_key,
+            render_pipeline_cache_key,
+            render_descriptor_hash,
+            ocio_layout_hash,
+            wrapper_layout_hash,
+            output_format,
+            vertex_count: 4,
+            node_hash: canonical_identity.diagnostic_key(),
+            resource_identity,
+            pipeline_identity,
+            ocio_bind_group_identity,
+            wrapper_layout_identity,
+            canonical_identity,
+        }
     }
 }
 
@@ -4533,6 +5011,8 @@ struct OcioGpuWgpuRenderPipelineMetadata {
     resource_key: u64,
     cache_key: u64,
     descriptor_hash: u64,
+    resource_identity: OcioGpuCanonicalIdentity,
+    canonical_identity: OcioGpuCanonicalIdentity,
 }
 
 /// Error returned before recording an OCIO fullscreen render pass.
@@ -4540,8 +5020,12 @@ struct OcioGpuWgpuRenderPipelineMetadata {
 pub enum OcioGpuWgpuRenderPassError {
     /// The OCIO bind group belongs to a different resource key.
     OcioBindGroupResourceKeyMismatch { expected: u64, actual: u64 },
+    /// Pipeline and OCIO bind group do not share one full resource identity.
+    OcioBindGroupResourceIdentityMismatch,
     /// The render target belongs to a different resource key.
     TargetResourceKeyMismatch { expected: u64, actual: u64 },
+    /// Render target does not carry the pass node's full resource identity.
+    TargetResourceIdentityMismatch,
     /// The render target format differs from the pass contract.
     TargetFormatMismatch {
         expected: OcioGpuWgpuColorTargetFormat,
@@ -4549,18 +5033,23 @@ pub enum OcioGpuWgpuRenderPassError {
     },
     /// The render pipeline differs from the pass contract.
     PipelineCacheKeyMismatch { expected: u64, actual: u64 },
+    /// Render pipeline differs despite a compact cache-key match.
+    PipelineIdentityMismatch,
     /// The OCIO bind-group layout differs from the pass contract.
     OcioLayoutHashMismatch { expected: u64, actual: u64 },
+    /// OCIO bind group differs despite a compact layout-hash match.
+    OcioBindGroupIdentityMismatch,
     /// The wrapper bind-group layout differs from the pass contract.
     WrapperLayoutHashMismatch { expected: u64, actual: u64 },
+    /// Wrapper bind-group layout differs despite a compact layout-hash match.
+    WrapperLayoutIdentityMismatch,
 }
 
 /// Stateless recorder for an OCIO fullscreen render pass.
-pub struct OcioGpuWgpuRenderPassRecorder;
+pub(crate) struct OcioGpuWgpuRenderPassRecorder;
 
 impl OcioGpuWgpuRenderPassRecorder {
-    /// Record a fullscreen OCIO pass into an existing command encoder.
-    pub fn record(
+    pub(crate) fn record(
         encoder: &mut wgpu::CommandEncoder,
         plan: &OcioGpuWgpuRenderPassNodePlan,
         pipeline: &OcioGpuWgpuRenderPipeline,
@@ -4637,7 +5126,7 @@ pub enum OcioGpuWgpuBlocker {
 
 /// Bounded cache for OCIO GPU shader extraction results.
 pub struct OcioGpuShaderCache {
-    entries: LruCache<u64, Arc<OcioGpuShaderPlan>>,
+    entries: LruCache<OcioGpuCanonicalIdentity, Arc<OcioGpuShaderPlan>>,
     hits: u64,
     misses: u64,
     extraction_failures: u64,
@@ -4672,7 +5161,7 @@ impl OcioGpuShaderCache {
                 return Err(OcioGpuShaderError { request, reason });
             }
         };
-        let request_key = request_hash(&request, config_revision);
+        let request_key = request_cache_identity(&request, config_revision);
         if let Some(hit) = self.entries.get(&request_key) {
             self.hits += 1;
             return Ok(Arc::clone(hit));
@@ -4823,6 +5312,7 @@ fn translate_shader_text(
     request: OcioGpuShaderTranslationRequest,
     shader_text: &str,
     required_bindings: OcioGpuBindingContract,
+    canonical_identity: OcioGpuCanonicalIdentity,
 ) -> Result<OcioGpuTranslatedShader, OcioGpuShaderTranslationError> {
     let stage = translate_naga_shader_stage(
         request.source_language,
@@ -4841,6 +5331,7 @@ fn translate_shader_text(
         required_bindings,
         diagnostics: stage.diagnostics,
         entry_point_count: stage.entry_point_count,
+        canonical_identity,
     })
 }
 
@@ -5052,6 +5543,84 @@ fn binding_contract_for_bundle(bundle: &OcioGpuShaderBundle) -> OcioGpuBindingCo
     }
 }
 
+fn shader_bundle_identity(bundle: &OcioGpuShaderBundle) -> OcioGpuCanonicalIdentity {
+    let mut hasher = CanonicalSha256Hasher::new(b"shader-bundle");
+    bundle.src_color_space.hash(&mut hasher);
+    bundle.dst_color_space.hash(&mut hasher);
+    (bundle.language as i32).hash(&mut hasher);
+    bundle.shader_text.hash(&mut hasher);
+    bundle.descriptor_set_index.hash(&mut hasher);
+    bundle.texture_binding_start.hash(&mut hasher);
+    bundle.uniform_buffer_binding.hash(&mut hasher);
+    bundle.uniform_buffer_size.hash(&mut hasher);
+    bundle.texture_2d_count.hash(&mut hasher);
+    bundle.texture_3d_count.hash(&mut hasher);
+    bundle.uniform_count.hash(&mut hasher);
+    bundle.cache_id.hash(&mut hasher);
+
+    bundle.textures_2d.len().hash(&mut hasher);
+    for texture in &bundle.textures_2d {
+        texture.index.hash(&mut hasher);
+        texture.texture_name.hash(&mut hasher);
+        texture.sampler_name.hash(&mut hasher);
+        texture.binding_index.hash(&mut hasher);
+        texture.channel.hash(&mut hasher);
+        texture.dimensions.hash(&mut hasher);
+        texture.interpolation.hash(&mut hasher);
+        texture.width.hash(&mut hasher);
+        texture.height.hash(&mut hasher);
+        texture.value_count.hash(&mut hasher);
+        hash_f32_slice_into(&mut hasher, &texture.values);
+    }
+
+    bundle.textures_3d.len().hash(&mut hasher);
+    for texture in &bundle.textures_3d {
+        texture.index.hash(&mut hasher);
+        texture.texture_name.hash(&mut hasher);
+        texture.sampler_name.hash(&mut hasher);
+        texture.binding_index.hash(&mut hasher);
+        texture.interpolation.hash(&mut hasher);
+        texture.edge_len.hash(&mut hasher);
+        texture.value_count.hash(&mut hasher);
+        hash_f32_slice_into(&mut hasher, &texture.values);
+    }
+
+    bundle.uniforms.len().hash(&mut hasher);
+    for uniform in &bundle.uniforms {
+        uniform.index.hash(&mut hasher);
+        uniform.name.hash(&mut hasher);
+        uniform.uniform_type.hash(&mut hasher);
+        uniform.buffer_offset.hash(&mut hasher);
+        uniform.value_count.hash(&mut hasher);
+        hash_uniform_value_into(&mut hasher, &uniform.value);
+    }
+
+    hasher.finalize()
+}
+
+fn hash_f32_slice_into(hasher: &mut CanonicalSha256Hasher, values: &[f32]) {
+    values.len().hash(hasher);
+    for value in values {
+        value.to_bits().hash(hasher);
+    }
+}
+
+fn hash_uniform_value_into(hasher: &mut CanonicalSha256Hasher, value: &OcioGpuUniformValue) {
+    match value {
+        OcioGpuUniformValue::F32(values) => {
+            0u8.hash(hasher);
+            hash_f32_slice_into(hasher, values);
+        }
+        OcioGpuUniformValue::I32(values) => {
+            1u8.hash(hasher);
+            values.hash(hasher);
+        }
+        OcioGpuUniformValue::Unsupported => {
+            2u8.hash(hasher);
+        }
+    }
+}
+
 fn plan_from_bundle(
     request: OcioGpuShaderRequest,
     bundle: Arc<OcioGpuShaderBundle>,
@@ -5060,6 +5629,7 @@ fn plan_from_bundle(
     let cache_key = hash_request_and_processor(&request, bundle.cache_id.as_deref());
     let binding_contract = Arc::new(binding_contract_for_bundle(&bundle));
     let binding_contract_hash = binding_contract.stable_hash();
+    let bundle_identity = shader_bundle_identity(&bundle);
     OcioGpuShaderPlan {
         request,
         cache_key,
@@ -5072,24 +5642,26 @@ fn plan_from_bundle(
         bundle,
         binding_contract,
         binding_contract_hash,
+        bundle_identity,
     }
 }
 
-fn request_hash(request: &OcioGpuShaderRequest, config_revision: u64) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    request.hash(&mut hasher);
-    config_revision.hash(&mut hasher);
-    hasher.finish()
+fn request_cache_identity(
+    request: &OcioGpuShaderRequest,
+    config_revision: u64,
+) -> OcioGpuCanonicalIdentity {
+    OcioGpuCanonicalIdentity::for_hash(b"shader-request", &(request, config_revision))
 }
 
 fn hash_request_and_processor(
     request: &OcioGpuShaderRequest,
     processor_cache_id: Option<&str>,
 ) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    request.hash(&mut hasher);
-    processor_cache_id.hash(&mut hasher);
-    hasher.finish()
+    OcioGpuCanonicalIdentity::for_hash(
+        b"diagnostic-request-processor",
+        &(request, processor_cache_id),
+    )
+    .diagnostic_key()
 }
 
 fn hash_resource_key(
@@ -5098,12 +5670,16 @@ fn hash_resource_key(
     binding_contract_hash: u64,
     pipeline_layout_hash: u64,
 ) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    shader_cache_key.hash(&mut hasher);
-    shader_hash.hash(&mut hasher);
-    binding_contract_hash.hash(&mut hasher);
-    pipeline_layout_hash.hash(&mut hasher);
-    hasher.finish()
+    OcioGpuCanonicalIdentity::for_hash(
+        b"diagnostic-resource-key",
+        &(
+            shader_cache_key,
+            shader_hash,
+            binding_contract_hash,
+            pipeline_layout_hash,
+        ),
+    )
+    .diagnostic_key()
 }
 
 fn hash_binding_layout(entries: &[OcioGpuWgpuBindingPlan]) -> u64 {
@@ -5171,13 +5747,17 @@ fn hash_bind_resource_plan(
     ocio_layout_hash: u64,
     entries: &[OcioGpuWgpuBindResourceEntry],
 ) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    resource_key.hash(&mut hasher);
-    ocio_bind_group.hash(&mut hasher);
-    wrapper_layout_hash.hash(&mut hasher);
-    ocio_layout_hash.hash(&mut hasher);
-    entries.hash(&mut hasher);
-    hasher.finish()
+    OcioGpuCanonicalIdentity::for_hash(
+        b"diagnostic-bind-resource-plan",
+        &(
+            resource_key,
+            ocio_bind_group,
+            wrapper_layout_hash,
+            ocio_layout_hash,
+            entries,
+        ),
+    )
+    .diagnostic_key()
 }
 
 fn hash_pipeline_layout_plan(
@@ -5186,12 +5766,16 @@ fn hash_pipeline_layout_plan(
     wrapper_layout_hash: u64,
     bind_groups: &[OcioGpuWgpuPipelineBindGroupSlot],
 ) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    resource_key.hash(&mut hasher);
-    ocio_layout_hash.hash(&mut hasher);
-    wrapper_layout_hash.hash(&mut hasher);
-    bind_groups.hash(&mut hasher);
-    hasher.finish()
+    OcioGpuCanonicalIdentity::for_hash(
+        b"diagnostic-pipeline-layout",
+        &(
+            resource_key,
+            ocio_layout_hash,
+            wrapper_layout_hash,
+            bind_groups,
+        ),
+    )
+    .diagnostic_key()
 }
 
 fn hash_render_pipeline_descriptor(
@@ -5201,13 +5785,17 @@ fn hash_render_pipeline_descriptor(
     shader_contract: &OcioGpuWgpuFullscreenShaderContract,
     output_format: OcioGpuWgpuColorTargetFormat,
 ) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    resource_key.hash(&mut hasher);
-    pipeline_layout_hash.hash(&mut hasher);
-    wrapper_link_hash.hash(&mut hasher);
-    shader_contract.hash(&mut hasher);
-    output_format.hash(&mut hasher);
-    hasher.finish()
+    OcioGpuCanonicalIdentity::for_hash(
+        b"diagnostic-render-pipeline-descriptor",
+        &(
+            resource_key,
+            pipeline_layout_hash,
+            wrapper_link_hash,
+            shader_contract,
+            output_format,
+        ),
+    )
+    .diagnostic_key()
 }
 
 fn hash_wrapper_link_plan(
@@ -5216,12 +5804,11 @@ fn hash_wrapper_link_plan(
     program_contract: &OcioGpuGeneratedProgramContract,
     shader_contract: &OcioGpuWgpuFullscreenShaderContract,
 ) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    resource_key.hash(&mut hasher);
-    shader_hash.hash(&mut hasher);
-    program_contract.hash(&mut hasher);
-    shader_contract.hash(&mut hasher);
-    hasher.finish()
+    OcioGpuCanonicalIdentity::for_hash(
+        b"diagnostic-wrapper-link",
+        &(resource_key, shader_hash, program_contract, shader_contract),
+    )
+    .diagnostic_key()
 }
 
 fn wrapper_link_blockers(
@@ -5718,18 +6305,6 @@ fn strip_glsl_version_directives(shader_text: &str) -> String {
         .join("\n")
 }
 
-fn pipeline_layout_bind_group_layouts<'a>(
-    plan: &OcioGpuWgpuPipelineLayoutPlan,
-    ocio_bind_group: &'a OcioGpuWgpuOcioBindGroup,
-    wrapper_bind_group: &'a OcioGpuWgpuWrapperBindGroup,
-) -> Result<Vec<Option<&'a wgpu::BindGroupLayout>>, OcioGpuWgpuPipelineLayoutError> {
-    pipeline_layout_bind_group_layouts_from_wrapper_layout(
-        plan,
-        ocio_bind_group,
-        &wrapper_bind_group.layout,
-    )
-}
-
 fn pipeline_layout_bind_group_layouts_from_wrapper_layout<'a>(
     plan: &OcioGpuWgpuPipelineLayoutPlan,
     ocio_bind_group: &'a OcioGpuWgpuOcioBindGroup,
@@ -6029,6 +6604,9 @@ fn validate_uniform_bind_resource(
             },
         );
     }
+    if uniform.packed_bytes_identity != bytes_identity(&uniform.bytes) {
+        return Err(OcioGpuWgpuBindResourcePlanError::UniformPackedBytesIdentityMismatch);
+    }
     Ok(())
 }
 
@@ -6144,6 +6722,13 @@ fn validate_texture_common(
             },
         ));
     }
+    if texture.packed_bytes_identity != bytes_identity(&texture.bytes) {
+        return Err(texture_contract_mismatch(
+            dimension,
+            index,
+            OcioGpuWgpuTextureContractMismatch::PackedBytesIdentity,
+        ));
+    }
     Ok(())
 }
 
@@ -6159,7 +6744,7 @@ fn wrapper_shader_module_artifact_key(
     source: &OcioGpuWgpuWrapperShaderSourceArtifact,
     pipeline_layout: &OcioGpuWgpuPipelineLayoutPlan,
     render_descriptor: &OcioGpuWgpuRenderPipelineDescriptorPlan,
-) -> Result<u64, OcioGpuWgpuWrapperShaderModuleArtifactError> {
+) -> Result<OcioGpuCanonicalIdentity, OcioGpuWgpuWrapperShaderModuleArtifactError> {
     let actual_source_hash = hash_value(&(source.vertex_source_hash, source.fragment_source_hash));
     if source.source_hash != actual_source_hash {
         return Err(
@@ -6185,6 +6770,11 @@ fn wrapper_shader_module_artifact_key(
             },
         );
     }
+    if source.resource_identity != pipeline_layout.resource_identity
+        || source.resource_identity != render_descriptor.resource_identity
+    {
+        return Err(OcioGpuWgpuWrapperShaderModuleArtifactError::ResourceIdentityMismatch);
+    }
     if pipeline_layout.layout_hash != render_descriptor.pipeline_layout_hash {
         return Err(
             OcioGpuWgpuWrapperShaderModuleArtifactError::PipelineLayoutHashMismatch {
@@ -6192,6 +6782,9 @@ fn wrapper_shader_module_artifact_key(
                 actual: render_descriptor.pipeline_layout_hash,
             },
         );
+    }
+    if pipeline_layout.canonical_identity != render_descriptor.pipeline_layout_identity {
+        return Err(OcioGpuWgpuWrapperShaderModuleArtifactError::PipelineLayoutIdentityMismatch);
     }
     if source.vertex_entry_point != render_descriptor.shader_contract.vertex_entry_point {
         return Err(
@@ -6218,41 +6811,33 @@ fn wrapper_shader_module_artifact_key(
         );
     }
 
-    let mut hasher = DefaultHasher::new();
-    source.resource_key.hash(&mut hasher);
-    source.link_hash.hash(&mut hasher);
-    source.source_hash.hash(&mut hasher);
-    pipeline_layout.layout_hash.hash(&mut hasher);
-    render_descriptor.descriptor_hash.hash(&mut hasher);
-    render_descriptor.output_format.hash(&mut hasher);
-    Ok(hasher.finish())
+    Ok(OcioGpuCanonicalIdentity::for_hash(
+        b"wrapper-module-artifact",
+        &(
+            wrapper_source_artifact_identity(source),
+            source.shader_plan_identity,
+            pipeline_layout_plan_cache_identity(pipeline_layout),
+            render_pipeline_descriptor_cache_identity(render_descriptor),
+        ),
+    ))
 }
 
 fn wrapper_backend_shader_modules_cache_key(
     artifact: &OcioGpuWgpuWrapperShaderModuleArtifact,
-) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    artifact.resource_key.hash(&mut hasher);
-    artifact.module_key.hash(&mut hasher);
-    artifact.source_hash.hash(&mut hasher);
-    artifact.pipeline_layout_hash.hash(&mut hasher);
-    artifact.render_descriptor_hash.hash(&mut hasher);
-    artifact.vertex.source_hash.hash(&mut hasher);
-    artifact.fragment.source_hash.hash(&mut hasher);
-    hasher.finish()
+) -> OcioGpuCanonicalIdentity {
+    artifact.canonical_identity
 }
 
 fn render_pipeline_cache_key(
     descriptor: &OcioGpuWgpuRenderPipelineDescriptorPlan,
-    pipeline_layout_resource_key: u64,
-    pipeline_layout_hash: u64,
+    pipeline_layout: OcioGpuWgpuPipelineLayoutKeyMetadata,
     modules: OcioGpuWgpuWrapperShaderModuleKeyMetadata,
-) -> Result<u64, OcioGpuWgpuRenderPipelineError> {
-    if descriptor.resource_key != pipeline_layout_resource_key {
+) -> Result<OcioGpuCanonicalIdentity, OcioGpuWgpuRenderPipelineError> {
+    if descriptor.resource_key != pipeline_layout.resource_key {
         return Err(
             OcioGpuWgpuRenderPipelineError::PipelineLayoutResourceKeyMismatch {
                 expected: descriptor.resource_key,
-                actual: pipeline_layout_resource_key,
+                actual: pipeline_layout.resource_key,
             },
         );
     }
@@ -6264,16 +6849,16 @@ fn render_pipeline_cache_key(
             },
         );
     }
-    if descriptor.pipeline_layout_hash != pipeline_layout_hash {
+    if descriptor.pipeline_layout_hash != pipeline_layout.layout_hash {
         return Err(OcioGpuWgpuRenderPipelineError::PipelineLayoutHashMismatch {
             expected: descriptor.pipeline_layout_hash,
-            actual: pipeline_layout_hash,
+            actual: pipeline_layout.layout_hash,
         });
     }
-    if modules.pipeline_layout_hash != pipeline_layout_hash {
+    if modules.pipeline_layout_hash != pipeline_layout.layout_hash {
         return Err(
             OcioGpuWgpuRenderPipelineError::ShaderModulePipelineLayoutHashMismatch {
-                expected: pipeline_layout_hash,
+                expected: pipeline_layout.layout_hash,
                 actual: modules.pipeline_layout_hash,
             },
         );
@@ -6286,14 +6871,48 @@ fn render_pipeline_cache_key(
             },
         );
     }
+    if descriptor.resource_identity != pipeline_layout.resource_identity
+        || descriptor.resource_identity != modules.resource_identity
+    {
+        return Err(OcioGpuWgpuRenderPipelineError::ResourceIdentityMismatch);
+    }
+    if descriptor.pipeline_layout_identity != pipeline_layout.canonical_identity
+        || pipeline_layout.canonical_identity != modules.pipeline_layout_identity
+        || pipeline_layout.canonical_identity != modules.module_pipeline_layout_identity
+    {
+        return Err(OcioGpuWgpuRenderPipelineError::PipelineLayoutIdentityMismatch);
+    }
+    if descriptor.canonical_identity != modules.render_descriptor_identity {
+        return Err(OcioGpuWgpuRenderPipelineError::RenderDescriptorIdentityMismatch);
+    }
 
-    let mut hasher = DefaultHasher::new();
-    descriptor.resource_key.hash(&mut hasher);
-    descriptor.descriptor_hash.hash(&mut hasher);
-    pipeline_layout_hash.hash(&mut hasher);
-    modules.cache_key.hash(&mut hasher);
-    modules.module_key.hash(&mut hasher);
-    Ok(hasher.finish())
+    Ok(OcioGpuCanonicalIdentity::for_hash(
+        b"render-pipeline",
+        &(
+            render_pipeline_descriptor_cache_identity(descriptor),
+            modules.pipeline_layout_identity,
+            modules.canonical_identity,
+        ),
+    ))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OcioGpuWgpuPipelineLayoutKeyMetadata {
+    resource_key: u64,
+    layout_hash: u64,
+    resource_identity: OcioGpuCanonicalIdentity,
+    canonical_identity: OcioGpuCanonicalIdentity,
+}
+
+impl From<&OcioGpuWgpuPipelineLayout> for OcioGpuWgpuPipelineLayoutKeyMetadata {
+    fn from(layout: &OcioGpuWgpuPipelineLayout) -> Self {
+        Self {
+            resource_key: layout.resource_key,
+            layout_hash: layout.layout_hash,
+            resource_identity: layout.resource_identity,
+            canonical_identity: layout.canonical_identity,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -6301,17 +6920,23 @@ struct OcioGpuWgpuWrapperShaderModuleKeyMetadata {
     resource_key: u64,
     pipeline_layout_hash: u64,
     render_descriptor_hash: u64,
-    cache_key: u64,
-    module_key: u64,
+    canonical_identity: OcioGpuCanonicalIdentity,
+    pipeline_layout_identity: OcioGpuCanonicalIdentity,
+    resource_identity: OcioGpuCanonicalIdentity,
+    module_pipeline_layout_identity: OcioGpuCanonicalIdentity,
+    render_descriptor_identity: OcioGpuCanonicalIdentity,
 }
 
-fn render_pass_node_hash(
+fn render_pass_node_identity(
     pipeline: OcioGpuWgpuRenderPipelineMetadata,
     ocio_bind_group_resource_key: u64,
+    ocio_resource_identity: OcioGpuCanonicalIdentity,
+    ocio_bind_group_identity: OcioGpuCanonicalIdentity,
     ocio_layout_hash: u64,
     wrapper_layout_hash: u64,
+    wrapper_layout_identity: OcioGpuCanonicalIdentity,
     output_format: OcioGpuWgpuColorTargetFormat,
-) -> Result<u64, OcioGpuWgpuRenderPassError> {
+) -> Result<OcioGpuCanonicalIdentity, OcioGpuWgpuRenderPassError> {
     if pipeline.resource_key != ocio_bind_group_resource_key {
         return Err(
             OcioGpuWgpuRenderPassError::OcioBindGroupResourceKeyMismatch {
@@ -6320,15 +6945,23 @@ fn render_pass_node_hash(
             },
         );
     }
+    if pipeline.resource_identity != ocio_resource_identity {
+        return Err(OcioGpuWgpuRenderPassError::OcioBindGroupResourceIdentityMismatch);
+    }
 
-    let mut hasher = DefaultHasher::new();
-    pipeline.resource_key.hash(&mut hasher);
-    pipeline.cache_key.hash(&mut hasher);
-    pipeline.descriptor_hash.hash(&mut hasher);
-    ocio_layout_hash.hash(&mut hasher);
-    wrapper_layout_hash.hash(&mut hasher);
-    output_format.hash(&mut hasher);
-    Ok(hasher.finish())
+    Ok(OcioGpuCanonicalIdentity::for_hash(
+        b"render-pass-node",
+        &(
+            pipeline.resource_identity,
+            pipeline.canonical_identity,
+            pipeline.descriptor_hash,
+            ocio_bind_group_identity,
+            ocio_layout_hash,
+            wrapper_layout_hash,
+            wrapper_layout_identity,
+            output_format,
+        ),
+    ))
 }
 
 fn validate_render_pass_contract(
@@ -6352,6 +6985,9 @@ fn validate_render_pass_contract(
             actual: target.resource_key,
         });
     }
+    if plan.resource_identity != target.resource_identity {
+        return Err(OcioGpuWgpuRenderPassError::TargetResourceIdentityMismatch);
+    }
     if plan.output_format != target.output_format {
         return Err(OcioGpuWgpuRenderPassError::TargetFormatMismatch {
             expected: plan.output_format,
@@ -6364,11 +7000,19 @@ fn validate_render_pass_contract(
             actual: pipeline.cache_key,
         });
     }
+    if plan.pipeline_identity != pipeline.canonical_identity {
+        return Err(OcioGpuWgpuRenderPassError::PipelineIdentityMismatch);
+    }
     if plan.ocio_layout_hash != ocio_bind_group.layout_hash {
         return Err(OcioGpuWgpuRenderPassError::OcioLayoutHashMismatch {
             expected: plan.ocio_layout_hash,
             actual: ocio_bind_group.layout_hash,
         });
+    }
+    if plan.resource_identity != ocio_bind_group.resource_identity
+        || plan.ocio_bind_group_identity != ocio_bind_group.canonical_identity
+    {
+        return Err(OcioGpuWgpuRenderPassError::OcioBindGroupIdentityMismatch);
     }
     if plan.wrapper_layout_hash != wrapper_bind_group.layout_hash {
         return Err(OcioGpuWgpuRenderPassError::WrapperLayoutHashMismatch {
@@ -6376,13 +7020,32 @@ fn validate_render_pass_contract(
             actual: wrapper_bind_group.layout_hash,
         });
     }
+    if plan.wrapper_layout_identity != wrapper_bind_group.layout_identity {
+        return Err(OcioGpuWgpuRenderPassError::WrapperLayoutIdentityMismatch);
+    }
+    let expected_node_identity = OcioGpuCanonicalIdentity::for_hash(
+        b"render-pass-node",
+        &(
+            plan.resource_identity,
+            plan.pipeline_identity,
+            plan.render_descriptor_hash,
+            plan.ocio_bind_group_identity,
+            plan.ocio_layout_hash,
+            plan.wrapper_layout_hash,
+            plan.wrapper_layout_identity,
+            plan.output_format,
+        ),
+    );
+    if plan.canonical_identity != expected_node_identity {
+        return Err(OcioGpuWgpuRenderPassError::PipelineIdentityMismatch);
+    }
     Ok(())
 }
 
 fn backend_shader_module_cache_key(
     translated: &OcioGpuTranslatedShader,
     resources: &OcioGpuWgpuResourcePlan,
-) -> Result<u64, OcioGpuWgpuShaderModuleError> {
+) -> Result<OcioGpuCanonicalIdentity, OcioGpuWgpuShaderModuleError> {
     if translated.request.source_shader_hash != resources.shader_hash {
         return Err(OcioGpuWgpuShaderModuleError::ShaderHashMismatch {
             translated_shader_hash: translated.request.source_shader_hash,
@@ -6399,11 +7062,13 @@ fn backend_shader_module_cache_key(
         return Err(OcioGpuWgpuShaderModuleError::BindingContractPayloadMismatch);
     }
 
-    let mut hasher = DefaultHasher::new();
-    translated.request.hash(&mut hasher);
-    resources.resource_key.hash(&mut hasher);
-    resources.pipeline_layout_hash.hash(&mut hasher);
-    Ok(hasher.finish())
+    Ok(OcioGpuCanonicalIdentity::for_hash(
+        b"backend-shader-module",
+        &(
+            translated.canonical_identity,
+            resource_layout_cache_identity(resources),
+        ),
+    ))
 }
 
 fn upload_lut_texture(
@@ -6452,6 +7117,7 @@ fn upload_lut_texture(
         packed.interpolation,
         &packed.sampler_name,
     ));
+    let canonical_identity = packed.canonical_identity();
     OcioGpuWgpuUploadedLutTexture {
         index: packed.index,
         texture_name: packed.texture_name.clone(),
@@ -6461,11 +7127,45 @@ fn upload_lut_texture(
         dimension: packed.dimension,
         extent: packed.extent,
         source_values_hash: packed.source_values_hash,
-        packed_bytes_hash: packed.packed_bytes_hash,
+        packed_bytes_hash: hash_bytes(&packed.bytes),
         texture,
         view,
         sampler,
+        canonical_identity,
     }
+}
+
+fn validate_packed_lut_texture(
+    packed: &OcioGpuWgpuPackedLutTexture,
+) -> Result<(), OcioGpuWgpuLutUploadError> {
+    let resource = match packed.dimension {
+        OcioGpuWgpuLutTextureDimension::D2 => {
+            OcioGpuWgpuLutUploadResource::Texture2D { index: packed.index }
+        }
+        OcioGpuWgpuLutTextureDimension::D3 => {
+            OcioGpuWgpuLutUploadResource::Texture3D { index: packed.index }
+        }
+    };
+    let expected_row_bytes = packed
+        .extent
+        .width
+        .checked_mul(packed.format.bytes_per_texel())
+        .ok_or(OcioGpuWgpuLutUploadError::PackedByteLayoutMismatch { resource })?;
+    let expected_len = usize::try_from(expected_row_bytes)
+        .ok()
+        .and_then(|row_bytes| row_bytes.checked_mul(packed.extent.height as usize))
+        .and_then(|image_bytes| {
+            image_bytes.checked_mul(packed.extent.depth_or_array_layers as usize)
+        })
+        .ok_or(OcioGpuWgpuLutUploadError::PackedByteLayoutMismatch { resource })?;
+    if packed.bytes_per_row != expected_row_bytes
+        || packed.rows_per_image != packed.extent.height
+        || packed.bytes.len() != expected_len
+        || packed.packed_bytes_identity != bytes_identity(&packed.bytes)
+    {
+        return Err(OcioGpuWgpuLutUploadError::PackedByteLayoutMismatch { resource });
+    }
+    Ok(())
 }
 
 fn sampler_descriptor_for_interpolation(
@@ -6575,6 +7275,129 @@ fn pack_rgb_values_as_rgba32(values: &[f32]) -> Vec<u8> {
     f32_values_to_bytes(&rgba)
 }
 
+fn shader_translation_identity(
+    plan: &OcioGpuShaderPlan,
+    target_language: OcioGpuShaderTargetLanguage,
+    stage: OcioGpuShaderStage,
+) -> OcioGpuCanonicalIdentity {
+    OcioGpuCanonicalIdentity::for_hash(
+        b"translated-shader",
+        &(
+            plan.canonical_identity(),
+            plan.request.language() as i32,
+            target_language,
+            stage,
+        ),
+    )
+}
+
+fn wrapper_source_identity(
+    vertex_source: &str,
+    fragment_source: &str,
+    shader_contract: &OcioGpuWgpuFullscreenShaderContract,
+) -> OcioGpuCanonicalIdentity {
+    OcioGpuCanonicalIdentity::for_hash(
+        b"wrapper-source",
+        &(vertex_source, fragment_source, shader_contract),
+    )
+}
+
+fn bind_group_layout_descriptor_identity(
+    descriptor: &OcioGpuWgpuBindGroupLayoutDescriptorPlan,
+) -> OcioGpuCanonicalIdentity {
+    OcioGpuCanonicalIdentity::for_hash(
+        b"bind-group-layout-descriptor",
+        &(
+            descriptor.bind_group,
+            &descriptor.label,
+            &descriptor.entries,
+        ),
+    )
+}
+
+fn wrapper_source_artifact_identity(
+    source: &OcioGpuWgpuWrapperShaderSourceArtifact,
+) -> OcioGpuCanonicalIdentity {
+    OcioGpuCanonicalIdentity::for_hash(
+        b"wrapper-source-artifact",
+        &(
+            source.canonical_identity,
+            &source.vertex_source,
+            &source.fragment_source,
+            &source.vertex_entry_point,
+            &source.fragment_entry_point,
+            source.output_location,
+        ),
+    )
+}
+
+fn resource_layout_cache_identity(resources: &OcioGpuWgpuResourcePlan) -> OcioGpuCanonicalIdentity {
+    OcioGpuCanonicalIdentity::for_hash(
+        b"resource-layout",
+        &(
+            (
+                resources.shader_plan_identity,
+                resources.shader_hash,
+                resources.binding_contract_hash,
+                &resources.binding_contract,
+                &resources.wrapper_contract,
+            ),
+            (
+                resources.input_textures,
+                resources.output_textures,
+                resources.ocio_texture_2d_bindings,
+                resources.ocio_texture_3d_bindings,
+                resources.uniform_buffers,
+                resources.samplers,
+                resources.bind_group_entries,
+                resources.bind_groups,
+            ),
+        ),
+    )
+}
+
+fn pipeline_layout_plan_cache_identity(
+    plan: &OcioGpuWgpuPipelineLayoutPlan,
+) -> OcioGpuCanonicalIdentity {
+    OcioGpuCanonicalIdentity::for_hash(
+        b"pipeline-layout-plan-current",
+        &(
+            plan.canonical_identity,
+            plan.resource_key,
+            plan.ocio_layout_hash,
+            plan.wrapper_layout_hash,
+            &plan.bind_groups,
+            plan.layout_hash,
+        ),
+    )
+}
+
+fn render_pipeline_descriptor_cache_identity(
+    descriptor: &OcioGpuWgpuRenderPipelineDescriptorPlan,
+) -> OcioGpuCanonicalIdentity {
+    OcioGpuCanonicalIdentity::for_hash(
+        b"render-pipeline-descriptor-current",
+        &(
+            descriptor.canonical_identity,
+            descriptor.resource_key,
+            descriptor.pipeline_layout_hash,
+            &descriptor.shader_contract,
+            descriptor.output_format,
+            descriptor.descriptor_hash,
+        ),
+    )
+}
+
+fn static_pipeline_cache_identity(key: StaticPipelineCacheKey) -> OcioGpuCanonicalIdentity {
+    OcioGpuCanonicalIdentity::for_hash(b"static-pipeline", &key)
+}
+
+fn static_pipeline_cache_runtime_identity(
+    pipeline: &OcioGpuWgpuPreparedStaticPipeline,
+) -> OcioGpuCanonicalIdentity {
+    pipeline.canonical_identity
+}
+
 struct ResourceLayoutSignature {
     language: GpuLanguage,
     binding_contract_hash: u64,
@@ -6590,31 +7413,36 @@ struct ResourceLayoutSignature {
 }
 
 fn hash_resource_layout(signature: ResourceLayoutSignature) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    (signature.language as i32).hash(&mut hasher);
-    signature.binding_contract_hash.hash(&mut hasher);
-    signature.wrapper_contract_hash.hash(&mut hasher);
-    signature.input_textures.hash(&mut hasher);
-    signature.output_textures.hash(&mut hasher);
-    signature.texture_2d_count.hash(&mut hasher);
-    signature.texture_3d_count.hash(&mut hasher);
-    signature.uniform_buffers.hash(&mut hasher);
-    signature.samplers.hash(&mut hasher);
-    signature.bind_group_entries.hash(&mut hasher);
-    signature.bind_groups.hash(&mut hasher);
-    hasher.finish()
+    OcioGpuCanonicalIdentity::for_hash(
+        b"diagnostic-resource-layout",
+        &(
+            signature.language as i32,
+            signature.binding_contract_hash,
+            signature.wrapper_contract_hash,
+            signature.input_textures,
+            signature.output_textures,
+            signature.texture_2d_count,
+            signature.texture_3d_count,
+            signature.uniform_buffers,
+            signature.samplers,
+            signature.bind_group_entries,
+            signature.bind_groups,
+        ),
+    )
+    .diagnostic_key()
 }
 
-fn backend_object_cache_key(static_pipeline: &OcioGpuWgpuPreparedStaticPipeline) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    static_pipeline.resources.resources.resource_key.hash(&mut hasher);
-    static_pipeline.resources.binding_layout.layout_hash.hash(&mut hasher);
-    static_pipeline.wrapper_binding.layout_hash.hash(&mut hasher);
-    static_pipeline.pipeline_layout.layout_hash.hash(&mut hasher);
-    static_pipeline.wrapper_module_artifact.module_key.hash(&mut hasher);
-    static_pipeline.render_descriptor.descriptor_hash.hash(&mut hasher);
-    static_pipeline.render_descriptor.output_format.hash(&mut hasher);
-    hasher.finish()
+fn backend_object_cache_key(
+    shader_plan: &OcioGpuShaderPlan,
+    static_pipeline: &OcioGpuWgpuPreparedStaticPipeline,
+) -> OcioGpuCanonicalIdentity {
+    OcioGpuCanonicalIdentity::for_hash(
+        b"backend-object-bundle",
+        &(
+            shader_plan.canonical_identity(),
+            static_pipeline_cache_runtime_identity(static_pipeline),
+        ),
+    )
 }
 
 fn static_pipeline_cache_key(
@@ -6622,9 +7450,7 @@ fn static_pipeline_cache_key(
     output_format: OcioGpuWgpuColorTargetFormat,
 ) -> StaticPipelineCacheKey {
     StaticPipelineCacheKey {
-        shader_cache_key: shader_plan.cache_key,
-        shader_hash: shader_plan.shader_hash,
-        binding_contract_hash: shader_plan.binding_contract_hash,
+        shader_plan: shader_plan.canonical_identity(),
         output_format,
     }
 }
@@ -6641,51 +7467,46 @@ fn fullscreen_wrapper_contract_for(
 }
 
 fn hash_value<T: Hash>(value: &T) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish()
+    OcioGpuCanonicalIdentity::for_hash(b"diagnostic-value", value).diagnostic_key()
 }
 
 fn hash_f32_values(values: &[f32]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    values.len().hash(&mut hasher);
-    for value in values {
-        value.to_bits().hash(&mut hasher);
-    }
-    hasher.finish()
+    f32_values_identity(values).diagnostic_key()
 }
 
-fn hash_i32_values(values: &[i32]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    values.len().hash(&mut hasher);
-    for value in values {
-        value.hash(&mut hasher);
-    }
-    hasher.finish()
+fn f32_values_identity(values: &[f32]) -> OcioGpuCanonicalIdentity {
+    let mut hasher = CanonicalSha256Hasher::new(b"f32-values");
+    hash_f32_slice_into(&mut hasher, values);
+    hasher.finalize()
 }
 
 fn hash_uniform_value(value: &OcioGpuUniformValue) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    match value {
-        OcioGpuUniformValue::F32(values) => {
-            0u8.hash(&mut hasher);
-            hash_f32_values(values).hash(&mut hasher);
-        }
-        OcioGpuUniformValue::I32(values) => {
-            1u8.hash(&mut hasher);
-            hash_i32_values(values).hash(&mut hasher);
-        }
-        OcioGpuUniformValue::Unsupported => {
-            2u8.hash(&mut hasher);
-        }
-    }
-    hasher.finish()
+    let mut hasher = CanonicalSha256Hasher::new(b"diagnostic-uniform-value");
+    hash_uniform_value_into(&mut hasher, value);
+    hasher.finalize().diagnostic_key()
 }
 
 fn hash_bytes(bytes: &[u8]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    hasher.finish()
+    bytes_identity(bytes).diagnostic_key()
+}
+
+fn bytes_identity(bytes: &[u8]) -> OcioGpuCanonicalIdentity {
+    OcioGpuCanonicalIdentity::for_hash(b"bytes", bytes)
+}
+
+fn lut_payload_identity(
+    shader_plan_identity: OcioGpuCanonicalIdentity,
+    textures_2d: impl IntoIterator<Item = OcioGpuCanonicalIdentity>,
+    textures_3d: impl IntoIterator<Item = OcioGpuCanonicalIdentity>,
+) -> OcioGpuCanonicalIdentity {
+    OcioGpuCanonicalIdentity::for_hash(
+        b"packed-lut-upload-payload",
+        &(
+            shader_plan_identity,
+            textures_2d.into_iter().collect::<Vec<_>>(),
+            textures_3d.into_iter().collect::<Vec<_>>(),
+        ),
+    )
 }
 
 #[cfg(test)]
@@ -6728,6 +7549,15 @@ mod tests {
             .chunks_exact(4)
             .map(|chunk| f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
             .collect()
+    }
+
+    fn standalone_test_identities(
+        resource_key: u64,
+    ) -> (OcioGpuCanonicalIdentity, OcioGpuCanonicalIdentity) {
+        (
+            OcioGpuCanonicalIdentity::for_hash(b"test-resource", &resource_key),
+            OcioGpuCanonicalIdentity::for_hash(b"test-shader", &resource_key),
+        )
     }
 
     fn texture_2d_upload(
@@ -6886,6 +7716,10 @@ mod tests {
             bind_group_entries: 5,
             bind_groups: 2,
             pipeline_layout_hash: 202,
+            shader_plan_identity: OcioGpuCanonicalIdentity::for_hash(
+                b"test-shader-plan",
+                &resource_key,
+            ),
         }
     }
 
@@ -7056,7 +7890,9 @@ mod tests {
         "#
     }
 
-    fn packed_luts_for_bind_resource(resource_key: u64) -> OcioGpuWgpuPackedLutUploadPlan {
+    fn packed_luts_for_bind_resource(
+        resources: &OcioGpuWgpuResourcePlan,
+    ) -> OcioGpuWgpuPackedLutUploadPlan {
         let texture_2d = texture_2d_upload(
             OcioGpuTextureChannel::Rgb,
             2,
@@ -7068,20 +7904,26 @@ mod tests {
             (0..24).map(|value| value as f32 / 23.0).collect::<Vec<_>>(),
         );
         OcioGpuWgpuLutUploadPlan {
-            resource_key,
+            resource_key: resources.resource_key,
             textures_2d: vec![texture_2d],
             textures_3d: vec![texture_3d],
+            resource_identity: resource_layout_cache_identity(resources),
+            shader_plan_identity: resources.shader_plan_identity,
         }
         .pack_textures()
         .expect("pack bind-resource LUTs")
     }
 
-    fn packed_uniform_for_bind_resource(resource_key: u64) -> OcioGpuWgpuPackedUniformBuffer {
+    fn packed_uniform_for_bind_resource(
+        resources: &OcioGpuWgpuResourcePlan,
+    ) -> OcioGpuWgpuPackedUniformBuffer {
         OcioGpuWgpuUniformUploadPlan {
-            resource_key,
+            resource_key: resources.resource_key,
             binding: 0,
             buffer_size: 16,
             uniforms: vec![f32_uniform(1, 0, vec![0.5, 1.0])],
+            resource_identity: resource_layout_cache_identity(resources),
+            shader_plan_identity: resources.shader_plan_identity,
         }
         .pack_buffer()
         .expect("pack bind-resource uniform")
@@ -7206,6 +8048,51 @@ mod tests {
     }
 
     #[test]
+    fn static_pipeline_cache_does_not_alias_forced_legacy_u64_collision() {
+        let first_plan = shader_plan_with_text(callable_ocio_program_text());
+        let mut second_plan = shader_plan_with_text(returning_ocio_program_text());
+
+        second_plan.cache_key = first_plan.cache_key;
+        second_plan.shader_hash = first_plan.shader_hash;
+        second_plan.binding_contract_hash = first_plan.binding_contract_hash;
+        assert_eq!(
+            (
+                first_plan.cache_key,
+                first_plan.shader_hash,
+                first_plan.binding_contract_hash,
+            ),
+            (
+                second_plan.cache_key,
+                second_plan.shader_hash,
+                second_plan.binding_contract_hash,
+            )
+        );
+        assert_ne!(
+            first_plan.canonical_identity(),
+            second_plan.canonical_identity()
+        );
+
+        let mut runtime = OcioGpuWgpuBackendPrepRuntime::default();
+        let first = runtime
+            .prepare_static_pipeline(&first_plan, OcioGpuWgpuColorTargetFormat::Rgba16Float)
+            .expect("prepare first colliding legacy projection");
+        let second = runtime
+            .prepare_static_pipeline(&second_plan, OcioGpuWgpuColorTargetFormat::Rgba16Float)
+            .expect("prepare second colliding legacy projection");
+
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_ne!(
+            first.wrapper_source.fragment_source,
+            second.wrapper_source.fragment_source
+        );
+        let diagnostics = runtime.diagnostics();
+        assert_eq!(diagnostics.static_pipelines.entries, 2);
+        assert_eq!(diagnostics.static_pipelines.hits, 0);
+        assert_eq!(diagnostics.static_pipelines.misses, 2);
+        assert_eq!(diagnostics.wrapper_module_artifacts.entries, 2);
+    }
+
+    #[test]
     fn backend_prep_runtime_surfaces_wrapper_link_blockers() {
         let shader_plan = shader_plan_with_text("void unrelated(inout vec4 color) {}");
         let mut runtime = OcioGpuWgpuBackendPrepRuntime::default();
@@ -7243,12 +8130,12 @@ mod tests {
             .expect("prepare different static pipeline");
 
         assert_eq!(
-            backend_object_cache_key(&first),
-            backend_object_cache_key(&second)
+            backend_object_cache_key(&shader_plan, &first),
+            backend_object_cache_key(&shader_plan, &second)
         );
         assert_ne!(
-            backend_object_cache_key(&first),
-            backend_object_cache_key(&different_format)
+            backend_object_cache_key(&shader_plan, &first),
+            backend_object_cache_key(&shader_plan, &different_format)
         );
     }
 
@@ -7344,6 +8231,13 @@ mod tests {
             first.pass_node.wrapper_layout_hash,
             first.wrapper_input_layout.layout_hash
         );
+        assert!(first
+            .wrapper_input_layout
+            .matches_wrapper_binding(&static_pipeline.wrapper_binding));
+        let mut forged_wrapper_binding = static_pipeline.wrapper_binding.clone();
+        forged_wrapper_binding.bind_group = forged_wrapper_binding.bind_group.saturating_add(1);
+        forged_wrapper_binding.layout_hash = static_pipeline.wrapper_binding.layout_hash;
+        assert!(!first.wrapper_input_layout.matches_wrapper_binding(&forged_wrapper_binding));
         assert_ne!(first.wrapper_modules.cache_key, 0);
         assert_ne!(first.render_pipeline.cache_key, 0);
         assert_ne!(first.pass_node.node_hash, 0);
@@ -7367,16 +8261,12 @@ mod tests {
             &context.device,
             &GpuColorFrameAllocationPlan::for_handle(input_handle),
         );
-        first.wrapper_input_layout.prepare_cached_bind_group(
-            &context.device,
-            &static_pipeline.wrapper_binding,
-            input.resource(),
-        );
-        first.wrapper_input_layout.prepare_cached_bind_group(
-            &context.device,
-            &static_pipeline.wrapper_binding,
-            input.resource(),
-        );
+        first
+            .wrapper_input_layout
+            .prepare_cached_bind_group(&context.device, input.resource());
+        first
+            .wrapper_input_layout
+            .prepare_cached_bind_group(&context.device, input.resource());
 
         let diagnostics = object_runtime.diagnostics();
         assert_eq!(diagnostics.entries, 1);
@@ -7420,6 +8310,8 @@ mod tests {
             resource_key: 11,
             textures_2d: vec![upload.clone()],
             textures_3d: Vec::new(),
+            resource_identity: standalone_test_identities(11).0,
+            shader_plan_identity: standalone_test_identities(11).1,
         };
 
         let packed = plan.pack_textures().expect("pack red 2D LUT");
@@ -7451,6 +8343,8 @@ mod tests {
             resource_key: 12,
             textures_2d: vec![upload],
             textures_3d: Vec::new(),
+            resource_identity: standalone_test_identities(12).0,
+            shader_plan_identity: standalone_test_identities(12).1,
         };
 
         let packed = plan.pack_textures().expect("pack RGB 2D LUT");
@@ -7466,6 +8360,28 @@ mod tests {
     }
 
     #[test]
+    fn packed_lut_identity_rejects_same_declared_hash_with_different_bytes() {
+        let upload = texture_2d_upload(OcioGpuTextureChannel::Rgb, 1, 1, vec![0.25, 0.5, 0.75]);
+        let plan = OcioGpuWgpuLutUploadPlan {
+            resource_key: 120,
+            textures_2d: vec![upload],
+            textures_3d: Vec::new(),
+            resource_identity: standalone_test_identities(120).0,
+            shader_plan_identity: standalone_test_identities(120).1,
+        };
+        let first = plan.pack_textures().expect("first packed LUT");
+        let mut second = first.clone();
+        second.textures_2d[0].bytes[0] ^= 0xff;
+        second.textures_2d[0].packed_bytes_hash = first.textures_2d[0].packed_bytes_hash;
+
+        assert_eq!(
+            first.textures_2d[0].packed_bytes_hash,
+            second.textures_2d[0].packed_bytes_hash
+        );
+        assert_ne!(first.payload_identity(), second.payload_identity());
+    }
+
+    #[test]
     fn lut_upload_pack_expands_rgb_3d_values_to_rgba32float() {
         let values = (0..24).map(|value| value as f32 / 23.0).collect::<Vec<_>>();
         let upload = texture_3d_upload(2, values);
@@ -7473,6 +8389,8 @@ mod tests {
             resource_key: 13,
             textures_2d: Vec::new(),
             textures_3d: vec![upload],
+            resource_identity: standalone_test_identities(13).0,
+            shader_plan_identity: standalone_test_identities(13).1,
         };
 
         let packed = plan.pack_textures().expect("pack RGB 3D LUT");
@@ -7498,6 +8416,8 @@ mod tests {
             resource_key: 14,
             textures_2d: vec![upload],
             textures_3d: Vec::new(),
+            resource_identity: standalone_test_identities(14).0,
+            shader_plan_identity: standalone_test_identities(14).1,
         };
 
         let err = plan.pack_textures().expect_err("RGB 2D LUT needs 3 values per texel");
@@ -7522,6 +8442,8 @@ mod tests {
                 f32_uniform(0, 0, vec![0.25, 0.5]),
                 i32_uniform(1, 16, vec![7, -3]),
             ],
+            resource_identity: standalone_test_identities(21).0,
+            shader_plan_identity: standalone_test_identities(21).1,
         };
 
         let packed = plan.pack_buffer().expect("pack uniform buffer");
@@ -7548,12 +8470,37 @@ mod tests {
     }
 
     #[test]
+    fn packed_uniform_identity_rejects_same_declared_hash_with_different_bytes() {
+        let plan = OcioGpuWgpuUniformUploadPlan {
+            resource_key: 121,
+            binding: 0,
+            buffer_size: 4,
+            uniforms: vec![f32_uniform(0, 0, vec![0.5])],
+            resource_identity: standalone_test_identities(121).0,
+            shader_plan_identity: standalone_test_identities(121).1,
+        };
+        let first = plan.pack_buffer().expect("first packed uniform");
+        let mut second = first.clone();
+        second.bytes[0] ^= 0xff;
+        second.bytes_hash = first.bytes_hash;
+
+        assert_eq!(first.bytes_hash, second.bytes_hash);
+        assert_ne!(first.payload_identity(), second.payload_identity());
+        assert_eq!(
+            validate_packed_uniform_upload(&second),
+            Err(OcioGpuWgpuUniformUploadError::PackedContentIdentityMismatch)
+        );
+    }
+
+    #[test]
     fn uniform_upload_pack_rejects_out_of_bounds_uniform() {
         let plan = OcioGpuWgpuUniformUploadPlan {
             resource_key: 22,
             binding: 0,
             buffer_size: 4,
             uniforms: vec![f32_uniform(2, 2, vec![1.0])],
+            resource_identity: standalone_test_identities(22).0,
+            shader_plan_identity: standalone_test_identities(22).1,
         };
 
         let err = plan.pack_buffer().expect_err("uniform payload must fit inside OCIO buffer");
@@ -7587,6 +8534,8 @@ mod tests {
                 value_hash: hash_uniform_value(&OcioGpuUniformValue::Unsupported),
                 value: OcioGpuUniformValue::Unsupported,
             }],
+            resource_identity: standalone_test_identities(23).0,
+            shader_plan_identity: standalone_test_identities(23).1,
         };
 
         let err = plan.pack_buffer().expect_err("unsupported uniform value must fail closed");
@@ -7605,8 +8554,8 @@ mod tests {
     #[test]
     fn bind_resource_plan_validates_matching_packed_luts_and_uniforms() {
         let resources = bind_resource_test_plan(31);
-        let packed_luts = packed_luts_for_bind_resource(31);
-        let packed_uniform = packed_uniform_for_bind_resource(31);
+        let packed_luts = packed_luts_for_bind_resource(&resources);
+        let packed_uniform = packed_uniform_for_bind_resource(&resources);
 
         let bind_plan = OcioGpuWgpuBindResourcePlan::from_packed_resources(
             &resources,
@@ -7906,7 +8855,16 @@ mod tests {
             binding_contract_hash: required_bindings.stable_hash(),
         };
 
-        match translate_shader_text(request, &artifact.fragment_source, required_bindings) {
+        let canonical_identity = OcioGpuCanonicalIdentity::for_hash(
+            b"test-wrapper-fragment-translation",
+            &(&artifact.fragment_source, &required_bindings),
+        );
+        match translate_shader_text(
+            request,
+            &artifact.fragment_source,
+            required_bindings,
+            canonical_identity,
+        ) {
             Ok(translated) => {
                 assert_eq!(translated.request, request);
                 assert_eq!(translated.entry_point_count, 1);
@@ -8165,20 +9123,24 @@ mod tests {
             resource_key: module_artifact.resource_key,
             pipeline_layout_hash: module_artifact.pipeline_layout_hash,
             render_descriptor_hash: module_artifact.render_descriptor_hash,
-            cache_key: module_cache_key,
-            module_key: module_artifact.module_key,
+            canonical_identity: module_artifact.canonical_identity,
+            pipeline_layout_identity: pipeline_layout.canonical_identity,
+            resource_identity: module_artifact.resource_identity,
+            module_pipeline_layout_identity: module_artifact.pipeline_layout_identity,
+            render_descriptor_identity: module_artifact.render_descriptor_identity,
+        };
+        let layout_metadata = OcioGpuWgpuPipelineLayoutKeyMetadata {
+            resource_key: pipeline_layout.resource_key,
+            layout_hash: pipeline_layout.layout_hash,
+            resource_identity: pipeline_layout.resource_identity,
+            canonical_identity: pipeline_layout.canonical_identity,
         };
 
-        let key = render_pipeline_cache_key(
-            &render_descriptor,
-            pipeline_layout.resource_key,
-            pipeline_layout.layout_hash,
-            metadata,
-        )
-        .expect("render pipeline cache key");
+        let key = render_pipeline_cache_key(&render_descriptor, layout_metadata, metadata)
+            .expect("render pipeline cache key");
 
-        assert_ne!(module_cache_key, 0);
-        assert_ne!(key, 0);
+        assert_ne!(module_cache_key.diagnostic_key(), 0);
+        assert_ne!(key.diagnostic_key(), 0);
     }
 
     #[test]
@@ -8213,17 +9175,23 @@ mod tests {
             resource_key: module_artifact.resource_key,
             pipeline_layout_hash: module_artifact.pipeline_layout_hash,
             render_descriptor_hash: module_artifact.render_descriptor_hash,
-            cache_key: wrapper_backend_shader_modules_cache_key(&module_artifact),
-            module_key: module_artifact.module_key,
+            canonical_identity: module_artifact.canonical_identity,
+            pipeline_layout_identity: pipeline_layout.canonical_identity,
+            resource_identity: module_artifact.resource_identity,
+            module_pipeline_layout_identity: module_artifact.pipeline_layout_identity,
+            render_descriptor_identity: module_artifact.render_descriptor_identity,
+        };
+        let layout_metadata = OcioGpuWgpuPipelineLayoutKeyMetadata {
+            resource_key: pipeline_layout.resource_key,
+            layout_hash: pipeline_layout.layout_hash,
+            resource_identity: pipeline_layout.resource_identity,
+            canonical_identity: pipeline_layout.canonical_identity,
         };
 
+        let mut mismatched_layout = layout_metadata;
+        mismatched_layout.resource_key = mismatched_layout.resource_key.wrapping_add(1);
         assert!(matches!(
-            render_pipeline_cache_key(
-                &render_descriptor,
-                pipeline_layout.resource_key.wrapping_add(1),
-                pipeline_layout.layout_hash,
-                metadata,
-            ),
+            render_pipeline_cache_key(&render_descriptor, mismatched_layout, metadata,),
             Err(OcioGpuWgpuRenderPipelineError::PipelineLayoutResourceKeyMismatch { .. })
         ));
 
@@ -8231,12 +9199,7 @@ mod tests {
         mismatched_modules.pipeline_layout_hash =
             mismatched_modules.pipeline_layout_hash.wrapping_add(1);
         assert!(matches!(
-            render_pipeline_cache_key(
-                &render_descriptor,
-                pipeline_layout.resource_key,
-                pipeline_layout.layout_hash,
-                mismatched_modules,
-            ),
+            render_pipeline_cache_key(&render_descriptor, layout_metadata, mismatched_modules,),
             Err(OcioGpuWgpuRenderPipelineError::ShaderModulePipelineLayoutHashMismatch { .. })
         ));
 
@@ -8244,29 +9207,35 @@ mod tests {
         mismatched_descriptor.render_descriptor_hash =
             mismatched_descriptor.render_descriptor_hash.wrapping_add(1);
         assert!(matches!(
-            render_pipeline_cache_key(
-                &render_descriptor,
-                pipeline_layout.resource_key,
-                pipeline_layout.layout_hash,
-                mismatched_descriptor,
-            ),
+            render_pipeline_cache_key(&render_descriptor, layout_metadata, mismatched_descriptor,),
             Err(OcioGpuWgpuRenderPipelineError::ShaderModuleRenderDescriptorHashMismatch { .. })
         ));
     }
 
     #[test]
     fn render_pass_node_plan_binds_pipeline_bind_groups_and_target_contract() {
+        let resource_identity = standalone_test_identities(54).0;
+        let pipeline_identity = OcioGpuCanonicalIdentity::for_hash(b"test-pipeline", &54_u64);
+        let ocio_bind_group_identity =
+            OcioGpuCanonicalIdentity::for_hash(b"test-ocio-bind-group", &54_u64);
+        let wrapper_layout_identity =
+            OcioGpuCanonicalIdentity::for_hash(b"test-wrapper-layout", &54_u64);
         let pipeline = OcioGpuWgpuRenderPipelineMetadata {
             resource_key: 54,
             cache_key: 101,
             descriptor_hash: 202,
+            resource_identity,
+            canonical_identity: pipeline_identity,
         };
 
         let plan = OcioGpuWgpuRenderPassNodePlan::for_pipeline_metadata_and_bind_groups(
             pipeline,
             54,
             303,
+            resource_identity,
+            ocio_bind_group_identity,
             404,
+            wrapper_layout_identity,
             OcioGpuWgpuColorTargetFormat::Rgba16Float,
         )
         .expect("render pass node plan");
@@ -8286,17 +9255,23 @@ mod tests {
 
     #[test]
     fn render_pass_node_plan_rejects_mismatched_ocio_resource_key() {
+        let resource_identity = standalone_test_identities(55).0;
         let pipeline = OcioGpuWgpuRenderPipelineMetadata {
             resource_key: 55,
             cache_key: 101,
             descriptor_hash: 202,
+            resource_identity,
+            canonical_identity: OcioGpuCanonicalIdentity::for_hash(b"test-pipeline", &55_u64),
         };
 
         let err = OcioGpuWgpuRenderPassNodePlan::for_pipeline_metadata_and_bind_groups(
             pipeline,
             56,
             303,
+            resource_identity,
+            OcioGpuCanonicalIdentity::for_hash(b"test-ocio-bind-group", &55_u64),
             404,
+            OcioGpuCanonicalIdentity::for_hash(b"test-wrapper-layout", &55_u64),
             OcioGpuWgpuColorTargetFormat::Rgba16Float,
         )
         .expect_err("resource key mismatch must fail");
@@ -8313,9 +9288,9 @@ mod tests {
     #[test]
     fn bind_resource_plan_rejects_missing_lut_texture() {
         let resources = bind_resource_test_plan(32);
-        let mut packed_luts = packed_luts_for_bind_resource(32);
+        let mut packed_luts = packed_luts_for_bind_resource(&resources);
         packed_luts.textures_3d.clear();
-        let packed_uniform = packed_uniform_for_bind_resource(32);
+        let packed_uniform = packed_uniform_for_bind_resource(&resources);
 
         let err = OcioGpuWgpuBindResourcePlan::from_packed_resources(
             &resources,
@@ -8337,10 +9312,10 @@ mod tests {
     #[test]
     fn bind_resource_plan_rejects_lut_source_hash_mismatch() {
         let resources = bind_resource_test_plan(33);
-        let mut packed_luts = packed_luts_for_bind_resource(33);
+        let mut packed_luts = packed_luts_for_bind_resource(&resources);
         packed_luts.textures_2d[0].source_values_hash =
             packed_luts.textures_2d[0].source_values_hash.wrapping_add(1);
-        let packed_uniform = packed_uniform_for_bind_resource(33);
+        let packed_uniform = packed_uniform_for_bind_resource(&resources);
 
         let err = OcioGpuWgpuBindResourcePlan::from_packed_resources(
             &resources,
@@ -8362,7 +9337,7 @@ mod tests {
     #[test]
     fn bind_resource_plan_requires_uniform_buffer_when_contract_needs_it() {
         let resources = bind_resource_test_plan(34);
-        let packed_luts = packed_luts_for_bind_resource(34);
+        let packed_luts = packed_luts_for_bind_resource(&resources);
 
         let err =
             OcioGpuWgpuBindResourcePlan::from_packed_resources(&resources, &packed_luts, None)
@@ -8377,8 +9352,9 @@ mod tests {
     #[test]
     fn bind_resource_plan_rejects_uniform_resource_key_mismatch() {
         let resources = bind_resource_test_plan(35);
-        let packed_luts = packed_luts_for_bind_resource(35);
-        let packed_uniform = packed_uniform_for_bind_resource(36);
+        let packed_luts = packed_luts_for_bind_resource(&resources);
+        let other_resources = bind_resource_test_plan(36);
+        let packed_uniform = packed_uniform_for_bind_resource(&other_resources);
 
         let err = OcioGpuWgpuBindResourcePlan::from_packed_resources(
             &resources,
@@ -8603,8 +9579,8 @@ mod tests {
             .expect_err("missing Custom config must fail instead of hitting Standard cache");
         assert_eq!(error.request, custom_request);
         assert_ne!(
-            request_hash(&standard_request, 0),
-            request_hash(&error.request, 0)
+            request_cache_identity(&standard_request, 0),
+            request_cache_identity(&error.request, 0)
         );
         let diagnostics = cache.diagnostics();
         assert_eq!(diagnostics.entries, 1);
@@ -8624,7 +9600,10 @@ mod tests {
         let legacy = request_for(mondrian_core::MondrianStandardPackageIdentity::V2);
         let current = request_for(mondrian_core::MondrianStandardPackageIdentity::V3);
 
-        assert_ne!(request_hash(&legacy, 0), request_hash(&current, 0));
+        assert_ne!(
+            request_cache_identity(&legacy, 0),
+            request_cache_identity(&current, 0)
+        );
         assert_ne!(
             hash_request_and_processor(&legacy, Some("same-processor-id")),
             hash_request_and_processor(&current, Some("same-processor-id"))
@@ -8640,8 +9619,14 @@ mod tests {
             language: GpuLanguage::Glsl4_0,
         };
 
-        assert_eq!(request_hash(&request, 7), request_hash(&request, 7));
-        assert_ne!(request_hash(&request, 7), request_hash(&request, 8));
+        assert_eq!(
+            request_cache_identity(&request, 7),
+            request_cache_identity(&request, 7)
+        );
+        assert_ne!(
+            request_cache_identity(&request, 7),
+            request_cache_identity(&request, 8)
+        );
     }
 
     #[test]
@@ -9129,7 +10114,9 @@ pixel.bgr.r = 0.0;"#
             .expect("translate GLSL to Naga IR");
         let resources = OcioGpuWgpuResourcePlan::for_shader_plan(&plan).expect("resource plan");
         assert_ne!(
-            backend_shader_module_cache_key(&translated, &resources).expect("matching contract"),
+            backend_shader_module_cache_key(&translated, &resources)
+                .expect("matching contract")
+                .diagnostic_key(),
             0
         );
 

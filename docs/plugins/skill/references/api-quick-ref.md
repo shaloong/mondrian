@@ -25,11 +25,12 @@ EffectPluginDefinitionBuilder::new(
 
 // Custom render (advanced)
 .with_custom_render_backend(params_builder, cache_key_builder, cache_policy, processor) -> Self
-.with_custom_render_processor(params_builder, processor) -> Self  // Simplified, no explicit cache_key
 // params_builder returns Result<Option<serde_json::Value>, EffectGraphBuildError>
 // Ok(None) is intentional identity; missing/invalid state returns Err
+// The staged RGBA8 ABI admits EffectExecutionModes::CPU_U8, not CPU_F32/GPU.
 
-// Contract
+// Required execution contract (the conservative default admits no backend)
+.with_execution_contract(contract: EffectExecutionContract) -> Self
 .with_plugin_contract(contract: EffectPluginContract) -> Self
 
 // Finalize
@@ -52,22 +53,36 @@ fn apply_to(&mut self, input: EffectGraphValue, op: EffectRenderOp) -> EffectGra
 fn branch<F>(&mut self, input: EffectGraphValue, build: F) -> EffectGraphValue
 fn blend<F>(&mut self, base: EffectGraphValue, blend_mode: BlendMode, opacity: f32, build: F) -> EffectGraphValue
 fn blend_current<F>(&mut self, blend_mode: BlendMode, opacity: f32, build: F) -> EffectGraphValue
-fn mask<F>(&mut self, input: EffectGraphValue, invert: bool, build: F) -> EffectGraphValue
-fn mask_current<F>(&mut self, invert: bool, build: F) -> EffectGraphValue
+fn mask<F>(&mut self, input: EffectGraphValue, invert: bool, mask_op: MaskOp, build: F) -> EffectGraphValue
+fn mask_current<F>(&mut self, invert: bool, mask_op: MaskOp, build: F) -> EffectGraphValue
 ```
+
+Every branch/blend/mask builder has
+`FnOnce(&mut EffectGraphDsl, EffectGraphValue) -> EffectGraphValue`; its final
+expression must return the value (no trailing semicolon).
 
 ## EffectRenderOp
 
 ```rust
-ColorAdjust { exposure: f32, contrast: f32, saturation: f32 }
-WhiteBalance { temperature: f32, tint: f32 }
+ColorAdjust {
+    exposure: f32,
+    contrast: f32,
+    saturation: f32,
+    working_color_space: WorkingColorSpace,
+}
 GaussianBlur { radius: f32 }
 Sharpen { amount: f32 }
 Vignette { intensity: f32, feather: f32 }
 ChromaticAberration { amount: f32 }
 Grain { amount: f32 }
-Custom { key: String, params: serde_json::Value, cache_key: Option<String>, cache_policy: EffectCachePolicy }
+TemporalFrameMix { past_offset: TimelineTime, mix: f32 }
+Lut3D { lut: Arc<PreparedLut3D>, intensity: f32 }
 ```
+
+White Balance remains modeled-only / execution-unavailable; no executable
+WhiteBalance op exists. Custom work is bound only through
+`EffectPluginDefinitionBuilder::with_custom_render_backend(...)`; never
+construct raw `EffectRenderOp::Custom` or leave its processor unbound.
 
 Methods: `hash_signature(hasher)`, `cache_policy() -> EffectCachePolicy`, `estimated_cost() -> u32`
 
@@ -76,6 +91,7 @@ Methods: `hash_signature(hasher)`, `cache_policy() -> EffectCachePolicy`, `estim
 ```rust
 Deterministic    // Same inputs → same outputs. Safe to cache across frames.
 FrameDependent   // Depends on frame seed or temporal noise. Cache includes frame_seed.
+Uncacheable      // No cross-call reproducibility; reusable output keys are forbidden.
 ```
 
 ## EffectPluginContract
@@ -109,27 +125,29 @@ processor failures remain structured execution errors.
 
 ```rust
 register_effect_definition(definition: EffectDefinition)
+    -> Result<(), mondrian_effects::effect::EffectDefinitionError>
 effect_definition(effect_type: &EffectType) -> Option<Arc<EffectDefinition>>
 effect_library_types() -> Vec<EffectType>
 
-register_plugin_contract(key: impl Into<String>, contract: EffectPluginContract)
-plugin_contract(key: &str) -> Option<EffectPluginContract>
-
 effect_plugin_runtime_status(key: &str) -> Option<EffectPluginRuntimeStatus>
-effect_plugin_is_runtime_available(key: &str, contract: Option<&EffectPluginContract>) -> bool
-effect_plugin_is_library_visible(key: &str, contract: Option<&EffectPluginContract>) -> bool
-record_plugin_runtime_failure(key: &str, contract: Option<&EffectPluginContract>, reason: impl Into<String>)
 ```
+
+Plugin Contracts are attached through
+`EffectDefinition::with_plugin_contract(...)` before the sole Definition
+registration. Availability, library visibility, and failure quarantine are
+engine-owned projections scoped to that Definition registry revision.
 
 ## EffectNode
 
 ```rust
-EffectNode::new(effect_type: EffectType) -> Self
+EffectNode::new(effect_type: EffectType) -> Self // empty PropertyBag
+EffectNode::with_defaults(effect_type: EffectType) -> Self // EffectNodeExt
 
 // Properties
-.evaluate_property(path: &str, time: TimeCode) -> Option<PropertyValue>
-.evaluate_f32_by_suffix(suffix: &str, time: TimeCode, fallback: f32) -> f32
-.set_static_value_by_suffix(suffix: &str, value: PropertyValue) -> Result<()>
+.evaluate_property(path: &str, time: TimelineTime) -> Option<PropertyValue>
+.evaluate_parameter(parameter_id: &ParameterId, time: TimelineTime) -> Option<PropertyValue>
+.evaluate_f32_parameter(parameter_id: &ParameterId, time: TimelineTime, fallback: f32) -> f32
+.set_static_value_by_parameter(parameter_id: &ParameterId, value: PropertyValue) -> Result<()>
 
 // Fields
 pub id: EffectId
@@ -138,20 +156,29 @@ pub properties: PropertyBag
 pub is_enabled: bool
 ```
 
-## Common PropertyValue Variants
+## PropertyValue Variants
 
 ```rust
-PropertyValue::Float(f32)
-PropertyValue::Int(i32)
 PropertyValue::Bool(bool)
-PropertyValue::Color(f32, f32, f32, f32)
-PropertyValue::String(String)
+PropertyValue::Int(i64)
+PropertyValue::Float(f32)
+PropertyValue::Double(f64)
+PropertyValue::Vec2(glam::Vec2)
+PropertyValue::Vec3(glam::Vec3)
+PropertyValue::Color(mondrian_core::Color)
+PropertyValue::Vec4([f32; 4])
+PropertyValue::Enum(String)
+PropertyValue::Resource(ParameterResourceReference)
+PropertyValue::Text(String)
 ```
 
 ## EffectEvalContext
 
 ```rust
-EffectEvalContext { time: TimeCode }
+EffectEvalContext {
+    time: TimelineTime,
+    working_color_space: WorkingColorSpace,
+}
 ```
 
 ## CustomEffectRenderProcessor

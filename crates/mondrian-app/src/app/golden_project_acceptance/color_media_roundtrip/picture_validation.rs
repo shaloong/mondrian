@@ -17,8 +17,8 @@ use mondrian_core::{AssetId, WorkingColorSpace};
 use mondrian_media::PreviewDecodeSessionContext;
 use mondrian_playback::PreviewResolutionScale;
 use mondrian_renderer::{
-    execute_cpu_output_boundary, RenderOutputColorBoundary, RenderOutputColorBoundaryTarget,
-    TimelineCompositeScratch,
+    execute_cpu_output_boundary, RenderCpuColorExecutionSession, RenderOutputColorBoundary,
+    RenderOutputColorBoundaryTarget, TimelineCompositeScratch,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -272,7 +272,8 @@ fn validate_source_patches(
         "HLG decoded patch error exceeded four 8-bit codes: {hlg_max_encoded_code_error}"
     );
 
-    let hlg_working = hlg.frame.working_frame()?.frame;
+    let mut color_session = RenderCpuColorExecutionSession::default();
+    let hlg_working = hlg.frame.working_frame_with_session(&mut color_session)?.frame;
     ensure!(
         hlg_working.descriptor().color_space == WorkingColorSpace::LinearRec2020.into(),
         "HLG input did not enter the Sequence working space"
@@ -328,7 +329,7 @@ fn validate_source_patches(
         "sRGB Alpha decoded patches are not byte-exact"
     );
 
-    let alpha_working = alpha.frame.working_frame()?.frame;
+    let alpha_working = alpha.frame.working_frame_with_session(&mut color_session)?.frame;
     ensure!(
         alpha_working.descriptor().color_space == WorkingColorSpace::LinearRec2020.into(),
         "sRGB Alpha input did not enter the Sequence working space"

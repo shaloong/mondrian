@@ -3,9 +3,10 @@
 use super::*;
 use mondrian_core::{JobId, MondrianError, Result};
 use mondrian_export::delivery::resolve_export_delivery;
+use mondrian_export::prepare_timeline_export_dependencies;
 use mondrian_export::preset::{
-    BuiltinExportPreset, Container, ExportConfig, ExportMediaDependency, ExportPreset,
-    TimelineExportRange, TimelineExportSnapshot,
+    AudioCodecConfig, BuiltinExportPreset, Container, ExportConfig, ExportMediaDependency,
+    ExportOutputPolicy, ExportPreset, TimelineExportRange, TimelineExportSnapshot,
 };
 use mondrian_export::queue::{
     ExportCancelOutcome, ExportJobSnapshot, ExportQueueDiagnostics, RenderJob,
@@ -22,6 +23,8 @@ pub struct TimelineExportRequest {
     pub range: TimelineExportRange,
     /// Output media file path.
     pub output_path: PathBuf,
+    /// Final namespace policy frozen at admission.
+    pub output_policy: ExportOutputPolicy,
 }
 
 /// UI-stable draft state for timeline export panels.
@@ -171,19 +174,26 @@ impl AppState {
             return Err(export_error("enqueue_timeline_export", reason));
         }
 
-        let timeline =
-            match capture_timeline_export_snapshot(self, sequence, sequences, request.range) {
-                Ok(timeline) => timeline,
-                Err(reason) => {
-                    self.set_status_hint(format!("导出失败：{reason}"), true);
-                    return Err(export_error("enqueue_timeline_export", reason));
-                }
-            };
+        let include_audio = !matches!(&request.preset.audio, AudioCodecConfig::Disabled);
+        let timeline = match capture_timeline_export_snapshot(
+            self,
+            sequence,
+            sequences,
+            request.range,
+            include_audio,
+        ) {
+            Ok(timeline) => timeline,
+            Err(reason) => {
+                self.set_status_hint(format!("导出失败：{reason}"), true);
+                return Err(export_error("enqueue_timeline_export", reason));
+            }
+        };
 
         let config = ExportConfig {
             preset: request.preset,
             timeline: Box::new(timeline),
             output_path: request.output_path,
+            output_policy: request.output_policy,
         };
         let output_path = config.output_path.display().to_string();
         let job_id = self.render_queue.enqueue(RenderJob::new(config)).map_err(|error| {
@@ -191,6 +201,7 @@ impl AppState {
             self.set_status_hint(format!("导出失败：{reason}"), true);
             export_error("enqueue_timeline_export", reason)
         })?;
+        let _ = self.refresh_internal_execution_resource_decision();
         self.set_status_hint("已加入导出队列", false);
         tracing::info!(%job_id, "导出任务已加入队列: {output_path}");
         Ok(job_id)
@@ -203,7 +214,9 @@ impl AppState {
 
     /// Request cancellation without exposing queue internals to UI actions.
     pub fn cancel_export_job(&self, job_id: JobId) -> ExportCancelOutcome {
-        self.render_queue.cancel(job_id)
+        let outcome = self.render_queue.cancel(job_id);
+        let _ = self.refresh_internal_execution_resource_decision();
+        outcome
     }
 
     /// Remove retained terminal export evidence after explicit user cleanup.
@@ -216,13 +229,17 @@ impl AppState {
         self.render_queue.diagnostics()
     }
 
-    /// Observe queue changes without consuming evidence needed by another observer.
+    /// Observe retained job-snapshot changes without consuming shared evidence.
+    ///
+    /// Queue policy and execution-yield diagnostics are intentionally excluded:
+    /// they must not dirty the editor model or schedule unrelated Preview work.
     pub fn poll_export_queue(&mut self) -> bool {
-        let revision = self.render_queue.revision();
-        if revision == self.export_queue_observed_revision {
+        let revision = self.render_queue.jobs_revision();
+        if revision == self.export_jobs_observed_revision {
             return false;
         }
-        self.export_queue_observed_revision = revision;
+        self.export_jobs_observed_revision = revision;
+        let _ = self.refresh_internal_execution_resource_decision();
         true
     }
 }
@@ -232,98 +249,104 @@ pub(crate) fn capture_timeline_export_snapshot(
     sequence: mondrian_timeline::sequence::Sequence,
     sequences: Vec<mondrian_timeline::sequence::Sequence>,
     range: TimelineExportRange,
+    include_audio: bool,
 ) -> std::result::Result<TimelineExportSnapshot, String> {
-    let mut asset_ids = HashSet::new();
-    let mut visited_sequences = HashSet::new();
-    let mut active_sequences = HashSet::new();
-    collect_sequence_asset_ids(
-        &sequence,
-        &sequences,
-        &mut visited_sequences,
-        &mut active_sequences,
-        &mut asset_ids,
-    )?;
-    state
-        .validate_video_transition_source_handles(&sequence)
-        .map_err(|error| error.to_string())?;
-    for nested in sequences.iter().filter(|candidate| {
-        candidate.id != sequence.id && visited_sequences.contains(&candidate.id)
-    }) {
-        state
-            .validate_video_transition_source_handles(nested)
+    let dependencies =
+        prepare_timeline_export_dependencies(&sequence, &sequences, range, include_audio)
             .map_err(|error| error.to_string())?;
-    }
-    let audio_component_ids =
-        collect_reachable_media_audio_components(&sequence, &sequences, &visited_sequences);
 
-    let media = resolve_export_media_dependencies(state, asset_ids, &audio_component_ids)?;
+    let media = resolve_export_media_dependencies(state, dependencies.media_components())?;
     let nested_sequences = sequences
         .into_iter()
         .filter(|candidate| {
-            candidate.id != sequence.id && visited_sequences.contains(&candidate.id)
+            candidate.id != sequence.id && dependencies.sequence_ids().contains(&candidate.id)
         })
         .collect();
 
-    Ok(TimelineExportSnapshot {
-        color_environment: state.project_color_environment().clone(),
+    Ok(TimelineExportSnapshot::captured(
+        state.project_color_environment().clone(),
         sequence,
-        sequences: nested_sequences,
+        nested_sequences,
         media,
         range,
-    })
+        dependencies.execution_snapshot().clone(),
+    ))
 }
 
 fn resolve_export_media_dependencies(
     state: &AppState,
-    asset_ids: HashSet<AssetId>,
-    audio_component_ids: &HashMap<AssetId, HashSet<AudioSourceComponentId>>,
+    media_demands: &std::collections::BTreeMap<
+        AssetId,
+        std::collections::BTreeSet<AudioSourceComponentId>,
+    >,
 ) -> std::result::Result<HashMap<AssetId, ExportMediaDependency>, String> {
-    if asset_ids.is_empty() {
+    if media_demands.is_empty() {
         return Ok(HashMap::new());
     }
     let library = state.asset_library().ok_or_else(|| "素材库未连接".to_string())?;
 
     let mut media = HashMap::new();
-    for asset_id in asset_ids {
+    for (asset_id, component_ids) in media_demands {
         let asset = library
-            .get_asset(asset_id)
+            .get_asset(*asset_id)
             .map_err(|err| format!("读取素材 {} 失败: {}", asset_id, err))?
             .ok_or_else(|| format!("素材不存在: {}", asset_id))?;
 
-        if matches!(asset.kind, AssetKind::AdjustmentLayer) {
+        if matches!(
+            &asset.kind,
+            AssetKind::AdjustmentLayer | AssetKind::SolidColor
+        ) {
             continue;
         }
 
-        let metadata = std::fs::metadata(&asset.path)
-            .map_err(|error| format!("素材离线: {} ({error})", asset.path.display()))?;
-        let source_fingerprint = mondrian_media::MediaFileFingerprint::from_metadata(&metadata);
-        let detected_color_space =
-            asset.media_info.primary_video().and_then(|video| video.detected_color_space);
-        let color_diagnostic = asset
-            .media_info
-            .primary_video()
-            .map(mondrian_media::VideoColorDiagnostic::from_stream);
+        let path = asset
+            .file_path()
+            .ok_or_else(|| format!("素材 {asset_id} 不是可导出的文件媒体源"))?
+            .to_path_buf();
+        let media_probe = asset
+            .media_probe()
+            .ok_or_else(|| format!("素材 {asset_id} 缺少与当前素材库状态一致的媒体探测结果"))?;
+        let admitted_fingerprint = asset
+            .source_fingerprint()
+            .ok_or_else(|| format!("素材 {asset_id} 缺少已准入的文件修订标识"))?;
+        let source_fingerprint = mondrian_media::MediaFileFingerprint::capture(&path);
+        if !source_fingerprint.authorizes_reuse() {
+            return Err(format!(
+                "素材 {} 缺少完整的文件修订证据，无法安全导出",
+                path.display()
+            ));
+        }
+        if source_fingerprint != admitted_fingerprint {
+            return Err(format!(
+                "素材 {asset_id} 的文件修订已变化，必须重新探测后才能导出"
+            ));
+        }
+        let primary_video = media_probe.primary_video();
+        let color_diagnostic = primary_video.map(mondrian_media::VideoColorDiagnostic::from_stream);
         let mut audio_components = HashMap::new();
-        for component_id in audio_component_ids.get(&asset_id).into_iter().flatten() {
-            let selection = asset
+        for component_id in component_ids {
+            let stream = asset
                 .audio_components
-                .resolve_current_selection(*component_id, &asset.media_info, source_fingerprint)
+                .resolve_current(*component_id, media_probe, source_fingerprint)
                 .map_err(|error| {
                     format!("素材 {asset_id} 的音频 Component {component_id} 无法绑定: {error}")
                 })?;
+            let selection =
+                mondrian_media::AudioSourceSelection::from_stream(stream, source_fingerprint);
             audio_components.insert(*component_id, selection);
         }
         media.insert(
-            asset_id,
+            *asset_id,
             ExportMediaDependency {
-                path: asset.path,
+                path,
                 source_fingerprint,
-                source_resolution: asset
-                    .media_info
-                    .primary_video()
+                video_stream_index: primary_video.map(|video| video.index),
+                picture_source_extent: primary_video.and_then(|video| {
+                    export_picture_source_extent(&asset.kind, video.duration, video.total_frames)
+                }),
+                source_resolution: primary_video
                     .map(|video| Resolution { width: video.width, height: video.height }),
                 audio_components,
-                detected_color_space,
                 interpretation: asset.interpretation,
                 color_diagnostic,
             },
@@ -333,84 +356,23 @@ fn resolve_export_media_dependencies(
     Ok(media)
 }
 
-fn collect_reachable_media_audio_components(
-    root: &mondrian_timeline::sequence::Sequence,
-    sequences: &[mondrian_timeline::sequence::Sequence],
-    reachable_sequences: &HashSet<SequenceId>,
-) -> HashMap<AssetId, HashSet<AudioSourceComponentId>> {
-    let mut components = HashMap::<AssetId, HashSet<AudioSourceComponentId>>::new();
-    for sequence in std::iter::once(root).chain(sequences) {
-        if !reachable_sequences.contains(&sequence.id) {
-            continue;
-        }
-        for clip in sequence
-            .audio_tracks
-            .iter()
-            .flat_map(|track| &track.clips)
-            .filter(|clip| !clip.is_disabled && !clip.is_nested_sequence())
-        {
-            for edit in &clip.audio_components {
-                if !edit.enabled {
-                    continue;
-                }
-                if let mondrian_timeline::audio::AudioComponentSource::Media { component_id } =
-                    &edit.source
-                {
-                    if let Some(asset_id) = clip.media_asset_id() {
-                        components.entry(asset_id).or_default().insert(*component_id);
-                    }
-                }
-            }
-        }
+fn export_picture_source_extent(
+    asset_kind: &AssetKind,
+    stream_duration: Option<std::time::Duration>,
+    _total_frames: Option<u64>,
+) -> Option<mondrian_timeline::PictureSourceExtent> {
+    if matches!(asset_kind, AssetKind::StillImage) {
+        return Some(mondrian_timeline::PictureSourceExtent::Still);
     }
-    components
-}
-
-pub(crate) fn collect_sequence_asset_ids(
-    sequence: &mondrian_timeline::sequence::Sequence,
-    sequences: &[mondrian_timeline::sequence::Sequence],
-    visited_sequences: &mut HashSet<SequenceId>,
-    active_sequences: &mut HashSet<SequenceId>,
-    asset_ids: &mut HashSet<mondrian_core::types::AssetId>,
-) -> std::result::Result<(), String> {
-    if active_sequences.contains(&sequence.id) {
-        return Err(format!("嵌套序列形成循环: {}", sequence.id));
+    if !matches!(asset_kind, AssetKind::Video) {
+        return None;
     }
-    if visited_sequences.contains(&sequence.id) {
-        return Ok(());
-    }
-    active_sequences.insert(sequence.id);
-
-    for track in sequence.video_tracks.iter().chain(sequence.audio_tracks.iter()) {
-        for clip in &track.clips {
-            if clip.is_disabled {
-                continue;
-            }
-            if clip.is_nested_sequence() {
-                let Some(nested_sequence_id) = clip.nested_sequence_id() else {
-                    return Err(format!("嵌套序列片段缺少序列引用: {}", clip.id));
-                };
-                let nested_sequence = sequences
-                    .iter()
-                    .find(|sequence| sequence.id == nested_sequence_id)
-                    .ok_or_else(|| format!("嵌套序列不存在: {nested_sequence_id}"))?;
-                collect_sequence_asset_ids(
-                    nested_sequence,
-                    sequences,
-                    visited_sequences,
-                    active_sequences,
-                    asset_ids,
-                )?;
-                continue;
-            }
-            if let Some(asset_id) = clip.media_asset_id() {
-                asset_ids.insert(asset_id);
-            }
-        }
-    }
-    active_sequences.remove(&sequence.id);
-    visited_sequences.insert(sequence.id);
-    Ok(())
+    let duration = stream_duration.filter(|duration| !duration.is_zero())?;
+    let nanoseconds = i64::try_from(duration.as_nanos()).ok()?;
+    let duration = mondrian_core::TimelineTime::new(nanoseconds, 1_000_000_000).ok()?;
+    let range =
+        mondrian_core::TimelineTimeRange::new(mondrian_core::TimelineTime::ZERO, duration).ok()?;
+    Some(mondrian_timeline::PictureSourceExtent::TimelineRange(range))
 }
 
 fn export_error(step_id: &'static str, reason: String) -> MondrianError {
@@ -429,6 +391,34 @@ mod tests {
     use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
     use mondrian_core::types::ColorSpace;
     use mondrian_timeline::{clip::Clip, sequence::Sequence};
+
+    #[test]
+    fn still_authority_comes_from_asset_kind_not_one_frame_movie_count() {
+        let one_frame_duration = std::time::Duration::from_millis(40);
+        let movie =
+            export_picture_source_extent(&AssetKind::Video, Some(one_frame_duration), Some(1))
+                .expect("one-frame Movie has finite picture time");
+        let expected_duration = mondrian_core::TimelineTime::new(40, 1_000).expect("40 ms");
+        assert_eq!(
+            movie,
+            mondrian_timeline::PictureSourceExtent::TimelineRange(
+                mondrian_core::TimelineTimeRange::new(
+                    mondrian_core::TimelineTime::ZERO,
+                    expected_duration,
+                )
+                .expect("finite Movie extent"),
+            )
+        );
+        assert_eq!(
+            export_picture_source_extent(&AssetKind::StillImage, None, Some(1)),
+            Some(mondrian_timeline::PictureSourceExtent::Still)
+        );
+        assert_eq!(
+            export_picture_source_extent(&AssetKind::Video, None, Some(1)),
+            None,
+            "one-frame Movie without selected-stream duration must fail closed"
+        );
+    }
 
     fn write_minimal_wav(path: &std::path::Path) {
         let sample_rate = 8_000u32;
@@ -506,11 +496,71 @@ mod tests {
             seq.clone(),
             vec![seq],
             TimelineExportRange::EntireSequence,
+            false,
         )
         .expect("capture export snapshot");
         assert!(snapshot.media.is_empty());
 
         let _ = std::fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn selected_range_does_not_require_off_range_or_hidden_media() {
+        let state = AppState::default();
+        let mut sequence = Sequence::new("selected capture");
+        let time_base = sequence.time_base();
+        let off_range_asset = AssetId::new();
+        sequence.video_tracks[0]
+            .add_clip(
+                Clip::new(off_range_asset, tt(20, time_base), tt(10, time_base))
+                    .expect("off-range Clip"),
+            )
+            .expect("add off-range Clip");
+        let mut hidden = mondrian_timeline::track::Track::new_video("hidden");
+        hidden.is_visible = false;
+        hidden
+            .add_clip(
+                Clip::new(AssetId::new(), tt(0, time_base), tt(10, time_base))
+                    .expect("hidden Clip"),
+            )
+            .expect("add hidden Clip");
+        sequence.video_tracks.push(hidden);
+
+        let snapshot = capture_timeline_export_snapshot(
+            &state,
+            sequence.clone(),
+            vec![sequence],
+            TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 10 },
+            false,
+        )
+        .expect("unselected media does not require an Asset Library");
+        assert!(snapshot.media.is_empty());
+    }
+
+    #[test]
+    fn selected_audio_capture_does_not_bind_muted_track_media() {
+        let state = AppState::default();
+        let mut sequence = Sequence::new("muted audio capture");
+        let time_base = sequence.time_base();
+        let track_id = sequence.audio_tracks[0].id;
+        sequence
+            .add_media_audio_clip(
+                track_id,
+                Clip::new(AssetId::new(), tt(0, time_base), tt(10, time_base)).expect("audio Clip"),
+                AudioSourceComponentId::primary(),
+            )
+            .expect("add audio Clip");
+        sequence.audio_tracks[0].is_muted = true;
+
+        let snapshot = capture_timeline_export_snapshot(
+            &state,
+            sequence.clone(),
+            vec![sequence],
+            TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 10 },
+            true,
+        )
+        .expect("muted audio is not a physical dependency");
+        assert!(snapshot.media.is_empty());
     }
 
     #[test]
@@ -527,8 +577,17 @@ mod tests {
         let media_path = temp_root.join("tone.wav");
         std::fs::create_dir_all(&temp_root).expect("create temp root");
         write_minimal_wav(&media_path);
+        let media_path = std::fs::canonicalize(media_path).expect("canonical export media fixture");
         let library = AssetLibrary::open(temp_root.join("library")).expect("open library");
-        let asset_id = library.import_media_file(&media_path).expect("import media");
+        let media_info = mondrian_media::probe_media_info(&media_path).expect("probe media");
+        let fingerprint = mondrian_media::MediaFileFingerprint::capture(&media_path);
+        let candidate = mondrian_assets::AssetMediaProbeCandidate::new(
+            media_path.clone(),
+            fingerprint,
+            media_info,
+        )
+        .expect("valid media candidate");
+        let asset_id = library.commit_media_probe(candidate, None).expect("import media");
         let interpretation = AssetMediaInterpretation {
             color: MediaColorInterpretation::Override {
                 color_space: ColorSpace::SonySLog3SGamut3Cine,
@@ -557,6 +616,7 @@ mod tests {
             seq.clone(),
             vec![seq],
             TimelineExportRange::EntireSequence,
+            true,
         )
         .expect("capture export snapshot");
 
@@ -584,35 +644,51 @@ mod tests {
     }
 
     #[test]
-    fn collect_sequence_asset_ids_recurses_into_nested_sequences() {
-        let mut parent = Sequence::new("parent");
-        let mut child = Sequence::new("child");
-        let tb = parent.time_base();
-        let asset_id = mondrian_core::types::AssetId::new();
+    fn export_snapshot_freezes_exact_physical_video_stream_index() {
+        const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+        let mut state = AppState::default();
+        state.test_set_sequence(Some(Sequence::new("export-video-stream-binding")));
+        let temp_root = std::env::temp_dir().join(format!(
+            "mondrian-export-video-stream-binding-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_root).expect("create temp root");
+        let media_path = temp_root.join("multi-stream-index.mp4");
+        std::fs::write(&media_path, FIXTURE).expect("write synthetic video fixture");
+        let media_path = std::fs::canonicalize(media_path).expect("canonical video fixture");
+        let library = AssetLibrary::open(temp_root.join("library")).expect("open library");
+        let mut media_info = mondrian_media::probe_media_info(&media_path).expect("probe media");
+        media_info.video_streams.first_mut().expect("fixture video stream").index = 3;
+        let fingerprint = mondrian_media::MediaFileFingerprint::capture(&media_path);
+        let candidate =
+            mondrian_assets::AssetMediaProbeCandidate::new(media_path, fingerprint, media_info)
+                .expect("valid media candidate");
+        let asset_id = library.commit_media_probe(candidate, None).expect("import media");
+        state.test_set_asset_library(Some(library));
+        {
+            let sequence = state.active_sequence_mut_uncommitted().expect("sequence should exist");
+            let time_base = sequence.time_base();
+            sequence.video_tracks[0]
+                .add_clip(Clip::new(asset_id, tt(0, time_base), tt(20, time_base)).expect("clip"))
+                .expect("add video clip");
+        }
 
-        child.video_tracks[0]
-            .add_clip(Clip::new(asset_id, tt(0, tb), tt(12, tb)).expect("valid clip"))
-            .expect("add media");
-        parent.video_tracks[0]
-            .add_clip(
-                Clip::new_nested_sequence(
-                    child.id,
-                    tt(0, tb),
-                    tt(12, tb),
-                    Some("child".to_string()),
-                )
-                .expect("valid clip"),
-            )
-            .expect("add nested");
+        let sequence = state.active_sequence().expect("sequence should exist").clone();
+        let snapshot = capture_timeline_export_snapshot(
+            &state,
+            sequence.clone(),
+            vec![sequence],
+            TimelineExportRange::EntireSequence,
+            false,
+        )
+        .expect("capture export snapshot");
+        let dependency = snapshot.media.get(&asset_id).expect("captured dependency");
+        assert_eq!(dependency.video_stream_index, Some(3));
 
-        let sequences = vec![parent.clone(), child];
-        let mut visited = HashSet::new();
-        let mut active = HashSet::new();
-        let mut assets = HashSet::new();
-        collect_sequence_asset_ids(&parent, &sequences, &mut visited, &mut active, &mut assets)
-            .expect("collect nested assets");
-
-        assert!(assets.contains(&asset_id));
+        let _ = std::fs::remove_dir_all(temp_root);
     }
 
     #[test]
@@ -639,6 +715,7 @@ mod tests {
             parent.clone(),
             vec![parent, child.clone(), unrelated],
             TimelineExportRange::EntireSequence,
+            false,
         )
         .expect("capture reachable closure");
 
@@ -680,10 +757,11 @@ mod tests {
             parent.clone(),
             vec![parent, child],
             TimelineExportRange::EntireSequence,
+            false,
         )
         .expect_err("recursive nesting must fail closed");
 
-        assert!(error.contains("循环"));
+        assert!(error.contains("cycle"));
     }
 
     #[test]
@@ -697,6 +775,7 @@ mod tests {
                 sequence_id: None,
                 range: TimelineExportRange::EntireSequence,
                 output_path: PathBuf::new(),
+                output_policy: ExportOutputPolicy::CreateNew,
             })
             .expect_err("empty output path should be rejected");
 
@@ -767,6 +846,7 @@ mod tests {
                 sequence_id: Some(SequenceId::new()),
                 range: TimelineExportRange::EntireSequence,
                 output_path: PathBuf::from("E:/renders/out.mp4"),
+                output_policy: ExportOutputPolicy::CreateNew,
             })
             .expect_err("stale explicit sequence id should be rejected");
 

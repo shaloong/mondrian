@@ -1,7 +1,7 @@
 //! Product Adapter for Timeline Lift and Extract commands.
 
 use super::AppState;
-use mondrian_core::{events::AppEvent, FrameRounding, MondrianError, TimelineTimeRange};
+use mondrian_core::{FrameRounding, MondrianError, TimelineTimeRange};
 use mondrian_timeline::{
     apply_range_edit, assess_range_edit, RangeEditAutomationPolicy, RangeEditKind,
     RangeEditOutcome, RangeEditRequest, RangeEditTimelineStatePolicy, RangeEditTransitionPolicy,
@@ -23,7 +23,7 @@ impl AppState {
     ) -> mondrian_core::Result<RangeEditOutcome> {
         let request = self.timeline_range_edit_request(kind)?;
         let range_start = request.range.start;
-        let (sequence_id, frame_rate, outcome) =
+        let (_sequence_id, frame_rate, outcome) =
             self.commit_active_sequence_edit(range_edit_description(kind), move |sequence| {
                 let outcome = apply_range_edit(sequence, &request)
                     .map_err(|error| range_edit_error(error.to_string()))?;
@@ -32,8 +32,7 @@ impl AppState {
 
         self.prune_selection_to_active_sequence();
         let frame = range_start.to_frame_position(frame_rate, FrameRounding::Nearest)?.frame.max(0);
-        self.seek(frame);
-        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+        self.reconcile_playhead_after_committed_authoring_change(frame, "timeline_range_edit");
         self.set_status_hint(range_edit_status(kind, &outcome), false);
         Ok(outcome)
     }

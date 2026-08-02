@@ -8,10 +8,11 @@ use crate::{clip::Clip, track::Track};
 use mondrian_core::{
     AudioChannelLayout, AudioChannelMixMatrix, AudioComponentEditId, AudioProcessingScopeId,
     AudioProcessorInstanceId, AudioRoleId, AudioRouteId, AudioSourceComponentId, AudioTransitionId,
-    AutomationSegmentInterpolation, ClipId, ExactAutomationCurve, MixBusId, ParameterCacheImpact,
-    ParameterId, ParameterInterpolation, ParameterInvalidValuePolicy, ParameterNumericContract,
-    ParameterNumericRange, ParameterSchema, ParameterUnit, ProgramOutputId, PropertyValue,
-    PropertyValueType, TimelineTime, TimelineTimeRange, TrackId,
+    AuthoringFootprint, AuthoringFootprintCollector, AuthoringFootprintError, AuthoringList,
+    AuthoringMap, AutomationSegmentInterpolation, ClipId, ExactAutomationCurve, MixBusId,
+    ParameterCacheImpact, ParameterId, ParameterInterpolation, ParameterInvalidValuePolicy,
+    ParameterNumericContract, ParameterNumericRange, ParameterSchema, ParameterUnit,
+    ProgramOutputId, PropertyValue, PropertyValueType, TimelineTime, TimelineTimeRange, TrackId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -202,23 +203,25 @@ pub struct AudioProcessorInstance {
     /// Explicit user bypass state.
     pub bypassed: bool,
     /// Definition snapshots and curves keyed by stable parameter identity.
-    pub parameters: BTreeMap<ParameterId, AudioProcessorParameter>,
+    /// The map detaches only when this processor's parameter state is edited.
+    pub parameters: AuthoringMap<ParameterId, AudioProcessorParameter>,
     /// Opaque, versioned plugin state preserved while a dependency is unavailable.
-    pub opaque_state: Option<Vec<u8>>,
+    /// Bytes remain structurally shared across immutable author snapshots.
+    pub opaque_state: Option<AuthoringList<u8>>,
 }
 
 impl AudioProcessorInstance {
     /// Create a built-in processor instance with its known definition schema.
     pub fn built_in(definition_id: impl Into<String>, schema_version: u32) -> Self {
         let definition_id = definition_id.into();
-        let mut parameters = BTreeMap::new();
+        let mut parameters = AuthoringMap::new();
         if definition_id == BUILTIN_GAIN_DEFINITION_ID && schema_version == 1 {
             let schema = gain_parameter_schema();
             let parameter_id = schema.parameter_id.clone();
             let automation = ExactAutomationCurve {
                 parameter_id: parameter_id.clone(),
                 default_value: 0.0,
-                keyframes: Vec::new(),
+                keyframes: AuthoringList::new(),
             };
             parameters.insert(parameter_id, AudioProcessorParameter { schema, automation });
         } else if definition_id == BUILTIN_SAMPLE_DELAY_DEFINITION_ID && schema_version == 1 {
@@ -227,7 +230,7 @@ impl AudioProcessorInstance {
             let automation = ExactAutomationCurve {
                 parameter_id: parameter_id.clone(),
                 default_value: 0.0,
-                keyframes: Vec::new(),
+                keyframes: AuthoringList::new(),
             };
             parameters.insert(parameter_id, AudioProcessorParameter { schema, automation });
         }
@@ -268,8 +271,8 @@ impl AudioProcessorInstance {
 /// An ordered processor chain. Order is author intent.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AudioProcessorRack {
-    /// Processors in signal-flow order.
-    pub processors: Vec<AudioProcessorInstance>,
+    /// Processors in signal-flow order, structurally shared until this Rack is edited.
+    pub processors: AuthoringList<AudioProcessorInstance>,
 }
 
 impl AudioProcessorRack {
@@ -670,17 +673,376 @@ pub struct AudioTransition {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioProgram {
     /// Non-placement Clip processing definitions.
-    pub processing_scopes: Vec<AudioProcessingScope>,
+    pub processing_scopes: AuthoringList<AudioProcessingScope>,
     /// Explicit two-input Transitions.
-    pub transitions: Vec<AudioTransition>,
+    pub transitions: AuthoringList<AudioTransition>,
     /// Mixer state for every and only audio Track in the owning Sequence.
-    pub track_channels: BTreeMap<TrackId, AudioTrackMixerChannel>,
+    /// Editing one channel detaches this map without copying unrelated Sequence
+    /// collections or immutable plugin payloads below its channel strips.
+    pub track_channels: AuthoringMap<TrackId, AudioTrackMixerChannel>,
     /// User-created intermediate Buses.
-    pub buses: Vec<AudioMixBus>,
+    pub buses: AuthoringList<AudioMixBus>,
     /// Stable public outputs.
-    pub outputs: Vec<AudioProgramOutput>,
+    pub outputs: AuthoringList<AudioProgramOutput>,
     /// Explicit typed Routes.
-    pub routes: Vec<AudioRoute>,
+    pub routes: AuthoringList<AudioRoute>,
+}
+
+impl AuthoringFootprint for AudioProcessorDefinitionRef {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        match self {
+            Self::BuiltIn { definition_id, schema_version: _ } => collector.collect(definition_id),
+            Self::Vst3 { class_id, vendor, schema_version: _ } => {
+                collector.collect(class_id)?;
+                collector.collect(vendor)
+            }
+            Self::Clap { plugin_id, schema_version: _ } => collector.collect(plugin_id),
+        }
+    }
+}
+
+impl AuthoringFootprint for AudioProcessorParameter {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self { schema, automation } = self;
+        collector.collect(schema)?;
+        collector.collect(automation)
+    }
+}
+
+impl AuthoringFootprint for AudioProcessorInstance {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self {
+            id: _,
+            definition,
+            bypassed: _,
+            parameters,
+            opaque_state,
+        } = self;
+        collector.collect(definition)?;
+        collector.collect(parameters)?;
+        collector.collect(opaque_state)
+    }
+}
+
+impl AuthoringFootprint for AudioProcessorRack {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self { processors } = self;
+        collector.collect(processors)
+    }
+}
+
+impl AuthoringFootprint for AudioChannelStrip {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self {
+            input_trim_db: _,
+            pre_fader,
+            fader_db: _,
+            fader_automation,
+            post_fader,
+        } = self;
+        collector.collect(pre_fader)?;
+        collector.collect(fader_automation)?;
+        collector.collect(post_fader)
+    }
+}
+
+impl AuthoringFootprint for AudioComponentSource {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        match self {
+            Self::Media { component_id: _ } | Self::NestedOutput { output_id: _ } => Ok(()),
+        }
+    }
+}
+
+impl AuthoringFootprint for AudioComponentChannelMapping {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        match self {
+            Self::Standard => Ok(()),
+            Self::Explicit(matrix) => collector.collect(matrix),
+        }
+    }
+}
+
+impl AuthoringFootprint for AudioProcessingBinding {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self { scope_id: _, scope_in: _ } = self;
+        Ok(())
+    }
+}
+
+impl AuthoringFootprint for AudioFadeCurve {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        match self {
+            Self::ConstantGain | Self::EqualPower => Ok(()),
+        }
+    }
+}
+
+impl AuthoringFootprint for AudioFade {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self { duration: _, curve } = self;
+        collector.collect(curve)
+    }
+}
+
+impl AuthoringFootprint for AudioClipFades {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self { fade_in, fade_out } = self;
+        collector.collect(fade_in)?;
+        collector.collect(fade_out)
+    }
+}
+
+impl AuthoringFootprint for AudioComponentEdit {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self {
+            id: _,
+            source,
+            channel_mapping,
+            role_id: _,
+            enabled: _,
+            local_time_in: _,
+            processing,
+            volume_db: _,
+            volume_automation,
+            pan: _,
+            pan_automation,
+            fades,
+        } = self;
+        collector.collect(source)?;
+        collector.collect(channel_mapping)?;
+        collector.collect(processing)?;
+        collector.collect(volume_automation)?;
+        collector.collect(pan_automation)?;
+        collector.collect(fades)
+    }
+}
+
+impl AuthoringFootprint for AudioProcessingScope {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self {
+            id: _,
+            input_gain_db: _,
+            input_gain_automation,
+            processors,
+        } = self;
+        collector.collect(input_gain_automation)?;
+        collector.collect(processors)
+    }
+}
+
+impl AuthoringFootprint for AudioTrackMixerChannel {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self { strip } = self;
+        collector.collect(strip)
+    }
+}
+
+impl AuthoringFootprint for AudioMixBus {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self { id: _, name, strip } = self;
+        collector.collect(name)?;
+        collector.collect(strip)
+    }
+}
+
+impl AuthoringFootprint for ProgramOutputMainSource {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        match self {
+            Self::RoutedInputs | Self::SemanticProjection { role_id: _ } => Ok(()),
+        }
+    }
+}
+
+impl AuthoringFootprint for AudioProgramOutput {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self { id: _, name, main_source, strip } = self;
+        collector.collect(name)?;
+        collector.collect(main_source)?;
+        collector.collect(strip)
+    }
+}
+
+impl AuthoringFootprint for AudioRole {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self { id: _, parent_id: _, name, standard_semantic_key } = self;
+        collector.collect(name)?;
+        collector.collect(standard_semantic_key)
+    }
+}
+
+impl AuthoringFootprint for AudioChannelStripOutputPort {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        match self {
+            Self::PreFader | Self::PostFaderPreMute | Self::PostMute => Ok(()),
+        }
+    }
+}
+
+impl AuthoringFootprint for AudioRouteSource {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        match self {
+            Self::Track { track_id: _, port: _ } | Self::Bus { bus_id: _, port: _ } => Ok(()),
+        }
+    }
+}
+
+impl AuthoringFootprint for AudioRouteDestination {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        match self {
+            Self::Bus(_) | Self::Output(_) => Ok(()),
+        }
+    }
+}
+
+impl AuthoringFootprint for AudioRoute {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self {
+            id: _,
+            source,
+            destination,
+            enabled: _,
+            gain_db: _,
+            gain_automation,
+        } = self;
+        collector.collect(source)?;
+        collector.collect(destination)?;
+        collector.collect(gain_automation)
+    }
+}
+
+impl AuthoringFootprint for AudioTransitionCurve {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        match self {
+            Self::ConstantGain | Self::EqualPower => Ok(()),
+        }
+    }
+}
+
+impl AuthoringFootprint for AudioTransition {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self { id: _, left: _, right: _, sequence_range: _, curve } = self;
+        collector.collect(curve)
+    }
+}
+
+impl AuthoringFootprint for AudioProgram {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self {
+            processing_scopes,
+            transitions,
+            track_channels,
+            buses,
+            outputs,
+            routes,
+        } = self;
+        collector.collect(processing_scopes)?;
+        collector.collect(transitions)?;
+        collector.collect(track_channels)?;
+        collector.collect(buses)?;
+        collector.collect(outputs)?;
+        collector.collect(routes)
+    }
+}
+
+fn audio_transition_fits_edit_ranges(
+    transition: &AudioTransition,
+    edit_ranges: &BTreeMap<AudioComponentEditId, TimelineTimeRange>,
+) -> bool {
+    let (Some(left), Some(right)) = (
+        edit_ranges.get(&transition.left),
+        edit_ranges.get(&transition.right),
+    ) else {
+        return false;
+    };
+    let Ok(transition_end) = transition.sequence_range.end() else {
+        return false;
+    };
+    let Ok(left_end) = left.end() else {
+        return false;
+    };
+    let Ok(right_end) = right.end() else {
+        return false;
+    };
+    transition.sequence_range.start >= left.start
+        && transition_end <= left_end
+        && transition.sequence_range.start >= right.start
+        && transition_end <= right_end
 }
 
 impl AudioProgram {
@@ -692,7 +1054,7 @@ impl AudioProgram {
             main_source: ProgramOutputMainSource::RoutedInputs,
             strip: AudioChannelStrip::default(),
         };
-        let mut track_channels = BTreeMap::new();
+        let mut track_channels = AuthoringMap::new();
         let mut routes = Vec::new();
         for track_id in track_ids {
             track_channels.insert(track_id, AudioTrackMixerChannel::default());
@@ -705,12 +1067,12 @@ impl AudioProgram {
             ));
         }
         Self {
-            processing_scopes: Vec::new(),
-            transitions: Vec::new(),
+            processing_scopes: AuthoringList::new(),
+            transitions: AuthoringList::new(),
             track_channels,
-            buses: Vec::new(),
-            outputs: vec![output],
-            routes,
+            buses: AuthoringList::new(),
+            outputs: AuthoringList::from(vec![output]),
+            routes: AuthoringList::from(routes),
         }
     }
 
@@ -764,28 +1126,17 @@ impl AudioProgram {
             .flat_map(|clip| &clip.audio_components)
             .map(|edit| edit.processing.scope_id)
             .collect::<BTreeSet<_>>();
-        self.transitions.retain(|transition| {
-            let (Some(left), Some(right)) = (
-                edit_ranges.get(&transition.left),
-                edit_ranges.get(&transition.right),
-            ) else {
-                return false;
-            };
-            let Ok(transition_end) = transition.sequence_range.end() else {
-                return false;
-            };
-            let Ok(left_end) = left.end() else {
-                return false;
-            };
-            let Ok(right_end) = right.end() else {
-                return false;
-            };
-            transition.sequence_range.start >= left.start
-                && transition_end <= left_end
-                && transition.sequence_range.start >= right.start
-                && transition_end <= right_end
-        });
-        self.processing_scopes.retain(|scope| scope_ids.contains(&scope.id));
+        if self
+            .transitions
+            .iter()
+            .any(|transition| !audio_transition_fits_edit_ranges(transition, &edit_ranges))
+        {
+            self.transitions
+                .retain(|transition| audio_transition_fits_edit_ranges(transition, &edit_ranges));
+        }
+        if self.processing_scopes.iter().any(|scope| !scope_ids.contains(&scope.id)) {
+            self.processing_scopes.retain(|scope| scope_ids.contains(&scope.id));
+        }
     }
 
     /// Validate the complete Sequence-local author closure against real Track/Clip placement.
@@ -1229,6 +1580,116 @@ mod tests {
     use super::*;
 
     #[test]
+    fn audio_cow_containers_preserve_json_and_detach_only_on_mutation() {
+        let mut processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        processor.definition = AudioProcessorDefinitionRef::Vst3 {
+            class_id: "00112233445566778899aabbccddeeff".to_owned(),
+            vendor: Some("Test Vendor".to_owned()),
+            schema_version: 7,
+        };
+        processor.opaque_state = Some(AuthoringList::from(vec![1, 2, 3, 4]));
+        let parameter_allocation = processor.parameters.allocation_id();
+        let opaque_allocation =
+            processor.opaque_state.as_ref().expect("opaque state").allocation_id();
+
+        let mut rack = AudioProcessorRack::default();
+        rack.processors.push(processor);
+        let processor_allocation = rack.processors.allocation_id();
+
+        let json = serde_json::to_vec(&rack).expect("serialize COW audio rack");
+        let json_value: serde_json::Value =
+            serde_json::from_slice(&json).expect("inspect COW audio JSON");
+        assert_eq!(
+            json_value["processors"][0]["opaque_state"],
+            serde_json::json!([1, 2, 3, 4])
+        );
+        assert!(json_value["processors"][0]["parameters"].is_object());
+        let restored: AudioProcessorRack =
+            serde_json::from_slice(&json).expect("deserialize COW audio rack");
+        assert_eq!(restored, rack);
+        assert_eq!(
+            serde_json::to_vec(&restored).expect("reserialize COW audio rack"),
+            json
+        );
+
+        let mut edited = rack.clone();
+        assert!(edited.processors.shares_allocation_with(&rack.processors));
+        assert!(edited.processors[0]
+            .parameters
+            .shares_allocation_with(&rack.processors[0].parameters));
+        assert!(edited.processors[0]
+            .opaque_state
+            .as_ref()
+            .expect("edited opaque state")
+            .shares_allocation_with(
+                rack.processors[0].opaque_state.as_ref().expect("original opaque state")
+            ));
+
+        edited.processors[0]
+            .parameters
+            .get_mut(&ParameterId::new_static(GAIN_DB_PARAMETER_ID))
+            .expect("gain parameter")
+            .automation
+            .default_value = 3.0;
+        edited.processors[0].opaque_state.as_mut().expect("edited opaque state").push(5);
+
+        assert_ne!(edited.processors.allocation_id(), processor_allocation);
+        assert_ne!(
+            edited.processors[0].parameters.allocation_id(),
+            parameter_allocation
+        );
+        assert_ne!(
+            edited.processors[0]
+                .opaque_state
+                .as_ref()
+                .expect("edited opaque state")
+                .allocation_id(),
+            opaque_allocation
+        );
+        assert_eq!(
+            rack.processors[0]
+                .parameters
+                .get(&ParameterId::new_static(GAIN_DB_PARAMETER_ID))
+                .expect("original gain parameter")
+                .automation
+                .default_value,
+            0.0
+        );
+        assert_eq!(
+            rack.processors[0]
+                .opaque_state
+                .as_deref()
+                .expect("original opaque state")
+                .as_slice(),
+            &[1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn track_channel_map_shares_until_one_channel_is_edited() {
+        let tracks = [TrackId::new(), TrackId::new()];
+        let original = AudioProgram::for_tracks(tracks);
+        let mut edited = original.clone();
+        assert!(edited.track_channels.shares_allocation_with(&original.track_channels));
+
+        edited
+            .track_channels
+            .get_mut(&tracks[0])
+            .expect("track channel")
+            .strip
+            .input_trim_db = -3.0;
+
+        assert!(!edited.track_channels.shares_allocation_with(&original.track_channels));
+        assert_eq!(original.track_channels[&tracks[0]].strip.input_trim_db, 0.0);
+        assert_eq!(edited.track_channels[&tracks[0]].strip.input_trim_db, -3.0);
+
+        let json = serde_json::to_vec(&edited).expect("serialize COW track-channel map");
+        let restored: AudioProgram =
+            serde_json::from_slice(&json).expect("deserialize COW track-channel map");
+        assert_eq!(restored, edited);
+    }
+
+    #[test]
     fn default_program_has_one_channel_and_post_mute_route_per_track() {
         let tracks = [TrackId::new(), TrackId::new()];
         let program = AudioProgram::for_tracks(tracks);
@@ -1492,6 +1953,59 @@ mod tests {
         program
             .validate(&[track], &[], AudioChannelLayout::Stereo)
             .expect("closed authoring");
+    }
+
+    #[test]
+    fn compact_for_tracks_preserves_valid_transition_and_scope_allocations() {
+        let mut track = Track::new_audio("Audio");
+        let scope = AudioProcessingScope::identity();
+        let mut left = Clip::new(
+            mondrian_core::AssetId::new(),
+            TimelineTime::ZERO,
+            TimelineTime::new(10, 1).expect("left duration"),
+        )
+        .expect("left Clip");
+        left.audio_components.push(AudioComponentEdit::media(
+            AudioSourceComponentId::primary(),
+            scope.id,
+        ));
+        let left_edit_id = left.audio_components[0].id;
+        let mut right = Clip::new(
+            mondrian_core::AssetId::new(),
+            TimelineTime::new(8, 1).expect("right position"),
+            TimelineTime::new(10, 1).expect("right duration"),
+        )
+        .expect("right Clip");
+        right.audio_components.push(AudioComponentEdit::media(
+            AudioSourceComponentId::primary(),
+            scope.id,
+        ));
+        let right_edit_id = right.audio_components[0].id;
+        track.add_clip(left).expect("left placement");
+        track.add_clip(right).expect("right placement");
+
+        let mut original = AudioProgram::for_tracks([track.id]);
+        original.add_processing_scope(scope);
+        original.transitions.push(AudioTransition {
+            id: AudioTransitionId::new(),
+            left: left_edit_id,
+            right: right_edit_id,
+            sequence_range: TimelineTimeRange::new(
+                TimelineTime::new(8, 1).expect("Transition start"),
+                TimelineTime::new(2, 1).expect("Transition duration"),
+            )
+            .expect("Transition range"),
+            curve: AudioTransitionCurve::EqualPower,
+        });
+        original
+            .validate(&[track.clone()], &[], AudioChannelLayout::Stereo)
+            .expect("valid source Audio Program");
+
+        let mut compacted = original.clone();
+        compacted.compact_for_tracks(&[track]);
+
+        assert!(compacted.transitions.shares_allocation_with(&original.transitions));
+        assert!(compacted.processing_scopes.shares_allocation_with(&original.processing_scopes));
     }
 
     #[test]

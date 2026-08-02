@@ -368,13 +368,13 @@ pub(super) fn estimate_asset_total_source_frames(
         }
     };
 
-    let frames_from_stream =
-        asset.media_info.estimated_frames().map(|v| v as i64).filter(|v| *v > 0);
+    let media_probe = asset.media_probe()?;
+    let frames_from_stream = media_probe.estimated_frames().map(|v| v as i64).filter(|v| *v > 0);
     if frames_from_stream.is_some() {
         return frames_from_stream;
     }
 
-    let duration_secs = asset.media_info.duration.as_secs_f64();
+    let duration_secs = media_probe.duration.as_secs_f64();
     if duration_secs <= 0.0 {
         return None;
     }
@@ -696,20 +696,6 @@ pub(super) fn compact_sequence_references(seq: &mut Sequence) {
     seq.compact_structural_references();
 }
 
-pub(super) fn remove_asset_clips_from_tracks(
-    tracks: &mut [mondrian_timeline::track::Track],
-    asset_id: AssetId,
-) -> mondrian_core::Result<usize> {
-    let mut removed = 0usize;
-    for track in tracks {
-        let before = track.clips.len();
-        track.clips.retain(|clip| clip.library_asset_id() != Some(asset_id));
-        removed += before.saturating_sub(track.clips.len());
-        resolve_track_overlaps(track)?;
-    }
-    Ok(removed)
-}
-
 pub(super) fn resolve_track_overlaps(
     track: &mut mondrian_timeline::track::Track,
 ) -> mondrian_core::Result<()> {
@@ -854,7 +840,7 @@ pub(super) fn apply_overwrite_conflicts(
         resolved.extend(segments);
     }
 
-    track.clips = resolved;
+    track.clips = resolved.into();
     track.clips.sort_by_key(|c| c.position);
     Ok(())
 }
@@ -890,21 +876,53 @@ pub(super) fn apply_track_conflicts_for_focus_group(
     if focus_ids.is_empty() {
         return Ok(());
     }
+    let focus_ranges = track
+        .clips
+        .iter()
+        .filter(|clip| focus_ids.contains(&clip.id))
+        .map(|clip| Ok((clip.position, clip.end_position()?)))
+        .collect::<mondrian_core::Result<Vec<_>>>()?;
+    if focus_ranges.is_empty() {
+        // A Track without a moved member is outside the mutation footprint.
+        // In particular, do not detach or sort its COW Clip storage.
+        return Ok(());
+    }
     match mode {
         ClipOverlapMode::PushForward => resolve_track_overlaps(track)?,
         ClipOverlapMode::Overwrite => {
-            let focus_ranges = track
-                .clips
-                .iter()
-                .filter(|clip| focus_ids.contains(&clip.id))
-                .map(|clip| Ok((clip.position, clip.end_position()?)))
-                .collect::<mondrian_core::Result<Vec<_>>>()?;
-            if focus_ranges.is_empty() {
-                track.clips.sort_by_key(|c| c.position);
-                return Ok(());
-            }
             apply_overwrite_conflicts(track, focus_ids, focus_ranges)?;
         }
+    }
+    Ok(())
+}
+
+pub(super) fn apply_sequence_track_conflicts_for_focus_group(
+    sequence: &mut Sequence,
+    focus_ids: &HashSet<ClipId>,
+    mode: ClipOverlapMode,
+) -> mondrian_core::Result<()> {
+    let video_indices = sequence
+        .video_tracks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, track)| {
+            track.clips.iter().any(|clip| focus_ids.contains(&clip.id)).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let audio_indices = sequence
+        .audio_tracks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, track)| {
+            track.clips.iter().any(|clip| focus_ids.contains(&clip.id)).then_some(index)
+        })
+        .collect::<Vec<_>>();
+
+    for index in video_indices {
+        apply_track_conflicts_for_focus_group(&mut sequence.video_tracks[index], focus_ids, mode)?;
+    }
+    for index in audio_indices {
+        apply_track_conflicts_for_focus_group(&mut sequence.audio_tracks[index], focus_ids, mode)?;
     }
     Ok(())
 }

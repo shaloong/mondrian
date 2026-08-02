@@ -16,7 +16,7 @@ use mondrian_ui_theme::{Theme, ThemePreset};
 use std::cell::Cell;
 
 /// Adapter that maps the current slider value to an editor [`Action`].
-pub type SliderChangeAction = dyn Fn(f32) -> Action;
+pub type SliderChangeAction = dyn Fn(f32) -> Option<Action>;
 
 /// Slider Widget —— 拖拽滑块控制数值
 pub struct Slider {
@@ -97,8 +97,12 @@ impl Slider {
     }
 
     /// Dispatch an action whenever user input changes the value.
-    pub fn on_change(mut self, action: impl Fn(f32) -> Action + 'static) -> Self {
-        self.on_change = Some(Box::new(action));
+    pub fn on_change<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(f32) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_change = Some(Box::new(move |value| action(value).into()));
         self
     }
 
@@ -164,7 +168,9 @@ impl Slider {
 
     fn dispatch_change(&self, ctx: &mut EventContext) {
         if let Some(action) = &self.on_change {
-            (ctx.dispatch)(action(self.value()));
+            if let Some(action) = action(self.value()) {
+                (ctx.dispatch)(action);
+            }
         }
     }
 

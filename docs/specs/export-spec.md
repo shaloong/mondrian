@@ -14,37 +14,59 @@ with its own intent and validation contract rather than a second branch inside
 
 ## Immutable submission
 
-`ExportConfig` contains exactly three authorities:
+`ExportConfig` contains exactly four authorities:
 
 - `ExportPreset`: container, video/audio codec settings, output resolution, and
   explicit `ExportColorTarget`, encoded signal representation, and Alpha
   delivery policy;
 - `TimelineExportSnapshot`: the immutable authoring and dependency closure;
-- `output_path`: the final deliverable name reserved by the queue.
+- `output_path`: the final deliverable name reserved by the queue;
+- `ExportOutputPolicy`: the final namespace policy frozen at admission.
 
-`TimelineExportSnapshot` contains the selected root Sequence, only the nested
-Sequences reachable from enabled Clips, the requested range, Project color
-management, and one `ExportMediaDependency` per reachable real media Asset.
+`ExportOutputPolicy::CreateNew` is the safe default. It requires the route to
+remain absent through the final atomic namespace operation, so an existing file
+or a file created by another actor during a long export wins the route.
+`OverwriteExisting` is explicit last-writer-wins authority over the direct file
+present at final publication time, or creates the route if it is still absent.
+It is not compare-and-swap against an object observed at admission. FFmpeg
+never receives either policy as `-y`/`-n`; it writes only the reserved sibling,
+and Mondrian applies the frozen policy after validation.
+
+`TimelineExportSnapshot` contains one selected root Sequence and range, the
+exact range-selected `PreparedVisualRangeClosure`, the selected Audio Program
+Output plus its exact compiled nested Program occurrences, the one Effect
+Definition Registry revision and Program set those captures bind, Project
+color management, and one internally consistent `ExportMediaDependency` per
+file-backed Asset selected by the union of visual and encoded-audio demand.
+The visual closure is derived from Prepared Visual Schedule interval queries,
+Transition/temporal expansion, and exact nesting/retime projection; it is not a
+second Export-owned Clip walker. Audio reachability follows routing and
+post-mute/output gating rather than media presence or visual visibility.
+
 Each media dependency binds the resolved path, `MediaFileFingerprint`, detected
 color evidence, persistent user interpretation, structured color diagnostic,
 and optional full source picture extent in one record. The extent is absent
-only for audio-only dependencies; a reachable picture plan without one fails
+only for audio-only dependencies; a selected picture plan without one fails
 closed. Parallel path/color/interpretation/geometry maps are forbidden because
 they permit internally inconsistent snapshots.
 
 Snapshot capture is an App-domain transaction performed before queue admission:
 
-- missing nested Sequence references and recursive Sequence nesting fail
-  closed;
+- missing or cyclic selected internal references, mixed Program/registry
+  revisions, and recursive depth overflow fail closed;
 - unrelated Project Sequences are not copied into the submission;
-- missing or offline real media fails before admission;
+- off-range, visually hidden, disabled, post-mute-gated, and non-encoded-audio
+  sources do not poison admission; missing or offline selected media does;
 - synthetic Adjustment Layers remain Timeline authoring data and do not create
   a filesystem dependency;
-- Basic Titles remain Sequence-local generated author data; their exact named
-  font dependency is resolved by the shared renderer during execution and a
-  missing/changed/undeclared fallback face fails the job closed;
+- Basic Titles remain Sequence-local generated author data. Queue admission
+  resolves and byte-freezes every selected exact named face under a separate
+  font grant; workers never query the live system catalog, and a
+  missing/changed/undeclared fallback face fails closed;
 - the admitted job remains valid after the live Project is edited or closed,
-  because it owns the frozen closure rather than reading mutable `AppState`.
+  the Effect Registry changes, or fonts are installed/removed, because it owns
+  the frozen Programs, media facts, and font bytes rather than reading mutable
+  `AppState`.
 
 The snapshot is an execution capture, not a persisted replacement for the
 Project document and not a compatibility boundary between releases.
@@ -163,8 +185,19 @@ Admission requirements are:
 - at most 64 Pending/Running/Cancelling jobs per queue;
 - one active owner for each normalized final output path, including lexical and
   canonical-parent aliases where the filesystem can resolve them;
-- a nonempty file-like output path;
+- a nonempty file-like output path whose parent already exists, is a directory,
+  and can be canonicalized;
+- an absent final route for `CreateNew`, or an absent/direct-file route for
+  `OverwriteExisting`; links, directories, and other non-file entries fail
+  closed;
 - an available worker and a unique nonzero monotonic attempt generation.
+
+Admission freezes the normalized route as an absolute path in both the heavy
+job and lightweight snapshot, together with the output policy. Execution and
+publication therefore cannot reinterpret a relative path after the process
+working directory changes or silently upgrade a create-only request to
+overwrite. Admission-time absence is only an early rejection: `CreateNew`
+enforces no-overwrite again at the atomic publication boundary.
 
 The App Adapter performs the same pure check before expensive media snapshot
 capture so the panel can explain an invalid choice immediately. That check is
@@ -197,12 +230,37 @@ frame counts.
 Cancellation uses `ExecutionCancellationToken`. A queued cancellation releases
 the heavy payload without crossing the execution boundary. A running request
 becomes `Cancelling` until the executor reaches a cooperative checkpoint.
-`JobExecutionResult` owns the irreversible publication boundary:
+The queue owns the irreversible publication boundary and exposes its state as
+`ExportPublicationState`:
 
-- `Cancelled` means cancellation was observed before publication;
-- `Failed` means no new deliverable was published;
-- `Completed` means the validated deliverable crossed the publication point and
-  must win over a cancellation request that arrived too late.
+- `Reversible` may still accept cancellation or resource yield;
+- `Committing` has atomically acquired irreversible publication authority;
+- `Published` requires durable publication evidence for the exact admitted
+  route;
+- `DurabilityUnconfirmed` proves the final route names the new object but not
+  that its containing-directory update survived a crash;
+- `NotPublished` proves that no irreversible deliverable namespace operation
+  completed, including a typed pre-namespace failure after the queue acquired
+  commit authority;
+- `OutcomeUnknown` conservatively represents a failure/panic after commit
+  authority when final-path observation is required.
+
+Cancellation in `Committing` returns
+`ExportCancelOutcome::TooLateCommitting` without setting the shared token or
+claiming cancellation success. An executor that reports `Published` without
+first entering the queue publication Gate fails closed.
+`JobExecutionResult::ReversibleWorkCompleted` is reserved for internal
+render/encode/validation sub-operations and is rejected as a terminal queue
+outcome; only `Published` can create a completed job. Likewise, an executor that
+reports `Cancelled` after the Gate becomes a structured failure with
+`OutcomeUnknown`, never false cancellation evidence.
+
+The public `ExportArtifactPublicationEvidence` records the corresponding
+artifact fact as exactly one of `Durable`, `BeforeNamespace`,
+`DurabilityUnconfirmed`, or `NamespaceIndeterminate`. Only `Durable` can
+authorize `Completed`. The other variants retain the absolute intended route
+and, when provable, the exact surviving partial-object route needed for
+diagnosis or an explicit retry policy.
 
 Every admitted terminal attempt records its generation, execution priority,
 terminal disposition, deadline status, timestamps, and whether worker execution
@@ -211,21 +269,53 @@ so terminal evidence records `NotApplicable` rather than fabricating one.
 Executor panics are isolated as structured failures and the worker continues to
 the next admitted job.
 
+## Exact partial-object and publication boundary
+
+FFmpeg never receives the final route. Export first asks `mondrian-storage` for
+one unique direct sibling file and releases that reservation to the external
+writer while retaining its kernel object identity and cleanup authority. After
+FFmpeg exits, Export reclaims the path only if it still names the reserved
+object. A missing, substituted, linked, or otherwise different object fails
+before validation and cannot be published.
+
+Validation runs while the reclaimed guard owns that exact object. After the
+Publishing Gate, the same guard maps `CreateNew` to Storage
+`FilePublicationMode::CreateNew` and `OverwriteExisting` to
+`FilePublicationMode::ReplaceExisting`. It delegates file flush, the atomic
+namespace operation, postcondition classification, and parent-directory
+durability to the single shared Storage primitive. Export contains no private
+`ReplaceFileW`, rename, or directory-sync implementation.
+
+If publication fails before the namespace boundary, the fully encoded and
+validated partial object is deliberately retained and named in terminal
+evidence; it is not silently deleted. A durability-unconfirmed result records
+the final route because the new namespace is already observable. An
+indeterminate result preserves every storage-observed possible new-object
+route and forbids automatic cleanup. These are failed jobs, not `Completed`
+jobs, even though retry/repair policy differs by variant.
+
 ## Media revision and color correctness
 
-Every real media dependency is checked against its admitted
-`MediaFileFingerprint` before preparation and again after validation immediately
-before publication. A missing, replaced, or modified source fails closed and the
-temporary output is discarded. This prevents a long export from publishing a
-mixture of author intent and silently changed source media.
+Every picture dependency freezes its exact physical video-stream index together
+with the admitted `MediaFileFingerprint`; missing bindings never fall back to
+stream zero. The fingerprint is checked before preparation, before decoder
+Session reuse/open, after frame materialization, and again after validation
+immediately before publication. The stream index and complete revision are
+also part of the decode-cache and returned-layer execution identity. A missing,
+replaced, modified, or invalidly bound source fails closed and the temporary
+output is discarded. This prevents a long export from publishing a mixture of
+author intent, silently changed source media, or the wrong stream.
 
 Preview and Export may differ in scheduling, cache lifetime, readback, and
 delivery transform. They must share Timeline ordering, nested Sequence
 semantics, exact time evaluation, processor/effect interpretation, audio
 schedule semantics, working-space compositing, and input-color resolution.
 One Export visual Session is reused across every frame, nested Sequence, and
-Transition endpoint so Basic Title font/raster identity and bounded cache
-lifetime are job-scoped rather than global or frame-local.
+Transition endpoint so Basic Title font/raster identity, explicit decoder
+Session/DPB residency, and bounded cache lifetime are job-scoped rather than
+global or frame-local. Terminal return and unwinding explicitly retire that
+decoder context; production Export never uses the media thread-local
+convenience decoder.
 Detected metadata absence invokes the authored missing-metadata policy; it never
 means implicit Rec.709. High-bit-depth output must cross the typed renderer
 float boundary and fails closed rather than manufacturing nominal 10/12-bit
@@ -245,20 +335,37 @@ count and semantic layout. Duration must remain within the explicit delivery
 tolerance. The same pass returns a typed `ExportOutputProbe` for Headless
 evidence; acceptance code must not reconstruct a second ffprobe policy.
 
-Only a validated partial may enter Publishing:
+Only a validated partial may enter Publishing. The shared Storage primitive
+flushes the exact source object, performs the frozen create-or-replace operation
+in the same directory, verifies the observed object identities, and establishes
+the containing-directory durability barrier. Platform mechanics remain
+Storage-owned and are specified by
+[Storage Publication](../architecture/storage-publication.md).
 
-- Windows uses the native write-through replace/move operation in the same
-  directory;
-- Unix-family platforms flush the temporary file, use same-filesystem atomic
-  rename, and attempt a containing-directory durability sync after the
-  irreversible commit; a directory-sync failure is reported as an operator
-  warning because it cannot truthfully undo the visible publication;
-- a missing/failed/cancelled partial never disturbs an existing deliverable;
-- temporary audio and output artifacts are cleaned on every non-success path.
+The result is not a boolean:
+
+- `Durable` proves the exact admitted final route names the validated object and
+  its namespace update crossed the durability barrier; only this result
+  authorizes `Completed`;
+- `BeforeNamespace` proves the new object did not become the final route. Export
+  retains the validated partial and reports its exact path; under `CreateNew`,
+  this includes a late target collision and the competing target is untouched;
+- `DurabilityUnconfirmed` proves the final route names the validated object but
+  not that the directory update survived a crash. The job fails and must not be
+  reported as completed merely because the file is visible;
+- `NamespaceIndeterminate` cannot prove whether the final route or a surviving
+  sibling names the new object. Export records every verified surviving route
+  available from Storage and forbids automatic cleanup or blind retry.
+
+A partial that fails before validation, or is cancelled before the Publishing
+Gate, is removed only while its retained object identity still proves ownership.
+The validated sibling is deliberately preserved on `BeforeNamespace`; unknown
+post-namespace state is quarantined rather than swept. Temporary audio is
+cleaned independently because it is never publication evidence.
 
 Cross-volume publication is structurally avoided by placing the partial beside
-the final path. Validation success is not reported as job completion until the
-publication operation succeeds.
+the final path. Validation success or namespace visibility is not reported as
+job completion until durable publication evidence exists.
 
 ## UI and Headless boundary
 

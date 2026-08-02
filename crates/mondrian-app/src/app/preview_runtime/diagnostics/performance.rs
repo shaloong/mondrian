@@ -132,6 +132,7 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
     let mut root_causes = Vec::new();
     let mut actions = Vec::new();
     let required_access_modes = required_access_modes.to_vec();
+    let policy = preview_decode_performance_policy(slow_frame_budget_us, &required_access_modes);
 
     push_decode_bool_check(
         &mut checks,
@@ -155,19 +156,32 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
             summary.max_frame_stage_durations,
             summary.max_frame_queue_wait_us,
         );
+        push_decode_exact_check(
+            &mut checks,
+            PreviewDecodePerformanceArea::CaptureIntegrity,
+            "preview_decode_access_mode_success_accounting",
+            summary.access_mode_profiles.total_frames(),
+            summary.decode_successes.saturating_sub(summary.startup_preroll_frames),
+        );
         push_decode_max_check(
             &mut checks,
-            PreviewDecodePerformanceArea::LatencyBudget,
-            "preview_decode_max_frame_us",
-            summary.max_duration_us,
-            slow_frame_budget_us,
+            PreviewDecodePerformanceArea::CaptureIntegrity,
+            "preview_decode_startup_preroll_success_accounting",
+            summary.startup_preroll_frames,
+            summary.decode_successes,
         );
         push_preview_decode_access_mode_coverage_checks(
             &mut checks,
             summary,
             &required_access_modes,
         );
-        push_preview_decode_access_mode_checks(&mut checks, summary, slow_frame_budget_us);
+        push_preview_decode_work_class_checks(&mut checks, summary, &policy);
+        push_preview_decode_session_churn_checks(&mut checks, summary, &policy);
+        push_preview_decode_access_mode_operational_checks(
+            &mut checks,
+            summary,
+            policy.queue_wait_budget_us,
+        );
         push_decode_max_check(
             &mut checks,
             PreviewDecodePerformanceArea::LatencyBudget,
@@ -200,9 +214,7 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
             &mut checks,
             PreviewDecodePerformanceArea::ProxyCache,
             "preview_decode_cache_hit_frames",
-            summary
-                .cache_hit_frames
-                .saturating_add(summary.playback_session_ring_hit_frames),
+            summary.playback_session_ring_hit_frames,
             1,
         );
         push_decode_warn_max_check(
@@ -314,9 +326,9 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
         push_decode_max_check(
             &mut checks,
             PreviewDecodePerformanceArea::Scheduling,
-            "preview_decode_cancel_observation_max_us",
-            summary.cancellation.all.request_to_checkpoint.max_us,
-            cancellation_policy.max_request_to_checkpoint.as_micros() as u64,
+            "preview_decode_logical_cancel_observation_max_us",
+            summary.cancellation.all.request_to_logical_cancellation.max_us,
+            cancellation_policy.max_request_to_logical_cancellation.as_micros() as u64,
         );
         push_decode_max_check(
             &mut checks,
@@ -334,29 +346,29 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
                 .all
                 .cancellations
                 .saturating_sub(summary.cancellation.all.unknown)
-                .saturating_sub(summary.cancellation.all.request_to_checkpoint.samples),
+                .saturating_sub(summary.cancellation.all.request_to_logical_cancellation.samples),
             0,
         );
         push_decode_max_check(
             &mut checks,
             PreviewDecodePerformanceArea::Scheduling,
             "preview_decode_playback_cancel_return_latency_max_us",
-            summary.cancellation.playback.checkpoint_to_return.max_us,
-            cancellation_policy.max_playback_return.as_micros() as u64,
+            summary.cancellation.playback.logical_cancellation_to_return.max_us,
+            cancellation_policy.max_playback_logical_cancellation_to_return.as_micros() as u64,
         );
         push_decode_max_check(
             &mut checks,
             PreviewDecodePerformanceArea::Scheduling,
             "preview_decode_interactive_cancel_return_latency_max_us",
-            summary.cancellation.interactive.checkpoint_to_return.max_us,
-            cancellation_policy.max_interactive_return.as_micros() as u64,
+            summary.cancellation.interactive.logical_cancellation_to_return.max_us,
+            cancellation_policy.max_interactive_logical_cancellation_to_return.as_micros() as u64,
         );
         push_decode_max_check(
             &mut checks,
             PreviewDecodePerformanceArea::Scheduling,
             "preview_decode_still_cancel_return_latency_max_us",
-            summary.cancellation.still.checkpoint_to_return.max_us,
-            cancellation_policy.max_still_return.as_micros() as u64,
+            summary.cancellation.still.logical_cancellation_to_return.max_us,
+            cancellation_policy.max_still_logical_cancellation_to_return.as_micros() as u64,
         );
         push_decode_max_check(
             &mut checks,
@@ -396,6 +408,7 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
 
         push_preview_decode_root_causes_and_actions(
             summary,
+            &policy,
             &required_access_modes,
             &mut root_causes,
             &mut actions,
@@ -407,6 +420,7 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
             profile: profile.into(),
             verdict,
             required_access_modes,
+            policy,
             summary: Some(summary),
             checks,
             root_causes,
@@ -431,6 +445,7 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
         profile: profile.into(),
         verdict,
         required_access_modes,
+        policy,
         summary: None,
         checks,
         root_causes,
@@ -528,6 +543,46 @@ fn push_decode_max_check(
     });
 }
 
+fn push_decode_min_check(
+    checks: &mut Vec<PreviewDecodePerformanceCheck>,
+    area: PreviewDecodePerformanceArea,
+    code: &'static str,
+    observed: u64,
+    limit: u64,
+) {
+    checks.push(PreviewDecodePerformanceCheck {
+        area,
+        code,
+        severity: if observed < limit {
+            PreviewDecodePerformanceSeverity::Fail
+        } else {
+            PreviewDecodePerformanceSeverity::Pass
+        },
+        observed,
+        limit: Some(limit),
+    });
+}
+
+fn push_decode_exact_check(
+    checks: &mut Vec<PreviewDecodePerformanceCheck>,
+    area: PreviewDecodePerformanceArea,
+    code: &'static str,
+    observed: u64,
+    expected: u64,
+) {
+    checks.push(PreviewDecodePerformanceCheck {
+        area,
+        code,
+        severity: if observed == expected {
+            PreviewDecodePerformanceSeverity::Pass
+        } else {
+            PreviewDecodePerformanceSeverity::Fail
+        },
+        observed,
+        limit: Some(expected),
+    });
+}
+
 fn push_decode_warn_max_check(
     checks: &mut Vec<PreviewDecodePerformanceCheck>,
     area: PreviewDecodePerformanceArea,
@@ -587,87 +642,297 @@ fn push_decode_bool_check(
     });
 }
 
-fn push_preview_decode_access_mode_checks(
+fn preview_decode_performance_policy(
+    slow_frame_budget_us: u64,
+    required_access_modes: &[PreviewDecodeAccessMode],
+) -> PreviewDecodePerformancePolicy {
+    const ACCESS_MODES: [PreviewDecodeAccessMode; 3] = [
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeAccessMode::ScrubCursor,
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+    ];
+    const WORK_CLASSES: [PreviewDecodeWorkClass; 7] = [
+        PreviewDecodeWorkClass::CacheHit,
+        PreviewDecodeWorkClass::SessionOpened,
+        PreviewDecodeWorkClass::SessionReplaced,
+        PreviewDecodeWorkClass::ForwardSteady,
+        PreviewDecodeWorkClass::ReusedSeek,
+        PreviewDecodeWorkClass::ReusedOther,
+        PreviewDecodeWorkClass::Unclassified,
+    ];
+    const REUSED_SEEK_BUDGET_US: u64 = 500_000;
+
+    let mut work_budgets = Vec::with_capacity(ACCESS_MODES.len() * WORK_CLASSES.len());
+    for access_mode in ACCESS_MODES {
+        let required = required_access_modes.contains(&access_mode);
+        for work_class in WORK_CLASSES {
+            let min_samples = match (required, access_mode, work_class) {
+                (
+                    true,
+                    PreviewDecodeAccessMode::PlaybackCursor,
+                    PreviewDecodeWorkClass::ForwardSteady,
+                ) => 4,
+                (
+                    true,
+                    PreviewDecodeAccessMode::ScrubCursor
+                    | PreviewDecodeAccessMode::RandomAccessStillFrame,
+                    PreviewDecodeWorkClass::ReusedSeek,
+                ) => 1,
+                _ => 0,
+            };
+            let (max_worker_execution_us, p95_worker_execution_us) = match work_class {
+                PreviewDecodeWorkClass::SessionOpened | PreviewDecodeWorkClass::SessionReplaced => {
+                    (PREVIEW_DECODE_DEFAULT_SESSION_OPEN_BUDGET_US, None)
+                }
+                PreviewDecodeWorkClass::ReusedSeek => {
+                    (REUSED_SEEK_BUDGET_US, Some(REUSED_SEEK_BUDGET_US))
+                }
+                PreviewDecodeWorkClass::Unclassified => (0, None),
+                PreviewDecodeWorkClass::CacheHit
+                | PreviewDecodeWorkClass::ForwardSteady
+                | PreviewDecodeWorkClass::ReusedOther => {
+                    (slow_frame_budget_us, Some(slow_frame_budget_us))
+                }
+            };
+            work_budgets.push(PreviewDecodeWorkBudget {
+                access_mode,
+                work_class,
+                min_samples,
+                max_worker_execution_us,
+                p95_worker_execution_us,
+            });
+        }
+    }
+
+    PreviewDecodePerformancePolicy {
+        work_budgets,
+        queue_wait_budget_us: slow_frame_budget_us,
+        session_churn_grace_frames: 2,
+        max_session_churn_basis_points: 2_500,
+    }
+}
+
+fn push_preview_decode_work_class_checks(
     checks: &mut Vec<PreviewDecodePerformanceCheck>,
     summary: PreviewDecodePerformanceSummary,
-    slow_frame_budget_us: u64,
+    policy: &PreviewDecodePerformancePolicy,
 ) {
     for (access_mode, profile) in summary.access_mode_profiles.named_profiles() {
-        if profile.frames == 0 && profile.queue_wait_max_us == 0 {
+        if profile.frames > 0 {
+            push_decode_exact_check(
+                checks,
+                PreviewDecodePerformanceArea::CaptureIntegrity,
+                preview_decode_work_class_accounting_code(access_mode),
+                profile.work_classes.total_frames(),
+                profile.frames,
+            );
+            push_decode_exact_check(
+                checks,
+                PreviewDecodePerformanceArea::CaptureIntegrity,
+                preview_decode_lifecycle_accounting_code(access_mode),
+                profile.successful_lifecycle_frames(),
+                profile.frames,
+            );
+            push_decode_min_check(
+                checks,
+                PreviewDecodePerformanceArea::CaptureIntegrity,
+                preview_decode_queue_wait_coverage_code(access_mode),
+                profile.queue_wait_samples,
+                profile.frames,
+            );
+        }
+        push_decode_exact_check(
+            checks,
+            PreviewDecodePerformanceArea::CaptureIntegrity,
+            preview_decode_queue_wait_histogram_accounting_code(access_mode),
+            profile.queue_wait_buckets.total(),
+            profile.queue_wait_samples,
+        );
+        push_decode_exact_check(
+            checks,
+            PreviewDecodePerformanceArea::CaptureIntegrity,
+            preview_decode_expired_queue_wait_histogram_accounting_code(access_mode),
+            profile.expired_queue_wait.buckets.total(),
+            profile.expired_queue_wait.samples,
+        );
+        push_decode_exact_check(
+            checks,
+            PreviewDecodePerformanceArea::CaptureIntegrity,
+            preview_decode_canceled_session_open_accounting_code(access_mode),
+            profile
+                .canceled_session_opened_attempts
+                .saturating_add(profile.canceled_session_replaced_attempts),
+            profile.canceled_session_open_attempts,
+        );
+    }
+    push_decode_exact_check(
+        checks,
+        PreviewDecodePerformanceArea::CaptureIntegrity,
+        "preview_decode_expired_queue_wait_histogram_samples",
+        summary.expired_queue_wait.buckets.total(),
+        summary.expired_queue_wait.samples,
+    );
+    push_decode_exact_check(
+        checks,
+        PreviewDecodePerformanceArea::CaptureIntegrity,
+        "preview_decode_expired_queue_wait_access_mode_samples",
+        summary.access_mode_profiles.total_expired_queue_wait_samples(),
+        summary.expired_queue_wait.samples,
+    );
+
+    for budget in &policy.work_budgets {
+        let access_profile = summary.access_mode_profiles.profile_for(budget.access_mode);
+        let profile = access_profile.work_classes.profile(budget.work_class);
+        let codes = preview_decode_work_check_codes(budget.access_mode, budget.work_class);
+        push_decode_exact_check(
+            checks,
+            PreviewDecodePerformanceArea::CaptureIntegrity,
+            codes.histogram_samples,
+            profile.latency_buckets.total(),
+            profile.frames,
+        );
+
+        if budget.work_class == PreviewDecodeWorkClass::Unclassified {
+            push_decode_max_check(
+                checks,
+                PreviewDecodePerformanceArea::CaptureIntegrity,
+                codes.samples,
+                profile.frames,
+                0,
+            );
+        } else if budget.min_samples > 0 {
+            push_decode_min_check(
+                checks,
+                PreviewDecodePerformanceArea::CaptureIntegrity,
+                codes.samples,
+                profile.frames,
+                budget.min_samples,
+            );
+        }
+        if profile.frames == 0 {
             continue;
         }
-        if profile.frames > 0 {
-            let p95_upper_bound_us = profile.latency_buckets.estimated_p95_upper_bound_us();
+
+        push_decode_max_check(
+            checks,
+            PreviewDecodePerformanceArea::AccessMode,
+            codes.max_worker_execution,
+            profile.max_duration_us,
+            budget.max_worker_execution_us,
+        );
+        if let Some(p95_budget_us) = budget.p95_worker_execution_us {
+            let p95_upper_bound_us = profile.latency_buckets.p95_upper_bound_us();
             checks.push(PreviewDecodePerformanceCheck {
                 area: PreviewDecodePerformanceArea::AccessMode,
-                code: preview_decode_access_mode_budget_code(access_mode),
-                severity: if profile.max_duration_us > slow_frame_budget_us {
-                    PreviewDecodePerformanceSeverity::Fail
-                } else {
-                    PreviewDecodePerformanceSeverity::Pass
-                },
-                observed: profile.max_duration_us,
-                limit: Some(slow_frame_budget_us),
-            });
-            checks.push(PreviewDecodePerformanceCheck {
-                area: PreviewDecodePerformanceArea::AccessMode,
-                code: preview_decode_access_mode_p95_budget_code(access_mode),
-                severity: if p95_upper_bound_us > slow_frame_budget_us {
-                    PreviewDecodePerformanceSeverity::Fail
-                } else {
-                    PreviewDecodePerformanceSeverity::Pass
-                },
-                observed: p95_upper_bound_us,
-                limit: Some(slow_frame_budget_us),
-            });
-            if access_mode == PreviewDecodeAccessMode::ScrubCursor {
-                checks.push(PreviewDecodePerformanceCheck {
-                    area: PreviewDecodePerformanceArea::AccessMode,
-                    code: "preview_decode_scrub_cursor_bounded_any_seek_strategy",
-                    severity: if profile.bounded_any_seek_strategy_frames == profile.frames {
+                code: codes.p95_worker_execution,
+                severity: match p95_upper_bound_us {
+                    Some(observed) if observed <= p95_budget_us => {
                         PreviewDecodePerformanceSeverity::Pass
-                    } else {
-                        PreviewDecodePerformanceSeverity::Fail
-                    },
-                    observed: profile.bounded_any_seek_strategy_frames,
-                    limit: Some(profile.frames),
-                });
-                checks.push(PreviewDecodePerformanceCheck {
-                    area: PreviewDecodePerformanceArea::AccessMode,
-                    code: "preview_decode_scrub_cursor_any_seek_window_ms",
-                    severity: if profile.any_seek_window_ms_max > 0 {
-                        PreviewDecodePerformanceSeverity::Pass
-                    } else {
-                        PreviewDecodePerformanceSeverity::Fail
-                    },
-                    observed: profile.any_seek_window_ms_max,
-                    limit: Some(1),
-                });
-            }
+                    }
+                    Some(_) | None => PreviewDecodePerformanceSeverity::Fail,
+                },
+                // `None` means the p95 rank is in the open >5 s bucket. The
+                // finite maximum is still real evidence and never masquerades
+                // as an upper bound for that quantile.
+                observed: p95_upper_bound_us.unwrap_or(profile.max_duration_us),
+                limit: Some(p95_budget_us),
+            });
         }
-        let queue_wait_p95_upper_bound_us =
-            profile.queue_wait_buckets.estimated_p95_upper_bound_us();
+    }
+}
+
+fn push_preview_decode_session_churn_checks(
+    checks: &mut Vec<PreviewDecodePerformanceCheck>,
+    summary: PreviewDecodePerformanceSummary,
+    policy: &PreviewDecodePerformancePolicy,
+) {
+    for (access_mode, profile) in summary.access_mode_profiles.named_profiles() {
+        let attempts = profile.session_churn_attempts();
+        if attempts == 0 {
+            continue;
+        }
+        let ratio_allowance = attempts
+            .saturating_mul(policy.max_session_churn_basis_points)
+            .saturating_add(9_999)
+            / 10_000;
+        let allowed = policy.session_churn_grace_frames.max(ratio_allowance);
+        push_decode_max_check(
+            checks,
+            PreviewDecodePerformanceArea::AccessMode,
+            preview_decode_session_churn_code(access_mode),
+            profile.session_churn_events(),
+            allowed,
+        );
+        push_decode_max_check(
+            checks,
+            PreviewDecodePerformanceArea::AccessMode,
+            preview_decode_canceled_session_open_max_code(access_mode),
+            profile.canceled_session_open_max_duration_us,
+            PREVIEW_DECODE_DEFAULT_SESSION_OPEN_BUDGET_US,
+        );
+    }
+}
+
+fn push_preview_decode_access_mode_operational_checks(
+    checks: &mut Vec<PreviewDecodePerformanceCheck>,
+    summary: PreviewDecodePerformanceSummary,
+    queue_wait_budget_us: u64,
+) {
+    for (access_mode, profile) in summary.access_mode_profiles.named_profiles() {
+        if profile.frames == 0 && profile.queue_wait_samples == 0 {
+            continue;
+        }
+        if profile.frames > 0 && access_mode == PreviewDecodeAccessMode::ScrubCursor {
+            checks.push(PreviewDecodePerformanceCheck {
+                area: PreviewDecodePerformanceArea::AccessMode,
+                code: "preview_decode_scrub_cursor_bounded_any_seek_strategy",
+                severity: if profile.bounded_any_seek_strategy_frames == profile.frames {
+                    PreviewDecodePerformanceSeverity::Pass
+                } else {
+                    PreviewDecodePerformanceSeverity::Fail
+                },
+                observed: profile.bounded_any_seek_strategy_frames,
+                limit: Some(profile.frames),
+            });
+            checks.push(PreviewDecodePerformanceCheck {
+                area: PreviewDecodePerformanceArea::AccessMode,
+                code: "preview_decode_scrub_cursor_any_seek_window_ms",
+                severity: if profile.any_seek_window_ms_max > 0 {
+                    PreviewDecodePerformanceSeverity::Pass
+                } else {
+                    PreviewDecodePerformanceSeverity::Fail
+                },
+                observed: profile.any_seek_window_ms_max,
+                limit: Some(1),
+            });
+        }
         checks.push(PreviewDecodePerformanceCheck {
             area: PreviewDecodePerformanceArea::AccessMode,
             code: preview_decode_access_mode_queue_wait_budget_code(access_mode),
-            severity: if profile.queue_wait_max_us > slow_frame_budget_us {
+            severity: if profile.queue_wait_max_us > queue_wait_budget_us {
                 PreviewDecodePerformanceSeverity::Warn
             } else {
                 PreviewDecodePerformanceSeverity::Pass
             },
             observed: profile.queue_wait_max_us,
-            limit: Some(slow_frame_budget_us),
+            limit: Some(queue_wait_budget_us),
         });
+        let queue_wait_p95_upper_bound_us =
+            profile.queue_wait_buckets.estimated_p95_upper_bound_us();
         checks.push(PreviewDecodePerformanceCheck {
             area: PreviewDecodePerformanceArea::AccessMode,
             code: preview_decode_access_mode_queue_wait_p95_budget_code(access_mode),
-            severity: if queue_wait_p95_upper_bound_us > slow_frame_budget_us {
-                PreviewDecodePerformanceSeverity::Warn
-            } else {
-                PreviewDecodePerformanceSeverity::Pass
+            severity: match queue_wait_p95_upper_bound_us {
+                Some(observed) if observed <= queue_wait_budget_us => {
+                    PreviewDecodePerformanceSeverity::Pass
+                }
+                Some(_) | None => PreviewDecodePerformanceSeverity::Warn,
             },
-            observed: queue_wait_p95_upper_bound_us,
-            limit: Some(slow_frame_budget_us),
+            // If the p95 rank falls into the open >80 ms interval, use the
+            // measured finite maximum as evidence; it is not described as a
+            // quantile upper bound.
+            observed: queue_wait_p95_upper_bound_us.unwrap_or(profile.queue_wait_max_us),
+            limit: Some(queue_wait_budget_us),
         });
     }
 }
@@ -696,12 +961,223 @@ fn push_preview_decode_access_mode_coverage_checks(
     }
 }
 
-fn preview_decode_access_mode_budget_code(access_mode: PreviewDecodeAccessMode) -> &'static str {
+#[derive(Clone, Copy)]
+struct PreviewDecodeWorkCheckCodes {
+    samples: &'static str,
+    histogram_samples: &'static str,
+    max_worker_execution: &'static str,
+    p95_worker_execution: &'static str,
+}
+
+macro_rules! preview_decode_work_check_codes {
+    ($mode:literal, $class:literal) => {
+        PreviewDecodeWorkCheckCodes {
+            samples: concat!("preview_decode_", $mode, "_", $class, "_samples"),
+            histogram_samples: concat!("preview_decode_", $mode, "_", $class, "_histogram_samples"),
+            max_worker_execution: concat!(
+                "preview_decode_",
+                $mode,
+                "_",
+                $class,
+                "_max_worker_execution_us"
+            ),
+            p95_worker_execution: concat!(
+                "preview_decode_",
+                $mode,
+                "_",
+                $class,
+                "_p95_worker_execution_us"
+            ),
+        }
+    };
+}
+
+fn preview_decode_work_check_codes(
+    access_mode: PreviewDecodeAccessMode,
+    work_class: PreviewDecodeWorkClass,
+) -> PreviewDecodeWorkCheckCodes {
+    match (access_mode, work_class) {
+        (PreviewDecodeAccessMode::PlaybackCursor, PreviewDecodeWorkClass::CacheHit) => {
+            preview_decode_work_check_codes!("playback_cursor", "cache_hit")
+        }
+        (PreviewDecodeAccessMode::PlaybackCursor, PreviewDecodeWorkClass::SessionOpened) => {
+            preview_decode_work_check_codes!("playback_cursor", "session_opened")
+        }
+        (PreviewDecodeAccessMode::PlaybackCursor, PreviewDecodeWorkClass::SessionReplaced) => {
+            preview_decode_work_check_codes!("playback_cursor", "session_replaced")
+        }
+        (PreviewDecodeAccessMode::PlaybackCursor, PreviewDecodeWorkClass::ForwardSteady) => {
+            preview_decode_work_check_codes!("playback_cursor", "forward_steady")
+        }
+        (PreviewDecodeAccessMode::PlaybackCursor, PreviewDecodeWorkClass::ReusedSeek) => {
+            preview_decode_work_check_codes!("playback_cursor", "reused_seek")
+        }
+        (PreviewDecodeAccessMode::PlaybackCursor, PreviewDecodeWorkClass::ReusedOther) => {
+            preview_decode_work_check_codes!("playback_cursor", "reused_other")
+        }
+        (PreviewDecodeAccessMode::PlaybackCursor, PreviewDecodeWorkClass::Unclassified) => {
+            preview_decode_work_check_codes!("playback_cursor", "unclassified")
+        }
+        (PreviewDecodeAccessMode::ScrubCursor, PreviewDecodeWorkClass::CacheHit) => {
+            preview_decode_work_check_codes!("scrub_cursor", "cache_hit")
+        }
+        (PreviewDecodeAccessMode::ScrubCursor, PreviewDecodeWorkClass::SessionOpened) => {
+            preview_decode_work_check_codes!("scrub_cursor", "session_opened")
+        }
+        (PreviewDecodeAccessMode::ScrubCursor, PreviewDecodeWorkClass::SessionReplaced) => {
+            preview_decode_work_check_codes!("scrub_cursor", "session_replaced")
+        }
+        (PreviewDecodeAccessMode::ScrubCursor, PreviewDecodeWorkClass::ForwardSteady) => {
+            preview_decode_work_check_codes!("scrub_cursor", "forward_steady")
+        }
+        (PreviewDecodeAccessMode::ScrubCursor, PreviewDecodeWorkClass::ReusedSeek) => {
+            preview_decode_work_check_codes!("scrub_cursor", "reused_seek")
+        }
+        (PreviewDecodeAccessMode::ScrubCursor, PreviewDecodeWorkClass::ReusedOther) => {
+            preview_decode_work_check_codes!("scrub_cursor", "reused_other")
+        }
+        (PreviewDecodeAccessMode::ScrubCursor, PreviewDecodeWorkClass::Unclassified) => {
+            preview_decode_work_check_codes!("scrub_cursor", "unclassified")
+        }
+        (PreviewDecodeAccessMode::RandomAccessStillFrame, PreviewDecodeWorkClass::CacheHit) => {
+            preview_decode_work_check_codes!("random_access_still", "cache_hit")
+        }
+        (
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            PreviewDecodeWorkClass::SessionOpened,
+        ) => preview_decode_work_check_codes!("random_access_still", "session_opened"),
+        (
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            PreviewDecodeWorkClass::SessionReplaced,
+        ) => preview_decode_work_check_codes!("random_access_still", "session_replaced"),
+        (
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            PreviewDecodeWorkClass::ForwardSteady,
+        ) => preview_decode_work_check_codes!("random_access_still", "forward_steady"),
+        (PreviewDecodeAccessMode::RandomAccessStillFrame, PreviewDecodeWorkClass::ReusedSeek) => {
+            preview_decode_work_check_codes!("random_access_still", "reused_seek")
+        }
+        (PreviewDecodeAccessMode::RandomAccessStillFrame, PreviewDecodeWorkClass::ReusedOther) => {
+            preview_decode_work_check_codes!("random_access_still", "reused_other")
+        }
+        (PreviewDecodeAccessMode::RandomAccessStillFrame, PreviewDecodeWorkClass::Unclassified) => {
+            preview_decode_work_check_codes!("random_access_still", "unclassified")
+        }
+    }
+}
+
+fn preview_decode_session_churn_code(access_mode: PreviewDecodeAccessMode) -> &'static str {
     match access_mode {
-        PreviewDecodeAccessMode::PlaybackCursor => "preview_decode_playback_cursor_max_frame_us",
-        PreviewDecodeAccessMode::ScrubCursor => "preview_decode_scrub_cursor_max_frame_us",
+        PreviewDecodeAccessMode::PlaybackCursor => {
+            "preview_decode_playback_cursor_session_churn_frames"
+        }
+        PreviewDecodeAccessMode::ScrubCursor => "preview_decode_scrub_cursor_session_churn_frames",
         PreviewDecodeAccessMode::RandomAccessStillFrame => {
-            "preview_decode_random_access_still_max_frame_us"
+            "preview_decode_random_access_still_session_churn_frames"
+        }
+    }
+}
+
+fn preview_decode_work_class_accounting_code(access_mode: PreviewDecodeAccessMode) -> &'static str {
+    match access_mode {
+        PreviewDecodeAccessMode::PlaybackCursor => {
+            "preview_decode_playback_cursor_work_class_accounted_frames"
+        }
+        PreviewDecodeAccessMode::ScrubCursor => {
+            "preview_decode_scrub_cursor_work_class_accounted_frames"
+        }
+        PreviewDecodeAccessMode::RandomAccessStillFrame => {
+            "preview_decode_random_access_still_work_class_accounted_frames"
+        }
+    }
+}
+
+fn preview_decode_lifecycle_accounting_code(access_mode: PreviewDecodeAccessMode) -> &'static str {
+    match access_mode {
+        PreviewDecodeAccessMode::PlaybackCursor => {
+            "preview_decode_playback_cursor_lifecycle_accounted_frames"
+        }
+        PreviewDecodeAccessMode::ScrubCursor => {
+            "preview_decode_scrub_cursor_lifecycle_accounted_frames"
+        }
+        PreviewDecodeAccessMode::RandomAccessStillFrame => {
+            "preview_decode_random_access_still_lifecycle_accounted_frames"
+        }
+    }
+}
+
+fn preview_decode_queue_wait_coverage_code(access_mode: PreviewDecodeAccessMode) -> &'static str {
+    match access_mode {
+        PreviewDecodeAccessMode::PlaybackCursor => {
+            "preview_decode_playback_cursor_queue_wait_samples"
+        }
+        PreviewDecodeAccessMode::ScrubCursor => "preview_decode_scrub_cursor_queue_wait_samples",
+        PreviewDecodeAccessMode::RandomAccessStillFrame => {
+            "preview_decode_random_access_still_queue_wait_samples"
+        }
+    }
+}
+
+fn preview_decode_queue_wait_histogram_accounting_code(
+    access_mode: PreviewDecodeAccessMode,
+) -> &'static str {
+    match access_mode {
+        PreviewDecodeAccessMode::PlaybackCursor => {
+            "preview_decode_playback_cursor_queue_wait_histogram_samples"
+        }
+        PreviewDecodeAccessMode::ScrubCursor => {
+            "preview_decode_scrub_cursor_queue_wait_histogram_samples"
+        }
+        PreviewDecodeAccessMode::RandomAccessStillFrame => {
+            "preview_decode_random_access_still_queue_wait_histogram_samples"
+        }
+    }
+}
+
+fn preview_decode_expired_queue_wait_histogram_accounting_code(
+    access_mode: PreviewDecodeAccessMode,
+) -> &'static str {
+    match access_mode {
+        PreviewDecodeAccessMode::PlaybackCursor => {
+            "preview_decode_playback_cursor_expired_queue_wait_histogram_samples"
+        }
+        PreviewDecodeAccessMode::ScrubCursor => {
+            "preview_decode_scrub_cursor_expired_queue_wait_histogram_samples"
+        }
+        PreviewDecodeAccessMode::RandomAccessStillFrame => {
+            "preview_decode_random_access_still_expired_queue_wait_histogram_samples"
+        }
+    }
+}
+
+fn preview_decode_canceled_session_open_accounting_code(
+    access_mode: PreviewDecodeAccessMode,
+) -> &'static str {
+    match access_mode {
+        PreviewDecodeAccessMode::PlaybackCursor => {
+            "preview_decode_playback_cursor_canceled_session_open_accounted_attempts"
+        }
+        PreviewDecodeAccessMode::ScrubCursor => {
+            "preview_decode_scrub_cursor_canceled_session_open_accounted_attempts"
+        }
+        PreviewDecodeAccessMode::RandomAccessStillFrame => {
+            "preview_decode_random_access_still_canceled_session_open_accounted_attempts"
+        }
+    }
+}
+
+fn preview_decode_canceled_session_open_max_code(
+    access_mode: PreviewDecodeAccessMode,
+) -> &'static str {
+    match access_mode {
+        PreviewDecodeAccessMode::PlaybackCursor => {
+            "preview_decode_playback_cursor_canceled_session_open_max_us"
+        }
+        PreviewDecodeAccessMode::ScrubCursor => {
+            "preview_decode_scrub_cursor_canceled_session_open_max_us"
+        }
+        PreviewDecodeAccessMode::RandomAccessStillFrame => {
+            "preview_decode_random_access_still_canceled_session_open_max_us"
         }
     }
 }
@@ -716,18 +1192,6 @@ fn preview_decode_access_mode_queue_wait_budget_code(
         PreviewDecodeAccessMode::ScrubCursor => "preview_decode_scrub_cursor_queue_wait_max_us",
         PreviewDecodeAccessMode::RandomAccessStillFrame => {
             "preview_decode_random_access_still_queue_wait_max_us"
-        }
-    }
-}
-
-fn preview_decode_access_mode_p95_budget_code(
-    access_mode: PreviewDecodeAccessMode,
-) -> &'static str {
-    match access_mode {
-        PreviewDecodeAccessMode::PlaybackCursor => "preview_decode_playback_cursor_p95_frame_us",
-        PreviewDecodeAccessMode::ScrubCursor => "preview_decode_scrub_cursor_p95_frame_us",
-        PreviewDecodeAccessMode::RandomAccessStillFrame => {
-            "preview_decode_random_access_still_p95_frame_us"
         }
     }
 }
@@ -772,6 +1236,7 @@ fn preview_decode_access_mode_local_coverage_code(
 
 fn push_preview_decode_root_causes_and_actions(
     summary: PreviewDecodePerformanceSummary,
+    policy: &PreviewDecodePerformancePolicy,
     required_access_modes: &[PreviewDecodeAccessMode],
     root_causes: &mut Vec<PreviewDecodePerformanceRootCause>,
     actions: &mut Vec<PreviewDecodePerformanceAction>,
@@ -800,49 +1265,143 @@ fn push_preview_decode_root_causes_and_actions(
             PreviewDecodePerformanceSeverity::Fail,
         );
     }
-    for access_mode in required_access_modes {
-        let profile = summary.access_mode_profiles.profile_for(*access_mode);
-        if profile.frames == 0 || profile.mode_local_evidence_frames() > 0 {
+
+    for (access_mode, profile) in summary.access_mode_profiles.named_profiles() {
+        let accounted_frames = profile.work_classes.total_frames();
+        if profile.frames == accounted_frames {
             continue;
         }
         push_decode_root_cause_with_action(
             root_causes,
             actions,
             PreviewDecodePerformanceArea::CaptureIntegrity,
-            "preview_decode_required_access_mode_cache_only",
+            "preview_decode_work_class_accounting_mismatch",
             format!(
-                "access_mode={} frames={} cache_hit_frames={} mode_local_evidence_frames=0",
+                "access_mode={} successful_frames={} accounted_work_class_frames={} lifecycle_opened_frames={} lifecycle_replaced_frames={} lifecycle_reused_frames={} lifecycle_bypassed_cache_frames={} lifecycle_unclassified_frames={}",
                 access_mode.as_str(),
                 profile.frames,
-                profile.cache_hit_frames
+                accounted_frames,
+                profile.session_opened_frames,
+                profile.session_replaced_frames,
+                profile.session_reused_frames,
+                profile.session_bypassed_cache_frames,
+                profile.session_unclassified_frames
             ),
-            "exercise_required_preview_access_modes_without_global_cache",
-            "Drive required preview access modes through mode-local decode evidence; process-global cache hits alone do not prove the access-mode contract.",
+            "restore_preview_decode_work_class_accounting",
+            "Classify every successful result exactly once; aggregate frame totals are not a substitute for lifecycle and work evidence.",
             PreviewDecodePerformanceSeverity::Fail,
         );
     }
 
-    if summary.max_duration_us > summary.slow_frame_budget_us {
-        push_decode_root_cause_with_action(
-            root_causes,
-            actions,
-            PreviewDecodePerformanceArea::LatencyBudget,
-            "preview_decode_frame_over_budget",
-            format!(
-                "max_duration_us={} slow_frame_budget_us={} max_frame_queue_wait_us={} primary_bottleneck={:?} slowest_access_mode={}",
-                summary.max_duration_us,
-                summary.slow_frame_budget_us,
-                summary.max_frame_queue_wait_us,
-                summary.primary_bottleneck,
-                summary
-                    .slowest_access_mode
-                    .map(PreviewDecodeAccessMode::as_str)
-                    .unwrap_or("None")
-            ),
-            "inspect_preview_decode_stage_durations",
-            "Inspect preview decode stage timings before changing color or render code.",
-            PreviewDecodePerformanceSeverity::Fail,
-        );
+    for budget in &policy.work_budgets {
+        let access_profile = summary.access_mode_profiles.profile_for(budget.access_mode);
+        let profile = access_profile.work_classes.profile(budget.work_class);
+        if budget.min_samples > 0 && profile.frames < budget.min_samples {
+            push_decode_root_cause_with_action(
+                root_causes,
+                actions,
+                PreviewDecodePerformanceArea::CaptureIntegrity,
+                "preview_decode_required_work_class_missing",
+                format!(
+                    "access_mode={} work_class={} samples={} required_samples={}",
+                    budget.access_mode.as_str(),
+                    budget.work_class.as_str(),
+                    profile.frames,
+                    budget.min_samples
+                ),
+                "exercise_required_preview_work_class",
+                "Exercise the required access-mode/work-class cell; do not substitute cold opens, cache hits, or another access mode.",
+                PreviewDecodePerformanceSeverity::Fail,
+            );
+        }
+        if budget.work_class == PreviewDecodeWorkClass::Unclassified && profile.frames > 0 {
+            push_decode_root_cause_with_action(
+                root_causes,
+                actions,
+                PreviewDecodePerformanceArea::CaptureIntegrity,
+                "preview_decode_unclassified_work",
+                format!(
+                    "access_mode={} unclassified_frames={} lifecycle_unclassified_frames={}",
+                    budget.access_mode.as_str(),
+                    profile.frames,
+                    access_profile.session_unclassified_frames
+                ),
+                "restore_preview_decode_lifecycle_evidence",
+                "Make every successful media result attest whether its decoder Session was opened, replaced, reused, or bypassed through a cache.",
+                PreviewDecodePerformanceSeverity::Fail,
+            );
+            continue;
+        }
+        if profile.frames == 0 {
+            continue;
+        }
+        let p95 = profile.latency_buckets.p95_upper_bound_us();
+        let p95_over_budget = budget
+            .p95_worker_execution_us
+            .is_some_and(|limit| p95.is_none_or(|observed| observed > limit));
+        if profile.max_duration_us > budget.max_worker_execution_us || p95_over_budget {
+            push_decode_root_cause_with_action(
+                root_causes,
+                actions,
+                PreviewDecodePerformanceArea::AccessMode,
+                "preview_decode_work_class_over_budget",
+                format!(
+                    "access_mode={} work_class={} frames={} max_worker_execution_us={} max_budget_us={} p95_upper_bound_us={:?} p95_budget_us={:?} max_frame_queue_wait_us={} max_frame_bottleneck={:?} primary_bottleneck={:?} latency_buckets={:?}",
+                    budget.access_mode.as_str(),
+                    budget.work_class.as_str(),
+                    profile.frames,
+                    profile.max_duration_us,
+                    budget.max_worker_execution_us,
+                    p95,
+                    budget.p95_worker_execution_us,
+                    access_profile.max_frame_queue_wait_us,
+                    access_profile.max_frame_bottleneck,
+                    summary.primary_bottleneck,
+                    profile.latency_buckets
+                ),
+                "inspect_preview_decode_work_class",
+                "Inspect this exact access-mode/work-class cell and its media-stage timings; do not weaken unrelated cold-start or steady-state obligations.",
+                PreviewDecodePerformanceSeverity::Fail,
+            );
+        }
+    }
+
+    for (access_mode, profile) in summary.access_mode_profiles.named_profiles() {
+        let attempts = profile.session_churn_attempts();
+        if attempts == 0 {
+            continue;
+        }
+        let ratio_allowance = attempts
+            .saturating_mul(policy.max_session_churn_basis_points)
+            .saturating_add(9_999)
+            / 10_000;
+        let allowed = policy.session_churn_grace_frames.max(ratio_allowance);
+        let observed = profile.session_churn_events();
+        if observed > allowed {
+            push_decode_root_cause_with_action(
+                root_causes,
+                actions,
+                PreviewDecodePerformanceArea::AccessMode,
+                "preview_decode_session_churn",
+                format!(
+                    "access_mode={} attempts={} successful_frames={} session_opened_frames={} session_replaced_frames={} canceled_session_open_attempts={} canceled_session_opened_attempts={} canceled_session_replaced_attempts={} canceled_session_open_max_duration_us={} allowed_churn_frames={} max_session_churn_basis_points={}",
+                    access_mode.as_str(),
+                    attempts,
+                    profile.frames,
+                    profile.session_opened_frames,
+                    profile.session_replaced_frames,
+                    profile.canceled_session_open_attempts,
+                    profile.canceled_session_opened_attempts,
+                    profile.canceled_session_replaced_attempts,
+                    profile.canceled_session_open_max_duration_us,
+                    allowed,
+                    policy.max_session_churn_basis_points
+                ),
+                "preserve_preview_decode_session",
+                "Preserve compatible decoder Sessions across requests; repeated bounded cold opens are still a locality failure.",
+                PreviewDecodePerformanceSeverity::Fail,
+            );
+        }
     }
 
     let scrub_profile = summary.access_mode_profiles.scrub_cursor;
@@ -884,7 +1443,7 @@ fn push_preview_decode_root_causes_and_actions(
         );
     }
     if scrub_profile.frames > 0
-        && scrub_profile.max_duration_us > summary.slow_frame_budget_us
+        && scrub_profile.work_classes.reused_seek.max_duration_us > summary.slow_frame_budget_us
         && scrub_profile.seeked_frames > 0
         && scrub_profile.seek_index_available_frames == 0
     {
@@ -912,22 +1471,23 @@ fn push_preview_decode_root_causes_and_actions(
     }
 
     for (access_mode, profile) in summary.access_mode_profiles.named_profiles() {
-        if profile.frames == 0 || profile.max_duration_us <= summary.slow_frame_budget_us {
+        let steady = profile.work_classes.forward_steady;
+        if steady.frames == 0 || steady.max_duration_us <= summary.slow_frame_budget_us {
             continue;
         }
-        let p95_upper_bound_us = profile.latency_buckets.estimated_p95_upper_bound_us();
+        let p95_upper_bound_us = steady.latency_buckets.p95_upper_bound_us();
         push_decode_root_cause_with_action(
             root_causes,
             actions,
             PreviewDecodePerformanceArea::AccessMode,
             "preview_decode_access_mode_over_budget",
             format!(
-                "access_mode={} frames={} max_duration_us={} p95_upper_bound_us={} total_duration_us={} queue_wait_max_us={} queue_wait_total_us={} max_frame_queue_wait_us={} max_frame_bottleneck={:?} seeked_frames={} keyframe_seek_strategy_frames={} bounded_any_seek_strategy_frames={} forward_reuse_frame_window_max={} forward_decode_budget_frames_max={} any_seek_window_ms_max={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} seek_index_available_frames={} seek_index_used_frames={} seek_index_keyframes_max={} seek_index_observed_packets_max={} seek_index_probe_backed_frames={} seek_index_session_observed_frames={} hardware_decode_active_frames={} zero_copy_active_frames={} gpu_texture_resident_frames={} decoded_nv12_surface_frames={} decoded_p010_surface_frames={} hardware_decode_texture_residency_blocker_frames={} hardware_decode_auto_requested_frames={} hardware_decode_prefer_hardware_requested_frames={} hardware_decode_prefer_gpu_requested_frames={} hardware_decode_require_gpu_requested_frames={} hardware_decode_cpu_not_requested_frames={} hardware_decode_cpu_unavailable_frames={} hardware_decode_backend_unavailable_frames={} hardware_decode_codec_unsupported_frames={} hardware_decode_device_context_attempted_frames={} hardware_decode_device_context_created_frames={} hardware_decode_device_context_unavailable_frames={} hardware_decode_cpu_transfer_frames={} hardware_decode_cpu_transfer_configured_frames={} hardware_decode_cpu_transfer_observed_frames={} hardware_decode_cpu_transfer_setup_failed_frames={} hardware_decode_cpu_transfer_decoder_open_failed_frames={} hardware_decode_cpu_transfer_awaiting_frame_frames={} hardware_decode_backend_boundary_frames={} hardware_decode_gpu_resident_native_frames={} hardware_decode_candidate_d3d12va_frames={} hardware_decode_candidate_d3d11va_frames={} hardware_decode_candidate_dxva2_frames={} hardware_decode_candidate_videotoolbox_frames={} hardware_decode_candidate_vaapi_frames={} hardware_decode_candidate_vdpau_frames={} hardware_decode_candidate_cuda_frames={} hardware_decode_adapter_unavailable_frames={} decoded_frame_count={} max_decoded_frame_count={} session_open_us={} output_lease_wait_us={} cache_lookup_us={} seek_us={} packet_decode_us={} hardware_transfer_us={} swscale_us={} rgba_copy_us={} external_process_us={} cache_hit_frames={} playback_session_ring_hit_frames={} latency_buckets={:?}",
+                "access_mode={} steady_frames={} steady_max_duration_us={} steady_p95_upper_bound_us={:?} steady_total_duration_us={} queue_wait_max_us={} queue_wait_total_us={} max_frame_queue_wait_us={} max_frame_bottleneck={:?} seeked_frames={} keyframe_seek_strategy_frames={} bounded_any_seek_strategy_frames={} forward_reuse_frame_window_max={} forward_decode_budget_frames_max={} any_seek_window_ms_max={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} seek_index_available_frames={} seek_index_used_frames={} seek_index_keyframes_max={} seek_index_observed_packets_max={} seek_index_probe_backed_frames={} seek_index_session_observed_frames={} hardware_decode_active_frames={} zero_copy_active_frames={} gpu_texture_resident_frames={} decoded_nv12_surface_frames={} decoded_p010_surface_frames={} hardware_decode_texture_residency_blocker_frames={} hardware_decode_auto_requested_frames={} hardware_decode_prefer_hardware_requested_frames={} hardware_decode_prefer_gpu_requested_frames={} hardware_decode_require_gpu_requested_frames={} hardware_decode_cpu_not_requested_frames={} hardware_decode_cpu_unavailable_frames={} hardware_decode_backend_unavailable_frames={} hardware_decode_codec_unsupported_frames={} hardware_decode_device_context_attempted_frames={} hardware_decode_device_context_created_frames={} hardware_decode_device_context_unavailable_frames={} hardware_decode_cpu_transfer_frames={} hardware_decode_cpu_transfer_configured_frames={} hardware_decode_cpu_transfer_observed_frames={} hardware_decode_cpu_transfer_setup_failed_frames={} hardware_decode_cpu_transfer_decoder_open_failed_frames={} hardware_decode_cpu_transfer_awaiting_frame_frames={} hardware_decode_backend_boundary_frames={} hardware_decode_gpu_resident_native_frames={} hardware_decode_candidate_d3d12va_frames={} hardware_decode_candidate_d3d11va_frames={} hardware_decode_candidate_dxva2_frames={} hardware_decode_candidate_videotoolbox_frames={} hardware_decode_candidate_vaapi_frames={} hardware_decode_candidate_vdpau_frames={} hardware_decode_candidate_cuda_frames={} hardware_decode_adapter_unavailable_frames={} decoded_frame_count={} max_decoded_frame_count={} slowest_aggregate_session_open_us={} slowest_aggregate_output_lease_wait_us={} slowest_aggregate_cache_lookup_us={} slowest_aggregate_seek_us={} slowest_aggregate_packet_decode_us={} slowest_aggregate_hardware_transfer_us={} slowest_aggregate_swscale_us={} slowest_aggregate_rgba_copy_us={} slowest_aggregate_external_process_us={} cache_hit_frames={} playback_session_ring_hit_frames={} steady_latency_buckets={:?}",
                 access_mode.as_str(),
-                profile.frames,
-                profile.max_duration_us,
+                steady.frames,
+                steady.max_duration_us,
                 p95_upper_bound_us,
-                profile.total_duration_us,
+                steady.total_duration_us,
                 profile.queue_wait_max_us,
                 profile.queue_wait_total_us,
                 profile.max_frame_queue_wait_us,
@@ -993,10 +1553,36 @@ fn push_preview_decode_root_causes_and_actions(
                 profile.max_frame_stage_durations.external_process_us,
                 profile.cache_hit_frames,
                 profile.playback_session_ring_hit_frames,
-                profile.latency_buckets
+                steady.latency_buckets
             ),
             "inspect_preview_decode_access_mode_profile",
             "Inspect the per-access-mode decode profile before changing global decode concurrency or color/render code.",
+            PreviewDecodePerformanceSeverity::Fail,
+        );
+    }
+    for (access_mode, profile) in summary.access_mode_profiles.named_profiles() {
+        let session_open = profile.work_classes.session_opened;
+        if session_open.frames == 0
+            || session_open.max_duration_us <= PREVIEW_DECODE_DEFAULT_SESSION_OPEN_BUDGET_US
+        {
+            continue;
+        }
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            PreviewDecodePerformanceArea::AccessMode,
+            "preview_decode_access_mode_session_open_over_budget",
+            format!(
+                "access_mode={} session_open_frames={} session_open_max_duration_us={} session_open_total_duration_us={} session_open_budget_us={} session_open_latency_buckets={:?}",
+                access_mode.as_str(),
+                session_open.frames,
+                session_open.max_duration_us,
+                session_open.total_duration_us,
+                PREVIEW_DECODE_DEFAULT_SESSION_OPEN_BUDGET_US,
+                session_open.latency_buckets
+            ),
+            "inspect_preview_decode_access_mode_session_open",
+            "Inspect access-mode-local decoder construction and session churn independently from steady frame cadence.",
             PreviewDecodePerformanceSeverity::Fail,
         );
     }
@@ -1013,7 +1599,7 @@ fn push_preview_decode_root_causes_and_actions(
             PreviewDecodePerformanceArea::AccessMode,
             "preview_decode_access_mode_queue_wait_bound",
             format!(
-                "access_mode={} queue_wait_max_us={} queue_wait_p95_upper_bound_us={} queue_wait_total_us={} queue_wait_last_us={} frames={} slow_frame_budget_us={} queue_wait_buckets={:?}",
+                "access_mode={} queue_wait_max_us={} queue_wait_p95_upper_bound_us={:?} queue_wait_total_us={} queue_wait_last_us={} frames={} slow_frame_budget_us={} queue_wait_buckets={:?}",
                 access_mode.as_str(),
                 profile.queue_wait_max_us,
                 queue_wait_p95_upper_bound_us,
@@ -1098,16 +1684,20 @@ fn push_preview_decode_root_causes_and_actions(
             PreviewDecodePerformanceSeverity::Warn,
         );
     }
-    if playback_profile.frames > 1 && playback_profile.session_reused_frames == 0 {
+    let playback_session_local_frames = playback_profile
+        .session_reused_frames
+        .saturating_add(playback_profile.session_bypassed_cache_frames);
+    if playback_profile.frames > 1 && playback_session_local_frames == 0 {
         push_decode_root_cause_with_action(
             root_causes,
             actions,
             PreviewDecodePerformanceArea::AccessMode,
             "preview_decode_playback_session_not_reused",
             format!(
-                "access_mode=PlaybackCursor frames={} session_opened_frames={} session_reused_frames=0 max_duration_us={} session_open_us={}",
+                "access_mode=PlaybackCursor frames={} session_opened_frames={} session_replaced_frames={} session_reused_frames=0 session_bypassed_cache_frames=0 max_duration_us={} session_open_us={}",
                 playback_profile.frames,
                 playback_profile.session_opened_frames,
+                playback_profile.session_replaced_frames,
                 playback_profile.max_duration_us,
                 playback_profile.max_frame_stage_durations.session_open_us
             ),
@@ -1526,30 +2116,6 @@ fn push_preview_decode_root_causes_and_actions(
         PreviewDecodeBottleneck::CacheLookup | PreviewDecodeBottleneck::None => {}
     }
 
-    if summary.cache_hit_frames == 0
-        && summary
-            .in_process_cpu_frames
-            .saturating_add(summary.external_ffmpeg_cpu_rgba_frames)
-            > 0
-        && summary.playback_session_ring_hit_frames == 0
-    {
-        push_decode_root_cause_with_action(
-            root_causes,
-            actions,
-            PreviewDecodePerformanceArea::ProxyCache,
-            "preview_decode_source_path_without_cache_hits",
-            format!(
-                "source_decode_frames={} cache_hit_frames=0",
-                summary
-                    .in_process_cpu_frames
-                    .saturating_add(summary.external_ffmpeg_cpu_rgba_frames)
-            ),
-            "warm_preview_cache_or_proxy",
-            "Warm preview cache or generate fresh playback proxies before interactive playback.",
-            PreviewDecodePerformanceSeverity::Warn,
-        );
-    }
-
     if summary.canceled_prefetch_deadline_jobs > 0 {
         push_decode_root_cause_with_action(
             root_causes,
@@ -1781,7 +2347,7 @@ fn push_preview_decode_root_causes_and_actions(
                 summary.cancellation.still
             ),
             "inspect_preview_decode_cancellation_points",
-            "Inspect cancellation authority attribution and FFmpeg open/seek/decode/copy checkpoints; realtime work must observe and return within the playback-owned policy.",
+            "Inspect logical cancellation authority timing separately from concrete FFmpeg open/seek/decode/copy checkpoints; realtime work must observe and return within the playback-owned policy.",
             PreviewDecodePerformanceSeverity::Fail,
         );
     }

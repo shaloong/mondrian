@@ -29,6 +29,18 @@ impl AssetThumbnailAdapter {
         self.service.set_color_context(context);
     }
 
+    /// Apply one product resource decision at the Thumbnail execution Seam.
+    pub(crate) fn apply_resource_decision(
+        &self,
+        decision: &crate::app::execution_resource_coordination::ThumbnailExecutionDecision,
+    ) {
+        self.service.set_resource_policy(
+            decision.automatic_admission_enabled,
+            decision.dispatch_enabled,
+            decision.cache_budget_bytes,
+        );
+    }
+
     /// Pump a bounded number of service completions.
     pub fn poll_finished(&self) -> bool {
         self.service.poll_finished()

@@ -1,6 +1,7 @@
 //! Preview Runtime Adapter for application-owned hardware-decode admission.
 
 use super::*;
+use mondrian_media::PreviewDecodeGeometry;
 
 impl<O: Clone> PreviewProductionRuntime<O> {
     /// Set playback hardware-decode admission selected by the app runtime.
@@ -13,6 +14,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         &self,
         admission: PlaybackHardwareDecodeAdmission,
     ) {
+        if self.hardware_decode_admission.get().observation() != Some(admission) {
+            self.future_media_window.borrow_mut().clear();
+        }
         self.hardware_decode_admission
             .set(PreviewHardwareDecodeAdmissionState::reported(admission));
     }
@@ -61,9 +65,21 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         _access_mode: PreviewDecodeAccessMode,
         key: &MediaPreviewKey,
     ) -> PreviewHardwareDecodeRequest {
-        self.hardware_decode_admission
+        let request = self
+            .hardware_decode_admission
             .get()
-            .request_for_surface(key.native_surface_hint)
+            .request_for_surface(key.native_surface_hint());
+        if matches!(key.decode.geometry(), PreviewDecodeGeometry::FitWithin(_))
+            && request == PreviewHardwareDecodeRequest::PreferGpuResident
+        {
+            // The immutable key's CPU-addressable/scaled geometry is the
+            // payload authority. A later hardware-admission observation may
+            // still prefer hardware decode, but cannot mutate that key into a
+            // native-surface request.
+            PreviewHardwareDecodeRequest::PreferHardwareDecode
+        } else {
+            request
+        }
     }
 
     pub(super) fn hardware_decode_device_selector_for_access_mode(

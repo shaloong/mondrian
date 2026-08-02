@@ -82,24 +82,27 @@ cargo run -p mondrian-app
 
 ### 测试
 
-```bash
+```powershell
 # 运行全部测试
 cargo test --workspace
 
 # 运行特定模块
 cargo test -p mondrian-timeline
 
+$perfRun = "target/perf/manual-$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"
+New-Item -ItemType Directory -Path $perfRun | Out-Null
+
 # 性能烟雾测试（项目创建/打开/保存，输出 AI 可解析 JSON）
-$env:MONDRIAN_PERF_OUTPUT='target/perf/project-lifecycle.jsonl'; cargo test -p mondrian-app perf_project_lifecycle_smoke -- --ignored --nocapture
+$env:MONDRIAN_PERF_OUTPUT=Join-Path $perfRun 'project-lifecycle.jsonl'; cargo test -p mondrian-app --release -j 2 --lib perf_project_lifecycle_smoke -- --ignored --nocapture --test-threads=1
 
-# 1080p29.97 预览模拟性能测试（广播常见帧率）
-$env:MONDRIAN_PREVIEW_SIM_OUTPUT='target/perf/preview-1080p2997.jsonl'; cargo test -p mondrian-app preview_1080p2997_simulated_perf -- --ignored --nocapture
+# 生产媒体解码/缓存 smoke（FFmpeg 生成短 testsrc2，不是 1080p 产品门禁）
+$env:MONDRIAN_PERF_OUTPUT=Join-Path $perfRun 'preview-media.jsonl'; cargo test -p mondrian-app --release -j 2 --lib preview_media_decode_cache_smoke -- --ignored --nocapture --test-threads=1
 
-# 4K60 预览模拟性能测试（用于更高负载优化）
-$env:MONDRIAN_PREVIEW_SIM_OUTPUT='target/perf/preview-4k60.jsonl'; cargo test -p mondrian-app preview_4k60_simulated_perf -- --ignored --nocapture
+# 生产连续播放 smoke（同样使用本地生成的短测试素材）
+$env:MONDRIAN_PERF_OUTPUT=Join-Path $perfRun 'preview-playback.jsonl'; cargo test -p mondrian-app --release -j 2 --lib preview_media_continuous_playback_smoke -- --ignored --nocapture --test-threads=1
 
-# 8K60 预览模拟性能测试（极限负载优化）
-$env:MONDRIAN_PREVIEW_SIM_OUTPUT='target/perf/preview-8k60.jsonl'; cargo test -p mondrian-app preview_8k60_simulated_perf -- --ignored --nocapture
+# 稠密音频 Schedule 的 scalar/SIMD 多轨负载矩阵
+$env:MONDRIAN_AUDIO_LOAD_MATRIX_OUTPUT=Join-Path $perfRun 'audio-load-matrix.jsonl'; cargo test -p mondrian-audio --release -j 2 --test load_matrix dense_schedule_multitrack_load_matrix -- --ignored --nocapture --test-threads=1
 
 # Benchmark
 cargo bench -p mondrian-renderer
@@ -118,38 +121,14 @@ cargo test -p mondrian-renderer golden
 - `MONDRIAN_PERF_SAVE_MS`：保存项目最大耗时（毫秒，默认 `6000`）
 - `MONDRIAN_PERF_OPEN_ITERS`：打开项目采样次数（默认 `3`）
 - `MONDRIAN_PERF_SAVE_ITERS`：保存项目采样次数（默认 `5`）
-- `MONDRIAN_PERF_OUTPUT`：可选，写入 JSONL 报告路径（每行一条 JSON）
+- `MONDRIAN_PERF_OUTPUT`：可选，写入 JSONL 报告路径（每行一条 JSON）。每项 smoke 必须使用独立的新文件。
 
-1080p29.97 预览模拟测试关键环境变量：
+短 Preview smoke 说明：
 
-- `MONDRIAN_PREVIEW_SIM_TTFF_MS`：首帧显示上限（毫秒，默认 `2000`）
-- `MONDRIAN_PREVIEW_SIM_FPS_MIN`：稳定播放最低 FPS（默认 `27`）
-- `MONDRIAN_PREVIEW_SIM_FPS_MAX`：稳定播放最高 FPS（默认 `30`）
-- `MONDRIAN_PREVIEW_SIM_FRAMES`：模拟帧数（默认 `96`）
-- `MONDRIAN_PREVIEW_SIM_LAYERS`：模拟合成图层数（默认 `2`）
-- `MONDRIAN_PREVIEW_SIM_OUTPUT`：可选，写入 JSONL 报告路径
-
-4K60 预览模拟测试关键环境变量：
-
-- `MONDRIAN_PREVIEW_SIM_4K_WIDTH`：模拟宽度（默认 `3840`）
-- `MONDRIAN_PREVIEW_SIM_4K_HEIGHT`：模拟高度（默认 `2160`）
-- `MONDRIAN_PREVIEW_SIM_4K_TARGET_FPS`：目标 FPS（默认 `60`）
-- `MONDRIAN_PREVIEW_SIM_4K_TTFF_MS`：首帧显示上限（默认 `3000`）
-- `MONDRIAN_PREVIEW_SIM_4K_FPS_MIN`：最低 FPS 门槛（默认 `30`）
-- `MONDRIAN_PREVIEW_SIM_4K_FPS_MAX`：最高 FPS 门槛（默认 `60`）
-- `MONDRIAN_PREVIEW_SIM_4K_FRAMES`：模拟帧数（默认 `120`）
-- `MONDRIAN_PREVIEW_SIM_4K_LAYERS`：模拟图层数（默认 `2`）
-
-8K60 预览模拟测试关键环境变量：
-
-- `MONDRIAN_PREVIEW_SIM_8K_WIDTH`：模拟宽度（默认 `7680`）
-- `MONDRIAN_PREVIEW_SIM_8K_HEIGHT`：模拟高度（默认 `4320`）
-- `MONDRIAN_PREVIEW_SIM_8K_TARGET_FPS`：目标 FPS（默认 `60`）
-- `MONDRIAN_PREVIEW_SIM_8K_TTFF_MS`：首帧显示上限（默认 `4000`）
-- `MONDRIAN_PREVIEW_SIM_8K_FPS_MIN`：最低 FPS 门槛（默认 `20`）
-- `MONDRIAN_PREVIEW_SIM_8K_FPS_MAX`：最高 FPS 门槛（默认 `60`）
-- `MONDRIAN_PREVIEW_SIM_8K_FRAMES`：模拟帧数（默认 `120`）
-- `MONDRIAN_PREVIEW_SIM_8K_LAYERS`：模拟图层数（默认 `2`）
+- Preview 报告使用与其他 app smoke 相同的 `MONDRIAN_PERF_OUTPUT`。
+两个 Preview smoke 都通过生产媒体路径生成短时、无版权依赖的本地测试素材。
+真实 4K HEVC Main10、长期 A/V 同步与设备时钟验证由
+`scripts/validation/invoke-playback-reference-gates.ps1` 负责，不能用内存模拟帧替代。
 
 ## 📋 功能路线图
 

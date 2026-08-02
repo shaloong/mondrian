@@ -4,12 +4,11 @@
 //! lifecycle details from leaking into the Playback Engine Interface.
 
 use super::panels::{ViewerPanelModel, ViewerPreviewState};
-use mondrian_playback::FrameDeliveryKind;
 
 /// Playback-relevant meaning of the current Viewer lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewerPlaybackFeedback {
-    /// No media frame is expected, such as an empty sequence.
+    /// No output target is active, so no Program frame is expected.
     #[default]
     Unavailable,
     /// Current-frame work is pending; this is not a terminal Frame Delivery.
@@ -41,21 +40,10 @@ impl ViewerPlaybackFeedback {
         match state {
             ViewerPreviewState::Unavailable(_) => Self::Unavailable,
             ViewerPreviewState::Transparent => Self::Ready,
+            ViewerPreviewState::StaleTransparent => Self::Stale,
             ViewerPreviewState::Loading => Self::Loading,
             ViewerPreviewState::Stale(_) => Self::Stale,
             ViewerPreviewState::Ready(_) => Self::Ready,
-        }
-    }
-
-    /// Convert only payload-free correctness feedback into Playback Engine vocabulary.
-    ///
-    /// A stale raster describes what remains visible while current work is
-    /// pending. It must not consume the current Frame Demand before its worker
-    /// can return Ready/Late/Canceled.
-    pub const fn terminal_delivery(self) -> Option<FrameDeliveryKind> {
-        match self {
-            Self::Blocked => Some(FrameDeliveryKind::Blocked),
-            Self::Unavailable | Self::Loading | Self::Stale | Self::Ready => None,
         }
     }
 
@@ -92,23 +80,11 @@ mod tests {
     }
 
     #[test]
-    fn loading_is_not_falsely_reported_as_terminal_delivery() {
-        assert_eq!(ViewerPlaybackFeedback::Loading.terminal_delivery(), None);
+    fn only_loading_defers_duplicate_gpu_prepare() {
         assert!(ViewerPlaybackFeedback::Loading.should_defer_gpu_prepare());
-    }
-
-    #[test]
-    fn ready_lifecycle_requires_an_exact_presentation_delivery() {
-        assert_eq!(ViewerPlaybackFeedback::Ready.terminal_delivery(), None);
-    }
-
-    #[test]
-    fn stale_visibility_does_not_consume_current_demand_but_blocked_is_terminal() {
-        assert_eq!(ViewerPlaybackFeedback::Stale.terminal_delivery(), None);
-        assert_eq!(
-            ViewerPlaybackFeedback::Blocked.terminal_delivery(),
-            Some(FrameDeliveryKind::Blocked)
-        );
+        assert!(!ViewerPlaybackFeedback::Ready.should_defer_gpu_prepare());
+        assert!(!ViewerPlaybackFeedback::Stale.should_defer_gpu_prepare());
+        assert!(!ViewerPlaybackFeedback::Blocked.should_defer_gpu_prepare());
     }
 
     #[test]

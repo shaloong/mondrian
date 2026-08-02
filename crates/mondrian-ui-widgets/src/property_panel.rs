@@ -252,8 +252,8 @@ impl PropertySection {
     ///
     /// Child row controls receive events first; this action is only a fallback
     /// for clicks that do not belong to an inner control.
-    pub fn on_select(mut self, action: Action) -> Self {
-        self.select_action = Some(action);
+    pub fn on_select(mut self, action: impl Into<Option<Action>>) -> Self {
+        self.select_action = action.into();
         self
     }
 
@@ -1061,12 +1061,12 @@ mod tests {
         let mut t = DummyTooltip;
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
         let mut panel = PropertyPanel::new("Inspector").with_section(
-            PropertySection::new("Effect")
-                .on_select(Action::NoOp)
-                .with_row(PropertyRow::new(
+            PropertySection::new("Effect").on_select(Action::SaveProject).with_row(
+                PropertyRow::new(
                     "Enabled",
                     Box::new(ConstraintRecordingWidget::new(Rc::clone(&seen))),
-                )),
+                ),
+            ),
         );
         panel.layout(Rect::new(0.0, 0.0, 300.0, 180.0));
 
@@ -1094,12 +1094,9 @@ mod tests {
         let mut t = DummyTooltip;
         let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch);
         let mut panel = PropertyPanel::new("Inspector").with_section(
-            PropertySection::new("Effect")
-                .on_select(Action::NoOp)
-                .with_row(PropertyRow::new(
-                    "Enabled",
-                    Box::new(ProbeWidget::new(Rc::clone(&handled))),
-                )),
+            PropertySection::new("Effect").on_select(Action::SaveProject).with_row(
+                PropertyRow::new("Enabled", Box::new(ProbeWidget::new(Rc::clone(&handled)))),
+            ),
         );
         panel.layout(Rect::new(0.0, 0.0, 300.0, 180.0));
 
@@ -1133,7 +1130,7 @@ mod tests {
                     let last_value = Rc::clone(&last_value);
                     Slider::new(0.0, 0.0, 100.0).on_change(move |value| {
                         last_value.set(value);
-                        Action::NoOp
+                        Action::SaveProject
                     })
                 }),
             )),
@@ -1171,7 +1168,10 @@ mod tests {
             "slider value was {}",
             last_value.get()
         );
-        assert_eq!(actions.borrow().as_slice(), &[Action::NoOp, Action::NoOp]);
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::SaveProject, Action::SaveProject]
+        );
     }
 
     #[test]

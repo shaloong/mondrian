@@ -185,7 +185,7 @@ mod tests {
         mgr.register(
             ShortcutScope::Widget(widget),
             ShortcutBinding::ctrl(KeyCode::S),
-            Action::NoOp,
+            Action::Pause,
         );
 
         assert_eq!(
@@ -194,7 +194,7 @@ mod tests {
                 Modifiers::ctrl(),
                 ShortcutContext::new(Some(widget), Some(PanelKind::Timeline)),
             ),
-            Some(Action::NoOp)
+            Some(Action::Pause)
         );
         assert_eq!(
             mgr.resolve(

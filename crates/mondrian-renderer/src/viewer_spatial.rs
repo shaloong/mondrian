@@ -10,8 +10,9 @@ use std::sync::Arc;
 use crate::{
     ColorFrameAlpha, ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding,
     ColorFrameResidency, ColorFrameSpace, GpuColorFrameAllocationPlan, GpuColorFrameHandle,
-    GpuColorFrameHandleError, GpuColorFrameIdAllocator, GpuColorFrameResource,
-    GpuColorFrameTextureFormat, GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool,
+    GpuColorFrameHandleError, GpuColorFrameIdAllocationError, GpuColorFrameIdAllocator,
+    GpuColorFrameResource, GpuColorFrameTextureFormat, GpuColorFrameWgpuResource,
+    GpuColorFrameWgpuResourcePool,
 };
 use bytemuck::{Pod, Zeroable};
 use thiserror::Error;
@@ -210,7 +211,7 @@ impl GpuViewerSpatialPlan {
         let descriptor =
             validate_spatial_request(&input, source_rect, output_width, output_height)?;
         let output = GpuColorFrameHandle::new(
-            ids.allocate(),
+            ids.allocate()?,
             ColorFrameDescriptor {
                 width: output_width,
                 height: output_height,
@@ -303,6 +304,9 @@ pub enum GpuViewerSpatialPlanError {
     /// Viewer reconstruction is intentionally aspect-preserving.
     #[error("Viewer spatial scale anisotropy exceeds the supported 2:1 bound")]
     ExcessiveScaleAnisotropy,
+    /// Renderer frame identity allocation is exhausted.
+    #[error(transparent)]
+    FrameId(#[from] GpuColorFrameIdAllocationError),
     /// Output handle creation failed.
     #[error(transparent)]
     OutputHandle(#[from] GpuColorFrameHandleError),
@@ -352,15 +356,14 @@ impl GpuViewerSpatialRuntime {
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         ids: &mut GpuColorFrameIdAllocator,
-        input: GpuColorFrameHandle,
-        input_view: &wgpu::TextureView,
+        input: &GpuColorFrameResource<GpuColorFrameWgpuResource>,
         source_rect: ViewerSourceRect,
         output_width: u32,
         output_height: u32,
     ) -> Result<GpuViewerSpatialRecord, GpuViewerSpatialRuntimeError> {
-        if spatial_request_is_identity(&input, source_rect, output_width, output_height) {
+        if spatial_request_is_identity(input.handle(), source_rect, output_width, output_height) {
             self.clear_frame_resources();
-            validate_spatial_request(&input, source_rect, output_width, output_height)?;
+            validate_spatial_request(input.handle(), source_rect, output_width, output_height)?;
             self.diagnostics.records = self.diagnostics.records.saturating_add(1);
             self.diagnostics.passthrough_frames =
                 self.diagnostics.passthrough_frames.saturating_add(1);
@@ -368,14 +371,13 @@ impl GpuViewerSpatialRuntime {
                 .diagnostics
                 .output_pixels
                 .saturating_add(u64::from(output_width).saturating_mul(u64::from(output_height)));
-            return Ok(GpuViewerSpatialRecord::Reused(input));
+            return Ok(GpuViewerSpatialRecord::Reused(input.handle().clone()));
         }
         self.record(
             device,
             encoder,
             ids,
             input,
-            input_view,
             source_rect,
             output_width,
             output_height,
@@ -389,8 +391,7 @@ impl GpuViewerSpatialRuntime {
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         ids: &mut GpuColorFrameIdAllocator,
-        input: GpuColorFrameHandle,
-        input_view: &wgpu::TextureView,
+        input: &GpuColorFrameResource<GpuColorFrameWgpuResource>,
         source_rect: ViewerSourceRect,
         output_width: u32,
         output_height: u32,
@@ -404,7 +405,13 @@ impl GpuViewerSpatialRuntime {
                 limit,
             });
         }
-        let plan = GpuViewerSpatialPlan::new(ids, input, source_rect, output_width, output_height)?;
+        let plan = GpuViewerSpatialPlan::new(
+            ids,
+            input.handle().clone(),
+            source_rect,
+            output_width,
+            output_height,
+        )?;
         if self.pipeline.is_none() {
             self.pipeline = Some(GpuViewerSpatialPipeline::new(device));
             self.diagnostics.pipeline_builds = self.diagnostics.pipeline_builds.saturating_add(1);
@@ -416,7 +423,7 @@ impl GpuViewerSpatialRuntime {
                     "pipeline",
                 ))?;
 
-        let mut selected_view = input_view;
+        let mut selected_view = &input.resource().texture_view;
         let mut selected_width = plan.input.descriptor().width;
         let mut selected_height = plan.input.descriptor().height;
         let mut selected_alpha = plan.input.descriptor().alpha;
@@ -630,6 +637,9 @@ pub enum GpuViewerSpatialRuntimeError {
         /// Active device limit.
         limit: u32,
     },
+    /// Renderer frame identity allocation is exhausted.
+    #[error(transparent)]
+    FrameId(#[from] GpuColorFrameIdAllocationError),
     /// A private working handle could not be created.
     #[error(transparent)]
     PrivateHandle(#[from] GpuColorFrameHandleError),
@@ -867,9 +877,9 @@ fn allocate_private_working_resource(
     width: u32,
     height: u32,
     label: &'static str,
-) -> Result<GpuColorFrameResource<GpuColorFrameWgpuResource>, GpuColorFrameHandleError> {
+) -> Result<GpuColorFrameResource<GpuColorFrameWgpuResource>, GpuViewerSpatialRuntimeError> {
     let handle = GpuColorFrameHandle::new(
-        ids.allocate(),
+        ids.allocate()?,
         ColorFrameDescriptor {
             width,
             height,
@@ -899,9 +909,9 @@ mod tests {
 
     #[test]
     fn plan_rejects_encoded_and_half_float_inputs() {
-        let mut ids = GpuColorFrameIdAllocator::new(1);
+        let mut ids = GpuColorFrameIdAllocator::new(1).expect("frame id allocator");
         let encoded = GpuColorFrameHandle::new(
-            ids.allocate(),
+            ids.allocate().expect("encoded frame id"),
             ColorFrameDescriptor {
                 width: 4,
                 height: 4,
@@ -936,9 +946,9 @@ mod tests {
 
     #[test]
     fn plan_rejects_premultiplied_public_working_input() {
-        let mut ids = GpuColorFrameIdAllocator::new(1);
+        let mut ids = GpuColorFrameIdAllocator::new(1).expect("frame id allocator");
         let input = GpuColorFrameHandle::new(
-            ids.allocate(),
+            ids.allocate().expect("input frame id"),
             ColorFrameDescriptor {
                 width: 4,
                 height: 4,
@@ -999,7 +1009,7 @@ mod tests {
 
     #[test]
     fn presentation_identity_requires_full_rect_and_matching_extent() {
-        let mut ids = GpuColorFrameIdAllocator::new(1);
+        let mut ids = GpuColorFrameIdAllocator::new(1).expect("frame id allocator");
         let input = working_handle(&mut ids, 960, 540, GpuColorFrameTextureFormat::Rgba32Float);
 
         assert!(spatial_request_is_identity(
@@ -1119,7 +1129,8 @@ mod tests {
         .expect("upload plan");
         let input = GpuColorFrameUploader::upload(&context.device, &context.queue, &upload);
         let mut spatial = GpuViewerSpatialRuntime::default();
-        let mut output_runtime = crate::RenderGpuOutputBoundaryRuntime::with_first_frame_id(20_000);
+        let mut output_runtime = crate::RenderGpuOutputBoundaryRuntime::with_first_frame_id(20_000)
+            .expect("GPU output runtime");
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewer-spatial-ocio-encoder"),
         });
@@ -1128,8 +1139,7 @@ mod tests {
                 &context.device,
                 &mut encoder,
                 output_runtime.frame_ids_mut(),
-                upload.handle,
-                &input.resource().texture_view,
+                &input,
                 ViewerSourceRect::FULL,
                 1,
                 1,
@@ -1208,7 +1218,7 @@ mod tests {
         let input = GpuColorFrameUploader::upload(&context.device, &context.queue, &upload);
         let pool = std::sync::Arc::new(GpuColorFrameWgpuResourcePool::default());
         let mut runtime = GpuViewerSpatialRuntime::with_resource_pool(std::sync::Arc::clone(&pool));
-        let mut ids = GpuColorFrameIdAllocator::new(20_000);
+        let mut ids = GpuColorFrameIdAllocator::new(20_000).expect("frame id allocator");
 
         for frame_index in 0..2 {
             let mut encoder =
@@ -1220,8 +1230,7 @@ mod tests {
                     &context.device,
                     &mut encoder,
                     &mut ids,
-                    upload.handle.clone(),
-                    &input.resource().texture_view,
+                    &input,
                     ViewerSourceRect::FULL,
                     4,
                     4,
@@ -1266,9 +1275,10 @@ mod tests {
                 .collect(),
             color_space: WorkingColorSpace::LinearRec709,
         });
-        let mut upload_ids = GpuColorFrameIdAllocator::new(10_000);
+        let mut upload_ids =
+            GpuColorFrameIdAllocator::new(10_000).expect("upload frame id allocator");
         let upload = GpuColorFrameUploadPlan::from_cpu_color_frame(
-            upload_ids.allocate(),
+            upload_ids.allocate().expect("upload frame id"),
             &frame,
             GpuColorFrameTextureFormat::Rgba32Float,
             "viewer-spatial-test-input",
@@ -1276,7 +1286,8 @@ mod tests {
         .expect("upload plan");
         let input = GpuColorFrameUploader::upload(&context.device, &context.queue, &upload);
         let mut runtime = GpuViewerSpatialRuntime::default();
-        let mut spatial_ids = GpuColorFrameIdAllocator::new(20_000);
+        let mut spatial_ids =
+            GpuColorFrameIdAllocator::new(20_000).expect("spatial frame id allocator");
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewer-spatial-test-encoder"),
         });
@@ -1285,8 +1296,7 @@ mod tests {
                 &context.device,
                 &mut encoder,
                 &mut spatial_ids,
-                upload.handle,
-                &input.resource().texture_view,
+                &input,
                 source_rect,
                 output_width,
                 output_height,
@@ -1302,8 +1312,9 @@ mod tests {
             &context.device,
             &mut encoder,
             &readback_plan,
-            output_resource.resource(),
-        );
+            &output_resource,
+        )
+        .expect("record Viewer spatial readback");
         context.queue.submit(std::iter::once(encoder.finish()));
         let mapped = map_readback_buffer(&context.device, &readback);
         let actual = readback_plan
@@ -1320,7 +1331,7 @@ mod tests {
         format: GpuColorFrameTextureFormat,
     ) -> GpuColorFrameHandle {
         GpuColorFrameHandle::new(
-            ids.allocate(),
+            ids.allocate().expect("working frame id"),
             ColorFrameDescriptor {
                 width,
                 height,

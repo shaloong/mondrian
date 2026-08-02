@@ -9,9 +9,7 @@ use super::demux_source::{
     PreviewDemuxWorkerConfig, PreviewPacketRead, PreviewPacketSeek, PreviewPacketSource,
     PreviewPacketSourceOpen, PreviewPacketSourceOpenError,
 };
-use super::native_frame::{
-    PreviewDecodeSessionOutputLease, PreviewDecodeSessionOutputLeaseObserver,
-};
+use super::native_frame::{PreviewDecodeSessionOutputLease, PreviewNativeOutputTracker};
 use super::*;
 
 thread_local! {
@@ -20,34 +18,108 @@ thread_local! {
     };
 }
 
+/// Reusable resources explicitly owned by one Preview decode worker family.
+///
+/// Clone this value only between workers in the same scheduling family.
+/// Preview, Thumbnail, and Export families should receive distinct owners so
+/// their cache policy and hardware-residency pressure remain independently
+/// governable.
+#[derive(Clone, Debug, Default)]
+pub struct PreviewDecodeWorkerResources {
+    seek_index_cache: PreviewSeekIndexCache,
+    hardware_device_contexts: HwDeviceContextPool,
+    native_outputs: PreviewNativeOutputTracker,
+}
+
+impl PreviewDecodeWorkerResources {
+    /// Construct a worker-family resource owner from explicit cache and device pools.
+    pub fn new(
+        seek_index_cache: PreviewSeekIndexCache,
+        hardware_device_contexts: HwDeviceContextPool,
+    ) -> Self {
+        Self {
+            seek_index_cache,
+            hardware_device_contexts,
+            native_outputs: PreviewNativeOutputTracker::default(),
+        }
+    }
+
+    /// Shared seek-index cache for this worker family.
+    pub fn seek_index_cache(&self) -> &PreviewSeekIndexCache {
+        &self.seek_index_cache
+    }
+
+    /// Shared hardware-device context pool for this worker family.
+    pub fn hardware_device_context_pool(&self) -> &HwDeviceContextPool {
+        &self.hardware_device_contexts
+    }
+
+    /// Exact number of logical native outputs still owned anywhere in this
+    /// worker family, including outputs whose originating Session was dropped.
+    pub fn outstanding_native_output_count(&self) -> usize {
+        self.native_outputs.outstanding()
+    }
+
+    fn native_output_tracker(&self) -> &PreviewNativeOutputTracker {
+        &self.native_outputs
+    }
+}
+
 /// Explicit owner of worker-family-specific FFmpeg Preview sessions.
 ///
 /// Production schedulers should create one context per decode worker and keep
 /// it on that worker thread. This makes codec, DPB, and hardware-surface-pool
 /// residency follow the worker lifecycle instead of depending on an implicit
 /// thread-local cache. The top-level convenience decode function retains a
-/// thread-local context for standalone thumbnail/export callers.
+/// thread-local context only for standalone compatibility callers and tests;
+/// production Preview, Thumbnail, and Export workers own explicit contexts.
 pub struct PreviewDecodeSessionContext {
     sessions: PreviewDecodeSessions,
     execution_observer: PreviewDecodeExecutionObserver,
     demux_worker: Option<PreviewDemuxWorkerConfig>,
+    resources: PreviewDecodeWorkerResources,
 }
 
-/// One-shot, thread-safe construction authority for a Preview decode context.
+/// Thread-safe construction authority for a Preview decode context.
 ///
-/// The bootstrap contains no FFmpeg state and may cross a worker-thread seam.
-/// Consuming it constructs the non-`Send` session context on its owner thread.
+/// The bootstrap contains no codec, demux, DPB, or frame-pool state and may
+/// cross a worker-thread seam. Injected family resources may retain immutable,
+/// FFmpeg-refcounted hardware device roots. It deliberately does not implement
+/// `Clone`: concurrently built contexts need independent observers. Consuming
+/// the bootstrap constructs the non-`Send` Session context on its owner thread.
 pub struct PreviewDecodeSessionContextBootstrap {
     execution_observer: PreviewDecodeExecutionObserver,
     demux_worker: Option<PreviewDemuxWorkerConfig>,
+    resources: PreviewDecodeWorkerResources,
 }
 
 impl PreviewDecodeSessionContextBootstrap {
+    /// Copy this construction authority for sequential worker recovery.
+    ///
+    /// The context built from the returned authority shares the same execution
+    /// observer and worker-family resources. Call this only after the context
+    /// built from the original authority has stopped executing; it must never
+    /// create concurrent stage writers.
+    pub fn clone_for_sequential_recovery(&self) -> Self {
+        Self {
+            execution_observer: self.execution_observer.clone(),
+            demux_worker: self.demux_worker.clone(),
+            resources: self.resources.clone(),
+        }
+    }
+
+    /// Supply resources shared by the decode workers in this scheduling family.
+    pub fn with_worker_resources(mut self, resources: PreviewDecodeWorkerResources) -> Self {
+        self.resources = resources;
+        self
+    }
+
     /// Construct the worker-owned context on the current thread.
     pub fn build(self) -> PreviewDecodeSessionContext {
         PreviewDecodeSessionContext::with_execution_observer(
             self.execution_observer,
             self.demux_worker,
+            self.resources,
         )
     }
 }
@@ -55,22 +127,34 @@ impl PreviewDecodeSessionContextBootstrap {
 impl PreviewDecodeSessionContext {
     /// Create an empty worker-local decode context.
     pub fn new() -> Self {
-        Self::with_execution_observer(PreviewDecodeExecutionObserver::new(), None)
+        Self::with_execution_observer(
+            PreviewDecodeExecutionObserver::new(),
+            None,
+            PreviewDecodeWorkerResources::default(),
+        )
     }
 
-    /// Create a one-shot worker bootstrap without retaining its observer.
+    /// Create an empty worker-local context with explicit family resources.
+    pub fn with_worker_resources(resources: PreviewDecodeWorkerResources) -> Self {
+        Self::with_execution_observer(PreviewDecodeExecutionObserver::new(), None, resources)
+    }
+
+    /// Create a worker bootstrap without retaining its observer.
     pub fn bootstrap() -> PreviewDecodeSessionContextBootstrap {
         PreviewDecodeSessionContextBootstrap {
             execution_observer: PreviewDecodeExecutionObserver::new(),
             demux_worker: None,
+            resources: PreviewDecodeWorkerResources::default(),
         }
     }
 
-    /// Create a one-shot worker bootstrap together with its read-only observer.
+    /// Create a worker bootstrap together with its read-only observer.
     ///
-    /// The bootstrap is not cloneable and is consumed on the worker thread.
-    /// Callers may clone the observer for diagnostics, but cannot create a
-    /// second stage writer for the same evidence stream.
+    /// The bootstrap is consumed on the worker thread. Its explicit sequential
+    /// recovery copy may replace that context only after the previous context
+    /// stops executing; callers must not create concurrent stage writers for
+    /// the same evidence stream. The returned observer remains independently
+    /// cloneable for diagnostics.
     pub fn observed_bootstrap() -> (
         PreviewDecodeSessionContextBootstrap,
         PreviewDecodeExecutionObserver,
@@ -80,6 +164,7 @@ impl PreviewDecodeSessionContext {
             PreviewDecodeSessionContextBootstrap {
                 execution_observer: observer.clone(),
                 demux_worker: None,
+                resources: PreviewDecodeWorkerResources::default(),
             },
             observer,
         )
@@ -102,6 +187,7 @@ impl PreviewDecodeSessionContext {
             PreviewDecodeSessionContextBootstrap {
                 execution_observer: observer.clone(),
                 demux_worker: Some(PreviewDemuxWorkerConfig::new(executable, observer.clone())),
+                resources: PreviewDecodeWorkerResources::default(),
             },
             observer,
         )
@@ -110,23 +196,30 @@ impl PreviewDecodeSessionContext {
     fn with_execution_observer(
         execution_observer: PreviewDecodeExecutionObserver,
         demux_worker: Option<PreviewDemuxWorkerConfig>,
+        resources: PreviewDecodeWorkerResources,
     ) -> Self {
         Self {
             sessions: PreviewDecodeSessions { playback: None, interactive: None, cpu_still: None },
             execution_observer,
             demux_worker,
+            resources,
         }
+    }
+
+    /// Return the reusable resources owned by this context's worker family.
+    pub fn worker_resources(&self) -> &PreviewDecodeWorkerResources {
+        &self.resources
     }
 
     /// Release all codec sessions and their owned decode resources.
     pub fn clear(&mut self) {
-        if self.sessions.is_empty() {
-            return;
+        if !self.sessions.is_empty() {
+            self.execution_observer
+                .publish_stage(PreviewDecodeExecutionStage::SessionRetire);
+            self.sessions.clear();
+            self.execution_observer.finish_idle();
         }
-        self.execution_observer
-            .publish_stage(PreviewDecodeExecutionStage::SessionRetire);
-        self.sessions.clear();
-        self.execution_observer.finish_idle();
+        self.resources.hardware_device_contexts.release_idle();
     }
 
     /// Whether every decoder-native output issued by this context is released.
@@ -135,7 +228,16 @@ impl PreviewDecodeSessionContext {
     /// family retirement; dropping the codec owner alone does not revoke frame
     /// references already published to a completion queue or renderer.
     pub fn native_outputs_released(&self) -> bool {
-        self.sessions.native_outputs_released()
+        self.resources.native_outputs.is_released()
+    }
+
+    /// Number of live decoder Sessions owned by this context.
+    ///
+    /// This lightweight lifecycle fact lets worker/job owners prove that an
+    /// explicit retirement boundary released codec, DPB, demux, and
+    /// hardware-surface-pool residency. It does not expose decoder internals.
+    pub fn resident_session_count(&self) -> usize {
+        self.sessions.resident_session_count()
     }
 
     /// Decode one request using sessions explicitly owned by this context.
@@ -149,16 +251,8 @@ impl PreviewDecodeSessionContext {
         decode_preview_frame_outcome_in_sessions(
             &mut self.sessions,
             &self.execution_observer,
-            request.path,
-            request.source_time,
-            request.max_width,
-            request.max_height,
-            request.access_mode,
-            request.fingerprint,
-            request.adaptive_hints,
-            request.hardware_decode_request,
-            request.hardware_decode_device_selector,
-            request.source_color,
+            request,
+            &self.resources,
             self.demux_worker.as_ref(),
             should_cancel,
         )
@@ -202,25 +296,23 @@ impl PreviewDecodeSessions {
         access_mode: PreviewDecodeAccessMode,
         hardware_decode_request: PreviewHardwareDecodeRequest,
     ) -> Option<PreviewDecodeSessionSlot> {
-        match access_mode {
-            PreviewDecodeAccessMode::PlaybackCursor => Some(PreviewDecodeSessionSlot::Playback),
-            PreviewDecodeAccessMode::ScrubCursor => self
-                .interactive
-                .as_ref()
-                .is_none_or(PreviewDecodeSession::native_output_released)
-                .then_some(PreviewDecodeSessionSlot::Interactive),
+        let slot = match access_mode {
+            PreviewDecodeAccessMode::PlaybackCursor => PreviewDecodeSessionSlot::Playback,
+            PreviewDecodeAccessMode::ScrubCursor => PreviewDecodeSessionSlot::Interactive,
             PreviewDecodeAccessMode::RandomAccessStillFrame
                 if hardware_decode_request.prefers_gpu_residency() =>
             {
-                self.interactive
-                    .as_ref()
-                    .is_none_or(PreviewDecodeSession::native_output_released)
-                    .then_some(PreviewDecodeSessionSlot::Interactive)
+                PreviewDecodeSessionSlot::Interactive
             }
-            PreviewDecodeAccessMode::RandomAccessStillFrame => {
-                Some(PreviewDecodeSessionSlot::CpuStill)
-            }
+            PreviewDecodeAccessMode::RandomAccessStillFrame => PreviewDecodeSessionSlot::CpuStill,
+        };
+        if !slot.requires_released_native_outputs() {
+            return Some(slot);
         }
+        self.interactive
+            .as_ref()
+            .is_none_or(PreviewDecodeSession::native_output_released)
+            .then_some(slot)
     }
 
     fn slot_mut(&mut self, slot: PreviewDecodeSessionSlot) -> &mut Option<PreviewDecodeSession> {
@@ -231,10 +323,11 @@ impl PreviewDecodeSessions {
         }
     }
 
-    fn native_outputs_released(&self) -> bool {
-        [&self.playback, &self.interactive, &self.cpu_still].into_iter().all(|session| {
-            session.as_ref().is_none_or(PreviewDecodeSession::native_output_released)
-        })
+    fn resident_session_count(&self) -> usize {
+        [&self.playback, &self.interactive, &self.cpu_still]
+            .into_iter()
+            .filter(|session| session.is_some())
+            .count()
     }
 
     fn clear(&mut self) {
@@ -251,6 +344,12 @@ enum PreviewDecodeSessionSlot {
     CpuStill,
 }
 
+impl PreviewDecodeSessionSlot {
+    fn requires_released_native_outputs(self) -> bool {
+        self == Self::Interactive
+    }
+}
+
 use hardware_decode::{
     preview_hardware_decode_get_format, preview_hardware_frame_format,
     PreviewHardwareDecodeContextState, PreviewHardwareDecodePlan,
@@ -259,6 +358,7 @@ use hardware_decode::{
 struct PreviewDecodeSession {
     path: PathBuf,
     fingerprint: MediaFileFingerprint,
+    requested_video_stream_index: Option<u32>,
     max_width: Option<u32>,
     max_height: Option<u32>,
     backend: PreviewDecodeBackend,
@@ -270,6 +370,18 @@ struct PreviewDecodeSession {
     // Declared after `packet_source` so a direct AVFormatContext releases its callback use
     // before the callback state is dropped.
     interrupt_state: Arc<PreviewDecodeInterruptState>,
+    // These decoder-dependent frame owners must be declared before `decoder`
+    // and its hardware contexts. Rust drops struct fields in declaration order;
+    // releasing every retained AVFrame/native surface first keeps the codec,
+    // DPB, surface pool, and device alive while FFmpeg unrefs those frames.
+    // Relying on Session retirement call sites to clear them is insufficient:
+    // error unwinding and ordinary Option replacement must have the same order.
+    /// Decoded candidate selected by the previous request.
+    last_decoded_frame: Option<RetainedDecodedCandidate>,
+    /// First decoded successor retained to prove the selected frame's exclusive
+    /// presentation boundary and seed the next forward request.
+    next_decoded_frame: Option<RetainedDecodedCandidate>,
+    playback_ring: PreviewPlaybackRing,
     decoder: ffmpeg::decoder::Video,
     scaler: Option<ffmpeg::software::scaling::Context>,
     scaler_source_format: Option<ffmpeg::util::format::pixel::Pixel>,
@@ -278,27 +390,93 @@ struct PreviewDecodeSession {
     /// Absolute stream PTS representing media-source-local time zero.
     stream_start_pts: i64,
     frame_duration_pts: i64,
-    hit_tolerance_pts: i64,
     target_width: u32,
     target_height: u32,
     _hardware_decode_context_state: Option<Box<PreviewHardwareDecodeContextState>>,
+    hardware_device_context: Option<HwAccelDeviceContext>,
     threading_kind: PreviewDecodeThreadingKind,
     threading_count: usize,
     hardware_decode_plan: PreviewHardwareDecodePlan,
     decoded_surface_format: DecodedVideoSurfaceFormat,
-    last_native_output_lease: Option<PreviewDecodeSessionOutputLeaseObserver>,
+    family_native_outputs: PreviewNativeOutputTracker,
+    session_native_outputs: PreviewNativeOutputTracker,
+    /// Monotonic maximum decoded presentation timestamp since the last seek.
     last_pts: Option<i64>,
+    duplicate_decoded_pts: Option<i64>,
     reached_eof: bool,
-    playback_ring: PreviewPlaybackRing,
     seek_index: PreviewSeekIndex,
+}
+
+impl Drop for PreviewDecodeSession {
+    fn drop(&mut self) {
+        // Drop runs before fields are destroyed. Clear every private AVFrame and
+        // native-frame owner explicitly so this invariant remains correct even
+        // if a future refactor accidentally changes field declaration order.
+        self.last_decoded_frame = None;
+        self.next_decoded_frame = None;
+        self.playback_ring.clear();
+    }
 }
 
 struct PreviewDecodeForwardResult {
     frame: Option<PreviewDecodedFramePayload>,
-    selected_pts: Option<i64>,
+    selected_extent: Option<DecodedTemporalExtent>,
+    retained_selected_frame: Option<RetainedDecodedCandidate>,
+    retained_next_frame: Option<RetainedDecodedCandidate>,
     decoded_frame_count: usize,
     canceled: bool,
     isolated_demux_terminated: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DecodedTemporalCandidate {
+    Before,
+    After,
+}
+
+pub(super) fn select_decoded_temporal_candidate(
+    requested_pts: i64,
+    access_mode: PreviewDecodeAccessMode,
+    before: Option<DecodedTemporalExtent>,
+    after: Option<DecodedTemporalExtent>,
+) -> Option<(DecodedTemporalCandidate, DecodedTemporalExtent)> {
+    let before = before.map(|extent| {
+        after.map_or(extent, |successor| {
+            extent.with_successor(successor.start_pts)
+        })
+    });
+    if let Some(extent) = before.filter(|extent| extent.covers(requested_pts)) {
+        return Some((DecodedTemporalCandidate::Before, extent));
+    }
+    if let Some(extent) = after.filter(|extent| extent.covers(requested_pts)) {
+        return Some((DecodedTemporalCandidate::After, extent));
+    }
+
+    match access_mode {
+        PreviewDecodeAccessMode::ScrubCursor => match (before, after) {
+            (Some(before), Some(after)) => {
+                if before.distance_to(requested_pts) <= after.distance_to(requested_pts) {
+                    Some((DecodedTemporalCandidate::Before, before))
+                } else {
+                    Some((DecodedTemporalCandidate::After, after))
+                }
+            }
+            (Some(before), None) => Some((DecodedTemporalCandidate::Before, before)),
+            (None, Some(after)) => Some((DecodedTemporalCandidate::After, after)),
+            (None, None) => None,
+        },
+        PreviewDecodeAccessMode::PlaybackCursor
+        | PreviewDecodeAccessMode::RandomAccessStillFrame => None,
+    }
+}
+
+pub(super) fn decoded_temporal_candidate_within_selection_distance(
+    selected_extent: DecodedTemporalExtent,
+    requested_pts: i64,
+    max_select_distance_pts: i64,
+) -> bool {
+    selected_extent.covers(requested_pts)
+        || selected_extent.distance_to(requested_pts) <= max_select_distance_pts
 }
 
 enum PreviewSeekToTarget {
@@ -327,39 +505,11 @@ impl From<FloatRgbaFrame> for PreviewDecodedFramePayload {
 }
 
 impl PreviewDecodedFramePayload {
-    pub(super) fn cache_cpu_frame(
-        &self,
-        path: &Path,
-        fingerprint: MediaFileFingerprint,
-        width: u32,
-        height: u32,
-        pts: i64,
-    ) {
-        let frame = match self {
-            Self::CpuRgba(frame) => Self::CpuRgba(frame.clone().with_decode_execution()),
-            Self::CpuFloat(frame) => Self::CpuFloat(frame.clone().with_decode_execution()),
-            Self::NativeGpu(_) => return,
-        };
-        preview_cache_put_with_fingerprint(path, fingerprint, width, height, pts, frame);
-    }
-
-    pub(super) fn source_color(&self) -> Option<PreviewSourceColorContract> {
+    pub(super) fn reserved_cpu_bytes(&self) -> usize {
         match self {
-            Self::CpuRgba(frame) => Some(frame.color_contract.source),
-            Self::CpuFloat(frame) => Some(frame.color_contract.source),
-            Self::NativeGpu(_) => None,
-        }
-    }
-
-    pub(super) fn into_cache_hit(
-        self,
-        elapsed: Duration,
-        access_mode: PreviewDecodeAccessMode,
-    ) -> Self {
-        match self {
-            Self::CpuRgba(frame) => Self::CpuRgba(frame.into_cache_hit(elapsed, access_mode)),
-            Self::CpuFloat(frame) => Self::CpuFloat(frame.into_cache_hit(elapsed, access_mode)),
-            Self::NativeGpu(frame) => Self::NativeGpu(frame),
+            Self::CpuRgba(frame) => frame.rgba().len(),
+            Self::CpuFloat(frame) => frame.rgba().len().saturating_mul(std::mem::size_of::<f32>()),
+            Self::NativeGpu(_) => 0,
         }
     }
 
@@ -367,6 +517,22 @@ impl PreviewDecodedFramePayload {
         match self {
             Self::CpuRgba(frame) => Self::CpuRgba(frame.into_playback_ring_hit(elapsed)),
             Self::CpuFloat(frame) => Self::CpuFloat(frame.into_playback_ring_hit(elapsed)),
+            Self::NativeGpu(frame) => Self::NativeGpu(frame),
+        }
+    }
+
+    pub(super) fn with_temporal_selection(
+        self,
+        requested_pts: i64,
+        selected_extent: Option<DecodedTemporalExtent>,
+    ) -> Self {
+        match self {
+            Self::CpuRgba(frame) => {
+                Self::CpuRgba(frame.with_temporal_selection(requested_pts, selected_extent))
+            }
+            Self::CpuFloat(frame) => {
+                Self::CpuFloat(frame.with_temporal_selection(requested_pts, selected_extent))
+            }
             Self::NativeGpu(frame) => Self::NativeGpu(frame),
         }
     }
@@ -454,15 +620,170 @@ impl RetainedDecodedFrame {
     }
 }
 
+struct RetainedDecodedCandidate {
+    extent: DecodedTemporalExtent,
+    frame: RetainedDecodedFrame,
+}
+
+impl RetainedDecodedCandidate {
+    fn retain(
+        start_pts: i64,
+        frame: &ffmpeg::util::frame::video::Video,
+        path: &Path,
+    ) -> Result<Self> {
+        Ok(Self {
+            extent: DecodedTemporalExtent::from_decoded_frame(start_pts, frame),
+            frame: RetainedDecodedFrame::retain(frame, path)?,
+        })
+    }
+}
+
+/// Bounded candidate window around one requested stream PTS.
+///
+/// Insertion is the sole owner of candidate ordering: regardless of decoder
+/// output order it retains the greatest PTS at/before the target and the least
+/// PTS after it. Equal-PTS decoded outputs keep the first frame deterministically
+/// and record ambiguity so exact access can fail closed after the ready queue is
+/// drained. Scrub may still use that deterministic first candidate; its ordinary
+/// interval-coverage evidence continues to decide whether the result is Degraded.
+struct RetainedDecodedCandidateWindow {
+    target_pts: i64,
+    before: Option<RetainedDecodedCandidate>,
+    after: Option<RetainedDecodedCandidate>,
+    duplicate_pts: Option<i64>,
+}
+
+fn advance_decoded_pts_high_water(high_water: &mut Option<i64>, observed_pts: i64) {
+    *high_water = Some(high_water.map_or(observed_pts, |current| current.max(observed_pts)));
+}
+
+impl RetainedDecodedCandidateWindow {
+    fn new(target_pts: i64) -> Self {
+        Self {
+            target_pts,
+            before: None,
+            after: None,
+            duplicate_pts: None,
+        }
+    }
+
+    fn seed(&mut self, candidate: RetainedDecodedCandidate) {
+        self.insert(candidate, false);
+    }
+
+    fn observe(
+        &mut self,
+        frame_pts: i64,
+        frame: &ffmpeg::util::frame::video::Video,
+        path: &Path,
+        pts_high_water: &mut Option<i64>,
+    ) -> Result<()> {
+        advance_decoded_pts_high_water(pts_high_water, frame_pts);
+        self.insert(
+            RetainedDecodedCandidate::retain(frame_pts, frame, path)?,
+            true,
+        );
+        Ok(())
+    }
+
+    fn insert(&mut self, candidate: RetainedDecodedCandidate, record_duplicate: bool) {
+        let candidate_pts = candidate.extent.start_pts;
+        let slot = if candidate_pts <= self.target_pts {
+            &mut self.before
+        } else {
+            &mut self.after
+        };
+        let current_pts = slot.as_ref().map(|current| current.extent.start_pts);
+        let duplicate = current_pts == Some(candidate_pts);
+        let replace = current_pts.is_none_or(|current_pts| {
+            if candidate_pts == current_pts {
+                false
+            } else if candidate_pts <= self.target_pts {
+                candidate_pts > current_pts
+            } else {
+                candidate_pts < current_pts
+            }
+        });
+        if replace {
+            *slot = Some(candidate);
+        }
+        if record_duplicate && duplicate {
+            self.duplicate_pts.get_or_insert(candidate_pts);
+        }
+    }
+
+    fn before(&self) -> Option<&RetainedDecodedCandidate> {
+        self.before.as_ref()
+    }
+
+    fn after(&self) -> Option<&RetainedDecodedCandidate> {
+        self.after.as_ref()
+    }
+
+    fn duplicate_pts(&self) -> Option<i64> {
+        self.duplicate_pts
+    }
+
+    fn validate_exact_ordering(
+        &self,
+        path: &Path,
+        access_mode: PreviewDecodeAccessMode,
+    ) -> Result<()> {
+        if access_mode == PreviewDecodeAccessMode::ScrubCursor {
+            return Ok(());
+        }
+        let Some(duplicate_pts) = self.duplicate_pts() else {
+            return Ok(());
+        };
+        Err(MondrianError::DecodeTemporalMismatch {
+            asset_id: path.display().to_string(),
+            access_mode: access_mode.as_str().to_owned(),
+            requested_pts: Some(self.target_pts),
+            selected_pts: Some(duplicate_pts),
+            selected_duration_pts: None,
+        })
+    }
+
+    fn selected_extent(
+        &self,
+        access_mode: PreviewDecodeAccessMode,
+    ) -> Option<DecodedTemporalExtent> {
+        select_decoded_temporal_candidate(
+            self.target_pts,
+            access_mode,
+            self.before().map(|candidate| candidate.extent),
+            self.after().map(|candidate| candidate.extent),
+        )
+        .map(|(_, extent)| extent)
+    }
+
+    fn take_successor(
+        &mut self,
+        selected_extent: DecodedTemporalExtent,
+    ) -> Option<RetainedDecodedCandidate> {
+        self.after
+            .take()
+            .filter(|candidate| candidate.extent.start_pts > selected_extent.start_pts)
+    }
+}
+
 impl PreviewDecodeForwardResult {
     fn frame(
         frame: PreviewDecodedFramePayload,
-        selected_pts: i64,
+        selected_extent: DecodedTemporalExtent,
+        retained_selected_frame: RetainedDecodedCandidate,
+        retained_next_frame: Option<RetainedDecodedCandidate>,
         decoded_frame_count: usize,
     ) -> Self {
+        debug_assert_eq!(selected_extent, retained_selected_frame.extent);
+        debug_assert!(retained_next_frame
+            .as_ref()
+            .is_none_or(|next| next.extent.start_pts > selected_extent.start_pts));
         Self {
             frame: Some(frame),
-            selected_pts: Some(selected_pts),
+            selected_extent: Some(selected_extent),
+            retained_selected_frame: Some(retained_selected_frame),
+            retained_next_frame,
             decoded_frame_count,
             canceled: false,
             isolated_demux_terminated: false,
@@ -472,7 +793,9 @@ impl PreviewDecodeForwardResult {
     fn empty(decoded_frame_count: usize) -> Self {
         Self {
             frame: None,
-            selected_pts: None,
+            selected_extent: None,
+            retained_selected_frame: None,
+            retained_next_frame: None,
             decoded_frame_count,
             canceled: false,
             isolated_demux_terminated: false,
@@ -482,7 +805,9 @@ impl PreviewDecodeForwardResult {
     fn canceled(decoded_frame_count: usize) -> Self {
         Self {
             frame: None,
-            selected_pts: None,
+            selected_extent: None,
+            retained_selected_frame: None,
+            retained_next_frame: None,
             decoded_frame_count,
             canceled: true,
             isolated_demux_terminated: false,
@@ -492,7 +817,9 @@ impl PreviewDecodeForwardResult {
     fn isolated_demux_canceled(decoded_frame_count: usize) -> Self {
         Self {
             frame: None,
-            selected_pts: None,
+            selected_extent: None,
+            retained_selected_frame: None,
+            retained_next_frame: None,
             decoded_frame_count,
             canceled: true,
             isolated_demux_terminated: true,
@@ -523,22 +850,41 @@ fn preview_decode_context_from_parameters(
 fn configure_preview_hardware_decode_context(
     context: &mut ffmpeg::codec::context::Context,
     plan: &PreviewHardwareDecodePlan,
-) -> std::result::Result<(Box<PreviewHardwareDecodeContextState>, HwAccelDeviceContext), String> {
-    let backend = plan
-        .probe
-        .candidate_backend
-        .ok_or_else(|| "no platform hardware decode backend candidate".to_owned())?;
+    device_context_pool: &HwDeviceContextPool,
+) -> std::result::Result<
+    (Box<PreviewHardwareDecodeContextState>, HwAccelDeviceContext),
+    HwAccelDeviceContextProbe,
+> {
+    let backend = plan.probe.candidate_backend.ok_or_else(|| {
+        HwAccelDeviceContextProbe::unavailable(
+            HwAccelBackend::None,
+            "no platform hardware decode backend candidate",
+        )
+    })?;
     let hw_pixel_format = plan
         .ffmpeg_codec_config
         .hw_pixel_format
         .and_then(HwAccelPixelFormat::to_ffmpeg)
         .ok_or_else(|| {
-            "FFmpeg codec config did not expose a usable hardware pixel format".to_owned()
+            HwAccelDeviceContextProbe::deferred(
+                backend,
+                plan.ffmpeg_codec_config.ffmpeg_device_type_available,
+                "FFmpeg codec config did not expose a usable hardware pixel format",
+            )
         })?;
-    let device_context = backend
-        .shared_ffmpeg_device_context(plan.device_selector)
-        .map_err(|probe| probe.reason)?;
-    device_context.attach_to_codec_context(context)?;
+    let device_context = device_context_pool.acquire(backend, plan.device_selector)?;
+    if let Err(reason) = device_context.attach_to_codec_context(context) {
+        let newly_created = device_context.newly_created();
+        device_context.retire_after_setup_failure(format!(
+            "{} hardware device codec attachment failed: {reason}",
+            backend.as_str()
+        ));
+        return Err(HwAccelDeviceContextProbe::acquired(
+            backend,
+            newly_created,
+            format!("hardware device was acquired but codec attachment failed: {reason}"),
+        ));
+    }
 
     let mut state =
         Box::new(PreviewHardwareDecodeContextState { preferred_hw_pixel_format: hw_pixel_format });
@@ -573,24 +919,33 @@ pub(super) fn preview_create_rgba_scaler(
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PreviewDecodeSessionOpenRequest<'a> {
+    path: &'a Path,
+    fingerprint: MediaFileFingerprint,
+    video_stream_index: Option<u32>,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+    access_mode: PreviewDecodeAccessMode,
+    backend: PreviewDecodeBackend,
+    hardware_decode_request: PreviewHardwareDecodeRequest,
+    hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
+    source_color: PreviewSourceColorContract,
+}
+
 impl PreviewDecodeSession {
     fn open(
-        path: &Path,
-        fingerprint: MediaFileFingerprint,
-        max_width: Option<u32>,
-        max_height: Option<u32>,
-        access_mode: PreviewDecodeAccessMode,
-        backend: PreviewDecodeBackend,
-        hardware_decode_request: PreviewHardwareDecodeRequest,
-        hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
-        source_color: PreviewSourceColorContract,
+        request: PreviewDecodeSessionOpenRequest<'_>,
+        resources: &PreviewDecodeWorkerResources,
         demux_worker: Option<&PreviewDemuxWorkerConfig>,
         should_cancel: &(dyn Fn() -> bool + Send + Sync),
         interrupt_state: Arc<PreviewDecodeInterruptState>,
     ) -> std::result::Result<Self, PreviewPacketSourceOpenError> {
         let source = PreviewPacketSource::open(
-            path,
-            fingerprint,
+            request.path,
+            request.fingerprint,
+            request.video_stream_index,
+            resources.seek_index_cache(),
             demux_worker,
             &interrupt_state,
             should_cancel,
@@ -598,15 +953,9 @@ impl PreviewDecodeSession {
         Self::from_packet_source(
             source,
             interrupt_state,
-            path,
-            fingerprint,
-            max_width,
-            max_height,
-            access_mode,
-            backend,
-            hardware_decode_request,
-            hardware_decode_device_selector,
-            source_color,
+            request,
+            resources.hardware_device_context_pool(),
+            resources.native_output_tracker(),
         )
         .map_err(PreviewPacketSourceOpenError::Failed)
     }
@@ -614,16 +963,22 @@ impl PreviewDecodeSession {
     fn from_packet_source(
         source: PreviewPacketSourceOpen,
         interrupt_state: Arc<PreviewDecodeInterruptState>,
-        path: &Path,
-        fingerprint: MediaFileFingerprint,
-        max_width: Option<u32>,
-        max_height: Option<u32>,
-        access_mode: PreviewDecodeAccessMode,
-        backend: PreviewDecodeBackend,
-        hardware_decode_request: PreviewHardwareDecodeRequest,
-        hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
-        source_color: PreviewSourceColorContract,
+        request: PreviewDecodeSessionOpenRequest<'_>,
+        hardware_device_context_pool: &HwDeviceContextPool,
+        family_native_outputs: &PreviewNativeOutputTracker,
     ) -> Result<Self> {
+        let PreviewDecodeSessionOpenRequest {
+            path,
+            fingerprint,
+            video_stream_index: requested_video_stream_index,
+            max_width,
+            max_height,
+            access_mode,
+            backend,
+            hardware_decode_request,
+            hardware_decode_device_selector,
+            source_color,
+        } = request;
         let PreviewPacketSourceOpen {
             source,
             parameters,
@@ -649,68 +1004,105 @@ impl PreviewDecodeSession {
         };
 
         let mut hardware_decode_context_state = None;
+        let mut hardware_device_context = None;
         interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::SessionSetup);
-        let mut context =
-            preview_decode_context_from_parameters(parameters.clone(), ffmpeg_threading, path)?;
-        if hardware_decode_plan.should_configure_hardware_decoder(access_mode)
+        let hardware_decoder = if hardware_decode_plan
+            .should_configure_hardware_decoder(access_mode)
             && backend != PreviewDecodeBackend::Software
         {
-            interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::HardwareDevice);
-            match configure_preview_hardware_decode_context(&mut context, &hardware_decode_plan) {
-                Ok((state, device_context)) => {
-                    if hardware_decode_plan.allows_cpu_transfer_fallback() {
-                        hardware_decode_plan
-                            .mark_hardware_cpu_transfer_configured(device_context.backend());
+            loop {
+                let mut context = preview_decode_context_from_parameters(
+                    parameters.clone(),
+                    ffmpeg_threading,
+                    path,
+                )?;
+                interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::HardwareDevice);
+                match configure_preview_hardware_decode_context(
+                    &mut context,
+                    &hardware_decode_plan,
+                    hardware_device_context_pool,
+                ) {
+                    Ok((state, device_context)) => {
+                        hardware_decode_plan.mark_device_context_acquired(
+                            device_context.backend(),
+                            device_context.newly_created(),
+                        );
+                        if hardware_decode_plan.allows_cpu_transfer_fallback() {
+                            hardware_decode_plan
+                                .mark_hardware_cpu_transfer_configured(device_context.backend());
+                        }
+                        interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::CodecOpen);
+                        match context.decoder().video() {
+                            Ok(decoder) => {
+                                hardware_decode_context_state = Some(state);
+                                hardware_device_context = Some(device_context);
+                                break Some(decoder);
+                            }
+                            Err(error) => {
+                                let reason = error.to_string();
+                                device_context.retire_after_setup_failure(format!(
+                                    "{} hardware decoder failed to open: {reason}",
+                                    device_context.backend().as_str()
+                                ));
+                                hardware_decode_plan.mark_decoder_open_failed(reason.clone());
+                                if hardware_decode_plan
+                                    .advance_hardware_candidate(access_mode, backend)
+                                {
+                                    continue;
+                                }
+                                if hardware_decode_request.requires_gpu_residency() {
+                                    return Err(MondrianError::DecodeFailed {
+                                        asset_id: path.display().to_string(),
+                                        reason: format!(
+                                            "required GPU-resident FFmpeg decoders failed to open: {}",
+                                            hardware_decode_plan.probe.reason
+                                        ),
+                                    });
+                                }
+                                preview_trace(format!(
+                                    "[preview] compatible hardware decoder backends failed to open, fallback software: {reason}"
+                                ));
+                                break None;
+                            }
+                        }
                     }
-                    hardware_decode_context_state = Some(state);
-                }
-                Err(reason) => {
-                    hardware_decode_plan.mark_hardware_cpu_transfer_setup_failed();
-                    if hardware_decode_request.requires_gpu_residency() {
-                        return Err(MondrianError::DecodeFailed {
-                            asset_id: path.display().to_string(),
-                            reason: format!(
-                                "required GPU-resident FFmpeg decoder setup failed: {reason}"
-                            ),
-                        });
+                    Err(probe) => {
+                        let reason = probe.reason.clone();
+                        hardware_decode_plan.mark_device_context_setup_failed(probe);
+                        if hardware_decode_plan.advance_hardware_candidate(access_mode, backend) {
+                            continue;
+                        }
+                        if hardware_decode_request.requires_gpu_residency() {
+                            return Err(MondrianError::DecodeFailed {
+                                asset_id: path.display().to_string(),
+                                reason: format!(
+                                    "required GPU-resident FFmpeg decoder setup failed: {}",
+                                    hardware_decode_plan.probe.reason
+                                ),
+                            });
+                        }
+                        preview_trace(format!(
+                            "[preview] compatible hardware device backends failed, fallback software: {reason}"
+                        ));
+                        break None;
                     }
-                    preview_trace(format!(
-                        "[preview] hardware decode CPU-transfer setup failed, fallback software: {reason}"
-                    ));
                 }
             }
-        }
+        } else {
+            None
+        };
 
-        interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::CodecOpen);
-        let decoder = match context.decoder().video() {
-            Ok(decoder) => decoder,
-            Err(err) if hardware_decode_context_state.is_some() => {
-                if hardware_decode_request.requires_gpu_residency() {
-                    return Err(MondrianError::DecodeFailed {
-                        asset_id: path.display().to_string(),
-                        reason: format!(
-                            "required GPU-resident FFmpeg decoder failed to open: {err}"
-                        ),
-                    });
-                }
-                preview_trace(format!(
-                    "[preview] hardware decode open failed, fallback software: {err}"
-                ));
-                hardware_decode_plan.mark_hardware_cpu_transfer_decoder_open_failed();
-                hardware_decode_context_state = None;
+        let decoder = match hardware_decoder {
+            Some(decoder) => decoder,
+            None => {
+                interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::CodecOpen);
                 preview_decode_context_from_parameters(parameters, ffmpeg_threading, path)?
                     .decoder()
                     .video()
-                    .map_err(|e| MondrianError::DecodeFailed {
+                    .map_err(|error| MondrianError::DecodeFailed {
                         asset_id: path.display().to_string(),
-                        reason: e.to_string(),
+                        reason: error.to_string(),
                     })?
-            }
-            Err(err) => {
-                return Err(MondrianError::DecodeFailed {
-                    asset_id: path.display().to_string(),
-                    reason: err.to_string(),
-                });
             }
         };
         interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::SessionSetup);
@@ -742,12 +1134,11 @@ impl PreviewDecodeSession {
         };
 
         let frame_duration_pts = estimate_frame_duration_pts(stream_tb, stream_rate).max(1);
-        let max_hit_tolerance_pts = seconds_to_stream_pts(PREVIEW_HIT_TOLERANCE_SECS, stream_tb);
-        let hit_tolerance_pts = (frame_duration_pts / 2).max(1).min(max_hit_tolerance_pts.max(1));
 
         Ok(Self {
             path: path.to_path_buf(),
             fingerprint,
+            requested_video_stream_index,
             max_width,
             max_height,
             backend,
@@ -764,54 +1155,59 @@ impl PreviewDecodeSession {
             stream_tb,
             stream_start_pts,
             frame_duration_pts,
-            hit_tolerance_pts,
             target_width,
             target_height,
             _hardware_decode_context_state: hardware_decode_context_state,
+            hardware_device_context,
             threading_kind,
             threading_count,
             hardware_decode_plan,
             decoded_surface_format,
-            last_native_output_lease: None,
+            family_native_outputs: family_native_outputs.clone(),
+            session_native_outputs: PreviewNativeOutputTracker::default(),
             last_pts: None,
+            duplicate_decoded_pts: None,
+            last_decoded_frame: None,
+            next_decoded_frame: None,
             reached_eof: false,
-            playback_ring: PreviewPlaybackRing::new(PREVIEW_PLAYBACK_SESSION_RING_CAPACITY),
+            playback_ring: PreviewPlaybackRing::new(
+                PREVIEW_PLAYBACK_SESSION_RING_CAPACITY,
+                PREVIEW_PLAYBACK_SESSION_RING_BYTE_BUDGET,
+            ),
             seek_index,
         })
     }
 
     fn matches(
         &self,
-        path: &Path,
-        fingerprint: MediaFileFingerprint,
-        max_width: Option<u32>,
-        max_height: Option<u32>,
+        request: &PreviewDecodeSessionOpenRequest<'_>,
         demux_worker_available: bool,
-        backend: PreviewDecodeBackend,
-        hardware_decode_request: PreviewHardwareDecodeRequest,
-        hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
-        source_color: PreviewSourceColorContract,
     ) -> bool {
         self.packet_source.is_healthy()
             && packet_source_execution_family_matches(
                 self.packet_source.is_isolated(),
                 demux_worker_available,
             )
-            && self.path == path
-            && fingerprint.authorizes_reuse()
-            && self.fingerprint == fingerprint
-            && self.max_width == max_width
-            && self.max_height == max_height
-            && self.backend == backend
-            && self.hardware_decode_request == hardware_decode_request
-            && self.hardware_decode_device_selector == hardware_decode_device_selector
-            && self.source_color == source_color
+            && self.path == request.path
+            && request.fingerprint.authorizes_reuse()
+            && self.fingerprint == request.fingerprint
+            && self.requested_video_stream_index == request.video_stream_index
+            && self.max_width == request.max_width
+            && self.max_height == request.max_height
+            && self.backend == request.backend
+            && self.hardware_decode_request == request.hardware_decode_request
+            && self.hardware_decode_device_selector == request.hardware_decode_device_selector
+            && self.source_color == request.source_color
     }
 
     fn native_output_released(&self) -> bool {
-        self.last_native_output_lease
-            .as_ref()
-            .is_none_or(PreviewDecodeSessionOutputLeaseObserver::is_released)
+        self.session_native_outputs.is_released()
+    }
+
+    fn retire_hardware_device_context(&self) {
+        if let Some(device_context) = &self.hardware_device_context {
+            device_context.retire();
+        }
     }
 
     /// Restore a deterministic decode entry after cooperative cancellation.
@@ -830,6 +1226,9 @@ impl PreviewDecodeSession {
         }
         self.decoder.skip_frame(ffmpeg::codec::discard::Discard::Default);
         self.last_pts = None;
+        self.duplicate_decoded_pts = None;
+        self.last_decoded_frame = None;
+        self.next_decoded_frame = None;
         self.reached_eof = false;
         self.playback_ring.clear();
     }
@@ -877,51 +1276,20 @@ impl PreviewDecodeSession {
         let cache_lookup_started_at = Instant::now();
         let allow_cpu_cache = !self.hardware_decode_request.prefers_gpu_residency();
         if allow_cpu_cache && policy.use_playback_ring {
-            if let Some(hit) = self.playback_ring.get(target_pts, self.hit_tolerance_pts) {
+            if let Some((selected_extent, hit)) = self.playback_ring.get(target_pts) {
                 if should_cancel() {
                     return Ok(PreviewDecodeOutcome::Canceled(
                         self.interrupt_state
-                            .cancellation(PreviewDecodeCancellationCheckpoint::CacheLookup),
+                            .cancellation(PreviewDecodeCancellationCheckpoint::CacheLookup)
+                            .with_session_attempt(
+                                PreviewDecodeSessionDisposition::BypassedCache,
+                                0,
+                            ),
                     ));
                 }
                 return Ok(hit
                     .into_playback_ring_hit(cache_lookup_started_at.elapsed())
-                    .with_access_policy(policy)
-                    .with_seek_index_diagnostics(
-                        self.seek_index.diagnostics(),
-                        PreviewSeekResolution::default(),
-                    )
-                    .with_stage_durations(PreviewDecodeStageDurations {
-                        cache_lookup_us: duration_us(cache_lookup_started_at.elapsed()),
-                        ..PreviewDecodeStageDurations::default()
-                    })
-                    .with_hardware_decode_plan(&self.hardware_decode_plan)
-                    .with_decoded_surface_format(self.decoded_surface_format)
-                    .into_outcome());
-            }
-        }
-        if allow_cpu_cache {
-            if let Some(hit) = preview_cache_get(
-                &self.path,
-                self.fingerprint,
-                self.source_color,
-                self.target_width,
-                self.target_height,
-                target_pts,
-                self.hit_tolerance_pts,
-            ) {
-                if should_cancel() {
-                    return Ok(PreviewDecodeOutcome::Canceled(
-                        self.interrupt_state
-                            .cancellation(PreviewDecodeCancellationCheckpoint::CacheLookup),
-                    ));
-                }
-                if policy.use_playback_ring {
-                    self.playback_ring.put(hit.pts, hit.frame.clone());
-                }
-                return Ok(hit
-                    .frame
-                    .into_cache_hit(cache_lookup_started_at.elapsed(), access_mode)
+                    .with_temporal_selection(target_pts, Some(selected_extent))
                     .with_access_policy(policy)
                     .with_seek_index_diagnostics(
                         self.seek_index.diagnostics(),
@@ -938,17 +1306,25 @@ impl PreviewDecodeSession {
         }
         let cache_lookup_us = duration_us(cache_lookup_started_at.elapsed());
 
-        let should_continue_forward = self
-            .last_pts
-            .map(|last| {
-                policy.can_continue_forward(
-                    last,
-                    decode_target_pts,
-                    self.frame_duration_pts,
-                    self.reached_eof,
-                )
-            })
-            .unwrap_or(false);
+        let retained_selection_covers_target = [
+            self.last_decoded_frame.as_ref(),
+            self.next_decoded_frame.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|candidate| candidate.extent.covers(target_pts));
+        let should_continue_forward = retained_selection_covers_target
+            || self
+                .last_pts
+                .map(|last| {
+                    policy.can_continue_forward(
+                        last,
+                        decode_target_pts,
+                        self.frame_duration_pts,
+                        self.reached_eof,
+                    )
+                })
+                .unwrap_or(false);
 
         let seek_performed = !should_continue_forward;
         let mut seek_resolution = PreviewSeekResolution::default();
@@ -993,14 +1369,22 @@ impl PreviewDecodeSession {
             ));
         }
         let decode_started_at = Instant::now();
-        let (session_output_lease, session_output_lease_observer) =
-            PreviewDecodeSessionOutputLease::new_pair();
-        let result = self.decode_forward_until(
+        let session_output_lease = PreviewDecodeSessionOutputLease::acquire(
+            &self.family_native_outputs,
+            &self.session_native_outputs,
+        )
+        .map_err(|error| MondrianError::DecodeFailed {
+            asset_id: self.path.display().to_string(),
+            reason: error.to_string(),
+        })?;
+        let mut result = self.decode_forward_until(
             decode_target_pts,
             policy,
             &session_output_lease,
             should_cancel,
         )?;
+        self.last_decoded_frame = result.retained_selected_frame.take();
+        self.next_decoded_frame = result.retained_next_frame.take();
         if result.canceled {
             let cancellation = if result.isolated_demux_terminated {
                 PreviewDecodeCancellation::isolated_demux_termination(
@@ -1031,12 +1415,7 @@ impl PreviewDecodeSession {
                             ..PreviewDecodeStageDurations::default()
                         })
                         .with_decode_work(seek_performed, result.decoded_frame_count)
-                        .with_temporal_selection(
-                            target_pts,
-                            result.selected_pts,
-                            self.hit_tolerance_pts,
-                            policy,
-                        )
+                        .with_temporal_selection(target_pts, result.selected_extent)
                         .with_access_policy(policy)
                         .with_forward_reused(should_continue_forward)
                         .with_seek_index_diagnostics(self.seek_index.diagnostics(), seek_resolution)
@@ -1045,9 +1424,9 @@ impl PreviewDecodeSession {
                         .with_decoded_surface_format(self.decoded_surface_format)
                         .with_decode_execution();
                     if policy.use_playback_ring {
-                        if let Some(selected_pts) = result.selected_pts {
+                        if let Some(selected_extent) = result.selected_extent {
                             self.playback_ring.put(
-                                selected_pts,
+                                selected_extent,
                                 PreviewDecodedFramePayload::CpuRgba(frame.clone()),
                             );
                         }
@@ -1072,12 +1451,7 @@ impl PreviewDecodeSession {
                             ..PreviewDecodeStageDurations::default()
                         })
                         .with_decode_work(seek_performed, result.decoded_frame_count)
-                        .with_temporal_selection(
-                            target_pts,
-                            result.selected_pts,
-                            self.hit_tolerance_pts,
-                            policy,
-                        )
+                        .with_temporal_selection(target_pts, result.selected_extent)
                         .with_access_policy(policy)
                         .with_forward_reused(should_continue_forward)
                         .with_seek_index_diagnostics(self.seek_index.diagnostics(), seek_resolution)
@@ -1086,9 +1460,9 @@ impl PreviewDecodeSession {
                         .with_decoded_surface_format(self.decoded_surface_format)
                         .with_decode_execution();
                     if policy.use_playback_ring {
-                        if let Some(selected_pts) = result.selected_pts {
+                        if let Some(selected_extent) = result.selected_extent {
                             self.playback_ring.put(
-                                selected_pts,
+                                selected_extent,
                                 PreviewDecodedFramePayload::CpuFloat(frame.clone()),
                             );
                         }
@@ -1096,8 +1470,10 @@ impl PreviewDecodeSession {
                     return Ok(PreviewDecodeOutcome::FloatFrame(frame));
                 }
                 PreviewDecodedFramePayload::NativeGpu(mut frame) => {
-                    self.last_native_output_lease = Some(session_output_lease_observer);
-                    let mut diagnostics = frame.diagnostics.with_access_mode(access_mode);
+                    let mut diagnostics = frame
+                        .diagnostics
+                        .with_access_mode(access_mode)
+                        .with_temporal_selection(target_pts, result.selected_extent);
                     diagnostics.stage_durations.accumulate(PreviewDecodeStageDurations {
                         cache_lookup_us,
                         seek_us,
@@ -1105,14 +1481,6 @@ impl PreviewDecodeSession {
                         ..PreviewDecodeStageDurations::default()
                     });
                     diagnostics.seek_performed = seek_performed;
-                    diagnostics.requested_pts = Some(target_pts);
-                    diagnostics.selected_pts = result.selected_pts;
-                    diagnostics.temporal_approximation = temporal_selection_is_approximate(
-                        target_pts,
-                        result.selected_pts,
-                        self.hit_tolerance_pts,
-                        policy,
-                    );
                     diagnostics.decoded_frame_count =
                         result.decoded_frame_count.min(u32::MAX as usize) as u32;
                     diagnostics = diagnostics.with_access_policy(policy);
@@ -1251,6 +1619,9 @@ impl PreviewDecodeSession {
         }
         self.reached_eof = false;
         self.last_pts = None;
+        self.duplicate_decoded_pts = None;
+        self.last_decoded_frame = None;
+        self.next_decoded_frame = None;
         Ok(PreviewSeekToTarget::Complete(PreviewSeekResolution {
             used_index: used_anchor_pts.is_some(),
             anchor_pts: used_anchor_pts,
@@ -1266,8 +1637,17 @@ impl PreviewDecodeSession {
     ) -> Result<PreviewDecodeForwardResult> {
         let interrupt_state = Arc::clone(&self.interrupt_state);
         interrupt_state.set_checkpoint(PreviewDecodeCancellationCheckpoint::Codec);
-        let mut best_before: Option<(i64, RetainedDecodedFrame)> = None;
-        let mut best_after: Option<(i64, RetainedDecodedFrame)> = None;
+        let mut candidates = RetainedDecodedCandidateWindow::new(target_pts);
+        candidates.duplicate_pts = self.duplicate_decoded_pts;
+        for retained in [
+            self.last_decoded_frame.take(),
+            self.next_decoded_frame.take(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            candidates.seed(retained);
+        }
         let mut frames_decoded: usize = 0;
         let mut video_packets_submitted: usize = 0;
         let mut non_reference_discard_until_pts =
@@ -1291,61 +1671,111 @@ impl PreviewDecodeSession {
             exact_select_distance_pts
         };
 
-        let choose_and_convert =
-            |hardware_decode_plan: &mut PreviewHardwareDecodePlan,
-             scaler: &mut Option<ffmpeg::software::scaling::Context>,
-             scaler_source_format: &mut Option<ffmpeg::util::format::pixel::Pixel>,
-             target_width: u32,
-             target_height: u32,
-             path: &Path,
-             before: Option<&(i64, RetainedDecodedFrame)>,
-             after: Option<&(i64, RetainedDecodedFrame)>|
-             -> Result<Option<(i64, PreviewDecodedFramePayload)>> {
-                if should_cancel() {
-                    return Ok(None);
-                }
-                let selected = match (before, after) {
-                    (Some((b_pts, b_frame)), Some((a_pts, a_frame))) => {
-                        let before_dist = (target_pts - *b_pts).abs();
-                        let after_dist = (*a_pts - target_pts).abs();
-                        if before_dist <= after_dist {
-                            Some((*b_pts, b_frame.frame()))
-                        } else {
-                            Some((*a_pts, a_frame.frame()))
-                        }
-                    }
-                    (Some((b_pts, b_frame)), None) => Some((*b_pts, b_frame.frame())),
-                    (None, Some((a_pts, a_frame))) => Some((*a_pts, a_frame.frame())),
-                    (None, None) => None,
-                };
-
-                let Some((selected_pts, selected_frame)) = selected else {
-                    return Ok(None);
-                };
-
-                let selected_distance = (selected_pts - target_pts).abs();
-                if selected_distance > max_select_distance_pts {
-                    return Ok(None);
-                }
-
-                if should_cancel() {
-                    return Ok(None);
-                }
-                interrupt_state
-                    .set_checkpoint(PreviewDecodeCancellationCheckpoint::FrameMaterialization);
-                let frame = materialize_decoded_frame_with_session_output_lease(
-                    selected_frame,
-                    hardware_decode_plan,
-                    scaler,
-                    scaler_source_format,
-                    target_width,
-                    target_height,
-                    path,
-                    self.source_color,
-                    session_output_lease.clone(),
-                )?;
-                Ok(Some((selected_pts, frame)))
+        let choose_and_convert = |hardware_decode_plan: &mut PreviewHardwareDecodePlan,
+                                  scaler: &mut Option<ffmpeg::software::scaling::Context>,
+                                  scaler_source_format: &mut Option<
+            ffmpeg::util::format::pixel::Pixel,
+        >,
+                                  target_width: u32,
+                                  target_height: u32,
+                                  path: &Path,
+                                  before: Option<&RetainedDecodedCandidate>,
+                                  after: Option<&RetainedDecodedCandidate>|
+         -> Result<
+            Option<(
+                DecodedTemporalExtent,
+                PreviewDecodedFramePayload,
+                RetainedDecodedCandidate,
+            )>,
+        > {
+            if should_cancel() {
+                return Ok(None);
+            }
+            let before_extent = before.map(|candidate| candidate.extent);
+            let after_extent = after.map(|candidate| candidate.extent);
+            let Some((candidate, selected_extent)) = select_decoded_temporal_candidate(
+                target_pts,
+                policy.access_mode,
+                before_extent,
+                after_extent,
+            ) else {
+                return Ok(None);
             };
+            let selected_frame = match candidate {
+                DecodedTemporalCandidate::Before => before.map(|candidate| candidate.frame.frame()),
+                DecodedTemporalCandidate::After => after.map(|candidate| candidate.frame.frame()),
+            }
+            .ok_or_else(|| MondrianError::DecodeFailed {
+                asset_id: path.display().to_string(),
+                reason: "temporal selector lost its retained decoded-frame candidate".to_owned(),
+            })?;
+
+            if !decoded_temporal_candidate_within_selection_distance(
+                selected_extent,
+                target_pts,
+                max_select_distance_pts,
+            ) {
+                return Ok(None);
+            }
+
+            if should_cancel() {
+                return Ok(None);
+            }
+            let retained_selected_frame = RetainedDecodedCandidate {
+                extent: selected_extent,
+                frame: RetainedDecodedFrame::retain(selected_frame, path)?,
+            };
+            interrupt_state
+                .set_checkpoint(PreviewDecodeCancellationCheckpoint::FrameMaterialization);
+            let frame = materialize_decoded_frame_with_session_output_lease(
+                selected_frame,
+                hardware_decode_plan,
+                scaler,
+                scaler_source_format,
+                target_width,
+                target_height,
+                path,
+                self.source_color,
+                session_output_lease.clone(),
+            )?;
+            Ok(Some((selected_extent, frame, retained_selected_frame)))
+        };
+
+        let retained_selection_is_exact = candidates
+            .selected_extent(policy.access_mode)
+            .is_some_and(|extent| extent.covers(target_pts));
+        if retained_selection_is_exact {
+            self.duplicate_decoded_pts = candidates.duplicate_pts();
+            candidates.validate_exact_ordering(self.path.as_path(), policy.access_mode)?;
+            let Some((selected_extent, frame, retained_selected_frame)) = choose_and_convert(
+                &mut self.hardware_decode_plan,
+                &mut self.scaler,
+                &mut self.scaler_source_format,
+                self.target_width,
+                self.target_height,
+                self.path.as_path(),
+                candidates.before(),
+                candidates.after(),
+            )?
+            else {
+                return Err(MondrianError::DecodeFailed {
+                    asset_id: self.path.display().to_string(),
+                    reason:
+                        "exact retained temporal candidate could not be materialized consistently"
+                            .to_owned(),
+                });
+            };
+            if should_cancel() {
+                return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
+            }
+            return Ok(PreviewDecodeForwardResult::frame(
+                frame,
+                selected_extent,
+                retained_selected_frame,
+                candidates.take_successor(selected_extent),
+                frames_decoded,
+            ));
+        }
 
         // A prior forward request may have returned as soon as it found its
         // target while the frame-threaded decoder still held reordered output.
@@ -1359,110 +1789,42 @@ impl PreviewDecodeSession {
                 return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
             }
             frames_decoded += 1;
-            let frame_pts = decoded.pts.unwrap_or(i64::MIN);
-            if frame_pts != i64::MIN {
-                self.last_pts = Some(frame_pts);
-                if frame_pts <= target_pts {
-                    best_before = Some((
-                        frame_pts,
-                        RetainedDecodedFrame::retain(&decoded.frame, self.path.as_path())?,
-                    ));
-                    if policy.accepts_first_decoded_approximation(
-                        frame_pts,
-                        target_pts,
-                        max_select_distance_pts,
-                    ) {
-                        if let Some((selected_pts, frame)) = choose_and_convert(
-                            &mut self.hardware_decode_plan,
-                            &mut self.scaler,
-                            &mut self.scaler_source_format,
-                            self.target_width,
-                            self.target_height,
-                            self.path.as_path(),
-                            best_before.as_ref(),
-                            None,
-                        )? {
-                            if should_cancel() {
-                                return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
-                            }
-                            return Ok(PreviewDecodeForwardResult::frame(
-                                frame,
-                                selected_pts,
-                                frames_decoded,
-                            ));
-                        }
-                    }
-                    if frame_pts >= target_pts.saturating_sub(self.hit_tolerance_pts) {
-                        interrupt_state.set_checkpoint(
-                            PreviewDecodeCancellationCheckpoint::FrameMaterialization,
-                        );
-                        let frame = materialize_decoded_frame_with_session_output_lease(
-                            &decoded.frame,
-                            &mut self.hardware_decode_plan,
-                            &mut self.scaler,
-                            &mut self.scaler_source_format,
-                            self.target_width,
-                            self.target_height,
-                            self.path.as_path(),
-                            self.source_color,
-                            session_output_lease.clone(),
-                        )?;
-                        if should_cancel() {
-                            return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
-                        }
-                        frame.cache_cpu_frame(
-                            &self.path,
-                            self.fingerprint,
-                            self.target_width,
-                            self.target_height,
-                            frame_pts,
-                        );
-                        return Ok(PreviewDecodeForwardResult::frame(
-                            frame,
-                            frame_pts,
-                            frames_decoded,
-                        ));
-                    }
-                } else {
-                    best_after = Some((
-                        frame_pts,
-                        RetainedDecodedFrame::retain(&decoded.frame, self.path.as_path())?,
-                    ));
-                    if let Some((selected_pts, frame)) = choose_and_convert(
-                        &mut self.hardware_decode_plan,
-                        &mut self.scaler,
-                        &mut self.scaler_source_format,
-                        self.target_width,
-                        self.target_height,
-                        self.path.as_path(),
-                        best_before.as_ref(),
-                        best_after.as_ref(),
-                    )? {
-                        if should_cancel() {
-                            return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
-                        }
-                        frame.cache_cpu_frame(
-                            &self.path,
-                            self.fingerprint,
-                            self.target_width,
-                            self.target_height,
-                            selected_pts,
-                        );
-                        return Ok(PreviewDecodeForwardResult::frame(
-                            frame,
-                            selected_pts,
-                            frames_decoded,
-                        ));
-                    }
-                }
+            if let Some(frame_pts) = decoded.pts {
+                candidates.observe(
+                    frame_pts,
+                    &decoded.frame,
+                    self.path.as_path(),
+                    &mut self.last_pts,
+                )?;
             }
+        }
 
-            if policy.forward_decode_budget_exhausted(forward_decode_work_units(
-                frames_decoded,
-                video_packets_submitted,
-            )) {
-                break;
+        // Selection happens only after FFmpeg's complete ready queue reaches
+        // EAGAIN. A first future frame cannot hide a later ready frame with a
+        // smaller PTS, and duplicate PTS evidence is visible before exact
+        // publication is considered.
+        self.duplicate_decoded_pts = candidates.duplicate_pts();
+        candidates.validate_exact_ordering(self.path.as_path(), policy.access_mode)?;
+        if let Some((selected_extent, frame, retained_selected_frame)) = choose_and_convert(
+            &mut self.hardware_decode_plan,
+            &mut self.scaler,
+            &mut self.scaler_source_format,
+            self.target_width,
+            self.target_height,
+            self.path.as_path(),
+            candidates.before(),
+            candidates.after(),
+        )? {
+            if should_cancel() {
+                return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
             }
+            return Ok(PreviewDecodeForwardResult::frame(
+                frame,
+                selected_extent,
+                retained_selected_frame,
+                candidates.take_successor(selected_extent),
+                frames_decoded,
+            ));
         }
 
         loop {
@@ -1520,115 +1882,38 @@ impl PreviewDecodeSession {
                     return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
                 }
                 frames_decoded += 1;
-                let frame_pts = decoded.pts.unwrap_or(i64::MIN);
-                if frame_pts != i64::MIN {
-                    self.last_pts = Some(frame_pts);
-                    if frame_pts <= target_pts {
-                        best_before = Some((
-                            frame_pts,
-                            RetainedDecodedFrame::retain(&decoded.frame, self.path.as_path())?,
-                        ));
-                        if policy.accepts_first_decoded_approximation(
-                            frame_pts,
-                            target_pts,
-                            max_select_distance_pts,
-                        ) {
-                            if let Some((selected_pts, frame)) = choose_and_convert(
-                                &mut self.hardware_decode_plan,
-                                &mut self.scaler,
-                                &mut self.scaler_source_format,
-                                self.target_width,
-                                self.target_height,
-                                self.path.as_path(),
-                                best_before.as_ref(),
-                                None,
-                            )? {
-                                if should_cancel() {
-                                    return Ok(PreviewDecodeForwardResult::canceled(
-                                        frames_decoded,
-                                    ));
-                                }
-                                return Ok(PreviewDecodeForwardResult::frame(
-                                    frame,
-                                    selected_pts,
-                                    frames_decoded,
-                                ));
-                            }
-                        }
-                        if frame_pts >= target_pts.saturating_sub(self.hit_tolerance_pts) {
-                            if should_cancel() {
-                                return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
-                            }
-                            interrupt_state.set_checkpoint(
-                                PreviewDecodeCancellationCheckpoint::FrameMaterialization,
-                            );
-                            let frame = materialize_decoded_frame_with_session_output_lease(
-                                &decoded.frame,
-                                &mut self.hardware_decode_plan,
-                                &mut self.scaler,
-                                &mut self.scaler_source_format,
-                                self.target_width,
-                                self.target_height,
-                                self.path.as_path(),
-                                self.source_color,
-                                session_output_lease.clone(),
-                            )?;
-                            if should_cancel() {
-                                return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
-                            }
-                            frame.cache_cpu_frame(
-                                &self.path,
-                                self.fingerprint,
-                                self.target_width,
-                                self.target_height,
-                                frame_pts,
-                            );
-                            return Ok(PreviewDecodeForwardResult::frame(
-                                frame,
-                                frame_pts,
-                                frames_decoded,
-                            ));
-                        }
-                    } else {
-                        best_after = Some((
-                            frame_pts,
-                            RetainedDecodedFrame::retain(&decoded.frame, self.path.as_path())?,
-                        ));
-                        if let Some((selected_pts, frame)) = choose_and_convert(
-                            &mut self.hardware_decode_plan,
-                            &mut self.scaler,
-                            &mut self.scaler_source_format,
-                            self.target_width,
-                            self.target_height,
-                            self.path.as_path(),
-                            best_before.as_ref(),
-                            best_after.as_ref(),
-                        )? {
-                            if should_cancel() {
-                                return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
-                            }
-                            frame.cache_cpu_frame(
-                                &self.path,
-                                self.fingerprint,
-                                self.target_width,
-                                self.target_height,
-                                selected_pts,
-                            );
-                            return Ok(PreviewDecodeForwardResult::frame(
-                                frame,
-                                selected_pts,
-                                frames_decoded,
-                            ));
-                        }
-                    }
+                if let Some(frame_pts) = decoded.pts {
+                    candidates.observe(
+                        frame_pts,
+                        &decoded.frame,
+                        self.path.as_path(),
+                        &mut self.last_pts,
+                    )?;
                 }
+            }
 
-                if policy.forward_decode_budget_exhausted(forward_decode_work_units(
-                    frames_decoded,
-                    video_packets_submitted,
-                )) {
-                    break;
+            self.duplicate_decoded_pts = candidates.duplicate_pts();
+            candidates.validate_exact_ordering(self.path.as_path(), policy.access_mode)?;
+            if let Some((selected_extent, frame, retained_selected_frame)) = choose_and_convert(
+                &mut self.hardware_decode_plan,
+                &mut self.scaler,
+                &mut self.scaler_source_format,
+                self.target_width,
+                self.target_height,
+                self.path.as_path(),
+                candidates.before(),
+                candidates.after(),
+            )? {
+                if should_cancel() {
+                    return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
                 }
+                return Ok(PreviewDecodeForwardResult::frame(
+                    frame,
+                    selected_extent,
+                    retained_selected_frame,
+                    candidates.take_successor(selected_extent),
+                    frames_decoded,
+                ));
             }
 
             if policy.forward_decode_budget_exhausted(forward_decode_work_units(
@@ -1663,117 +1948,55 @@ impl PreviewDecodeSession {
                     return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
                 }
                 frames_decoded += 1;
-                let frame_pts = decoded.pts.unwrap_or(i64::MIN);
-                if frame_pts != i64::MIN {
-                    self.last_pts = Some(frame_pts);
-                    if frame_pts <= target_pts {
-                        best_before = Some((
-                            frame_pts,
-                            RetainedDecodedFrame::retain(&decoded.frame, self.path.as_path())?,
-                        ));
-                        if policy.accepts_first_decoded_approximation(
-                            frame_pts,
-                            target_pts,
-                            max_select_distance_pts,
-                        ) {
-                            if let Some((selected_pts, frame)) = choose_and_convert(
-                                &mut self.hardware_decode_plan,
-                                &mut self.scaler,
-                                &mut self.scaler_source_format,
-                                self.target_width,
-                                self.target_height,
-                                self.path.as_path(),
-                                best_before.as_ref(),
-                                None,
-                            )? {
-                                if should_cancel() {
-                                    return Ok(PreviewDecodeForwardResult::canceled(
-                                        frames_decoded,
-                                    ));
-                                }
-                                self.reached_eof = true;
-                                return Ok(PreviewDecodeForwardResult::frame(
-                                    frame,
-                                    selected_pts,
-                                    frames_decoded,
-                                ));
-                            }
-                        }
-                    } else {
-                        best_after = Some((
-                            frame_pts,
-                            RetainedDecodedFrame::retain(&decoded.frame, self.path.as_path())?,
-                        ));
-                        if let Some((selected_pts, frame)) = choose_and_convert(
-                            &mut self.hardware_decode_plan,
-                            &mut self.scaler,
-                            &mut self.scaler_source_format,
-                            self.target_width,
-                            self.target_height,
-                            self.path.as_path(),
-                            best_before.as_ref(),
-                            best_after.as_ref(),
-                        )? {
-                            if should_cancel() {
-                                return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
-                            }
-                            frame.cache_cpu_frame(
-                                &self.path,
-                                self.fingerprint,
-                                self.target_width,
-                                self.target_height,
-                                selected_pts,
-                            );
-                            self.reached_eof = true;
-                            return Ok(PreviewDecodeForwardResult::frame(
-                                frame,
-                                selected_pts,
-                                frames_decoded,
-                            ));
-                        }
-                    }
-                }
-
-                if policy.forward_decode_budget_exhausted(forward_decode_work_units(
-                    frames_decoded,
-                    video_packets_submitted,
-                )) {
-                    break;
+                if let Some(frame_pts) = decoded.pts {
+                    candidates.observe(
+                        frame_pts,
+                        &decoded.frame,
+                        self.path.as_path(),
+                        &mut self.last_pts,
+                    )?;
                 }
             }
 
             self.reached_eof = true;
         }
 
-        if let Some((selected_pts, frame)) = choose_and_convert(
+        self.duplicate_decoded_pts = candidates.duplicate_pts();
+        candidates.validate_exact_ordering(self.path.as_path(), policy.access_mode)?;
+        if let Some((selected_extent, frame, retained_selected_frame)) = choose_and_convert(
             &mut self.hardware_decode_plan,
             &mut self.scaler,
             &mut self.scaler_source_format,
             self.target_width,
             self.target_height,
             self.path.as_path(),
-            best_before.as_ref(),
-            best_after.as_ref(),
+            candidates.before(),
+            candidates.after(),
         )? {
             if should_cancel() {
                 return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
             }
-            frame.cache_cpu_frame(
-                &self.path,
-                self.fingerprint,
-                self.target_width,
-                self.target_height,
-                selected_pts,
-            );
             return Ok(PreviewDecodeForwardResult::frame(
                 frame,
-                selected_pts,
+                selected_extent,
+                retained_selected_frame,
+                candidates.take_successor(selected_extent),
                 frames_decoded,
             ));
         }
 
         if should_cancel() {
             return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
+        }
+        if self.reached_eof && policy.access_mode != PreviewDecodeAccessMode::ScrubCursor {
+            let selected_extent = candidates.before().map(|candidate| candidate.extent);
+            return Err(MondrianError::DecodeTemporalMismatch {
+                asset_id: self.path.display().to_string(),
+                access_mode: policy.access_mode.as_str().to_owned(),
+                requested_pts: Some(target_pts),
+                selected_pts: selected_extent.map(|extent| extent.start_pts),
+                selected_duration_pts: selected_extent.and_then(|extent| extent.duration_pts),
+            });
         }
         let forward_decode_work_units =
             forward_decode_work_units(frames_decoded, video_packets_submitted);
@@ -1816,58 +2039,46 @@ pub(super) fn forward_decode_work_units(
 }
 
 pub(super) fn decode_preview_frame_outcome(
-    path: &Path,
-    source_time: TimelineTime,
-    max_width: Option<u32>,
-    max_height: Option<u32>,
-    access_mode: PreviewDecodeAccessMode,
-    fingerprint: Option<MediaFileFingerprint>,
-    adaptive_hints: PreviewDecodeAdaptiveHints,
-    hardware_decode_request: PreviewHardwareDecodeRequest,
-    hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
-    source_color: PreviewSourceColorContract,
+    request: PreviewDecodeRequest<'_>,
     should_cancel: PreviewDecodeCancelProbe,
 ) -> Result<PreviewDecodeOutcome> {
     THREAD_PREVIEW_DECODE_CONTEXT.with(|context| {
         let mut context = context.borrow_mut();
         let execution_observer = context.execution_observer.clone();
+        let resources = context.resources.clone();
         let _execution = execution_observer.begin_request();
         decode_preview_frame_outcome_in_sessions(
             &mut context.sessions,
             &execution_observer,
-            path,
-            source_time,
-            max_width,
-            max_height,
-            access_mode,
-            fingerprint,
-            adaptive_hints,
-            hardware_decode_request,
-            hardware_decode_device_selector,
-            source_color,
+            request,
+            &resources,
             None,
             should_cancel,
         )
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn decode_preview_frame_outcome_in_sessions(
     sessions: &mut PreviewDecodeSessions,
     execution_observer: &PreviewDecodeExecutionObserver,
-    path: &Path,
-    source_time: TimelineTime,
-    max_width: Option<u32>,
-    max_height: Option<u32>,
-    access_mode: PreviewDecodeAccessMode,
-    fingerprint: Option<MediaFileFingerprint>,
-    adaptive_hints: PreviewDecodeAdaptiveHints,
-    hardware_decode_request: PreviewHardwareDecodeRequest,
-    hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
-    source_color: PreviewSourceColorContract,
+    request: PreviewDecodeRequest<'_>,
+    resources: &PreviewDecodeWorkerResources,
     demux_worker: Option<&PreviewDemuxWorkerConfig>,
     should_cancel: PreviewDecodeCancelProbe,
 ) -> Result<PreviewDecodeOutcome> {
+    let PreviewDecodeRequest {
+        path,
+        video_stream_index,
+        source_time,
+        max_width,
+        max_height,
+        access_mode,
+        fingerprint,
+        adaptive_hints,
+        hardware_decode_request,
+        hardware_decode_device_selector,
+        source_color,
+    } = request;
     let started_at = Instant::now();
     if should_cancel() {
         return Ok(PreviewDecodeOutcome::Canceled(
@@ -1896,10 +2107,26 @@ fn decode_preview_frame_outcome_in_sessions(
     };
     let output_lease_wait_us = duration_us(output_lease_wait_started_at.elapsed());
     ensure_ffmpeg_initialized(path)?;
-    let fingerprint = fingerprint.unwrap_or_else(|| MediaFileFingerprint::capture(path));
-    let outcome = {
+    // A caller-supplied complete revision authorized the request's probe,
+    // color contract, and cache identity. Recheck it at the execution worker
+    // after any output-lease wait so a replacement cannot enter an existing or
+    // newly opened decoder Session under stale semantics.
+    let fingerprint = resolve_preview_execution_fingerprint(path, fingerprint)?;
+    let outcome: Result<PreviewDecodeOutcome> = {
         let slot = sessions.slot_mut(selected_slot);
         let backend = preview_decode_backend();
+        let open_request = PreviewDecodeSessionOpenRequest {
+            path,
+            fingerprint,
+            video_stream_index,
+            max_width,
+            max_height,
+            access_mode,
+            backend,
+            hardware_decode_request,
+            hardware_decode_device_selector,
+            source_color,
+        };
         let mut session_open_us = 0;
 
         if should_cancel() {
@@ -1909,22 +2136,18 @@ fn decode_preview_frame_outcome_in_sessions(
                 ),
             ));
         }
+        let had_session = slot.is_some();
         let current_match = slot
             .as_ref()
-            .map(|session| {
-                session.matches(
-                    path,
-                    fingerprint,
-                    max_width,
-                    max_height,
-                    demux_worker.is_some(),
-                    backend,
-                    hardware_decode_request,
-                    hardware_decode_device_selector,
-                    source_color,
-                )
-            })
+            .map(|session| session.matches(&open_request, demux_worker.is_some()))
             .unwrap_or(false);
+        let session_disposition = if current_match {
+            PreviewDecodeSessionDisposition::Reused
+        } else if had_session {
+            PreviewDecodeSessionDisposition::Replaced
+        } else {
+            PreviewDecodeSessionDisposition::Opened
+        };
 
         if !current_match {
             // A changed source or decode contract cannot reuse this decoder.
@@ -1941,15 +2164,8 @@ fn decode_preview_frame_outcome_in_sessions(
             ));
             let _interrupt_guard = interrupt_state.install(Arc::clone(&should_cancel));
             let opened = PreviewDecodeSession::open(
-                path,
-                fingerprint,
-                max_width,
-                max_height,
-                access_mode,
-                backend,
-                hardware_decode_request,
-                hardware_decode_device_selector,
-                source_color,
+                open_request,
+                resources,
                 demux_worker,
                 should_cancel.as_ref(),
                 Arc::clone(&interrupt_state),
@@ -1957,15 +2173,19 @@ fn decode_preview_frame_outcome_in_sessions(
             *slot = match opened {
                 Ok(session) => Some(session),
                 Err(PreviewPacketSourceOpenError::DirectCanceled) => {
+                    let session_open_us = duration_us(open_started_at.elapsed());
                     return Ok(PreviewDecodeOutcome::Canceled(
                         interrupt_state
-                            .cancellation(PreviewDecodeCancellationCheckpoint::InputOpen),
-                    ))
+                            .cancellation(PreviewDecodeCancellationCheckpoint::InputOpen)
+                            .with_session_attempt(session_disposition, session_open_us),
+                    ));
                 }
                 Err(PreviewPacketSourceOpenError::IsolatedCanceled(checkpoint)) => {
+                    let session_open_us = duration_us(open_started_at.elapsed());
                     return Ok(PreviewDecodeOutcome::Canceled(
-                        PreviewDecodeCancellation::isolated_demux_termination(checkpoint),
-                    ))
+                        PreviewDecodeCancellation::isolated_demux_termination(checkpoint)
+                            .with_session_attempt(session_disposition, session_open_us),
+                    ));
                 }
                 Err(PreviewPacketSourceOpenError::Failed(error)) => return Err(error),
             };
@@ -1989,12 +2209,14 @@ fn decode_preview_frame_outcome_in_sessions(
             if should_cancel() {
                 return Ok(PreviewDecodeOutcome::Canceled(
                     interrupt_state
-                        .cancellation(PreviewDecodeCancellationCheckpoint::ExternalProcess),
+                        .cancellation(PreviewDecodeCancellationCheckpoint::ExternalProcess)
+                        .with_session_attempt(session_disposition, session_open_us),
                 ));
             }
             let external_started_at = Instant::now();
             if let Some(result) = try_decode_with_external_ffmpeg_cpu_rgba(
                 path,
+                video_stream_index,
                 source_time,
                 session.target_width,
                 session.target_height,
@@ -2009,33 +2231,49 @@ fn decode_preview_frame_outcome_in_sessions(
                     Ok(Some(frame)) => {
                         if should_cancel() {
                             return Ok(PreviewDecodeOutcome::Canceled(
-                                interrupt_state.cancellation(
-                                    PreviewDecodeCancellationCheckpoint::ExternalProcess,
-                                ),
+                                interrupt_state
+                                    .cancellation(
+                                        PreviewDecodeCancellationCheckpoint::ExternalProcess,
+                                    )
+                                    .with_session_attempt(session_disposition, session_open_us),
                             ));
                         }
-                        return Ok(PreviewDecodeOutcome::Frame(
-                            frame
-                                .with_access_mode(access_mode)
-                                .with_seek_strategy(
-                                    PreviewDecodeAccessPolicy::for_access_mode(access_mode)
-                                        .seek_strategy,
-                                )
-                                .with_session_reused(current_match)
-                                .with_stage_durations(PreviewDecodeStageDurations {
-                                    session_open_us,
-                                    output_lease_wait_us,
-                                    external_process_us,
-                                    ..PreviewDecodeStageDurations::default()
-                                })
-                                .with_hardware_decode_plan(&external_hardware_decode_plan)
-                                .with_elapsed(started_at.elapsed()),
-                        ));
+                        let frame = frame
+                            .with_access_mode(access_mode)
+                            .with_seek_strategy(
+                                PreviewDecodeAccessPolicy::for_access_mode(access_mode)
+                                    .seek_strategy,
+                            )
+                            .with_session_disposition(session_disposition)
+                            .with_stage_durations(PreviewDecodeStageDurations {
+                                session_open_us,
+                                output_lease_wait_us,
+                                external_process_us,
+                                ..PreviewDecodeStageDurations::default()
+                            })
+                            .with_hardware_decode_plan(&external_hardware_decode_plan)
+                            .with_elapsed(started_at.elapsed());
+                        if external_exact_frame_is_publishable(path, &frame)? {
+                            return finalize_preview_decode_outcome(
+                                path,
+                                fingerprint,
+                                PreviewDecodeOutcome::Frame(frame),
+                            );
+                        }
+                        // Rawvideo stdout proves raster bytes only. Without a
+                        // selected stream PTS and presentation extent it cannot
+                        // satisfy deterministic Still semantics, so discard it
+                        // and continue through the in-process exact decoder.
+                        preview_trace(
+                            "[preview] external ffmpeg still lacks exact temporal evidence; fallback in-process"
+                                .to_owned(),
+                        );
                     }
                     Ok(None) => {
                         return Ok(PreviewDecodeOutcome::Canceled(
                             interrupt_state
-                                .cancellation(PreviewDecodeCancellationCheckpoint::ExternalProcess),
+                                .cancellation(PreviewDecodeCancellationCheckpoint::ExternalProcess)
+                                .with_session_attempt(session_disposition, session_open_us),
                         ));
                     }
                     Err(err) => {
@@ -2057,51 +2295,70 @@ fn decode_preview_frame_outcome_in_sessions(
             Err(error) => {
                 // A failed send/receive/materialization contract cannot leave
                 // mutable demux, codec, DPB, or device state eligible for the
-                // next request. The immutable shared device cache is outside
-                // this slot and remains independently reusable.
+                // next request. Retire this device generation from new
+                // acquisitions while existing Session Arcs remain valid.
+                session.retire_hardware_device_context();
                 execution_observer.publish_stage(PreviewDecodeExecutionStage::SessionRetire);
                 *slot = None;
                 return Err(error);
             }
         };
         match outcome {
-            PreviewDecodeOutcome::Frame(frame) => Ok(PreviewDecodeOutcome::Frame(
-                frame
-                    .with_access_mode(access_mode)
-                    .with_seek_strategy(
-                        PreviewDecodeAccessPolicy::for_access_mode(access_mode).seek_strategy,
-                    )
-                    .with_session_reused(current_match)
-                    .with_stage_durations(PreviewDecodeStageDurations {
-                        session_open_us,
-                        output_lease_wait_us,
-                        external_process_us,
-                        ..PreviewDecodeStageDurations::default()
-                    })
-                    .with_elapsed(started_at.elapsed()),
-            )),
-            PreviewDecodeOutcome::FloatFrame(frame) => Ok(PreviewDecodeOutcome::FloatFrame(
-                frame
-                    .with_access_mode(access_mode)
-                    .with_seek_strategy(
-                        PreviewDecodeAccessPolicy::for_access_mode(access_mode).seek_strategy,
-                    )
-                    .with_session_reused(current_match)
-                    .with_stage_durations(PreviewDecodeStageDurations {
-                        session_open_us,
-                        output_lease_wait_us,
-                        external_process_us,
-                        ..PreviewDecodeStageDurations::default()
-                    })
-                    .with_elapsed(started_at.elapsed()),
-            )),
+            PreviewDecodeOutcome::Frame(frame) => {
+                let result_session_disposition = if frame.diagnostics.session_disposition
+                    == PreviewDecodeSessionDisposition::BypassedCache
+                {
+                    PreviewDecodeSessionDisposition::BypassedCache
+                } else {
+                    session_disposition
+                };
+                Ok(PreviewDecodeOutcome::Frame(
+                    frame
+                        .with_access_mode(access_mode)
+                        .with_seek_strategy(
+                            PreviewDecodeAccessPolicy::for_access_mode(access_mode).seek_strategy,
+                        )
+                        .with_session_disposition(result_session_disposition)
+                        .with_stage_durations(PreviewDecodeStageDurations {
+                            session_open_us,
+                            output_lease_wait_us,
+                            external_process_us,
+                            ..PreviewDecodeStageDurations::default()
+                        })
+                        .with_elapsed(started_at.elapsed()),
+                ))
+            }
+            PreviewDecodeOutcome::FloatFrame(frame) => {
+                let result_session_disposition = if frame.diagnostics.session_disposition
+                    == PreviewDecodeSessionDisposition::BypassedCache
+                {
+                    PreviewDecodeSessionDisposition::BypassedCache
+                } else {
+                    session_disposition
+                };
+                Ok(PreviewDecodeOutcome::FloatFrame(
+                    frame
+                        .with_access_mode(access_mode)
+                        .with_seek_strategy(
+                            PreviewDecodeAccessPolicy::for_access_mode(access_mode).seek_strategy,
+                        )
+                        .with_session_disposition(result_session_disposition)
+                        .with_stage_durations(PreviewDecodeStageDurations {
+                            session_open_us,
+                            output_lease_wait_us,
+                            external_process_us,
+                            ..PreviewDecodeStageDurations::default()
+                        })
+                        .with_elapsed(started_at.elapsed()),
+                ))
+            }
             PreviewDecodeOutcome::NativeGpuFrame(mut frame) => {
                 frame.diagnostics = frame
                     .diagnostics
                     .with_access_mode(access_mode)
                     .with_access_policy(PreviewDecodeAccessPolicy::for_access_mode(access_mode))
                     .with_elapsed(started_at.elapsed());
-                frame.diagnostics.session_reused = current_match;
+                frame.diagnostics.session_disposition = session_disposition;
                 frame.diagnostics.stage_durations.accumulate(PreviewDecodeStageDurations {
                     session_open_us,
                     output_lease_wait_us,
@@ -2117,11 +2374,83 @@ fn decode_preview_frame_outcome_in_sessions(
                 } else {
                     session.recover_after_cancellation();
                 }
+                let cancellation = if cancellation.session_disposition
+                    == PreviewDecodeSessionDisposition::Unspecified
+                {
+                    cancellation.with_session_attempt(session_disposition, session_open_us)
+                } else {
+                    cancellation
+                };
                 Ok(PreviewDecodeOutcome::Canceled(cancellation))
             }
         }
     };
-    outcome
+    finalize_preview_decode_outcome(path, fingerprint, outcome?)
+}
+
+pub(super) fn external_exact_frame_is_publishable(path: &Path, frame: &RgbaFrame) -> Result<bool> {
+    match validate_preview_temporal_contract(path, &frame.diagnostics) {
+        Ok(()) => Ok(true),
+        Err(MondrianError::DecodeTemporalMismatch { .. }) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Bind a successful frame to the exact revision that authorized its decode,
+/// then revalidate that revision after all demux, codec, conversion, and copy
+/// work. This closes the replacement race between execution admission and
+/// result publication.
+pub(super) fn finalize_preview_decode_outcome(
+    path: &Path,
+    fingerprint: MediaFileFingerprint,
+    outcome: PreviewDecodeOutcome,
+) -> Result<PreviewDecodeOutcome> {
+    let diagnostics = match &outcome {
+        PreviewDecodeOutcome::Frame(frame) => Some(&frame.diagnostics),
+        PreviewDecodeOutcome::FloatFrame(frame) => Some(&frame.diagnostics),
+        PreviewDecodeOutcome::NativeGpuFrame(frame) => Some(&frame.diagnostics),
+        PreviewDecodeOutcome::Canceled(_) => None,
+    };
+    if let Some(diagnostics) = diagnostics {
+        verify_preview_source_revision(path, fingerprint)?;
+        validate_preview_temporal_contract(path, diagnostics)?;
+    }
+    Ok(outcome)
+}
+
+fn validate_preview_temporal_contract(
+    path: &Path,
+    diagnostics: &PreviewDecodeDiagnostics,
+) -> Result<()> {
+    let selected_extent = DecodedTemporalExtent::from_diagnostics(*diagnostics);
+    let covers_request = diagnostics
+        .requested_pts
+        .zip(selected_extent)
+        .is_some_and(|(requested_pts, extent)| extent.covers(requested_pts));
+    let has_selection_evidence = diagnostics.requested_pts.is_some() && selected_extent.is_some();
+    let approximation_is_consistent = diagnostics.temporal_approximation != covers_request;
+    let access_contract_satisfied = match diagnostics.access_mode {
+        PreviewDecodeAccessMode::ScrubCursor => {
+            has_selection_evidence && approximation_is_consistent
+        }
+        PreviewDecodeAccessMode::PlaybackCursor
+        | PreviewDecodeAccessMode::RandomAccessStillFrame => {
+            has_selection_evidence
+                && covers_request
+                && approximation_is_consistent
+                && !diagnostics.temporal_approximation
+        }
+    };
+    if access_contract_satisfied {
+        return Ok(());
+    }
+    Err(MondrianError::DecodeTemporalMismatch {
+        asset_id: path.display().to_string(),
+        access_mode: diagnostics.access_mode.as_str().to_owned(),
+        requested_pts: diagnostics.requested_pts,
+        selected_pts: diagnostics.selected_pts,
+        selected_duration_pts: diagnostics.selected_duration_pts,
+    })
 }
 
 fn cancellation_requires_session_retirement(cancellation: PreviewDecodeCancellation) -> bool {
@@ -2141,6 +2470,13 @@ mod session_topology_tests {
 
     fn empty_sessions() -> PreviewDecodeSessions {
         PreviewDecodeSessions { playback: None, interactive: None, cpu_still: None }
+    }
+
+    fn retained_candidate(start_pts: i64, duration_pts: i64) -> RetainedDecodedCandidate {
+        RetainedDecodedCandidate {
+            extent: DecodedTemporalExtent::from_duration(start_pts, duration_pts),
+            frame: RetainedDecodedFrame(ffmpeg::util::frame::video::Video::empty()),
+        }
     }
 
     #[test]
@@ -2204,6 +2540,45 @@ mod session_topology_tests {
             ),
             Some(PreviewDecodeSessionSlot::Interactive)
         );
+        assert!(!PreviewDecodeSessionSlot::Playback.requires_released_native_outputs());
+        assert!(PreviewDecodeSessionSlot::Interactive.requires_released_native_outputs());
+        assert!(!PreviewDecodeSessionSlot::CpuStill.requires_released_native_outputs());
+    }
+
+    #[test]
+    fn context_clear_retires_sessions_without_erasing_family_output_evidence() {
+        const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("context-clear-output-evidence.mp4");
+        std::fs::write(&path, FIXTURE).expect("write synthetic H.264 fixture");
+        let resources = PreviewDecodeWorkerResources::default();
+        let mut context = PreviewDecodeSessionContext::with_worker_resources(resources.clone());
+        let request = PreviewDecodeRequest::new(
+            path.as_path(),
+            TimelineTime::ZERO,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            PreviewSourceColorContract::automatic(ColorSpace::Rec709, DecodedVideoRange::Limited),
+        )
+        .with_max_size(Some(64), Some(64));
+        context
+            .decode_cancellable(request, || false)
+            .expect("fixture must create one decoder Session");
+        assert_eq!(context.resident_session_count(), 1);
+
+        let session_tracker = PreviewNativeOutputTracker::default();
+        let output = PreviewDecodeSessionOutputLease::acquire(
+            resources.native_output_tracker(),
+            &session_tracker,
+        )
+        .expect("logical native output evidence");
+        assert!(!context.native_outputs_released());
+
+        context.clear();
+        assert_eq!(context.resident_session_count(), 0);
+        assert!(!context.native_outputs_released());
+
+        drop(output);
+        assert!(context.native_outputs_released());
     }
 
     #[test]
@@ -2212,5 +2587,78 @@ mod session_topology_tests {
         assert!(packet_source_execution_family_matches(true, true));
         assert!(packet_source_execution_family_matches(false, false));
         assert!(!packet_source_execution_family_matches(true, false));
+    }
+
+    #[test]
+    fn temporal_lookahead_is_retained_only_beyond_the_selected_frame() {
+        let selected = DecodedTemporalExtent::from_duration(100, 20);
+        let mut candidates = RetainedDecodedCandidateWindow::new(100);
+        candidates.seed(retained_candidate(100, 20));
+        candidates.seed(retained_candidate(120, 20));
+        let retained = candidates
+            .take_successor(selected)
+            .expect("decoded successor must survive the selection boundary");
+        assert_eq!(retained.extent.start_pts, 120);
+        assert!(candidates.after().is_none());
+
+        let mut selected_after = RetainedDecodedCandidateWindow::new(100);
+        selected_after.seed(retained_candidate(120, 20));
+        assert!(selected_after
+            .take_successor(DecodedTemporalExtent::from_duration(120, 20))
+            .is_none());
+    }
+
+    #[test]
+    fn candidate_window_keeps_extrema_under_non_monotonic_output() {
+        let mut candidates = RetainedDecodedCandidateWindow::new(110);
+        for candidate in [
+            retained_candidate(130, 1),
+            retained_candidate(80, 1),
+            retained_candidate(120, 1),
+            retained_candidate(100, 1),
+            retained_candidate(90, 1),
+            retained_candidate(140, 1),
+        ] {
+            candidates.insert(candidate, true);
+        }
+
+        assert_eq!(
+            candidates.before().map(|value| value.extent.start_pts),
+            Some(100)
+        );
+        assert_eq!(
+            candidates.after().map(|value| value.extent.start_pts),
+            Some(120)
+        );
+
+        let mut high_water = None;
+        for pts in [130, 80, 120, 100, 140] {
+            advance_decoded_pts_high_water(&mut high_water, pts);
+        }
+        assert_eq!(high_water, Some(140));
+    }
+
+    #[test]
+    fn duplicate_pts_keep_first_for_scrub_but_fail_exact_closed() {
+        let mut candidates = RetainedDecodedCandidateWindow::new(100);
+        candidates.insert(retained_candidate(100, 10), true);
+        candidates.insert(retained_candidate(100, 40), true);
+
+        assert_eq!(
+            candidates.before().map(|value| value.extent.duration_pts),
+            Some(Some(10))
+        );
+        assert!(candidates
+            .validate_exact_ordering(
+                Path::new("duplicate-pts.mov"),
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+            )
+            .is_err());
+        candidates
+            .validate_exact_ordering(
+                Path::new("duplicate-pts.mov"),
+                PreviewDecodeAccessMode::ScrubCursor,
+            )
+            .expect("scrub uses the deterministic first duplicate candidate");
     }
 }

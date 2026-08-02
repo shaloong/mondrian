@@ -105,8 +105,8 @@ impl Button {
         self
     }
 
-    pub fn on_click(mut self, action: Action) -> Self {
-        self.on_click = Some(action);
+    pub fn on_click(mut self, action: impl Into<Option<Action>>) -> Self {
+        self.on_click = action.into();
         self
     }
 

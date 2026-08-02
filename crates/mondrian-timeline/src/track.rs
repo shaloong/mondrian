@@ -7,6 +7,7 @@ use mondrian_core::{
         PropertyBag, PropertyDescriptor, PropertyHost, PropertyMutation, PropertyValue,
     },
     types::*,
+    AuthoringFootprint, AuthoringFootprintCollector, AuthoringFootprintError, AuthoringList,
     MondrianError, ParameterId, Result, TimelineTime,
 };
 use serde::{Deserialize, Serialize};
@@ -18,8 +19,19 @@ pub enum TrackType {
     Subtitle,
 }
 
+impl AuthoringFootprint for TrackType {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut AuthoringFootprintCollector,
+    ) -> std::result::Result<(), AuthoringFootprintError> {
+        match self {
+            Self::Video | Self::Audio | Self::Subtitle => Ok(()),
+        }
+    }
+}
+
 /// 时间线轨道
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub id: TrackId,
     pub name: String,
@@ -33,7 +45,31 @@ pub struct Track {
     /// 轨道不透明度关键帧（仅视频轨有效）
     pub opacity: AnimatedProperty,
     /// 按位置排序的 Clip 列表
-    pub clips: Vec<Clip>,
+    pub clips: AuthoringList<Clip>,
+}
+
+impl AuthoringFootprint for Track {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> std::result::Result<(), AuthoringFootprintError> {
+        let Self {
+            id: _,
+            name,
+            track_type,
+            height: _,
+            is_muted: _,
+            is_locked: _,
+            is_visible: _,
+            blend_mode: _,
+            opacity,
+            clips,
+        } = self;
+        collector.collect(name)?;
+        collector.collect(track_type)?;
+        collector.collect(opacity)?;
+        collector.collect(clips)
+    }
 }
 
 impl Track {
@@ -50,7 +86,7 @@ impl Track {
             is_visible: true,
             blend_mode: BlendMode::Normal,
             opacity: AnimatedProperty::from_descriptor(track_opacity_descriptor()),
-            clips: vec![],
+            clips: AuthoringList::new(),
         }
     }
 
@@ -65,8 +101,31 @@ impl Track {
             is_visible: true,
             blend_mode: BlendMode::Normal,
             opacity: AnimatedProperty::from_descriptor(track_opacity_descriptor()),
-            clips: vec![],
+            clips: AuthoringList::new(),
         }
+    }
+
+    /// Validate persisted Track-owned author state before publication.
+    pub fn validate_author_state(&self) -> Result<()> {
+        if !self.height.is_finite() || self.height <= 0.0 {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "track_author_state_validation".to_owned(),
+                reason: format!(
+                    "track {} height must be finite and greater than zero, got {}",
+                    self.id, self.height
+                ),
+            });
+        }
+        if self.clips.windows(2).any(|pair| pair[0].position > pair[1].position) {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "track_author_state_validation".to_owned(),
+                reason: format!(
+                    "track {} Clip placements must be ordered by nondecreasing position",
+                    self.id
+                ),
+            });
+        }
+        Ok(())
     }
 
     /// 添加 Clip（按位置插入，保持排序）
@@ -161,5 +220,53 @@ impl PropertyHost for Track {
 impl Track {
     pub fn evaluate_opacity(&self, time: TimelineTime) -> f32 {
         self.opacity.evaluate(time).as_f32().unwrap_or(1.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persisted_height_must_be_positive_and_finite() {
+        for invalid_height in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut track = Track::new_video("V1");
+            track.height = invalid_height;
+            assert!(track.validate_author_state().is_err(), "{invalid_height:?}");
+        }
+
+        let track = Track::new_video("V1");
+        assert!(track.validate_author_state().is_ok());
+    }
+
+    #[test]
+    fn persisted_clip_placements_must_be_sorted_but_equal_positions_are_stable() {
+        let mut track = Track::new_video("V1");
+        let late = Clip::new(
+            AssetId::new(),
+            TimelineTime::new(2, 1).expect("late position"),
+            TimelineTime::ONE,
+        )
+        .expect("valid late Clip");
+        let early = Clip::new(
+            AssetId::new(),
+            TimelineTime::new(1, 1).expect("early position"),
+            TimelineTime::ONE,
+        )
+        .expect("valid early Clip");
+        track.clips = AuthoringList::from(vec![late, early]);
+        assert!(track.validate_author_state().is_err());
+
+        let first = Clip::new(AssetId::new(), TimelineTime::ONE, TimelineTime::ONE)
+            .expect("valid first Clip");
+        let second = Clip::new(AssetId::new(), TimelineTime::ONE, TimelineTime::ONE)
+            .expect("valid second Clip");
+        let expected_order = [first.id, second.id];
+        track.clips = AuthoringList::from(vec![first, second]);
+        track.validate_author_state().expect("equal positions remain valid");
+        assert_eq!(
+            track.clips.iter().map(|clip| clip.id).collect::<Vec<_>>(),
+            expected_order
+        );
     }
 }

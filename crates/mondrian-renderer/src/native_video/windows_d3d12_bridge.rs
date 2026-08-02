@@ -45,6 +45,15 @@ pub struct D3D12VideoPlaneViews<'a> {
 #[must_use = "prepared native video frames must be submitted or explicitly discarded"]
 pub struct D3D12PreparedVideoFrame {
     sync_plan: NativeVideoFrameSyncPlan,
+    decode_fence_ready_at_admission: Option<bool>,
+}
+
+impl D3D12PreparedVideoFrame {
+    /// Lock-free decoder-fence observation sampled immediately before the
+    /// queue wait/copy/acquire chain was published.
+    pub(super) const fn decode_fence_ready_at_admission(&self) -> Option<bool> {
+        self.decode_fence_ready_at_admission
+    }
 }
 
 /// Error creating or driving a D3D12VA-to-wgpu DX12 shared texture.
@@ -264,6 +273,7 @@ impl D3D12SharedVideoTexture {
             self.retire_completed_source()?;
         }
 
+        let decode_fence_ready_at_admission = decode_fence_ready_at_admission(source);
         let plan = self.timeline.begin_copy().map_err(sync_error)?;
         if let Err(error) = self.publish_decoder_copy(source, plan) {
             self.timeline.poison();
@@ -275,7 +285,7 @@ impl D3D12SharedVideoTexture {
             return Err(error);
         }
         self.timeline.acquire_renderer(plan).map_err(sync_error)?;
-        Ok(D3D12PreparedVideoFrame { sync_plan: plan })
+        Ok(D3D12PreparedVideoFrame { sync_plan: plan, decode_fence_ready_at_admission })
     }
 
     /// Borrow plane views while recording renderer commands for `prepared`.
@@ -361,15 +371,24 @@ impl D3D12SharedVideoTexture {
         // non-blocking observation of the shared copy/render timeline.
         let completed = unsafe { self.decoder_shared_fence.GetCompletedValue() };
         if completed == u64::MAX {
+            // D3D's device-removed sentinel is physical proof that this copy
+            // can never execute again. Clear only this fence-protected source;
+            // callers preserve the typed error and fail closed for every
+            // other bridge failure.
+            self.clear_retained_source_after_terminal_fence();
             return Err(D3D12SharedVideoTextureError::DeviceRemoved);
         }
         if completed < required {
             return Ok(false);
         }
+        self.clear_retained_source_after_terminal_fence();
+        Ok(true)
+    }
+
+    fn clear_retained_source_after_terminal_fence(&mut self) {
         self.in_flight_source = None;
         self.in_flight_decode_fence = None;
         self.in_flight_copy_ready = None;
-        Ok(true)
     }
 
     /// Whether one decoder source is retained until its copy fence completes.
@@ -443,6 +462,13 @@ impl D3D12SharedVideoTexture {
         unsafe { self.renderer_queue.Signal(&self.renderer_fence, plan.renderer_complete) }
             .map_err(|error| windows_error("renderer ID3D12CommandQueue::Signal", error))
     }
+}
+
+fn decode_fence_ready_at_admission(source: &ValidatedD3D12NativeDecodedFrame) -> Option<bool> {
+    // SAFETY: validation proved the frame fence is a live ID3D12Fence from the
+    // same decoder device. GetCompletedValue is a lock-free observation.
+    let completed = unsafe { source.decode_fence.GetCompletedValue() };
+    (completed != u64::MAX).then_some(completed >= source.inspection.decode_fence_value)
 }
 
 impl D3D12CopyCommands {

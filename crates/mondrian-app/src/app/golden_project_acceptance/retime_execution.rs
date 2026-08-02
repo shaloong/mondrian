@@ -27,7 +27,8 @@ use mondrian_media::{
     VideoStreamInfo,
 };
 use mondrian_renderer::{
-    evaluate_timeline_render_plan, TimelineEvaluationRequest, TimelineRenderPlanElement,
+    evaluate_prepared_visual_program, PreparedVisualProgram, TimelineEvaluationRequest,
+    TimelineRenderPlanElement,
 };
 use mondrian_timeline::{
     InsertAutomationPolicy, InsertTimelineStatePolicy, InsertTransitionPolicy, Sequence,
@@ -57,67 +58,79 @@ fn golden_hero_retime_is_one_exact_contract_across_author_preview_audio_export_a
 
     let media_path = directory.join("metadata-only-retime-source.mov");
     std::fs::write(&media_path, [0_u8])?;
+    let media_path =
+        std::fs::canonicalize(media_path).context("canonicalize Golden Retime media fixture")?;
+    let fingerprint = mondrian_media::MediaFileFingerprint::capture(&media_path);
+    let candidate = mondrian_assets::AssetMediaProbeCandidate::new(
+        media_path.clone(),
+        fingerprint,
+        MediaInfo {
+            duration: Duration::from_secs(10),
+            file_size: 1,
+            container: "mov".to_owned(),
+            video_streams: vec![VideoStreamInfo {
+                index: 0,
+                codec: VideoCodec::H264,
+                duration: Some(Duration::from_secs(10)),
+                codec_profile: VideoCodecProfile::H264High,
+                width: 1920,
+                height: 1080,
+                frame_rate: Rational::FPS_25,
+                frame_rate_proven: true,
+                pixel_format: PixelFormat::Yuv420p,
+                pixel_format_proven: true,
+                color_range: DecodedVideoRange::Limited,
+                color_interpretation: DetectedColorInterpretation {
+                    candidate_color_space: Some(ColorSpace::Rec709),
+                    confidence: VideoColorInterpretationConfidence::High,
+                    source: VideoColorSpaceSource::Metadata,
+                    method: VideoColorDetectionMethod::MetadataHint,
+                    evidence: vec![
+                        mondrian_media::VideoColorInterpretationEvidence::MetadataHint {
+                            scope: mondrian_media::VideoColorMetadataHintScope::Stream,
+                            key: "source_color_space".to_owned(),
+                            value: "Rec709".to_owned(),
+                            detected_color_space: ColorSpace::Rec709,
+                            authority:
+                                mondrian_media::VideoColorMetadataHintAuthority::SourceDeclaration(
+                                    mondrian_media::VideoColorMetadataDeclaration::SourceColorSpace,
+                                ),
+                        },
+                    ],
+                    warnings: Vec::new(),
+                    user_overridable: true,
+                },
+                color_metadata: None,
+                color_metadata_hints: Vec::new(),
+                hdr_metadata: Vec::new(),
+                bit_depth: 8,
+                has_alpha: false,
+                avg_bitrate: 8_000_000,
+                total_frames: Some(250),
+            }],
+            audio_streams: vec![AudioStreamInfo {
+                index: 1,
+                stream_id: Some(1),
+                language: None,
+                title: None,
+                is_default: true,
+                codec: AudioCodec::Pcm { bit_depth: 24 },
+                duration: Some(Duration::from_secs(10)),
+                sample_rate: 48_000,
+                channels: 2,
+                channel_layout: ChannelLayout::Stereo,
+                bit_depth: 24,
+                avg_bitrate: 2_304_000,
+            }],
+            has_video: true,
+            has_audio: true,
+        },
+    )?;
     let asset_id = workflow
         .app()
         .asset_library()
         .context("Golden Retime Asset Library is absent")?
-        .upsert_media_file_with_info(
-            &media_path,
-            MediaInfo {
-                path: media_path.clone(),
-                duration: Duration::from_secs(10),
-                file_size: 1,
-                container: "mov".to_owned(),
-                video_streams: vec![VideoStreamInfo {
-                    index: 0,
-                    codec: VideoCodec::H264,
-                    duration: Some(Duration::from_secs(10)),
-                    codec_profile: VideoCodecProfile::H264High,
-                    width: 1920,
-                    height: 1080,
-                    frame_rate: Rational::FPS_25,
-                    frame_rate_proven: true,
-                    pixel_format: PixelFormat::Yuv420p,
-                    pixel_format_proven: true,
-                    color_range: DecodedVideoRange::Limited,
-                    detected_color_space: Some(ColorSpace::Rec709),
-                    color_interpretation: DetectedColorInterpretation {
-                        color_space: Some(ColorSpace::Rec709),
-                        confidence: VideoColorInterpretationConfidence::High,
-                        source: VideoColorSpaceSource::Metadata,
-                        method: VideoColorDetectionMethod::CicpTags,
-                        evidence: Vec::new(),
-                        warnings: Vec::new(),
-                        user_overridable: true,
-                    },
-                    color_space_source: VideoColorSpaceSource::Metadata,
-                    color_detection_method: VideoColorDetectionMethod::CicpTags,
-                    color_metadata: None,
-                    color_metadata_hints: Vec::new(),
-                    hdr_metadata: Vec::new(),
-                    bit_depth: 8,
-                    has_alpha: false,
-                    avg_bitrate: 8_000_000,
-                    total_frames: Some(250),
-                }],
-                audio_streams: vec![AudioStreamInfo {
-                    index: 1,
-                    stream_id: Some(1),
-                    language: None,
-                    title: None,
-                    is_default: true,
-                    codec: AudioCodec::Pcm { bit_depth: 24 },
-                    duration: Some(Duration::from_secs(10)),
-                    sample_rate: 48_000,
-                    channels: 2,
-                    channel_layout: ChannelLayout::Stereo,
-                    bit_depth: 24,
-                    avg_bitrate: 2_304_000,
-                }],
-                has_video: true,
-                has_audio: true,
-            },
-        )?;
+        .commit_media_probe(candidate, None)?;
 
     let sequence = workflow
         .app()
@@ -300,11 +313,13 @@ fn assert_visual_source_time(
     timeline_frame: i64,
     expected: TimelineTime,
 ) -> anyhow::Result<()> {
+    let position = FramePosition::new(timeline_frame, sequence.time_base());
     for request in [
-        TimelineEvaluationRequest::preview(timeline_frame, 0.5),
-        TimelineEvaluationRequest::export(timeline_frame),
+        TimelineEvaluationRequest::preview(position, 0.5),
+        TimelineEvaluationRequest::export(position),
     ] {
-        let plan = evaluate_timeline_render_plan(sequence, request)?;
+        let program = PreparedVisualProgram::prepare(sequence)?;
+        let plan = evaluate_prepared_visual_program(&program, request)?;
         let media = plan
             .elements
             .iter()

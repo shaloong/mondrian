@@ -7,17 +7,25 @@
 
 use anyhow::Context;
 use mondrian_core::{
-    automation::PropertyHost, AssetId, ProjectColorEnvironment, ProjectId, ProjectMeta,
-    ProjectSettings,
+    AssetId, AuthoringFootprint, AuthoringFootprintCollector, AuthoringFootprintError,
+    AuthoringSet, ProjectColorEnvironment, ProjectId, ProjectMeta, ProjectSettings, SequenceId,
 };
-use mondrian_timeline::{SequenceCollection, SequenceSettings};
+use mondrian_storage::{
+    FilePublicationFailure as StoragePublicationFailure, FilePublicationMode, OwnedPublicationFile,
+};
+use mondrian_timeline::{
+    Sequence, SequenceAuthorContractCertificate, SequenceCollection, SequenceDependencyCertificate,
+    SequenceSettings,
+};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::fmt;
 use std::fs;
-use std::hash::{Hash, Hasher};
-use std::io::{Read, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 mod migration;
 
@@ -28,7 +36,281 @@ pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
 pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 22;
 /// Current embedded asset-library SQLite schema version.
-pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 2;
+pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 4;
+
+/// Final namespace semantics for one atomic Project archive publication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectArchivePublication {
+    /// Atomically replace an existing target, or create it when absent.
+    ReplaceExisting,
+    /// Atomically create the target and fail without changing it if any entry
+    /// already occupies the destination.
+    CreateNew,
+}
+
+/// Immutable point-in-time construction evidence returned after one exact
+/// Project archive is durably published.
+///
+/// The fields are private so downstream code cannot manufacture publication
+/// evidence from a path and author metadata alone. The content identity is
+/// measured from the retained, entry-verified temporary file object before
+/// the atomic namespace operation; this evidence is returned only after that
+/// operation succeeds. It does not replace later path revalidation when the
+/// archive is discovered or opened outside the publication lease.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ProjectArchivePublicationEvidence {
+    namespace: ProjectArchiveNamespacePublicationEvidence,
+}
+
+/// Point-in-time evidence that an atomic Project archive namespace operation
+/// completed, without claiming that the containing directory was durably
+/// synchronized.
+///
+/// This is intentionally a different type from
+/// [`ProjectArchivePublicationEvidence`]. It is exposed only by
+/// [`ProjectArchivePublicationDurabilityUnconfirmed`] after the irreversible
+/// namespace boundary has been crossed and must never authorize a saved
+/// baseline or Recovery Manifest.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ProjectArchiveNamespacePublicationEvidence {
+    published_path: PathBuf,
+    publication: ProjectArchivePublication,
+    project_id: ProjectId,
+    document_revision: u64,
+    archive_len: u64,
+    archive_sha256: [u8; 32],
+}
+
+impl ProjectArchivePublicationEvidence {
+    /// Exact target path supplied to the successful publication.
+    pub fn published_path(&self) -> &Path {
+        self.namespace.published_path()
+    }
+
+    /// Final namespace semantics used by the successful publication.
+    pub fn publication(&self) -> ProjectArchivePublication {
+        self.namespace.publication()
+    }
+
+    /// Project identity encoded by the entry-verified document.
+    pub fn project_id(&self) -> ProjectId {
+        self.namespace.project_id()
+    }
+
+    /// Durable document revision encoded by the entry-verified document.
+    pub fn document_revision(&self) -> u64 {
+        self.namespace.document_revision()
+    }
+
+    /// Exact byte length of the published archive object.
+    pub fn archive_len(&self) -> u64 {
+        self.namespace.archive_len()
+    }
+
+    /// SHA-256 identity of the complete published archive bytes.
+    pub fn archive_sha256(&self) -> [u8; 32] {
+        self.namespace.archive_sha256()
+    }
+
+    /// Lowercase hexadecimal SHA-256 identity for durable text manifests.
+    pub fn archive_sha256_hex(&self) -> String {
+        self.namespace.archive_sha256_hex()
+    }
+}
+
+impl ProjectArchiveNamespacePublicationEvidence {
+    /// Exact target path supplied to the namespace publication.
+    pub fn published_path(&self) -> &Path {
+        &self.published_path
+    }
+
+    /// Final namespace semantics used by the completed atomic operation.
+    pub fn publication(&self) -> ProjectArchivePublication {
+        self.publication
+    }
+
+    /// Project identity encoded by the entry-verified document.
+    pub fn project_id(&self) -> ProjectId {
+        self.project_id
+    }
+
+    /// Document revision encoded by the entry-verified document.
+    pub fn document_revision(&self) -> u64 {
+        self.document_revision
+    }
+
+    /// Exact byte length of the namespace-published archive object.
+    pub fn archive_len(&self) -> u64 {
+        self.archive_len
+    }
+
+    /// SHA-256 identity of the complete namespace-published archive bytes.
+    pub fn archive_sha256(&self) -> [u8; 32] {
+        self.archive_sha256
+    }
+
+    /// Lowercase hexadecimal SHA-256 identity for diagnostics.
+    pub fn archive_sha256_hex(&self) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut value = String::with_capacity(64);
+        for byte in self.archive_sha256 {
+            value.push(char::from(HEX[usize::from(byte >> 4)]));
+            value.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+        value
+    }
+}
+
+/// Error returned after a Project archive namespace operation completed but
+/// synchronization of its containing directory failed.
+///
+/// The target may already name the new archive. Retrying `CreateNew` as though
+/// publication never happened is therefore incorrect. The embedded namespace
+/// evidence is deliberately not durable publication evidence.
+#[derive(Debug)]
+pub struct ProjectArchivePublicationDurabilityUnconfirmed {
+    namespace: ProjectArchiveNamespacePublicationEvidence,
+    source: mondrian_storage::FilePublicationDurabilityUnconfirmed,
+}
+
+impl ProjectArchivePublicationDurabilityUnconfirmed {
+    /// Evidence for the completed namespace operation.
+    pub fn namespace_evidence(&self) -> &ProjectArchiveNamespacePublicationEvidence {
+        &self.namespace
+    }
+}
+
+impl fmt::Display for ProjectArchivePublicationDurabilityUnconfirmed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Project archive namespace was published at {}, but the platform durability barrier was not confirmed: {}",
+            self.namespace.published_path.display(),
+            self.source
+        )
+    }
+}
+
+impl std::error::Error for ProjectArchivePublicationDurabilityUnconfirmed {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// Error returned when a Project archive namespace operation has an
+/// indeterminate postcondition.
+///
+/// This carries identity facts for diagnostics and recovery tooling, but it is
+/// not publication evidence and cannot authorize a saved baseline.
+#[derive(Debug)]
+pub struct ProjectArchivePublicationNamespaceIndeterminate {
+    intended_path: PathBuf,
+    publication: ProjectArchivePublication,
+    project_id: ProjectId,
+    document_revision: u64,
+    archive_len: u64,
+    archive_sha256: [u8; 32],
+    source: mondrian_storage::FilePublicationNamespaceIndeterminate,
+}
+
+impl ProjectArchivePublicationNamespaceIndeterminate {
+    /// Intended final target of the ambiguous namespace operation.
+    pub fn intended_path(&self) -> &Path {
+        &self.intended_path
+    }
+
+    /// Requested namespace semantics.
+    pub fn publication(&self) -> ProjectArchivePublication {
+        self.publication
+    }
+
+    /// Project identity encoded by the verified archive candidate.
+    pub fn project_id(&self) -> ProjectId {
+        self.project_id
+    }
+
+    /// Document revision encoded by the verified archive candidate.
+    pub fn document_revision(&self) -> u64 {
+        self.document_revision
+    }
+
+    /// Exact byte length of the verified archive candidate.
+    pub fn archive_len(&self) -> u64 {
+        self.archive_len
+    }
+
+    /// SHA-256 identity of the verified archive candidate.
+    pub fn archive_sha256(&self) -> [u8; 32] {
+        self.archive_sha256
+    }
+
+    /// Verified surviving source name for the new archive, when observed.
+    pub fn retained_new_path(&self) -> Option<&Path> {
+        self.source.retained_new_path()
+    }
+}
+
+impl fmt::Display for ProjectArchivePublicationNamespaceIndeterminate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Project archive publication at {} has an indeterminate namespace postcondition; no durable publication evidence was issued",
+            self.intended_path.display()
+        )?;
+        if let Some(path) = self.source.retained_new_path() {
+            write!(
+                formatter,
+                " and verified new bytes remain at {}",
+                path.display()
+            )?;
+        }
+        write!(formatter, ": {}", self.source)
+    }
+}
+
+impl std::error::Error for ProjectArchivePublicationNamespaceIndeterminate {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// Exhaustive failure states for Project archive publication.
+#[derive(Debug)]
+pub enum ProjectArchivePublicationFailure {
+    /// No irreversible namespace operation is known to have completed.
+    BeforeNamespace(anyhow::Error),
+    /// The target names the new archive, but crash durability is unconfirmed.
+    DurabilityUnconfirmed(Box<ProjectArchivePublicationDurabilityUnconfirmed>),
+    /// Object-identity postconditions cannot prove either unchanged or
+    /// published state.
+    NamespaceIndeterminate(Box<ProjectArchivePublicationNamespaceIndeterminate>),
+}
+
+impl fmt::Display for ProjectArchivePublicationFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BeforeNamespace(error) => write!(formatter, "{error:#}"),
+            Self::DurabilityUnconfirmed(error) => error.fmt(formatter),
+            Self::NamespaceIndeterminate(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for ProjectArchivePublicationFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::BeforeNamespace(error) => Some(error.as_ref()),
+            Self::DurabilityUnconfirmed(error) => Some(error.as_ref()),
+            Self::NamespaceIndeterminate(error) => Some(error.as_ref()),
+        }
+    }
+}
+
+impl From<anyhow::Error> for ProjectArchivePublicationFailure {
+    fn from(error: anyhow::Error) -> Self {
+        Self::BeforeNamespace(error)
+    }
+}
 
 /// Entry name for the archive manifest.
 pub const MANIFEST_ENTRY: &str = "manifest.json";
@@ -51,6 +333,232 @@ const DOCUMENT_MIGRATIONS: JsonMigrationRegistry = JsonMigrationRegistry::new(
     PROJECT_DOCUMENT_SCHEMA_VERSION,
     &[],
 );
+const REQUIRED_ARCHIVE_ENTRIES: [&str; 3] = [MANIFEST_ENTRY, PROJECT_ENTRY, LIBRARY_ENTRY];
+
+/// Admission limits for opening one untrusted `.mdp` archive.
+///
+/// These are resource budgets, not statements about media duration. Callers
+/// may choose a tighter or larger budget for their execution environment. The
+/// default admits the current 120-minute stress Project (about 578 MiB at its
+/// largest recovery checkpoint) while retaining a hard sub-GiB JSON bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectArchiveReadBudget {
+    /// Maximum compressed archive file length.
+    pub max_archive_bytes: u64,
+    /// Maximum uncompressed `manifest.json` length.
+    pub max_manifest_bytes: u64,
+    /// Maximum uncompressed `project.json` length.
+    pub max_project_bytes: u64,
+    /// Maximum uncompressed `library/index.db` length.
+    pub max_library_bytes: u64,
+}
+
+impl ProjectArchiveReadBudget {
+    /// Default balanced admission budget for ordinary product open.
+    pub const DEFAULT: Self = Self {
+        max_archive_bytes: 2 * 1024 * 1024 * 1024,
+        max_manifest_bytes: 64 * 1024,
+        max_project_bytes: 768 * 1024 * 1024,
+        max_library_bytes: 1536 * 1024 * 1024,
+    };
+
+    fn entry_limit(self, entry_name: &str) -> anyhow::Result<u64> {
+        match entry_name {
+            MANIFEST_ENTRY => Ok(self.max_manifest_bytes),
+            PROJECT_ENTRY => Ok(self.max_project_bytes),
+            LIBRARY_ENTRY => Ok(self.max_library_bytes),
+            _ => anyhow::bail!("archive admission requested for unknown entry: {entry_name}"),
+        }
+    }
+
+    fn admit_archive_file(self, file: &fs::File) -> anyhow::Result<()> {
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            anyhow::bail!("Project archive handle does not name a regular file object");
+        }
+        let observed = metadata.len();
+        if observed > self.max_archive_bytes {
+            anyhow::bail!(
+                "project archive compressed length exceeds admission budget: {observed} > {}",
+                self.max_archive_bytes
+            );
+        }
+        Ok(())
+    }
+
+    fn admit_declared_entry(self, entry_name: &str, declared: u64) -> anyhow::Result<()> {
+        let limit = self.entry_limit(entry_name)?;
+        if declared > limit {
+            anyhow::bail!(
+                "project archive entry '{entry_name}' declared length exceeds admission budget: {declared} > {limit}"
+            );
+        }
+        Ok(())
+    }
+}
+
+impl Default for ProjectArchiveReadBudget {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+struct BudgetedArchiveEntryReader<R> {
+    inner: R,
+    entry_name: &'static str,
+    declared_len: u64,
+    limit: u64,
+    observed_len: u64,
+    reached_eof: bool,
+}
+
+impl<R> BudgetedArchiveEntryReader<R> {
+    fn new(inner: R, entry_name: &'static str, declared_len: u64, limit: u64) -> Self {
+        Self {
+            inner,
+            entry_name,
+            declared_len,
+            limit,
+            observed_len: 0,
+            reached_eof: false,
+        }
+    }
+
+    fn verify_complete(&self) -> anyhow::Result<()> {
+        if !self.reached_eof {
+            anyhow::bail!(
+                "project archive entry '{}' was not read to EOF",
+                self.entry_name
+            );
+        }
+        if self.observed_len != self.declared_len {
+            anyhow::bail!(
+                "project archive entry '{}' actual length differs from ZIP declaration: {} != {}",
+                self.entry_name,
+                self.observed_len,
+                self.declared_len
+            );
+        }
+        Ok(())
+    }
+}
+
+impl<R: Read> Read for BudgetedArchiveEntryReader<R> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        let remaining = self.limit.saturating_sub(self.observed_len);
+        if remaining == 0 {
+            let mut probe = [0_u8; 1];
+            let read = self.inner.read(&mut probe)?;
+            if read == 0 {
+                self.reached_eof = true;
+                return Ok(0);
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "project archive entry '{}' actual length exceeds admission budget {}",
+                    self.entry_name, self.limit
+                ),
+            ));
+        }
+        let requested = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        let admitted = usize::try_from(remaining.min(requested)).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "archive entry admission length does not fit usize",
+            )
+        })?;
+        let read = self.inner.read(&mut bytes[..admitted])?;
+        if read == 0 {
+            self.reached_eof = true;
+            return Ok(0);
+        }
+        self.observed_len = self
+            .observed_len
+            .checked_add(u64::try_from(read).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "archive entry observed length does not fit u64",
+                )
+            })?)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "archive entry observed length overflowed u64",
+                )
+            })?;
+        Ok(read)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ArchiveEntryEvidence {
+    name: &'static str,
+    uncompressed_len: u64,
+    sha256: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectArchiveWriteEvidence {
+    manifest: ArchiveEntryEvidence,
+    project: ArchiveEntryEvidence,
+    library: ArchiveEntryEvidence,
+}
+
+impl ProjectArchiveWriteEvidence {
+    fn entries(&self) -> [&ArchiveEntryEvidence; 3] {
+        [&self.manifest, &self.project, &self.library]
+    }
+}
+
+struct EvidenceWriter<'a, W> {
+    inner: &'a mut W,
+    hasher: Sha256,
+    uncompressed_len: u64,
+}
+
+impl<'a, W> EvidenceWriter<'a, W> {
+    fn new(inner: &'a mut W) -> Self {
+        Self { inner, hasher: Sha256::new(), uncompressed_len: 0 }
+    }
+
+    fn finish(self, name: &'static str) -> ArchiveEntryEvidence {
+        ArchiveEntryEvidence {
+            name,
+            uncompressed_len: self.uncompressed_len,
+            sha256: self.hasher.finalize().into(),
+        }
+    }
+}
+
+impl<W: Write> Write for EvidenceWriter<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(bytes)?;
+        self.uncompressed_len = self
+            .uncompressed_len
+            .checked_add(u64::try_from(written).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "archive entry write length does not fit in u64",
+                )
+            })?)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "archive entry write length overflowed u64",
+                )
+            })?;
+        self.hasher.update(&bytes[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
 
 /// `.mdp` archive manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -118,7 +626,7 @@ impl ProjectManifest {
 }
 
 /// Canonical persisted project document.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectDocument {
     /// JSON document schema version.
@@ -141,7 +649,219 @@ pub struct ProjectDocument {
     /// Complete sequence collection for the current single-document layout.
     pub sequences: SequenceCollection,
     /// Assets currently forced into proxy playback mode.
-    pub proxy_mode_assets: BTreeSet<AssetId>,
+    pub proxy_mode_assets: AuthoringSet<AssetId>,
+}
+
+impl AuthoringFootprint for ProjectDocument {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self {
+            schema_version: _,
+            project_id: _,
+            document_revision: _,
+            meta,
+            settings,
+            color_environment,
+            new_sequence_defaults,
+            sequences,
+            proxy_mode_assets,
+        } = self;
+        collector.collect(meta)?;
+        collector.collect(settings)?;
+        collector.collect(color_environment)?;
+        collector.collect(new_sequence_defaults)?;
+        collector.collect(sequences)?;
+        collector.collect(proxy_mode_assets)
+    }
+}
+
+const PROJECT_AUTHORING_VALIDATION_CERTIFICATE_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq)]
+struct ProjectAuthoringValidationContext {
+    project_id: ProjectId,
+    color_environment: ProjectColorEnvironment,
+}
+
+impl ProjectAuthoringValidationContext {
+    fn from_document(document: &ProjectDocument) -> Self {
+        Self {
+            project_id: document.project_id,
+            color_environment: document.color_environment.clone(),
+        }
+    }
+}
+
+/// Opaque process-local proof that one Project's complete authoring contract
+/// and cross-Sequence dependency closure were validated together.
+///
+/// The certificate is deliberately non-serializable and non-cloneable. It
+/// retains per-Sequence immutable validation evidence plus the sole anchored
+/// dependency certificate; the canonical [`ProjectDocument`] remains the only author
+/// authority.
+#[derive(Debug)]
+pub struct ProjectAuthoringValidationCertificate {
+    version: u32,
+    context: ProjectAuthoringValidationContext,
+    sequence_certificates: BTreeMap<SequenceId, Arc<SequenceAuthorContractCertificate>>,
+    dependency_certificate: SequenceDependencyCertificate,
+}
+
+/// Fully prepared, infallibly installable Project state for one validated
+/// Sequence replacement.
+///
+/// The document and certificate are kept together so the installed Sequence
+/// collection and the dependency certificate retain the exact same outer COW
+/// root. This ticket has no persistence representation and cannot be cloned.
+#[derive(Debug)]
+pub struct PreparedProjectSequenceReplacement {
+    document: ProjectDocument,
+    certificate: ProjectAuthoringValidationCertificate,
+    replacement_index: usize,
+}
+
+impl PreparedProjectSequenceReplacement {
+    /// Read the already-validated replacement for History preparation.
+    pub fn replacement(&self) -> &Sequence {
+        &self.document.sequences.sequences[self.replacement_index]
+    }
+
+    /// Consume this ticket into the only document/certificate pair it proves.
+    ///
+    /// All fallible validation and allocation happened before this call.
+    pub fn into_installation(self) -> (ProjectDocument, ProjectAuthoringValidationCertificate) {
+        (self.document, self.certificate)
+    }
+}
+
+impl ProjectAuthoringValidationCertificate {
+    /// Prepare a certificate for replacing exactly one existing Sequence.
+    ///
+    /// Success returns all evidence required for the same atomic installation
+    /// boundary as the replacement document and History record.
+    pub fn prepare_sequence_replacement(
+        &self,
+        current: &ProjectDocument,
+        replacement: Sequence,
+    ) -> anyhow::Result<PreparedProjectSequenceReplacement> {
+        self.validate_current_baseline(current)?;
+        let target_index = current
+            .sequences
+            .sequences
+            .iter()
+            .position(|sequence| sequence.id == replacement.id)
+            .with_context(|| {
+                format!(
+                    "replacement Sequence does not exist in the current Project: {}",
+                    replacement.id
+                )
+            })?;
+        let mut next_sequences = current.sequences.sequences.clone();
+        next_sequences[target_index] = replacement;
+        let replacement = &next_sequences[target_index];
+        let current_sequence = &current.sequences.sequences[target_index];
+        let sequence_certificate = self
+            .sequence_certificates
+            .get(&replacement.id)
+            .context("current Sequence has no author-contract certificate")?
+            .prepare_replacement(current_sequence, replacement, &current.color_environment)
+            .with_context(|| {
+                format!(
+                    "sequence '{}' replacement author contract is invalid",
+                    replacement.name
+                )
+            })?;
+        let dependency_certificate = self
+            .dependency_certificate
+            .prepare_replacement_with_baseline(&current.sequences, replacement, &next_sequences)
+            .context("replacement Sequence dependency closure is invalid")?;
+        let mut sequence_certificates = self.sequence_certificates.clone();
+        sequence_certificates.insert(replacement.id, Arc::new(sequence_certificate));
+        let certificate = Self {
+            version: PROJECT_AUTHORING_VALIDATION_CERTIFICATE_VERSION,
+            context: self.context.clone(),
+            sequence_certificates,
+            dependency_certificate,
+        };
+        let mut document = current.clone();
+        document.sequences.sequences = next_sequences;
+        Ok(PreparedProjectSequenceReplacement {
+            document,
+            certificate,
+            replacement_index: target_index,
+        })
+    }
+
+    /// Fully validate a prospective Project replacement after proving this
+    /// certificate still belongs to the exact current author baseline.
+    pub fn prepare_project_replacement(
+        &self,
+        current: &ProjectDocument,
+        replacement: &ProjectDocument,
+    ) -> anyhow::Result<Self> {
+        self.validate_current_baseline(current)?;
+        if replacement.project_id != current.project_id {
+            anyhow::bail!(
+                "Project replacement identity changed from {} to {}",
+                current.project_id,
+                replacement.project_id
+            );
+        }
+        replacement.validate_document_contract()?;
+        let sequence_evidence_unchanged = replacement.color_environment
+            == current.color_environment
+            && replacement.sequences.default_sequence_id == current.sequences.default_sequence_id
+            && replacement.sequences.sequences == current.sequences.sequences;
+        if sequence_evidence_unchanged {
+            self.dependency_certificate
+                .validate_baseline(&replacement.sequences)
+                .context(
+                    "Project-only replacement has an invalid active Sequence or stale dependency baseline",
+                )?;
+            return Ok(Self {
+                version: PROJECT_AUTHORING_VALIDATION_CERTIFICATE_VERSION,
+                context: ProjectAuthoringValidationContext::from_document(replacement),
+                sequence_certificates: self.sequence_certificates.clone(),
+                dependency_certificate: self.dependency_certificate.clone(),
+            });
+        }
+        replacement.prepare_authoring_validation_certificate()
+    }
+
+    fn validate_current_baseline(&self, current: &ProjectDocument) -> anyhow::Result<()> {
+        if self.version != PROJECT_AUTHORING_VALIDATION_CERTIFICATE_VERSION {
+            anyhow::bail!("Project authoring-validation certificate version is unsupported");
+        }
+        current.validate_document_contract()?;
+        if self.context != ProjectAuthoringValidationContext::from_document(current) {
+            anyhow::bail!(
+                "Project authoring-validation certificate does not match the current validation context"
+            );
+        }
+        self.dependency_certificate.validate_baseline(&current.sequences).context(
+            "Project dependency certificate does not match the current Sequence baseline",
+        )?;
+        if self.sequence_certificates.len() != current.sequences.sequences.len() {
+            anyhow::bail!(
+                "Project authoring-validation certificate does not match the current Sequence set"
+            );
+        }
+        for sequence in &current.sequences.sequences {
+            self.sequence_certificates
+                .get(&sequence.id)
+                .context("current Sequence has no author-contract certificate")?
+                .validate_baseline(sequence, &current.color_environment)
+                .with_context(|| {
+                    format!(
+                        "sequence '{}' no longer matches its certified baseline",
+                        sequence.name
+                    )
+                })?;
+        }
+        Ok(())
+    }
 }
 
 impl ProjectDocument {
@@ -162,12 +882,54 @@ impl ProjectDocument {
             color_environment,
             new_sequence_defaults,
             sequences,
-            proxy_mode_assets: BTreeSet::new(),
+            proxy_mode_assets: AuthoringSet::new(),
         }
     }
 
     /// Validate document-level invariants before opening or saving.
     pub fn validate(&self) -> anyhow::Result<()> {
+        self.prepare_authoring_validation_certificate().map(|_| ())
+    }
+
+    /// Fully validate the canonical author model and retain opaque,
+    /// process-local evidence for later transactional replacement preparation.
+    pub fn prepare_authoring_validation_certificate(
+        &self,
+    ) -> anyhow::Result<ProjectAuthoringValidationCertificate> {
+        self.validate_document_contract()?;
+        let mut sequence_certificates = BTreeMap::new();
+        for sequence in &self.sequences.sequences {
+            let certificate = sequence
+                .prepare_author_contract_certificate(&self.color_environment)
+                .with_context(|| {
+                    format!("sequence '{}' author contract is invalid", sequence.name)
+                })?;
+            sequence_certificates.insert(sequence.id, Arc::new(certificate));
+        }
+        let dependency_certificate = SequenceDependencyCertificate::build(&self.sequences)
+            .context("Project Sequence dependency closure is invalid")?;
+        Ok(ProjectAuthoringValidationCertificate {
+            version: PROJECT_AUTHORING_VALIDATION_CERTIFICATE_VERSION,
+            context: ProjectAuthoringValidationContext::from_document(self),
+            sequence_certificates,
+            dependency_certificate,
+        })
+    }
+
+    /// Validate one Sequence replacement against the canonical Project.
+    ///
+    /// This is the general stateless validation seam for callers that do not
+    /// retain process-local validation evidence. It validates the replacement plus
+    /// every collection-wide nesting and child-output obligation. The
+    /// authoring Session hot path instead prepares and atomically installs its
+    /// retained [`ProjectAuthoringValidationCertificate`].
+    pub fn validate_sequence_replacement(&self, replacement: &Sequence) -> anyhow::Result<()> {
+        self.prepare_authoring_validation_certificate()?
+            .prepare_sequence_replacement(self, replacement.clone())
+            .map(|_| ())
+    }
+
+    fn validate_document_contract(&self) -> anyhow::Result<()> {
         if self.schema_version != PROJECT_DOCUMENT_SCHEMA_VERSION {
             anyhow::bail!(
                 "unsupported project document schema version: {}",
@@ -180,52 +942,6 @@ impl ProjectDocument {
         self.new_sequence_defaults
             .validate_with_color_environment(&self.color_environment)
             .context("new Sequence defaults are invalid")?;
-        self.sequences.validate_nested_sequences()?;
-        if self.sequences.active().is_none() {
-            anyhow::bail!("project document has no active sequence");
-        }
-        for sequence in &self.sequences.sequences {
-            if sequence.revision.get() == 0 {
-                anyhow::bail!(
-                    "sequence '{}' has invalid author revision zero",
-                    sequence.name
-                );
-            }
-            sequence
-                .settings
-                .validate_with_color_environment(&self.color_environment)
-                .with_context(|| {
-                    format!("sequence '{}' color management is invalid", sequence.name)
-                })?;
-            for track in sequence.video_tracks.iter().chain(&sequence.audio_tracks) {
-                track.property_bag()?.validate().with_context(|| {
-                    format!("track '{}' parameter schema is invalid", track.name)
-                })?;
-                for clip in &track.clips {
-                    clip.validate_time_state().with_context(|| {
-                        format!("Clip '{}' author-time mapping is invalid", clip.id)
-                    })?;
-                    if let Some(title) = clip.content.basic_title() {
-                        title.validate_author_state().with_context(|| {
-                            format!("Basic Title '{}' author state is invalid", clip.id)
-                        })?;
-                    }
-                    clip.property_bag()?.validate().with_context(|| {
-                        format!("clip '{}' parameter schema is invalid", clip.id)
-                    })?;
-                    for effect in &clip.effects {
-                        effect.validate_author_state().with_context(|| {
-                            format!("effect '{}' author state is invalid", effect.id)
-                        })?;
-                    }
-                    for mask in &clip.masks {
-                        mask.validate_author_state().with_context(|| {
-                            format!("mask '{}' author state is invalid", mask.id)
-                        })?;
-                    }
-                }
-            }
-        }
         Ok(())
     }
 
@@ -250,12 +966,45 @@ pub fn project_document_fingerprint(document: ProjectDocument) -> anyhow::Result
 
 /// Read and validate only the canonical project document from an archive.
 pub fn read_project_document_from_archive(project_file: &Path) -> anyhow::Result<ProjectDocument> {
-    let file = fs::File::open(project_file)?;
-    let mut archive = zip::ZipArchive::new(file)?;
-    read_project_document_from_zip(&mut archive)
+    read_project_document_from_archive_with_budget(
+        project_file,
+        ProjectArchiveReadBudget::default(),
+    )
+}
+
+/// Read and validate only the canonical Project document under an explicit
+/// archive admission budget.
+pub fn read_project_document_from_archive_with_budget(
+    project_file: &Path,
+    budget: ProjectArchiveReadBudget,
+) -> anyhow::Result<ProjectDocument> {
+    let mut file = fs::File::open(project_file)?;
+    read_project_document_from_open_archive_with_budget(&mut file, budget)
+}
+
+/// Read and validate the canonical Project document from one already-authorized
+/// archive file object.
+///
+/// The caller retains namespace and sharing policy. The handle is rewound
+/// before reading so verification and loading can use one exact file object
+/// without reopening a potentially replaced path.
+pub fn read_project_document_from_open_archive(
+    file: &mut fs::File,
+) -> anyhow::Result<ProjectDocument> {
+    read_project_document_from_open_archive_with_budget(file, ProjectArchiveReadBudget::default())
+}
+
+/// Read and validate the canonical Project document from one retained file
+/// object under an explicit admission budget.
+pub fn read_project_document_from_open_archive_with_budget(
+    file: &mut fs::File,
+    budget: ProjectArchiveReadBudget,
+) -> anyhow::Result<ProjectDocument> {
+    Ok(PreparedProjectArchive::from_open_file(file, budget)?.into_document())
 }
 
 /// Fully loaded archive payload with independently versioned SQLite evidence.
+#[derive(Debug)]
 pub struct LoadedProjectArchive {
     /// Migrated and validated canonical project document.
     pub document: ProjectDocument,
@@ -263,32 +1012,132 @@ pub struct LoadedProjectArchive {
     pub library_schema_version: u32,
 }
 
+/// One validated, single-consumption `.mdp` open ticket.
+///
+/// Preparation checks the compressed-file budget, exact archive-v1 entry set,
+/// every declared uncompressed entry length, Manifest, and canonical Project
+/// contract. The Project is deserialized exactly once. A caller may inspect its
+/// stable Project identity to acquire runtime authority, then consume this
+/// ticket to extract the Library into that authority's fresh generation.
+pub struct PreparedProjectArchive<'archive> {
+    archive: zip::ZipArchive<&'archive mut fs::File>,
+    manifest: ProjectManifest,
+    document: ProjectDocument,
+    budget: ProjectArchiveReadBudget,
+}
+
+impl<'archive> PreparedProjectArchive<'archive> {
+    /// Prepare one retained archive file object under an explicit read budget.
+    pub fn from_open_file(
+        file: &'archive mut fs::File,
+        budget: ProjectArchiveReadBudget,
+    ) -> anyhow::Result<Self> {
+        budget.admit_archive_file(file)?;
+        file.seek(SeekFrom::Start(0))?;
+        let mut archive = zip::ZipArchive::new(&mut *file)?;
+        validate_exact_archive_entry_set(&mut archive)?;
+        validate_declared_archive_entry_budgets(&mut archive, budget)?;
+        let (manifest, document) = read_project_archive_metadata_from_zip(&mut archive, budget)?;
+        Ok(Self { archive, manifest, document, budget })
+    }
+
+    /// Stable Project identity available before runtime authority is acquired.
+    pub fn project_id(&self) -> ProjectId {
+        self.document.project_id
+    }
+
+    /// Consume the ticket without extracting its Library.
+    pub fn into_document(self) -> ProjectDocument {
+        self.document
+    }
+
+    /// Consume the ticket and extract its Library into a runtime generation.
+    ///
+    /// Extraction stages into an exclusively created sibling. Failure,
+    /// including a decompression CRC error or actual-length violation, removes
+    /// only the staging object owned by this call and never changes an existing
+    /// `index.db`.
+    pub fn load_into(
+        mut self,
+        runtime_library_root: &Path,
+    ) -> anyhow::Result<LoadedProjectArchive> {
+        ensure_direct_runtime_library_root(runtime_library_root)?;
+        let db_path = runtime_library_root.join("index.db");
+        reject_existing_non_file_or_link(&db_path, "runtime Project Library")?;
+        let mut staging = OwnedPublicationFile::create_sibling(&db_path, "extract")?;
+
+        {
+            let db_entry = self
+                .archive
+                .by_name(LIBRARY_ENTRY)
+                .with_context(|| format!("missing project archive entry: {LIBRARY_ENTRY}"))?;
+            let declared_len = db_entry.size();
+            self.budget.admit_declared_entry(LIBRARY_ENTRY, declared_len)?;
+            let mut reader = BudgetedArchiveEntryReader::new(
+                db_entry,
+                LIBRARY_ENTRY,
+                declared_len,
+                self.budget.max_library_bytes,
+            );
+            std::io::copy(&mut reader, staging.file_mut()?)
+                .context("failed to extract the complete Project Library archive entry")?;
+            reader.verify_complete()?;
+        }
+        staging.file_mut()?.flush()?;
+        staging.file_mut()?.sync_all()?;
+        staging.publish(FilePublicationMode::ReplaceExisting)?;
+
+        Ok(LoadedProjectArchive {
+            document: self.document,
+            library_schema_version: self.manifest.library_schema_version,
+        })
+    }
+}
+
 /// Open an `.mdp` archive, validate the document, and extract the library DB.
 pub fn load_project_archive(
     archive_file: &Path,
     runtime_library_root: &Path,
 ) -> anyhow::Result<LoadedProjectArchive> {
-    fs::create_dir_all(runtime_library_root)?;
+    load_project_archive_with_budget(
+        archive_file,
+        runtime_library_root,
+        ProjectArchiveReadBudget::default(),
+    )
+}
 
-    let file = fs::File::open(archive_file)?;
-    let mut archive = zip::ZipArchive::new(file)?;
-    let (manifest, document) = read_project_archive_metadata_from_zip(&mut archive)?;
+/// Open and extract an `.mdp` archive under an explicit admission budget.
+pub fn load_project_archive_with_budget(
+    archive_file: &Path,
+    runtime_library_root: &Path,
+    budget: ProjectArchiveReadBudget,
+) -> anyhow::Result<LoadedProjectArchive> {
+    let mut file = fs::File::open(archive_file)?;
+    load_project_archive_from_open_file_with_budget(&mut file, runtime_library_root, budget)
+}
 
-    let mut db_entry = archive
-        .by_name(LIBRARY_ENTRY)
-        .with_context(|| format!("missing project archive entry: {LIBRARY_ENTRY}"))?;
-    let db_path = runtime_library_root.join("index.db");
-    let db_tmp_path = temporary_sibling_path(&db_path, "extract");
-    let mut db_file = fs::File::create(&db_tmp_path)?;
-    std::io::copy(&mut db_entry, &mut db_file)?;
-    db_file.flush()?;
-    db_file.sync_all()?;
-    replace_file_preserving_original(&db_tmp_path, &db_path)?;
+/// Load an `.mdp` archive from one already-authorized file object.
+///
+/// This is the object-evidence counterpart of [`load_project_archive`]. It
+/// rewinds the handle and never resolves the archive path again.
+pub fn load_project_archive_from_open_file(
+    file: &mut fs::File,
+    runtime_library_root: &Path,
+) -> anyhow::Result<LoadedProjectArchive> {
+    load_project_archive_from_open_file_with_budget(
+        file,
+        runtime_library_root,
+        ProjectArchiveReadBudget::default(),
+    )
+}
 
-    Ok(LoadedProjectArchive {
-        document,
-        library_schema_version: manifest.library_schema_version,
-    })
+/// Load from one retained archive object under an explicit admission budget.
+pub fn load_project_archive_from_open_file_with_budget(
+    file: &mut fs::File,
+    runtime_library_root: &Path,
+    budget: ProjectArchiveReadBudget,
+) -> anyhow::Result<LoadedProjectArchive> {
+    PreparedProjectArchive::from_open_file(file, budget)?.load_into(runtime_library_root)
 }
 
 /// Save an `.mdp` archive atomically next to the target file.
@@ -296,235 +1145,463 @@ pub fn save_project_archive(
     document: &ProjectDocument,
     library_db_path: &Path,
     target_file: &Path,
-) -> anyhow::Result<()> {
+) -> Result<(), ProjectArchivePublicationFailure> {
+    save_project_archive_with_publication(
+        document,
+        library_db_path,
+        target_file,
+        ProjectArchivePublication::ReplaceExisting,
+    )
+    .map(|_| ())
+}
+
+/// Save an `.mdp` archive with explicit final namespace semantics.
+///
+/// `CreateNew` carries the user's non-overwrite intent through the complete
+/// archive build and performs the existence decision in the final atomic
+/// namespace operation. A preceding `Path::exists` check is never treated as
+/// publication authority.
+pub fn save_project_archive_with_publication(
+    document: &ProjectDocument,
+    library_db_path: &Path,
+    target_file: &Path,
+    publication: ProjectArchivePublication,
+) -> Result<ProjectArchivePublicationEvidence, ProjectArchivePublicationFailure> {
+    let mut library_db = fs::File::open(library_db_path).with_context(|| {
+        format!(
+            "open exact Asset Library snapshot object failed: {}",
+            library_db_path.display()
+        )
+    })?;
+    save_project_archive_from_open_library_with_publication(
+        document,
+        &mut library_db,
+        target_file,
+        publication,
+    )
+}
+
+/// Save an `.mdp` archive from one already-authorized Asset Library snapshot
+/// object with explicit final namespace semantics.
+///
+/// The retained handle is rewound and streamed directly. This is the
+/// production persistence boundary for identity-bound SQLite snapshots:
+/// reopening a temporary pathname after validation is forbidden.
+pub fn save_project_archive_from_open_library_with_publication(
+    document: &ProjectDocument,
+    library_db: &mut fs::File,
+    target_file: &Path,
+    publication: ProjectArchivePublication,
+) -> Result<ProjectArchivePublicationEvidence, ProjectArchivePublicationFailure> {
     let document = document.clone().normalized();
     document.validate()?;
+    let target_file = std::path::absolute(target_file)
+        .context("failed to make Project publication target absolute")?;
+    if !library_db
+        .metadata()
+        .context("inspect retained Asset Library snapshot object failed")?
+        .is_file()
+    {
+        return Err(anyhow::anyhow!(
+            "Asset Library snapshot handle does not name a regular file object"
+        )
+        .into());
+    }
+    save_project_archive_from_open_library_with_publication_impl(
+        &document,
+        library_db,
+        &target_file,
+        publication,
+        |_| Ok(()),
+    )
+}
 
-    if !library_db_path.exists() {
-        anyhow::bail!(
-            "asset library database does not exist: {}",
+#[cfg(test)]
+fn save_project_archive_with_publication_impl(
+    document: &ProjectDocument,
+    library_db_path: &Path,
+    target_file: &Path,
+    publication: ProjectArchivePublication,
+    before_publication: impl FnOnce(&Path) -> anyhow::Result<()>,
+) -> Result<ProjectArchivePublicationEvidence, ProjectArchivePublicationFailure> {
+    let mut library_db = fs::File::open(library_db_path).with_context(|| {
+        format!(
+            "open Asset Library test fixture failed: {}",
             library_db_path.display()
+        )
+    })?;
+    save_project_archive_from_open_library_with_publication_impl(
+        document,
+        &mut library_db,
+        target_file,
+        publication,
+        before_publication,
+    )
+}
+
+fn save_project_archive_from_open_library_with_publication_impl(
+    document: &ProjectDocument,
+    library_db: &mut fs::File,
+    target_file: &Path,
+    publication: ProjectArchivePublication,
+    before_publication: impl FnOnce(&Path) -> anyhow::Result<()>,
+) -> Result<ProjectArchivePublicationEvidence, ProjectArchivePublicationFailure> {
+    let mut temp = OwnedPublicationFile::create_sibling(target_file, "archive")?;
+    let evidence = write_project_archive_from_open_library_to_open_file(
+        document,
+        library_db,
+        temp.file_mut()?,
+    )?;
+    verify_written_project_archive_from_open_file(temp.file_mut()?, &evidence)
+        .context("new project archive failed retained-object validation")?;
+    let (archive_sha256, archive_len) = hash_complete_open_file(temp.file_mut()?)?;
+    if archive_len == 0 {
+        return Err(
+            anyhow::anyhow!("validated Project archive unexpectedly has zero length").into(),
         );
     }
-
-    if let Some(parent) = target_file.parent() {
-        fs::create_dir_all(parent)?;
+    before_publication(temp.path())?;
+    let namespace = ProjectArchiveNamespacePublicationEvidence {
+        published_path: target_file.to_path_buf(),
+        publication,
+        project_id: document.project_id,
+        document_revision: document.document_revision,
+        archive_len,
+        archive_sha256,
+    };
+    let mode = match publication {
+        ProjectArchivePublication::ReplaceExisting => FilePublicationMode::ReplaceExisting,
+        ProjectArchivePublication::CreateNew => FilePublicationMode::CreateNew,
+    };
+    match temp.publish(mode) {
+        Ok(_) => Ok(ProjectArchivePublicationEvidence { namespace }),
+        Err(StoragePublicationFailure::BeforeNamespace(source)) => {
+            Err(ProjectArchivePublicationFailure::BeforeNamespace(source))
+        }
+        Err(StoragePublicationFailure::DurabilityUnconfirmed(source)) => {
+            Err(ProjectArchivePublicationFailure::DurabilityUnconfirmed(
+                Box::new(ProjectArchivePublicationDurabilityUnconfirmed { namespace, source }),
+            ))
+        }
+        Err(StoragePublicationFailure::NamespaceIndeterminate(source)) => {
+            Err(ProjectArchivePublicationFailure::NamespaceIndeterminate(
+                Box::new(ProjectArchivePublicationNamespaceIndeterminate {
+                    intended_path: namespace.published_path,
+                    publication: namespace.publication,
+                    project_id: namespace.project_id,
+                    document_revision: namespace.document_revision,
+                    archive_len: namespace.archive_len,
+                    archive_sha256: namespace.archive_sha256,
+                    source,
+                }),
+            ))
+        }
     }
-
-    let tmp_path = temporary_archive_path(target_file);
-    let result = write_project_archive(&document, library_db_path, tmp_path.as_path());
-    if let Err(err) = result {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(err);
-    }
-    read_project_document_from_archive(&tmp_path)
-        .context("new project archive failed reopen validation")?;
-    replace_file_preserving_original(&tmp_path, target_file)?;
-    Ok(())
-}
-
-/// Durably and atomically publish arbitrary bytes at `target_file`.
-///
-/// The new payload is fully flushed before the platform replacement primitive
-/// runs. A failed replacement leaves an existing target untouched. This is the
-/// shared publication boundary for project-adjacent manifests and indexes that
-/// must obey the same crash semantics as the `.mdp` archive.
-pub fn write_durable_file_atomically(target_file: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    if let Some(parent) = target_file.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let temp_file = temporary_sibling_path(target_file, "publication");
-    let result = (|| {
-        let mut file = fs::File::create(&temp_file)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        replace_file_preserving_original(&temp_file, target_file)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp_file);
-    }
-    result
-}
-
-fn read_project_document_from_zip<R: Read + std::io::Seek>(
-    archive: &mut zip::ZipArchive<R>,
-) -> anyhow::Result<ProjectDocument> {
-    Ok(read_project_archive_metadata_from_zip(archive)?.1)
 }
 
 fn read_project_archive_metadata_from_zip<R: Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
+    budget: ProjectArchiveReadBudget,
 ) -> anyhow::Result<(ProjectManifest, ProjectDocument)> {
-    let manifest = {
-        let mut manifest_json = String::new();
-        archive
-            .by_name(MANIFEST_ENTRY)
-            .with_context(|| format!("missing project archive entry: {MANIFEST_ENTRY}"))?
-            .read_to_string(&mut manifest_json)?;
-        let value = serde_json::from_str(&manifest_json)?;
-        serde_json::from_value::<ProjectManifest>(ARCHIVE_MIGRATIONS.migrate(value)?)?
-    };
+    let manifest = read_versioned_json_entry(
+        archive,
+        MANIFEST_ENTRY,
+        PROJECT_FORMAT_VERSION,
+        |manifest: &ProjectManifest| manifest.format_version,
+        &ARCHIVE_MIGRATIONS,
+        budget,
+    )?;
     manifest.validate()?;
 
-    let mut project_json = String::new();
-    archive
-        .by_name(PROJECT_ENTRY)
-        .with_context(|| format!("missing project archive entry: {PROJECT_ENTRY}"))?
-        .read_to_string(&mut project_json)?;
-    let value = serde_json::from_str(&project_json)?;
-    let document = serde_json::from_value::<ProjectDocument>(DOCUMENT_MIGRATIONS.migrate(value)?)?;
+    let document = read_versioned_json_entry(
+        archive,
+        PROJECT_ENTRY,
+        PROJECT_DOCUMENT_SCHEMA_VERSION,
+        |document: &ProjectDocument| document.schema_version,
+        &DOCUMENT_MIGRATIONS,
+        budget,
+    )?;
     document.validate()?;
     Ok((manifest, document.normalized()))
 }
 
+fn read_versioned_json_entry<R, T>(
+    archive: &mut zip::ZipArchive<R>,
+    entry_name: &'static str,
+    current_version: u32,
+    version: impl Fn(&T) -> u32,
+    migrations: &JsonMigrationRegistry,
+    budget: ProjectArchiveReadBudget,
+) -> anyhow::Result<T>
+where
+    R: Read + Seek,
+    T: DeserializeOwned,
+{
+    let current = read_json_entry::<_, T>(archive, entry_name, budget);
+
+    match current {
+        Ok(value) if version(&value) == current_version => Ok(value),
+        Ok(_) | Err(_) => {
+            // The current schema remains a direct typed streaming read. Only an
+            // older, future, or malformed payload pays for the in-memory Value
+            // needed by the explicit migration Registry Seam.
+            let value = read_json_entry(archive, entry_name, budget)
+                .with_context(|| format!("invalid JSON in project archive entry: {entry_name}"))?;
+            Ok(serde_json::from_value(migrations.migrate(value)?)?)
+        }
+    }
+}
+
+fn read_json_entry<R, T>(
+    archive: &mut zip::ZipArchive<R>,
+    entry_name: &'static str,
+    budget: ProjectArchiveReadBudget,
+) -> anyhow::Result<T>
+where
+    R: Read + Seek,
+    T: DeserializeOwned,
+{
+    let entry = archive
+        .by_name(entry_name)
+        .with_context(|| format!("missing project archive entry: {entry_name}"))?;
+    let declared_len = entry.size();
+    let limit = budget.entry_limit(entry_name)?;
+    budget.admit_declared_entry(entry_name, declared_len)?;
+    let mut reader = BudgetedArchiveEntryReader::new(entry, entry_name, declared_len, limit);
+    let value = serde_json::from_reader(&mut reader)?;
+    let mut sink = std::io::sink();
+    std::io::copy(&mut reader, &mut sink)?;
+    reader.verify_complete()?;
+    Ok(value)
+}
+
+fn validate_exact_archive_entry_set<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> anyhow::Result<()> {
+    let mut seen = [false; REQUIRED_ARCHIVE_ENTRIES.len()];
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index)?;
+        if entry.is_dir() {
+            anyhow::bail!(
+                "directories are not permitted in project archive v1: {}",
+                entry.name()
+            );
+        }
+        let Some(required_index) =
+            REQUIRED_ARCHIVE_ENTRIES.iter().position(|required| *required == entry.name())
+        else {
+            anyhow::bail!("unexpected project archive entry: {}", entry.name());
+        };
+        if seen[required_index] {
+            anyhow::bail!("duplicate project archive entry: {}", entry.name());
+        }
+        seen[required_index] = true;
+    }
+
+    for (required, was_seen) in REQUIRED_ARCHIVE_ENTRIES.iter().zip(seen) {
+        if !was_seen {
+            anyhow::bail!("missing project archive entry: {required}");
+        }
+    }
+    Ok(())
+}
+
+fn validate_declared_archive_entry_budgets<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    budget: ProjectArchiveReadBudget,
+) -> anyhow::Result<()> {
+    for entry_name in REQUIRED_ARCHIVE_ENTRIES {
+        let entry = archive
+            .by_name(entry_name)
+            .with_context(|| format!("missing project archive entry: {entry_name}"))?;
+        budget.admit_declared_entry(entry_name, entry.size())?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn write_project_archive(
     document: &ProjectDocument,
     library_db_path: &Path,
     target_file: &Path,
-) -> anyhow::Result<()> {
-    let tmp_file = fs::File::create(target_file)?;
-    let mut writer = zip::ZipWriter::new(tmp_file);
+) -> anyhow::Result<ProjectArchiveWriteEvidence> {
+    let mut file = fs::File::create(target_file)?;
+    write_project_archive_to_open_file(document, library_db_path, &mut file)
+}
+
+#[cfg(test)]
+fn write_project_archive_to_open_file(
+    document: &ProjectDocument,
+    library_db_path: &Path,
+    target_file: &mut fs::File,
+) -> anyhow::Result<ProjectArchiveWriteEvidence> {
+    let mut library_db = fs::File::open(library_db_path)?;
+    write_project_archive_from_open_library_to_open_file(document, &mut library_db, target_file)
+}
+
+fn write_project_archive_from_open_library_to_open_file(
+    document: &ProjectDocument,
+    library_db: &mut fs::File,
+    target_file: &mut fs::File,
+) -> anyhow::Result<ProjectArchiveWriteEvidence> {
+    target_file.set_len(0)?;
+    target_file.seek(SeekFrom::Start(0))?;
+    let mut writer = zip::ZipWriter::new(&mut *target_file);
     let options = zip::write::FileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
         .unix_permissions(0o644);
 
     writer.start_file(MANIFEST_ENTRY, options)?;
-    writer.write_all(&serde_json::to_vec_pretty(&ProjectManifest::default())?)?;
-
-    writer.start_file(PROJECT_ENTRY, options)?;
-    writer.write_all(&serde_json::to_vec_pretty(document)?)?;
-
-    writer.start_file(LIBRARY_ENTRY, options)?;
-    let mut db_file = fs::File::open(library_db_path)?;
-    std::io::copy(&mut db_file, &mut writer)?;
-
-    let archive = writer.finish()?;
-    archive.sync_all()?;
-    Ok(())
-}
-
-fn temporary_archive_path(target_file: &Path) -> PathBuf {
-    temporary_sibling_path(target_file, "archive")
-}
-
-fn temporary_sibling_path(target_file: &Path, purpose: &str) -> PathBuf {
-    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    target_file.to_string_lossy().hash(&mut hasher);
-    let pid = std::process::id();
-    let nonce = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
-    let suffix = format!("{purpose}.{}.{nonce}.tmp", hasher.finish());
-    target_file.with_extension(format!("mdp.{pid}.{suffix}"))
-}
-
-fn replace_file_preserving_original(temp_file: &Path, target_file: &Path) -> anyhow::Result<()> {
-    if !temp_file.is_file() {
-        anyhow::bail!("replacement source is not a file: {}", temp_file.display());
+    let mut manifest_writer = EvidenceWriter::new(&mut writer);
+    {
+        let mut buffered = BufWriter::new(&mut manifest_writer);
+        serde_json::to_writer_pretty(&mut buffered, &ProjectManifest::default())?;
+        buffered.flush()?;
     }
-    fs::OpenOptions::new().write(true).open(temp_file)?.sync_all()?;
-    replace_file_atomically(temp_file, target_file).with_context(|| {
-        format!(
-            "failed to atomically publish {} as {}",
-            temp_file.display(),
-            target_file.display()
-        )
-    })?;
-    sync_parent_directory(target_file)?;
-    Ok(())
-}
+    let manifest = manifest_writer.finish(MANIFEST_ENTRY);
 
-#[cfg(windows)]
-fn replace_file_atomically(temp_file: &Path, target_file: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, ReplaceFileW, MOVEFILE_WRITE_THROUGH, REPLACEFILE_WRITE_THROUGH,
-    };
-
-    fn wide(path: &Path) -> Vec<u16> {
-        path.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    // `large_file(true)` writes ZIP64 size fields from the start, so a large
+    // Project or Library never crosses the 32-bit ZIP boundary after streaming
+    // has already begun. Open-time admission remains a separate caller policy.
+    writer.start_file(PROJECT_ENTRY, options.large_file(true))?;
+    let mut project_writer = EvidenceWriter::new(&mut writer);
+    {
+        let mut buffered = BufWriter::new(&mut project_writer);
+        serde_json::to_writer_pretty(&mut buffered, document)?;
+        buffered.flush()?;
     }
+    let project = project_writer.finish(PROJECT_ENTRY);
 
-    let source = wide(temp_file);
-    let target = wide(target_file);
-    let succeeded = if target_file.exists() {
-        // SAFETY: The pointers reference live NUL-terminated UTF-16 buffers.
-        unsafe {
-            ReplaceFileW(
-                target.as_ptr(),
-                source.as_ptr(),
-                std::ptr::null(),
-                REPLACEFILE_WRITE_THROUGH,
-                std::ptr::null(),
-                std::ptr::null(),
-            )
-        }
-    } else {
-        // SAFETY: The pointers reference live NUL-terminated UTF-16 buffers.
-        unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), MOVEFILE_WRITE_THROUGH) }
-    };
-    if succeeded == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
+    writer.start_file(LIBRARY_ENTRY, options.large_file(true))?;
+    library_db.seek(SeekFrom::Start(0))?;
+    let mut db_reader = BufReader::new(library_db);
+    let mut library_writer = EvidenceWriter::new(&mut writer);
+    std::io::copy(&mut db_reader, &mut library_writer)?;
+    let library = library_writer.finish(LIBRARY_ENTRY);
 
-#[cfg(not(windows))]
-fn replace_file_atomically(temp_file: &Path, target_file: &Path) -> std::io::Result<()> {
-    fs::rename(temp_file, target_file)
-}
-
-#[cfg(unix)]
-fn sync_parent_directory(target_file: &Path) -> anyhow::Result<()> {
-    if let Some(parent) = target_file.parent().filter(|path| !path.as_os_str().is_empty()) {
-        fs::File::open(parent)?.sync_all()?;
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn sync_parent_directory(_target_file: &Path) -> anyhow::Result<()> {
-    Ok(())
+    writer.finish()?;
+    drop(writer);
+    target_file.sync_all()?;
+    Ok(ProjectArchiveWriteEvidence { manifest, project, library })
 }
 
 #[cfg(test)]
-fn replace_file_preserving_original_with(
-    temp_file: &Path,
-    target_file: &Path,
-    replace: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+fn verify_written_project_archive(
+    archive_path: &Path,
+    expected: &ProjectArchiveWriteEvidence,
 ) -> anyhow::Result<()> {
-    if !temp_file.is_file() {
-        anyhow::bail!("replacement source is not a file: {}", temp_file.display());
-    }
-    if !target_file.exists() {
-        replace(temp_file, target_file)?;
-        return Ok(());
-    }
-    let backup = temporary_sibling_path(target_file, "backup");
-    if backup.exists() {
-        fs::remove_file(&backup)?;
-    }
-    fs::rename(target_file, &backup)
-        .with_context(|| format!("failed to stage original file: {}", target_file.display()))?;
-    match replace(temp_file, target_file) {
-        Ok(()) => {
-            fs::remove_file(&backup)?;
-            Ok(())
+    let mut file = fs::File::open(archive_path)?;
+    verify_written_project_archive_from_open_file(&mut file, expected)
+}
+
+fn verify_written_project_archive_from_open_file(
+    archive_file: &mut fs::File,
+    expected: &ProjectArchiveWriteEvidence,
+) -> anyhow::Result<()> {
+    archive_file.seek(SeekFrom::Start(0))?;
+    let verifier = archive_file.try_clone()?;
+    let mut archive = zip::ZipArchive::new(BufReader::new(verifier))?;
+    validate_exact_archive_entry_set(&mut archive)?;
+
+    for expected_entry in expected.entries() {
+        let mut entry = archive.by_name(expected_entry.name).with_context(|| {
+            format!(
+                "missing project archive entry during reopen verification: {}",
+                expected_entry.name
+            )
+        })?;
+        if entry.size() != expected_entry.uncompressed_len {
+            anyhow::bail!(
+                "project archive entry length mismatch for {}: expected {}, ZIP declares {}",
+                expected_entry.name,
+                expected_entry.uncompressed_len,
+                entry.size()
+            );
         }
-        Err(replace_error) => {
-            let restore_result = fs::rename(&backup, target_file);
-            let _ = fs::remove_file(temp_file);
-            match restore_result {
-                Ok(()) => Err(replace_error).context("failed to replace file; original restored"),
-                Err(restore_error) => Err(anyhow::anyhow!(
-                    "failed to replace {} ({replace_error}) and restore backup {} ({restore_error})",
-                    target_file.display(),
-                    backup.display()
-                )),
-            }
+
+        let mut sink = std::io::sink();
+        let mut observed_writer = EvidenceWriter::new(&mut sink);
+        std::io::copy(&mut entry, &mut observed_writer).with_context(|| {
+            format!(
+                "failed to read complete project archive entry during reopen verification: {}",
+                expected_entry.name
+            )
+        })?;
+        let observed = observed_writer.finish(expected_entry.name);
+        if observed.uncompressed_len != expected_entry.uncompressed_len {
+            anyhow::bail!(
+                "project archive entry length mismatch for {}: expected {}, read {}",
+                expected_entry.name,
+                expected_entry.uncompressed_len,
+                observed.uncompressed_len
+            );
+        }
+        if observed.sha256 != expected_entry.sha256 {
+            anyhow::bail!(
+                "project archive entry SHA-256 mismatch during reopen verification: {}",
+                expected_entry.name
+            );
         }
     }
+    Ok(())
+}
+
+fn hash_complete_open_file(archive_file: &mut fs::File) -> anyhow::Result<([u8; 32], u64)> {
+    archive_file.seek(SeekFrom::Start(0))?;
+    let expected_len = archive_file.metadata()?.len();
+    let mut reader = BufReader::new(archive_file.try_clone()?);
+    let mut hasher = Sha256::new();
+    let mut observed_len = 0u64;
+    let mut buffer = [0u8; 128 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        observed_len =
+            observed_len
+                .checked_add(u64::try_from(read).map_err(|_| {
+                    anyhow::anyhow!("Project archive read length does not fit in u64")
+                })?)
+                .ok_or_else(|| anyhow::anyhow!("Project archive read length overflowed u64"))?;
+        hasher.update(&buffer[..read]);
+    }
+    anyhow::ensure!(
+        observed_len == expected_len,
+        "Project archive whole-file hash observed {observed_len} bytes but retained object reports {expected_len}"
+    );
+    archive_file.seek(SeekFrom::Start(0))?;
+    Ok((hasher.finalize().into(), observed_len))
+}
+
+fn reject_existing_non_file_or_link(path: &Path, description: &str) -> anyhow::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            anyhow::bail!("{description} is not a direct regular file")
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn ensure_direct_runtime_library_root(root: &Path) -> anyhow::Result<()> {
+    match fs::symlink_metadata(root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            anyhow::bail!("runtime Project Library root is not a direct directory")
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(root)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    let metadata = fs::symlink_metadata(root)?;
+    anyhow::ensure!(
+        !metadata.file_type().is_symlink() && metadata.is_dir(),
+        "runtime Project Library root is not a direct directory"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -536,7 +1613,8 @@ mod tests {
     use mondrian_core::effect_data::{EffectNode, EffectType};
     use mondrian_core::mask_data::{MaskComponent, MaskKeyframe};
     use mondrian_core::{
-        ExactAutomationCurve, ExactAutomationKeyframe, ParameterId, ParameterUnit, TimelineTime,
+        ExactAutomationCurve, ExactAutomationKeyframe, ParameterId, ParameterUnit, PropertyHost,
+        TimelineTime,
     };
     use mondrian_timeline::audio::{
         AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID, BUILTIN_SAMPLE_DELAY_DEFINITION_ID,
@@ -592,6 +1670,62 @@ mod tests {
             SequenceSettings::default(),
             ProjectSettings::default(),
         )
+    }
+
+    fn evidence_for_bytes(name: &'static str, bytes: &[u8]) -> ArchiveEntryEvidence {
+        ArchiveEntryEvidence {
+            name,
+            uncompressed_len: u64::try_from(bytes.len()).expect("fixture length fits u64"),
+            sha256: Sha256::digest(bytes).into(),
+        }
+    }
+
+    fn write_stored_test_archive(
+        path: &Path,
+        document: &ProjectDocument,
+        library: &[u8],
+        extra: Option<(&str, &[u8])>,
+    ) -> ProjectArchiveWriteEvidence {
+        let manifest =
+            serde_json::to_vec_pretty(&ProjectManifest::default()).expect("serialize manifest");
+        let project = serde_json::to_vec_pretty(document).expect("serialize project");
+        let file = fs::File::create(path).expect("create stored fixture archive");
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::FileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .unix_permissions(0o644);
+        for (name, bytes) in [
+            (MANIFEST_ENTRY, manifest.as_slice()),
+            (PROJECT_ENTRY, project.as_slice()),
+            (LIBRARY_ENTRY, library),
+        ] {
+            writer.start_file(name, options).expect("start fixture entry");
+            writer.write_all(bytes).expect("write fixture entry");
+        }
+        if let Some((name, bytes)) = extra {
+            writer.start_file(name, options).expect("start extra fixture entry");
+            writer.write_all(bytes).expect("write extra fixture entry");
+        }
+        writer.finish().expect("finish stored fixture archive");
+
+        ProjectArchiveWriteEvidence {
+            manifest: evidence_for_bytes(MANIFEST_ENTRY, &manifest),
+            project: evidence_for_bytes(PROJECT_ENTRY, &project),
+            library: evidence_for_bytes(LIBRARY_ENTRY, library),
+        }
+    }
+
+    fn write_raw_stored_archive(path: &Path, entries: &[(&str, &[u8])]) {
+        let file = fs::File::create(path).expect("create raw fixture archive");
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::FileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .unix_permissions(0o644);
+        for (name, bytes) in entries {
+            writer.start_file(*name, options).expect("start raw fixture entry");
+            writer.write_all(bytes).expect("write raw fixture entry");
+        }
+        writer.finish().expect("finish raw fixture archive");
     }
 
     #[test]
@@ -665,6 +1799,543 @@ mod tests {
     }
 
     #[test]
+    fn retained_library_handle_prevents_snapshot_path_substitution() {
+        let root = unique_temp_dir("retained-library-object");
+        let db_path = root.join("snapshot.db");
+        let original = b"exact SQLite snapshot object";
+        let replacement = b"foreign replacement path";
+        fs::write(&db_path, original).expect("write original snapshot");
+        let mut retained = fs::File::open(&db_path).expect("retain original snapshot object");
+        fs::remove_file(&db_path).expect("detach original snapshot name");
+        fs::write(&db_path, replacement).expect("install replacement path");
+        let archive_path = root.join("project.mdp");
+
+        save_project_archive_from_open_library_with_publication(
+            &test_document(),
+            &mut retained,
+            &archive_path,
+            ProjectArchivePublication::CreateNew,
+        )
+        .expect("save from retained snapshot object");
+
+        let archive_file = fs::File::open(&archive_path).expect("open archive");
+        let mut archive = zip::ZipArchive::new(archive_file).expect("read archive");
+        let mut library = archive.by_name(LIBRARY_ENTRY).expect("library entry");
+        let mut stored = Vec::new();
+        library.read_to_end(&mut stored).expect("read library entry");
+        assert_eq!(stored, original);
+        assert_eq!(
+            fs::read(&db_path).expect("read replacement path"),
+            replacement
+        );
+    }
+
+    #[test]
+    fn prepared_archive_ticket_exposes_identity_then_loads_without_reopening() {
+        let root = unique_temp_dir("prepared-ticket");
+        let db_path = root.join("index.db");
+        fs::write(&db_path, b"prepared library").expect("write library");
+        let archive_path = root.join("prepared.mdp");
+        let document = test_document();
+        save_project_archive(&document, &db_path, &archive_path).expect("save archive");
+
+        let mut archive_file = fs::File::open(&archive_path).expect("open retained archive object");
+        let prepared = PreparedProjectArchive::from_open_file(
+            &mut archive_file,
+            ProjectArchiveReadBudget::default(),
+        )
+        .expect("prepare archive once");
+        assert_eq!(prepared.project_id(), document.project_id);
+
+        let runtime = root.join("runtime");
+        let loaded = prepared.load_into(&runtime).expect("consume prepared archive");
+        assert_eq!(loaded.document.project_id, document.project_id);
+        assert_eq!(
+            fs::read(runtime.join("index.db")).expect("read extracted library"),
+            b"prepared library"
+        );
+    }
+
+    #[test]
+    fn default_archive_budget_admits_current_large_project_evidence_without_being_unbounded() {
+        const KNOWN_120_MINUTE_STRESS_PROJECT_JSON_BYTES: u64 = 606_155_667;
+        let budget = ProjectArchiveReadBudget::default();
+        assert!(budget.max_project_bytes > KNOWN_120_MINUTE_STRESS_PROJECT_JSON_BYTES);
+        assert!(budget.max_project_bytes < 1024 * 1024 * 1024);
+        assert_eq!(budget.max_manifest_bytes, 64 * 1024);
+        assert!(budget.max_archive_bytes < 3 * 1024 * 1024 * 1024);
+        assert!(budget.max_library_bytes < 2 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn archive_budget_rejects_compressed_and_declared_lengths_before_json_parse() {
+        let root = unique_temp_dir("archive-budget");
+        let archive_path = root.join("budget.mdp");
+        let document = test_document();
+        let evidence = write_stored_test_archive(&archive_path, &document, b"library", None);
+        let archive_len = fs::metadata(&archive_path).expect("archive metadata").len();
+
+        let compressed_error = read_project_document_from_archive_with_budget(
+            &archive_path,
+            ProjectArchiveReadBudget {
+                max_archive_bytes: archive_len.saturating_sub(1),
+                ..ProjectArchiveReadBudget::default()
+            },
+        )
+        .expect_err("compressed archive over budget must fail admission");
+        assert!(
+            format!("{compressed_error:#}").contains("compressed length exceeds"),
+            "{compressed_error:#}"
+        );
+
+        let project_error = read_project_document_from_archive_with_budget(
+            &archive_path,
+            ProjectArchiveReadBudget {
+                max_project_bytes: evidence.project.uncompressed_len.saturating_sub(1),
+                ..ProjectArchiveReadBudget::default()
+            },
+        )
+        .expect_err("declared Project JSON over budget must fail admission");
+        assert!(
+            format!("{project_error:#}").contains("declared length exceeds"),
+            "{project_error:#}"
+        );
+    }
+
+    #[test]
+    fn archive_entry_reader_rejects_actual_length_over_budget_and_declared_mismatch() {
+        let mut over_budget =
+            BudgetedArchiveEntryReader::new(std::io::Cursor::new(b"1234"), PROJECT_ENTRY, 4, 3);
+        let error = std::io::copy(&mut over_budget, &mut std::io::sink())
+            .expect_err("actual bytes beyond the budget must fail");
+        assert!(error.to_string().contains("actual length exceeds"));
+
+        let mut wrong_declaration =
+            BudgetedArchiveEntryReader::new(std::io::Cursor::new(b"1234"), PROJECT_ENTRY, 3, 8);
+        std::io::copy(&mut wrong_declaration, &mut std::io::sink())
+            .expect("copy bytes within budget");
+        let error = wrong_declaration
+            .verify_complete()
+            .expect_err("actual bytes must equal the declared length");
+        assert!(error.to_string().contains("differs from ZIP declaration"));
+    }
+
+    #[test]
+    fn exact_entry_contract_precedes_manifest_parse_and_rejects_duplicates_and_directories() {
+        let root = unique_temp_dir("exact-entry-contract");
+        let document = serde_json::to_vec(&test_document()).expect("serialize Project");
+        let duplicate = root.join("duplicate.mdp");
+        write_raw_stored_archive(
+            &duplicate,
+            &[
+                (MANIFEST_ENTRY, b"{"),
+                (MANIFEST_ENTRY, b"{"),
+                (PROJECT_ENTRY, &document),
+                (LIBRARY_ENTRY, b"library"),
+            ],
+        );
+        let error = read_project_document_from_archive(&duplicate)
+            .expect_err("duplicate entry must fail before malformed Manifest parse");
+        assert!(
+            format!("{error:#}").contains("duplicate project archive entry"),
+            "{error:#}"
+        );
+
+        let directory = root.join("directory.mdp");
+        let file = fs::File::create(&directory).expect("create directory-entry archive");
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::FileOptions::default();
+        writer.add_directory("unexpected/", options).expect("directory entry");
+        writer.start_file(MANIFEST_ENTRY, options).expect("manifest");
+        writer.write_all(b"{").expect("malformed manifest");
+        writer.start_file(PROJECT_ENTRY, options).expect("Project");
+        writer.write_all(&document).expect("Project bytes");
+        writer.start_file(LIBRARY_ENTRY, options).expect("Library");
+        writer.write_all(b"library").expect("Library bytes");
+        writer.finish().expect("finish directory-entry archive");
+        let error = read_project_document_from_archive(&directory)
+            .expect_err("directory entry must fail before malformed Manifest parse");
+        assert!(
+            format!("{error:#}").contains("directories are not permitted"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn future_and_malformed_manifests_fail_closed_under_the_exact_layout() {
+        let root = unique_temp_dir("manifest-failure");
+        let project = serde_json::to_vec(&test_document()).expect("serialize Project");
+        let future_manifest = ProjectManifest {
+            format_version: PROJECT_FORMAT_VERSION + 1,
+            ..ProjectManifest::default()
+        };
+        let future_manifest =
+            serde_json::to_vec(&future_manifest).expect("serialize future Manifest");
+        let future = root.join("future.mdp");
+        write_raw_stored_archive(
+            &future,
+            &[
+                (MANIFEST_ENTRY, &future_manifest),
+                (PROJECT_ENTRY, &project),
+                (LIBRARY_ENTRY, b"library"),
+            ],
+        );
+        let error = read_project_document_from_archive(&future)
+            .expect_err("future archive format must fail closed");
+        assert!(
+            format!("{error:#}").contains("unsupported project archive version"),
+            "{error:#}"
+        );
+
+        let malformed = root.join("malformed.mdp");
+        write_raw_stored_archive(
+            &malformed,
+            &[
+                (MANIFEST_ENTRY, b"{"),
+                (PROJECT_ENTRY, &project),
+                (LIBRARY_ENTRY, b"library"),
+            ],
+        );
+        let error = read_project_document_from_archive(&malformed)
+            .expect_err("malformed Manifest must fail closed");
+        assert!(format!("{error:#}").contains("invalid JSON"), "{error:#}");
+    }
+
+    #[test]
+    fn library_crc_failure_cleans_staging_and_preserves_existing_target() {
+        let root = unique_temp_dir("library-crc-staging");
+        let archive_path = root.join("crc.mdp");
+        let library = b"MONDRIAN_LIBRARY_STAGING_CRC_SENTINEL_74A892BC";
+        let document = test_document();
+        write_stored_test_archive(&archive_path, &document, library, None);
+        let mut bytes = fs::read(&archive_path).expect("read stored archive");
+        let offset = bytes
+            .windows(library.len())
+            .position(|candidate| candidate == library)
+            .expect("unique library sentinel");
+        bytes[offset + library.len() / 2] ^= 0x01;
+        fs::write(&archive_path, bytes).expect("tamper Library entry");
+
+        let runtime = root.join("runtime");
+        fs::create_dir_all(&runtime).expect("runtime root");
+        fs::write(runtime.join("index.db"), b"existing library").expect("existing target");
+        let error = load_project_archive(&archive_path, &runtime)
+            .expect_err("Library CRC failure must reject staging");
+        let detail = format!("{error:#}");
+        assert!(
+            detail.contains("checksum") || detail.contains("complete Project Library"),
+            "{detail}"
+        );
+        assert_eq!(
+            fs::read(runtime.join("index.db")).expect("preserved existing target"),
+            b"existing library"
+        );
+        assert!(
+            fs::read_dir(&runtime).expect("runtime entries").all(|entry| !entry
+                .expect("runtime entry")
+                .file_name()
+                .to_string_lossy()
+                .contains("-extract-")),
+            "failed extraction must RAII-clean its owned staging file"
+        );
+    }
+
+    #[test]
+    fn injected_prepublication_failure_cleans_only_the_owned_archive_temp() {
+        let root = unique_temp_dir("prepublication-failure");
+        let library = root.join("index.db");
+        fs::write(&library, b"library").expect("write library");
+        let target = root.join("project.mdp");
+        let error = save_project_archive_with_publication_impl(
+            &test_document(),
+            &library,
+            &target,
+            ProjectArchivePublication::ReplaceExisting,
+            |_| anyhow::bail!("injected prepublication failure"),
+        )
+        .expect_err("injected seam must abort publication");
+        assert!(format!("{error:#}").contains("injected prepublication failure"));
+        assert!(!target.exists());
+        assert!(
+            fs::read_dir(&root).expect("root entries").all(|entry| !entry
+                .expect("root entry")
+                .file_name()
+                .to_string_lossy()
+                .contains("-archive-")),
+            "owned temporary archive must be cleaned"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepublication_identity_recheck_rejects_and_preserves_a_foreign_replacement() {
+        let root = unique_temp_dir("prepublication-replacement");
+        let library = root.join("index.db");
+        fs::write(&library, b"library").expect("write library");
+        let target = root.join("project.mdp");
+        let mut foreign_path = None;
+        let error = save_project_archive_with_publication_impl(
+            &test_document(),
+            &library,
+            &target,
+            ProjectArchivePublication::ReplaceExisting,
+            |temp_path| {
+                let displaced = root.join("verified-but-displaced.tmp");
+                fs::rename(temp_path, &displaced).expect("displace verified object");
+                fs::write(temp_path, b"foreign replacement").expect("install foreign object");
+                foreign_path = Some(temp_path.to_path_buf());
+                Ok(())
+            },
+        )
+        .expect_err("namespace replacement must fail final identity admission");
+        assert!(
+            format!("{error:#}").contains("no longer names its owned file object"),
+            "{error:#}"
+        );
+        let foreign_path = foreign_path.expect("hook observed temporary path");
+        assert_eq!(
+            fs::read(foreign_path).expect("foreign replacement preserved"),
+            b"foreign replacement"
+        );
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn streamed_archive_write_returns_exact_reopen_evidence() {
+        let root = unique_temp_dir("streamed-write-evidence");
+        let db_path = root.join("index.db");
+        let library = b"sqlite streamed evidence";
+        fs::write(&db_path, library).expect("write library");
+        let archive_path = root.join("evidence.mdp");
+        let document = test_document();
+
+        let evidence =
+            write_project_archive(&document, &db_path, &archive_path).expect("write archive");
+
+        assert_eq!(
+            evidence.library.uncompressed_len,
+            u64::try_from(library.len()).expect("fixture length fits u64")
+        );
+        assert_eq!(
+            evidence.library.sha256,
+            <[u8; 32]>::from(Sha256::digest(library))
+        );
+        assert!(evidence.manifest.uncompressed_len > 0);
+        assert!(evidence.project.uncompressed_len > 0);
+        verify_written_project_archive(&archive_path, &evidence)
+            .expect("streamed evidence verifies exact written bytes");
+    }
+
+    #[test]
+    fn reopen_verifier_rejects_tamper_even_with_a_recomputed_zip_crc() {
+        let root = unique_temp_dir("recomputed-crc-tamper");
+        let archive_path = root.join("tampered.mdp");
+        let document = test_document();
+        let expected =
+            write_stored_test_archive(&archive_path, &document, b"library revision A", None);
+
+        write_stored_test_archive(&archive_path, &document, b"library revision B", None);
+        let error = verify_written_project_archive(&archive_path, &expected)
+            .expect_err("content changed with a valid ZIP CRC must fail SHA-256 evidence");
+
+        assert!(
+            format!("{error:#}").contains("SHA-256 mismatch"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn reopen_verifier_reads_entries_to_eof_and_rejects_zip_crc_tamper() {
+        let root = unique_temp_dir("crc-tamper");
+        let archive_path = root.join("tampered.mdp");
+        let library = b"MONDRIAN_LIBRARY_CRC_SENTINEL_9DB16E8A4D72";
+        let document = test_document();
+        let expected = write_stored_test_archive(&archive_path, &document, library, None);
+        let mut archive_bytes = fs::read(&archive_path).expect("read stored archive");
+        let offsets = archive_bytes
+            .windows(library.len())
+            .enumerate()
+            .filter_map(|(offset, candidate)| (candidate == library).then_some(offset))
+            .collect::<Vec<_>>();
+        assert_eq!(offsets.len(), 1, "library sentinel must occur exactly once");
+        archive_bytes[offsets[0] + library.len() / 2] ^= 0x01;
+        fs::write(&archive_path, archive_bytes).expect("tamper stored entry bytes");
+
+        let error = verify_written_project_archive(&archive_path, &expected)
+            .expect_err("full entry read must trigger ZIP CRC validation");
+        assert!(
+            format!("{error:#}").contains("Invalid checksum"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn reopen_verifier_rejects_any_non_contract_archive_entry() {
+        let root = unique_temp_dir("extra-entry");
+        let archive_path = root.join("extra-entry.mdp");
+        let document = test_document();
+        let evidence = write_stored_test_archive(
+            &archive_path,
+            &document,
+            b"library",
+            Some(("unexpected.bin", b"not part of archive v1")),
+        );
+
+        let error = verify_written_project_archive(&archive_path, &evidence)
+            .expect_err("archive v1 requires the exact three-entry set");
+        assert!(
+            format!("{error:#}").contains("unexpected project archive entry"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn create_new_archive_publication_never_replaces_an_existing_entry() {
+        let root = unique_temp_dir("create-new");
+        let db_path = root.join("index.db");
+        fs::write(&db_path, b"sqlite placeholder").expect("write db");
+        let project_path = root.join("project.mdp");
+        let document = test_document();
+
+        let evidence = save_project_archive_with_publication(
+            &document,
+            &db_path,
+            &project_path,
+            ProjectArchivePublication::CreateNew,
+        )
+        .expect("first create-only publication");
+        assert_eq!(evidence.published_path(), project_path);
+        assert_eq!(evidence.publication(), ProjectArchivePublication::CreateNew);
+        assert_eq!(evidence.project_id(), document.project_id);
+        assert_eq!(evidence.document_revision(), document.document_revision);
+        assert_eq!(
+            evidence.archive_len(),
+            fs::metadata(&project_path).expect("published archive metadata").len()
+        );
+        let mut published_file = fs::File::open(&project_path).expect("open publication");
+        let (published_sha256, published_len) =
+            hash_complete_open_file(&mut published_file).expect("hash publication");
+        assert_eq!(evidence.archive_sha256(), published_sha256);
+        assert_eq!(evidence.archive_len(), published_len);
+        assert_eq!(evidence.archive_sha256_hex().len(), 64);
+        let published = fs::read(&project_path).expect("read first publication");
+
+        let mut replacement = test_document();
+        replacement.meta.name = "Must Not Replace".to_owned();
+        let error = save_project_archive_with_publication(
+            &replacement,
+            &db_path,
+            &project_path,
+            ProjectArchivePublication::CreateNew,
+        )
+        .expect_err("second create-only publication must fail atomically");
+
+        assert!(
+            format!("{error:#}").contains("atomically publish"),
+            "{error:#}"
+        );
+        assert_eq!(
+            fs::read(&project_path).expect("read preserved publication"),
+            published
+        );
+        assert!(
+            fs::read_dir(&root).expect("read publication directory").all(|entry| !entry
+                .expect("publication entry")
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")),
+            "a rejected create-only publication must remove its completed temporary archive"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prepared_sequence_replacement_pairs_the_installation_and_certificate_root() {
+        let document = test_document();
+        let certificate = document
+            .prepare_authoring_validation_certificate()
+            .expect("valid Project certificate");
+        let mut replacement = document.sequences.sequences[0].clone();
+        replacement.revision = replacement.revision.checked_next().expect("next revision");
+        replacement.name = "Validated replacement".to_owned();
+
+        let ticket = certificate
+            .prepare_sequence_replacement(&document, replacement)
+            .expect("prepared replacement");
+
+        assert!(ticket
+            .certificate
+            .dependency_certificate
+            .shares_baseline_root_with(&ticket.document.sequences.sequences));
+        assert_eq!(ticket.replacement().name, "Validated replacement");
+        let (next_document, next_certificate) = ticket.into_installation();
+        next_certificate
+            .validate_current_baseline(&next_document)
+            .expect("installed pair remains exact");
+    }
+
+    #[test]
+    fn project_only_replacement_reuses_exact_anchored_sequence_evidence() {
+        let document = test_document();
+        let certificate = document
+            .prepare_authoring_validation_certificate()
+            .expect("valid Project certificate");
+        let sequence_id = document.sequences.default_sequence_id;
+        let retained_sequence_certificate = certificate
+            .sequence_certificates
+            .get(&sequence_id)
+            .expect("default Sequence certificate");
+        let mut replacement = document.clone();
+        replacement.new_sequence_defaults.resolution.width =
+            replacement.new_sequence_defaults.resolution.width.saturating_add(2);
+
+        let next = certificate
+            .prepare_project_replacement(&document, &replacement)
+            .expect("Project-only replacement");
+
+        assert!(Arc::ptr_eq(
+            retained_sequence_certificate,
+            next.sequence_certificates
+                .get(&sequence_id)
+                .expect("reused Sequence certificate")
+        ));
+        assert_eq!(
+            next.dependency_certificate,
+            certificate.dependency_certificate
+        );
+        next.validate_current_baseline(&replacement)
+            .expect("reused evidence certifies the replacement Project");
+    }
+
+    #[test]
+    fn project_color_change_requires_a_full_certificate_rebuild() {
+        let document = test_document();
+        let certificate = document
+            .prepare_authoring_validation_certificate()
+            .expect("valid Project certificate");
+        let mut color_changed = document.clone();
+        color_changed.color_environment =
+            ProjectColorEnvironment::new(mondrian_core::ColorEngine::MondrianStandard {
+                package: mondrian_core::MondrianStandardPackageIdentity::V2,
+            });
+        let rebuilt = certificate
+            .prepare_project_replacement(&document, &color_changed)
+            .expect("valid Project-wide color replacement");
+        let mut replacement = color_changed.sequences.sequences[0].clone();
+        replacement.revision = replacement.revision.checked_next().expect("next revision");
+        replacement.name = "After color change".to_owned();
+
+        assert!(certificate
+            .prepare_sequence_replacement(&color_changed, replacement.clone())
+            .expect_err("old certificate must not cross color environments")
+            .to_string()
+            .contains("validation context"));
+        rebuilt
+            .prepare_sequence_replacement(&color_changed, replacement)
+            .expect("rebuilt certificate validates the new color context");
+    }
+
+    #[test]
     fn document_validation_rejects_zero_sequence_revision() {
         let mut value = serde_json::to_value(test_document()).expect("serialize document");
         value["sequences"]["sequences"][0]["revision"] = serde_json::json!(0);
@@ -672,7 +2343,8 @@ mod tests {
             .expect("zero revision remains structurally deserializable");
 
         let error = document.validate().expect_err("zero revision must fail");
-        assert!(error.to_string().contains("author revision zero"));
+        let detail = format!("{error:#}");
+        assert!(detail.contains("author revision zero"), "{detail}");
     }
 
     #[test]
@@ -1204,46 +2876,6 @@ mod tests {
 
         assert!(format!("{error:#}").contains("Mondrian Standard"));
         assert!(format!("{error:#}").contains("Linear Rec.2020"));
-    }
-
-    #[test]
-    fn failed_file_replacement_restores_original() {
-        let root = unique_temp_dir("replace-restore");
-        let target = root.join("project.mdp");
-        fs::write(&target, b"original").expect("original");
-        let temp = root.join("replacement.tmp");
-        fs::write(&temp, b"replacement").expect("replacement");
-
-        assert!(
-            replace_file_preserving_original_with(&temp, &target, |_source, _target| {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "injected replacement failure",
-                ))
-            })
-            .is_err()
-        );
-
-        assert_eq!(fs::read(&target).expect("restored original"), b"original");
-    }
-
-    #[test]
-    fn durable_atomic_file_publication_replaces_an_existing_target() {
-        let root = unique_temp_dir("durable-publication");
-        let target = root.join("manifest.json");
-
-        write_durable_file_atomically(&target, b"first").expect("publish first payload");
-        write_durable_file_atomically(&target, b"second").expect("replace payload");
-
-        assert_eq!(fs::read(&target).expect("published payload"), b"second");
-        assert_eq!(
-            fs::read_dir(&root)
-                .expect("publication directory")
-                .filter_map(Result::ok)
-                .count(),
-            1,
-            "temporary publication files must not leak"
-        );
     }
 
     #[test]

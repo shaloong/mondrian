@@ -3,6 +3,54 @@
 use mondrian_core::Result;
 use std::sync::Arc;
 
+#[cfg(test)]
+const TEST_GPU_CONTEXT_CAPACITY: usize = 2;
+
+#[cfg(test)]
+static TEST_GPU_CONTEXT_ADMISSION: (std::sync::Mutex<usize>, std::sync::Condvar) =
+    (std::sync::Mutex::new(0), std::sync::Condvar::new());
+
+/// Process-local admission for unit tests that own independent native devices.
+///
+/// The Rust test harness otherwise provisions dozens of DX12 devices at once.
+/// That is not representative of product execution and can terminate the test
+/// process in the Windows driver before an assertion is reported. The permit
+/// remains attached to the context so device destruction, not test scheduling,
+/// releases capacity.
+#[cfg(test)]
+struct TestGpuContextPermit;
+
+#[cfg(test)]
+impl TestGpuContextPermit {
+    fn acquire() -> Self {
+        let (admission, changed) = &TEST_GPU_CONTEXT_ADMISSION;
+        let active = match admission.lock() {
+            Ok(active) => active,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut active =
+            match changed.wait_while(active, |active| *active >= TEST_GPU_CONTEXT_CAPACITY) {
+                Ok(active) => active,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+        *active += 1;
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestGpuContextPermit {
+    fn drop(&mut self) {
+        let (admission, changed) = &TEST_GPU_CONTEXT_ADMISSION;
+        let mut active = match admission.lock() {
+            Ok(active) => active,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *active = active.saturating_sub(1);
+        changed.notify_one();
+    }
+}
+
 /// Optional wgpu features required to sample native NV12/P010 video textures.
 ///
 /// Only features advertised by the selected adapter are returned, so callers
@@ -109,6 +157,8 @@ pub struct GpuContext {
     pub device: Arc<wgpu::Device>,
     pub queue: Arc<wgpu::Queue>,
     pub adapter: wgpu::Adapter,
+    #[cfg(test)]
+    _test_permit: Option<TestGpuContextPermit>,
 }
 
 impl GpuContext {
@@ -119,12 +169,21 @@ impl GpuContext {
         queue: Arc<wgpu::Queue>,
         adapter: wgpu::Adapter,
     ) -> Arc<Self> {
-        Arc::new(Self { device, queue, adapter })
+        Arc::new(Self {
+            device,
+            queue,
+            adapter,
+            #[cfg(test)]
+            _test_permit: None,
+        })
     }
 
     /// Creates a new independent GPU context (standalone device).
     /// Used when no external device is available (e.g., tests, export).
     pub async fn new() -> Result<Arc<Self>> {
+        #[cfg(test)]
+        let test_permit = TestGpuContextPermit::acquire();
+
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
 
@@ -158,6 +217,8 @@ impl GpuContext {
             device: Arc::new(device),
             queue: Arc::new(queue),
             adapter,
+            #[cfg(test)]
+            _test_permit: Some(test_permit),
         }))
     }
 }

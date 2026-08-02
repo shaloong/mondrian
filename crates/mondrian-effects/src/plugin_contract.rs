@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    sync::{Mutex, OnceLock, RwLock},
+    sync::{Mutex, OnceLock},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -82,6 +82,8 @@ impl EffectPluginContract {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EffectPluginRuntimeStatus {
+    /// Exact Definition-registry generation whose quarantine state is reported.
+    pub definition_registry_revision: u64,
     pub disabled: bool,
     pub last_error: Option<String>,
     pub api_compatible: bool,
@@ -93,54 +95,64 @@ struct EffectPluginRuntimeState {
     last_error: Option<String>,
 }
 
-fn plugin_contract_registry() -> &'static RwLock<HashMap<String, EffectPluginContract>> {
-    static REGISTRY: OnceLock<RwLock<HashMap<String, EffectPluginContract>>> = OnceLock::new();
-    REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct EffectPluginRuntimeKey {
+    effect_key: String,
+    definition_registry_revision: u64,
 }
 
-fn plugin_runtime_registry() -> &'static Mutex<HashMap<String, EffectPluginRuntimeState>> {
-    static REGISTRY: OnceLock<Mutex<HashMap<String, EffectPluginRuntimeState>>> = OnceLock::new();
+fn plugin_runtime_registry(
+) -> &'static Mutex<HashMap<EffectPluginRuntimeKey, EffectPluginRuntimeState>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<EffectPluginRuntimeKey, EffectPluginRuntimeState>>> =
+        OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub fn register_plugin_contract(key: impl Into<String>, contract: EffectPluginContract) {
-    let key = key.into();
-    plugin_contract_registry()
-        .write()
-        .expect("plugin contract registry poisoned")
-        .insert(key.clone(), contract);
-    plugin_runtime_registry()
-        .lock()
-        .expect("plugin runtime registry poisoned")
-        .entry(key)
-        .or_default();
+fn runtime_key(effect_key: &str, definition_registry_revision: u64) -> EffectPluginRuntimeKey {
+    EffectPluginRuntimeKey {
+        effect_key: effect_key.to_owned(),
+        definition_registry_revision,
+    }
 }
 
-pub fn plugin_contract(key: &str) -> Option<EffectPluginContract> {
-    plugin_contract_registry()
-        .read()
-        .expect("plugin contract registry poisoned")
-        .get(key)
-        .cloned()
-}
-
+/// Runtime status of the currently registered Definition generation.
+///
+/// Replaced Definitions have independent quarantine state. A failure reported
+/// by an older immutable Program therefore cannot disable the current
+/// Definition that happens to reuse the same persistent effect key.
 pub fn effect_plugin_runtime_status(key: &str) -> Option<EffectPluginRuntimeStatus> {
-    let contract = plugin_contract(key)?;
+    let definition =
+        crate::effect::effect_definition(&mondrian_core::effect_data::EffectType::from_key(key))?;
+    let contract = definition.plugin_contract()?;
+    Some(runtime_status(
+        definition.key(),
+        definition.definition_registry_revision(),
+        contract,
+    ))
+}
+
+fn runtime_status(
+    key: &str,
+    definition_registry_revision: u64,
+    contract: &EffectPluginContract,
+) -> EffectPluginRuntimeStatus {
     let state = plugin_runtime_registry()
         .lock()
         .expect("plugin runtime registry poisoned")
-        .get(key)
+        .get(&runtime_key(key, definition_registry_revision))
         .cloned()
         .unwrap_or_default();
-    Some(EffectPluginRuntimeStatus {
+    EffectPluginRuntimeStatus {
+        definition_registry_revision,
         disabled: state.disabled,
         last_error: state.last_error,
         api_compatible: contract.is_api_compatible(),
-    })
+    }
 }
 
-pub fn effect_plugin_is_runtime_available(
+pub(crate) fn effect_plugin_is_runtime_available(
     key: &str,
+    definition_registry_revision: u64,
     contract: Option<&EffectPluginContract>,
 ) -> bool {
     let Some(contract) = contract else {
@@ -152,26 +164,28 @@ pub fn effect_plugin_is_runtime_available(
     !plugin_runtime_registry()
         .lock()
         .expect("plugin runtime registry poisoned")
-        .get(key)
+        .get(&runtime_key(key, definition_registry_revision))
         .map(|state| state.disabled)
         .unwrap_or(false)
 }
 
-pub fn effect_plugin_is_library_visible(
+pub(crate) fn effect_plugin_is_library_visible(
     key: &str,
+    definition_registry_revision: u64,
     contract: Option<&EffectPluginContract>,
 ) -> bool {
     let Some(contract) = contract else {
         return true;
     };
-    if effect_plugin_is_runtime_available(key, Some(contract)) {
+    if effect_plugin_is_runtime_available(key, definition_registry_revision, Some(contract)) {
         return true;
     }
     contract.library_policy != EffectPluginLibraryPolicy::HideWhenUnavailable
 }
 
-pub fn record_plugin_runtime_failure(
+pub(crate) fn record_plugin_runtime_failure(
     key: &str,
+    definition_registry_revision: u64,
     contract: Option<&EffectPluginContract>,
     reason: impl Into<String>,
 ) {
@@ -179,7 +193,7 @@ pub fn record_plugin_runtime_failure(
         return;
     };
     let mut registry = plugin_runtime_registry().lock().expect("plugin runtime registry poisoned");
-    let state = registry.entry(key.to_string()).or_default();
+    let state = registry.entry(runtime_key(key, definition_registry_revision)).or_default();
     state.last_error = Some(reason.into());
     if matches!(
         contract.runtime_failure_policy,
@@ -190,11 +204,11 @@ pub fn record_plugin_runtime_failure(
 }
 
 #[cfg(test)]
-pub fn reset_plugin_runtime_state(key: &str) {
+fn reset_plugin_runtime_state(key: &str, definition_registry_revision: u64) {
     plugin_runtime_registry()
         .lock()
         .expect("plugin runtime registry poisoned")
-        .remove(key);
+        .remove(&runtime_key(key, definition_registry_revision));
 }
 
 #[cfg(test)]
@@ -204,36 +218,50 @@ mod tests {
     #[test]
     fn incompatible_plugin_can_hide_from_effect_library() {
         let key = "plugin.contract.hidden";
-        register_plugin_contract(
+        let generation = 7;
+        let contract = EffectPluginContract::new("1.2.3")
+            .with_api_version(EffectPluginApiVersion::new(2, 0))
+            .with_library_policy(EffectPluginLibraryPolicy::HideWhenUnavailable);
+        assert!(!effect_plugin_is_runtime_available(
             key,
-            EffectPluginContract::new("1.2.3")
-                .with_api_version(EffectPluginApiVersion::new(2, 0))
-                .with_library_policy(EffectPluginLibraryPolicy::HideWhenUnavailable),
-        );
-
-        let contract = plugin_contract(key).expect("plugin contract");
-        assert!(!effect_plugin_is_runtime_available(key, Some(&contract)));
-        assert!(!effect_plugin_is_library_visible(key, Some(&contract)));
+            generation,
+            Some(&contract)
+        ));
+        assert!(!effect_plugin_is_library_visible(
+            key,
+            generation,
+            Some(&contract)
+        ));
     }
 
     #[test]
-    fn disable_definition_policy_marks_plugin_unavailable_after_error() {
+    fn quarantine_is_scoped_to_the_frozen_definition_generation() {
         let key = "plugin.contract.disable_on_failure";
-        reset_plugin_runtime_state(key);
-        register_plugin_contract(
+        let failed_generation = 11;
+        let replacement_generation = 12;
+        reset_plugin_runtime_state(key, failed_generation);
+        reset_plugin_runtime_state(key, replacement_generation);
+        let contract = EffectPluginContract::new("1.0.0")
+            .with_runtime_failure_policy(EffectPluginRuntimeFailurePolicy::DisableDefinition);
+        assert!(effect_plugin_is_runtime_available(
             key,
-            EffectPluginContract::new("1.0.0")
-                .with_runtime_failure_policy(EffectPluginRuntimeFailurePolicy::DisableDefinition),
+            failed_generation,
+            Some(&contract)
+        ));
+
+        record_plugin_runtime_failure(key, failed_generation, Some(&contract), "processor panic");
+
+        let failed = runtime_status(key, failed_generation, &contract);
+        assert!(failed.disabled);
+        assert_eq!(failed.last_error.as_deref(), Some("processor panic"));
+        assert!(!effect_plugin_is_runtime_available(
+            key,
+            failed_generation,
+            Some(&contract)
+        ));
+        assert!(
+            effect_plugin_is_runtime_available(key, replacement_generation, Some(&contract)),
+            "a failed immutable Program must not quarantine a replacement Definition"
         );
-
-        let contract = plugin_contract(key).expect("plugin contract");
-        assert!(effect_plugin_is_runtime_available(key, Some(&contract)));
-
-        record_plugin_runtime_failure(key, Some(&contract), "processor panic");
-
-        let status = effect_plugin_runtime_status(key).expect("runtime status");
-        assert!(status.disabled);
-        assert_eq!(status.last_error.as_deref(), Some("processor panic"));
-        assert!(!effect_plugin_is_runtime_available(key, Some(&contract)));
     }
 }

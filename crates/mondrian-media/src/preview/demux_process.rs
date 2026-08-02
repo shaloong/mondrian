@@ -82,6 +82,7 @@ impl IsolatedDemuxSession {
         config: &PreviewDemuxWorkerConfig,
         path: &Path,
         source_revision: MediaFileFingerprint,
+        video_stream_index: Option<u32>,
         should_cancel: &(dyn Fn() -> bool + Send + Sync),
         on_open_phase: &mut dyn FnMut(DemuxOpenPhase),
     ) -> Result<IsolatedDemuxOpen, IsolatedDemuxOpenError> {
@@ -111,8 +112,9 @@ impl IsolatedDemuxSession {
                 "Preview demux worker stdin was not piped".to_owned(),
             ));
         };
-        if let Err(error) = write_worker_request(&mut stdin, nonce, path, source_revision)
-            .and_then(|()| stdin.flush())
+        if let Err(error) =
+            write_worker_request(&mut stdin, nonce, path, source_revision, video_stream_index)
+                .and_then(|()| stdin.flush())
         {
             terminate_child(&mut child);
             lifecycle.settle(PreviewIsolatedDemuxTermination::Failed);
@@ -210,6 +212,15 @@ impl IsolatedDemuxSession {
                 }
             }
         };
+        if let Some(requested) = video_stream_index {
+            if stream.stream_index != requested as usize {
+                let observed = stream.stream_index;
+                source.terminate(PreviewIsolatedDemuxTermination::Failed);
+                return Err(IsolatedDemuxOpenError::Failed(format!(
+                    "Preview demux worker returned physical stream {observed} for requested stream {requested}"
+                )));
+            }
+        }
         source.lifecycle.record_ready();
         Ok(IsolatedDemuxOpen { source, stream })
     }

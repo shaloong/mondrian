@@ -286,6 +286,7 @@ pub(crate) struct PreviewProfessionalPlaybackGateReport {
     fallback_adapter_unavailable_frames: u64,
     observed_duration_limit_us: u64,
     observed_duration_us: u64,
+    wall_duration_us: u64,
     min_warm_seeks: u64,
     warm_seek_count: u64,
     warm_seek_p95_limit_us: u64,
@@ -310,6 +311,7 @@ pub(crate) struct PreviewProfessionalPlaybackGateReport {
     decode_cancellation_checkpoints: mondrian_media::PreviewDecodeCancellationEvidence,
     isolated_demux: PreviewIsolatedDemuxGateEvidence,
     decode_worker_execution: PreviewDecodeWorkerExecutionDiagnostics,
+    native_video_gpu_timing: ProfessionalNativeVideoGpuTimingEvidence,
     pub(crate) passed: bool,
     pub(crate) failures: Vec<PreviewAcceptanceFailure>,
 }
@@ -353,19 +355,25 @@ pub(crate) struct PreviewPlaybackQualificationGateReport {
     pub(crate) failures: Vec<PreviewAcceptanceFailure>,
 }
 
-/// Bounded, process-wide memory evidence collected by a native platform Adapter.
+/// Bounded, whole-product memory evidence collected by a native platform Adapter.
 ///
 /// The collector keeps only scalar aggregates. It deliberately uses private
-/// committed memory for acceptance and reports the reclaimable resident set as
-/// diagnostics rather than treating it as application ownership.
+/// commit summed across the verified Mondrian process tree for acceptance and
+/// reports reclaimable working sets as diagnostics. A complete current-process
+/// sample is rejected because it cannot account for demux or FFmpeg children.
 #[derive(Debug, Clone, Default, Serialize)]
 pub(crate) struct PreviewProcessMemoryEvidenceReport {
+    scope: Option<String>,
     backend: Option<String>,
     discovery_available: bool,
+    inventory_complete: bool,
     attempted_samples: u64,
     observed_samples: u64,
     probe_errors: u64,
     last_probe_error: Option<String>,
+    minimum_observed_process_count: Option<u32>,
+    maximum_observed_process_count: u32,
+    maximum_inventory_attempts: u32,
     observed_duration_us: u64,
     peak_private_committed_bytes: u64,
     peak_resident_bytes: u64,
@@ -385,6 +393,11 @@ pub(crate) struct PreviewProcessMemoryEvidenceCollector {
 }
 
 impl PreviewProcessMemoryEvidenceCollector {
+    pub(crate) fn observe_playback_duration(&mut self, observed_duration_us: u64) {
+        self.report.observed_duration_us =
+            self.report.observed_duration_us.max(observed_duration_us);
+    }
+
     pub(crate) fn observe_playback(
         &mut self,
         observed_at_us: u64,
@@ -417,6 +430,9 @@ impl PreviewProcessMemoryEvidenceCollector {
     }
 
     pub(crate) fn report(mut self) -> PreviewProcessMemoryEvidenceReport {
+        self.report.inventory_complete = self.report.attempted_samples > 0
+            && self.report.observed_samples == self.report.attempted_samples
+            && self.report.probe_errors == 0;
         self.report.baseline_average_private_committed_bytes =
             average_bytes(self.baseline_private_sum, self.report.baseline_sample_count);
         self.report.final_average_private_committed_bytes =
@@ -430,6 +446,25 @@ impl PreviewProcessMemoryEvidenceCollector {
     ) -> Option<u64> {
         self.report.attempted_samples = self.report.attempted_samples.saturating_add(1);
         self.report.discovery_available |= sample.discovery_available;
+        let scope = sample.scope.as_str().to_owned();
+        if self.report.scope.as_ref().is_some_and(|known| known != &scope) {
+            self.report.probe_errors = self.report.probe_errors.saturating_add(1);
+            self.report.last_probe_error =
+                Some("process-memory scope changed during one acceptance run".to_owned());
+            return None;
+        }
+        self.report.scope = Some(scope);
+        self.report.minimum_observed_process_count = Some(
+            self.report
+                .minimum_observed_process_count
+                .map_or(sample.observed_process_count, |known| {
+                    known.min(sample.observed_process_count)
+                }),
+        );
+        self.report.maximum_observed_process_count =
+            self.report.maximum_observed_process_count.max(sample.observed_process_count);
+        self.report.maximum_inventory_attempts =
+            self.report.maximum_inventory_attempts.max(sample.inventory_attempts);
         if let Some(backend) = sample.backend {
             let backend = backend.as_str().to_owned();
             if self.report.backend.as_ref().is_some_and(|known| known != &backend) {
@@ -439,6 +474,19 @@ impl PreviewProcessMemoryEvidenceCollector {
                 return None;
             }
             self.report.backend = Some(backend);
+        }
+        if !sample.is_complete_for(mondrian_platform::ProcessMemoryScope::ProductProcessTree) {
+            self.report.probe_errors = self.report.probe_errors.saturating_add(1);
+            self.report.last_probe_error = sample.error.or_else(|| {
+                Some(format!(
+                    "expected complete product-process-tree sample, observed scope={}, complete={}, processes={}, attempts={}",
+                    sample.scope.as_str(),
+                    sample.inventory_complete,
+                    sample.observed_process_count,
+                    sample.inventory_attempts,
+                ))
+            });
+            return None;
         }
         let Some(private_bytes) = sample.private_committed_bytes else {
             self.report.probe_errors = self.report.probe_errors.saturating_add(1);
@@ -473,7 +521,20 @@ fn average_bytes(sum: u128, count: u64) -> u64 {
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct PreviewProcessMemoryGateReport {
     profile: &'static str,
+    scope: Option<String>,
+    backend: Option<String>,
+    inventory_complete: bool,
+    minimum_observed_process_count: Option<u32>,
+    maximum_observed_process_count: u32,
+    maximum_inventory_attempts: u32,
+    attempted_samples: u64,
+    observed_samples: u64,
+    probe_errors: u64,
+    observed_duration_us: u64,
     max_private_committed_bytes: u64,
+    peak_private_committed_bytes: u64,
+    peak_resident_bytes: u64,
+    os_peak_resident_bytes: u64,
     max_settled_growth_bytes: u64,
     baseline_sample_count: u64,
     final_sample_count: u64,
@@ -483,6 +544,7 @@ pub(crate) struct PreviewProcessMemoryGateReport {
     post_stress_private_committed_bytes: Option<u64>,
     post_stress_growth_bytes: Option<u64>,
     passed: bool,
+    failures: Vec<PreviewAcceptanceFailure>,
 }
 
 impl PreviewProcessMemoryGateReport {
@@ -599,20 +661,20 @@ fn evaluate_cancellation_contract(
             mondrian_playback::FrameCancellationGateFailureKind::UnknownCause => {
                 "frame_cancellation_unknown_cause"
             }
-            mondrian_playback::FrameCancellationGateFailureKind::MissingRequestToCheckpoint => {
-                "frame_cancellation_request_evidence_missing"
+            mondrian_playback::FrameCancellationGateFailureKind::MissingRequestToLogicalCancellation => {
+                "frame_cancellation_request_to_logical_evidence_missing"
             }
-            mondrian_playback::FrameCancellationGateFailureKind::MissingExecutionToCheckpoint => {
-                "frame_cancellation_checkpoint_evidence_missing"
+            mondrian_playback::FrameCancellationGateFailureKind::MissingExecutionToLogicalCancellation => {
+                "frame_cancellation_execution_to_logical_evidence_missing"
             }
             mondrian_playback::FrameCancellationGateFailureKind::InvalidTimingOrder => {
                 "frame_cancellation_timing_invalid"
             }
-            mondrian_playback::FrameCancellationGateFailureKind::RequestToCheckpointExceeded => {
-                "frame_cancellation_checkpoint_late"
+            mondrian_playback::FrameCancellationGateFailureKind::RequestToLogicalCancellationExceeded => {
+                "frame_cancellation_logical_observation_late"
             }
-            mondrian_playback::FrameCancellationGateFailureKind::CheckpointToReturnExceeded => {
-                "frame_cancellation_return_late"
+            mondrian_playback::FrameCancellationGateFailureKind::LogicalCancellationToReturnExceeded => {
+                "frame_cancellation_physical_return_late"
             }
         };
         push_failure(
@@ -702,19 +764,79 @@ pub(crate) struct PlaybackDecodeExecutionEvidence {
     pub(crate) hardware_decode_adapter_unavailable_frames: u64,
 }
 
+/// Renderer-owned native-video GPU timing facts reconciled to successful,
+/// presentation-bound Viewer candidates for one professional playback run.
+///
+/// Renderer counters, candidate receipts, asynchronous samples, and
+/// publication ownership remain separate evidence families. The professional
+/// gate accepts them only when both accounting identities and the ownership
+/// reconciliation are exact; an Adapter may not infer expected samples from
+/// layer counts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub(crate) struct ProfessionalNativeVideoGpuTimingEvidence {
+    /// Whether the renderer device exposed the complete timestamp capability.
+    pub(crate) capability_supported: bool,
+    /// Whether explicit product policy activated a healthy timing runtime.
+    pub(crate) activated: bool,
+    /// Stable policy, capability, or runtime-failure reason when inactive.
+    pub(crate) inactive_reason: Option<String>,
+    /// Native imports that returned a valid renderer working-frame output.
+    pub(crate) renderer_submitted_imports: u64,
+    /// Asynchronously completed renderer timing samples.
+    pub(crate) renderer_samples: u64,
+    /// Renderer samples still awaiting asynchronous readback.
+    pub(crate) renderer_pending_samples: u64,
+    /// Valid imports for which the renderer could not schedule timing.
+    pub(crate) renderer_missing_samples: u64,
+    /// Valid imports deliberately unsampled because the bounded ring was full.
+    pub(crate) renderer_dropped_samples: u64,
+    /// Unique successful candidate receipts accepted by reconciliation.
+    pub(crate) receipt_candidates: u64,
+    /// Valid imports closed by those exact candidate receipts.
+    pub(crate) receipt_submitted_imports: u64,
+    /// Receipt imports admitted to asynchronous readback.
+    pub(crate) receipt_scheduled_samples: u64,
+    /// Receipt imports that could not schedule a timing sample.
+    pub(crate) receipt_missing_samples: u64,
+    /// Receipt imports deliberately unsampled because the ring was full.
+    pub(crate) receipt_dropped_samples: u64,
+    /// Renderer samples drained and observed exactly once by the gate Adapter.
+    pub(crate) observed_samples: u64,
+    /// Completed renderer samples discarded by the Adapter's explicitly
+    /// bounded observation buffer before ownership reconciliation.
+    pub(crate) adapter_dropped_samples: u64,
+    /// Receipt-owning native Viewer candidates that completed publication.
+    pub(crate) published_native_candidates: u64,
+    /// Observed samples matched to native candidates that completed publication.
+    ///
+    /// This may be smaller than `observed_samples`: a uniquely owned successful
+    /// record may be released, superseded, or retire late without publication.
+    pub(crate) published_native_samples: u64,
+    /// Repeated receipt ownership attempts rejected during reconciliation.
+    pub(crate) duplicate_candidate_receipts: u64,
+    /// Samples repeated with the same execution-session/import identity.
+    pub(crate) duplicate_samples: u64,
+    /// Attempts to assign one exact sample to multiple candidate/phase owners.
+    pub(crate) duplicate_sample_ownership: u64,
+    /// Unique successful candidates whose observed sample count differs from
+    /// that exact receipt's scheduled sample count.
+    pub(crate) candidate_sample_count_mismatches: u64,
+    /// Observed samples without one exact successful candidate receipt owner.
+    pub(crate) unmatched_samples: u64,
+    /// Receipts that could not be assigned to one unique successful
+    /// candidate/phase.
+    ///
+    /// A uniquely owned successful record that is later released, superseded,
+    /// or retired late is not orphaned merely because it was never published.
+    pub(crate) orphan_candidate_receipts: u64,
+}
+
 /// UI-independent point-in-time execution facts required by professional acceptance.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct PreviewRuntimeAcceptanceEvidence {
     pub(crate) scheduler: MediaPreviewSchedulerDiagnostics,
     pub(crate) worker_queue: MediaPreviewJobQueueDiagnostics,
-    pub(crate) media_cache_reserved_bytes: usize,
-    pub(crate) media_cache_byte_budget: usize,
-    pub(crate) media_cache_oversize_rejections: u64,
-    pub(crate) viewer_frame_cache_reserved_bytes: usize,
-    pub(crate) viewer_frame_cache_byte_budget: usize,
-    pub(crate) viewer_frame_cache_oversize_rejections: u64,
-    pub(crate) pinned_viewer_frame_bytes: usize,
-    pub(crate) pinned_media_frame_bytes: usize,
+    pub(crate) frame_store: mondrian_playback::PreviewFrameStoreDiagnostics,
     pub(crate) accurate_seek_temporal_approximation_frames: u64,
     pub(crate) decode_cancellation: mondrian_playback::FrameCancellationEvidenceReport,
     pub(crate) decode_cancellation_checkpoints: mondrian_media::PreviewDecodeCancellationEvidence,
@@ -728,8 +850,11 @@ pub(crate) struct ProfessionalPlaybackObservation<'a> {
     pub viewer_fallback_reasons: &'a [String],
     pub playback_decode: PlaybackDecodeExecutionEvidence,
     pub playback_evidence: &'a mondrian_playback::PlaybackEvidenceReport,
+    pub continuous_playback_evidence: &'a mondrian_playback::PlaybackEvidenceReport,
+    pub continuous_playback_wall_duration_us: u64,
     pub preview_diagnostics: &'a PreviewRuntimeAcceptanceEvidence,
     pub process_memory: &'a PreviewProcessMemoryEvidenceReport,
+    pub native_video_gpu_timing: &'a ProfessionalNativeVideoGpuTimingEvidence,
     pub frames: usize,
     pub frame_interval_ns: u64,
 }
@@ -745,6 +870,328 @@ pub(crate) struct PreviewPlaybackQualificationObservation<'a> {
     pub playback_evidence: &'a mondrian_playback::PlaybackEvidenceReport,
     pub preview_diagnostics: &'a PreviewRuntimeAcceptanceEvidence,
     pub cancellation_recovery: PreviewCancellationRecoveryEvidence,
+}
+
+fn evaluate_preview_frame_store_contract(
+    diagnostics: mondrian_playback::PreviewFrameStoreDiagnostics,
+    failures: &mut Vec<PreviewAcceptanceFailure>,
+) -> (bool, u64) {
+    let within_budget = diagnostics.production_residency_contract_holds();
+    if !within_budget {
+        push_failure(
+            failures,
+            "preview_frame_store_physical_budget_exceeded",
+            "optional cache within trim policy, physical aggregate within its global hard grant, each exact current demand within its per-demand grant, zero overcommit events, and zero live work leases",
+            format!(
+                "cache=({}/{}, {}/{}, {}/{}), overflow=({}, {}, {}), aggregate=({}/{}, {}/{}, {}/{}), aggregate_high_water=({}, {}, {}), current_demand_high_water=({}/{}, {}/{}, {}/{}), work={}, aggregate_overcommitted={}, aggregate_overcommit_events={}, current_demand_overcommitted={}, current_demand_overcommit_events={}, current_demand_rejections={}, viewer={}/{}, pinned_viewer={}",
+                diagnostics.media_entries,
+                diagnostics.media_entry_capacity,
+                diagnostics.media_reserved_bytes,
+                diagnostics.media_byte_budget,
+                diagnostics.media_resource_units,
+                diagnostics.media_resource_unit_budget,
+                diagnostics.current_media_overflow_entries,
+                diagnostics.current_media_overflow_bytes,
+                diagnostics.current_media_overflow_resource_units,
+                diagnostics.media_aggregate_entries,
+                diagnostics.media_aggregate_hard_entry_limit,
+                diagnostics.media_aggregate_reserved_bytes,
+                diagnostics.media_aggregate_hard_byte_limit,
+                diagnostics.media_aggregate_resource_units,
+                diagnostics.media_aggregate_hard_resource_unit_limit,
+                diagnostics.media_aggregate_entry_high_water,
+                diagnostics.media_aggregate_byte_high_water,
+                diagnostics.media_aggregate_resource_unit_high_water,
+                diagnostics.media_current_working_set_entry_high_water,
+                diagnostics.current_media_working_set_entry_limit,
+                diagnostics.media_current_working_set_byte_high_water,
+                diagnostics.current_media_working_set_byte_limit,
+                diagnostics.media_current_working_set_resource_unit_high_water,
+                diagnostics.current_media_working_set_resource_unit_limit,
+                diagnostics.media_work_reservations,
+                diagnostics.media_capacity_overcommitted,
+                diagnostics.media_capacity_overcommit_events,
+                diagnostics.media_current_working_set_overcommitted,
+                diagnostics.media_current_working_set_overcommit_events,
+                diagnostics.media_current_working_set_rejections,
+                diagnostics.viewer_reserved_bytes,
+                diagnostics.viewer_byte_budget,
+                diagnostics.pinned_viewer_bytes,
+            ),
+            "Preview Frame Store physical allocation ledger",
+        );
+    }
+
+    let oversize_rejections = diagnostics.oversize_rejections();
+    if oversize_rejections > 0 {
+        push_failure(
+            failures,
+            "preview_frame_store_oversize_rejection",
+            "0 payloads rejected by their applicable physical admission grant",
+            oversize_rejections.to_string(),
+            "Preview Frame Store admission diagnostics",
+        );
+    }
+    (within_budget, oversize_rejections)
+}
+
+fn checked_evidence_total(values: &[u64]) -> Option<u64> {
+    values.iter().try_fold(0_u64, |total, value| total.checked_add(*value))
+}
+
+fn evaluate_professional_native_video_gpu_timing(
+    evidence: &ProfessionalNativeVideoGpuTimingEvidence,
+    failures: &mut Vec<PreviewAcceptanceFailure>,
+) {
+    let renderer_accounted = checked_evidence_total(&[
+        evidence.renderer_samples,
+        evidence.renderer_pending_samples,
+        evidence.renderer_missing_samples,
+        evidence.renderer_dropped_samples,
+    ]);
+    if renderer_accounted != Some(evidence.renderer_submitted_imports) {
+        push_failure(
+            failures,
+            "native_video_gpu_timing_renderer_accounting_mismatch",
+            "renderer submitted = samples + pending + missing + dropped without overflow",
+            format!(
+                "submitted={}, samples={}, pending={}, missing={}, dropped={}, classified={renderer_accounted:?}",
+                evidence.renderer_submitted_imports,
+                evidence.renderer_samples,
+                evidence.renderer_pending_samples,
+                evidence.renderer_missing_samples,
+                evidence.renderer_dropped_samples,
+            ),
+            "renderer NativeVideoImportGpuTimingDiagnostics",
+        );
+    }
+
+    let receipt_accounted = checked_evidence_total(&[
+        evidence.receipt_scheduled_samples,
+        evidence.receipt_missing_samples,
+        evidence.receipt_dropped_samples,
+    ]);
+    if receipt_accounted != Some(evidence.receipt_submitted_imports) {
+        push_failure(
+            failures,
+            "native_video_gpu_timing_receipt_accounting_mismatch",
+            "receipt submitted = scheduled + missing + dropped without overflow",
+            format!(
+                "submitted={}, scheduled={}, missing={}, dropped={}, classified={receipt_accounted:?}",
+                evidence.receipt_submitted_imports,
+                evidence.receipt_scheduled_samples,
+                evidence.receipt_missing_samples,
+                evidence.receipt_dropped_samples,
+            ),
+            "move-only native-video candidate timing receipts",
+        );
+    }
+
+    if !evidence.capability_supported {
+        push_failure(
+            failures,
+            "native_video_gpu_timing_capability_unavailable",
+            "renderer hardware timestamp capability",
+            "false",
+            evidence
+                .inactive_reason
+                .as_deref()
+                .unwrap_or("renderer reported no inactive reason"),
+        );
+    }
+    if !evidence.activated {
+        push_failure(
+            failures,
+            "native_video_gpu_timing_not_activated",
+            "explicitly activated healthy native-import GPU timing",
+            "false",
+            evidence
+                .inactive_reason
+                .as_deref()
+                .unwrap_or("renderer reported no inactive reason"),
+        );
+    } else if let Some(reason) = evidence.inactive_reason.as_deref() {
+        push_failure(
+            failures,
+            "native_video_gpu_timing_active_with_inactive_reason",
+            "activated timing with no inactive reason",
+            reason,
+            "renderer timing activation diagnostics",
+        );
+    }
+
+    if evidence.renderer_submitted_imports == 0 {
+        push_failure(
+            failures,
+            "native_video_gpu_timing_no_submitted_imports",
+            "at least one valid native import",
+            "0",
+            "renderer native-import timing coverage",
+        );
+    }
+    for (code, label, observed) in [
+        (
+            "native_video_gpu_timing_renderer_pending_samples",
+            "pending renderer samples",
+            evidence.renderer_pending_samples,
+        ),
+        (
+            "native_video_gpu_timing_renderer_missing_samples",
+            "missing renderer samples",
+            evidence.renderer_missing_samples,
+        ),
+        (
+            "native_video_gpu_timing_renderer_dropped_samples",
+            "dropped renderer samples",
+            evidence.renderer_dropped_samples,
+        ),
+        (
+            "native_video_gpu_timing_receipt_missing_samples",
+            "missing receipt samples",
+            evidence.receipt_missing_samples,
+        ),
+        (
+            "native_video_gpu_timing_receipt_dropped_samples",
+            "dropped receipt samples",
+            evidence.receipt_dropped_samples,
+        ),
+        (
+            "native_video_gpu_timing_adapter_dropped_samples",
+            "Adapter-dropped observation samples",
+            evidence.adapter_dropped_samples,
+        ),
+    ] {
+        if observed > 0 {
+            push_failure(
+                failures,
+                code,
+                format!("0 {label}"),
+                observed.to_string(),
+                "native-video GPU timing coverage",
+            );
+        }
+    }
+
+    if evidence.receipt_candidates == 0 {
+        push_failure(
+            failures,
+            "native_video_gpu_timing_receipt_candidate_missing",
+            "at least one unique successful candidate receipt",
+            "0",
+            "native-video candidate receipt reconciliation",
+        );
+    }
+
+    if !(evidence.renderer_samples == evidence.observed_samples
+        && evidence.observed_samples == evidence.receipt_scheduled_samples
+        && evidence.receipt_scheduled_samples == evidence.receipt_submitted_imports
+        && evidence.receipt_submitted_imports == evidence.renderer_submitted_imports)
+    {
+        push_failure(
+            failures,
+            "native_video_gpu_timing_sample_reconciliation_mismatch",
+            "renderer samples = observed samples = receipt scheduled = receipt submitted = renderer submitted",
+            format!(
+                "renderer_samples={}, observed={}, receipt_scheduled={}, receipt_submitted={}, renderer_submitted={}",
+                evidence.renderer_samples,
+                evidence.observed_samples,
+                evidence.receipt_scheduled_samples,
+                evidence.receipt_submitted_imports,
+                evidence.renderer_submitted_imports,
+            ),
+            "renderer diagnostics, move-only receipts, and drained timing samples",
+        );
+    }
+
+    if evidence.candidate_sample_count_mismatches > 0 {
+        push_failure(
+            failures,
+            "native_video_gpu_timing_candidate_sample_count_mismatch",
+            "every successful candidate's observed samples = its receipt scheduled samples",
+            evidence.candidate_sample_count_mismatches.to_string(),
+            "session-qualified candidate receipt/sample reconciliation",
+        );
+    }
+
+    for (code, label, observed) in [
+        (
+            "native_video_gpu_timing_duplicate_candidate_receipt",
+            "duplicate candidate receipts",
+            evidence.duplicate_candidate_receipts,
+        ),
+        (
+            "native_video_gpu_timing_duplicate_sample",
+            "duplicate timing samples",
+            evidence.duplicate_samples,
+        ),
+        (
+            "native_video_gpu_timing_duplicate_sample_ownership",
+            "multiply owned timing samples",
+            evidence.duplicate_sample_ownership,
+        ),
+        (
+            "native_video_gpu_timing_unmatched_sample",
+            "unmatched timing samples",
+            evidence.unmatched_samples,
+        ),
+        (
+            "native_video_gpu_timing_orphan_candidate_receipt",
+            "orphan candidate receipts",
+            evidence.orphan_candidate_receipts,
+        ),
+    ] {
+        if observed > 0 {
+            push_failure(
+                failures,
+                code,
+                format!("0 {label}"),
+                observed.to_string(),
+                "native-video receipt/sample ownership reconciliation",
+            );
+        }
+    }
+    if evidence.published_native_candidates > evidence.receipt_candidates {
+        push_failure(
+            failures,
+            "native_video_gpu_timing_published_candidates_exceed_receipts",
+            "published native candidates <= unique successful candidate receipts",
+            format!(
+                "published={}, receipts={}",
+                evidence.published_native_candidates, evidence.receipt_candidates
+            ),
+            "presentation-bound native candidate coverage",
+        );
+    }
+    if evidence.published_native_samples > evidence.observed_samples {
+        push_failure(
+            failures,
+            "native_video_gpu_timing_published_samples_exceed_observed",
+            "published native samples <= uniquely observed timing samples",
+            format!(
+                "published={}, observed={}",
+                evidence.published_native_samples, evidence.observed_samples
+            ),
+            "presentation-bound native timing sample coverage",
+        );
+    }
+    if evidence.published_native_candidates == 0 {
+        push_failure(
+            failures,
+            "native_video_gpu_timing_published_candidate_missing",
+            "at least one native candidate completed Viewer publication",
+            "0",
+            "presentation-bound native candidate ownership",
+        );
+    }
+    if evidence.published_native_samples == 0 {
+        push_failure(
+            failures,
+            "native_video_gpu_timing_published_sample_missing",
+            "at least one timing sample owned by a published native candidate",
+            "0",
+            "presentation-bound native timing sample ownership",
+        );
+    }
 }
 
 pub(crate) fn evaluate_playback_qualification(
@@ -813,41 +1260,8 @@ pub(crate) fn evaluate_playback_qualification(
     }
     let isolated_demux =
         evaluate_isolated_demux(diagnostics.decode_worker_execution, &mut failures);
-    let cpu_frame_store_within_budget = diagnostics.media_cache_reserved_bytes
-        <= diagnostics.media_cache_byte_budget
-        && diagnostics.pinned_media_frame_bytes <= diagnostics.media_cache_byte_budget
-        && diagnostics.viewer_frame_cache_reserved_bytes
-            <= diagnostics.viewer_frame_cache_byte_budget
-        && diagnostics.pinned_viewer_frame_bytes <= diagnostics.viewer_frame_cache_byte_budget;
-    if !cpu_frame_store_within_budget {
-        push_failure(
-            &mut failures,
-            "cpu_frame_store_budget_exceeded",
-            "all evictable and pinned CPU residency within declared byte budgets",
-            format!(
-                "media={}/{}, pinned_media={}, viewer={}/{}, pinned_viewer={}",
-                diagnostics.media_cache_reserved_bytes,
-                diagnostics.media_cache_byte_budget,
-                diagnostics.pinned_media_frame_bytes,
-                diagnostics.viewer_frame_cache_reserved_bytes,
-                diagnostics.viewer_frame_cache_byte_budget,
-                diagnostics.pinned_viewer_frame_bytes
-            ),
-            "Preview Frame Store structured diagnostics",
-        );
-    }
-    let cpu_frame_store_oversize_rejections = diagnostics
-        .media_cache_oversize_rejections
-        .saturating_add(diagnostics.viewer_frame_cache_oversize_rejections);
-    if cpu_frame_store_oversize_rejections > 0 {
-        push_failure(
-            &mut failures,
-            "cpu_frame_store_oversize_rejection",
-            "0 oversize CPU payload rejections",
-            cpu_frame_store_oversize_rejections.to_string(),
-            "Preview Frame Store admission diagnostics",
-        );
-    }
+    let (cpu_frame_store_within_budget, cpu_frame_store_oversize_rejections) =
+        evaluate_preview_frame_store_contract(diagnostics.frame_store, &mut failures);
     let cancellation_gate =
         evaluate_cancellation_contract(diagnostics.decode_cancellation, &mut failures);
 
@@ -887,14 +1301,24 @@ pub(crate) fn evaluate_professional_playback(
     );
 
     let evidence = observation.playback_evidence;
+    let continuous_evidence = observation.continuous_playback_evidence;
     let diagnostics = observation.preview_diagnostics;
-    if evidence.observed_duration_us < PROFESSIONAL_MIN_OBSERVED_DURATION_US {
+    if continuous_evidence.observed_duration_us < PROFESSIONAL_MIN_OBSERVED_DURATION_US {
         push_failure(
             &mut failures,
             "playback_duration_below_minimum",
             format!("at least {PROFESSIONAL_MIN_OBSERVED_DURATION_US} us"),
-            format!("{} us", evidence.observed_duration_us),
-            "Playback Evidence monotonic observation span",
+            format!("{} us", continuous_evidence.observed_duration_us),
+            "continuous-window Playback Evidence monotonic observation span",
+        );
+    }
+    if observation.continuous_playback_wall_duration_us < PROFESSIONAL_MIN_OBSERVED_DURATION_US {
+        push_failure(
+            &mut failures,
+            "playback_wall_duration_below_minimum",
+            format!("at least {PROFESSIONAL_MIN_OBSERVED_DURATION_US} us"),
+            format!("{} us", observation.continuous_playback_wall_duration_us),
+            "continuous-window process monotonic elapsed time",
         );
     }
     if evidence.warm_seek_latency.count < PROFESSIONAL_MIN_WARM_SEEKS {
@@ -987,44 +1411,15 @@ pub(crate) fn evaluate_professional_playback(
     }
     let isolated_demux =
         evaluate_isolated_demux(diagnostics.decode_worker_execution, &mut failures);
-    let cpu_frame_store_within_budget = diagnostics.media_cache_reserved_bytes
-        <= diagnostics.media_cache_byte_budget
-        && diagnostics.pinned_media_frame_bytes <= diagnostics.media_cache_byte_budget
-        && diagnostics.viewer_frame_cache_reserved_bytes
-            <= diagnostics.viewer_frame_cache_byte_budget
-        && diagnostics.pinned_viewer_frame_bytes <= diagnostics.viewer_frame_cache_byte_budget;
-    if !cpu_frame_store_within_budget {
-        push_failure(
-            &mut failures,
-            "cpu_frame_store_budget_exceeded",
-            "all evictable and pinned CPU residency within declared byte budgets",
-            format!(
-                "media={}/{}, pinned_media={}, viewer={}/{}, pinned_viewer={}",
-                diagnostics.media_cache_reserved_bytes,
-                diagnostics.media_cache_byte_budget,
-                diagnostics.pinned_media_frame_bytes,
-                diagnostics.viewer_frame_cache_reserved_bytes,
-                diagnostics.viewer_frame_cache_byte_budget,
-                diagnostics.pinned_viewer_frame_bytes
-            ),
-            "Preview Frame Store structured diagnostics",
-        );
-    }
-    let cpu_frame_store_oversize_rejections = diagnostics
-        .media_cache_oversize_rejections
-        .saturating_add(diagnostics.viewer_frame_cache_oversize_rejections);
-    if cpu_frame_store_oversize_rejections > 0 {
-        push_failure(
-            &mut failures,
-            "cpu_frame_store_oversize_rejection",
-            "0 oversize CPU payload rejections",
-            cpu_frame_store_oversize_rejections.to_string(),
-            "Preview Frame Store admission diagnostics",
-        );
-    }
+    let (cpu_frame_store_within_budget, cpu_frame_store_oversize_rejections) =
+        evaluate_preview_frame_store_contract(diagnostics.frame_store, &mut failures);
     let process_memory = evaluate_process_memory(observation.process_memory, &mut failures);
     let cancellation_gate =
         evaluate_cancellation_contract(diagnostics.decode_cancellation, &mut failures);
+    evaluate_professional_native_video_gpu_timing(
+        observation.native_video_gpu_timing,
+        &mut failures,
+    );
     let presented = evaluate_presented_main10_hardware(
         observation.rendered_decode_execution,
         observation.viewer_fallback_count,
@@ -1038,7 +1433,7 @@ pub(crate) fn evaluate_professional_playback(
         .saturating_add(playback.hardware_decode_prefer_gpu_requested_frames)
         .saturating_add(playback.hardware_decode_require_gpu_requested_frames);
     PreviewProfessionalPlaybackGateReport {
-        profile: "uhd_hevc_main10_hardware_1x_v5",
+        profile: "uhd_hevc_main10_hardware_1x_v6",
         required_hardware_execution_percent,
         presented_media_layers: presented.presented_media_layers,
         presented_hardware_layers: presented.presented_hardware_layers,
@@ -1061,7 +1456,8 @@ pub(crate) fn evaluate_professional_playback(
         fallback_backend_boundary_frames: playback.hardware_decode_backend_boundary_frames,
         fallback_adapter_unavailable_frames: playback.hardware_decode_adapter_unavailable_frames,
         observed_duration_limit_us: PROFESSIONAL_MIN_OBSERVED_DURATION_US,
-        observed_duration_us: evidence.observed_duration_us,
+        observed_duration_us: continuous_evidence.observed_duration_us,
+        wall_duration_us: observation.continuous_playback_wall_duration_us,
         min_warm_seeks: PROFESSIONAL_MIN_WARM_SEEKS,
         warm_seek_count: evidence.warm_seek_latency.count,
         warm_seek_p95_limit_us: PROFESSIONAL_WARM_SEEK_P95_LIMIT_US,
@@ -1087,6 +1483,7 @@ pub(crate) fn evaluate_professional_playback(
         decode_cancellation_checkpoints: diagnostics.decode_cancellation_checkpoints,
         isolated_demux,
         decode_worker_execution: diagnostics.decode_worker_execution,
+        native_video_gpu_timing: (*observation.native_video_gpu_timing).clone(),
         passed: failures.is_empty(),
         failures,
     }
@@ -1096,13 +1493,46 @@ fn evaluate_process_memory(
     evidence: &PreviewProcessMemoryEvidenceReport,
     failures: &mut Vec<PreviewAcceptanceFailure>,
 ) -> PreviewProcessMemoryGateReport {
+    let failure_start = failures.len();
+    if evidence.scope.as_deref()
+        != Some(mondrian_platform::ProcessMemoryScope::ProductProcessTree.as_str())
+    {
+        push_failure(
+            failures,
+            "process_memory_scope_not_product_tree",
+            mondrian_platform::ProcessMemoryScope::ProductProcessTree.as_str(),
+            evidence.scope.as_deref().unwrap_or("unavailable"),
+            "professional memory acceptance requires Mondrian plus every descendant process",
+        );
+    }
     if !evidence.discovery_available || evidence.backend.is_none() {
         push_failure(
             failures,
             "process_memory_probe_unavailable",
-            "native private-commit process-memory evidence",
+            "native product-process-tree private-commit evidence",
             evidence.backend.as_deref().unwrap_or("unavailable"),
             evidence.last_probe_error.as_deref().unwrap_or("no native backend"),
+        );
+    }
+    if !evidence.inventory_complete
+        || evidence.minimum_observed_process_count.is_none_or(|count| count == 0)
+    {
+        push_failure(
+            failures,
+            "process_memory_inventory_incomplete",
+            "every attempted sample has one complete non-empty product process-tree inventory",
+            format!(
+                "complete={}, observed={}/{}, process_count={:?}..{}",
+                evidence.inventory_complete,
+                evidence.observed_samples,
+                evidence.attempted_samples,
+                evidence.minimum_observed_process_count,
+                evidence.maximum_observed_process_count,
+            ),
+            evidence
+                .last_probe_error
+                .as_deref()
+                .unwrap_or("no complete process-tree evidence"),
         );
     }
     if evidence.probe_errors > 0 {
@@ -1120,7 +1550,7 @@ fn evaluate_process_memory(
             "process_memory_observation_too_short",
             format!("at least {PROFESSIONAL_MIN_OBSERVED_DURATION_US} us"),
             format!("{} us", evidence.observed_duration_us),
-            "process-memory evidence observation span",
+            "product-process-tree memory evidence observation span",
         );
     }
     if evidence.baseline_sample_count < PROCESS_MEMORY_MIN_WINDOW_SAMPLES {
@@ -1129,7 +1559,7 @@ fn evaluate_process_memory(
             "process_memory_baseline_coverage_below_minimum",
             format!("at least {PROCESS_MEMORY_MIN_WINDOW_SAMPLES} samples from minutes 5-10"),
             evidence.baseline_sample_count.to_string(),
-            "fixed-cadence private-commit samples",
+            "fixed-cadence product-process-tree private-commit samples",
         );
     }
     if evidence.final_sample_count < PROCESS_MEMORY_MIN_WINDOW_SAMPLES {
@@ -1138,7 +1568,7 @@ fn evaluate_process_memory(
             "process_memory_final_coverage_below_minimum",
             format!("at least {PROCESS_MEMORY_MIN_WINDOW_SAMPLES} samples from minutes 25-30"),
             evidence.final_sample_count.to_string(),
-            "fixed-cadence private-commit samples",
+            "fixed-cadence product-process-tree private-commit samples",
         );
     }
     if evidence.peak_private_committed_bytes > PROCESS_MEMORY_MAX_PRIVATE_COMMITTED_BYTES {
@@ -1147,7 +1577,7 @@ fn evaluate_process_memory(
             "process_memory_private_commit_above_limit",
             format!("at most {PROCESS_MEMORY_MAX_PRIVATE_COMMITTED_BYTES} bytes"),
             format!("{} bytes", evidence.peak_private_committed_bytes),
-            "native process private-commit high-water mark",
+            "native product-process-tree private-commit high-water mark",
         );
     }
     let settled_growth_bytes = evidence
@@ -1183,7 +1613,7 @@ fn evaluate_process_memory(
                     "process_memory_post_stress_private_commit_above_limit",
                     format!("at most {PROCESS_MEMORY_MAX_PRIVATE_COMMITTED_BYTES} bytes"),
                     format!("{bytes} bytes"),
-                    "post-stress native process private commit",
+                    "post-stress native product-process-tree private commit",
                 );
             }
             if growth > PROCESS_MEMORY_MAX_SETTLED_GROWTH_BYTES {
@@ -1199,10 +1629,24 @@ fn evaluate_process_memory(
         _ => {}
     }
 
-    let passed = !failures.iter().any(|failure| failure.code.starts_with("process_memory_"));
+    let memory_failures = failures[failure_start..].to_vec();
+    let passed = memory_failures.is_empty();
     PreviewProcessMemoryGateReport {
-        profile: "whole_process_private_commit_v1",
+        profile: "product_process_tree_private_commit_v2",
+        scope: evidence.scope.clone(),
+        backend: evidence.backend.clone(),
+        inventory_complete: evidence.inventory_complete,
+        minimum_observed_process_count: evidence.minimum_observed_process_count,
+        maximum_observed_process_count: evidence.maximum_observed_process_count,
+        maximum_inventory_attempts: evidence.maximum_inventory_attempts,
+        attempted_samples: evidence.attempted_samples,
+        observed_samples: evidence.observed_samples,
+        probe_errors: evidence.probe_errors,
+        observed_duration_us: evidence.observed_duration_us,
         max_private_committed_bytes: PROCESS_MEMORY_MAX_PRIVATE_COMMITTED_BYTES,
+        peak_private_committed_bytes: evidence.peak_private_committed_bytes,
+        peak_resident_bytes: evidence.peak_resident_bytes,
+        os_peak_resident_bytes: evidence.os_peak_resident_bytes,
         max_settled_growth_bytes: PROCESS_MEMORY_MAX_SETTLED_GROWTH_BYTES,
         baseline_sample_count: evidence.baseline_sample_count,
         final_sample_count: evidence.final_sample_count,
@@ -1212,10 +1656,11 @@ fn evaluate_process_memory(
         post_stress_private_committed_bytes: evidence.post_stress_private_committed_bytes,
         post_stress_growth_bytes,
         passed,
+        failures: memory_failures,
     }
 }
 
-/// Evaluate the shared whole-process memory contract without coupling another
+/// Evaluate the shared whole-product process-tree memory contract without coupling another
 /// professional gate to the video-specific failure representation.
 pub(crate) fn evaluate_process_memory_gate(
     evidence: &PreviewProcessMemoryEvidenceReport,
@@ -1254,6 +1699,153 @@ mod tests {
     type PreviewDiagnostics = PreviewRuntimeAcceptanceEvidence;
     type PreviewDecodeExecutionSummary = PresentedDecodeExecutionEvidence;
     type PreviewDecodeAccessModeProfile = PlaybackDecodeExecutionEvidence;
+
+    #[test]
+    fn native_gpu_timing_accepts_owned_successful_candidates_without_requiring_publication() {
+        let evidence = passing_native_video_gpu_timing_evidence();
+
+        assert!(
+            native_video_gpu_timing_failure_codes(&evidence).is_empty(),
+            "uniquely owned Release/superseded/late candidates remain valid"
+        );
+        assert!(evidence.receipt_candidates > evidence.published_native_candidates);
+        assert!(evidence.observed_samples > evidence.published_native_samples);
+    }
+
+    #[test]
+    fn native_gpu_timing_rejects_missing_capability_activation_and_contradictory_reason() {
+        let mut inactive = passing_native_video_gpu_timing_evidence();
+        inactive.capability_supported = false;
+        inactive.activated = false;
+        inactive.inactive_reason = Some("timestamp queries unavailable".to_owned());
+        assert_eq!(
+            native_video_gpu_timing_failure_codes(&inactive),
+            vec![
+                "native_video_gpu_timing_capability_unavailable",
+                "native_video_gpu_timing_not_activated",
+            ]
+        );
+
+        let mut contradictory = passing_native_video_gpu_timing_evidence();
+        contradictory.inactive_reason = Some("readback failed".to_owned());
+        assert_eq!(
+            native_video_gpu_timing_failure_codes(&contradictory),
+            vec!["native_video_gpu_timing_active_with_inactive_reason"]
+        );
+    }
+
+    #[test]
+    fn native_gpu_timing_rejects_each_renderer_and_receipt_coverage_hole() {
+        let mut evidence = passing_native_video_gpu_timing_evidence();
+        evidence.renderer_pending_samples = 1;
+        evidence.renderer_missing_samples = 1;
+        evidence.renderer_dropped_samples = 1;
+        evidence.receipt_missing_samples = 1;
+        evidence.receipt_dropped_samples = 1;
+        evidence.adapter_dropped_samples = 1;
+
+        assert_eq!(
+            native_video_gpu_timing_failure_codes(&evidence),
+            vec![
+                "native_video_gpu_timing_renderer_accounting_mismatch",
+                "native_video_gpu_timing_receipt_accounting_mismatch",
+                "native_video_gpu_timing_renderer_pending_samples",
+                "native_video_gpu_timing_renderer_missing_samples",
+                "native_video_gpu_timing_renderer_dropped_samples",
+                "native_video_gpu_timing_receipt_missing_samples",
+                "native_video_gpu_timing_receipt_dropped_samples",
+                "native_video_gpu_timing_adapter_dropped_samples",
+            ]
+        );
+    }
+
+    #[test]
+    fn native_gpu_timing_rejects_zero_submission_receipt_and_publication_coverage() {
+        let evidence = ProfessionalNativeVideoGpuTimingEvidence {
+            capability_supported: true,
+            activated: true,
+            ..ProfessionalNativeVideoGpuTimingEvidence::default()
+        };
+
+        assert_eq!(
+            native_video_gpu_timing_failure_codes(&evidence),
+            vec![
+                "native_video_gpu_timing_no_submitted_imports",
+                "native_video_gpu_timing_receipt_candidate_missing",
+                "native_video_gpu_timing_published_candidate_missing",
+                "native_video_gpu_timing_published_sample_missing",
+            ]
+        );
+    }
+
+    #[test]
+    fn native_gpu_timing_rejects_renderer_receipt_and_observation_mismatch() {
+        let mut evidence = passing_native_video_gpu_timing_evidence();
+        evidence.observed_samples = evidence.observed_samples.saturating_sub(1);
+
+        assert_eq!(
+            native_video_gpu_timing_failure_codes(&evidence),
+            vec!["native_video_gpu_timing_sample_reconciliation_mismatch"]
+        );
+    }
+
+    #[test]
+    fn native_gpu_timing_rejects_candidate_local_sample_count_mismatch() {
+        let mut evidence = passing_native_video_gpu_timing_evidence();
+        evidence.candidate_sample_count_mismatches = 2;
+
+        assert_eq!(
+            native_video_gpu_timing_failure_codes(&evidence),
+            vec!["native_video_gpu_timing_candidate_sample_count_mismatch"]
+        );
+    }
+
+    #[test]
+    fn native_gpu_timing_rejects_adapter_observation_overflow() {
+        let mut evidence = passing_native_video_gpu_timing_evidence();
+        evidence.adapter_dropped_samples = 1;
+
+        assert_eq!(
+            native_video_gpu_timing_failure_codes(&evidence),
+            vec!["native_video_gpu_timing_adapter_dropped_samples"]
+        );
+    }
+
+    #[test]
+    fn native_gpu_timing_rejects_duplicate_unmatched_and_orphan_ownership() {
+        let mut evidence = passing_native_video_gpu_timing_evidence();
+        evidence.duplicate_candidate_receipts = 1;
+        evidence.duplicate_samples = 1;
+        evidence.duplicate_sample_ownership = 1;
+        evidence.unmatched_samples = 1;
+        evidence.orphan_candidate_receipts = 1;
+
+        assert_eq!(
+            native_video_gpu_timing_failure_codes(&evidence),
+            vec![
+                "native_video_gpu_timing_duplicate_candidate_receipt",
+                "native_video_gpu_timing_duplicate_sample",
+                "native_video_gpu_timing_duplicate_sample_ownership",
+                "native_video_gpu_timing_unmatched_sample",
+                "native_video_gpu_timing_orphan_candidate_receipt",
+            ]
+        );
+    }
+
+    #[test]
+    fn native_gpu_timing_rejects_fabricated_publication_coverage() {
+        let mut evidence = passing_native_video_gpu_timing_evidence();
+        evidence.published_native_candidates = evidence.receipt_candidates.saturating_add(1);
+        evidence.published_native_samples = evidence.observed_samples.saturating_add(1);
+
+        assert_eq!(
+            native_video_gpu_timing_failure_codes(&evidence),
+            vec![
+                "native_video_gpu_timing_published_candidates_exceed_receipts",
+                "native_video_gpu_timing_published_samples_exceed_observed",
+            ]
+        );
+    }
 
     #[test]
     fn accepts_short_production_demux_cancellation_qualification() {
@@ -1344,8 +1936,11 @@ mod tests {
             viewer_fallback_reasons: &[],
             playback_decode: PreviewDecodeAccessModeProfile::default(),
             playback_evidence: &evidence,
+            continuous_playback_evidence: &evidence,
+            continuous_playback_wall_duration_us: evidence.observed_duration_us,
             preview_diagnostics: &diagnostics,
             process_memory: &passing_process_memory_evidence(),
+            native_video_gpu_timing: &passing_native_video_gpu_timing_evidence(),
             frames: 45_000,
             frame_interval_ns: 40_000_000,
         };
@@ -1353,13 +1948,17 @@ mod tests {
         let report = evaluate_professional_playback(observation);
 
         assert!(report.passed, "{:?}", report.failures);
-        assert_eq!(report.profile, "uhd_hevc_main10_hardware_1x_v5");
+        assert_eq!(report.profile, "uhd_hevc_main10_hardware_1x_v6");
         assert_eq!(
             report.required_hardware_execution_percent,
             PROFESSIONAL_REQUIRED_HARDWARE_EXECUTION_PERCENT
         );
         assert_eq!(report.presented_hardware_layers, 100);
         assert_eq!(report.hardware_execution_percent, 100);
+        assert_eq!(
+            report.native_video_gpu_timing,
+            passing_native_video_gpu_timing_evidence()
+        );
     }
 
     #[test]
@@ -1370,9 +1969,9 @@ mod tests {
         cancellation.observe(mondrian_playback::FrameCancellationObservation {
             work_class: mondrian_playback::FrameWorkClass::Interactive,
             cause: mondrian_playback::FrameCancellationCause::Superseded,
-            execution_duration: std::time::Duration::from_millis(90),
-            execution_to_checkpoint: Some(std::time::Duration::from_millis(20)),
-            request_to_checkpoint: Some(std::time::Duration::from_millis(1)),
+            execution_duration: std::time::Duration::from_micros(70_001),
+            execution_to_logical_cancellation: Some(std::time::Duration::from_millis(20)),
+            request_to_logical_cancellation: Some(std::time::Duration::from_millis(1)),
         });
         let diagnostics = PreviewDiagnostics {
             decode_cancellation: cancellation.report(),
@@ -1390,8 +1989,11 @@ mod tests {
             viewer_fallback_reasons: &[],
             playback_decode: PreviewDecodeAccessModeProfile::default(),
             playback_evidence: &evidence,
+            continuous_playback_evidence: &evidence,
+            continuous_playback_wall_duration_us: evidence.observed_duration_us,
             preview_diagnostics: &diagnostics,
             process_memory: &passing_process_memory_evidence(),
+            native_video_gpu_timing: &passing_native_video_gpu_timing_evidence(),
             frames: 45_000,
             frame_interval_ns: 40_000_000,
         };
@@ -1400,10 +2002,22 @@ mod tests {
 
         assert!(!report.passed);
         assert!(!report.cancellation_gate.passed);
+        let failure = report
+            .cancellation_gate
+            .failures
+            .iter()
+            .find(|failure| {
+                failure.work_class == mondrian_playback::FrameWorkClass::Interactive
+                    && failure.kind
+                        == mondrian_playback::FrameCancellationGateFailureKind::LogicalCancellationToReturnExceeded
+            })
+            .expect("Interactive cancellation return must exceed the product gate");
+        assert_eq!(failure.observed, 50_001);
+        assert_eq!(failure.limit, 50_000);
         assert!(report
             .failures
             .iter()
-            .any(|failure| failure.code == "frame_cancellation_return_late"));
+            .any(|failure| failure.code == "frame_cancellation_physical_return_late"));
     }
 
     #[test]
@@ -1425,8 +2039,11 @@ mod tests {
             viewer_fallback_reasons: &[],
             playback_decode: PreviewDecodeAccessModeProfile::default(),
             playback_evidence: &evidence,
+            continuous_playback_evidence: &evidence,
+            continuous_playback_wall_duration_us: evidence.observed_duration_us,
             preview_diagnostics: &diagnostics,
             process_memory: &passing_process_memory_evidence(),
+            native_video_gpu_timing: &passing_native_video_gpu_timing_evidence(),
             frames: 10,
             frame_interval_ns: 40_000_000,
         };
@@ -1503,8 +2120,11 @@ mod tests {
             viewer_fallback_reasons: &[],
             playback_decode: PreviewDecodeAccessModeProfile::default(),
             playback_evidence: &evidence,
+            continuous_playback_evidence: &evidence,
+            continuous_playback_wall_duration_us: evidence.observed_duration_us,
             preview_diagnostics: &diagnostics,
             process_memory: &passing_process_memory_evidence(),
+            native_video_gpu_timing: &passing_native_video_gpu_timing_evidence(),
             frames: 45_000,
             frame_interval_ns: 40_000_000,
         });
@@ -1534,8 +2154,11 @@ mod tests {
                 viewer_fallback_reasons: &[],
                 playback_decode: PreviewDecodeAccessModeProfile::default(),
                 playback_evidence: &evidence,
+                continuous_playback_evidence: &evidence,
+                continuous_playback_wall_duration_us: evidence.observed_duration_us,
                 preview_diagnostics: &diagnostics,
                 process_memory: &passing_process_memory_evidence(),
+                native_video_gpu_timing: &passing_native_video_gpu_timing_evidence(),
                 frames: 45_000,
                 frame_interval_ns: 40_000_000,
             });
@@ -1567,8 +2190,11 @@ mod tests {
             viewer_fallback_reasons: &[],
             playback_decode: PreviewDecodeAccessModeProfile::default(),
             playback_evidence: &evidence,
+            continuous_playback_evidence: &evidence,
+            continuous_playback_wall_duration_us: evidence.observed_duration_us,
             preview_diagnostics: &diagnostics,
             process_memory: &passing_process_memory_evidence(),
+            native_video_gpu_timing: &passing_native_video_gpu_timing_evidence(),
             frames: 10,
             frame_interval_ns: 40_000_000,
         };
@@ -1603,8 +2229,11 @@ mod tests {
             viewer_fallback_reasons: &[],
             playback_decode: PreviewDecodeAccessModeProfile::default(),
             playback_evidence: &evidence,
+            continuous_playback_evidence: &evidence,
+            continuous_playback_wall_duration_us: evidence.observed_duration_us,
             preview_diagnostics: &diagnostics,
             process_memory: &passing_process_memory_evidence(),
+            native_video_gpu_timing: &passing_native_video_gpu_timing_evidence(),
             frames: 45_000,
             frame_interval_ns: 40_000_000,
         };
@@ -1635,8 +2264,11 @@ mod tests {
             viewer_fallback_reasons: &[],
             playback_decode: PreviewDecodeAccessModeProfile::default(),
             playback_evidence: &evidence,
+            continuous_playback_evidence: &evidence,
+            continuous_playback_wall_duration_us: evidence.observed_duration_us,
             preview_diagnostics: &diagnostics,
             process_memory: &passing_process_memory_evidence(),
+            native_video_gpu_timing: &passing_native_video_gpu_timing_evidence(),
             frames: 45_000,
             frame_interval_ns: 40_000_000,
         };
@@ -1711,6 +2343,67 @@ mod tests {
             report.attempted_samples,
             PROCESS_MEMORY_MIN_WINDOW_SAMPLES * 2 + 2
         );
+        assert_eq!(
+            report.scope.as_deref(),
+            Some(mondrian_platform::ProcessMemoryScope::ProductProcessTree.as_str())
+        );
+        assert!(report.inventory_complete);
+        assert_eq!(report.minimum_observed_process_count, Some(3));
+        assert_eq!(report.maximum_observed_process_count, 3);
+    }
+
+    #[test]
+    fn process_memory_gate_rejects_complete_current_process_scope() {
+        let mut collector = PreviewProcessMemoryEvidenceCollector::default();
+        collector.observe_playback(
+            PROFESSIONAL_MIN_OBSERVED_DURATION_US,
+            mondrian_platform::ProcessMemoryProbeResult::observed(
+                mondrian_platform::ProcessMemoryScope::CurrentProcess,
+                mondrian_platform::ProcessMemoryProbeBackend::WindowsCurrentProcessStatus,
+                1,
+                1,
+                512 * 1024 * 1024,
+                384 * 1024 * 1024,
+                512 * 1024 * 1024,
+            ),
+        );
+        let evidence = collector.report();
+        let mut failures = Vec::new();
+
+        let gate = evaluate_process_memory(&evidence, &mut failures);
+
+        assert!(!gate.passed());
+        assert!(failures
+            .iter()
+            .any(|failure| failure.code == "process_memory_scope_not_product_tree"));
+        assert!(failures
+            .iter()
+            .any(|failure| failure.code == "process_memory_inventory_incomplete"));
+    }
+
+    #[test]
+    fn process_memory_gate_rejects_incomplete_product_tree_inventory() {
+        let mut collector = PreviewProcessMemoryEvidenceCollector::default();
+        collector.observe_playback(
+            PROFESSIONAL_MIN_OBSERVED_DURATION_US,
+            mondrian_platform::ProcessMemoryProbeResult::failed(
+                mondrian_platform::ProcessMemoryScope::ProductProcessTree,
+                mondrian_platform::ProcessMemoryProbeBackend::WindowsToolhelpProcessTree,
+                2,
+                4,
+                "child exited during inventory validation",
+            ),
+        );
+        let evidence = collector.report();
+        let mut failures = Vec::new();
+
+        let gate = evaluate_process_memory(&evidence, &mut failures);
+
+        assert!(!gate.passed());
+        assert!(failures
+            .iter()
+            .any(|failure| failure.code == "process_memory_inventory_incomplete"));
+        assert!(failures.iter().any(|failure| failure.code == "process_memory_probe_error"));
     }
 
     #[test]
@@ -1738,8 +2431,11 @@ mod tests {
             viewer_fallback_reasons: &[],
             playback_decode: PreviewDecodeAccessModeProfile::default(),
             playback_evidence: &evidence,
+            continuous_playback_evidence: &evidence,
+            continuous_playback_wall_duration_us: evidence.observed_duration_us,
             preview_diagnostics: &diagnostics,
             process_memory: &process_memory,
+            native_video_gpu_timing: &passing_native_video_gpu_timing_evidence(),
             frames: 45_000,
             frame_interval_ns: 40_000_000,
         });
@@ -1799,12 +2495,19 @@ mod tests {
 
     fn passing_process_memory_evidence() -> PreviewProcessMemoryEvidenceReport {
         PreviewProcessMemoryEvidenceReport {
-            backend: Some("test-private-commit".to_owned()),
+            scope: Some(
+                mondrian_platform::ProcessMemoryScope::ProductProcessTree.as_str().to_owned(),
+            ),
+            backend: Some("test-product-process-tree-private-commit".to_owned()),
             discovery_available: true,
+            inventory_complete: true,
             attempted_samples: 601,
             observed_samples: 601,
             probe_errors: 0,
             last_probe_error: None,
+            minimum_observed_process_count: Some(3),
+            maximum_observed_process_count: 4,
+            maximum_inventory_attempts: 2,
             observed_duration_us: PROFESSIONAL_MIN_OBSERVED_DURATION_US,
             peak_private_committed_bytes: 768 * 1024 * 1024,
             peak_resident_bytes: 512 * 1024 * 1024,
@@ -1815,6 +2518,42 @@ mod tests {
             final_average_private_committed_bytes: 544 * 1024 * 1024,
             post_stress_private_committed_bytes: Some(560 * 1024 * 1024),
         }
+    }
+
+    fn passing_native_video_gpu_timing_evidence() -> ProfessionalNativeVideoGpuTimingEvidence {
+        ProfessionalNativeVideoGpuTimingEvidence {
+            capability_supported: true,
+            activated: true,
+            inactive_reason: None,
+            renderer_submitted_imports: 4,
+            renderer_samples: 4,
+            renderer_pending_samples: 0,
+            renderer_missing_samples: 0,
+            renderer_dropped_samples: 0,
+            receipt_candidates: 2,
+            receipt_submitted_imports: 4,
+            receipt_scheduled_samples: 4,
+            receipt_missing_samples: 0,
+            receipt_dropped_samples: 0,
+            observed_samples: 4,
+            adapter_dropped_samples: 0,
+            published_native_candidates: 1,
+            published_native_samples: 2,
+            duplicate_candidate_receipts: 0,
+            duplicate_samples: 0,
+            duplicate_sample_ownership: 0,
+            candidate_sample_count_mismatches: 0,
+            unmatched_samples: 0,
+            orphan_candidate_receipts: 0,
+        }
+    }
+
+    fn native_video_gpu_timing_failure_codes(
+        evidence: &ProfessionalNativeVideoGpuTimingEvidence,
+    ) -> Vec<&'static str> {
+        let mut failures = Vec::new();
+        evaluate_professional_native_video_gpu_timing(evidence, &mut failures);
+        failures.into_iter().map(|failure| failure.code).collect()
     }
 
     fn passing_cancellation_recovery() -> PreviewCancellationRecoveryEvidence {
@@ -1834,7 +2573,10 @@ mod tests {
         private_committed_bytes: u64,
     ) -> mondrian_platform::ProcessMemoryProbeResult {
         mondrian_platform::ProcessMemoryProbeResult::observed(
-            mondrian_platform::ProcessMemoryProbeBackend::WindowsProcessStatus,
+            mondrian_platform::ProcessMemoryScope::ProductProcessTree,
+            mondrian_platform::ProcessMemoryProbeBackend::WindowsToolhelpProcessTree,
+            3,
+            1,
             private_committed_bytes,
             private_committed_bytes.saturating_sub(64 * 1024 * 1024),
             private_committed_bytes,

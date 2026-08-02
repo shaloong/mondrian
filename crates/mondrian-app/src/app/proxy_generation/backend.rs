@@ -2,7 +2,7 @@
 
 use mondrian_core::ExecutionCancellationToken;
 use mondrian_media::proxy::ProxyProgress;
-use mondrian_media::{ProxyGenerationOutcome, ProxyGenerator, ProxyStatus};
+use mondrian_media::{ProxyGenerationError, ProxyGenerationOutcome, ProxyGenerator, ProxyStatus};
 
 use super::state::ProxyGenerationRequest;
 use super::{ProxyGenerationFailure, ProxyGenerationFailureReason};
@@ -72,11 +72,14 @@ impl ProxyGenerationBackend for MediaProxyGenerationBackend {
                 progress_tx,
                 cancellation,
             ))
-            .map_err(|error| {
-                ProxyGenerationFailure::new(
+            .map_err(|error| match error {
+                ProxyGenerationError::Execution(error) => ProxyGenerationFailure::new(
                     ProxyGenerationFailureReason::GenerationFailed,
                     error.to_string(),
-                )
+                ),
+                ProxyGenerationError::Publication(failure) => {
+                    ProxyGenerationFailure::publication(failure)
+                }
             })
     }
 }

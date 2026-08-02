@@ -9,10 +9,12 @@ use mondrian_platform::{NativeVideoTextureImportProbe, SystemPlatformService};
 use serde::Serialize;
 
 use crate::app::headless_preview_presentation::{
-    present_headless_preview_output, HeadlessPresentedOutput, HeadlessPreviewCandidate,
-    HeadlessPreviewRuntime,
+    present_headless_preview_output, HeadlessCompletedGpuDisposition, HeadlessPresentedOutput,
+    HeadlessPreviewCandidate, HeadlessPreviewRuntime,
 };
-use crate::app::headless_viewer_gpu::{HeadlessViewerGpuAdapter, HeadlessViewerGpuAdapterInfo};
+use crate::app::headless_viewer_gpu::{
+    HeadlessGpuCompletionDeadline, HeadlessViewerGpuAdapter, HeadlessViewerGpuAdapterInfo,
+};
 use crate::app::native_video_import::resolve_playback_hardware_decode_admission;
 use crate::app::playback_preview::pump_playback_preview;
 use crate::app::AppState;
@@ -65,8 +67,9 @@ pub(super) struct GoldenHeadlessPreview {
 impl GoldenHeadlessPreview {
     pub(super) fn new() -> anyhow::Result<Self> {
         let runtime = HeadlessPreviewRuntime::new();
-        let gpu =
+        let mut gpu =
             HeadlessViewerGpuAdapter::new().context("create Golden Headless Viewer GPU Adapter")?;
+        gpu.install_completion_waker(runtime.work_watch().completion_waker());
         let hardware_admission = resolve_playback_hardware_decode_admission(
             &gpu.native_import_support(),
             &SystemPlatformService.native_video_texture_import(),
@@ -93,27 +96,49 @@ impl GoldenHeadlessPreview {
         timeout: Duration,
     ) -> anyhow::Result<GoldenViewerPresentationEvidence> {
         let deadline = Instant::now() + timeout;
+        let mut queued_demand_completed = false;
         loop {
             pump_playback_preview(state, &self.runtime);
-            match present_headless_preview_output(&self.runtime, state, &mut self.gpu)? {
-                HeadlessPreviewCandidate::Ready { output, demand_completed } => {
+            match present_headless_preview_output(
+                &self.runtime,
+                state,
+                &mut self.gpu,
+                HeadlessGpuCompletionDeadline::at(deadline),
+            )? {
+                HeadlessPreviewCandidate::Ready { output, completed_demand } => {
+                    let demand_completed = completed_demand.is_some();
+                    if matches!(&output, HeadlessPresentedOutput::QueuedGpu) {
+                        ensure!(
+                            demand_completed,
+                            "Golden queue-ordered Viewer publication did not complete the current Frame Demand"
+                        );
+                        queued_demand_completed = true;
+                        thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    if matches!(&output, HeadlessPresentedOutput::CurrentGpu)
+                        && self.gpu.has_submission_in_flight()
+                    {
+                        thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    let demand_completed = demand_completed || queued_demand_completed;
                     ensure!(
                         demand_completed,
                         "Golden Viewer output did not complete the current Frame Demand"
                     );
                     let evidence = match output {
-                        HeadlessPresentedOutput::Gpu(execution) => {
+                        HeadlessPresentedOutput::Gpu { execution } => {
                             self.gpu_executions = self.gpu_executions.saturating_add(1);
-                            if execution.cached {
-                                self.cached_gpu_executions =
-                                    self.cached_gpu_executions.saturating_add(1);
-                            }
                             GoldenViewerPresentationEvidence {
                                 output: GoldenViewerOutputKind::GpuExecution,
-                                output_reused: execution.cached,
+                                output_reused: false,
                                 new_gpu_completion_observed: execution.gpu_completion_observed,
                                 demand_completed,
                             }
+                        }
+                        HeadlessPresentedOutput::QueuedGpu => {
+                            unreachable!("queue publication is drained before Golden evidence")
                         }
                         HeadlessPresentedOutput::CurrentGpu => {
                             self.current_gpu_presentations =
@@ -155,7 +180,31 @@ impl GoldenHeadlessPreview {
                     self.completed_demands = self.completed_demands.saturating_add(1);
                     return Ok(evidence);
                 }
-                HeadlessPreviewCandidate::Loading | HeadlessPreviewCandidate::Backpressured => {}
+                HeadlessPreviewCandidate::CompletedGpu { execution, disposition } => {
+                    ensure!(
+                        execution.gpu_completion_observed,
+                        "Golden Viewer received a completed GPU disposition without exact completion evidence"
+                    );
+                    match disposition {
+                        HeadlessCompletedGpuDisposition::PublishedCurrent { completed_demand } => {
+                            queued_demand_completed |= completed_demand.is_some();
+                        }
+                        HeadlessCompletedGpuDisposition::Released => {}
+                        HeadlessCompletedGpuDisposition::TerminalDelivery(kind) => {
+                            ensure!(
+                                !matches!(
+                                    kind,
+                                    mondrian_playback::FrameDeliveryKind::Ready
+                                        | mondrian_playback::FrameDeliveryKind::Degraded
+                                ),
+                                "Golden Viewer classified presentable GPU delivery as terminal"
+                            );
+                        }
+                    }
+                }
+                HeadlessPreviewCandidate::Loading
+                | HeadlessPreviewCandidate::Backpressured
+                | HeadlessPreviewCandidate::DroppedLate => {}
                 HeadlessPreviewCandidate::Unavailable(reason) => {
                     bail!(
                         "Golden Viewer cannot present the current Hero frame: {reason:?}; diagnostics: {:?}",

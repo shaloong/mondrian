@@ -4,7 +4,7 @@ use mondrian_core::{
     ensure_mondrian_default_ocio_loaded, GpuLanguage, OcioColorSpaceIdentity, WorkingColorSpace,
 };
 use mondrian_effects::{
-    get_or_compile_scheduled_render_graph, lower_effect_graph_to_gpu_plan, EffectGraphBuilderState,
+    compile_reference_render_graph, lower_effect_graph_to_gpu_plan, EffectGraphBuilderState,
     EffectRenderOp,
 };
 use mondrian_renderer::profile::{gpu_timestamp_query_device_features, GpuTimestampFrameTimer};
@@ -511,8 +511,8 @@ async fn standard_views_4k_gpu_timestamp_meet_budget_and_beat_aces2() -> Result<
         view: "ACES 2.0 - HDR 1000 nits (Rec.2020)",
     };
 
-    let compositor = GpuFrameCompositor::new(&context.device);
-    let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(50_000);
+    let compositor = GpuFrameCompositor::new(&context.device)?;
+    let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(50_000)?;
     let input = create_spatially_varying_4k_working_frame(&context, &compositor, &mut runtime)?;
     let timer = GpuTimestampFrameTimer::new(&context.device, &context.queue)
         .context("timestamp features were enabled but timer creation failed")?;
@@ -757,8 +757,8 @@ async fn standard_input_transforms_4k_gpu_timestamp_meet_budget() -> Result<()> 
         execution: TransformExecution::InputToWorking,
     };
 
-    let compositor = GpuFrameCompositor::new(&context.device);
-    let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(80_000);
+    let compositor = GpuFrameCompositor::new(&context.device)?;
+    let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(80_000)?;
     let working_input =
         create_spatially_varying_4k_working_frame(&context, &compositor, &mut runtime)?;
     let rec709_input = create_encoded_float_source(
@@ -970,7 +970,7 @@ fn create_spatially_varying_4k_working_frame(
         working_color_space: WorkingColorSpace::LinearRec2020,
     });
     graph.append_unary(EffectRenderOp::Grain { amount: 0.35 });
-    let graph = get_or_compile_scheduled_render_graph(graph.finish())
+    let graph = compile_reference_render_graph(graph.finish())
         .context("compile spatially varying benchmark effect graph")?;
     let effect_plan = lower_effect_graph_to_gpu_plan(&graph)
         .context("lower spatially varying benchmark effect graph")?;
@@ -1029,7 +1029,10 @@ fn create_encoded_float_source(
     label: &'static str,
 ) -> Result<GpuColorFrameHandle> {
     let handle = GpuColorFrameHandle::new(
-        runtime.frame_ids_mut().allocate(),
+        runtime
+            .frame_ids_mut()
+            .allocate()
+            .map_err(|error| anyhow!("allocate {label} frame id: {error}"))?,
         ColorFrameDescriptor {
             width: WIDTH,
             height: HEIGHT,
@@ -1127,7 +1130,10 @@ fn record_transform_sample(
         }
         TransformExecution::InputToWorking => {
             let output = GpuColorFrameHandle::new(
-                runtime.frame_ids_mut().allocate(),
+                runtime
+                    .frame_ids_mut()
+                    .allocate()
+                    .map_err(|error| anyhow!("allocate {} output frame id: {error}", case.mode))?,
                 ColorFrameDescriptor {
                     width: WIDTH,
                     height: HEIGHT,

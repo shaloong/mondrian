@@ -580,14 +580,17 @@ fn execute_complete_golden_project(
         proxy_relink_sequence_id,
     );
     let proxy_relink_asset_id = proxy_relink.asset_id();
-    let proxy_relink_asset_path = run
+    let proxy_relink_asset = run
         .workflow
         .app()
         .asset_library()
         .context("Asset Library is absent after proxy/relink stage")?
         .get_asset(proxy_relink_asset_id)?
-        .context("relinked asset is absent after proxy/relink stage")?
-        .path;
+        .context("relinked asset is absent after proxy/relink stage")?;
+    let proxy_relink_asset_path = proxy_relink_asset
+        .file_path()
+        .context("relinked Asset is no longer file-backed after proxy/relink stage")?
+        .to_path_buf();
     let foundation_before_recovery = hero.foundation.capture_audio_anchor(run.workflow.app())?;
     let editorial_before_recovery = hero.editorial.capture_authoring_anchor(run.workflow.app())?;
     let before_recovery_sequence_ids = run
@@ -764,9 +767,13 @@ fn execute_complete_golden_project(
         .iter()
         .find(|asset| asset.id == proxy_relink_asset_id)
         .context("final Project library lost the relinked H.264 asset")?;
+    let reopened_proxy_asset_path = reopened_proxy_asset
+        .file_path()
+        .context("relinked H.264 Asset is no longer file-backed")?
+        .to_path_buf();
     ensure!(
-        reopened_proxy_asset.path == proxy_relink_asset_path
-            && reopened_proxy_asset.path.is_file()
+        reopened_proxy_asset_path == proxy_relink_asset_path
+            && reopened_proxy_asset_path.is_file()
             && run.workflow.app().is_asset_proxy_mode(proxy_relink_asset_id),
         "final durable reopen lost relinked source identity or proxy author intent"
     );
@@ -780,11 +787,16 @@ fn execute_complete_golden_project(
         .iter()
         .filter(|asset| {
             asset
-                .path
-                .extension()
+                .file_path()
+                .and_then(|path| path.extension())
                 .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("mp4"))
         })
-        .filter_map(|asset| asset.media_info.primary_video().map(|video| video.codec_profile))
+        .filter_map(|asset| {
+            asset
+                .media_probe()
+                .and_then(|probe| probe.primary_video())
+                .map(|video| video.codec_profile)
+        })
         .collect::<Vec<_>>();
     ensure!(
         exported_profiles.contains(&VideoCodecProfile::H264High)
@@ -841,7 +853,7 @@ fn execute_complete_golden_project(
             primary_sequence_ids: stage_primary_sequence_ids,
             sequence_count: run.workflow.app().sequences().len(),
             asset_count: assets.len(),
-            relinked_asset_path: reopened_proxy_asset.path.clone(),
+            relinked_asset_path: reopened_proxy_asset_path,
             relinked_proxy_mode: run.workflow.app().is_asset_proxy_mode(proxy_relink_asset_id),
             exported_profiles,
             proxy_queued: proxy_diagnostics.queued,

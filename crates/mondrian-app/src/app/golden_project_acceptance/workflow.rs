@@ -167,7 +167,7 @@ impl GoldenProductWorkflowDriver {
     pub(super) fn reopen_created_project(&mut self) -> anyhow::Result<GoldenProjectOpenEvidence> {
         self.verify_binding()?;
         let created_session = author_checkpoint(&self.state)?;
-        self.state.close_project();
+        self.state.close_project()?;
         ensure!(
             self.state.authoring_session_id().is_none(),
             "close retained the created Authoring Session"
@@ -398,7 +398,7 @@ fn golden_product_workflow_binds_hero_and_diagnostic_sequences_explicitly() -> a
         "reopen must retain persisted ProjectId"
     );
 
-    workflow.app_mut().close_project();
+    workflow.app_mut().close_project()?;
     let binding_error = workflow
         .verify_binding()
         .expect_err("closed Project must fail the workflow binding");

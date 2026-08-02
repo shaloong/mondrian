@@ -56,9 +56,10 @@ impl AppState {
                     payload.duration_frames,
                     time_base,
                 ))?;
+                let media_probe = asset.media_probe();
                 validate_source_interval(
                     asset.kind.clone(),
-                    asset.media_info.duration,
+                    media_probe.map(|probe| probe.duration),
                     source_in,
                     duration,
                     time_base.to_f64(),
@@ -82,7 +83,7 @@ impl AppState {
                     clip.set_source_origin(source_in)?;
                     clip.label = Some(asset.name.clone());
                     clip.link_group = link_group;
-                    if let Some(video) = asset.media_info.primary_video() {
+                    if let Some(video) = media_probe.and_then(|probe| probe.primary_video()) {
                         auto_fit_picture(sequence, &mut clip, video.width, video.height);
                     }
                     placements.push(InsertEditPlacement {
@@ -122,14 +123,21 @@ impl AppState {
                 Ok((sequence.id, outcome))
             })?;
 
-        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         for clip_id in &outcome.inserted_clip_ids {
             self.event_bus.publish(AppEvent::ClipAdded { sequence_id, clip_id: *clip_id });
         }
         if timeline_state_policy == InsertTimelineStatePolicy::FollowEdit
             && playhead_frame_before >= insert_frame
         {
-            self.seek(playhead_frame_before.saturating_add(duration_frames));
+            if let Some(frame) = playhead_frame_before.checked_add(duration_frames) {
+                self.reconcile_playhead_after_committed_authoring_change(frame, "timeline_insert");
+            } else {
+                tracing::error!(
+                    playhead_frame_before,
+                    duration_frames,
+                    "failed to move playhead after committed Insert: frame arithmetic overflow"
+                );
+            }
         }
         Ok(outcome)
     }
@@ -146,12 +154,28 @@ fn validate_asset_targets(
                     "an audio Asset requires exactly one audio target Track",
                 ));
             }
+            let media_probe = asset.media_probe().ok_or_else(|| {
+                insert_error("the selected audio Asset has no coherent media probe")
+            })?;
+            if media_probe.primary_audio().is_none() {
+                return Err(insert_error(
+                    "the selected audio Asset has no audio stream to insert",
+                ));
+            }
         }
         AssetKind::Video => {
             if payload.video_target_track_id.is_none() {
                 return Err(insert_error("a video Asset requires a video target Track"));
             }
-            if payload.audio_target_track_id.is_some() && !asset.media_info.has_audio {
+            let media_probe = asset.media_probe().ok_or_else(|| {
+                insert_error("the selected video Asset has no coherent media probe")
+            })?;
+            if media_probe.primary_video().is_none() {
+                return Err(insert_error(
+                    "the selected video Asset has no video stream to insert",
+                ));
+            }
+            if payload.audio_target_track_id.is_some() && !media_probe.has_audio {
                 return Err(insert_error(
                     "the selected video Asset has no audio component to insert",
                 ));
@@ -161,6 +185,11 @@ fn validate_asset_targets(
             if payload.video_target_track_id.is_none() || payload.audio_target_track_id.is_some() {
                 return Err(insert_error(
                     "a still-image Asset requires exactly one video target Track",
+                ));
+            }
+            if asset.media_probe().and_then(|probe| probe.primary_video()).is_none() {
+                return Err(insert_error(
+                    "the selected still-image Asset has no coherent picture probe",
                 ));
             }
         }
@@ -177,7 +206,7 @@ fn validate_asset_targets(
 
 fn validate_source_interval(
     kind: AssetKind,
-    available: std::time::Duration,
+    available: Option<std::time::Duration>,
     source_in: TimelineTime,
     duration: TimelineTime,
     frame_seconds: f64,
@@ -193,6 +222,9 @@ fn validate_source_interval(
         }
         return Ok(());
     }
+    let available = available.ok_or_else(|| {
+        insert_error("file-backed media has no coherent probe for source-range validation")
+    })?;
     let requested_end = source_in.checked_add(duration)?.to_f64();
     let tolerance = frame_seconds.abs() * 0.5;
     if available.is_zero() || requested_end > available.as_secs_f64() + tolerance {

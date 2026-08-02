@@ -37,10 +37,12 @@ pub(super) fn composite_transition_input_f32(
         TimelineTransitionInput::Media(layer) => {
             let frame = layer.frame.rgba_f32();
             let effect_output;
-            let source = if layer.effect_graph.graph.is_identity() {
+            let source = if layer.effect_graph.graph().is_identity() {
                 frame.data.as_slice()
             } else {
                 effect_output = apply_effect_graph_f32(
+                    &mut scratch.effect_execution,
+                    &mut scratch.color_execution,
                     &frame.data,
                     frame.width,
                     frame.height,
@@ -66,7 +68,7 @@ pub(super) fn composite_transition_input_f32(
         TimelineTransitionInput::SolidColor(layer) => {
             let pixel_count = width as usize * height as usize;
             let color = [layer.color.r, layer.color.g, layer.color.b, layer.color.a];
-            if layer.effect_graph.graph.is_identity() && is_identity_transform(layer.transform) {
+            if layer.effect_graph.graph().is_identity() && is_identity_transform(layer.transform) {
                 alpha_blend_f32_solid(
                     canvas,
                     color,
@@ -77,10 +79,12 @@ pub(super) fn composite_transition_input_f32(
             } else {
                 scratch.solid_fill_f32.resize(pixel_count, color);
                 scratch.solid_fill_f32.fill(color);
-                let source = if layer.effect_graph.graph.is_identity() {
+                let source = if layer.effect_graph.graph().is_identity() {
                     scratch.solid_fill_f32.as_slice()
                 } else {
                     scratch.solid_effect_f32 = apply_effect_graph_f32(
+                        &mut scratch.effect_execution,
+                        &mut scratch.color_execution,
                         &scratch.solid_fill_f32,
                         width,
                         height,
@@ -132,38 +136,19 @@ pub(crate) fn cross_dissolve_straight_rgba_f32(
 pub(super) fn diagnose_transition_input(
     input: &TimelineTransitionInput<'_>,
     diagnostics: &mut TimelineCompositeDiagnostics,
+    session: &mut EffectExecutionSession,
 ) {
     match input {
         TimelineTransitionInput::Transparent => {}
         TimelineTransitionInput::Media(layer) => {
-            diagnostics.effect_gpu_blockers =
-                diagnostics.effect_gpu_blockers.saturating_add(u64::from(
-                    mondrian_effects::get_or_lower_effect_graph_to_gpu_plan(&layer.effect_graph)
-                        .is_err(),
-                ));
-            if effect_domain_is_blocked(&layer.effect_graph) {
-                diagnostics.blocked_media_effect_domain =
-                    diagnostics.blocked_media_effect_domain.saturating_add(1);
-            } else if !compiled_effect_graph_supports_rgba_f32_with_domain_processor(
-                &layer.effect_graph,
-            ) {
-                diagnostics.legacy_media_effect = diagnostics.legacy_media_effect.saturating_add(1);
-            }
+            diagnostics.effect_gpu_blockers = diagnostics.effect_gpu_blockers.saturating_add(
+                u64::from(session.get_or_lower_gpu_plan(&layer.effect_graph).is_err()),
+            );
         }
         TimelineTransitionInput::SolidColor(layer) => {
-            diagnostics.effect_gpu_blockers =
-                diagnostics.effect_gpu_blockers.saturating_add(u64::from(
-                    mondrian_effects::get_or_lower_effect_graph_to_gpu_plan(&layer.effect_graph)
-                        .is_err(),
-                ));
-            if effect_domain_is_blocked(&layer.effect_graph) {
-                diagnostics.blocked_solid_effect_domain =
-                    diagnostics.blocked_solid_effect_domain.saturating_add(1);
-            } else if !compiled_effect_graph_supports_rgba_f32_with_domain_processor(
-                &layer.effect_graph,
-            ) {
-                diagnostics.legacy_solid_effect = diagnostics.legacy_solid_effect.saturating_add(1);
-            }
+            diagnostics.effect_gpu_blockers = diagnostics.effect_gpu_blockers.saturating_add(
+                u64::from(session.get_or_lower_gpu_plan(&layer.effect_graph).is_err()),
+            );
         }
     }
 }
@@ -188,10 +173,10 @@ pub(super) fn composite_transition_input_rgba8(
                     pixel.iter().map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8)
                 })
                 .collect();
-            let source = if layer.effect_graph.graph.is_identity() {
+            let source = if layer.effect_graph.graph().is_identity() {
                 scratch.media_source.as_slice()
             } else {
-                scratch.media_effect = apply_compiled_effect_graph(
+                scratch.media_effect = scratch.effect_execution.apply_compiled_rgba8(
                     &scratch.media_source,
                     descriptor.width,
                     descriptor.height,
@@ -219,10 +204,10 @@ pub(super) fn composite_transition_input_rgba8(
                 height as usize,
                 layer.color,
             );
-            let source = if layer.effect_graph.graph.is_identity() {
+            let source = if layer.effect_graph.graph().is_identity() {
                 scratch.solid_fill.as_slice()
             } else {
-                scratch.media_effect = apply_compiled_effect_graph(
+                scratch.media_effect = scratch.effect_execution.apply_compiled_rgba8(
                     &scratch.solid_fill,
                     width,
                     height,

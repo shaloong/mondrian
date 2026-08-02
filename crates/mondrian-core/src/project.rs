@@ -38,6 +38,28 @@ impl ProjectMeta {
     pub fn touch(&mut self) {
         self.updated_at = Utc::now();
     }
+
+    /// Compare user-authored metadata while ignoring publication timestamp evidence.
+    pub fn author_state_eq_ignoring_updated_at(&self, other: &Self) -> bool {
+        let Self {
+            name,
+            description,
+            author,
+            created_at,
+            updated_at: _,
+        } = self;
+        let Self {
+            name: other_name,
+            description: other_description,
+            author: other_author,
+            created_at: other_created_at,
+            updated_at: _,
+        } = other;
+        name == other_name
+            && description == other_description
+            && author == other_author
+            && created_at == other_created_at
+    }
 }
 
 /// Project-wide color transform vocabulary and execution engine.
@@ -124,5 +146,64 @@ impl Default for ProjectSettings {
             cache_dir: None,
             auto_save_interval: 300,
         }
+    }
+}
+
+impl crate::AuthoringFootprint for ProjectMeta {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self {
+            name,
+            description,
+            author,
+            created_at: _,
+            updated_at: _,
+        } = self;
+        collector.collect(name)?;
+        collector.collect(description)?;
+        collector.collect(author)
+    }
+}
+
+impl crate::AuthoringFootprint for ProjectColorEnvironment {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self { engine } = self;
+        collector.collect(engine)
+    }
+}
+
+impl crate::AuthoringFootprint for ProjectSettings {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self {
+            proxy_enabled: _,
+            proxy_resolution: _,
+            cache_dir,
+            auto_save_interval: _,
+        } = self;
+        collector.collect(cache_dir)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_meta_author_comparison_ignores_only_publication_timestamp() {
+        let meta = ProjectMeta::new("Project");
+        let mut publication = meta.clone();
+        publication.updated_at += chrono::Duration::seconds(1);
+        assert!(meta.author_state_eq_ignoring_updated_at(&publication));
+
+        publication.name = "Renamed outside authoring".to_owned();
+        assert!(!meta.author_state_eq_ignoring_updated_at(&publication));
     }
 }

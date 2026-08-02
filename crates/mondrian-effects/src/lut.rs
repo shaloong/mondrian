@@ -1,14 +1,12 @@
 //! 3D LUT 加载、校验与 CPU 采样。
 
+use crate::effect::PreparedLut3D;
 use mondrian_core::{MondrianError, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{OnceLock, RwLock};
-use std::time::{Duration, Instant};
-
-const HOT_REVALIDATION_INTERVAL: Duration = Duration::from_millis(250);
+use std::sync::{Arc, Mutex};
 
 /// Parsed three-dimensional `.cube` lookup table.
 ///
@@ -144,10 +142,6 @@ impl Lut3D {
             .map_err(|error| lut_error(format!("LUT is not UTF-8 text: {error}")))?;
         let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown").to_string();
         Self::from_cube_str(name, content)
-    }
-
-    pub fn from_cube_file_cached(path: &Path) -> Result<Self> {
-        LutCache::global().load_cube_for_render(path)
     }
 
     pub fn from_cube_str(name: impl Into<String>, content: &str) -> Result<Self> {
@@ -309,21 +303,44 @@ impl Lut3D {
     /// remains in float so partial intensity preserves extended working-range
     /// values instead of introducing an RGBA8 boundary.
     pub fn apply_rgba_f32_in_place(&self, rgba: &mut [[f32; 4]], intensity: f32) {
+        match self.apply_rgba_f32_in_place_controlled(rgba, intensity, &mut || {
+            Ok::<(), std::convert::Infallible>(())
+        }) {
+            Ok(()) => {}
+            Err(never) => match never {},
+        }
+    }
+
+    /// Apply this LUT with caller-owned cooperative checkpoints.
+    ///
+    /// This is crate-private because cancellation/deadline policy belongs to
+    /// an owning execution attempt rather than to the immutable LUT resource.
+    pub(crate) fn apply_rgba_f32_in_place_controlled<E>(
+        &self,
+        rgba: &mut [[f32; 4]],
+        intensity: f32,
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<(), E> {
+        checkpoint()?;
         let intensity = intensity.clamp(0.0, 1.0);
         if intensity <= 1.0e-4 {
-            return;
+            return Ok(());
         }
-        for pixel in rgba {
-            if pixel[3] <= 1.0e-6 {
-                continue;
+        for chunk in rgba.chunks_mut(4_096) {
+            checkpoint()?;
+            for pixel in chunk {
+                if pixel[3] <= 1.0e-6 {
+                    continue;
+                }
+                let source = [pixel[0], pixel[1], pixel[2]];
+                let graded = self.sample(source);
+                let output = lerp3(source, graded, intensity);
+                pixel[0] = output[0];
+                pixel[1] = output[1];
+                pixel[2] = output[2];
             }
-            let source = [pixel[0], pixel[1], pixel[2]];
-            let graded = self.sample(source);
-            let output = lerp3(source, graded, intensity);
-            pixel[0] = output[0];
-            pixel[1] = output[1];
-            pixel[2] = output[2];
         }
+        checkpoint()
     }
 
     fn at(&self, r: u32, g: u32, b: u32) -> [f32; 3] {
@@ -333,86 +350,243 @@ impl Lut3D {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct LutCacheFingerprint {
+struct LutPreparationFingerprint {
     sha256: [u8; 32],
 }
 
 #[derive(Debug, Clone)]
-struct LutCacheEntry {
-    fingerprint: LutCacheFingerprint,
-    lut: Lut3D,
-    validated_at: Instant,
+struct LutPreparationCacheEntry {
+    fingerprint: LutPreparationFingerprint,
+    prepared: Arc<PreparedLut3D>,
+    retained_bytes: usize,
 }
 
-#[derive(Debug, Default)]
-pub struct LutCache {
-    entries: RwLock<HashMap<PathBuf, LutCacheEntry>>,
+/// Explicit residency limits for one LUT preparation owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LutPreparationCacheConfig {
+    max_entries: usize,
+    max_bytes: usize,
 }
 
-impl LutCache {
-    pub fn global() -> &'static Self {
-        static CACHE: OnceLock<LutCache> = OnceLock::new();
-        CACHE.get_or_init(LutCache::default)
+impl LutPreparationCacheConfig {
+    /// Construct exact entry and conservative logical-byte limits.
+    pub const fn new(max_entries: usize, max_bytes: usize) -> Self {
+        Self { max_entries, max_bytes }
     }
 
-    pub fn load_cube(&self, path: &Path) -> Result<Lut3D> {
+    /// A non-resident preparation policy.
+    pub const fn uncached() -> Self {
+        Self::new(0, 0)
+    }
+
+    /// Maximum retained prepared LUTs.
+    pub const fn max_entries(self) -> usize {
+        self.max_entries
+    }
+
+    /// Maximum conservative logical bytes retained by this owner.
+    pub const fn max_bytes(self) -> usize {
+        self.max_bytes
+    }
+}
+
+/// Current bounded residency facts for one LUT preparation owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LutPreparationCacheDiagnostics {
+    /// Retained prepared LUT count.
+    pub entries: usize,
+    /// Aggregate conservative logical charge.
+    pub retained_bytes: usize,
+    /// Configured entry limit.
+    pub max_entries: usize,
+    /// Configured logical-byte limit.
+    pub max_bytes: usize,
+}
+
+#[derive(Debug)]
+struct LutPreparationCacheState {
+    config: LutPreparationCacheConfig,
+    entries: HashMap<PathBuf, LutPreparationCacheEntry>,
+    lru: VecDeque<PathBuf>,
+    retained_bytes: usize,
+    residency_epoch: Arc<()>,
+}
+
+/// Owner-scoped, entry-and-byte-bounded prepared LUT residency.
+///
+/// Preview and Export must own different instances. Every preparation reads
+/// and hashes the complete file before a cache hit is accepted, so this
+/// low-frequency Module never turns a time window into external-resource
+/// validity. Oversized entries are returned to the caller but not retained.
+#[derive(Debug)]
+pub struct LutPreparationCache {
+    state: Mutex<LutPreparationCacheState>,
+}
+
+impl LutPreparationCache {
+    /// Create one cache with explicit owner-local limits.
+    pub fn new(config: LutPreparationCacheConfig) -> Self {
+        Self {
+            state: Mutex::new(LutPreparationCacheState {
+                config,
+                entries: HashMap::new(),
+                lru: VecDeque::new(),
+                retained_bytes: 0,
+                residency_epoch: Arc::new(()),
+            }),
+        }
+    }
+
+    /// Create a cache that performs preparation without retaining entries.
+    pub fn uncached() -> Self {
+        Self::new(LutPreparationCacheConfig::uncached())
+    }
+
+    /// Load, validate, and prepare one `.cube` resource.
+    ///
+    /// File I/O, SHA-256 validation, and parsing happen only at an explicit
+    /// preparation seam. A matching resident entry avoids reparsing and shares
+    /// its immutable `PreparedLut3D` payload.
+    pub fn load_cube(&self, path: &Path) -> Result<Arc<PreparedLut3D>> {
+        let residency_epoch = {
+            let state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            Arc::clone(&state.residency_epoch)
+        };
         let key = cache_key_for_path(path);
         let bytes = std::fs::read(path)?;
         let fingerprint = lut_file_fingerprint(&bytes);
-        let cached = {
-            let entries = self.entries.read().expect("LUT cache read lock");
-            entries
-                .get(&key)
-                .filter(|entry| entry.fingerprint == fingerprint)
-                .map(|entry| entry.lut.clone())
-        };
-        if let Some(lut) = cached {
-            if let Some(entry) = self.entries.write().expect("LUT cache write lock").get_mut(&key) {
-                entry.validated_at = Instant::now();
+        {
+            let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if Arc::ptr_eq(&state.residency_epoch, &residency_epoch) {
+                if let Some(prepared) = state
+                    .entries
+                    .get(&key)
+                    .filter(|entry| entry.fingerprint == fingerprint)
+                    .map(|entry| Arc::clone(&entry.prepared))
+                {
+                    state.touch(&key);
+                    return Ok(prepared);
+                }
+                state.remove(&key);
             }
-            return Ok(lut);
         }
 
         let content = std::str::from_utf8(&bytes)
             .map_err(|error| lut_error(format!("LUT is not UTF-8 text: {error}")))?;
         let name = path.file_stem().and_then(|value| value.to_str()).unwrap_or("unknown");
-        let lut = Lut3D::from_cube_str(name, content)?;
-        self.entries.write().expect("LUT cache write lock").insert(
+        let prepared = Arc::new(PreparedLut3D::new(Lut3D::from_cube_str(name, content)?));
+        let retained_bytes = lut_cache_entry_retained_bytes(&key, &prepared);
+
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !Arc::ptr_eq(&state.residency_epoch, &residency_epoch) {
+            return Ok(prepared);
+        }
+        if let Some(existing) = state
+            .entries
+            .get(&key)
+            .filter(|entry| entry.fingerprint == fingerprint)
+            .map(|entry| Arc::clone(&entry.prepared))
+        {
+            state.touch(&key);
+            return Ok(existing);
+        }
+        state.remove(&key);
+        state.insert(
             key,
-            LutCacheEntry {
+            LutPreparationCacheEntry {
                 fingerprint,
-                lut: lut.clone(),
-                validated_at: Instant::now(),
+                prepared: Arc::clone(&prepared),
+                retained_bytes,
             },
         );
-        Ok(lut)
+        Ok(prepared)
     }
 
-    fn load_cube_for_render(&self, path: &Path) -> Result<Lut3D> {
-        let key = cache_key_for_path(path);
-        if let Some(lut) = self
-            .entries
-            .read()
-            .expect("LUT cache read lock")
-            .get(&key)
-            .filter(|entry| entry.validated_at.elapsed() < HOT_REVALIDATION_INTERVAL)
-            .map(|entry| entry.lut.clone())
-        {
-            return Ok(lut);
-        }
-        self.load_cube(path)
+    /// Apply new owner-local limits and synchronously evict LRU entries.
+    pub fn reconfigure(&self, config: LutPreparationCacheConfig) {
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.config = config;
+        state.trim();
     }
 
+    /// Remove every retained LUT while preserving configured limits.
+    ///
+    /// This also rotates the residency epoch, so a preparation that began
+    /// before this call may return its immutable result but cannot repopulate
+    /// the cleared owner.
     pub fn clear(&self) {
-        self.entries.write().expect("LUT cache write lock").clear();
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.entries.clear();
+        state.lru.clear();
+        state.retained_bytes = 0;
+        state.residency_epoch = Arc::new(());
     }
 
+    /// Current owner-local diagnostics.
+    pub fn diagnostics(&self) -> LutPreparationCacheDiagnostics {
+        let state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        LutPreparationCacheDiagnostics {
+            entries: state.entries.len(),
+            retained_bytes: state.retained_bytes,
+            max_entries: state.config.max_entries,
+            max_bytes: state.config.max_bytes,
+        }
+    }
+
+    /// Retained prepared LUT count.
     pub fn len(&self) -> usize {
-        self.entries.read().expect("LUT cache read lock").len()
+        self.diagnostics().entries
     }
 
+    /// Whether this owner currently retains no prepared LUT.
     pub fn is_empty(&self) -> bool {
-        self.entries.read().expect("LUT cache read lock").is_empty()
+        self.len() == 0
+    }
+}
+
+impl LutPreparationCacheState {
+    fn insert(&mut self, key: PathBuf, entry: LutPreparationCacheEntry) {
+        if self.config.max_entries == 0
+            || entry.retained_bytes > self.config.max_bytes
+            || self.config.max_bytes == 0
+        {
+            return;
+        }
+        self.retained_bytes = self.retained_bytes.saturating_add(entry.retained_bytes);
+        self.entries.insert(key.clone(), entry);
+        self.touch(&key);
+        self.trim();
+    }
+
+    fn remove(&mut self, key: &Path) {
+        if let Some(entry) = self.entries.remove(key) {
+            self.retained_bytes = self.retained_bytes.saturating_sub(entry.retained_bytes);
+        }
+        if let Some(index) = self.lru.iter().position(|candidate| candidate.as_path() == key) {
+            self.lru.remove(index);
+        }
+    }
+
+    fn touch(&mut self, key: &Path) {
+        if let Some(index) = self.lru.iter().position(|candidate| candidate.as_path() == key) {
+            self.lru.remove(index);
+        }
+        self.lru.push_back(key.to_path_buf());
+    }
+
+    fn trim(&mut self) {
+        while self.entries.len() > self.config.max_entries
+            || self.retained_bytes > self.config.max_bytes
+        {
+            let Some(key) = self.lru.pop_front() else {
+                self.entries.clear();
+                self.retained_bytes = 0;
+                break;
+            };
+            if let Some(entry) = self.entries.remove(&key) {
+                self.retained_bytes = self.retained_bytes.saturating_sub(entry.retained_bytes);
+            }
+        }
     }
 }
 
@@ -420,8 +594,19 @@ fn cache_key_for_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn lut_file_fingerprint(bytes: &[u8]) -> LutCacheFingerprint {
-    LutCacheFingerprint { sha256: Sha256::digest(bytes).into() }
+fn lut_file_fingerprint(bytes: &[u8]) -> LutPreparationFingerprint {
+    LutPreparationFingerprint { sha256: Sha256::digest(bytes).into() }
+}
+
+fn lut_cache_entry_retained_bytes(path: &Path, prepared: &PreparedLut3D) -> usize {
+    // One path is owned by the HashMap key and another by the LRU queue.
+    // Add a fixed bucket/control allowance so the logical byte limit does not
+    // pretend that only the LUT table consumes residency.
+    std::mem::size_of::<(PathBuf, LutPreparationCacheEntry)>()
+        .saturating_add(std::mem::size_of::<PathBuf>())
+        .saturating_add(path.as_os_str().len().saturating_mul(2))
+        .saturating_add(64)
+        .saturating_add(prepared.retained_bytes_estimate())
 }
 
 fn validate_lut_size(size: u32) -> Result<()> {
@@ -712,10 +897,8 @@ mod tests {
     }
 
     #[test]
-    fn lut_cache_reuses_entries_and_invalidates_on_file_change() {
-        use std::time::UNIX_EPOCH;
-
-        let cache = LutCache::default();
+    fn lut_preparation_cache_reuses_entries_and_invalidates_on_file_change() {
+        let cache = LutPreparationCache::new(LutPreparationCacheConfig::new(4, 1024 * 1024));
         let unique = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_nanos();
         let root = std::env::temp_dir().join(format!("mondrian-lut-cache-{unique}"));
         let _ = std::fs::remove_dir_all(&root);
@@ -726,7 +909,7 @@ mod tests {
 
         let first = cache.load_cube(&path).expect("first");
         let second = cache.load_cube(&path).expect("second");
-        assert_eq!(first, second);
+        assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(cache.len(), 1);
 
         std::fs::write(
@@ -749,12 +932,73 @@ mod tests {
             "fixture must prove same-length mutation invalidation"
         );
         let changed = cache.load_cube(&path).expect("changed");
-        assert_ne!(first.data, changed.data);
+        assert!(!Arc::ptr_eq(&first, &changed));
+        assert_ne!(first.lut().data, changed.lut().data);
         assert_eq!(
             cache.len(),
             1,
             "cache should still have 1 entry after file modification"
         );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lut_preparation_cache_is_owner_local_lru_and_byte_bounded() {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_nanos();
+        let root = std::env::temp_dir().join(format!("mondrian-lut-owner-cache-{unique}"));
+        std::fs::create_dir_all(&root).expect("root");
+        let first_path = root.join("first.cube");
+        let second_path = root.join("second.cube");
+        std::fs::write(&first_path, cube_identity_2()).expect("first cube");
+        std::fs::write(&second_path, cube_identity_2()).expect("second cube");
+
+        let preview = LutPreparationCache::new(LutPreparationCacheConfig::new(1, 1024 * 1024));
+        let export = LutPreparationCache::new(LutPreparationCacheConfig::new(1, 1024 * 1024));
+        let preview_first = preview.load_cube(&first_path).expect("preview first");
+        let export_first = export.load_cube(&first_path).expect("export first");
+        assert!(
+            !Arc::ptr_eq(&preview_first, &export_first),
+            "owners must not share mutable residency authority"
+        );
+
+        preview.load_cube(&second_path).expect("preview second");
+        assert_eq!(preview.diagnostics().entries, 1);
+        assert!(preview.diagnostics().retained_bytes <= preview.diagnostics().max_bytes);
+        let preview_first_after_eviction =
+            preview.load_cube(&first_path).expect("preview first after eviction");
+        assert!(!Arc::ptr_eq(&preview_first, &preview_first_after_eviction));
+        let export_cached = export.load_cube(&first_path).expect("export cached");
+        assert!(
+            Arc::ptr_eq(&export_cached, &export_first),
+            "preview eviction must not mutate Export residency"
+        );
+
+        preview.reconfigure(LutPreparationCacheConfig::uncached());
+        assert!(preview.is_empty());
+        assert_eq!(preview.diagnostics().retained_bytes, 0);
+        let uncached_first = preview.load_cube(&first_path).expect("uncached first");
+        let uncached_second = preview.load_cube(&first_path).expect("uncached second");
+        assert!(!Arc::ptr_eq(&uncached_first, &uncached_second));
+        assert!(preview.is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn oversized_prepared_lut_is_returned_without_residency() {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_nanos();
+        let root = std::env::temp_dir().join(format!("mondrian-lut-oversized-{unique}"));
+        std::fs::create_dir_all(&root).expect("root");
+        let path = root.join("look.cube");
+        std::fs::write(&path, cube_identity_2()).expect("cube");
+        let cache = LutPreparationCache::new(LutPreparationCacheConfig::new(8, 1));
+
+        let first = cache.load_cube(&path).expect("first");
+        let second = cache.load_cube(&path).expect("second");
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(cache.diagnostics().entries, 0);
+        assert_eq!(cache.diagnostics().retained_bytes, 0);
 
         let _ = std::fs::remove_dir_all(root);
     }

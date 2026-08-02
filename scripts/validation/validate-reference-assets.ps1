@@ -53,7 +53,7 @@ $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $playbackPlan = Get-Content -LiteralPath $playbackPlanPath -Raw | ConvertFrom-Json
 $machineProfile = Get-Content -LiteralPath $machineProfilePath -Raw | ConvertFrom-Json
 if ($manifest.schema_version -ne 2) { Add-Issue "error" "schema.unsupported" "Unsupported corpus schema version: $($manifest.schema_version)" }
-if ($playbackPlan.schema_version -ne 3) { Add-Issue "error" "playback-plan.schema-unsupported" "Unsupported playback gate-plan schema: $($playbackPlan.schema_version)" }
+if ($playbackPlan.schema_version -ne 4) { Add-Issue "error" "playback-plan.schema-unsupported" "Unsupported playback gate-plan schema: $($playbackPlan.schema_version)" }
 if ($machineProfile.schema_version -ne 3) { Add-Issue "error" "machine-profile.schema-unsupported" "Unsupported Windows machine-profile schema: $($machineProfile.schema_version)" }
 if ($playbackPlan.machine_profile -ne $machineProfile.id) { Add-Issue "error" "playback-plan.machine-profile-mismatch" "Playback plan references '$($playbackPlan.machine_profile)' but the configured profile is '$($machineProfile.id)'" }
 $diagnosticExecution = if (Has-Property $playbackPlan "diagnostic_execution") { $playbackPlan.diagnostic_execution } else { $null }
@@ -378,7 +378,7 @@ foreach ($export in $golden.exports) {
 
 $gateIds = @{}
 foreach ($gate in $playbackPlan.gates) {
-    $missingGateFields = @("id", "fixture_id", "required_purposes", "cargo_test", "media_environment", "process_timeout_seconds", "expected_report_profile", "expected_report_path") | Where-Object { -not (Has-Property $gate $_) }
+    $missingGateFields = @("id", "fixture_id", "required_purposes", "cargo_test", "media_environment", "build_timeout_seconds", "process_timeout_seconds", "expected_report_profile", "expected_report_path") | Where-Object { -not (Has-Property $gate $_) }
     foreach ($field in $missingGateFields) { Add-Issue "error" "playback-plan.gate-field-missing" "Playback gate is missing '$field'" }
     if (@($missingGateFields).Count -gt 0) { continue }
     if ($gateIds.ContainsKey($gate.id)) { Add-Issue "error" "playback-plan.duplicate-gate" "Duplicate playback gate id: $($gate.id)" } else { $gateIds[$gate.id] = $true }
@@ -389,6 +389,10 @@ foreach ($gate in $playbackPlan.gates) {
     $fixture = $ids[$gate.fixture_id]
     foreach ($field in @("cargo_test", "media_environment", "expected_report_profile", "expected_report_path")) {
         if (-not (Has-Property $gate $field) -or [string]::IsNullOrWhiteSpace([string]$gate.$field)) { Add-Issue "error" "playback-plan.gate-field-missing" "Gate '$($gate.id)' requires non-empty '$field'" }
+    }
+    $buildTimeoutSeconds = 0
+    if (-not [int]::TryParse([string]$gate.build_timeout_seconds, [ref]$buildTimeoutSeconds) -or $buildTimeoutSeconds -le 0) {
+        Add-Issue "error" "playback-plan.gate-build-timeout-invalid" "Gate '$($gate.id)' requires a positive build_timeout_seconds"
     }
     $processTimeoutSeconds = 0
     if (-not [int]::TryParse([string]$gate.process_timeout_seconds, [ref]$processTimeoutSeconds) -or $processTimeoutSeconds -le 0) {
@@ -404,6 +408,9 @@ foreach ($gate in $playbackPlan.gates) {
     }
 }
 $baselineEvidence = if (Has-Property $playbackPlan "baseline_acceptance") { $playbackPlan.baseline_acceptance } else { $null }
+if ($null -eq $baselineEvidence -or -not (Has-Property $baselineEvidence "bounded_gate_build_required") -or $baselineEvidence.bounded_gate_build_required -ne $true) {
+    Add-Issue "error" "playback-plan.bounded-gate-build-requirement-missing" "Baseline evidence must require a separately bounded gate test build"
+}
 if ($null -eq $baselineEvidence -or -not (Has-Property $baselineEvidence "external_process_timeout_required") -or $baselineEvidence.external_process_timeout_required -ne $true) {
     Add-Issue "error" "playback-plan.external-timeout-requirement-missing" "Baseline evidence must require the external gate process timeout"
 }

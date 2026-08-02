@@ -41,6 +41,26 @@ the persisted time representation. SMPTE timecode is a separate display
 contract containing nominal rate, drop/non-drop rules, and start offset; it is
 not the arithmetic timeline value.
 
+Realtime audio prepare, reprime, and device recovery follow the same rule. The
+Playback Engine lowers its authoritative phase at one explicit Playback Epoch
+and monotonic timestamp directly to an `AudioSamplePosition` on the requested
+output rate. A published integer video frame is never an intermediate audio
+anchor; rate mismatch, negative realtime anchor, or overflow fails before
+execution state changes.
+
+After a video source time is lowered once to an integer stream PTS, exact frame
+selection uses the decoded frame's half-open presentation interval
+`[start_pts, end_pts)`, never a nominal-frame or nearest-PTS tolerance. A
+positive decoded duration supplies a provisional end; an observed successor
+PTS conservatively shortens it when earlier. With neither duration nor
+successor, only equality with `start_pts` is proven. Playback and deterministic
+Still requests fail closed with typed temporal evidence when no interval covers
+the request; only explicit Scrub evaluation may publish a nearby non-covering
+frame as Degraded. The same duration or successor evidence proves the same
+interval for every access mode; access policy changes fallback behavior, never
+the meaning of temporal evidence. A valid VFR interior therefore need not equal
+the selected frame's start PTS.
+
 Visual and audio automation share the same exact curve primitives and stable
 Parameter IDs. They do not share evaluation cadence or processor semantics:
 visual consumers usually sample curves at frame or shutter instants, while the

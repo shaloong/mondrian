@@ -23,17 +23,74 @@
 ## Existing Smoke Tests
 
 ```powershell
-$env:MONDRIAN_PERF_OUTPUT='target/perf/project-lifecycle.jsonl'; cargo test -p mondrian-app perf_project_lifecycle_smoke -- --ignored --nocapture
-$env:MONDRIAN_PREVIEW_SIM_OUTPUT='target/perf/preview-1080p2997.jsonl'; cargo test -p mondrian-app preview_1080p2997_simulated_perf -- --ignored --nocapture
-$env:MONDRIAN_EXPORT_SIM_OUTPUT='target/perf/export-1080p2997.jsonl'; cargo test -p mondrian-export export_1080p2997_simulated_perf -- --ignored --nocapture
-$env:MONDRIAN_PERF_OUTPUT='target/perf/preview-media.jsonl'; cargo test -p mondrian-app preview_media_decode_cache_smoke -- --ignored --nocapture
-$env:MONDRIAN_PREVIEW_EXTERNAL_MEDIA_PATH='E:\Video Projects\Mondrian Test\HEVC Samples\hevc_4k25P_main10_1.mp4'; $env:MONDRIAN_PERF_OUTPUT='target/perf/preview-external-media.jsonl'; cargo test -p mondrian-app preview_media_external_access_mode_smoke -- --ignored --nocapture
-$env:MONDRIAN_PERF_OUTPUT='target/perf/preview-playback.jsonl'; cargo test -p mondrian-app preview_media_continuous_playback_smoke -- --ignored --nocapture
-$env:MONDRIAN_PREVIEW_DECODE_FIXTURE='E:\media\sample-4k-hdr.mov'; $env:MONDRIAN_PREVIEW_DECODE_TIMESTAMP='1.0'; $env:MONDRIAN_PREVIEW_DECODE_MAX_WIDTH='1920'; $env:MONDRIAN_PREVIEW_DECODE_MAX_HEIGHT='1080'; cargo test -p mondrian-media preview_decode_fixture_perf_smoke -- --ignored --nocapture
-$env:MONDRIAN_RENDERER_GPU_OUTPUT_SMOKE_OUTPUT='target/perf/renderer-gpu-output.jsonl'; cargo test -p mondrian-renderer gpu_output_boundary_runtime_smoke_report_on_real_wgpu_device -- --ignored --nocapture
-$env:MONDRIAN_COLOR_VIEW_GPU_PERF_OUTPUT='target/perf/color-view-4k.jsonl'; cargo test -p mondrian-renderer --test color_view_gpu_perf standard_views_4k_gpu_timestamp_meet_budget_and_beat_aces2 -- --ignored --nocapture
-$env:MONDRIAN_COLOR_TRANSFORM_GPU_PERF_OUTPUT='target/perf/color-transform-4k.jsonl'; cargo test -p mondrian-renderer --test color_view_gpu_perf standard_input_transforms_4k_gpu_timestamp_meet_budget -- --ignored --nocapture
+$perfRun = "target/perf/manual-$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"
+New-Item -ItemType Directory -Path $perfRun | Out-Null
+$env:MONDRIAN_PERF_OUTPUT=Join-Path $perfRun 'project-lifecycle.jsonl'; cargo test -p mondrian-app --release -j 2 --lib perf_project_lifecycle_smoke -- --ignored --nocapture --test-threads=1
+$env:MONDRIAN_PERF_OUTPUT=Join-Path $perfRun 'app-ui-scale.jsonl'; cargo test -p mondrian-app --release -j 2 --lib app_ui_scale_smoke -- --ignored --nocapture --test-threads=1
+$env:MONDRIAN_PERF_OUTPUT=Join-Path $perfRun 'preview-media.jsonl'; cargo test -p mondrian-app --release -j 2 --lib preview_media_decode_cache_smoke -- --ignored --nocapture --test-threads=1
+$env:MONDRIAN_PERF_OUTPUT=Join-Path $perfRun 'preview-playback.jsonl'; cargo test -p mondrian-app --release -j 2 --lib preview_media_continuous_playback_smoke -- --ignored --nocapture --test-threads=1
+$env:MONDRIAN_EXPORT_SIM_OUTPUT=Join-Path $perfRun 'export-1080p2997.jsonl'; cargo test -p mondrian-export --release -j 2 --lib export_1080p2997_simulated_perf -- --ignored --nocapture --test-threads=1
+$env:MONDRIAN_AUDIO_LOAD_MATRIX_OUTPUT=Join-Path $perfRun 'audio-load-matrix.jsonl'; cargo test -p mondrian-audio --release -j 2 --test load_matrix dense_schedule_multitrack_load_matrix -- --ignored --nocapture --test-threads=1
+
+$env:MONDRIAN_PREVIEW_EXTERNAL_MEDIA_PATH='<external-media-path>'; $env:MONDRIAN_PERF_OUTPUT=Join-Path $perfRun 'preview-external-media.jsonl'; cargo test -p mondrian-app --release -j 2 preview_media_external_access_mode_smoke -- --ignored --nocapture --test-threads=1
+$env:MONDRIAN_PREVIEW_DECODE_FIXTURE='<external-media-path>'; $env:MONDRIAN_PREVIEW_DECODE_TIMESTAMP='1.0'; $env:MONDRIAN_PREVIEW_DECODE_MAX_WIDTH='1920'; $env:MONDRIAN_PREVIEW_DECODE_MAX_HEIGHT='1080'; cargo test -p mondrian-media --release -j 2 preview_decode_fixture_perf_smoke -- --ignored --nocapture --test-threads=1
+$env:MONDRIAN_RENDERER_GPU_OUTPUT_SMOKE_OUTPUT=Join-Path $perfRun 'renderer-gpu-output.jsonl'; cargo test -p mondrian-renderer --release -j 2 gpu_output_boundary_runtime_smoke_report_on_real_wgpu_device -- --ignored --nocapture --test-threads=1
+$env:MONDRIAN_COLOR_VIEW_GPU_PERF_OUTPUT=Join-Path $perfRun 'color-view-4k.jsonl'; cargo test -p mondrian-renderer --release -j 2 --test color_view_gpu_perf standard_views_4k_gpu_timestamp_meet_budget_and_beat_aces2 -- --ignored --nocapture --test-threads=1
+$env:MONDRIAN_COLOR_TRANSFORM_GPU_PERF_OUTPUT=Join-Path $perfRun 'color-transform-4k.jsonl'; cargo test -p mondrian-renderer --release -j 2 --test color_view_gpu_perf standard_input_transforms_4k_gpu_timestamp_meet_budget -- --ignored --nocapture --test-threads=1
 ```
+
+Every smoke must use a fresh report path. The two short Preview smokes generate
+their own copyright-free media and run the production media path; they are not
+substitutes for the reference-validation runner's real 4K HEVC Main10, device
+clock, long A/V synchronization, memory, and GPU-presentation gates. A test
+process that exits successfully after reporting `skipped` has not produced
+eligible performance evidence.
+
+The reference audio gate uses report profile
+`cpal_av_48khz_30min_recovery_v2` and must be built and tested with the
+`validation` feature. It qualifies one real CPAL generation with one second of
+stable Audio Device Clock/active-callback residency, then begins Playback
+Evidence before requesting an exact-current controlled recycle. The gate
+requires one retained `ControlledRecycle` loss with a post-drop frozen inactive
+callback snapshot and exact 48 kHz media anchor, Synthetic Clock fallback
+within one second, one newer opened generation, and Audio Device Clock/active
+phase handoff within five seconds followed by one stable second. Lifecycle
+deltas must be exactly one open, one loss, and one controlled recycle;
+backend-loss and deactivation-failure deltas must remain zero. Only after that
+handoff does the gate reset its Viewer counters and measure 30 continuous
+minutes on the final generation, so recovery work cannot satisfy the final
+callback or headless-GPU duration requirement.
+
+Playback Evidence schema 4 replaces the old target-versus-latest-clock drift
+aggregate with completion-time phase evidence partitioned by Clock Master. The
+CPAL recovery gate requires Audio Device and Synthetic point-error,
+uncertainty, and conservative proven-error samples, a proven maximum of at most
+20 ms for both masters, and zero running presentable deliveries without a
+proven phase. `phase_not_applicable` remains diagnostic for paused/still
+deliveries and does not fail this gate. The bounded event tail is not lifecycle
+authority: stream-loss/reopen qualification comes from retained aggregate
+counters and the frozen last-loss record.
+
+Use `scripts/perf/run-perf-suite.ps1` for the generic suite rather than treating
+the direct commands above as one coordinated gate. It applies a 2,700-second
+wall-clock deadline to every Cargo child by default (override only with the
+positive `-ProcessTimeoutSeconds` parameter), drains both output streams, and
+terminates the complete descendant process tree on timeout. Per-child logs are
+retained under the run's `cargo-logs` directory, and a timeout is always an
+explicit suite failure rather than a missing report interpreted as success.
+Long Preview and CPAL reports use `product_process_tree_private_commit_v2`.
+Their JSON evidence must identify `product-process-tree` scope, the Windows
+Tool Help/Process Status Backend, a non-zero observed member-count range, and a
+complete inventory for every cadence and post-stress sample. This intentionally
+charges isolated demux and FFmpeg audio children to the same 4 GiB/plateau
+contract. `CurrentProcess`, an unsupported Adapter, a changing inventory after
+bounded retries, or one failed member query is a failed gate—not a zero-byte or
+smaller sample. Working Set and summed member lifetime peaks remain diagnostic;
+aggregate Private Commit is the acceptance metric.
+For `app_ui_scale`, both `preview_color_report` and
+`preview_playback_color_report` must be present and carry a recognized non-Fail
+verdict; the Rust producer also writes both structured reports before rejecting
+a missing-evidence or Fail result.
 
 The color-View gate requires a timestamp-capable real adapter. It rotates 60
 warm 4K samples each for Mondrian Standard SDR, PQ, HLG, and the official ACES
@@ -83,14 +140,38 @@ blockers, has no upload/readback transfer stages, reports no structured legacy
 RGBA8 reasons, and has at least one diagnosed frame. The old `color_health*`
 perf fields are not part of the report contract.
 
+These simulations are hot-Session CPU Float32 compositor kernel gates, not
+end-to-end Export throughput claims. They compile the immutable identity Effect
+program once and retain one job-local `TimelineCompositeScratch`; decode,
+Prepared Visual closure construction, root output conversion, encode, and
+publication require separate production-loop evidence. A reported
+`passthrough_frame` is counted only from
+`TimelineCompositeExecutionDiagnostics::zero_copy_identity_passthroughs`.
+Layer count, opacity heuristics, or pixel equality do not prove that the
+zero-copy production route executed. The named `export-4k60-simulated` gate
+likewise fixes its workload at 3840×2160, 60 fps, two Normal/identity media
+layers, and at least 16 measured frames. Environment variables may lengthen the
+sample window or tighten TTFF/FPS thresholds, but cannot substitute a smaller
+frame, one layer, or a lower target rate under the same scenario name. Release
+execution keeps the complete output observable through `black_box`, requires
+fusion evidence for every frame, and compares deterministic output samples with
+the canonical scalar source-over oracle; both execution and pixel evidence must
+pass. The suite parser independently rejects a missing pixel oracle, non-Pass
+color report, altered 4K workload identity, or incomplete fusion count, even if
+an artifact claims `passed=true`.
+
 Renderer GPU output smoke reports include a versioned `health_report`. That
 report is the sole renderer-side native GPU output contract: tooling should key
 off `health_report.verdict`, `checks`, `root_causes`, and `actions`, not off
 legacy `health`, `health_failures`, or `passed` fields. Default renderer smoke
-expectations are fail-closed: the run must not be skipped, the native GPU stage
-sequence must be complete, GPU blockers must be absent, backend runtime and
-shader cache must be ready, readback must be byte-complete, and CPU/GPU parity
-must stay within tolerance. The schema is owned by
+qualification is fail-closed: the report must not be skipped, the native GPU
+stage sequence must be complete, GPU blockers must be absent, backend runtime
+and shader cache must be ready, readback must be byte-complete, and CPU/GPU
+parity must stay within tolerance. The ignored Rust test is a report producer:
+when no adapter is available it deliberately emits a structured `skipped`
+report and exits successfully. Therefore raw `cargo test` status is not a GPU
+qualification verdict; a gate runner must parse the requested output and reject
+missing or skipped evidence. The schema is owned by
 `mondrian-renderer::RenderGpuOutputHealthReport` and its companion
 frame/stage/runtime report types, so perf tooling should not redefine the JSON
 shape locally.
@@ -117,13 +198,13 @@ OCIO, compositor, or viewer-output cost.
 
 Preview software decode defaults to the coordinated `PreviewDecodeCpuBudget`:
 the app preview worker count and FFmpeg decoder threads per worker are sized
-together so software decode does not multiply independent thread pools. Override
-these only for profiling or platform-specific investigation:
+together so software decode does not multiply independent thread pools. Worker
+count is always derived from that budget. Only FFmpeg's threading mode and its
+bounded per-worker decoder-thread count can be overridden for profiling:
 
 ```powershell
 $env:MONDRIAN_PREVIEW_DECODE_THREADING='slice' # none | frame | slice
 $env:MONDRIAN_PREVIEW_DECODE_THREADS='4'      # FFmpeg decoder threads per worker
-$env:MONDRIAN_PREVIEW_DECODE_WORKERS='2'      # app preview decode workers
 ```
 
 App preview diagnostics also report proxy path resolution:
@@ -141,10 +222,25 @@ changing color/render code: high `packet_decode_us` usually points at codec/GOP
 or hardware-decode work, high `seek_us` points at random-access/indexing/proxy
 work, and high `swscale_us`/`rgba_copy_us` points at the CPU RGBA boundary.
 Preview media perf artifacts also include a versioned `preview_decode_report`
-with checks, root causes, and actions. The default slow-frame budget is 50 ms;
-over-budget hard failures make the preview media smoke fail and should be
-diagnosed from `preview_decode_report.root_causes` before changing
-renderer/color code. Access-mode profiles include `queue_wait_max_us` and
+with checks, root causes, actions, and the exact serialized policy. Schema 33
+does not gate one mixed access-mode latency aggregate. It first records the
+Session disposition (`Opened`, `Replaced`, `Reused`, or `BypassedCache`) and
+then partitions every successful result into exactly one work class:
+`CacheHit`, `SessionOpened`, `SessionReplaced`, `ForwardSteady`, `ReusedSeek`,
+`ReusedOther`, or `Unclassified`. Missing/double accounting and
+`Unclassified` samples fail capture integrity.
+
+The default recurring worker-execution budget is 50 ms for cache, forward
+steady, and non-seeking reuse; reused seek is bounded separately at 500 ms.
+Session open/replacement has a 5 s absolute fail-safe but is not included in
+steady p95. Required Playback profiles need at least four real forward-steady
+samples, while required Scrub and Still profiles need at least one reused-seek
+sample. Repeated opens/replacements are constrained by the report's session
+churn policy even when each open is individually below 5 s. A histogram p95
+whose rank lands in the open greater-than-5-second bucket fails; reports never
+invent a finite upper bound.
+
+Access-mode profiles include `queue_wait_max_us` and
 `queue_wait_total_us`; high values there point at worker-lane contention or
 stale prefetch/current admission before codec, color, or render work. The
 preview media smokes fail when the access modes exercised by that scenario have
@@ -158,7 +254,7 @@ must use `bounded_any_seek_strategy_frames`; if scrub frames show
 `keyframe_seek_strategy_frames`, the access-mode routing is wrong and the test
 should fail before anyone tunes codec threads, proxy thresholds, color, or
 renderer code.
-`preview_decode_report` schema v24 records the media-layer policy contract
+`preview_decode_report` schema 36 records the media-layer policy contract
 observed by each access mode: `forward_reuse_frame_window_max`,
 `forward_decode_budget_frames_max`, and `any_seek_window_ms_max`. A healthy
 `ScrubCursor` sample must have a non-zero `any_seek_window_ms_max`; otherwise
@@ -212,7 +308,7 @@ from the active sequence frame duration, with conservative min/max bounds, so
 slow playback at 24 fps and 60 fps playback are judged against different
 budgets. Treat playback deadline pressure as a reason to improve proxy/hardware
 decode/drop policy, not as a reason to increase speculative prefetch.
-`preview_decode_report` schema v24 also includes `playback_schedule`, the
+`preview_decode_report` schema 36 also includes `playback_schedule`, the
 app-owned playback-clock contract used by the scheduler. It records the last
 current-frame deadline budget, the dynamic forward-prefetch horizon/window, and
 invalid frame-rate counters. It also records `current_decode_decisions`,
@@ -226,12 +322,15 @@ Prefetch preemption means the app protected visible current-frame work from
 in-flight playback speculation. Still preemption means deterministic still-frame
 work yielded to playback or scrub current-frame work. Both are scheduling
 pressure signals, not media decode failures.
-During playback, viewer `Loading` or stale-frame preview states put the app into
-preview buffering so the playback clock does not keep advancing into obsolete
-frames while CPU fallback decode catches up. Persistent buffering should be
-diagnosed from `preview_decode_report`, `preview_render_report`, and viewer
-state counts; do not hide it by widening timeouts without fixing decode,
-proxy/hardware residency, or render bottlenecks.
+During playback, Viewer `Loading` and stale-frame states are nonterminal
+presentation evidence. They never create UI-owned buffering or stop the Audio
+device Clock Master; after device loss the Synthetic monotonic Clock Master
+continues instead. Video scheduling follows that clock, drops late work, and
+accepts presentation only for the current exact ticket. Persistent
+Loading/Stale, late drops, or `Priming`/`Recovering` should be diagnosed
+separately from `preview_decode_report`, `preview_render_report`, transport
+evidence, and Viewer state counts; do not hide them by widening timeouts or
+reintroducing a Viewer-to-clock control path.
 `preview_media_decode_cache_smoke` intentionally exercises both settled
 non-playing seeks (`RandomAccessStillFrame`) and active playhead dragging
 (`ScrubCursor`). The active scrub window is controlled by
@@ -283,7 +382,7 @@ with `MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_MEDIA_PATH` and
 `MONDRIAN_PREVIEW_ACCELERATED_ENDURANCE_FRAMES`. Set
 `MONDRIAN_PREVIEW_ACCELERATED_ENDURANCE_SEEK_PROBES` to append up to 200
 cross-region warm/exact seek probes after continuous decode. This diagnostic
-does not replace cadence, whole-process memory, or reference-machine gates; it
+does not replace cadence, whole-product process-tree memory, or reference-machine gates; it
 only separates accumulated decode/surface state from real-time scheduling. Set
 `MONDRIAN_PREVIEW_DECODE_EXECUTION_OUTPUT` to capture the same independently
 flushed progress journal during this compressed run.
@@ -308,8 +407,21 @@ restart a codec merely because the stage stopped changing.
 The versioned Reference Playback runner sets
 `MONDRIAN_PREVIEW_DECODE_EXECUTION_OUTPUT` for the Video gate. A sampler that
 owns only a clone of the read watch writes versioned JSONL beside the normal
-report. The current schema is v2 and includes the interrupt poll/cancel fields.
-It samples at 100 ms, writes on progress changes or a five-second
+report. The current schema is v3. Every record carries `schema_version`,
+`scenario`, monotonic process-local `observed_at_us`, `terminal`, and a
+`workers` object split into `any`, `playback`, and `non_playback` lanes. A
+present lane contains `stage`, `request_sequence`, `progress_sequence`, the
+`interrupt_poll_sequence`, `interrupt_cancel_sequence`, and
+`interrupt_last_cancel_request_sequence` fields, plus `isolated_demux`. That
+object contains `session_launches`, `ready_sessions`,
+`cross_request_reused_sessions`, `completed_seeks`, `completed_reads`,
+`packet_responses`, `end_responses`, `clean_closes`,
+`cancellation_terminations`, `failure_terminations`,
+`forced_close_terminations`, `active_sessions`, and `peak_active_sessions`.
+These cumulative demux lifecycle facts are the schema-v3 addition; absent
+worker lanes remain JSON `null`.
+
+The sampler runs at 100 ms, writes on progress changes or a five-second
 heartbeat, and flushes every record so an externally terminated gate retains
 its last observation; a normal finish adds `terminal: true`. The gate plan also
 defines a 45-minute external process deadline. On expiry, the parent runner
@@ -473,5 +585,75 @@ explicit threshold flags still override the preset afterwards.
 The health report is the only external report shape: fixed area checks, verdict,
 root causes, actions, compact evidence, and the raw budget summary in one JSON
 object.
+
+Preview decode report schema v36 evaluates an explicit access-mode × work-class
+matrix. `SessionOpened`/`SessionReplaced`, steady forward reuse, reused seeks,
+reused ambiguous work, and decoder-bypassing ring hits are non-overlapping
+cells; contradictory lifecycle/path/seek facts enter `Unclassified` and fail
+capture integrity. Each cell's frame count must equal its histogram sample
+count, successful lifecycle totals must equal successful frames, and queue
+histogram totals must equal explicit queue sample counts. Required playback
+profiles must contain steady-forward samples; required scrub and exact-still
+profiles must contain a real reused seek after lane warm-up.
+
+The >5 s work-latency bucket and >80 ms queue bucket are open intervals and have
+no fabricated quantile upper bound. A quantile in either bucket retains the
+measured maximum only as evidence. Missing queue/decode p95 checks are not zero:
+Headless acceptance consumes them as optional evidence and fails when absent.
+Session churn includes successful and canceled opens/replacements, while
+canceled work remains outside successful-frame latency profiles.
+
+Native D3D12VA Viewer runs must keep two hardware-timestamp domains distinct.
+The ordinary Viewer ring measures the caller-owned composite/spatial/output
+suffix. The renderer native-import ring measures the preceding YUV and
+source-to-working color submission and correlates its deferred samples through
+backend-runtime-local candidate/import tokens plus the gate's execution-session
+identity. A report must carry `yuv_decode_marker_bracket_us`,
+`input_color_marker_bracket_us`, `capability_supported`, `activated`,
+`inactive_reason`, and cumulative `samples`/`pending`/`missing`/`dropped`
+coverage; it must not relabel Viewer suffix duration as native-import work.
+Those two deltas begin inside the wgpu import command buffer and do not include
+decoder execution, the cross-device copy, queue-wait latency, or the raw
+acquire transition. They can include implicit barriers, scheduler gaps, and
+backend command placement/reordering inside the markers, so tooling must call
+them bracket attribution rather than pure shader time. Capability alone does
+not activate timing: gates explicitly enable a bounded `1..=256` ring, while
+normal runtime defaults to disabled. Disabled policy, unsupported capability,
+or readback failure is explicit inactive evidence, not a zero-duration sample,
+and ring pressure drops telemetry instead of delaying the measured playback
+scheduler. Collection follows an execution-owner device poll and must not add
+another poll or wait.
+`submitted_imports` is usable-output coverage: it counts only imports that
+returned a valid working frame. A failed bridge may have ambiguously submitted
+GPU commands, but that attempt is not a successful import and must not be
+treated as covered output.
+
+Only the full professional 4K HEVC Main10 playback gate activates this prefix
+timing contract. Ordinary playback smokes and the short isolated-demux
+qualification select `Disabled` explicitly. The professional probe derives a
+fixed observation-buffer capacity from its frozen frame/seek workload, enables
+the renderer ring at its bounded maximum, and fails on either renderer-ring
+drops or App observation-buffer overflow; profiling never backpressures frame
+publication. Each successful Viewer record moves its renderer receipt exactly
+once into App evidence qualified by one process-local Headless session ID.
+Preroll and measured-playback candidates retain separate ownership until all
+deferred samples are collected after the existing suffix-timing device wait,
+then one linear reconciliation assigns every receipt and sample exactly once.
+A uniquely owned successful candidate may be released, superseded, or retire
+late without becoming an orphan; only candidates that actually completed
+publication contribute `published_native_candidates` and
+`published_native_samples`.
+
+Professional acceptance requires the renderer and receipt accounting
+identities, zero pending/missing/dropped/overflow evidence, unique
+session/candidate/import identities, and exact sample reconciliation. It fails
+on duplicate receipts, duplicate samples, multiply owned samples, unmatched
+samples, orphan receipts, or any candidate whose observed sample count differs
+from that exact receipt's `scheduled_samples` even when run-wide totals happen
+to balance. The serialized report also publishes
+p50/p95/mean/max for both marker brackets and ready/not-ready/unknown decoder
+fence counts. These statistics describe only uniquely reconciled samples;
+untrusted samples remain visible through failure evidence instead of
+contaminating the stage distributions.
 
 Performance output should be committed only when it is an intentional benchmark artifact; ordinary runs should leave `target/` ignored.

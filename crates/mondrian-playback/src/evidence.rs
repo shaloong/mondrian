@@ -1,15 +1,17 @@
 //! Bounded, versioned Playback Evidence aggregation.
 
 use crate::{
-    ClockMaster, FrameDelivery, FrameDeliveryKind, FrameDemand, FrameDemandIdentity,
-    MonotonicTimestamp, PlaybackEpoch, PlaybackSnapshot, PreviewResolutionScale, TransportState,
+    timeline_position_ns_floor, ClockMaster, FrameDeliveryApplication, FrameDeliveryKind,
+    FrameDemand, FrameDemandIdentity, MonotonicTimestamp, PlaybackEpoch, PlaybackSnapshot,
+    PreviewResolutionScale, TransportState,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::time::Duration;
 use thiserror::Error;
 
 /// Current serialized Playback Evidence schema.
-pub const PLAYBACK_EVIDENCE_SCHEMA_VERSION: u32 = 2;
+pub const PLAYBACK_EVIDENCE_SCHEMA_VERSION: u32 = 4;
 
 /// Bounded retention policy for one evidence collector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +37,9 @@ pub enum PlaybackEvidenceError {
     /// Runtime observations must be monotonic.
     #[error("playback evidence timestamp moved backwards")]
     NonMonotonicTimestamp,
+    /// Engine-authenticated delivery phase evidence could not be represented.
+    #[error("playback delivery phase evidence is invalid or overflowed")]
+    InvalidDeliveryPhaseEvidence,
 }
 
 /// User-visible seek class used by latency gates.
@@ -65,6 +70,15 @@ pub enum PlaybackEvidenceEventKind {
     PreviewScaleChanged {
         from: PreviewResolutionScale,
         to: PreviewResolutionScale,
+    },
+    /// The active Clock Master advanced across one or more media-frame boundaries.
+    ClockFramesAdvanced {
+        /// Previously observed authoritative timeline frame.
+        from_frame: i64,
+        /// Newly observed authoritative timeline frame.
+        to_frame: i64,
+        /// Intermediate frame targets skipped between the two observations.
+        skipped_intermediate_frames: u64,
     },
     /// A distinct current Frame Demand was observed.
     DemandIssued { sequence: u64, target_frame: i64 },
@@ -119,6 +133,30 @@ pub struct PlaybackLatencySummary {
     pub max_us: u64,
 }
 
+/// Point, uncertainty, and conservative proven phase-error distributions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaybackClockPhaseErrorSummary {
+    /// Absolute exact target-to-phase distance before uncertainty.
+    pub point_error: PlaybackLatencySummary,
+    /// Conservative Clock-phase uncertainty upper bound.
+    pub uncertainty: PlaybackLatencySummary,
+    /// Point error plus the Clock observation's uncertainty upper bound.
+    pub proven_error: PlaybackLatencySummary,
+}
+
+/// Per-master phase evidence for accepted presentable Frame Deliveries.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaybackDeliveryPhaseErrorReport {
+    /// Deliveries completed while Audio Device Clock Master was authoritative.
+    pub audio_device: PlaybackClockPhaseErrorSummary,
+    /// Deliveries completed while Synthetic Clock Master was authoritative.
+    pub synthetic: PlaybackClockPhaseErrorSummary,
+    /// Accepted running Ready/Degraded deliveries missing an expected Clock phase.
+    pub unproven_presentable: u64,
+    /// Accepted still/seek deliveries for which no running Clock phase applies.
+    pub phase_not_applicable: u64,
+}
+
 /// Clock Master residency accumulated between observations.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlaybackClockResidency {
@@ -170,6 +208,19 @@ pub struct PlaybackDeliveryCounts {
     pub rejected: u64,
 }
 
+/// Bounded aggregate evidence for Clock Master frame advancement.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaybackClockFrameAdvanceCounts {
+    /// Observations that advanced by exactly one media frame.
+    pub single_frame_advances: u64,
+    /// Observations that crossed two or more media-frame boundaries.
+    pub multi_frame_advances: u64,
+    /// Total media-frame boundaries crossed across all observations.
+    pub advanced_frames: u64,
+    /// Intermediate frame targets skipped by multi-frame observations.
+    pub skipped_intermediate_frames: u64,
+}
+
 /// Versioned aggregate report shared by UI diagnostics and headless harnesses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlaybackEvidenceReport {
@@ -193,6 +244,8 @@ pub struct PlaybackEvidenceReport {
     pub clock_residency: PlaybackClockResidency,
     /// Transport State residency.
     pub state_residency: PlaybackStateResidency,
+    /// Clock-driven single-frame and multi-frame advancement totals.
+    pub clock_frame_advances: PlaybackClockFrameAdvanceCounts,
     /// Terminal delivery totals.
     pub deliveries: PlaybackDeliveryCounts,
     /// Demand issue-to-terminal latency.
@@ -201,8 +254,8 @@ pub struct PlaybackEvidenceReport {
     pub warm_seek_latency: PlaybackLatencySummary,
     /// Settled seek-to-ready latency.
     pub accurate_seek_latency: PlaybackLatencySummary,
-    /// Absolute authoritative-clock versus accepted-delivery target distance.
-    pub delivery_clock_drift: PlaybackLatencySummary,
+    /// Exact target versus completion-time Clock phase, partitioned by master.
+    pub delivery_phase_error: PlaybackDeliveryPhaseErrorReport,
     /// Missing output frames observed.
     pub audio_underrun_frames: u64,
     /// Sustained-underrun recoveries observed.
@@ -228,6 +281,19 @@ struct PendingSeek {
     started_at: MonotonicTimestamp,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreparedDeliveryPhaseEvidence {
+    NotPresentable,
+    NotApplicable,
+    Unproven,
+    Proven {
+        master: ClockMaster,
+        point_error_us: u64,
+        uncertainty_us: u64,
+        proven_error_us: u64,
+    },
+}
+
 /// Deep Module aggregating bounded Playback Evidence from any Adapter.
 pub struct PlaybackEvidenceCollector {
     config: PlaybackEvidenceConfig,
@@ -237,15 +303,18 @@ pub struct PlaybackEvidenceCollector {
     first_epoch: Option<PlaybackEpoch>,
     latest_epoch: Option<PlaybackEpoch>,
     last_observed_at: Option<MonotonicTimestamp>,
+    observed_duration: Duration,
     last_state: Option<TransportState>,
     last_master: Option<Option<ClockMaster>>,
     last_scale: Option<PreviewResolutionScale>,
+    last_position: Option<(PlaybackEpoch, i64)>,
     snapshot_count: u64,
     demand_count: u64,
     superseded_demand_count: u64,
     seek_superseded_count: u64,
-    clock_residency: PlaybackClockResidency,
-    state_residency: PlaybackStateResidency,
+    clock_residency: PlaybackClockResidencyDuration,
+    state_residency: PlaybackStateResidencyDuration,
+    clock_frame_advances: PlaybackClockFrameAdvanceCounts,
     deliveries: PlaybackDeliveryCounts,
     active_demand: Option<ActiveDemand>,
     last_demand_identity: Option<FrameDemandIdentity>,
@@ -253,9 +322,58 @@ pub struct PlaybackEvidenceCollector {
     demand_latencies: BoundedMetric,
     warm_seek_latencies: BoundedMetric,
     accurate_seek_latencies: BoundedMetric,
-    delivery_clock_drifts: BoundedMetric,
+    audio_device_point_errors: BoundedMetric,
+    audio_device_uncertainties: BoundedMetric,
+    audio_device_proven_errors: BoundedMetric,
+    synthetic_point_errors: BoundedMetric,
+    synthetic_uncertainties: BoundedMetric,
+    synthetic_proven_errors: BoundedMetric,
+    unproven_presentable_deliveries: u64,
+    phase_not_applicable_deliveries: u64,
     audio_underrun_frames: u64,
     audio_underrun_recoveries: u64,
+}
+
+#[derive(Default)]
+struct PlaybackClockResidencyDuration {
+    audio_device: Duration,
+    synthetic: Duration,
+    none: Duration,
+}
+
+impl PlaybackClockResidencyDuration {
+    fn report(&self) -> PlaybackClockResidency {
+        PlaybackClockResidency {
+            audio_device_us: duration_us(self.audio_device),
+            synthetic_us: duration_us(self.synthetic),
+            none_us: duration_us(self.none),
+        }
+    }
+}
+
+#[derive(Default)]
+struct PlaybackStateResidencyDuration {
+    stopped: Duration,
+    paused: Duration,
+    priming: Duration,
+    playing: Duration,
+    recovering: Duration,
+    ended: Duration,
+    blocked: Duration,
+}
+
+impl PlaybackStateResidencyDuration {
+    fn report(&self) -> PlaybackStateResidency {
+        PlaybackStateResidency {
+            stopped_us: duration_us(self.stopped),
+            paused_us: duration_us(self.paused),
+            priming_us: duration_us(self.priming),
+            playing_us: duration_us(self.playing),
+            recovering_us: duration_us(self.recovering),
+            ended_us: duration_us(self.ended),
+            blocked_us: duration_us(self.blocked),
+        }
+    }
 }
 
 /// Constant-memory metric accumulator with exact population count/maximum and
@@ -341,15 +459,18 @@ impl PlaybackEvidenceCollector {
             first_epoch: None,
             latest_epoch: None,
             last_observed_at: None,
+            observed_duration: Duration::ZERO,
             last_state: None,
             last_master: None,
             last_scale: None,
+            last_position: None,
             snapshot_count: 0,
             demand_count: 0,
             superseded_demand_count: 0,
             seek_superseded_count: 0,
-            clock_residency: PlaybackClockResidency::default(),
-            state_residency: PlaybackStateResidency::default(),
+            clock_residency: PlaybackClockResidencyDuration::default(),
+            state_residency: PlaybackStateResidencyDuration::default(),
+            clock_frame_advances: PlaybackClockFrameAdvanceCounts::default(),
             deliveries: PlaybackDeliveryCounts::default(),
             active_demand: None,
             last_demand_identity: None,
@@ -357,7 +478,14 @@ impl PlaybackEvidenceCollector {
             demand_latencies: BoundedMetric::new(config.sample_capacity),
             warm_seek_latencies: BoundedMetric::new(config.sample_capacity),
             accurate_seek_latencies: BoundedMetric::new(config.sample_capacity),
-            delivery_clock_drifts: BoundedMetric::new(config.sample_capacity),
+            audio_device_point_errors: BoundedMetric::new(config.sample_capacity),
+            audio_device_uncertainties: BoundedMetric::new(config.sample_capacity),
+            audio_device_proven_errors: BoundedMetric::new(config.sample_capacity),
+            synthetic_point_errors: BoundedMetric::new(config.sample_capacity),
+            synthetic_uncertainties: BoundedMetric::new(config.sample_capacity),
+            synthetic_proven_errors: BoundedMetric::new(config.sample_capacity),
+            unproven_presentable_deliveries: 0,
+            phase_not_applicable_deliveries: 0,
             audio_underrun_frames: 0,
             audio_underrun_recoveries: 0,
         }
@@ -405,12 +533,14 @@ impl PlaybackEvidenceCollector {
                 PlaybackEvidenceEventKind::PreviewScaleChanged { from, to: snapshot.preview_scale },
             );
         }
+        self.observe_clock_frame_advance(observed_at, snapshot);
         self.observe_demand(observed_at, epoch, demand);
         self.snapshot_count = self.snapshot_count.saturating_add(1);
         self.last_observed_at = Some(observed_at);
         self.last_state = Some(snapshot.state);
         self.last_master = Some(snapshot.clock_master);
         self.last_scale = Some(snapshot.preview_scale);
+        self.last_position = Some((snapshot.epoch, snapshot.position.frame));
         Ok(())
     }
 
@@ -437,62 +567,68 @@ impl PlaybackEvidenceCollector {
         Ok(())
     }
 
-    /// Observe one terminal delivery and update latency/drift aggregates.
+    /// Consume one Engine-authenticated delivery application.
+    ///
+    /// All fallible timestamp and exact phase calculations complete before any
+    /// aggregate, event, demand, or seek state is changed.
     pub fn observe_delivery(
         &mut self,
-        observed_at: MonotonicTimestamp,
-        snapshot: PlaybackSnapshot,
-        delivery: FrameDelivery,
-        accepted: bool,
+        application: FrameDeliveryApplication,
     ) -> Result<(), PlaybackEvidenceError> {
-        self.advance_time(observed_at)?;
-        if accepted {
-            increment_delivery(&mut self.deliveries, delivery.kind);
+        let delivery = application.delivery();
+        let identity = delivery.identity();
+        let completed_at = delivery.completed_at();
+        let snapshot = application.snapshot();
+        self.validate_timestamp(completed_at)?;
+        let prepared_phase_evidence = prepare_delivery_phase_evidence(&application)?;
+
+        self.advance_time(completed_at)?;
+        if application.accepted() {
+            increment_delivery(&mut self.deliveries, delivery.kind());
         } else {
             self.deliveries.rejected = self.deliveries.rejected.saturating_add(1);
         }
         self.push_event(
-            observed_at,
+            completed_at,
             snapshot.epoch,
             PlaybackEvidenceEventKind::Delivery {
-                sequence: delivery.demand_sequence.get(),
-                target_frame: delivery.target_frame,
-                kind: delivery.kind,
-                accepted,
+                sequence: identity.sequence.get(),
+                target_frame: identity.target_frame,
+                kind: delivery.kind(),
+                accepted: application.accepted(),
             },
         );
-        let matching_active = self.active_demand.filter(|active| {
-            active.identity.epoch == delivery.epoch
-                && active.identity.quality_revision == delivery.quality_revision
-                && active.identity.sequence == delivery.demand_sequence
-        });
+        let matching_active = if application.accepted() {
+            self.active_demand.filter(|active| {
+                active.identity.epoch == identity.epoch
+                    && active.identity.quality_revision == identity.quality_revision
+                    && active.identity.sequence == identity.sequence
+            })
+        } else {
+            None
+        };
         if let Some(active) = matching_active {
             self.active_demand = None;
-            let latency = elapsed_us(observed_at, active.issued_at);
+            let latency = elapsed_us(completed_at, active.issued_at);
             self.demand_latencies.observe(latency);
         }
-        if accepted
+        if application.accepted()
             && matches!(
-                delivery.kind,
+                delivery.kind(),
                 FrameDeliveryKind::Ready | FrameDeliveryKind::Degraded
             )
         {
-            let drift_us = frame_distance_us(
-                snapshot.position.frame,
-                delivery.target_frame,
-                snapshot.position.time_base,
-            );
-            self.delivery_clock_drifts.observe(drift_us);
-            if let Some(seek) = self.pending_seek.filter(|seek| seek.epoch == delivery.epoch) {
+            self.observe_prepared_phase_evidence(prepared_phase_evidence);
+            if let Some(seek) = self.pending_seek.filter(|seek| seek.epoch == identity.epoch) {
                 self.pending_seek = None;
-                let latency = elapsed_us(observed_at, seek.started_at);
+                let latency = elapsed_us(completed_at, seek.started_at);
                 let metric = match seek.kind {
                     PlaybackSeekKind::Warm => &mut self.warm_seek_latencies,
                     PlaybackSeekKind::Accurate => &mut self.accurate_seek_latencies,
                 };
                 metric.observe(latency);
                 self.push_event(
-                    observed_at,
+                    completed_at,
                     snapshot.epoch,
                     PlaybackEvidenceEventKind::SeekCompleted {
                         kind: seek.kind,
@@ -502,6 +638,42 @@ impl PlaybackEvidenceCollector {
             }
         }
         Ok(())
+    }
+
+    fn observe_prepared_phase_evidence(&mut self, prepared: PreparedDeliveryPhaseEvidence) {
+        match prepared {
+            PreparedDeliveryPhaseEvidence::NotPresentable => {}
+            PreparedDeliveryPhaseEvidence::NotApplicable => {
+                self.phase_not_applicable_deliveries =
+                    self.phase_not_applicable_deliveries.saturating_add(1);
+            }
+            PreparedDeliveryPhaseEvidence::Unproven => {
+                self.unproven_presentable_deliveries =
+                    self.unproven_presentable_deliveries.saturating_add(1);
+            }
+            PreparedDeliveryPhaseEvidence::Proven {
+                master,
+                point_error_us,
+                uncertainty_us,
+                proven_error_us,
+            } => {
+                let (point, uncertainty, proven) = match master {
+                    ClockMaster::AudioDevice => (
+                        &mut self.audio_device_point_errors,
+                        &mut self.audio_device_uncertainties,
+                        &mut self.audio_device_proven_errors,
+                    ),
+                    ClockMaster::Synthetic => (
+                        &mut self.synthetic_point_errors,
+                        &mut self.synthetic_uncertainties,
+                        &mut self.synthetic_proven_errors,
+                    ),
+                };
+                point.observe(point_error_us);
+                uncertainty.observe(uncertainty_us);
+                proven.observe(proven_error_us);
+            }
+        }
     }
 
     /// Add missing audio frames and optionally one sustained-underrun recovery.
@@ -531,18 +703,32 @@ impl PlaybackEvidenceCollector {
             schema_version: PLAYBACK_EVIDENCE_SCHEMA_VERSION,
             first_epoch: self.first_epoch.map(PlaybackEpoch::get),
             latest_epoch: self.latest_epoch.map(PlaybackEpoch::get),
-            observed_duration_us: residency_total(self.clock_residency),
+            observed_duration_us: duration_us(self.observed_duration),
             snapshot_count: self.snapshot_count,
             demand_count: self.demand_count,
             superseded_demand_count: self.superseded_demand_count,
             seek_superseded_count: self.seek_superseded_count,
-            clock_residency: self.clock_residency,
-            state_residency: self.state_residency,
+            clock_residency: self.clock_residency.report(),
+            state_residency: self.state_residency.report(),
+            clock_frame_advances: self.clock_frame_advances,
             deliveries: self.deliveries,
             demand_latency: self.demand_latencies.summary(),
             warm_seek_latency: self.warm_seek_latencies.summary(),
             accurate_seek_latency: self.accurate_seek_latencies.summary(),
-            delivery_clock_drift: self.delivery_clock_drifts.summary(),
+            delivery_phase_error: PlaybackDeliveryPhaseErrorReport {
+                audio_device: PlaybackClockPhaseErrorSummary {
+                    point_error: self.audio_device_point_errors.summary(),
+                    uncertainty: self.audio_device_uncertainties.summary(),
+                    proven_error: self.audio_device_proven_errors.summary(),
+                },
+                synthetic: PlaybackClockPhaseErrorSummary {
+                    point_error: self.synthetic_point_errors.summary(),
+                    uncertainty: self.synthetic_uncertainties.summary(),
+                    proven_error: self.synthetic_proven_errors.summary(),
+                },
+                unproven_presentable: self.unproven_presentable_deliveries,
+                phase_not_applicable: self.phase_not_applicable_deliveries,
+            },
             audio_underrun_frames: self.audio_underrun_frames,
             audio_underrun_recoveries: self.audio_underrun_recoveries,
             retained_event_count: self.events.len(),
@@ -588,6 +774,58 @@ impl PlaybackEvidenceCollector {
         );
     }
 
+    fn observe_clock_frame_advance(
+        &mut self,
+        observed_at: MonotonicTimestamp,
+        snapshot: PlaybackSnapshot,
+    ) {
+        let Some((previous_epoch, previous_frame)) = self.last_position else {
+            return;
+        };
+        let previous_clock_running = self.last_state.is_some_and(|state| {
+            matches!(
+                state,
+                TransportState::Priming | TransportState::Playing | TransportState::Recovering
+            )
+        });
+        if previous_epoch != snapshot.epoch
+            || !previous_clock_running
+            || matches!(
+                snapshot.state,
+                TransportState::Stopped | TransportState::Blocked
+            )
+            || snapshot.position.frame <= previous_frame
+        {
+            return;
+        }
+        let advanced_frames = (snapshot.position.frame as i128)
+            .saturating_sub(previous_frame as i128)
+            .min(u64::MAX as i128) as u64;
+        let skipped_intermediate_frames = advanced_frames.saturating_sub(1);
+        if skipped_intermediate_frames == 0 {
+            self.clock_frame_advances.single_frame_advances =
+                self.clock_frame_advances.single_frame_advances.saturating_add(1);
+        } else {
+            self.clock_frame_advances.multi_frame_advances =
+                self.clock_frame_advances.multi_frame_advances.saturating_add(1);
+        }
+        self.clock_frame_advances.advanced_frames =
+            self.clock_frame_advances.advanced_frames.saturating_add(advanced_frames);
+        self.clock_frame_advances.skipped_intermediate_frames = self
+            .clock_frame_advances
+            .skipped_intermediate_frames
+            .saturating_add(skipped_intermediate_frames);
+        self.push_event(
+            observed_at,
+            snapshot.epoch,
+            PlaybackEvidenceEventKind::ClockFramesAdvanced {
+                from_frame: previous_frame,
+                to_frame: snapshot.position.frame,
+                skipped_intermediate_frames,
+            },
+        );
+    }
+
     fn validate_timestamp(
         &self,
         observed_at: MonotonicTimestamp,
@@ -612,29 +850,30 @@ impl PlaybackEvidenceCollector {
         let Some(last_at) = self.last_observed_at else {
             return;
         };
-        let delta = elapsed_us(observed_at, last_at);
+        let delta = observed_at
+            .duration_since_origin()
+            .saturating_sub(last_at.duration_since_origin());
+        self.observed_duration = self.observed_duration.saturating_add(delta);
         match self.last_master.flatten() {
             Some(ClockMaster::AudioDevice) => {
-                self.clock_residency.audio_device_us =
-                    self.clock_residency.audio_device_us.saturating_add(delta)
+                self.clock_residency.audio_device =
+                    self.clock_residency.audio_device.saturating_add(delta)
             }
             Some(ClockMaster::Synthetic) => {
-                self.clock_residency.synthetic_us =
-                    self.clock_residency.synthetic_us.saturating_add(delta)
+                self.clock_residency.synthetic =
+                    self.clock_residency.synthetic.saturating_add(delta)
             }
-            None => {
-                self.clock_residency.none_us = self.clock_residency.none_us.saturating_add(delta)
-            }
+            None => self.clock_residency.none = self.clock_residency.none.saturating_add(delta),
         }
         if let Some(state) = self.last_state {
             let target = match state {
-                TransportState::Stopped => &mut self.state_residency.stopped_us,
-                TransportState::Paused => &mut self.state_residency.paused_us,
-                TransportState::Priming => &mut self.state_residency.priming_us,
-                TransportState::Playing => &mut self.state_residency.playing_us,
-                TransportState::Recovering => &mut self.state_residency.recovering_us,
-                TransportState::Ended => &mut self.state_residency.ended_us,
-                TransportState::Blocked => &mut self.state_residency.blocked_us,
+                TransportState::Stopped => &mut self.state_residency.stopped,
+                TransportState::Paused => &mut self.state_residency.paused,
+                TransportState::Priming => &mut self.state_residency.priming,
+                TransportState::Playing => &mut self.state_residency.playing,
+                TransportState::Recovering => &mut self.state_residency.recovering,
+                TransportState::Ended => &mut self.state_residency.ended,
+                TransportState::Blocked => &mut self.state_residency.blocked,
             };
             *target = target.saturating_add(delta);
         }
@@ -686,35 +925,85 @@ fn duration_us(value: std::time::Duration) -> u64 {
     value.as_micros().min(u64::MAX as u128) as u64
 }
 
-fn frame_distance_us(current: i64, delivered: i64, time_base: mondrian_core::Rational) -> u64 {
-    if time_base.num <= 0 || time_base.den <= 0 {
-        return u64::MAX;
+fn prepare_delivery_phase_evidence(
+    application: &FrameDeliveryApplication,
+) -> Result<PreparedDeliveryPhaseEvidence, PlaybackEvidenceError> {
+    let delivery = application.delivery();
+    if !application.accepted()
+        || !matches!(
+            delivery.kind(),
+            FrameDeliveryKind::Ready | FrameDeliveryKind::Degraded
+        )
+    {
+        return Ok(PreparedDeliveryPhaseEvidence::NotPresentable);
     }
-    let frames = (current as i128).saturating_sub(delivered as i128).unsigned_abs();
-    frames
-        .saturating_mul(time_base.num as u128)
-        .saturating_mul(1_000_000)
-        .checked_div(time_base.den as u128)
-        .unwrap_or(u128::MAX)
-        .min(u64::MAX as u128) as u64
+
+    let target = application
+        .target()
+        .ok_or(PlaybackEvidenceError::InvalidDeliveryPhaseEvidence)?;
+    let identity = delivery.identity();
+    if target.frame != identity.target_frame {
+        return Err(PlaybackEvidenceError::InvalidDeliveryPhaseEvidence);
+    }
+    let Some(phase) = application.clock_phase() else {
+        return if matches!(
+            application.snapshot().state,
+            TransportState::Playing | TransportState::Recovering
+        ) {
+            Ok(PreparedDeliveryPhaseEvidence::Unproven)
+        } else {
+            Ok(PreparedDeliveryPhaseEvidence::NotApplicable)
+        };
+    };
+    if phase.epoch() != identity.epoch
+        || phase.observed_at() != delivery.completed_at()
+        || application.snapshot().clock_master != Some(phase.master())
+    {
+        return Err(PlaybackEvidenceError::InvalidDeliveryPhaseEvidence);
+    }
+
+    let target_ns = timeline_position_ns_floor(target)
+        .map_err(|_| PlaybackEvidenceError::InvalidDeliveryPhaseEvidence)?;
+    let signed_point_error = phase
+        .phase_ns()
+        .checked_sub(target_ns)
+        .ok_or(PlaybackEvidenceError::InvalidDeliveryPhaseEvidence)?;
+    let point_error_ns = signed_point_error.unsigned_abs();
+    let proven_error_ns = point_error_ns
+        .checked_add(phase.uncertainty_ns())
+        .ok_or(PlaybackEvidenceError::InvalidDeliveryPhaseEvidence)?;
+    Ok(PreparedDeliveryPhaseEvidence::Proven {
+        master: phase.master(),
+        point_error_us: ns_to_us_ceil(point_error_ns)?,
+        uncertainty_us: ns_to_us_ceil(phase.uncertainty_ns())?,
+        proven_error_us: ns_to_us_ceil(proven_error_ns)?,
+    })
 }
 
-fn residency_total(value: PlaybackClockResidency) -> u64 {
-    value
-        .audio_device_us
-        .saturating_add(value.synthetic_us)
-        .saturating_add(value.none_us)
+fn ns_to_us_ceil(nanos: u128) -> Result<u64, PlaybackEvidenceError> {
+    let quotient = nanos / 1_000;
+    let rounded = quotient
+        .checked_add(u128::from(!nanos.is_multiple_of(1_000)))
+        .ok_or(PlaybackEvidenceError::InvalidDeliveryPhaseEvidence)?;
+    u64::try_from(rounded).map_err(|_| PlaybackEvidenceError::InvalidDeliveryPhaseEvidence)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AudioDeviceClockObservation, FrameDemandSequence, PlaybackSnapshot};
+    use crate::{
+        AudioDeviceClockObservation, FrameDeliveryCandidate, FrameDemandSequence,
+        PlaybackClockPhaseObservation, PlaybackSnapshot,
+    };
     use mondrian_core::{FramePosition, Rational};
     use std::time::Duration;
 
     fn at(ms: u64) -> MonotonicTimestamp {
         MonotonicTimestamp::from_duration(Duration::from_millis(ms))
+    }
+
+    fn at_ns(ns: u64) -> MonotonicTimestamp {
+        MonotonicTimestamp::from_duration(Duration::from_nanos(ns))
     }
 
     fn snapshot(
@@ -748,8 +1037,67 @@ mod tests {
         }
     }
 
+    fn delivery_application(
+        epoch: PlaybackEpoch,
+        sequence: u64,
+        target: FramePosition,
+        completed_at: MonotonicTimestamp,
+        master_and_phase: Option<(ClockMaster, i128, u128)>,
+    ) -> FrameDeliveryApplication {
+        delivery_application_in_state(
+            epoch,
+            sequence,
+            target,
+            completed_at,
+            TransportState::Playing,
+            master_and_phase,
+        )
+    }
+
+    fn delivery_application_in_state(
+        epoch: PlaybackEpoch,
+        sequence: u64,
+        target: FramePosition,
+        completed_at: MonotonicTimestamp,
+        state: TransportState,
+        master_and_phase: Option<(ClockMaster, i128, u128)>,
+    ) -> FrameDeliveryApplication {
+        let identity = FrameDemandIdentity {
+            epoch,
+            quality_revision: 1,
+            sequence: FrameDemandSequence(sequence),
+            target_frame: target.frame,
+        };
+        let master = master_and_phase.map(|(master, _, _)| master);
+        FrameDeliveryApplication {
+            delivery: FrameDeliveryCandidate::for_demand(identity, FrameDeliveryKind::Ready)
+                .complete_at(completed_at),
+            accepted: true,
+            snapshot: PlaybackSnapshot {
+                epoch,
+                state,
+                position: target,
+                clock_master: master,
+                preview_scale: PreviewResolutionScale::Full,
+                quality_revision: 1,
+                audio_clock_observation: None,
+                audio_handoff: None,
+            },
+            target: Some(target),
+            clock_phase: master_and_phase.map(|(master, phase_ns, uncertainty_ns)| {
+                PlaybackClockPhaseObservation {
+                    epoch,
+                    master,
+                    observed_at: completed_at,
+                    phase_ns,
+                    uncertainty_ns,
+                }
+            }),
+        }
+    }
+
     #[test]
-    fn aggregates_clock_delivery_seek_drift_and_underrun_evidence() {
+    fn aggregates_clock_delivery_seek_phase_and_underrun_evidence() {
         let epoch = PlaybackEpoch(7);
         let mut collector = PlaybackEvidenceCollector::new(PlaybackEvidenceConfig {
             event_capacity: 16,
@@ -764,14 +1112,15 @@ mod tests {
         );
         collector.observe_snapshot(at(0), playing, Some(demand(epoch, 1, 0))).unwrap();
         collector.begin_seek(at(10), epoch, PlaybackSeekKind::Accurate).unwrap();
-        let delivery = FrameDelivery {
-            epoch,
-            quality_revision: 1,
-            demand_sequence: FrameDemandSequence(1),
-            target_frame: 0,
-            kind: FrameDeliveryKind::Ready,
-        };
-        collector.observe_delivery(at(60), playing, delivery, true).unwrap();
+        collector
+            .observe_delivery(delivery_application(
+                epoch,
+                1,
+                FramePosition::new(0, Rational::new(1, 25)),
+                at(60),
+                Some((ClockMaster::Synthetic, 0, 0)),
+            ))
+            .unwrap();
         let audio = snapshot(
             epoch,
             1,
@@ -790,9 +1139,32 @@ mod tests {
         assert_eq!(report.deliveries.ready, 1);
         assert_eq!(report.demand_latency.p95_us, 60_000);
         assert_eq!(report.accurate_seek_latency.p95_us, 50_000);
-        assert_eq!(report.delivery_clock_drift.max_us, 0);
+        assert_eq!(report.delivery_phase_error.synthetic.proven_error.max_us, 0);
+        assert_eq!(report.delivery_phase_error.synthetic.proven_error.count, 1);
+        assert_eq!(report.delivery_phase_error.unproven_presentable, 0);
         assert_eq!(report.audio_underrun_frames, 960);
         assert_eq!(report.audio_underrun_recoveries, 1);
+    }
+
+    #[test]
+    fn residency_keeps_sub_microsecond_deltas_until_report_quantization() {
+        let epoch = PlaybackEpoch(8);
+        let mut collector = PlaybackEvidenceCollector::default();
+        let playing = snapshot(
+            epoch,
+            0,
+            TransportState::Playing,
+            Some(ClockMaster::Synthetic),
+        );
+        collector.observe_snapshot(at_ns(0), playing, None).unwrap();
+        for sample in 1..=2_000 {
+            collector.observe_snapshot(at_ns(sample * 500), playing, None).unwrap();
+        }
+
+        let report = collector.report();
+        assert_eq!(report.observed_duration_us, 1_000);
+        assert_eq!(report.clock_residency.synthetic_us, 1_000);
+        assert_eq!(report.state_residency.playing_us, 1_000);
     }
 
     #[test]
@@ -823,6 +1195,63 @@ mod tests {
     }
 
     #[test]
+    fn distinguishes_single_frame_advancement_from_clock_skips() {
+        let epoch = PlaybackEpoch(4);
+        let mut collector = PlaybackEvidenceCollector::default();
+        let playing = |frame| {
+            snapshot(
+                epoch,
+                frame,
+                TransportState::Playing,
+                Some(ClockMaster::Synthetic),
+            )
+        };
+
+        collector.observe_snapshot(at(0), playing(0), None).unwrap();
+        collector.observe_snapshot(at(40), playing(1), None).unwrap();
+        collector.observe_snapshot(at(160), playing(4), None).unwrap();
+        collector
+            .observe_snapshot(
+                at(200),
+                snapshot(
+                    PlaybackEpoch(5),
+                    20,
+                    TransportState::Playing,
+                    Some(ClockMaster::Synthetic),
+                ),
+                None,
+            )
+            .unwrap();
+
+        let report = collector.report();
+        assert_eq!(
+            report.clock_frame_advances,
+            PlaybackClockFrameAdvanceCounts {
+                single_frame_advances: 1,
+                multi_frame_advances: 1,
+                advanced_frames: 4,
+                skipped_intermediate_frames: 2,
+            }
+        );
+        assert!(report.events.iter().any(|event| {
+            event.kind
+                == PlaybackEvidenceEventKind::ClockFramesAdvanced {
+                    from_frame: 0,
+                    to_frame: 1,
+                    skipped_intermediate_frames: 0,
+                }
+        }));
+        assert!(report.events.iter().any(|event| {
+            event.kind
+                == PlaybackEvidenceEventKind::ClockFramesAdvanced {
+                    from_frame: 1,
+                    to_frame: 4,
+                    skipped_intermediate_frames: 2,
+                }
+        }));
+    }
+
+    #[test]
     fn metric_reservoir_is_bounded_while_population_max_remains_exact() {
         let mut metric = BoundedMetric::new(16);
         for sample in 1..=10_000 {
@@ -850,18 +1279,13 @@ mod tests {
         let current = demand(epoch, 9, 4);
         collector.observe_snapshot(at(0), playing, Some(current)).unwrap();
         collector
-            .observe_delivery(
+            .observe_delivery(delivery_application(
+                epoch,
+                9,
+                FramePosition::new(4, Rational::new(1, 25)),
                 at(10),
-                playing,
-                FrameDelivery {
-                    epoch,
-                    quality_revision: 1,
-                    demand_sequence: FrameDemandSequence(9),
-                    target_frame: 4,
-                    kind: FrameDeliveryKind::Ready,
-                },
-                true,
-            )
+                Some((ClockMaster::Synthetic, 160_000_000, 0)),
+            ))
             .unwrap();
         collector.observe_snapshot(at(20), playing, Some(current)).unwrap();
 
@@ -869,5 +1293,145 @@ mod tests {
         assert_eq!(report.demand_count, 1);
         assert_eq!(report.demand_latency.count, 1);
         assert_eq!(report.superseded_demand_count, 0);
+    }
+
+    #[test]
+    fn phase_error_uses_ceil_microseconds_at_the_twenty_millisecond_boundary() {
+        let epoch = PlaybackEpoch(10);
+        let mut collector = PlaybackEvidenceCollector::default();
+        for (sequence, completed_ns, phase_ns) in
+            [(1, 1, 19_999_999), (2, 2, 20_000_000), (3, 3, 20_000_001)]
+        {
+            collector
+                .observe_delivery(delivery_application(
+                    epoch,
+                    sequence,
+                    FramePosition::new(0, Rational::new(1, 25)),
+                    at_ns(completed_ns),
+                    Some((ClockMaster::Synthetic, phase_ns, 0)),
+                ))
+                .expect("phase evidence");
+        }
+
+        let summary = collector.report().delivery_phase_error.synthetic.proven_error;
+        assert_eq!(summary.count, 3);
+        assert_eq!(summary.max_us, 20_001);
+        assert_eq!(summary.p50_us, 20_000);
+    }
+
+    #[test]
+    fn audio_phase_error_adds_uncertainty_before_threshold_quantization() {
+        let epoch = PlaybackEpoch(11);
+        let mut collector = PlaybackEvidenceCollector::default();
+        collector
+            .observe_delivery(delivery_application(
+                epoch,
+                1,
+                FramePosition::new(0, Rational::new(1, 25)),
+                at_ns(1),
+                Some((ClockMaster::AudioDevice, 19_000_000, 1_000_001)),
+            ))
+            .expect("audio phase evidence");
+
+        let summary = collector.report().delivery_phase_error.audio_device;
+        assert_eq!(summary.point_error.max_us, 19_000);
+        assert_eq!(summary.uncertainty.max_us, 1_001);
+        assert_eq!(summary.proven_error.max_us, 20_001);
+    }
+
+    #[test]
+    fn fractional_target_uses_the_same_floor_nanosecond_grid_as_clock_phase() {
+        let epoch = PlaybackEpoch(12);
+        let mut collector = PlaybackEvidenceCollector::default();
+        collector
+            .observe_delivery(delivery_application(
+                epoch,
+                1,
+                FramePosition::new(1, Rational::new(1001, 60_000)),
+                at_ns(1),
+                Some((ClockMaster::Synthetic, 16_683_333, 0)),
+            ))
+            .expect("59.94 phase evidence");
+
+        let summary = collector.report().delivery_phase_error.synthetic;
+        assert_eq!(summary.point_error.max_us, 0);
+        assert_eq!(summary.proven_error.max_us, 0);
+    }
+
+    #[test]
+    fn phase_preflight_failure_is_transactional() {
+        let epoch = PlaybackEpoch(13);
+        let mut collector = PlaybackEvidenceCollector::default();
+        let before = collector.report();
+        let result = collector.observe_delivery(delivery_application(
+            epoch,
+            1,
+            FramePosition::new(i64::MAX, Rational::new(i64::from(i32::MAX), 1)),
+            at_ns(1),
+            Some((ClockMaster::Synthetic, i128::MIN, 0)),
+        ));
+
+        assert_eq!(
+            result,
+            Err(PlaybackEvidenceError::InvalidDeliveryPhaseEvidence)
+        );
+        assert_eq!(collector.report(), before);
+    }
+
+    #[test]
+    fn playing_delivery_without_clock_phase_is_reported_unproven() {
+        let epoch = PlaybackEpoch(14);
+        let mut collector = PlaybackEvidenceCollector::default();
+        collector
+            .observe_delivery(delivery_application(
+                epoch,
+                1,
+                FramePosition::new(0, Rational::new(1, 25)),
+                at_ns(1),
+                None,
+            ))
+            .expect("unproven delivery");
+
+        let report = collector.report();
+        assert_eq!(report.delivery_phase_error.unproven_presentable, 1);
+        assert_eq!(report.delivery_phase_error.phase_not_applicable, 0);
+        assert_eq!(report.delivery_phase_error.synthetic.proven_error.count, 0);
+        assert_eq!(
+            report.delivery_phase_error.audio_device.proven_error.count,
+            0
+        );
+    }
+
+    #[test]
+    fn paused_seeks_after_continuous_playback_are_phase_not_applicable() {
+        let epoch = PlaybackEpoch(15);
+        let mut collector = PlaybackEvidenceCollector::default();
+        collector
+            .observe_delivery(delivery_application(
+                epoch,
+                1,
+                FramePosition::new(0, Rational::new(1, 25)),
+                at_ns(1),
+                Some((ClockMaster::Synthetic, 0, 0)),
+            ))
+            .expect("running delivery");
+
+        for sequence in 2..=101 {
+            collector
+                .observe_delivery(delivery_application_in_state(
+                    epoch,
+                    sequence,
+                    FramePosition::new(sequence as i64, Rational::new(1, 25)),
+                    at_ns(sequence),
+                    TransportState::Paused,
+                    None,
+                ))
+                .expect("paused seek delivery");
+        }
+
+        let report = collector.report();
+        assert_eq!(report.delivery_phase_error.synthetic.proven_error.count, 1);
+        assert_eq!(report.delivery_phase_error.unproven_presentable, 0);
+        assert_eq!(report.delivery_phase_error.phase_not_applicable, 100);
     }
 }

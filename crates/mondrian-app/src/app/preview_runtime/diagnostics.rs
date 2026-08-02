@@ -186,9 +186,35 @@ impl PreviewHardwareDecodeAdmissionDiagnostics {
     }
 }
 
+/// Bounded future-media lowering and source-revalidation evidence.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct PreviewFutureMediaWindowDiagnostics {
+    /// Retained immutable frame contracts reused after live source revalidation.
+    pub cache_hits: u64,
+    /// Canonical future-frame semantic evaluations performed on cache misses.
+    pub semantic_frame_evaluations: u64,
+    /// Media demands lowered into immutable physical request contracts.
+    pub media_request_lowerings: u64,
+    /// Complete window identities retired by authoring, execution-policy, or lifecycle edges.
+    pub identity_invalidations: u64,
+    /// Live file-revision observations used to authorize retained contracts.
+    ///
+    /// One planning turn observes each unique physical path at most once. A
+    /// later turn must observe the path again.
+    pub source_fingerprint_observations: u64,
+}
+
 /// Point-in-time preview service counters for local performance diagnostics.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct PreviewDiagnostics {
+    /// Complete Preview resource decisions applied at the Host policy Seam.
+    pub resource_decision_applications: u64,
+    /// Bounded prepared visual Program residency and author-binding evidence.
+    pub visual_program_cache: PreparedVisualProgramCacheDiagnostics,
+    /// Bounded future-media lowering and source-revalidation evidence.
+    pub future_media_window: PreviewFutureMediaWindowDiagnostics,
+    /// Whether the sole visual execution worker terminated unexpectedly.
+    pub visual_execution_health_failed: bool,
     /// Viewer preview render requests received by the service.
     pub render_requests: u64,
     /// Requests that produced a current ready frame.
@@ -259,14 +285,34 @@ pub struct PreviewDiagnostics {
     pub media_cache_misses: u64,
     /// Requests skipped because a media preview key is known to have failed.
     pub media_failure_hits: u64,
+    /// Last exhaustive admission result for a current Timeline media source.
+    pub last_current_media_admission: Option<&'static str>,
+    /// Current immutable Preview execution generation.
+    pub preview_execution_generation: u64,
+    /// Exact current-candidate bindings waiting on reused Broker work.
+    pub media_existing_work_waiters: usize,
+    /// Existing-work retry authority retained until candidate evaluation acknowledges it.
+    pub media_existing_work_retry_pending: bool,
+    /// Current media requests that registered exact existing-work waiters.
+    pub media_existing_work_waiter_registrations: u64,
+    /// Retained existing-work retries acknowledged by real candidate evaluation.
+    pub media_existing_work_retry_acknowledgements: u64,
+    /// Last exhaustive reason the GPU candidate returned Loading.
+    pub last_gpu_loading_reason: Option<&'static str>,
     /// Coordinated CPU budget used for preview workers and FFmpeg decoder threads.
     pub decode_cpu_budget: PreviewDecodeCpuBudget,
     /// Preview decode workers successfully started for this service.
     pub decode_worker_count: usize,
+    /// Whether every configured media result producer terminated before shutdown.
+    pub media_worker_health_failed: bool,
     /// Lock-free point-in-time execution stage for every bounded decode worker.
     pub decode_worker_execution: PreviewDecodeWorkerExecutionDiagnostics,
     /// Latest decoder-residency phase revision.
     pub decode_residency_revision: u64,
+    /// Completed retirement barriers available to Runtime retry projection.
+    pub decode_residency_actionable_retry_revision: u64,
+    /// Latest retirement-barrier retry revision projected by this Runtime.
+    pub decode_residency_observed_retry_revision: u64,
     /// Active decoder-residency family (`playback` or `interactive`).
     pub decode_residency_family: Option<&'static str>,
     /// Playback/interactive residency transitions published by the Runtime.
@@ -323,13 +369,13 @@ pub struct PreviewDiagnostics {
     pub decode_canceled_max_duration_us: u64,
     /// Most recent worker execution time for a canceled decode job.
     pub decode_canceled_last_duration_us: u64,
-    /// Canceled jobs with an attributable external request-to-checkpoint timestamp.
+    /// Canceled jobs with attributable request-to-logical-cancellation timing.
     pub decode_cancel_observation_samples: u64,
-    /// Total latency from external cancellation request to the first cooperative checkpoint.
+    /// Total authority-request to `LogicalCancellationObserved` latency.
     pub decode_cancel_observation_total_us: u64,
-    /// Slowest latency from external cancellation request to the first cooperative checkpoint.
+    /// Slowest authority-request to `LogicalCancellationObserved` latency.
     pub decode_cancel_observation_max_us: u64,
-    /// Most recent latency from external cancellation request to the first cooperative checkpoint.
+    /// Most recent authority-request to `LogicalCancellationObserved` latency.
     pub decode_cancel_observation_last_us: u64,
     /// Total latency after canceled decode jobs first observed cancellation.
     pub decode_canceled_return_latency_total_us: u64,
@@ -343,7 +389,11 @@ pub struct PreviewDiagnostics {
     pub decode_external_ffmpeg_cpu_rgba_frames: u64,
     /// Successful playback decodes served from the playback session-local ring.
     pub decode_playback_session_ring_hit_frames: u64,
-    /// Successful decodes served from the preview frame cache.
+    /// Successful decodes served from a decoder-session-local cache.
+    ///
+    /// This currently aliases playback-session ring hits. App-owned Preview
+    /// Frame Store hits bypass media decode and therefore never enter this
+    /// counter.
     pub decode_cache_hit_frames: u64,
     /// Decode results requested through the playback cursor access contract.
     pub decode_playback_cursor_frames: u64,
@@ -363,16 +413,18 @@ pub struct PreviewDiagnostics {
     pub decode_max_duration_us: u64,
     /// Most recent successful preview decode duration in microseconds.
     pub decode_last_duration_us: u64,
-    /// Total time decoded jobs spent waiting in the preview worker queue.
+    /// Total time Ready jobs spent waiting in the preview worker queue.
     pub decode_queue_wait_total_us: u64,
-    /// Slowest decoded job queue wait.
+    /// Slowest Ready job queue wait.
     pub decode_queue_wait_max_us: u64,
-    /// Most recent decoded job queue wait.
+    /// Most recent Ready job queue wait.
     pub decode_queue_wait_last_us: u64,
-    /// Slowest current-frame decode queue wait.
+    /// Slowest Ready current-frame decode queue wait.
     pub decode_current_queue_wait_max_us: u64,
-    /// Slowest prefetch decode queue wait.
+    /// Slowest Ready prefetch decode queue wait.
     pub decode_prefetch_queue_wait_max_us: u64,
+    /// Queue wait for jobs rejected as expired before codec execution.
+    pub decode_expired_queue_wait: PreviewDecodeQueueWaitProfile,
     /// Decode requests that required a decoder seek before frame selection.
     pub decode_seeked_frames: u64,
     /// Total decoded frames consumed by preview decode requests.
@@ -469,38 +521,12 @@ pub struct PreviewDiagnostics {
     pub viewer_frame_cache_hits: u64,
     /// Final viewer preview frame cache misses.
     pub viewer_frame_cache_misses: u64,
-    /// Current number of final viewer preview frames in the bounded cache.
-    pub viewer_frame_cache_entries: usize,
-    /// Current number of frames in the media preview LRU cache.
-    pub media_cache_entries: usize,
-    /// Current number of keys in the media preview failure LRU cache.
-    pub media_failure_entries: usize,
-    /// CPU pixel bytes reserved by decoded/media cache entries.
-    pub media_cache_reserved_bytes: usize,
-    /// Maximum CPU pixel bytes allowed for decoded/media cache entries.
-    pub media_cache_byte_budget: usize,
-    /// Decoder/GPU resource leases retained by decoded-media cache entries.
-    pub media_cache_resource_units: usize,
-    /// Maximum decoder/GPU resource leases retained by decoded-media entries.
-    pub media_cache_resource_unit_budget: usize,
-    /// Decoded/media cache entries evicted by count or byte pressure.
-    pub media_cache_evictions: u64,
-    /// Decoded/media payloads refused because one entry exceeded the byte budget.
-    pub media_cache_oversize_rejections: u64,
-    /// Encoded CPU pixel bytes reserved by final Viewer raster cache entries.
-    pub viewer_frame_cache_reserved_bytes: usize,
-    /// Maximum encoded CPU pixel bytes allowed for final Viewer raster cache entries.
-    pub viewer_frame_cache_byte_budget: usize,
-    /// Final Viewer raster entries evicted by count or byte pressure.
-    pub viewer_frame_cache_evictions: u64,
-    /// Final Viewer raster payloads refused because one entry exceeded the byte budget.
-    pub viewer_frame_cache_oversize_rejections: u64,
-    /// Encoded bytes retained by the non-evictable current/stale Viewer frame.
-    pub pinned_viewer_frame_bytes: usize,
-    /// CPU pixel bytes retained by an oversize current decoded/media frame.
-    pub pinned_media_frame_bytes: usize,
-    /// Remembered failure keys evicted by their bounded LRU policy.
-    pub media_failure_evictions: u64,
+    /// Playback-owned physical Preview Frame Store ledger and cache evidence.
+    ///
+    /// Consumers must evaluate optional cache residency separately from the
+    /// aggregate hard current-working-set grant. App diagnostics do not
+    /// reconstruct or rename that capacity authority.
+    pub frame_store: mondrian_playback::PreviewFrameStoreDiagnostics,
     /// Source/media color transforms into the timeline working space.
     pub color_input_transform_calls: u64,
     /// Pixels processed by source/media color transforms into the timeline working space.
@@ -605,8 +631,8 @@ pub struct PreviewColorRejection {
     pub source: InputColorResolutionSource,
     /// Clip/media color-space override in effect, if any.
     pub override_color_space: Option<ColorSpace>,
-    /// Explicitly detected media color space, if any.
-    pub detected_color_space: Option<ColorSpace>,
+    /// Validated metadata identity that was eligible to drive pixels.
+    pub executable_color_space: Option<ColorSpace>,
     /// Sequence working color space active during the decision.
     pub working_color_space: WorkingColorSpace,
     /// Compact media color diagnostic summary from `mondrian-media`.
@@ -715,32 +741,292 @@ impl PreviewDecodeLatencyBuckets {
             .saturating_add(self.gt_80ms)
     }
 
-    fn estimated_p95_upper_bound_us(self) -> u64 {
+    fn estimated_p95_upper_bound_us(self) -> Option<u64> {
         self.estimated_quantile_upper_bound_us(95)
     }
 
-    fn estimated_quantile_upper_bound_us(self, percentile: u64) -> u64 {
+    fn estimated_quantile_upper_bound_us(self, percentile: u64) -> Option<u64> {
         let total = self.total();
         if total == 0 {
-            return 0;
+            return None;
         }
         let rank = total.saturating_mul(percentile.min(100)).saturating_add(99) / 100;
         let mut cumulative = 0_u64;
         for (count, upper_bound_us) in [
-            (self.le_10ms, 10_000),
-            (self.le_16ms, 16_000),
-            (self.le_25ms, 25_000),
-            (self.le_40ms, 40_000),
-            (self.le_50ms, 50_000),
-            (self.le_80ms, 80_000),
-            (self.gt_80ms, 80_001),
+            (self.le_10ms, Some(10_000)),
+            (self.le_16ms, Some(16_000)),
+            (self.le_25ms, Some(25_000)),
+            (self.le_40ms, Some(40_000)),
+            (self.le_50ms, Some(50_000)),
+            (self.le_80ms, Some(80_000)),
+            (self.gt_80ms, None),
         ] {
             cumulative = cumulative.saturating_add(count);
             if cumulative >= rank {
                 return upper_bound_us;
             }
         }
-        80_001
+        None
+    }
+}
+
+/// Queue-wait evidence for one broker dequeue disposition.
+///
+/// `Ready` and `Expired` observations use separate instances so deadline
+/// cleanup that never entered codec execution cannot contaminate execution
+/// admission latency gates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct PreviewDecodeQueueWaitProfile {
+    /// Jobs with explicit queue-wait evidence.
+    pub samples: u64,
+    /// Total queue wait across the observed jobs.
+    pub total_us: u64,
+    /// Slowest observed queue wait.
+    pub max_us: u64,
+    /// Most recent observed queue wait.
+    pub last_us: u64,
+    /// Slowest current-frame queue wait.
+    pub current_max_us: u64,
+    /// Slowest prefetch queue wait.
+    pub prefetch_max_us: u64,
+    /// Fixed distribution buckets for queue wait.
+    pub buckets: PreviewDecodeLatencyBuckets,
+}
+
+impl PreviewDecodeQueueWaitProfile {
+    pub(super) fn record(&mut self, priority: MediaPreviewRequestPriority, queue_wait_us: u64) {
+        self.samples = self.samples.saturating_add(1);
+        self.total_us = self.total_us.saturating_add(queue_wait_us);
+        self.max_us = self.max_us.max(queue_wait_us);
+        self.last_us = queue_wait_us;
+        match priority {
+            MediaPreviewRequestPriority::Current => {
+                self.current_max_us = self.current_max_us.max(queue_wait_us);
+            }
+            MediaPreviewRequestPriority::Prefetch => {
+                self.prefetch_max_us = self.prefetch_max_us.max(queue_wait_us);
+            }
+        }
+        self.buckets.record(queue_wait_us);
+    }
+}
+
+/// Decode execution classes with materially different latency obligations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+pub enum PreviewDecodeWorkClass {
+    /// Session-local forward-ring result; the decoder was bypassed.
+    CacheHit,
+    /// First compatible decoder Session for this access-mode lane.
+    SessionOpened,
+    /// Existing incompatible/retired decoder Session was replaced.
+    SessionReplaced,
+    /// Compatible Session continued forward without seeking.
+    ForwardSteady,
+    /// Compatible Session performed a seek before returning the frame.
+    ReusedSeek,
+    /// Compatible Session returned without a proven forward-reuse or seek classification.
+    ReusedOther,
+    /// Producer lifecycle facts were missing or contradictory.
+    Unclassified,
+}
+
+impl PreviewDecodeWorkClass {
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::CacheHit => "CacheHit",
+            Self::SessionOpened => "SessionOpened",
+            Self::SessionReplaced => "SessionReplaced",
+            Self::ForwardSteady => "ForwardSteady",
+            Self::ReusedSeek => "ReusedSeek",
+            Self::ReusedOther => "ReusedOther",
+            Self::Unclassified => "Unclassified",
+        }
+    }
+}
+
+/// Extended fixed histogram used by class-specific decode gates.
+///
+/// Unlike the legacy compact aggregate histogram, the overflow bucket has no
+/// fabricated upper bound. Quantile evaluation returns `None` when the target
+/// rank falls into that open interval.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct PreviewDecodeWorkLatencyBuckets {
+    /// Samples at or below 10 ms.
+    pub le_10ms: u64,
+    /// Samples above 10 ms and at or below 16 ms.
+    pub le_16ms: u64,
+    /// Samples above 16 ms and at or below 25 ms.
+    pub le_25ms: u64,
+    /// Samples above 25 ms and at or below 40 ms.
+    pub le_40ms: u64,
+    /// Samples above 40 ms and at or below 50 ms.
+    pub le_50ms: u64,
+    /// Samples above 50 ms and at or below 80 ms.
+    pub le_80ms: u64,
+    /// Samples above 80 ms and at or below 120 ms.
+    pub le_120ms: u64,
+    /// Samples above 120 ms and at or below 250 ms.
+    pub le_250ms: u64,
+    /// Samples above 250 ms and at or below 500 ms.
+    pub le_500ms: u64,
+    /// Samples above 500 ms and at or below 1 second.
+    pub le_1s: u64,
+    /// Samples above 1 second and at or below 2 seconds.
+    pub le_2s: u64,
+    /// Samples above 2 seconds and at or below 5 seconds.
+    pub le_5s: u64,
+    /// Samples above 5 seconds; this interval has no finite upper bound.
+    pub gt_5s: u64,
+}
+
+impl PreviewDecodeWorkLatencyBuckets {
+    fn record(&mut self, duration_us: u64) {
+        match duration_us {
+            0..=10_000 => self.le_10ms = self.le_10ms.saturating_add(1),
+            10_001..=16_000 => self.le_16ms = self.le_16ms.saturating_add(1),
+            16_001..=25_000 => self.le_25ms = self.le_25ms.saturating_add(1),
+            25_001..=40_000 => self.le_40ms = self.le_40ms.saturating_add(1),
+            40_001..=50_000 => self.le_50ms = self.le_50ms.saturating_add(1),
+            50_001..=80_000 => self.le_80ms = self.le_80ms.saturating_add(1),
+            80_001..=120_000 => self.le_120ms = self.le_120ms.saturating_add(1),
+            120_001..=250_000 => self.le_250ms = self.le_250ms.saturating_add(1),
+            250_001..=500_000 => self.le_500ms = self.le_500ms.saturating_add(1),
+            500_001..=1_000_000 => self.le_1s = self.le_1s.saturating_add(1),
+            1_000_001..=2_000_000 => self.le_2s = self.le_2s.saturating_add(1),
+            2_000_001..=5_000_000 => self.le_5s = self.le_5s.saturating_add(1),
+            _ => self.gt_5s = self.gt_5s.saturating_add(1),
+        }
+    }
+
+    pub(super) fn total(self) -> u64 {
+        [
+            self.le_10ms,
+            self.le_16ms,
+            self.le_25ms,
+            self.le_40ms,
+            self.le_50ms,
+            self.le_80ms,
+            self.le_120ms,
+            self.le_250ms,
+            self.le_500ms,
+            self.le_1s,
+            self.le_2s,
+            self.le_5s,
+            self.gt_5s,
+        ]
+        .into_iter()
+        .fold(0, u64::saturating_add)
+    }
+
+    pub(super) fn p95_upper_bound_us(self) -> Option<u64> {
+        let total = self.total();
+        if total == 0 {
+            return None;
+        }
+        let rank = total.saturating_mul(95).saturating_add(99) / 100;
+        let mut cumulative = 0_u64;
+        for (count, upper_bound_us) in [
+            (self.le_10ms, Some(10_000)),
+            (self.le_16ms, Some(16_000)),
+            (self.le_25ms, Some(25_000)),
+            (self.le_40ms, Some(40_000)),
+            (self.le_50ms, Some(50_000)),
+            (self.le_80ms, Some(80_000)),
+            (self.le_120ms, Some(120_000)),
+            (self.le_250ms, Some(250_000)),
+            (self.le_500ms, Some(500_000)),
+            (self.le_1s, Some(1_000_000)),
+            (self.le_2s, Some(2_000_000)),
+            (self.le_5s, Some(5_000_000)),
+            (self.gt_5s, None),
+        ] {
+            cumulative = cumulative.saturating_add(count);
+            if cumulative >= rank {
+                return upper_bound_us;
+            }
+        }
+        None
+    }
+}
+
+/// Latency evidence for one access-mode/work-class cell.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct PreviewDecodeWorkLatencyProfile {
+    /// Successful frames classified into this cell.
+    pub frames: u64,
+    /// Total worker execution time for successful frames.
+    pub total_duration_us: u64,
+    /// Slowest worker execution time for a successful frame.
+    pub max_duration_us: u64,
+    /// Bounded latency distribution for quantile gates.
+    pub latency_buckets: PreviewDecodeWorkLatencyBuckets,
+}
+
+impl PreviewDecodeWorkLatencyProfile {
+    fn record(&mut self, duration_us: u64) {
+        self.frames = self.frames.saturating_add(1);
+        self.total_duration_us = self.total_duration_us.saturating_add(duration_us);
+        self.max_duration_us = self.max_duration_us.max(duration_us);
+        self.latency_buckets.record(duration_us);
+    }
+}
+
+/// Exhaustive successful-frame latency classes for one access mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct PreviewDecodeWorkClassProfiles {
+    /// Decoder-bypassing ring/cache hits.
+    pub cache_hit: PreviewDecodeWorkLatencyProfile,
+    /// Frames that opened a new Session.
+    pub session_opened: PreviewDecodeWorkLatencyProfile,
+    /// Frames that replaced an incompatible/retired Session.
+    pub session_replaced: PreviewDecodeWorkLatencyProfile,
+    /// Forward, seek-free reuse.
+    pub forward_steady: PreviewDecodeWorkLatencyProfile,
+    /// Reused Session with a seek.
+    pub reused_seek: PreviewDecodeWorkLatencyProfile,
+    /// Reused Session without enough facts for forward/seek specialization.
+    pub reused_other: PreviewDecodeWorkLatencyProfile,
+    /// Missing or contradictory producer lifecycle facts.
+    pub unclassified: PreviewDecodeWorkLatencyProfile,
+}
+
+impl PreviewDecodeWorkClassProfiles {
+    pub(super) fn total_frames(self) -> u64 {
+        [
+            self.cache_hit.frames,
+            self.session_opened.frames,
+            self.session_replaced.frames,
+            self.forward_steady.frames,
+            self.reused_seek.frames,
+            self.reused_other.frames,
+            self.unclassified.frames,
+        ]
+        .into_iter()
+        .fold(0, u64::saturating_add)
+    }
+
+    pub(super) fn profile(self, class: PreviewDecodeWorkClass) -> PreviewDecodeWorkLatencyProfile {
+        match class {
+            PreviewDecodeWorkClass::CacheHit => self.cache_hit,
+            PreviewDecodeWorkClass::SessionOpened => self.session_opened,
+            PreviewDecodeWorkClass::SessionReplaced => self.session_replaced,
+            PreviewDecodeWorkClass::ForwardSteady => self.forward_steady,
+            PreviewDecodeWorkClass::ReusedSeek => self.reused_seek,
+            PreviewDecodeWorkClass::ReusedOther => self.reused_other,
+            PreviewDecodeWorkClass::Unclassified => self.unclassified,
+        }
+    }
+
+    fn record(&mut self, class: PreviewDecodeWorkClass, duration_us: u64) {
+        match class {
+            PreviewDecodeWorkClass::CacheHit => self.cache_hit.record(duration_us),
+            PreviewDecodeWorkClass::SessionOpened => self.session_opened.record(duration_us),
+            PreviewDecodeWorkClass::SessionReplaced => self.session_replaced.record(duration_us),
+            PreviewDecodeWorkClass::ForwardSteady => self.forward_steady.record(duration_us),
+            PreviewDecodeWorkClass::ReusedSeek => self.reused_seek.record(duration_us),
+            PreviewDecodeWorkClass::ReusedOther => self.reused_other.record(duration_us),
+            PreviewDecodeWorkClass::Unclassified => self.unclassified.record(duration_us),
+        }
     }
 }
 
@@ -755,7 +1041,7 @@ pub struct PreviewDecodeAccessModeProfile {
     pub external_ffmpeg_cpu_rgba_frames: u64,
     /// Successful playback ring hits for this access mode.
     pub playback_session_ring_hit_frames: u64,
-    /// Successful preview cache hits for this access mode.
+    /// Successful decoder-session-local cache hits for this access mode.
     pub cache_hit_frames: u64,
     /// Total end-to-end decode duration for this access mode.
     pub total_duration_us: u64,
@@ -765,6 +1051,8 @@ pub struct PreviewDecodeAccessModeProfile {
     pub last_duration_us: u64,
     /// Fixed distribution buckets for end-to-end decode duration.
     pub latency_buckets: PreviewDecodeLatencyBuckets,
+    /// Non-overlapping latency evidence by decoder work class.
+    pub work_classes: PreviewDecodeWorkClassProfiles,
     /// Total worker-queue wait before decode started for this access mode.
     pub queue_wait_total_us: u64,
     /// Slowest worker-queue wait before decode started for this access mode.
@@ -773,6 +1061,10 @@ pub struct PreviewDecodeAccessModeProfile {
     pub queue_wait_last_us: u64,
     /// Fixed distribution buckets for worker-queue wait.
     pub queue_wait_buckets: PreviewDecodeLatencyBuckets,
+    /// Jobs with explicit worker-queue wait evidence for this access mode.
+    pub queue_wait_samples: u64,
+    /// Queue wait for jobs rejected as expired before codec execution.
+    pub expired_queue_wait: PreviewDecodeQueueWaitProfile,
     /// Canceled decode jobs for this access mode.
     pub canceled_jobs: u64,
     /// Canceled jobs caused by preview shutdown for this access mode.
@@ -789,19 +1081,35 @@ pub struct PreviewDecodeAccessModeProfile {
     pub canceled_still_preempted_jobs: u64,
     /// Canceled jobs without a structured reason for this access mode.
     pub canceled_unknown_jobs: u64,
+    /// Canceled attempts first observed while opening or probing a decoder Session.
+    pub canceled_session_open_attempts: u64,
+    /// Canceled requests that had opened a new decoder Session.
+    pub canceled_session_opened_attempts: u64,
+    /// Canceled requests that had replaced an incompatible decoder Session.
+    pub canceled_session_replaced_attempts: u64,
+    /// Canceled requests that reused a compatible decoder Session.
+    pub canceled_session_reused_attempts: u64,
+    /// Canceled requests that bypassed decoder-Session work through a cache.
+    pub canceled_session_bypassed_cache_attempts: u64,
+    /// Canceled requests that entered no Session or lacked exact lifecycle evidence.
+    pub canceled_session_unclassified_attempts: u64,
+    /// Total decoder Session open/replacement time retained from canceled requests.
+    pub canceled_session_open_total_duration_us: u64,
+    /// Slowest decoder Session open/replacement time retained from a canceled request.
+    pub canceled_session_open_max_duration_us: u64,
     /// Total worker execution time spent in canceled decode jobs for this access mode.
     pub canceled_total_duration_us: u64,
     /// Slowest worker execution time for a canceled decode job in this access mode.
     pub canceled_max_duration_us: u64,
     /// Most recent canceled decode worker execution time in this access mode.
     pub canceled_last_duration_us: u64,
-    /// Canceled jobs with attributable request-to-checkpoint timing in this access mode.
+    /// Canceled jobs with attributable request-to-logical-cancellation timing in this mode.
     pub cancel_observation_samples: u64,
-    /// Total external cancellation request-to-checkpoint latency for this access mode.
+    /// Total request-to-logical-cancellation latency for this access mode.
     pub cancel_observation_total_us: u64,
-    /// Slowest external cancellation request-to-checkpoint latency for this access mode.
+    /// Slowest request-to-logical-cancellation latency for this access mode.
     pub cancel_observation_max_us: u64,
-    /// Most recent external cancellation request-to-checkpoint latency for this access mode.
+    /// Most recent request-to-logical-cancellation latency for this access mode.
     pub cancel_observation_last_us: u64,
     /// Total latency after canceled jobs first observed cancellation for this access mode.
     pub canceled_return_latency_total_us: u64,
@@ -815,6 +1123,8 @@ pub struct PreviewDecodeAccessModeProfile {
     pub timeout_failures: u64,
     /// Failed decode jobs caused by forward-scan budget exhaustion for this access mode.
     pub budget_exhausted_failures: u64,
+    /// Exact Playback/still requests rejected because decode selected another timestamp.
+    pub temporal_mismatch_failures: u64,
     /// Decode requests for this access mode that required a seek.
     pub seeked_frames: u64,
     /// Results that intentionally selected a non-exact temporal approximation.
@@ -831,8 +1141,14 @@ pub struct PreviewDecodeAccessModeProfile {
     pub any_seek_window_ms_max: u64,
     /// Decode results that reused an existing access-mode-local session.
     pub session_reused_frames: u64,
-    /// Decode results that opened or replaced the access-mode-local session.
+    /// Decode results that opened a new access-mode-local session.
     pub session_opened_frames: u64,
+    /// Decode results that replaced an incompatible/retired access-mode-local session.
+    pub session_replaced_frames: u64,
+    /// Decode results that bypassed the decoder through its session-local ring.
+    pub session_bypassed_cache_frames: u64,
+    /// Decode results without valid session lifecycle evidence.
+    pub session_unclassified_frames: u64,
     /// Decode results produced by continuing forward in an existing session without seeking.
     pub forward_reused_frames: u64,
     /// Decode results where the media session had observed keyframe seek-index evidence.
@@ -927,9 +1243,92 @@ pub struct PreviewDecodeAccessModeProfile {
     pub max_frame_bottleneck: PreviewDecodeBottleneck,
 }
 
+fn preview_decode_work_class(diagnostics: PreviewDecodeDiagnostics) -> PreviewDecodeWorkClass {
+    let decoder_path =
+        diagnostics.path != PreviewDecodePath::PlaybackSessionRingHit && !diagnostics.cache_hit;
+    let no_session_open = diagnostics.stage_durations.session_open_us == 0;
+    match diagnostics.session_disposition {
+        PreviewDecodeSessionDisposition::Opened if decoder_path && !diagnostics.forward_reused => {
+            PreviewDecodeWorkClass::SessionOpened
+        }
+        PreviewDecodeSessionDisposition::Replaced
+            if decoder_path && !diagnostics.forward_reused =>
+        {
+            PreviewDecodeWorkClass::SessionReplaced
+        }
+        PreviewDecodeSessionDisposition::BypassedCache
+            if diagnostics.path == PreviewDecodePath::PlaybackSessionRingHit
+                && diagnostics.cache_hit
+                && !diagnostics.seek_performed
+                && !diagnostics.forward_reused
+                && diagnostics.stage_durations.session_open_us == 0 =>
+        {
+            PreviewDecodeWorkClass::CacheHit
+        }
+        PreviewDecodeSessionDisposition::Reused
+            if decoder_path
+                && no_session_open
+                && diagnostics.forward_reused
+                && !diagnostics.seek_performed =>
+        {
+            PreviewDecodeWorkClass::ForwardSteady
+        }
+        PreviewDecodeSessionDisposition::Reused
+            if decoder_path
+                && no_session_open
+                && diagnostics.seek_performed
+                && !diagnostics.forward_reused =>
+        {
+            PreviewDecodeWorkClass::ReusedSeek
+        }
+        PreviewDecodeSessionDisposition::Reused
+            if decoder_path
+                && no_session_open
+                && !diagnostics.seek_performed
+                && !diagnostics.forward_reused =>
+        {
+            PreviewDecodeWorkClass::ReusedOther
+        }
+        PreviewDecodeSessionDisposition::Opened
+        | PreviewDecodeSessionDisposition::Replaced
+        | PreviewDecodeSessionDisposition::Unspecified
+        | PreviewDecodeSessionDisposition::BypassedCache
+        | PreviewDecodeSessionDisposition::Reused => PreviewDecodeWorkClass::Unclassified,
+    }
+}
+
 impl PreviewDecodeAccessModeProfile {
     fn mode_local_evidence_frames(self) -> u64 {
-        self.frames.saturating_sub(self.cache_hit_frames)
+        // The only media-layer reuse path is the access-mode-local playback
+        // Session ring. App Frame Store hits are counted separately and never
+        // enter this decode profile.
+        self.frames
+    }
+
+    fn successful_lifecycle_frames(self) -> u64 {
+        self.session_opened_frames
+            .saturating_add(self.session_replaced_frames)
+            .saturating_add(self.session_reused_frames)
+            .saturating_add(self.session_bypassed_cache_frames)
+            .saturating_add(self.session_unclassified_frames)
+    }
+
+    fn canceled_session_lifecycle_attempts(self) -> u64 {
+        self.canceled_session_opened_attempts
+            .saturating_add(self.canceled_session_replaced_attempts)
+            .saturating_add(self.canceled_session_reused_attempts)
+            .saturating_add(self.canceled_session_bypassed_cache_attempts)
+            .saturating_add(self.canceled_session_unclassified_attempts)
+    }
+
+    fn session_churn_events(self) -> u64 {
+        self.session_opened_frames
+            .saturating_add(self.session_replaced_frames)
+            .saturating_add(self.canceled_session_open_attempts)
+    }
+
+    fn session_churn_attempts(self) -> u64 {
+        self.frames.saturating_add(self.canceled_session_lifecycle_attempts())
     }
 
     fn hardware_decode_requested_frames(self) -> u64 {
@@ -963,13 +1362,13 @@ impl PreviewDecodeAccessModeProfile {
             PreviewDecodePath::PlaybackSessionRingHit => {
                 self.playback_session_ring_hit_frames =
                     self.playback_session_ring_hit_frames.saturating_add(1);
-            }
-            PreviewDecodePath::PreviewCacheHit => {
                 self.cache_hit_frames = self.cache_hit_frames.saturating_add(1);
             }
         }
         self.total_duration_us = self.total_duration_us.saturating_add(diagnostics.elapsed_us);
         self.latency_buckets.record(diagnostics.elapsed_us);
+        let work_class = preview_decode_work_class(diagnostics);
+        self.work_classes.record(work_class, diagnostics.elapsed_us);
         if diagnostics.elapsed_us >= self.max_duration_us {
             self.max_duration_us = diagnostics.elapsed_us;
             self.max_frame_stage_durations = diagnostics.stage_durations;
@@ -1003,10 +1402,26 @@ impl PreviewDecodeAccessModeProfile {
             .max(u64::from(diagnostics.forward_decode_budget_frames));
         self.any_seek_window_ms_max =
             self.any_seek_window_ms_max.max(diagnostics.any_seek_window_ms);
-        if diagnostics.session_reused {
-            self.session_reused_frames = self.session_reused_frames.saturating_add(1);
-        } else {
-            self.session_opened_frames = self.session_opened_frames.saturating_add(1);
+        match work_class {
+            PreviewDecodeWorkClass::SessionOpened => {
+                self.session_opened_frames = self.session_opened_frames.saturating_add(1);
+            }
+            PreviewDecodeWorkClass::SessionReplaced => {
+                self.session_replaced_frames = self.session_replaced_frames.saturating_add(1);
+            }
+            PreviewDecodeWorkClass::ForwardSteady
+            | PreviewDecodeWorkClass::ReusedSeek
+            | PreviewDecodeWorkClass::ReusedOther => {
+                self.session_reused_frames = self.session_reused_frames.saturating_add(1);
+            }
+            PreviewDecodeWorkClass::CacheHit => {
+                self.session_bypassed_cache_frames =
+                    self.session_bypassed_cache_frames.saturating_add(1);
+            }
+            PreviewDecodeWorkClass::Unclassified => {
+                self.session_unclassified_frames =
+                    self.session_unclassified_frames.saturating_add(1);
+            }
         }
         if diagnostics.forward_reused {
             self.forward_reused_frames = self.forward_reused_frames.saturating_add(1);
@@ -1187,10 +1602,56 @@ impl PreviewDecodeAccessModeProfile {
     }
 
     fn record_queue_wait(&mut self, queue_wait_us: u64) {
+        self.queue_wait_samples = self.queue_wait_samples.saturating_add(1);
         self.queue_wait_total_us = self.queue_wait_total_us.saturating_add(queue_wait_us);
         self.queue_wait_max_us = self.queue_wait_max_us.max(queue_wait_us);
         self.queue_wait_last_us = queue_wait_us;
         self.queue_wait_buckets.record(queue_wait_us);
+    }
+
+    fn record_expired_queue_wait(
+        &mut self,
+        priority: MediaPreviewRequestPriority,
+        queue_wait_us: u64,
+    ) {
+        self.expired_queue_wait.record(priority, queue_wait_us);
+    }
+
+    fn record_session_cancellation(
+        &mut self,
+        cancellation: mondrian_media::PreviewDecodeCancellation,
+    ) {
+        match cancellation.session_disposition {
+            PreviewDecodeSessionDisposition::Opened => {
+                self.canceled_session_opened_attempts =
+                    self.canceled_session_opened_attempts.saturating_add(1);
+                self.canceled_session_open_attempts =
+                    self.canceled_session_open_attempts.saturating_add(1);
+            }
+            PreviewDecodeSessionDisposition::Replaced => {
+                self.canceled_session_replaced_attempts =
+                    self.canceled_session_replaced_attempts.saturating_add(1);
+                self.canceled_session_open_attempts =
+                    self.canceled_session_open_attempts.saturating_add(1);
+            }
+            PreviewDecodeSessionDisposition::Reused => {
+                self.canceled_session_reused_attempts =
+                    self.canceled_session_reused_attempts.saturating_add(1);
+            }
+            PreviewDecodeSessionDisposition::BypassedCache => {
+                self.canceled_session_bypassed_cache_attempts =
+                    self.canceled_session_bypassed_cache_attempts.saturating_add(1);
+            }
+            PreviewDecodeSessionDisposition::Unspecified => {
+                self.canceled_session_unclassified_attempts =
+                    self.canceled_session_unclassified_attempts.saturating_add(1);
+            }
+        }
+        self.canceled_session_open_total_duration_us = self
+            .canceled_session_open_total_duration_us
+            .saturating_add(cancellation.session_open_us);
+        self.canceled_session_open_max_duration_us =
+            self.canceled_session_open_max_duration_us.max(cancellation.session_open_us);
     }
 
     fn apply_cancellation(&mut self, profile: mondrian_playback::FrameCancellationProfile) {
@@ -1205,13 +1666,13 @@ impl PreviewDecodeAccessModeProfile {
         self.canceled_total_duration_us = profile.execution.total_us;
         self.canceled_max_duration_us = profile.execution.max_us;
         self.canceled_last_duration_us = profile.execution.last_us;
-        self.cancel_observation_samples = profile.request_to_checkpoint.samples;
-        self.cancel_observation_total_us = profile.request_to_checkpoint.total_us;
-        self.cancel_observation_max_us = profile.request_to_checkpoint.max_us;
-        self.cancel_observation_last_us = profile.request_to_checkpoint.last_us;
-        self.canceled_return_latency_total_us = profile.checkpoint_to_return.total_us;
-        self.canceled_return_latency_max_us = profile.checkpoint_to_return.max_us;
-        self.canceled_return_latency_last_us = profile.checkpoint_to_return.last_us;
+        self.cancel_observation_samples = profile.request_to_logical_cancellation.samples;
+        self.cancel_observation_total_us = profile.request_to_logical_cancellation.total_us;
+        self.cancel_observation_max_us = profile.request_to_logical_cancellation.max_us;
+        self.cancel_observation_last_us = profile.request_to_logical_cancellation.last_us;
+        self.canceled_return_latency_total_us = profile.logical_cancellation_to_return.total_us;
+        self.canceled_return_latency_max_us = profile.logical_cancellation_to_return.max_us;
+        self.canceled_return_latency_last_us = profile.logical_cancellation_to_return.last_us;
     }
 
     fn record_failure(&mut self, reason: MediaPreviewFailureReason) {
@@ -1223,7 +1684,13 @@ impl PreviewDecodeAccessModeProfile {
             MediaPreviewFailureReason::ForwardDecodeBudgetExhausted => {
                 self.budget_exhausted_failures = self.budget_exhausted_failures.saturating_add(1);
             }
-            MediaPreviewFailureReason::DecodeError => {}
+            MediaPreviewFailureReason::TemporalMismatch => {
+                self.temporal_mismatch_failures = self.temporal_mismatch_failures.saturating_add(1);
+            }
+            MediaPreviewFailureReason::DecodeError
+            | MediaPreviewFailureReason::WorkerPanicked
+            | MediaPreviewFailureReason::ResidencyContractViolation
+            | MediaPreviewFailureReason::ResidencyCapacityRejected => {}
         }
     }
 }
@@ -1240,6 +1707,21 @@ pub struct PreviewDecodeAccessModeProfiles {
 }
 
 impl PreviewDecodeAccessModeProfiles {
+    fn total_frames(self) -> u64 {
+        self.playback_cursor
+            .frames
+            .saturating_add(self.scrub_cursor.frames)
+            .saturating_add(self.random_access_still.frames)
+    }
+
+    fn total_expired_queue_wait_samples(self) -> u64 {
+        self.playback_cursor
+            .expired_queue_wait
+            .samples
+            .saturating_add(self.scrub_cursor.expired_queue_wait.samples)
+            .saturating_add(self.random_access_still.expired_queue_wait.samples)
+    }
+
     fn profile_for(self, access_mode: PreviewDecodeAccessMode) -> PreviewDecodeAccessModeProfile {
         match access_mode {
             PreviewDecodeAccessMode::PlaybackCursor => self.playback_cursor,
@@ -1276,6 +1758,43 @@ impl PreviewDecodeAccessModeProfiles {
             }
             PreviewDecodeAccessMode::RandomAccessStillFrame => {
                 self.random_access_still.record_queue_wait(queue_wait_us);
+            }
+        }
+    }
+
+    pub(super) fn record_expired_queue_wait(
+        &mut self,
+        priority: MediaPreviewRequestPriority,
+        access_mode: PreviewDecodeAccessMode,
+        queue_wait_us: u64,
+    ) {
+        match access_mode {
+            PreviewDecodeAccessMode::PlaybackCursor => {
+                self.playback_cursor.record_expired_queue_wait(priority, queue_wait_us);
+            }
+            PreviewDecodeAccessMode::ScrubCursor => {
+                self.scrub_cursor.record_expired_queue_wait(priority, queue_wait_us);
+            }
+            PreviewDecodeAccessMode::RandomAccessStillFrame => {
+                self.random_access_still.record_expired_queue_wait(priority, queue_wait_us);
+            }
+        }
+    }
+
+    pub(super) fn record_session_cancellation(
+        &mut self,
+        access_mode: PreviewDecodeAccessMode,
+        cancellation: mondrian_media::PreviewDecodeCancellation,
+    ) {
+        match access_mode {
+            PreviewDecodeAccessMode::PlaybackCursor => {
+                self.playback_cursor.record_session_cancellation(cancellation);
+            }
+            PreviewDecodeAccessMode::ScrubCursor => {
+                self.scrub_cursor.record_session_cancellation(cancellation);
+            }
+            PreviewDecodeAccessMode::RandomAccessStillFrame => {
+                self.random_access_still.record_session_cancellation(cancellation);
             }
         }
     }
@@ -1379,13 +1898,13 @@ pub struct PreviewDecodePerformanceSummary {
     pub canceled_max_duration_us: u64,
     /// Most recent worker execution time for a canceled decode job.
     pub canceled_last_duration_us: u64,
-    /// Canceled jobs with an attributable external request-to-checkpoint timestamp.
+    /// Canceled jobs with attributable request-to-logical-cancellation timing.
     pub cancel_observation_samples: u64,
-    /// Total latency from external cancellation request to the first cooperative checkpoint.
+    /// Total authority-request to `LogicalCancellationObserved` latency.
     pub cancel_observation_total_us: u64,
-    /// Slowest latency from external cancellation request to the first cooperative checkpoint.
+    /// Slowest authority-request to `LogicalCancellationObserved` latency.
     pub cancel_observation_max_us: u64,
-    /// Most recent latency from external cancellation request to the first cooperative checkpoint.
+    /// Most recent authority-request to `LogicalCancellationObserved` latency.
     pub cancel_observation_last_us: u64,
     /// Total latency after canceled decode jobs first observed cancellation.
     pub canceled_return_latency_total_us: u64,
@@ -1399,7 +1918,7 @@ pub struct PreviewDecodePerformanceSummary {
     pub external_ffmpeg_cpu_rgba_frames: u64,
     /// Successful playback decodes served from the playback session-local ring.
     pub playback_session_ring_hit_frames: u64,
-    /// Successful decodes served from preview cache.
+    /// Successful decodes served from a decoder-session-local cache.
     pub cache_hit_frames: u64,
     /// Decode results requested through the playback cursor access contract.
     pub playback_cursor_frames: u64,
@@ -1421,16 +1940,18 @@ pub struct PreviewDecodePerformanceSummary {
     pub total_duration_us: u64,
     /// Slow-frame budget applied by the report.
     pub slow_frame_budget_us: u64,
-    /// Total time decoded jobs spent waiting in the preview worker queue.
+    /// Total time Ready jobs spent waiting in the preview worker queue.
     pub queue_wait_total_us: u64,
-    /// Slowest decoded job queue wait.
+    /// Slowest Ready job queue wait.
     pub queue_wait_max_us: u64,
-    /// Most recent decoded job queue wait.
+    /// Most recent Ready job queue wait.
     pub queue_wait_last_us: u64,
-    /// Slowest current-frame decode queue wait.
+    /// Slowest Ready current-frame decode queue wait.
     pub current_queue_wait_max_us: u64,
-    /// Slowest prefetch decode queue wait.
+    /// Slowest Ready prefetch decode queue wait.
     pub prefetch_queue_wait_max_us: u64,
+    /// Queue wait for jobs rejected as expired before codec execution.
+    pub expired_queue_wait: PreviewDecodeQueueWaitProfile,
     /// Media preview jobs accepted by the worker queue.
     pub enqueued_jobs: u64,
     /// Playback prefetch passes skipped while visible current-frame work was pending.
@@ -1516,10 +2037,44 @@ pub enum PreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 32;
+pub const PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 36;
 
-/// Default preview slow-frame budget: one frame should complete in tens of ms.
+/// Default steady-state Preview decode budget.
 pub const PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
+
+/// Default cold decode-session readiness budget.
+///
+/// Session construction is not a recurring frame deadline, but it remains
+/// bounded user-visible first-frame work and is never discarded from evidence.
+pub const PREVIEW_DECODE_DEFAULT_SESSION_OPEN_BUDGET_US: u64 = 5_000_000;
+
+/// One versioned latency/coverage obligation in the decode report matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct PreviewDecodeWorkBudget {
+    /// Access mode governed by this matrix cell.
+    pub access_mode: PreviewDecodeAccessMode,
+    /// Concrete decoder work class governed by this matrix cell.
+    pub work_class: PreviewDecodeWorkClass,
+    /// Minimum successful samples required by this report profile.
+    pub min_samples: u64,
+    /// Maximum worker execution time for any successful sample.
+    pub max_worker_execution_us: u64,
+    /// Optional bounded p95 worker-execution target.
+    pub p95_worker_execution_us: Option<u64>,
+}
+
+/// Serialized policy applied to a Preview decode performance report.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PreviewDecodePerformancePolicy {
+    /// Explicit access-mode/work-class latency matrix.
+    pub work_budgets: Vec<PreviewDecodeWorkBudget>,
+    /// Queue wait target kept separate from worker execution.
+    pub queue_wait_budget_us: u64,
+    /// Minimum absolute Session open/replacement churn allowance.
+    pub session_churn_grace_frames: u64,
+    /// Maximum session open/replacement ratio after the grace allowance.
+    pub max_session_churn_basis_points: u64,
+}
 
 /// Versioned preview decode performance report for UI, telemetry, and perf artifacts.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -1532,6 +2087,8 @@ pub struct PreviewDecodePerformanceReport {
     pub verdict: PreviewDecodePerformanceVerdict,
     /// Access modes this report profile required to be sampled.
     pub required_access_modes: Vec<PreviewDecodeAccessMode>,
+    /// Exact latency and coverage policy used to evaluate this report.
+    pub policy: PreviewDecodePerformancePolicy,
     /// Structured decode performance summary used as report evidence.
     pub summary: Option<PreviewDecodePerformanceSummary>,
     /// Structured checks by preview decode area.
@@ -1786,7 +2343,7 @@ impl PreviewColorRejection {
             missing_metadata_policy: resolution.missing_metadata_policy,
             source: resolution.source,
             override_color_space: resolution.override_color_space,
-            detected_color_space: resolution.detected_color_space,
+            executable_color_space: resolution.executable_color_space,
             working_color_space: resolution.working_color_space,
             diagnostic_summary,
             diagnostic_issue_summary,
@@ -1869,6 +2426,7 @@ impl PreviewDiagnostics {
             queue_wait_last_us: self.decode_queue_wait_last_us,
             current_queue_wait_max_us: self.decode_current_queue_wait_max_us,
             prefetch_queue_wait_max_us: self.decode_prefetch_queue_wait_max_us,
+            expired_queue_wait: self.decode_expired_queue_wait,
             enqueued_jobs: self.enqueued_jobs,
             prefetch_skipped_current_pending: self.prefetch_skipped_current_pending,
             prefetch_skipped_current_work: self.prefetch_skipped_current_work,

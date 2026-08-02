@@ -6,9 +6,12 @@
 //! result or leak a process/thread.
 
 use super::*;
-use std::io::{self, Read};
+use crate::{
+    run_supervised_command_while, SupervisedProcessError, SupervisedProcessPolicy,
+    SupervisedStreamCapture,
+};
+use std::io;
 use std::process::{Command, Output, Stdio};
-use std::thread;
 
 const EXTERNAL_DECODE_STDERR_RETAIN_BYTES: usize = 64 * 1024;
 
@@ -44,6 +47,7 @@ pub(super) fn ensure_ffmpeg_initialized(path: &Path) -> Result<()> {
 
 pub(super) fn try_decode_with_external_ffmpeg_cpu_rgba(
     path: &Path,
+    video_stream_index: Option<u32>,
     source_time: TimelineTime,
     width: u32,
     height: u32,
@@ -112,7 +116,11 @@ pub(super) fn try_decode_with_external_ffmpeg_cpu_rgba(
         .arg("-ss")
         .arg(source_time_arg)
         .arg("-i")
-        .arg(path)
+        .arg(path);
+    if let Some(index) = video_stream_index {
+        command.arg("-map").arg(format!("0:{index}"));
+    }
+    command
         .arg("-frames:v")
         .arg("1")
         .arg("-vf")
@@ -184,78 +192,27 @@ pub(super) fn run_external_decode_command_cancellable(
     stdout_retain_bytes: usize,
     should_cancel: &(dyn Fn() -> bool + Send + Sync),
 ) -> io::Result<Option<(Output, bool)>> {
-    let mut child = command.spawn()?;
-    let Some(stdout) = child.stdout.take() else {
-        terminate_external_decode_child(&mut child);
-        return Err(io::Error::other("external decoder stdout was not piped"));
+    let policy = SupervisedProcessPolicy {
+        pipe_stdin: false,
+        stdout: SupervisedStreamCapture::Head {
+            limit_bytes: stdout_retain_bytes,
+            reject_excess: false,
+        },
+        stderr: SupervisedStreamCapture::Tail { limit_bytes: EXTERNAL_DECODE_STDERR_RETAIN_BYTES },
+        ..SupervisedProcessPolicy::default()
     };
-    let Some(stderr) = child.stderr.take() else {
-        terminate_external_decode_child(&mut child);
-        return Err(io::Error::other("external decoder stderr was not piped"));
-    };
-    let stdout_reader =
-        thread::spawn(move || read_external_decode_pipe_bounded(stdout, stdout_retain_bytes));
-    let stderr_reader = thread::spawn(move || {
-        read_external_decode_pipe_bounded(stderr, EXTERNAL_DECODE_STDERR_RETAIN_BYTES)
-    });
-
-    let status = loop {
-        if should_cancel() {
-            terminate_external_decode_child(&mut child);
-            let _ = join_external_decode_reader(stdout_reader);
-            let _ = join_external_decode_reader(stderr_reader);
-            return Ok(None);
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {}
-            Err(error) => {
-                terminate_external_decode_child(&mut child);
-                let _ = join_external_decode_reader(stdout_reader);
-                let _ = join_external_decode_reader(stderr_reader);
-                return Err(error);
-            }
-        }
-        thread::sleep(Duration::from_millis(1));
-    };
-
-    let (stdout, stdout_exceeded_retain_limit) = join_external_decode_reader(stdout_reader)?;
-    let (stderr, _) = join_external_decode_reader(stderr_reader)?;
-    Ok(Some((
-        Output { status, stdout, stderr },
-        stdout_exceeded_retain_limit,
-    )))
-}
-
-fn terminate_external_decode_child(child: &mut std::process::Child) {
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-fn read_external_decode_pipe_bounded(
-    mut pipe: impl Read,
-    retain_bytes: usize,
-) -> io::Result<(Vec<u8>, bool)> {
-    let mut retained = Vec::with_capacity(retain_bytes.min(64 * 1024));
-    let mut exceeded_retain_limit = false;
-    let mut buffer = [0_u8; 16 * 1024];
-    loop {
-        let read = pipe.read(&mut buffer)?;
-        if read == 0 {
-            return Ok((retained, exceeded_retain_limit));
-        }
-        let remaining = retain_bytes.saturating_sub(retained.len());
-        exceeded_retain_limit |= read > remaining;
-        retained.extend_from_slice(&buffer[..read.min(remaining)]);
+    match run_supervised_command_while(command, None, policy, should_cancel) {
+        Ok(output) => Ok(Some((
+            Output {
+                status: output.status,
+                stdout: output.stdout,
+                stderr: output.stderr,
+            },
+            output.stdout_truncated,
+        ))),
+        Err(SupervisedProcessError::Canceled { .. }) => Ok(None),
+        Err(error) => Err(io::Error::other(error)),
     }
-}
-
-fn join_external_decode_reader(
-    reader: thread::JoinHandle<io::Result<(Vec<u8>, bool)>>,
-) -> io::Result<(Vec<u8>, bool)> {
-    reader
-        .join()
-        .map_err(|_| io::Error::other("external decoder pipe reader panicked"))?
 }
 
 pub(super) fn fit_target_size(
@@ -286,22 +243,4 @@ pub(super) fn fit_target_size(
     }
 
     (out_w, out_h)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::read_external_decode_pipe_bounded;
-    use std::io::Cursor;
-
-    #[test]
-    fn pipe_reader_drains_input_while_bounding_retained_bytes() {
-        let input = (0..=255).cycle().take(200_000).collect::<Vec<_>>();
-        let (retained, exceeded_limit) =
-            read_external_decode_pipe_bounded(Cursor::new(&input), 65_537)
-                .expect("bounded pipe read");
-
-        assert_eq!(retained.len(), 65_537);
-        assert_eq!(retained.as_slice(), &input[..65_537]);
-        assert!(exceeded_limit);
-    }
 }

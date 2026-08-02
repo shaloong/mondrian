@@ -42,8 +42,7 @@ Ask these questions to determine the right approach:
 |----------|---------|---------------|
 | Can it be expressed with built-in ops? | blur, sharpen, color, vignette | `with_graph(...)` |
 | Does it branch/blend/mask from current output? | glow, bloom, soft focus | `with_branching_graph(...)` |
-| Does it need custom pixel algorithms? | LUT loader, custom filter | `with_custom_render_backend(...)` |
-| Is it just parameter evaluation? | legacy, non-visual | `with_evaluator(...)` (avoid for new plugins) |
+| Does it need custom encoded CPU pixel algorithms? | custom RGBA8 filter | `with_custom_render_backend(...)` |
 
 **Rule: prefer the highest-level API that can express the effect.**
 Built-in ops > graph DSL > custom render backend.
@@ -95,32 +94,49 @@ Use when the effect is a sequence of built-in operations.
 
 ```rust
 use mondrian_core::automation::{PropertyDescriptor, PropertyValue};
+use mondrian_effects::effect::EffectDefinitionError;
 use mondrian_effects::{
-    EffectPluginContract, EffectPluginDefinitionBuilder, EffectRenderOp, EffectType,
-    register_effect_definition,
+    register_effect_definition, EffectColorDomainContract, EffectDeterminism,
+    EffectExecutionContract, EffectExecutionModes, EffectGraphTopology, EffectPluginContract,
+    EffectPluginDefinitionBuilder, EffectRenderOp, EffectResourceLifetime,
+    EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent, EffectType,
 };
 
-pub fn register() {
+pub fn register() -> Result<(), EffectDefinitionError> {
     let plugin_type = EffectType::Plugin("plugin.<author>.<name>".to_string());
+    let amount_id = plugin_type
+        .parameter_id("amount")
+        .expect("static parameter ID");
 
-    let definition = EffectPluginDefinitionBuilder::new(plugin_type.key(), "Display Name")
+    let definition = EffectPluginDefinitionBuilder::new(
+        plugin_type.key(),
+        "Display Name",
+        EffectColorDomainContract::SCENE_LINEAR,
+    )
+        .with_execution_contract(EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            determinism: EffectDeterminism::Deterministic,
+            state_model: EffectStateModel::Stateless,
+            temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+            roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+            resource_lifetime: EffectResourceLifetime::Frame,
+            topology: EffectGraphTopology::LinearChain,
+        })
         .with_plugin_contract(EffectPluginContract::new("0.1.0"))
         .property(PropertyDescriptor::new(
             "plugin.<author>.<name>.amount",
             "Amount",
             PropertyValue::Float(0.5),
-        ))
-        .with_graph(|effect, context, graph| {
-            let amount = effect.evaluate_f32_by_suffix(
-                "plugin.<author>.<name>.amount", context.time, 0.5
-            );
+        ).with_parameter_id(amount_id.clone()))
+        .with_graph(move |effect, context, graph| {
+            let amount = effect.evaluate_f32_parameter(&amount_id, context.time, 0.5);
             // Chain operations. Each apply() operates on the current output.
             graph.apply(EffectRenderOp::GaussianBlur { radius: amount * 10.0 });
             graph.apply(EffectRenderOp::Sharpen { amount: amount * 0.5 });
         })
         .build();
 
-    register_effect_definition(definition);
+    register_effect_definition(definition)
 }
 ```
 
@@ -129,13 +145,9 @@ pub fn register() {
 Use when the effect branches from the current output, processes the branch, then blends back.
 
 ```rust
-.with_branching_graph(|effect, context, graph| {
-    let radius = effect.evaluate_f32_by_suffix(
-        "plugin.<author>.<name>.radius", context.time, 6.0
-    );
-    let opacity = effect.evaluate_f32_by_suffix(
-        "plugin.<author>.<name>.opacity", context.time, 0.35
-    );
+.with_branching_graph(move |effect, context, graph| {
+    let radius = effect.evaluate_f32_parameter(&radius_id, context.time, 6.0);
+    let opacity = effect.evaluate_f32_parameter(&opacity_id, context.time, 0.35);
 
     // Early return if parameters produce no visible effect (identity optimization)
     if radius <= 1.0e-4 || opacity <= 1.0e-4 {
@@ -143,33 +155,34 @@ Use when the effect branches from the current output, processes the branch, then
     }
 
     graph.blend_current(BlendMode::Screen, opacity, |graph, source| {
-        graph.apply_to(source, EffectRenderOp::GaussianBlur { radius });
+        graph.apply_to(source, EffectRenderOp::GaussianBlur { radius })
     });
 })
 ```
 
-Available `BlendMode` variants: `Normal`, `Screen`, `Multiply`, `Overlay`, `Add`, `Subtract`.
+`radius_id` / `opacity_id` 必须由 `plugin_type.parameter_id(...)` 创建，并分别绑定到
+`PropertyDescriptor::with_parameter_id(...)` 后再由 `move` 闭包捕获。
+
+Available `BlendMode` variants include `Normal`, `Screen`, `Multiply`, `Overlay`,
+`LinearDodge`, and `Subtract`; consult `mondrian_core::BlendMode` for the complete set.
 
 ### Pattern C: Custom render backend
 
 Use when built-in `EffectRenderOp` variants cannot express the pixel algorithm.
 
 ```rust
-.with_custom_render_backend(
+let amount_id = plugin_type
+    .parameter_id("amount")
+    .expect("static parameter ID");
+
+let builder = builder.with_custom_render_backend(
     // 1. Params builder — produce the JSON params for the processor
-    Arc::new(|effect, context| {
-        let path = effect.evaluate_str_by_suffix(
-            "plugin.<author>.<name>.asset_path", context.time, ""
-        );
-        Ok(Some(serde_json::json!({ "asset_path": path })))
+    Arc::new(move |effect, context| {
+        let amount = effect.evaluate_f32_parameter(&amount_id, context.time, 1.0);
+        Ok(Some(serde_json::json!({ "amount": amount })))
     }),
-    // 2. Cache key builder — stable key for caching (None if not cacheable)
-    Some(Arc::new(|effect, context| {
-        let path = effect.evaluate_str_by_suffix(
-            "plugin.<author>.<name>.asset_path", context.time, ""
-        );
-        Some(format!("asset:{}", path))
-    })),
+    // 2. No external resource identity is needed for this processor
+    None,
     // 3. Cache policy
     EffectCachePolicy::Deterministic,
     // 4. Pixel processor — called on a staged buffer
@@ -179,31 +192,29 @@ Use when built-in `EffectRenderOp` variants cannot express the pixel algorithm.
         // On Err or panic, staged result is discarded and execution fails.
         Ok(())
     }),
-)
+);
 ```
 
 **Custom processor rules:**
+- Declare `EffectExecutionModes::CPU_U8`; this ABI does not implement CPU
+  Float32 or GPU modes.
 - Process on the provided `buffer` in-place. Do NOT allocate a new full-size buffer.
 - `Ok(())` commits the staged result. `Err(...)` or panic discards it.
 - The buffer is a separate staged buffer — semi-finished pixels won't leak to the output frame.
 - Do NOT do file I/O or network requests inside the processor — load resources beforehand.
+- Graph builders and cache-key builders have the same no-I/O rule.
+- The high-level SDK does not yet expose author-selected external-resource
+  preparation/revalidation. Fail closed for those instances instead of using a
+  path-only key or loading on the frame path.
 
 ### Pattern D: Mask effect
 
-Use when applying an alpha mask generated by a subtree.
-
-```rust
-graph.mask_current(false, |graph, source| {
-    graph.apply_to(source, EffectRenderOp::Custom {
-        key: "plugin.<author>.<name>.mask".to_string(),
-        params: serde_json::json!({"shape": "ellipse", "feather": 0.3}),
-        cache_key: Some("mask-v1".to_string()),
-        cache_policy: EffectCachePolicy::Deterministic,
-    });
-});
-```
-
-Set `mask_current(true, ...)` to invert the mask.
+`mask(...)` and `mask_current(...)` require both an explicit `MaskOp` and a
+subtree whose output domain is `EffectColorDomain::AlphaMask`. Their closures
+must return `EffectGraphValue` as the final expression. The current high-level
+plugin DSL does not expose `MaskSource` or an RGB-to-matte producer, so do not
+construct a raw `EffectRenderOp::Custom` to fake one; an unbound processor or
+non-alpha mask domain is rejected. Clip masks are injected by the engine.
 
 ## Step 4: Configure cache policy
 
@@ -212,7 +223,7 @@ Choose the right cache policy for the effect:
 | Effect characteristics | Policy | Provide cache_key? |
 |----------------------|--------|-------------------|
 | Pure built-in ops, no external deps | `Deterministic` (default) | No |
-| Depends on external file (LUT, model) | `Deterministic` | Yes — hash of file path/content |
+| Uses an already prepared immutable LUT/model | `Deterministic` | Yes — exact content/revision identity |
 | Contains randomness, noise, time variation | `FrameDependent` | Depends |
 | Custom processor with stable inputs | `Deterministic` | Yes — identify the resource |
 
@@ -250,7 +261,7 @@ until the instance is repaired or explicitly disabled.
 
 ### Effect not appearing in library
 - Check `register_effect_definition()` is called
-- Check `effect_plugin_is_library_visible()` returns true
+- Check the registered Definition's Contract uses the intended library policy
 - Check API version compatibility: `contract.is_api_compatible()`
 - Check plugin not disabled: `effect_plugin_runtime_status(key)`
 
@@ -260,9 +271,12 @@ until the instance is repaired or explicitly disabled.
 - Graph builder returned early due to parameter check
 
 ### Custom processor not called
-- Check `register_custom_render_processor()` is called (done automatically by builder)
+- Use `with_custom_render_backend(...)`; Definition evaluation is the sole
+  supported path that embeds an immutable processor binding
+- A manually constructed raw Custom node without a binding is intentionally
+  rejected at compilation; there is no ambient compatibility registry
 - Verify params_builder returns `Ok(Some(...))`; `Ok(None)` is an intentional identity and `Err` is a structured build failure
-- Check `effect_plugin_is_runtime_available()` — disabled plugins skip execution
+- Check `effect_plugin_runtime_status(key)` — a quarantined current Definition generation is rejected before execution
 
 ### Performance issues
 - Add `cache_key` for deterministic effects that depend on external resources
@@ -297,24 +311,44 @@ This skill covers the most common patterns. Read the full documentation for:
 Built-in ops that can be used in `graph.apply()` and `graph.apply_to()`:
 
 ```rust
-EffectRenderOp::ColorAdjust { exposure: f32, contrast: f32, saturation: f32 }
-EffectRenderOp::WhiteBalance { temperature: f32, tint: f32 }
+EffectRenderOp::ColorAdjust {
+    exposure: f32,
+    contrast: f32,
+    saturation: f32,
+    working_color_space: WorkingColorSpace,
+}
 EffectRenderOp::GaussianBlur { radius: f32 }
 EffectRenderOp::Sharpen { amount: f32 }
 EffectRenderOp::Vignette { intensity: f32, feather: f32 }
 EffectRenderOp::ChromaticAberration { amount: f32 }
 EffectRenderOp::Grain { amount: f32 }
-EffectRenderOp::Custom { key, params, cache_key, cache_policy }
+EffectRenderOp::TemporalFrameMix { past_offset: TimelineTime, mix: f32 }
+EffectRenderOp::Lut3D { lut: Arc<PreparedLut3D>, intensity: f32 }
 ```
+
+Write `ColorAdjust` as
+`EffectRenderOp::ColorAdjust { exposure, contrast, saturation,
+working_color_space: context.working_color_space }`. White Balance is currently
+modeled-only and execution-unavailable; there is no executable WhiteBalance
+render op. Bind custom CPU RGBA8 work only with
+`EffectPluginDefinitionBuilder::with_custom_render_backend(...)`.
 
 ## Property types
 
 ```rust
-PropertyValue::Float(f32)     // Sliders, continuous values
-PropertyValue::Int(i32)        // Integer values
-PropertyValue::Bool(bool)      // Toggles
-PropertyValue::Color(r,g,b,a)  // Color pickers
-PropertyValue::String(String)  // Paths, URLs, text
+PropertyValue::Bool(bool)
+PropertyValue::Int(i64)
+PropertyValue::Float(f32)
+PropertyValue::Double(f64)
+PropertyValue::Vec2(glam::Vec2)
+PropertyValue::Vec3(glam::Vec3)
+PropertyValue::Color(mondrian_core::Color)
+PropertyValue::Vec4([f32; 4])
+PropertyValue::Enum(String)
+PropertyValue::Resource(ParameterResourceReference)
+PropertyValue::Text(String)
 ```
 
-Properties are automatically editable in the Inspector panel and can be animated with keyframes.
+Validated schemas drive Inspector editing. `Resource` and `Text` are not
+animatable; other variants follow their schema's allowed interpolation (for
+example Bool/Int/Enum use hold semantics).

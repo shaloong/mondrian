@@ -1,6 +1,6 @@
 //! Pure deadline, execution-quality, and prefetch policy for preview scheduling.
 
-use crate::app::preview_access_mode::MediaPreviewRequestPriority;
+use crate::app::preview_access_mode::{MediaPreviewKey, MediaPreviewRequestPriority};
 use std::time::Instant;
 
 use mondrian_core::{types::AssetId, Rational, TimelineTime};
@@ -28,12 +28,68 @@ pub(crate) const PREVIEW_SCRUB_SLOW_LATENCY_US: u64 = 40_000;
 pub(crate) const PREVIEW_SCRUB_RECOVERY_LATENCY_US: u64 = 25_000;
 const PREVIEW_SCRUB_SLOW_SCORE_MAX: u8 = 3;
 
+/// Conservative physical reservation for one speculative decoded frame.
+///
+/// CPU bytes include both the retained source payload and the lazily
+/// materialized working float frame. Native requests additionally reserve one
+/// decoder-surface unit while retaining CPU-fallback headroom.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct MediaPreviewResidencyReservation {
+    pub(crate) entries: usize,
+    pub(crate) cpu_bytes: usize,
+    pub(crate) decoder_resource_units: usize,
+}
+
+impl MediaPreviewResidencyReservation {
+    fn for_key(key: &MediaPreviewKey, hardware: PreviewHardwareDecodeRequest) -> Self {
+        let resolution = key.residency_resolution();
+        let pixels = (resolution.width as usize).saturating_mul(resolution.height as usize);
+        let bytes_per_pixel = if key.decode.source_color().color_space.is_scene_linear() {
+            // Retained RGBA f32 source plus a possible working RGBA f32 frame.
+            2 * 4 * std::mem::size_of::<f32>()
+        } else {
+            // Retained encoded RGBA8 source plus a working RGBA f32 frame.
+            4 + 4 * std::mem::size_of::<f32>()
+        };
+        let decoder_resource_units = usize::from(matches!(
+            hardware,
+            PreviewHardwareDecodeRequest::PreferGpuResident
+                | PreviewHardwareDecodeRequest::RequireGpuResident
+        ));
+        Self {
+            entries: 1,
+            cpu_bytes: pixels.saturating_mul(bytes_per_pixel),
+            decoder_resource_units,
+        }
+    }
+}
+
+pub(crate) fn media_preview_residency_reservation(
+    key: &MediaPreviewKey,
+    hardware: PreviewHardwareDecodeRequest,
+) -> MediaPreviewResidencyReservation {
+    MediaPreviewResidencyReservation::for_key(key, hardware)
+}
+
 /// Structured decode failure consumed by scheduling policy and diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MediaPreviewFailureReason {
     Timeout,
     DecodeError,
     ForwardDecodeBudgetExhausted,
+    /// An exact Playback or settled still request decoded a different source
+    /// timestamp. Only explicitly interactive scrub policy may present a
+    /// nearby temporal approximation.
+    TemporalMismatch,
+    /// The worker contained an unwind from codec, color-materialization, or
+    /// frame-construction work and rebuilt its worker-local decode context.
+    WorkerPanicked,
+    /// A successful decode crossed the Adapter boundary without the physical
+    /// residency lease required to retain or present its frame.
+    ResidencyContractViolation,
+    /// A valid physical lease could not enter the generation's bounded Frame
+    /// Store working set.
+    ResidencyCapacityRejected,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -224,14 +280,19 @@ pub(crate) fn preview_hardware_decode_effective(diagnostics: &PreviewDecodeDiagn
 /// reuse cannot lose hardware-fallback evidence.
 pub(crate) fn preview_decode_presentation_quality(
     diagnostics: &PreviewDecodeDiagnostics,
-) -> FramePresentationQuality {
-    if diagnostics.temporal_approximation
-        || (playback_hardware_decode_requested(diagnostics.hardware_decode_request)
-            && !preview_hardware_decode_effective(diagnostics))
+) -> Result<FramePresentationQuality, MediaPreviewFailureReason> {
+    if diagnostics.temporal_approximation {
+        if diagnostics.access_mode != PreviewDecodeAccessMode::ScrubCursor {
+            return Err(MediaPreviewFailureReason::TemporalMismatch);
+        }
+        return Ok(FramePresentationQuality::Degraded);
+    }
+    if playback_hardware_decode_requested(diagnostics.hardware_decode_request)
+        && !preview_hardware_decode_effective(diagnostics)
     {
-        FramePresentationQuality::Degraded
+        Ok(FramePresentationQuality::Degraded)
     } else {
-        FramePresentationQuality::Ready
+        Ok(FramePresentationQuality::Ready)
     }
 }
 
@@ -340,6 +401,47 @@ mod tests {
             media_preview_forward_prefetch_window_frames(Rational::new(1, 1)),
             Some(MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES)
         );
+    }
+
+    fn four_k_key(color_space: mondrian_core::ColorSpace) -> MediaPreviewKey {
+        MediaPreviewKey::test_cpu(
+            std::path::PathBuf::from("E:/media/4k-main10.mov"),
+            MediaPreviewKey::test_fingerprint(4_000),
+            TimelineTime::ZERO,
+            mondrian_core::Resolution { width: 3840, height: 2160 },
+            mondrian_media::PreviewSourceColorContract::automatic(
+                color_space,
+                mondrian_media::DecodedVideoRange::Limited,
+            ),
+        )
+    }
+
+    #[test]
+    fn four_k_encoded_reservation_covers_source_and_working_payloads() {
+        let reservation = media_preview_residency_reservation(
+            &four_k_key(mondrian_core::ColorSpace::Rec709),
+            PreviewHardwareDecodeRequest::Auto,
+        );
+        assert_eq!(reservation.entries, 1);
+        assert_eq!(
+            reservation.cpu_bytes,
+            3840usize * 2160usize * (4 + 4 * std::mem::size_of::<f32>())
+        );
+        assert_eq!(reservation.decoder_resource_units, 0);
+    }
+
+    #[test]
+    fn scene_linear_4k_reservation_covers_two_float_payloads() {
+        let reservation = media_preview_residency_reservation(
+            &four_k_key(mondrian_core::ColorSpace::LinearRec709),
+            PreviewHardwareDecodeRequest::Auto,
+        );
+        assert_eq!(reservation.entries, 1);
+        assert_eq!(
+            reservation.cpu_bytes,
+            3840usize * 2160usize * (2 * 4 * std::mem::size_of::<f32>())
+        );
+        assert_eq!(reservation.decoder_resource_units, 0);
     }
 
     #[test]

@@ -1,12 +1,16 @@
 //! Timeline-agnostic data types shared between `mondrian-timeline` and
-//! `mondrian-renderer`. These types decouple the renderer from the timeline
-//! crate so the renderer only sees flat data, never `Sequence` internals.
+//! `mondrian-renderer`. They keep frame lowering independent from author-model
+//! traversal while allowing a separate renderer-owned compiler Module to bind
+//! an immutable `Sequence` revision into a prepared execution program.
 //!
 //! ## Architecture (P-ARCH2)
 //! - `mondrian-timeline` defines `Sequence`, `Track`, `Clip` and implements
 //!   `RenderPlanSource` to project them into ordered `FlatVisualItem` values.
-//! - `mondrian-renderer` consumes `&dyn RenderPlanSource` only, with zero
-//!   knowledge of `Sequence`/`Track`/`Clip`.
+//! - The low-level render-plan lowering Interface consumes
+//!   `&dyn RenderPlanSource` and never traverses author objects.
+//! - The higher-level prepared-program compiler intentionally accepts one
+//!   immutable `Sequence` revision, then publishes only the flat schedule and
+//!   prepared Effect programs to repeated frame evaluation.
 
 use crate::automation::PropertyBag;
 use crate::effect_data::EffectNode;
@@ -15,8 +19,9 @@ use crate::types::{
     AssetId, BlendMode, ClipId, Color, ColorSpace, Rational, SequenceId, VideoTransitionId,
     WorkingColorSpace,
 };
-use crate::{BasicTitle, Result, TimelineTime};
+use crate::{BasicTitle, Result, SequenceRevision, TimelineTime};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 // ── Pure data enums (moved from mondrian-timeline) ────────────────────
 
@@ -292,6 +297,21 @@ impl ClipContent {
     }
 }
 
+impl crate::AuthoringFootprint for ClipContent {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        match self {
+            Self::BasicTitle { title } => collector.collect(title),
+            Self::Media { asset_id: _, interpretation: _ }
+            | Self::AdjustmentLayer { asset_id: _ }
+            | Self::NestedSequence { sequence_id: _, color_processing: _ }
+            | Self::SolidColor { asset_id: _, color: _ } => Ok(()),
+        }
+    }
+}
+
 /// Pixel aspect ratio presets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PixelAspectRatio {
@@ -343,6 +363,47 @@ pub enum NestedColorProcessing {
     ForceParentWorkingSpace,
 }
 
+/// Which use of a Clip placement produced one execution request.
+///
+/// Transition endpoints retain their explicit side because querying "the
+/// active Transition" again at a historical Effect time can select a different
+/// editorial operation or no operation at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TimelineClipEndpointContext {
+    /// Ordinary Track-stack evaluation outside a Transition replacement.
+    Ordinary,
+    /// The earlier endpoint of one exact authored Transition.
+    TransitionLeft {
+        /// Transition whose left endpoint owns this request.
+        transition_id: VideoTransitionId,
+    },
+    /// The later endpoint of one exact authored Transition.
+    TransitionRight {
+        /// Transition whose right endpoint owns this request.
+        transition_id: VideoTransitionId,
+    },
+}
+
+/// Stable placement identity carried from the prepared author snapshot into
+/// Preview and Export execution.
+///
+/// `clip_time` is the current output sample. Historical requests retain this
+/// placement reference and provide a different requested Clip time to the
+/// prepared schedule's canonical sampling API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TimelineClipExecutionRef {
+    /// Sequence that owns the placement.
+    pub sequence_id: SequenceId,
+    /// Exact conservative author revision compiled for execution.
+    pub sequence_revision: SequenceRevision,
+    /// Stable Clip occurrence identity.
+    pub clip_id: ClipId,
+    /// Current Clip-local visual author time.
+    pub clip_time: TimelineTime,
+    /// Ordinary or exact Transition-endpoint context.
+    pub endpoint: TimelineClipEndpointContext,
+}
+
 // ── Flat clip representation (no timeline internals) ──────────────────
 
 /// A flattened view of an active clip for render plan construction.
@@ -354,8 +415,13 @@ pub struct FlatActiveClip {
     pub clip_id: ClipId,
     pub content: ClipContent,
     pub is_disabled: bool,
-    pub effects: Vec<EffectNode>,
-    pub masks: Vec<MaskComponent>,
+    /// Immutable effect author snapshot for this Sequence revision.
+    ///
+    /// Prepared visual evaluation shares this payload across frame queries so
+    /// animated parameter sampling does not clone every Property Bag.
+    pub effects: Arc<[EffectNode]>,
+    /// Immutable mask author snapshot for this Sequence revision.
+    pub masks: Arc<[MaskComponent]>,
     /// Stable Clip-local visual author time for all Clip-owned processing.
     pub clip_time: TimelineTime,
     pub source_time: TimelineTime,
@@ -377,6 +443,22 @@ pub enum FlatVideoTransitionDefinition {
     CrossDissolve,
     /// Recoverable author intent for an externally supplied definition.
     Plugin { definition_id: String },
+}
+
+/// Immutable execution snapshot of one visual Transition definition instance.
+///
+/// Prepared visual evaluation shares this value across frame queries. Dynamic
+/// progress and endpoint sampling remain frame-local, while definition
+/// identity, parameter automation, and opaque payload are copied exactly once
+/// for the owning Sequence revision.
+#[derive(Debug, Clone)]
+pub struct FlatVideoTransitionDefinitionSnapshot {
+    /// Built-in or external definition selected by the author.
+    pub definition: FlatVideoTransitionDefinition,
+    /// Definition-described parameter state.
+    pub properties: PropertyBag,
+    /// Definition-specific non-parameter payload.
+    pub params: serde_json::Value,
 }
 
 /// Exact progress coordinates for one Transition evaluation.
@@ -410,18 +492,14 @@ impl FlatTransitionProgress {
 pub struct FlatVideoTransition {
     /// Stable author identity for diagnostics and future execution caches.
     pub transition_id: VideoTransitionId,
-    /// Built-in or external definition selected by the author.
-    pub definition: FlatVideoTransitionDefinition,
+    /// Shared immutable definition and parameter snapshot.
+    pub definition: Arc<FlatVideoTransitionDefinitionSnapshot>,
     /// Earlier edit endpoint evaluated at the requested Sequence time.
     pub left: FlatActiveClip,
     /// Later edit endpoint evaluated at the requested Sequence time.
     pub right: FlatActiveClip,
     /// Exact normalized-progress source coordinates.
     pub progress: FlatTransitionProgress,
-    /// Definition-described parameter state.
-    pub properties: PropertyBag,
-    /// Definition-specific non-parameter payload.
-    pub params: serde_json::Value,
 }
 
 /// One ordered visual item emitted by timeline semantic evaluation.
@@ -445,6 +523,12 @@ pub enum FlatVisualItem {
 pub trait RenderPlanSource {
     /// Return the ordered visual program at a given time, flattened.
     fn flat_visual_items_at(&self, time: TimelineTime) -> Result<Vec<FlatVisualItem>>;
+
+    /// Sequence identity represented by this immutable source.
+    fn source_sequence_id(&self) -> SequenceId;
+
+    /// Exact conservative author revision represented by this source.
+    fn source_sequence_revision(&self) -> SequenceRevision;
 
     /// Time base of the sequence.
     fn source_time_base(&self) -> Rational;

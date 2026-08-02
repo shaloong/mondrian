@@ -5,7 +5,13 @@
 
 use crate::app::animation_authoring::{ClipNumericCurveEdit, NormalizedCurvePoint};
 use crate::app::exporting::TimelineExportRequest;
+use crate::app::media_asset_mutation::MediaAssetMutationKind;
 use crate::app::preview_quality::normalize_preview_resolution_scale;
+use crate::app::product_action::{
+    ProductAction, TimelineClipSelectionModePayload, TimelineProductAction, TimelineTrimPayloadEdge,
+};
+#[cfg(test)]
+use crate::app::product_action::{TimelineMoveClipPayload, TimelineSelectClipPayload};
 use crate::app::proxy_generation::{
     resolve_app_state_proxy_color_contract, ProxyGenerationOrigin, ProxyGenerationRequestOutcome,
 };
@@ -31,15 +37,14 @@ use crate::app::ui_actions::{
     InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
     ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
     ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
-    TimelineAddTrackKind, TimelineAddTrackPayload, TimelineClipSelectionModePayload,
-    TimelineCreateCrossDissolvePayload, TimelineDropAssetPayload, TimelineInOutPointPayloadKind,
-    TimelineInsertAssetPayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
-    TimelineOpenNestedSequencePayload, TimelinePrecomposeSelectionPayload, TimelineSeekPayload,
-    TimelineSelectClipPayload, TimelineSelectVideoTransitionPayload, TimelineSetInOutPointPayload,
-    TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
-    TimelineSetTrackTargetingPayload, TimelineSetVideoTransitionRangePayload,
-    TimelineTrackControlPayloadKind, TimelineTrackTargetingControl, TimelineTrimClipsPayload,
-    TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
+    TimelineAddTrackKind, TimelineAddTrackPayload, TimelineCreateCrossDissolvePayload,
+    TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineInsertAssetPayload,
+    TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
+    TimelinePrecomposeSelectionPayload, TimelineSelectVideoTransitionPayload,
+    TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
+    TimelineSetTrackControlPayload, TimelineSetTrackTargetingPayload,
+    TimelineSetVideoTransitionRangePayload, TimelineTrackControlPayloadKind,
+    TimelineTrackTargetingControl, TimelineTrimSelectedClipsToPlayheadPayload,
     ViewerSetClipTransformPayload, ViewerSetPreviewResolutionScalePayload,
     ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
     ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
@@ -59,12 +64,11 @@ use crate::app::ui_actions::{
     SEQUENCE_UPDATE_SETTINGS, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
     TIMELINE_CREATE_BASIC_TITLE, TIMELINE_CREATE_CROSS_DISSOLVE, TIMELINE_DROP_ASSET,
     TIMELINE_EXTRACT_RANGE, TIMELINE_INSERT_ASSET, TIMELINE_LIFT_RANGE,
-    TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
+    TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
     TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_PRECOMPOSE_SELECTION,
-    TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
-    TIMELINE_SELECT_VIDEO_TRANSITION, TIMELINE_SET_IN_OUT_POINT,
-    TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL, TIMELINE_SET_TRACK_TARGETING,
-    TIMELINE_SET_VIDEO_TRANSITION_RANGE, TIMELINE_TRIM_CLIPS,
+    TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SELECT_VIDEO_TRANSITION,
+    TIMELINE_SET_IN_OUT_POINT, TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
+    TIMELINE_SET_TRACK_TARGETING, TIMELINE_SET_VIDEO_TRANSITION_RANGE,
     TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, TIMELINE_UNLINK_SELECTED_CLIPS, VIEWER_NAMESPACE,
     VIEWER_SET_CLIP_TRANSFORM, VIEWER_SET_PREVIEW_RESOLUTION_SCALE,
 };
@@ -95,48 +99,56 @@ impl AppState {
     pub fn dispatch_action(&mut self, action: mondrian_editor_state::Action) -> Result<()> {
         use mondrian_editor_state::Action;
 
-        match action {
-            Action::NoOp => Ok(()),
+        if let Some(product_action) = ProductAction::decode_external(&action).map_err(|error| {
+            let step_id = error.dispatch_step_id();
+            MondrianError::WorkflowStepFailed { step_id, reason: error.to_string() }
+        })? {
+            return self.dispatch_product_action(product_action);
+        }
 
+        match action {
             // ── 播放控制（已有方法）───────────────────────────────────────
-            Action::Play => {
-                self.play();
-                Ok(())
-            }
-            Action::Pause => {
-                self.pause();
-                Ok(())
-            }
+            Action::Play => self.play(),
+            Action::Pause => self.pause(),
             Action::TogglePlay => {
                 if self.is_playing() {
-                    self.pause();
+                    self.pause()
                 } else {
-                    self.play();
+                    self.play()
                 }
-                Ok(())
             }
-            Action::Seek(timecode) => {
-                self.seek(timecode.frame);
-                Ok(())
+            Action::Seek(position) => {
+                let frame = self.sequence_frame_from_action_position("seek", position)?;
+                self.seek(frame)
             }
             Action::StepForward => {
-                self.seek(self.current_frame() + 1);
-                Ok(())
+                self.seek(self.current_frame().checked_add(1).ok_or_else(|| {
+                    MondrianError::ActionNotExecuted {
+                        action: "step_forward".to_owned(),
+                        reason: "timeline frame arithmetic overflow".to_owned(),
+                    }
+                })?)
             }
             Action::StepBack => {
-                self.seek((self.current_frame() - 1).max(0));
-                Ok(())
+                let previous = self.current_frame().checked_sub(1).ok_or_else(|| {
+                    MondrianError::ActionNotExecuted {
+                        action: "step_back".to_owned(),
+                        reason: "timeline frame arithmetic overflow".to_owned(),
+                    }
+                })?;
+                self.seek(previous.max(0))
             }
-            Action::GoToStart => {
-                self.seek(0);
-                Ok(())
-            }
+            Action::GoToStart => self.seek(0),
             Action::GoToEnd => {
                 let end = self.last_content_frame()?;
                 if end >= 0 {
-                    self.seek(end);
+                    self.seek(end)
+                } else {
+                    Err(MondrianError::ActionNotExecuted {
+                        action: "go_to_end".to_owned(),
+                        reason: "active Sequence has no valid terminal frame".to_owned(),
+                    })
                 }
-                Ok(())
             }
 
             // ── 选择（当前 AppState 可表达 track / clip / mask / animation selection）──
@@ -181,14 +193,23 @@ impl AppState {
             // ── 时间线编辑（复用已有 undoable 命令层）────────────────────
             Action::DeleteSelection => self.delete_selection_from_ui(false),
             Action::RippleDeleteSelection => self.delete_selection_from_ui(true),
-            Action::SplitClipAtPlayhead => self.split_at_playhead().map(|_| ()),
+            Action::SplitClipAtPlayhead => {
+                let split_count = self.split_at_playhead()?;
+                require_action_executed(
+                    split_count > 0,
+                    "split_clip_at_playhead",
+                    "播放头未命中可拆分的未锁定片段",
+                )
+            }
             Action::MarkInAtPlayhead => self.mark_in_at_current_frame(),
             Action::MarkOutAtPlayhead => self.mark_out_at_current_frame(),
             Action::NudgeClip { clip_id, delta_frames } => {
                 self.nudge_clip_from_action(clip_id, delta_frames)
             }
             Action::MoveClipToTrack { clip_id, target_track, position } => {
-                self.move_clip_to_track_from_action(clip_id, target_track, position.frame)
+                let frame =
+                    self.sequence_frame_from_action_position("move_clip_to_track", position)?;
+                self.move_clip_to_track_from_action(clip_id, target_track, frame)
             }
             Action::TrimClipStart { clip_id, new_source_in } => {
                 self.trim_clip_source_from_action(clip_id, TrimEdge::In, new_source_in)
@@ -220,7 +241,7 @@ impl AppState {
             }
             Action::SaveProjectAs(path) => self.save_project_as_from_action(path),
             Action::CloseProject => {
-                self.close_project();
+                self.close_project().map_err(mondrian_core::MondrianError::Other)?;
                 Ok(())
             }
             Action::ImportMedia(paths) => self.import_media_from_action(paths),
@@ -260,23 +281,32 @@ impl AppState {
     }
 
     fn copy_from_action(&mut self) -> Result<()> {
+        if !self.can_copy_to_app_clipboard() {
+            return Err(action_not_executed(
+                "copy",
+                "当前没有可复制的片段或动画关键帧",
+            ));
+        }
         let Some(selection) = self.primary_selected_clip() else {
-            return self.copy_selected_clips_to_clipboard().map(|_| ());
+            let copied = self.copy_selected_clips_to_clipboard()?;
+            return require_action_executed(copied, "copy", "当前没有可复制的片段");
         };
         if self.copy_selected_animation_keyframes(selection)? {
             Ok(())
         } else {
-            self.copy_selected_clips_to_clipboard().map(|_| ())
+            let copied = self.copy_selected_clips_to_clipboard()?;
+            require_action_executed(copied, "copy", "当前没有可复制的片段")
         }
     }
 
     fn cut_from_action(&mut self) -> Result<()> {
-        self.cut_selected_clips_to_clipboard().map(|_| ())
+        let removed = self.cut_selected_clips_to_clipboard()?;
+        require_action_executed(removed > 0, "cut", "当前没有可剪切的未锁定片段")
     }
 
     fn open_project_from_action(&mut self, path: PathBuf) -> Result<()> {
         if path.as_os_str().is_empty() {
-            return Ok(());
+            return Err(action_not_executed("open_project", "项目路径不能为空"));
         }
         self.open_project_file(path).map_err(|err| {
             let reason = err.to_string();
@@ -289,7 +319,7 @@ impl AppState {
 
     fn save_project_as_from_action(&mut self, path: PathBuf) -> Result<()> {
         if path.as_os_str().is_empty() {
-            return Ok(());
+            return Err(action_not_executed("save_project_as", "目标路径不能为空"));
         }
         if !self.has_open_project() {
             let reason = "当前无可另存项目".to_string();
@@ -311,7 +341,7 @@ impl AppState {
 
     fn create_project_from_ui(&mut self, payload: ProjectCreateWithSettingsPayload) -> Result<()> {
         if payload.project_file.as_os_str().is_empty() {
-            return Ok(());
+            return Err(action_not_executed("create_project", "项目路径不能为空"));
         }
         let project_file = super::ensure_project_extension(payload.project_file);
         let name = if payload.name.trim().is_empty() {
@@ -345,22 +375,14 @@ impl AppState {
         &mut self,
         payload: ProjectRecoverFromAutosavePayload,
     ) -> Result<()> {
-        if payload.project_file.as_os_str().is_empty()
-            || payload.autosave_file.as_os_str().is_empty()
-        {
-            return Ok(());
-        }
-        self.open_project_from_autosave_snapshot(
-            payload.project_file.clone(),
-            payload.autosave_file,
-        )
-        .map_err(|err| {
+        let project_file = payload.candidate.project_file.clone();
+        self.open_project_from_autosave_snapshot(payload.candidate).map_err(|err| {
             let reason = err.to_string();
             self.set_status_hint(format!("恢复自动保存失败：{reason}"), true);
             MondrianError::WorkflowStepFailed { step_id: "recover_project".to_string(), reason }
         })?;
         self.set_status_hint(
-            format!("已从自动保存恢复：{}", payload.project_file.display()),
+            format!("已从自动保存恢复：{}", project_file.display()),
             false,
         );
         Ok(())
@@ -376,7 +398,18 @@ impl AppState {
         folder_id: Option<&str>,
     ) -> Result<()> {
         if paths.is_empty() {
-            return Ok(());
+            return Err(action_not_executed(
+                "import_media",
+                "没有提供待导入的媒体文件",
+            ));
+        }
+        if paths.iter().any(|path| path.as_os_str().is_empty()) {
+            let reason = "媒体路径不能为空".to_string();
+            self.set_status_hint(format!("导入失败：{reason}"), true);
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "import_media".to_string(),
+                reason,
+            });
         }
 
         let library = self.asset_library_handle().ok_or_else(|| {
@@ -411,36 +444,27 @@ impl AppState {
             .map(|asset| asset.name)
             .unwrap_or_else(|| payload.asset_id.to_string());
 
-        self.delete_asset_from_library(payload.asset_id).map_err(|err| {
+        self.retire_asset_from_library(payload.asset_id).map_err(|err| {
             let reason = err.to_string();
             self.set_status_hint(format!("删除素材失败：{reason}"), true);
             MondrianError::WorkflowStepFailed { step_id: "delete_asset".to_string(), reason }
         })?;
-        self.set_status_hint(format!("已删除素材：{asset_name}"), false);
+        self.set_status_hint(format!("已从素材面板移除：{asset_name}"), false);
         Ok(())
     }
 
     fn relink_asset_from_ui(&mut self, payload: AssetsRelinkAssetPayload) -> Result<()> {
-        let library = self.asset_library_handle().ok_or_else(|| {
-            let reason = "素材库未连接".to_string();
-            self.set_status_hint(format!("重新链接素材失败：{reason}"), true);
-            MondrianError::WorkflowStepFailed { step_id: "relink_asset".to_string(), reason }
-        })?;
-        let asset_name = library
-            .get_asset(payload.asset_id)?
-            .map(|asset| asset.name)
-            .unwrap_or_else(|| payload.asset_id.to_string());
-
-        self.relink_asset(payload.asset_id, &payload.path).map_err(|err| {
+        self.request_media_asset_mutation(
+            payload.asset_id,
+            Some(payload.path),
+            MediaAssetMutationKind::Relink,
+        )
+        .map_err(|err| {
             let reason = err.to_string();
             self.set_status_hint(format!("重新链接素材失败：{reason}"), true);
             MondrianError::WorkflowStepFailed { step_id: "relink_asset".to_string(), reason }
         })?;
-        self.event_bus.publish(mondrian_core::events::AppEvent::AssetLibraryReloaded);
-        self.set_status_hint(
-            format!("已重新链接素材：{asset_name} → {}", payload.path.display()),
-            false,
-        );
+        self.set_status_hint("正在分析重新链接的媒体…".to_owned(), false);
         Ok(())
     }
 
@@ -448,19 +472,12 @@ impl AppState {
         &mut self,
         payload: AssetsRefreshAudioComponentsPayload,
     ) -> Result<()> {
-        let library = self.asset_library_handle().ok_or_else(|| {
-            let reason = "素材库未连接".to_string();
-            self.set_status_hint(format!("音频 Component 探测失败：{reason}"), true);
-            MondrianError::WorkflowStepFailed {
-                step_id: "assets_refresh_audio_components".to_string(),
-                reason,
-            }
-        })?;
-        let asset_name = library
-            .get_asset(payload.asset_id)?
-            .map(|asset| asset.name)
-            .unwrap_or_else(|| payload.asset_id.to_string());
-        library.refresh_audio_components(payload.asset_id).map_err(|error| {
+        self.request_media_asset_mutation(
+            payload.asset_id,
+            None,
+            MediaAssetMutationKind::RefreshAudioComponents,
+        )
+        .map_err(|error| {
             let reason = error.to_string();
             self.set_status_hint(format!("音频 Component 探测失败：{reason}"), true);
             MondrianError::WorkflowStepFailed {
@@ -468,9 +485,7 @@ impl AppState {
                 reason,
             }
         })?;
-        self.refresh_audio_playback_after_authoring_change();
-        self.event_bus.publish(AppEvent::AssetLibraryReloaded);
-        self.set_status_hint(format!("已刷新 {asset_name} 的音频流候选"), false);
+        self.set_status_hint("正在刷新音频流候选…".to_owned(), false);
         Ok(())
     }
 
@@ -478,37 +493,23 @@ impl AppState {
         &mut self,
         payload: AssetsRebindAudioComponentPayload,
     ) -> Result<()> {
-        let library = self.asset_library_handle().ok_or_else(|| {
-            let reason = "素材库未连接".to_string();
+        self.request_media_asset_mutation(
+            payload.asset_id,
+            None,
+            MediaAssetMutationKind::RebindAudioComponent {
+                component_id: payload.component_id,
+                stream_index: payload.stream_index,
+            },
+        )
+        .map_err(|error| {
+            let reason = error.to_string();
             self.set_status_hint(format!("音频 Component 重绑定失败：{reason}"), true);
             MondrianError::WorkflowStepFailed {
                 step_id: "assets_rebind_audio_component".to_string(),
                 reason,
             }
         })?;
-        let asset_name = library
-            .get_asset(payload.asset_id)?
-            .map(|asset| asset.name)
-            .unwrap_or_else(|| payload.asset_id.to_string());
-        library
-            .rebind_audio_component(payload.asset_id, payload.component_id, payload.stream_index)
-            .map_err(|error| {
-                let reason = error.to_string();
-                self.set_status_hint(format!("音频 Component 重绑定失败：{reason}"), true);
-                MondrianError::WorkflowStepFailed {
-                    step_id: "assets_rebind_audio_component".to_string(),
-                    reason,
-                }
-            })?;
-        self.refresh_audio_playback_after_authoring_change();
-        self.event_bus.publish(AppEvent::AssetLibraryReloaded);
-        self.set_status_hint(
-            format!(
-                "已将 {asset_name} 的音频 Component 映射到流 #{}",
-                payload.stream_index
-            ),
-            false,
-        );
+        self.set_status_hint("正在验证音频 Component 重绑定…".to_owned(), false);
         Ok(())
     }
 
@@ -600,7 +601,8 @@ impl AppState {
                 reason,
             });
         }
-        if payload.enabled && !asset.path.exists() {
+        let source_path = asset.file_path().map(PathBuf::from);
+        if payload.enabled && source_path.as_ref().is_none_or(|source_path| !source_path.exists()) {
             let reason = "素材文件不存在，请先重新链接媒体".to_string();
             self.set_status_hint(format!("设置代理模式失败：{reason}"), true);
             return Err(MondrianError::WorkflowStepFailed {
@@ -623,6 +625,10 @@ impl AppState {
             format!("已关闭代理模式：{}", asset.name)
         };
         if payload.enabled {
+            let source_path = source_path.ok_or_else(|| MondrianError::WorkflowStepFailed {
+                step_id: "set_asset_proxy_mode".to_owned(),
+                reason: "视频素材没有文件源".to_owned(),
+            })?;
             let proxy_config = self.proxy_config();
             let proxy_color =
                 resolve_app_state_proxy_color_contract(self, &asset).map_err(|reason| {
@@ -634,7 +640,7 @@ impl AppState {
                 })?;
             match self.request_proxy_generation(
                 payload.asset_id,
-                asset.path,
+                source_path,
                 proxy_config,
                 proxy_color,
                 ProxyGenerationOrigin::User,
@@ -698,6 +704,12 @@ impl AppState {
         &mut self,
         payload: AssetsDeleteSelectionPayload,
     ) -> Result<()> {
+        if payload.asset_ids.is_empty() && payload.folder_ids.is_empty() {
+            return Err(action_not_executed(
+                "delete_asset_selection",
+                "当前没有可删除的素材或文件夹选择",
+            ));
+        }
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("删除素材选择失败：{reason}"), true);
@@ -706,48 +718,34 @@ impl AppState {
                 reason,
             }
         })?;
-        let mut deleted_assets = 0usize;
-        let mut deleted_folders = 0usize;
+        let outcome = library
+            .retire_assets_and_delete_folders(&payload.asset_ids, &payload.folder_ids)
+            .map_err(|err| {
+                let reason = err.to_string();
+                self.set_status_hint(format!("删除素材选择失败：{reason}"), true);
+                MondrianError::WorkflowStepFailed {
+                    step_id: "delete_asset_selection".to_string(),
+                    reason,
+                }
+            })?;
 
-        for asset_id in &payload.asset_ids {
-            self.delete_asset_and_cleanup_timeline(*asset_id).map_err(|err| {
-                let reason = err.to_string();
-                self.set_status_hint(format!("删除素材选择失败：{reason}"), true);
-                MondrianError::WorkflowStepFailed {
-                    step_id: "delete_asset_selection".to_string(),
-                    reason,
-                }
-            })?;
-            library.delete_asset(*asset_id).map_err(|err| {
-                let reason = err.to_string();
-                self.set_status_hint(format!("删除素材选择失败：{reason}"), true);
-                MondrianError::WorkflowStepFailed {
-                    step_id: "delete_asset_selection".to_string(),
-                    reason,
-                }
-            })?;
-            self.event_bus
-                .publish(mondrian_core::events::AppEvent::AssetDeleted { asset_id: *asset_id });
-            deleted_assets += 1;
-        }
-        for folder_id in &payload.folder_ids {
-            library.delete_folder(folder_id).map_err(|err| {
-                let reason = err.to_string();
-                self.set_status_hint(format!("删除素材选择失败：{reason}"), true);
-                MondrianError::WorkflowStepFailed {
-                    step_id: "delete_asset_selection".to_string(),
-                    reason,
-                }
-            })?;
-            deleted_folders += 1;
-        }
-
-        if deleted_assets + deleted_folders == 0 {
+        if outcome.retired_assets + outcome.deleted_folders == 0 {
             return Ok(());
+        }
+        let mut retired_ids = Vec::new();
+        for asset_id in payload.asset_ids {
+            if !retired_ids.contains(&asset_id) {
+                retired_ids.push(asset_id);
+                self.event_bus
+                    .publish(mondrian_core::events::AppEvent::AssetRetired { asset_id });
+            }
         }
         self.event_bus.publish(mondrian_core::events::AppEvent::AssetLibraryReloaded);
         self.set_status_hint(
-            format!("已删除 {deleted_assets} 个素材、{deleted_folders} 个文件夹"),
+            format!(
+                "已从素材面板移除 {} 个素材、删除 {} 个文件夹",
+                outcome.retired_assets, outcome.deleted_folders
+            ),
             false,
         );
         Ok(())
@@ -818,6 +816,12 @@ impl AppState {
     }
 
     fn move_selection_from_ui(&mut self, payload: AssetsMoveSelectionPayload) -> Result<()> {
+        if payload.asset_ids.is_empty() && payload.folder_ids.is_empty() {
+            return Err(action_not_executed(
+                "move_asset_selection",
+                "当前没有可移动的素材或文件夹选择",
+            ));
+        }
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("移动素材选择失败：{reason}"), true);
@@ -895,28 +899,46 @@ impl AppState {
     }
 
     fn duplicate_from_action(&mut self) -> Result<()> {
-        self.duplicate_selected_clips_after_selection().map(|_| ())
+        if !self.can_cut_to_app_clipboard() {
+            return Err(action_not_executed(
+                "duplicate",
+                "当前没有可复制的未锁定片段",
+            ));
+        }
+        let duplicated = self.duplicate_selected_clips_after_selection()?;
+        require_action_executed(duplicated > 0, "duplicate", "当前没有可复制的未锁定片段")
     }
 
     fn paste_from_action(&mut self) -> Result<()> {
+        if !self.can_paste_from_app_clipboard() {
+            return Err(action_not_executed(
+                "paste",
+                "剪贴板为空或当前没有可用的粘贴目标",
+            ));
+        }
         match self.active_clipboard_kind {
             Some(AppClipboardKind::AnimationKeyframes) => self
                 .paste_animation_keyframes_from_action()
-                .or_else(|_| self.paste_clip_clipboard_at_playhead().map(|_| ())),
-            Some(AppClipboardKind::Clips) => self.paste_clip_clipboard_at_playhead().map(|_| ()),
+                .or_else(|_| self.paste_clip_clipboard_from_action()),
+            Some(AppClipboardKind::Clips) => self.paste_clip_clipboard_from_action(),
             None => {
                 if self.has_animation_clipboard() {
                     self.paste_animation_keyframes_from_action()
                 } else {
-                    self.paste_clip_clipboard_at_playhead().map(|_| ())
+                    self.paste_clip_clipboard_from_action()
                 }
             }
         }
     }
 
+    fn paste_clip_clipboard_from_action(&mut self) -> Result<()> {
+        let pasted = self.paste_clip_clipboard_at_playhead()?;
+        require_action_executed(pasted > 0, "paste", "剪贴板为空或当前没有可用的粘贴目标")
+    }
+
     fn paste_animation_keyframes_from_action(&mut self) -> Result<()> {
         let Some(selection) = self.primary_selected_clip() else {
-            return Ok(());
+            return Err(action_not_executed("paste", "当前没有动画关键帧粘贴目标"));
         };
         let timeline_time = self.current_timeline_time()?.unwrap_or(TimelineTime::ZERO);
         let destination_time = self
@@ -925,12 +947,13 @@ impl AppState {
             .map(|clip| clip_visual_author_time_at(clip, timeline_time))
             .transpose()?
             .ok_or_else(|| missing_clip_error("paste_animation_keyframes", selection.clip_id))?;
-        self.paste_animation_keyframes(selection, destination_time).map(|_| ())
+        let pasted = self.paste_animation_keyframes(selection, destination_time)?;
+        require_action_executed(pasted, "paste", "动画关键帧剪贴板为空")
     }
 
     fn nudge_clip_from_action(&mut self, clip_id: ClipId, delta_frames: i64) -> Result<()> {
         if delta_frames == 0 {
-            return Ok(());
+            return Err(action_not_executed("nudge_clip", "移动帧数不能为零"));
         }
         let (track_id, is_video_track, frame) = self.clip_action_location("nudge_clip", clip_id)?;
         self.move_clip_with_snapshot(
@@ -952,6 +975,28 @@ impl AppState {
         self.move_clip_with_snapshot(target_track_id, is_video_track, clip_id, frame.max(0))
     }
 
+    /// Lower one exact Action position onto the active Sequence evaluation
+    /// grid. `FramePosition::time_base` is part of the input value and is
+    /// therefore converted to exact author time before the single, explicit
+    /// nearest-frame quantization at this Adapter seam.
+    fn sequence_frame_from_action_position(
+        &self,
+        step_id: &'static str,
+        position: FramePosition,
+    ) -> Result<i64> {
+        let time = TimelineTime::from_frame_position(position)?;
+        if time.is_negative() {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: step_id.to_owned(),
+                reason: "Sequence position must be nonnegative".to_owned(),
+            });
+        }
+        let sequence = self.active_sequence().ok_or_else(|| missing_sequence_error(step_id))?;
+        Ok(time
+            .to_frame_position(sequence.settings.frame_rate, FrameRounding::Nearest)?
+            .frame)
+    }
+
     fn trim_clip_source_from_action(
         &mut self,
         clip_id: ClipId,
@@ -964,7 +1009,9 @@ impl AppState {
             };
             let clip = find_clip(seq, clip_id)
                 .ok_or_else(|| missing_clip_error("trim_clip_source", clip_id))?;
-            source_trim_target_frame(clip, edge, source_time)?
+            source_trim_target_time(clip, edge, source_time)?
+                .to_frame_position(seq.settings.frame_rate, FrameRounding::Nearest)?
+                .frame
         };
         self.trim_clips_bulk_to_frame(&[clip_id], edge, target_frame).map(|_| ())
     }
@@ -1133,7 +1180,10 @@ impl AppState {
     fn delete_selected_tracks_from_ui(&mut self) -> Result<()> {
         let track_ids = self.selection.selected_track_ids.clone();
         if track_ids.is_empty() {
-            return Ok(());
+            return Err(action_not_executed(
+                "delete_selection",
+                "当前没有可删除的时间线选择",
+            ));
         }
 
         let Some(seq) = self.active_sequence() else {
@@ -1161,18 +1211,15 @@ impl AppState {
         self.authoring_history().is_some_and(|history| history.can_redo())
     }
 
-    fn dispatch_timeline_ui_action(
-        &mut self,
-        name: &str,
-        payload: serde_json::Value,
-    ) -> Result<()> {
-        match name {
-            TIMELINE_SELECT_CLIP => {
-                let payload = parse_ui_payload::<TimelineSelectClipPayload>(
-                    "timeline_ui_action",
-                    name,
-                    payload,
-                )?;
+    fn dispatch_product_action(&mut self, action: ProductAction) -> Result<()> {
+        match action {
+            ProductAction::Timeline(action) => self.dispatch_timeline_product_action(action),
+        }
+    }
+
+    fn dispatch_timeline_product_action(&mut self, action: TimelineProductAction) -> Result<()> {
+        match action {
+            TimelineProductAction::SelectClip(payload) => {
                 let mode = match payload.mode {
                     TimelineClipSelectionModePayload::Replace => ClipSelectionMode::Replace,
                     TimelineClipSelectionModePayload::Toggle => ClipSelectionMode::Toggle,
@@ -1182,6 +1229,32 @@ impl AppState {
                     .map(|_| ())
                     .ok_or_else(|| missing_clip_error("timeline_select_clip", payload.clip_id))
             }
+            TimelineProductAction::MoveClip(payload) => self.move_clip_with_snapshot(
+                payload.target_track_id,
+                payload.is_video_track,
+                payload.clip_id,
+                payload.frame,
+            ),
+            TimelineProductAction::TrimClips(payload) => {
+                let edge = match payload.edge {
+                    TimelineTrimPayloadEdge::In => TrimEdge::In,
+                    TimelineTrimPayloadEdge::Out => TrimEdge::Out,
+                };
+                self.trim_clips_bulk_to_frame(&payload.clip_ids, edge, payload.frame)
+                    .map(|_| ())
+            }
+            TimelineProductAction::Seek(payload) => {
+                self.seek_with_source(payload.frame, payload.source)
+            }
+        }
+    }
+
+    fn dispatch_timeline_ui_action(
+        &mut self,
+        name: &str,
+        payload: serde_json::Value,
+    ) -> Result<()> {
+        match name {
             TIMELINE_LINK_SELECTED_CLIPS => {
                 self.edit_selected_clip_links_from_ui(ClipLinkEditKind::Link)
             }
@@ -1261,32 +1334,6 @@ impl AppState {
                     }
                 }
             }
-            TIMELINE_MOVE_CLIP => {
-                let payload = parse_ui_payload::<TimelineMoveClipPayload>(
-                    "timeline_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.move_clip_with_snapshot(
-                    payload.target_track_id,
-                    payload.is_video_track,
-                    payload.clip_id,
-                    payload.frame,
-                )
-            }
-            TIMELINE_TRIM_CLIPS => {
-                let payload = parse_ui_payload::<TimelineTrimClipsPayload>(
-                    "timeline_ui_action",
-                    name,
-                    payload,
-                )?;
-                let edge = match payload.edge {
-                    TimelineTrimPayloadEdge::In => TrimEdge::In,
-                    TimelineTrimPayloadEdge::Out => TrimEdge::Out,
-                };
-                self.trim_clips_bulk_to_frame(&payload.clip_ids, edge, payload.frame)
-                    .map(|_| ())
-            }
             TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD => {
                 let payload = parse_ui_payload::<TimelineTrimSelectedClipsToPlayheadPayload>(
                     "timeline_ui_action",
@@ -1322,12 +1369,6 @@ impl AppState {
                     payload,
                 )?;
                 self.set_selected_clips_enabled_from_ui(payload.enabled)
-            }
-            TIMELINE_SEEK => {
-                let payload =
-                    parse_ui_payload::<TimelineSeekPayload>("timeline_ui_action", name, payload)?;
-                self.seek_with_source(payload.frame.max(0), payload.source);
-                Ok(())
             }
             TIMELINE_SET_TRACK_CONTROL => {
                 let payload = parse_ui_payload::<TimelineSetTrackControlPayload>(
@@ -1784,6 +1825,7 @@ impl AppState {
                     sequence_id: payload.sequence_id,
                     range: payload.range,
                     output_path: payload.output_path,
+                    output_policy: payload.output_policy,
                 })
                 .map(|_| ())
             }
@@ -1932,31 +1974,27 @@ impl AppState {
                 step_id: "viewer_ui_action".to_string(),
                 reason: "当前无序列".to_string(),
             })?;
-        let before = self
+        let sequence = self
             .sequences()
             .iter()
             .find(|sequence| sequence.id == sequence_id)
-            .cloned()
-            .or_else(|| {
-                self.active_sequence().filter(|sequence| sequence.id == sequence_id).cloned()
-            })
+            .or_else(|| self.active_sequence().filter(|sequence| sequence.id == sequence_id))
             .ok_or_else(|| MondrianError::WorkflowStepFailed {
                 step_id: "viewer_ui_action".to_string(),
                 reason: format!("序列不存在: {sequence_id}"),
             })?;
 
-        let current = normalize_preview_resolution_scale(before.settings.preview.resolution_scale);
+        let current =
+            normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale);
         if (current - scale).abs() <= f32::EPSILON {
             return Ok(());
         }
 
-        let mut after = before.clone();
-        let mut settings = after.settings.clone();
-        settings.preview.resolution_scale = scale;
-        after.apply_settings(settings)?;
-
-        self.record_sequence_snapshot_command("修改预览分辨率", before, after)?;
-        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+        self.commit_sequence_edit(sequence_id, "修改预览分辨率", |sequence| {
+            let mut settings = sequence.settings.clone();
+            settings.preview.resolution_scale = scale;
+            sequence.apply_settings(settings)
+        })?;
         self.set_status_hint(
             format!("预览分辨率：{}", preview_resolution_scale_label(scale)),
             false,
@@ -1975,17 +2013,44 @@ impl AppState {
             self.set_status_hint(format!("素材准备失败：{reason}"), true);
             MondrianError::WorkflowStepFailed { step_id: "assets_prepare_drag".into(), reason }
         })?;
-        let duration = if matches!(
+        let media_probe = asset.media_probe();
+        if matches!(
             asset.kind,
-            AssetKind::StillImage | AssetKind::AdjustmentLayer | AssetKind::SolidColor
-        ) {
-            self.default_visual_placement_drag_duration()?
-        } else if asset.media_info.duration > Duration::ZERO {
-            asset.media_info.duration
-        } else {
-            self.default_visual_placement_drag_duration()?
+            AssetKind::Audio | AssetKind::Video | AssetKind::StillImage
+        ) && media_probe.is_none()
+        {
+            let reason = "文件素材的探测证据缺失或已失效，请先刷新或重新链接素材".to_owned();
+            self.set_status_hint(format!("素材准备失败：{reason}"), true);
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "assets_prepare_drag".to_owned(),
+                reason,
+            });
+        }
+        let duration = match asset.kind {
+            AssetKind::AdjustmentLayer | AssetKind::SolidColor => {
+                self.default_visual_placement_drag_duration()?
+            }
+            AssetKind::StillImage => self.default_visual_placement_drag_duration()?,
+            AssetKind::Audio | AssetKind::Video => {
+                let Some(probe) = media_probe else {
+                    return Err(MondrianError::WorkflowStepFailed {
+                        step_id: "assets_prepare_drag".to_owned(),
+                        reason: "文件素材探测证据在动作执行期间失效".to_owned(),
+                    });
+                };
+                if probe.duration == Duration::ZERO {
+                    let reason = "媒体探测没有证明正的源时长，不能创建虚构长度的 Clip".to_owned();
+                    self.set_status_hint(format!("素材准备失败：{reason}"), true);
+                    return Err(MondrianError::WorkflowStepFailed {
+                        step_id: "assets_prepare_drag".to_owned(),
+                        reason,
+                    });
+                }
+                probe.duration
+            }
         };
-        let has_linked_audio = matches!(asset.kind, AssetKind::Video) && asset.media_info.has_audio;
+        let has_linked_audio = matches!(asset.kind, AssetKind::Video)
+            && media_probe.is_some_and(|probe| probe.has_audio);
         let lane = match asset.kind {
             AssetKind::Audio => "音频轨",
             AssetKind::Video
@@ -2040,12 +2105,11 @@ impl AppState {
         value: PropertyValue,
     ) -> Result<()> {
         self.ensure_clip_track_unlocked("set_effect_property", selection.clip_id)?;
-        let Some(before) = self.active_sequence().cloned() else {
+        let Some(sequence_id) = self.active_sequence_id() else {
             return Err(missing_sequence_error("set_effect_property"));
         };
-        let mut after = before.clone();
-        let changed = {
-            let clip = find_clip_mut(&mut after, selection.clip_id)
+        self.commit_sequence_edit(sequence_id, "调整特效属性", move |sequence| {
+            let clip = find_clip_mut(sequence, selection.clip_id)
                 .ok_or_else(|| missing_clip_error("set_effect_property", selection.clip_id))?;
             let effect = clip.effects.iter_mut().find(|e| e.id == effect_id).ok_or_else(|| {
                 MondrianError::WorkflowStepFailed {
@@ -2060,19 +2124,15 @@ impl AppState {
                 }
             })?;
             if property.static_value() == &value {
-                false
+                return Ok(());
             } else {
                 effect.apply_property_mutation(PropertyMutation::SetStaticValue {
                     path: path.to_string(),
                     value,
                 })?;
-                true
             }
-        };
-        if changed {
-            self.record_sequence_snapshot_command("调整特效属性", before, after)?;
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     fn set_clip_property_from_ui(
@@ -2083,12 +2143,11 @@ impl AppState {
     ) -> Result<()> {
         self.ensure_clip_track_unlocked("set_clip_property", selection.clip_id)?;
         let current_time = self.current_timeline_time()?.unwrap_or(TimelineTime::ZERO);
-        let Some(before) = self.active_sequence().cloned() else {
+        let Some(sequence_id) = self.active_sequence_id() else {
             return Err(missing_sequence_error("set_clip_property"));
         };
-        let mut after = before.clone();
-        let changed = {
-            let clip = find_clip_mut(&mut after, selection.clip_id)
+        self.commit_sequence_edit(sequence_id, "调整剪辑属性", move |sequence| {
+            let clip = find_clip_mut(sequence, selection.clip_id)
                 .ok_or_else(|| missing_clip_error("set_clip_property", selection.clip_id))?;
             let properties = clip.property_bag()?;
             let property =
@@ -2128,17 +2187,9 @@ impl AppState {
             };
             if let Some(mutation) = mutation {
                 clip.apply_property_mutation(mutation)?;
-                true
-            } else {
-                false
             }
-        };
-        if changed {
-            let sequence_id = after.id;
-            self.record_sequence_snapshot_command("调整剪辑属性", before, after)?;
-            self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     fn set_selected_clips_enabled_from_ui(&mut self, enabled: bool) -> Result<()> {
@@ -2149,7 +2200,10 @@ impl AppState {
     fn trim_selected_clips_to_playhead_from_ui(&mut self, edge: TrimEdge) -> Result<()> {
         let clip_ids = self.selected_clip_ids_for_timeline_action();
         if clip_ids.is_empty() {
-            return Ok(());
+            return Err(action_not_executed(
+                "trim_selected_clips_to_playhead",
+                "当前没有可修剪的片段选择",
+            ));
         }
         let target_frame = match edge {
             TrimEdge::In => self.current_frame(),
@@ -2161,51 +2215,46 @@ impl AppState {
     fn roll_selected_cut_to_playhead_from_ui(&mut self) -> Result<()> {
         let clip_ids = self.selected_clip_ids_for_timeline_action();
         let [clip_id] = clip_ids.as_slice() else {
-            return Ok(());
+            return Err(action_not_executed(
+                "roll_selected_cut_to_playhead",
+                "滚动编辑要求且仅允许选择一个片段",
+            ));
         };
         match self.roll_cut_to_frame(*clip_id, self.current_frame())? {
             true => Ok(()),
             false => {
-                self.set_status_hint("未找到可滚动切点，或播放头不在可滚动范围", true);
-                Ok(())
+                let reason = "未找到可滚动切点，或播放头不在可滚动范围";
+                self.set_status_hint(reason, true);
+                Err(action_not_executed("roll_selected_cut_to_playhead", reason))
             }
         }
     }
 
     fn set_in_out_point_from_ui(&mut self, payload: TimelineSetInOutPointPayload) -> Result<()> {
-        let before = self
-            .active_sequence()
-            .cloned()
+        let sequence_id = self
+            .active_sequence_id()
             .ok_or_else(|| missing_sequence_error("timeline_set_in_out_point"))?;
-        let mut after = before.clone();
-        let time = TimelineTime::from_frame_position(FramePosition::new(
-            payload.frame,
-            after.time_base(),
-        ))?;
-        match payload.point {
-            TimelineInOutPointPayloadKind::In => after.mark_in(time),
-            TimelineInOutPointPayloadKind::Out => after.mark_out(time),
-        }
-        let sequence_id = after.id;
-        self.record_sequence_snapshot_command("设置时间线入出点", before, after)?;
-        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-        Ok(())
+        self.commit_sequence_edit(sequence_id, "设置时间线入出点", |sequence| {
+            let time = TimelineTime::from_frame_position(FramePosition::new(
+                payload.frame,
+                sequence.time_base(),
+            ))?;
+            match payload.point {
+                TimelineInOutPointPayloadKind::In => sequence.mark_in(time),
+                TimelineInOutPointPayloadKind::Out => sequence.mark_out(time),
+            }
+            Ok(())
+        })
     }
 
     fn clear_in_out_points_from_ui(&mut self) -> Result<()> {
-        let before = self
-            .active_sequence()
-            .cloned()
+        let sequence_id = self
+            .active_sequence_id()
             .ok_or_else(|| missing_sequence_error("timeline_clear_in_out_points"))?;
-        if before.in_point.is_none() && before.out_point.is_none() {
-            return Ok(());
-        }
-        let mut after = before.clone();
-        after.clear_in_out();
-        let sequence_id = after.id;
-        self.record_sequence_snapshot_command("清除时间线入出点", before, after)?;
-        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-        Ok(())
+        self.commit_sequence_edit(sequence_id, "清除时间线入出点", |sequence| {
+            sequence.clear_in_out();
+            Ok(())
+        })
     }
 
     fn selected_clip_ids_for_timeline_action(&self) -> Vec<ClipId> {
@@ -2256,9 +2305,6 @@ impl AppState {
                 }
             })
         })?;
-        let sequence_id = self
-            .active_sequence_id()
-            .ok_or_else(|| missing_sequence_error("timeline_edit_clip_links"))?;
         let mut selections = self
             .active_sequence()
             .map(|sequence| {
@@ -2277,7 +2323,6 @@ impl AppState {
             }
         }
         self.replace_clip_selection(selections);
-        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         self.set_status_hint(
             match kind {
                 ClipLinkEditKind::Link => "已链接所选剪辑",
@@ -2327,60 +2372,48 @@ impl AppState {
         enabled: bool,
     ) -> Result<()> {
         if clip_ids.is_empty() {
-            return Ok(());
+            return Err(action_not_executed(step_id, "当前没有可修改的片段选择"));
         }
         for clip_id in clip_ids {
             self.ensure_clip_track_unlocked(step_id, *clip_id)?;
         }
-        let Some(before) = self.active_sequence().cloned() else {
+        let Some(sequence_id) = self.active_sequence_id() else {
             return Err(missing_sequence_error(step_id));
         };
-        let mut after = before.clone();
-        let mut changed = false;
-        for clip_id in clip_ids {
-            changed |= set_clip_disabled(&mut after, *clip_id, !enabled);
-        }
-        if changed {
-            self.record_sequence_snapshot_command("切换片段启用状态", before, after)?;
+        self.commit_sequence_edit(sequence_id, "切换片段启用状态", |sequence| {
+            if let Some(missing) =
+                clip_ids.iter().copied().find(|clip_id| !clip_exists(sequence, *clip_id))
+            {
+                return Err(missing_clip_error(step_id, missing));
+            }
+            for clip_id in clip_ids {
+                let _ = set_clip_disabled(sequence, *clip_id, !enabled);
+            }
             Ok(())
-        } else if clip_ids.iter().all(|clip_id| clip_exists(&after, *clip_id)) {
-            Ok(())
-        } else {
-            let missing = clip_ids
-                .iter()
-                .copied()
-                .find(|clip_id| !clip_exists(&after, *clip_id))
-                .unwrap_or(clip_ids[0]);
-            Err(missing_clip_error(step_id, missing))
-        }
+        })
     }
 
     fn set_clip_opacity_from_ui(&mut self, clip_id: ClipId, opacity_percent: f32) -> Result<()> {
         self.ensure_clip_track_unlocked("inspector_set_clip_opacity", clip_id)?;
-        let Some(before) = self.active_sequence().cloned() else {
+        let Some(sequence_id) = self.active_sequence_id() else {
             return Err(missing_sequence_error("inspector_set_clip_opacity"));
         };
         let opacity = (opacity_percent / 100.0).clamp(0.0, 1.0);
-        let mut after = before.clone();
-        let playhead = after.playhead;
-        let changed = {
-            let clip = find_clip_mut(&mut after, clip_id)
+        self.commit_sequence_edit(sequence_id, "调整片段不透明度", |sequence| {
+            let playhead = sequence.playhead;
+            let clip = find_clip_mut(sequence, clip_id)
                 .ok_or_else(|| missing_clip_error("inspector_set_clip_opacity", clip_id))?;
             let author_time = clip_visual_author_time_at(clip, playhead)?;
             if (clip.transform.evaluate_opacity(author_time) - opacity).abs() < f32::EPSILON {
-                false
+                return Ok(());
             } else {
                 clip.apply_property_mutation(PropertyMutation::SetStaticValue {
                     path: Transform2D::OPACITY_PATH.to_string(),
                     value: PropertyValue::Float(opacity),
                 })?;
-                true
             }
-        };
-        if changed {
-            self.record_sequence_snapshot_command("调整片段不透明度", before, after)?;
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     fn set_clip_tint_from_ui(
@@ -2389,27 +2422,22 @@ impl AppState {
         color: mondrian_core::Color,
     ) -> Result<()> {
         self.ensure_clip_track_unlocked("inspector_set_clip_tint", clip_id)?;
-        let Some(before) = self.active_sequence().cloned() else {
+        let Some(sequence_id) = self.active_sequence_id() else {
             return Err(missing_sequence_error("inspector_set_clip_tint"));
         };
-        let mut after = before.clone();
-        let changed = {
-            let clip = find_clip_mut(&mut after, clip_id)
+        self.commit_sequence_edit(sequence_id, "调整片段颜色", |sequence| {
+            let clip = find_clip_mut(sequence, clip_id)
                 .ok_or_else(|| missing_clip_error("inspector_set_clip_tint", clip_id))?;
             if clip.content.solid_color() == Some(color) {
-                false
+                return Ok(());
             } else {
                 clip.apply_property_mutation(PropertyMutation::SetStaticValue {
                     path: Clip::SOLID_COLOR_PATH.to_string(),
                     value: PropertyValue::Color(color),
                 })?;
-                true
             }
-        };
-        if changed {
-            self.record_sequence_snapshot_command("调整片段颜色", before, after)?;
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     fn set_clip_transform_field_from_ui(
@@ -2426,16 +2454,15 @@ impl AppState {
         }
 
         self.ensure_clip_track_unlocked("inspector_set_clip_transform_field", clip_id)?;
-        let Some(before) = self.active_sequence().cloned() else {
+        let Some(sequence_id) = self.active_sequence_id() else {
             return Err(missing_sequence_error("inspector_set_clip_transform_field"));
         };
-        let mut after = before.clone();
-        let playhead = after.playhead;
-        let changed = {
-            let clip = find_clip_mut(&mut after, clip_id)
+        self.commit_sequence_edit(sequence_id, "调整片段变换", |sequence| {
+            let playhead = sequence.playhead;
+            let clip = find_clip_mut(sequence, clip_id)
                 .ok_or_else(|| missing_clip_error("inspector_set_clip_transform_field", clip_id))?;
             let author_time = clip_visual_author_time_at(clip, playhead)?;
-            match field {
+            let _changed = match field {
                 InspectorClipTransformField::PositionX => {
                     let mut position = clip.transform.get_position(author_time);
                     if (position.x - value).abs() < f32::EPSILON {
@@ -2494,12 +2521,9 @@ impl AppState {
                         true
                     }
                 }
-            }
-        };
-        if changed {
-            self.record_sequence_snapshot_command("调整片段变换", before, after)?;
-        }
-        Ok(())
+            };
+            Ok(())
+        })
     }
 
     fn set_clip_transform_from_viewer_ui(
@@ -2520,16 +2544,14 @@ impl AppState {
         }
 
         self.ensure_clip_track_unlocked(STEP_ID, payload.clip.clip_id)?;
-        let Some(before) = self.active_sequence().cloned() else {
+        let Some(sequence_id) = self.active_sequence_id() else {
             return Err(missing_sequence_error(STEP_ID));
         };
-        let mut after = before.clone();
-        let playhead = after.playhead;
-        let changed = {
-            let clip = find_clip_mut(&mut after, payload.clip.clip_id)
+        self.commit_sequence_edit(sequence_id, "调整监视器片段变换", |sequence| {
+            let playhead = sequence.playhead;
+            let clip = find_clip_mut(sequence, payload.clip.clip_id)
                 .ok_or_else(|| missing_clip_error(STEP_ID, payload.clip.clip_id))?;
             let author_time = clip_visual_author_time_at(clip, playhead)?;
-            let mut changed = false;
 
             if let Some(position) = payload.position {
                 let position = Vec2::new(position.x, position.y);
@@ -2540,7 +2562,6 @@ impl AppState {
                         path: Transform2D::POSITION_PATH.to_string(),
                         value: PropertyValue::Vec2(position),
                     })?;
-                    changed = true;
                 }
             }
 
@@ -2552,7 +2573,6 @@ impl AppState {
                         path: Transform2D::SCALE_PATH.to_string(),
                         value: PropertyValue::Vec2(scale),
                     })?;
-                    changed = true;
                 }
             }
 
@@ -2568,16 +2588,10 @@ impl AppState {
                         path: Transform2D::ROTATION_PATH.to_string(),
                         value: PropertyValue::Float(rotation),
                     })?;
-                    changed = true;
                 }
             }
-
-            changed
-        };
-        if changed {
-            self.record_sequence_snapshot_command("调整监视器片段变换", before, after)?;
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     fn edit_clip_curve_from_ui(&mut self, payload: InspectorEditClipCurvePayload) -> Result<()> {
@@ -2722,43 +2736,38 @@ impl AppState {
             }
         };
 
-        let Some(before) = self.active_sequence().cloned() else {
+        let Some(sequence_id) = self.active_sequence_id() else {
             return Err(missing_sequence_error(STEP_ID));
         };
-        let mut after = before.clone();
-        let changed = {
-            let clip = find_clip_mut(&mut after, payload.clip.clip_id)
-                .ok_or_else(|| missing_clip_error(STEP_ID, payload.clip.clip_id))?;
-            let edit = clip
-                .audio_components
-                .iter_mut()
-                .find(|edit| edit.id == payload.edit_id)
-                .ok_or_else(|| MondrianError::WorkflowStepFailed {
-                    step_id: STEP_ID.to_string(),
-                    reason: format!("audio Component Edit {} disappeared", payload.edit_id),
-                })?;
-            if edit.source == target_source {
-                false
-            } else {
+        self.commit_sequence_edit(
+            sequence_id,
+            "切换片段音频 Component",
+            move |sequence| {
+                let clip = find_clip_mut(sequence, payload.clip.clip_id)
+                    .ok_or_else(|| missing_clip_error(STEP_ID, payload.clip.clip_id))?;
+                let edit = clip
+                    .audio_components
+                    .iter_mut()
+                    .find(|edit| edit.id == payload.edit_id)
+                    .ok_or_else(|| MondrianError::WorkflowStepFailed {
+                        step_id: STEP_ID.to_string(),
+                        reason: format!("audio Component Edit {} disappeared", payload.edit_id),
+                    })?;
                 edit.source = target_source;
-                true
-            }
-        };
-        if !changed {
-            return Ok(());
-        }
-        if let Err(error) = after.audio_program.validate(
-            &after.audio_tracks,
-            &after.audio_roles,
-            after.settings.audio_channel_layout,
-        ) {
-            return Err(MondrianError::WorkflowStepFailed {
-                step_id: STEP_ID.to_string(),
-                reason: format!("audio authoring rejected source selection: {error}"),
-            });
-        }
-        self.record_sequence_snapshot_command("切换片段音频 Component", before, after)?;
-        self.refresh_audio_playback_after_authoring_change();
+                if let Err(error) = sequence.audio_program.validate(
+                    &sequence.audio_tracks,
+                    &sequence.audio_roles,
+                    sequence.settings.audio_channel_layout,
+                ) {
+                    return Err(MondrianError::WorkflowStepFailed {
+                        step_id: STEP_ID.to_string(),
+                        reason: format!("audio authoring rejected source selection: {error}"),
+                    });
+                }
+                Ok(())
+            },
+        )?;
+        self.reconcile_audio_after_committed_authoring_change("rebind_audio_component");
         Ok(())
     }
 
@@ -2769,56 +2778,70 @@ impl AppState {
         const STEP_ID: &str = "inspector_set_audio_component_edit_field";
         self.ensure_audio_component_edit_target(STEP_ID, payload.clip.clip_id, payload.edit_id)?;
 
-        let Some(before) = self.active_sequence().cloned() else {
+        let Some(sequence_id) = self.active_sequence_id() else {
             return Err(missing_sequence_error(STEP_ID));
         };
-        let mut after = before.clone();
-        let edit = find_clip_mut(&mut after, payload.clip.clip_id)
-            .ok_or_else(|| missing_clip_error(STEP_ID, payload.clip.clip_id))?
-            .audio_components
-            .iter_mut()
-            .find(|edit| edit.id == payload.edit_id)
-            .ok_or_else(|| {
-                missing_audio_component_edit_error(STEP_ID, payload.clip.clip_id, payload.edit_id)
+        let changed =
+            self.commit_sequence_edit(sequence_id, "调整片段音频 Component", |sequence| {
+                let edit = find_clip_mut(sequence, payload.clip.clip_id)
+                    .ok_or_else(|| missing_clip_error(STEP_ID, payload.clip.clip_id))?
+                    .audio_components
+                    .iter_mut()
+                    .find(|edit| edit.id == payload.edit_id)
+                    .ok_or_else(|| {
+                        missing_audio_component_edit_error(
+                            STEP_ID,
+                            payload.clip.clip_id,
+                            payload.edit_id,
+                        )
+                    })?;
+                let changed = match payload.field {
+                    InspectorAudioComponentEditField::Enabled(value) if edit.enabled != value => {
+                        edit.enabled = value;
+                        true
+                    }
+                    InspectorAudioComponentEditField::VolumeDb(value)
+                        if edit.volume_db != value =>
+                    {
+                        edit.volume_db = value;
+                        true
+                    }
+                    InspectorAudioComponentEditField::Pan(value) if edit.pan != value => {
+                        edit.pan = value;
+                        true
+                    }
+                    InspectorAudioComponentEditField::FadeIn(value)
+                        if edit.fades.fade_in != value =>
+                    {
+                        edit.fades.fade_in = value;
+                        true
+                    }
+                    InspectorAudioComponentEditField::FadeOut(value)
+                        if edit.fades.fade_out != value =>
+                    {
+                        edit.fades.fade_out = value;
+                        true
+                    }
+                    _ => false,
+                };
+                if !changed {
+                    return Ok(false);
+                }
+                if let Err(error) = sequence.audio_program.validate(
+                    &sequence.audio_tracks,
+                    &sequence.audio_roles,
+                    sequence.settings.audio_channel_layout,
+                ) {
+                    return Err(MondrianError::WorkflowStepFailed {
+                        step_id: STEP_ID.to_string(),
+                        reason: format!("audio authoring rejected Component edit: {error}"),
+                    });
+                }
+                Ok(true)
             })?;
-        let changed = match payload.field {
-            InspectorAudioComponentEditField::Enabled(value) if edit.enabled != value => {
-                edit.enabled = value;
-                true
-            }
-            InspectorAudioComponentEditField::VolumeDb(value) if edit.volume_db != value => {
-                edit.volume_db = value;
-                true
-            }
-            InspectorAudioComponentEditField::Pan(value) if edit.pan != value => {
-                edit.pan = value;
-                true
-            }
-            InspectorAudioComponentEditField::FadeIn(value) if edit.fades.fade_in != value => {
-                edit.fades.fade_in = value;
-                true
-            }
-            InspectorAudioComponentEditField::FadeOut(value) if edit.fades.fade_out != value => {
-                edit.fades.fade_out = value;
-                true
-            }
-            _ => false,
-        };
-        if !changed {
-            return Ok(());
+        if changed {
+            self.reconcile_audio_after_committed_authoring_change("refresh_audio_components");
         }
-        if let Err(error) = after.audio_program.validate(
-            &after.audio_tracks,
-            &after.audio_roles,
-            after.settings.audio_channel_layout,
-        ) {
-            return Err(MondrianError::WorkflowStepFailed {
-                step_id: STEP_ID.to_string(),
-                reason: format!("audio authoring rejected Component edit: {error}"),
-            });
-        }
-        self.record_sequence_snapshot_command("调整片段音频 Component", before, after)?;
-        self.refresh_audio_playback_after_authoring_change();
         Ok(())
     }
 
@@ -2935,12 +2958,15 @@ fn validate_folder_reparent(
     Ok(())
 }
 
-fn source_trim_target_frame(
+/// Map a source-local trim coordinate into exact Sequence-local author time.
+///
+/// The caller lowers the result once onto the active Sequence evaluation grid;
+/// the source frame grid must never be reused to interpret a Sequence position.
+fn source_trim_target_time(
     clip: &Clip,
     edge: TrimEdge,
     source_time: FramePosition,
-) -> Result<i64> {
-    let source_frame_rate = Rational::new(source_time.time_base.den, source_time.time_base.num);
+) -> Result<TimelineTime> {
     let source_time = TimelineTime::from_frame_position(source_time)?;
     let speed = clip.source_time_scale();
     if speed.numerator() <= 0 {
@@ -2969,11 +2995,7 @@ fn source_trim_target_frame(
 
     let source_delta = source_time.checked_sub(source_origin)?;
     let timeline_delta = source_delta.checked_scale(speed.reciprocal()?)?;
-    let target = clip.position.checked_add(timeline_delta)?.max(TimelineTime::ZERO);
-    target
-        .to_frame_position(source_frame_rate, FrameRounding::Nearest)
-        .map(|position| position.frame)
-        .map_err(Into::into)
+    Ok(clip.position.checked_add(timeline_delta)?.max(TimelineTime::ZERO))
 }
 
 #[cfg(test)]
@@ -3043,6 +3065,22 @@ fn poll_media_imports_until_idle(state: &mut AppState) {
     }
 }
 
+#[cfg(test)]
+fn poll_media_asset_mutations_until_idle(state: &mut AppState) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while state.media_asset_mutation_diagnostics().outstanding > 0 {
+        state.poll_media_asset_mutations();
+        if state.media_asset_mutation_diagnostics().outstanding == 0 {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for background media Asset mutation"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn parse_ui_payload<T: serde::de::DeserializeOwned>(
     step_prefix: &str,
     name: &str,
@@ -3058,6 +3096,22 @@ fn unknown_ui_action_error(step_prefix: &'static str, name: &str) -> MondrianErr
     MondrianError::WorkflowStepFailed {
         step_id: format!("{step_prefix}.{name}"),
         reason: format!("unknown app UI action: {name}"),
+    }
+}
+
+fn action_not_executed(action: &'static str, reason: impl Into<String>) -> MondrianError {
+    MondrianError::ActionNotExecuted { action: action.to_owned(), reason: reason.into() }
+}
+
+fn require_action_executed(
+    executed: bool,
+    action: &'static str,
+    reason: &'static str,
+) -> Result<()> {
+    if executed {
+        Ok(())
+    } else {
+        Err(action_not_executed(action, reason))
     }
 }
 
@@ -3135,6 +3189,17 @@ mod tests {
     fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::TimelineTime {
         let numerator = frame.checked_mul(time_base.num).expect("test time fits i64");
         mondrian_core::TimelineTime::new(numerator, time_base.den).expect("valid test time")
+    }
+
+    fn assert_action_not_executed(error: MondrianError, expected_action: &'static str) -> String {
+        match error {
+            MondrianError::ActionNotExecuted { action, reason } => {
+                assert_eq!(action, expected_action);
+                assert!(!reason.trim().is_empty());
+                reason
+            }
+            other => panic!("expected ActionNotExecuted for {expected_action}, got {other:?}"),
+        }
     }
     use crate::app::ui_actions::{
         assets_create_adjustment_layer_action, assets_create_folder_action,
@@ -3242,8 +3307,19 @@ mod tests {
         mondrian_core::types::TrackId,
         mondrian_core::types::ClipId,
     ) {
+        state_with_two_video_tracks_at_rate(SequenceSettings::default().frame_rate)
+    }
+
+    fn state_with_two_video_tracks_at_rate(
+        frame_rate: Rational,
+    ) -> (
+        AppState,
+        mondrian_core::types::TrackId,
+        mondrian_core::types::ClipId,
+    ) {
         let mut state = AppState::new();
         let mut sequence = Sequence::new("edit");
+        sequence.settings.frame_rate = frame_rate;
         sequence.add_video_track();
         let tb = sequence.time_base();
         let track_id = sequence.video_tracks[0].id;
@@ -3254,7 +3330,7 @@ mod tests {
         (state, track_id, clip_id)
     }
 
-    fn audio_test_media_info(path: &std::path::Path) -> MediaInfo {
+    fn audio_test_media_info() -> MediaInfo {
         let stream = |index, stream_id, language: &str, is_default| AudioStreamInfo {
             index,
             stream_id: Some(stream_id),
@@ -3270,7 +3346,6 @@ mod tests {
             avg_bitrate: 256_000,
         };
         MediaInfo {
-            path: path.to_path_buf(),
             duration: Duration::from_secs(1),
             file_size: 1,
             container: "mov".to_string(),
@@ -3279,6 +3354,16 @@ mod tests {
             has_video: false,
             has_audio: true,
         }
+    }
+
+    fn commit_probed_test_media(library: &AssetLibrary, path: &std::path::Path) -> AssetId {
+        let canonical_path = path.canonicalize().expect("canonical test media");
+        let info = mondrian_media::probe_media_info(&canonical_path).expect("probe test media");
+        let fingerprint = mondrian_core::MediaFileFingerprint::capture(&canonical_path);
+        let candidate =
+            mondrian_assets::AssetMediaProbeCandidate::new(canonical_path, fingerprint, info)
+                .expect("test media candidate");
+        library.commit_media_probe(candidate, None).expect("commit test media")
     }
 
     fn state_with_audio_asset() -> (
@@ -3293,9 +3378,15 @@ mod tests {
         let library = AssetLibrary::open(root.join("library")).expect("asset library");
         let media_path = root.join("component-source.mov");
         std::fs::write(&media_path, [0u8]).expect("media fixture");
-        let asset_id = library
-            .upsert_media_file_with_info(&media_path, audio_test_media_info(&media_path))
-            .expect("register audio asset");
+        let canonical_path = media_path.canonicalize().expect("canonical media fixture");
+        let fingerprint = mondrian_core::MediaFileFingerprint::capture(&canonical_path);
+        let candidate = mondrian_assets::AssetMediaProbeCandidate::new(
+            canonical_path,
+            fingerprint,
+            audio_test_media_info(),
+        )
+        .expect("valid media candidate");
+        let asset_id = library.commit_media_probe(candidate, None).expect("register audio asset");
         let asset = library.get_asset(asset_id).expect("asset query").expect("asset");
         let alternate_component = asset
             .audio_components
@@ -3422,23 +3513,6 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_noop_does_not_mutate_editor_state() {
-        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
-        state.selection.selected_clips =
-            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
-
-        state
-            .dispatch_action(mondrian_editor_state::Action::NoOp)
-            .expect("dispatch noop");
-
-        assert_eq!(
-            state.selection.selected_clips,
-            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }]
-        );
-        assert!(!state.can_undo_action());
-    }
-
-    #[test]
     fn dispatch_undo_redo_reject_unexecuted_history_intents() {
         for (action, expected_action, expected_reason) in [
             (mondrian_editor_state::Action::Undo, "undo", "撤销历史为空"),
@@ -3488,6 +3562,26 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_recognized_product_action_rejects_malformed_payload_before_legacy_routing() {
+        let mut state = AppState::new();
+        let error = state
+            .dispatch_action(mondrian_editor_state::Action::Custom {
+                namespace: TIMELINE_NAMESPACE.to_owned(),
+                name: crate::app::product_action::TIMELINE_MOVE_CLIP.to_owned(),
+                payload: serde_json::json!({"clip_id": ClipId::new()}),
+            })
+            .expect_err("recognized malformed product payload must fail closed");
+
+        match error {
+            MondrianError::WorkflowStepFailed { step_id, reason } => {
+                assert_eq!(step_id, "timeline_ui_action.move_clip");
+                assert!(reason.contains("recognized product action"));
+            }
+            other => panic!("expected product decode workflow error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn dispatch_export_ui_rejects_empty_output_path_without_queueing() {
         let mut state = AppState::new();
         state.test_set_sequence(Some(Sequence::new("export")));
@@ -3498,6 +3592,7 @@ mod tests {
                 sequence_id: None,
                 range: mondrian_export::preset::TimelineExportRange::EntireSequence,
                 output_path: PathBuf::new(),
+                output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
             }))
             .expect_err("empty output path should fail");
 
@@ -3717,6 +3812,21 @@ mod tests {
 
         assert_eq!(state.current_frame(), 44);
         assert_eq!(state.last_timeline_seek_source, TimelineSeekSource::Settled);
+    }
+
+    #[test]
+    fn rejected_timeline_product_seek_does_not_change_transport() {
+        let (mut state, _, _) = state_with_two_video_tracks();
+        state.seek(12).expect("initial seek");
+        let before = state.playback_engine.snapshot();
+        let source_before = state.last_timeline_seek_source;
+
+        state
+            .dispatch_action(timeline_seek_action(-1))
+            .expect_err("negative product seek must fail closed");
+
+        assert_eq!(state.playback_engine.snapshot(), before);
+        assert_eq!(state.last_timeline_seek_source, source_before);
     }
 
     #[test]
@@ -4045,7 +4155,7 @@ mod tests {
         state.test_set_active_sequence(sequence_id);
         state.test_set_sequence(Some(sequence.clone()));
         state.test_add_sequence(sequence);
-        state.play();
+        state.play().expect("play");
 
         state
             .dispatch_action(viewer_set_preview_resolution_scale_action(
@@ -4377,6 +4487,73 @@ mod tests {
     }
 
     #[test]
+    fn semantic_move_converts_input_time_base_before_sequence_grid_quantization() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks_at_rate(Rational::FPS_2997);
+        let target_track = state.active_sequence().expect("sequence").video_tracks[1].id;
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::MoveClipToTrack {
+                clip_id,
+                target_track,
+                position: FramePosition::new(24, Rational::new(1, 24)),
+            })
+            .expect("move exact one second onto Sequence grid");
+
+        let sequence = state.active_sequence().expect("sequence");
+        assert!(sequence.video_tracks[0].clips.is_empty());
+        assert_eq!(
+            sequence.video_tracks[1].clips[0].position,
+            tt(30, sequence.time_base())
+        );
+    }
+
+    #[test]
+    fn semantic_seek_converts_input_time_base_before_sequence_grid_quantization() {
+        let (mut state, _, _) = state_with_two_video_tracks_at_rate(Rational::FPS_2997);
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::Seek(FramePosition::new(
+                24,
+                Rational::new(1, 24),
+            )))
+            .expect("seek exact one second onto Sequence grid");
+
+        assert_eq!(state.current_frame(), 30);
+    }
+
+    #[test]
+    fn semantic_sequence_positions_fail_closed_for_invalid_time_bases() {
+        let (mut state, source_track, clip_id) =
+            state_with_two_video_tracks_at_rate(Rational::FPS_2997);
+        let target_track = state.active_sequence().expect("sequence").video_tracks[1].id;
+        let invalid = FramePosition::new(24, Rational::new(0, 24));
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::Seek(invalid))
+            .expect_err("invalid seek time base must fail");
+        state
+            .dispatch_action(mondrian_editor_state::Action::Seek(FramePosition::new(
+                -1,
+                Rational::new(1, 24),
+            )))
+            .expect_err("negative Sequence time must fail");
+        state
+            .dispatch_action(mondrian_editor_state::Action::MoveClipToTrack {
+                clip_id,
+                target_track,
+                position: invalid,
+            })
+            .expect_err("invalid move time base must fail");
+
+        assert_eq!(state.current_frame(), 0);
+        let sequence = state.active_sequence().expect("sequence");
+        assert_eq!(sequence.video_tracks[0].id, source_track);
+        assert_eq!(sequence.video_tracks[0].clips[0].id, clip_id);
+        assert!(sequence.video_tracks[1].clips.is_empty());
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
     fn dispatch_timeline_ui_rejects_cross_media_clip_move() {
         let (mut state, source_track_id, clip_id) = state_with_two_video_tracks();
         let target_track_id = state.active_sequence().unwrap().audio_tracks[0].id;
@@ -4484,7 +4661,7 @@ mod tests {
                 clip_id: second_clip_id,
             },
         ];
-        state.seek(18);
+        state.seek(18).expect("seek");
 
         state
             .dispatch_action(timeline_trim_selected_clips_to_playhead_action(
@@ -4513,7 +4690,7 @@ mod tests {
             .expect("add adjacent clip");
         state.selection.selected_clips =
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id: clip_a_id }];
-        state.seek(35);
+        state.seek(35).expect("seek");
 
         state
             .dispatch_action(timeline_roll_selected_cut_to_playhead_action())
@@ -4608,6 +4785,44 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_trim_clip_start_lowers_24fps_source_time_on_2997_sequence_grid() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks_at_rate(Rational::FPS_2997);
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::TrimClipStart {
+                clip_id,
+                new_source_in: FramePosition::new(1, Rational::new(1, 24)),
+            })
+            .expect("trim source in across frame grids");
+
+        let sequence = state.active_sequence().expect("sequence");
+        let sequence_time_base = sequence.time_base();
+        let clip = &sequence.video_tracks[0].clips[0];
+        assert_eq!(clip.position, tt(11, sequence_time_base));
+        assert_eq!(clip.duration, tt(19, sequence_time_base));
+        assert_eq!(clip.source_origin(), tt(1, sequence_time_base));
+    }
+
+    #[test]
+    fn dispatch_trim_clip_start_lowers_2997_source_time_on_24fps_sequence_grid() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks_at_rate(Rational::FPS_24);
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::TrimClipStart {
+                clip_id,
+                new_source_in: FramePosition::new(15, Rational::new(1_001, 30_000)),
+            })
+            .expect("trim source in across frame grids");
+
+        let sequence = state.active_sequence().expect("sequence");
+        let sequence_time_base = sequence.time_base();
+        let clip = &sequence.video_tracks[0].clips[0];
+        assert_eq!(clip.position, tt(22, sequence_time_base));
+        assert_eq!(clip.duration, tt(8, sequence_time_base));
+        assert_eq!(clip.source_origin(), tt(12, sequence_time_base));
+    }
+
+    #[test]
     fn dispatch_trim_clip_end_uses_source_out_time() {
         let (mut state, _, clip_id) = state_with_two_video_tracks();
         let tb = state.active_sequence().expect("sequence").time_base();
@@ -4651,14 +4866,71 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_import_media_with_empty_paths_is_noop_without_library() {
-        let mut state = AppState::new();
+    fn dispatch_source_trim_fails_closed_for_invalid_source_time_base() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks_at_rate(Rational::FPS_2997);
 
         state
-            .dispatch_action(mondrian_editor_state::Action::ImportMedia(Vec::new()))
-            .expect("empty import should be ignored");
+            .dispatch_action(mondrian_editor_state::Action::TrimClipStart {
+                clip_id,
+                new_source_in: FramePosition::new(1, Rational::new(0, 24)),
+            })
+            .expect_err("invalid source coordinate must fail");
 
+        let sequence = state.active_sequence().expect("sequence");
+        let time_base = sequence.time_base();
+        let clip = &sequence.video_tracks[0].clips[0];
+        assert_eq!(clip.position, tt(10, time_base));
+        assert_eq!(clip.duration, tt(20, time_base));
+        assert_eq!(clip.source_origin(), TimelineTime::ZERO);
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_import_media_rejects_empty_paths_before_library_lookup() {
+        let mut state = AppState::new();
+
+        let error = state
+            .dispatch_action(mondrian_editor_state::Action::ImportMedia(Vec::new()))
+            .expect_err("empty import is not an executable intent");
+
+        assert_action_not_executed(error, "import_media");
         assert!(state.status_hint.is_none());
+    }
+
+    #[test]
+    fn dispatch_asset_batch_actions_reject_empty_inputs_before_library_lookup() {
+        let cases = [
+            (
+                assets_import_files_action(AssetsImportFilesPayload {
+                    paths: Vec::new(),
+                    folder_id: None,
+                }),
+                "import_media",
+            ),
+            (
+                assets_delete_selection_action(AssetsDeleteSelectionPayload {
+                    asset_ids: Vec::new(),
+                    folder_ids: Vec::new(),
+                }),
+                "delete_asset_selection",
+            ),
+            (
+                assets_move_selection_action(AssetsMoveSelectionPayload {
+                    asset_ids: Vec::new(),
+                    folder_ids: Vec::new(),
+                    target_folder_id: None,
+                }),
+                "move_asset_selection",
+            ),
+        ];
+
+        for (action, expected_action) in cases {
+            let mut state = AppState::new();
+            let error = state
+                .dispatch_action(action)
+                .expect_err("an empty batch is not an executable intent");
+            assert_action_not_executed(error, expected_action);
+        }
     }
 
     #[test]
@@ -4884,7 +5156,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_assets_delete_asset_removes_library_record_and_timeline_refs() {
+    fn dispatch_assets_delete_asset_retires_membership_without_mutating_author_state() {
         let (mut state, _, _) = state_with_two_video_tracks();
         let library_root = unique_temp_path("assets-delete-action-library");
         let library = AssetLibrary::open(library_root.clone()).expect("library");
@@ -4893,6 +5165,8 @@ mod tests {
             .content =
             mondrian_core::timeline_data::ClipContent::SolidColor { asset_id, color: Color::BLACK };
         state.test_set_asset_library(Some(library));
+        state.set_asset_proxy_mode(asset_id, true);
+        let sequence_before = state.active_sequence().expect("sequence").clone();
         let events = state.event_bus.subscribe();
 
         state
@@ -4901,30 +5175,59 @@ mod tests {
             }))
             .expect("delete asset");
 
-        assert!(state
+        let record = state
             .asset_library()
             .expect("library")
             .get_asset(asset_id)
             .expect("get asset")
-            .is_none());
-        assert!(
-            state.active_sequence().expect("sequence").video_tracks.iter().all(|track| {
-                track.clips.iter().all(|clip| clip.library_asset_id() != Some(asset_id))
-            })
-        );
+            .expect("retained strong record");
+        assert!(record.membership.is_retired());
+        assert!(state
+            .asset_library()
+            .expect("library")
+            .list_assets()
+            .expect("visible")
+            .is_empty());
+        assert_eq!(state.active_sequence().expect("sequence"), &sequence_before);
+        assert!(state.is_asset_proxy_mode(asset_id));
         assert!(state.can_undo_action());
         assert!(state
             .status_hint
             .as_ref()
             .is_some_and(|(message, is_error)| !*is_error && message.contains("Temp Plate")));
-        let mut saw_asset_deleted = false;
+        let mut saw_asset_retired = false;
         while let Ok(event) = events.try_recv() {
-            if matches!(event, AppEvent::AssetDeleted { asset_id: event_asset_id } if event_asset_id == asset_id)
+            if matches!(event, AppEvent::AssetRetired { asset_id: event_asset_id } if event_asset_id == asset_id)
             {
-                saw_asset_deleted = true;
+                saw_asset_retired = true;
             }
         }
-        assert!(saw_asset_deleted);
+        assert!(saw_asset_retired);
+
+        state
+            .dispatch_action(mondrian_editor_state::Action::Undo)
+            .expect("Undo proxy intent");
+        assert!(!state.is_asset_proxy_mode(asset_id));
+        assert!(state
+            .asset_library()
+            .expect("library")
+            .get_asset(asset_id)
+            .expect("lookup after Undo")
+            .expect("record after Undo")
+            .membership
+            .is_retired());
+        state
+            .dispatch_action(mondrian_editor_state::Action::Redo)
+            .expect("Redo proxy intent");
+        assert!(state.is_asset_proxy_mode(asset_id));
+        assert!(state
+            .asset_library()
+            .expect("library")
+            .get_asset(asset_id)
+            .expect("lookup after Redo")
+            .expect("record after Redo")
+            .membership
+            .is_retired());
 
         remove_temp_path(&library_root);
     }
@@ -4963,6 +5266,31 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_assets_relink_rejects_generated_asset_without_admitting_probe() {
+        let mut state = AppState::new();
+        let library_root = unique_temp_path("assets-relink-generated-library");
+        let library = AssetLibrary::open(library_root.clone()).expect("library");
+        let asset_id =
+            library.create_solid_color_asset(Some("Generated")).expect("generated asset");
+        state.test_set_asset_library(Some(library));
+
+        let error = state
+            .dispatch_action(assets_relink_asset_action(AssetsRelinkAssetPayload {
+                asset_id,
+                path: PathBuf::from("replacement.mov"),
+            }))
+            .expect_err("generated Asset cannot be relinked");
+
+        assert!(matches!(
+            error,
+            MondrianError::WorkflowStepFailed { step_id, .. } if step_id == "relink_asset"
+        ));
+        assert_eq!(state.media_asset_mutation_diagnostics().outstanding, 0);
+
+        remove_temp_path(&library_root);
+    }
+
+    #[test]
     fn dispatch_assets_relink_asset_updates_library_path_and_publishes_reload() {
         let mut state = AppState::new();
         let library_root = unique_temp_path("assets-relink-action-library");
@@ -4974,7 +5302,7 @@ mod tests {
         write_minimal_wav(&replacement_path);
 
         let library = AssetLibrary::open(library_root.clone()).expect("library");
-        let asset_id = library.import_media_file(&original_path).expect("import original");
+        let asset_id = commit_probed_test_media(&library, &original_path);
         state.test_set_asset_library(Some(library));
         let events = state.event_bus.subscribe();
 
@@ -4984,6 +5312,7 @@ mod tests {
                 path: replacement_path.clone(),
             }))
             .expect("relink asset");
+        poll_media_asset_mutations_until_idle(&mut state);
 
         let asset = state
             .asset_library()
@@ -4991,9 +5320,10 @@ mod tests {
             .get_asset(asset_id)
             .expect("get asset")
             .expect("asset");
+        let stored_path = asset.file_path().expect("file-backed Asset path");
         assert_eq!(
-            asset.path,
-            replacement_path.canonicalize().expect("canonical path")
+            stored_path.canonicalize().expect("canonical stored path"),
+            replacement_path.canonicalize().expect("canonical replacement path")
         );
         assert!(
             state.status_hint.as_ref().is_some_and(|(message, is_error)| {
@@ -5001,6 +5331,64 @@ mod tests {
             })
         );
         assert!(events.try_iter().any(|event| matches!(event, AppEvent::AssetLibraryReloaded)));
+
+        remove_temp_path(&library_root);
+        remove_temp_path(&media_root);
+    }
+
+    #[test]
+    fn audio_component_refresh_and_rebind_commit_only_after_background_probe() {
+        let mut state = AppState::new();
+        let library_root = unique_temp_path("assets-audio-mutation-library");
+        let media_root = unique_temp_path("assets-audio-mutation-media");
+        std::fs::create_dir_all(&media_root).expect("media root");
+        let media_path = media_root.join("audio.wav");
+        write_minimal_wav(&media_path);
+        let library = AssetLibrary::open(library_root.clone()).expect("library");
+        let asset_id = commit_probed_test_media(&library, &media_path);
+        let asset = library.get_asset(asset_id).expect("query").expect("asset");
+        let component =
+            asset.audio_components.components.first().expect("primary Component").clone();
+        state.test_set_asset_library(Some(library));
+        let events = state.event_bus.subscribe();
+
+        state
+            .dispatch_action(assets_refresh_audio_components_action(
+                AssetsRefreshAudioComponentsPayload { asset_id },
+            ))
+            .expect("admit refresh");
+        assert_eq!(state.media_asset_mutation_diagnostics().outstanding, 1);
+        poll_media_asset_mutations_until_idle(&mut state);
+
+        state
+            .dispatch_action(assets_rebind_audio_component_action(
+                AssetsRebindAudioComponentPayload {
+                    asset_id,
+                    component_id: component.id,
+                    stream_index: component.binding.stream_index,
+                },
+            ))
+            .expect("admit rebind");
+        assert_eq!(state.media_asset_mutation_diagnostics().outstanding, 1);
+        poll_media_asset_mutations_until_idle(&mut state);
+
+        let diagnostics = state.media_asset_mutation_diagnostics();
+        assert_eq!(diagnostics.outstanding, 0);
+        assert_eq!(diagnostics.terminals.len(), 2);
+        assert!(diagnostics.terminals.iter().all(|terminal| {
+            terminal.evidence.disposition == mondrian_core::ExecutionTerminalDisposition::Completed
+        }));
+        assert!(state
+            .status_hint
+            .as_ref()
+            .is_some_and(|(message, is_error)| { !*is_error && message.contains("映射到流") }));
+        assert_eq!(
+            events
+                .try_iter()
+                .filter(|event| matches!(event, AppEvent::AssetLibraryReloaded))
+                .count(),
+            2
+        );
 
         remove_temp_path(&library_root);
         remove_temp_path(&media_root);
@@ -5132,7 +5520,7 @@ mod tests {
         let media_path = media_root.join("tone.wav");
         write_minimal_wav(&media_path);
         let library = AssetLibrary::open(library_root.clone()).expect("library");
-        let asset_id = library.import_media_file(&media_path).expect("import audio");
+        let asset_id = commit_probed_test_media(&library, &media_path);
         state.test_set_asset_library(Some(library));
 
         let err = state
@@ -5210,7 +5598,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_assets_delete_selection_removes_assets_folders_and_timeline_refs() {
+    fn dispatch_assets_delete_selection_is_one_library_transaction_and_keeps_timeline_refs() {
         let mut state = AppState::new();
         let library_root = unique_temp_path("assets-delete-selection-action-library");
         let library = AssetLibrary::open(library_root.clone()).expect("library");
@@ -5242,25 +5630,32 @@ mod tests {
             .expect("delete selection");
 
         let library = state.asset_library().expect("library");
-        assert!(library.get_asset(asset_id).expect("get deleted").is_none());
+        assert!(library
+            .get_asset(asset_id)
+            .expect("get retired")
+            .expect("strong record")
+            .membership
+            .is_retired());
+        assert!(library
+            .list_assets()
+            .expect("visible Assets")
+            .iter()
+            .all(|asset| asset.id != asset_id));
         assert!(library.get_asset(keep_asset_id).expect("get keep").is_some());
         assert!(!library.folder_exists(&folder_id).expect("folder removed"));
         let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
-        assert!(
-            !sequence.video_tracks[0]
-                .clips
-                .iter()
-                .any(|clip| clip.library_asset_id() == Some(asset_id)),
-            "clips referencing deleted assets should be removed"
-        );
+        assert!(sequence.video_tracks[0]
+            .clips
+            .iter()
+            .any(|clip| clip.library_asset_id() == Some(asset_id)));
         assert!(sequence.video_tracks[0]
             .clips
             .iter()
             .any(|clip| clip.library_asset_id() == Some(keep_asset_id)));
         let events: Vec<AppEvent> = events.try_iter().collect();
         assert!(events.iter().any(
-            |event| matches!(event, AppEvent::AssetDeleted { asset_id: event_id } if *event_id == asset_id)
+            |event| matches!(event, AppEvent::AssetRetired { asset_id: event_id } if *event_id == asset_id)
         ));
         assert!(events.iter().any(|event| matches!(event, AppEvent::AssetLibraryReloaded)));
         assert!(
@@ -5268,6 +5663,45 @@ mod tests {
                 !*is_error && message.contains("1 个素材") && message.contains("1 个文件夹")
             })
         );
+
+        remove_temp_path(&library_root);
+    }
+
+    #[test]
+    fn dispatch_assets_delete_selection_failure_publishes_no_partial_membership_or_events() {
+        let mut state = AppState::new();
+        let library_root = unique_temp_path("assets-delete-selection-atomic-library");
+        let library = AssetLibrary::open(library_root.clone()).expect("library");
+        let asset_id = library.create_solid_color_asset(Some("Keep")).expect("create asset");
+        state.test_set_asset_library(Some(library));
+        let events = state.event_bus.subscribe();
+
+        let error = state
+            .dispatch_action(assets_delete_selection_action(
+                AssetsDeleteSelectionPayload {
+                    asset_ids: vec![asset_id],
+                    folder_ids: vec!["missing-folder".to_owned()],
+                },
+            ))
+            .expect_err("invalid batch must fail");
+
+        assert!(matches!(error, MondrianError::WorkflowStepFailed { .. }));
+        let library = state.asset_library().expect("library");
+        assert!(!library
+            .get_asset(asset_id)
+            .expect("asset")
+            .expect("record")
+            .membership
+            .is_retired());
+        assert_eq!(library.list_assets().expect("visible records").len(), 1);
+        let events = events.try_iter().collect::<Vec<_>>();
+        assert!(!events.iter().any(|event| {
+            matches!(
+                event,
+                AppEvent::AssetRetired { asset_id: retired } if *retired == asset_id
+            )
+        }));
+        assert!(!events.iter().any(|event| matches!(event, AppEvent::AssetLibraryReloaded)));
 
         remove_temp_path(&library_root);
     }
@@ -5542,13 +5976,14 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_open_project_with_empty_path_is_noop() {
+    fn dispatch_open_project_rejects_empty_path() {
         let mut state = AppState::new();
 
-        state
+        let error = state
             .dispatch_action(mondrian_editor_state::Action::OpenProject(PathBuf::new()))
-            .expect("empty open path should be ignored");
+            .expect_err("empty open path is not an executable intent");
 
+        assert_action_not_executed(error, "open_project");
         assert!(state.status_hint.is_none());
     }
 
@@ -5579,6 +6014,18 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_save_project_as_rejects_empty_target_before_project_lookup() {
+        let mut state = AppState::new();
+
+        let error = state
+            .dispatch_action(mondrian_editor_state::Action::SaveProjectAs(PathBuf::new()))
+            .expect_err("empty save target is not an executable intent");
+
+        assert_action_not_executed(error, "save_project_as");
+        assert!(state.status_hint.is_none());
+    }
+
+    #[test]
     fn dispatch_project_recovery_reports_missing_autosave() {
         let mut state = AppState::new();
         let root = unique_temp_path("recover-missing-autosave");
@@ -5587,7 +6034,20 @@ mod tests {
 
         let err = state
             .dispatch_action(project_recover_from_autosave_action(
-                ProjectRecoverFromAutosavePayload { project_file, autosave_file },
+                ProjectRecoverFromAutosavePayload {
+                    candidate: crate::app::CrashRecoveryCandidate {
+                        project_id: mondrian_core::ProjectId::new(),
+                        runtime_root: root.clone(),
+                        project_file,
+                        autosave_file,
+                        author_generation: 1,
+                        asset_library_revision: 0,
+                        document_revision: 1,
+                        archive_sha256: "0".repeat(64),
+                        saved_at_unix_ms: 0,
+                        total_snapshots: 1,
+                    },
+                },
             ))
             .expect_err("missing autosave should fail");
 
@@ -5697,6 +6157,25 @@ mod tests {
         assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| !*is_error));
 
         remove_temp_path(&root);
+    }
+
+    #[test]
+    fn dispatch_project_create_with_settings_rejects_empty_target() {
+        let mut state = AppState::new();
+        let error = state
+            .dispatch_action(project_create_with_settings_action(
+                ProjectCreateWithSettingsPayload {
+                    project_file: PathBuf::new(),
+                    name: "Invalid".into(),
+                    sequence_settings: SequenceSettings::default(),
+                    color_environment: mondrian_core::ProjectColorEnvironment::default(),
+                    project_settings: ProjectSettings::default(),
+                },
+            ))
+            .expect_err("empty project target is not an executable intent");
+
+        assert_action_not_executed(error, "create_project");
+        assert!(state.active_sequence().is_none());
     }
 
     #[test]
@@ -6126,11 +6605,11 @@ mod tests {
     #[test]
     fn dispatch_mark_in_out_actions_update_active_sequence_bounds() {
         let (mut state, _, _) = state_with_two_video_tracks();
-        state.seek(42);
+        state.seek(42).expect("seek");
         state
             .dispatch_action(mondrian_editor_state::Action::MarkInAtPlayhead)
             .expect("mark in");
-        state.seek(16);
+        state.seek(16).expect("seek");
         state
             .dispatch_action(mondrian_editor_state::Action::MarkOutAtPlayhead)
             .expect("mark out");
@@ -6341,9 +6820,51 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_timeline_selection_actions_reject_missing_selection() {
+        let actions = [
+            (
+                mondrian_editor_state::Action::DeleteSelection,
+                "delete_selection",
+            ),
+            (
+                mondrian_editor_state::Action::RippleDeleteSelection,
+                "delete_selection",
+            ),
+            (
+                timeline_trim_selected_clips_to_playhead_action(
+                    TimelineTrimSelectedClipsToPlayheadPayload {
+                        edge: TimelineTrimPayloadEdge::In,
+                    },
+                ),
+                "trim_selected_clips_to_playhead",
+            ),
+            (
+                timeline_roll_selected_cut_to_playhead_action(),
+                "roll_selected_cut_to_playhead",
+            ),
+            (
+                timeline_set_selected_clips_enabled_action(
+                    TimelineSetSelectedClipsEnabledPayload { enabled: false },
+                ),
+                "timeline_set_selected_clips_enabled",
+            ),
+        ];
+
+        for (action, expected_action) in actions {
+            let mut state = AppState::new();
+            state.test_set_sequence(Some(Sequence::new("empty selection")));
+            let error = state
+                .dispatch_action(action)
+                .expect_err("selection command requires a concrete target");
+            assert_action_not_executed(error, expected_action);
+            assert!(!state.can_undo_action());
+        }
+    }
+
+    #[test]
     fn dispatch_split_clip_at_playhead_splits_intersecting_clip() {
         let (mut state, _, clip_id) = state_with_two_video_tracks();
-        state.seek(20);
+        state.seek(20).expect("seek");
 
         state
             .dispatch_action(mondrian_editor_state::Action::SplitClipAtPlayhead)
@@ -6362,14 +6883,15 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_split_clip_at_playhead_ignores_clip_boundary() {
+    fn dispatch_split_clip_at_playhead_rejects_clip_boundary() {
         let (mut state, _, _) = state_with_two_video_tracks();
-        state.seek(10);
+        state.seek(10).expect("seek");
 
-        state
+        let error = state
             .dispatch_action(mondrian_editor_state::Action::SplitClipAtPlayhead)
-            .expect("split at clip boundary");
+            .expect_err("clip boundary has no splittable target");
 
+        assert_action_not_executed(error, "split_clip_at_playhead");
         let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks[0].clips.len(), 1);
@@ -6396,13 +6918,14 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_nudge_clip_zero_delta_does_not_enter_undo_history() {
+    fn dispatch_nudge_clip_rejects_zero_delta() {
         let (mut state, _, clip_id) = state_with_two_video_tracks();
 
-        state
+        let error = state
             .dispatch_action(mondrian_editor_state::Action::NudgeClip { clip_id, delta_frames: 0 })
-            .expect("nudge clip");
+            .expect_err("zero delta is not an executable nudge");
 
+        assert_action_not_executed(error, "nudge_clip");
         let sequence = state.active_sequence().expect("sequence");
         let tb = sequence.time_base();
         assert_eq!(sequence.video_tracks[0].clips[0].position, tt(10, tb));
@@ -7524,7 +8047,7 @@ mod tests {
             .expect("seed keyframe");
         let keyframe_selection = opacity_keyframe_selection(&state, clip_id, source_time);
         state.set_animation_keyframe_selection(vec![keyframe_selection]);
-        state.seek(18);
+        state.seek(18).expect("seek");
 
         state
             .dispatch_action(mondrian_editor_state::Action::Copy)
@@ -7545,23 +8068,30 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_clipboard_actions_noop_without_selection_or_clipboard() {
+    fn dispatch_clipboard_actions_reject_missing_selection_or_clipboard() {
         let (mut state, track_id, clip_id) = state_with_two_video_tracks();
 
-        state
+        let copy_error = state
             .dispatch_action(mondrian_editor_state::Action::Copy)
-            .expect("copy without selection");
-        state
+            .expect_err("copy without selection must fail");
+        let cut_error = state
+            .dispatch_action(mondrian_editor_state::Action::Cut)
+            .expect_err("cut without selection must fail");
+        let paste_error = state
             .dispatch_action(mondrian_editor_state::Action::Paste)
-            .expect("paste without selection");
+            .expect_err("paste without clipboard must fail");
+        assert_action_not_executed(copy_error, "copy");
+        assert_action_not_executed(cut_error, "cut");
+        assert_action_not_executed(paste_error, "paste");
         assert!(!state.has_animation_clipboard());
         assert!(!state.can_undo_action());
 
         state.selection.selected_clips =
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
-        state
+        let paste_error = state
             .dispatch_action(mondrian_editor_state::Action::Paste)
-            .expect("paste without clipboard");
+            .expect_err("a target cannot make an empty clipboard executable");
+        assert_action_not_executed(paste_error, "paste");
         assert!(!state.can_undo_action());
     }
 
@@ -7573,7 +8103,7 @@ mod tests {
         state.selection.selected_mask = Some((MaskId::new(), clip_id, track_id));
         state.animation_selection.active_property =
             Some(opacity_property_selection(&state, clip_id));
-        state.seek(50);
+        state.seek(50).expect("seek");
 
         state.dispatch_action(mondrian_editor_state::Action::Copy).expect("copy clip");
         state.dispatch_action(mondrian_editor_state::Action::Paste).expect("paste clip");
@@ -7646,7 +8176,7 @@ mod tests {
         state.selection.selected_mask = Some((MaskId::new(), clip_id, track_id));
         state.animation_selection.active_property =
             Some(opacity_property_selection(&state, clip_id));
-        state.seek(0);
+        state.seek(0).expect("seek");
 
         state
             .dispatch_action(mondrian_editor_state::Action::Duplicate)
@@ -7675,13 +8205,14 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_duplicate_action_noops_without_selection() {
+    fn dispatch_duplicate_action_rejects_missing_selection() {
         let (mut state, _, _) = state_with_two_video_tracks();
 
-        state
+        let error = state
             .dispatch_action(mondrian_editor_state::Action::Duplicate)
-            .expect("duplicate without selection");
+            .expect_err("duplicate without selection must fail");
 
+        assert_action_not_executed(error, "duplicate");
         let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks[0].clips.len(), 1);
@@ -7716,7 +8247,7 @@ mod tests {
             is_video_track: true,
             clip_id: video_clip_id,
         }];
-        state.seek(40);
+        state.seek(40).expect("seek");
 
         state
             .dispatch_action(mondrian_editor_state::Action::Copy)

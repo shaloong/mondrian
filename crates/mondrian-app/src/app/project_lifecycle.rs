@@ -1,77 +1,371 @@
-use super::project_persistence::{ProjectPersistenceCompletion, ProjectPersistenceRequestId};
+use super::project_library_generation::{
+    collect_retired_project_libraries, protected_project_library_paths,
+    retained_project_runtime_lease, sweep_orphaned_project_libraries,
+    ProjectLibraryGenerationCandidate, RetiredProjectLibraryGeneration,
+};
+use super::project_persistence::{
+    ProjectPersistenceCompletion, ProjectPersistencePauseToken, ProjectPersistenceRequestId,
+};
+#[cfg(test)]
+use super::project_recovery::recovery_manifest_path;
 use super::project_recovery::{
-    reconcile_recovery_after_manual_save, recovery_manifest_path, validate_recovery_selection,
+    cleanup_recovery_runtime_artifacts, copy_recovery_selection_under_lease,
+    preflight_recovery_selection, reconcile_recovery_after_manual_save,
+};
+#[cfg(test)]
+use super::project_runtime::project_runtime_roots_for_path_for_test;
+use super::project_runtime::{
+    claim_project_runtime, claim_project_runtime_sharing_logical_authority,
+    lease_existing_project_runtime, lease_existing_project_runtime_sharing_logical_authority,
+    project_runtime_root_for_project, ProjectRuntimeLease,
 };
 use super::*;
-use mondrian_project::{load_project_archive, ProjectDocument};
+use anyhow::Context;
+#[cfg(test)]
+use mondrian_project::load_project_archive;
+use mondrian_project::{
+    PreparedProjectArchive, ProjectArchivePublication, ProjectArchiveReadBudget, ProjectDocument,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PersistenceCompletionDisposition {
     Applied,
     AppliedWithRecoveryWarning { reason: String },
+    SatisfiedByNewerPublication,
+    IgnoredSupersededDestination,
     IgnoredStaleSession,
 }
 
-impl AppState {
-    fn project_runtime_root(project_file: &Path) -> PathBuf {
-        let stem = project_file.file_stem().and_then(|s| s.to_str()).unwrap_or("project");
-        let mut hasher = DefaultHasher::new();
-        project_file.to_string_lossy().hash(&mut hasher);
-        let hash = hasher.finish();
-        let dir_name = format!("mondrian_{stem}_{hash:x}");
-        std::env::temp_dir().join("mondrian-runtime").join(dir_name)
-    }
+fn autosave_archive_leaf(saved_at_unix_ms: u64, generation: u64) -> String {
+    format!(
+        "project-{saved_at_unix_ms}-g{}-{}.autosave.mdp",
+        generation,
+        uuid::Uuid::new_v4()
+    )
+}
 
+impl AppState {
+    #[cfg(test)]
     pub(super) fn autosave_manifest_path(runtime_root: &Path) -> PathBuf {
         recovery_manifest_path(runtime_root)
     }
 
+    fn claim_or_reuse_project_runtime(
+        &mut self,
+        project_file: &Path,
+        project_id: ProjectId,
+    ) -> Result<Arc<ProjectRuntimeLease>, String> {
+        if let Some(lease) = self
+            .project_runtime_lease
+            .as_ref()
+            .filter(|lease| lease.project_id() == project_id)
+        {
+            if lease.allocation_target_matches(project_file)? {
+                lease.retain_publication_target(project_file)?;
+                return Ok(Arc::clone(lease));
+            }
+        }
+        let expected_runtime_root = project_runtime_root_for_project(project_file, project_id)?;
+        let shared_logical_authority = self
+            .project_runtime_lease
+            .as_ref()
+            .filter(|lease| lease.project_id() == project_id)
+            .map(Arc::clone);
+        collect_retired_project_libraries(&mut self.retired_project_libraries);
+        if let Some(lease) = retained_project_runtime_lease(
+            &self.retired_project_libraries,
+            project_id,
+            Some(&expected_runtime_root),
+        ) {
+            lease.validate()?;
+            lease.retain_publication_target(project_file)?;
+            return Ok(lease);
+        }
+        let shared_logical_authority = shared_logical_authority.or_else(|| {
+            retained_project_runtime_lease(&self.retired_project_libraries, project_id, None)
+        });
+        match shared_logical_authority {
+            Some(authority) => claim_project_runtime_sharing_logical_authority(
+                project_file,
+                project_id,
+                &authority,
+            ),
+            None => claim_project_runtime(project_file, project_id),
+        }
+    }
+
+    fn lease_or_reuse_existing_runtime(
+        &mut self,
+        runtime_root: &Path,
+        project_id: ProjectId,
+        publication_target: &Path,
+    ) -> Result<Arc<ProjectRuntimeLease>, String> {
+        if let Some(lease) = self.project_runtime_lease.as_ref().filter(|lease| {
+            lease.runtime_root() == runtime_root && lease.project_id() == project_id
+        }) {
+            lease.validate()?;
+            lease.retain_publication_target(publication_target)?;
+            return Ok(Arc::clone(lease));
+        }
+        collect_retired_project_libraries(&mut self.retired_project_libraries);
+        if let Some(lease) = retained_project_runtime_lease(
+            &self.retired_project_libraries,
+            project_id,
+            Some(runtime_root),
+        ) {
+            lease.validate()?;
+            lease.retain_publication_target(publication_target)?;
+            return Ok(lease);
+        }
+        let shared_logical_authority = self
+            .project_runtime_lease
+            .as_ref()
+            .filter(|lease| lease.project_id() == project_id)
+            .map(Arc::clone)
+            .or_else(|| {
+                retained_project_runtime_lease(&self.retired_project_libraries, project_id, None)
+            });
+        match shared_logical_authority {
+            Some(authority) => lease_existing_project_runtime_sharing_logical_authority(
+                runtime_root,
+                project_id,
+                publication_target,
+                &authority,
+            ),
+            None => lease_existing_project_runtime(runtime_root, project_id, publication_target),
+        }
+    }
+
+    fn ensure_open_project_runtime_lease(&mut self) -> anyhow::Result<Arc<ProjectRuntimeLease>> {
+        let (runtime_root, project_id, project_file) = {
+            let session =
+                self.authoring.as_ref().ok_or_else(|| anyhow::anyhow!("当前没有打开的项目"))?;
+            (
+                session.runtime_root().to_path_buf(),
+                session.project_id(),
+                session.project_file().to_path_buf(),
+            )
+        };
+        let lease = self
+            .lease_or_reuse_existing_runtime(&runtime_root, project_id, &project_file)
+            .map_err(anyhow::Error::msg)?;
+        self.project_runtime_lease = Some(Arc::clone(&lease));
+        Ok(lease)
+    }
+
+    fn prepare_project_library_generation(
+        &mut self,
+        runtime_lease: Arc<ProjectRuntimeLease>,
+    ) -> anyhow::Result<ProjectLibraryGenerationCandidate> {
+        collect_retired_project_libraries(&mut self.retired_project_libraries);
+        let protected = protected_project_library_paths(
+            self.authoring.as_ref().map(AuthoringSession::asset_library),
+            runtime_lease.runtime_root(),
+            &self.retired_project_libraries,
+        );
+        sweep_orphaned_project_libraries(&runtime_lease, protected).map_err(anyhow::Error::msg)?;
+        ProjectLibraryGenerationCandidate::create(runtime_lease).map_err(anyhow::Error::msg)
+    }
+
+    fn retain_current_project_library_generation(&mut self) {
+        let Some(session) = self.authoring.as_ref() else {
+            return;
+        };
+        let Some(runtime_lease) = self.project_runtime_lease.as_ref() else {
+            return;
+        };
+        if runtime_lease.runtime_root() != session.runtime_root()
+            || runtime_lease.project_id() != session.project_id()
+        {
+            return;
+        }
+        if let Some(retired) = RetiredProjectLibraryGeneration::capture(
+            Arc::clone(runtime_lease),
+            session.asset_library(),
+        ) {
+            self.retired_project_libraries.push(retired);
+        }
+    }
+
+    fn retire_uninstalled_project_session(
+        &mut self,
+        session: AuthoringSession,
+        runtime_lease: Arc<ProjectRuntimeLease>,
+    ) -> Result<(), String> {
+        let session_id = session.session_id();
+        let admission_result = self
+            .project_persistence
+            .pause_and_quiesce(session_id)
+            .and_then(|token| self.project_persistence.retire(token));
+        let retired =
+            RetiredProjectLibraryGeneration::capture(runtime_lease, session.asset_library());
+        drop(session);
+        if let Some(retired) = retired {
+            self.retired_project_libraries.push(retired);
+        }
+        collect_retired_project_libraries(&mut self.retired_project_libraries);
+        admission_result
+    }
+
+    fn discard_prepared_project_session_after_error(
+        &mut self,
+        session: AuthoringSession,
+        runtime_lease: Arc<ProjectRuntimeLease>,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        match self.retire_uninstalled_project_session(session, runtime_lease) {
+            Ok(()) => error,
+            Err(cleanup_error) => anyhow::anyhow!(
+                "{error:#}; additionally failed to retire the prepared Project persistence generation: {cleanup_error}"
+            ),
+        }
+    }
+
+    fn begin_project_session_handoff(
+        &mut self,
+    ) -> anyhow::Result<Option<ProjectPersistencePauseToken>> {
+        let Some(session_id) = self.authoring.as_ref().map(AuthoringSession::session_id) else {
+            return Ok(None);
+        };
+        let token = self
+            .project_persistence
+            .pause_and_quiesce(session_id)
+            .map_err(anyhow::Error::msg)?;
+        self.drain_quiesced_project_persistence_completions();
+        Ok(Some(token))
+    }
+
+    fn drain_quiesced_project_persistence_completions(&mut self) {
+        loop {
+            let completions = self.project_persistence.poll_completions();
+            if completions.is_empty() {
+                break;
+            }
+            for completion in completions {
+                if let Err(error) = self.apply_persistence_completion(completion) {
+                    self.set_status_hint(format!("项目持久化完成失败：{error}"), true);
+                }
+            }
+        }
+    }
+
+    fn resume_project_session_handoff(
+        &mut self,
+        handoff: &mut Option<ProjectPersistencePauseToken>,
+    ) -> Result<(), String> {
+        let Some(token) = handoff.take() else {
+            return Ok(());
+        };
+        self.project_persistence.resume(token)
+    }
+
+    fn retire_project_session_handoff(
+        &mut self,
+        handoff: &mut Option<ProjectPersistencePauseToken>,
+    ) -> Result<(), String> {
+        let Some(token) = handoff.as_ref().copied() else {
+            return Ok(());
+        };
+        self.project_persistence.retire(token)?;
+        *handoff = None;
+        Ok(())
+    }
+
+    fn resume_handoff_after_error(
+        &mut self,
+        mut handoff: Option<ProjectPersistencePauseToken>,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        match self.resume_project_session_handoff(&mut handoff) {
+            Ok(()) => error,
+            Err(resume_error) => anyhow::anyhow!(
+                "{error:#}; additionally failed to resume the previous Project persistence generation: {resume_error}"
+            ),
+        }
+    }
+
+    pub(super) fn prepare_project_session_close(&mut self) -> anyhow::Result<()> {
+        let mut handoff = self.begin_project_session_handoff()?;
+        self.retire_project_session_handoff(&mut handoff).map_err(anyhow::Error::msg)?;
+        self.retain_current_project_library_generation();
+        Ok(())
+    }
+
+    pub(super) fn collect_released_project_libraries(&mut self) {
+        collect_retired_project_libraries(&mut self.retired_project_libraries);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_poison_project_persistence_admission(&mut self) {
+        let session_id = self
+            .authoring
+            .as_ref()
+            .expect("test requires an open Authoring Session")
+            .session_id();
+        self.project_persistence.poison_session_admission_for_test(session_id);
+    }
+
     pub fn open_project_from_autosave_snapshot(
         &mut self,
-        project_file: PathBuf,
-        autosave_file: PathBuf,
+        candidate: CrashRecoveryCandidate,
     ) -> anyhow::Result<()> {
-        if !autosave_file.exists() {
-            anyhow::bail!("未找到自动保存文件：{}", autosave_file.display());
+        let mut handoff = self.begin_project_session_handoff()?;
+        let result = self.open_project_from_autosave_snapshot_in_handoff(candidate, &mut handoff);
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => Err(self.resume_handoff_after_error(handoff, error)),
         }
-        let selection = validate_recovery_selection(&project_file, &autosave_file)
+    }
+
+    fn open_project_from_autosave_snapshot_in_handoff(
+        &mut self,
+        candidate: CrashRecoveryCandidate,
+        handoff: &mut Option<ProjectPersistencePauseToken>,
+    ) -> anyhow::Result<()> {
+        if !candidate.autosave_file.exists() {
+            anyhow::bail!("未找到自动保存文件：{}", candidate.autosave_file.display());
+        }
+        let selection = preflight_recovery_selection(&candidate).map_err(anyhow::Error::msg)?;
+        let runtime_lease = self
+            .lease_or_reuse_existing_runtime(
+                &selection.runtime_root,
+                selection.project_id,
+                &candidate.project_file,
+            )
             .map_err(anyhow::Error::msg)?;
+        let cleanup =
+            cleanup_recovery_runtime_artifacts(&runtime_lease).map_err(anyhow::Error::msg)?;
+        if cleanup.removed_staging_count > 0 || cleanup.removed_unreferenced_snapshot_count > 0 {
+            tracing::info!(
+                runtime_root = %runtime_lease.runtime_root().display(),
+                removed_staging = cleanup.removed_staging_count,
+                removed_unreferenced_snapshots = cleanup.removed_unreferenced_snapshot_count,
+                "removed abandoned Project recovery artifacts"
+            );
+        }
 
-        let staged = std::env::temp_dir().join(format!(
-            "mondrian-autosave-recover-{}-{}.mdp",
-            std::process::id(),
-            unix_now_ms()
+        let staged = runtime_lease.runtime_root().join(format!(
+            ".recovery-open-{}.staging.mdp",
+            uuid::Uuid::new_v4()
         ));
-        fs::copy(&autosave_file, &staged)?;
-
-        let open_result = self.open_project_archive_in_runtime(
-            project_file.clone(),
-            staged.as_path(),
-            selection.runtime_root,
-        );
-        let _ = fs::remove_file(&staged);
-        open_result?;
+        let mut verified_archive =
+            copy_recovery_selection_under_lease(&selection, &runtime_lease, &staged)
+                .map_err(anyhow::Error::msg)?;
+        let prepared = PreparedProjectArchive::from_open_file(
+            verified_archive.file_mut().map_err(anyhow::Error::msg)?,
+            ProjectArchiveReadBudget::default(),
+        )?;
+        self.open_prepared_project_archive_in_runtime(
+            candidate.project_file,
+            prepared,
+            false,
+            runtime_lease,
+            handoff,
+        )?;
 
         // A recovered snapshot is intentionally dirty until the user explicitly
         // saves it. Keep all recovery points until that durable save succeeds.
         Ok(())
-    }
-
-    pub fn open_project_from_autosave(&mut self, project_file: PathBuf) -> anyhow::Result<()> {
-        let candidate = discover_crash_recovery_candidates()
-            .into_iter()
-            .find(|c| c.project_file == project_file)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "未找到自动保存文件：{}",
-                    Self::autosave_manifest_path(
-                        Self::project_runtime_root(project_file.as_path()).as_path()
-                    )
-                    .display()
-                )
-            })?;
-
-        self.open_project_from_autosave_snapshot(project_file, candidate.autosave_file)
     }
 
     pub fn has_open_project(&self) -> bool {
@@ -91,22 +385,58 @@ impl AppState {
         &mut self,
         project_file: PathBuf,
         archive_file: &Path,
+        handoff: &mut Option<ProjectPersistencePauseToken>,
     ) -> anyhow::Result<()> {
-        let runtime_root = Self::project_runtime_root(&project_file);
-        self.open_project_archive_in_runtime(project_file, archive_file, runtime_root)
+        let mut archive_handle = fs::File::open(archive_file)?;
+        let prepared = PreparedProjectArchive::from_open_file(
+            &mut archive_handle,
+            ProjectArchiveReadBudget::default(),
+        )?;
+        if self.active_sequence().is_some() {
+            self.stop().map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        }
+        let runtime_lease = self
+            .claim_or_reuse_project_runtime(&project_file, prepared.project_id())
+            .map_err(anyhow::Error::msg)?;
+        let cleanup =
+            cleanup_recovery_runtime_artifacts(&runtime_lease).map_err(anyhow::Error::msg)?;
+        if cleanup.removed_staging_count > 0 || cleanup.removed_unreferenced_snapshot_count > 0 {
+            tracing::info!(
+                runtime_root = %runtime_lease.runtime_root().display(),
+                removed_staging = cleanup.removed_staging_count,
+                removed_unreferenced_snapshots = cleanup.removed_unreferenced_snapshot_count,
+                "removed abandoned Project recovery artifacts"
+            );
+        }
+        self.open_prepared_project_archive_in_runtime(
+            project_file,
+            prepared,
+            true,
+            runtime_lease,
+            handoff,
+        )
     }
 
-    fn open_project_archive_in_runtime(
+    fn open_prepared_project_archive_in_runtime(
         &mut self,
         project_file: PathBuf,
-        archive_file: &Path,
-        runtime_root: PathBuf,
+        prepared: PreparedProjectArchive<'_>,
+        opens_canonical_project: bool,
+        runtime_lease: Arc<ProjectRuntimeLease>,
+        handoff: &mut Option<ProjectPersistencePauseToken>,
     ) -> anyhow::Result<()> {
-        let library_root = runtime_root.join("library");
-        if library_root.exists() {
-            fs::remove_dir_all(&library_root)?;
+        let prepared_project_id = prepared.project_id();
+        if runtime_lease.project_id() != prepared_project_id {
+            anyhow::bail!("Project runtime lease belongs to another Project");
         }
-        let loaded = load_project_archive(archive_file, library_root.as_path())?;
+        runtime_lease.validate().map_err(anyhow::Error::msg)?;
+        let runtime_root = runtime_lease.runtime_root().to_path_buf();
+        let mut library_generation =
+            self.prepare_project_library_generation(Arc::clone(&runtime_lease))?;
+        let loaded = prepared.load_into(library_generation.root())?;
+        if loaded.document.project_id != prepared_project_id {
+            anyhow::bail!("项目归属在打开期间发生变化，拒绝安装新的素材库代际与项目会话");
+        }
         if loaded.library_schema_version > mondrian_assets::ASSET_LIBRARY_SCHEMA_VERSION {
             anyhow::bail!(
                 "项目素材库 schema v{} 高于当前支持的 v{}",
@@ -114,29 +444,42 @@ impl AppState {
                 mondrian_assets::ASSET_LIBRARY_SCHEMA_VERSION
             );
         }
-        let asset_library = AssetLibrary::open(library_root)?;
-        let session = if archive_file == project_file.as_path() {
+        let asset_library = library_generation.open()?;
+        let session = if opens_canonical_project {
             AuthoringSession::open_saved(
                 loaded.document,
                 project_file.clone(),
-                runtime_root,
+                runtime_root.clone(),
                 asset_library,
             )
         } else {
             AuthoringSession::new_unsaved(
                 loaded.document,
                 project_file.clone(),
-                runtime_root,
+                runtime_root.clone(),
                 asset_library,
             )
         }
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let project_id = session.project_id();
+        self.retire_project_session_handoff(handoff).map_err(anyhow::Error::msg)?;
+        self.retain_current_project_library_generation();
         self.clear_timeline_targeting();
+        // Commit filesystem ownership before the live Arc escapes into App
+        // state. A panic after this point can leave only an owner-recognized
+        // orphan for the next sweep; it can never delete an installed SQLite
+        // directory out from under a live Session.
+        library_generation.commit();
         self.authoring = Some(session);
+        self.synchronize_audio_idle_warmup_binding();
+        self.project_runtime_lease = Some(runtime_lease);
+        self.manual_project_file_destination = None;
+        self.manual_project_file_applied_request = None;
         self.autosave_in_flight_request = None;
         self.proxy_generation.bind_project(Some(project_id));
-        self.stop();
+        self.media_import.bind_project(Some(project_id));
+        self.media_import_batches.clear();
+        self.media_asset_mutations.bind_project(Some(project_id));
         self.settle_preview_access_source();
         self.dragging_asset = None;
         self.ensure_minimum_tracks();
@@ -144,7 +487,13 @@ impl AppState {
     }
 
     pub fn open_project_file(&mut self, project_file: PathBuf) -> anyhow::Result<()> {
-        self.open_project_archive(project_file.clone(), project_file.as_path())
+        let mut handoff = self.begin_project_session_handoff()?;
+        let result =
+            self.open_project_archive(project_file.clone(), project_file.as_path(), &mut handoff);
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => Err(self.resume_handoff_after_error(handoff, error)),
+        }
     }
 
     /// Enqueue a manual save and return without waiting for filesystem I/O.
@@ -153,28 +502,76 @@ impl AppState {
     }
 
     /// Enqueue Save As and return without waiting for filesystem I/O.
+    ///
+    /// The supplied path is a user-confirmed file-dialog or Headless target.
+    /// An absent entry retains create-only intent through final publication;
+    /// an entry that already existed when the user confirmed the target may be
+    /// replaced. A later race can therefore never turn a new-target choice
+    /// into an implicit overwrite.
     pub fn request_project_save_as(
         &mut self,
         target_file: PathBuf,
     ) -> anyhow::Result<ProjectPersistenceRequestId> {
-        self.submit_project_save(Some(super::ensure_project_extension(target_file)))
+        let target_file = super::ensure_project_extension(target_file);
+        let publication = match fs::symlink_metadata(&target_file) {
+            Ok(_) => ProjectArchivePublication::ReplaceExisting,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                ProjectArchivePublication::CreateNew
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("无法检查另存为目标：{}", target_file.display()));
+            }
+        };
+        self.submit_project_save(Some((target_file, publication)))
     }
 
     fn submit_project_save(
         &mut self,
-        target_file: Option<PathBuf>,
+        target: Option<(PathBuf, ProjectArchivePublication)>,
     ) -> anyhow::Result<ProjectPersistenceRequestId> {
+        let runtime_lease = self.ensure_open_project_runtime_lease()?;
         let session =
             self.authoring.as_ref().ok_or_else(|| anyhow::anyhow!("当前没有打开的项目"))?;
         let snapshot = session.snapshot().map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        let target = target_file.clone().unwrap_or_else(|| session.project_file().to_path_buf());
-        self.project_persistence
+        let current_project_file = session.project_file().to_path_buf();
+        let destination = match self
+            .manual_project_file_destination
+            .as_ref()
+            .filter(|destination| destination.session_id() == snapshot.session_id)
+        {
+            Some(current) => match target {
+                Some((target_file, publication)) => current.retarget(target_file, publication),
+                None => Ok(current.clone()),
+            },
+            None => match target {
+                Some((target_file, ProjectArchivePublication::CreateNew)) => {
+                    ManualProjectFileDestination::initial_create(snapshot.session_id, target_file)
+                }
+                Some((target_file, ProjectArchivePublication::ReplaceExisting)) => {
+                    ManualProjectFileDestination::initial(snapshot.session_id, target_file)
+                }
+                None => {
+                    ManualProjectFileDestination::initial(snapshot.session_id, current_project_file)
+                }
+            },
+        }
+        .map_err(anyhow::Error::msg)?;
+        let request_id = self
+            .project_persistence
             .submit(
                 snapshot,
-                target,
-                ProjectPersistencePurpose::Manual { update_project_path: target_file.is_some() },
+                ProjectPersistencePurpose::Manual { destination: destination.clone() },
+                runtime_lease,
             )
-            .map_err(anyhow::Error::msg)
+            .map_err(anyhow::Error::msg)?;
+        // The destination becomes current only after the exact request was
+        // admitted. Queue rejection must not redirect a later ordinary Save.
+        if self.manual_project_file_destination.as_ref() != Some(&destination) {
+            self.manual_project_file_applied_request = None;
+        }
+        self.manual_project_file_destination = Some(destination);
+        Ok(request_id)
     }
 
     fn submit_autosave(
@@ -182,30 +579,34 @@ impl AppState {
         max_recovery_points: usize,
         retention_days: u32,
     ) -> anyhow::Result<(ProjectPersistenceRequestId, PathBuf)> {
+        let runtime_lease = self.ensure_open_project_runtime_lease()?;
         let session = self
             .authoring
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("当前无可自动保存的项目"))?;
         let snapshot = session.snapshot().map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let project_file = session.project_file().to_path_buf();
-        let runtime_root = session.runtime_root().to_path_buf();
+        let runtime_root = runtime_lease.runtime_root().to_path_buf();
         let saved_at_unix_ms = unix_now_ms();
-        let autosave_file = runtime_root.join("autosave").join(format!(
-            "project-{saved_at_unix_ms}-g{}.autosave.mdp",
-            snapshot.generation.get()
+        let autosave_file = runtime_root.join("autosave").join(autosave_archive_leaf(
+            saved_at_unix_ms,
+            snapshot.generation.get(),
         ));
         let request_id = self
             .project_persistence
             .submit(
                 snapshot,
-                autosave_file.clone(),
                 ProjectPersistencePurpose::Autosave {
-                    original_project_file: project_file,
-                    runtime_root,
+                    destination: AutosaveArchiveDestination::new(
+                        autosave_file.clone(),
+                        project_file,
+                    )
+                    .map_err(anyhow::Error::msg)?,
                     max_recovery_points: max_recovery_points.max(1),
                     retention_days: retention_days.max(1),
                     saved_at_unix_ms,
                 },
+                runtime_lease,
             )
             .map_err(anyhow::Error::msg)?;
         self.autosave_in_flight_request = Some(request_id);
@@ -215,8 +616,10 @@ impl AppState {
 
     /// Poll durable persistence and schedule due autosaves.
     pub fn poll_project_persistence(&mut self) -> bool {
+        let retired_before = self.retired_project_libraries.len();
+        collect_retired_project_libraries(&mut self.retired_project_libraries);
         let completions = self.project_persistence.poll_completions();
-        let mut changed = false;
+        let mut changed = self.retired_project_libraries.len() != retired_before;
         for completion in completions {
             changed = true;
             let purpose = completion.purpose.clone();
@@ -241,6 +644,8 @@ impl AppState {
                     ProjectPersistencePurpose::Autosave { .. },
                     Ok(PersistenceCompletionDisposition::Applied),
                 )
+                | (_, Ok(PersistenceCompletionDisposition::SatisfiedByNewerPublication))
+                | (_, Ok(PersistenceCompletionDisposition::IgnoredSupersededDestination))
                 | (_, Ok(PersistenceCompletionDisposition::IgnoredStaleSession)) => {}
                 (
                     ProjectPersistencePurpose::Autosave { .. },
@@ -272,6 +677,9 @@ impl AppState {
         if self.autosave_in_flight_request == Some(completion.request_id) {
             self.autosave_in_flight_request = None;
         }
+        if !self.project_persistence.accepts_completion(&completion) {
+            return Ok(PersistenceCompletionDisposition::IgnoredStaleSession);
+        }
         let same_session = self
             .authoring
             .as_ref()
@@ -279,57 +687,137 @@ impl AppState {
         if !same_session {
             return Ok(PersistenceCompletionDisposition::IgnoredStaleSession);
         }
-        let persisted = completion.result?;
+        let Some(active_lease) = self.project_runtime_lease.as_ref() else {
+            return Err("open Project Session has no runtime lease".to_owned());
+        };
+        if active_lease.id() != completion.runtime_lease_id {
+            return Err(
+                "persistence completion carries a different Project runtime lease identity"
+                    .to_owned(),
+            );
+        }
+        if let ProjectPersistencePurpose::Manual { destination } = &completion.purpose {
+            if destination.session_id() != completion.session_id {
+                return Err(
+                    "manual persistence completion has an inconsistent destination binding"
+                        .to_owned(),
+                );
+            }
+            if self.manual_project_file_destination.as_ref() != Some(destination) {
+                return Ok(PersistenceCompletionDisposition::IgnoredSupersededDestination);
+            }
+            let Some(session) = self.authoring.as_ref() else {
+                return Ok(PersistenceCompletionDisposition::IgnoredStaleSession);
+            };
+            let covered_by_applied_request = self
+                .manual_project_file_applied_request
+                .as_ref()
+                .is_some_and(|(applied_destination, applied_request_id)| {
+                    applied_destination == destination
+                        && applied_request_id.get() >= completion.request_id.get()
+                });
+            if covered_by_applied_request
+                && session.project_file() == destination.project_file()
+                && session.manual_save_baseline_covers(
+                    completion.generation,
+                    completion.asset_library_revision,
+                )
+            {
+                let current_project_file = session.project_file().to_path_buf();
+                let retire_all = !session.is_dirty();
+                if let Err(reason) = reconcile_recovery_after_manual_save(
+                    active_lease,
+                    &current_project_file,
+                    retire_all,
+                ) {
+                    let reason = reason.to_string();
+                    return Ok(
+                        PersistenceCompletionDisposition::AppliedWithRecoveryWarning { reason },
+                    );
+                }
+                return Ok(PersistenceCompletionDisposition::SatisfiedByNewerPublication);
+            }
+        }
+        let publication_context = completion.publication_failure.as_ref().map(|failure| {
+            format!(
+                "publication phase={:?}, state={:?}: {}",
+                failure.phase, failure.kind, failure.reason
+            )
+        });
+        if completion.result.is_ok() && publication_context.is_some() {
+            return Err(
+                "successful persistence completion carries contradictory publication-failure evidence"
+                    .to_owned(),
+            );
+        }
+        let persisted = completion.result.map_err(|reason| match publication_context {
+            Some(context) => format!("{reason}; {context}"),
+            None => reason,
+        })?;
+        if persisted.asset_library_revision != completion.asset_library_revision {
+            return Err(
+                "persistence completion result does not match its captured Asset Library revision"
+                    .to_owned(),
+            );
+        }
         let Some(session) = self.authoring.as_mut() else {
             return Ok(PersistenceCompletionDisposition::IgnoredStaleSession);
         };
+        let mut applied_manual_destination = None;
         let recovery_reconciliation = match completion.purpose {
-            ProjectPersistencePurpose::Manual { update_project_path } => {
-                let runtime_root = session.runtime_root().to_path_buf();
-                let project_id = session.project_id();
+            ProjectPersistencePurpose::Manual { destination } => {
                 session
                     .mark_saved(
                         completion.generation,
                         persisted.document_revision,
                         persisted.asset_library_revision,
                         persisted.meta,
-                        update_project_path.then_some(completion.target_file),
+                        Some(destination.project_file().to_path_buf()),
                     )
                     .map_err(|error| error.to_string())?;
+                applied_manual_destination = Some(destination.clone());
                 let current_project_file = session.project_file().to_path_buf();
                 let retire_all = !session.is_dirty();
-                Some((runtime_root, project_id, current_project_file, retire_all))
+                Some((current_project_file, retire_all))
             }
             ProjectPersistencePurpose::Autosave { .. } => {
                 session
                     .mark_autosaved(completion.generation, persisted.asset_library_revision)
                     .map_err(|error| error.to_string())?;
-                (session.has_durable_baseline() && !session.is_dirty()).then(|| {
-                    (
-                        session.runtime_root().to_path_buf(),
-                        session.project_id(),
-                        session.project_file().to_path_buf(),
-                        true,
-                    )
-                })
+                (session.has_durable_baseline() && !session.is_dirty())
+                    .then(|| (session.project_file().to_path_buf(), true))
             }
         };
-        if let Some((runtime_root, project_id, current_project_file, retire_all)) =
-            recovery_reconciliation
-        {
+        if let Some(destination) = applied_manual_destination {
+            let retain_newer_receipt = self
+                .manual_project_file_applied_request
+                .as_ref()
+                .is_some_and(|(applied_destination, applied_request_id)| {
+                    applied_destination == &destination
+                        && applied_request_id.get() > completion.request_id.get()
+                });
+            if !retain_newer_receipt {
+                self.manual_project_file_applied_request =
+                    Some((destination, completion.request_id));
+            }
+        }
+        if let Some((current_project_file, retire_all)) = recovery_reconciliation {
             if let Err(reason) = reconcile_recovery_after_manual_save(
-                &runtime_root,
-                project_id,
+                active_lease,
                 &current_project_file,
                 retire_all,
             ) {
                 tracing::warn!(
-                    project_id = %project_id,
-                    runtime_root = %runtime_root.display(),
+                    project_id = %active_lease.project_id(),
+                    runtime_root = %active_lease.runtime_root().display(),
                     %reason,
                     "manual Project save succeeded but recovery authority reconciliation failed"
                 );
-                return Ok(PersistenceCompletionDisposition::AppliedWithRecoveryWarning { reason });
+                return Ok(
+                    PersistenceCompletionDisposition::AppliedWithRecoveryWarning {
+                        reason: reason.to_string(),
+                    },
+                );
             }
         }
         Ok(PersistenceCompletionDisposition::Applied)
@@ -362,27 +850,39 @@ impl AppState {
         &mut self,
         request_id: ProjectPersistenceRequestId,
     ) -> anyhow::Result<()> {
+        let completion = self.wait_for_persistence_completion(request_id)?;
+        match self.apply_persistence_completion(completion).map_err(anyhow::Error::msg)? {
+            PersistenceCompletionDisposition::Applied => Ok(()),
+            PersistenceCompletionDisposition::AppliedWithRecoveryWarning { reason } => {
+                self.set_status_hint(format!("项目已耐久保存，但恢复点清理失败：{reason}"), true);
+                Ok(())
+            }
+            PersistenceCompletionDisposition::SatisfiedByNewerPublication => Ok(()),
+            PersistenceCompletionDisposition::IgnoredSupersededDestination => {
+                anyhow::bail!("项目耐久保存目标在完成前已被较新的 Save As 请求取代")
+            }
+            PersistenceCompletionDisposition::IgnoredStaleSession => {
+                anyhow::bail!("项目持久化完成不再属于当前会话代际")
+            }
+        }
+    }
+
+    fn wait_for_persistence_completion(
+        &mut self,
+        request_id: ProjectPersistenceRequestId,
+    ) -> anyhow::Result<ProjectPersistenceCompletion> {
         let deadline = Instant::now() + std::time::Duration::from_secs(300);
         loop {
+            let mut requested = None;
             for completion in self.project_persistence.poll_completions() {
-                let is_requested = completion.request_id == request_id;
-                let result =
-                    self.apply_persistence_completion(completion).map_err(anyhow::Error::msg);
-                if is_requested {
-                    return match result? {
-                        PersistenceCompletionDisposition::Applied => Ok(()),
-                        PersistenceCompletionDisposition::AppliedWithRecoveryWarning { reason } => {
-                            self.set_status_hint(
-                                format!("项目已耐久保存，但恢复点清理失败：{reason}"),
-                                true,
-                            );
-                            Ok(())
-                        }
-                        PersistenceCompletionDisposition::IgnoredStaleSession => {
-                            anyhow::bail!("项目会话在耐久保存完成前已被替换")
-                        }
-                    };
+                if completion.request_id == request_id {
+                    requested = Some(completion);
+                } else {
+                    self.apply_persistence_completion(completion).map_err(anyhow::Error::msg)?;
                 }
+            }
+            if let Some(completion) = requested {
+                return Ok(completion);
             }
             if Instant::now() >= deadline {
                 anyhow::bail!("等待项目耐久保存超时");
@@ -419,10 +919,7 @@ impl AppState {
         if !needs_tracks {
             return;
         }
-        let Some(session) = self.authoring.as_mut() else {
-            return;
-        };
-        let _ = session.edit_active_sequence("补齐基础轨道", |sequence| {
+        let _ = self.commit_active_sequence_edit("补齐基础轨道", |sequence| {
             if sequence.video_tracks.is_empty() {
                 sequence.video_tracks.push(mondrian_timeline::track::Track::new_video("V1"));
             }
@@ -464,6 +961,30 @@ impl AppState {
         color_environment: mondrian_core::ProjectColorEnvironment,
         project_settings: ProjectSettings,
     ) -> anyhow::Result<()> {
+        let mut handoff = self.begin_project_session_handoff()?;
+        let result = self.create_new_project_with_settings_at_in_handoff(
+            project_file,
+            name,
+            settings,
+            color_environment,
+            project_settings,
+            &mut handoff,
+        );
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => Err(self.resume_handoff_after_error(handoff, error)),
+        }
+    }
+
+    fn create_new_project_with_settings_at_in_handoff(
+        &mut self,
+        project_file: PathBuf,
+        name: &str,
+        settings: SequenceSettings,
+        color_environment: mondrian_core::ProjectColorEnvironment,
+        project_settings: ProjectSettings,
+        handoff: &mut Option<ProjectPersistencePauseToken>,
+    ) -> anyhow::Result<()> {
         if project_file.exists() {
             anyhow::bail!("项目文件已存在：{}", project_file.display());
         }
@@ -478,15 +999,6 @@ impl AppState {
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         sequence.playhead = TimelineTime::ZERO;
 
-        let runtime_root = Self::project_runtime_root(&project_file);
-        if runtime_root.exists() {
-            let _ = fs::remove_dir_all(&runtime_root);
-        }
-        fs::create_dir_all(runtime_root.join("library"))?;
-
-        let library_root = runtime_root.join("library");
-        let library = AssetLibrary::open(library_root)?;
-        library.clear_assets()?;
         let document = ProjectDocument::new(
             name,
             SequenceCollection::new(sequence),
@@ -494,17 +1006,138 @@ impl AppState {
             settings,
             project_settings,
         );
-        let session = AuthoringSession::new_unsaved(document, project_file, runtime_root, library)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        if self.active_sequence().is_some() {
+            self.stop().map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        }
+        let runtime_lease = self
+            .claim_or_reuse_project_runtime(&project_file, document.project_id)
+            .map_err(anyhow::Error::msg)?;
+        runtime_lease.validate().map_err(anyhow::Error::msg)?;
+        let runtime_root = runtime_lease.runtime_root().to_path_buf();
+        let mut library_generation =
+            self.prepare_project_library_generation(Arc::clone(&runtime_lease))?;
+        let library = library_generation.open()?;
+        let mut session =
+            AuthoringSession::new_unsaved(document, project_file, runtime_root, library)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let project_id = session.project_id();
+        let session_id = session.session_id();
+        let destination = ManualProjectFileDestination::initial_create(
+            session_id,
+            session.project_file().to_path_buf(),
+        )
+        .map_err(anyhow::Error::msg)?;
+        let snapshot = session.snapshot().map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let expected_generation = snapshot.generation;
+        let expected_asset_library_revision = snapshot.asset_library_revision;
+        // The persistence worker may now receive a shared library Arc.
+        // Disable candidate-drop deletion before submission; every failure
+        // below retires it through weak lifetime evidence instead.
+        library_generation.commit();
+        let request_id = match self.project_persistence.submit(
+            snapshot,
+            ProjectPersistencePurpose::Manual { destination: destination.clone() },
+            Arc::clone(&runtime_lease),
+        ) {
+            Ok(request_id) => request_id,
+            Err(error) => {
+                let error = self.discard_prepared_project_session_after_error(
+                    session,
+                    runtime_lease,
+                    anyhow::Error::msg(error),
+                );
+                return Err(error);
+            }
+        };
+        let completion = match self.wait_for_persistence_completion(request_id) {
+            Ok(completion) => completion,
+            Err(error) => {
+                let error = self.discard_prepared_project_session_after_error(
+                    session,
+                    runtime_lease,
+                    error,
+                );
+                return Err(error);
+            }
+        };
+        let completion_is_exact = self.project_persistence.accepts_completion(&completion)
+            && completion.session_id == session_id
+            && completion.runtime_lease_id == runtime_lease.id()
+            && completion.generation == expected_generation
+            && completion.asset_library_revision == expected_asset_library_revision
+            && matches!(
+                &completion.purpose,
+                ProjectPersistencePurpose::Manual {
+                    destination: completed_destination
+                } if completed_destination == &destination
+            );
+        if !completion_is_exact {
+            let error = self.discard_prepared_project_session_after_error(
+                session,
+                runtime_lease,
+                anyhow::anyhow!(
+                    "initial Project publication returned inconsistent Session evidence"
+                ),
+            );
+            return Err(error);
+        }
+        let persisted = match completion.result {
+            Ok(persisted) => persisted,
+            Err(error) => {
+                let error = self.discard_prepared_project_session_after_error(
+                    session,
+                    runtime_lease,
+                    anyhow::Error::msg(error),
+                );
+                return Err(error);
+            }
+        };
+        if persisted.asset_library_revision != expected_asset_library_revision {
+            let error = self.discard_prepared_project_session_after_error(
+                session,
+                runtime_lease,
+                anyhow::anyhow!(
+                    "initial Project publication returned a mismatched Asset Library revision"
+                ),
+            );
+            return Err(error);
+        }
+        if let Err(error) = session.mark_saved(
+            completion.generation,
+            persisted.document_revision,
+            persisted.asset_library_revision,
+            persisted.meta,
+            Some(destination.project_file().to_path_buf()),
+        ) {
+            let error = self.discard_prepared_project_session_after_error(
+                session,
+                runtime_lease,
+                anyhow::anyhow!(error.to_string()),
+            );
+            return Err(error);
+        }
+        if let Err(error) = self.retire_project_session_handoff(handoff) {
+            let error = self.discard_prepared_project_session_after_error(
+                session,
+                runtime_lease,
+                anyhow::Error::msg(error),
+            );
+            return Err(error);
+        }
+        self.retain_current_project_library_generation();
         self.clear_timeline_targeting();
         self.authoring = Some(session);
+        self.synchronize_audio_idle_warmup_binding();
+        self.project_runtime_lease = Some(runtime_lease);
+        let replacement_destination = destination.replacement_binding();
+        self.manual_project_file_destination = Some(replacement_destination.clone());
+        self.manual_project_file_applied_request = Some((replacement_destination, request_id));
         self.autosave_in_flight_request = None;
         self.proxy_generation.bind_project(Some(project_id));
-        self.stop();
+        self.media_import.bind_project(Some(project_id));
+        self.media_import_batches.clear();
+        self.media_asset_mutations.bind_project(Some(project_id));
         self.settle_preview_access_source();
-
-        self.save_project_file()?;
         Ok(())
     }
 
@@ -520,7 +1153,7 @@ impl AppState {
         &mut self,
         settings: SequenceSettings,
     ) -> mondrian_core::Result<()> {
-        let Some(session) = self.authoring.as_mut() else {
+        let Some(session) = self.authoring.as_ref() else {
             return Err(mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "update_new_sequence_defaults".to_owned(),
                 reason: "当前没有打开的项目".to_owned(),
@@ -533,7 +1166,7 @@ impl AppState {
         let before = session.document().clone();
         let mut after = before.clone();
         after.new_sequence_defaults = settings;
-        session.commit_project_snapshot("修改新建序列默认设置", before, after)?;
+        self.commit_project_snapshot_command("修改新建序列默认设置", before, after)?;
         Ok(())
     }
 
@@ -572,8 +1205,8 @@ impl AppState {
         let before = session.document().clone();
         let mut after = before.clone();
         after.color_environment = color_environment;
-        session.commit_project_snapshot("修改项目色彩引擎", before, after)?;
-        self.stop();
+        self.stop()?;
+        self.commit_project_snapshot_command("修改项目色彩引擎", before, after)?;
         self.settle_preview_access_source();
         Ok(())
     }
@@ -582,18 +1215,49 @@ impl AppState {
 #[cfg(test)]
 mod persistence_lifecycle_tests {
     use super::*;
+    use crate::app::project_runtime::claim_project_runtime_lease_for_test;
+    use mondrian_project::save_project_archive;
+    use std::collections::BTreeSet;
+    use std::collections::HashMap;
     use std::time::{Duration, Instant};
 
-    fn unique_root(name: &str) -> PathBuf {
+    #[test]
+    fn project_manifest_and_asset_library_schema_versions_match() {
+        assert_eq!(
+            mondrian_project::PROJECT_LIBRARY_SCHEMA_VERSION,
+            mondrian_assets::ASSET_LIBRARY_SCHEMA_VERSION,
+            "the App composition root may not publish a manifest for a different embedded-library schema"
+        );
+    }
+
+    #[test]
+    fn autosave_archive_names_remain_unique_with_identical_time_and_generation() {
+        let saved_at_unix_ms = 1_900_000_000_123_u64;
+        let generation = 1;
+        let first = autosave_archive_leaf(saved_at_unix_ms, generation);
+        let second = autosave_archive_leaf(saved_at_unix_ms, generation);
+
+        assert_ne!(
+            first, second,
+            "same-millisecond autosaves must never claim the same archive object"
+        );
+        assert!(first.starts_with("project-1900000000123-g1-"));
+        assert!(first.ends_with(".autosave.mdp"));
+        assert!(second.starts_with("project-1900000000123-g1-"));
+        assert!(second.ends_with(".autosave.mdp"));
+    }
+
+    fn unique_root(_name: &str) -> PathBuf {
+        static NEXT_ROOT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         std::env::temp_dir().join(format!(
-            "mondrian-persistence-lifecycle-{name}-{}-{}",
+            "mpl-{}-{}-{}",
             std::process::id(),
-            unix_now_ms()
+            unix_now_ms(),
+            NEXT_ROOT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ))
     }
 
-    fn test_session(root: &Path) -> AuthoringSession {
-        let library = AssetLibrary::open(root.join("library")).expect("asset library");
+    fn test_state(root: &Path) -> AppState {
         let document = ProjectDocument::new(
             "Persistence Lifecycle",
             SequenceCollection::new(Sequence::new("Sequence")),
@@ -601,24 +1265,476 @@ mod persistence_lifecycle_tests {
             SequenceSettings::default(),
             ProjectSettings::default(),
         );
-        AuthoringSession::new_unsaved(
-            document,
-            root.join("project.mdp"),
-            root.join("runtime"),
-            library,
+        let project_file = root.join("project.mdp");
+        let lease = claim_project_runtime_lease_for_test(
+            &root.join("runtime-roots"),
+            &project_file,
+            document.project_id,
         )
-        .expect("authoring session")
+        .expect("claim runtime owner");
+        let runtime_root = lease.runtime_root().to_path_buf();
+        let library = AssetLibrary::open(runtime_root.join("library")).expect("asset library");
+        let session = AuthoringSession::new_unsaved(document, project_file, runtime_root, library)
+            .expect("authoring session");
+        let mut state = AppState::new();
+        state.authoring = Some(session);
+        state.project_runtime_lease = Some(lease);
+        state
+    }
+
+    fn wait_for_completions(
+        state: &AppState,
+        request_ids: &[ProjectPersistenceRequestId],
+    ) -> HashMap<u64, ProjectPersistenceCompletion> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut completions = HashMap::new();
+        while completions.len() < request_ids.len() {
+            for completion in state.project_persistence.poll_completions() {
+                if request_ids.contains(&completion.request_id) {
+                    completions.insert(completion.request_id.get(), completion);
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "persistence requests did not complete"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        completions
+    }
+
+    fn library_generation_roots(runtime_root: &Path) -> BTreeSet<PathBuf> {
+        fs::read_dir(runtime_root)
+            .expect("read runtime root")
+            .map(|entry| entry.expect("runtime entry").path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("library-generation-"))
+            })
+            .collect()
+    }
+
+    fn discovered_candidate(project_file: &Path, autosave_file: &Path) -> CrashRecoveryCandidate {
+        discover_crash_recovery_candidates()
+            .into_iter()
+            .find(|candidate| {
+                candidate.project_file == project_file && candidate.autosave_file == autosave_file
+            })
+            .expect("exact recovery candidate")
+    }
+
+    #[test]
+    fn same_project_reopen_keeps_retired_library_until_the_last_arc_drops() {
+        let root = unique_root("same-project-reopen");
+        let mut state = test_state(&root);
+        state.save_project_file().expect("establish saved archive");
+        let project_file = state.authoring.as_ref().expect("session").project_file().to_path_buf();
+        let runtime_root = state.authoring.as_ref().expect("session").runtime_root().to_path_buf();
+        let lease_id = state.project_runtime_lease.as_ref().expect("lease").id();
+        let old_library = Arc::clone(state.authoring.as_ref().expect("session").asset_library());
+        let old_library_root =
+            old_library.database_path().parent().expect("library root").to_path_buf();
+
+        state.open_project_file(project_file).expect("reopen the same Project");
+
+        let new_library_root = state
+            .authoring
+            .as_ref()
+            .expect("reopened session")
+            .asset_library()
+            .database_path()
+            .parent()
+            .expect("new library root")
+            .to_path_buf();
+        assert_ne!(new_library_root, old_library_root);
+        assert_eq!(
+            state.project_runtime_lease.as_ref().expect("reused lease").id(),
+            lease_id
+        );
+        assert_eq!(
+            state.authoring.as_ref().expect("reopened session").runtime_root(),
+            runtime_root
+        );
+
+        state.collect_released_project_libraries();
+        assert!(old_library_root.is_dir());
+        drop(old_library);
+        state.collect_released_project_libraries();
+        assert!(!old_library_root.exists());
+        assert!(new_library_root.is_dir());
+
+        state.close_project().expect("close project");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_library_candidate_resumes_previous_session_and_persistence_generation() {
+        let root = unique_root("failed-library-candidate");
+        let mut state = test_state(&root);
+        state.save_project_file().expect("establish saved archive");
+        let sequence_id = state.active_sequence().expect("active Sequence").id;
+        state
+            .rename_sequence(sequence_id, "Undoable Name")
+            .expect("create authoring history");
+        let original_session_id = state.authoring.as_ref().expect("session").session_id();
+        let original_project_file =
+            state.authoring.as_ref().expect("session").project_file().to_path_buf();
+        let original_history = state.authoring_history().expect("history").diagnostics();
+        let runtime_root = state.authoring.as_ref().expect("session").runtime_root().to_path_buf();
+        let generations_before = library_generation_roots(&runtime_root);
+
+        let invalid_library = root.join("invalid-library.db");
+        fs::write(&invalid_library, b"not a SQLite database").expect("invalid library fixture");
+        let invalid_archive = root.join("invalid-library.mdp");
+        save_project_archive(
+            state.authoring.as_ref().expect("session").document(),
+            &invalid_library,
+            &invalid_archive,
+        )
+        .expect("package structurally valid archive");
+
+        let error = state
+            .open_project_file(invalid_archive)
+            .expect_err("invalid embedded SQLite must reject the candidate");
+        assert!(!error.to_string().is_empty());
+        let session = state.authoring.as_ref().expect("original session remains");
+        assert_eq!(session.session_id(), original_session_id);
+        assert_eq!(session.project_file(), original_project_file);
+        assert_eq!(
+            session.active_sequence().expect("active Sequence").name,
+            "Undoable Name"
+        );
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics(),
+            original_history
+        );
+        assert_eq!(
+            library_generation_roots(&runtime_root),
+            generations_before,
+            "failed candidate must leave no untracked immutable generation"
+        );
+
+        state
+            .save_project_file()
+            .expect("resumed persistence generation accepts a later save");
+        state.close_project().expect("close project");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn closed_project_can_be_reopened_immediately_without_a_runtime_lease_race() {
+        let root = unique_root("close-immediate-reopen");
+        let project_file = root.join("project.mdp");
+        let mut first = AppState::new();
+        first
+            .create_new_project_at(
+                project_file.clone(),
+                "Immediate Reopen",
+                1920,
+                1080,
+                Rational::new(25, 1),
+            )
+            .expect("create project");
+        let project_id = first.authoring.as_ref().expect("session").project_id();
+        let first_session_id = first.authoring.as_ref().expect("session").session_id();
+        let runtime_root = first.authoring.as_ref().expect("session").runtime_root().to_path_buf();
+
+        first.close_project().expect("close project");
+        let mut second = AppState::new();
+        second
+            .open_project_file(project_file)
+            .expect("immediate reopen in a fresh AppState");
+        let reopened = second.authoring.as_ref().expect("reopened session");
+        assert_eq!(reopened.project_id(), project_id);
+        assert_eq!(reopened.runtime_root(), runtime_root);
+        assert_ne!(reopened.session_id(), first_session_id);
+
+        second.close_project().expect("close reopened project");
+        drop(second);
+        drop(first);
+        let _ = fs::remove_dir_all(&runtime_root);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ordinary_open_of_a_same_id_copy_uses_its_own_path_paired_runtime_root() {
+        let root = unique_root("same-id-copy-open");
+        let source_file = root.join("source.mdp");
+        let copy_file = root.join("copy.mdp");
+        let mut state = AppState::new();
+        state
+            .create_new_project_at(
+                source_file.clone(),
+                "Source",
+                1920,
+                1080,
+                Rational::new(25, 1),
+            )
+            .expect("create source Project");
+        let project_id = state.authoring.as_ref().expect("source session").project_id();
+        let source_runtime =
+            state.authoring.as_ref().expect("source session").runtime_root().to_path_buf();
+        let retained_source_library =
+            Arc::clone(state.authoring.as_ref().expect("source session").asset_library());
+        fs::copy(&source_file, &copy_file).expect("copy Project archive with the same ProjectId");
+
+        state
+            .open_project_file(copy_file.clone())
+            .expect("open same-ID filesystem copy in the coordinated process");
+
+        let opened = state.authoring.as_ref().expect("copy session");
+        let copy_runtime = opened.runtime_root().to_path_buf();
+        assert_eq!(opened.project_id(), project_id);
+        assert_eq!(opened.project_file(), copy_file);
+        assert_ne!(copy_runtime, source_runtime);
+        assert_eq!(
+            copy_runtime,
+            project_runtime_root_for_project(&copy_file, project_id)
+                .expect("derive copy paired root")
+        );
+        assert!(
+            retained_source_library.database_path().is_file(),
+            "the retired source generation remains immutable while external Arcs exist"
+        );
+
+        state.close_project().expect("close copy");
+        drop(retained_source_library);
+        drop(state);
+        let mut reopened = AppState::new();
+        reopened
+            .open_project_file(copy_file)
+            .expect("logical authority releases after every coordinated root lease drops");
+        assert_eq!(
+            reopened.authoring.as_ref().expect("reopened copy").runtime_root(),
+            copy_runtime
+        );
+        reopened.close_project().expect("close reopened copy");
+
+        let _ = fs::remove_dir_all(source_runtime);
+        let _ = fs::remove_dir_all(copy_runtime);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_initial_publication_leaves_the_previous_project_fully_active() {
+        let root = unique_root("atomic-project-create");
+        let mut state = test_state(&root);
+        state.save_project_file().expect("establish old baseline");
+        let sequence_id = state.active_sequence().expect("active Sequence").id;
+        state
+            .rename_sequence(sequence_id, "Previous Project State")
+            .expect("create old history");
+        let old_session_id = state.authoring.as_ref().expect("old session").session_id();
+        let old_project_file =
+            state.authoring.as_ref().expect("old session").project_file().to_path_buf();
+        let old_lease_id = state.project_runtime_lease.as_ref().expect("old lease").id();
+        let old_history = state.authoring_history().expect("old history").diagnostics();
+        let new_project_file = root.join("new-project.mdp");
+        state
+            .project_persistence
+            .fail_next_submission_for_test("injected initial publication failure");
+
+        let error = state
+            .create_new_project_at(
+                new_project_file.clone(),
+                "Must Not Install",
+                1920,
+                1080,
+                Rational::new(25, 1),
+            )
+            .expect_err("failed first publication must abort Project replacement");
+
+        assert!(error.to_string().contains("injected initial publication failure"));
+        let session = state.authoring.as_ref().expect("old session remains");
+        assert_eq!(session.session_id(), old_session_id);
+        assert_eq!(session.project_file(), old_project_file);
+        assert_eq!(
+            session.active_sequence().expect("active Sequence").name,
+            "Previous Project State"
+        );
+        assert_eq!(
+            state.project_runtime_lease.as_ref().expect("old lease").id(),
+            old_lease_id
+        );
+        assert_eq!(
+            state.authoring_history().expect("old history").diagnostics(),
+            old_history
+        );
+        assert!(!new_project_file.exists());
+        let candidate_runtime_roots = project_runtime_roots_for_path_for_test(&new_project_file)
+            .expect("enumerate prepared runtime payloads");
+        assert!(!candidate_runtime_roots.is_empty());
+        for runtime_root in &candidate_runtime_roots {
+            assert!(
+                library_generation_roots(runtime_root).is_empty(),
+                "failed prepared Session must not retain a library generation"
+            );
+        }
+        state
+            .save_project_file()
+            .expect("old persistence admission was resumed exactly");
+
+        state.close_project().expect("close old project");
+        for runtime_root in candidate_runtime_roots {
+            let _ = fs::remove_dir_all(runtime_root);
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn concurrent_entry_creation_cannot_be_overwritten_by_initial_project_publication() {
+        let root = unique_root("atomic-project-create-race");
+        let mut state = test_state(&root);
+        state.save_project_file().expect("establish old baseline");
+        let sequence_id = state.active_sequence().expect("active Sequence").id;
+        state
+            .rename_sequence(sequence_id, "Previous Project State")
+            .expect("create old history");
+        let old_session_id = state.authoring.as_ref().expect("old session").session_id();
+        let old_project_file =
+            state.authoring.as_ref().expect("old session").project_file().to_path_buf();
+        let old_lease_id = state.project_runtime_lease.as_ref().expect("old lease").id();
+        let old_history = state.authoring_history().expect("old history").diagnostics();
+        let new_project_file = root.join("concurrently-created.mdp");
+        let external_bytes = b"external directory entry must survive".to_vec();
+        let gate = state.project_persistence.gate_next_request();
+        let racer_target = new_project_file.clone();
+        let racer_bytes = external_bytes.clone();
+        let racer = std::thread::spawn(move || {
+            gate.wait_until_running();
+            fs::write(&racer_target, racer_bytes).expect("create competing directory entry");
+            gate.release();
+        });
+
+        let error = state
+            .create_new_project_at(
+                new_project_file.clone(),
+                "Must Not Replace",
+                1920,
+                1080,
+                Rational::new(25, 1),
+            )
+            .expect_err("create-only publication must reject the competing entry");
+        racer.join().expect("competing publisher");
+
+        assert!(
+            !error.to_string().is_empty(),
+            "publication rejection must preserve a diagnostic"
+        );
+        assert_eq!(
+            fs::read(&new_project_file).expect("read competing entry"),
+            external_bytes,
+            "the final publication operation must never replace a newly created entry"
+        );
+        let session = state.authoring.as_ref().expect("old session remains");
+        assert_eq!(session.session_id(), old_session_id);
+        assert_eq!(session.project_file(), old_project_file);
+        assert_eq!(
+            session.active_sequence().expect("active Sequence").name,
+            "Previous Project State"
+        );
+        assert_eq!(
+            state.project_runtime_lease.as_ref().expect("old lease").id(),
+            old_lease_id
+        );
+        assert_eq!(
+            state.authoring_history().expect("old history").diagnostics(),
+            old_history
+        );
+        let candidate_runtime_roots = project_runtime_roots_for_path_for_test(&new_project_file)
+            .expect("enumerate prepared runtime payloads");
+        assert!(!candidate_runtime_roots.is_empty());
+        for runtime_root in &candidate_runtime_roots {
+            assert!(
+                library_generation_roots(runtime_root).is_empty(),
+                "rejected publication must not retain a library generation"
+            );
+        }
+        state
+            .save_project_file()
+            .expect("old persistence generation resumes after rejection");
+
+        state.close_project().expect("close old project");
+        let _ = fs::remove_file(new_project_file);
+        for runtime_root in candidate_runtime_roots {
+            let _ = fs::remove_dir_all(runtime_root);
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn save_as_establishment_blocks_following_saves_from_overwriting_a_competing_entry() {
+        let root = unique_root("save-as-establishment-race");
+        let mut state = test_state(&root);
+        let original_project_file =
+            state.authoring.as_ref().expect("session").project_file().to_path_buf();
+        let target = root.join("new-canonical.mdp");
+        let external_bytes = b"competing Save As entry must survive".to_vec();
+        let gate = state.project_persistence.gate_next_request();
+
+        let establish_id = state
+            .request_project_save_as(target.clone())
+            .expect("admit Save As establishment");
+        let following_id =
+            state.request_project_save().expect("admit ordinary Save behind establishment");
+        let racer_target = target.clone();
+        let racer_bytes = external_bytes.clone();
+        let racer = std::thread::spawn(move || {
+            gate.wait_until_running();
+            fs::write(&racer_target, racer_bytes).expect("create competing entry");
+            gate.release();
+        });
+        let mut completions = wait_for_completions(&state, &[establish_id, following_id]);
+        racer.join().expect("competing publisher");
+
+        assert!(
+            completions
+                .remove(&establish_id.get())
+                .expect("establishment completion")
+                .result
+                .is_err(),
+            "the establishment request must reject the competing entry"
+        );
+        assert!(
+            completions
+                .remove(&following_id.get())
+                .expect("following Save completion")
+                .result
+                .is_err(),
+            "a dependent Save must not downgrade failed establishment to replacement"
+        );
+        assert_eq!(
+            fs::read(&target).expect("read competing entry"),
+            external_bytes
+        );
+        assert_eq!(
+            state.authoring.as_ref().expect("session").project_file(),
+            original_project_file
+        );
+
+        fs::remove_file(&target).expect("remove competing entry");
+        let retry_id =
+            state.request_project_save().expect("retry retained create-only destination");
+        state
+            .wait_for_persistence_request(retry_id)
+            .expect("retry establishes the destination after it becomes free");
+        assert_eq!(
+            state.authoring.as_ref().expect("session").project_file(),
+            target
+        );
+
+        state.close_project().expect("close project");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn failed_autosave_releases_the_scheduler_for_retry() {
         let root = unique_root("retry");
-        let runtime_root = root.join("runtime");
-        fs::create_dir_all(&runtime_root).expect("runtime root");
+        let mut state = test_state(&root);
+        let runtime_root = state.authoring.as_ref().expect("session").runtime_root().to_path_buf();
         fs::write(runtime_root.join("autosave"), b"blocks-directory")
             .expect("blocking autosave path");
-        let mut state = AppState::new();
-        state.authoring = Some(test_session(&root));
 
         state.submit_autosave(2, 7).expect("admit failing autosave");
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -641,17 +1757,19 @@ mod persistence_lifecycle_tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         assert!(state.authoring.as_ref().expect("session").is_current_autosaved());
+        state.close_project().expect("close project");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn current_manual_save_durably_retires_recovery_points() {
         let root = unique_root("retire-current");
-        let mut state = AppState::new();
-        state.authoring = Some(test_session(&root));
+        let mut state = test_state(&root);
+        let runtime_root = state.authoring.as_ref().expect("session").runtime_root().to_path_buf();
 
         let autosave = state.write_autosave_snapshot(4, 7).expect("write autosave");
         assert!(autosave.is_file());
-        assert!(AppState::autosave_manifest_path(&root.join("runtime")).is_file());
+        assert!(AppState::autosave_manifest_path(&runtime_root).is_file());
 
         state.save_project_file().expect("manual save");
         assert!(!state.has_unsaved_project_changes());
@@ -660,8 +1778,7 @@ mod persistence_lifecycle_tests {
             "current manual save must retire covered recovery archive"
         );
         let manifest: serde_json::Value = serde_json::from_slice(
-            &fs::read(AppState::autosave_manifest_path(&root.join("runtime")))
-                .expect("retired manifest"),
+            &fs::read(AppState::autosave_manifest_path(&runtime_root)).expect("retired manifest"),
         )
         .expect("valid retired manifest");
         assert_eq!(
@@ -669,14 +1786,15 @@ mod persistence_lifecycle_tests {
             Some(0),
             "retirement must first publish an empty canonical manifest"
         );
+        state.close_project().expect("close project");
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn stale_manual_completion_cannot_retire_newer_recovery_authority() {
         let root = unique_root("retain-on-stale-save");
-        let mut state = AppState::new();
-        state.authoring = Some(test_session(&root));
+        let mut state = test_state(&root);
+        let runtime_root = state.authoring.as_ref().expect("session").runtime_root().to_path_buf();
         let autosave = state.write_autosave_snapshot(4, 7).expect("write autosave");
         let request_id = state.request_project_save().expect("submit manual save");
 
@@ -697,21 +1815,33 @@ mod persistence_lifecycle_tests {
             "a stale manual completion must not remove recovery authority"
         );
         let manifest: serde_json::Value = serde_json::from_slice(
-            &fs::read(AppState::autosave_manifest_path(&root.join("runtime")))
-                .expect("recovery manifest"),
+            &fs::read(AppState::autosave_manifest_path(&runtime_root)).expect("recovery manifest"),
         )
         .expect("valid recovery manifest");
         assert_eq!(manifest["snapshots"].as_array().map(Vec::len), Some(1));
+        state.close_project().expect("close project");
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn stale_save_as_rebinds_recovery_without_moving_the_live_runtime() {
         let root = unique_root("rebind-stale-save-as");
-        let runtime_root = root.join("runtime");
         let target = root.join("save-as.mdp");
         let mut state = AppState::new();
-        state.authoring = Some(test_session(&root));
+        state
+            .create_new_project_at(
+                root.join("project.mdp"),
+                "Recovery Rebind",
+                1920,
+                1080,
+                Rational::new(25, 1),
+            )
+            .expect("create production-lifecycle Project");
+        let sequence_id = state.active_sequence().expect("active Sequence").id;
+        state
+            .rename_sequence(sequence_id, "Dirty Before Recovery")
+            .expect("create recoverable author state");
+        let runtime_root = state.authoring.as_ref().expect("session").runtime_root().to_path_buf();
         let first_autosave = state.write_autosave_snapshot(4, 7).expect("first autosave");
         let request_id = state.request_project_save_as(target.clone()).expect("submit save as");
 
@@ -740,9 +1870,17 @@ mod persistence_lifecycle_tests {
 
         let second_autosave = state.write_autosave_snapshot(4, 7).expect("second autosave");
         assert!(second_autosave.is_file());
+        let candidate = discovered_candidate(&target, &second_autosave);
+        let mut blocked = AppState::new();
+        let contention = blocked
+            .open_project_from_autosave_snapshot(candidate.clone())
+            .expect_err("a live Project Session must exclude recovery in another AppState");
+        assert!(contention.to_string().contains("already leased"));
+        state.close_project().expect("close project");
+
         let mut recovered = AppState::new();
         recovered
-            .open_project_from_autosave_snapshot(target.clone(), second_autosave.clone())
+            .open_project_from_autosave_snapshot(candidate)
             .expect("recover through rebound authority");
         let recovered_session = recovered.authoring.as_ref().expect("recovered session");
         assert_eq!(recovered_session.runtime_root(), runtime_root);
@@ -756,14 +1894,236 @@ mod persistence_lifecycle_tests {
                 .expect("valid retired manifest");
         assert_eq!(retired["project_file"], target.to_string_lossy().as_ref());
         assert_eq!(retired["snapshots"].as_array().map(Vec::len), Some(0));
+        recovered.close_project().expect("close recovered project");
+        let _ = fs::remove_dir_all(runtime_root);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn save_admitted_during_save_as_targets_the_new_destination_and_cleans_exactly_that_file() {
+        let root = unique_root("save-during-save-as");
+        let target = root.join("new-canonical.mdp");
+        let mut state = test_state(&root);
+        let old_project_file =
+            state.authoring.as_ref().expect("session").project_file().to_path_buf();
+        let autosave = state.write_autosave_snapshot(4, 7).expect("recovery point");
+        let save_as_id = state.request_project_save_as(target.clone()).expect("admit Save As");
+
+        state
+            .authoring
+            .as_mut()
+            .expect("session")
+            .edit_active_sequence("edit-while-save-as-is-in-flight", |sequence| {
+                sequence.name = "Saved Only At New Destination".to_owned();
+                Ok(())
+            })
+            .expect("commit interleaved edit");
+        let save_id = state.request_project_save().expect("admit following Save");
+
+        let mut completions = wait_for_completions(&state, &[save_as_id, save_id]);
+        let save_as_completion = completions.remove(&save_as_id.get()).expect("Save As completion");
+        let save_completion = completions.remove(&save_id.get()).expect("Save completion");
+        let (save_as_destination, save_destination) =
+            match (&save_as_completion.purpose, &save_completion.purpose) {
+                (
+                    ProjectPersistencePurpose::Manual { destination: save_as_destination },
+                    ProjectPersistencePurpose::Manual { destination: save_destination },
+                ) => (save_as_destination, save_destination),
+                _ => panic!("both requests must be manual publications"),
+            };
+        assert_eq!(save_as_destination, save_destination);
+        assert_eq!(save_destination.project_file(), target);
+
+        assert_eq!(
+            state
+                .apply_persistence_completion(save_as_completion)
+                .expect("apply Save As completion"),
+            PersistenceCompletionDisposition::Applied
+        );
+        assert!(state.has_unsaved_project_changes());
+        assert!(autosave.is_file(), "stale Save As may only rebind recovery");
+        assert_eq!(
+            state.authoring.as_ref().expect("session").project_file(),
+            target
+        );
+
+        assert_eq!(
+            state
+                .apply_persistence_completion(save_completion)
+                .expect("apply covering Save completion"),
+            PersistenceCompletionDisposition::Applied
+        );
+        assert!(!state.has_unsaved_project_changes());
+        assert!(
+            !autosave.exists(),
+            "only the completion that covers the interleaved edit may retire recovery"
+        );
+        assert!(
+            !old_project_file.exists(),
+            "the following Save must never publish the newer snapshot to the pre-Save-As path"
+        );
+
+        let extracted = root.join("verify-new-canonical");
+        let loaded = load_project_archive(&target, &extracted).expect("open new canonical archive");
+        assert_eq!(
+            loaded.document.sequences.active().expect("active Sequence").name,
+            "Saved Only At New Destination"
+        );
+        state.close_project().expect("close project");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reverse_completion_application_cannot_regress_a_newer_same_destination_save() {
+        let root = unique_root("reverse-save-completions");
+        let target = root.join("new-canonical.mdp");
+        let mut state = test_state(&root);
+        let save_as_id = state.request_project_save_as(target.clone()).expect("admit Save As");
+        state
+            .authoring
+            .as_mut()
+            .expect("session")
+            .edit_active_sequence("edit-before-following-save", |sequence| {
+                sequence.name = "Newer Same Destination".to_owned();
+                Ok(())
+            })
+            .expect("commit newer state");
+        let save_id = state.request_project_save().expect("admit following Save");
+        let mut completions = wait_for_completions(&state, &[save_as_id, save_id]);
+        let older = completions.remove(&save_as_id.get()).expect("older completion");
+        let newer = completions.remove(&save_id.get()).expect("newer completion");
+
+        assert_eq!(
+            state.apply_persistence_completion(newer).expect("apply newer completion first"),
+            PersistenceCompletionDisposition::Applied
+        );
+        assert_eq!(
+            state
+                .apply_persistence_completion(older)
+                .expect("older completion is already covered"),
+            PersistenceCompletionDisposition::SatisfiedByNewerPublication
+        );
+        let session = state.authoring.as_ref().expect("session");
+        assert_eq!(session.project_file(), target);
+        assert!(!session.is_dirty());
+        assert_eq!(
+            session.active_sequence().expect("active Sequence").name,
+            "Newer Same Destination"
+        );
+        state.close_project().expect("close project");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_save_as_keeps_its_admitted_destination_for_an_ordinary_save_retry() {
+        let root = unique_root("failed-save-as-retry");
+        let blocked_parent = root.join("blocked-parent");
+        fs::create_dir_all(&root).expect("create test root");
+        fs::write(&blocked_parent, b"not-a-directory").expect("create path blocker");
+        let target = blocked_parent.join("new-canonical.mdp");
+        let mut state = test_state(&root);
+        let original = state.authoring.as_ref().expect("session").project_file().to_path_buf();
+
+        let failed_id =
+            state.request_project_save_as(target.clone()).expect("admit failing Save As");
+        let failure = state
+            .wait_for_persistence_request(failed_id)
+            .expect_err("blocked destination must fail");
+        assert!(!failure.to_string().is_empty());
+        assert_eq!(
+            state.authoring.as_ref().expect("session").project_file(),
+            original
+        );
+        let admitted = state
+            .manual_project_file_destination
+            .as_ref()
+            .expect("admitted destination")
+            .clone();
+        assert_eq!(admitted.project_file(), target);
+
+        fs::remove_file(&blocked_parent).expect("remove path blocker");
+        fs::create_dir_all(&blocked_parent).expect("create destination directory");
+        let retry_id = state.request_project_save().expect("ordinary Save retries Save As target");
+        let mut completions = wait_for_completions(&state, &[retry_id]);
+        let retry = completions.remove(&retry_id.get()).expect("retry completion");
+        let ProjectPersistencePurpose::Manual { destination } = &retry.purpose else {
+            panic!("retry must be a manual publication");
+        };
+        assert_eq!(destination, &admitted);
+        assert_eq!(destination.project_file(), target);
+        assert_eq!(
+            state.apply_persistence_completion(retry).expect("apply retry completion"),
+            PersistenceCompletionDisposition::Applied
+        );
+        assert_eq!(
+            state.authoring.as_ref().expect("session").project_file(),
+            target
+        );
+        assert!(!state.has_unsaved_project_changes());
+        state.close_project().expect("close project");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_existing_baseline_cannot_hide_a_newer_manual_request_failure() {
+        let root = unique_root("newer-manual-failure");
+        let mut state = test_state(&root);
+        state.save_project_file().expect("establish manual baseline");
+        let request_id = state.request_project_save().expect("admit newer Save");
+        let mut completions = wait_for_completions(&state, &[request_id]);
+        let mut completion = completions.remove(&request_id.get()).expect("newer Save completion");
+        completion.result = Err("modeled later publication failure".to_owned());
+
+        let error = state
+            .apply_persistence_completion(completion)
+            .expect_err("an older applied receipt cannot satisfy a newer request");
+
+        assert!(error.contains("modeled later publication failure"));
+        assert!(!state.has_unsaved_project_changes());
+        state.close_project().expect("close project");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn superseded_destination_failure_cannot_rebind_or_dirty_the_current_destination() {
+        let root = unique_root("superseded-save-as");
+        let first_target = root.join("first-target.mdp");
+        let final_target = root.join("final-target.mdp");
+        let mut state = test_state(&root);
+        let first_id = state.request_project_save_as(first_target.clone()).expect("first Save As");
+        let final_id = state.request_project_save_as(final_target.clone()).expect("final Save As");
+        let mut completions = wait_for_completions(&state, &[first_id, final_id]);
+        let mut first = completions.remove(&first_id.get()).expect("first completion");
+        let final_completion = completions.remove(&final_id.get()).expect("final completion");
+
+        assert_eq!(
+            state
+                .apply_persistence_completion(final_completion)
+                .expect("apply final destination"),
+            PersistenceCompletionDisposition::Applied
+        );
+        first.result = Err("obsolete destination failed".to_owned());
+        assert_eq!(
+            state
+                .apply_persistence_completion(first)
+                .expect("obsolete failure is non-authoritative"),
+            PersistenceCompletionDisposition::IgnoredSupersededDestination
+        );
+        let session = state.authoring.as_ref().expect("session");
+        assert_eq!(session.project_file(), final_target);
+        assert!(!session.is_dirty());
+        assert!(
+            first_target.is_file(),
+            "completed obsolete artifact remains an ordinary copy"
+        );
+        state.close_project().expect("close project");
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn completion_from_a_closed_session_cannot_clean_or_rebind_a_reopen() {
         let root = unique_root("stale-session");
-        let mut state = AppState::new();
-        state.authoring = Some(test_session(&root));
+        let mut state = test_state(&root);
         let old_document = state.authoring.as_ref().expect("old session").document().clone();
         let old_library =
             Arc::clone(state.authoring.as_ref().expect("old session").asset_library());

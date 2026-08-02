@@ -7,14 +7,104 @@
 
 use super::preview_unavailability::PreviewUnavailability;
 use mondrian_core::types::SequenceId;
-use mondrian_core::WorkingColorSpace;
+use mondrian_core::{ExecutionCancellationToken, WorkingColorSpace};
 use mondrian_media::{DecodedVideoSurfaceFormat, PreviewDecodeExecutionPath};
 use mondrian_playback::FramePresentationQuality;
 use mondrian_renderer::{
-    RenderMonitorAdaptation, RenderOutputColorBoundary, ViewerGpuExecutionLayer,
+    HeterogeneousGpuContinuationBinding, RenderMonitorAdaptation, RenderOutputColorBoundary,
+    ViewerGpuExecutionLayer, ViewerHeterogeneousGpuCompletedBatch, ViewerHeterogeneousGpuInput,
 };
-use std::collections::hash_map::DefaultHasher;
+use sha2::{Digest, Sha256};
 use std::hash::{Hash, Hasher};
+
+/// Strong process-local semantic identity used by Preview cache and
+/// presentation-registration keys.
+///
+/// Construction is domain-separated and hashes every canonical field with
+/// SHA-256. The complete 32-byte value is equality authority; a compact
+/// `Hasher::finish()` projection is diagnostic only.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct PreviewSemanticIdentity([u8; 32]);
+
+impl std::fmt::Debug for PreviewSemanticIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, formatter)
+    }
+}
+
+impl std::fmt::Display for PreviewSemanticIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for byte in self.0 {
+            write!(formatter, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+impl PreviewSemanticIdentity {
+    /// Construct an identity from an already domain-separated complete
+    /// semantic fingerprint.
+    pub(crate) const fn from_complete_fingerprint(fingerprint: [u8; 32]) -> Self {
+        Self(fingerprint)
+    }
+
+    /// Complete authoritative fingerprint.
+    pub(crate) const fn semantic_fingerprint(self) -> [u8; 32] {
+        self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn from_test_fingerprint(fingerprint: [u8; 32]) -> Self {
+        Self::from_complete_fingerprint(fingerprint)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn compact_diagnostic_hash(self) -> u64 {
+        u64::from_le_bytes([
+            self.0[0], self.0[1], self.0[2], self.0[3], self.0[4], self.0[5], self.0[6], self.0[7],
+        ])
+    }
+}
+
+/// Canonical field writer shared by Preview media and Viewer-plan identities.
+pub(crate) struct PreviewSemanticIdentityBuilder {
+    hasher: Sha256,
+}
+
+impl PreviewSemanticIdentityBuilder {
+    /// Start a domain-separated identity.
+    pub(crate) fn new(domain: &'static [u8]) -> Self {
+        let mut builder = Self { hasher: Sha256::new() };
+        builder.write(domain);
+        builder
+    }
+
+    /// Finish the complete authoritative identity.
+    pub(crate) fn finish_identity(self) -> PreviewSemanticIdentity {
+        PreviewSemanticIdentity(self.hasher.finalize().into())
+    }
+}
+
+impl Hasher for PreviewSemanticIdentityBuilder {
+    fn finish(&self) -> u64 {
+        let fingerprint: [u8; 32] = self.hasher.clone().finalize().into();
+        u64::from_le_bytes([
+            fingerprint[0],
+            fingerprint[1],
+            fingerprint[2],
+            fingerprint[3],
+            fingerprint[4],
+            fingerprint[5],
+            fingerprint[6],
+            fingerprint[7],
+        ])
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.hasher.update((bytes.len() as u64).to_le_bytes());
+        self.hasher.update(bytes);
+    }
+}
 
 /// Complete identity of one resolved Viewer output.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -22,35 +112,65 @@ pub(crate) struct PreviewOutputKey {
     pub(crate) sequence_id: SequenceId,
     pub(crate) width: u32,
     pub(crate) height: u32,
-    pub(crate) plan_signature: u64,
+    pub(crate) plan_identity: PreviewSemanticIdentity,
+}
+
+impl std::fmt::Display for PreviewOutputKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}:{}x{}:{}",
+            self.sequence_id, self.width, self.height, self.plan_identity
+        )
+    }
 }
 
 impl PreviewOutputKey {
-    /// Construct one output identity from its complete resolved plan signature.
+    /// Construct one output identity from its complete resolved-plan identity.
     pub(crate) const fn new(
         sequence_id: SequenceId,
         width: u32,
         height: u32,
-        plan_signature: u64,
+        plan_identity: PreviewSemanticIdentity,
     ) -> Self {
-        Self { sequence_id, width, height, plan_signature }
+        Self { sequence_id, width, height, plan_identity }
     }
 
     /// Derive the monitor-adapted identity used by final Viewer presentation.
     pub(crate) fn with_monitor_adaptation(&self, adaptation: &RenderMonitorAdaptation) -> Self {
-        let mut hasher = DefaultHasher::new();
-        self.plan_signature.hash(&mut hasher);
-        adaptation.hash(&mut hasher);
-        Self::new(self.sequence_id, self.width, self.height, hasher.finish())
+        let mut builder =
+            PreviewSemanticIdentityBuilder::new(b"mondrian.preview.monitor-output.v1");
+        self.plan_identity.hash(&mut builder);
+        adaptation.hash(&mut builder);
+        Self::new(
+            self.sequence_id,
+            self.width,
+            self.height,
+            builder.finish_identity(),
+        )
+    }
+
+    /// Bind a semantic plan identity to one concrete non-reusable execution.
+    pub(crate) fn with_execution_nonce(&self, candidate_id: u64) -> Self {
+        let mut builder =
+            PreviewSemanticIdentityBuilder::new(b"mondrian.preview.execution-output.v1");
+        self.plan_identity.hash(&mut builder);
+        candidate_id.hash(&mut builder);
+        Self::new(
+            self.sequence_id,
+            self.width,
+            self.height,
+            builder.finish_identity(),
+        )
     }
 }
 
 /// UI-neutral result of asking for a GPU Viewer execution candidate.
 pub(crate) enum PreviewGpuFrameState {
     /// The exact output is already registered by the active presentation Adapter.
-    Current,
+    Current(super::preview_runtime::PreviewPresentationCandidate<()>),
     /// The exact current output is the semantic transparent canvas and needs no texture.
-    Transparent,
+    Transparent(super::preview_runtime::PreviewPresentationCandidate<()>),
     /// A working-space frame is ready for Viewer GPU execution.
     Ready(Box<PreviewGpuFrame>),
     /// Required media is still decoding or rendering.
@@ -80,6 +200,10 @@ pub(crate) struct PreviewGpuFrame {
     pub(crate) monitor_adaptation: RenderMonitorAdaptation,
     candidate_id: u64,
     presentation_ticket: Option<mondrian_playback::FramePresentationTicket>,
+    heterogeneous_execution: Option<PreviewGpuHeterogeneousExecution>,
+    // Intentionally unread: dropping the complete submitted frame releases
+    // these demand-scoped Frame Store guards only after exact GPU completion.
+    _media_residency_protections: Vec<mondrian_playback::MediaFrameProtectionLease>,
     #[cfg_attr(not(test), allow(dead_code))]
     decode_execution: PreviewDecodeExecutionSummary,
 }
@@ -100,6 +224,8 @@ impl PreviewGpuFrame {
         candidate_id: u64,
         presentation_ticket: Option<mondrian_playback::FramePresentationTicket>,
         decode_execution: PreviewDecodeExecutionSummary,
+        heterogeneous_execution: Option<PreviewGpuHeterogeneousExecution>,
+        media_residency_protections: Vec<mondrian_playback::MediaFrameProtectionLease>,
     ) -> Self {
         Self {
             output_key,
@@ -113,16 +239,15 @@ impl PreviewGpuFrame {
             monitor_adaptation,
             candidate_id,
             presentation_ticket,
+            heterogeneous_execution,
+            _media_residency_protections: media_residency_protections,
             decode_execution,
         }
     }
 
     /// Stable renderer registration key for this resolved output.
     pub(crate) fn external_texture_key(&self) -> String {
-        format!(
-            "viewer.gpu:{}:{}x{}:{:016x}",
-            self.sequence_id, self.width, self.height, self.output_key.plan_signature
-        )
+        format!("viewer.gpu:{}", self.output_key)
     }
 
     /// Candidate identity used to correlate one execution attempt.
@@ -137,11 +262,177 @@ impl PreviewGpuFrame {
         self.presentation_ticket
     }
 
+    /// Move the exact CPU-prefix completions into Viewer command recording.
+    ///
+    /// The Broker lease remains attached to this frame until recording and
+    /// submission succeed. Calling this twice returns an empty input table and
+    /// causes renderer validation to fail closed.
+    pub(crate) fn take_heterogeneous_gpu_inputs(&mut self) -> Vec<ViewerHeterogeneousGpuInput> {
+        self.heterogeneous_execution
+            .as_mut()
+            .map_or_else(Vec::new, PreviewGpuHeterogeneousExecution::take_inputs)
+    }
+
+    /// Whether this candidate owns a Broker lease that must cross actual GPU
+    /// completion before publication.
+    pub(crate) fn has_heterogeneous_gpu_execution(&self) -> bool {
+        self.heterogeneous_execution.is_some()
+    }
+
+    /// Move terminal authority into the Adapter's in-flight submission state.
+    pub(crate) fn take_heterogeneous_gpu_execution(
+        &mut self,
+    ) -> Option<PreviewGpuHeterogeneousExecution> {
+        self.heterogeneous_execution.take()
+    }
+
     /// Decode provenance for the exact media layers entering this candidate.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const fn decode_execution(&self) -> PreviewDecodeExecutionSummary {
         self.decode_execution
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PreviewGpuHeterogeneousExpectation {
+    graph_fingerprint: [u8; 32],
+    generation: u64,
+    frame_extent: mondrian_effects::EffectFrameExtent,
+    frame_seed: i64,
+}
+
+/// Move-only terminal authority for a Broker-owned heterogeneous Viewer
+/// candidate.
+pub(crate) struct PreviewGpuHeterogeneousExecution {
+    inputs: Vec<ViewerHeterogeneousGpuInput>,
+    expectations: Vec<PreviewGpuHeterogeneousExpectation>,
+    lease: Option<super::preview_visual_execution_task::VisualExecutionLease>,
+    reusable: bool,
+}
+
+impl PreviewGpuHeterogeneousExecution {
+    /// Bind exact renderer inputs to the visual Broker lease that produced
+    /// their CPU prefixes.
+    pub(crate) fn new(
+        inputs: Vec<ViewerHeterogeneousGpuInput>,
+        lease: super::preview_visual_execution_task::VisualExecutionLease,
+        reusable: bool,
+    ) -> Result<
+        Self,
+        (
+            PreviewGpuHeterogeneousCompletionError,
+            super::preview_visual_execution_task::VisualExecutionLease,
+        ),
+    > {
+        if inputs.is_empty() {
+            return Err((
+                PreviewGpuHeterogeneousCompletionError::EmptyInputBatch,
+                lease,
+            ));
+        }
+        let lease_generation = lease.generation();
+        let expectations = inputs
+            .iter()
+            .map(|input| expectation(input.request.binding()))
+            .collect::<Vec<_>>();
+        if expectations.iter().any(|expected| expected.generation != lease_generation) {
+            return Err((
+                PreviewGpuHeterogeneousCompletionError::LeaseGenerationMismatch {
+                    lease_generation,
+                },
+                lease,
+            ));
+        }
+        Ok(Self { inputs, expectations, lease: Some(lease), reusable })
+    }
+
+    fn take_inputs(&mut self) -> Vec<ViewerHeterogeneousGpuInput> {
+        std::mem::take(&mut self.inputs)
+    }
+
+    /// Validate renderer completion evidence without consuming the still-active
+    /// Broker lease. No freshness or deadline decision is made here.
+    pub(crate) fn validate_completed(
+        &self,
+        completed: &ViewerHeterogeneousGpuCompletedBatch,
+    ) -> Result<(), PreviewGpuHeterogeneousCompletionError> {
+        if !self.inputs.is_empty() {
+            return Err(PreviewGpuHeterogeneousCompletionError::InputsNotRecorded);
+        }
+        if completed.len() != self.expectations.len() {
+            return Err(
+                PreviewGpuHeterogeneousCompletionError::CompletionCountMismatch {
+                    expected: self.expectations.len(),
+                    actual: completed.len(),
+                },
+            );
+        }
+        for (expected, actual) in self.expectations.iter().zip(completed.continuations().iter()) {
+            let recorded = actual.evidence().recorded();
+            if recorded.graph_fingerprint() != expected.graph_fingerprint
+                || recorded.generation() != expected.generation
+                || recorded.frame_extent() != expected.frame_extent
+                || recorded.frame_seed() != expected.frame_seed
+            {
+                return Err(PreviewGpuHeterogeneousCompletionError::CompletionIdentityMismatch);
+            }
+        }
+        if self.lease.is_none() {
+            return Err(PreviewGpuHeterogeneousCompletionError::LeaseMissing);
+        }
+        Ok(())
+    }
+
+    /// Whether this exact effect output admits compatible in-flight rebound
+    /// and post-completion cache use.
+    pub(crate) const fn reusable(&self) -> bool {
+        self.reusable
+    }
+
+    /// Consume the validated terminal and return its active Broker lease.
+    pub(crate) fn into_lease(
+        mut self,
+    ) -> Result<
+        super::preview_visual_execution_task::VisualExecutionLease,
+        PreviewGpuHeterogeneousCompletionError,
+    > {
+        self.lease.take().ok_or(PreviewGpuHeterogeneousCompletionError::LeaseMissing)
+    }
+
+    /// Fail this candidate before actual GPU completion. The Broker atomically
+    /// decides whether a latest compatible binding still owns terminal
+    /// authority.
+    pub(crate) fn fail(
+        mut self,
+    ) -> Option<super::preview_visual_execution_task::VisualExecutionGpuFailure> {
+        self.lease.take().map(|lease| lease.fail_gpu())
+    }
+}
+
+fn expectation(binding: HeterogeneousGpuContinuationBinding) -> PreviewGpuHeterogeneousExpectation {
+    PreviewGpuHeterogeneousExpectation {
+        graph_fingerprint: binding.graph_fingerprint(),
+        generation: binding.generation(),
+        frame_extent: binding.frame_extent(),
+        frame_seed: binding.frame_seed(),
+    }
+}
+
+/// Invalid ownership or evidence at the heterogeneous Viewer terminal seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum PreviewGpuHeterogeneousCompletionError {
+    #[error("heterogeneous Viewer execution has no CPU-prefix inputs")]
+    EmptyInputBatch,
+    #[error("heterogeneous Viewer input generation does not match lease {lease_generation}")]
+    LeaseGenerationMismatch { lease_generation: u64 },
+    #[error("heterogeneous Viewer inputs were not consumed by command recording")]
+    InputsNotRecorded,
+    #[error("heterogeneous Viewer completion count is {actual}, expected {expected}")]
+    CompletionCountMismatch { expected: usize, actual: usize },
+    #[error("heterogeneous Viewer completion identity differs from its recorded request")]
+    CompletionIdentityMismatch,
+    #[error("heterogeneous Viewer Broker lease is missing")]
+    LeaseMissing,
 }
 
 /// Decode provenance aggregated across one resolved Viewer candidate.
@@ -222,6 +513,7 @@ pub(crate) enum PreviewCandidateDecision {
 pub(crate) struct PreviewExecutionCoordinator<G, K, O> {
     generation_key: Option<G>,
     generation: u64,
+    generation_cancellation: ExecutionCancellationToken,
     pending: bool,
     presentation_quality: FramePresentationQuality,
     next_candidate_id: u64,
@@ -234,6 +526,7 @@ impl<G, K, O> Default for PreviewExecutionCoordinator<G, K, O> {
         Self {
             generation_key: None,
             generation: 0,
+            generation_cancellation: ExecutionCancellationToken::new(),
             pending: false,
             presentation_quality: FramePresentationQuality::Ready,
             next_candidate_id: 0,
@@ -264,8 +557,10 @@ impl<G: PartialEq, K, O> PreviewExecutionCoordinator<G, K, O> {
         if self.generation_key.as_ref() == Some(&key) {
             return PreviewGenerationBinding::Current(self.generation);
         }
+        self.generation_cancellation.cancel();
         self.generation_key = Some(key);
         self.generation = begin_generation();
+        self.generation_cancellation = ExecutionCancellationToken::new();
         self.pending = false;
         PreviewGenerationBinding::Rotated(self.generation)
     }
@@ -273,8 +568,10 @@ impl<G: PartialEq, K, O> PreviewExecutionCoordinator<G, K, O> {
     /// Invalidate every intent and bind the resulting empty lifecycle to a new
     /// execution generation.
     pub(crate) fn invalidate(&mut self, begin_generation: impl FnOnce() -> u64) -> u64 {
+        self.generation_cancellation.cancel();
         self.generation_key = None;
         self.generation = begin_generation();
+        self.generation_cancellation = ExecutionCancellationToken::new();
         self.pending = false;
         self.presentation_quality = FramePresentationQuality::Ready;
         self.current_output = None;
@@ -285,6 +582,12 @@ impl<G: PartialEq, K, O> PreviewExecutionCoordinator<G, K, O> {
     /// Current execution generation.
     pub(crate) const fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Cooperative cancellation authority for the current immutable
+    /// generation. A rotation cancels every previously issued clone.
+    pub(crate) fn generation_cancellation(&self) -> ExecutionCancellationToken {
+        self.generation_cancellation.clone()
     }
 
     /// Mark whether the current intent is waiting for required media work.
@@ -321,6 +624,20 @@ impl<G: PartialEq, K, O> PreviewExecutionCoordinator<G, K, O> {
     where
         K: PartialEq,
     {
+        self.plan_candidate_with_reuse(resolved_key, true)
+    }
+
+    /// Select one action while keeping semantic identity separate from cache
+    /// admission. A non-reusable plan always receives a fresh candidate even
+    /// when its semantic key equals the retained output.
+    pub(crate) fn plan_candidate_with_reuse(
+        &mut self,
+        resolved_key: Option<&K>,
+        allow_cross_call_reuse: bool,
+    ) -> PreviewCandidateDecision
+    where
+        K: PartialEq,
+    {
         let Some(key) = resolved_key else {
             return if self.pending {
                 PreviewCandidateDecision::Loading
@@ -328,7 +645,9 @@ impl<G: PartialEq, K, O> PreviewExecutionCoordinator<G, K, O> {
                 PreviewCandidateDecision::Unavailable
             };
         };
-        if self.current_output.as_ref().is_some_and(|(current, _)| current == key) {
+        if allow_cross_call_reuse
+            && self.current_output.as_ref().is_some_and(|(current, _)| current == key)
+        {
             // Re-resolving the complete output identity proves that a retained
             // stale output is exact under the active generation again.
             self.current_output_generation = Some(self.generation);
@@ -371,10 +690,46 @@ impl<G: PartialEq, K, O> PreviewExecutionCoordinator<G, K, O> {
         self.current_output.as_ref().map(|(key, output)| (key, output))
     }
 
+    /// Inspect the registered output only when it remains proved under the
+    /// active execution generation.
+    ///
+    /// This is a read-only observation of an artifact that was already made
+    /// usable. It does not re-resolve a semantic key, refresh stale authority,
+    /// or publish an output.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn exact_current_output(&self) -> Option<(&K, &O)> {
+        self.has_exact_current_output().then(|| self.current_output()).flatten()
+    }
+
     /// Retire the currently registered output without rotating media work.
     pub(crate) fn clear_output(&mut self) -> bool {
         self.current_output_generation = None;
         self.current_output.take().is_some()
+    }
+
+    /// Retire the output only when both its semantic key and Adapter-owned
+    /// physical artifact identity still match.
+    ///
+    /// The predicate must be a bounded, non-reentrant identity comparison. It
+    /// executes while the Coordinator exclusively owns the check-and-clear
+    /// transition so a same-semantic replacement cannot be cleared between
+    /// authority validation and commit.
+    pub(crate) fn clear_output_if(
+        &mut self,
+        key: &K,
+        matches_artifact: impl FnOnce(&O) -> bool,
+    ) -> bool
+    where
+        K: PartialEq,
+    {
+        let matches = self
+            .current_output
+            .as_ref()
+            .is_some_and(|(current, output)| current == key && matches_artifact(output));
+        if !matches {
+            return false;
+        }
+        self.clear_output()
     }
 }
 
@@ -393,6 +748,7 @@ mod tests {
         coordinator.set_presentation_quality(FramePresentationQuality::Degraded);
         coordinator.register_output(9, "texture");
         assert!(coordinator.has_exact_current_output());
+        assert_eq!(coordinator.exact_current_output(), Some((&9, &"texture")));
         assert_eq!(
             coordinator.plan_candidate(Some(&9)),
             PreviewCandidateDecision::Current
@@ -421,6 +777,7 @@ mod tests {
         );
         assert_eq!(coordinator.output_for(&9), None);
         assert!(!coordinator.has_exact_current_output());
+        assert_eq!(coordinator.exact_current_output(), None);
     }
 
     #[test]
@@ -437,10 +794,69 @@ mod tests {
             PreviewGenerationBinding::Rotated(42)
         );
         assert!(!coordinator.has_exact_current_output());
+        assert_eq!(coordinator.exact_current_output(), None);
         assert_eq!(
             coordinator.plan_candidate(Some(&9)),
             PreviewCandidateDecision::Current
         );
         assert!(coordinator.has_exact_current_output());
+    }
+
+    #[test]
+    fn seek_and_invalidation_cancel_only_the_retired_generation() {
+        let mut coordinator = PreviewExecutionCoordinator::<u8, u8, ()>::default();
+        coordinator.bind_generation(1, || 41);
+        let first = coordinator.generation_cancellation();
+        assert!(!first.is_canceled());
+
+        assert_eq!(
+            coordinator.bind_generation(1, || panic!("same intent must not rotate")),
+            PreviewGenerationBinding::Current(41)
+        );
+        assert!(!first.is_canceled());
+
+        assert_eq!(
+            coordinator.bind_generation(2, || 42),
+            PreviewGenerationBinding::Rotated(42)
+        );
+        assert!(
+            first.is_canceled(),
+            "seek rotation must retire the old token"
+        );
+        let second = coordinator.generation_cancellation();
+        assert!(!second.is_canceled());
+
+        coordinator.invalidate(|| 43);
+        assert!(second.is_canceled());
+        assert!(!coordinator.generation_cancellation().is_canceled());
+    }
+
+    #[test]
+    fn non_reusable_semantic_identity_always_issues_a_fresh_candidate() {
+        let mut coordinator = PreviewExecutionCoordinator::<u8, u8, &'static str>::default();
+        coordinator.bind_generation(1, || 41);
+        coordinator.register_output(9, "texture");
+
+        assert_eq!(
+            coordinator.plan_candidate_with_reuse(Some(&9), false),
+            PreviewCandidateDecision::Execute(1)
+        );
+        assert_eq!(
+            coordinator.plan_candidate_with_reuse(Some(&9), false),
+            PreviewCandidateDecision::Execute(2)
+        );
+    }
+
+    #[test]
+    fn conditional_clear_is_atomic_across_semantic_and_physical_identity() {
+        let mut coordinator = PreviewExecutionCoordinator::<u8, u8, &'static str>::default();
+        coordinator.bind_generation(1, || 41);
+        coordinator.register_output(9, "physical:new");
+
+        assert!(!coordinator.clear_output_if(&9, |output| *output == "physical:old"));
+        assert_eq!(coordinator.current_output(), Some((&9, &"physical:new")));
+        assert!(!coordinator.clear_output_if(&10, |output| *output == "physical:new"));
+        assert!(coordinator.clear_output_if(&9, |output| *output == "physical:new"));
+        assert!(coordinator.current_output().is_none());
     }
 }

@@ -405,7 +405,7 @@ mod tests {
         let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
         let mut group = SegmentedButtonGroup::new(
             vec![
-                SegmentedButtonItem::new("System", Action::NoOp),
+                SegmentedButtonItem::new("System", Action::CloseProject),
                 SegmentedButtonItem::new("Dark", Action::SaveProject),
             ],
             0,
@@ -444,8 +444,8 @@ mod tests {
     fn segmented_group_selected_pill_uses_rounded_geometry() {
         let mut group = SegmentedButtonGroup::new(
             vec![
-                SegmentedButtonItem::new("A", Action::NoOp),
-                SegmentedButtonItem::new("B", Action::NoOp),
+                SegmentedButtonItem::new("A", Action::Play),
+                SegmentedButtonItem::new("B", Action::Pause),
             ],
             1,
         );
@@ -474,7 +474,7 @@ mod tests {
         let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
         let mut group = SegmentedButtonGroup::new(
             vec![
-                SegmentedButtonItem::new("System", Action::NoOp),
+                SegmentedButtonItem::new("System", Action::CloseProject),
                 SegmentedButtonItem::new("Dark", Action::SaveProject),
             ],
             0,
@@ -499,7 +499,7 @@ mod tests {
         let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
         let mut group = SegmentedButtonGroup::new(
             vec![
-                SegmentedButtonItem::new("System", Action::NoOp),
+                SegmentedButtonItem::new("System", Action::CloseProject),
                 SegmentedButtonItem::new("Dark", Action::SaveProject),
             ],
             0,

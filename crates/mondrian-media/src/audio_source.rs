@@ -16,16 +16,56 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const AUDIO_SOURCE_WINDOW_SECONDS: usize = 10;
-const AUDIO_SOURCE_CACHE_ENTRY_CAPACITY: usize = 128;
-const AUDIO_SOURCE_CACHE_BYTE_BUDGET: usize = 256 * 1024 * 1024;
+const AUDIO_SOURCE_CACHE_ENTRY_CAPACITY: usize = 16;
+const AUDIO_SOURCE_CACHE_BYTE_BUDGET: usize = 64 * 1024 * 1024;
+const AUDIO_SOURCE_DECODER_SESSION_CAPACITY: usize = 2;
 const AUDIO_SOURCE_FAILURE_CAPACITY: usize = 64;
+
+/// Online-reconfigurable residency limits for one decoded-audio source cache.
+///
+/// These limits control retained PCM and persistent decoder residency only.
+/// Lowering them never changes sample coordinates, channel mapping, or mixing
+/// semantics; a non-resident window is decoded again on demand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioSourceCacheConfig {
+    /// Maximum number of retained decoded PCM windows.
+    pub entry_capacity: usize,
+    /// Maximum retained decoded PCM payload bytes.
+    pub byte_budget: usize,
+    /// Maximum persistent FFmpeg source sessions.
+    pub decoder_session_capacity: usize,
+}
+
+impl AudioSourceCacheConfig {
+    /// Build normalized limits. Every execution cache retains at least one
+    /// admission slot, while a byte budget smaller than one decoded window is
+    /// valid and makes that window non-resident after use.
+    pub const fn new(
+        entry_capacity: usize,
+        byte_budget: usize,
+        decoder_session_capacity: usize,
+    ) -> Self {
+        Self {
+            entry_capacity: if entry_capacity == 0 {
+                1
+            } else {
+                entry_capacity
+            },
+            byte_budget: if byte_budget == 0 { 1 } else { byte_budget },
+            decoder_session_capacity: if decoder_session_capacity == 0 {
+                1
+            } else {
+                decoder_session_capacity
+            },
+        }
+    }
+}
 
 /// Shared weighted-LRU owner for native-layout decoded PCM windows at one sample rate.
 pub struct AudioSourceCache {
     sample_rate: u32,
     window_frames: usize,
-    entry_capacity: usize,
-    byte_budget: usize,
+    configuration: Mutex<()>,
     state: Mutex<AudioSourceCacheState>,
     window_ready: Condvar,
     decoder: Arc<dyn AudioWindowDecoder>,
@@ -47,7 +87,15 @@ impl AudioSourceIdentity {
             asset_id: path.display().to_string(),
             reason: format!("读取音频源元数据失败: {error}"),
         })?;
-        let current_fingerprint = crate::MediaFileFingerprint::from_metadata(&metadata);
+        let current_fingerprint = crate::MediaFileFingerprint::capture(path);
+        if !current_fingerprint.authorizes_reuse()
+            || !selection.source_fingerprint().authorizes_reuse()
+        {
+            return Err(MondrianError::DecodeFailed {
+                asset_id: path.display().to_string(),
+                reason: "audio source revision evidence is incomplete".to_owned(),
+            });
+        }
         if current_fingerprint != selection.source_fingerprint() {
             return Err(MondrianError::DecodeFailed {
                 asset_id: path.display().to_string(),
@@ -109,8 +157,8 @@ struct AudioSourceFailureEntry {
     reason: String,
 }
 
-#[derive(Default)]
 struct AudioSourceCacheState {
+    config: AudioSourceCacheConfig,
     entries: VecDeque<AudioSourceWindowEntry>,
     failures: VecDeque<AudioSourceFailureEntry>,
     reserved_bytes: usize,
@@ -121,9 +169,38 @@ struct AudioSourceCacheState {
     decode_total_duration_us: u64,
     decode_max_duration_us: u64,
     evictions: u64,
+    budget_reconfigurations: u64,
+    budget_trim_events: u64,
+    budget_trimmed_entries: u64,
+    budget_trimmed_bytes: u64,
     oversize_windows: u64,
     in_flight: Vec<AudioSourceWindowKey>,
     peak_in_flight: usize,
+}
+
+impl AudioSourceCacheState {
+    fn new(config: AudioSourceCacheConfig) -> Self {
+        Self {
+            config,
+            entries: VecDeque::new(),
+            failures: VecDeque::new(),
+            reserved_bytes: 0,
+            hits: 0,
+            misses: 0,
+            decode_successes: 0,
+            decode_failures: 0,
+            decode_total_duration_us: 0,
+            decode_max_duration_us: 0,
+            evictions: 0,
+            budget_reconfigurations: 0,
+            budget_trim_events: 0,
+            budget_trimmed_entries: 0,
+            budget_trimmed_bytes: 0,
+            oversize_windows: 0,
+            in_flight: Vec::new(),
+            peak_in_flight: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -135,6 +212,9 @@ pub(super) struct AudioWindowDecoderDiagnostics {
     pub(super) sequential_reuses: u64,
     pub(super) random_seek_restarts: u64,
     pub(super) session_evictions: u64,
+    pub(super) capacity_reconfigurations: u64,
+    pub(super) capacity_trim_evictions: u64,
+    pub(super) sessions_above_capacity: usize,
     pub(super) cancellations: u64,
     pub(super) cold_window_max_duration_us: u64,
     pub(super) sequential_window_max_duration_us: u64,
@@ -155,6 +235,8 @@ pub(super) trait AudioWindowDecoder: Send + Sync {
     fn diagnostics(&self) -> AudioWindowDecoderDiagnostics {
         AudioWindowDecoderDiagnostics::default()
     }
+
+    fn reconfigure_session_capacity(&self, _session_capacity: usize) {}
 }
 
 /// Stable reader for one fingerprinted media source in its exact native layout.
@@ -194,6 +276,14 @@ pub struct AudioSourceCacheDiagnostics {
     pub decode_max_duration_us: u64,
     /// LRU evictions caused by entry or byte pressure.
     pub evictions: u64,
+    /// Number of online residency-limit changes.
+    pub budget_reconfigurations: u64,
+    /// Limit changes that immediately removed at least one resident window.
+    pub budget_trim_events: u64,
+    /// Resident windows removed synchronously by online limit changes.
+    pub budget_trimmed_entries: u64,
+    /// PCM payload bytes released synchronously by online limit changes.
+    pub budget_trimmed_bytes: u64,
     /// Decoded windows too large for the configured byte budget and therefore not retained.
     pub oversize_windows: u64,
     /// Distinct source windows currently owned by decode leaders.
@@ -214,6 +304,15 @@ pub struct AudioSourceCacheDiagnostics {
     pub decoder_random_seek_restarts: u64,
     /// Sessions evicted by bounded decoder-pool pressure.
     pub decoder_session_evictions: u64,
+    /// Number of online persistent-session capacity changes.
+    pub decoder_capacity_reconfigurations: u64,
+    /// Idle sessions terminated synchronously or on post-use convergence after
+    /// an online capacity reduction.
+    pub decoder_capacity_trim_evictions: u64,
+    /// Busy sessions temporarily retained above the configured capacity.
+    ///
+    /// This converges to zero as those sessions finish their current decode.
+    pub decoder_sessions_above_capacity: usize,
     /// Decode sessions terminated by generation cancellation.
     pub decoder_cancellations: u64,
     /// Slowest first window from a newly opened decode session.
@@ -225,15 +324,21 @@ pub struct AudioSourceCacheDiagnostics {
 }
 
 impl AudioSourceCache {
-    /// Create the product cache: ten-second decode windows, 128 entries, and a
-    /// 256 MiB global PCM payload budget across every open source.
+    /// Create a conservatively sized product cache.
+    ///
+    /// The composition root applies the current machine/pressure decision
+    /// online through [`Self::reconfigure`]. These initial limits are therefore
+    /// a safe startup baseline, not a fixed product entitlement.
     pub fn new(sample_rate: u32) -> Self {
         Self::with_decoder(
             sample_rate,
             AUDIO_SOURCE_WINDOW_SECONDS,
             AUDIO_SOURCE_CACHE_ENTRY_CAPACITY,
             AUDIO_SOURCE_CACHE_BYTE_BUDGET,
-            Arc::new(PersistentFfmpegAudioWindowDecoder::default()),
+            AUDIO_SOURCE_DECODER_SESSION_CAPACITY,
+            Arc::new(PersistentFfmpegAudioWindowDecoder::with_capacity(
+                AUDIO_SOURCE_DECODER_SESSION_CAPACITY,
+            )),
         )
     }
 
@@ -254,12 +359,33 @@ impl AudioSourceCache {
         entry_capacity: usize,
         byte_budget: usize,
     ) -> Self {
+        Self::new_bounded_with_sessions(
+            sample_rate,
+            window_seconds,
+            entry_capacity,
+            byte_budget,
+            AUDIO_SOURCE_DECODER_SESSION_CAPACITY,
+        )
+    }
+
+    /// Create an independently scheduled cache with explicit PCM and
+    /// persistent-decoder limits.
+    pub fn new_bounded_with_sessions(
+        sample_rate: u32,
+        window_seconds: usize,
+        entry_capacity: usize,
+        byte_budget: usize,
+        decoder_session_capacity: usize,
+    ) -> Self {
         Self::with_decoder(
             sample_rate,
             window_seconds,
             entry_capacity,
             byte_budget,
-            Arc::new(PersistentFfmpegAudioWindowDecoder::default()),
+            decoder_session_capacity,
+            Arc::new(PersistentFfmpegAudioWindowDecoder::with_capacity(
+                decoder_session_capacity,
+            )),
         )
     }
 
@@ -268,18 +394,57 @@ impl AudioSourceCache {
         window_seconds: usize,
         entry_capacity: usize,
         byte_budget: usize,
+        decoder_session_capacity: usize,
         decoder: Arc<dyn AudioWindowDecoder>,
     ) -> Self {
         let sample_rate = sample_rate.max(8_000);
+        let config =
+            AudioSourceCacheConfig::new(entry_capacity, byte_budget, decoder_session_capacity);
+        decoder.reconfigure_session_capacity(config.decoder_session_capacity);
         Self {
             sample_rate,
             window_frames: (sample_rate as usize).saturating_mul(window_seconds.max(1)),
-            entry_capacity: entry_capacity.max(1),
-            byte_budget: byte_budget.max(1),
-            state: Mutex::new(AudioSourceCacheState::default()),
+            configuration: Mutex::new(()),
+            state: Mutex::new(AudioSourceCacheState::new(config)),
             window_ready: Condvar::new(),
             decoder,
         }
+    }
+
+    /// Apply new hard residency limits and synchronously trim the PCM LRU.
+    ///
+    /// In-flight decodes are never interrupted merely to reclaim cache
+    /// residency. Their result observes the latest limits before publication.
+    /// The decoder pool similarly terminates idle LRU sessions immediately and
+    /// converges after any busy sessions finish.
+    pub fn reconfigure(&self, config: AudioSourceCacheConfig) {
+        let _configuration = self.configuration.lock();
+        let config = AudioSourceCacheConfig::new(
+            config.entry_capacity,
+            config.byte_budget,
+            config.decoder_session_capacity,
+        );
+        {
+            let mut state = self.state.lock();
+            if state.config.entry_capacity != config.entry_capacity
+                || state.config.byte_budget != config.byte_budget
+            {
+                state.config.entry_capacity = config.entry_capacity;
+                state.config.byte_budget = config.byte_budget;
+                state.budget_reconfigurations = state.budget_reconfigurations.saturating_add(1);
+                let (entries, bytes) = trim_pcm_entries_to_config(&mut state);
+                if entries > 0 {
+                    state.budget_trim_events = state.budget_trim_events.saturating_add(1);
+                    state.budget_trimmed_entries =
+                        state.budget_trimmed_entries.saturating_add(entries as u64);
+                    state.budget_trimmed_bytes =
+                        state.budget_trimmed_bytes.saturating_add(bytes as u64);
+                    state.evictions = state.evictions.saturating_add(entries as u64);
+                }
+            }
+            state.config.decoder_session_capacity = config.decoder_session_capacity;
+        }
+        self.decoder.reconfigure_session_capacity(config.decoder_session_capacity);
     }
 
     /// Open one source identity without decoding its complete duration.
@@ -296,14 +461,15 @@ impl AudioSourceCache {
 
     /// Capture bounded residency and execution evidence.
     pub fn diagnostics(&self) -> AudioSourceCacheDiagnostics {
+        let _configuration = self.configuration.lock();
         let state = self.state.lock();
         let decoder = self.decoder.diagnostics();
         AudioSourceCacheDiagnostics {
             entries: state.entries.len(),
             failures: state.failures.len(),
             reserved_bytes: state.reserved_bytes,
-            byte_budget: self.byte_budget,
-            entry_capacity: self.entry_capacity,
+            byte_budget: state.config.byte_budget,
+            entry_capacity: state.config.entry_capacity,
             hits: state.hits,
             misses: state.misses,
             decode_successes: state.decode_successes,
@@ -311,6 +477,10 @@ impl AudioSourceCache {
             decode_total_duration_us: state.decode_total_duration_us,
             decode_max_duration_us: state.decode_max_duration_us,
             evictions: state.evictions,
+            budget_reconfigurations: state.budget_reconfigurations,
+            budget_trim_events: state.budget_trim_events,
+            budget_trimmed_entries: state.budget_trimmed_entries,
+            budget_trimmed_bytes: state.budget_trimmed_bytes,
             oversize_windows: state.oversize_windows,
             in_flight_decodes: state.in_flight.len(),
             peak_in_flight_decodes: state.peak_in_flight,
@@ -321,6 +491,9 @@ impl AudioSourceCache {
             decoder_sequential_reuses: decoder.sequential_reuses,
             decoder_random_seek_restarts: decoder.random_seek_restarts,
             decoder_session_evictions: decoder.session_evictions,
+            decoder_capacity_reconfigurations: decoder.capacity_reconfigurations,
+            decoder_capacity_trim_evictions: decoder.capacity_trim_evictions,
+            decoder_sessions_above_capacity: decoder.sessions_above_capacity,
             decoder_cancellations: decoder.cancellations,
             decoder_cold_window_max_duration_us: decoder.cold_window_max_duration_us,
             decoder_sequential_window_max_duration_us: decoder.sequential_window_max_duration_us,
@@ -394,15 +567,15 @@ impl AudioSourceCache {
                 state.decode_max_duration_us = state.decode_max_duration_us.max(decode_duration_us);
                 state.failures.retain(|failure| failure.key != key);
                 while !state.entries.is_empty()
-                    && (state.entries.len() >= self.entry_capacity
-                        || state.reserved_bytes.saturating_add(bytes) > self.byte_budget)
+                    && (state.entries.len() >= state.config.entry_capacity
+                        || state.reserved_bytes.saturating_add(bytes) > state.config.byte_budget)
                 {
                     if let Some(evicted) = state.entries.pop_back() {
                         state.reserved_bytes = state.reserved_bytes.saturating_sub(evicted.bytes);
                         state.evictions = state.evictions.saturating_add(1);
                     }
                 }
-                if bytes <= self.byte_budget {
+                if bytes <= state.config.byte_budget {
                     state.reserved_bytes = state.reserved_bytes.saturating_add(bytes);
                     state.in_flight.retain(|in_flight| in_flight != &key);
                     state.entries.push_front(AudioSourceWindowEntry {
@@ -469,6 +642,22 @@ impl AudioSourceCache {
         }
         Ok(buffer)
     }
+}
+
+fn trim_pcm_entries_to_config(state: &mut AudioSourceCacheState) -> (usize, usize) {
+    let mut entries = 0usize;
+    let mut bytes = 0usize;
+    while state.entries.len() > state.config.entry_capacity
+        || state.reserved_bytes > state.config.byte_budget
+    {
+        let Some(evicted) = state.entries.pop_back() else {
+            break;
+        };
+        state.reserved_bytes = state.reserved_bytes.saturating_sub(evicted.bytes);
+        entries = entries.saturating_add(1);
+        bytes = bytes.saturating_add(evicted.bytes);
+    }
+    (entries, bytes)
 }
 
 impl AudioSourceReader {
@@ -715,6 +904,7 @@ mod tests {
             1,
             entry_capacity,
             byte_budget,
+            1,
             decoder,
         ));
         let reader =
@@ -752,6 +942,7 @@ mod tests {
             1,
             4,
             4 * 8_000 * 2 * std::mem::size_of::<f32>(),
+            1,
             decoder.clone(),
         ));
         let first = cache.open(file.path(), stereo_selection(file.path(), 1)).expect("stream one");
@@ -780,6 +971,7 @@ mod tests {
             1,
             2,
             1_000_000,
+            1,
             decoder.clone(),
         ));
         let reader =
@@ -827,6 +1019,7 @@ mod tests {
             1,
             2,
             1_000_000,
+            1,
             decoder.clone(),
         ));
         let first_reader = cache
@@ -901,11 +1094,75 @@ mod tests {
     }
 
     #[test]
+    fn online_budget_reduction_synchronously_trims_the_true_pcm_lru() {
+        let decoder = Arc::new(RampWindowDecoder::new());
+        let mut file = tempfile::NamedTempFile::new().expect("temporary source");
+        file.write_all(b"source").expect("source identity");
+        let window_frames = 48_000 * 10;
+        let window_bytes = window_frames * 2 * std::mem::size_of::<f32>();
+        let cache = Arc::new(AudioSourceCache::with_decoder(
+            48_000,
+            10,
+            8,
+            4 * window_bytes,
+            1,
+            decoder.clone(),
+        ));
+        let reader = cache
+            .open(file.path(), stereo_selection(file.path(), 0))
+            .expect("open large-window source");
+        let mut destination = vec![0.0; 2];
+
+        for start in [0, window_frames as i64, (2 * window_frames) as i64] {
+            reader
+                .read_interleaved(start, 1, &mut destination)
+                .expect("populate large PCM window");
+        }
+        reader
+            .read_interleaved(window_frames as i64, 1, &mut destination)
+            .expect("make middle window most recent");
+        assert_eq!(decoder.calls.load(Ordering::Relaxed), 3);
+
+        cache.reconfigure(AudioSourceCacheConfig::new(2, 2 * window_bytes, 1));
+        let reduced = cache.diagnostics();
+        assert_eq!(reduced.entries, 2);
+        assert_eq!(reduced.reserved_bytes, 2 * window_bytes);
+        assert_eq!(reduced.entry_capacity, 2);
+        assert_eq!(reduced.byte_budget, 2 * window_bytes);
+        assert_eq!(reduced.budget_reconfigurations, 1);
+        assert_eq!(reduced.budget_trim_events, 1);
+        assert_eq!(reduced.budget_trimmed_entries, 1);
+        assert_eq!(reduced.budget_trimmed_bytes, window_bytes as u64);
+
+        reader
+            .read_interleaved((2 * window_frames) as i64, 1, &mut destination)
+            .expect("newer window survived trim");
+        assert_eq!(decoder.calls.load(Ordering::Relaxed), 3);
+        reader
+            .read_interleaved(0, 1, &mut destination)
+            .expect("oldest window reloads after trim");
+        assert_eq!(decoder.calls.load(Ordering::Relaxed), 4);
+
+        cache.reconfigure(AudioSourceCacheConfig::new(8, window_bytes, 1));
+        let byte_reduced = cache.diagnostics();
+        assert_eq!(byte_reduced.entries, 1);
+        assert_eq!(byte_reduced.reserved_bytes, window_bytes);
+        assert_eq!(byte_reduced.budget_reconfigurations, 2);
+        assert_eq!(byte_reduced.budget_trim_events, 2);
+        assert_eq!(byte_reduced.budget_trimmed_entries, 2);
+        assert_eq!(byte_reduced.budget_trimmed_bytes, (2 * window_bytes) as u64);
+    }
+
+    #[test]
     fn independently_bounded_cache_reports_effective_hard_limits() {
         let cache = AudioSourceCache::new_bounded(48_000, 10, 4, 16 * 1024 * 1024);
         let diagnostics = cache.diagnostics();
         assert_eq!(diagnostics.entry_capacity, 4);
         assert_eq!(diagnostics.byte_budget, 16 * 1024 * 1024);
+        assert_eq!(
+            diagnostics.decoder_session_capacity,
+            AUDIO_SOURCE_DECODER_SESSION_CAPACITY
+        );
         assert_eq!(diagnostics.entries, 0);
         assert_eq!(diagnostics.reserved_bytes, 0);
     }
@@ -951,6 +1208,32 @@ mod tests {
     }
 
     #[test]
+    fn open_rejects_partial_fingerprint_evidence_instead_of_using_path_metadata() {
+        let mut file = tempfile::NamedTempFile::new().expect("temporary source");
+        file.write_all(b"source").expect("source identity");
+        file.flush().expect("flush source");
+        let partial = AudioSourceSelection::new(
+            0,
+            ChannelLayout::Stereo,
+            MediaFileFingerprint {
+                len: Some(6),
+                modified_secs: Some(1),
+                modified_nanos: Some(0),
+                object_identity: None,
+                change_stamp: None,
+            },
+        );
+        let cache = Arc::new(AudioSourceCache::new(48_000));
+
+        let error = cache
+            .open(file.path(), partial)
+            .err()
+            .expect("partial source identity must fail closed");
+
+        assert!(error.to_string().contains("incomplete"));
+    }
+
+    #[test]
     fn malformed_window_fails_closed_and_uses_bounded_failure_memory() {
         let decoder = Arc::new(MalformedWindowDecoder { calls: AtomicU64::new(0) });
         let mut file = tempfile::NamedTempFile::new().expect("temporary source");
@@ -960,6 +1243,7 @@ mod tests {
             1,
             2,
             128 * 1024,
+            1,
             decoder.clone(),
         ));
         let reader =
@@ -1001,9 +1285,10 @@ mod tests {
             1,
             1,
             sample_rate as usize * usize::from(channels) * std::mem::size_of::<f32>(),
+            1,
             Arc::new(PersistentFfmpegAudioWindowDecoder::default()),
         ));
-        let stream = crate::MediaInfo::probe(&path)
+        let stream = crate::probe_media_info(&path)
             .expect("probe external source")
             .primary_audio()
             .expect("primary audio stream")
@@ -1054,7 +1339,7 @@ mod tests {
             return;
         };
         let cache = Arc::new(AudioSourceCache::new(48_000));
-        let stream = crate::MediaInfo::probe(&path)
+        let stream = crate::probe_media_info(&path)
             .expect("probe external source")
             .primary_audio()
             .expect("primary audio stream")

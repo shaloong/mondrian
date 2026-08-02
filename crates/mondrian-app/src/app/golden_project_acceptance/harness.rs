@@ -6,7 +6,7 @@ use crate::app::AppState;
 use anyhow::{ensure, Context};
 use mondrian_core::{ExecutionTerminalDisposition, JobId, ProjectId, SequenceId};
 use mondrian_editor_state::{Action, AuthoringSessionId};
-use mondrian_export::preset::{ExportPreset, TimelineExportRange};
+use mondrian_export::preset::{ExportOutputPolicy, ExportPreset, TimelineExportRange};
 use mondrian_export::queue::{ExportJobDiagnostics, ExportJobSnapshot, JobStatus};
 use serde::{Serialize, Serializer};
 use std::collections::BTreeSet;
@@ -197,7 +197,7 @@ pub(super) fn durable_save_reopen(
     );
     let saved_session = author_checkpoint(state)?;
     let project_archive_sha256 = sha256_file(project_path)?;
-    state.close_project();
+    state.close_project()?;
     ensure!(
         state.authoring_session_id().is_none(),
         "close retained the saved Authoring Session"
@@ -344,6 +344,7 @@ pub(super) fn execute_export_job(
         sequence_id,
         range,
         output_path: output_path.clone(),
+        output_policy: ExportOutputPolicy::CreateNew,
     }))?;
     let created = state
         .export_jobs_snapshot()

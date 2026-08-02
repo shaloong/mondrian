@@ -1,7 +1,7 @@
-use mondrian_core::{FramePosition, Rational};
+use mondrian_core::{AudioSamplePosition, AudioSampleRate, FramePosition, Rational};
 use mondrian_playback::{
     AudioClockObservationGrade, AudioDeviceClockObservation, AudioDeviceClockState, ClockMaster,
-    FrameDelivery, FrameDeliveryKind, MonotonicTimestamp, PlaybackEngine,
+    FrameDeliveryCandidate, FrameDeliveryKind, MonotonicTimestamp, PlaybackEngine,
     PlaybackEvidenceCollector, PlaybackEvidenceConfig, PlaybackPolicy, PlaybackTimelineBinding,
 };
 use std::time::Duration;
@@ -83,9 +83,18 @@ fn thirty_minute_48khz_2997_av_continuity_survives_device_clock_reacquisition() 
     assert_eq!(report.observed_duration_us, RUN_SECONDS * 1_000_000);
     assert_eq!(report.clock_residency.synthetic_us, 1_000_000);
     assert_eq!(report.clock_residency.audio_device_us, 1_799_000_000);
-    assert_eq!(report.delivery_clock_drift.max_us, 0);
-    assert_eq!(report.delivery_clock_drift.count, report.deliveries.ready);
-    assert_eq!(report.delivery_clock_drift.sampled_count, 128);
+    assert!(report.delivery_phase_error.audio_device.point_error.max_us <= 10_000);
+    assert!(report.delivery_phase_error.audio_device.uncertainty.max_us <= 10_000);
+    assert!(report.delivery_phase_error.audio_device.proven_error.max_us <= 20_000);
+    assert_eq!(report.delivery_phase_error.synthetic.uncertainty.max_us, 0);
+    assert!(report.delivery_phase_error.synthetic.proven_error.max_us <= 10_000);
+    assert_eq!(
+        report.delivery_phase_error.audio_device.proven_error.count
+            + report.delivery_phase_error.synthetic.proven_error.count,
+        report.deliveries.ready
+    );
+    assert_eq!(report.delivery_phase_error.unproven_presentable, 0);
+    assert_eq!(report.delivery_phase_error.phase_not_applicable, 0);
     assert_eq!(report.audio_underrun_frames, 0);
     assert_eq!(report.audio_underrun_recoveries, 0);
     assert_eq!(report.retained_event_count, 64);
@@ -104,9 +113,9 @@ fn audio_observation(
         stream_generation,
         sample_rate: SAMPLE_RATE,
         consumed_frames,
-        media_anchor: FramePosition::new(
-            media_anchor_sample as i64,
-            Rational::new(1, i64::from(SAMPLE_RATE)),
+        media_anchor: AudioSamplePosition::new(
+            i64::try_from(media_anchor_sample).expect("sample anchor"),
+            AudioSampleRate::new(SAMPLE_RATE).expect("sample rate"),
         ),
         observed_at,
         grade: AudioClockObservationGrade::CallbackConsumptionEstimate,
@@ -128,15 +137,11 @@ fn observe_and_deliver_current(
     let Some(demand) = demand else {
         return;
     };
-    let delivery = FrameDelivery {
-        epoch: demand.epoch,
-        quality_revision: demand.quality_revision,
-        demand_sequence: demand.sequence,
-        target_frame: demand.target.frame,
-        kind: FrameDeliveryKind::Ready,
-    };
-    if engine.observe_frame_delivery(delivery).unwrap() {
-        evidence.observe_delivery(now, snapshot, delivery, true).unwrap();
+    let delivery = FrameDeliveryCandidate::for_demand(demand.identity(), FrameDeliveryKind::Ready)
+        .complete_at(now);
+    let application = engine.observe_frame_delivery(delivery).unwrap();
+    if application.accepted() {
+        evidence.observe_delivery(application).unwrap();
     }
 }
 

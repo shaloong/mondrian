@@ -19,6 +19,16 @@ pub struct TimelineTime {
     denominator: i64,
 }
 
+impl crate::AuthoringFootprint for TimelineTime {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self { numerator: _, denominator: _ } = self;
+        Ok(())
+    }
+}
+
 impl TimelineTime {
     /// Exact zero.
     pub const ZERO: Self = Self { numerator: 0, denominator: 1 };

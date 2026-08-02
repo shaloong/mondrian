@@ -361,7 +361,7 @@ fn resolve_monitor_profile_status(
                     (
                         MonitorProfileStatus::ManagedIccCalibration {
                             source_color_space,
-                            profile_fingerprint: calibration.profile_fingerprint,
+                            profile_fingerprint: calibration.profile_fingerprint(),
                         },
                         Some(calibration),
                     )
@@ -859,7 +859,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_contract_generation_changes_with_display_name() {
+    fn snapshot_contract_identity_changes_with_display_name() {
         let a = generate_display_snapshot(
             Some("Monitor A".to_owned()),
             (0, 0),
@@ -888,7 +888,7 @@ mod tests {
             ColorSpace::Rec709,
             "Test",
         );
-        assert_ne!(a.contract_generation(), b.contract_generation());
+        assert_ne!(a.contract_identity(), b.contract_identity());
     }
 
     #[test]

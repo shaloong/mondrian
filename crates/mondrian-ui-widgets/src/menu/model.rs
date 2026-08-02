@@ -220,15 +220,19 @@ pub struct MenuItem {
 }
 
 impl MenuItem {
-    pub fn new(label: impl Into<String>, action: Action) -> Self {
-        Self {
-            label: label.into(),
-            command: MenuItemCommand::Action(action),
-            enabled: true,
-            kind: MenuItemKind::Action,
-            icon: None,
-            shortcut: None,
-            checked: false,
+    pub fn new(label: impl Into<String>, action: impl Into<Option<Action>>) -> Self {
+        let label = label.into();
+        match action.into() {
+            Some(action) => Self {
+                label,
+                command: MenuItemCommand::Action(action),
+                enabled: true,
+                kind: MenuItemKind::Action,
+                icon: None,
+                shortcut: None,
+                checked: false,
+            },
+            None => Self::inert(label),
         }
     }
 

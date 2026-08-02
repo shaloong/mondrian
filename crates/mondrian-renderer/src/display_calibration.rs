@@ -3,11 +3,13 @@
 use crate::{
     ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency,
     ColorFrameSpace, GpuColorFrameAllocationPlan, GpuColorFrameHandle, GpuColorFrameHandleError,
-    GpuColorFrameIdAllocator, GpuColorFrameResource, GpuColorFrameTextureFormat,
-    GpuColorFrameUploader, GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool,
+    GpuColorFrameIdAllocationError, GpuColorFrameIdAllocator, GpuColorFrameResource,
+    GpuColorFrameTextureFormat, GpuColorFrameUploader, GpuColorFrameWgpuResource,
+    GpuColorFrameWgpuResourcePool,
 };
-use mondrian_core::display_calibration::{DisplayCalibrationLut3d, IccProfileFingerprint};
-use mondrian_core::ColorSpace;
+#[cfg(test)]
+use mondrian_core::display_calibration::IccProfileFingerprint;
+use mondrian_core::display_calibration::{DisplayCalibrationLut3d, DisplayCalibrationLutIdentity};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -34,7 +36,7 @@ impl GpuDisplayCalibrationPlan {
         if descriptor.domain != ColorFrameDomain::Display
             || descriptor.encoding != ColorFrameEncoding::EncodedFloat
             || descriptor.residency != ColorFrameResidency::Gpu
-            || descriptor.color_space.color() != Some(calibration.source_color_space)
+            || descriptor.color_space.color() != Some(calibration.source_color_space())
         {
             return Err(GpuDisplayCalibrationPlanError::InvalidInputContract {
                 actual: descriptor,
@@ -68,12 +70,14 @@ impl GpuDisplayCalibrationPlan {
             );
         }
         let output_descriptor = ColorFrameDescriptor {
-            color_space: ColorFrameSpace::Device(calibration.profile_fingerprint.calibration_key()),
+            color_space: ColorFrameSpace::Device(
+                calibration.profile_fingerprint().calibration_key(),
+            ),
             encoding: ColorFrameEncoding::DeviceFloat,
             ..descriptor
         };
         let output = GpuColorFrameHandle::new(
-            ids.allocate(),
+            ids.allocate()?,
             output_descriptor,
             output_texture_format,
             "display-calibration-device-output",
@@ -85,17 +89,15 @@ impl GpuDisplayCalibrationPlan {
 
 /// Uploaded immutable ICC calibration LUT.
 pub struct GpuDisplayCalibrationLut {
-    profile_fingerprint: IccProfileFingerprint,
-    edge_size: u16,
+    calibration_identity: DisplayCalibrationLutIdentity,
     _texture: wgpu::Texture,
     view: wgpu::TextureView,
 }
 
 /// Input/LUT bindings prepared for one calibration plan.
 pub struct GpuDisplayCalibrationPreparedPass {
-    input_contract: crate::GpuColorFrameContract,
-    profile_fingerprint: IccProfileFingerprint,
-    edge_size: u16,
+    input: GpuColorFrameHandle,
+    calibration_identity: DisplayCalibrationLutIdentity,
     bind_group: wgpu::BindGroup,
 }
 
@@ -104,7 +106,7 @@ pub struct GpuDisplayCalibrationRuntime {
     pipeline: Option<GpuDisplayCalibrationPipeline>,
     pipeline_format: Option<GpuColorFrameTextureFormat>,
     lut: Option<GpuDisplayCalibrationLut>,
-    lut_contract: Option<(ColorSpace, IccProfileFingerprint, u16)>,
+    lut_contract: Option<DisplayCalibrationLutIdentity>,
     output: Option<GpuColorFrameResource<GpuColorFrameWgpuResource>>,
     resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
     ids: GpuColorFrameIdAllocator,
@@ -122,34 +124,26 @@ pub struct GpuDisplayCalibrationRuntimeDiagnostics {
     pub records: u64,
 }
 
-impl Default for GpuDisplayCalibrationRuntime {
-    fn default() -> Self {
-        Self {
-            pipeline: None,
-            pipeline_format: None,
-            lut: None,
-            lut_contract: None,
-            output: None,
-            resource_pool: Arc::new(GpuColorFrameWgpuResourcePool::default()),
-            ids: GpuColorFrameIdAllocator::new(1),
-            diagnostics: GpuDisplayCalibrationRuntimeDiagnostics::default(),
-        }
-    }
-}
-
 impl GpuDisplayCalibrationRuntime {
+    /// Create a calibration runtime with its own device-scoped texture pool.
+    pub fn new() -> Result<Self, GpuColorFrameIdAllocationError> {
+        Self::with_resource_pool(Arc::new(GpuColorFrameWgpuResourcePool::default()))
+    }
+
     /// Create a calibration runtime backed by a shared device-scoped texture pool.
-    pub fn with_resource_pool(resource_pool: Arc<GpuColorFrameWgpuResourcePool>) -> Self {
-        Self {
+    pub fn with_resource_pool(
+        resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
+    ) -> Result<Self, GpuColorFrameIdAllocationError> {
+        Ok(Self {
             pipeline: None,
             pipeline_format: None,
             lut: None,
             lut_contract: None,
             output: None,
             resource_pool,
-            ids: GpuColorFrameIdAllocator::new(1),
+            ids: GpuColorFrameIdAllocator::new(1)?,
             diagnostics: GpuDisplayCalibrationRuntimeDiagnostics::default(),
-        }
+        })
     }
 
     /// Record calibration and retain the device-RGB output through presentation.
@@ -158,15 +152,14 @@ impl GpuDisplayCalibrationRuntime {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        input: GpuColorFrameHandle,
-        input_view: &wgpu::TextureView,
+        input: &GpuColorFrameResource<GpuColorFrameWgpuResource>,
         calibration: Arc<DisplayCalibrationLut3d>,
         output_format: GpuColorFrameTextureFormat,
     ) -> Result<GpuColorFrameHandle, GpuDisplayCalibrationRuntimeError> {
         self.clear_frame_resources();
         let plan = GpuDisplayCalibrationPlan::new(
             &mut self.ids,
-            input,
+            input.handle().clone(),
             calibration.clone(),
             output_format,
         )?;
@@ -175,11 +168,7 @@ impl GpuDisplayCalibrationRuntime {
             self.pipeline_format = Some(output_format);
             self.diagnostics.pipeline_builds = self.diagnostics.pipeline_builds.saturating_add(1);
         }
-        let lut_contract = (
-            calibration.source_color_space,
-            calibration.profile_fingerprint,
-            calibration.edge_size,
-        );
+        let lut_contract = calibration.identity();
         if self.lut_contract != Some(lut_contract) {
             self.lut = Some(GpuDisplayCalibrationPipeline::upload_lut(
                 device,
@@ -198,7 +187,7 @@ impl GpuDisplayCalibrationRuntime {
                 .ok_or(GpuDisplayCalibrationRuntimeError::InternalResourceMissing(
                     "LUT",
                 ))?;
-        let prepared = pipeline.prepare_pass(device, &plan, input_view, lut)?;
+        let prepared = pipeline.prepare_pass(device, &plan, input, lut)?;
         let output = self.resource_pool.acquire(
             device,
             &GpuColorFrameAllocationPlan::for_handle(plan.output.clone()),
@@ -215,9 +204,23 @@ impl GpuDisplayCalibrationRuntime {
         &self,
         handle: &GpuColorFrameHandle,
     ) -> Option<&GpuColorFrameResource<GpuColorFrameWgpuResource>> {
-        self.output
-            .as_ref()
-            .filter(|output| output.handle().contract() == handle.contract())
+        self.output.as_ref().filter(|output| output.handle() == handle)
+    }
+
+    /// Move the exact retained calibration output out of this runtime.
+    ///
+    /// A non-matching handle leaves the current output untouched. This keeps
+    /// ownership transfer contract-validated while the presentation adapter
+    /// retains the frame beyond this runtime's next record or clear.
+    pub fn take_output(
+        &mut self,
+        handle: &GpuColorFrameHandle,
+    ) -> Option<GpuColorFrameResource<GpuColorFrameWgpuResource>> {
+        let matches = self.output.as_ref().is_some_and(|output| output.handle() == handle);
+        if !matches {
+            return None;
+        }
+        self.output.take()
     }
 
     /// Drop per-frame output while retaining immutable pipeline and LUT caches.
@@ -340,7 +343,7 @@ impl GpuDisplayCalibrationPipeline {
         queue: &wgpu::Queue,
         calibration: &DisplayCalibrationLut3d,
     ) -> GpuDisplayCalibrationLut {
-        let edge = u32::from(calibration.edge_size);
+        let edge = u32::from(calibration.edge_size());
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("mondrian.display-calibration.lut"),
             size: wgpu::Extent3d {
@@ -382,8 +385,7 @@ impl GpuDisplayCalibrationPipeline {
             ..wgpu::TextureViewDescriptor::default()
         });
         GpuDisplayCalibrationLut {
-            profile_fingerprint: calibration.profile_fingerprint,
-            edge_size: calibration.edge_size,
+            calibration_identity: calibration.identity(),
             _texture: texture,
             view,
         }
@@ -405,12 +407,13 @@ impl GpuDisplayCalibrationPipeline {
         &self,
         device: &wgpu::Device,
         plan: &GpuDisplayCalibrationPlan,
-        input_view: &wgpu::TextureView,
+        input: &GpuColorFrameResource<GpuColorFrameWgpuResource>,
         lut: &GpuDisplayCalibrationLut,
     ) -> Result<GpuDisplayCalibrationPreparedPass, GpuDisplayCalibrationPrepareError> {
-        if lut.profile_fingerprint != plan.calibration.profile_fingerprint
-            || lut.edge_size != plan.calibration.edge_size
-        {
+        if input.handle() != &plan.input {
+            return Err(GpuDisplayCalibrationPrepareError::InputHandleMismatch);
+        }
+        if lut.calibration_identity != plan.calibration.identity() {
             return Err(GpuDisplayCalibrationPrepareError::LutContractMismatch);
         }
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -419,7 +422,7 @@ impl GpuDisplayCalibrationPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(input_view),
+                    resource: wgpu::BindingResource::TextureView(&input.resource().texture_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -428,9 +431,8 @@ impl GpuDisplayCalibrationPipeline {
             ],
         });
         Ok(GpuDisplayCalibrationPreparedPass {
-            input_contract: plan.input.contract(),
-            profile_fingerprint: lut.profile_fingerprint,
-            edge_size: lut.edge_size,
+            input: plan.input.clone(),
+            calibration_identity: lut.calibration_identity,
             bind_group,
         })
     }
@@ -446,14 +448,13 @@ impl GpuDisplayCalibrationPipeline {
         if self.output_texture_format != plan.output.texture_format() {
             return Err(GpuDisplayCalibrationRecordError::PipelineOutputFormatMismatch);
         }
-        if prepared.input_contract != plan.input.contract()
-            || prepared.profile_fingerprint != plan.calibration.profile_fingerprint
-            || prepared.edge_size != plan.calibration.edge_size
+        if prepared.input != plan.input
+            || prepared.calibration_identity != plan.calibration.identity()
         {
             return Err(GpuDisplayCalibrationRecordError::PreparedPassMismatch);
         }
-        if output.handle().contract() != plan.output.contract() {
-            return Err(GpuDisplayCalibrationRecordError::OutputContractMismatch);
+        if output.handle() != &plan.output {
+            return Err(GpuDisplayCalibrationRecordError::OutputHandleMismatch);
         }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("mondrian.display-calibration.pass"),
@@ -496,6 +497,9 @@ pub enum GpuDisplayCalibrationPlanError {
     /// Output storage cannot carry float device values.
     #[error("unsupported display calibration output texture {0:?}")]
     UnsupportedOutputTextureFormat(GpuColorFrameTextureFormat),
+    /// Renderer frame identity allocation is exhausted.
+    #[error(transparent)]
+    FrameId(#[from] GpuColorFrameIdAllocationError),
     /// Output handle validation failed.
     #[error("invalid display calibration output handle: {0}")]
     OutputHandle(GpuColorFrameHandleError),
@@ -512,6 +516,9 @@ pub enum GpuDisplayCalibrationPipelineError {
 /// Binding preparation failure.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum GpuDisplayCalibrationPrepareError {
+    /// Typed input resource does not match the planned frame identity.
+    #[error("display calibration input resource does not match the plan")]
+    InputHandleMismatch,
     /// Uploaded LUT does not match the plan.
     #[error("uploaded display calibration LUT does not match the plan")]
     LutContractMismatch,
@@ -526,9 +533,9 @@ pub enum GpuDisplayCalibrationRecordError {
     /// Prepared bindings differ from the plan.
     #[error("prepared display calibration pass does not match the plan")]
     PreparedPassMismatch,
-    /// Materialized output differs from the plan.
+    /// Materialized output handle differs from the plan.
     #[error("display calibration output resource does not match the plan")]
-    OutputContractMismatch,
+    OutputHandleMismatch,
 }
 
 fn nonfilterable_texture_binding(
@@ -548,7 +555,7 @@ fn nonfilterable_texture_binding(
 }
 
 fn pack_lut_upload(calibration: &DisplayCalibrationLut3d) -> (Vec<u8>, u32) {
-    let edge = usize::from(calibration.edge_size);
+    let edge = usize::from(calibration.edge_size());
     let source_row_bytes = edge * 4 * size_of::<f32>();
     let bytes_per_row = source_row_bytes.div_ceil(256) * 256;
     let mut bytes = vec![0_u8; bytes_per_row * edge * edge];
@@ -626,8 +633,8 @@ mod tests {
     #[test]
     fn plan_produces_typed_device_rgb_output() {
         let calibration = Arc::new(identity_calibration());
-        let input = input_handle(1, calibration.source_color_space);
-        let mut ids = GpuColorFrameIdAllocator::new(2);
+        let input = input_handle(1, calibration.source_color_space());
+        let mut ids = GpuColorFrameIdAllocator::new(2).expect("frame id allocator");
 
         let plan = GpuDisplayCalibrationPlan::new(
             &mut ids,
@@ -639,7 +646,7 @@ mod tests {
 
         assert_eq!(
             plan.output.descriptor().color_space,
-            ColorFrameSpace::Device(calibration.profile_fingerprint.calibration_key())
+            ColorFrameSpace::Device(calibration.profile_fingerprint().calibration_key())
         );
         assert_eq!(
             plan.output.descriptor().encoding,
@@ -654,10 +661,10 @@ mod tests {
             return;
         };
         let calibration = Arc::new(identity_calibration());
-        let input_handle = input_handle(10, calibration.source_color_space);
+        let input_handle_value = input_handle(10, calibration.source_color_space());
         let input = GpuColorFrameUploader::allocate(
             &context.device,
-            &GpuColorFrameAllocationPlan::for_handle(input_handle.clone()),
+            &GpuColorFrameAllocationPlan::for_handle(input_handle_value.clone()),
         );
         let source = [0.1_f32, 0.5, 0.9, 0.25, 1.0, 0.0, 0.33, 0.75];
         let source_bytes = source.iter().flat_map(|value| value.to_le_bytes()).collect::<Vec<_>>();
@@ -677,10 +684,10 @@ mod tests {
             wgpu::Extent3d { width: 2, height: 1, depth_or_array_layers: 1 },
         );
 
-        let mut ids = GpuColorFrameIdAllocator::new(11);
+        let mut ids = GpuColorFrameIdAllocator::new(11).expect("frame id allocator");
         let plan = GpuDisplayCalibrationPlan::new(
             &mut ids,
-            input_handle,
+            input_handle_value,
             calibration.clone(),
             GpuColorFrameTextureFormat::Rgba32Float,
         )
@@ -696,15 +703,41 @@ mod tests {
             &calibration,
         );
         let prepared = pipeline
-            .prepare_pass(&context.device, &plan, &input.resource().texture_view, &lut)
+            .prepare_pass(&context.device, &plan, &input, &lut)
             .expect("prepared calibration pass");
         let output = GpuDisplayCalibrationPipeline::allocate_output(&context.device, &plan);
+        let alternate_input_handle = input_handle(12, calibration.source_color_space());
+        let alternate_input = GpuColorFrameUploader::allocate(
+            &context.device,
+            &GpuColorFrameAllocationPlan::for_handle(alternate_input_handle.clone()),
+        );
+        assert!(matches!(
+            pipeline.prepare_pass(&context.device, &plan, &alternate_input, &lut),
+            Err(GpuDisplayCalibrationPrepareError::InputHandleMismatch)
+        ));
+        let alternate_plan = GpuDisplayCalibrationPlan::new(
+            &mut ids,
+            alternate_input_handle,
+            calibration.clone(),
+            GpuColorFrameTextureFormat::Rgba32Float,
+        )
+        .expect("alternate calibration plan");
+        let alternate_output =
+            GpuDisplayCalibrationPipeline::allocate_output(&context.device, &alternate_plan);
         let readback_plan =
             crate::GpuColorFrameReadbackPlan::encoded_rgba32float(plan.output.clone())
                 .expect("device output readback");
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mondrian-test-display-calibration"),
         });
+        assert_eq!(
+            pipeline.record(&mut encoder, &alternate_plan, &prepared, &alternate_output),
+            Err(GpuDisplayCalibrationRecordError::PreparedPassMismatch)
+        );
+        assert_eq!(
+            pipeline.record(&mut encoder, &plan, &prepared, &alternate_output),
+            Err(GpuDisplayCalibrationRecordError::OutputHandleMismatch)
+        );
         pipeline
             .record(&mut encoder, &plan, &prepared, &output)
             .expect("record calibration");
@@ -712,8 +745,9 @@ mod tests {
             &context.device,
             &mut encoder,
             &readback_plan,
-            output.resource(),
-        );
+            &output,
+        )
+        .expect("record display calibration readback");
         context.queue.submit(std::iter::once(encoder.finish()));
         let mapped = map_readback_buffer(&context.device, &readback);
         let actual =
@@ -738,14 +772,15 @@ mod tests {
             return;
         };
         let calibration = Arc::new(identity_calibration());
-        let original_input_handle = input_handle(30, calibration.source_color_space);
+        let original_input_handle = input_handle(30, calibration.source_color_space());
         let input = GpuColorFrameUploader::allocate(
             &context.device,
             &GpuColorFrameAllocationPlan::for_handle(original_input_handle.clone()),
         );
         let resource_pool = Arc::new(crate::GpuColorFrameWgpuResourcePool::default());
         let mut runtime =
-            GpuDisplayCalibrationRuntime::with_resource_pool(Arc::clone(&resource_pool));
+            GpuDisplayCalibrationRuntime::with_resource_pool(Arc::clone(&resource_pool))
+                .expect("display calibration runtime");
 
         for _ in 0..2 {
             let mut encoder =
@@ -757,15 +792,27 @@ mod tests {
                     &context.device,
                     &context.queue,
                     &mut encoder,
-                    original_input_handle.clone(),
-                    &input.resource().texture_view,
+                    &input,
                     calibration.clone(),
                     GpuColorFrameTextureFormat::Rgba16Float,
                 )
                 .expect("runtime calibration record");
             assert!(runtime.output(&output).is_some());
+            let stale_same_contract = GpuColorFrameHandle::new(
+                crate::GpuColorFrameId::from_raw(output.id().raw().saturating_add(1_000)),
+                output.descriptor(),
+                output.texture_format(),
+                output.label(),
+            )
+            .expect("stale same-contract handle");
+            assert!(runtime.output(&stale_same_contract).is_none());
+            assert!(runtime.take_output(&stale_same_contract).is_none());
+            assert!(runtime.output(&output).is_some());
+            let detached =
+                runtime.take_output(&output).expect("exact output handle transfers ownership");
+            assert!(runtime.output(&output).is_none());
             context.queue.submit(std::iter::once(encoder.finish()));
-            runtime.clear_frame_resources();
+            resource_pool.release(detached);
         }
 
         assert_eq!(
@@ -782,7 +829,11 @@ mod tests {
         assert_eq!(pool_diagnostics.retained_resources, 1);
 
         let alternate_calibration = Arc::new(identity_calibration_for(ColorSpace::DisplayP3));
-        let alternate_input_handle = input_handle(31, alternate_calibration.source_color_space);
+        let alternate_input_handle = input_handle(31, alternate_calibration.source_color_space());
+        let alternate_input = GpuColorFrameUploader::allocate(
+            &context.device,
+            &GpuColorFrameAllocationPlan::for_handle(alternate_input_handle),
+        );
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mondrian-test-display-calibration-runtime-source-change"),
         });
@@ -791,8 +842,7 @@ mod tests {
                 &context.device,
                 &context.queue,
                 &mut encoder,
-                alternate_input_handle,
-                &input.resource().texture_view,
+                &alternate_input,
                 alternate_calibration,
                 GpuColorFrameTextureFormat::Rgba16Float,
             )
@@ -816,8 +866,7 @@ mod tests {
                 &context.device,
                 &context.queue,
                 &mut encoder,
-                original_input_handle,
-                &input.resource().texture_view,
+                &input,
                 calibration,
                 GpuColorFrameTextureFormat::Rgba16Float,
             )

@@ -23,7 +23,7 @@ fn solid_rgba(w: u32, h: u32, r: u8, g: u8, b: u8) -> Vec<u8> {
 }
 
 fn identity_graph() -> Arc<mondrian_effects::CompiledEffectGraph> {
-    mondrian_effects::get_or_compile_scheduled_render_graph(
+    mondrian_effects::compile_reference_render_graph(
         mondrian_effects::EffectRenderGraph::identity(),
     )
     .expect("compile identity graph")

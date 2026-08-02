@@ -139,6 +139,13 @@ impl EffectPluginDefinitionBuilder {
         self
     }
 
+    /// Declare the complete processing, temporal, ROI, precision, and lifetime
+    /// contract required before this plugin can enter prepared execution.
+    pub fn with_execution_contract(mut self, contract: crate::EffectExecutionContract) -> Self {
+        self.definition = self.definition.with_execution_contract(contract);
+        self
+    }
+
     pub fn with_graph<F>(mut self, build: F) -> Self
     where
         F: for<'a> Fn(&EffectNode, EffectEvalContext, &mut EffectGraphDsl<'a>)
@@ -254,6 +261,18 @@ mod tests {
         TimelineTime::new(frame, 25).expect("valid test time")
     }
 
+    fn plugin_test_execution_contract() -> crate::EffectExecutionContract {
+        crate::EffectExecutionContract {
+            execution_modes: crate::EffectExecutionModes::CPU_F32,
+            determinism: crate::EffectDeterminism::Deterministic,
+            state_model: crate::EffectStateModel::Stateless,
+            temporal_input: crate::EffectTemporalInputExtent::CURRENT_FRAME,
+            roi_propagation: crate::EffectRoiPropagation::FullFrame,
+            resource_lifetime: crate::EffectResourceLifetime::Frame,
+            topology: crate::EffectGraphTopology::GeneralDag,
+        }
+    }
+
     #[test]
     fn plugin_definition_exposes_its_explicit_color_domain_contract() {
         let domain = crate::EffectColorDomainContract::preserving(
@@ -293,6 +312,7 @@ mod tests {
             )
             .with_parameter_id(opacity_id.clone()),
         )
+        .with_execution_contract(plugin_test_execution_contract())
         .with_branching_graph(move |effect, context, graph| {
             let radius = effect.evaluate_f32_parameter(&radius_id, context.time, 0.0);
             let opacity = effect.evaluate_f32_parameter(&opacity_id, context.time, 0.0);
@@ -315,8 +335,12 @@ mod tests {
         .expect("build plugin SDK graph");
         assert_eq!(graph.nodes.len(), 3);
 
-        let caps = effect_definition(&plugin_type).expect("effect definition").capabilities();
-        assert!(caps.supports_render_graph);
-        assert!(caps.supports_branching_render_graph);
+        let contract =
+            effect_definition(&plugin_type).expect("effect definition").execution_contract();
+        assert_eq!(contract.topology, crate::EffectGraphTopology::GeneralDag);
+        assert_eq!(
+            contract.execution_modes,
+            crate::EffectExecutionModes::CPU_F32
+        );
     }
 }

@@ -5,8 +5,9 @@ use crate::plan::{
 };
 use mondrian_core::{AudioProcessingScopeId, MixBusId, ProgramOutputId, TrackId};
 use mondrian_timeline::audio::{
-    AudioChannelStrip, AudioComponentSource, AudioProcessorRack, AudioProgramOutput, AudioRoute,
-    AudioRouteDestination, AudioRouteSource, ProgramOutputMainSource,
+    AudioChannelStrip, AudioChannelStripOutputPort, AudioComponentSource, AudioProcessorRack,
+    AudioProgramOutput, AudioRoute, AudioRouteDestination, AudioRouteSource,
+    ProgramOutputMainSource,
 };
 use mondrian_timeline::{AudioAuthoringError, Sequence};
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,8 +32,17 @@ pub fn compile_audio_program(
         return Err(AudioCompileError::SemanticProjectionNotExecutableYet);
     }
 
-    let (mut routes, mut required_tracks, required_buses) =
-        resolve_signal_closure(&sequence.audio_program.routes, request.output_id);
+    let muted_tracks = sequence
+        .audio_tracks
+        .iter()
+        .filter(|track| track.is_muted)
+        .map(|track| track.id)
+        .collect::<BTreeSet<_>>();
+    let (mut routes, mut required_tracks, required_buses) = resolve_signal_closure(
+        &sequence.audio_program.routes,
+        request.output_id,
+        &muted_tracks,
+    );
     if !request.audition.soloed_tracks.is_empty() {
         required_tracks.retain(|track| request.audition.soloed_tracks.contains(track));
         routes.retain(|route| match route.source {
@@ -40,6 +50,28 @@ pub fn compile_audio_program(
             AudioRouteSource::Bus { .. } => true,
         });
     }
+    let post_fader_tracks = routes
+        .iter()
+        .filter_map(|route| match route.source {
+            AudioRouteSource::Track { track_id, port }
+                if port != AudioChannelStripOutputPort::PreFader =>
+            {
+                Some(track_id)
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let post_fader_buses = routes
+        .iter()
+        .filter_map(|route| match route.source {
+            AudioRouteSource::Bus { bus_id, port }
+                if port != AudioChannelStripOutputPort::PreFader =>
+            {
+                Some(bus_id)
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
 
     let mut track_channels = BTreeMap::new();
     for track_id in &required_tracks {
@@ -57,7 +89,7 @@ pub fn compile_audio_program(
             *track_id,
             CompiledTrackChannel {
                 muted: track.is_muted,
-                strip: compile_strip(&channel.strip)?,
+                strip: compile_source_strip(&channel.strip, post_fader_tracks.contains(track_id))?,
             },
         );
     }
@@ -65,7 +97,10 @@ pub fn compile_audio_program(
     let mut buses = BTreeMap::new();
     for bus in &sequence.audio_program.buses {
         if required_buses.contains(&bus.id) {
-            buses.insert(bus.id, compile_strip(&bus.strip)?);
+            buses.insert(
+                bus.id,
+                compile_source_strip(&bus.strip, post_fader_buses.contains(&bus.id))?,
+            );
         }
     }
     let bus_order = topological_bus_order(&routes, &required_buses)?;
@@ -189,6 +224,22 @@ fn compile_output(output: &AudioProgramOutput) -> Result<CompiledChannelStrip, A
     compile_strip(&output.strip)
 }
 
+fn compile_source_strip(
+    strip: &AudioChannelStrip,
+    include_post_fader: bool,
+) -> Result<CompiledChannelStrip, AudioCompileError> {
+    if include_post_fader {
+        return compile_strip(strip);
+    }
+    Ok(CompiledChannelStrip {
+        input_trim_db: strip.input_trim_db,
+        pre_fader: compile_rack(&strip.pre_fader)?,
+        fader_db: 0.0,
+        fader_automation: None,
+        post_fader: CompiledRack::default(),
+    })
+}
+
 fn compile_strip(strip: &AudioChannelStrip) -> Result<CompiledChannelStrip, AudioCompileError> {
     Ok(CompiledChannelStrip {
         input_trim_db: strip.input_trim_db,
@@ -207,8 +258,15 @@ fn compile_rack(rack: &AudioProcessorRack) -> Result<CompiledRack, AudioCompileE
         .map(|processor| CompiledProcessor {
             instance_id: processor.id,
             definition: processor.definition.clone(),
-            parameters: processor.parameters.clone(),
-            opaque_state: processor.opaque_state.clone(),
+            // This is the sole author -> execution ownership boundary. The
+            // compiled plan intentionally owns ordinary execution containers
+            // and does not expose authoring COW allocation identities.
+            parameters: processor
+                .parameters
+                .iter()
+                .map(|(parameter_id, parameter)| (parameter_id.clone(), parameter.clone()))
+                .collect(),
+            opaque_state: processor.opaque_state.as_ref().map(|state| state.as_slice().to_vec()),
         })
         .collect();
     Ok(CompiledRack { processors })
@@ -217,14 +275,24 @@ fn compile_rack(rack: &AudioProcessorRack) -> Result<CompiledRack, AudioCompileE
 fn resolve_signal_closure(
     routes: &[AudioRoute],
     output_id: ProgramOutputId,
+    muted_tracks: &BTreeSet<TrackId>,
 ) -> (Vec<CompiledRoute>, BTreeSet<TrackId>, BTreeSet<MixBusId>) {
     let mut required_buses = BTreeSet::new();
     let mut required_tracks = BTreeSet::new();
     let mut selected = Vec::new();
     let mut pending_destinations = vec![AudioRouteDestination::Output(output_id)];
     while let Some(destination) = pending_destinations.pop() {
-        for route in routes.iter().filter(|route| route.enabled && route.destination == destination)
-        {
+        for route in routes.iter().filter(|route| {
+            route.enabled
+                && route.destination == destination
+                && !matches!(
+                    route.source,
+                    AudioRouteSource::Track {
+                        track_id,
+                        port: AudioChannelStripOutputPort::PostMute,
+                    } if muted_tracks.contains(&track_id)
+                )
+        }) {
             if selected.iter().any(|selected: &CompiledRoute| selected.id == route.id) {
                 continue;
             }

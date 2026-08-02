@@ -749,7 +749,7 @@ mod tests {
         let snap_a = probe_a.current_display_snapshot(&policy, ColorSpace::Rec709);
         let snap_b = probe_b.current_display_snapshot(&policy, ColorSpace::Rec709);
         assert_ne!(snap_a.display_id, snap_b.display_id);
-        assert_ne!(snap_a.contract_generation(), snap_b.contract_generation());
+        assert_ne!(snap_a.contract_identity(), snap_b.contract_identity());
     }
 
     #[test]

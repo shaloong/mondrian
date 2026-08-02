@@ -7,7 +7,7 @@ status: accepted
 ## Decision
 
 Timeline placement is the single source of truth. A `Track` owns ordered Clip
-placements; a Clip owns exact placement/source ranges and one closed
+placements; a Clip owns exact placement and source-time mapping plus one closed
 `ClipContent` variant: Media, Adjustment Layer, Nested Sequence, Solid Color,
 or Basic Title. Variant-specific references, generated-source parameters, and
 interpretation data exist only inside that payload. Current-schema
@@ -48,8 +48,24 @@ invariants before the candidate commits. A destructive edit may remove a
 relationship whose promise no longer holds; it may not leave a dangling or
 misleading reference. Copy, razor, paste, overwrite fragments, precompose, and
 Sequence duplication fork all addressable placement/processing/automation
-identities and remap internal strong references. Asset and nested Sequence IDs
-remain external references.
+identities and remap internal strong references. Asset Library record
+identities are Project-contained strong references. Only their concrete
+media/provider bindings are recoverable dependencies: an unavailable binding
+retains the Asset record and expected contract for diagnosis and relink. Nested
+Sequence IDs cross the duplicated aggregate boundary but must resolve inside
+the owning Project.
+
+Removing an Asset from the ordinary Library view retires only its Library
+membership. One SQLite transaction preflights the complete selected Asset and
+folder batch, retains every Asset row and binding, and hides retired rows from
+ordinary listings. It does not edit any Sequence, proxy-mode membership, or
+History endpoint. Retirement is not entered into Sequence/Project History:
+Undo/Redo continues with the preceding Author Transaction and leaves membership
+retired. Reimporting the same concrete path is the current restoration operation
+and preserves the same `AssetId`. No record-level physical-purge Interface
+exists until a future Project+History+SQLite authority can prove that identity
+unreachable; a genuinely missing row is invalid strong-reference state, not
+offline media.
 
 Mask scalar Property Bags are persisted with each Mask. Project validation
 requires canonical Parameter IDs, valid curves, finite shape geometry, and
@@ -67,10 +83,13 @@ author data.
   relative placement under group edits.
 - A Transition cannot disagree with its endpoint Track or silently read beyond
   source handles.
-- The typed Transition author foundation does not claim renderer support.
-  Cross Dissolve becomes supported only when shared Preview/Export projection,
-  backend execution, source-handle diagnostics, persistence/Undo, and Golden
-  Project evidence all pass.
+- Library removal cannot produce dangling inactive/nested Sequence references,
+  make Undo restore a missing row, partially apply a multi-selection, or erase
+  Project proxy intent.
+- Cross Dissolve admission requires shared Preview/Export projection and
+  execution, exact source-handle diagnostics, strong endpoint persistence, and
+  atomic Undo/Redo; insufficient handles or an unavailable endpoint fail
+  closed.
 - Free-form routing remains in typed audio/visual execution projections; the
   ordinary user author model stays Track-based and does not expose a universal
   untyped DAG.

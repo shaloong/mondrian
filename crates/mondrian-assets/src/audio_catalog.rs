@@ -1,8 +1,7 @@
 //! Stable asset-owned bindings from authored audio components to probed streams.
 
-use mondrian_core::AudioSourceComponentId;
-use mondrian_media::{
-    info::ChannelLayout, AudioSourceSelection, AudioStreamInfo, MediaFileFingerprint, MediaInfo,
+use mondrian_core::{
+    AudioSourceComponentId, AudioStreamInfo, ChannelLayout, MediaFileFingerprint, MediaInfo,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -174,28 +173,21 @@ impl AssetAudioComponentCatalog {
         Ok(stream)
     }
 
-    /// Resolve one stable Component into a physical media execution selection.
-    pub fn resolve_selection(
-        &self,
-        component_id: AudioSourceComponentId,
-        info: &MediaInfo,
-    ) -> Result<AudioSourceSelection, AudioComponentCatalogError> {
-        self.resolve(component_id, info)
-            .map(|stream| AudioSourceSelection::from_stream(stream, self.source_fingerprint))
-    }
-
     /// Resolve only when current filesystem evidence matches the revision that
     /// produced the persisted stream catalog.
-    pub fn resolve_current_selection(
+    ///
+    /// This returns stable probe evidence. The media execution Adapter is the
+    /// sole owner of lowering it into a physical decode selection.
+    pub fn resolve_current<'a>(
         &self,
         component_id: AudioSourceComponentId,
-        info: &MediaInfo,
+        info: &'a MediaInfo,
         current_fingerprint: MediaFileFingerprint,
-    ) -> Result<AudioSourceSelection, AudioComponentCatalogError> {
+    ) -> Result<&'a AudioStreamInfo, AudioComponentCatalogError> {
         if current_fingerprint != self.source_fingerprint {
             return Err(AudioComponentCatalogError::SourceRevisionDrift);
         }
-        self.resolve_selection(component_id, info)
+        self.resolve(component_id, info)
     }
 
     /// Validate stable logical Component identity uniqueness.
@@ -280,8 +272,9 @@ fn sort_components(components: &mut [AssetAudioComponent]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_media::{info::AudioCodec, AudioStreamInfo};
-    use std::path::PathBuf;
+    use mondrian_core::{
+        AudioCodec, AudioStreamInfo, MediaFileChangeStamp, MediaFileObjectIdentity,
+    };
     use std::time::Duration;
 
     fn fingerprint(revision: u64) -> MediaFileFingerprint {
@@ -289,6 +282,11 @@ mod tests {
             len: Some(revision),
             modified_secs: Some(revision),
             modified_nanos: Some(0),
+            object_identity: Some(MediaFileObjectIdentity::Unix { device: 1, inode: revision }),
+            change_stamp: Some(MediaFileChangeStamp::Unix {
+                seconds: revision as i64,
+                nanoseconds: 0,
+            }),
         }
     }
 
@@ -317,7 +315,6 @@ mod tests {
 
     fn media_info(audio_streams: Vec<AudioStreamInfo>) -> MediaInfo {
         MediaInfo {
-            path: PathBuf::from("fixture.mov"),
             duration: Duration::from_secs(60),
             file_size: 1024,
             container: "mov".to_owned(),
@@ -449,11 +446,7 @@ mod tests {
         let catalog = AssetAudioComponentCatalog::from_media_info(&info, fingerprint(1));
 
         assert!(matches!(
-            catalog.resolve_current_selection(
-                AudioSourceComponentId::primary(),
-                &info,
-                fingerprint(2)
-            ),
+            catalog.resolve_current(AudioSourceComponentId::primary(), &info, fingerprint(2)),
             Err(AudioComponentCatalogError::SourceRevisionDrift)
         ));
     }

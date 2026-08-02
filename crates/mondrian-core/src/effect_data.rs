@@ -138,7 +138,7 @@ impl EffectType {
 /// The struct holds identity (id, type), animatable properties, and opaque
 /// JSON params. Effect evaluation is performed by `mondrian-effects`, not by
 /// methods on this struct.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EffectNode {
     #[serde(default)]
     pub id: EffectId,
@@ -331,6 +331,48 @@ pub fn parse_effect_id_from_property_path(path: &str) -> Option<EffectId> {
     }
     let id_raw = segments.next()?;
     uuid::Uuid::parse_str(id_raw).ok().map(EffectId)
+}
+
+impl crate::AuthoringFootprint for EffectType {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        match self {
+            Self::Plugin(key) => collector.collect(key),
+            Self::BasicCorrection
+            | Self::WhiteBalance
+            | Self::Lut3D
+            | Self::ColorWheel
+            | Self::Curves
+            | Self::HueSaturationLightness
+            | Self::GaussianBlur
+            | Self::Sharpen
+            | Self::Vignette
+            | Self::ChromaticAberration
+            | Self::Grain
+            | Self::ChromaKey
+            | Self::LumaKey => Ok(()),
+        }
+    }
+}
+
+impl crate::AuthoringFootprint for EffectNode {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self {
+            id: _,
+            effect_type,
+            properties,
+            params,
+            is_enabled: _,
+        } = self;
+        collector.collect(effect_type)?;
+        collector.collect(properties)?;
+        collector.collect(params)
+    }
 }
 
 #[cfg(test)]

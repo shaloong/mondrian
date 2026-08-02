@@ -1,6 +1,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$BeforeDir,
-    [Parameter(Mandatory = $true)][string]$AfterDir
+    [Parameter(Mandatory = $true)][string]$AfterDir,
+    [double]$RegressionTolerancePct = 5.0,
+    [switch]$FailOnRegression
 )
 
 Set-StrictMode -Version Latest
@@ -31,7 +33,7 @@ function Read-JsonLines {
     return $rows
 }
 
-function Latest-ByKey {
+function Strict-ByKey {
     param(
         [array]$Rows = @(),
         [Parameter(Mandatory = $true)][string]$Key
@@ -41,10 +43,45 @@ function Latest-ByKey {
         return $map
     }
     foreach ($row in $Rows) {
+        if (!($row.PSObject.Properties.Name -contains $Key)) {
+            throw "Report row is missing required key '$Key'"
+        }
         $k = [string]$row.$Key
+        if ([string]::IsNullOrWhiteSpace($k)) {
+            throw "Report row has an empty '$Key'"
+        }
+        if ($map.ContainsKey($k)) {
+            throw "Report contains duplicate '$Key' value '$k'"
+        }
         $map[$k] = $row
     }
     return $map
+}
+
+function Assert-SameKeySet {
+    param(
+        [hashtable]$Before,
+        [hashtable]$After,
+        [Parameter(Mandatory = $true)][string]$Context
+    )
+
+    $difference = Compare-Object `
+        -ReferenceObject @($Before.Keys | Sort-Object) `
+        -DifferenceObject @($After.Keys | Sort-Object)
+    if ($difference) {
+        throw "$Context baseline/current case sets differ"
+    }
+}
+
+function Assert-Passed {
+    param(
+        [Parameter(Mandatory = $true)]$Row,
+        [Parameter(Mandatory = $true)][string]$Context
+    )
+
+    if (!($Row.PSObject.Properties.Name -contains "passed") -or !$Row.passed) {
+        throw "$Context is missing a passing verdict"
+    }
 }
 
 function Add-Comparison {
@@ -55,7 +92,8 @@ function Add-Comparison {
         [Parameter(Mandatory = $true)][string]$Metric,
         [double]$Before,
         [double]$After,
-        [Parameter(Mandatory = $true)][string]$Direction
+        [Parameter(Mandatory = $true)][string]$Direction,
+        [double]$TolerancePct = 0.0
     )
     if ($null -eq $Out) {
         return
@@ -67,12 +105,38 @@ function Add-Comparison {
         $deltaPct = (($After - $Before) / $Before) * 100.0
     }
 
-    $better = switch ($Direction) {
-        "lower" { $After -lt $Before }
-        "higher" { $After -gt $Before }
-        default { $false }
+    $tolerance = [math]::Max($TolerancePct, 0.0) / 100.0
+    $status = switch ($Direction) {
+        "lower" {
+            if ($Before -eq 0) {
+                if ($After -eq 0) { "flat" } else { "regressed" }
+            }
+            elseif ($After -gt $Before * (1.0 + $tolerance)) {
+                "regressed"
+            }
+            elseif ($After -lt $Before * (1.0 - $tolerance)) {
+                "improved"
+            }
+            else {
+                "flat"
+            }
+        }
+        "higher" {
+            if ($Before -eq 0) {
+                if ($After -gt 0) { "improved" } else { "flat" }
+            }
+            elseif ($After -lt $Before * (1.0 - $tolerance)) {
+                "regressed"
+            }
+            elseif ($After -gt $Before * (1.0 + $tolerance)) {
+                "improved"
+            }
+            else {
+                "flat"
+            }
+        }
+        default { throw "Unknown metric direction: $Direction" }
     }
-    $status = if ($better) { "improved" } elseif ($After -eq $Before) { "flat" } else { "regressed" }
 
     [void]$Out.Add([pscustomobject]@{
             stage = $Stage
@@ -87,54 +151,95 @@ function Add-Comparison {
 
 $comparisons = [System.Collections.ArrayList]::new()
 
-$beforeProject = Latest-ByKey -Rows (Read-JsonLines -Path (Join-Path $BeforeDir "project-lifecycle.jsonl")) -Key "case"
-$afterProject = Latest-ByKey -Rows (Read-JsonLines -Path (Join-Path $AfterDir "project-lifecycle.jsonl")) -Key "case"
+$beforeProject = Strict-ByKey -Rows (Read-JsonLines -Path (Join-Path $BeforeDir "project-lifecycle.jsonl")) -Key "case"
+$afterProject = Strict-ByKey -Rows (Read-JsonLines -Path (Join-Path $AfterDir "project-lifecycle.jsonl")) -Key "case"
+$expectedProjectCases = @(
+    "project.create_new_project",
+    "project.open_existing",
+    "project.save_existing"
+)
+if ($beforeProject.Count -ne $expectedProjectCases.Count -or
+    $afterProject.Count -ne $expectedProjectCases.Count) {
+    throw "Project baseline/current must each contain exactly three cases"
+}
+Assert-SameKeySet -Before $beforeProject -After $afterProject -Context "Project report"
+if (Compare-Object `
+        -ReferenceObject ($expectedProjectCases | Sort-Object) `
+        -DifferenceObject @($afterProject.Keys | Sort-Object)) {
+    throw "Project report does not contain the expected lifecycle cases"
+}
 
 foreach ($key in $afterProject.Keys) {
-    if (!$beforeProject.ContainsKey($key)) {
-        continue
+    $before = $beforeProject[$key]
+    $after = $afterProject[$key]
+    Assert-Passed -Row $before -Context "Project baseline '$key'"
+    Assert-Passed -Row $after -Context "Project current '$key'"
+    if ([uint64]$before.iterations -ne [uint64]$after.iterations -or
+        [uint64]$before.threshold_ms -ne [uint64]$after.threshold_ms) {
+        throw "Project workload or threshold changed for '$key'"
     }
-    Add-Comparison -Out $comparisons -Stage "project" -Scenario $key -Metric "avg_ms" -Before ([double]$beforeProject[$key].avg_ms) -After ([double]$afterProject[$key].avg_ms) -Direction "lower"
-    Add-Comparison -Out $comparisons -Stage "project" -Scenario $key -Metric "max_ms" -Before ([double]$beforeProject[$key].max_ms) -After ([double]$afterProject[$key].max_ms) -Direction "lower"
+    Add-Comparison -Out $comparisons -Stage "project" -Scenario $key -Metric "avg_ms" -Before ([double]$before.avg_ms) -After ([double]$after.avg_ms) -Direction "lower" -TolerancePct $RegressionTolerancePct
+    Add-Comparison -Out $comparisons -Stage "project" -Scenario $key -Metric "max_ms" -Before ([double]$before.max_ms) -After ([double]$after.max_ms) -Direction "lower" -TolerancePct $RegressionTolerancePct
 }
 
-$beforePreview = Latest-ByKey -Rows (Read-JsonLines -Path (Join-Path $BeforeDir "preview.jsonl")) -Key "scenario"
-$afterPreview = Latest-ByKey -Rows (Read-JsonLines -Path (Join-Path $AfterDir "preview.jsonl")) -Key "scenario"
-foreach ($key in $afterPreview.Keys) {
-    if (!$beforePreview.ContainsKey($key)) {
-        continue
+$exportFiles = @(
+    "export-1080p2997.jsonl",
+    "export-4k60.jsonl",
+    "export-4k60-passthrough.jsonl"
+)
+$beforeExportRows = @()
+$afterExportRows = @()
+foreach ($file in $exportFiles) {
+    $beforePath = Join-Path $BeforeDir $file
+    $afterPath = Join-Path $AfterDir $file
+    $beforeExists = Test-Path -LiteralPath $beforePath -PathType Leaf
+    $afterExists = Test-Path -LiteralPath $afterPath -PathType Leaf
+    if ($beforeExists -ne $afterExists) {
+        throw "Export baseline/current file sets differ at '$file'"
     }
-    Add-Comparison -Out $comparisons -Stage "preview" -Scenario $key -Metric "first_frame_ms" -Before ([double]$beforePreview[$key].first_frame_ms) -After ([double]$afterPreview[$key].first_frame_ms) -Direction "lower"
-    Add-Comparison -Out $comparisons -Stage "preview" -Scenario $key -Metric "frame_ms_avg" -Before ([double]$beforePreview[$key].frame_ms_avg) -After ([double]$afterPreview[$key].frame_ms_avg) -Direction "lower"
-    Add-Comparison -Out $comparisons -Stage "preview" -Scenario $key -Metric "achieved_fps" -Before ([double]$beforePreview[$key].achieved_fps) -After ([double]$afterPreview[$key].achieved_fps) -Direction "higher"
+    if ($beforeExists) {
+        $beforeExportRows += @(Read-JsonLines -Path $beforePath)
+        $afterExportRows += @(Read-JsonLines -Path $afterPath)
+    }
 }
-
-$beforeExport = Latest-ByKey -Rows (Read-JsonLines -Path (Join-Path $BeforeDir "export.jsonl")) -Key "scenario"
-$afterExport = Latest-ByKey -Rows (Read-JsonLines -Path (Join-Path $AfterDir "export.jsonl")) -Key "scenario"
+$beforeExport = Strict-ByKey -Rows $beforeExportRows -Key "scenario"
+$afterExport = Strict-ByKey -Rows $afterExportRows -Key "scenario"
+Assert-SameKeySet -Before $beforeExport -After $afterExport -Context "Export report"
 foreach ($key in $afterExport.Keys) {
-    if (!$beforeExport.ContainsKey($key)) {
-        continue
+    $before = $beforeExport[$key]
+    $after = $afterExport[$key]
+    Assert-Passed -Row $before -Context "Export baseline '$key'"
+    Assert-Passed -Row $after -Context "Export current '$key'"
+    $beforeWorkload = [pscustomobject]@{
+        resolution = $before.resolution
+        target_fps = $before.target_fps
+        simulated_frames = $before.simulated_frames
+        layers = $before.layers
+        opacity_pattern = $before.opacity_pattern
+        first_frame_threshold_ms = $before.first_frame_threshold_ms
+        fps_min_threshold = $before.fps_min_threshold
+        fps_max_threshold = $before.fps_max_threshold
+    } | ConvertTo-Json -Compress
+    $afterWorkload = [pscustomobject]@{
+        resolution = $after.resolution
+        target_fps = $after.target_fps
+        simulated_frames = $after.simulated_frames
+        layers = $after.layers
+        opacity_pattern = $after.opacity_pattern
+        first_frame_threshold_ms = $after.first_frame_threshold_ms
+        fps_min_threshold = $after.fps_min_threshold
+        fps_max_threshold = $after.fps_max_threshold
+    } | ConvertTo-Json -Compress
+    if ($beforeWorkload -ne $afterWorkload) {
+        throw "Export workload or threshold changed for '$key'"
     }
-    Add-Comparison -Out $comparisons -Stage "export" -Scenario $key -Metric "first_frame_ms" -Before ([double]$beforeExport[$key].first_frame_ms) -After ([double]$afterExport[$key].first_frame_ms) -Direction "lower"
-    Add-Comparison -Out $comparisons -Stage "export" -Scenario $key -Metric "frame_ms_avg" -Before ([double]$beforeExport[$key].frame_ms_avg) -After ([double]$afterExport[$key].frame_ms_avg) -Direction "lower"
-    Add-Comparison -Out $comparisons -Stage "export" -Scenario $key -Metric "achieved_fps" -Before ([double]$beforeExport[$key].achieved_fps) -After ([double]$afterExport[$key].achieved_fps) -Direction "higher"
-}
-
-$beforeAudio = Latest-ByKey -Rows (Read-JsonLines -Path (Join-Path $BeforeDir "audio.jsonl")) -Key "scenario"
-$afterAudio = Latest-ByKey -Rows (Read-JsonLines -Path (Join-Path $AfterDir "audio.jsonl")) -Key "scenario"
-foreach ($key in $afterAudio.Keys) {
-    if (!$beforeAudio.ContainsKey($key)) {
-        continue
-    }
-    Add-Comparison -Out $comparisons -Stage "audio" -Scenario $key -Metric "first_chunk_ms" -Before ([double]$beforeAudio[$key].first_chunk_ms) -After ([double]$afterAudio[$key].first_chunk_ms) -Direction "lower"
-    Add-Comparison -Out $comparisons -Stage "audio" -Scenario $key -Metric "chunk_ms_avg" -Before ([double]$beforeAudio[$key].chunk_ms_avg) -After ([double]$afterAudio[$key].chunk_ms_avg) -Direction "lower"
-    Add-Comparison -Out $comparisons -Stage "audio" -Scenario $key -Metric "chunk_ms_p95" -Before ([double]$beforeAudio[$key].chunk_ms_p95) -After ([double]$afterAudio[$key].chunk_ms_p95) -Direction "lower"
-    Add-Comparison -Out $comparisons -Stage "audio" -Scenario $key -Metric "realtime_factor" -Before ([double]$beforeAudio[$key].realtime_factor) -After ([double]$afterAudio[$key].realtime_factor) -Direction "higher"
+    Add-Comparison -Out $comparisons -Stage "export" -Scenario $key -Metric "first_frame_ms" -Before ([double]$before.first_frame_ms) -After ([double]$after.first_frame_ms) -Direction "lower" -TolerancePct $RegressionTolerancePct
+    Add-Comparison -Out $comparisons -Stage "export" -Scenario $key -Metric "frame_ms_avg" -Before ([double]$before.frame_ms_avg) -After ([double]$after.frame_ms_avg) -Direction "lower" -TolerancePct $RegressionTolerancePct
+    Add-Comparison -Out $comparisons -Stage "export" -Scenario $key -Metric "achieved_fps" -Before ([double]$before.achieved_fps) -After ([double]$after.achieved_fps) -Direction "higher" -TolerancePct $RegressionTolerancePct
 }
 
 if ($comparisons.Count -eq 0) {
-    Write-Host "No comparable rows found. Check baseline/current directories and jsonl files."
-    exit 0
+    throw "No comparable rows found; baseline/current evidence is incomplete"
 }
 
 $sorted = $comparisons | Sort-Object stage, scenario, metric
@@ -149,3 +254,8 @@ Write-Host "Summary:"
 Write-Host "  improved : $improved"
 Write-Host "  regressed: $regressed"
 Write-Host "  flat     : $flat"
+Write-Host "  tolerance: $RegressionTolerancePct%"
+
+if ($FailOnRegression -and $regressed -gt 0) {
+    exit 1
+}

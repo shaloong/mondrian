@@ -7,6 +7,7 @@
 //!
 //! * 每个 Action 描述 **"发生了什么"**，不描述"怎么做"
 //! * Action 是纯数据（值对象），不含任何逻辑
+//! * 每个 Action 都表示真实语义意图；未形成命令的输入由 Adapter 保留为 `None`
 //! * 新增 Action 必须由应用组合根映射到一个明确的领域 Interface
 //! * `Custom` 变体提供无边界扩展，供脚本/AI/宏使用
 
@@ -41,12 +42,6 @@ pub enum EffectTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Action {
     // ═══════════════════════════════════════════════════════════════════
-    // 调度控制
-    // ═══════════════════════════════════════════════════════════════════
-    /// Explicitly represent an input path that should not mutate editor state.
-    NoOp,
-
-    // ═══════════════════════════════════════════════════════════════════
     // 项目
     // ═══════════════════════════════════════════════════════════════════
     NewProject,
@@ -75,6 +70,9 @@ pub enum Action {
     MoveClipToTrack {
         clip_id: ClipId,
         target_track: TrackId,
+        /// Exact input coordinate in the active Sequence domain. The App
+        /// converts the complete frame/time-base pair before one nearest-frame
+        /// lowering onto that Sequence's evaluation grid.
         position: FramePosition,
     },
     TrimClipStart {
@@ -105,6 +103,10 @@ pub enum Action {
     Play,
     Pause,
     TogglePlay,
+    /// Seek to an exact input coordinate in the active Sequence domain.
+    ///
+    /// The `FramePosition` time base is authoritative input, not a display hint;
+    /// the App converts it before lowering once onto the active Sequence grid.
     Seek(FramePosition),
     StepForward,
     StepBack,
@@ -213,11 +215,6 @@ mod tests {
     #[test]
     fn round_trip_new_project() {
         assert_eq!(round_trip(&Action::NewProject), Action::NewProject);
-    }
-
-    #[test]
-    fn round_trip_no_op() {
-        assert_eq!(round_trip(&Action::NoOp), Action::NoOp);
     }
 
     #[test]
@@ -520,9 +517,8 @@ mod tests {
     }
 
     #[test]
-    fn json_format_no_op() {
-        let json = serde_json::to_string(&Action::NoOp).unwrap();
-        assert_eq!(json, "\"NoOp\"");
+    fn json_rejects_removed_no_op_sentinel() {
+        assert!(serde_json::from_str::<Action>("\"NoOp\"").is_err());
     }
 
     #[test]

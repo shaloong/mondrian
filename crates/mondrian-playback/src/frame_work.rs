@@ -1,6 +1,6 @@
 //! Semantic frame-work value types shared by the Playback Engine and Broker.
 
-use crate::FrameDemandIdentity;
+use crate::{FrameDemandIdentity, MediaWorkReservationIntent};
 pub use mondrian_core::{
     ExecutionDeadline as FrameWorkDeadline, ExecutionDeadlineStatus as FrameWorkDeadlineStatus,
 };
@@ -24,6 +24,37 @@ pub enum FrameWorkPriority {
     Prefetch,
     /// Work required for the current visible position.
     Current,
+}
+
+/// Deadline-expiry behavior for an execution that already owns a worker lease.
+///
+/// Queue expiry and completion classification always continue to use the
+/// request deadline. This policy controls only whether crossing that deadline
+/// asks an already-running execution to stop.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum FrameInFlightDeadlinePolicy {
+    /// Crossing the deadline requests cooperative execution cancellation.
+    #[default]
+    Cancel,
+    /// Let the execution finish so its stateful locality can serve later work.
+    ///
+    /// The completed artifact is still classified as late against the exact
+    /// deadline and cannot satisfy the expired presentation demand.
+    FinishForLocality,
+}
+
+/// Physical resource-ownership identity required to reuse frame work.
+///
+/// Semantic frame keys intentionally remain Adapter-defined. This scope keeps
+/// a matching key from reusing queued or in-flight work whose move-only
+/// physical reservation was admitted for a different purpose.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FrameWorkResourceScope {
+    /// Work whose physical ownership is fully represented by its semantic key.
+    #[default]
+    Shared,
+    /// Decoded-media work bound to one exact Frame Store reservation intent.
+    Media(MediaWorkReservationIntent),
 }
 
 /// Freshness disposition for completed Adapter work.
@@ -69,6 +100,11 @@ pub enum FrameExecutionCancellation {
         /// Elapsed time since the Broker-owned deadline instant.
         age: Duration,
     },
+    /// The lease exhausted its presentation-independent execution budget.
+    ExecutionBudgetExpired {
+        /// Elapsed time since the Broker-owned execution-budget instant.
+        age: Duration,
+    },
 }
 
 impl FrameExecutionCancellation {
@@ -80,16 +116,17 @@ impl FrameExecutionCancellation {
             Self::PrefetchPreemptedByCurrent { request_age }
             | Self::StillPreemptedByRealtimeCurrent { request_age } => Some(request_age),
             Self::DeadlineExpired { age } => Some(age),
+            Self::ExecutionBudgetExpired { age } => Some(age),
         }
     }
 }
 
 /// One atomic Broker-clock sample of cancellation and execution age.
 ///
-/// Adapters must use this evidence when comparing request-to-checkpoint and
-/// execution-to-checkpoint durations. Reconstructing execution age from an
-/// Adapter-local codec entry instant creates incompatible time origins during
-/// dequeue/cancellation races.
+/// Adapters must use this evidence when comparing
+/// request-to-logical-cancellation and execution-to-logical-cancellation
+/// durations. Reconstructing execution age from an Adapter-local codec entry
+/// instant creates incompatible time origins during dequeue/cancellation races.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameExecutionCancellationEvidence {
     /// Authoritative semantic cancellation reason and request age.
@@ -119,6 +156,8 @@ pub struct FrameRequestBinding<D> {
     pub priority: FrameWorkPriority,
     /// Semantic work class used for worker eligibility.
     pub work_class: FrameWorkClass,
+    /// Exact physical resource-ownership scope eligible for reuse.
+    pub resource_scope: FrameWorkResourceScope,
     /// Playback demand identity, when the request is demand-backed.
     pub demand_identity: Option<FrameDemandIdentity>,
     /// Opaque Adapter deadline associated with the Broker-compared budget.

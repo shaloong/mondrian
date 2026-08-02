@@ -1,9 +1,14 @@
 use super::*;
+use std::path::PathBuf;
+
+use mondrian_core::types::ColorSpace;
+use mondrian_core::Resolution;
+use mondrian_media::{DecodedVideoRange, PreviewSourceColorContract};
 
 #[test]
 fn cancellation_policy_owns_speculative_budget_and_session_deadline() {
     assert_eq!(
-        media_preview_cancel_reason(
+        media_preview_cancel_reason_for_test_observation(
             None,
             MediaPreviewRequestPriority::Prefetch,
             PreviewDecodeAccessMode::PlaybackCursor,
@@ -13,7 +18,7 @@ fn cancellation_policy_owns_speculative_budget_and_session_deadline() {
         None
     );
     assert_eq!(
-        media_preview_cancel_reason(
+        media_preview_cancel_reason_for_test_observation(
             None,
             MediaPreviewRequestPriority::Prefetch,
             PreviewDecodeAccessMode::PlaybackCursor,
@@ -23,7 +28,7 @@ fn cancellation_policy_owns_speculative_budget_and_session_deadline() {
         Some(MediaPreviewCancelReason::PrefetchDeadline)
     );
     assert_eq!(
-        media_preview_cancel_reason_at_checkpoint(
+        media_preview_cancel_reason_at_logical_observation(
             None,
             MediaPreviewRequestPriority::Prefetch,
             PreviewDecodeAccessMode::PlaybackCursor,
@@ -92,7 +97,7 @@ fn speculative_cancellation_latency_uses_budget_authority_instant() {
         started_at + Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US + 7);
 
     assert_eq!(
-        media_preview_cancel_request_to_observed_us(
+        media_preview_cancel_request_to_logical_observation_us(
             MediaPreviewCancelReason::PrefetchDeadline,
             None,
             started_at,
@@ -103,26 +108,20 @@ fn speculative_cancellation_latency_uses_budget_authority_instant() {
 }
 
 fn test_media_key(source_frame: i64) -> MediaPreviewKey {
-    MediaPreviewKey {
-        asset_id: AssetId::new(),
-        path: PathBuf::from(format!("E:/media/{source_frame}.mov")),
-        fingerprint: None,
-        source_time: TimelineTime::new(source_frame, 1).expect("exact source time"),
-        target_width: 320,
-        target_height: 180,
-        source_width: 320,
-        source_height: 180,
-        input_color_space: ColorSpace::Rec709,
-        input_video_range: mondrian_media::DecodedVideoRangeContract::Automatic {
-            probed_range: mondrian_media::DecodedVideoRange::Limited,
-        },
-        native_surface_hint: None,
-        source_has_alpha: false,
-        alpha_interpretation: AlphaInterpretation::Straight,
-        working_color_space: WorkingColorSpace::LinearRec709,
-        input_tone_map: false,
-        engine: ColorEngine::mondrian_standard(),
-    }
+    test_media_key_at(
+        source_frame,
+        TimelineTime::new(source_frame, 1).expect("exact source time"),
+    )
+}
+
+fn test_media_key_at(path_label: i64, source_time: TimelineTime) -> MediaPreviewKey {
+    MediaPreviewKey::test_cpu(
+        PathBuf::from(format!("E:/media/{path_label}.mov")),
+        MediaPreviewKey::test_fingerprint(path_label as u64),
+        source_time,
+        Resolution { width: 320, height: 180 },
+        PreviewSourceColorContract::automatic(ColorSpace::Rec709, DecodedVideoRange::Limited),
+    )
 }
 
 fn test_media_job(key: MediaPreviewKey, priority: MediaPreviewRequestPriority) -> MediaPreviewJob {
@@ -146,16 +145,55 @@ fn test_media_job_with_generation(
         deadline_at: None,
         demand_identity: None,
         execution_id: None,
+        residency_work: None,
+    }
+}
+
+#[test]
+fn only_current_playback_preserves_in_flight_work_after_presentation_deadline() {
+    let cases = [
+        (
+            MediaPreviewRequestPriority::Current,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            mondrian_playback::FrameInFlightDeadlinePolicy::FinishForLocality,
+        ),
+        (
+            MediaPreviewRequestPriority::Prefetch,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            mondrian_playback::FrameInFlightDeadlinePolicy::Cancel,
+        ),
+        (
+            MediaPreviewRequestPriority::Current,
+            PreviewDecodeAccessMode::ScrubCursor,
+            mondrian_playback::FrameInFlightDeadlinePolicy::Cancel,
+        ),
+        (
+            MediaPreviewRequestPriority::Current,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            mondrian_playback::FrameInFlightDeadlinePolicy::Cancel,
+        ),
+    ];
+
+    for (index, (priority, access_mode, expected)) in cases.into_iter().enumerate() {
+        let mut job = test_media_job(test_media_key(index as i64), priority);
+        job.access_mode = access_mode;
+        job.deadline_at = Some(Instant::now() + Duration::from_secs(1));
+        assert_eq!(
+            frame_work_request(job, mondrian_playback::FrameWorkResourceScope::Shared)
+                .in_flight_deadline_policy,
+            expected,
+            "unexpected in-flight deadline policy for {priority:?}/{access_mode:?}"
+        );
     }
 }
 
 #[test]
 fn media_preview_key_does_not_collapse_distinct_exact_source_targets() {
-    let mut exact_third = test_media_key(0);
-    exact_third.source_time = TimelineTime::ONE_THIRD;
-    let mut microsecond_approximation = exact_third.clone();
-    microsecond_approximation.source_time =
-        TimelineTime::new(333_333, 1_000_000).expect("exact approximation");
+    let exact_third = test_media_key_at(0, TimelineTime::ONE_THIRD);
+    let microsecond_approximation = test_media_key_at(
+        0,
+        TimelineTime::new(333_333, 1_000_000).expect("exact approximation"),
+    );
 
     assert_ne!(exact_third, microsecond_approximation);
 }
@@ -256,7 +294,7 @@ fn media_preview_scheduler_rejects_non_playback_prefetch_requests() {
 }
 
 #[test]
-fn media_preview_scheduler_skips_obsolete_generations() {
+fn media_preview_scheduler_prunes_queued_obsolete_generation_before_decode() {
     let scheduler = MediaPreviewScheduler::default();
     let first_generation = scheduler.begin_generation();
     let key = test_media_key(1);
@@ -279,8 +317,8 @@ fn media_preview_scheduler_skips_obsolete_generations() {
     ));
     assert_eq!(scheduler.pending_len(), 0);
     let diagnostics = scheduler.diagnostics();
-    assert_eq!(diagnostics.skipped_decode_obsolete_generation, 1);
-    assert_eq!(diagnostics.skipped_decode_missing_pending, 0);
+    assert_eq!(diagnostics.skipped_decode_obsolete_generation, 0);
+    assert_eq!(diagnostics.skipped_decode_missing_pending, 1);
     assert_eq!(diagnostics.skipped_decode_access_mode_mismatch, 0);
 }
 
@@ -307,7 +345,7 @@ fn media_preview_scheduler_replaces_playback_prefetch_with_scrub_current() {
             second_generation,
             MediaPreviewRequestPriority::Current,
         ),
-        MediaPreviewRequestStatus::AlreadyPending { access_mode_changed: true }
+        scheduled_request()
     );
 
     assert!(test_scheduler_should_decode(
@@ -322,7 +360,8 @@ fn media_preview_scheduler_replaces_playback_prefetch_with_scrub_current() {
         MediaPreviewRequestPriority::Prefetch
     ));
     let diagnostics = scheduler.diagnostics();
-    assert_eq!(diagnostics.already_pending_access_mode_changes, 1);
+    assert_eq!(diagnostics.already_pending_access_mode_changes, 0);
+    assert_eq!(diagnostics.pruned_obsolete_requests, 1);
     assert_eq!(diagnostics.completed_stale_access_mode_mismatch, 1);
     assert_eq!(scheduler.pending_len(), 1);
     assert!(test_scheduler_complete(
@@ -543,7 +582,7 @@ fn pending_playback_identity_tracks_latest_demand_for_same_media_key() {
 }
 
 #[test]
-fn media_preview_scheduler_keeps_same_key_in_flight_decode_current_after_rerequest() {
+fn media_preview_scheduler_reusable_in_flight_decode_consumes_new_generation_fallback() {
     let scheduler = MediaPreviewScheduler::default();
     let first_generation = scheduler.begin_generation();
     let key = test_media_key(1);
@@ -563,6 +602,9 @@ fn media_preview_scheduler_keeps_same_key_in_flight_decode_current_after_rereque
         first_generation,
         MediaPreviewRequestPriority::Current
     ));
+    let execution_id = scheduler
+        .begin_test_execution(MediaPreviewWorkerLane::Any)
+        .expect("first generation execution");
 
     let second_generation = scheduler.begin_generation();
     assert_eq!(
@@ -572,7 +614,7 @@ fn media_preview_scheduler_keeps_same_key_in_flight_decode_current_after_rereque
             second_generation,
             MediaPreviewRequestPriority::Current,
         ),
-        MediaPreviewRequestStatus::AlreadyPending { access_mode_changed: false }
+        scheduled_request()
     );
 
     assert!(
@@ -582,14 +624,12 @@ fn media_preview_scheduler_keeps_same_key_in_flight_decode_current_after_rereque
             first_generation,
             MediaPreviewRequestPriority::Current
         ),
-        "same frame/key decode must survive UI generation refreshes"
+        "the new generation fallback must remain current while old work finishes"
     );
-    assert!(test_scheduler_complete(
-        &scheduler,
-        &key,
-        first_generation,
-        MediaPreviewRequestPriority::Current
-    ));
+    let resolution = scheduler.resolve_execution(execution_id, true);
+    assert_eq!(resolution.status, MediaPreviewCompletionStatus::Current);
+    assert_eq!(resolution.binding_generation, Some(second_generation));
+    assert_eq!(scheduler.pending_len(), 0);
 }
 
 #[test]
@@ -685,11 +725,11 @@ fn media_preview_scheduler_rejects_obsolete_generation_requests() {
             first_generation,
             MediaPreviewRequestPriority::Current,
         ),
-        MediaPreviewRequestStatus::DroppedBackpressure
+        MediaPreviewRequestStatus::DroppedObsoleteGeneration
     );
     assert_eq!(scheduler.pending_len(), 0);
     let diagnostics = scheduler.diagnostics();
-    assert_eq!(diagnostics.dropped_backpressure_requests, 1);
+    assert_eq!(diagnostics.dropped_backpressure_requests, 0);
     assert_eq!(diagnostics.dropped_obsolete_generation_requests, 1);
     assert_eq!(diagnostics.dropped_pending_window_requests, 0);
 }
@@ -765,7 +805,7 @@ fn media_preview_scheduler_reports_request_and_drop_diagnostics() {
 }
 
 #[test]
-fn media_preview_scheduler_reports_obsolete_completion_reason() {
+fn media_preview_scheduler_reports_pruned_completion_as_missing() {
     let scheduler = MediaPreviewScheduler::default();
     let generation = scheduler.begin_generation();
     let key = test_media_key(1);
@@ -789,8 +829,8 @@ fn media_preview_scheduler_reports_obsolete_completion_reason() {
     ));
     let diagnostics = scheduler.diagnostics();
     assert_eq!(diagnostics.completed_stale_results, 1);
-    assert_eq!(diagnostics.completed_stale_obsolete_generation, 1);
-    assert_eq!(diagnostics.completed_stale_missing_pending, 0);
+    assert_eq!(diagnostics.completed_stale_obsolete_generation, 0);
+    assert_eq!(diagnostics.completed_stale_missing_pending, 1);
     assert_eq!(diagnostics.completed_stale_access_mode_mismatch, 0);
 }
 
@@ -1443,12 +1483,11 @@ fn media_preview_job_queue_promotes_existing_prefetch_to_current() {
     let (sender, receiver) = media_preview_job_queue(2);
     let promoted = test_media_key(1);
     let other_prefetch = test_media_key(2);
+    let promoted_payload = test_media_job(promoted.clone(), MediaPreviewRequestPriority::Prefetch);
+    let original_enqueued_at = promoted_payload.enqueued_at;
 
     assert_eq!(
-        sender.enqueue(test_media_job(
-            promoted.clone(),
-            MediaPreviewRequestPriority::Prefetch
-        )),
+        sender.enqueue(promoted_payload),
         MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
     );
     assert_eq!(
@@ -1504,8 +1543,11 @@ fn media_preview_job_queue_promotes_existing_prefetch_to_current() {
     assert_eq!(promoted_job.key, promoted);
     assert_eq!(promoted_job.priority, MediaPreviewRequestPriority::Current);
     assert_eq!(promoted_job.generation, 7);
-    assert_eq!(promoted_job.key.source_time, promoted.source_time);
-    assert_eq!(promoted_job.enqueued_at, promoted_at);
+    assert_eq!(promoted_job.key.source_time(), promoted.source_time());
+    assert_eq!(
+        promoted_job.enqueued_at, original_enqueued_at,
+        "metadata promotion must preserve the queued execution payload"
+    );
     assert_eq!(promoted_job.deadline_at, None);
     assert_eq!(promoted_job.demand_identity, Some(demand_identity));
     assert_eq!(
@@ -1514,7 +1556,8 @@ fn media_preview_job_queue_promotes_existing_prefetch_to_current() {
     );
     assert_eq!(
         promoted_job.hardware_decode_request,
-        PreviewHardwareDecodeRequest::PreferGpuResident
+        PreviewHardwareDecodeRequest::Auto,
+        "payload-free promotion must not replace execution-policy payload fields"
     );
     assert_eq!(
         receiver.recv().expect("remaining prefetch").key,
@@ -1526,13 +1569,12 @@ fn media_preview_job_queue_promotes_existing_prefetch_to_current() {
 fn media_preview_job_queue_promote_refreshes_current_generation_without_priority_metric() {
     let (sender, receiver) = media_preview_job_queue(1);
     let key = test_media_key(1);
+    let original_payload =
+        test_media_job_with_generation(key.clone(), 2, MediaPreviewRequestPriority::Current);
+    let original_enqueued_at = original_payload.enqueued_at;
 
     assert_eq!(
-        sender.enqueue(test_media_job_with_generation(
-            key.clone(),
-            2,
-            MediaPreviewRequestPriority::Current,
-        )),
+        sender.enqueue(original_payload),
         MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
     );
 
@@ -1565,7 +1607,7 @@ fn media_preview_job_queue_promote_refreshes_current_generation_without_priority
     assert_eq!(job.priority, MediaPreviewRequestPriority::Current);
     assert_eq!(job.access_mode, PreviewDecodeAccessMode::ScrubCursor);
     assert_eq!(job.generation, 5);
-    assert_eq!(job.enqueued_at, refreshed_at);
+    assert_eq!(job.enqueued_at, original_enqueued_at);
     assert_eq!(job.deadline_at, refreshed_deadline);
 }
 
@@ -1709,6 +1751,7 @@ fn media_preview_job_queue_diagnostics_break_down_current_depth_by_access_mode()
             deadline_at: None,
             demand_identity: None,
             execution_id: None,
+            residency_work: None,
         }),
         MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
     );

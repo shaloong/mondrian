@@ -349,8 +349,12 @@ impl MultilineTextInput {
         self.scroll_x.set(0.0);
     }
 
-    pub fn on_change(mut self, action: impl Fn(&str) -> Action + 'static) -> Self {
-        self.on_change = Some(Box::new(action));
+    pub fn on_change<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(&str) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_change = Some(Box::new(move |text| action(text).into()));
         self
     }
 
@@ -436,7 +440,9 @@ impl MultilineTextInput {
 
     fn dispatch_change(&self, ctx: &mut EventContext) {
         if let Some(factory) = &self.on_change {
-            (ctx.dispatch)(factory(self.edit.text()));
+            if let Some(action) = factory(self.edit.text()) {
+                (ctx.dispatch)(action);
+            }
         }
     }
 
@@ -1631,7 +1637,7 @@ mod tests {
     fn on_change_dispatches_after_text_edit() {
         let mut widget = MultilineTextInput::new("")
             .with_text(String::from("hello"))
-            .on_change(|_| Action::NoOp);
+            .on_change(|_| Action::SaveProject);
         widget.set_text("hellox".into());
 
         let mut f = DummyFocus;
@@ -1769,7 +1775,9 @@ mod tests {
 
     #[test]
     fn insert_text_pushes_undo_and_dispatches() {
-        let mut widget = MultilineTextInput::new("").with_text("hello").on_change(|_| Action::NoOp);
+        let mut widget = MultilineTextInput::new("")
+            .with_text("hello")
+            .on_change(|_| Action::SaveProject);
         widget.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
         widget.focused = true;
 
@@ -1835,7 +1843,9 @@ mod tests {
 
     #[test]
     fn undo_command_restores_previous_state() {
-        let mut widget = MultilineTextInput::new("").with_text("hello").on_change(|_| Action::NoOp);
+        let mut widget = MultilineTextInput::new("")
+            .with_text("hello")
+            .on_change(|_| Action::SaveProject);
         widget.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
         widget.focused = true;
 
@@ -1869,7 +1879,9 @@ mod tests {
 
     #[test]
     fn redo_after_undo_restores_forward() {
-        let mut widget = MultilineTextInput::new("").with_text("hello").on_change(|_| Action::NoOp);
+        let mut widget = MultilineTextInput::new("")
+            .with_text("hello")
+            .on_change(|_| Action::SaveProject);
         widget.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
         widget.focused = true;
 

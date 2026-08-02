@@ -6,9 +6,8 @@
 //! painting uses resvg/tiny-skia to rasterize the source SVG at the target pixel
 //! size, then submits the result to the renderer image atlas.
 
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 
@@ -21,9 +20,11 @@ use lyon::tessellation::{
 use mondrian_core::Color;
 use mondrian_ui_core::types::{Point, Rect};
 use mondrian_ui_core::widget::PaintContext;
+use sha2::{Digest, Sha256};
 use tiny_skia_path::{PathSegment as TinyPathSegment, Point as TinyPoint, Transform};
 
 const TESSELLATION_TOLERANCE: f32 = 0.08;
+const SVG_SOURCE_IDENTITY_DOMAIN: &[u8] = b"mondrian.ui.vector-icon.svg-source.v1\0";
 /// Largest SVG icon edge rasterized into the renderer image atlas.
 ///
 /// The UI image atlas is currently 2048x2048 with transparent padding around
@@ -38,11 +39,13 @@ const MAX_RASTER_ICON_SIZE: u32 = 1024;
 /// atlas. This gives diagonals and curves stable coverage without asking the GPU
 /// to minify icon atlases with point-like linear samples.
 const MAX_RASTER_ICON_SUPERSAMPLE: u32 = 4;
+const DEFAULT_RASTER_ICON_CACHE_ENTRIES: usize = 128;
+const DEFAULT_RASTER_ICON_CACHE_BYTES: usize = 32 * 1024 * 1024;
 
-static STATIC_SVG_ICON_CACHE: OnceLock<Mutex<std::collections::HashMap<&'static str, VectorIcon>>> =
-    OnceLock::new();
-static RASTER_ICON_CACHE: OnceLock<Mutex<std::collections::HashMap<RasterIconKey, RasterIcon>>> =
-    OnceLock::new();
+static STATIC_SVG_ICON_CACHE: OnceLock<
+    Mutex<std::collections::HashMap<SvgSourceIdentity, VectorIcon>>,
+> = OnceLock::new();
+static RASTER_ICON_CACHE: OnceLock<Mutex<RasterIconCache>> = OnceLock::new();
 
 /// Parsed, tessellated icon geometry ready for widget painting.
 #[derive(Debug, Clone, PartialEq)]
@@ -57,15 +60,51 @@ struct VectorIconMesh {
     triangles: Vec<[Point; 3]>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 struct VectorIconRasterSource {
-    id: Arc<str>,
+    caller_id: &'static str,
+    identity: SvgSourceIdentity,
     svg: Arc<str>,
+}
+
+impl fmt::Debug for VectorIconRasterSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VectorIconRasterSource")
+            .field("caller_id", &self.caller_id)
+            .field("identity", &self.identity)
+            .field("svg_bytes", &self.svg.len())
+            .finish()
+    }
+}
+
+/// Complete content identity of one exact SVG source document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct SvgSourceIdentity([u8; 32]);
+
+impl SvgSourceIdentity {
+    fn new(svg: &str) -> Self {
+        let bytes = svg.as_bytes();
+        let mut digest = Sha256::new();
+        digest.update(SVG_SOURCE_IDENTITY_DOMAIN);
+        digest.update((bytes.len() as u64).to_le_bytes());
+        digest.update(bytes);
+        Self(digest.finalize().into())
+    }
+}
+
+impl fmt::Display for SvgSourceIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in self.0 {
+            write!(formatter, "{byte:02x}")?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct RasterIconKey {
-    id: Arc<str>,
+    source_identity: SvgSourceIdentity,
     width: u32,
     height: u32,
 }
@@ -75,6 +114,137 @@ struct RasterIcon {
     width: u32,
     height: u32,
     rgba: Arc<[u8]>,
+}
+
+impl RasterIcon {
+    fn byte_len(&self) -> usize {
+        self.rgba.len()
+    }
+}
+
+struct RasterIconCache {
+    entries: HashMap<RasterIconKey, RasterIcon>,
+    lru: VecDeque<RasterIconKey>,
+    retained_bytes: usize,
+    max_entries: usize,
+    max_bytes: usize,
+}
+
+impl Default for RasterIconCache {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            lru: VecDeque::new(),
+            retained_bytes: 0,
+            max_entries: DEFAULT_RASTER_ICON_CACHE_ENTRIES,
+            max_bytes: DEFAULT_RASTER_ICON_CACHE_BYTES,
+        }
+    }
+}
+
+impl RasterIconCache {
+    fn get(&mut self, key: &RasterIconKey) -> Option<RasterIcon> {
+        let icon = self.entries.get(key)?.clone();
+        self.touch(key);
+        Some(icon)
+    }
+
+    fn insert(&mut self, key: RasterIconKey, icon: RasterIcon) -> RasterIcon {
+        if let Some(existing) = self.get(&key) {
+            return existing;
+        }
+        let byte_len = icon.byte_len();
+        if self.max_entries == 0 || byte_len > self.max_bytes {
+            return icon;
+        }
+        self.retained_bytes = self.retained_bytes.saturating_add(byte_len);
+        self.lru.push_back(key.clone());
+        self.entries.insert(key, icon.clone());
+        self.trim();
+        icon
+    }
+
+    fn touch(&mut self, key: &RasterIconKey) {
+        if let Some(index) = self.lru.iter().position(|candidate| candidate == key) {
+            self.lru.remove(index);
+        }
+        self.lru.push_back(key.clone());
+    }
+
+    fn reconfigure(&mut self, max_entries: usize, max_bytes: usize) {
+        self.max_entries = max_entries;
+        self.max_bytes = max_bytes;
+        self.trim();
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.lru.clear();
+        self.retained_bytes = 0;
+    }
+
+    fn trim(&mut self) {
+        while self.entries.len() > self.max_entries || self.retained_bytes > self.max_bytes {
+            let Some(evicted) = self.lru.pop_front() else {
+                self.clear();
+                break;
+            };
+            if let Some(icon) = self.entries.remove(&evicted) {
+                self.retained_bytes = self.retained_bytes.saturating_sub(icon.byte_len());
+            }
+        }
+    }
+}
+
+/// Point-in-time evidence for bounded CPU SVG raster residency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VectorIconRasterCacheDiagnostics {
+    /// Exact source-and-size raster entries currently retained.
+    pub entries: usize,
+    /// RGBA payload bytes retained by those entries.
+    pub retained_bytes: usize,
+    /// Current entry limit.
+    pub max_entries: usize,
+    /// Current RGBA payload byte limit.
+    pub max_bytes: usize,
+}
+
+/// Apply an online CPU SVG raster-cache policy and synchronously evict excess entries.
+pub fn configure_vector_icon_raster_cache(
+    max_entries: usize,
+    max_bytes: usize,
+) -> Result<(), VectorIconError> {
+    let cache = RASTER_ICON_CACHE.get_or_init(|| Mutex::new(RasterIconCache::default()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| VectorIconError::new("vector icon raster cache is poisoned"))?;
+    cache.reconfigure(max_entries, max_bytes);
+    Ok(())
+}
+
+/// Drop every cached CPU SVG raster while preserving parsed static SVG geometry.
+pub fn clear_vector_icon_raster_cache() -> Result<(), VectorIconError> {
+    let cache = RASTER_ICON_CACHE.get_or_init(|| Mutex::new(RasterIconCache::default()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| VectorIconError::new("vector icon raster cache is poisoned"))?;
+    cache.clear();
+    Ok(())
+}
+
+/// Return bounded CPU SVG raster-cache residency evidence.
+pub fn vector_icon_raster_cache_diagnostics(
+) -> Result<VectorIconRasterCacheDiagnostics, VectorIconError> {
+    let cache = RASTER_ICON_CACHE.get_or_init(|| Mutex::new(RasterIconCache::default()));
+    let cache = cache
+        .lock()
+        .map_err(|_| VectorIconError::new("vector icon raster cache is poisoned"))?;
+    Ok(VectorIconRasterCacheDiagnostics {
+        entries: cache.entries.len(),
+        retained_bytes: cache.retained_bytes,
+        max_entries: cache.max_entries,
+        max_bytes: cache.max_bytes,
+    })
 }
 
 /// Error returned when SVG icon data cannot be converted to icon geometry.
@@ -124,42 +294,44 @@ impl VectorIcon {
             ));
         }
 
-        let source_id = format!("svg:{:016x}", hash_str(svg));
+        let identity = SvgSourceIdentity::new(svg);
         Ok(Self {
             view_box,
             meshes,
             raster_source: Some(VectorIconRasterSource {
-                id: Arc::from(source_id),
+                caller_id: "dynamic-svg",
+                identity,
                 svg: Arc::from(svg),
             }),
         })
     }
 
-    /// Parse static SVG data once per `id` and return cached geometry clones.
+    /// Parse each exact static SVG document once and return cached geometry clones.
     ///
     /// This is the preferred path for bundled icons created from
     /// `include_str!()` assets. It keeps designer-authored SVGs in source while
     /// avoiding XML parsing and tessellation during every widget tree rebuild.
+    /// `id` is retained only as a diagnostic label; complete SVG identity owns
+    /// all parsing, raster, and atlas reuse.
     pub fn from_static_svg(id: &'static str, svg: &'static str) -> Result<Self, VectorIconError> {
+        let identity = SvgSourceIdentity::new(svg);
         let cache =
             STATIC_SVG_ICON_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
         {
             let guard = cache
                 .lock()
                 .map_err(|_| VectorIconError::new("static SVG icon cache is poisoned"))?;
-            if let Some(icon) = guard.get(id) {
-                return Ok(icon.clone());
+            if let Some(icon) = guard.get(&identity) {
+                return Ok(icon.clone().with_caller_id(id, identity));
             }
         }
 
-        let mut icon = Self::from_svg_str(svg)?;
-        icon.raster_source =
-            Some(VectorIconRasterSource { id: Arc::from(id), svg: Arc::from(svg) });
+        let icon = Self::from_svg_str(svg)?;
         let mut guard = cache
             .lock()
             .map_err(|_| VectorIconError::new("static SVG icon cache is poisoned"))?;
-        let icon = guard.entry(id).or_insert(icon);
-        Ok(icon.clone())
+        let icon = guard.entry(identity).or_insert(icon).clone();
+        Ok(icon.with_caller_id(id, identity))
     }
 
     /// Paint the icon into a square or rectangular viewport using one theme color.
@@ -213,23 +385,31 @@ impl VectorIcon {
         }
         let supersample = raster_supersample_scale(target_width, target_height);
         let key = RasterIconKey {
-            id: source.id.clone(),
+            source_identity: source.identity,
             width: target_width,
             height: target_height,
         };
-        let cache = RASTER_ICON_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+        let cache = RASTER_ICON_CACHE.get_or_init(|| Mutex::new(RasterIconCache::default()));
         {
-            let guard = cache.lock().ok()?;
+            let mut guard = cache.lock().ok()?;
             if let Some(icon) = guard.get(&key) {
-                return Some((raster_draw_key(&key), icon.clone()));
+                return Some((raster_draw_key(&key), icon));
             }
         }
 
         let raster =
             rasterize_svg_to_alpha_rgba(&source.svg, target_width, target_height, supersample)?;
         let mut guard = cache.lock().ok()?;
-        let raster = guard.entry(key.clone()).or_insert(raster).clone();
+        let raster = guard.insert(key.clone(), raster);
         Some((raster_draw_key(&key), raster))
+    }
+
+    fn with_caller_id(mut self, caller_id: &'static str, identity: SvgSourceIdentity) -> Self {
+        if let Some(source) = &mut self.raster_source {
+            debug_assert_eq!(source.identity, identity);
+            source.caller_id = caller_id;
+        }
+        self
     }
 }
 
@@ -248,14 +428,11 @@ fn raster_supersample_scale(target_width: u32, target_height: u32) -> u32 {
     1
 }
 
-fn hash_str(value: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish()
-}
-
 fn raster_draw_key(key: &RasterIconKey) -> String {
-    format!("vector-icon:{}:{}x{}", key.id, key.width, key.height)
+    format!(
+        "vector-icon:sha256:{}:{}x{}",
+        key.source_identity, key.width, key.height
+    )
 }
 
 fn rasterize_svg_to_alpha_rgba(
@@ -633,19 +810,62 @@ mod tests {
     }
 
     #[test]
-    fn static_svg_icons_are_cached_by_id() {
-        let first = VectorIcon::from_static_svg(
-            "test.minus",
-            r#"<svg viewBox="0 0 24 24"><path d="M6 12L18 12" fill="none" stroke="black"/></svg>"#,
-        )
-        .expect("first icon");
-        let second = VectorIcon::from_static_svg(
-            "test.minus",
-            r#"<svg viewBox="0 0 24 24"><path d="M1 1L23 23" fill="none" stroke="black"/></svg>"#,
-        )
-        .expect("cached icon");
+    fn same_static_caller_id_with_different_svg_never_reuses_old_icon() {
+        const HORIZONTAL: &str =
+            r#"<svg viewBox="0 0 24 24"><path d="M6 12L18 12" fill="none" stroke="black"/></svg>"#;
+        const DIAGONAL: &str =
+            r#"<svg viewBox="0 0 24 24"><path d="M1 1L23 23" fill="none" stroke="black"/></svg>"#;
+        let first =
+            VectorIcon::from_static_svg("test.same-diagnostic-id", HORIZONTAL).expect("first icon");
+        let second =
+            VectorIcon::from_static_svg("test.same-diagnostic-id", DIAGONAL).expect("second icon");
 
-        assert_eq!(first, second);
+        assert_ne!(first, second);
+        assert_eq!(
+            first.raster_source.as_ref().map(|source| source.caller_id),
+            Some("test.same-diagnostic-id")
+        );
+        assert_ne!(
+            first.raster_source.as_ref().map(|source| source.identity),
+            second.raster_source.as_ref().map(|source| source.identity)
+        );
+        let (first_draw_key, _) = first
+            .raster_icon_for_bounds(Rect::new(0.0, 0.0, 24.0, 24.0))
+            .expect("first raster");
+        let (second_draw_key, _) = second
+            .raster_icon_for_bounds(Rect::new(0.0, 0.0, 24.0, 24.0))
+            .expect("second raster");
+        assert_ne!(first_draw_key, second_draw_key);
+    }
+
+    #[test]
+    fn complete_svg_identity_survives_a_forced_legacy_u64_collision() {
+        let left = r#"<svg viewBox="0 0 24 24"><path d="M2 2H22V22H2Z" fill="black"/></svg>"#;
+        let right = r#"<svg viewBox="0 0 24 24"><path d="M12 2L22 22H2Z" fill="black"/></svg>"#;
+
+        // Model the former `DefaultHasher::finish()` authority after two
+        // distinct sources have been forced into the same projected value.
+        let forced_legacy_u64 = 0x0123_4567_89ab_cdef_u64;
+        let legacy_left = format!("svg:{forced_legacy_u64:016x}");
+        let legacy_right = format!("svg:{forced_legacy_u64:016x}");
+        assert_eq!(legacy_left, legacy_right);
+
+        let left_key = RasterIconKey {
+            source_identity: SvgSourceIdentity::new(left),
+            width: 24,
+            height: 24,
+        };
+        let right_key = RasterIconKey {
+            source_identity: SvgSourceIdentity::new(right),
+            width: 24,
+            height: 24,
+        };
+        assert_ne!(left_key, right_key);
+        assert_ne!(raster_draw_key(&left_key), raster_draw_key(&right_key));
+        assert_eq!(
+            raster_draw_key(&left_key).len(),
+            "vector-icon:sha256:".len() + 64 + 1 + 2 + 1 + 2
+        );
     }
 
     #[test]
@@ -939,6 +1159,48 @@ mod tests {
         assert_eq!((small.width, small.height), (16, 17));
         assert_eq!((large.width, large.height), (32, 32));
         assert_ne!(small.rgba.len(), large.rgba.len());
+    }
+
+    #[test]
+    fn raster_icon_cache_enforces_lru_entry_and_byte_limits() {
+        let make_key = |byte| RasterIconKey {
+            source_identity: SvgSourceIdentity([byte; 32]),
+            width: 1,
+            height: 1,
+        };
+        let make_icon = |byte| RasterIcon {
+            width: 1,
+            height: 1,
+            rgba: Arc::from(vec![byte; 8]),
+        };
+        let mut cache = RasterIconCache {
+            entries: HashMap::new(),
+            lru: VecDeque::new(),
+            retained_bytes: 0,
+            max_entries: 2,
+            max_bytes: 16,
+        };
+        let first = make_key(1);
+        let second = make_key(2);
+        let third = make_key(3);
+
+        cache.insert(first.clone(), make_icon(1));
+        cache.insert(second.clone(), make_icon(2));
+        assert!(
+            cache.get(&first).is_some(),
+            "first entry becomes most recently used"
+        );
+        cache.insert(third.clone(), make_icon(3));
+
+        assert!(cache.entries.contains_key(&first));
+        assert!(!cache.entries.contains_key(&second));
+        assert!(cache.entries.contains_key(&third));
+        assert_eq!(cache.retained_bytes, 16);
+
+        cache.reconfigure(1, 8);
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.retained_bytes, 8);
+        assert!(cache.entries.contains_key(&third));
     }
 
     #[test]

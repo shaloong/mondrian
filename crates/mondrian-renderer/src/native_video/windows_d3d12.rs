@@ -3,6 +3,7 @@
 use super::windows_adapter::{
     renderer_adapter_luid, NativeVideoAdapterError, NativeVideoAdapterLuid,
 };
+use super::GPU_NATIVE_IMPORT_MAX_STORAGE_PIXEL_RATIO;
 use crate::GpuNativeDecodedFrameTextureFormat;
 use mondrian_media::{
     DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat, FfmpegNativeDecodedFrameResource,
@@ -82,6 +83,20 @@ pub enum D3D12NativeDecodedFrameInspectionError {
         "D3D12 decoder texture {storage_width}x{storage_height} is smaller than visible frame {visible_width}x{visible_height}"
     )]
     StorageExtentTooSmall {
+        /// Visible decoded width.
+        visible_width: u32,
+        /// Visible decoded height.
+        visible_height: u32,
+        /// Allocated texture width.
+        storage_width: u64,
+        /// Allocated texture height.
+        storage_height: u32,
+    },
+    /// Codec padding exceeded the renderer-owned bridge allocation envelope.
+    #[error(
+        "D3D12 decoder texture {storage_width}x{storage_height} exceeds the native-import storage envelope for visible frame {visible_width}x{visible_height}"
+    )]
+    StorageExtentExceedsImportEnvelope {
         /// Visible decoded width.
         visible_width: u32,
         /// Visible decoded height.
@@ -306,6 +321,18 @@ fn validate_texture_facts(
             },
         );
     }
+    let visible_pixels = u128::from(visible_width) * u128::from(visible_height);
+    let storage_pixels = u128::from(facts.width) * u128::from(facts.height);
+    if storage_pixels > visible_pixels * u128::from(GPU_NATIVE_IMPORT_MAX_STORAGE_PIXEL_RATIO) {
+        return Err(
+            D3D12NativeDecodedFrameInspectionError::StorageExtentExceedsImportEnvelope {
+                visible_width,
+                visible_height,
+                storage_width: facts.width,
+                storage_height: facts.height,
+            },
+        );
+    }
     let storage_width = u32::try_from(facts.width).map_err(|_| {
         D3D12NativeDecodedFrameInspectionError::StorageWidthOverflow { width: facts.width }
     })?;
@@ -417,8 +444,8 @@ mod tests {
         facts.depth_or_array_size = 4;
         assert_eq!(
             validate_texture_facts(
-                1920,
-                1080,
+                3840,
+                2160,
                 expected_dxgi_format(DecodedVideoSurfaceFormat::Nv12)
                     .expect("NV12 must be supported"),
                 facts,
@@ -444,6 +471,43 @@ mod tests {
             D3D12NativeDecodedFrameInspectionError::TextureFormatMismatch {
                 expected: "DXGI_FORMAT_P010",
                 actual: DXGI_FORMAT_NV12.0,
+            }
+        );
+    }
+
+    #[test]
+    fn texture_validation_enforces_active_budget_storage_envelope() {
+        let mut at_limit = valid_facts(DXGI_FORMAT_NV12);
+        at_limit.width = 1280;
+        at_limit.height = 360;
+        assert_eq!(
+            validate_texture_facts(
+                640,
+                360,
+                expected_dxgi_format(DecodedVideoSurfaceFormat::Nv12)
+                    .expect("NV12 must be supported"),
+                at_limit,
+            )
+            .expect("two-times pixel storage is the admitted boundary"),
+            (1280, 360)
+        );
+
+        let mut outside = at_limit;
+        outside.height = 720;
+        assert_eq!(
+            validate_texture_facts(
+                640,
+                360,
+                expected_dxgi_format(DecodedVideoSurfaceFormat::Nv12)
+                    .expect("NV12 must be supported"),
+                outside,
+            )
+            .expect_err("storage outside the estimated bridge envelope must fail"),
+            D3D12NativeDecodedFrameInspectionError::StorageExtentExceedsImportEnvelope {
+                visible_width: 640,
+                visible_height: 360,
+                storage_width: 1280,
+                storage_height: 720,
             }
         );
     }

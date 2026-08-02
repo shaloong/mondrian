@@ -17,6 +17,7 @@ mondrian-editor-state = { workspace = true }
 mondrian-platform-core = { workspace = true }
 
 serde = { workspace = true }
+sha2 = { workspace = true }
 glam = { workspace = true }
 lyon = { workspace = true }
 resvg = { workspace = true }

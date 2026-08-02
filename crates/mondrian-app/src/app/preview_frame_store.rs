@@ -2,7 +2,7 @@
 //!
 //! This Module maps Mondrian media and Preview raster payloads to opaque playback keys,
 //! exact byte reservations, and an exact presentation scope. Residency,
-//! admission, eviction, failure memory, and pinning remain playback-owned.
+//! admission, eviction, failure memory, and continuity residency remain playback-owned.
 
 use mondrian_core::types::SequenceId;
 
@@ -10,12 +10,20 @@ use super::preview_access_mode::MediaPreviewKey;
 use super::preview_execution::PreviewOutputKey as ViewerPreviewCacheKey;
 use super::preview_media_frame::MediaPreviewFrame;
 use super::preview_raster_frame::PreviewRasterFrame;
-use super::preview_scheduler_policy::MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES;
 
-#[cfg(test)]
 pub(crate) type PreviewFrameStoreAdapterConfig = mondrian_playback::PreviewFrameStoreConfig;
 pub(crate) type PreviewFrameStoreAdapterDiagnostics =
     mondrian_playback::PreviewFrameStoreDiagnostics;
+pub(crate) type MediaWorkReservationAdmission = mondrian_playback::MediaWorkReservationAdmission;
+pub(crate) type MediaFrameStoreAdmission = mondrian_playback::FrameStoreAdmission;
+pub(crate) type MediaFrameProtectionError = mondrian_playback::MediaFrameProtectionError;
+
+/// App contract error detected before playback-owned physical admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MediaWorkReservationAdapterError {
+    /// The physical media source lacks immutable identity evidence required for reuse.
+    UnstableMediaIdentity,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ViewerFrameScope {
@@ -48,14 +56,9 @@ pub(crate) struct PreviewFrameStoreAdapter {
 
 impl Default for PreviewFrameStoreAdapter {
     fn default() -> Self {
-        let mut config = mondrian_playback::PreviewFrameStoreConfig::default();
-        // The composition root must keep speculative scheduling and decoder
-        // resource residency coherent. Otherwise completing the far edge of
-        // the bounded lookahead can evict the imminent frame before playback
-        // reaches it, defeating prefetch while still consuming decoder work.
-        config.media_resource_unit_budget =
-            config.media_resource_unit_budget.max(MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES);
-        Self { store: PlaybackFrameStore::new(config) }
+        Self {
+            store: PlaybackFrameStore::new(mondrian_playback::PreviewFrameStoreConfig::default()),
+        }
     }
 }
 
@@ -68,21 +71,58 @@ impl PreviewFrameStoreAdapter {
 
     /// Return and touch one decoded-media frame.
     pub(crate) fn media_frame(&mut self, key: &MediaPreviewKey) -> Option<MediaPreviewFrame> {
-        self.store.media_frame(key)
+        if !media_key_authorizes_residency(key) {
+            return None;
+        }
+        self.store
+            .media_frame(key)
+            .map(|(frame, resource)| frame.with_residency_resource(resource))
     }
 
-    /// Admit a decoded-media frame and optionally pin an oversize current frame.
+    /// Return one decoded frame protected for a current Viewer candidate.
+    pub(crate) fn protected_media_frame(
+        &mut self,
+        key: &MediaPreviewKey,
+        demand_id: mondrian_playback::MediaWorkDemandId,
+    ) -> Result<Option<MediaPreviewFrame>, MediaFrameProtectionError> {
+        if !media_key_authorizes_residency(key) {
+            return Ok(None);
+        }
+        self.store.protected_media_frame(key, demand_id).map(|frame| {
+            frame.map(|(frame, resource, protection)| {
+                frame.with_residency_resource(resource).with_residency_protection(protection)
+            })
+        })
+    }
+
+    /// Reserve bounded decoded-media residency before Broker admission.
+    pub(crate) fn reserve_media_work(
+        &mut self,
+        key: &MediaPreviewKey,
+        intent: mondrian_playback::MediaWorkReservationIntent,
+        reserved_bytes: usize,
+        resource_units: usize,
+    ) -> Result<MediaWorkReservationAdmission, MediaWorkReservationAdapterError> {
+        if !media_key_authorizes_residency(key) {
+            return Err(MediaWorkReservationAdapterError::UnstableMediaIdentity);
+        }
+        Ok(self.store.reserve_media_work(key, intent, reserved_bytes, resource_units))
+    }
+
+    /// Admit a decoded-media frame under its attempt's physical resource lease.
     pub(crate) fn insert_media_frame(
         &mut self,
         key: MediaPreviewKey,
         frame: MediaPreviewFrame,
-        pin_if_oversize: bool,
-    ) -> bool {
+        work: mondrian_playback::MediaWorkResourceLease,
+    ) -> MediaFrameStoreAdmission {
+        if !media_key_authorizes_residency(&key) {
+            return MediaFrameStoreAdmission::RejectedCapacity;
+        }
         let reserved_bytes = frame.reserved_cpu_bytes();
         let resource_units = frame.decoder_resource_units();
-        self.store
-            .admit_media_frame(key, frame, reserved_bytes, resource_units, pin_if_oversize)
-            .is_resident()
+        let frame = frame.into_unbound_store_payload();
+        self.store.admit_media_frame(key, frame, work, reserved_bytes, resource_units)
     }
 
     /// Return and touch one final Preview raster.
@@ -105,17 +145,23 @@ impl PreviewFrameStoreAdapter {
 
     /// Remember one terminal media failure.
     pub(crate) fn remember_failure(&mut self, key: MediaPreviewKey) {
+        if !media_key_authorizes_residency(&key) {
+            return;
+        }
         self.store.remember_failure(key);
     }
 
     /// Remove failure memory after a successful completion.
     pub(crate) fn forget_failure(&mut self, key: &MediaPreviewKey) {
+        if !media_key_authorizes_residency(key) {
+            return;
+        }
         self.store.forget_failure(key);
     }
 
     /// Return whether the key has a remembered terminal failure and touch it.
     pub(crate) fn contains_failure(&mut self, key: &MediaPreviewKey) -> bool {
-        self.store.contains_failure(key)
+        media_key_authorizes_residency(key) && self.store.contains_failure(key)
     }
 
     /// Pin the current Preview raster with its exact stale-reuse scope.
@@ -144,9 +190,10 @@ impl PreviewFrameStoreAdapter {
         self.store.clear_pinned_viewer_frame();
     }
 
-    /// Release the oversize current-media pin.
-    pub(crate) fn clear_pinned_media_frame(&mut self) {
-        self.store.clear_pinned_media_frame();
+    /// Release Store-owned current working-set overflow residency.
+    #[cfg(test)]
+    pub(crate) fn clear_current_media_overflow(&mut self) {
+        self.store.clear_current_media_overflow();
     }
 
     /// Clear final Viewer residency and its current/stale pin.
@@ -164,6 +211,12 @@ impl PreviewFrameStoreAdapter {
         self.store.clear_decoder_resource_media_frames();
     }
 
+    /// Apply persistent product residency limits and immediately evict
+    /// ordinary entries that exceed them.
+    pub(crate) fn reconfigure(&mut self, config: PreviewFrameStoreAdapterConfig) {
+        self.store.reconfigure(config);
+    }
+
     /// Clear every payload, failure key, and explicit pin.
     pub(crate) fn clear_all(&mut self) {
         self.store.clear_all();
@@ -173,4 +226,13 @@ impl PreviewFrameStoreAdapter {
     pub(crate) fn diagnostics(&self) -> PreviewFrameStoreAdapterDiagnostics {
         self.store.diagnostics()
     }
+
+    /// Exact speculative headroom after Store-exclusive media LRU release.
+    pub(crate) fn media_prefetch_headroom(&self) -> mondrian_playback::MediaPrefetchHeadroom {
+        self.store.media_prefetch_headroom()
+    }
+}
+
+fn media_key_authorizes_residency(key: &MediaPreviewKey) -> bool {
+    key.decode.source().fingerprint().authorizes_reuse()
 }

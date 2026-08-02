@@ -1,5 +1,14 @@
 //! Platform renderer admission for hardware-decoded native video resources.
 
+mod gpu_timing;
+
+pub use gpu_timing::{
+    NativeVideoImportCandidateTimingReceipt, NativeVideoImportCandidateToken,
+    NativeVideoImportGpuTimingDiagnostics, NativeVideoImportGpuTimingPolicy,
+    NativeVideoImportGpuTimingSample, NativeVideoImportToken,
+    NATIVE_VIDEO_IMPORT_GPU_TIMING_MAX_CAPACITY, NATIVE_VIDEO_IMPORT_GPU_TIMING_SCHEMA_VERSION,
+};
+
 /// CPU command-preparation attribution for native decoded-frame import.
 ///
 /// These measurements cover host-side validation, bridge coordination, and
@@ -65,6 +74,16 @@ mod timing_tests {
 }
 
 mod yuv_decode;
+
+/// Maximum codec-padding inflation admitted by the native-import bridge.
+///
+/// The Viewer active-texture estimator reserves this multiple of the visible
+/// NV12/P010 surface bytes for one renderer-owned bridge texture. Native
+/// backend validation rejects a decoder allocation outside the same envelope
+/// before creating or growing a bridge entry, so the request-only estimate
+/// remains a hard upper bound without platform inspection in the pure
+/// estimator.
+pub const GPU_NATIVE_IMPORT_MAX_STORAGE_PIXEL_RATIO: u64 = 2;
 
 pub use yuv_decode::{
     GpuNativeVideoExtent, GpuNativeYuvDecodePlan, GpuNativeYuvDecodePlanError,

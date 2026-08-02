@@ -10,34 +10,90 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroU64;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 
-/// One decode-session output lease carried by every native-resource clone.
+/// Exact outstanding-native-output count for one decode ownership domain.
 ///
-/// The session keeps only the matching weak observer, so it can prove that all
-/// downstream App and renderer ownership ended before reusing its decoder/DPB.
-#[derive(Debug, Clone)]
-pub(super) struct PreviewDecodeSessionOutputLease {
-    _owner: Arc<()>,
+/// A worker family owns one shared tracker and every decoder Session owns one
+/// local tracker. A native output lease charges both, so Session-slot reuse can
+/// wait for its local count while family retirement waits for the total count.
+/// The counter itself is strongly retained by every lease; dropping a Session
+/// or context therefore cannot erase outstanding-output evidence.
+#[derive(Clone, Debug, Default)]
+pub(super) struct PreviewNativeOutputTracker {
+    outstanding: Arc<AtomicUsize>,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct PreviewDecodeSessionOutputLeaseObserver(Weak<()>);
+impl PreviewNativeOutputTracker {
+    pub(super) fn outstanding(&self) -> usize {
+        self.outstanding.load(Ordering::Acquire)
+    }
 
-impl PreviewDecodeSessionOutputLease {
-    pub(super) fn new_pair() -> (Self, PreviewDecodeSessionOutputLeaseObserver) {
-        let lease = Arc::new(());
-        (
-            Self { _owner: Arc::clone(&lease) },
-            PreviewDecodeSessionOutputLeaseObserver(Arc::downgrade(&lease)),
-        )
+    pub(super) fn is_released(&self) -> bool {
+        self.outstanding() == 0
+    }
+
+    fn try_increment(&self) -> Result<(), PreviewNativeOutputLeaseError> {
+        self.outstanding
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(1)
+            })
+            .map(|_| ())
+            .map_err(|_| PreviewNativeOutputLeaseError::CounterExhausted)
+    }
+
+    fn decrement(&self) {
+        let previous = self.outstanding.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "native-output tracker underflow");
     }
 }
 
-impl PreviewDecodeSessionOutputLeaseObserver {
-    pub(super) fn is_released(&self) -> bool {
-        self.0.upgrade().is_none()
+/// One logical native decoder output shared by all payload/renderer clones.
+///
+/// Cloning the lease shares one RAII owner and does not charge either tracker
+/// again. Creating the next logical output always creates a new lease and adds
+/// exactly one family charge plus one Session-local charge.
+#[derive(Debug, Clone)]
+pub(super) struct PreviewDecodeSessionOutputLease {
+    _owner: Arc<PreviewDecodeSessionOutputLeaseInner>,
+}
+
+#[derive(Debug)]
+struct PreviewDecodeSessionOutputLeaseInner {
+    family: PreviewNativeOutputTracker,
+    session: PreviewNativeOutputTracker,
+}
+
+#[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
+pub(super) enum PreviewNativeOutputLeaseError {
+    #[error("native decoded-output counter is exhausted")]
+    CounterExhausted,
+}
+
+impl PreviewDecodeSessionOutputLease {
+    pub(super) fn acquire(
+        family: &PreviewNativeOutputTracker,
+        session: &PreviewNativeOutputTracker,
+    ) -> Result<Self, PreviewNativeOutputLeaseError> {
+        family.try_increment()?;
+        if let Err(error) = session.try_increment() {
+            family.decrement();
+            return Err(error);
+        }
+        Ok(Self {
+            _owner: Arc::new(PreviewDecodeSessionOutputLeaseInner {
+                family: family.clone(),
+                session: session.clone(),
+            }),
+        })
+    }
+}
+
+impl Drop for PreviewDecodeSessionOutputLeaseInner {
+    fn drop(&mut self) {
+        self.session.decrement();
+        self.family.decrement();
     }
 }
 
@@ -528,15 +584,42 @@ mod session_output_lease_tests {
     use super::*;
 
     #[test]
-    fn observer_releases_only_after_every_output_lease_clone_drops() {
-        let (lease, observer) = PreviewDecodeSessionOutputLease::new_pair();
-        let renderer_clone = lease.clone();
-        assert!(!observer.is_released());
+    fn logical_outputs_are_counted_once_while_clones_share_their_token() {
+        let family = PreviewNativeOutputTracker::default();
+        let session = PreviewNativeOutputTracker::default();
+        let first = PreviewDecodeSessionOutputLease::acquire(&family, &session)
+            .expect("first logical native output");
+        let first_renderer_clone = first.clone();
+        let second = PreviewDecodeSessionOutputLease::acquire(&family, &session)
+            .expect("second logical native output");
 
-        drop(lease);
-        assert!(!observer.is_released());
+        assert_eq!(family.outstanding(), 2);
+        assert_eq!(session.outstanding(), 2);
 
-        drop(renderer_clone);
-        assert!(observer.is_released());
+        drop(first);
+        assert_eq!(family.outstanding(), 2);
+        assert_eq!(session.outstanding(), 2);
+
+        drop(first_renderer_clone);
+        assert_eq!(family.outstanding(), 1);
+        assert_eq!(session.outstanding(), 1);
+
+        drop(second);
+        assert!(family.is_released());
+        assert!(session.is_released());
+    }
+
+    #[test]
+    fn family_evidence_survives_dropped_session_tracker_owner() {
+        let family = PreviewNativeOutputTracker::default();
+        let session = PreviewNativeOutputTracker::default();
+        let output = PreviewDecodeSessionOutputLease::acquire(&family, &session)
+            .expect("logical native output");
+
+        drop(session);
+        assert_eq!(family.outstanding(), 1);
+
+        drop(output);
+        assert!(family.is_released());
     }
 }

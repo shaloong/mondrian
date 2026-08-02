@@ -1,12 +1,24 @@
+use super::request_scheduler::MediaPreviewRequestAdmission;
 use super::*;
-use crate::app::preview_raster_frame::PreviewRasterColorSpace;
+use crate::app::preview_access_mode::MediaPreviewRequestIntent;
+use crate::app::preview_execution::{
+    PreviewOutputKey, PreviewSemanticIdentity, PreviewSemanticIdentityBuilder,
+};
+use crate::app::preview_frame_store::MediaWorkReservationAdmission;
+use crate::app::preview_raster_frame::{
+    preview_raster_resource_key, PreviewRasterColorSpace, PreviewRasterFrame,
+};
 use crate::app::preview_unavailability::PreviewUnavailabilityDisposition;
-use crate::app::preview_viewer_plan::ResolvedPreviewTransitionInput;
+use crate::app::preview_viewer_plan::{
+    viewer_preview_plan_allows_cross_call_reuse, ResolvedPreviewTransitionInput,
+};
+use crate::app::AppState;
 use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
 use crate::app_ui::playback_feedback::ViewerPlaybackFeedback;
-use crate::app_ui::preview::{WindowPreviewAdapter, WindowPreviewOutputRegistration};
+use crate::app_ui::preview::WindowPreviewAdapter;
 use mondrian_ui_widgets::{
-    ViewerExternalTexturePresentation, ViewerFrameContent, ViewerFrameImage,
+    ViewerExternalTextureFrame, ViewerExternalTexturePresentation, ViewerFrameContent,
+    ViewerFrameImage,
 };
 
 fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::TimelineTime {
@@ -14,20 +26,70 @@ fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::Timeline
     mondrian_core::TimelineTime::new(numerator, time_base.den).expect("valid test time")
 }
 
+fn register_test_window_preview_output(
+    service: &WindowPreviewAdapter,
+    frame: &PreviewGpuFrame,
+    texture_key: impl Into<String>,
+    presentation: ViewerExternalTexturePresentation,
+) -> bool {
+    let Some(output) = ViewerExternalTextureFrame::new_spatial(texture_key, presentation) else {
+        service.reject_gpu_output_registration();
+        return false;
+    };
+    service.register_gpu_output(frame.output_key.clone(), output);
+    service.try_release_settled_transport_media_residency();
+    true
+}
+
+#[test]
+fn visual_result_drain_limit_requires_follow_up_without_a_new_notification() {
+    assert!(!visual_execution_drain_needs_follow_up(
+        MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL - 1
+    ));
+    assert!(visual_execution_drain_needs_follow_up(
+        MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL
+    ));
+}
+
+fn test_preview_semantic_identity(revision: u64) -> PreviewSemanticIdentity {
+    let mut builder =
+        PreviewSemanticIdentityBuilder::new(b"mondrian.preview.test-frame-identity.v1");
+    std::hash::Hasher::write_u64(&mut builder, revision);
+    builder.finish_identity()
+}
+
+fn test_media_file_fingerprint(len: u64, revision: u64) -> MediaFileFingerprint {
+    MediaFileFingerprint {
+        len: Some(len),
+        modified_secs: Some(revision),
+        modified_nanos: Some(20),
+        object_identity: Some(mondrian_core::MediaFileObjectIdentity::Unix {
+            device: 1,
+            inode: revision,
+        }),
+        change_stamp: Some(mondrian_core::MediaFileChangeStamp::Unix {
+            seconds: revision as i64,
+            nanoseconds: 20,
+        }),
+    }
+}
+
 fn cancellation_evidence(
     work_class: mondrian_playback::FrameWorkClass,
     cause: mondrian_playback::FrameCancellationCause,
     execution_us: u64,
-    execution_to_checkpoint_us: Option<u64>,
-    request_to_checkpoint_us: Option<u64>,
+    execution_to_logical_cancellation_us: Option<u64>,
+    request_to_logical_cancellation_us: Option<u64>,
 ) -> mondrian_playback::FrameCancellationEvidenceReport {
     let mut collector = mondrian_playback::FrameCancellationEvidenceCollector::default();
     collector.observe(mondrian_playback::FrameCancellationObservation {
         work_class,
         cause,
         execution_duration: Duration::from_micros(execution_us),
-        execution_to_checkpoint: execution_to_checkpoint_us.map(Duration::from_micros),
-        request_to_checkpoint: request_to_checkpoint_us.map(Duration::from_micros),
+        execution_to_logical_cancellation: execution_to_logical_cancellation_us
+            .map(Duration::from_micros),
+        request_to_logical_cancellation: request_to_logical_cancellation_us
+            .map(Duration::from_micros),
     });
     collector.report()
 }
@@ -76,11 +138,36 @@ fn runtime_diagnostics_exposes_each_bounded_worker_progress_observer() {
     );
 }
 
+#[test]
+fn runtime_applies_one_resource_policy_to_the_shared_decode_worker_family_owner() {
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    let shared_owner = runtime.decode_worker_resources.clone();
+    let coordinator =
+        crate::app::execution_resource_coordination::ExecutionResourceCoordinator::new(
+            crate::app::execution_resource_coordination::MachineResourceProfile::from_capacity(
+                Some(16 * 1024 * 1024 * 1024),
+                8,
+            ),
+        );
+    let decision = coordinator.decision();
+
+    runtime.apply_resource_decision(&decision.preview);
+
+    assert_eq!(
+        shared_owner.seek_index_cache().diagnostics().policy,
+        decision.preview.seek_index_cache
+    );
+    assert_eq!(
+        shared_owner.hardware_device_context_pool().diagnostics().policy,
+        decision.preview.hardware_device_contexts
+    );
+}
+
 use mondrian_assets::AssetLibrary;
 use mondrian_core::types::{AssetId, Rational};
 use mondrian_core::{ensure_mondrian_default_ocio_loaded, Color};
 use mondrian_effects::EffectNodeExt;
-use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
+use mondrian_effects::{compile_reference_effect_graph, EffectCachePolicy, EffectRenderPlan};
 use mondrian_media::info::{PixelFormat, VideoCodec};
 use mondrian_media::{
     DetectedColorInterpretation, HwAccelPixelFormat, MediaInfo, VideoColorDetectionMethod,
@@ -93,6 +180,56 @@ use mondrian_renderer::{
 use mondrian_timeline::clip::Clip;
 use mondrian_timeline::sequence::{MissingColorMetadataPolicy, Sequence};
 use mondrian_timeline::track::Track;
+
+fn custom_u8_effect_graph(
+    label: &str,
+    cache_policy: EffectCachePolicy,
+    processor: mondrian_effects::CustomEffectRenderProcessor,
+) -> Arc<mondrian_effects::CompiledEffectGraph> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_DEFINITION: AtomicU64 = AtomicU64::new(1);
+    let suffix = NEXT_DEFINITION.fetch_add(1, Ordering::Relaxed);
+    let effect_type =
+        mondrian_effects::EffectType::Plugin(format!("test.preview.custom.{label}.{suffix}"));
+    let determinism = match cache_policy {
+        EffectCachePolicy::Deterministic => mondrian_effects::EffectDeterminism::Deterministic,
+        EffectCachePolicy::FrameDependent => mondrian_effects::EffectDeterminism::FrameSeeded,
+        EffectCachePolicy::Uncacheable => mondrian_effects::EffectDeterminism::Nondeterministic,
+    };
+    mondrian_effects::register_effect_definition(
+        mondrian_effects::EffectDefinition::new(
+            effect_type.key(),
+            "Custom preview test",
+            Default::default(),
+            mondrian_effects::EffectColorDomainContract::SCENE_LINEAR,
+        )
+        .with_execution_contract(mondrian_effects::EffectExecutionContract {
+            execution_modes: mondrian_effects::EffectExecutionModes::CPU_U8,
+            determinism,
+            state_model: mondrian_effects::EffectStateModel::Stateless,
+            temporal_input: mondrian_effects::EffectTemporalInputExtent::CURRENT_FRAME,
+            roi_propagation: mondrian_effects::EffectRoiPropagation::UnknownRequiresFullFrame,
+            resource_lifetime: mondrian_effects::EffectResourceLifetime::Frame,
+            topology: mondrian_effects::EffectGraphTopology::LinearChain,
+        })
+        .with_custom_render_backend(
+            Arc::new(|_, _| Ok(Some(serde_json::json!({})))),
+            None,
+            cache_policy,
+            processor,
+        ),
+    )
+    .expect("register custom preview test definition");
+    mondrian_effects::PreparedEffectProgram::prepare(
+        &[mondrian_effects::EffectNode::new(effect_type)],
+        &[],
+        mondrian_core::WorkingColorSpace::LinearRec709,
+    )
+    .expect("prepare custom preview test program")
+    .evaluate(mondrian_core::TimelineTime::ZERO)
+    .expect("evaluate custom preview test graph")
+}
 
 fn ensure_test_ocio_loaded() {
     ensure_mondrian_default_ocio_loaded().expect("preview tests require Mondrian default OCIO");
@@ -110,17 +247,187 @@ fn state_with_solid_color_clip(color: Color) -> AppState {
         )
         .expect("solid clip should be insertable");
     state.test_set_sequence(Some(sequence));
-    state.seek(4);
+    state.seek(4).expect("seek");
     state
+}
+
+fn execute_gpu_preview_for_test_app<O: Clone>(
+    runtime: &PreviewProductionRuntime<O>,
+    state: &AppState,
+) -> PreviewGpuFrameState {
+    runtime.gpu_preview_frame(state.preview_frame_execution_request(Instant::now()))
+}
+
+fn execute_preview_presentation_for_test_app<O: Clone>(
+    runtime: &PreviewProductionRuntime<O>,
+    state: &AppState,
+) -> PreviewPresentationState<O> {
+    runtime.presentation(state.preview_frame_execution_request(Instant::now()))
+}
+
+fn playback_presentation_ticket_for_state<O: Clone>(
+    runtime: &PreviewProductionRuntime<O>,
+    state: &AppState,
+) -> Option<mondrian_playback::FramePresentationTicket> {
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    runtime.playback_presentation_ticket(&snapshot)
+}
+
+fn synchronize_visual_program_for_state<O: Clone>(
+    runtime: &PreviewProductionRuntime<O>,
+    state: &AppState,
+) {
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    runtime.synchronize_visual_program_authoring_session(&snapshot);
+}
+
+fn playback_video_preroll_for_state<O: Clone>(
+    runtime: &PreviewProductionRuntime<O>,
+    state: &AppState,
+) -> Option<PreviewVideoPreroll> {
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    runtime.playback_video_preroll_readiness(&snapshot, state)
+}
+
+fn schedule_media_prefetches_for_state<O: Clone>(
+    runtime: &PreviewProductionRuntime<O>,
+    state: &AppState,
+    sequence: &Sequence,
+    frame: i64,
+    width: u32,
+    height: u32,
+) {
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    runtime.schedule_media_prefetches(&snapshot, state, sequence, frame, width, height);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn viewer_preview_generation_key_for_state(
+    state: &AppState,
+    sequence: &Sequence,
+    frame: i64,
+    width: u32,
+    height: u32,
+    display_color_space: ColorSpace,
+    display_contract_identity: Option<DisplayOutputIdentity>,
+) -> ViewerPreviewGenerationKey {
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    ViewerPreviewGenerationKey::from_snapshot(
+        &snapshot,
+        sequence,
+        frame,
+        width,
+        height,
+        display_color_space,
+        display_contract_identity,
+    )
+}
+
+#[test]
+fn visual_program_cache_does_not_cross_equal_author_state_between_open_sessions() {
+    fn resolve_author_lifetime(
+        runtime: &PreviewProductionRuntime<()>,
+        state: &AppState,
+    ) -> crate::app::preview_timeline_execution::ResolvedPreviewTimeline {
+        let mut last_failure = "no resolution attempt completed".to_owned();
+        for _ in 0..32 {
+            let sequence = state.active_sequence().expect("active Sequence");
+            let snapshot = state.preview_execution_snapshot(Instant::now());
+            match runtime.resolve_timeline(
+                &snapshot,
+                state,
+                sequence,
+                state.current_frame(),
+                64,
+                36,
+                sequence.settings.root_program_color_context(state.project_color_environment()),
+            ) {
+                PreviewTimelineResolution::Ready(resolved) => return resolved,
+                PreviewTimelineResolution::Empty => {
+                    last_failure = "unexpected empty plan".to_owned();
+                }
+                PreviewTimelineResolution::Pending { .. } => {
+                    last_failure = "unexpected pending dependency".to_owned();
+                }
+                PreviewTimelineResolution::Unavailable { reason } => {
+                    last_failure = reason.to_string();
+                }
+            }
+        }
+        panic!("visual program preparation did not stabilize: {last_failure}");
+    }
+
+    let first_state = state_with_solid_color_clip(Color::BLACK);
+    let mut second_sequence = first_state.active_sequence().expect("first Sequence").clone();
+    let content = &mut second_sequence.video_tracks[0].clips[0].content;
+    let asset_id = match content {
+        mondrian_core::timeline_data::ClipContent::SolidColor { asset_id, .. } => *asset_id,
+        _ => panic!("test fixture must remain a Solid Color Clip"),
+    };
+    *content =
+        mondrian_core::timeline_data::ClipContent::SolidColor { asset_id, color: Color::WHITE };
+
+    let mut second_state = AppState::new();
+    second_state.test_set_sequence(Some(second_sequence));
+    second_state.seek(first_state.current_frame()).expect("seek");
+
+    assert_ne!(
+        first_state.authoring_session_id(),
+        second_state.authoring_session_id(),
+        "separate opens require distinct process-local Authoring Sessions"
+    );
+    assert_eq!(
+        first_state.active_sequence().expect("first Sequence").id,
+        second_state.active_sequence().expect("second Sequence").id
+    );
+    assert_eq!(
+        first_state.active_sequence().expect("first Sequence").revision,
+        second_state.active_sequence().expect("second Sequence").revision
+    );
+
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    let first_resolution = resolve_author_lifetime(&runtime, &first_state);
+    let ResolvedPreviewElement::SolidColor(first_solid) = &first_resolution.plan.elements[0] else {
+        panic!("first author plan must remain a Solid Color");
+    };
+    assert_eq!(first_solid.color, Color::BLACK);
+    let first_diagnostics = runtime.visual_programs.borrow().diagnostics();
+
+    let second_resolution = resolve_author_lifetime(&runtime, &second_state);
+    let ResolvedPreviewElement::SolidColor(second_solid) = &second_resolution.plan.elements[0]
+    else {
+        panic!("second author plan must remain a Solid Color");
+    };
+    assert_eq!(
+        second_solid.color,
+        Color::WHITE,
+        "equal durable IDs and revisions must not reuse the prior Open lifetime"
+    );
+
+    let second_diagnostics = runtime.visual_programs.borrow().diagnostics();
+    assert_eq!(
+        second_diagnostics.scope_rotations,
+        first_diagnostics.scope_rotations.saturating_add(1)
+    );
+    assert_eq!(
+        second_diagnostics.misses,
+        first_diagnostics.misses.saturating_add(1),
+        "the second Authoring Session must prepare a new program"
+    );
+    assert_eq!(
+        runtime.visual_program_authoring_session.get(),
+        second_state.authoring_session_id()
+    );
+    runtime.shutdown();
 }
 
 #[test]
 fn playback_generation_survives_frame_advance_but_not_discontinuity() {
     let mut state = state_with_solid_color_clip(Color::from_rgba8(12, 34, 56, 255));
     let sequence = state.active_sequence().expect("sequence").clone();
-    state.play();
+    state.play().expect("play");
 
-    let current = ViewerPreviewGenerationKey::from_state(
+    let current = viewer_preview_generation_key_for_state(
         &state,
         &sequence,
         4,
@@ -129,7 +436,7 @@ fn playback_generation_survives_frame_advance_but_not_discontinuity() {
         ColorSpace::Srgb,
         None,
     );
-    let advanced = ViewerPreviewGenerationKey::from_state(
+    let advanced = viewer_preview_generation_key_for_state(
         &state,
         &sequence,
         5,
@@ -143,8 +450,8 @@ fn playback_generation_survives_frame_advance_but_not_discontinuity() {
         "ordinary playback must retain forward prefetch work"
     );
 
-    state.seek(6);
-    let after_seek = ViewerPreviewGenerationKey::from_state(
+    state.seek(6).expect("seek");
+    let after_seek = viewer_preview_generation_key_for_state(
         &state,
         &sequence,
         6,
@@ -158,8 +465,8 @@ fn playback_generation_survives_frame_advance_but_not_discontinuity() {
         "seek must invalidate the prior playback epoch"
     );
 
-    state.pause();
-    let idle_a = ViewerPreviewGenerationKey::from_state(
+    state.pause().expect("pause");
+    let idle_a = viewer_preview_generation_key_for_state(
         &state,
         &sequence,
         6,
@@ -168,7 +475,7 @@ fn playback_generation_survives_frame_advance_but_not_discontinuity() {
         ColorSpace::Srgb,
         None,
     );
-    let idle_b = ViewerPreviewGenerationKey::from_state(
+    let idle_b = viewer_preview_generation_key_for_state(
         &state,
         &sequence,
         7,
@@ -185,7 +492,7 @@ fn playback_generation_survives_frame_advance_but_not_discontinuity() {
     let mut revised_sequence = sequence.clone();
     revised_sequence.revision =
         revised_sequence.revision.checked_next().expect("test revision can advance");
-    let revised = ViewerPreviewGenerationKey::from_state(
+    let revised = viewer_preview_generation_key_for_state(
         &state,
         &revised_sequence,
         6,
@@ -199,7 +506,7 @@ fn playback_generation_survives_frame_advance_but_not_discontinuity() {
         "Sequence authoring must rotate Preview work"
     );
     state.test_advance_project_generation();
-    let project_revised = ViewerPreviewGenerationKey::from_state(
+    let project_revised = viewer_preview_generation_key_for_state(
         &state,
         &sequence,
         6,
@@ -213,14 +520,14 @@ fn playback_generation_survives_frame_advance_but_not_discontinuity() {
         "Project authoring must rotate Preview work"
     );
 
-    let display_revised = ViewerPreviewGenerationKey::from_state(
+    let display_revised = viewer_preview_generation_key_for_state(
         &state,
         &sequence,
         6,
         960,
         540,
         ColorSpace::Srgb,
-        Some(7),
+        Some(managed_icc_display_snapshot(ColorSpace::Srgb).contract_identity()),
     );
     assert_ne!(
         project_revised, display_revised,
@@ -229,9 +536,40 @@ fn playback_generation_survives_frame_advance_but_not_discontinuity() {
 }
 
 #[test]
-fn app_frame_store_residency_covers_the_prefetch_window() {
+fn app_frame_store_exposes_independent_byte_and_decoder_resource_budgets() {
     let diagnostics = PreviewFrameStoreAdapter::default().diagnostics();
-    assert!(diagnostics.media_resource_unit_budget >= MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES);
+    assert!(diagnostics.media_byte_budget > 0);
+    assert!(diagnostics.media_resource_unit_budget > 0);
+    assert!(
+        diagnostics.media_resource_unit_budget < MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES,
+        "the default store budget must not be inflated to match a fixed prefetch horizon"
+    );
+}
+
+#[test]
+fn authoring_session_rotation_clears_decoded_media_residency() {
+    let first_state = state_with_solid_color_clip(Color::BLACK);
+    let second_state = state_with_solid_color_clip(Color::WHITE);
+    assert_ne!(
+        first_state.authoring_session_id(),
+        second_state.authoring_session_id()
+    );
+
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    synchronize_visual_program_for_state(&runtime, &first_state);
+    assert!(admit_test_media_frame(
+        &mut runtime.frame_store.borrow_mut(),
+        test_media_key(1),
+        test_media_frame(1),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
+    assert_eq!(runtime.frame_store.borrow().diagnostics().media_entries, 1);
+
+    synchronize_visual_program_for_state(&runtime, &second_state);
+    let diagnostics = runtime.frame_store.borrow().diagnostics();
+    assert_eq!(diagnostics.media_entries, 0);
+    assert_eq!(diagnostics.media_reserved_bytes, 0);
+    runtime.shutdown();
 }
 
 fn unique_preview_test_root(name: &str) -> PathBuf {
@@ -244,9 +582,8 @@ fn unique_preview_test_root(name: &str) -> PathBuf {
     ))
 }
 
-fn rec709_video_media_info(path: PathBuf, file_size: u64) -> MediaInfo {
+fn rec709_video_media_info(file_size: u64) -> MediaInfo {
     MediaInfo {
-        path,
         duration: Duration::from_secs(2),
         file_size,
         container: "mp4".to_owned(),
@@ -262,18 +599,26 @@ fn rec709_video_media_info(path: PathBuf, file_size: u64) -> MediaInfo {
             pixel_format: PixelFormat::Yuv420p10le,
             pixel_format_proven: true,
             color_range: DecodedVideoRange::Limited,
-            detected_color_space: Some(ColorSpace::Rec709),
             color_interpretation: DetectedColorInterpretation {
-                color_space: Some(ColorSpace::Rec709),
+                candidate_color_space: Some(ColorSpace::Rec709),
                 confidence: VideoColorInterpretationConfidence::High,
                 source: VideoColorSpaceSource::Metadata,
-                method: VideoColorDetectionMethod::CicpTags,
-                evidence: Vec::new(),
+                method: VideoColorDetectionMethod::MetadataHint,
+                evidence: vec![
+                    mondrian_media::VideoColorInterpretationEvidence::MetadataHint {
+                        scope: mondrian_media::VideoColorMetadataHintScope::Stream,
+                        key: "source_color_space".to_owned(),
+                        value: "Rec709".to_owned(),
+                        detected_color_space: ColorSpace::Rec709,
+                        authority:
+                            mondrian_media::VideoColorMetadataHintAuthority::SourceDeclaration(
+                                mondrian_media::VideoColorMetadataDeclaration::SourceColorSpace,
+                            ),
+                    },
+                ],
                 warnings: Vec::new(),
                 user_overridable: true,
             },
-            color_space_source: VideoColorSpaceSource::Metadata,
-            color_detection_method: VideoColorDetectionMethod::CicpTags,
             color_metadata: None,
             color_metadata_hints: Vec::new(),
             hdr_metadata: Vec::new(),
@@ -288,6 +633,20 @@ fn rec709_video_media_info(path: PathBuf, file_size: u64) -> MediaInfo {
     }
 }
 
+fn commit_preview_test_media(
+    library: &AssetLibrary,
+    media_path: PathBuf,
+    media_info: MediaInfo,
+) -> AssetId {
+    let media_path =
+        std::fs::canonicalize(media_path).expect("canonical Preview test media fixture");
+    let fingerprint = mondrian_media::MediaFileFingerprint::capture(&media_path);
+    let candidate =
+        mondrian_assets::AssetMediaProbeCandidate::new(media_path, fingerprint, media_info)
+            .expect("valid Preview test media candidate");
+    library.commit_media_probe(candidate, None).expect("insert video asset")
+}
+
 fn state_with_invalid_video_asset() -> (AppState, AssetId, PathBuf) {
     ensure_test_ocio_loaded();
     let root = unique_preview_test_root("mondrian-preview-invalid-video");
@@ -296,12 +655,8 @@ fn state_with_invalid_video_asset() -> (AppState, AssetId, PathBuf) {
     std::fs::write(&media_path, b"not a real video").expect("invalid media");
     let file_size = std::fs::metadata(&media_path).expect("media metadata").len();
     let library = AssetLibrary::open(root.join("library")).expect("asset library");
-    let asset_id = library
-        .upsert_media_file_with_info(
-            &media_path,
-            rec709_video_media_info(media_path.clone(), file_size),
-        )
-        .expect("insert video asset");
+    let asset_id =
+        commit_preview_test_media(&library, media_path, rec709_video_media_info(file_size));
 
     let mut state = AppState::new();
     state.test_set_asset_library(Some(library));
@@ -311,7 +666,7 @@ fn state_with_invalid_video_asset() -> (AppState, AssetId, PathBuf) {
         .add_clip(Clip::new(asset_id, tt(0, tb), tt(50, tb)).expect("valid clip"))
         .expect("media clip should be insertable");
     state.test_set_sequence(Some(sequence));
-    state.seek(0);
+    state.seek(0).expect("seek");
     (state, asset_id, root)
 }
 
@@ -325,12 +680,8 @@ fn state_with_two_invalid_video_assets() -> (AppState, PathBuf) {
         let media_path = root.join(name);
         std::fs::write(&media_path, b"not a real video").expect("invalid media");
         let file_size = std::fs::metadata(&media_path).expect("media metadata").len();
-        let asset_id = library
-            .upsert_media_file_with_info(
-                &media_path,
-                rec709_video_media_info(media_path.clone(), file_size),
-            )
-            .expect("insert video asset");
+        let asset_id =
+            commit_preview_test_media(&library, media_path, rec709_video_media_info(file_size));
         asset_ids.push(asset_id);
     }
 
@@ -344,7 +695,7 @@ fn state_with_two_invalid_video_assets() -> (AppState, PathBuf) {
             .expect("media clip should be insertable");
     }
     state.test_set_sequence(Some(sequence));
-    state.seek(0);
+    state.seek(0).expect("seek");
     (state, root)
 }
 
@@ -416,8 +767,8 @@ fn preview_raster_presentation_contract_adapts_wide_gamut_sdr_and_rejects_hdr() 
 
 #[test]
 fn cpu_raster_preview_retains_program_output_before_srgb_adaptation() {
-    let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
-        .expect("default effect graph");
+    let effect_graph =
+        compile_reference_effect_graph(&EffectRenderPlan::default()).expect("default effect graph");
     let resolved = [ResolvedPreviewElement::SolidColor(
         TimelineSolidColorLayer {
             color: Color::from_rgba8(48, 96, 192, 255),
@@ -547,7 +898,8 @@ fn gpu_preview_frame_for_icc_policy_rejects_uncalibrated_monitor_profile() {
     let snapshot = managed_icc_display_snapshot(ColorSpace::DisplayP3);
     service.set_display_output_snapshot(Some(&snapshot));
 
-    let PreviewGpuFrameState::Unavailable(reason) = service.gpu_preview_frame_for_state(&state)
+    let PreviewGpuFrameState::Unavailable(reason) =
+        execute_gpu_preview_for_test_app(&service, &state)
     else {
         panic!("uncalibrated monitor profile must block GPU Preview");
     };
@@ -588,10 +940,12 @@ fn paused_gpu_candidate_carries_untimed_presentation_authority() {
     let service = WindowPreviewAdapter::new();
     let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
 
-    let frame = match service.gpu_preview_frame_for_state(&state) {
+    let frame = match execute_gpu_preview_for_test_app(&service, &state) {
         PreviewGpuFrameState::Ready(frame) => frame,
-        PreviewGpuFrameState::Current => panic!("expected new GPU preview candidate"),
-        PreviewGpuFrameState::Transparent => panic!("expected rendered GPU preview candidate"),
+        PreviewGpuFrameState::Current(_) => panic!("expected new GPU preview candidate"),
+        PreviewGpuFrameState::Transparent(_) => {
+            panic!("expected rendered GPU preview candidate")
+        }
         PreviewGpuFrameState::Loading => panic!("expected ready GPU preview candidate"),
         PreviewGpuFrameState::Unavailable(_) => {
             panic!("expected available GPU preview candidate")
@@ -629,7 +983,7 @@ fn paused_gpu_candidate_carries_untimed_presentation_authority() {
 fn gpu_candidate_separates_program_output_from_monitor_identity() {
     let service = WindowPreviewAdapter::new();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
-    let baseline_frame = match service.gpu_preview_frame_for_state(&state) {
+    let baseline_frame = match execute_gpu_preview_for_test_app(&service, &state) {
         PreviewGpuFrameState::Ready(frame) => frame,
         _ => panic!("expected baseline GPU preview candidate"),
     };
@@ -640,7 +994,7 @@ fn gpu_candidate_separates_program_output_from_monitor_identity() {
     let snapshot = calibrated_icc_display_snapshot(ColorSpace::Srgb);
     service.set_display_output_snapshot(Some(&snapshot));
 
-    let frame = match service.gpu_preview_frame_for_state(&state) {
+    let frame = match execute_gpu_preview_for_test_app(&service, &state) {
         PreviewGpuFrameState::Ready(frame) => frame,
         _ => panic!("expected ready GPU preview candidate"),
     };
@@ -665,18 +1019,21 @@ fn gpu_candidate_separates_program_output_from_monitor_identity() {
 fn playing_gpu_candidate_carries_exact_presentation_ticket() {
     let service = WindowPreviewAdapter::new();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
-    state.play();
+    state.play().expect("play");
     let identity = state.pending_playback_frame_demand_identity().expect("frame demand identity");
 
-    let frame = match service.gpu_preview_frame_for_state(&state) {
+    let frame = match execute_gpu_preview_for_test_app(&service, &state) {
         PreviewGpuFrameState::Ready(frame) => frame,
         _ => panic!("expected ready GPU preview candidate"),
     };
 
     let ticket = frame.presentation_ticket().expect("presentation ticket");
     assert_eq!(ticket.identity(), identity);
+    let completion = state
+        .complete_frame_presentation(ticket, Instant::now())
+        .expect("exact current presentation");
     assert!(
-        !state.complete_frame_presentation(ticket, Instant::now()),
+        !completion.transport_changed(),
         "presenting the current frame must hold priming until lookahead is observed"
     );
     assert!(
@@ -686,10 +1043,60 @@ fn playing_gpu_candidate_carries_exact_presentation_ticket() {
 }
 
 #[test]
+fn running_transport_without_a_pending_demand_cannot_publish_a_retry() {
+    let service = WindowPreviewAdapter::new();
+    let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    state.play().expect("play");
+    let identity = state.pending_playback_frame_demand_identity().expect("frame demand identity");
+
+    state.observe_frame_delivery_candidate(
+        mondrian_playback::FrameDeliveryCandidate::for_demand(
+            identity,
+            mondrian_playback::FrameDeliveryKind::Late,
+        ),
+        Instant::now(),
+    );
+
+    assert!(state.pending_playback_frame_demand_identity().is_none());
+    assert!(matches!(
+        execute_gpu_preview_for_test_app(&service, &state),
+        PreviewGpuFrameState::Loading
+    ));
+    let diagnostics = service.diagnostics();
+    assert_eq!(diagnostics.gpu_preview_candidate_ready, 0);
+    assert_eq!(diagnostics.gpu_preview_candidate_current, 0);
+    assert_eq!(diagnostics.gpu_preview_candidate_loading, 1);
+}
+
+#[test]
+fn running_empty_timeline_without_a_pending_demand_is_not_republished_transparent() {
+    let service = WindowPreviewAdapter::new();
+    let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    let sequence = state.active_sequence_mut_uncommitted().expect("sequence");
+    let time_base = sequence.time_base();
+    sequence.video_tracks[0].clips[0].position = tt(20, time_base);
+    state.seek(0).expect("seek");
+    state.play().expect("play");
+    let identity = state.pending_playback_frame_demand_identity().expect("frame demand identity");
+    state.observe_frame_delivery_candidate(
+        mondrian_playback::FrameDeliveryCandidate::for_demand(
+            identity,
+            mondrian_playback::FrameDeliveryKind::Late,
+        ),
+        Instant::now(),
+    );
+
+    assert!(matches!(
+        execute_preview_presentation_for_test_app(&service, &state),
+        PreviewPresentationState::Loading
+    ));
+}
+
+#[test]
 fn gpu_composite_layers_accept_transformed_media_frame() {
     let media = test_media_frame_with_size(180, 320, 180, 42);
     let transform = [3.0, 0.0, 12.0, 0.0, 3.0, 18.0];
-    let effect_graph = mondrian_effects::get_or_compile_scheduled_effect_graph(
+    let effect_graph = mondrian_effects::compile_reference_effect_graph(
         &mondrian_effects::EffectRenderPlan::default(),
     )
     .expect("compile identity graph");
@@ -720,8 +1127,55 @@ fn gpu_composite_layers_accept_transformed_media_frame() {
 }
 
 #[test]
+fn gpu_viewer_lowering_reuses_the_preview_owned_effect_session() {
+    let media = test_media_frame_with_size(180, 320, 180, 42);
+    let effect_graph =
+        mondrian_effects::compile_reference_effect_graph(&mondrian_effects::EffectRenderPlan {
+            ops: vec![mondrian_effects::EffectRenderOp::Grain { amount: 0.2 }],
+        })
+        .expect("compile GPU effect graph");
+    let elements = vec![ResolvedPreviewElement::Media {
+        frame: media,
+        opacity: 1.0,
+        blend_mode: BlendMode::Normal,
+        transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        effect_graph,
+        frame_seed: 7,
+    }];
+    let mut scratch = TimelineCompositeScratch::default();
+
+    let first = gpu_composite_layers_for_resolved_with_session(
+        &elements,
+        WorkingColorSpace::LinearRec709,
+        &mut scratch,
+    )
+    .expect("first lowering");
+    let first_plan = match &first[0] {
+        ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::Media { effect_plan, .. }) => {
+            Arc::clone(effect_plan)
+        }
+        _ => panic!("expected media layer"),
+    };
+    let second = gpu_composite_layers_for_resolved_with_session(
+        &elements,
+        WorkingColorSpace::LinearRec709,
+        &mut scratch,
+    )
+    .expect("cached lowering");
+    let second_plan = match &second[0] {
+        ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::Media { effect_plan, .. }) => {
+            effect_plan
+        }
+        _ => panic!("expected media layer"),
+    };
+
+    assert!(Arc::ptr_eq(&first_plan, second_plan));
+    assert_eq!(scratch.effect_execution_diagnostics().gpu_plan_entries, 1);
+}
+
+#[test]
 fn gpu_composite_layers_lower_cross_dissolve_as_typed_two_input_node() {
-    let effect_graph = mondrian_effects::get_or_compile_scheduled_effect_graph(
+    let effect_graph = mondrian_effects::compile_reference_effect_graph(
         &mondrian_effects::EffectRenderPlan::default(),
     )
     .expect("compile identity graph");
@@ -748,17 +1202,16 @@ fn gpu_composite_layers_lower_cross_dissolve_as_typed_two_input_node() {
     let layers = gpu_composite_layers_for_resolved(&elements, WorkingColorSpace::LinearRec709)
         .expect("Cross Dissolve inputs should share the ordinary GPU source contract");
 
-    assert!(preview_elements_require_deferred_composite(&elements));
     assert_eq!(layers.len(), 1);
     match &layers[0] {
-        ViewerGpuExecutionLayer::CrossDissolve { left, right, progress } => {
-            assert_eq!(*progress, 0.25);
+        ViewerGpuExecutionLayer::CrossDissolve(transition) => {
+            assert_eq!(transition.progress, 0.25);
             assert!(matches!(
-                left,
+                &transition.left,
                 ViewerGpuTransitionInput::Source(ViewerGpuSourceLayer::Media { opacity: 0.8, .. })
             ));
             assert!(matches!(
-                right,
+                &transition.right,
                 ViewerGpuTransitionInput::Source(ViewerGpuSourceLayer::SolidColor { .. })
             ));
         }
@@ -793,7 +1246,7 @@ fn gpu_composite_layers_lower_supported_working_effects() {
         working_color_space: WorkingColorSpace::LinearRec709,
     });
     graph.append_unary(mondrian_effects::EffectRenderOp::Vignette { intensity: 0.6, feather: 0.7 });
-    let effect_graph = mondrian_effects::get_or_compile_scheduled_render_graph(graph.finish())
+    let effect_graph = mondrian_effects::compile_reference_render_graph(graph.finish())
         .expect("compile supported effect graph");
     let elements = vec![ResolvedPreviewElement::Media {
         frame: media,
@@ -829,7 +1282,7 @@ fn gpu_composite_layers_lower_solid_and_adjustment_effects() {
         saturation: 0.9,
         working_color_space: WorkingColorSpace::LinearRec709,
     });
-    let effect_graph = mondrian_effects::get_or_compile_scheduled_render_graph(graph.finish())
+    let effect_graph = mondrian_effects::compile_reference_render_graph(graph.finish())
         .expect("compile supported effect graph");
     let elements = vec![
         ResolvedPreviewElement::SolidColor(TimelineSolidColorLayer {
@@ -875,7 +1328,7 @@ fn gpu_composite_layers_lower_solid_and_adjustment_effects() {
 fn gpu_composite_layers_skip_leading_adjustment_before_layer_limit() {
     let mut graph = mondrian_effects::EffectGraphBuilderState::new();
     graph.append_unary(mondrian_effects::EffectRenderOp::Grain { amount: 0.1 });
-    let effect_graph = mondrian_effects::get_or_compile_scheduled_render_graph(graph.finish())
+    let effect_graph = mondrian_effects::compile_reference_render_graph(graph.finish())
         .expect("compile supported effect graph");
     let mut elements = (0..5)
         .map(|seed| {
@@ -921,11 +1374,11 @@ fn gpu_composite_layers_accept_source_only_media_frame() {
     let media = MediaPreviewFrame::from_source(
         MediaPreviewGpuSourceFrame::new(source, input_transform),
         Resolution { width: 320, height: 180 },
-        44,
+        test_preview_semantic_identity(44),
         mondrian_playback::FramePresentationQuality::Ready,
         PreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::SoftwareCpu),
     );
-    let effect_graph = mondrian_effects::get_or_compile_scheduled_effect_graph(
+    let effect_graph = mondrian_effects::compile_reference_effect_graph(
         &mondrian_effects::EffectRenderPlan::default(),
     )
     .expect("compile identity graph");
@@ -961,11 +1414,12 @@ fn gpu_composite_layers_preserve_native_source_only_media_frame() {
     let media = MediaPreviewFrame::from_native(
         test_native_source_frame(320, 180),
         Resolution { width: 320, height: 180 },
-        45,
+        Resolution { width: 320, height: 180 },
+        test_preview_semantic_identity(45),
         mondrian_playback::FramePresentationQuality::Ready,
         PreviewDecodeExecutionSummary::default(),
     );
-    let effect_graph = mondrian_effects::get_or_compile_scheduled_effect_graph(
+    let effect_graph = mondrian_effects::compile_reference_effect_graph(
         &mondrian_effects::EffectRenderPlan::default(),
     )
     .expect("compile identity graph");
@@ -1036,7 +1490,8 @@ fn native_source_only_media_frame_fails_cpu_working_fallback() {
     let frame = MediaPreviewFrame::from_native(
         test_native_source_frame(320, 180),
         Resolution { width: 320, height: 180 },
-        46,
+        Resolution { width: 320, height: 180 },
+        test_preview_semantic_identity(46),
         mondrian_playback::FramePresentationQuality::Ready,
         PreviewDecodeExecutionSummary::default(),
     );
@@ -1053,7 +1508,7 @@ fn native_source_only_media_frame_fails_cpu_working_fallback() {
 #[test]
 fn gpu_composite_layers_reject_singular_media_transform() {
     let media = test_media_frame_with_size(180, 320, 180, 43);
-    let effect_graph = mondrian_effects::get_or_compile_scheduled_effect_graph(
+    let effect_graph = mondrian_effects::compile_reference_effect_graph(
         &mondrian_effects::EffectRenderPlan::default(),
     )
     .expect("compile identity graph");
@@ -1078,21 +1533,22 @@ fn gpu_composite_layers_reject_singular_media_transform() {
 fn external_gpu_preview_frame_overrides_raster_preview_for_same_plan() {
     let service = WindowPreviewAdapter::new();
     let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
-    let frame = match service.gpu_preview_frame_for_state(&state) {
+    let frame = match execute_gpu_preview_for_test_app(&service, &state) {
         PreviewGpuFrameState::Ready(frame) => frame,
         _ => panic!("expected ready GPU preview candidate"),
     };
     let key = frame.external_texture_key();
     let first_candidate_id = frame.candidate_id();
 
-    assert!(service.set_external_viewer_frame(
+    assert!(register_test_window_preview_output(
+        &service,
         &frame,
         key.clone(),
         ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
             .expect("full-frame presentation"),
     ));
-    match service.gpu_preview_frame_for_state(&state) {
-        PreviewGpuFrameState::Current => {}
+    match execute_gpu_preview_for_test_app(&service, &state) {
+        PreviewGpuFrameState::Current(_) => {}
         _ => panic!("expected current external GPU preview frame"),
     }
     match service.viewer_preview_for_state(&state) {
@@ -1117,7 +1573,7 @@ fn external_gpu_preview_frame_overrides_raster_preview_for_same_plan() {
     assert_eq!(diagnostics.gpu_preview_external_frames_cleared, 0);
 
     service.clear_external_viewer_frame();
-    let second_frame = match service.gpu_preview_frame_for_state(&state) {
+    let second_frame = match execute_gpu_preview_for_test_app(&service, &state) {
         PreviewGpuFrameState::Ready(frame) => frame,
         _ => panic!("expected new ready GPU preview candidate after external frame clear"),
     };
@@ -1128,12 +1584,13 @@ fn external_gpu_preview_frame_overrides_raster_preview_for_same_plan() {
 fn playing_current_gpu_candidate_releases_execution_borrow_before_prefetch() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
-    state.play();
-    let frame = match service.gpu_preview_frame_for_state(&state) {
+    state.play().expect("play");
+    let frame = match execute_gpu_preview_for_test_app(&service, &state) {
         PreviewGpuFrameState::Ready(frame) => frame,
         _ => panic!("expected ready GPU preview candidate"),
     };
-    assert!(service.set_external_viewer_frame(
+    assert!(register_test_window_preview_output(
+        &service,
         &frame,
         frame.external_texture_key(),
         ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
@@ -1141,8 +1598,8 @@ fn playing_current_gpu_candidate_releases_execution_borrow_before_prefetch() {
     ));
 
     assert!(matches!(
-        service.gpu_preview_frame_for_state(&state),
-        PreviewGpuFrameState::Current
+        execute_gpu_preview_for_test_app(&service, &state),
+        PreviewGpuFrameState::Current(_)
     ));
 }
 
@@ -1155,34 +1612,107 @@ fn headless_output_uses_the_same_runtime_registration_and_current_lifecycle() {
 
     let service = PreviewProductionRuntime::<TestHeadlessOutput>::new_without_workers_for_test();
     let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
-    let frame = match service.gpu_preview_frame_for_state(&state) {
+    let frame = match execute_gpu_preview_for_test_app(&service, &state) {
         PreviewGpuFrameState::Ready(frame) => frame,
         _ => panic!("expected ready Headless GPU candidate"),
     };
     let output = TestHeadlessOutput { resource_key: frame.external_texture_key() };
 
-    assert!(service.register_gpu_output(&frame, output.clone()));
+    service.register_gpu_output(frame.output_key.clone(), output.clone());
     assert!(matches!(
-        service.gpu_preview_frame_for_state(&state),
-        PreviewGpuFrameState::Current
+        execute_gpu_preview_for_test_app(&service, &state),
+        PreviewGpuFrameState::Current(_)
     ));
-    match service.presentation_for_state(&state) {
-        PreviewPresentationState::Ready(PreviewPresentationContent::Gpu(current)) => {
-            assert_eq!(current, output);
-        }
+    match execute_preview_presentation_for_test_app(&service, &state) {
+        PreviewPresentationState::Ready(candidate) => match candidate.into_value() {
+            PreviewPresentationContent::Gpu(current) => assert_eq!(current, output),
+            other => panic!("expected registered Headless GPU output, got {other:?}"),
+        },
         other => panic!("expected exact registered Headless output, got {other:?}"),
     }
+}
+
+#[test]
+fn retained_gpu_artifact_requires_semantic_and_physical_identity() {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct TestOutput {
+        resource_key: &'static str,
+    }
+
+    let service = PreviewProductionRuntime::<TestOutput>::new_without_workers_for_test();
+    let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    let frame = match execute_gpu_preview_for_test_app(&service, &state) {
+        PreviewGpuFrameState::Ready(frame) => frame,
+        _ => panic!("expected ready GPU preview candidate"),
+    };
+    let other_key = PreviewOutputKey {
+        plan_identity: test_preview_semantic_identity(999),
+        ..frame.output_key.clone()
+    };
+
+    service.register_gpu_output(
+        frame.output_key.clone(),
+        TestOutput { resource_key: "physical:new" },
+    );
+
+    assert!(
+        service.has_gpu_output_artifact(&frame.output_key, |output| {
+            output.resource_key == "physical:new"
+        })
+    );
+    assert!(
+        !service.has_gpu_output_artifact(&frame.output_key, |output| {
+            output.resource_key == "physical:old"
+        })
+    );
+    assert!(!service.has_gpu_output_artifact(&other_key, |output| {
+        output.resource_key == "physical:new"
+    }));
+}
+
+#[test]
+fn exact_artifact_clear_cannot_erase_same_semantic_replacement() {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct TestOutput {
+        resource_key: &'static str,
+    }
+
+    let service = PreviewProductionRuntime::<TestOutput>::new_without_workers_for_test();
+    let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    let frame = match execute_gpu_preview_for_test_app(&service, &state) {
+        PreviewGpuFrameState::Ready(frame) => frame,
+        _ => panic!("expected ready GPU preview candidate"),
+    };
+
+    service.register_gpu_output(
+        frame.output_key.clone(),
+        TestOutput { resource_key: "physical:new" },
+    );
+
+    assert!(!service
+        .clear_external_viewer_frame_for_artifact(&frame.output_key, |output| output.resource_key
+            == "physical:old",));
+    assert!(
+        service.has_gpu_output_artifact(&frame.output_key, |output| {
+            output.resource_key == "physical:new"
+        })
+    );
+    assert!(service
+        .clear_external_viewer_frame_for_artifact(&frame.output_key, |output| output.resource_key
+            == "physical:new",));
+    assert!(!service.has_retained_gpu_output());
 }
 
 #[test]
 fn pending_replacement_prefers_last_presented_gpu_frame() {
     let service = WindowPreviewAdapter::new();
     let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
-    let frame = match service.gpu_preview_frame_for_state(&state) {
+    let frame = match execute_gpu_preview_for_test_app(&service, &state) {
         PreviewGpuFrameState::Ready(frame) => frame,
         _ => panic!("expected ready GPU preview candidate"),
     };
-    assert!(service.set_external_viewer_frame(
+    assert!(register_test_window_preview_output(
+        &service,
         &frame,
         "viewer:last-presented",
         ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
@@ -1232,9 +1762,9 @@ fn preview_diagnostics_count_ready_render_requests() {
     assert_eq!(diagnostics.input_color_resolution_data_texture, 0);
     assert_eq!(diagnostics.viewer_frame_cache_hits, 0);
     assert_eq!(diagnostics.viewer_frame_cache_misses, 1);
-    assert_eq!(diagnostics.viewer_frame_cache_entries, 1);
-    assert_eq!(diagnostics.media_cache_entries, 0);
-    assert_eq!(diagnostics.media_failure_entries, 0);
+    assert_eq!(diagnostics.frame_store.viewer_entries, 1);
+    assert_eq!(diagnostics.frame_store.media_entries, 0);
+    assert_eq!(diagnostics.frame_store.failure_entries, 0);
     assert_eq!(diagnostics.color_input_transform_calls, 0);
     assert_eq!(diagnostics.color_input_transform_pixels, 0);
     assert_eq!(diagnostics.color_output_transform_calls, 1);
@@ -1305,6 +1835,8 @@ fn test_preview_decode_diagnostics(
         seek_performed: false,
         requested_pts: None,
         selected_pts: None,
+        selected_duration_pts: None,
+        selected_temporal_extent_source: PreviewTemporalExtentSource::Unknown,
         temporal_approximation: false,
         seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
         forward_reuse_frame_window: 0,
@@ -1325,7 +1857,7 @@ fn test_preview_decode_diagnostics(
         hardware_decode_cpu_transfer_configured: false,
         hardware_decode_cpu_transfer_observed: false,
         hardware_decode_cpu_transfer_status: PreviewHardwareDecodeCpuTransferStatus::NotAttempted,
-        session_reused: false,
+        session_disposition: PreviewDecodeSessionDisposition::Opened,
         forward_reused: false,
         seek_index_available: false,
         seek_index_keyframes: 0,
@@ -1363,15 +1895,38 @@ fn nearest_keyframe_scrub_is_explicitly_degraded_until_settled() {
 
     assert_eq!(
         preview_decode_presentation_quality(&diagnostics),
-        mondrian_playback::FramePresentationQuality::Degraded
+        Ok(mondrian_playback::FramePresentationQuality::Degraded)
     );
 
     diagnostics.selected_pts = diagnostics.requested_pts;
     diagnostics.temporal_approximation = false;
     assert_eq!(
         preview_decode_presentation_quality(&diagnostics),
-        mondrian_playback::FramePresentationQuality::Ready
+        Ok(mondrian_playback::FramePresentationQuality::Ready)
     );
+}
+
+#[test]
+fn exact_preview_access_rejects_temporal_approximation() {
+    for access_mode in [
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+    ] {
+        let mut diagnostics = test_preview_decode_diagnostics(
+            access_mode,
+            PreviewHardwareDecodeDecision::CpuRgbaNotRequested,
+            PreviewHardwareDecodeBlocker::None,
+        );
+        diagnostics.hardware_decode_request = PreviewHardwareDecodeRequest::Auto;
+        diagnostics.requested_pts = Some(1_000);
+        diagnostics.selected_pts = Some(1_001);
+        diagnostics.temporal_approximation = true;
+
+        assert_eq!(
+            preview_decode_presentation_quality(&diagnostics),
+            Err(MediaPreviewFailureReason::TemporalMismatch)
+        );
+    }
 }
 
 #[test]
@@ -1389,6 +1944,8 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
             seek_performed: true,
             requested_pts: Some(100),
             selected_pts: Some(100),
+            selected_duration_pts: Some(40),
+            selected_temporal_extent_source: PreviewTemporalExtentSource::FrameDuration,
             temporal_approximation: false,
             seek_strategy: PreviewDecodeSeekStrategy::BoundedAnyFrame,
             forward_reuse_frame_window: 1,
@@ -1410,7 +1967,7 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
             hardware_decode_cpu_transfer_observed: false,
             hardware_decode_cpu_transfer_status:
                 PreviewHardwareDecodeCpuTransferStatus::NotAttempted,
-            session_reused: false,
+            session_disposition: PreviewDecodeSessionDisposition::Opened,
             forward_reused: false,
             seek_index_available: true,
             seek_index_keyframes: 3,
@@ -1457,6 +2014,8 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
             seek_performed: false,
             requested_pts: None,
             selected_pts: None,
+            selected_duration_pts: None,
+            selected_temporal_extent_source: PreviewTemporalExtentSource::Unknown,
             temporal_approximation: false,
             seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
             forward_reuse_frame_window: 3,
@@ -1478,7 +2037,7 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
             hardware_decode_cpu_transfer_observed: false,
             hardware_decode_cpu_transfer_status:
                 PreviewHardwareDecodeCpuTransferStatus::NotAttempted,
-            session_reused: true,
+            session_disposition: PreviewDecodeSessionDisposition::Reused,
             forward_reused: false,
             seek_index_available: false,
             seek_index_keyframes: 0,
@@ -1516,15 +2075,17 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
     );
     service.record_preview_decode(
         PreviewDecodeDiagnostics {
-            path: PreviewDecodePath::PreviewCacheHit,
+            path: PreviewDecodePath::InProcessFfmpegCpuRgba,
             elapsed_us: 25,
-            cache_hit: true,
+            cache_hit: false,
             access_mode: PreviewDecodeAccessMode::RandomAccessStillFrame,
             external_process: false,
             cpu_resident: true,
             seek_performed: false,
             requested_pts: None,
             selected_pts: None,
+            selected_duration_pts: None,
+            selected_temporal_extent_source: PreviewTemporalExtentSource::Unknown,
             temporal_approximation: false,
             seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
             forward_reuse_frame_window: 0,
@@ -1546,7 +2107,7 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
             hardware_decode_cpu_transfer_observed: false,
             hardware_decode_cpu_transfer_status:
                 PreviewHardwareDecodeCpuTransferStatus::NotAttempted,
-            session_reused: false,
+            session_disposition: PreviewDecodeSessionDisposition::Opened,
             forward_reused: false,
             seek_index_available: true,
             seek_index_keyframes: 2,
@@ -1593,6 +2154,8 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
             seek_performed: false,
             requested_pts: None,
             selected_pts: None,
+            selected_duration_pts: None,
+            selected_temporal_extent_source: PreviewTemporalExtentSource::Unknown,
             temporal_approximation: false,
             seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
             forward_reuse_frame_window: 3,
@@ -1613,7 +2176,7 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
             hardware_decode_cpu_transfer_configured: true,
             hardware_decode_cpu_transfer_observed: true,
             hardware_decode_cpu_transfer_status: PreviewHardwareDecodeCpuTransferStatus::Observed,
-            session_reused: true,
+            session_disposition: PreviewDecodeSessionDisposition::BypassedCache,
             forward_reused: false,
             seek_index_available: true,
             seek_index_keyframes: 4,
@@ -1670,10 +2233,14 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
         Some(mondrian_media::PreviewDecodeCancellation {
             checkpoint: mondrian_media::PreviewDecodeCancellationCheckpoint::PacketRead,
             source: mondrian_media::PreviewDecodeCancellationSource::FfmpegIoInterrupt,
+            session_disposition: PreviewDecodeSessionDisposition::Reused,
+            session_open_us: 0,
         }),
         700,
-        Some(600),
-        Some(50),
+        Some(LogicalCancellationObserved {
+            execution_elapsed_us: 600,
+            request_elapsed_us: Some(50),
+        }),
         false,
     );
     service.record_preview_decode_cancel(
@@ -1681,8 +2248,10 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
         Some(MediaPreviewCancelReason::Obsolete),
         None,
         1_400,
-        Some(1_000),
-        Some(200),
+        Some(LogicalCancellationObserved {
+            execution_elapsed_us: 1_000,
+            request_elapsed_us: Some(200),
+        }),
         false,
     );
     service.record_preview_decode_cancel(
@@ -1690,8 +2259,10 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
         Some(MediaPreviewCancelReason::Shutdown),
         None,
         20,
-        Some(5),
-        Some(5),
+        Some(LogicalCancellationObserved {
+            execution_elapsed_us: 5,
+            request_elapsed_us: Some(5),
+        }),
         false,
     );
 
@@ -1721,7 +2292,7 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
     assert_eq!(diagnostics.decode_canceled_return_latency_total_us, 515);
     assert_eq!(diagnostics.decode_canceled_return_latency_max_us, 400);
     assert_eq!(diagnostics.decode_canceled_return_latency_last_us, 15);
-    assert_eq!(diagnostics.decode_in_process_cpu_frames, 1);
+    assert_eq!(diagnostics.decode_in_process_cpu_frames, 2);
     assert_eq!(diagnostics.decode_external_ffmpeg_cpu_rgba_frames, 1);
     assert_eq!(diagnostics.decode_playback_session_ring_hit_frames, 1);
     assert_eq!(diagnostics.decode_cache_hit_frames, 1);
@@ -1781,6 +2352,7 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
     assert_eq!(playback_profile.queue_wait_last_us, 400);
     assert_eq!(playback_profile.queue_wait_buckets.le_10ms, 1);
     assert_eq!(playback_profile.queue_wait_buckets.total(), 1);
+    assert_eq!(playback_profile.queue_wait_samples, 1);
     assert_eq!(playback_profile.max_frame_queue_wait_us, 400);
     assert_eq!(
         playback_profile.max_frame_bottleneck,
@@ -1801,8 +2373,23 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
     assert_eq!(playback_profile.canceled_shutdown_jobs, 0);
     assert_eq!(playback_profile.canceled_obsolete_jobs, 0);
     assert_eq!(playback_profile.canceled_unknown_jobs, 0);
-    assert_eq!(playback_profile.session_reused_frames, 2);
+    assert_eq!(playback_profile.canceled_session_open_attempts, 0);
+    assert_eq!(playback_profile.canceled_session_reused_attempts, 1);
+    assert_eq!(playback_profile.canceled_session_open_total_duration_us, 0);
+    assert_eq!(playback_profile.session_reused_frames, 1);
     assert_eq!(playback_profile.session_opened_frames, 0);
+    assert_eq!(playback_profile.session_bypassed_cache_frames, 1);
+    assert_eq!(playback_profile.work_classes.reused_other.frames, 1);
+    assert_eq!(
+        playback_profile.work_classes.reused_other.total_duration_us,
+        2_500
+    );
+    assert_eq!(playback_profile.work_classes.cache_hit.frames, 1);
+    assert_eq!(
+        playback_profile.work_classes.cache_hit.total_duration_us,
+        40
+    );
+    assert_eq!(playback_profile.work_classes.session_opened.frames, 0);
     assert_eq!(playback_profile.forward_reused_frames, 0);
     assert_eq!(playback_profile.seek_index_available_frames, 1);
     assert_eq!(playback_profile.seek_index_probe_backed_frames, 1);
@@ -1898,6 +2485,20 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
     assert_eq!(scrub_profile.any_seek_window_ms_max, 120);
     assert_eq!(scrub_profile.session_reused_frames, 0);
     assert_eq!(scrub_profile.session_opened_frames, 1);
+    assert_eq!(scrub_profile.work_classes.reused_seek.frames, 0);
+    assert_eq!(scrub_profile.work_classes.session_opened.frames, 1);
+    assert_eq!(
+        scrub_profile.work_classes.session_opened.total_duration_us,
+        1_000
+    );
+    assert_eq!(
+        scrub_profile.work_classes.session_opened.max_duration_us,
+        1_000
+    );
+    assert_eq!(
+        scrub_profile.work_classes.session_opened.latency_buckets.total(),
+        1
+    );
     assert_eq!(scrub_profile.forward_reused_frames, 0);
     assert_eq!(scrub_profile.seek_index_available_frames, 1);
     assert_eq!(scrub_profile.seek_index_probe_backed_frames, 1);
@@ -1939,7 +2540,7 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
     assert_eq!(scrub_profile.stage_durations.packet_decode_us, 500);
     let still_profile = diagnostics.decode_access_mode_profiles.random_access_still;
     assert_eq!(still_profile.frames, 1);
-    assert_eq!(still_profile.cache_hit_frames, 1);
+    assert_eq!(still_profile.cache_hit_frames, 0);
     assert_eq!(still_profile.latency_buckets.le_10ms, 1);
     assert_eq!(still_profile.latency_buckets.total(), 1);
     assert_eq!(still_profile.queue_wait_total_us, 20);
@@ -1964,6 +2565,20 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
     assert_eq!(still_profile.canceled_unknown_jobs, 0);
     assert_eq!(still_profile.session_reused_frames, 0);
     assert_eq!(still_profile.session_opened_frames, 1);
+    assert_eq!(still_profile.work_classes.reused_seek.frames, 0);
+    assert_eq!(still_profile.work_classes.session_opened.frames, 1);
+    assert_eq!(
+        still_profile.work_classes.session_opened.total_duration_us,
+        25
+    );
+    assert_eq!(
+        still_profile.work_classes.session_opened.max_duration_us,
+        25
+    );
+    assert_eq!(
+        still_profile.work_classes.session_opened.latency_buckets.total(),
+        1
+    );
     assert_eq!(still_profile.seek_index_available_frames, 1);
     assert_eq!(still_profile.seek_index_probe_backed_frames, 0);
     assert_eq!(still_profile.seek_index_session_observed_frames, 1);
@@ -2032,8 +2647,10 @@ fn preview_diagnostics_count_prefetch_preemptions_by_access_mode() {
         Some(MediaPreviewCancelReason::PrefetchPreemptedByCurrent),
         None,
         120,
-        Some(80),
-        Some(10),
+        Some(LogicalCancellationObserved {
+            execution_elapsed_us: 80,
+            request_elapsed_us: Some(10),
+        }),
         false,
     );
 
@@ -2059,8 +2676,10 @@ fn preview_diagnostics_count_playback_deadline_cancellations_by_access_mode() {
         Some(MediaPreviewCancelReason::PlaybackDeadline),
         None,
         0,
-        Some(0),
-        Some(0),
+        Some(LogicalCancellationObserved {
+            execution_elapsed_us: 0,
+            request_elapsed_us: Some(0),
+        }),
         true,
     );
 
@@ -2090,8 +2709,10 @@ fn preview_diagnostics_count_still_preemptions_by_access_mode() {
         Some(MediaPreviewCancelReason::StillPreemptedByRealtimeCurrent),
         None,
         320,
-        Some(200),
-        Some(30),
+        Some(LogicalCancellationObserved {
+            execution_elapsed_us: 200,
+            request_elapsed_us: Some(30),
+        }),
         false,
     );
 
@@ -2107,6 +2728,124 @@ fn preview_diagnostics_count_still_preemptions_by_access_mode() {
     assert_eq!(still_profile.canceled_return_latency_total_us, 120);
 }
 
+fn test_preview_decode_work_classes(
+    work_class: PreviewDecodeWorkClass,
+    frames: u64,
+    total_duration_us: u64,
+    max_duration_us: u64,
+    latency_buckets: PreviewDecodeWorkLatencyBuckets,
+) -> PreviewDecodeWorkClassProfiles {
+    let profile = PreviewDecodeWorkLatencyProfile {
+        frames,
+        total_duration_us,
+        max_duration_us,
+        latency_buckets,
+    };
+    match work_class {
+        PreviewDecodeWorkClass::CacheHit => PreviewDecodeWorkClassProfiles {
+            cache_hit: profile,
+            ..PreviewDecodeWorkClassProfiles::default()
+        },
+        PreviewDecodeWorkClass::SessionOpened => PreviewDecodeWorkClassProfiles {
+            session_opened: profile,
+            ..PreviewDecodeWorkClassProfiles::default()
+        },
+        PreviewDecodeWorkClass::SessionReplaced => PreviewDecodeWorkClassProfiles {
+            session_replaced: profile,
+            ..PreviewDecodeWorkClassProfiles::default()
+        },
+        PreviewDecodeWorkClass::ForwardSteady => PreviewDecodeWorkClassProfiles {
+            forward_steady: profile,
+            ..PreviewDecodeWorkClassProfiles::default()
+        },
+        PreviewDecodeWorkClass::ReusedSeek => PreviewDecodeWorkClassProfiles {
+            reused_seek: profile,
+            ..PreviewDecodeWorkClassProfiles::default()
+        },
+        PreviewDecodeWorkClass::ReusedOther => PreviewDecodeWorkClassProfiles {
+            reused_other: profile,
+            ..PreviewDecodeWorkClassProfiles::default()
+        },
+        PreviewDecodeWorkClass::Unclassified => PreviewDecodeWorkClassProfiles {
+            unclassified: profile,
+            ..PreviewDecodeWorkClassProfiles::default()
+        },
+    }
+}
+
+fn test_zero_latency_preview_decode_work_classes(
+    work_class: PreviewDecodeWorkClass,
+    frames: u64,
+) -> PreviewDecodeWorkClassProfiles {
+    test_preview_decode_work_classes(
+        work_class,
+        frames,
+        0,
+        0,
+        PreviewDecodeWorkLatencyBuckets {
+            le_10ms: frames,
+            ..PreviewDecodeWorkLatencyBuckets::default()
+        },
+    )
+}
+
+fn test_decode_latency_buckets_at(duration_us: u64, samples: u64) -> PreviewDecodeLatencyBuckets {
+    let mut buckets = PreviewDecodeLatencyBuckets::default();
+    match duration_us {
+        0..=10_000 => buckets.le_10ms = samples,
+        10_001..=16_000 => buckets.le_16ms = samples,
+        16_001..=25_000 => buckets.le_25ms = samples,
+        25_001..=40_000 => buckets.le_40ms = samples,
+        40_001..=50_000 => buckets.le_50ms = samples,
+        50_001..=80_000 => buckets.le_80ms = samples,
+        _ => buckets.gt_80ms = samples,
+    }
+    buckets
+}
+
+fn test_complete_successful_decode_evidence(
+    mut profile: PreviewDecodeAccessModeProfile,
+) -> PreviewDecodeAccessModeProfile {
+    assert!(
+        profile.frames > 0,
+        "successful decode evidence requires at least one frame"
+    );
+    assert_eq!(
+        profile.work_classes.total_frames(),
+        profile.frames,
+        "test fixture must classify every successful frame"
+    );
+    let lifecycle_frames = profile
+        .session_opened_frames
+        .saturating_add(profile.session_replaced_frames)
+        .saturating_add(profile.session_reused_frames)
+        .saturating_add(profile.session_bypassed_cache_frames)
+        .saturating_add(profile.session_unclassified_frames);
+    assert_eq!(
+        lifecycle_frames, profile.frames,
+        "test fixture must retain lifecycle evidence for every successful frame"
+    );
+
+    let queue_histogram_samples = profile.queue_wait_buckets.total();
+    match (profile.queue_wait_samples, queue_histogram_samples) {
+        (0, 0) => {
+            profile.queue_wait_samples = profile.frames;
+            profile.queue_wait_buckets =
+                test_decode_latency_buckets_at(profile.queue_wait_max_us, profile.frames);
+        }
+        (0, samples) => profile.queue_wait_samples = samples,
+        (samples, histogram_samples) => assert_eq!(
+            samples, histogram_samples,
+            "test fixture queue-wait sample and histogram accounting must agree"
+        ),
+    }
+    assert!(
+        profile.queue_wait_samples >= profile.frames,
+        "every successful frame needs queue-wait evidence"
+    );
+    profile
+}
+
 #[test]
 fn preview_decode_performance_report_fails_scrub_keyframe_seek_strategy() {
     let diagnostics = PreviewDiagnostics {
@@ -2117,7 +2856,13 @@ fn preview_decode_performance_report_fails_scrub_keyframe_seek_strategy() {
             scrub_cursor: PreviewDecodeAccessModeProfile {
                 frames: 1,
                 in_process_cpu_frames: 1,
+                seeked_frames: 1,
                 keyframe_seek_strategy_frames: 1,
+                session_reused_frames: 1,
+                work_classes: test_zero_latency_preview_decode_work_classes(
+                    PreviewDecodeWorkClass::ReusedSeek,
+                    1,
+                ),
                 ..PreviewDecodeAccessModeProfile::default()
             },
             ..PreviewDecodeAccessModeProfiles::default()
@@ -2163,6 +2908,12 @@ fn preview_decode_performance_report_fails_scrub_without_any_seek_window() {
                 forward_reuse_frame_window_max: 1,
                 forward_decode_budget_frames_max: 8,
                 any_seek_window_ms_max: 0,
+                seeked_frames: 1,
+                session_reused_frames: 1,
+                work_classes: test_zero_latency_preview_decode_work_classes(
+                    PreviewDecodeWorkClass::ReusedSeek,
+                    1,
+                ),
                 ..PreviewDecodeAccessModeProfile::default()
             },
             ..PreviewDecodeAccessModeProfiles::default()
@@ -2307,25 +3058,26 @@ fn startup_preroll_decode_evidence_is_separate_from_steady_state_latency() {
 #[test]
 fn playback_video_preroll_requires_next_media_payload_and_observes_cache_residency() {
     let (mut state, asset_id, root) = state_with_invalid_video_asset();
-    state.play();
+    state.play().expect("play");
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let sequence = state.active_sequence().expect("media sequence");
     let preroll_window = media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
         .expect("valid media sequence frame rate");
 
     assert_eq!(
-        service.playback_video_preroll_readiness(&state),
+        playback_video_preroll_for_state(&service, &state),
         Some(PreviewVideoPreroll {
             ready_media_frames: 0,
-            available_media_frames: preroll_window,
+            preservable_media_frames: preroll_window,
         })
     );
 
     let frame = state.current_frame().saturating_add(1);
-    let evaluation = evaluate_timeline_render_plan(
-        sequence,
+    let program = PreparedVisualProgram::prepare(sequence).expect("next frame visual program");
+    let evaluation = evaluate_prepared_visual_program(
+        &program,
         TimelineEvaluationRequest::preview(
-            frame,
+            mondrian_core::FramePosition::new(frame, sequence.time_base()),
             normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale),
         ),
     )
@@ -2339,13 +3091,15 @@ fn playback_video_preroll_requires_next_media_payload_and_observes_cache_residen
         })
         .expect("next frame media");
     assert_eq!(media.asset_id, asset_id);
-    let (width, height) = preview_dimensions_for_state(&state, sequence);
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
     let input_color = sequence
         .settings
         .root_program_color_context(state.project_color_environment())
         .media_input(media.auto_tone_map);
     let key = service
         .media_preview_key_for_asset(
+            &snapshot,
             &state,
             &media.asset_id,
             media.color_space_override,
@@ -2358,17 +3112,513 @@ fn playback_video_preroll_requires_next_media_payload_and_observes_cache_residen
             false,
         )
         .expect("next media cache key");
-    service
-        .frame_store
-        .borrow_mut()
-        .insert_media_frame(key, test_media_frame(7), false);
+    admit_test_media_frame(
+        &mut service.frame_store.borrow_mut(),
+        key,
+        test_media_frame(7),
+        MediaPreviewRequestPriority::Prefetch,
+    );
 
     assert_eq!(
-        service.playback_video_preroll_readiness(&state),
+        playback_video_preroll_for_state(&service, &state),
         Some(PreviewVideoPreroll {
             ready_media_frames: 1,
-            available_media_frames: preroll_window,
+            preservable_media_frames: preroll_window,
         })
+    );
+
+    service.shutdown();
+    drop(state);
+    std::fs::remove_dir_all(root).expect("remove preview test root");
+}
+
+fn media_preview_key_for_simple_sequence_frame<O: Clone>(
+    service: &PreviewProductionRuntime<O>,
+    state: &AppState,
+    frame: i64,
+) -> MediaPreviewKey {
+    let sequence = state.active_sequence().expect("media sequence");
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
+    let prepared = PreparedVisualProgram::prepare(sequence).expect("prepared visual program");
+    let evaluation = evaluate_prepared_visual_program(
+        &prepared,
+        TimelineEvaluationRequest::preview(
+            mondrian_core::FramePosition::new(frame, sequence.time_base()),
+            normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale),
+        ),
+    )
+    .expect("future frame");
+    let media = evaluation
+        .elements
+        .into_iter()
+        .find_map(|element| match element {
+            TimelineRenderPlanElement::Media(media) => Some(media),
+            _ => None,
+        })
+        .expect("future media");
+    let input_color = sequence
+        .settings
+        .root_program_color_context(state.project_color_environment())
+        .media_input(media.auto_tone_map);
+    service
+        .media_preview_key_for_asset(
+            &snapshot,
+            state,
+            &media.asset_id,
+            media.color_space_override,
+            media.alpha_interpretation,
+            media.source_time,
+            width,
+            height,
+            &input_color,
+            false,
+            false,
+        )
+        .expect("future media key")
+}
+
+fn future_media_prefix_keys_for_state<O: Clone>(
+    service: &PreviewProductionRuntime<O>,
+    state: &AppState,
+    current_frame: i64,
+    max_future_frames: usize,
+    target_resolution: Resolution,
+) -> Vec<MediaPreviewKey> {
+    let sequence = state.active_sequence().expect("media sequence");
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    let color_context =
+        sequence.settings.root_program_color_context(state.project_color_environment());
+    service.future_media_prefix_keys_for_test(
+        &snapshot,
+        state,
+        sequence,
+        current_frame,
+        max_future_frames,
+        target_resolution,
+        color_context,
+    )
+}
+
+#[test]
+fn future_media_window_reuses_sliding_semantic_and_lowered_frame_contracts() {
+    let (mut state, _, root) = state_with_invalid_video_asset();
+    state.play().expect("play");
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let target_resolution = Resolution { width: 64, height: 36 };
+    let window = MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES;
+    let sequential_frames = 20usize;
+
+    let first = future_media_prefix_keys_for_state(&service, &state, 0, window, target_resolution);
+    let cached = future_media_prefix_keys_for_state(&service, &state, 0, window, target_resolution);
+    assert_eq!(
+        cached, first,
+        "cached lowering must equal a fresh canonical plan"
+    );
+
+    for current_frame in 1..sequential_frames as i64 {
+        let keys = future_media_prefix_keys_for_state(
+            &service,
+            &state,
+            current_frame,
+            window,
+            target_resolution,
+        );
+        assert_eq!(
+            keys.len(),
+            window,
+            "the complete small future window should remain physically admissible"
+        );
+    }
+
+    let diagnostics = service.diagnostics().future_media_window;
+    let unique_frames = sequential_frames.saturating_add(window).saturating_sub(1) as u64;
+    assert_eq!(
+        diagnostics.semantic_frame_evaluations, unique_frames,
+        "sequential playback must evaluate N + window - 1 semantic frames, not N * window"
+    );
+    assert_eq!(
+        diagnostics.media_request_lowerings, unique_frames,
+        "one-media-layer frames must lower each unique future frame exactly once"
+    );
+    assert!(
+        diagnostics.cache_hits >= (sequential_frames * window) as u64 - unique_frames,
+        "the overlapping sliding window must account for every repeated future frame"
+    );
+
+    service.clear_future_media_window_for_test();
+    let fresh = future_media_prefix_keys_for_state(&service, &state, 0, window, target_resolution);
+    assert_eq!(
+        fresh, first,
+        "evicting the optimization must not change canonical lowered request identity"
+    );
+
+    service.shutdown();
+    drop(state);
+    std::fs::remove_dir_all(root).expect("remove preview test root");
+}
+
+#[test]
+fn future_media_window_revalidates_each_physical_source_once_per_planning_turn() {
+    let (mut state, _, root) = state_with_invalid_video_asset();
+    state.play().expect("play");
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let target_resolution = Resolution { width: 64, height: 36 };
+    let window = MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES;
+
+    let first = future_media_prefix_keys_for_state(&service, &state, 0, window, target_resolution);
+    assert_eq!(first.len(), window);
+    let populated = service.diagnostics().future_media_window;
+    assert_eq!(
+        populated.source_fingerprint_observations, 0,
+        "fresh lowering already binds the observed source revision and needs no cache revalidation"
+    );
+
+    let second = future_media_prefix_keys_for_state(&service, &state, 0, window, target_resolution);
+    assert_eq!(second, first);
+    let first_reuse = service.diagnostics().future_media_window;
+    assert_eq!(
+        first_reuse.source_fingerprint_observations, 1,
+        "one planning turn must observe one shared physical source once, not once per cached frame"
+    );
+
+    let third = future_media_prefix_keys_for_state(&service, &state, 0, window, target_resolution);
+    assert_eq!(third, first);
+    let second_reuse = service.diagnostics().future_media_window;
+    assert_eq!(
+        second_reuse
+            .source_fingerprint_observations
+            .saturating_sub(first_reuse.source_fingerprint_observations),
+        1,
+        "a later planning turn must reobserve the physical source instead of reusing prior-turn evidence"
+    );
+
+    service.shutdown();
+    drop(state);
+    std::fs::remove_dir_all(root).expect("remove preview test root");
+}
+
+#[test]
+fn future_media_window_fails_closed_when_a_retained_source_revision_drifts() {
+    let (mut state, _, root) = state_with_invalid_video_asset();
+    state.play().expect("play");
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let target_resolution = Resolution { width: 64, height: 36 };
+
+    let retained = future_media_prefix_keys_for_state(&service, &state, 0, 1, target_resolution);
+    assert_eq!(retained.len(), 1);
+
+    std::fs::write(
+        root.join("source.mp4"),
+        b"a physically replaced invalid media source",
+    )
+    .expect("replace retained source");
+    let after_drift = future_media_prefix_keys_for_state(&service, &state, 0, 1, target_resolution);
+    assert!(
+        after_drift.is_empty(),
+        "a retained decode contract must not authorize a physically replaced source"
+    );
+    assert_eq!(
+        service.diagnostics().future_media_window.source_fingerprint_observations,
+        1,
+        "the failed retained-contract check must remain observable"
+    );
+
+    service.shutdown();
+    drop(state);
+    std::fs::remove_dir_all(root).expect("remove preview test root");
+}
+
+#[test]
+fn future_media_window_invalidates_scale_extent_color_revision_and_library_edges() {
+    let (mut state, _, root) = state_with_invalid_video_asset();
+    state.play().expect("play");
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let first_target = Resolution { width: 64, height: 36 };
+    let second_target = Resolution { width: 96, height: 54 };
+
+    {
+        let sequence = state.active_sequence().expect("media sequence");
+        let snapshot = state.preview_execution_snapshot(Instant::now());
+        let color_context =
+            sequence.settings.root_program_color_context(state.project_color_environment());
+        let full = service
+            .future_media_frame_keys_at_scale_for_test(
+                &snapshot,
+                &state,
+                sequence,
+                1,
+                mondrian_playback::PreviewResolutionScale::Full,
+                first_target,
+                color_context.clone(),
+            )
+            .expect("full-scale media contract");
+        let full_cached = service
+            .future_media_frame_keys_at_scale_for_test(
+                &snapshot,
+                &state,
+                sequence,
+                1,
+                mondrian_playback::PreviewResolutionScale::Full,
+                first_target,
+                color_context.clone(),
+            )
+            .expect("cached full-scale media contract");
+        assert_eq!(full_cached, full);
+
+        let half = service
+            .future_media_frame_keys_at_scale_for_test(
+                &snapshot,
+                &state,
+                sequence,
+                1,
+                mondrian_playback::PreviewResolutionScale::Half,
+                first_target,
+                color_context.clone(),
+            )
+            .expect("half-scale media contract");
+        assert_eq!(
+            half.len(),
+            full.len(),
+            "runtime scale changes execution semantics, not dependency cardinality"
+        );
+
+        let resized = service
+            .future_media_frame_keys_at_scale_for_test(
+                &snapshot,
+                &state,
+                sequence,
+                1,
+                mondrian_playback::PreviewResolutionScale::Half,
+                second_target,
+                color_context.clone(),
+            )
+            .expect("resized media contract");
+        assert_ne!(
+            resized, half,
+            "target extent must participate in the physical decode contract"
+        );
+
+        let mut alternate_color = color_context;
+        alternate_color.working_color_space = WorkingColorSpace::LinearRec709;
+        let recolored = service
+            .future_media_frame_keys_at_scale_for_test(
+                &snapshot,
+                &state,
+                sequence,
+                1,
+                mondrian_playback::PreviewResolutionScale::Half,
+                second_target,
+                alternate_color,
+            )
+            .expect("alternate-color media contract");
+        assert_ne!(
+            recolored, resized,
+            "Program color changes must produce a freshly lowered media contract"
+        );
+    }
+
+    let next_revision = state
+        .active_sequence()
+        .expect("media sequence")
+        .revision
+        .checked_next()
+        .expect("test Sequence revision can advance");
+    state.active_sequence_mut_uncommitted().expect("media sequence").revision = next_revision;
+    let _ = future_media_prefix_keys_for_state(&service, &state, 0, 1, second_target);
+
+    state
+        .asset_library()
+        .expect("asset library")
+        .create_folder("future-window-revision", None)
+        .expect("advance Asset Library revision");
+    let _ = future_media_prefix_keys_for_state(&service, &state, 0, 1, second_target);
+
+    let diagnostics = service.diagnostics().future_media_window;
+    assert_eq!(
+        diagnostics.cache_hits, 1,
+        "only the exact repeated full-scale request may hit"
+    );
+    assert!(
+        diagnostics.identity_invalidations >= 5,
+        "scale, extent, color, Sequence revision, and Asset Library revision must each rotate the window"
+    );
+
+    service.shutdown();
+    drop(state);
+    std::fs::remove_dir_all(root).expect("remove preview test root");
+}
+
+#[test]
+fn future_media_prefix_preserves_nearest_resident_across_preroll_and_prefetch() {
+    let (mut state, _, root) = state_with_invalid_video_asset();
+    state.play().expect("play");
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    service.frame_store.replace(PreviewFrameStoreAdapter::new(
+        PreviewFrameStoreAdapterConfig {
+            media_entry_capacity: 1,
+            media_byte_budget: 256 * 1024 * 1024,
+            media_resource_unit_budget: 4,
+            current_media_working_set_entry_limit: 1,
+            current_media_working_set_byte_limit: 256 * 1024 * 1024,
+            current_media_working_set_resource_unit_limit: 4,
+            viewer_entry_capacity: 2,
+            viewer_byte_budget: 256 * 1024 * 1024,
+            failure_entry_capacity: 2,
+        },
+    ));
+    let sequence = state.active_sequence().expect("media sequence");
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
+    let nearest_key = media_preview_key_for_simple_sequence_frame(
+        &service,
+        &state,
+        state.current_frame().saturating_add(1),
+    );
+    assert!(admit_test_media_frame(
+        &mut service.frame_store.borrow_mut(),
+        nearest_key.clone(),
+        test_media_frame(11),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
+    let evictions_before =
+        service.frame_store.borrow().diagnostics().media_work_reservation_evictions;
+
+    assert_eq!(
+        playback_video_preroll_for_state(&service, &state),
+        Some(PreviewVideoPreroll { ready_media_frames: 1, preservable_media_frames: 1 }),
+        "preroll must expose only the physically preservable near-term prefix"
+    );
+    schedule_media_prefetches_for_state(
+        &service,
+        &state,
+        sequence,
+        state.current_frame(),
+        width,
+        height,
+    );
+
+    assert!(
+        service.frame_store.borrow_mut().media_frame(&nearest_key).is_some(),
+        "farther Prefetch work must not evict the accepted nearest resident frame"
+    );
+    assert_eq!(service.jobs.diagnostics().queued_prefetch_jobs, 0);
+    assert_eq!(
+        service.frame_store.borrow().diagnostics().media_work_reservation_evictions,
+        evictions_before,
+        "planning must protect the resident prefix before computing speculative headroom"
+    );
+
+    service.shutdown();
+    drop(state);
+    std::fs::remove_dir_all(root).expect("remove preview test root");
+}
+
+#[test]
+fn future_media_prefix_drops_a_far_guard_before_admitting_nearer_missing_work() {
+    let (mut state, _, root) = state_with_invalid_video_asset();
+    state.play().expect("play");
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    service.frame_store.replace(PreviewFrameStoreAdapter::new(
+        PreviewFrameStoreAdapterConfig {
+            media_entry_capacity: 1,
+            media_byte_budget: 256 * 1024 * 1024,
+            media_resource_unit_budget: 4,
+            current_media_working_set_entry_limit: 1,
+            current_media_working_set_byte_limit: 256 * 1024 * 1024,
+            current_media_working_set_resource_unit_limit: 4,
+            viewer_entry_capacity: 2,
+            viewer_byte_budget: 256 * 1024 * 1024,
+            failure_entry_capacity: 2,
+        },
+    ));
+    let current_frame = state.current_frame();
+    let near_key = media_preview_key_for_simple_sequence_frame(&service, &state, current_frame + 1);
+    let far_key = media_preview_key_for_simple_sequence_frame(&service, &state, current_frame + 2);
+    assert!(admit_test_media_frame(
+        &mut service.frame_store.borrow_mut(),
+        far_key.clone(),
+        test_media_frame(12),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
+    let evictions_before =
+        service.frame_store.borrow().diagnostics().media_work_reservation_evictions;
+    let sequence = state.active_sequence().expect("media sequence");
+    let (width, height) = preview_dimensions_for_sequence(sequence);
+
+    schedule_media_prefetches_for_state(&service, &state, sequence, current_frame, width, height);
+
+    assert!(
+        service.scheduler.has_pending_key(&near_key),
+        "the nearest missing frame must own the only speculative reservation"
+    );
+    assert_eq!(service.jobs.diagnostics().queued_prefetch_jobs, 1);
+    assert!(
+        service.frame_store.borrow_mut().media_frame(&far_key).is_none(),
+        "a rejected farther resident guard must not block nearer missing work"
+    );
+    assert_eq!(
+        service.frame_store.borrow().diagnostics().media_work_reservation_evictions,
+        evictions_before + 1
+    );
+
+    service.shutdown();
+    drop(state);
+    std::fs::remove_dir_all(root).expect("remove preview test root");
+}
+
+#[test]
+fn future_media_prefix_commits_nearest_first_lru_priority_after_preroll_inspection() {
+    let (mut state, _, root) = state_with_invalid_video_asset();
+    state.play().expect("play");
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    service.frame_store.replace(PreviewFrameStoreAdapter::new(
+        PreviewFrameStoreAdapterConfig {
+            media_entry_capacity: 2,
+            media_byte_budget: 256 * 1024 * 1024,
+            media_resource_unit_budget: 4,
+            current_media_working_set_entry_limit: 2,
+            current_media_working_set_byte_limit: 256 * 1024 * 1024,
+            current_media_working_set_resource_unit_limit: 4,
+            viewer_entry_capacity: 2,
+            viewer_byte_budget: 256 * 1024 * 1024,
+            failure_entry_capacity: 2,
+        },
+    ));
+    let current_frame = state.current_frame();
+    let near_key = media_preview_key_for_simple_sequence_frame(&service, &state, current_frame + 1);
+    let far_key = media_preview_key_for_simple_sequence_frame(&service, &state, current_frame + 2);
+    assert!(admit_test_media_frame(
+        &mut service.frame_store.borrow_mut(),
+        far_key.clone(),
+        test_media_frame(13),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
+    assert!(admit_test_media_frame(
+        &mut service.frame_store.borrow_mut(),
+        near_key.clone(),
+        test_media_frame(14),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
+
+    assert_eq!(
+        playback_video_preroll_for_state(&service, &state),
+        Some(PreviewVideoPreroll { ready_media_frames: 2, preservable_media_frames: 2 })
+    );
+    assert!(admit_test_media_frame(
+        &mut service.frame_store.borrow_mut(),
+        test_media_key(3_003),
+        test_media_frame(15),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
+
+    assert!(
+        service.frame_store.borrow_mut().media_frame(&far_key).is_none(),
+        "later resource pressure should evict the farther future frame first"
+    );
+    assert!(
+        service.frame_store.borrow_mut().media_frame(&near_key).is_some(),
+        "preroll inspection must leave the nearest future frame hottest"
     );
 
     service.shutdown();
@@ -2379,13 +3629,13 @@ fn playback_video_preroll_requires_next_media_payload_and_observes_cache_residen
 #[test]
 fn playback_video_preroll_does_not_delay_procedural_future_frames() {
     let mut state = state_with_solid_color_clip(Color::WHITE);
-    state.seek(0);
-    state.play();
+    state.seek(0).expect("seek");
+    state.play().expect("play");
     let service = WindowPreviewAdapter::new_without_workers_for_test();
 
     assert_eq!(
-        service.playback_video_preroll_readiness(&state),
-        Some(PreviewVideoPreroll { ready_media_frames: 0, available_media_frames: 0 })
+        playback_video_preroll_for_state(&service, &state),
+        Some(PreviewVideoPreroll { ready_media_frames: 0, preservable_media_frames: 0 })
     );
 
     service.shutdown();
@@ -2550,11 +3800,18 @@ fn preview_decode_performance_report_defaults_to_no_required_access_modes() {
         decode_successes: 1,
         decode_in_process_cpu_frames: 1,
         decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
-            random_access_still: PreviewDecodeAccessModeProfile {
-                frames: 1,
-                in_process_cpu_frames: 1,
-                ..PreviewDecodeAccessModeProfile::default()
-            },
+            random_access_still: test_complete_successful_decode_evidence(
+                PreviewDecodeAccessModeProfile {
+                    frames: 1,
+                    in_process_cpu_frames: 1,
+                    session_opened_frames: 1,
+                    work_classes: test_zero_latency_preview_decode_work_classes(
+                        PreviewDecodeWorkClass::SessionOpened,
+                        1,
+                    ),
+                    ..PreviewDecodeAccessModeProfile::default()
+                },
+            ),
             ..PreviewDecodeAccessModeProfiles::default()
         },
         ..PreviewDiagnostics::default()
@@ -2583,6 +3840,11 @@ fn preview_decode_performance_report_fails_missing_required_access_modes() {
             random_access_still: PreviewDecodeAccessModeProfile {
                 frames: 1,
                 in_process_cpu_frames: 1,
+                session_opened_frames: 1,
+                work_classes: test_zero_latency_preview_decode_work_classes(
+                    PreviewDecodeWorkClass::SessionOpened,
+                    1,
+                ),
                 ..PreviewDecodeAccessModeProfile::default()
             },
             ..PreviewDecodeAccessModeProfiles::default()
@@ -2629,51 +3891,6 @@ fn preview_decode_performance_report_fails_missing_required_access_modes() {
 }
 
 #[test]
-fn preview_decode_performance_report_rejects_cache_only_required_access_mode() {
-    let diagnostics = PreviewDiagnostics {
-        decode_successes: 1,
-        decode_cache_hit_frames: 1,
-        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
-            scrub_cursor: PreviewDecodeAccessModeProfile {
-                frames: 1,
-                cache_hit_frames: 1,
-                bounded_any_seek_strategy_frames: 1,
-                any_seek_window_ms_max: 1,
-                ..PreviewDecodeAccessModeProfile::default()
-            },
-            ..PreviewDecodeAccessModeProfiles::default()
-        },
-        ..PreviewDiagnostics::default()
-    };
-
-    let report = build_preview_decode_performance_report_with_required_access_modes(
-        diagnostics.decode_performance_summary(50_000),
-        "preview-decode-required-cache-only-test",
-        50_000,
-        &[PreviewDecodeAccessMode::ScrubCursor],
-    );
-
-    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Fail);
-    assert!(report.checks.iter().any(|check| {
-        check.code == "preview_decode_scrub_cursor_sampled"
-            && check.severity == PreviewDecodePerformanceSeverity::Pass
-    }));
-    assert!(report.checks.iter().any(|check| {
-        check.code == "preview_decode_scrub_cursor_mode_local_sampled"
-            && check.severity == PreviewDecodePerformanceSeverity::Fail
-            && check.observed == 0
-    }));
-    assert!(report.root_causes.iter().any(|root| {
-        root.code == "preview_decode_required_access_mode_cache_only"
-            && root.evidence.contains("access_mode=ScrubCursor")
-            && root.evidence.contains("cache_hit_frames=1")
-    }));
-    assert!(report.actions.iter().any(|action| {
-        action.code == "exercise_required_preview_access_modes_without_global_cache"
-    }));
-}
-
-#[test]
 fn preview_decode_performance_report_accepts_playback_ring_as_mode_local_evidence() {
     let diagnostics = PreviewDiagnostics {
         decode_successes: 1,
@@ -2682,6 +3899,18 @@ fn preview_decode_performance_report_accepts_playback_ring_as_mode_local_evidenc
             playback_cursor: PreviewDecodeAccessModeProfile {
                 frames: 1,
                 playback_session_ring_hit_frames: 1,
+                session_bypassed_cache_frames: 1,
+                work_classes: PreviewDecodeWorkClassProfiles {
+                    cache_hit: PreviewDecodeWorkLatencyProfile {
+                        frames: 1,
+                        latency_buckets: PreviewDecodeWorkLatencyBuckets {
+                            le_10ms: 1,
+                            ..PreviewDecodeWorkLatencyBuckets::default()
+                        },
+                        ..PreviewDecodeWorkLatencyProfile::default()
+                    },
+                    ..PreviewDecodeWorkClassProfiles::default()
+                },
                 ..PreviewDecodeAccessModeProfile::default()
             },
             ..PreviewDecodeAccessModeProfiles::default()
@@ -2696,7 +3925,7 @@ fn preview_decode_performance_report_accepts_playback_ring_as_mode_local_evidenc
         &[PreviewDecodeAccessMode::PlaybackCursor],
     );
 
-    assert_ne!(report.verdict, PreviewDecodePerformanceVerdict::Fail);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Fail);
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_playback_cursor_mode_local_sampled"
             && check.severity == PreviewDecodePerformanceSeverity::Pass
@@ -2705,18 +3934,22 @@ fn preview_decode_performance_report_accepts_playback_ring_as_mode_local_evidenc
     assert!(!report
         .root_causes
         .iter()
-        .any(|root| root.code == "preview_decode_required_access_mode_cache_only"));
+        .any(|root| root.code == "preview_decode_work_class_accounting_mismatch"));
+    assert!(report.root_causes.iter().any(|root| {
+        root.code == "preview_decode_required_work_class_missing"
+            && root.evidence.contains("work_class=ForwardSteady")
+    }));
 }
 
 #[test]
 fn preview_decode_performance_report_classifies_codec_bound_slow_frame() {
     let diagnostics = PreviewDiagnostics {
         decode_successes: 1,
+        decode_playback_cursor_frames: 1,
         decode_in_process_cpu_frames: 1,
         decode_total_duration_us: 120_000,
         decode_max_duration_us: 120_000,
         decode_last_duration_us: 120_000,
-        decode_seeked_frames: 1,
         decode_decoded_frame_count: 36,
         decode_max_decoded_frame_count: 36,
         decode_stage_durations: PreviewDecodeStageDurations {
@@ -2734,15 +3967,26 @@ fn preview_decode_performance_report_classifies_codec_bound_slow_frame() {
             ..PreviewDecodeStageDurations::default()
         },
         decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
-            scrub_cursor: PreviewDecodeAccessModeProfile {
+            playback_cursor: PreviewDecodeAccessModeProfile {
                 frames: 1,
                 in_process_cpu_frames: 1,
                 total_duration_us: 120_000,
                 max_duration_us: 120_000,
                 last_duration_us: 120_000,
-                seeked_frames: 1,
-                bounded_any_seek_strategy_frames: 1,
-                any_seek_window_ms_max: 1,
+                session_reused_frames: 1,
+                forward_reused_frames: 1,
+                work_classes: PreviewDecodeWorkClassProfiles {
+                    forward_steady: PreviewDecodeWorkLatencyProfile {
+                        frames: 1,
+                        total_duration_us: 120_000,
+                        max_duration_us: 120_000,
+                        latency_buckets: PreviewDecodeWorkLatencyBuckets {
+                            le_120ms: 1,
+                            ..PreviewDecodeWorkLatencyBuckets::default()
+                        },
+                    },
+                    ..PreviewDecodeWorkClassProfiles::default()
+                },
                 decoded_frame_count: 36,
                 max_decoded_frame_count: 36,
                 stage_durations: PreviewDecodeStageDurations {
@@ -2780,33 +4024,19 @@ fn preview_decode_performance_report_classifies_codec_bound_slow_frame() {
     );
     assert_eq!(
         summary.slowest_access_mode,
-        Some(PreviewDecodeAccessMode::ScrubCursor)
+        Some(PreviewDecodeAccessMode::PlaybackCursor)
     );
-    assert!(report
-        .root_causes
-        .iter()
-        .any(|root| root.code == "preview_decode_frame_over_budget"));
-    assert!(report.root_causes.iter().any(|root| {
-        root.code == "preview_decode_frame_over_budget"
-            && root.evidence.contains("slowest_access_mode=ScrubCursor")
-    }));
     assert!(report.checks.iter().any(|check| {
-        check.code == "preview_decode_scrub_cursor_max_frame_us"
+        check.code == "preview_decode_playback_cursor_forward_steady_max_worker_execution_us"
             && check.severity == PreviewDecodePerformanceSeverity::Fail
             && check.observed == 120_000
             && check.limit == Some(50_000)
     }));
     assert!(report.root_causes.iter().any(|root| {
-        root.code == "preview_decode_access_mode_over_budget"
+        root.code == "preview_decode_work_class_over_budget"
             && root.area == PreviewDecodePerformanceArea::AccessMode
-            && root.evidence.contains("access_mode=ScrubCursor")
-            && root.evidence.contains("packet_decode_us=95000")
-            && root.evidence.contains("seek_index_available_frames=0")
-    }));
-    assert!(report.root_causes.iter().any(|root| {
-        root.code == "preview_decode_scrub_cursor_without_seek_index_evidence"
-            && root.area == PreviewDecodePerformanceArea::AccessMode
-            && root.evidence.contains("seek_index_available_frames=0")
+            && root.evidence.contains("access_mode=PlaybackCursor")
+            && root.evidence.contains("work_class=ForwardSteady")
     }));
     assert!(report
         .root_causes
@@ -2819,11 +4049,153 @@ fn preview_decode_performance_report_classifies_codec_bound_slow_frame() {
     assert!(report
         .actions
         .iter()
-        .any(|action| action.code == "build_preview_seek_index_evidence"));
-    assert!(report
-        .actions
+        .any(|action| action.code == "inspect_preview_decode_work_class"));
+}
+
+#[test]
+fn preview_decode_report_separates_cold_session_readiness_from_steady_cadence() {
+    let profile = test_complete_successful_decode_evidence(PreviewDecodeAccessModeProfile {
+        frames: 2,
+        total_duration_us: 1_510_000,
+        max_duration_us: 1_500_000,
+        latency_buckets: PreviewDecodeLatencyBuckets {
+            le_10ms: 1,
+            gt_80ms: 1,
+            ..PreviewDecodeLatencyBuckets::default()
+        },
+        session_opened_frames: 1,
+        session_reused_frames: 1,
+        seeked_frames: 1,
+        work_classes: PreviewDecodeWorkClassProfiles {
+            session_opened: PreviewDecodeWorkLatencyProfile {
+                frames: 1,
+                total_duration_us: 1_500_000,
+                max_duration_us: 1_500_000,
+                latency_buckets: PreviewDecodeWorkLatencyBuckets {
+                    le_2s: 1,
+                    ..PreviewDecodeWorkLatencyBuckets::default()
+                },
+            },
+            reused_seek: PreviewDecodeWorkLatencyProfile {
+                frames: 1,
+                total_duration_us: 10_000,
+                max_duration_us: 10_000,
+                latency_buckets: PreviewDecodeWorkLatencyBuckets {
+                    le_10ms: 1,
+                    ..PreviewDecodeWorkLatencyBuckets::default()
+                },
+            },
+            ..PreviewDecodeWorkClassProfiles::default()
+        },
+        bounded_any_seek_strategy_frames: 2,
+        any_seek_window_ms_max: 500,
+        max_frame_stage_durations: PreviewDecodeStageDurations {
+            session_open_us: 1_490_000,
+            packet_decode_us: 10_000,
+            ..PreviewDecodeStageDurations::default()
+        },
+        ..PreviewDecodeAccessModeProfile::default()
+    });
+    let diagnostics = PreviewDiagnostics {
+        decode_successes: 2,
+        decode_total_duration_us: 1_510_000,
+        decode_max_duration_us: 1_500_000,
+        decode_last_duration_us: 10_000,
+        decode_max_frame_stage_durations: profile.max_frame_stage_durations,
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            scrub_cursor: profile,
+            ..PreviewDecodeAccessModeProfiles::default()
+        },
+        ..PreviewDiagnostics::default()
+    };
+
+    let report = build_preview_decode_performance_report_with_required_access_modes(
+        diagnostics.decode_performance_summary(50_000),
+        "preview-cold-steady-partition",
+        50_000,
+        &[PreviewDecodeAccessMode::ScrubCursor],
+    );
+
+    assert_ne!(report.verdict, PreviewDecodePerformanceVerdict::Fail);
+    assert!(report.checks.iter().any(|check| {
+        check.code == "preview_decode_scrub_cursor_reused_seek_max_worker_execution_us"
+            && check.observed == 10_000
+            && check.limit == Some(500_000)
+            && check.severity == PreviewDecodePerformanceSeverity::Pass
+    }));
+    assert!(report.checks.iter().any(|check| {
+        check.code == "preview_decode_scrub_cursor_session_opened_max_worker_execution_us"
+            && check.observed == 1_500_000
+            && check.limit == Some(PREVIEW_DECODE_DEFAULT_SESSION_OPEN_BUDGET_US)
+            && check.severity == PreviewDecodePerformanceSeverity::Pass
+    }));
+    assert!(!report
+        .root_causes
         .iter()
-        .any(|action| action.code == "inspect_preview_decode_access_mode_profile"));
+        .any(|root| root.code == "preview_decode_work_class_over_budget"));
+}
+
+#[test]
+fn preview_decode_report_fails_unbounded_cold_session_readiness() {
+    let profile = PreviewDecodeAccessModeProfile {
+        frames: 2,
+        total_duration_us: PREVIEW_DECODE_DEFAULT_SESSION_OPEN_BUDGET_US + 10_001,
+        max_duration_us: PREVIEW_DECODE_DEFAULT_SESSION_OPEN_BUDGET_US + 1,
+        session_opened_frames: 1,
+        session_reused_frames: 1,
+        seeked_frames: 1,
+        work_classes: PreviewDecodeWorkClassProfiles {
+            session_opened: PreviewDecodeWorkLatencyProfile {
+                frames: 1,
+                total_duration_us: PREVIEW_DECODE_DEFAULT_SESSION_OPEN_BUDGET_US + 1,
+                max_duration_us: PREVIEW_DECODE_DEFAULT_SESSION_OPEN_BUDGET_US + 1,
+                latency_buckets: PreviewDecodeWorkLatencyBuckets {
+                    gt_5s: 1,
+                    ..PreviewDecodeWorkLatencyBuckets::default()
+                },
+            },
+            reused_seek: PreviewDecodeWorkLatencyProfile {
+                frames: 1,
+                total_duration_us: 10_000,
+                max_duration_us: 10_000,
+                latency_buckets: PreviewDecodeWorkLatencyBuckets {
+                    le_10ms: 1,
+                    ..PreviewDecodeWorkLatencyBuckets::default()
+                },
+            },
+            ..PreviewDecodeWorkClassProfiles::default()
+        },
+        ..PreviewDecodeAccessModeProfile::default()
+    };
+    let diagnostics = PreviewDiagnostics {
+        decode_successes: 2,
+        decode_total_duration_us: profile.total_duration_us,
+        decode_max_duration_us: profile.max_duration_us,
+        decode_last_duration_us: profile.max_duration_us,
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            random_access_still: profile,
+            ..PreviewDecodeAccessModeProfiles::default()
+        },
+        ..PreviewDiagnostics::default()
+    };
+
+    let report = build_preview_decode_performance_report_with_required_access_modes(
+        diagnostics.decode_performance_summary(50_000),
+        "preview-unbounded-cold-open",
+        50_000,
+        &[PreviewDecodeAccessMode::RandomAccessStillFrame],
+    );
+
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Fail);
+    assert!(report.checks.iter().any(|check| {
+        check.code == "preview_decode_random_access_still_session_opened_max_worker_execution_us"
+            && check.severity == PreviewDecodePerformanceSeverity::Fail
+    }));
+    assert!(report.root_causes.iter().any(|root| {
+        root.code == "preview_decode_work_class_over_budget"
+            && root.evidence.contains("access_mode=RandomAccessStillFrame")
+            && root.evidence.contains("work_class=SessionOpened")
+    }));
 }
 
 #[test]
@@ -2831,7 +4203,6 @@ fn preview_decode_performance_report_classifies_hardware_transfer_bound_frame() 
     let diagnostics = PreviewDiagnostics {
         decode_successes: 1,
         decode_playback_cursor_frames: 1,
-        decode_playback_session_ring_hit_frames: 1,
         decode_total_duration_us: 90_000,
         decode_max_duration_us: 90_000,
         decode_last_duration_us: 90_000,
@@ -2850,10 +4221,20 @@ fn preview_decode_performance_report_classifies_hardware_transfer_bound_frame() 
         decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
             playback_cursor: PreviewDecodeAccessModeProfile {
                 frames: 1,
-                playback_session_ring_hit_frames: 1,
                 total_duration_us: 90_000,
                 max_duration_us: 90_000,
                 last_duration_us: 90_000,
+                session_reused_frames: 1,
+                work_classes: test_preview_decode_work_classes(
+                    PreviewDecodeWorkClass::ReusedOther,
+                    1,
+                    90_000,
+                    90_000,
+                    PreviewDecodeWorkLatencyBuckets {
+                        le_120ms: 1,
+                        ..PreviewDecodeWorkLatencyBuckets::default()
+                    },
+                ),
                 hardware_decode_cpu_transfer_observed_frames: 1,
                 stage_durations: PreviewDecodeStageDurations {
                     hardware_transfer_us: 70_000,
@@ -2885,6 +4266,17 @@ fn preview_decode_performance_report_classifies_hardware_transfer_bound_frame() 
         summary.primary_bottleneck,
         PreviewDecodeBottleneck::HardwareTransfer
     );
+    assert!(report.checks.iter().any(|check| {
+        check.code == "preview_decode_playback_cursor_reused_other_max_worker_execution_us"
+            && check.severity == PreviewDecodePerformanceSeverity::Fail
+            && check.observed == 90_000
+            && check.limit == Some(50_000)
+    }));
+    assert!(report.root_causes.iter().any(|root| {
+        root.code == "preview_decode_work_class_over_budget"
+            && root.evidence.contains("access_mode=PlaybackCursor")
+            && root.evidence.contains("work_class=ReusedOther")
+    }));
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_hardware_transfer_bound"
             && root.evidence.contains("hardware_transfer_us=70000")
@@ -2904,6 +4296,27 @@ fn preview_decode_performance_report_flags_hardware_cpu_transfer_setup_failures(
         decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
             playback_cursor: PreviewDecodeAccessModeProfile {
                 frames: 2,
+                session_opened_frames: 1,
+                session_reused_frames: 1,
+                work_classes: PreviewDecodeWorkClassProfiles {
+                    session_opened: PreviewDecodeWorkLatencyProfile {
+                        frames: 1,
+                        latency_buckets: PreviewDecodeWorkLatencyBuckets {
+                            le_10ms: 1,
+                            ..PreviewDecodeWorkLatencyBuckets::default()
+                        },
+                        ..PreviewDecodeWorkLatencyProfile::default()
+                    },
+                    reused_other: PreviewDecodeWorkLatencyProfile {
+                        frames: 1,
+                        latency_buckets: PreviewDecodeWorkLatencyBuckets {
+                            le_10ms: 1,
+                            ..PreviewDecodeWorkLatencyBuckets::default()
+                        },
+                        ..PreviewDecodeWorkLatencyProfile::default()
+                    },
+                    ..PreviewDecodeWorkClassProfiles::default()
+                },
                 hardware_decode_prefer_hardware_requested_frames: 2,
                 hardware_decode_device_context_attempted_frames: 2,
                 hardware_decode_device_context_created_frames: 1,
@@ -2944,20 +4357,43 @@ fn preview_decode_performance_report_flags_unengaged_playback_hardware_fallback(
         decode_successes: 3,
         decode_playback_cursor_frames: 3,
         decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
-            playback_cursor: PreviewDecodeAccessModeProfile {
-                frames: 3,
-                hardware_decode_prefer_hardware_requested_frames: 3,
-                hardware_decode_backend_unavailable_frames: 1,
-                hardware_decode_codec_unsupported_frames: 1,
-                hardware_decode_device_context_attempted_frames: 1,
-                hardware_decode_device_context_unavailable_frames: 1,
-                hardware_decode_cpu_transfer_setup_failed_frames: 1,
-                hardware_decode_cpu_transfer_observed_frames: 0,
-                hardware_decode_gpu_resident_native_frames: 0,
-                hardware_decode_candidate_d3d12va_frames: 1,
-                hardware_decode_candidate_d3d11va_frames: 1,
-                ..PreviewDecodeAccessModeProfile::default()
-            },
+            playback_cursor: test_complete_successful_decode_evidence(
+                PreviewDecodeAccessModeProfile {
+                    frames: 3,
+                    session_opened_frames: 1,
+                    session_reused_frames: 2,
+                    work_classes: PreviewDecodeWorkClassProfiles {
+                        session_opened: PreviewDecodeWorkLatencyProfile {
+                            frames: 1,
+                            latency_buckets: PreviewDecodeWorkLatencyBuckets {
+                                le_10ms: 1,
+                                ..PreviewDecodeWorkLatencyBuckets::default()
+                            },
+                            ..PreviewDecodeWorkLatencyProfile::default()
+                        },
+                        reused_other: PreviewDecodeWorkLatencyProfile {
+                            frames: 2,
+                            latency_buckets: PreviewDecodeWorkLatencyBuckets {
+                                le_10ms: 2,
+                                ..PreviewDecodeWorkLatencyBuckets::default()
+                            },
+                            ..PreviewDecodeWorkLatencyProfile::default()
+                        },
+                        ..PreviewDecodeWorkClassProfiles::default()
+                    },
+                    hardware_decode_prefer_hardware_requested_frames: 3,
+                    hardware_decode_backend_unavailable_frames: 1,
+                    hardware_decode_codec_unsupported_frames: 1,
+                    hardware_decode_device_context_attempted_frames: 1,
+                    hardware_decode_device_context_unavailable_frames: 1,
+                    hardware_decode_cpu_transfer_setup_failed_frames: 1,
+                    hardware_decode_cpu_transfer_observed_frames: 0,
+                    hardware_decode_gpu_resident_native_frames: 0,
+                    hardware_decode_candidate_d3d12va_frames: 1,
+                    hardware_decode_candidate_d3d11va_frames: 1,
+                    ..PreviewDecodeAccessModeProfile::default()
+                },
+            ),
             ..PreviewDecodeAccessModeProfiles::default()
         },
         ..PreviewDiagnostics::default()
@@ -3002,6 +4438,28 @@ fn preview_decode_performance_report_accepts_engaged_playback_hardware_fallback(
         decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
             playback_cursor: PreviewDecodeAccessModeProfile {
                 frames: 2,
+                session_replaced_frames: 1,
+                session_reused_frames: 1,
+                forward_reused_frames: 1,
+                work_classes: PreviewDecodeWorkClassProfiles {
+                    session_replaced: PreviewDecodeWorkLatencyProfile {
+                        frames: 1,
+                        latency_buckets: PreviewDecodeWorkLatencyBuckets {
+                            le_10ms: 1,
+                            ..PreviewDecodeWorkLatencyBuckets::default()
+                        },
+                        ..PreviewDecodeWorkLatencyProfile::default()
+                    },
+                    forward_steady: PreviewDecodeWorkLatencyProfile {
+                        frames: 1,
+                        latency_buckets: PreviewDecodeWorkLatencyBuckets {
+                            le_10ms: 1,
+                            ..PreviewDecodeWorkLatencyBuckets::default()
+                        },
+                        ..PreviewDecodeWorkLatencyProfile::default()
+                    },
+                    ..PreviewDecodeWorkClassProfiles::default()
+                },
                 hardware_decode_prefer_hardware_requested_frames: 2,
                 hardware_decode_cpu_transfer_observed_frames: 1,
                 hardware_decode_gpu_resident_native_frames: 1,
@@ -3023,6 +4481,18 @@ fn preview_decode_performance_report_accepts_engaged_playback_hardware_fallback(
             && check.severity == PreviewDecodePerformanceSeverity::Pass
             && check.observed == 0
     }));
+    assert!(report.checks.iter().any(|check| {
+        check.code == "preview_decode_playback_cursor_session_replaced_max_worker_execution_us"
+            && check.severity == PreviewDecodePerformanceSeverity::Pass
+            && check.observed == 0
+            && check.limit == Some(PREVIEW_DECODE_DEFAULT_SESSION_OPEN_BUDGET_US)
+    }));
+    assert!(report.checks.iter().any(|check| {
+        check.code == "preview_decode_playback_cursor_forward_steady_max_worker_execution_us"
+            && check.severity == PreviewDecodePerformanceSeverity::Pass
+            && check.observed == 0
+            && check.limit == Some(50_000)
+    }));
     assert!(!report
         .root_causes
         .iter()
@@ -3043,15 +4513,38 @@ fn preview_decode_performance_report_flags_hardware_fallback_recovery_decisions(
             ..PreviewPlaybackScheduleDiagnostics::default()
         },
         decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
-            playback_cursor: PreviewDecodeAccessModeProfile {
-                frames: 2,
-                hardware_decode_prefer_hardware_requested_frames: 2,
-                hardware_decode_backend_unavailable_frames: 1,
-                hardware_decode_codec_unsupported_frames: 1,
-                hardware_decode_cpu_transfer_observed_frames: 0,
-                hardware_decode_gpu_resident_native_frames: 0,
-                ..PreviewDecodeAccessModeProfile::default()
-            },
+            playback_cursor: test_complete_successful_decode_evidence(
+                PreviewDecodeAccessModeProfile {
+                    frames: 2,
+                    session_opened_frames: 1,
+                    session_reused_frames: 1,
+                    work_classes: PreviewDecodeWorkClassProfiles {
+                        session_opened: PreviewDecodeWorkLatencyProfile {
+                            frames: 1,
+                            latency_buckets: PreviewDecodeWorkLatencyBuckets {
+                                le_10ms: 1,
+                                ..PreviewDecodeWorkLatencyBuckets::default()
+                            },
+                            ..PreviewDecodeWorkLatencyProfile::default()
+                        },
+                        reused_other: PreviewDecodeWorkLatencyProfile {
+                            frames: 1,
+                            latency_buckets: PreviewDecodeWorkLatencyBuckets {
+                                le_10ms: 1,
+                                ..PreviewDecodeWorkLatencyBuckets::default()
+                            },
+                            ..PreviewDecodeWorkLatencyProfile::default()
+                        },
+                        ..PreviewDecodeWorkClassProfiles::default()
+                    },
+                    hardware_decode_prefer_hardware_requested_frames: 2,
+                    hardware_decode_backend_unavailable_frames: 1,
+                    hardware_decode_codec_unsupported_frames: 1,
+                    hardware_decode_cpu_transfer_observed_frames: 0,
+                    hardware_decode_gpu_resident_native_frames: 0,
+                    ..PreviewDecodeAccessModeProfile::default()
+                },
+            ),
             ..PreviewDecodeAccessModeProfiles::default()
         },
         ..PreviewDiagnostics::default()
@@ -3143,33 +4636,46 @@ fn preview_decode_performance_report_classifies_queue_wait_bound_frame() {
             closed: false,
         },
         decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
-            scrub_cursor: PreviewDecodeAccessModeProfile {
-                frames: 1,
-                in_process_cpu_frames: 1,
-                total_duration_us: 12_000,
-                max_duration_us: 12_000,
-                last_duration_us: 12_000,
-                queue_wait_total_us: 95_000,
-                queue_wait_max_us: 95_000,
-                queue_wait_last_us: 95_000,
-                bounded_any_seek_strategy_frames: 1,
-                any_seek_window_ms_max: 1,
-                stage_durations: PreviewDecodeStageDurations {
-                    packet_decode_us: 10_000,
-                    swscale_us: 1_000,
-                    rgba_copy_us: 500,
-                    ..PreviewDecodeStageDurations::default()
+            scrub_cursor: test_complete_successful_decode_evidence(
+                PreviewDecodeAccessModeProfile {
+                    frames: 1,
+                    in_process_cpu_frames: 1,
+                    total_duration_us: 12_000,
+                    max_duration_us: 12_000,
+                    last_duration_us: 12_000,
+                    session_opened_frames: 1,
+                    work_classes: test_preview_decode_work_classes(
+                        PreviewDecodeWorkClass::SessionOpened,
+                        1,
+                        12_000,
+                        12_000,
+                        PreviewDecodeWorkLatencyBuckets {
+                            le_16ms: 1,
+                            ..PreviewDecodeWorkLatencyBuckets::default()
+                        },
+                    ),
+                    queue_wait_total_us: 95_000,
+                    queue_wait_max_us: 95_000,
+                    queue_wait_last_us: 95_000,
+                    bounded_any_seek_strategy_frames: 1,
+                    any_seek_window_ms_max: 1,
+                    stage_durations: PreviewDecodeStageDurations {
+                        packet_decode_us: 10_000,
+                        swscale_us: 1_000,
+                        rgba_copy_us: 500,
+                        ..PreviewDecodeStageDurations::default()
+                    },
+                    max_frame_stage_durations: PreviewDecodeStageDurations {
+                        packet_decode_us: 10_000,
+                        swscale_us: 1_000,
+                        rgba_copy_us: 500,
+                        ..PreviewDecodeStageDurations::default()
+                    },
+                    max_frame_queue_wait_us: 95_000,
+                    max_frame_bottleneck: PreviewDecodeBottleneck::QueueWait,
+                    ..PreviewDecodeAccessModeProfile::default()
                 },
-                max_frame_stage_durations: PreviewDecodeStageDurations {
-                    packet_decode_us: 10_000,
-                    swscale_us: 1_000,
-                    rgba_copy_us: 500,
-                    ..PreviewDecodeStageDurations::default()
-                },
-                max_frame_queue_wait_us: 95_000,
-                max_frame_bottleneck: PreviewDecodeBottleneck::QueueWait,
-                ..PreviewDecodeAccessModeProfile::default()
-            },
+            ),
             ..PreviewDecodeAccessModeProfiles::default()
         },
         decode_stage_durations: PreviewDecodeStageDurations {
@@ -3298,6 +4804,7 @@ fn preview_decode_performance_report_classifies_queue_wait_bound_frame() {
 fn preview_decode_performance_report_flags_expired_playback_current_queue() {
     let diagnostics = PreviewDiagnostics {
         decode_successes: 1,
+        decode_playback_cursor_frames: 1,
         decode_in_process_cpu_frames: 1,
         decode_total_duration_us: 12_000,
         decode_max_duration_us: 12_000,
@@ -3305,6 +4812,24 @@ fn preview_decode_performance_report_flags_expired_playback_current_queue() {
         decode_queue_wait_total_us: 10_000,
         decode_queue_wait_max_us: 10_000,
         decode_queue_wait_last_us: 10_000,
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            playback_cursor: test_complete_successful_decode_evidence(
+                PreviewDecodeAccessModeProfile {
+                    frames: 1,
+                    in_process_cpu_frames: 1,
+                    session_reused_frames: 1,
+                    work_classes: test_zero_latency_preview_decode_work_classes(
+                        PreviewDecodeWorkClass::ReusedOther,
+                        1,
+                    ),
+                    queue_wait_total_us: 10_000,
+                    queue_wait_max_us: 10_000,
+                    queue_wait_last_us: 10_000,
+                    ..PreviewDecodeAccessModeProfile::default()
+                },
+            ),
+            ..PreviewDecodeAccessModeProfiles::default()
+        },
         worker_queue: MediaPreviewJobQueueDiagnostics {
             queued_jobs: 3,
             queued_current_jobs: 2,
@@ -3471,11 +4996,18 @@ fn preview_decode_performance_report_flags_native_import_unavailable_playback_fr
         decode_successes: 1,
         decode_playback_cursor_frames: 1,
         decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
-            playback_cursor: PreviewDecodeAccessModeProfile {
-                frames: 1,
-                hardware_decode_prefer_gpu_requested_frames: 1,
-                ..PreviewDecodeAccessModeProfile::default()
-            },
+            playback_cursor: test_complete_successful_decode_evidence(
+                PreviewDecodeAccessModeProfile {
+                    frames: 1,
+                    session_opened_frames: 1,
+                    work_classes: test_zero_latency_preview_decode_work_classes(
+                        PreviewDecodeWorkClass::SessionOpened,
+                        1,
+                    ),
+                    hardware_decode_prefer_gpu_requested_frames: 1,
+                    ..PreviewDecodeAccessModeProfile::default()
+                },
+            ),
             ..PreviewDecodeAccessModeProfiles::default()
         },
         playback_schedule: PreviewPlaybackScheduleDiagnostics {
@@ -3519,6 +5051,20 @@ fn preview_decode_performance_report_flags_hardware_decode_admission_gate() {
         playback_schedule: PreviewPlaybackScheduleDiagnostics {
             current_decode_decisions: 1,
             ..PreviewPlaybackScheduleDiagnostics::default()
+        },
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            playback_cursor: test_complete_successful_decode_evidence(
+                PreviewDecodeAccessModeProfile {
+                    frames: 1,
+                    session_reused_frames: 1,
+                    work_classes: test_zero_latency_preview_decode_work_classes(
+                        PreviewDecodeWorkClass::ReusedOther,
+                        1,
+                    ),
+                    ..PreviewDecodeAccessModeProfile::default()
+                },
+            ),
+            ..PreviewDecodeAccessModeProfiles::default()
         },
         hardware_decode_admission: PreviewHardwareDecodeAdmissionDiagnostics {
             playback_request: PreviewHardwareDecodeRequest::PreferHardwareDecode,
@@ -3589,21 +5135,38 @@ fn preview_decode_performance_report_checks_access_mode_p95_upper_bounds() {
         decode_queue_wait_last_us: 60_000,
         decode_current_queue_wait_max_us: 70_000,
         decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
-            scrub_cursor: PreviewDecodeAccessModeProfile {
-                frames: 20,
-                in_process_cpu_frames: 20,
-                total_duration_us: 1_250_000,
-                max_duration_us: 70_000,
-                last_duration_us: 60_000,
-                latency_buckets: slow_buckets,
-                queue_wait_total_us: 1_200_000,
-                queue_wait_max_us: 70_000,
-                queue_wait_last_us: 60_000,
-                queue_wait_buckets: slow_buckets,
-                bounded_any_seek_strategy_frames: 20,
-                any_seek_window_ms_max: 1,
-                ..PreviewDecodeAccessModeProfile::default()
-            },
+            scrub_cursor: test_complete_successful_decode_evidence(
+                PreviewDecodeAccessModeProfile {
+                    frames: 20,
+                    in_process_cpu_frames: 20,
+                    total_duration_us: 1_250_000,
+                    max_duration_us: 70_000,
+                    last_duration_us: 60_000,
+                    latency_buckets: slow_buckets,
+                    queue_wait_total_us: 1_200_000,
+                    queue_wait_max_us: 70_000,
+                    queue_wait_last_us: 60_000,
+                    queue_wait_buckets: slow_buckets,
+                    bounded_any_seek_strategy_frames: 20,
+                    any_seek_window_ms_max: 1,
+                    session_reused_frames: 20,
+                    forward_reused_frames: 20,
+                    work_classes: PreviewDecodeWorkClassProfiles {
+                        forward_steady: PreviewDecodeWorkLatencyProfile {
+                            frames: 20,
+                            total_duration_us: 1_250_000,
+                            max_duration_us: 70_000,
+                            latency_buckets: PreviewDecodeWorkLatencyBuckets {
+                                le_50ms: 1,
+                                le_80ms: 19,
+                                ..PreviewDecodeWorkLatencyBuckets::default()
+                            },
+                        },
+                        ..PreviewDecodeWorkClassProfiles::default()
+                    },
+                    ..PreviewDecodeAccessModeProfile::default()
+                },
+            ),
             ..PreviewDecodeAccessModeProfiles::default()
         },
         ..PreviewDiagnostics::default()
@@ -3617,7 +5180,7 @@ fn preview_decode_performance_report_checks_access_mode_p95_upper_bounds() {
 
     assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Fail);
     assert!(report.checks.iter().any(|check| {
-        check.code == "preview_decode_scrub_cursor_p95_frame_us"
+        check.code == "preview_decode_scrub_cursor_forward_steady_p95_worker_execution_us"
             && check.severity == PreviewDecodePerformanceSeverity::Fail
             && check.observed == 80_000
     }));
@@ -3627,15 +5190,88 @@ fn preview_decode_performance_report_checks_access_mode_p95_upper_bounds() {
             && check.observed == 80_000
     }));
     assert!(report.root_causes.iter().any(|root| {
-        root.code == "preview_decode_access_mode_over_budget"
-            && root.evidence.contains("p95_upper_bound_us=80000")
+        root.code == "preview_decode_work_class_over_budget"
+            && root.evidence.contains("p95_upper_bound_us=Some(80000)")
             && root.evidence.contains("latency_buckets=")
     }));
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_access_mode_queue_wait_bound"
-            && root.evidence.contains("queue_wait_p95_upper_bound_us=80000")
+            && root.evidence.contains("queue_wait_p95_upper_bound_us=Some(80000)")
             && root.evidence.contains("queue_wait_buckets=")
     }));
+}
+
+#[test]
+fn preview_decode_performance_report_excludes_expired_queue_wait_from_ready_p95() {
+    let ready_buckets = PreviewDecodeLatencyBuckets {
+        le_10ms: 95,
+        ..PreviewDecodeLatencyBuckets::default()
+    };
+    let expired_queue_wait = PreviewDecodeQueueWaitProfile {
+        samples: 64,
+        total_us: 5_760_000,
+        max_us: 90_000,
+        last_us: 90_000,
+        current_max_us: 90_000,
+        buckets: PreviewDecodeLatencyBuckets {
+            gt_80ms: 64,
+            ..PreviewDecodeLatencyBuckets::default()
+        },
+        ..PreviewDecodeQueueWaitProfile::default()
+    };
+    let diagnostics = PreviewDiagnostics {
+        decode_successes: 95,
+        decode_in_process_cpu_frames: 95,
+        decode_queue_wait_total_us: 380_000,
+        decode_queue_wait_max_us: 4_000,
+        decode_queue_wait_last_us: 4_000,
+        decode_current_queue_wait_max_us: 4_000,
+        decode_expired_queue_wait: expired_queue_wait,
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            playback_cursor: PreviewDecodeAccessModeProfile {
+                frames: 95,
+                in_process_cpu_frames: 95,
+                queue_wait_total_us: 380_000,
+                queue_wait_max_us: 4_000,
+                queue_wait_last_us: 4_000,
+                queue_wait_buckets: ready_buckets,
+                queue_wait_samples: 95,
+                expired_queue_wait,
+                ..PreviewDecodeAccessModeProfile::default()
+            },
+            ..PreviewDecodeAccessModeProfiles::default()
+        },
+        ..PreviewDiagnostics::default()
+    };
+
+    let report = build_preview_decode_performance_report(
+        diagnostics.decode_performance_summary(50_000),
+        "preview-decode-queue-disposition-test",
+        50_000,
+    );
+    let ready_p95 = report
+        .checks
+        .iter()
+        .find(|check| check.code == "preview_decode_playback_cursor_queue_wait_p95_us")
+        .expect("playback Ready queue-wait p95 check");
+
+    assert_eq!(ready_p95.observed, 10_000);
+    assert_eq!(
+        report.summary.expect("summary").expired_queue_wait,
+        expired_queue_wait
+    );
+    let json = serde_json::to_value(&report).expect("serialize queue-disposition report");
+    assert_eq!(
+        json["schema_version"],
+        PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION
+    );
+    assert_eq!(json["schema_version"], 36);
+    assert_eq!(json["summary"]["expired_queue_wait"]["samples"], 64);
+    assert_eq!(
+        json["summary"]["access_mode_profiles"]["playback_cursor"]["expired_queue_wait"]["buckets"]
+            ["gt_80ms"],
+        64
+    );
 }
 
 #[test]
@@ -3822,6 +5458,11 @@ fn preview_decode_performance_report_keeps_queue_wait_evidence_without_successfu
                 queue_wait_total_us: 75_000,
                 queue_wait_max_us: 75_000,
                 queue_wait_last_us: 75_000,
+                queue_wait_buckets: PreviewDecodeLatencyBuckets {
+                    le_80ms: 1,
+                    ..PreviewDecodeLatencyBuckets::default()
+                },
+                queue_wait_samples: 1,
                 canceled_jobs: 1,
                 canceled_obsolete_jobs: 1,
                 ..PreviewDecodeAccessModeProfile::default()
@@ -3844,10 +5485,10 @@ fn preview_decode_performance_report_keeps_queue_wait_evidence_without_successfu
             && check.observed == 75_000
             && check.limit == Some(50_000)
     }));
-    assert!(!report
-        .checks
-        .iter()
-        .any(|check| check.code == "preview_decode_scrub_cursor_max_frame_us"));
+    assert!(!report.checks.iter().any(|check| {
+        check.code.starts_with("preview_decode_scrub_cursor_")
+            && check.code.ends_with("_max_worker_execution_us")
+    }));
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_access_mode_queue_wait_bound"
             && root.evidence.contains("access_mode=ScrubCursor")
@@ -3961,7 +5602,7 @@ fn preview_decode_performance_report_flags_slow_cancel_return_latency() {
     }));
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_cancellation_gate_failed"
-            && root.evidence.contains("CheckpointToReturnExceeded")
+            && root.evidence.contains("LogicalCancellationToReturnExceeded")
     }));
     assert!(report
         .actions
@@ -4015,19 +5656,19 @@ fn preview_decode_performance_report_flags_slow_cancel_observation_latency() {
 
     assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Fail);
     assert!(report.checks.iter().any(|check| {
-        check.code == "preview_decode_cancel_observation_max_us"
+        check.code == "preview_decode_logical_cancel_observation_max_us"
             && check.severity == PreviewDecodePerformanceSeverity::Fail
             && check.observed == 8_000
             && check.limit
                 == Some(
                     mondrian_playback::FrameCancellationPolicy::default()
-                        .max_request_to_checkpoint
+                        .max_request_to_logical_cancellation
                         .as_micros() as u64,
                 )
     }));
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_cancellation_gate_failed"
-            && root.evidence.contains("RequestToCheckpointExceeded")
+            && root.evidence.contains("RequestToLogicalCancellationExceeded")
     }));
     assert!(report
         .actions
@@ -4065,14 +5706,27 @@ fn preview_decode_performance_report_classifies_prefetch_deadline_cancellations(
             ..PreviewDecodeStageDurations::default()
         },
         decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
-            playback_cursor: PreviewDecodeAccessModeProfile {
-                frames: 1,
-                in_process_cpu_frames: 1,
-                canceled_jobs: 3,
-                canceled_prefetch_deadline_jobs: 2,
-                canceled_prefetch_preempted_jobs: 1,
-                ..PreviewDecodeAccessModeProfile::default()
-            },
+            playback_cursor: test_complete_successful_decode_evidence(
+                PreviewDecodeAccessModeProfile {
+                    frames: 1,
+                    in_process_cpu_frames: 1,
+                    session_opened_frames: 1,
+                    work_classes: test_preview_decode_work_classes(
+                        PreviewDecodeWorkClass::SessionOpened,
+                        1,
+                        12_000,
+                        12_000,
+                        PreviewDecodeWorkLatencyBuckets {
+                            le_16ms: 1,
+                            ..PreviewDecodeWorkLatencyBuckets::default()
+                        },
+                    ),
+                    canceled_jobs: 3,
+                    canceled_prefetch_deadline_jobs: 2,
+                    canceled_prefetch_preempted_jobs: 1,
+                    ..PreviewDecodeAccessModeProfile::default()
+                },
+            ),
             ..PreviewDecodeAccessModeProfiles::default()
         },
         ..PreviewDiagnostics::default()
@@ -4178,13 +5832,26 @@ fn preview_decode_performance_report_classifies_still_preemptions() {
             ..MediaPreviewJobQueueDiagnostics::default()
         },
         decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
-            random_access_still: PreviewDecodeAccessModeProfile {
-                frames: 1,
-                in_process_cpu_frames: 1,
-                canceled_jobs: 1,
-                canceled_still_preempted_jobs: 1,
-                ..PreviewDecodeAccessModeProfile::default()
-            },
+            random_access_still: test_complete_successful_decode_evidence(
+                PreviewDecodeAccessModeProfile {
+                    frames: 1,
+                    in_process_cpu_frames: 1,
+                    session_opened_frames: 1,
+                    work_classes: test_preview_decode_work_classes(
+                        PreviewDecodeWorkClass::SessionOpened,
+                        1,
+                        18_000,
+                        18_000,
+                        PreviewDecodeWorkLatencyBuckets {
+                            le_25ms: 1,
+                            ..PreviewDecodeWorkLatencyBuckets::default()
+                        },
+                    ),
+                    canceled_jobs: 1,
+                    canceled_still_preempted_jobs: 1,
+                    ..PreviewDecodeAccessModeProfile::default()
+                },
+            ),
             ..PreviewDecodeAccessModeProfiles::default()
         },
         ..PreviewDiagnostics::default()
@@ -4287,6 +5954,17 @@ fn preview_decode_performance_report_flags_playback_without_locality() {
                 session_opened_frames: 2,
                 session_reused_frames: 0,
                 forward_reused_frames: 0,
+                work_classes: test_preview_decode_work_classes(
+                    PreviewDecodeWorkClass::SessionOpened,
+                    2,
+                    80_000,
+                    45_000,
+                    PreviewDecodeWorkLatencyBuckets {
+                        le_40ms: 1,
+                        le_50ms: 1,
+                        ..PreviewDecodeWorkLatencyBuckets::default()
+                    },
+                ),
                 decoded_frame_count: 96,
                 max_decoded_frame_count: 48,
                 stage_durations: PreviewDecodeStageDurations {
@@ -4564,6 +6242,20 @@ fn preview_decode_bottleneck_uses_queue_wait_from_same_slowest_frame() {
                 queue_wait_max_us: 200_000,
                 bounded_any_seek_strategy_frames: 1,
                 any_seek_window_ms_max: 1,
+                session_reused_frames: 1,
+                forward_reused_frames: 1,
+                work_classes: PreviewDecodeWorkClassProfiles {
+                    forward_steady: PreviewDecodeWorkLatencyProfile {
+                        frames: 1,
+                        total_duration_us: 120_000,
+                        max_duration_us: 120_000,
+                        latency_buckets: PreviewDecodeWorkLatencyBuckets {
+                            le_120ms: 1,
+                            ..PreviewDecodeWorkLatencyBuckets::default()
+                        },
+                    },
+                    ..PreviewDecodeWorkClassProfiles::default()
+                },
                 stage_durations: PreviewDecodeStageDurations {
                     packet_decode_us: 95_000,
                     ..PreviewDecodeStageDurations::default()
@@ -4595,7 +6287,7 @@ fn preview_decode_bottleneck_uses_queue_wait_from_same_slowest_frame() {
     assert_eq!(summary.queue_wait_max_us, 200_000);
     assert_eq!(summary.max_frame_queue_wait_us, 1_000);
     assert!(report.root_causes.iter().any(|root| {
-        root.code == "preview_decode_frame_over_budget"
+        root.code == "preview_decode_work_class_over_budget"
             && root.evidence.contains("max_frame_queue_wait_us=1000")
             && root.evidence.contains("primary_bottleneck=PacketDecode")
     }));
@@ -5116,7 +6808,7 @@ fn nested_solid_color_sequence_returns_preview_frame() {
 
     state.test_add_sequence(child);
     state.test_set_sequence(Some(parent));
-    state.seek(3);
+    state.seek(3).expect("seek");
 
     let service = WindowPreviewAdapter::new();
     let frame = service.viewer_preview_for_state(&state);
@@ -5187,8 +6879,8 @@ fn transparent_timeline_presentation_completes_the_exact_playback_demand() {
     let sequence = state.active_sequence_mut_uncommitted().expect("sequence");
     let time_base = sequence.time_base();
     sequence.video_tracks[0].clips[0].position = tt(20, time_base);
-    state.seek(0);
-    state.play();
+    state.seek(0).expect("seek");
+    state.play().expect("play");
     let demand = state.pending_playback_frame_demand_identity().expect("playback demand");
 
     assert!(matches!(
@@ -5199,11 +6891,16 @@ fn transparent_timeline_presentation_completes_the_exact_playback_demand() {
         ViewerPlaybackFeedback::from_preview_state(&ViewerPreviewState::Transparent),
         ViewerPlaybackFeedback::Ready
     );
-    let ticket = service
-        .playback_presentation_ticket(&state)
+    let ticket = playback_presentation_ticket_for_state(&service, &state)
         .expect("transparent canvas presentation ticket");
     assert_eq!(ticket.identity(), demand);
-    state.complete_frame_presentation(ticket, Instant::now());
+    let completion = state
+        .complete_frame_presentation(ticket, Instant::now())
+        .expect("accepted transparent presentation");
+    assert_eq!(
+        completion.delivery().kind(),
+        mondrian_playback::FrameDeliveryKind::Ready
+    );
     assert!(state.pending_playback_frame_demand_identity().is_none());
     assert_eq!(state.playback_evidence_report().deliveries.ready, 1);
 }
@@ -5217,7 +6914,7 @@ fn repeated_same_viewer_request_does_not_obsolete_in_flight_decode() {
         .add_clip(Clip::new(AssetId::new(), tt(0, tb), tt(24, tb)).expect("valid clip"))
         .expect("media clip should be insertable");
     state.test_set_sequence(Some(sequence));
-    state.seek(3);
+    state.seek(3).expect("seek");
 
     let service = WindowPreviewAdapter::new();
     let _ = service.viewer_preview_for_state(&state);
@@ -5227,7 +6924,7 @@ fn repeated_same_viewer_request_does_not_obsolete_in_flight_decode() {
 
     assert_eq!(first_generation, second_generation);
 
-    state.seek(4);
+    state.seek(4).expect("seek");
     let _ = service.viewer_preview_for_state(&state);
     let third_generation = service.diagnostics().scheduler.latest_generation;
 
@@ -5255,7 +6952,7 @@ fn deterministic_solid_preview_reuses_raster_key_across_frames() {
     let mut state = state_with_solid_color_clip(Color::from_rgba8(255, 128, 0, 255));
 
     let first = ready_frame(service.viewer_preview_for_state(&state));
-    state.seek(5);
+    state.seek(5).expect("seek");
     let second = ready_frame(service.viewer_preview_for_state(&state));
 
     assert_eq!(first.rgba, second.rgba);
@@ -5263,7 +6960,19 @@ fn deterministic_solid_preview_reuses_raster_key_across_frames() {
     let diagnostics = service.diagnostics();
     assert_eq!(diagnostics.render_requests, 2);
     assert_eq!(diagnostics.ready_frames, 2);
-    assert!(diagnostics.viewer_frame_cache_entries >= 1);
+    assert_eq!(
+        diagnostics.visual_program_cache.author_fingerprint_evaluations,
+        1
+    );
+    assert_eq!(
+        diagnostics.visual_program_cache.author_snapshot_binding_misses,
+        1
+    );
+    assert!(
+        diagnostics.visual_program_cache.author_snapshot_binding_hits >= 1,
+        "the second frame must reuse the exact author-generation Program binding"
+    );
+    assert!(diagnostics.frame_store.viewer_entries >= 1);
     assert!(diagnostics.color_output_transform_calls >= 1);
     assert_eq!(
         diagnostics.color_output_transform_pixels,
@@ -5301,12 +7010,12 @@ fn deterministic_solid_preview_reuses_raster_key_across_frames() {
 }
 
 #[test]
-fn resolved_media_preview_cache_key_includes_media_frame_signature() {
-    let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
-        .expect("default effect graph");
-    let make_plan = |signature| {
+fn resolved_media_preview_cache_key_includes_media_frame_identity() {
+    let effect_graph =
+        compile_reference_effect_graph(&EffectRenderPlan::default()).expect("default effect graph");
+    let make_plan = |identity_revision| {
         vec![ResolvedPreviewElement::Media {
-            frame: test_media_frame_with_size(0, 2, 2, signature),
+            frame: test_media_frame_with_size(0, 2, 2, identity_revision),
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -5333,6 +7042,53 @@ fn resolved_media_preview_cache_key_includes_media_frame_signature() {
     );
 
     assert_ne!(first, second);
+}
+
+#[test]
+fn uncacheable_effect_retains_semantic_identity_without_admitting_viewer_reuse() {
+    let effect_graph = custom_u8_effect_graph(
+        "uncacheable",
+        EffectCachePolicy::Uncacheable,
+        Arc::new(|_buffer, _width, _height, _params, _frame_seed| Ok(())),
+    );
+    let resolved = vec![ResolvedPreviewElement::SolidColor(
+        TimelineSolidColorLayer {
+            color: Color::from_rgba8(48, 96, 192, 255),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_graph,
+            frame_seed: 12,
+        },
+    )];
+    let sequence_id = SequenceId::new();
+    let color_context = test_color_context(ColorSpace::Rec709);
+
+    let first = viewer_preview_cache_key_for_resolved_plan(
+        sequence_id,
+        320,
+        180,
+        &resolved,
+        &color_context,
+    );
+    let second = viewer_preview_cache_key_for_resolved_plan(
+        sequence_id,
+        320,
+        180,
+        &resolved,
+        &color_context,
+    );
+
+    assert_eq!(first, second, "semantic identity remains available");
+    assert!(
+        !viewer_preview_plan_allows_cross_call_reuse(&resolved),
+        "semantic identity must not become cache admission"
+    );
+    assert_ne!(
+        first.with_execution_nonce(1),
+        second.with_execution_nonce(2),
+        "separate executions of an uncacheable semantic plan must receive distinct output keys"
+    );
 }
 
 #[test]
@@ -5369,7 +7125,10 @@ fn stable_parameter_value_changes_compiled_graph_and_viewer_cache_identity() {
         WorkingColorSpace::LinearRec709,
     )
     .expect("compile second graph");
-    assert_ne!(first_graph.signature_hash, second_graph.signature_hash);
+    assert_ne!(
+        first_graph.semantic_fingerprint(),
+        second_graph.semantic_fingerprint()
+    );
 
     let make_plan = |effect_graph| {
         vec![ResolvedPreviewElement::Media {
@@ -5402,8 +7161,8 @@ fn stable_parameter_value_changes_compiled_graph_and_viewer_cache_identity() {
 
 #[test]
 fn resolved_media_preview_cache_key_includes_color_context() {
-    let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
-        .expect("default effect graph");
+    let effect_graph =
+        compile_reference_effect_graph(&EffectRenderPlan::default()).expect("default effect graph");
     let resolved = vec![ResolvedPreviewElement::Media {
         frame: test_media_frame_with_size(0, 2, 2, 100),
         opacity: 1.0,
@@ -5426,8 +7185,8 @@ fn resolved_media_preview_cache_key_includes_color_context() {
 
 #[test]
 fn resolved_media_preview_cache_key_includes_resolved_display_color_space() {
-    let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
-        .expect("default effect graph");
+    let effect_graph =
+        compile_reference_effect_graph(&EffectRenderPlan::default()).expect("default effect graph");
     let resolved = vec![ResolvedPreviewElement::Media {
         frame: test_media_frame_with_size(0, 2, 2, 100),
         opacity: 1.0,
@@ -5448,8 +7207,8 @@ fn resolved_media_preview_cache_key_includes_resolved_display_color_space() {
 
 #[test]
 fn resolved_media_preview_cache_key_includes_versioned_output_transform_intent() {
-    let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
-        .expect("default effect graph");
+    let effect_graph =
+        compile_reference_effect_graph(&EffectRenderPlan::default()).expect("default effect graph");
     let resolved = vec![ResolvedPreviewElement::Media {
         frame: test_media_frame_with_size(0, 2, 2, 100),
         opacity: 1.0,
@@ -5478,8 +7237,8 @@ fn resolved_media_preview_cache_key_includes_versioned_output_transform_intent()
 
 #[test]
 fn resolved_media_preview_cache_key_includes_output_transform_intent() {
-    let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
-        .expect("default effect graph");
+    let effect_graph =
+        compile_reference_effect_graph(&EffectRenderPlan::default()).expect("default effect graph");
     let resolved = vec![ResolvedPreviewElement::Media {
         frame: test_media_frame_with_size(0, 2, 2, 100),
         opacity: 1.0,
@@ -5505,8 +7264,8 @@ fn resolved_media_preview_cache_key_includes_output_transform_intent() {
 
 #[test]
 fn resolved_media_preview_cache_key_includes_exact_standard_package() {
-    let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
-        .expect("default effect graph");
+    let effect_graph =
+        compile_reference_effect_graph(&EffectRenderPlan::default()).expect("default effect graph");
     let resolved = vec![ResolvedPreviewElement::Media {
         frame: test_media_frame_with_size(0, 2, 2, 100),
         opacity: 1.0,
@@ -5599,7 +7358,7 @@ fn preview_input_color_resolution_honors_override_metadata_and_missing_policy() 
             resolved: ResolvedInputColor::Color(ColorSpace::Srgb),
             source: mondrian_timeline::sequence::InputColorResolutionSource::DetectedMetadata,
             override_color_space: None,
-            detected_color_space: Some(ColorSpace::Srgb),
+            executable_color_space: Some(ColorSpace::Srgb),
             missing_metadata_policy: color_context.missing_metadata_policy,
             working_color_space: color_context.working_color_space,
         }
@@ -5707,7 +7466,7 @@ fn preview_color_rejection_preserves_resolution_and_media_diagnostic() {
         unsupported_cicp_tags: 0,
         has_user_visible_warnings: true,
         ..VideoColorDiagnosticIssueSummary {
-            detected_color_space: None,
+            executable_color_space: None,
             source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
             method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
             confidence: mondrian_media::VideoColorInterpretationConfidence::None,
@@ -5756,7 +7515,7 @@ fn preview_color_rejection_preserves_resolution_and_media_diagnostic() {
         InputColorResolutionSource::MissingPolicyRejectMedia
     );
     assert_eq!(rejection.override_color_space, None);
-    assert_eq!(rejection.detected_color_space, None);
+    assert_eq!(rejection.executable_color_space, None);
     assert_eq!(
         rejection.working_color_space,
         WorkingColorSpace::LinearRec2020
@@ -5780,7 +7539,7 @@ fn preview_render_request_clears_stale_color_rejection() {
         ),
         "old".to_string(),
         VideoColorDiagnosticIssueSummary {
-            detected_color_space: None,
+            executable_color_space: None,
             source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
             method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
             confidence: mondrian_media::VideoColorInterpretationConfidence::None,
@@ -5826,20 +7585,94 @@ fn export_test_media_dependencies(
         .into_iter()
         .map(|asset_id| {
             let path = PathBuf::from(format!("preview-export-parity-{asset_id}.mov"));
+            let color_diagnostic = diagnostics.get(&asset_id).cloned().or_else(|| {
+                color_spaces.get(&asset_id).copied().map(trusted_test_color_diagnostic)
+            });
             (
                 asset_id,
                 mondrian_export::preset::ExportMediaDependency {
                     source_fingerprint: MediaFileFingerprint::capture(path.as_path()),
                     path,
+                    video_stream_index: Some(0),
+                    picture_source_extent: Some(mondrian_timeline::PictureSourceExtent::Still),
                     source_resolution: Some(Resolution { width: 1, height: 1 }),
                     audio_components: HashMap::new(),
-                    detected_color_space: color_spaces.get(&asset_id).copied(),
                     interpretation: interpretations.get(&asset_id).copied().unwrap_or_default(),
-                    color_diagnostic: diagnostics.get(&asset_id).cloned(),
+                    color_diagnostic,
                 },
             )
         })
         .collect()
+}
+
+fn trusted_test_color_diagnostic(color_space: ColorSpace) -> VideoColorDiagnostic {
+    assert_eq!(
+        color_space,
+        ColorSpace::Srgb,
+        "extend this fixture with closed executable evidence before using another identity"
+    );
+    let sampling = mondrian_media::ProvenVideoSampling {
+        pixel_format: mondrian_core::PixelFormat::Rgb24,
+        bit_depth: 8,
+        has_alpha: false,
+    };
+    let metadata = mondrian_media::VideoColorMetadata {
+        primaries: mondrian_media::VideoColorTag {
+            code: 1,
+            name: Some("bt709".to_owned()),
+            specified: true,
+        },
+        transfer: mondrian_media::VideoColorTag {
+            code: 13,
+            name: Some("iec61966-2-1".to_owned()),
+            specified: true,
+        },
+        matrix: mondrian_media::VideoColorTag {
+            code: 0,
+            name: Some("gbr".to_owned()),
+            specified: true,
+        },
+    };
+    let interpretation =
+        mondrian_media::interpret_video_color_metadata(&metadata, Some(sampling), &[]);
+    assert_eq!(interpretation.candidate_color_space, Some(color_space));
+    VideoColorDiagnostic {
+        color_range: DecodedVideoRange::Unknown,
+        sampling: Some(sampling),
+        interpretation,
+        metadata: Some(metadata),
+        metadata_hints: Vec::new(),
+        hdr_metadata: Vec::new(),
+    }
+}
+
+fn captured_title_free_export_test_snapshot(
+    color_environment: mondrian_core::ProjectColorEnvironment,
+    sequence: Sequence,
+    sequences: Vec<Sequence>,
+    media: HashMap<AssetId, mondrian_export::preset::ExportMediaDependency>,
+    range: mondrian_export::preset::TimelineExportRange,
+) -> mondrian_export::preset::TimelineExportSnapshot {
+    let prepared =
+        mondrian_export::prepare_timeline_export_dependencies(&sequence, &sequences, range, false)
+            .expect("prepare immutable export execution snapshot");
+    let visual = prepared.execution_snapshot().visual();
+    assert!(
+        visual.basic_title_font_queries().is_empty(),
+        "this title-free fixture must not bypass exact Basic Title font capture"
+    );
+    assert!(
+        visual.title_fonts().is_some(),
+        "an empty Basic Title query set must be frozen as an exact empty closure"
+    );
+    mondrian_export::preset::TimelineExportSnapshot::captured(
+        color_environment,
+        sequence,
+        sequences,
+        media,
+        range,
+        prepared.execution_snapshot().clone(),
+    )
 }
 
 #[test]
@@ -5904,13 +7737,13 @@ fn preview_and_export_input_color_resolution_counts_match_for_frame() {
         &HashMap::new(),
     );
     let export_counts = mondrian_export::queue::export_input_color_resolution_counts_for_frame(
-        &mondrian_export::preset::TimelineExportSnapshot {
+        &captured_title_free_export_test_snapshot(
+            mondrian_core::ProjectColorEnvironment::default(),
             sequence,
-            sequences: Vec::new(),
+            Vec::new(),
             media,
-            color_environment: mondrian_core::ProjectColorEnvironment::default(),
-            range: mondrian_export::preset::TimelineExportRange::SequenceInOut,
-        },
+            mondrian_export::preset::TimelineExportRange::SequenceInOut,
+        ),
         0,
     )
     .expect("export counts");
@@ -6028,13 +7861,13 @@ fn preview_and_export_nested_input_color_resolution_counts_match_for_frame() {
         &HashMap::new(),
     );
     let export_counts = mondrian_export::queue::export_input_color_resolution_counts_for_frame(
-        &mondrian_export::preset::TimelineExportSnapshot {
-            sequence: parent,
-            sequences: nested_sequences,
+        &captured_title_free_export_test_snapshot(
+            mondrian_core::ProjectColorEnvironment::default(),
+            parent,
+            nested_sequences,
             media,
-            color_environment: mondrian_core::ProjectColorEnvironment::default(),
-            range: mondrian_export::preset::TimelineExportRange::SequenceInOut,
-        },
+            mondrian_export::preset::TimelineExportRange::SequenceInOut,
+        ),
         0,
     )
     .expect("export nested counts");
@@ -6100,10 +7933,10 @@ fn preview_and_export_asset_issue_summaries_match_for_referenced_assets() {
     asset_color_diagnostics.insert(
         direct_id,
         mondrian_media::VideoColorDiagnostic {
-            detected_color_space: None,
             color_range: DecodedVideoRange::Unknown,
+            sampling: None,
             interpretation: mondrian_media::DetectedColorInterpretation {
-                color_space: None,
+                candidate_color_space: None,
                 confidence: mondrian_media::VideoColorInterpretationConfidence::None,
                 source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
                 method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
@@ -6111,8 +7944,6 @@ fn preview_and_export_asset_issue_summaries_match_for_referenced_assets() {
                 warnings: vec![mondrian_media::VideoColorInterpretationWarning::MissingCicpTags],
                 user_overridable: true,
             },
-            source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
-            method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
             metadata: None,
             metadata_hints: Vec::new(),
             hdr_metadata: Vec::new(),
@@ -6121,10 +7952,10 @@ fn preview_and_export_asset_issue_summaries_match_for_referenced_assets() {
     asset_color_diagnostics.insert(
         nested_asset_id,
         mondrian_media::VideoColorDiagnostic {
-            detected_color_space: None,
             color_range: DecodedVideoRange::Unknown,
+            sampling: None,
             interpretation: mondrian_media::DetectedColorInterpretation {
-                color_space: None,
+                candidate_color_space: None,
                 confidence: mondrian_media::VideoColorInterpretationConfidence::None,
                 source: mondrian_media::VideoColorSpaceSource::DecoderUnavailable,
                 method: mondrian_media::VideoColorDetectionMethod::DecoderUnavailable,
@@ -6134,8 +7965,6 @@ fn preview_and_export_asset_issue_summaries_match_for_referenced_assets() {
                 warnings: vec![mondrian_media::VideoColorInterpretationWarning::DecoderUnavailable],
                 user_overridable: true,
             },
-            source: mondrian_media::VideoColorSpaceSource::DecoderUnavailable,
-            method: mondrian_media::VideoColorDetectionMethod::DecoderUnavailable,
             metadata: None,
             metadata_hints: Vec::new(),
             hdr_metadata: Vec::new(),
@@ -6144,14 +7973,23 @@ fn preview_and_export_asset_issue_summaries_match_for_referenced_assets() {
     asset_color_diagnostics.insert(
         unused_id,
         mondrian_media::VideoColorDiagnostic {
-            detected_color_space: Some(ColorSpace::Rec709),
             color_range: DecodedVideoRange::Limited,
+            sampling: None,
             interpretation: mondrian_media::DetectedColorInterpretation {
-                color_space: Some(ColorSpace::Rec709),
+                candidate_color_space: Some(ColorSpace::Rec709),
                 confidence: mondrian_media::VideoColorInterpretationConfidence::Low,
                 source: mondrian_media::VideoColorSpaceSource::Metadata,
                 method: mondrian_media::VideoColorDetectionMethod::MetadataHint,
-                evidence: Vec::new(),
+                evidence: vec![
+                    mondrian_media::VideoColorInterpretationEvidence::MetadataHint {
+                        scope: mondrian_media::VideoColorMetadataHintScope::FileName,
+                        key: "filename".to_owned(),
+                        value: "unused-rec709.mov".to_owned(),
+                        detected_color_space: ColorSpace::Rec709,
+                        authority:
+                            mondrian_media::VideoColorMetadataHintAuthority::DiagnosticSuggestion,
+                    },
+                ],
                 warnings: vec![
                     mondrian_media::VideoColorInterpretationWarning::PartialCicpTags {
                         detected_color_space: ColorSpace::Rec709,
@@ -6159,8 +7997,6 @@ fn preview_and_export_asset_issue_summaries_match_for_referenced_assets() {
                 ],
                 user_overridable: true,
             },
-            source: mondrian_media::VideoColorSpaceSource::Metadata,
-            method: mondrian_media::VideoColorDetectionMethod::MetadataHint,
             metadata: None,
             metadata_hints: Vec::new(),
             hdr_metadata: Vec::new(),
@@ -6189,15 +8025,25 @@ fn preview_and_export_asset_issue_summaries_match_for_referenced_assets() {
         &HashMap::new(),
         &asset_color_diagnostics,
     );
-    let export_summary = mondrian_export::queue::export_asset_issue_summary(
-        &mondrian_export::preset::TimelineExportSnapshot {
-            sequence: parent,
-            sequences: nested_sequences,
+    let prepared_visual = mondrian_export::prepare_timeline_export_dependencies(
+        &parent,
+        &nested_sequences,
+        mondrian_export::preset::TimelineExportRange::SequenceInOut,
+        false,
+    )
+    .expect("prepare immutable export visual snapshot");
+    let export_summary = mondrian_export::queue::export_media_diagnostic_set(
+        &mondrian_export::preset::TimelineExportSnapshot::captured(
+            mondrian_core::ProjectColorEnvironment::default(),
+            parent,
+            nested_sequences,
             media,
-            color_environment: mondrian_core::ProjectColorEnvironment::default(),
-            range: mondrian_export::preset::TimelineExportRange::SequenceInOut,
-        },
-    );
+            mondrian_export::preset::TimelineExportRange::SequenceInOut,
+            prepared_visual.execution_snapshot().clone(),
+        ),
+    )
+    .expect("prepare export media diagnostic set")
+    .issue_summary;
 
     assert_eq!(preview_summary, export_summary);
     assert_eq!(preview_summary.diagnostics, 2);
@@ -6249,20 +8095,20 @@ fn preview_and_export_composite_color_path_summaries_match_for_frame() {
 
     let mut state = AppState::new();
     state.test_set_sequence(Some(sequence.clone()));
-    state.seek(0);
+    state.seek(0).expect("seek");
     let preview_service = WindowPreviewAdapter::new();
     let preview_frame = preview_service.viewer_preview_for_state(&state);
     let preview_frame = ready_frame(preview_frame);
     let preview_summary = preview_service.diagnostics().composite_color_path_summary();
 
     let export_diagnostics = mondrian_export::queue::export_composite_diagnostics_for_frame(
-        &mondrian_export::preset::TimelineExportSnapshot {
+        &captured_title_free_export_test_snapshot(
+            mondrian_core::ProjectColorEnvironment::default(),
             sequence,
-            sequences: Vec::new(),
-            media: HashMap::new(),
-            color_environment: mondrian_core::ProjectColorEnvironment::default(),
-            range: mondrian_export::preset::TimelineExportRange::SequenceInOut,
-        },
+            Vec::new(),
+            HashMap::new(),
+            mondrian_export::preset::TimelineExportRange::SequenceInOut,
+        ),
         0,
         preview_frame.width,
         preview_frame.height,
@@ -6298,10 +8144,21 @@ fn preview_and_export_composite_color_path_summaries_match_for_frame() {
 
 #[test]
 fn preview_single_media_color_output_matches_export_composite_contract() {
-    let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
-        .expect("default effect graph");
-    let frame = test_media_frame_rgba(vec![200, 100, 40, 255], 1, 1, 77);
+    let effect_graph =
+        compile_reference_effect_graph(&EffectRenderPlan::default()).expect("default effect graph");
     let color_context = test_color_context(ColorSpace::Srgb);
+    let frame = test_media_frame_rgba_in_working(
+        vec![200, 100, 40, 255],
+        1,
+        1,
+        77,
+        color_context.working_color_space,
+    );
+    assert_eq!(
+        frame.working_color_space(),
+        Some(color_context.working_color_space),
+        "Preview media fixtures must honor the Sequence working-space contract"
+    );
     let resolved = vec![ResolvedPreviewElement::Media {
         frame: frame.clone(),
         opacity: 1.0,
@@ -6373,8 +8230,8 @@ fn preview_single_media_color_output_matches_export_composite_contract() {
 fn preview_camera_log_input_matches_export_frame_hash() {
     const SLOG3_TO_STANDARD_V3_SDR_V2_GOLDEN_HASH: u64 = 2_504_953_508_210_442_961;
 
-    let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
-        .expect("default effect graph");
+    let effect_graph =
+        compile_reference_effect_graph(&EffectRenderPlan::default()).expect("default effect graph");
     let source = CpuEncodedColorFrame::source_rgba8(
         2,
         2,
@@ -6391,7 +8248,7 @@ fn preview_camera_log_input_matches_export_frame_hash() {
     let media = MediaPreviewFrame::from_source(
         MediaPreviewGpuSourceFrame::new(source.clone(), input_transform.clone()),
         Resolution { width: 2, height: 2 },
-        3_003,
+        test_preview_semantic_identity(3_003),
         mondrian_playback::FramePresentationQuality::Ready,
         PreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::SoftwareCpu),
     );
@@ -6467,8 +8324,8 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
     const REC2020_TO_STANDARD_V3_SDR_V2_SRGB_MULTILAYER_GOLDEN_HASH: u64 =
         16_678_535_327_707_552_965;
 
-    let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
-        .expect("default effect graph");
+    let effect_graph =
+        compile_reference_effect_graph(&EffectRenderPlan::default()).expect("default effect graph");
     let source = CpuEncodedColorFrame::source_rgba8(
         2,
         2,
@@ -6495,7 +8352,7 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
     let media = MediaPreviewFrame::from_working(
         frame,
         logical_resolution,
-        2_020,
+        test_preview_semantic_identity(2_020),
         mondrian_playback::FramePresentationQuality::Ready,
         PreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::SoftwareCpu),
     );
@@ -6682,12 +8539,19 @@ fn stale_viewer_frame_is_scoped_to_sequence_and_dimensions() {
 fn playback_prefetch_yields_while_current_frame_is_pending() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
-    state.play();
+    state.play().expect("play");
     let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
 
     service.execution.borrow_mut().set_pending(true);
-    service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
+    schedule_media_prefetches_for_state(
+        &service,
+        &state,
+        sequence,
+        state.current_frame(),
+        width,
+        height,
+    );
 
     let diagnostics = service.diagnostics();
     assert_eq!(diagnostics.prefetch_skipped_current_pending, 1);
@@ -6710,7 +8574,7 @@ fn stalled_playback_current_expiration_releases_pending_and_queued_work() {
         service.expire_stalled_realtime_current_with_timeout(Duration::ZERO, Some(demand_identity));
     assert!(!outcome.visible_change);
     assert!(outcome.transport_change);
-    assert_eq!(outcome.frame_deliveries.len(), 1);
+    assert_eq!(outcome.frame_delivery_candidates.len(), 1);
 
     let diagnostics = service.diagnostics();
     assert_eq!(diagnostics.playback_current_stalled_expirations, 1);
@@ -6727,6 +8591,70 @@ fn stalled_playback_current_expiration_releases_pending_and_queued_work() {
     assert_eq!(diagnostics.scheduler.canceled_requests, 1);
     assert_eq!(diagnostics.worker_queue.queued_jobs, 0);
     assert!(!service.execution.borrow().is_pending());
+}
+
+#[test]
+fn stalled_playback_expiration_retains_in_flight_locality_without_queue_cancel_or_publish() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let demand_identity = WindowPreviewAdapter::test_frame_demand_identity();
+    let result_tx = install_preview_result_channel_for_test(&service);
+    let key = test_media_key(2_501);
+    let generation = service.scheduler.begin_generation();
+    let deadline = Instant::now();
+    assert!(matches!(
+        service.scheduler.request_with_binding(
+            key.clone(),
+            generation,
+            MediaPreviewRequestPriority::Current,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            Some(demand_identity),
+            Some(deadline),
+        ),
+        MediaPreviewRequestStatus::Scheduled { .. }
+    ));
+    let execution_id = service
+        .scheduler
+        .begin_test_execution(MediaPreviewWorkerLane::Playback)
+        .expect("playback execution must hold the sole in-flight lease");
+
+    let expired =
+        service.expire_stalled_realtime_current_with_timeout(Duration::ZERO, Some(demand_identity));
+    assert_eq!(
+        expired.frame_delivery_candidates,
+        vec![mondrian_playback::FrameDeliveryCandidate::for_demand(
+            demand_identity,
+            mondrian_playback::FrameDeliveryKind::Late,
+        )]
+    );
+    assert_eq!(service.diagnostics().queue_canceled_jobs, 0);
+    assert_eq!(service.diagnostics().scheduler.pending_requests, 0);
+    assert_eq!(service.diagnostics().worker_queue.in_flight_jobs, 1);
+    assert_eq!(service.scheduler.execution_cancellation(execution_id), None);
+
+    let mut result = test_successful_media_preview_result(&service, key.clone(), generation, 91);
+    result.priority = MediaPreviewRequestPriority::Current;
+    result.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
+    result.deadline_at = Some(deadline);
+    result.demand_identity = Some(demand_identity);
+    result.execution_id = Some(execution_id);
+    result_tx.send(result).expect("send locality completion");
+
+    let completion = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5), None);
+    assert!(!completion.visible_change);
+    assert!(
+        completion.frame_delivery_candidates.is_empty(),
+        "an expired binding must never reacquire terminal presentation authority"
+    );
+    let diagnostics = service.diagnostics();
+    assert_eq!(diagnostics.scheduler.completed_cache_only_results, 1);
+    assert_eq!(diagnostics.scheduler.pending_requests, 0);
+    assert_eq!(diagnostics.worker_queue.in_flight_jobs, 0);
+    assert_eq!(diagnostics.queue_canceled_jobs, 0);
+    assert!(
+        service.frame_store.borrow_mut().media_frame(&key).is_none(),
+        "a deadline-missed locality completion may warm decoder state but not the frame cache"
+    );
+    service.shutdown();
 }
 
 #[test]
@@ -6761,7 +8689,7 @@ fn expired_work_cannot_publish_late_after_its_demand_completed() {
         .expire_stalled_realtime_current_with_timeout(Duration::ZERO, Some(replacement_identity));
 
     assert!(
-        outcome.frame_deliveries.is_empty(),
+        outcome.frame_delivery_candidates.is_empty(),
         "scheduler expiration must not revive an already-completed playback demand"
     );
     assert_eq!(service.diagnostics().scheduler.pending_requests, 0);
@@ -6779,7 +8707,7 @@ fn stalled_scrub_releases_capacity_without_reporting_playback_delivery() {
 
     assert!(!outcome.visible_change);
     assert!(outcome.transport_change);
-    assert!(outcome.frame_deliveries.is_empty());
+    assert!(outcome.frame_delivery_candidates.is_empty());
     let diagnostics = service.diagnostics();
     assert_eq!(diagnostics.scheduler.pending_requests, 0);
     assert_eq!(diagnostics.worker_queue.queued_jobs, 0);
@@ -6834,20 +8762,26 @@ fn playback_pressure_skips_new_current_decode_when_realtime_work_is_pending() {
             deadline_at: None,
             demand_identity: None,
             execution_id: None,
+            residency_work: None,
         }),
         MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
     );
     service
         .record_playback_current_late_drop(MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD);
 
-    assert!(!service.request_media_preview(
-        test_media_key(201),
-        MediaPreviewRequestPriority::Current,
-        PreviewDecodeAccessMode::PlaybackCursor,
-        Some(Instant::now() + Duration::from_millis(33)),
-        None,
-        PreviewDecodeAdaptiveHints::default(),
-    ));
+    assert_eq!(
+        service.request_media_preview(
+            test_media_key(201),
+            crate::app::preview_access_mode::MediaPreviewRequestIntent::Current(
+                test_media_work_demand(201),
+            ),
+            PreviewDecodeAccessMode::PlaybackCursor,
+            Some(Instant::now() + Duration::from_millis(33)),
+            None,
+            PreviewDecodeAdaptiveHints::default(),
+        ),
+        request_scheduler::MediaPreviewRequestAdmission::DeferredExecutionPressure
+    );
 
     let diagnostics = service.diagnostics();
     assert_eq!(diagnostics.worker_queue.queued_jobs, 1);
@@ -6868,14 +8802,19 @@ fn playback_pressure_allows_recovery_decode_when_no_realtime_work_is_pending() {
     service
         .record_playback_current_late_drop(MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD);
 
-    assert!(service.request_media_preview(
-        test_media_key(202),
-        MediaPreviewRequestPriority::Current,
-        PreviewDecodeAccessMode::PlaybackCursor,
-        Some(Instant::now() + Duration::from_millis(33)),
-        None,
-        PreviewDecodeAdaptiveHints::default(),
-    ));
+    assert_eq!(
+        service.request_media_preview(
+            test_media_key(202),
+            crate::app::preview_access_mode::MediaPreviewRequestIntent::Current(
+                test_media_work_demand(202),
+            ),
+            PreviewDecodeAccessMode::PlaybackCursor,
+            Some(Instant::now() + Duration::from_millis(33)),
+            None,
+            PreviewDecodeAdaptiveHints::default(),
+        ),
+        request_scheduler::MediaPreviewRequestAdmission::Scheduled
+    );
 
     let diagnostics = service.diagnostics();
     assert_eq!(
@@ -6892,22 +8831,32 @@ fn realtime_current_preempts_queued_still_work_before_queue_is_full() {
     let still_key = test_media_key(203);
     let scrub_key = test_media_key(204);
 
-    assert!(service.request_media_preview(
-        still_key.clone(),
-        MediaPreviewRequestPriority::Current,
-        PreviewDecodeAccessMode::RandomAccessStillFrame,
-        None,
-        None,
-        PreviewDecodeAdaptiveHints::default(),
-    ));
-    assert!(service.request_media_preview(
-        scrub_key.clone(),
-        MediaPreviewRequestPriority::Current,
-        PreviewDecodeAccessMode::ScrubCursor,
-        Some(Instant::now() + Duration::from_millis(33)),
-        None,
-        PreviewDecodeAdaptiveHints::default(),
-    ));
+    assert_eq!(
+        service.request_media_preview(
+            still_key.clone(),
+            crate::app::preview_access_mode::MediaPreviewRequestIntent::Current(
+                test_media_work_demand(203),
+            ),
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            None,
+            None,
+            PreviewDecodeAdaptiveHints::default(),
+        ),
+        request_scheduler::MediaPreviewRequestAdmission::Scheduled
+    );
+    assert_eq!(
+        service.request_media_preview(
+            scrub_key.clone(),
+            crate::app::preview_access_mode::MediaPreviewRequestIntent::Current(
+                test_media_work_demand(204),
+            ),
+            PreviewDecodeAccessMode::ScrubCursor,
+            Some(Instant::now() + Duration::from_millis(33)),
+            None,
+            PreviewDecodeAdaptiveHints::default(),
+        ),
+        request_scheduler::MediaPreviewRequestAdmission::Scheduled
+    );
 
     let diagnostics = service.diagnostics();
     assert_eq!(diagnostics.scheduler.pending_requests, 1);
@@ -6940,14 +8889,19 @@ fn realtime_current_keeps_in_flight_still_pending_for_structured_preemption() {
         .scheduler
         .begin_test_execution(MediaPreviewWorkerLane::NonPlayback)
         .expect("still work should be in flight before realtime admission");
-    assert!(service.request_media_preview(
-        scrub_key.clone(),
-        MediaPreviewRequestPriority::Current,
-        PreviewDecodeAccessMode::ScrubCursor,
-        Some(Instant::now() + Duration::from_millis(33)),
-        None,
-        PreviewDecodeAdaptiveHints::default(),
-    ));
+    assert_eq!(
+        service.request_media_preview(
+            scrub_key.clone(),
+            crate::app::preview_access_mode::MediaPreviewRequestIntent::Current(
+                test_media_work_demand(206),
+            ),
+            PreviewDecodeAccessMode::ScrubCursor,
+            Some(Instant::now() + Duration::from_millis(33)),
+            None,
+            PreviewDecodeAdaptiveHints::default(),
+        ),
+        request_scheduler::MediaPreviewRequestAdmission::Scheduled
+    );
 
     let diagnostics = service.diagnostics();
     assert_eq!(diagnostics.scheduler.pending_requests, 2);
@@ -6958,7 +8912,7 @@ fn realtime_current_keeps_in_flight_still_pending_for_structured_preemption() {
     assert!(service.scheduler.has_pending_key(&still_key));
     assert!(service.scheduler.has_pending_key(&scrub_key));
     assert_eq!(
-        media_preview_cancel_reason(
+        media_preview_cancel_reason_for_test_observation(
             service.scheduler.execution_cancellation(still_execution),
             MediaPreviewRequestPriority::Current,
             PreviewDecodeAccessMode::RandomAccessStillFrame,
@@ -6973,13 +8927,20 @@ fn realtime_current_keeps_in_flight_still_pending_for_structured_preemption() {
 fn playback_pressure_recovery_suppresses_forward_prefetch_until_current_success() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
-    state.play();
+    state.play().expect("play");
     let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
 
     service
         .record_playback_current_late_drop(MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD);
-    service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
+    schedule_media_prefetches_for_state(
+        &service,
+        &state,
+        sequence,
+        state.current_frame(),
+        width,
+        height,
+    );
 
     let diagnostics = service.diagnostics();
     assert!(diagnostics.playback_schedule.sustained_pressure_active);
@@ -7008,7 +8969,7 @@ fn playback_pressure_recovery_suppresses_forward_prefetch_until_current_success(
 fn playback_prefetch_yields_while_current_work_is_queued() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
-    state.play();
+    state.play().expect("play");
     let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
     let current_key = test_media_key(100);
@@ -7026,11 +8987,19 @@ fn playback_prefetch_yields_while_current_work_is_queued() {
             deadline_at: None,
             demand_identity: None,
             execution_id: None,
+            residency_work: None,
         }),
         MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
     );
 
-    service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
+    schedule_media_prefetches_for_state(
+        &service,
+        &state,
+        sequence,
+        state.current_frame(),
+        width,
+        height,
+    );
 
     let diagnostics = service.diagnostics();
     assert_eq!(diagnostics.prefetch_skipped_current_pending, 0);
@@ -7044,7 +9013,7 @@ fn playback_prefetch_yields_while_current_work_is_queued() {
 fn playback_prefetch_yields_while_current_work_is_in_flight() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
-    state.play();
+    state.play().expect("play");
     let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
     let generation = service.scheduler.begin_generation();
@@ -7057,7 +9026,14 @@ fn playback_prefetch_yields_while_current_work_is_in_flight() {
         MediaPreviewWorkerLane::NonPlayback,
     );
 
-    service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
+    schedule_media_prefetches_for_state(
+        &service,
+        &state,
+        sequence,
+        state.current_frame(),
+        width,
+        height,
+    );
 
     let diagnostics = service.diagnostics();
     assert_eq!(diagnostics.prefetch_skipped_current_pending, 0);
@@ -7072,7 +9048,7 @@ fn playback_prefetch_yields_while_current_work_is_in_flight() {
 fn playback_prefetch_yields_when_prefetch_backlog_already_covers_window() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
-    state.play();
+    state.play().expect("play");
     let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
     let prefetch_window =
@@ -7093,12 +9069,20 @@ fn playback_prefetch_yields_when_prefetch_backlog_already_covers_window() {
                 deadline_at: None,
                 demand_identity: None,
                 execution_id: None,
+                residency_work: None,
             }),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
     }
 
-    service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
+    schedule_media_prefetches_for_state(
+        &service,
+        &state,
+        sequence,
+        state.current_frame(),
+        width,
+        height,
+    );
 
     let diagnostics = service.diagnostics();
     assert_eq!(diagnostics.prefetch_skipped_current_pending, 0);
@@ -7114,7 +9098,7 @@ fn playback_prefetch_yields_when_prefetch_backlog_already_covers_window() {
 fn playback_prefetch_yields_when_in_flight_prefetch_covers_window() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
-    state.play();
+    state.play().expect("play");
     let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
     let prefetch_window =
@@ -7134,7 +9118,14 @@ fn playback_prefetch_yields_when_in_flight_prefetch_covers_window() {
         })
         .collect::<Vec<_>>();
 
-    service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
+    schedule_media_prefetches_for_state(
+        &service,
+        &state,
+        sequence,
+        state.current_frame(),
+        width,
+        height,
+    );
 
     let diagnostics = service.diagnostics();
     assert_eq!(diagnostics.prefetch_skipped_current_pending, 0);
@@ -7152,7 +9143,7 @@ fn playback_prefetch_yields_when_in_flight_prefetch_covers_window() {
 fn playback_prefetch_tops_up_only_remaining_window_slots() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let (mut state, _, root) = state_with_invalid_video_asset();
-    state.play();
+    state.play().expect("play");
     let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
     let prefetch_window =
@@ -7172,11 +9163,19 @@ fn playback_prefetch_tops_up_only_remaining_window_slots() {
             deadline_at: None,
             demand_identity: None,
             execution_id: None,
+            residency_work: None,
         }),
         MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
     );
 
-    service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
+    schedule_media_prefetches_for_state(
+        &service,
+        &state,
+        sequence,
+        state.current_frame(),
+        width,
+        height,
+    );
 
     let diagnostics = service.diagnostics();
     assert_eq!(diagnostics.prefetch_skipped_prefetch_backlog, 0);
@@ -7196,7 +9195,7 @@ fn playback_prefetch_tops_up_only_remaining_window_slots() {
 fn playback_prefetch_tops_up_only_remaining_in_flight_window_slots() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let (mut state, _, root) = state_with_invalid_video_asset();
-    state.play();
+    state.play().expect("play");
     let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
     let prefetch_window =
@@ -7213,7 +9212,14 @@ fn playback_prefetch_tops_up_only_remaining_in_flight_window_slots() {
         MediaPreviewWorkerLane::Playback,
     );
 
-    service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
+    schedule_media_prefetches_for_state(
+        &service,
+        &state,
+        sequence,
+        state.current_frame(),
+        width,
+        height,
+    );
 
     let diagnostics = service.diagnostics();
     assert_eq!(diagnostics.prefetch_skipped_prefetch_backlog, 0);
@@ -7234,7 +9240,7 @@ fn playback_prefetch_tops_up_only_remaining_in_flight_window_slots() {
 fn playback_prefetch_tops_up_by_actual_jobs_across_tracks() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let (mut state, root) = state_with_two_invalid_video_assets();
-    state.play();
+    state.play().expect("play");
     let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
     let prefetch_window =
@@ -7254,11 +9260,19 @@ fn playback_prefetch_tops_up_by_actual_jobs_across_tracks() {
             deadline_at: None,
             demand_identity: None,
             execution_id: None,
+            residency_work: None,
         }),
         MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
     );
 
-    service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
+    schedule_media_prefetches_for_state(
+        &service,
+        &state,
+        sequence,
+        state.current_frame(),
+        width,
+        height,
+    );
 
     let diagnostics = service.diagnostics();
     assert_eq!(diagnostics.prefetch_skipped_prefetch_backlog, 0);
@@ -7285,12 +9299,19 @@ fn playback_prefetch_primes_the_next_media_activation_across_a_blank_gap() {
     let activation_frame = steady_window as i64 + 12;
     let time_base = sequence.time_base();
     sequence.video_tracks[0].clips[0].position = tt(activation_frame, time_base);
-    state.seek(0);
-    state.play();
+    state.seek(0).expect("seek");
+    state.play().expect("play");
     let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
 
-    service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
+    schedule_media_prefetches_for_state(
+        &service,
+        &state,
+        sequence,
+        state.current_frame(),
+        width,
+        height,
+    );
 
     let diagnostics = service.diagnostics();
     assert_eq!(
@@ -7331,6 +9352,7 @@ fn queued_expiry_completes_matching_demand_without_cancellation_latency_evidence
             deadline_at: Some(Instant::now() - Duration::from_millis(1)),
             demand_identity: Some(demand_identity),
             execution_id: None,
+            residency_work: None,
         },
         12_000,
         MediaPreviewCancelReason::PlaybackDeadline,
@@ -7339,6 +9361,7 @@ fn queued_expiry_completes_matching_demand_without_cancellation_latency_evidence
         None,
     );
     result.cancellation_phase = Some(MediaPreviewCancellationPhase::Queued);
+    result.queue_disposition = MediaPreviewQueueDisposition::Expired;
     result_tx.send(result).expect("send queued expiry result");
 
     let outcome = service.poll_finished_outcome_with_budget(
@@ -7348,8 +9371,8 @@ fn queued_expiry_completes_matching_demand_without_cancellation_latency_evidence
     );
 
     assert_eq!(
-        outcome.frame_deliveries,
-        vec![mondrian_playback::FrameDelivery::for_demand(
+        outcome.frame_delivery_candidates,
+        vec![mondrian_playback::FrameDeliveryCandidate::for_demand(
             demand_identity,
             mondrian_playback::FrameDeliveryKind::Late,
         )]
@@ -7358,6 +9381,17 @@ fn queued_expiry_completes_matching_demand_without_cancellation_latency_evidence
     assert_eq!(diagnostics.scheduler.pending_requests, 0);
     assert_eq!(diagnostics.decode_canceled_jobs, 0);
     assert_eq!(diagnostics.decode_cancellation.all.cancellations, 0);
+    assert_eq!(diagnostics.decode_queue_wait_total_us, 0);
+    assert_eq!(diagnostics.decode_queue_wait_max_us, 0);
+    assert_eq!(diagnostics.decode_expired_queue_wait.samples, 1);
+    assert_eq!(diagnostics.decode_expired_queue_wait.total_us, 12_000);
+    assert_eq!(diagnostics.decode_expired_queue_wait.max_us, 12_000);
+    assert_eq!(diagnostics.decode_expired_queue_wait.current_max_us, 12_000);
+    assert_eq!(diagnostics.decode_expired_queue_wait.buckets.le_16ms, 1);
+    assert_eq!(
+        diagnostics.decode_access_mode_profiles.playback_cursor.expired_queue_wait,
+        diagnostics.decode_expired_queue_wait
+    );
     assert_eq!(diagnostics.playback_schedule.current_drop_late_decisions, 1);
     service.shutdown();
 }
@@ -7394,6 +9428,7 @@ fn preview_service_poll_releases_expired_playback_deadline_without_preview_refre
             deadline_at: Some(Instant::now() - Duration::from_millis(1)),
             demand_identity: Some(demand_identity),
             execution_id: None,
+            residency_work: None,
         },
         12_000,
         MediaPreviewCancelReason::PlaybackDeadline,
@@ -7413,7 +9448,7 @@ fn preview_service_poll_releases_expired_playback_deadline_without_preview_refre
         "deadline cancellation is scheduler/diagnostic evidence, not a new visible frame"
     );
     assert!(
-        outcome.frame_deliveries.is_empty(),
+        outcome.frame_delivery_candidates.is_empty(),
         "canceled decode work is not a terminal frame presentation"
     );
     assert!(!outcome.needs_follow_up_poll);
@@ -7423,6 +9458,7 @@ fn preview_service_poll_releases_expired_playback_deadline_without_preview_refre
     assert_eq!(diagnostics.decode_canceled_playback_deadline_jobs, 1);
     assert_eq!(diagnostics.decode_canceled_playback_cursor_jobs, 1);
     assert_eq!(diagnostics.decode_queue_wait_max_us, 12_000);
+    assert_eq!(diagnostics.decode_expired_queue_wait.samples, 0);
     assert_eq!(diagnostics.playback_schedule.current_drop_late_decisions, 1);
     assert_eq!(
         diagnostics.playback_schedule.current_proxy_or_hardware_recommended_decisions,
@@ -7435,7 +9471,7 @@ fn preview_service_poll_releases_expired_playback_deadline_without_preview_refre
 fn preview_service_poll_drops_successful_playback_completion_after_deadline() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
-    state.play();
+    state.play().expect("play");
     let demand_identity = state
         .pending_playback_frame_demand_identity()
         .expect("playback demand identity");
@@ -7454,7 +9490,7 @@ fn preview_service_poll_drops_successful_playback_completion_after_deadline() {
         ),
         MediaPreviewRequestStatus::Scheduled { evicted_prefetch: None, evicted_still: None }
     );
-    let mut result = test_successful_media_preview_result(key.clone(), generation, 9);
+    let mut result = test_successful_media_preview_result(&service, key.clone(), generation, 9);
     result.priority = MediaPreviewRequestPriority::Current;
     result.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
     result.deadline_at = Some(deadline);
@@ -7473,8 +9509,8 @@ fn preview_service_poll_drops_successful_playback_completion_after_deadline() {
     );
     assert!(!outcome.needs_follow_up_poll);
     assert_eq!(
-        outcome.frame_deliveries,
-        vec![mondrian_playback::FrameDelivery::for_demand(
+        outcome.frame_delivery_candidates,
+        vec![mondrian_playback::FrameDeliveryCandidate::for_demand(
             demand_identity,
             mondrian_playback::FrameDeliveryKind::Late,
         )]
@@ -7499,7 +9535,7 @@ fn preview_service_poll_drops_successful_playback_completion_after_deadline() {
 fn preview_service_stale_late_completion_cannot_publish_terminal_delivery() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
-    state.play();
+    state.play().expect("play");
     let demand_identity = state
         .pending_playback_frame_demand_identity()
         .expect("playback demand identity");
@@ -7518,7 +9554,7 @@ fn preview_service_stale_late_completion_cannot_publish_terminal_delivery() {
         MediaPreviewRequestStatus::Scheduled { .. }
     ));
     let _newer_generation = service.scheduler.begin_generation();
-    let mut result = test_successful_media_preview_result(key, generation, 9);
+    let mut result = test_successful_media_preview_result(&service, key, generation, 9);
     result.priority = MediaPreviewRequestPriority::Current;
     result.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
     result.deadline_at = Some(Instant::now() - Duration::from_millis(1));
@@ -7531,7 +9567,7 @@ fn preview_service_stale_late_completion_cannot_publish_terminal_delivery() {
         Some(demand_identity),
     );
 
-    assert!(outcome.frame_deliveries.is_empty());
+    assert!(outcome.frame_delivery_candidates.is_empty());
     assert_eq!(service.diagnostics().scheduler.completed_stale_results, 1);
     service.shutdown();
 }
@@ -7540,7 +9576,7 @@ fn preview_service_stale_late_completion_cannot_publish_terminal_delivery() {
 fn preview_service_current_late_completion_cannot_revive_replaced_playback_demand() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
-    state.play();
+    state.play().expect("play");
     let completed_identity = state
         .pending_playback_frame_demand_identity()
         .expect("completed playback demand identity");
@@ -7558,12 +9594,12 @@ fn preview_service_current_late_completion_cannot_revive_replaced_playback_deman
         ),
         MediaPreviewRequestStatus::Scheduled { .. }
     ));
-    state.seek(1);
+    state.seek(1).expect("seek");
     let replacement_identity = state
         .pending_playback_frame_demand_identity()
         .expect("replacement playback demand identity");
     assert_ne!(replacement_identity, completed_identity);
-    let mut result = test_successful_media_preview_result(key, generation, 9);
+    let mut result = test_successful_media_preview_result(&service, key, generation, 9);
     result.priority = MediaPreviewRequestPriority::Current;
     result.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
     result.deadline_at = Some(Instant::now() - Duration::from_millis(1));
@@ -7576,7 +9612,7 @@ fn preview_service_current_late_completion_cannot_revive_replaced_playback_deman
         Some(replacement_identity),
     );
 
-    assert!(outcome.frame_deliveries.is_empty());
+    assert!(outcome.frame_delivery_candidates.is_empty());
     assert_eq!(
         service.diagnostics().playback_schedule.current_drop_late_decisions,
         0,
@@ -7589,7 +9625,7 @@ fn preview_service_current_late_completion_cannot_revive_replaced_playback_deman
 fn preview_service_deadline_uses_worker_completion_not_later_poll_time() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
-    state.play();
+    state.play().expect("play");
     let demand_identity = state
         .pending_playback_frame_demand_identity()
         .expect("playback demand identity");
@@ -7608,7 +9644,7 @@ fn preview_service_deadline_uses_worker_completion_not_later_poll_time() {
         ),
         MediaPreviewRequestStatus::Scheduled { evicted_prefetch: None, evicted_still: None }
     );
-    let mut result = test_successful_media_preview_result(key.clone(), generation, 9);
+    let mut result = test_successful_media_preview_result(&service, key.clone(), generation, 9);
     result.priority = MediaPreviewRequestPriority::Current;
     result.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
     result.demand_identity = Some(demand_identity);
@@ -7631,7 +9667,7 @@ fn preview_service_deadline_uses_worker_completion_not_later_poll_time() {
     );
 
     assert!(outcome.visible_change);
-    assert!(outcome.frame_deliveries.is_empty());
+    assert!(outcome.frame_delivery_candidates.is_empty());
     assert!(service.frame_store.borrow_mut().media_frame(&key).is_some());
     assert_eq!(
         service.diagnostics().playback_schedule.current_drop_late_decisions,
@@ -7644,7 +9680,7 @@ fn preview_service_deadline_uses_worker_completion_not_later_poll_time() {
 fn preview_service_stages_presentable_hardware_fallback_until_presentation() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
-    state.play();
+    state.play().expect("play");
     let demand_identity = state
         .pending_playback_frame_demand_identity()
         .expect("playback demand identity");
@@ -7660,7 +9696,7 @@ fn preview_service_stages_presentable_hardware_fallback_until_presentation() {
         ),
         MediaPreviewRequestStatus::Scheduled { evicted_prefetch: None, evicted_still: None }
     );
-    let mut result = test_successful_media_preview_result(key.clone(), generation, 9);
+    let mut result = test_successful_media_preview_result(&service, key.clone(), generation, 9);
     result.priority = MediaPreviewRequestPriority::Current;
     result.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
     result.demand_identity = Some(demand_identity);
@@ -7669,11 +9705,10 @@ fn preview_service_stages_presentable_hardware_fallback_until_presentation() {
         PreviewHardwareDecodeDecision::CpuRgbaHardwareUnavailable,
         PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
     );
-    result
-        .frame
-        .as_mut()
-        .expect("decoded frame")
-        .set_presentation_quality(preview_decode_presentation_quality(&decode_diagnostics));
+    result.frame.as_mut().expect("decoded frame").set_presentation_quality(
+        preview_decode_presentation_quality(&decode_diagnostics)
+            .expect("hardware fallback remains temporally exact"),
+    );
     result.decode_diagnostics = Some(decode_diagnostics);
     result_tx.send(result).expect("send degraded successful result");
 
@@ -7688,7 +9723,7 @@ fn preview_service_stages_presentable_hardware_fallback_until_presentation() {
         "correct CPU fallback remains presentable"
     );
     assert!(
-        outcome.frame_deliveries.is_empty(),
+        outcome.frame_delivery_candidates.is_empty(),
         "decode readiness must not terminate the demand before presentation"
     );
     let cached_quality = service
@@ -7703,17 +9738,18 @@ fn preview_service_stages_presentable_hardware_fallback_until_presentation() {
         "cache admission must preserve executed hardware-fallback quality"
     );
     service.execution.borrow_mut().set_presentation_quality(cached_quality);
-    let ticket = service.playback_presentation_ticket(&state).expect("presentation ticket");
-    let delivery = ticket.complete_at(mondrian_playback::MonotonicTimestamp::ZERO);
+    let ticket =
+        playback_presentation_ticket_for_state(&service, &state).expect("presentation ticket");
+    let completion = state
+        .complete_frame_presentation(ticket, Instant::now())
+        .expect("current degraded presentation remains authoritative");
+    assert_eq!(completion.delivery().identity(), demand_identity);
     assert_eq!(
-        delivery,
-        mondrian_playback::FrameDelivery::for_demand(
-            demand_identity,
-            mondrian_playback::FrameDeliveryKind::Degraded,
-        )
+        completion.delivery().kind(),
+        mondrian_playback::FrameDeliveryKind::Degraded
     );
     assert!(
-        !state.observe_frame_delivery(delivery),
+        !completion.transport_changed(),
         "presentable fallback must still wait for bounded media lookahead"
     );
     assert!(state.observe_video_preroll(1, 1));
@@ -7751,6 +9787,7 @@ fn preview_service_poll_separates_canceled_backlog_from_visible_change() {
                     deadline_at: Some(Instant::now() - Duration::from_millis(1)),
                     demand_identity: None,
                     execution_id: None,
+                    residency_work: None,
                 },
                 1_000,
                 MediaPreviewCancelReason::PlaybackDeadline,
@@ -7768,8 +9805,331 @@ fn preview_service_poll_separates_canceled_backlog_from_visible_change() {
         outcome.needs_follow_up_poll,
         "count-budget exhaustion should keep draining without forcing preview refresh"
     );
+    assert!(
+        !outcome.candidate_retry_required,
+        "background completion cannot request a candidate retry without pending execution intent"
+    );
     assert_eq!(service.scheduler.diagnostics().pending_requests, 1);
     assert_eq!(service.diagnostics().decode_canceled_jobs, 1);
+    service.shutdown();
+}
+
+#[test]
+fn preempted_prefetch_release_without_a_capacity_waiter_does_not_retry_current_candidate() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let result_tx = install_preview_result_channel_for_test(&service);
+    let generation = service.scheduler.begin_generation();
+    let key = test_media_key(90);
+    assert!(matches!(
+        service.scheduler.request(
+            key.clone(),
+            generation,
+            MediaPreviewRequestPriority::Prefetch,
+            PreviewDecodeAccessMode::PlaybackCursor,
+        ),
+        MediaPreviewRequestStatus::Scheduled { .. }
+    ));
+    let execution_id = service
+        .scheduler
+        .begin_test_execution(MediaPreviewWorkerLane::Playback)
+        .expect("Prefetch execution lease");
+    assert!(service.scheduler.request_one_in_flight_prefetch_preemption());
+
+    let frame = test_media_frame(90);
+    let residency_work = match service.frame_store.borrow_mut().reserve_media_work(
+        &key,
+        mondrian_playback::MediaWorkReservationIntent::Prefetch,
+        frame.reserved_cpu_bytes(),
+        frame.decoder_resource_units(),
+    ) {
+        Ok(MediaWorkReservationAdmission::Reserved(work)) => work,
+        admission => panic!("Prefetch test requires a physical work lease: {admission:?}"),
+    };
+    service.execution.borrow_mut().set_pending(true);
+    result_tx
+        .send(media_preview_canceled_result(
+            MediaPreviewJob {
+                key: key.clone(),
+                generation,
+                priority: MediaPreviewRequestPriority::Prefetch,
+                access_mode: PreviewDecodeAccessMode::PlaybackCursor,
+                adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+                hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+                hardware_decode_device_selector: None,
+                enqueued_at: Instant::now(),
+                deadline_at: None,
+                demand_identity: None,
+                execution_id: Some(execution_id),
+                residency_work: Some(residency_work),
+            },
+            1_000,
+            MediaPreviewCancelReason::PrefetchPreemptedByCurrent,
+            1_000,
+            Some(1_000),
+            Some(10),
+        ))
+        .expect("send preempted Prefetch result");
+
+    let outcome = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5), None);
+
+    assert!(!outcome.visible_change);
+    assert!(
+        !outcome.candidate_retry_required,
+        "background Prefetch retirement cannot retry an unrelated pending Viewer intent"
+    );
+    assert_eq!(service.diagnostics().frame_store.media_work_reservations, 0);
+    assert_eq!(service.jobs.diagnostics().in_flight_jobs, 0);
+    assert!(service.frame_store.borrow_mut().media_frame(&key).is_none());
+    service.shutdown();
+}
+
+#[test]
+fn aggregate_capacity_waiter_consumes_exactly_one_completion_edge() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let result_tx = install_preview_result_channel_for_test(&service);
+    let generation = service.scheduler.begin_generation();
+    let key = test_media_key(91);
+    assert!(matches!(
+        service.scheduler.request(
+            key.clone(),
+            generation,
+            MediaPreviewRequestPriority::Prefetch,
+            PreviewDecodeAccessMode::PlaybackCursor,
+        ),
+        MediaPreviewRequestStatus::Scheduled { .. }
+    ));
+    service.media_aggregate_capacity_waiting.set(true);
+    result_tx
+        .send(media_preview_canceled_result(
+            MediaPreviewJob {
+                key,
+                generation,
+                priority: MediaPreviewRequestPriority::Prefetch,
+                access_mode: PreviewDecodeAccessMode::PlaybackCursor,
+                adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+                hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+                hardware_decode_device_selector: None,
+                enqueued_at: Instant::now(),
+                deadline_at: None,
+                demand_identity: None,
+                execution_id: None,
+                residency_work: None,
+            },
+            1_000,
+            MediaPreviewCancelReason::PrefetchPreemptedByCurrent,
+            0,
+            Some(0),
+            None,
+        ))
+        .expect("send capacity-releasing result");
+
+    let first = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5), None);
+    assert!(first.candidate_retry_required);
+    assert!(!service.media_aggregate_capacity_waiting.get());
+
+    let second = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5), None);
+    assert!(
+        !second.candidate_retry_required,
+        "one capacity-release edge must not become a retry loop"
+    );
+    service.shutdown();
+}
+
+#[test]
+fn aggregate_capacity_waiter_retries_once_when_its_observable_owner_settles_without_a_result() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let generation = service.scheduler.begin_generation();
+    let key = test_media_key(92);
+    assert!(matches!(
+        service.scheduler.request(
+            key,
+            generation,
+            MediaPreviewRequestPriority::Prefetch,
+            PreviewDecodeAccessMode::PlaybackCursor,
+        ),
+        MediaPreviewRequestStatus::Scheduled { .. }
+    ));
+    service.media_aggregate_capacity_waiting.set(true);
+
+    let pending = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5), None);
+    assert!(!pending.candidate_retry_required);
+    assert!(service.media_aggregate_capacity_waiting.get());
+
+    let (_, canceled) = service.scheduler.cancel_all();
+    assert_eq!(canceled, 1);
+    let settled = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5), None);
+    assert!(settled.candidate_retry_required);
+    assert!(!service.media_aggregate_capacity_waiting.get());
+
+    let second = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5), None);
+    assert!(!second.candidate_retry_required);
+    service.shutdown();
+}
+
+#[test]
+fn deterministic_temporal_mismatch_is_remembered_for_only_the_current_generation() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let result_tx = install_preview_result_channel_for_test(&service);
+    let demand_identity = PreviewProductionRuntime::<()>::test_frame_demand_identity();
+    let key = test_media_key(900);
+    let generation = service.scheduler.begin_generation();
+    service.execution.borrow_mut().invalidate(|| generation);
+    assert!(matches!(
+        service.scheduler.request_with_binding(
+            key.clone(),
+            generation,
+            MediaPreviewRequestPriority::Current,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            Some(demand_identity),
+            None,
+        ),
+        MediaPreviewRequestStatus::Scheduled { .. }
+    ));
+
+    let mut result = test_successful_media_preview_result(&service, key.clone(), generation, 9);
+    result.frame = None;
+    result.residency_work = None;
+    result.failure_reason = Some(MediaPreviewFailureReason::TemporalMismatch);
+    result.error = Some("selected frame does not cover requested source time".to_owned());
+    result.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
+    result.demand_identity = Some(demand_identity);
+    result_tx.send(result).expect("send exact temporal mismatch");
+
+    let outcome = service.poll_finished_outcome_with_budget(
+        8,
+        Duration::from_millis(5),
+        Some(demand_identity),
+    );
+
+    assert!(
+        outcome.visible_change,
+        "the first deterministic failure must publish the current Unavailable state"
+    );
+    assert_eq!(
+        outcome.frame_delivery_candidates,
+        vec![mondrian_playback::FrameDeliveryCandidate::for_demand(
+            demand_identity,
+            mondrian_playback::FrameDeliveryKind::Failed,
+        )]
+    );
+    assert_eq!(
+        service.media_execution_failures.borrow().get(&key).copied(),
+        Some((generation, MediaPreviewFailureReason::TemporalMismatch))
+    );
+    assert!(
+        service.failed_media_key(&key).is_some(),
+        "the media Adapter must stop resubmitting a deterministic failure in this generation"
+    );
+    assert_eq!(service.scheduler.diagnostics().pending_requests, 0);
+    assert!(
+        !service
+            .poll_finished_outcome_with_budget(8, Duration::from_millis(5), Some(demand_identity),)
+            .visible_change,
+        "retained failure evidence must not create an idle repaint loop"
+    );
+
+    let replacement_generation = service.scheduler.begin_generation();
+    service.execution.borrow_mut().invalidate(|| replacement_generation);
+    assert!(
+        service.failed_media_key(&key).is_none(),
+        "a new generation must remain eligible to decode the same semantic key"
+    );
+    service.shutdown();
+}
+
+#[test]
+fn rebound_execution_failure_is_scoped_to_the_completion_binding_generation() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let result_tx = install_preview_result_channel_for_test(&service);
+    let key = test_media_key(901);
+    let original_generation = service.scheduler.begin_generation();
+    assert!(matches!(
+        service.scheduler.request(
+            key.clone(),
+            original_generation,
+            MediaPreviewRequestPriority::Current,
+            PreviewDecodeAccessMode::ScrubCursor,
+        ),
+        MediaPreviewRequestStatus::Scheduled { .. }
+    ));
+    let execution_id = service
+        .scheduler
+        .begin_test_execution(MediaPreviewWorkerLane::NonPlayback)
+        .expect("original request must own an execution lease");
+
+    let rebound_generation = service.scheduler.begin_generation();
+    assert!(matches!(
+        service.scheduler.request(
+            key.clone(),
+            rebound_generation,
+            MediaPreviewRequestPriority::Current,
+            PreviewDecodeAccessMode::ScrubCursor,
+        ),
+        MediaPreviewRequestStatus::Scheduled { .. }
+    ));
+
+    let mut result =
+        test_successful_media_preview_result(&service, key.clone(), original_generation, 9);
+    result.frame = None;
+    result.failure_reason = Some(MediaPreviewFailureReason::WorkerPanicked);
+    result.error = Some("contained test panic".to_owned());
+    result.execution_id = Some(execution_id);
+    result_tx.send(result).expect("send rebound failure result");
+
+    let outcome = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5), None);
+
+    assert!(
+        !outcome.visible_change,
+        "an obsolete producer failure has no current presentation authority"
+    );
+    assert_eq!(service.scheduler.diagnostics().pending_requests, 1);
+    assert_eq!(service.jobs.diagnostics().queued_jobs, 1);
+    assert_eq!(
+        service.media_execution_failures.borrow().get(&key).copied(),
+        None,
+        "an obsolete producer must not poison its same-generation rebound"
+    );
+
+    let rebound_execution_id = service
+        .scheduler
+        .begin_test_execution(MediaPreviewWorkerLane::NonPlayback)
+        .expect("rebound request must retain its own execution lease");
+    let mut rebound_result =
+        test_successful_media_preview_result(&service, key.clone(), rebound_generation, 10);
+    rebound_result.frame = None;
+    rebound_result.failure_reason = Some(MediaPreviewFailureReason::WorkerPanicked);
+    rebound_result.error = Some("contained rebound test panic".to_owned());
+    rebound_result.execution_id = Some(rebound_execution_id);
+    result_tx
+        .send(rebound_result)
+        .expect("send authoritative rebound failure result");
+
+    let rebound_outcome =
+        service.poll_finished_outcome_with_budget(8, Duration::from_millis(5), None);
+
+    assert!(rebound_outcome.visible_change);
+    assert_eq!(service.scheduler.diagnostics().pending_requests, 0);
+    assert_eq!(
+        service.media_execution_failures.borrow().get(&key).copied(),
+        Some((
+            rebound_generation,
+            MediaPreviewFailureReason::WorkerPanicked
+        )),
+        "only the producer that owns the current binding may establish transient failure memory"
+    );
+    service.remember_media_execution_failure(
+        &key,
+        original_generation,
+        MediaPreviewFailureReason::ResidencyContractViolation,
+    );
+    assert_eq!(
+        service.media_execution_failures.borrow().get(&key).copied(),
+        Some((
+            rebound_generation,
+            MediaPreviewFailureReason::WorkerPanicked
+        )),
+        "a later-arriving stale completion must not overwrite newer generation evidence"
+    );
     service.shutdown();
 }
 
@@ -7802,6 +10162,7 @@ fn canceled_current_scrub_requests_follow_up_render_for_settled_frame() {
                 deadline_at: None,
                 demand_identity: None,
                 execution_id: None,
+                residency_work: None,
             },
             1_000,
             MediaPreviewCancelReason::Obsolete,
@@ -7830,8 +10191,10 @@ fn failed_current_media_preview_cache_does_not_leave_viewer_loading() {
         .settings
         .root_program_color_context(state.project_color_environment())
         .media_input(sequence.settings.color.input.auto_tone_map_media);
+    let snapshot = state.preview_execution_snapshot(Instant::now());
     let key = service
         .media_preview_key_for_asset(
+            &snapshot,
             &state,
             &asset_id,
             None,
@@ -7858,6 +10221,353 @@ fn failed_current_media_preview_cache_does_not_leave_viewer_loading() {
 }
 
 #[test]
+fn current_media_grant_rejection_is_blocked_without_phantom_pending_work() {
+    let (state, asset_id, root) = state_with_invalid_video_asset();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    service.frame_store.replace(PreviewFrameStoreAdapter::new(
+        PreviewFrameStoreAdapterConfig {
+            media_entry_capacity: 2,
+            media_byte_budget: 256 * 1024 * 1024,
+            media_resource_unit_budget: 4,
+            current_media_working_set_entry_limit: 1,
+            current_media_working_set_byte_limit: 256 * 1024 * 1024,
+            current_media_working_set_resource_unit_limit: 4,
+            viewer_entry_capacity: 2,
+            viewer_byte_budget: 256 * 1024 * 1024,
+            failure_entry_capacity: 2,
+        },
+    ));
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    let demand_id = mondrian_playback::MediaWorkDemandId::for_preview_generation(
+        snapshot.transport().epoch(),
+        service.execution.borrow().generation(),
+        snapshot.transport().current_frame(),
+    );
+    let resident_key = test_media_key(930);
+    assert!(admit_test_media_frame(
+        &mut service.frame_store.borrow_mut(),
+        resident_key.clone(),
+        test_media_frame(9),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
+    let guarded = service
+        .frame_store
+        .borrow_mut()
+        .protected_media_frame(&resident_key, demand_id)
+        .expect("demand protection should fit")
+        .expect("resident test frame");
+    let sequence = state.active_sequence().expect("sequence");
+    let target_resolution = Resolution {
+        width: sequence.settings.resolution.width,
+        height: sequence.settings.resolution.height,
+    };
+    let request = crate::app::preview_timeline_execution::PreviewTimelineMediaRequest {
+        asset_id,
+        color_space_override: None,
+        alpha_interpretation: AlphaInterpretation::Straight,
+        source_time: mondrian_core::TimelineTime::ZERO,
+        target_resolution,
+        input_color: sequence
+            .settings
+            .root_program_color_context(state.project_color_environment())
+            .media_input(sequence.settings.color.input.auto_tone_map_media),
+        cpu_working_required: false,
+    };
+
+    let outcome = service.media_frame_for_plan(&snapshot, &state, request);
+
+    let crate::app::preview_timeline_execution::PreviewTimelineMediaFrame::Unavailable { reason } =
+        outcome
+    else {
+        panic!("per-demand capacity must be a typed blocker");
+    };
+    assert_eq!(
+        reason.disposition(),
+        PreviewUnavailabilityDisposition::Blocked
+    );
+    assert_eq!(reason.stage(), PreviewOutputStage::MediaDecode);
+    assert!(!service.execution.borrow().is_pending());
+    assert_eq!(service.scheduler.diagnostics().pending_requests, 0);
+    assert_eq!(service.jobs.diagnostics().queued_jobs, 0);
+    assert_eq!(
+        service.frame_store.borrow().diagnostics().media_current_working_set_rejections,
+        1
+    );
+    drop(guarded);
+    service.shutdown();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn repeated_exact_media_request_rebinds_before_acquiring_another_physical_lease() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    service.frame_store.replace(PreviewFrameStoreAdapter::new(
+        PreviewFrameStoreAdapterConfig {
+            media_entry_capacity: 2,
+            media_byte_budget: 256 * 1024 * 1024,
+            media_resource_unit_budget: 4,
+            current_media_working_set_entry_limit: 1,
+            current_media_working_set_byte_limit: 256 * 1024 * 1024,
+            current_media_working_set_resource_unit_limit: 4,
+            viewer_entry_capacity: 2,
+            viewer_byte_budget: 256 * 1024 * 1024,
+            failure_entry_capacity: 2,
+        },
+    ));
+    let key = test_media_key(935);
+    let demand_id = test_media_work_demand(935);
+    let request = || {
+        service.request_media_preview(
+            key.clone(),
+            MediaPreviewRequestIntent::Current(demand_id),
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            None,
+            None,
+            PreviewDecodeAdaptiveHints::default(),
+        )
+    };
+
+    assert_eq!(request(), MediaPreviewRequestAdmission::Scheduled);
+    assert_eq!(service.scheduler.diagnostics().pending_requests, 1);
+    assert_eq!(service.jobs.diagnostics().queued_jobs, 1);
+    assert_eq!(
+        service.frame_store.borrow().diagnostics().media_work_reservations,
+        1
+    );
+
+    assert_eq!(request(), MediaPreviewRequestAdmission::ExistingWork);
+    assert_eq!(service.scheduler.diagnostics().pending_requests, 1);
+    assert_eq!(service.jobs.diagnostics().queued_jobs, 1);
+    assert_eq!(
+        service.frame_store.borrow().diagnostics().media_work_reservations,
+        1,
+        "repeated UI evaluation must retain the queued payload instead of charging the demand twice"
+    );
+    assert_eq!(service.media_existing_work_waiters.borrow().len(), 1);
+    service.shutdown();
+}
+
+#[test]
+fn settled_existing_media_owner_retries_its_current_candidate_exactly_once() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let key = test_media_key(936);
+    let demand_id = test_media_work_demand(936);
+    let request = || {
+        service.request_media_preview(
+            key.clone(),
+            MediaPreviewRequestIntent::Current(demand_id),
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            None,
+            None,
+            PreviewDecodeAdaptiveHints::default(),
+        )
+    };
+
+    assert_eq!(request(), MediaPreviewRequestAdmission::Scheduled);
+    assert_eq!(request(), MediaPreviewRequestAdmission::ExistingWork);
+    assert_eq!(service.media_existing_work_waiters.borrow().len(), 1);
+
+    let pending = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5), None);
+    assert!(!pending.candidate_retry_required);
+    assert_eq!(service.media_existing_work_waiters.borrow().len(), 1);
+
+    let (_, canceled) = service.scheduler.cancel_all();
+    assert_eq!(canceled, 1);
+    let before_wake = service.work_watch.revision();
+    service.publish_existing_work_retry_if_actionable();
+    assert_ne!(service.work_watch.revision(), before_wake);
+    let settled = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5), None);
+    assert!(settled.candidate_retry_required);
+    assert!(service.media_existing_work_waiters.borrow().is_empty());
+
+    let retained = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5), None);
+    assert!(retained.candidate_retry_required);
+    service.media_existing_work_retry_pending.set(false);
+    let acknowledged = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5), None);
+    assert!(!acknowledged.candidate_retry_required);
+    service.shutdown();
+}
+
+#[test]
+fn unobservable_aggregate_media_owner_is_blocked_instead_of_pending_forever() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    service.frame_store.replace(PreviewFrameStoreAdapter::new(
+        PreviewFrameStoreAdapterConfig {
+            media_entry_capacity: 1,
+            media_byte_budget: 16 * 1024 * 1024,
+            media_resource_unit_budget: 4,
+            current_media_working_set_entry_limit: 1,
+            current_media_working_set_byte_limit: 16 * 1024 * 1024,
+            current_media_working_set_resource_unit_limit: 4,
+            viewer_entry_capacity: 2,
+            viewer_byte_budget: 16 * 1024 * 1024,
+            failure_entry_capacity: 2,
+        },
+    ));
+    let retained_key = test_media_key(940);
+    assert!(admit_test_media_frame(
+        &mut service.frame_store.borrow_mut(),
+        retained_key.clone(),
+        test_media_frame(4),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
+    let retained = service
+        .frame_store
+        .borrow_mut()
+        .media_frame(&retained_key)
+        .expect("external frame owner");
+    service.frame_store.borrow_mut().clear_media_frames();
+    let demand_id = test_media_work_demand(941);
+
+    let admission = service.request_media_preview(
+        test_media_key(941),
+        crate::app::preview_access_mode::MediaPreviewRequestIntent::Current(demand_id),
+        PreviewDecodeAccessMode::ScrubCursor,
+        None,
+        None,
+        PreviewDecodeAdaptiveHints::default(),
+    );
+
+    assert_eq!(
+        admission,
+        request_scheduler::MediaPreviewRequestAdmission::BlockedAggregateCapacity
+    );
+    assert!(!service.execution.borrow().is_pending());
+    assert_eq!(service.scheduler.diagnostics().pending_requests, 0);
+    assert_eq!(service.jobs.diagnostics().queued_jobs, 0);
+    drop(retained);
+    service.shutdown();
+}
+
+#[test]
+fn completed_media_work_is_an_observable_aggregate_capacity_retry_owner() {
+    let completed = MediaPreviewJobQueueDiagnostics {
+        in_flight_completed_jobs: 1,
+        ..MediaPreviewJobQueueDiagnostics::default()
+    };
+
+    assert!(
+        request_scheduler::aggregate_pressure_has_observable_retry_owner(
+            false,
+            MediaPreviewSchedulerDiagnostics::default(),
+            completed,
+        )
+    );
+    assert!(
+        !request_scheduler::aggregate_pressure_has_observable_retry_owner(
+            false,
+            MediaPreviewSchedulerDiagnostics::default(),
+            MediaPreviewJobQueueDiagnostics::default(),
+        )
+    );
+}
+
+#[test]
+fn obsolete_media_request_never_becomes_unowned_pending_work() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let execution_generation = service.execution.borrow().generation();
+    while service.scheduler.diagnostics().latest_generation <= execution_generation {
+        service.scheduler.begin_generation();
+    }
+
+    let admission = service.request_media_preview(
+        test_media_key(950),
+        crate::app::preview_access_mode::MediaPreviewRequestIntent::Current(
+            test_media_work_demand(950),
+        ),
+        PreviewDecodeAccessMode::ScrubCursor,
+        None,
+        None,
+        PreviewDecodeAdaptiveHints::default(),
+    );
+
+    assert_eq!(
+        admission,
+        request_scheduler::MediaPreviewRequestAdmission::ObsoleteGeneration
+    );
+    assert!(!service.execution.borrow().is_pending());
+    assert_eq!(service.scheduler.diagnostics().pending_requests, 0);
+    assert_eq!(service.jobs.diagnostics().queued_jobs, 0);
+    service.shutdown();
+}
+
+#[test]
+fn terminal_media_worker_health_refuses_new_pending_admission() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    service.media_worker_health_failed.set(true);
+
+    let admission = service.request_media_preview(
+        test_media_key(960),
+        crate::app::preview_access_mode::MediaPreviewRequestIntent::Current(
+            test_media_work_demand(960),
+        ),
+        PreviewDecodeAccessMode::ScrubCursor,
+        None,
+        None,
+        PreviewDecodeAdaptiveHints::default(),
+    );
+
+    assert_eq!(
+        admission,
+        request_scheduler::MediaPreviewRequestAdmission::WorkerUnavailable
+    );
+    assert!(!service.execution.borrow().is_pending());
+    assert_eq!(service.scheduler.diagnostics().pending_requests, 0);
+    assert_eq!(service.jobs.diagnostics().queued_jobs, 0);
+    service.shutdown();
+}
+
+#[test]
+fn configured_media_result_disconnect_fails_pending_demand_once_and_closes_admission() {
+    let service = WindowPreviewAdapter::with_worker_count(preview_decode_cpu_budget(), 1);
+    let (disconnected_sender, disconnected_receiver) =
+        mpsc::sync_channel(MEDIA_PREVIEW_COMPLETED_RESULT_QUEUE_CAPACITY);
+    service.results.replace(disconnected_receiver);
+    drop(disconnected_sender);
+    service.execution.borrow_mut().set_pending(true);
+    let demand_identity = WindowPreviewAdapter::test_frame_demand_identity();
+
+    let first = service.poll_finished_outcome_with_budget(
+        8,
+        Duration::from_millis(5),
+        Some(demand_identity),
+    );
+
+    assert!(first.visible_change);
+    assert_eq!(
+        first.frame_delivery_candidates,
+        vec![mondrian_playback::FrameDeliveryCandidate::for_demand(
+            demand_identity,
+            mondrian_playback::FrameDeliveryKind::Failed,
+        )]
+    );
+    assert!(service.media_worker_health_failed());
+    assert!(!service.execution.borrow().is_pending());
+    assert_eq!(
+        service.request_media_preview(
+            test_media_key(961),
+            crate::app::preview_access_mode::MediaPreviewRequestIntent::Current(
+                test_media_work_demand(961),
+            ),
+            PreviewDecodeAccessMode::ScrubCursor,
+            None,
+            None,
+            PreviewDecodeAdaptiveHints::default(),
+        ),
+        request_scheduler::MediaPreviewRequestAdmission::WorkerUnavailable
+    );
+
+    let second = service.poll_finished_outcome_with_budget(
+        8,
+        Duration::from_millis(5),
+        Some(demand_identity),
+    );
+    assert!(!second.visible_change);
+    assert!(second.frame_delivery_candidates.is_empty());
+    service.shutdown();
+}
+
+#[test]
 fn media_preview_cache_identity_changes_with_range_override() {
     let (state, asset_id, root) = state_with_invalid_video_asset();
     let service = WindowPreviewAdapter::new_without_workers_for_test();
@@ -7867,9 +10577,11 @@ fn media_preview_cache_identity_changes_with_range_override() {
         .settings
         .root_program_color_context(state.project_color_environment())
         .media_input(sequence.settings.color.input.auto_tone_map_media);
+    let snapshot = state.preview_execution_snapshot(Instant::now());
     let key_for_state = || {
         service
             .media_preview_key_for_asset(
+                &snapshot,
                 &state,
                 &asset_id,
                 None,
@@ -7886,7 +10598,7 @@ fn media_preview_cache_identity_changes_with_range_override() {
 
     let auto_key = key_for_state();
     assert_eq!(
-        auto_key.input_video_range.baseline(),
+        auto_key.decode.source_color().range.baseline(),
         DecodedVideoRange::Limited
     );
     let library = state.asset_library().expect("asset library");
@@ -7904,11 +10616,11 @@ fn media_preview_cache_identity_changes_with_range_override() {
 
     let override_key = key_for_state();
     assert_eq!(
-        override_key.input_video_range.baseline(),
+        override_key.decode.source_color().range.baseline(),
         DecodedVideoRange::Full
     );
     assert_eq!(
-        override_key.input_video_range,
+        override_key.decode.source_color().range,
         DecodedVideoRangeContract::OverrideFull
     );
     assert_ne!(auto_key, override_key);
@@ -7927,8 +10639,10 @@ fn playing_cached_media_preview_defers_sync_raster_composite() {
         .settings
         .root_program_color_context(state.project_color_environment())
         .media_input(sequence.settings.color.input.auto_tone_map_media);
+    let snapshot = state.preview_execution_snapshot(Instant::now());
     let key = service
         .media_preview_key_for_asset(
+            &snapshot,
             &state,
             &asset_id,
             None,
@@ -7941,13 +10655,20 @@ fn playing_cached_media_preview_defers_sync_raster_composite() {
             false,
         )
         .expect("media preview key");
-    service.frame_store.borrow_mut().insert_media_frame(
+    admit_test_media_frame(
+        &mut service.frame_store.borrow_mut(),
         key,
-        test_media_frame_with_size(80, width, height, 123),
-        false,
+        test_media_frame_with_size_in_working(
+            80,
+            width,
+            height,
+            123,
+            input_color.working_color_space,
+        ),
+        MediaPreviewRequestPriority::Prefetch,
     );
 
-    state.play();
+    state.play().expect("play");
     let playing_preview = service.viewer_preview_for_state(&state);
     assert!(
         matches!(
@@ -7957,37 +10678,100 @@ fn playing_cached_media_preview_defers_sync_raster_composite() {
         "playback must not synchronously CPU-composite cached media on the UI thread"
     );
 
-    state.pause();
+    state.pause().expect("pause");
+    let paused_preview = service.viewer_preview_for_state(&state);
+    assert!(
+        matches!(&paused_preview, ViewerPreviewState::Ready(_)),
+        "paused still-frame preview may use the CPU correctness path, got {paused_preview:?}"
+    );
+    service.shutdown();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn playing_generated_preview_defers_sync_raster_composite() {
+    let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+
+    state.play().expect("play");
+    let playing_preview = service.viewer_preview_for_state(&state);
+    assert!(
+        matches!(
+            playing_preview,
+            ViewerPreviewState::Loading | ViewerPreviewState::Stale(_)
+        ),
+        "playback UI projection must not synchronously CPU-composite generated picture"
+    );
+    assert!(
+        matches!(
+            execute_gpu_preview_for_test_app(&service, &state),
+            PreviewGpuFrameState::Ready(_)
+        ),
+        "deferring the UI raster projection must preserve the production GPU candidate seam"
+    );
+
+    state.pause().expect("pause");
     let paused_preview = service.viewer_preview_for_state(&state);
     assert!(
         matches!(paused_preview, ViewerPreviewState::Ready(_)),
         "paused still-frame preview may use the CPU correctness path"
     );
     service.shutdown();
-    let _ = std::fs::remove_dir_all(root);
 }
 
 fn test_media_key(source_frame: i64) -> MediaPreviewKey {
-    MediaPreviewKey {
-        asset_id: AssetId::new(),
-        path: PathBuf::from(format!("E:/media/{source_frame}.mov")),
-        fingerprint: None,
-        source_time: mondrian_core::TimelineTime::new(source_frame, 1).expect("exact source time"),
-        target_width: 320,
-        target_height: 180,
-        source_width: 320,
-        source_height: 180,
-        input_color_space: ColorSpace::Rec709,
-        input_video_range: DecodedVideoRangeContract::Automatic {
-            probed_range: DecodedVideoRange::Limited,
-        },
-        native_surface_hint: None,
-        source_has_alpha: false,
-        alpha_interpretation: AlphaInterpretation::Straight,
-        working_color_space: WorkingColorSpace::LinearRec709,
-        input_tone_map: false,
-        engine: ColorEngine::mondrian_standard(),
+    MediaPreviewKey::test_cpu(
+        PathBuf::from(format!("E:/media/{source_frame}.mov")),
+        test_media_file_fingerprint(
+            source_frame.unsigned_abs().saturating_add(1),
+            source_frame.unsigned_abs().saturating_add(1),
+        ),
+        mondrian_core::TimelineTime::new(source_frame, 1).expect("exact source time"),
+        Resolution { width: 320, height: 180 },
+        mondrian_media::PreviewSourceColorContract::automatic(
+            ColorSpace::Rec709,
+            DecodedVideoRange::Limited,
+        ),
+    )
+}
+
+fn test_media_key_with_source_time(
+    mut key: MediaPreviewKey,
+    source_time: mondrian_core::TimelineTime,
+) -> MediaPreviewKey {
+    key.decode = mondrian_media::PreviewDecodeKey::new(
+        key.decode.source().clone(),
+        source_time,
+        key.decode.geometry(),
+        key.decode.source_color(),
+    )
+    .expect("valid replacement source time");
+    key
+}
+
+fn test_media_key_with_physical_source(
+    mut key: MediaPreviewKey,
+    mut path: PathBuf,
+    fingerprint: MediaFileFingerprint,
+    video_stream_index: u32,
+) -> MediaPreviewKey {
+    if !path.is_absolute() {
+        path = std::env::temp_dir().join(path);
     }
+    let source = mondrian_media::PreviewDecodeSource::from_frozen_cpu_stream(
+        path,
+        fingerprint,
+        video_stream_index,
+    )
+    .expect("complete replacement physical source");
+    key.decode = mondrian_media::PreviewDecodeKey::new(
+        source,
+        key.source_time(),
+        key.decode.geometry(),
+        key.decode.source_color(),
+    )
+    .expect("valid replacement physical source");
+    key
 }
 
 fn begin_test_media_execution(
@@ -8011,6 +10795,7 @@ fn begin_test_media_execution(
             deadline_at: None,
             demand_identity: None,
             execution_id: None,
+            residency_work: None,
         }),
         MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
     );
@@ -8026,10 +10811,49 @@ fn test_cpu_frame_store(
         media_entry_capacity,
         media_byte_budget,
         media_resource_unit_budget: 4,
+        current_media_working_set_entry_limit: media_entry_capacity.max(8),
+        current_media_working_set_byte_limit: media_byte_budget.saturating_mul(4).max(1_024),
+        current_media_working_set_resource_unit_limit: 8,
         viewer_entry_capacity: 4,
         viewer_byte_budget: 1_024,
         failure_entry_capacity,
     })
+}
+
+fn admit_test_media_frame(
+    store: &mut PreviewFrameStoreAdapter,
+    key: MediaPreviewKey,
+    frame: MediaPreviewFrame,
+    priority: MediaPreviewRequestPriority,
+) -> bool {
+    let intent = match priority {
+        MediaPreviewRequestPriority::Current => {
+            mondrian_playback::MediaWorkReservationIntent::Current(test_media_work_demand(1))
+        }
+        MediaPreviewRequestPriority::Prefetch => {
+            mondrian_playback::MediaWorkReservationIntent::Prefetch
+        }
+    };
+    let reserved_bytes = frame.reserved_cpu_bytes();
+    let resource_units = frame.decoder_resource_units();
+    let work = match store.reserve_media_work(&key, intent, reserved_bytes, resource_units) {
+        Ok(MediaWorkReservationAdmission::Reserved(work)) => work,
+        Ok(
+            MediaWorkReservationAdmission::AlreadyResident
+            | MediaWorkReservationAdmission::RejectedCurrentDemandGrant
+            | MediaWorkReservationAdmission::RejectedAggregateCapacity,
+        )
+        | Err(_) => return false,
+    };
+    store.insert_media_frame(key, frame, work).is_admitted()
+}
+
+fn test_media_work_demand(target_frame: i64) -> mondrian_playback::MediaWorkDemandId {
+    mondrian_playback::MediaWorkDemandId::for_preview_generation(
+        mondrian_playback::PlaybackEngine::default().snapshot().epoch,
+        1,
+        target_frame,
+    )
 }
 
 fn install_preview_result_channel_for_test(
@@ -8041,32 +10865,45 @@ fn install_preview_result_channel_for_test(
 }
 
 fn test_successful_media_preview_result(
+    service: &WindowPreviewAdapter,
     key: MediaPreviewKey,
     generation: u64,
     seed: u8,
 ) -> MediaPreviewResult {
+    let frame = test_media_frame(seed);
+    let demand_id = test_media_work_demand(0);
+    let residency_work = match service.frame_store.borrow_mut().reserve_media_work(
+        &key,
+        mondrian_playback::MediaWorkReservationIntent::Current(demand_id),
+        frame.reserved_cpu_bytes(),
+        frame.decoder_resource_units(),
+    ) {
+        Ok(MediaWorkReservationAdmission::Reserved(work)) => work,
+        admission => panic!("test result requires a physical work lease: {admission:?}"),
+    };
     MediaPreviewResult {
         key,
-        frame: Some(test_media_frame(seed)),
+        frame: Some(frame),
         error: None,
         failure_reason: None,
         generation,
         priority: MediaPreviewRequestPriority::Current,
         access_mode: PreviewDecodeAccessMode::ScrubCursor,
+        queue_disposition: MediaPreviewQueueDisposition::Ready,
         queue_wait_us: 0,
         decode_elapsed_us: 0,
         deadline_at: None,
-        cancel_observed_elapsed_us: None,
-        cancel_request_to_observed_us: None,
+        logical_cancellation_observed: None,
         canceled: false,
         cancellation_phase: None,
         cancel_reason: None,
-        decode_cancellation: None,
+        concrete_media_checkpoint: None,
         decode_diagnostics: None,
         color_diagnostics: None,
         color_stage_diagnostics: None,
         demand_identity: None,
         execution_id: None,
+        residency_work: Some(residency_work),
     }
 }
 
@@ -8078,15 +10915,32 @@ fn test_media_frame_with_size(
     seed: u8,
     width: u32,
     height: u32,
-    signature: u64,
+    identity_revision: u64,
 ) -> MediaPreviewFrame {
-    test_media_frame_rgba(
+    test_media_frame_with_size_in_working(
+        seed,
+        width,
+        height,
+        identity_revision,
+        WorkingColorSpace::LinearRec709,
+    )
+}
+
+fn test_media_frame_with_size_in_working(
+    seed: u8,
+    width: u32,
+    height: u32,
+    identity_revision: u64,
+    working_color_space: WorkingColorSpace,
+) -> MediaPreviewFrame {
+    test_media_frame_rgba_in_working(
         std::iter::repeat_n([seed, 0, 0, 255], width as usize * height as usize)
             .flatten()
             .collect(),
         width,
         height,
-        signature,
+        identity_revision,
+        working_color_space,
     )
 }
 
@@ -8094,18 +10948,34 @@ fn test_media_frame_rgba(
     rgba: Vec<u8>,
     width: u32,
     height: u32,
-    signature: u64,
+    identity_revision: u64,
+) -> MediaPreviewFrame {
+    test_media_frame_rgba_in_working(
+        rgba,
+        width,
+        height,
+        identity_revision,
+        WorkingColorSpace::LinearRec709,
+    )
+}
+
+fn test_media_frame_rgba_in_working(
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+    identity_revision: u64,
+    working_color_space: WorkingColorSpace,
 ) -> MediaPreviewFrame {
     let source = CpuEncodedColorFrame::source_rgba8(width, height, ColorSpace::Rec709, rgba);
     let input_transform = RenderInputTransform::to_working(
-        WorkingColorSpace::LinearRec709,
+        working_color_space,
         false,
         ColorEngine::mondrian_standard(),
     );
     MediaPreviewFrame::from_source(
         MediaPreviewGpuSourceFrame::new(source, input_transform),
         Resolution { width, height },
-        signature,
+        test_preview_semantic_identity(identity_revision),
         mondrian_playback::FramePresentationQuality::Ready,
         PreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::SoftwareCpu),
     )
@@ -8202,7 +11072,7 @@ fn media_preview_gpu_source_caches_lazy_cpu_working_transform() {
     let frame = MediaPreviewFrame::from_source(
         MediaPreviewGpuSourceFrame::new(source, input_transform),
         Resolution { width: 1, height: 1 },
-        42,
+        test_preview_semantic_identity(42),
         mondrian_playback::FramePresentationQuality::Ready,
         PreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::SoftwareCpu),
     );
@@ -8237,7 +11107,7 @@ fn media_preview_scene_linear_source_stays_gpu_eligible_and_lazily_caches_cpu_fa
     let frame = MediaPreviewFrame::from_source(
         MediaPreviewGpuSourceFrame::new(source, input_transform),
         Resolution { width: 2, height: 1 },
-        43,
+        test_preview_semantic_identity(43),
         mondrian_playback::FramePresentationQuality::Ready,
         PreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::SoftwareCpu),
     );
@@ -8314,7 +11184,7 @@ fn gpu_viewer_hardware_decode_admission_covers_every_access_mode() {
 }
 
 #[test]
-fn gpu_viewer_hardware_decode_admission_is_scoped_to_native_surface_format() {
+fn gpu_viewer_hardware_decode_admission_does_not_invent_native_payload_contract() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     service.set_playback_hardware_decode_admission(PlaybackHardwareDecodeAdmission {
         request: PreviewHardwareDecodeRequest::PreferGpuResident,
@@ -8331,18 +11201,11 @@ fn gpu_viewer_hardware_decode_admission_is_scoped_to_native_surface_format() {
         renderer_supports_nv12: true,
         renderer_supports_p010: false,
     });
-    let mut key = test_media_key(0);
-
-    key.native_surface_hint = Some(MediaPreviewNativeSurfaceHint::Nv12);
+    let key = test_media_key(0);
     assert_eq!(
         service.hardware_decode_request_for_key(PreviewDecodeAccessMode::PlaybackCursor, &key),
-        PreviewHardwareDecodeRequest::PreferGpuResident
-    );
-
-    key.native_surface_hint = Some(MediaPreviewNativeSurfaceHint::P010);
-    assert_eq!(
-        service.hardware_decode_request_for_key(PreviewDecodeAccessMode::PlaybackCursor, &key),
-        PreviewHardwareDecodeRequest::PreferHardwareDecode
+        PreviewHardwareDecodeRequest::PreferHardwareDecode,
+        "a CPU geometry with no proven surface hint cannot be promoted by later admission"
     );
 }
 
@@ -8354,33 +11217,35 @@ fn scrub_adaptation_switches_for_hot_region_and_slow_latency() {
 
     assert_eq!(
         adaptation
-            .observe_request(key.asset_id, key.source_time, observed_at)
+            .observe_request(key.asset_id, key.source_time(), observed_at)
             .scrub_class,
         PreviewScrubAdaptiveClass::Normal
     );
-    key.source_time = key
-        .source_time
+    let next_source_time = key
+        .source_time()
         .checked_add(mondrian_core::TimelineTime::new(1, 10).expect("exact source delta"))
         .expect("source time remains valid");
+    key = test_media_key_with_source_time(key, next_source_time);
     assert_eq!(
         adaptation
             .observe_request(
                 key.asset_id,
-                key.source_time,
+                key.source_time(),
                 observed_at + Duration::from_millis(1),
             )
             .scrub_class,
         PreviewScrubAdaptiveClass::Normal
     );
-    key.source_time = key
-        .source_time
+    let next_source_time = key
+        .source_time()
         .checked_add(mondrian_core::TimelineTime::new(1, 10).expect("exact source delta"))
         .expect("source time remains valid");
+    key = test_media_key_with_source_time(key, next_source_time);
     assert_eq!(
         adaptation
             .observe_request(
                 key.asset_id,
-                key.source_time,
+                key.source_time(),
                 observed_at + Duration::from_millis(2),
             )
             .scrub_class,
@@ -8397,6 +11262,8 @@ fn scrub_adaptation_switches_for_hot_region_and_slow_latency() {
         seek_performed: true,
         requested_pts: Some(100),
         selected_pts: Some(100),
+        selected_duration_pts: Some(40),
+        selected_temporal_extent_source: PreviewTemporalExtentSource::FrameDuration,
         temporal_approximation: false,
         seek_strategy: PreviewDecodeSeekStrategy::BoundedAnyFrame,
         forward_reuse_frame_window: 0,
@@ -8417,7 +11284,7 @@ fn scrub_adaptation_switches_for_hot_region_and_slow_latency() {
         hardware_decode_cpu_transfer_configured: false,
         hardware_decode_cpu_transfer_observed: false,
         hardware_decode_cpu_transfer_status: PreviewHardwareDecodeCpuTransferStatus::NotAttempted,
-        session_reused: false,
+        session_disposition: PreviewDecodeSessionDisposition::Opened,
         forward_reused: false,
         seek_index_available: false,
         seek_index_keyframes: 0,
@@ -8441,15 +11308,16 @@ fn scrub_adaptation_switches_for_hot_region_and_slow_latency() {
     };
     adaptation.observe_decode(slow_decode);
     adaptation.observe_decode(slow_decode);
-    key.source_time = key
-        .source_time
+    let next_source_time = key
+        .source_time()
         .checked_add(mondrian_core::TimelineTime::new(1, 10).expect("exact source delta"))
         .expect("source time remains valid");
+    key = test_media_key_with_source_time(key, next_source_time);
     assert_eq!(
         adaptation
             .observe_request(
                 key.asset_id,
-                key.source_time,
+                key.source_time(),
                 observed_at + Duration::from_millis(3),
             )
             .scrub_class,
@@ -8465,7 +11333,7 @@ fn scrub_adaptation_switches_for_hot_region_and_slow_latency() {
         failed_adaptation
             .observe_request(
                 key.asset_id,
-                key.source_time,
+                key.source_time(),
                 observed_at + Duration::from_millis(4),
             )
             .scrub_class,
@@ -8479,6 +11347,9 @@ fn preview_frame_store_evicts_least_recently_used_media_frame() {
         media_entry_capacity: 2,
         media_byte_budget: 1_024,
         media_resource_unit_budget: 4,
+        current_media_working_set_entry_limit: 8,
+        current_media_working_set_byte_limit: 4_096,
+        current_media_working_set_resource_unit_limit: 8,
         viewer_entry_capacity: 2,
         viewer_byte_budget: 1_024,
         failure_entry_capacity: 2,
@@ -8487,11 +11358,26 @@ fn preview_frame_store_evicts_least_recently_used_media_frame() {
     let second = test_media_key(2);
     let third = test_media_key(3);
 
-    store.insert_media_frame(first.clone(), test_media_frame(1), false);
-    store.insert_media_frame(second.clone(), test_media_frame(2), false);
+    assert!(admit_test_media_frame(
+        &mut store,
+        first.clone(),
+        test_media_frame(1),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
+    assert!(admit_test_media_frame(
+        &mut store,
+        second.clone(),
+        test_media_frame(2),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
     assert!(store.media_frame(&first).is_some());
 
-    store.insert_media_frame(third.clone(), test_media_frame(3), false);
+    assert!(admit_test_media_frame(
+        &mut store,
+        third.clone(),
+        test_media_frame(3),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
 
     assert_eq!(store.diagnostics().media_entries, 2);
     assert!(store.media_frame(&first).is_some());
@@ -8500,23 +11386,99 @@ fn preview_frame_store_evicts_least_recently_used_media_frame() {
 }
 
 #[test]
-fn preview_frame_store_updates_existing_media_frame_without_growing() {
+fn preview_frame_store_preserves_existing_media_frame_on_same_key_retry() {
     let mut store = PreviewFrameStoreAdapter::new(PreviewFrameStoreAdapterConfig {
         media_entry_capacity: 2,
         media_byte_budget: 1_024,
         media_resource_unit_budget: 4,
+        current_media_working_set_entry_limit: 8,
+        current_media_working_set_byte_limit: 4_096,
+        current_media_working_set_resource_unit_limit: 8,
         viewer_entry_capacity: 2,
         viewer_byte_budget: 1_024,
         failure_entry_capacity: 2,
     });
     let key = test_media_key(1);
 
-    store.insert_media_frame(key.clone(), test_media_frame(1), false);
-    store.insert_media_frame(key.clone(), test_media_frame(9), false);
+    assert!(admit_test_media_frame(
+        &mut store,
+        key.clone(),
+        test_media_frame(1),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
+    assert!(!admit_test_media_frame(
+        &mut store,
+        key.clone(),
+        test_media_frame(9),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
 
-    let frame = store.media_frame(&key).expect("updated frame");
+    let frame = store.media_frame(&key).expect("original frame");
     assert_eq!(store.diagnostics().media_entries, 1);
-    assert_eq!(test_media_frame_rgba8(&frame), vec![9, 0, 0, 255]);
+    assert_eq!(test_media_frame_rgba8(&frame), vec![1, 0, 0, 255]);
+}
+
+#[test]
+fn viewer_frame_store_does_not_alias_equal_compact_diagnostic_hashes() {
+    let first_fingerprint = [0x5a; 32];
+    let mut second_fingerprint = first_fingerprint;
+    second_fingerprint[31] ^= 0xff;
+    let first_identity = PreviewSemanticIdentity::from_test_fingerprint(first_fingerprint);
+    let second_identity = PreviewSemanticIdentity::from_test_fingerprint(second_fingerprint);
+    assert_eq!(
+        first_identity.compact_diagnostic_hash(),
+        second_identity.compact_diagnostic_hash(),
+        "test precondition: the legacy 64-bit projection collides"
+    );
+
+    let sequence_id = SequenceId::new();
+    let first_key = PreviewOutputKey::new(sequence_id, 1, 1, first_identity);
+    let second_key = PreviewOutputKey::new(sequence_id, 1, 1, second_identity);
+    assert_ne!(first_key, second_key);
+    assert_ne!(
+        preview_raster_resource_key(&first_key),
+        preview_raster_resource_key(&second_key),
+        "presentation registration must retain the complete identity"
+    );
+
+    let first_frame = PreviewRasterFrame::new(
+        "first-viewer-frame",
+        1,
+        1,
+        PreviewRasterColorSpace::Srgb,
+        vec![1, 2, 3, 255],
+    )
+    .expect("first Viewer frame");
+    let second_frame = PreviewRasterFrame::new(
+        "second-viewer-frame",
+        1,
+        1,
+        PreviewRasterColorSpace::Srgb,
+        vec![4, 5, 6, 255],
+    )
+    .expect("second Viewer frame");
+    let mut store = PreviewFrameStoreAdapter::new(PreviewFrameStoreAdapterConfig {
+        media_entry_capacity: 1,
+        media_byte_budget: 16,
+        media_resource_unit_budget: 1,
+        current_media_working_set_entry_limit: 1,
+        current_media_working_set_byte_limit: 16,
+        current_media_working_set_resource_unit_limit: 1,
+        viewer_entry_capacity: 2,
+        viewer_byte_budget: 16,
+        failure_entry_capacity: 1,
+    });
+
+    assert!(store.insert_viewer_frame(first_key.clone(), first_frame));
+    assert!(store.insert_viewer_frame(second_key.clone(), second_frame));
+    assert_eq!(
+        store.viewer_frame(&first_key).expect("first frame").rgba.as_ref(),
+        &[1, 2, 3, 255]
+    );
+    assert_eq!(
+        store.viewer_frame(&second_key).expect("second frame").rgba.as_ref(),
+        &[4, 5, 6, 255]
+    );
 }
 
 #[test]
@@ -8526,10 +11488,11 @@ fn preview_frame_store_stays_within_budget_across_one_hundred_media_regions() {
     let mut store = test_cpu_frame_store(100, byte_budget, 8);
 
     for region in 0..100i64 {
-        assert!(store.insert_media_frame(
+        assert!(admit_test_media_frame(
+            &mut store,
             test_media_key(region),
             test_media_frame(region as u8),
-            false,
+            MediaPreviewRequestPriority::Prefetch,
         ));
         let diagnostics = store.diagnostics();
         assert!(diagnostics.media_reserved_bytes <= diagnostics.media_byte_budget);
@@ -8547,27 +11510,78 @@ fn preview_frame_store_stays_within_budget_across_one_hundred_media_regions() {
 }
 
 #[test]
-fn preview_frame_store_pins_only_an_oversize_current_media_frame() {
+fn preview_frame_store_admits_current_beyond_optional_cache_into_bounded_working_set() {
     let current_key = test_media_key(200);
     let current_frame = test_media_frame(7);
     let frame_bytes = current_frame.reserved_cpu_bytes();
     let mut store = test_cpu_frame_store(4, frame_bytes.saturating_sub(1), 4);
 
-    assert!(!store.insert_media_frame(current_key.clone(), current_frame, true));
+    assert!(admit_test_media_frame(
+        &mut store,
+        current_key.clone(),
+        current_frame,
+        MediaPreviewRequestPriority::Current,
+    ));
     assert!(store.media_frame(&current_key).is_some());
     let current = store.diagnostics();
     assert_eq!(current.media_entries, 0);
-    assert_eq!(current.pinned_media_bytes, frame_bytes);
-    assert_eq!(current.media_oversize_rejections, 1);
+    assert_eq!(current.current_media_overflow_bytes, frame_bytes);
+    assert_eq!(current.media_oversize_rejections, 0);
 
     let prefetch_key = test_media_key(201);
-    assert!(!store.insert_media_frame(prefetch_key.clone(), test_media_frame(8), false));
+    assert!(!admit_test_media_frame(
+        &mut store,
+        prefetch_key.clone(),
+        test_media_frame(8),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
     assert!(store.media_frame(&prefetch_key).is_none());
     assert!(store.media_frame(&current_key).is_some());
 
-    store.clear_pinned_media_frame();
+    store.clear_current_media_overflow();
     assert!(store.media_frame(&current_key).is_none());
-    assert_eq!(store.diagnostics().pinned_media_bytes, 0);
+    assert_eq!(store.diagnostics().current_media_overflow_bytes, 0);
+}
+
+#[test]
+fn preview_frame_store_reports_demand_capacity_without_terminal_decode_memory() {
+    let mut store = PreviewFrameStoreAdapter::new(PreviewFrameStoreAdapterConfig {
+        media_entry_capacity: 2,
+        media_byte_budget: 1_024,
+        media_resource_unit_budget: 4,
+        current_media_working_set_entry_limit: 1,
+        current_media_working_set_byte_limit: 1_024,
+        current_media_working_set_resource_unit_limit: 4,
+        viewer_entry_capacity: 1,
+        viewer_byte_budget: 1_024,
+        failure_entry_capacity: 2,
+    });
+    let first = test_media_key(301);
+    let second = test_media_key(302);
+    assert!(admit_test_media_frame(
+        &mut store,
+        first.clone(),
+        test_media_frame(1),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
+    assert!(admit_test_media_frame(
+        &mut store,
+        second.clone(),
+        test_media_frame(2),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
+    let demand_id = test_media_work_demand(17);
+    let first_guarded = store
+        .protected_media_frame(&first, demand_id)
+        .expect("first demand allocation fits")
+        .expect("first frame is resident");
+    assert!(matches!(
+        store.protected_media_frame(&second, demand_id),
+        Err(crate::app::preview_frame_store::MediaFrameProtectionError::CurrentWorkingSetCapacity)
+    ));
+    assert!(!store.contains_failure(&second));
+    assert_eq!(store.diagnostics().media_current_working_set_rejections, 1);
+    drop(first_guarded);
 }
 
 #[test]
@@ -8576,13 +11590,21 @@ fn preview_frame_store_clear_releases_frames_failures_and_reserved_bytes() {
         media_entry_capacity: 2,
         media_byte_budget: 1_024,
         media_resource_unit_budget: 4,
+        current_media_working_set_entry_limit: 8,
+        current_media_working_set_byte_limit: 4_096,
+        current_media_working_set_resource_unit_limit: 8,
         viewer_entry_capacity: 2,
         viewer_byte_budget: 1_024,
         failure_entry_capacity: 2,
     });
     let key = test_media_key(1);
 
-    store.insert_media_frame(key.clone(), test_media_frame(1), false);
+    assert!(admit_test_media_frame(
+        &mut store,
+        key.clone(),
+        test_media_frame(1),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
     store.remember_failure(key.clone());
     store.clear_all();
 
@@ -8596,44 +11618,86 @@ fn preview_frame_store_clear_releases_frames_failures_and_reserved_bytes() {
 
 #[test]
 fn media_preview_key_includes_file_length_in_identity() {
-    let mut first = test_media_key(1);
-    first.path = PathBuf::from("E:/media/replaced.mov");
-    first.fingerprint = Some(MediaFileFingerprint {
-        len: Some(1_024),
-        modified_secs: Some(10),
-        modified_nanos: Some(20),
-    });
-    let mut second = first.clone();
-    second.fingerprint = Some(MediaFileFingerprint {
-        len: Some(2_048),
-        modified_secs: Some(10),
-        modified_nanos: Some(20),
-    });
+    let first = test_media_key_with_physical_source(
+        test_media_key(1),
+        PathBuf::from("E:/media/replaced.mov"),
+        test_media_file_fingerprint(1_024, 10),
+        0,
+    );
+    let second = test_media_key_with_physical_source(
+        first.clone(),
+        PathBuf::from("E:/media/replaced.mov"),
+        test_media_file_fingerprint(2_048, 10),
+        0,
+    );
 
     assert_ne!(first, second);
 }
 
 #[test]
 fn media_preview_cache_does_not_reuse_same_path_with_different_file_length() {
-    let mut old_key = test_media_key(1);
-    old_key.path = PathBuf::from("E:/media/replaced.mov");
-    old_key.fingerprint = Some(MediaFileFingerprint {
-        len: Some(1_024),
-        modified_secs: Some(10),
-        modified_nanos: Some(20),
-    });
-    let mut new_key = old_key.clone();
-    new_key.fingerprint = Some(MediaFileFingerprint {
-        len: Some(2_048),
-        modified_secs: Some(10),
-        modified_nanos: Some(20),
-    });
+    let old_key = test_media_key_with_physical_source(
+        test_media_key(1),
+        PathBuf::from("E:/media/replaced.mov"),
+        test_media_file_fingerprint(1_024, 10),
+        0,
+    );
+    let new_key = test_media_key_with_physical_source(
+        old_key.clone(),
+        PathBuf::from("E:/media/replaced.mov"),
+        test_media_file_fingerprint(2_048, 10),
+        0,
+    );
     let mut store = test_cpu_frame_store(2, 1_024, 2);
 
-    store.insert_media_frame(old_key.clone(), test_media_frame(1), false);
+    assert!(admit_test_media_frame(
+        &mut store,
+        old_key.clone(),
+        test_media_frame(1),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
 
     assert!(store.media_frame(&new_key).is_none());
     assert!(store.media_frame(&old_key).is_some());
+}
+
+#[test]
+fn media_preview_cache_isolates_physical_video_streams() {
+    let first_stream = test_media_key(1);
+    let second_stream = test_media_key_with_physical_source(
+        first_stream.clone(),
+        first_stream.decode.source().path().to_path_buf(),
+        first_stream.decode.source().fingerprint(),
+        first_stream.decode.source().video_stream_index().saturating_add(1),
+    );
+    let mut store = test_cpu_frame_store(2, 1_024, 2);
+
+    assert!(admit_test_media_frame(
+        &mut store,
+        first_stream.clone(),
+        test_media_frame(1),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
+    assert!(store.media_frame(&second_stream).is_none());
+    assert!(store.media_frame(&first_stream).is_some());
+}
+
+#[test]
+fn media_preview_key_rejects_incomplete_source_revision_before_frame_store() {
+    let store = test_cpu_frame_store(2, 1_024, 2);
+
+    let source = mondrian_media::PreviewDecodeSource::from_frozen_cpu_stream(
+        std::env::temp_dir().join("mondrian-preview-incomplete.mov"),
+        MediaFileFingerprint::default(),
+        0,
+    );
+
+    assert!(matches!(
+        source,
+        Err(mondrian_media::PreviewDecodeContractError::IncompleteSourceRevision { .. })
+    ));
+    assert_eq!(store.diagnostics().media_entries, 0);
+    assert_eq!(store.diagnostics().failure_entries, 0);
 }
 
 #[test]
@@ -8645,7 +11709,12 @@ fn media_preview_caches_isolate_exact_color_engines() {
     };
     let mut store = test_cpu_frame_store(2, 1_024, 2);
 
-    store.insert_media_frame(old_key.clone(), test_media_frame(1), false);
+    assert!(admit_test_media_frame(
+        &mut store,
+        old_key.clone(),
+        test_media_frame(1),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
     store.remember_failure(old_key.clone());
 
     assert!(store.media_frame(&new_key).is_none());
@@ -8686,8 +11755,204 @@ fn media_preview_failure_cache_updates_existing_key_without_growing() {
 }
 
 #[test]
-fn preview_service_cancel_interactive_work_clears_pending_and_cached_state() {
+fn transport_intent_synchronization_retires_only_real_discontinuities() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    let reusable_media_key = test_media_key(44);
+
+    service.synchronize_transport_intent(state.preview_transport_intent());
+    assert!(admit_test_media_frame(
+        &mut service.frame_store.borrow_mut(),
+        reusable_media_key.clone(),
+        test_media_frame(44),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
+    assert_eq!(
+        service.decode_residency.diagnostics().active_family,
+        Some(PreviewDecodeResidencyFamily::Interactive)
+    );
+    assert_eq!(service.decode_residency.diagnostics().transitions, 1);
+    assert_eq!(service.diagnostics().interactive_cancel_requests, 0);
+
+    service.seed_pending_preview_work_for_test();
+    state
+        .dispatch_action(mondrian_editor_state::Action::DeselectAll)
+        .expect("ordinary editor action");
+    service.synchronize_transport_intent(state.preview_transport_intent());
+    assert_eq!(
+        service.diagnostics().interactive_cancel_requests,
+        0,
+        "an Action that preserves transport intent must not request cancellation"
+    );
+    assert_eq!(service.diagnostics().scheduler.pending_requests, 1);
+
+    state.play().expect("play");
+    service.synchronize_transport_intent(state.preview_transport_intent());
+    let after_play = service.diagnostics();
+    assert_eq!(after_play.interactive_cancel_requests, 1);
+    assert_eq!(after_play.scheduler.pending_requests, 0);
+    assert_eq!(
+        service.decode_residency.diagnostics().active_family,
+        Some(PreviewDecodeResidencyFamily::Playback)
+    );
+    assert_eq!(service.decode_residency.diagnostics().transitions, 2);
+    assert!(
+        service.frame_store.borrow_mut().media_frame(&reusable_media_key).is_some(),
+        "transport authority must not invalidate an exact semantic CPU-frame cache entry"
+    );
+
+    service.seed_pending_preview_work_with_access_mode_for_test(
+        PreviewDecodeAccessMode::PlaybackCursor,
+        None,
+    );
+    state.seek(5).expect("seek");
+    service.synchronize_transport_intent(state.preview_transport_intent());
+    let after_seek = service.diagnostics();
+    assert_eq!(
+        after_seek.interactive_cancel_requests, 2,
+        "a new Playback Epoch must retire prior-family work even while play intent remains active"
+    );
+    assert_eq!(after_seek.scheduler.pending_requests, 0);
+    assert_eq!(
+        service.decode_residency.diagnostics().active_family,
+        Some(PreviewDecodeResidencyFamily::Playback),
+        "a seek must not needlessly rebuild the same-family decoder context"
+    );
+    assert_eq!(service.decode_residency.diagnostics().transitions, 2);
+
+    service.seed_pending_preview_work_with_access_mode_for_test(
+        PreviewDecodeAccessMode::PlaybackCursor,
+        None,
+    );
+    state.pause().expect("pause");
+    service.synchronize_transport_intent(state.preview_transport_intent());
+    let after_pause = service.diagnostics();
+    assert_eq!(after_pause.interactive_cancel_requests, 3);
+    assert_eq!(after_pause.scheduler.pending_requests, 0);
+    assert_eq!(
+        service.decode_residency.diagnostics().active_family,
+        Some(PreviewDecodeResidencyFamily::Interactive)
+    );
+    assert_eq!(service.decode_residency.diagnostics().transitions, 3);
+    assert!(
+        service.frame_store.borrow_mut().media_frame(&reusable_media_key).is_some(),
+        "play/pause retirement cancels work but retains independently valid CPU residency"
+    );
+
+    state.seek(6).expect("seek");
+    service.synchronize_transport_intent(state.preview_transport_intent());
+    let after_stopped_seek = service.diagnostics();
+    assert_eq!(after_stopped_seek.interactive_cancel_requests, 4);
+    assert!(
+        service.frame_store.borrow_mut().media_frame(&reusable_media_key).is_some(),
+        "a stopped seek without an exact Viewer output must not evict reusable CPU residency"
+    );
+    service.shutdown();
+}
+
+#[test]
+fn completed_decode_residency_barrier_retries_a_pending_candidate_once() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    service.decode_residency.register_worker(MediaPreviewWorkerLane::NonPlayback);
+
+    assert!(service.decode_residency.activate(PreviewDecodeResidencyFamily::Interactive));
+    let interactive_revision = service.decode_residency.revision();
+    assert!(service.decode_residency.activate(PreviewDecodeResidencyFamily::Playback));
+    let retirement = service
+        .decode_residency
+        .worker_directive(MediaPreviewWorkerLane::NonPlayback, interactive_revision)
+        .expect("non-playback worker must retire for playback residency");
+    assert!(retirement.retire_context());
+
+    service
+        .decode_residency_waiting
+        .set(Some(PreviewDecodeAccessMode::PlaybackCursor));
+    service
+        .decode_residency
+        .acknowledge_retirement(MediaPreviewWorkerLane::NonPlayback, retirement.revision());
+
+    let mut state = AppState::new();
+    state.set_playback_frame_running(0);
+    let first = service.poll_playback_work(
+        state.pending_playback_frame_demand_identity(),
+        state.preview_transport_intent(),
+    );
+    assert!(
+        first.candidate_retry_required,
+        "the final residency acknowledgement must make the blocked candidate actionable"
+    );
+
+    let second = service.poll_playback_work(
+        state.pending_playback_frame_demand_identity(),
+        state.preview_transport_intent(),
+    );
+    assert!(
+        !second.candidate_retry_required,
+        "one coordination edge must not create an unbounded retry loop"
+    );
+
+    service.decode_residency.unregister_worker(MediaPreviewWorkerLane::NonPlayback);
+    service.shutdown();
+}
+
+#[test]
+fn completed_decode_residency_barrier_remains_actionable_for_a_late_waiter() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    service.decode_residency.register_worker(MediaPreviewWorkerLane::NonPlayback);
+    assert!(service.decode_residency.activate(PreviewDecodeResidencyFamily::Playback));
+    let retirement = service
+        .decode_residency
+        .worker_directive(MediaPreviewWorkerLane::NonPlayback, 0)
+        .expect("non-playback retirement directive");
+    service
+        .decode_residency
+        .acknowledge_retirement(MediaPreviewWorkerLane::NonPlayback, retirement.revision());
+
+    let mut state = AppState::new();
+    state.set_playback_frame_running(0);
+    let before_wait = service.poll_playback_work(
+        state.pending_playback_frame_demand_identity(),
+        state.preview_transport_intent(),
+    );
+    assert!(!before_wait.candidate_retry_required);
+
+    service
+        .decode_residency_waiting
+        .set(Some(PreviewDecodeAccessMode::PlaybackCursor));
+    let late_wait = service.poll_playback_work(
+        state.pending_playback_frame_demand_identity(),
+        state.preview_transport_intent(),
+    );
+    assert!(late_wait.candidate_retry_required);
+    assert!(service.decode_residency_waiting.get().is_none());
+
+    let consumed = service.poll_playback_work(
+        state.pending_playback_frame_demand_identity(),
+        state.preview_transport_intent(),
+    );
+    assert!(!consumed.candidate_retry_required);
+    service.decode_residency.unregister_worker(MediaPreviewWorkerLane::NonPlayback);
+    service.shutdown();
+}
+
+#[test]
+fn preview_service_lifecycle_cancel_clears_pending_and_cached_state() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let visual_sequence = Sequence::new("lifecycle visual cache");
+    let mut visual_program_seeded = false;
+    for _ in 0..64 {
+        match service.visual_programs.borrow_mut().prepare(&visual_sequence) {
+            Ok(_) => {
+                visual_program_seeded = true;
+                break;
+            }
+            Err(mondrian_renderer::PreparedVisualProgramError::EffectRegistryChanged {
+                ..
+            }) => {}
+            Err(error) => panic!("unexpected visual preparation failure: {error}"),
+        }
+    }
+    assert!(visual_program_seeded, "Effect registry must stabilize");
     let key = test_media_key(1);
     let generation = service.scheduler.begin_generation();
     assert_eq!(
@@ -8712,16 +11977,19 @@ fn preview_service_cancel_interactive_work_clears_pending_and_cached_state() {
             deadline_at: None,
             demand_identity: None,
             execution_id: None,
+            residency_work: None,
         }),
         MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
     );
-    service
-        .frame_store
-        .borrow_mut()
-        .insert_media_frame(key.clone(), test_media_frame(1), false);
+    assert!(admit_test_media_frame(
+        &mut service.frame_store.borrow_mut(),
+        key.clone(),
+        test_media_frame(1),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
     service.frame_store.borrow_mut().remember_failure(key.clone());
 
-    service.cancel_interactive_work();
+    service.cancel_all_work_for_lifecycle();
 
     assert_eq!(service.scheduler.pending_len(), 0);
     assert!(!service.scheduler.is_decode_current(
@@ -8738,6 +12006,9 @@ fn preview_service_cancel_interactive_work_clears_pending_and_cached_state() {
     assert_eq!(frame_store.media_entries, 0);
     assert_eq!(frame_store.media_reserved_bytes, 0);
     assert_eq!(frame_store.failure_entries, 0);
+    let visual_programs = service.visual_programs.borrow().diagnostics();
+    assert_eq!(visual_programs.entries, 0);
+    assert_eq!(visual_programs.scope_rotations, 1);
     service.shutdown();
 }
 
@@ -8745,10 +12016,12 @@ fn preview_service_cancel_interactive_work_clears_pending_and_cached_state() {
 fn preview_service_idle_release_preserves_failure_memory() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let key = test_media_key(1);
-    service
-        .frame_store
-        .borrow_mut()
-        .insert_media_frame(key.clone(), test_media_frame(1), false);
+    assert!(admit_test_media_frame(
+        &mut service.frame_store.borrow_mut(),
+        key.clone(),
+        test_media_frame(1),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
     service.frame_store.borrow_mut().remember_failure(key);
 
     assert!(service.try_release_idle_media_residency());
@@ -8764,10 +12037,12 @@ fn preview_service_idle_release_preserves_failure_memory() {
 fn preview_service_idle_release_fails_closed_while_intent_is_pending() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let key = test_media_key(1);
-    service
-        .frame_store
-        .borrow_mut()
-        .insert_media_frame(key, test_media_frame(1), false);
+    assert!(admit_test_media_frame(
+        &mut service.frame_store.borrow_mut(),
+        key,
+        test_media_frame(1),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
     service.execution.borrow_mut().set_pending(true);
 
     assert!(!service.try_release_idle_media_residency());
@@ -8784,10 +12059,39 @@ fn preview_service_settled_release_requires_an_exact_viewer_output() {
 }
 
 #[test]
+fn gpu_output_registration_does_not_run_settled_media_release_inside_commit() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    let frame = match execute_gpu_preview_for_test_app(&service, &state) {
+        PreviewGpuFrameState::Ready(frame) => frame,
+        _ => panic!("expected stopped GPU candidate"),
+    };
+    assert!(admit_test_media_frame(
+        &mut service.frame_store.borrow_mut(),
+        test_media_key(901),
+        test_media_frame(91),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
+    let output = ViewerExternalTextureFrame::new_spatial(
+        "bounded-registration",
+        ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
+            .expect("valid test presentation"),
+    )
+    .expect("valid external texture frame");
+
+    service.register_gpu_output(frame.output_key.clone(), output);
+
+    assert_eq!(service.frame_store.borrow().diagnostics().media_entries, 1);
+    assert!(service.try_release_settled_transport_media_residency());
+    assert_eq!(service.frame_store.borrow().diagnostics().media_entries, 0);
+    service.shutdown();
+}
+
+#[test]
 fn stopped_generation_rotation_retries_media_release_after_worker_settles() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
-    let frame = match service.gpu_preview_frame_for_state(&state) {
+    let frame = match execute_gpu_preview_for_test_app(&service, &state) {
         PreviewGpuFrameState::Ready(frame) => frame,
         _ => panic!("expected first stopped GPU candidate"),
     };
@@ -8801,12 +12105,15 @@ fn stopped_generation_rotation_retries_media_release_after_worker_settles() {
         PreviewDecodeAccessMode::RandomAccessStillFrame,
         MediaPreviewWorkerLane::NonPlayback,
     );
-    service
-        .frame_store
-        .borrow_mut()
-        .insert_media_frame(media_key, test_media_frame(90), false);
+    assert!(admit_test_media_frame(
+        &mut service.frame_store.borrow_mut(),
+        media_key,
+        test_media_frame(90),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
 
-    assert!(service.set_external_viewer_frame(
+    assert!(register_test_window_preview_output(
+        &service,
         &frame,
         "first-output",
         ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
@@ -8817,10 +12124,10 @@ fn stopped_generation_rotation_retries_media_release_after_worker_settles() {
     assert!(service.scheduler.resolve_execution(execution_id, true).status.is_current());
     assert_eq!(service.diagnostics().worker_queue.in_flight_jobs, 0);
 
-    state.seek(5);
+    state.seek(5).expect("seek");
     assert!(matches!(
-        service.gpu_preview_frame_for_state(&state),
-        PreviewGpuFrameState::Ready(_) | PreviewGpuFrameState::Current
+        execute_gpu_preview_for_test_app(&service, &state),
+        PreviewGpuFrameState::Ready(_) | PreviewGpuFrameState::Current(_)
     ));
     assert_eq!(
         service.frame_store.borrow().diagnostics().media_entries,
@@ -8848,6 +12155,7 @@ fn preview_service_completion_poll_respects_result_count_budget() {
         );
         results
             .send(test_successful_media_preview_result(
+                &service,
                 key,
                 generation,
                 index as u8,
@@ -8893,6 +12201,7 @@ fn preview_service_completion_poll_respects_time_budget() {
         );
         results
             .send(test_successful_media_preview_result(
+                &service,
                 key,
                 generation,
                 index as u8,
@@ -8947,7 +12256,7 @@ fn media_preview_forward_prefetch_window_uses_sequence_frame_rate() {
 #[test]
 fn media_preview_decode_cancellation_keeps_current_frame_unbudgeted() {
     assert_eq!(
-        media_preview_cancel_reason(
+        media_preview_cancel_reason_for_test_observation(
             None,
             MediaPreviewRequestPriority::Current,
             PreviewDecodeAccessMode::ScrubCursor,
@@ -8961,7 +12270,7 @@ fn media_preview_decode_cancellation_keeps_current_frame_unbudgeted() {
 #[test]
 fn media_preview_decode_cancellation_reports_shutdown() {
     assert_eq!(
-        media_preview_cancel_reason(
+        media_preview_cancel_reason_for_test_observation(
             Some(
                 mondrian_playback::FrameExecutionCancellation::BrokerClosed { age: Duration::ZERO }
             ),
@@ -9010,7 +12319,7 @@ fn media_preview_shutdown_observation_uses_broker_close_timestamp() {
         Some(mondrian_playback::FrameExecutionCancellation::BrokerClosed { .. })
     ));
     let observed_at = Instant::now();
-    let latency = media_preview_cancel_request_to_observed_us(
+    let latency = media_preview_cancel_request_to_logical_observation_us(
         MediaPreviewCancelReason::Shutdown,
         scheduler_cancellation,
         observed_at,
@@ -9047,7 +12356,7 @@ fn media_preview_cancel_observation_uses_scheduler_invalidation_timestamp() {
     scheduler.begin_generation();
     let scheduler_cancellation = scheduler.execution_cancellation(execution_id);
     let observed_at = Instant::now();
-    let latency = media_preview_cancel_request_to_observed_us(
+    let latency = media_preview_cancel_request_to_logical_observation_us(
         MediaPreviewCancelReason::Obsolete,
         scheduler_cancellation,
         observed_at,
@@ -9086,7 +12395,7 @@ fn media_preview_cancel_observation_uses_competing_request_timestamp() {
     ));
     let scheduler_cancellation = scheduler.execution_cancellation(execution_id);
     let observed_at = Instant::now();
-    let latency = media_preview_cancel_request_to_observed_us(
+    let latency = media_preview_cancel_request_to_logical_observation_us(
         MediaPreviewCancelReason::StillPreemptedByRealtimeCurrent,
         scheduler_cancellation,
         observed_at,
@@ -9122,7 +12431,7 @@ fn preview_service_shutdown_does_not_block_on_busy_worker() {
 #[test]
 fn media_preview_decode_cancellation_budgets_prefetch_work() {
     assert_eq!(
-        media_preview_cancel_reason(
+        media_preview_cancel_reason_for_test_observation(
             None,
             MediaPreviewRequestPriority::Prefetch,
             PreviewDecodeAccessMode::PlaybackCursor,
@@ -9132,7 +12441,7 @@ fn media_preview_decode_cancellation_budgets_prefetch_work() {
         None,
     );
     assert_eq!(
-        media_preview_cancel_reason(
+        media_preview_cancel_reason_for_test_observation(
             None,
             MediaPreviewRequestPriority::Prefetch,
             PreviewDecodeAccessMode::PlaybackCursor,
@@ -9142,7 +12451,7 @@ fn media_preview_decode_cancellation_budgets_prefetch_work() {
         Some(MediaPreviewCancelReason::PrefetchDeadline),
     );
     assert_eq!(
-        media_preview_cancel_reason(
+        media_preview_cancel_reason_for_test_observation(
             None,
             MediaPreviewRequestPriority::Prefetch,
             PreviewDecodeAccessMode::ScrubCursor,
@@ -9157,7 +12466,7 @@ fn media_preview_decode_cancellation_budgets_prefetch_work() {
 fn startup_preroll_prefetch_uses_session_deadline_instead_of_steady_state_budget() {
     let future_deadline = Instant::now() + Duration::from_millis(500);
     assert_eq!(
-        media_preview_cancel_reason_at_checkpoint(
+        media_preview_cancel_reason_at_logical_observation(
             None,
             MediaPreviewRequestPriority::Prefetch,
             PreviewDecodeAccessMode::PlaybackCursor,
@@ -9167,7 +12476,7 @@ fn startup_preroll_prefetch_uses_session_deadline_instead_of_steady_state_budget
         None,
     );
     assert_eq!(
-        media_preview_cancel_reason_at_checkpoint(
+        media_preview_cancel_reason_at_logical_observation(
             Some(
                 mondrian_playback::FrameExecutionCancellation::DeadlineExpired {
                     age: Duration::from_millis(1),
@@ -9185,7 +12494,7 @@ fn startup_preroll_prefetch_uses_session_deadline_instead_of_steady_state_budget
 #[test]
 fn media_preview_decode_cancellation_preempts_prefetch_for_current_work() {
     assert_eq!(
-        media_preview_cancel_reason(
+        media_preview_cancel_reason_for_test_observation(
             Some(
                 mondrian_playback::FrameExecutionCancellation::PrefetchPreemptedByCurrent {
                     request_age: Duration::ZERO,
@@ -9199,7 +12508,7 @@ fn media_preview_decode_cancellation_preempts_prefetch_for_current_work() {
         Some(MediaPreviewCancelReason::PrefetchPreemptedByCurrent),
     );
     assert_eq!(
-        media_preview_cancel_reason(
+        media_preview_cancel_reason_for_test_observation(
             None,
             MediaPreviewRequestPriority::Prefetch,
             PreviewDecodeAccessMode::PlaybackCursor,
@@ -9213,7 +12522,7 @@ fn media_preview_decode_cancellation_preempts_prefetch_for_current_work() {
 #[test]
 fn media_preview_decode_cancellation_preempts_still_for_realtime_current_work() {
     assert_eq!(
-        media_preview_cancel_reason(
+        media_preview_cancel_reason_for_test_observation(
             Some(
                 mondrian_playback::FrameExecutionCancellation::StillPreemptedByRealtimeCurrent {
                     request_age: Duration::ZERO,
@@ -9227,7 +12536,7 @@ fn media_preview_decode_cancellation_preempts_still_for_realtime_current_work() 
         Some(MediaPreviewCancelReason::StillPreemptedByRealtimeCurrent),
     );
     assert_eq!(
-        media_preview_cancel_reason(
+        media_preview_cancel_reason_for_test_observation(
             None,
             MediaPreviewRequestPriority::Current,
             PreviewDecodeAccessMode::RandomAccessStillFrame,
@@ -9241,7 +12550,7 @@ fn media_preview_decode_cancellation_preempts_still_for_realtime_current_work() 
 #[test]
 fn media_preview_decode_cancellation_stops_stale_work() {
     assert_eq!(
-        media_preview_cancel_reason(
+        media_preview_cancel_reason_for_test_observation(
             Some(mondrian_playback::FrameExecutionCancellation::Superseded {
                 age: Some(Duration::ZERO),
             }),
@@ -9253,7 +12562,7 @@ fn media_preview_decode_cancellation_stops_stale_work() {
         Some(MediaPreviewCancelReason::Obsolete),
     );
     assert_eq!(
-        media_preview_cancel_reason(
+        media_preview_cancel_reason_for_test_observation(
             Some(mondrian_playback::FrameExecutionCancellation::Superseded {
                 age: Some(Duration::ZERO),
             }),
@@ -9269,7 +12578,7 @@ fn media_preview_decode_cancellation_stops_stale_work() {
 #[test]
 fn media_preview_decode_cancellation_drops_late_playback_current_work() {
     assert_eq!(
-        media_preview_cancel_reason(
+        media_preview_cancel_reason_for_test_observation(
             Some(
                 mondrian_playback::FrameExecutionCancellation::DeadlineExpired {
                     age: Duration::ZERO,
@@ -9283,7 +12592,7 @@ fn media_preview_decode_cancellation_drops_late_playback_current_work() {
         Some(MediaPreviewCancelReason::PlaybackDeadline),
     );
     assert_eq!(
-        media_preview_cancel_reason(
+        media_preview_cancel_reason_for_test_observation(
             None,
             MediaPreviewRequestPriority::Current,
             PreviewDecodeAccessMode::PlaybackCursor,
@@ -9293,7 +12602,7 @@ fn media_preview_decode_cancellation_drops_late_playback_current_work() {
         None,
     );
     assert_eq!(
-        media_preview_cancel_reason(
+        media_preview_cancel_reason_for_test_observation(
             Some(
                 mondrian_playback::FrameExecutionCancellation::DeadlineExpired {
                     age: Duration::ZERO,

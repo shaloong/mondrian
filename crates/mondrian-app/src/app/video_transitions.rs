@@ -4,11 +4,14 @@
 //! Timeline persistence owns edit geometry; media/nested adapters own real
 //! source extents; the renderer consumes only an already-admitted author plan.
 
-use std::time::Duration;
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use mondrian_core::{
-    events::AppEvent, ClipId, FramePosition, MondrianError, Rational, TimelineTime,
-    TimelineTimeRange, VideoTransitionId,
+    ClipId, FramePosition, MondrianError, Rational, TimelineTime, TimelineTimeRange,
+    VideoTransitionId,
 };
 use mondrian_timeline::{clip::Clip, VideoTransition};
 
@@ -51,12 +54,13 @@ impl AppState {
     ///
     /// Unresolved media remains recoverable author intent. A resolved but
     /// insufficient handle range rejects the author transaction.
-    pub(crate) fn validate_resolved_retimed_transition_handles(
+    pub(crate) fn resolved_retimed_transition_source_extents(
         &self,
         sequence: &mondrian_timeline::sequence::Sequence,
         retimed_clip_ids: &[ClipId],
-    ) -> mondrian_core::Result<()> {
-        let retimed = retimed_clip_ids.iter().copied().collect::<std::collections::HashSet<_>>();
+    ) -> mondrian_core::Result<HashMap<ClipId, Option<TimelineTimeRange>>> {
+        let retimed = retimed_clip_ids.iter().copied().collect::<HashSet<_>>();
+        let mut extents = HashMap::new();
         for transition in sequence.video_transitions.iter().filter(|transition| {
             transition.is_enabled
                 && (retimed.contains(&transition.left) || retimed.contains(&transition.right))
@@ -69,19 +73,44 @@ impl AppState {
             let Ok(right_extent) = self.transition_source_extent(right) else {
                 continue;
             };
-            if !handles_satisfy(transition, left, right, left_extent, right_extent)? {
-                return Err(MondrianError::WorkflowStepFailed {
-                    step_id: "clip_retime_transition_handles".to_owned(),
-                    reason: format!(
-                        "retime would exceed the resolved source handles of Transition {}",
-                        transition.id
-                    ),
-                });
-            }
+            extents.insert(left.id, left_extent);
+            extents.insert(right.id, right_extent);
         }
-        Ok(())
+        Ok(extents)
     }
+}
 
+pub(super) fn validate_retimed_transition_handles_with_extents(
+    sequence: &mondrian_timeline::sequence::Sequence,
+    retimed_clip_ids: &[ClipId],
+    source_extents: &HashMap<ClipId, Option<TimelineTimeRange>>,
+) -> mondrian_core::Result<()> {
+    let retimed = retimed_clip_ids.iter().copied().collect::<HashSet<_>>();
+    for transition in sequence.video_transitions.iter().filter(|transition| {
+        transition.is_enabled
+            && (retimed.contains(&transition.left) || retimed.contains(&transition.right))
+    }) {
+        let (_, _, left, right) =
+            transition_endpoints(sequence, transition.left, transition.right)?;
+        let (Some(left_extent), Some(right_extent)) =
+            (source_extents.get(&left.id), source_extents.get(&right.id))
+        else {
+            continue;
+        };
+        if !handles_satisfy(transition, left, right, *left_extent, *right_extent)? {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "clip_retime_transition_handles".to_owned(),
+                reason: format!(
+                    "retime would exceed the resolved source handles of Transition {}",
+                    transition.id
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+impl AppState {
     /// Resolve current source-handle evidence for one authored Transition.
     ///
     /// This observation never repairs author state or changes the Transition
@@ -139,35 +168,6 @@ impl AppState {
         )
     }
 
-    /// Preflight every enabled visual Transition in one immutable Sequence.
-    ///
-    /// This is used again at export snapshot capture because relinked media or
-    /// an edited child Sequence may have changed external source extents since
-    /// the author transaction was committed.
-    pub(crate) fn validate_video_transition_source_handles(
-        &self,
-        sequence: &mondrian_timeline::sequence::Sequence,
-    ) -> mondrian_core::Result<()> {
-        for transition in
-            sequence.video_transitions.iter().filter(|transition| transition.is_enabled)
-        {
-            let (_, _, left, right) =
-                transition_endpoints(sequence, transition.left, transition.right)?;
-            let left_extent = self.transition_source_extent(left)?;
-            let right_extent = self.transition_source_extent(right)?;
-            if !handles_satisfy(transition, left, right, left_extent, right_extent)? {
-                return Err(MondrianError::WorkflowStepFailed {
-                    step_id: "video_transition_handle_preflight".to_owned(),
-                    reason: format!(
-                        "video Transition {} exceeds the current source handles",
-                        transition.id
-                    ),
-                });
-            }
-        }
-        Ok(())
-    }
-
     /// Create one Cross Dissolve between an ordered adjacent Clip pair.
     ///
     /// The entire operation, including an explicitly requested shortening, is
@@ -197,12 +197,11 @@ impl AppState {
         )?;
         let transition = VideoTransition::cross_dissolve(left_id, right_id, applied_range);
         let transition_id = transition.id;
-        let sequence_id = self.commit_active_sequence_edit("创建交叉溶解", |sequence| {
+        let _sequence_id = self.commit_active_sequence_edit("创建交叉溶解", |sequence| {
             sequence.video_transitions.push(transition);
             sequence.validate_author_identities()?;
             Ok(sequence.id)
         })?;
-        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         if was_shortened {
             self.set_status_hint("交叉溶解已按可用源素材手柄缩短", false);
         }
@@ -240,7 +239,7 @@ impl AppState {
             right_extent,
             handle_policy,
         )?;
-        let sequence_id = self.commit_active_sequence_edit("调整视频转场", |sequence| {
+        let _sequence_id = self.commit_active_sequence_edit("调整视频转场", |sequence| {
             let transition = sequence
                 .video_transitions
                 .iter_mut()
@@ -250,7 +249,6 @@ impl AppState {
             sequence.validate_author_identities()?;
             Ok(sequence.id)
         })?;
-        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         if was_shortened {
             self.set_status_hint("视频转场已按可用源素材手柄缩短", false);
         }
@@ -276,7 +274,7 @@ impl AppState {
                 reason: "Transition endpoint Track is locked".to_owned(),
             });
         }
-        let sequence_id = self.commit_active_sequence_edit("删除视频转场", |sequence| {
+        let _sequence_id = self.commit_active_sequence_edit("删除视频转场", |sequence| {
             let index = sequence
                 .video_transitions
                 .iter()
@@ -285,7 +283,6 @@ impl AppState {
             sequence.video_transitions.remove(index);
             Ok(sequence.id)
         })?;
-        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         Ok(())
     }
 
@@ -326,10 +323,13 @@ impl AppState {
                         reason: format!("Transition source asset does not exist: {asset_id}"),
                     }
                 })?;
-                let Some(video) = asset.media_info.primary_video() else {
+                let Some(video) = asset.media_probe().and_then(|probe| probe.primary_video())
+                else {
                     return Err(MondrianError::WorkflowStepFailed {
                         step_id: "video_transition_source_extent".to_owned(),
-                        reason: format!("Transition source has no video stream: {asset_id}"),
+                        reason: format!(
+                            "Transition source has no coherent video probe: {asset_id}"
+                        ),
                     });
                 };
                 if video.total_frames == Some(1) {

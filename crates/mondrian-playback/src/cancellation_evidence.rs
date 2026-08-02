@@ -32,10 +32,13 @@ pub struct FrameCancellationObservation {
     pub cause: FrameCancellationCause,
     /// Total worker execution lifetime before returning the canceled outcome.
     pub execution_duration: Duration,
-    /// Worker-start to first cooperative checkpoint that observed cancellation.
-    pub execution_to_checkpoint: Option<Duration>,
-    /// Authority-request to first cooperative checkpoint latency.
-    pub request_to_checkpoint: Option<Duration>,
+    /// Worker-start to `LogicalCancellationObserved`.
+    ///
+    /// This is scheduler/observer evidence, never a claim that FFmpeg or any
+    /// other concrete media checkpoint has already run.
+    pub execution_to_logical_cancellation: Option<Duration>,
+    /// Authority-request to `LogicalCancellationObserved` latency.
+    pub request_to_logical_cancellation: Option<Duration>,
 }
 
 /// Exact streaming timing aggregate in microseconds.
@@ -82,13 +85,13 @@ pub struct FrameCancellationProfile {
     pub unknown: u64,
     /// Total worker lifetime of canceled executions.
     pub execution: FrameCancellationTiming,
-    /// Worker start to the first cooperative checkpoint.
-    pub execution_to_checkpoint: FrameCancellationTiming,
-    /// Cancellation-authority request to first cooperative checkpoint.
-    pub request_to_checkpoint: FrameCancellationTiming,
-    /// First cooperative checkpoint to worker return.
-    pub checkpoint_to_return: FrameCancellationTiming,
-    /// Observations whose checkpoint ordering is mathematically impossible.
+    /// Worker start to `LogicalCancellationObserved`.
+    pub execution_to_logical_cancellation: FrameCancellationTiming,
+    /// Cancellation-authority request to `LogicalCancellationObserved`.
+    pub request_to_logical_cancellation: FrameCancellationTiming,
+    /// `LogicalCancellationObserved` to worker return.
+    pub logical_cancellation_to_return: FrameCancellationTiming,
+    /// Observations whose logical-cancellation ordering is mathematically impossible.
     pub invalid_timing_order: u64,
 }
 
@@ -110,27 +113,30 @@ impl FrameCancellationProfile {
         };
         *cause = cause.saturating_add(1);
         self.execution.observe(observation.execution_duration);
-        if let Some(execution_to_checkpoint) = observation.execution_to_checkpoint {
-            self.execution_to_checkpoint.observe(execution_to_checkpoint);
+        if let Some(execution_to_logical_cancellation) =
+            observation.execution_to_logical_cancellation
+        {
+            self.execution_to_logical_cancellation
+                .observe(execution_to_logical_cancellation);
         }
-        if let Some(request_to_checkpoint) = observation.request_to_checkpoint {
-            self.request_to_checkpoint.observe(request_to_checkpoint);
+        if let Some(request_to_logical_cancellation) = observation.request_to_logical_cancellation {
+            self.request_to_logical_cancellation.observe(request_to_logical_cancellation);
         }
         let invalid_timing_order = observation
-            .execution_to_checkpoint
-            .is_some_and(|checkpoint| checkpoint > observation.execution_duration)
+            .execution_to_logical_cancellation
+            .is_some_and(|observed| observed > observation.execution_duration)
             || observation
-                .execution_to_checkpoint
-                .zip(observation.request_to_checkpoint)
+                .execution_to_logical_cancellation
+                .zip(observation.request_to_logical_cancellation)
                 .is_some_and(|(execution_age, request_age)| request_age > execution_age);
         if invalid_timing_order {
             self.invalid_timing_order = self.invalid_timing_order.saturating_add(1);
         }
-        let checkpoint_to_return = observation
-            .execution_to_checkpoint
-            .map(|checkpoint| observation.execution_duration.saturating_sub(checkpoint))
+        let logical_cancellation_to_return = observation
+            .execution_to_logical_cancellation
+            .map(|observed| observation.execution_duration.saturating_sub(observed))
             .unwrap_or(observation.execution_duration);
-        self.checkpoint_to_return.observe(checkpoint_to_return);
+        self.logical_cancellation_to_return.observe(logical_cancellation_to_return);
     }
 }
 
@@ -184,23 +190,23 @@ impl FrameCancellationEvidenceCollector {
 /// Product cancellation budgets used by production and Headless acceptance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameCancellationPolicy {
-    /// Maximum authority-request to first cooperative checkpoint latency.
-    pub max_request_to_checkpoint: Duration,
-    /// Maximum checkpoint-to-return latency for playback work.
-    pub max_playback_return: Duration,
-    /// Maximum checkpoint-to-return latency for interactive work.
-    pub max_interactive_return: Duration,
-    /// Maximum checkpoint-to-return latency for deterministic still work.
-    pub max_still_return: Duration,
+    /// Maximum authority-request to `LogicalCancellationObserved` latency.
+    pub max_request_to_logical_cancellation: Duration,
+    /// Maximum logical-cancellation-to-return latency for playback work.
+    pub max_playback_logical_cancellation_to_return: Duration,
+    /// Maximum logical-cancellation-to-return latency for interactive work.
+    pub max_interactive_logical_cancellation_to_return: Duration,
+    /// Maximum logical-cancellation-to-return latency for deterministic still work.
+    pub max_still_logical_cancellation_to_return: Duration,
 }
 
 impl Default for FrameCancellationPolicy {
     fn default() -> Self {
         Self {
-            max_request_to_checkpoint: Duration::from_millis(5),
-            max_playback_return: Duration::from_millis(50),
-            max_interactive_return: Duration::from_millis(50),
-            max_still_return: Duration::from_millis(500),
+            max_request_to_logical_cancellation: Duration::from_millis(5),
+            max_playback_logical_cancellation_to_return: Duration::from_millis(50),
+            max_interactive_logical_cancellation_to_return: Duration::from_millis(50),
+            max_still_logical_cancellation_to_return: Duration::from_millis(500),
         }
     }
 }
@@ -211,15 +217,15 @@ pub enum FrameCancellationGateFailureKind {
     /// A cancellation returned without a structured authority.
     UnknownCause,
     /// A structured cancellation lacked request-age evidence.
-    MissingRequestToCheckpoint,
-    /// A structured cancellation lacked first-checkpoint execution timing.
-    MissingExecutionToCheckpoint,
-    /// A sample violates execution/checkpoint/request temporal ordering.
+    MissingRequestToLogicalCancellation,
+    /// A structured cancellation lacked logical-cancellation execution timing.
+    MissingExecutionToLogicalCancellation,
+    /// A sample violates execution/logical-cancellation/request temporal ordering.
     InvalidTimingOrder,
     /// A worker observed the authority request too late.
-    RequestToCheckpointExceeded,
-    /// Cleanup after the first checkpoint returned too late.
-    CheckpointToReturnExceeded,
+    RequestToLogicalCancellationExceeded,
+    /// Cleanup after logical cancellation returned too late.
+    LogicalCancellationToReturnExceeded,
 }
 
 /// One fail-closed cancellation acceptance failure.
@@ -267,21 +273,23 @@ pub fn evaluate_frame_cancellation(
             });
         }
         let structured = profile.cancellations.saturating_sub(profile.unknown);
-        let unattributed = structured.saturating_sub(profile.request_to_checkpoint.samples);
+        let unattributed =
+            structured.saturating_sub(profile.request_to_logical_cancellation.samples);
         if unattributed > 0 {
             failures.push(FrameCancellationGateFailure {
                 work_class,
-                kind: FrameCancellationGateFailureKind::MissingRequestToCheckpoint,
+                kind: FrameCancellationGateFailureKind::MissingRequestToLogicalCancellation,
                 observed: unattributed,
                 limit: 0,
             });
         }
-        let missing_checkpoint = structured.saturating_sub(profile.execution_to_checkpoint.samples);
-        if missing_checkpoint > 0 {
+        let missing_logical_cancellation =
+            structured.saturating_sub(profile.execution_to_logical_cancellation.samples);
+        if missing_logical_cancellation > 0 {
             failures.push(FrameCancellationGateFailure {
                 work_class,
-                kind: FrameCancellationGateFailureKind::MissingExecutionToCheckpoint,
-                observed: missing_checkpoint,
+                kind: FrameCancellationGateFailureKind::MissingExecutionToLogicalCancellation,
+                observed: missing_logical_cancellation,
                 limit: 0,
             });
         }
@@ -293,25 +301,25 @@ pub fn evaluate_frame_cancellation(
                 limit: 0,
             });
         }
-        let request_limit = duration_us(policy.max_request_to_checkpoint);
-        if profile.request_to_checkpoint.max_us > request_limit {
+        let request_limit = duration_us(policy.max_request_to_logical_cancellation);
+        if profile.request_to_logical_cancellation.max_us > request_limit {
             failures.push(FrameCancellationGateFailure {
                 work_class,
-                kind: FrameCancellationGateFailureKind::RequestToCheckpointExceeded,
-                observed: profile.request_to_checkpoint.max_us,
+                kind: FrameCancellationGateFailureKind::RequestToLogicalCancellationExceeded,
+                observed: profile.request_to_logical_cancellation.max_us,
                 limit: request_limit,
             });
         }
         let return_limit = duration_us(match work_class {
-            FrameWorkClass::Playback => policy.max_playback_return,
-            FrameWorkClass::Interactive => policy.max_interactive_return,
-            FrameWorkClass::Still => policy.max_still_return,
+            FrameWorkClass::Playback => policy.max_playback_logical_cancellation_to_return,
+            FrameWorkClass::Interactive => policy.max_interactive_logical_cancellation_to_return,
+            FrameWorkClass::Still => policy.max_still_logical_cancellation_to_return,
         });
-        if profile.checkpoint_to_return.max_us > return_limit {
+        if profile.logical_cancellation_to_return.max_us > return_limit {
             failures.push(FrameCancellationGateFailure {
                 work_class,
-                kind: FrameCancellationGateFailureKind::CheckpointToReturnExceeded,
-                observed: profile.checkpoint_to_return.max_us,
+                kind: FrameCancellationGateFailureKind::LogicalCancellationToReturnExceeded,
+                observed: profile.logical_cancellation_to_return.max_us,
                 limit: return_limit,
             });
         }
@@ -324,7 +332,7 @@ pub fn evaluate_frame_cancellation(
 }
 
 /// Current standalone cancellation-gate report schema.
-pub const FRAME_CANCELLATION_GATE_REPORT_SCHEMA_VERSION: u32 = 1;
+pub const FRAME_CANCELLATION_GATE_REPORT_SCHEMA_VERSION: u32 = 2;
 
 fn duration_us(value: Duration) -> u64 {
     value.as_micros().min(u128::from(u64::MAX)) as u64
@@ -335,66 +343,128 @@ mod tests {
     use super::*;
 
     #[test]
-    fn collector_derives_checkpoint_to_return_and_keeps_class_locality() {
+    fn collector_derives_logical_cancellation_to_return_and_keeps_class_locality() {
         let mut collector = FrameCancellationEvidenceCollector::default();
         collector.observe(FrameCancellationObservation {
             work_class: FrameWorkClass::Interactive,
             cause: FrameCancellationCause::Superseded,
             execution_duration: Duration::from_millis(40),
-            execution_to_checkpoint: Some(Duration::from_millis(7)),
-            request_to_checkpoint: Some(Duration::from_millis(2)),
+            execution_to_logical_cancellation: Some(Duration::from_millis(7)),
+            request_to_logical_cancellation: Some(Duration::from_millis(2)),
         });
 
         let report = collector.report();
         assert_eq!(report.all.cancellations, 1);
         assert_eq!(report.interactive.superseded, 1);
         assert_eq!(report.interactive.execution.max_us, 40_000);
-        assert_eq!(report.interactive.execution_to_checkpoint.max_us, 7_000);
-        assert_eq!(report.interactive.request_to_checkpoint.max_us, 2_000);
-        assert_eq!(report.interactive.checkpoint_to_return.max_us, 33_000);
+        assert_eq!(
+            report.interactive.execution_to_logical_cancellation.max_us,
+            7_000
+        );
+        assert_eq!(
+            report.interactive.request_to_logical_cancellation.max_us,
+            2_000
+        );
+        assert_eq!(
+            report.interactive.logical_cancellation_to_return.max_us,
+            33_000
+        );
         assert_eq!(report.playback.cancellations, 0);
     }
 
     #[test]
     fn gate_applies_strict_realtime_and_distinct_still_return_budgets() {
         let mut collector = FrameCancellationEvidenceCollector::default();
-        for work_class in [FrameWorkClass::Playback, FrameWorkClass::Still] {
+        for work_class in [
+            FrameWorkClass::Playback,
+            FrameWorkClass::Interactive,
+            FrameWorkClass::Still,
+        ] {
             collector.observe(FrameCancellationObservation {
                 work_class,
                 cause: FrameCancellationCause::Superseded,
-                execution_duration: Duration::from_millis(100),
-                execution_to_checkpoint: Some(Duration::from_millis(1)),
-                request_to_checkpoint: Some(Duration::from_millis(1)),
+                execution_duration: Duration::from_micros(51_001),
+                execution_to_logical_cancellation: Some(Duration::from_millis(1)),
+                request_to_logical_cancellation: Some(Duration::from_millis(1)),
             });
         }
 
         let gate =
             evaluate_frame_cancellation(collector.report(), FrameCancellationPolicy::default());
         assert!(!gate.passed);
-        assert_eq!(gate.failures.len(), 1);
+        assert_eq!(gate.failures.len(), 2);
         assert_eq!(gate.failures[0].work_class, FrameWorkClass::Playback);
         assert_eq!(
             gate.failures[0].kind,
-            FrameCancellationGateFailureKind::CheckpointToReturnExceeded
+            FrameCancellationGateFailureKind::LogicalCancellationToReturnExceeded
         );
+        assert_eq!(gate.failures[0].observed, 50_001);
+        assert_eq!(gate.failures[0].limit, 50_000);
+        assert_eq!(gate.failures[1].work_class, FrameWorkClass::Interactive);
+        assert_eq!(
+            gate.failures[1].kind,
+            FrameCancellationGateFailureKind::LogicalCancellationToReturnExceeded
+        );
+        assert_eq!(gate.failures[1].observed, 50_001);
+        assert_eq!(gate.failures[1].limit, 50_000);
     }
 
     #[test]
-    fn gate_rejects_unknown_unattributed_and_late_checkpoint_evidence() {
+    fn cancellation_return_budgets_have_exact_inclusive_boundaries() {
+        let evaluate = |work_class: FrameWorkClass, return_latency: Duration| {
+            let checkpoint = Duration::from_millis(1);
+            let mut collector = FrameCancellationEvidenceCollector::default();
+            collector.observe(FrameCancellationObservation {
+                work_class,
+                cause: FrameCancellationCause::Superseded,
+                execution_duration: checkpoint.saturating_add(return_latency),
+                execution_to_logical_cancellation: Some(checkpoint),
+                request_to_logical_cancellation: Some(checkpoint),
+            });
+            evaluate_frame_cancellation(collector.report(), FrameCancellationPolicy::default())
+        };
+
+        for work_class in [FrameWorkClass::Playback, FrameWorkClass::Interactive] {
+            assert!(evaluate(work_class, Duration::from_millis(50)).passed);
+            let exceeded = evaluate(work_class, Duration::from_micros(50_001));
+            assert!(!exceeded.passed);
+            assert!(exceeded.failures.iter().any(|failure| {
+                failure.work_class == work_class
+                    && failure.kind
+                        == FrameCancellationGateFailureKind::LogicalCancellationToReturnExceeded
+                    && failure.observed == 50_001
+                    && failure.limit == 50_000
+            }));
+        }
+
+        assert!(evaluate(FrameWorkClass::Still, Duration::from_millis(500)).passed);
+        let exceeded = evaluate(FrameWorkClass::Still, Duration::from_micros(500_001));
+        assert!(!exceeded.passed);
+        assert!(exceeded.failures.iter().any(|failure| {
+            failure.work_class == FrameWorkClass::Still
+                && failure.kind
+                    == FrameCancellationGateFailureKind::LogicalCancellationToReturnExceeded
+                && failure.observed == 500_001
+                && failure.limit == 500_000
+        }));
+    }
+
+    #[test]
+    fn gate_rejects_unknown_unattributed_and_late_logical_cancellation_evidence() {
         let mut collector = FrameCancellationEvidenceCollector::default();
         collector.observe(FrameCancellationObservation {
             work_class: FrameWorkClass::Interactive,
             cause: FrameCancellationCause::Unknown,
             execution_duration: Duration::from_millis(1),
-            execution_to_checkpoint: None,
-            request_to_checkpoint: None,
+            execution_to_logical_cancellation: None,
+            request_to_logical_cancellation: None,
         });
         collector.observe(FrameCancellationObservation {
             work_class: FrameWorkClass::Playback,
             cause: FrameCancellationCause::PlaybackDeadline,
             execution_duration: Duration::from_millis(10),
-            execution_to_checkpoint: Some(Duration::from_millis(9)),
-            request_to_checkpoint: Some(Duration::from_millis(8)),
+            execution_to_logical_cancellation: Some(Duration::from_millis(9)),
+            request_to_logical_cancellation: Some(Duration::from_millis(8)),
         });
 
         let gate =
@@ -404,36 +474,67 @@ mod tests {
             .iter()
             .any(|failure| { failure.kind == FrameCancellationGateFailureKind::UnknownCause }));
         assert!(gate.failures.iter().any(|failure| {
-            failure.kind == FrameCancellationGateFailureKind::RequestToCheckpointExceeded
+            failure.kind == FrameCancellationGateFailureKind::RequestToLogicalCancellationExceeded
         }));
     }
 
     #[test]
-    fn gate_rejects_missing_or_impossible_checkpoint_timing() {
+    fn gate_rejects_missing_or_impossible_logical_cancellation_timing() {
         let mut collector = FrameCancellationEvidenceCollector::default();
         collector.observe(FrameCancellationObservation {
             work_class: FrameWorkClass::Playback,
             cause: FrameCancellationCause::PlaybackDeadline,
             execution_duration: Duration::from_millis(10),
-            execution_to_checkpoint: None,
-            request_to_checkpoint: Some(Duration::from_millis(1)),
+            execution_to_logical_cancellation: None,
+            request_to_logical_cancellation: Some(Duration::from_millis(1)),
         });
         collector.observe(FrameCancellationObservation {
             work_class: FrameWorkClass::Interactive,
             cause: FrameCancellationCause::Superseded,
             execution_duration: Duration::from_millis(10),
-            execution_to_checkpoint: Some(Duration::from_millis(2)),
-            request_to_checkpoint: Some(Duration::from_millis(3)),
+            execution_to_logical_cancellation: Some(Duration::from_millis(2)),
+            request_to_logical_cancellation: Some(Duration::from_millis(3)),
         });
 
         let gate =
             evaluate_frame_cancellation(collector.report(), FrameCancellationPolicy::default());
 
         assert!(gate.failures.iter().any(|failure| {
-            failure.kind == FrameCancellationGateFailureKind::MissingExecutionToCheckpoint
+            failure.kind == FrameCancellationGateFailureKind::MissingExecutionToLogicalCancellation
         }));
         assert!(gate.failures.iter().any(|failure| {
             failure.kind == FrameCancellationGateFailureKind::InvalidTimingOrder
+        }));
+    }
+
+    #[test]
+    fn request_to_logical_cancellation_observation_has_exact_five_ms_boundary() {
+        let evaluate = |latency: Duration| {
+            let mut collector = FrameCancellationEvidenceCollector::default();
+            collector.observe(FrameCancellationObservation {
+                work_class: FrameWorkClass::Playback,
+                cause: FrameCancellationCause::PrefetchDeadline,
+                execution_duration: latency,
+                execution_to_logical_cancellation: Some(latency),
+                request_to_logical_cancellation: Some(latency),
+            });
+            evaluate_frame_cancellation(
+                collector.report(),
+                FrameCancellationPolicy {
+                    max_playback_logical_cancellation_to_return: Duration::ZERO,
+                    ..FrameCancellationPolicy::default()
+                },
+            )
+        };
+
+        assert!(evaluate(Duration::from_micros(4_999)).passed);
+        assert!(evaluate(Duration::from_micros(5_000)).passed);
+        let exceeded = evaluate(Duration::from_micros(5_001));
+        assert!(!exceeded.passed);
+        assert!(exceeded.failures.iter().any(|failure| {
+            failure.kind == FrameCancellationGateFailureKind::RequestToLogicalCancellationExceeded
+                && failure.observed == 5_001
+                && failure.limit == 5_000
         }));
     }
 }

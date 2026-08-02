@@ -5,12 +5,8 @@
 //! media execution, caching, color decisions, and playback coordination remain
 //! in `app::preview_runtime`.
 
-use mondrian_ui_widgets::{
-    ViewerExternalTextureFrame, ViewerExternalTexturePresentation, ViewerFrameContent,
-    ViewerFrameImage,
-};
+use mondrian_ui_widgets::{ViewerExternalTextureFrame, ViewerFrameContent, ViewerFrameImage};
 
-use crate::app::preview_execution::PreviewGpuFrame;
 use crate::app::preview_raster_frame::PreviewRasterColorSpace;
 use crate::app::preview_runtime::{PreviewPresentationContent, PreviewPresentationState};
 use crate::app::preview_unavailability::{PreviewOutputStage, PreviewUnavailability};
@@ -24,40 +20,48 @@ use crate::app_ui::panels::{
 pub type WindowPreviewAdapter =
     crate::app::preview_runtime::PreviewProductionRuntime<ViewerExternalTextureFrame>;
 
-/// Window-owned publication seam for renderer-registered Viewer textures.
-pub(crate) trait WindowPreviewOutputRegistration {
-    /// Publish one exact spatial output after renderer registration succeeds.
-    fn set_external_viewer_frame(
-        &self,
-        frame: &PreviewGpuFrame,
-        texture_key: impl Into<String>,
-        presentation: ViewerExternalTexturePresentation,
-    ) -> bool;
+/// Immutable Window projection of the last output admitted by presentation
+/// authority.
+///
+/// Widget model refreshes consume this snapshot instead of reevaluating
+/// Preview and attaching payload-free Ready feedback to a later demand.
+pub(crate) struct WindowPreviewSnapshot<'a> {
+    state: &'a ViewerPreviewState,
+    adapter: &'a WindowPreviewAdapter,
 }
 
-impl WindowPreviewOutputRegistration for WindowPreviewAdapter {
-    fn set_external_viewer_frame(
-        &self,
-        frame: &PreviewGpuFrame,
-        texture_key: impl Into<String>,
-        presentation: ViewerExternalTexturePresentation,
-    ) -> bool {
-        let Some(output) = ViewerExternalTextureFrame::new_spatial(texture_key, presentation)
-        else {
-            self.reject_gpu_output_registration();
-            return false;
-        };
-        self.register_gpu_output(frame, output)
+impl<'a> WindowPreviewSnapshot<'a> {
+    pub(crate) const fn new(
+        state: &'a ViewerPreviewState,
+        adapter: &'a WindowPreviewAdapter,
+    ) -> Self {
+        Self { state, adapter }
+    }
+}
+
+impl ViewerPreviewSource for WindowPreviewSnapshot<'_> {
+    fn viewer_preview_for_state(&self, _state: &AppState) -> ViewerPreviewState {
+        self.state.clone()
+    }
+
+    fn viewer_color_rejection(&self) -> Option<ViewerPreviewColorRejectionModel> {
+        <WindowPreviewAdapter as ViewerPreviewSource>::viewer_color_rejection(self.adapter)
+    }
+
+    fn viewer_color_pipeline_status(&self) -> Option<ViewerColorPipelineStatus> {
+        <WindowPreviewAdapter as ViewerPreviewSource>::viewer_color_pipeline_status(self.adapter)
     }
 }
 
 impl ViewerPreviewSource for WindowPreviewAdapter {
     fn viewer_preview_for_state(&self, state: &AppState) -> ViewerPreviewState {
-        match self.presentation_for_state(state) {
-            PreviewPresentationState::Ready(content) => viewer_frame_content(content)
-                .map(ViewerPreviewState::Ready)
-                .unwrap_or_else(ViewerPreviewState::Unavailable),
-            PreviewPresentationState::Transparent => ViewerPreviewState::Transparent,
+        match self.presentation(state.preview_frame_execution_request(std::time::Instant::now())) {
+            PreviewPresentationState::Ready(candidate) => {
+                { viewer_frame_content(candidate.into_value()) }
+                    .map(ViewerPreviewState::Ready)
+                    .unwrap_or_else(ViewerPreviewState::Unavailable)
+            }
+            PreviewPresentationState::Transparent(_) => ViewerPreviewState::Transparent,
             PreviewPresentationState::Loading => ViewerPreviewState::Loading,
             PreviewPresentationState::Stale(content) => viewer_frame_content(content)
                 .map(ViewerPreviewState::Stale)
@@ -75,7 +79,7 @@ impl ViewerPreviewSource for WindowPreviewAdapter {
             missing_metadata_policy: rejection.missing_metadata_policy,
             source: rejection.source,
             override_color_space: rejection.override_color_space,
-            detected_color_space: rejection.detected_color_space,
+            executable_color_space: rejection.executable_color_space,
             working_color_space: rejection.working_color_space,
             diagnostic_summary: rejection.diagnostic_summary,
             diagnostic_issue_summary: rejection.diagnostic_issue_summary,
@@ -115,7 +119,7 @@ impl ViewerPreviewSource for WindowPreviewAdapter {
     }
 }
 
-fn viewer_frame_content(
+pub(crate) fn viewer_frame_content(
     content: PreviewPresentationContent<ViewerExternalTextureFrame>,
 ) -> Result<ViewerFrameContent, PreviewUnavailability> {
     match content {

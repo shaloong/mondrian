@@ -8,6 +8,13 @@
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct PreviewHardwareDecodeCandidate {
+    backend: HwAccelBackend,
+    codec_config: HwAccelCodecConfigProbe,
+    device_context: HwAccelDeviceContextProbe,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PreviewHardwareDecodePlan {
     pub(super) request: PreviewHardwareDecodeRequest,
     pub(super) decision: PreviewHardwareDecodeDecision,
@@ -19,6 +26,22 @@ pub(super) struct PreviewHardwareDecodePlan {
     pub(super) hardware_cpu_transfer_observed: bool,
     pub(super) hardware_cpu_transfer_status: PreviewHardwareDecodeCpuTransferStatus,
     pub(super) native_decode_fallback: Option<PreviewNativeDecodeFallback>,
+    candidates: Vec<PreviewHardwareDecodeCandidate>,
+    candidate_index: Option<usize>,
+    setup_failures: Vec<PreviewHardwareDecodeSetupFailure>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewHardwareDecodeSetupFailureStage {
+    DeviceAcquireOrAttach,
+    DecoderOpen,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreviewHardwareDecodeSetupFailure {
+    backend: HwAccelBackend,
+    stage: PreviewHardwareDecodeSetupFailureStage,
+    reason: String,
 }
 
 impl PreviewHardwareDecodePlan {
@@ -30,14 +53,18 @@ impl PreviewHardwareDecodePlan {
         device_selector: Option<HwAccelDeviceSelector>,
     ) -> Self {
         let probe = HwAccelBackend::probe();
-        let (probe, ffmpeg_codec_config, ffmpeg_device_context) = Self::resolve_backend_probes(
-            request,
-            access_mode,
-            backend,
-            codec_id,
-            device_selector,
-            probe,
-        );
+        let (probe, ffmpeg_codec_config, ffmpeg_device_context, candidates) =
+            Self::resolve_backend_probes(
+                request,
+                access_mode,
+                backend,
+                codec_id,
+                device_selector,
+                probe,
+            );
+        let candidate_index = candidates
+            .iter()
+            .position(|candidate| Some(candidate.backend) == probe.candidate_backend);
         let decision = Self::decision_for(
             request,
             access_mode,
@@ -57,10 +84,13 @@ impl PreviewHardwareDecodePlan {
             hardware_cpu_transfer_observed: false,
             hardware_cpu_transfer_status: PreviewHardwareDecodeCpuTransferStatus::NotAttempted,
             native_decode_fallback: None,
+            candidates,
+            candidate_index,
+            setup_failures: Vec::new(),
         }
     }
 
-    pub(super) fn resolve_backend_probes(
+    fn resolve_backend_probes(
         request: PreviewHardwareDecodeRequest,
         access_mode: PreviewDecodeAccessMode,
         backend: PreviewDecodeBackend,
@@ -71,8 +101,10 @@ impl PreviewHardwareDecodePlan {
         HwAccelProbe,
         HwAccelCodecConfigProbe,
         HwAccelDeviceContextProbe,
+        Vec<PreviewHardwareDecodeCandidate>,
     ) {
         let mut fallback = None;
+        let mut candidates = Vec::new();
         for candidate in probe.candidate_backends.iter().copied() {
             let codec_config = candidate.probe_ffmpeg_codec_config(codec_id);
             let device_context = Self::device_context_probe_for_plan(
@@ -97,35 +129,41 @@ impl PreviewHardwareDecodePlan {
             {
                 continue;
             }
-            if request.prefers_gpu_residency()
+            if Self::plan_requires_device_context(request, access_mode, backend)
                 && device_selector.is_some_and(|selector| !selector.selects_backend(candidate))
             {
                 continue;
             }
-            if Self::plan_requires_device_context(request, access_mode, backend)
-                && !device_context.device_context_created
-            {
-                continue;
+            if Self::plan_requires_device_context(request, access_mode, backend) {
+                candidates.push(PreviewHardwareDecodeCandidate {
+                    backend: candidate,
+                    codec_config,
+                    device_context,
+                });
             }
-            probe.candidate_backend = Some(candidate);
-            probe.candidate_handle_kind = candidate.native_handle_kind();
-            probe.candidate_surface_formats = candidate.preferred_surface_formats();
-            probe.decoder_adapter_available =
-                ffmpeg_native_resource_adapter_available(&codec_config);
-            return (probe, codec_config, device_context);
         }
 
-        let (candidate, codec_config, device_context) = fallback.unwrap_or_else(|| {
-            let backend = HwAccelBackend::None;
-            (
-                backend,
-                backend.probe_ffmpeg_codec_config(codec_id),
-                HwAccelDeviceContextProbe::unavailable(
+        let selected = candidates.first().cloned();
+        let (candidate, codec_config, device_context) = selected
+            .map(|candidate| {
+                (
+                    candidate.backend,
+                    candidate.codec_config,
+                    candidate.device_context,
+                )
+            })
+            .or(fallback)
+            .unwrap_or_else(|| {
+                let backend = HwAccelBackend::None;
+                (
                     backend,
-                    "no platform hardware decode backend candidates are available",
-                ),
-            )
-        });
+                    backend.probe_ffmpeg_codec_config(codec_id),
+                    HwAccelDeviceContextProbe::unavailable(
+                        backend,
+                        "no platform hardware decode backend candidates are available",
+                    ),
+                )
+            });
         probe.candidate_backend = if candidate == HwAccelBackend::None {
             None
         } else {
@@ -133,7 +171,8 @@ impl PreviewHardwareDecodePlan {
         };
         probe.candidate_handle_kind = candidate.native_handle_kind();
         probe.candidate_surface_formats = candidate.preferred_surface_formats();
-        (probe, codec_config, device_context)
+        probe.decoder_adapter_available = ffmpeg_native_resource_adapter_available(&codec_config);
+        (probe, codec_config, device_context, candidates)
     }
 
     pub(super) fn plan_requires_device_context(
@@ -155,7 +194,8 @@ impl PreviewHardwareDecodePlan {
     ) -> bool {
         self.request != PreviewHardwareDecodeRequest::Auto
             && self.ffmpeg_codec_config.ffmpeg_codec_config_available
-            && self.ffmpeg_device_context.device_context_created
+            && self.ffmpeg_device_context.backend_maps_to_ffmpeg_device
+            && self.ffmpeg_device_context.ffmpeg_device_type_available
     }
 
     pub(super) fn allows_cpu_transfer_fallback(&self) -> bool {
@@ -174,6 +214,90 @@ impl PreviewHardwareDecodePlan {
             "{} FFmpeg hardware decode is configured; waiting for hardware frames before reporting active CPU-transfer decode",
             backend.as_str()
         );
+    }
+
+    pub(super) fn mark_device_context_acquired(
+        &mut self,
+        backend: HwAccelBackend,
+        newly_created: bool,
+    ) {
+        let action = if newly_created { "created" } else { "reused" };
+        self.ffmpeg_device_context = HwAccelDeviceContextProbe::acquired(
+            backend,
+            newly_created,
+            format!(
+                "FFmpeg {action} the worker-family {} hardware device context",
+                backend.as_str()
+            ),
+        );
+    }
+
+    pub(super) fn mark_device_context_setup_failed(&mut self, probe: HwAccelDeviceContextProbe) {
+        self.setup_failures.push(PreviewHardwareDecodeSetupFailure {
+            backend: probe.backend,
+            stage: PreviewHardwareDecodeSetupFailureStage::DeviceAcquireOrAttach,
+            reason: probe.reason.clone(),
+        });
+        self.ffmpeg_device_context = probe;
+        self.mark_hardware_cpu_transfer_setup_failed();
+    }
+
+    pub(super) fn mark_decoder_open_failed(&mut self, reason: impl Into<String>) {
+        let backend = self.probe.candidate_backend.unwrap_or(HwAccelBackend::None);
+        self.setup_failures.push(PreviewHardwareDecodeSetupFailure {
+            backend,
+            stage: PreviewHardwareDecodeSetupFailureStage::DecoderOpen,
+            reason: reason.into(),
+        });
+        self.mark_hardware_cpu_transfer_decoder_open_failed();
+    }
+
+    /// Select the next statically compatible backend after a concrete Session
+    /// setup failure. Device availability is never memoized by this plan.
+    pub(super) fn advance_hardware_candidate(
+        &mut self,
+        access_mode: PreviewDecodeAccessMode,
+        backend: PreviewDecodeBackend,
+    ) -> bool {
+        let next_index = self.candidate_index.map_or(0, |index| index.saturating_add(1));
+        let Some(candidate) = self.candidates.get(next_index).cloned() else {
+            if !self.setup_failures.is_empty() {
+                self.probe.reason = self
+                    .setup_failures
+                    .iter()
+                    .map(|failure| {
+                        format!(
+                            "{} {:?}: {}",
+                            failure.backend.as_str(),
+                            failure.stage,
+                            failure.reason
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+            }
+            return false;
+        };
+        self.candidate_index = Some(next_index);
+        self.probe.candidate_backend = Some(candidate.backend);
+        self.probe.candidate_handle_kind = candidate.backend.native_handle_kind();
+        self.probe.candidate_surface_formats = candidate.backend.preferred_surface_formats();
+        self.probe.decoder_adapter_available =
+            ffmpeg_native_resource_adapter_available(&candidate.codec_config);
+        self.ffmpeg_codec_config = candidate.codec_config;
+        self.ffmpeg_device_context = candidate.device_context;
+        self.hardware_cpu_transfer_configured = false;
+        self.hardware_cpu_transfer_observed = false;
+        self.hardware_cpu_transfer_status = PreviewHardwareDecodeCpuTransferStatus::NotAttempted;
+        self.decision = Self::decision_for(
+            self.request,
+            access_mode,
+            backend,
+            &self.probe,
+            &self.ffmpeg_codec_config,
+            &self.ffmpeg_device_context,
+        );
+        true
     }
 
     pub(super) fn mark_hardware_cpu_transfer_setup_failed(&mut self) {
@@ -242,7 +366,21 @@ impl PreviewHardwareDecodePlan {
                 "hardware device context creation was not required for this preview plan",
             );
         }
-        selected_backend.cached_ffmpeg_device_context_probe_for(device_selector)
+        if device_selector.is_some_and(|selector| !selector.selects_backend(selected_backend)) {
+            return HwAccelDeviceContextProbe::deferred(
+                selected_backend,
+                ffmpeg_codec_config.ffmpeg_device_type_available,
+                format!(
+                    "hardware device selector does not select {}",
+                    selected_backend.as_str()
+                ),
+            );
+        }
+        HwAccelDeviceContextProbe::deferred(
+            selected_backend,
+            ffmpeg_codec_config.ffmpeg_device_type_available,
+            "hardware device acquisition is deferred to the owning decode Session",
+        )
     }
 
     pub(super) fn decision_for(
@@ -270,7 +408,7 @@ impl PreviewHardwareDecodePlan {
         {
             return PreviewHardwareDecodeDecision::CpuRgbaCodecUnsupported;
         }
-        if !ffmpeg_device_context.device_context_created {
+        if !ffmpeg_device_context.ffmpeg_device_type_available {
             return PreviewHardwareDecodeDecision::CpuRgbaHardwareUnavailable;
         }
         if !probe.decoder_adapter_available {

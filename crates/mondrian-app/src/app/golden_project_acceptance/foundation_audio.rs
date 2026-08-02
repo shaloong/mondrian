@@ -323,13 +323,17 @@ pub(super) fn execute_foundation_stage(
     let assets = library.list_assets()?;
     let asset = assets
         .into_iter()
-        .find(|asset| asset.path == fixture.path)
+        .find(|asset| asset.file_path() == Some(fixture.path.as_path()))
         .context("imported PCM fixture is absent from the Asset Library")?;
     ensure!(
         asset.kind == AssetKind::Audio,
         "PCM fixture imported as a non-audio asset"
     );
-    let audio = asset.media_info.primary_audio().context("imported PCM has no audio stream")?;
+    let audio = asset
+        .media_probe()
+        .context("imported PCM has no coherent media probe")?
+        .primary_audio()
+        .context("imported PCM has no audio stream")?;
     ensure!(
         audio.sample_rate == contract.timeline.audio_sample_rate
             && audio.channels == 2

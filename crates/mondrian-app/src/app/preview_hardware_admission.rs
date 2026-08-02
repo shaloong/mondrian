@@ -4,10 +4,11 @@
 //! must be projected from one renderer/platform observation. Window and
 //! Headless Adapters cannot maintain parallel booleans or downgrade rules.
 
-use mondrian_media::{HwAccelDeviceSelector, PreviewHardwareDecodeRequest};
+use mondrian_media::{
+    HwAccelDeviceSelector, PreviewHardwareDecodeRequest, PreviewNativeSurfaceHint,
+};
 
 use super::native_video_import::PlaybackHardwareDecodeAdmission;
-use super::preview_access_mode::MediaPreviewNativeSurfaceHint;
 
 /// One coherent renderer/platform admission observation.
 ///
@@ -37,20 +38,20 @@ impl PreviewHardwareDecodeAdmissionState {
     /// Request for one source surface family without inventing GPU residency.
     pub(crate) fn request_for_surface(
         self,
-        surface: Option<MediaPreviewNativeSurfaceHint>,
+        surface: Option<PreviewNativeSurfaceHint>,
     ) -> PreviewHardwareDecodeRequest {
         let request = self.request();
         if request != PreviewHardwareDecodeRequest::PreferGpuResident {
             return request;
         }
         let supported = match (self.0, surface) {
-            (Some(admission), Some(MediaPreviewNativeSurfaceHint::Nv12)) => {
+            (Some(admission), Some(PreviewNativeSurfaceHint::Nv12)) => {
                 admission.renderer_supports_nv12
             }
-            (Some(admission), Some(MediaPreviewNativeSurfaceHint::P010)) => {
+            (Some(admission), Some(PreviewNativeSurfaceHint::P010)) => {
                 admission.renderer_supports_p010
             }
-            (_, None) => true,
+            (_, None) => false,
             (None, Some(_)) => false,
         };
         if supported {
@@ -98,11 +99,11 @@ mod tests {
             PreviewHardwareDecodeRequest::PreferGpuResident
         );
         assert_eq!(
-            state.request_for_surface(Some(MediaPreviewNativeSurfaceHint::Nv12)),
+            state.request_for_surface(Some(PreviewNativeSurfaceHint::Nv12)),
             PreviewHardwareDecodeRequest::PreferHardwareDecode
         );
         assert_eq!(
-            state.request_for_surface(Some(MediaPreviewNativeSurfaceHint::P010)),
+            state.request_for_surface(Some(PreviewNativeSurfaceHint::P010)),
             PreviewHardwareDecodeRequest::PreferGpuResident
         );
         assert_eq!(
@@ -115,6 +116,24 @@ mod tests {
     fn undiscovered_state_is_auto_and_has_no_device() {
         let state = PreviewHardwareDecodeAdmissionState::default();
         assert_eq!(state.request(), PreviewHardwareDecodeRequest::Auto);
+        assert_eq!(
+            state.request_for_surface(Some(PreviewNativeSurfaceHint::P010)),
+            PreviewHardwareDecodeRequest::Auto
+        );
+        assert_eq!(
+            state.request_for_surface(None),
+            PreviewHardwareDecodeRequest::Auto
+        );
         assert_eq!(state.device_selector(), None);
+    }
+
+    #[test]
+    fn unknown_surface_never_authorizes_gpu_residency() {
+        let state = PreviewHardwareDecodeAdmissionState::reported(admission());
+
+        assert_eq!(
+            state.request_for_surface(None),
+            PreviewHardwareDecodeRequest::PreferHardwareDecode
+        );
     }
 }

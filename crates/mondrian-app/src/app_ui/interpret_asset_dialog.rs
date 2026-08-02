@@ -150,6 +150,7 @@ impl InterpretAssetDialog {
             color_space_dropdown: color_space_dropdown_for(
                 AssetMediaInterpretation::default(),
                 None,
+                None,
             ),
             range_label: row_label("信号范围"),
             range_dropdown: range_dropdown_for(AssetMediaInterpretation::default(), None),
@@ -184,6 +185,7 @@ impl InterpretAssetDialog {
         self.color_space_dropdown = color_space_dropdown_for(
             self.draft.interpretation,
             self.draft.auto_interpretation.as_ref(),
+            self.draft.video_signal.as_ref(),
         );
         self.range_dropdown =
             range_dropdown_for(self.draft.interpretation, self.draft.video_signal.as_ref());
@@ -201,13 +203,14 @@ fn row_label(text: impl Into<String>) -> Label {
 fn color_space_dropdown_for(
     interpretation: AssetMediaInterpretation,
     auto_interpretation: Option<&DetectedColorInterpretation>,
+    signal: Option<&AppShellVideoSignalDiagnostics>,
 ) -> Dropdown {
     let selected = selected_override_color_space(
         interpretation,
-        auto_detected_color_space(auto_interpretation),
+        auto_executable_color_space(auto_interpretation, signal),
     );
     let mut items = vec![MenuItem::new(
-        auto_option_label(auto_interpretation),
+        auto_option_label(auto_interpretation, signal),
         draft_update_action(interpretation, MediaColorInterpretation::Auto),
     )
     .checked(matches!(
@@ -231,7 +234,7 @@ fn color_space_dropdown_for(
     }));
 
     let label = match interpretation.color {
-        MediaColorInterpretation::Auto => auto_option_label(auto_interpretation),
+        MediaColorInterpretation::Auto => auto_option_label(auto_interpretation, signal),
         MediaColorInterpretation::Override { color_space } => {
             color_space_label(color_space).to_owned()
         }
@@ -321,28 +324,48 @@ fn range_label_text(range: DecodedVideoRange) -> &'static str {
 
 fn selected_override_color_space(
     interpretation: AssetMediaInterpretation,
-    detected_color_space: Option<ColorSpace>,
+    executable_color_space: Option<ColorSpace>,
 ) -> ColorSpace {
     interpretation
         .color
         .override_color_space()
-        .or(detected_color_space)
+        .or(executable_color_space)
         .unwrap_or(ColorSpace::Rec709)
 }
 
-fn auto_detected_color_space(
+fn auto_executable_color_space(
     auto_interpretation: Option<&DetectedColorInterpretation>,
+    signal: Option<&AppShellVideoSignalDiagnostics>,
 ) -> Option<ColorSpace> {
-    auto_interpretation.and_then(|interpretation| interpretation.color_space)
+    let signal = signal?;
+    auto_interpretation.and_then(|interpretation| {
+        interpretation.executable_color_space_from_probe(
+            signal.sampling,
+            signal.color_metadata.as_ref(),
+            &signal.color_metadata_hints,
+        )
+    })
 }
 
-fn auto_option_label(auto_interpretation: Option<&DetectedColorInterpretation>) -> String {
+fn auto_option_label(
+    auto_interpretation: Option<&DetectedColorInterpretation>,
+    signal: Option<&AppShellVideoSignalDiagnostics>,
+) -> String {
     let Some(interpretation) = auto_interpretation else {
         return "自动 — 未明确标记".to_owned();
     };
-    let base = match interpretation.color_space {
-        Some(color_space) => format!("自动 — 已识别为 {}", color_space_label(color_space)),
-        None => "自动 — 未明确标记".to_owned(),
+    let base = match (
+        interpretation.candidate_color_space,
+        auto_executable_color_space(Some(interpretation), signal),
+    ) {
+        (Some(color_space), Some(_)) => {
+            format!("自动 — 已识别为 {}", color_space_label(color_space))
+        }
+        (Some(color_space), None) => format!(
+            "自动 — 建议 {}（仅诊断，不应用）",
+            color_space_label(color_space)
+        ),
+        (None, _) => "自动 — 未明确标记".to_owned(),
     };
     let mut details = vec![
         confidence_label(interpretation.confidence).to_owned(),
@@ -376,7 +399,10 @@ fn method_label(method: VideoColorDetectionMethod) -> &'static str {
 
 fn interpretation_status(draft: &AppUiInterpretAssetDraft) -> String {
     match draft.interpretation.color {
-        MediaColorInterpretation::Auto => auto_option_label(draft.auto_interpretation.as_ref()),
+        MediaColorInterpretation::Auto => auto_option_label(
+            draft.auto_interpretation.as_ref(),
+            draft.video_signal.as_ref(),
+        ),
         MediaColorInterpretation::Override { color_space } => {
             format!("手动 — {}", color_space_label(color_space))
         }
@@ -394,7 +420,9 @@ fn input_color_diagnostics_text(draft: &AppUiInterpretAssetDraft) -> String {
     let interpretation = draft.auto_interpretation.as_ref();
     let source = match draft.interpretation.color {
         MediaColorInterpretation::Override { color_space } => Some(color_space),
-        MediaColorInterpretation::Auto => interpretation.and_then(|value| value.color_space),
+        MediaColorInterpretation::Auto => {
+            auto_executable_color_space(interpretation, draft.video_signal.as_ref())
+        }
     };
     let decision = match draft.interpretation.color {
         MediaColorInterpretation::Override { .. } => "用户显式覆盖".to_owned(),
@@ -402,8 +430,8 @@ fn input_color_diagnostics_text(draft: &AppUiInterpretAssetDraft) -> String {
             .map(|value| {
                 let inference = if value.confidence == VideoColorInterpretationConfidence::High {
                     "确定/声明"
-                } else if value.color_space.is_some() {
-                    "推断"
+                } else if value.candidate_color_space.is_some() {
+                    "仅建议/不执行"
                 } else {
                     "未知"
                 };
@@ -490,9 +518,11 @@ fn evidence_summary(evidence: &VideoColorInterpretationEvidence) -> String {
             key,
             value,
             detected_color_space,
+            authority,
         } => format!(
-            "{:?} metadata {key}={value} → {}",
+            "{:?} {:?} metadata {key}={value} → {}",
             scope,
+            authority,
             color_space_label(*detected_color_space)
         ),
         VideoColorInterpretationEvidence::ExactCicpTags {
@@ -772,12 +802,14 @@ mod tests {
 
     #[test]
     fn status_reports_auto_detection_without_explainer_copy() {
+        let (interpretation, signal) = exact_cicp_fixture(ColorSpace::Rec2020);
         let draft = AppUiInterpretAssetDraft::new(
             AssetId::new(),
             "Shot",
             AssetMediaInterpretation::default(),
-            Some(detected_interpretation(ColorSpace::Rec2020)),
-        );
+            Some(interpretation),
+        )
+        .with_input_diagnostics(Some(signal), None);
 
         let status = interpretation_status(&draft);
 
@@ -787,6 +819,33 @@ mod tests {
         assert!(status.contains("高置信度"));
         assert!(status.contains("CICP"));
         assert!(!status.contains("预览/导出"));
+    }
+
+    #[test]
+    fn diagnostic_candidate_is_visible_without_becoming_auto_execution() {
+        let mut interpretation = detected_interpretation(ColorSpace::SonySLog3SGamut3Cine);
+        interpretation.confidence = VideoColorInterpretationConfidence::Low;
+        interpretation.evidence = vec![VideoColorInterpretationEvidence::MetadataHint {
+            scope: mondrian_media::VideoColorMetadataHintScope::FileName,
+            key: "filename".to_owned(),
+            value: "camera-S-Log3_S-Gamut3.Cine.mov".to_owned(),
+            detected_color_space: ColorSpace::SonySLog3SGamut3Cine,
+            authority: mondrian_media::VideoColorMetadataHintAuthority::DiagnosticSuggestion,
+        }];
+        let draft = AppUiInterpretAssetDraft::new(
+            AssetId::new(),
+            "Shot",
+            AssetMediaInterpretation::default(),
+            Some(interpretation.clone()),
+        );
+
+        let status = interpretation_status(&draft);
+        assert!(status.contains("建议"));
+        assert!(status.contains("仅诊断，不应用"));
+        assert_eq!(
+            auto_executable_color_space(Some(&interpretation), None),
+            None
+        );
     }
 
     #[test]
@@ -956,28 +1015,7 @@ mod tests {
     #[test]
     fn input_diagnostics_preserve_signal_evidence_and_processor_identity() {
         mondrian_core::ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
-        let primaries = VideoColorTag {
-            code: 1,
-            name: Some("bt709".to_owned()),
-            specified: true,
-        };
-        let transfer = VideoColorTag {
-            code: 1,
-            name: Some("bt709".to_owned()),
-            specified: true,
-        };
-        let matrix = VideoColorTag {
-            code: 1,
-            name: Some("bt709".to_owned()),
-            specified: true,
-        };
-        let mut interpretation = detected_interpretation(ColorSpace::Rec709);
-        interpretation.evidence.push(VideoColorInterpretationEvidence::ExactCicpTags {
-            primaries: primaries.clone(),
-            transfer: transfer.clone(),
-            matrix: matrix.clone(),
-            detected_color_space: ColorSpace::Rec709,
-        });
+        let (interpretation, signal) = exact_cicp_fixture(ColorSpace::Rec709);
         let draft = AppUiInterpretAssetDraft::new(
             AssetId::new(),
             "Camera A.mov",
@@ -985,14 +1023,7 @@ mod tests {
             Some(interpretation),
         )
         .with_input_diagnostics(
-            Some(AppShellVideoSignalDiagnostics {
-                range: DecodedVideoRange::Limited,
-                color_metadata: Some(mondrian_media::VideoColorMetadata {
-                    primaries,
-                    transfer,
-                    matrix,
-                }),
-            }),
+            Some(signal),
             Some(AppShellInputColorPipelineDiagnostics {
                 engine: mondrian_core::ColorEngine::mondrian_standard(),
                 working_color_space: mondrian_core::WorkingColorSpace::LinearRec2020,
@@ -1025,14 +1056,66 @@ mod tests {
 
     fn detected_interpretation(color_space: ColorSpace) -> DetectedColorInterpretation {
         DetectedColorInterpretation {
-            color_space: Some(color_space),
+            candidate_color_space: Some(color_space),
             confidence: VideoColorInterpretationConfidence::High,
             source: VideoColorSpaceSource::Metadata,
-            method: VideoColorDetectionMethod::CicpTags,
-            evidence: Vec::new(),
+            method: VideoColorDetectionMethod::MetadataHint,
+            evidence: vec![VideoColorInterpretationEvidence::MetadataHint {
+                scope: mondrian_media::VideoColorMetadataHintScope::Stream,
+                key: "source_color_space".to_owned(),
+                value: format!("{color_space:?}"),
+                detected_color_space: color_space,
+                authority: mondrian_media::VideoColorMetadataHintAuthority::SourceDeclaration(
+                    mondrian_media::VideoColorMetadataDeclaration::SourceColorSpace,
+                ),
+            }],
             warnings: Vec::new(),
             user_overridable: true,
         }
+    }
+
+    fn exact_cicp_fixture(
+        color_space: ColorSpace,
+    ) -> (DetectedColorInterpretation, AppShellVideoSignalDiagnostics) {
+        let (primaries, transfer, matrix) = match color_space {
+            ColorSpace::Rec709 => ((1, "bt709"), (1, "bt709"), (1, "bt709")),
+            ColorSpace::Rec2020 => ((9, "bt2020"), (1, "bt709"), (9, "bt2020nc")),
+            other => panic!("no exact CICP fixture for {other:?}"),
+        };
+        let sampling = mondrian_media::ProvenVideoSampling {
+            pixel_format: mondrian_core::PixelFormat::Yuv420p,
+            bit_depth: 8,
+            has_alpha: false,
+        };
+        let metadata = mondrian_media::VideoColorMetadata {
+            primaries: VideoColorTag {
+                code: primaries.0,
+                name: Some(primaries.1.to_owned()),
+                specified: true,
+            },
+            transfer: VideoColorTag {
+                code: transfer.0,
+                name: Some(transfer.1.to_owned()),
+                specified: true,
+            },
+            matrix: VideoColorTag {
+                code: matrix.0,
+                name: Some(matrix.1.to_owned()),
+                specified: true,
+            },
+        };
+        let interpretation =
+            mondrian_media::interpret_video_color_metadata(&metadata, Some(sampling), &[]);
+        assert_eq!(interpretation.candidate_color_space, Some(color_space));
+        (
+            interpretation,
+            AppShellVideoSignalDiagnostics {
+                range: DecodedVideoRange::Limited,
+                sampling: Some(sampling),
+                color_metadata: Some(metadata),
+                color_metadata_hints: Vec::new(),
+            },
+        )
     }
 
     fn draft_update_payload_from_action(action: &Action) -> InterpretAssetDraftUpdatePayload {

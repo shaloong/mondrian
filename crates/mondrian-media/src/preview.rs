@@ -7,10 +7,11 @@ use crate::decoder::{
     DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoMatrix, DecodedVideoRange,
     DecodedVideoRangeContract, DecodedVideoSampling, DecodedVideoSurfaceFormat, HwAccelBackend,
     HwAccelCodecConfigProbe, HwAccelDeviceContext, HwAccelDeviceContextProbe,
-    HwAccelDeviceSelector, HwAccelPixelFormat, HwAccelProbe,
+    HwAccelDeviceSelector, HwAccelPixelFormat, HwAccelProbe, HwDeviceContextPool,
 };
 use ffmpeg_next as ffmpeg;
 use mondrian_core::types::ColorSpace;
+pub use mondrian_core::{MediaFileChangeStamp, MediaFileFingerprint, MediaFileObjectIdentity};
 use mondrian_core::{MondrianError, Result, TimelineTime};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -20,9 +21,10 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 mod cancellation;
+mod decode_contract;
 mod decode_session;
 mod decoded_frame;
 mod demux_process;
@@ -32,7 +34,6 @@ mod demux_source;
 mod demux_worker;
 mod execution_progress;
 mod external_decode;
-mod frame_cache;
 mod frame_contract;
 mod frame_materialization;
 mod hardware_decode;
@@ -40,7 +41,59 @@ mod native_frame;
 mod playback_ring;
 mod seek_index;
 
+pub use decode_contract::{
+    PreviewDecodeAlphaPresence, PreviewDecodeContractError, PreviewDecodeGeometry,
+    PreviewDecodeKey, PreviewDecodePayloadRequirement, PreviewDecodeSource,
+    PreviewNativeSurfaceHint,
+};
 pub use demux_worker::run_preview_demux_worker;
+pub use seek_index::{
+    PreviewSeekIndexCache, PreviewSeekIndexCacheDiagnostics, PreviewSeekIndexCachePolicy,
+};
+
+fn verify_preview_source_revision(path: &Path, expected: MediaFileFingerprint) -> Result<()> {
+    if !expected.authorizes_reuse() {
+        return Err(MondrianError::MediaSourceRevisionUnavailable {
+            path: path.display().to_string(),
+            reason: "request did not carry object identity and filesystem change generation"
+                .to_owned(),
+        });
+    }
+    let actual = MediaFileFingerprint::capture(path);
+    if actual != expected {
+        return Err(MondrianError::MediaSourceRevisionChanged {
+            path: path.display().to_string(),
+            expected: Box::new(expected),
+            actual: Box::new(actual),
+        });
+    }
+    Ok(())
+}
+
+fn resolve_preview_execution_fingerprint(
+    path: &Path,
+    requested: Option<MediaFileFingerprint>,
+) -> Result<MediaFileFingerprint> {
+    match requested {
+        Some(expected) => {
+            verify_preview_source_revision(path, expected)?;
+            Ok(expected)
+        }
+        None => {
+            let observed = MediaFileFingerprint::capture(path);
+            if observed.authorizes_reuse() {
+                Ok(observed)
+            } else {
+                Err(MondrianError::MediaSourceRevisionUnavailable {
+                    path: path.display().to_string(),
+                    reason:
+                        "filesystem did not expose a stable object identity and change generation"
+                            .to_owned(),
+                })
+            }
+        }
+    }
+}
 
 use cancellation::{
     preview_decode_interrupt_callback, PreviewDecodeCancelProbe, PreviewDecodeInterruptState,
@@ -91,9 +144,12 @@ const PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES: usize = 72;
 const PREVIEW_SCRUB_RECOVERY_FORWARD_DECODE_BUDGET_FRAMES: usize = 48;
 const PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS: u64 = 250;
 const PREVIEW_SCRUB_RECOVERY_ANY_SEEK_WINDOW_MS: u64 = 180;
-const PREVIEW_FRAME_CACHE_CAPACITY: usize = 256;
 const PREVIEW_SEEK_INDEX_CACHE_CAPACITY: usize = 32;
 const PREVIEW_PLAYBACK_SESSION_RING_CAPACITY: usize = 8;
+// Session-local forward reuse is an optimization, not an independent
+// residency authority. A byte limit prevents eight large CPU frames from
+// bypassing the App-owned Preview Frame Store budget.
+const PREVIEW_PLAYBACK_SESSION_RING_BYTE_BUDGET: usize = 96 * 1024 * 1024;
 // Native preview frames may outlive one codec call in the bounded App
 // completion transport (8 queued plus at most 2 worker-held results), Preview
 // Frame Store (8), renderer import (4), and exact selector/transient ownership
@@ -107,7 +163,6 @@ const PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES: i32 = 32;
 // available. Sixty-four frames exceeds ordinary H.264/HEVC DPB plus decoder
 // thread headroom without turning the optimization into approximate seeking.
 const PREVIEW_EXACT_SEEK_FULL_DECODE_PREROLL_FRAMES: i64 = 64;
-const PREVIEW_HIT_TOLERANCE_SECS: f64 = 0.025;
 const PREVIEW_MAX_SELECT_DISTANCE_SECS: f64 = 0.100;
 const PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES: i64 = 48;
 const PREVIEW_SCRUB_FORWARD_REUSE_FRAMES: i64 = 2;
@@ -141,8 +196,26 @@ pub enum PreviewDecodePath {
     ExternalFfmpegCpuRgba,
     /// Playback cursor reused a frame from its session-local forward ring.
     PlaybackSessionRingHit,
-    /// The frame was served from the process-global preview frame cache.
-    PreviewCacheHit,
+}
+
+/// Decode-session lifecycle fact for the frame that was actually returned.
+///
+/// This is deliberately not a Boolean: a session-local ring hit bypasses the
+/// decoder, while a contract change replaces an existing session. Consumers
+/// must not infer either case from `reused == false`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PreviewDecodeSessionDisposition {
+    /// The producer did not attach lifecycle evidence.
+    #[default]
+    Unspecified,
+    /// No compatible session existed and a new session was opened.
+    Opened,
+    /// An incompatible or retired session was replaced before decoding.
+    Replaced,
+    /// A compatible access-mode-local session was reused.
+    Reused,
+    /// The result came from a cache/ring path and did not enter a decoder session.
+    BypassedCache,
 }
 
 /// Caller intent for a preview decode request.
@@ -351,6 +424,8 @@ impl PreviewDecodeAccessMode {
 pub struct PreviewDecodeRequest<'a> {
     /// Source media path to decode.
     pub path: &'a Path,
+    /// Optional exact physical video stream selected by the caller's probe.
+    pub video_stream_index: Option<u32>,
     /// Exact media-source-local target; FFmpeg PTS lowering occurs inside the Adapter.
     pub source_time: TimelineTime,
     /// Optional maximum output width.
@@ -359,7 +434,11 @@ pub struct PreviewDecodeRequest<'a> {
     pub max_height: Option<u32>,
     /// Access pattern that drives decoder residency and seek policy.
     pub access_mode: PreviewDecodeAccessMode,
-    /// Optional stable file fingerprint already resolved by the caller.
+    /// Optional complete bounded file-revision evidence resolved by the caller.
+    ///
+    /// A complete value is revalidated at the execution worker before Session
+    /// reuse/open; a mismatch fails closed instead of decoding under stale
+    /// probe or color semantics.
     pub fingerprint: Option<MediaFileFingerprint>,
     /// Adaptive scheduling hints selected by the caller.
     pub adaptive_hints: PreviewDecodeAdaptiveHints,
@@ -408,6 +487,28 @@ impl PreviewSourceColorContract {
 }
 
 impl<'a> PreviewDecodeRequest<'a> {
+    /// Project one validated physical decode key into the existing execution request.
+    ///
+    /// This keeps access-mode scheduling and adaptive/hardware execution hints
+    /// outside [`PreviewDecodeKey`] while preventing callers from rebuilding
+    /// path, revision, stream, time, geometry, or source color independently.
+    pub fn from_key(key: &'a PreviewDecodeKey, access_mode: PreviewDecodeAccessMode) -> Self {
+        let (max_width, max_height) = key.geometry().maximum_dimensions();
+        Self {
+            path: key.source().path(),
+            video_stream_index: Some(key.source().video_stream_index()),
+            source_time: key.source_time(),
+            max_width,
+            max_height,
+            access_mode,
+            fingerprint: Some(key.source().fingerprint()),
+            adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+            hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+            hardware_decode_device_selector: None,
+            source_color: key.source_color(),
+        }
+    }
+
     /// Create a request for one scaled preview decode outcome.
     pub fn new(
         path: &'a Path,
@@ -417,6 +518,7 @@ impl<'a> PreviewDecodeRequest<'a> {
     ) -> Self {
         Self {
             path,
+            video_stream_index: None,
             source_time,
             max_width: None,
             max_height: None,
@@ -429,6 +531,12 @@ impl<'a> PreviewDecodeRequest<'a> {
         }
     }
 
+    /// Select one exact physical video stream instead of FFmpeg's best-stream heuristic.
+    pub fn with_video_stream_index(mut self, video_stream_index: u32) -> Self {
+        self.video_stream_index = Some(video_stream_index);
+        self
+    }
+
     /// Set optional maximum output dimensions.
     pub fn with_max_size(mut self, max_width: Option<u32>, max_height: Option<u32>) -> Self {
         self.max_width = max_width;
@@ -437,6 +545,8 @@ impl<'a> PreviewDecodeRequest<'a> {
     }
 
     /// Attach a caller-resolved file fingerprint.
+    ///
+    /// Complete revisions are execution preconditions, not cache hints.
     pub fn with_fingerprint(mut self, fingerprint: MediaFileFingerprint) -> Self {
         self.fingerprint = Some(fingerprint);
         self
@@ -554,7 +664,11 @@ impl PreviewDecodeAccessPolicy {
         frame_duration_pts: i64,
         reached_eof: bool,
     ) -> bool {
-        if reached_eof || self.forward_reuse_frame_window <= 0 || target_pts < last_pts {
+        // Forward continuation can only produce a strictly newer target.
+        // Equality requires an exact retained artifact; without one, decoding
+        // another packet would select the following frame and permanently
+        // phase-shift a GPU-resident/no-ring playback session.
+        if reached_eof || self.forward_reuse_frame_window <= 0 || target_pts <= last_pts {
             return false;
         }
         let max_distance =
@@ -564,16 +678,6 @@ impl PreviewDecodeAccessPolicy {
 
     fn forward_decode_budget_exhausted(self, frames_decoded: usize) -> bool {
         frames_decoded >= self.forward_decode_budget_frames
-    }
-
-    fn accepts_first_decoded_approximation(
-        self,
-        selected_pts: i64,
-        target_pts: i64,
-        max_distance_pts: i64,
-    ) -> bool {
-        self.keyframe_only
-            && selected_pts.saturating_sub(target_pts).abs() <= max_distance_pts.max(1)
     }
 
     fn adapt_for_request(
@@ -639,20 +743,104 @@ fn pts_distance_to_frames(distance_pts: i64, frame_duration_pts: i64) -> usize {
         .min(usize::MAX as u128) as usize
 }
 
+/// Evidence used to establish one decoded frame's presentation interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PreviewTemporalExtentSource {
+    /// No positive interval boundary is known; only the exact start PTS is proven.
+    #[default]
+    Unknown,
+    /// FFmpeg supplied a positive decoded-frame/packet duration.
+    FrameDuration,
+    /// A later decoded frame supplied the exclusive successor boundary.
+    SuccessorBoundary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DecodedTemporalExtent {
+    start_pts: i64,
+    duration_pts: Option<i64>,
+    source: PreviewTemporalExtentSource,
+}
+
+impl DecodedTemporalExtent {
+    fn point(start_pts: i64) -> Self {
+        Self {
+            start_pts,
+            duration_pts: None,
+            source: PreviewTemporalExtentSource::Unknown,
+        }
+    }
+
+    fn from_duration(start_pts: i64, duration_pts: i64) -> Self {
+        if duration_pts <= 0 || start_pts.checked_add(duration_pts).is_none() {
+            return Self::point(start_pts);
+        }
+        Self {
+            start_pts,
+            duration_pts: Some(duration_pts),
+            source: PreviewTemporalExtentSource::FrameDuration,
+        }
+    }
+
+    fn from_decoded_frame(start_pts: i64, frame: &ffmpeg::util::frame::video::Video) -> Self {
+        Self::from_duration(start_pts, frame.packet().duration)
+    }
+
+    fn from_diagnostics(diagnostics: PreviewDecodeDiagnostics) -> Option<Self> {
+        diagnostics.selected_pts.map(|start_pts| {
+            let Some(duration_pts) =
+                diagnostics.selected_duration_pts.filter(|duration| *duration > 0).filter(|_| {
+                    diagnostics.selected_temporal_extent_source
+                        != PreviewTemporalExtentSource::Unknown
+                })
+            else {
+                return Self::point(start_pts);
+            };
+            let mut extent = Self::from_duration(start_pts, duration_pts);
+            if extent.duration_pts.is_some() {
+                extent.source = diagnostics.selected_temporal_extent_source;
+            }
+            extent
+        })
+    }
+
+    fn with_successor(self, successor_pts: i64) -> Self {
+        let Some(successor_duration) = successor_pts.checked_sub(self.start_pts) else {
+            return self;
+        };
+        if successor_duration <= 0 {
+            return self;
+        }
+        if self.duration_pts.is_some_and(|duration| duration <= successor_duration) {
+            return self;
+        }
+        Self {
+            start_pts: self.start_pts,
+            duration_pts: Some(successor_duration),
+            source: PreviewTemporalExtentSource::SuccessorBoundary,
+        }
+    }
+
+    fn end_pts(self) -> Option<i64> {
+        self.duration_pts.and_then(|duration| self.start_pts.checked_add(duration))
+    }
+
+    fn covers(self, requested_pts: i64) -> bool {
+        requested_pts == self.start_pts
+            || (requested_pts > self.start_pts
+                && self.end_pts().is_some_and(|end_pts| requested_pts < end_pts))
+    }
+
+    fn distance_to(self, requested_pts: i64) -> i64 {
+        self.start_pts.saturating_sub(requested_pts).saturating_abs()
+    }
+}
+
 fn temporal_selection_is_approximate(
     requested_pts: i64,
-    selected_pts: Option<i64>,
-    hit_tolerance_pts: i64,
-    policy: PreviewDecodeAccessPolicy,
+    selected_extent: Option<DecodedTemporalExtent>,
 ) -> bool {
-    selected_pts.is_some_and(|selected_pts| {
-        let distance = selected_pts.saturating_sub(requested_pts).abs();
-        if policy.keyframe_only {
-            distance > 0
-        } else {
-            distance > hit_tolerance_pts.max(0)
-        }
-    })
+    selected_extent.is_some_and(|extent| !extent.covers(requested_pts))
 }
 
 /// FFmpeg decoder threading mode requested for preview software decode.
@@ -798,7 +986,6 @@ impl PreviewDecodePath {
             Self::InProcessFfmpegNative => "InProcessFfmpegNative",
             Self::ExternalFfmpegCpuRgba => "ExternalFfmpegCpuRgba",
             Self::PlaybackSessionRingHit => "PlaybackSessionRingHit",
-            Self::PreviewCacheHit => "PreviewCacheHit",
         }
     }
 }
@@ -815,7 +1002,7 @@ pub struct PreviewDecodeStageDurations {
     /// Time spent waiting for downstream native-output leases before decoder reuse.
     #[serde(default)]
     pub output_lease_wait_us: u64,
-    /// Time spent checking the process-global preview frame cache.
+    /// Time spent checking the decoder-session-local playback ring.
     #[serde(default)]
     pub cache_lookup_us: u64,
     /// Time spent seeking and flushing the decoder before forward decode.
@@ -863,7 +1050,7 @@ pub struct PreviewDecodeDiagnostics {
     pub path: PreviewDecodePath,
     /// End-to-end decode call duration in microseconds.
     pub elapsed_us: u64,
-    /// Whether this result came from the preview frame cache.
+    /// Whether this result came from the decoder-session-local playback ring.
     pub cache_hit: bool,
     /// Caller intent that selected this decode path.
     pub access_mode: PreviewDecodeAccessMode,
@@ -880,6 +1067,12 @@ pub struct PreviewDecodeDiagnostics {
     /// Stream timestamp actually selected for presentation.
     #[serde(default)]
     pub selected_pts: Option<i64>,
+    /// Positive stream-tick duration of the selected frame's proven presentation interval.
+    #[serde(default)]
+    pub selected_duration_pts: Option<i64>,
+    /// Evidence source that established the selected frame's presentation interval.
+    #[serde(default)]
+    pub selected_temporal_extent_source: PreviewTemporalExtentSource,
     /// Whether interactive scrubbing intentionally presented a nearby keyframe.
     #[serde(default)]
     pub temporal_approximation: bool,
@@ -940,9 +1133,9 @@ pub struct PreviewDecodeDiagnostics {
     /// Structured FFmpeg hardware CPU-transfer setup state.
     #[serde(default)]
     pub hardware_decode_cpu_transfer_status: PreviewHardwareDecodeCpuTransferStatus,
-    /// Whether an existing access-mode-local decode session was reused.
+    /// Exact decoder-session lifecycle used by this result.
     #[serde(default)]
-    pub session_reused: bool,
+    pub session_disposition: PreviewDecodeSessionDisposition,
     /// Whether this frame was produced by continuing forward in an existing session without seeking.
     #[serde(default)]
     pub forward_reused: bool,
@@ -1008,10 +1201,10 @@ pub struct PreviewDecodeDiagnostics {
 /// Actual decode execution that produced a reusable frame payload.
 ///
 /// This is frame-local provenance, not a request or capability decision. It is
-/// retained across playback-ring and preview-cache reuse so acceptance gates
+/// retained across playback-ring and App-owned Frame Store reuse so acceptance gates
 /// can bind the frame ultimately presented for a Frame Demand to the decode
 /// work that originally produced it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PreviewDecodeExecutionPath {
     #[default]
     SoftwareCpu,
@@ -1033,16 +1226,15 @@ impl PreviewDecodeDiagnostics {
         Self {
             path,
             elapsed_us: 0,
-            cache_hit: matches!(
-                path,
-                PreviewDecodePath::PreviewCacheHit | PreviewDecodePath::PlaybackSessionRingHit
-            ),
+            cache_hit: path == PreviewDecodePath::PlaybackSessionRingHit,
             access_mode: PreviewDecodeAccessMode::RandomAccessStillFrame,
             external_process: path == PreviewDecodePath::ExternalFfmpegCpuRgba,
             cpu_resident: path != PreviewDecodePath::InProcessFfmpegNative,
             seek_performed: false,
             requested_pts: None,
             selected_pts: None,
+            selected_duration_pts: None,
+            selected_temporal_extent_source: PreviewTemporalExtentSource::Unknown,
             temporal_approximation: false,
             seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
             forward_reuse_frame_window: 0,
@@ -1064,7 +1256,7 @@ impl PreviewDecodeDiagnostics {
             hardware_decode_cpu_transfer_observed: false,
             hardware_decode_cpu_transfer_status:
                 PreviewHardwareDecodeCpuTransferStatus::NotAttempted,
-            session_reused: false,
+            session_disposition: PreviewDecodeSessionDisposition::Unspecified,
             forward_reused: false,
             seek_index_available: false,
             seek_index_keyframes: 0,
@@ -1119,21 +1311,37 @@ impl PreviewDecodeDiagnostics {
         self
     }
 
-    fn cache_hit_for_mode(elapsed: Duration, access_mode: PreviewDecodeAccessMode) -> Self {
-        Self::new(PreviewDecodePath::PreviewCacheHit)
-            .with_access_mode(access_mode)
-            .with_elapsed(elapsed)
-    }
-
     fn playback_ring_hit(elapsed: Duration) -> Self {
         Self::new(PreviewDecodePath::PlaybackSessionRingHit)
             .with_access_mode(PreviewDecodeAccessMode::PlaybackCursor)
+            .with_session_disposition(PreviewDecodeSessionDisposition::BypassedCache)
             .with_elapsed(elapsed)
     }
 
     fn with_access_mode(mut self, access_mode: PreviewDecodeAccessMode) -> Self {
         self.access_mode = access_mode;
         self = self.with_access_policy(PreviewDecodeAccessPolicy::for_access_mode(access_mode));
+        self
+    }
+
+    fn with_temporal_selection(
+        mut self,
+        requested_pts: i64,
+        selected_extent: Option<DecodedTemporalExtent>,
+    ) -> Self {
+        self.requested_pts = Some(requested_pts);
+        self.selected_pts = selected_extent.map(|extent| extent.start_pts);
+        self.selected_duration_pts = selected_extent.and_then(|extent| extent.duration_pts);
+        self.selected_temporal_extent_source = selected_extent
+            .map(|extent| extent.source)
+            .unwrap_or(PreviewTemporalExtentSource::Unknown);
+        self.temporal_approximation =
+            temporal_selection_is_approximate(requested_pts, selected_extent);
+        self
+    }
+
+    fn with_session_disposition(mut self, disposition: PreviewDecodeSessionDisposition) -> Self {
+        self.session_disposition = disposition;
         self
     }
 
@@ -1223,19 +1431,7 @@ pub fn decode_preview_frame_cancellable(
     should_cancel: impl Fn() -> bool + Send + Sync + 'static,
 ) -> Result<PreviewDecodeOutcome> {
     let should_cancel: PreviewDecodeCancelProbe = Arc::new(should_cancel);
-    decode_preview_frame_outcome(
-        request.path,
-        request.source_time,
-        request.max_width,
-        request.max_height,
-        request.access_mode,
-        request.fingerprint,
-        request.adaptive_hints,
-        request.hardware_decode_request,
-        request.hardware_decode_device_selector,
-        request.source_color,
-        should_cancel,
-    )
+    decode_preview_frame_outcome(request, should_cancel)
 }
 
 /// Result of a cancellable preview decode request.
@@ -1253,69 +1449,21 @@ pub enum PreviewDecodeOutcome {
 
 pub use decode_session::{
     clear_thread_local_preview_decode_session, PreviewDecodeSessionContext,
-    PreviewDecodeSessionContextBootstrap,
+    PreviewDecodeSessionContextBootstrap, PreviewDecodeWorkerResources,
 };
 use decode_session::{
     decode_preview_frame_outcome, preview_create_rgba_scaler, PreviewDecodedFramePayload,
 };
 #[cfg(test)]
-use decode_session::{exact_seek_non_reference_discard_until_pts, forward_decode_work_units};
+use decode_session::{
+    decoded_temporal_candidate_within_selection_distance,
+    exact_seek_non_reference_discard_until_pts, forward_decode_work_units,
+    select_decoded_temporal_candidate, DecodedTemporalCandidate,
+};
 use hardware_decode::{preview_hardware_frame_format, PreviewHardwareDecodePlan};
 #[cfg(test)]
 use playback_ring::PreviewPlaybackRing;
-#[cfg(test)]
-use seek_index::{preview_seek_index_cache_get, preview_seek_index_cache_put};
 use seek_index::{PreviewSeekIndex, PreviewSeekIndexDiagnostics, PreviewSeekResolution};
-
-/// Stable media-file revision identity shared by decode and derived-work snapshots.
-///
-/// The optional fields let callers represent missing/unreadable metadata
-/// without falling back to a false stable identity. A successful app/media path
-/// probe should prefer [`MediaFileFingerprint::from_metadata`].
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
-)]
-pub struct MediaFileFingerprint {
-    /// File length in bytes when available.
-    pub len: Option<u64>,
-    /// File modification time seconds since Unix epoch when available.
-    pub modified_secs: Option<u64>,
-    /// File modification time subsecond nanoseconds when available.
-    pub modified_nanos: Option<u32>,
-}
-
-impl MediaFileFingerprint {
-    /// Whether this value can conservatively authorize cache/session reuse.
-    ///
-    /// Missing metadata remains a valid observation, but it must never become
-    /// a false stable identity for a source that may have been replaced.
-    pub fn authorizes_reuse(self) -> bool {
-        self.len.is_some() && self.modified_secs.is_some() && self.modified_nanos.is_some()
-    }
-
-    /// Capture a fingerprint from the filesystem, preserving missing metadata.
-    pub fn capture(path: &Path) -> Self {
-        let Ok(metadata) = std::fs::metadata(path) else {
-            return Self {
-                len: None,
-                modified_secs: None,
-                modified_nanos: None,
-            };
-        };
-        Self::from_metadata(&metadata)
-    }
-
-    /// Build a fingerprint from a metadata record the caller already fetched.
-    pub fn from_metadata(metadata: &std::fs::Metadata) -> Self {
-        let modified =
-            metadata.modified().ok().and_then(|time| time.duration_since(UNIX_EPOCH).ok());
-        Self {
-            len: Some(metadata.len()),
-            modified_secs: modified.map(|duration| duration.as_secs()),
-            modified_nanos: modified.map(|duration| duration.subsec_nanos()),
-        }
-    }
-}
 
 fn duration_us(duration: Duration) -> u64 {
     duration.as_micros().min(u128::from(u64::MAX)) as u64
@@ -1402,9 +1550,6 @@ fn apply_preview_codec_threading_policy(
     }
     requested
 }
-
-pub use frame_cache::clear_global_preview_frame_cache;
-use frame_cache::{preview_cache_get, preview_cache_put_with_fingerprint};
 
 use external_decode::{
     ensure_ffmpeg_initialized, fit_target_size, preview_external_ffmpeg_cpu_rgba_enabled,

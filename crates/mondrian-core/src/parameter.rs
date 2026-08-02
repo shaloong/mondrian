@@ -1,6 +1,8 @@
 //! Stable parameter identity and exact-time numeric automation curves.
 
-use crate::{KeyframeId, TimeScale, TimelineTime, TimelineTimeError, TimelineTimeRange};
+use crate::{
+    AuthoringList, KeyframeId, TimeScale, TimelineTime, TimelineTimeError, TimelineTimeRange,
+};
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use std::{collections::HashSet, fmt};
 
@@ -44,6 +46,16 @@ impl ParameterId {
     /// Canonical serialized identifier.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl crate::AuthoringFootprint for ParameterId {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> Result<(), crate::AuthoringFootprintError> {
+        let Self(value) = self;
+        collector.collect(value)
     }
 }
 
@@ -116,6 +128,23 @@ pub struct ExactAutomationKeyframe {
     pub out_handle: Option<ExactBezierHandle>,
 }
 
+impl crate::AuthoringFootprint for ExactAutomationKeyframe {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut crate::AuthoringFootprintCollector,
+    ) -> Result<(), crate::AuthoringFootprintError> {
+        let Self {
+            id: _,
+            time: _,
+            value: _,
+            interpolation_to_next: _,
+            in_handle: _,
+            out_handle: _,
+        } = self;
+        Ok(())
+    }
+}
+
 impl ExactAutomationKeyframe {
     /// Construct a linear keyframe.
     pub fn linear(time: TimelineTime, value: f64) -> Self {
@@ -138,7 +167,18 @@ pub struct ExactAutomationCurve {
     /// Value used when no keyframes exist.
     pub default_value: f64,
     /// Strictly time-ordered unique keyframes.
-    pub keyframes: Vec<ExactAutomationKeyframe>,
+    pub keyframes: AuthoringList<ExactAutomationKeyframe>,
+}
+
+impl crate::AuthoringFootprint for ExactAutomationCurve {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> Result<(), crate::AuthoringFootprintError> {
+        let Self { parameter_id, default_value: _, keyframes } = self;
+        collector.collect(parameter_id)?;
+        collector.collect(keyframes)
+    }
 }
 
 impl ExactAutomationCurve {
@@ -147,7 +187,11 @@ impl ExactAutomationCurve {
         if !default_value.is_finite() {
             return Err(AutomationError::NonFiniteValue);
         }
-        Ok(Self { parameter_id, default_value, keyframes: Vec::new() })
+        Ok(Self {
+            parameter_id,
+            default_value,
+            keyframes: AuthoringList::new(),
+        })
     }
 
     /// Insert or replace a keyframe at the same exact time.

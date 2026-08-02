@@ -34,7 +34,7 @@ pub enum PreviewOutputStage {
     Project,
     /// Display or surface intent cannot be resolved correctly.
     DisplayContract,
-    /// Canonical Timeline evaluation or nested traversal cannot complete.
+    /// Prepared Timeline evaluation or closure materialization cannot complete.
     TimelineEvaluation,
     /// An authored media dependency cannot be resolved to a canonical request.
     MediaResolution,

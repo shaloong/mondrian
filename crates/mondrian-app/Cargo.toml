@@ -8,7 +8,11 @@ rust-version.workspace = true
 default-run = "mondrian"
 
 [features]
-validation = []
+validation = [
+    "mondrian-export/validation",
+    "mondrian-media/validation",
+    "mondrian-renderer/validation",
+]
 
 # Product app UI editor shell.
 [[bin]]
@@ -44,6 +48,7 @@ name = "viewer_gpu_output_budget"
 path = "src/bin/viewer_gpu_output_budget.rs"
 
 [dependencies]
+mondrian-storage  = { workspace = true }
 mondrian-core     = { workspace = true }
 mondrian-playback = { workspace = true }
 mondrian-audio    = { workspace = true }
@@ -90,7 +95,6 @@ uuid = { workspace = true }
 sha2 = { workspace = true }
 # 并发
 parking_lot = { workspace = true }
-rayon = { workspace = true }
 glam  = { workspace = true }
 bytemuck = { workspace = true }
 wgpu = { workspace = true }
@@ -99,7 +103,7 @@ pollster = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
-windows-sys = { workspace = true }
+windows-sys = { workspace = true, features = ["Win32_Security"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -109,3 +113,5 @@ winres = "0.1"
 
 [dev-dependencies]
 mondrian-editor-state = { workspace = true, features = ["test-support"] }
+mondrian-export = { workspace = true, features = ["validation"] }
+mondrian-renderer = { workspace = true, features = ["validation"] }

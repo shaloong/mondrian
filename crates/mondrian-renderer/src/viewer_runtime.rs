@@ -7,22 +7,33 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::viewer_spatial::{GpuViewerSpatialRecord, GpuViewerSpatialRuntime};
 use crate::{
-    native_source_texture_format_from_decoded, native_video_sampling_from_decoded, CpuColorFrame,
-    GpuColorFrameHandle, GpuColorFrameTextureFormat, GpuColorFrameWgpuResourcePool,
-    GpuCompositeLayer, GpuCompositeLayerSource, GpuCompositeRequest, GpuCompositingDiagnostics,
-    GpuDisplayCalibrationRuntime, GpuFrameCompositor, GpuNativeDecodedFrameImportError,
-    GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat,
-    GpuNativeDecodedFrameVideoSampling, GpuProgramScopesError, GpuProgramScopesRecord,
-    GpuProgramScopesRequest, GpuProgramScopesRuntime, GpuProgramScopesRuntimeDiagnostics,
-    GpuViewerSpatialRecord, GpuViewerSpatialRuntime, GpuViewerSpatialRuntimeDiagnostics,
-    NativeVideoImportCpuTimings, RenderColorStageDiagnostics, RenderColorTransformGpuOptions,
+    estimate_viewer_gpu_active_working_set, native_source_texture_format_from_decoded,
+    native_video_sampling_from_decoded, CpuColorFrame,
+    GpuColorFrameBindGroupCacheKeyAllocationError, GpuColorFrameHandle, GpuColorFrameId,
+    GpuColorFrameIdAllocationError, GpuColorFrameResourceTableError, GpuColorFrameTextureFormat,
+    GpuColorFrameWgpuResourcePool, GpuCompositeLayer, GpuCompositeLayerSource, GpuCompositeRequest,
+    GpuCompositingDiagnostics, GpuDisplayCalibrationRuntime, GpuFrameCompositor,
+    GpuNativeDecodedFrameImportError, GpuNativeDecodedFrameImportSupport,
+    GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuProgramScopesError,
+    GpuProgramScopesRecord, GpuProgramScopesRequest, GpuProgramScopesRuntime,
+    GpuProgramScopesRuntimeDiagnostics, GpuViewerSpatialRuntimeDiagnostics,
+    HeterogeneousGpuCompletedContinuation, HeterogeneousGpuContinuationError,
+    HeterogeneousGpuRecordResources, HeterogeneousGpuRecordedContinuation,
+    HeterogeneousGpuSubmittedContinuation, NativeVideoImportCandidateTimingReceipt,
+    NativeVideoImportCpuTimings, NativeVideoImportGpuTimingDiagnostics,
+    NativeVideoImportGpuTimingPolicy, NativeVideoImportGpuTimingSample,
+    RenderColorStageDiagnostics, RenderColorTransformGpuOptions,
     RenderGpuColorTransformRuntimeRecordError, RenderGpuCompositeGraphRecordError,
     RenderGpuInputStageRecord, RenderGpuInputStageRuntimeRecordError,
     RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
     RenderGpuOutputBoundaryRuntimeRecordError, RenderMonitorAdaptation, RenderOutputColorBoundary,
-    ViewerGpuExecutionLayer, ViewerGpuMediaSource, ViewerGpuNativeSource,
-    ViewerNativeVideoImportRuntime, ViewerSourceRect,
+    ViewerGpuActiveWorkingSetAdmissionError, ViewerGpuActiveWorkingSetEstimate,
+    ViewerGpuActiveWorkingSetEstimateError, ViewerGpuExecutionLayer,
+    ViewerGpuExecutionResourceGrant, ViewerGpuMediaSource, ViewerGpuNativeSource,
+    ViewerGpuPresentationOutputLease, ViewerHeterogeneousGpuInput, ViewerNativeVideoImportRuntime,
+    ViewerSourceRect,
 };
 use mondrian_core::display_calibration::DisplayCalibrationLut3d;
 use mondrian_core::types::{BlendMode, Color, SequenceId};
@@ -44,6 +55,13 @@ pub struct ViewerGpuExecutionRequest<'a> {
     pub working_color_space: WorkingColorSpace,
     /// Bottom-to-top layer stack entering working-linear compositing.
     pub layers: &'a [ViewerGpuExecutionLayer],
+    /// Move-only CPU-prefix completions addressed by heterogeneous media
+    /// layers.
+    ///
+    /// Each addressed entry is consumed exactly once during recording. Entries
+    /// not referenced by a contributing layer are discarded without recording
+    /// or submission.
+    pub heterogeneous_inputs: Vec<ViewerHeterogeneousGpuInput>,
     /// Exact Program Output transform shared with delivery/export.
     pub program_output_boundary: &'a RenderOutputColorBoundary,
     /// Preview-only Program Output to local-monitor adaptation.
@@ -123,11 +141,17 @@ pub trait ViewerGpuExecutionStageMarker {
 
 /// Long-lived GPU state for a single Viewer preview execution context.
 ///
-/// Frame resources are cleared between candidates; pipelines and backend
-/// capabilities remain resident for the lifetime of this object. Fields are
-/// temporarily visible to the sibling Window Adapter while execution is moved
-/// behind this module's stable interface.
+/// Candidate-owned frame resources are cleared between records; a presentation
+/// output explicitly detached into [`ViewerGpuPresentationOutputLease`] is no
+/// longer candidate-owned and remains valid across ordinary clears. `reset`
+/// invalidates the shared pool generation so a lease may remain readable while
+/// its later drop cannot repopulate a retired device/runtime epoch. Pipelines
+/// and backend capabilities otherwise remain resident for this object's
+/// lifetime.
 pub struct ViewerGpuExecutionRuntime {
+    resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
+    resource_grant: ViewerGpuExecutionResourceGrant,
+    last_active_working_set: Option<ViewerGpuActiveWorkingSetEstimate>,
     native_video_import: ViewerNativeVideoImportRuntime,
     color_output: RenderGpuOutputBoundaryRuntime,
     spatial: GpuViewerSpatialRuntime,
@@ -136,30 +160,124 @@ pub struct ViewerGpuExecutionRuntime {
     working_compositor: GpuFrameCompositor,
 }
 
+/// Error creating one Viewer GPU execution context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ViewerGpuExecutionRuntimeCreateError {
+    /// Renderer frame identity allocation is exhausted.
+    #[error(transparent)]
+    FrameId(#[from] GpuColorFrameIdAllocationError),
+    /// Renderer bind-group cache identity allocation is exhausted.
+    #[error(transparent)]
+    BindGroupCacheKey(#[from] GpuColorFrameBindGroupCacheKeyAllocationError),
+}
+
 impl ViewerGpuExecutionRuntime {
     /// Create one execution context for a renderer device.
-    pub fn new(adapter: &wgpu::Adapter, device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
-        let resource_pool = Arc::new(GpuColorFrameWgpuResourcePool::default());
-        Self {
-            native_video_import: ViewerNativeVideoImportRuntime::new_with_resource_pool(
-                adapter,
-                device,
-                queue,
-                Arc::clone(&resource_pool),
-            ),
+    pub fn new(
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<Self, ViewerGpuExecutionRuntimeCreateError> {
+        Self::new_with_native_import_gpu_timing_policy(
+            adapter,
+            device,
+            queue,
+            NativeVideoImportGpuTimingPolicy::default(),
+        )
+    }
+
+    /// Create one execution context with an explicit native-import timing policy.
+    pub fn new_with_native_import_gpu_timing_policy(
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        native_import_gpu_timing_policy: NativeVideoImportGpuTimingPolicy,
+    ) -> Result<Self, ViewerGpuExecutionRuntimeCreateError> {
+        let resource_grant = ViewerGpuExecutionResourceGrant::default();
+        let resource_pool = Arc::new(GpuColorFrameWgpuResourcePool::new(
+            resource_grant.output_pool,
+        ));
+        Ok(Self {
+            resource_pool: Arc::clone(&resource_pool),
+            resource_grant,
+            last_active_working_set: None,
+            native_video_import:
+                ViewerNativeVideoImportRuntime::new_with_resource_pool_and_gpu_timing_policy(
+                    adapter,
+                    device,
+                    queue,
+                    Arc::clone(&resource_pool),
+                    native_import_gpu_timing_policy,
+                ),
             color_output: RenderGpuOutputBoundaryRuntime::with_resource_pool(Arc::clone(
                 &resource_pool,
-            )),
+            ))?,
             spatial: GpuViewerSpatialRuntime::with_resource_pool(Arc::clone(&resource_pool)),
-            display_calibration: GpuDisplayCalibrationRuntime::with_resource_pool(resource_pool),
+            display_calibration: GpuDisplayCalibrationRuntime::with_resource_pool(Arc::clone(
+                &resource_pool,
+            ))?,
             program_scopes: GpuProgramScopesRuntime::default(),
-            working_compositor: GpuFrameCompositor::new(device),
+            working_compositor: GpuFrameCompositor::new(device)?,
+        })
+    }
+
+    /// Return the Viewer owner's idle-retention and active-frame grant.
+    pub const fn resource_grant(&self) -> ViewerGpuExecutionResourceGrant {
+        self.resource_grant
+    }
+
+    /// Return the hard grant and most recent admitted request estimate.
+    pub const fn active_working_set_diagnostics(
+        &self,
+    ) -> crate::ViewerGpuActiveWorkingSetDiagnostics {
+        crate::ViewerGpuActiveWorkingSetDiagnostics {
+            grant: self.resource_grant,
+            last_admitted: self.last_active_working_set,
         }
+    }
+
+    /// Apply a changed Viewer resource grant without rebuilding GPU pipelines.
+    ///
+    /// Idle resources above a reduced idle grant are retired synchronously.
+    /// Checked-out resources remain valid and observe that idle grant when they
+    /// return to the shared device-scoped pool. Changed active limits apply to
+    /// the next request admission and never invalidate an already-recording
+    /// candidate; product policy keeps those limits stable across pressure.
+    pub fn reconfigure_resource_grant(&mut self, grant: ViewerGpuExecutionResourceGrant) -> bool {
+        if self.resource_grant == grant {
+            return false;
+        }
+        self.resource_pool.reconfigure(grant.output_pool);
+        self.resource_grant = grant;
+        true
+    }
+
+    /// Release all idle Viewer color-frame textures while retaining pipelines,
+    /// exact execution contracts, and resources owned by an active candidate.
+    pub fn clear_idle_resources(&self) {
+        self.resource_pool.clear();
     }
 
     /// Native decoder import capability exposed to preview scheduling.
     pub fn native_import_support(&self) -> GpuNativeDecodedFrameImportSupport {
         self.native_video_import.support()
+    }
+
+    /// Collect native-import callbacks after the owner has polled the device.
+    pub fn collect_native_import_gpu_timings_after_device_poll(&mut self) {
+        self.native_video_import.collect_gpu_timings_after_device_poll();
+    }
+
+    /// Drain completed native-import GPU timing samples.
+    pub fn take_completed_native_import_gpu_timings(
+        &mut self,
+    ) -> Vec<NativeVideoImportGpuTimingSample> {
+        self.native_video_import.take_completed_gpu_timings()
+    }
+
+    /// Cumulative native-import GPU timing coverage and availability.
+    pub fn native_import_gpu_timing_diagnostics(&self) -> NativeVideoImportGpuTimingDiagnostics {
+        self.native_video_import.gpu_timing_diagnostics()
     }
 
     /// Current bounded native-import contract-pool and bridge-entry residency.
@@ -215,7 +333,8 @@ impl ViewerGpuExecutionRuntime {
     /// Record one current Viewer frame through the shared GPU execution path.
     ///
     /// The returned handle remains owned by this runtime until the next frame
-    /// clear/reset. Presentation registration and publication are Adapter work.
+    /// clear/reset or an exact call to [`Self::take_presentation_output`].
+    /// Presentation registration and publication are Adapter work.
     pub fn record(
         &mut self,
         device: &wgpu::Device,
@@ -233,6 +352,31 @@ impl ViewerGpuExecutionRuntime {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         request: ViewerGpuExecutionRequest<'_>,
+        stage_marker: Option<&mut dyn ViewerGpuExecutionStageMarker>,
+    ) -> Result<ViewerGpuExecutionRecord, ViewerGpuExecutionError> {
+        let candidate_token = self.native_video_import.begin_viewer_candidate();
+        let result =
+            self.record_candidate_with_stage_marker(device, queue, encoder, request, stage_marker);
+        let receipt =
+            self.native_video_import.end_viewer_candidate(candidate_token, result.is_ok());
+        match result {
+            Ok(mut record) => {
+                record.native_video_import_timing_receipt = receipt;
+                Ok(record)
+            }
+            Err(error) => {
+                debug_assert!(receipt.is_none());
+                Err(error)
+            }
+        }
+    }
+
+    fn record_candidate_with_stage_marker(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        mut request: ViewerGpuExecutionRequest<'_>,
         mut stage_marker: Option<&mut dyn ViewerGpuExecutionStageMarker>,
     ) -> Result<ViewerGpuExecutionRecord, ViewerGpuExecutionError> {
         validate_output_precision(
@@ -244,13 +388,56 @@ impl ViewerGpuExecutionRuntime {
             request.monitor_adaptation,
         )?;
         validate_program_scopes_contract(request.program_output_boundary, request.program_scopes)?;
-        self.native_video_import.reset_frame_cpu_timings();
+        let mut active_working_set =
+            estimate_viewer_gpu_active_working_set(&request).map_err(|error| match error {
+                ViewerGpuActiveWorkingSetEstimateError::InvalidHeterogeneousInput { reason } => {
+                    ViewerGpuExecutionError::InvalidHeterogeneousInput { reason }
+                }
+                error => ViewerGpuExecutionError::ActiveWorkingSet(
+                    ViewerGpuActiveWorkingSetAdmissionError::Estimate(error),
+                ),
+            })?;
+        let (detached_presentation_textures, detached_presentation_bytes) = self
+            .resource_pool
+            .detached_presentation_demand()
+            .ok_or(ViewerGpuExecutionError::ActiveWorkingSet(
+                ViewerGpuActiveWorkingSetAdmissionError::Estimate(
+                    ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow {
+                        stage: crate::ViewerGpuActiveWorkingSetStage::DetachedPresentations,
+                    },
+                ),
+            ))?;
+        active_working_set
+            .include_presentation_residency(
+                detached_presentation_textures,
+                detached_presentation_bytes,
+            )
+            .map_err(|error| match error {
+                ViewerGpuActiveWorkingSetEstimateError::PresentationCapacityExceeded {
+                    live_outputs,
+                } => ViewerGpuExecutionError::Backpressure(format!(
+                    "capacity-one presentation owner still has {live_outputs} live outputs"
+                )),
+                error => ViewerGpuExecutionError::ActiveWorkingSet(
+                    ViewerGpuActiveWorkingSetAdmissionError::Estimate(error),
+                ),
+            })?;
+        self.resource_grant
+            .admit_active_working_set(active_working_set)
+            .map_err(ViewerGpuExecutionError::ActiveWorkingSet)?;
+        self.last_active_working_set = Some(active_working_set);
         let input_prepare_started = Instant::now();
+        let mut heterogeneous_inputs = std::mem::take(&mut request.heterogeneous_inputs)
+            .into_iter()
+            .map(Some)
+            .collect::<Vec<_>>();
         let mut prepared = prepare_composite(
             &request,
+            &mut heterogeneous_inputs,
             &mut self.color_output,
             &mut self.native_video_import,
             &self.working_compositor,
+            &self.resource_pool,
             device,
             queue,
             encoder,
@@ -283,7 +470,7 @@ impl ViewerGpuExecutionRuntime {
                 request.program_output_boundary.engine.clone(),
                 RenderColorTransformGpuOptions::default(),
             )
-            .map_err(ViewerGpuExecutionError::WorkingComposite)?;
+            .map_err(|error| ViewerGpuExecutionError::WorkingComposite(Box::new(error)))?;
         compositing_diagnostics.accumulate(composite.compositing_diagnostics);
         let residency = prepared.residency;
         let fallback_reasons = prepared.fallback_reasons;
@@ -295,28 +482,24 @@ impl ViewerGpuExecutionRuntime {
             encoder,
             ViewerGpuExecutionGpuStage::WorkingComposite,
         )?;
-        let working_view = self
-            .color_output
-            .frame_table()
-            .get(&composite.output)
-            .map_err(|error| ViewerGpuExecutionError::WorkingOutputMissing(format!("{error:?}")))?
-            .resource()
-            .texture_view
-            .clone();
         let spatial_started = Instant::now();
-        let spatial_record = self
-            .spatial
-            .record_for_presentation(
-                device,
-                encoder,
-                self.color_output.frame_ids_mut(),
-                composite.output,
-                &working_view,
-                request.source_rect,
-                request.output_width,
-                request.output_height,
-            )
-            .map_err(|error| ViewerGpuExecutionError::Spatial(error.to_string()))?;
+        let spatial_record = {
+            let (frame_table, frame_ids) = self.color_output.frame_table_and_ids_mut();
+            let working = frame_table.get(&composite.output).map_err(|error| {
+                ViewerGpuExecutionError::WorkingOutputMissing(format!("{error:?}"))
+            })?;
+            self.spatial
+                .record_for_presentation(
+                    device,
+                    encoder,
+                    frame_ids,
+                    working,
+                    request.source_rect,
+                    request.output_width,
+                    request.output_height,
+                )
+                .map_err(|error| ViewerGpuExecutionError::Spatial(error.to_string()))?
+        };
         let spatial_diagnostics = self.spatial.diagnostics();
         let spatial_output = spatial_record.output().clone();
         if matches!(spatial_record, GpuViewerSpatialRecord::Materialized(_)) {
@@ -355,7 +538,7 @@ impl ViewerGpuExecutionRuntime {
                     load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                 },
             )
-            .map_err(ViewerGpuExecutionError::ProgramOutputBoundary)?;
+            .map_err(|error| ViewerGpuExecutionError::ProgramOutputBoundary(Box::new(error)))?;
         let program_output_boundary_us = elapsed_us(program_output_boundary_started);
         mark_gpu_stage(
             &mut stage_marker,
@@ -387,7 +570,7 @@ impl ViewerGpuExecutionRuntime {
                         request.output_height,
                         scopes_request,
                     )
-                    .map_err(ViewerGpuExecutionError::ProgramScopes)?,
+                    .map_err(|error| ViewerGpuExecutionError::ProgramScopes(Box::new(error)))?,
             )
         } else {
             None
@@ -415,7 +598,7 @@ impl ViewerGpuExecutionRuntime {
                         load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     },
                 )
-                .map_err(ViewerGpuExecutionError::MonitorAdaptation)?;
+                .map_err(|error| ViewerGpuExecutionError::MonitorAdaptation(Box::new(error)))?;
             stage_diagnostics.accumulate(monitor_record.stage_diagnostics);
             monitor_record.materialized.output
         } else {
@@ -429,24 +612,17 @@ impl ViewerGpuExecutionRuntime {
         )?;
         let calibration_started = Instant::now();
         let (output, output_owner) = if let Some(calibration) = request.display_calibration {
-            let output_view = self
-                .color_output
-                .frame_table()
-                .get(&output)
-                .map_err(|error| {
+            let output_resource =
+                self.color_output.frame_table().get(&output).map_err(|error| {
                     ViewerGpuExecutionError::DisplayOutputMissing(format!("{error:?}"))
-                })?
-                .resource()
-                .texture_view
-                .clone();
+                })?;
             let calibrated = self
                 .display_calibration
                 .record(
                     device,
                     queue,
                     encoder,
-                    output,
-                    &output_view,
+                    output_resource,
                     calibration,
                     GpuColorFrameTextureFormat::Rgba16Float,
                 )
@@ -459,11 +635,12 @@ impl ViewerGpuExecutionRuntime {
             (output, ViewerGpuExecutionOutputOwner::ColorOutput)
         };
         let display_calibration_us = elapsed_us(calibration_started);
+        let heterogeneous_continuations = std::mem::take(&mut prepared.heterogeneous_continuations);
         Ok(ViewerGpuExecutionRecord {
             program_output,
             program_scopes,
             output,
-            output_owner,
+            output_owner: Some(output_owner),
             stage_diagnostics,
             compositing_diagnostics,
             spatial_diagnostics,
@@ -479,16 +656,59 @@ impl ViewerGpuExecutionRuntime {
                 monitor_adaptation_us,
                 display_calibration_us,
             },
+            native_video_import_timing_receipt: None,
+            heterogeneous_continuations,
         })
     }
 
+    /// Move the exact recorded presentation output into an Adapter-owned lease.
+    ///
+    /// This is the only production ownership transfer for a Viewer output. The
+    /// record's private owner authority is consumed before the concrete
+    /// resource is detached, so a missing resource fails closed and the same
+    /// record can never acquire a later allocation under a reused handle.
+    ///
+    /// Callers must submit the command buffer containing this record before
+    /// publishing the lease. If a candidate is abandoned before submission,
+    /// its encoder must be discarded before the lease is dropped.
+    pub fn take_presentation_output(
+        &mut self,
+        record: &mut ViewerGpuExecutionRecord,
+    ) -> Result<ViewerGpuPresentationOutputLease, ViewerGpuPresentationOutputTakeError> {
+        let owner = record
+            .output_owner
+            .take()
+            .ok_or(ViewerGpuPresentationOutputTakeError::AlreadyTaken { id: record.output.id() })?;
+        let resource = match owner {
+            ViewerGpuExecutionOutputOwner::ColorOutput => self
+                .color_output
+                .take_frame_resource(&record.output)
+                .map_err(ViewerGpuPresentationOutputTakeError::ColorOutput)?,
+            ViewerGpuExecutionOutputOwner::DisplayCalibration => {
+                self.display_calibration.take_output(&record.output).ok_or(
+                    ViewerGpuPresentationOutputTakeError::DisplayCalibrationMissing {
+                        id: record.output.id(),
+                    },
+                )?
+            }
+        };
+        Ok(ViewerGpuPresentationOutputLease::new(
+            resource,
+            Arc::clone(&self.resource_pool),
+        ))
+    }
+
     /// Resolve the recorded presentation texture without exposing resource tables.
+    ///
+    /// This compatibility borrow is valid only before
+    /// [`Self::take_presentation_output`]. Presentation Adapters should retain
+    /// the move-only lease instead of a cloned view.
     pub fn output_texture_view(
         &self,
         record: &ViewerGpuExecutionRecord,
     ) -> Result<wgpu::TextureView, ViewerGpuExecutionError> {
         match record.output_owner {
-            ViewerGpuExecutionOutputOwner::ColorOutput => self
+            Some(ViewerGpuExecutionOutputOwner::ColorOutput) => self
                 .color_output
                 .frame_table()
                 .get(&record.output)
@@ -496,7 +716,7 @@ impl ViewerGpuExecutionRuntime {
                 .map_err(|error| {
                     ViewerGpuExecutionError::DisplayOutputMissing(format!("{error:?}"))
                 }),
-            ViewerGpuExecutionOutputOwner::DisplayCalibration => self
+            Some(ViewerGpuExecutionOutputOwner::DisplayCalibration) => self
                 .display_calibration
                 .output(&record.output)
                 .map(|resource| resource.resource().texture_view.clone())
@@ -505,6 +725,9 @@ impl ViewerGpuExecutionRuntime {
                         "calibrated output disappeared before presentation".to_owned(),
                     )
                 }),
+            None => Err(ViewerGpuExecutionError::DisplayOutputMissing(
+                "presentation output ownership was already transferred".to_owned(),
+            )),
         }
     }
 
@@ -530,7 +753,8 @@ impl ViewerGpuExecutionRuntime {
         self.display_calibration.clear();
         self.program_scopes.clear();
         self.color_output.clear_frame_resources();
-        self.color_output.resource_pool().clear();
+        self.resource_pool.invalidate();
+        self.last_active_working_set = None;
     }
 }
 
@@ -589,9 +813,9 @@ pub struct ViewerGpuExecutionRecord {
     pub program_output: GpuColorFrameHandle,
     /// GPU-only scope display products when the active UI requested analysis.
     pub program_scopes: Option<GpuProgramScopesRecord>,
-    /// Renderer-owned output handle retained until frame resources clear.
+    /// Renderer output handle whose private ownership authority can be consumed once.
     pub output: GpuColorFrameHandle,
-    output_owner: ViewerGpuExecutionOutputOwner,
+    output_owner: Option<ViewerGpuExecutionOutputOwner>,
     /// Accumulated input and output color-stage diagnostics.
     pub stage_diagnostics: RenderColorStageDiagnostics,
     /// Working compositor execution diagnostics.
@@ -604,6 +828,133 @@ pub struct ViewerGpuExecutionRecord {
     pub fallback_reasons: Vec<String>,
     /// CPU wall time spent recording each renderer stage before queue submission.
     pub cpu_stage_timings: ViewerGpuExecutionCpuStageTimings,
+    native_video_import_timing_receipt: Option<NativeVideoImportCandidateTimingReceipt>,
+    heterogeneous_continuations: Vec<HeterogeneousGpuRecordedContinuation>,
+}
+
+impl ViewerGpuExecutionRecord {
+    /// Move the exact native-import candidate receipt out at most once.
+    ///
+    /// `None` means timing was inactive/unsupported, the record did not retain
+    /// a receipt, or a prior call already consumed it. It is not permission to
+    /// infer expected sample coverage from layer counts.
+    pub fn take_native_video_import_timing_receipt(
+        &mut self,
+    ) -> Option<NativeVideoImportCandidateTimingReceipt> {
+        self.native_video_import_timing_receipt.take()
+    }
+
+    /// Number of CPU-prefix → GPU-suffix continuations recorded into the same
+    /// caller-owned encoder as this Viewer frame.
+    pub fn heterogeneous_continuation_count(&self) -> usize {
+        self.heterogeneous_continuations.len()
+    }
+
+    /// Bind every recorded heterogeneous continuation to the exact Adapter
+    /// submission containing this Viewer frame.
+    ///
+    /// Call this once, immediately after `Queue::submit`, before either
+    /// publishing the candidate or clearing the Viewer runtime.
+    pub fn assert_adapter_submission(
+        &mut self,
+        submission_index: wgpu::SubmissionIndex,
+    ) -> ViewerHeterogeneousGpuSubmissionBatch {
+        let continuations = std::mem::take(&mut self.heterogeneous_continuations)
+            .into_iter()
+            .map(|continuation| continuation.assert_adapter_submission(submission_index.clone()))
+            .collect();
+        ViewerHeterogeneousGpuSubmissionBatch { continuations }
+    }
+}
+
+/// Heterogeneous parts of one Viewer frame bound to its exact queue
+/// submission.
+///
+/// This value proves submission, not completion. Window adapters register its
+/// non-blocking callback; Headless adapters may wait for the exact submission.
+pub struct ViewerHeterogeneousGpuSubmissionBatch {
+    continuations: Vec<HeterogeneousGpuSubmittedContinuation>,
+}
+
+impl ViewerHeterogeneousGpuSubmissionBatch {
+    /// Whether this Viewer frame contained no heterogeneous continuation.
+    pub fn is_empty(&self) -> bool {
+        self.continuations.is_empty()
+    }
+
+    /// Number of continuations covered by the same submission.
+    pub fn len(&self) -> usize {
+        self.continuations.len()
+    }
+
+    /// Wait for the exact Viewer submission before one non-renewing monotonic
+    /// deadline and produce completion evidence for every continuation.
+    ///
+    /// Every continuation in this batch is bound to the same Adapter
+    /// submission. Observing the first continuation's submission therefore
+    /// proves completion for the whole batch; the remaining values must not
+    /// renew the deadline with additional waits.
+    pub fn wait_until(
+        self,
+        device: &wgpu::Device,
+        deadline: std::time::Instant,
+    ) -> Result<ViewerHeterogeneousGpuCompletedBatch, HeterogeneousGpuContinuationError> {
+        let mut continuations = self.continuations.into_iter();
+        let Some(first) = continuations.next() else {
+            return Ok(ViewerHeterogeneousGpuCompletedBatch { continuations: Vec::new() });
+        };
+        let mut completed = Vec::with_capacity(continuations.len().saturating_add(1));
+        completed.push(first.wait_until(device, deadline)?);
+        completed.extend(
+            continuations
+                .map(HeterogeneousGpuSubmittedContinuation::complete_after_observed_submission),
+        );
+        Ok(ViewerHeterogeneousGpuCompletedBatch { continuations: completed })
+    }
+
+    /// Register one short queue-completion callback for this whole Viewer
+    /// submission.
+    ///
+    /// The callback is driven by a later `Queue::submit` or poll call and must
+    /// only hand the completed batch to an Adapter inbox. It must not perform
+    /// publication or other long-running UI work.
+    pub fn register_completion_callback(
+        self,
+        queue: &wgpu::Queue,
+        callback: impl FnOnce(ViewerHeterogeneousGpuCompletedBatch) + Send + 'static,
+    ) {
+        queue.on_submitted_work_done(move || {
+            let continuations = self
+                .continuations
+                .into_iter()
+                .map(HeterogeneousGpuSubmittedContinuation::complete_after_observed_submission)
+                .collect();
+            callback(ViewerHeterogeneousGpuCompletedBatch { continuations });
+        });
+    }
+}
+
+/// Exact completion evidence for every heterogeneous continuation in one
+/// Viewer candidate.
+pub struct ViewerHeterogeneousGpuCompletedBatch {
+    continuations: Vec<HeterogeneousGpuCompletedContinuation>,
+}
+
+impl ViewerHeterogeneousGpuCompletedBatch {
+    /// Completed continuations in deterministic layer-recording order.
+    pub fn continuations(&self) -> &[HeterogeneousGpuCompletedContinuation] {
+        &self.continuations
+    }
+
+    /// Number of completed continuations.
+    pub fn len(&self) -> usize {
+        self.continuations.len()
+    }
+
+    /// Whether the batch contains no heterogeneous work.
+    pub fn is_empty(&self) -> bool {
+        self.continuations.is_empty()
+    }
 }
 
 /// CPU command-recording attribution for one successful Viewer frame.
@@ -637,15 +988,51 @@ enum ViewerGpuExecutionOutputOwner {
     DisplayCalibration,
 }
 
+/// Fail-closed ownership-transfer error for one recorded Viewer output.
+#[derive(Debug, thiserror::Error)]
+pub enum ViewerGpuPresentationOutputTakeError {
+    /// This record's private output authority was already consumed.
+    #[error("Viewer presentation output {id:?} was already taken")]
+    AlreadyTaken {
+        /// Renderer resource identity that cannot be transferred twice.
+        id: GpuColorFrameId,
+    },
+    /// The color-output owner no longer held the record's exact typed resource.
+    #[error("Viewer color output could not be detached: {0}")]
+    ColorOutput(#[source] GpuColorFrameResourceTableError),
+    /// The calibration owner no longer held the record's exact typed resource.
+    #[error("Viewer display-calibration output {id:?} is missing")]
+    DisplayCalibrationMissing {
+        /// Renderer resource identity expected from display calibration.
+        id: GpuColorFrameId,
+    },
+}
+
 /// Stage-specific failures from the shared Viewer GPU execution Interface.
 #[derive(Debug, thiserror::Error)]
 pub enum ViewerGpuExecutionError {
+    /// The complete request could not fit this owner's pressure-stable active
+    /// texture grant. This is returned before any frame texture is created.
+    #[error(transparent)]
+    ActiveWorkingSet(#[from] ViewerGpuActiveWorkingSetAdmissionError),
     /// Bounded native/GPU resources are still in flight. The presentation
     /// adapter should retain its current output and retry or discard this candidate.
     #[error("Viewer GPU execution is backpressured: {0}")]
     Backpressure(String),
     #[error("Viewer GPU input preparation failed: {0}")]
     InputPreparation(String),
+    /// A move-only CPU-prefix completion was absent, duplicated, ambiguous, or
+    /// bound to a different Viewer frame.
+    #[error("Viewer heterogeneous GPU input is invalid: {reason}")]
+    InvalidHeterogeneousInput {
+        /// Stable rejected invariant.
+        reason: &'static str,
+    },
+    /// Recording the exact GPU suffix failed. Once this route is selected the
+    /// Viewer must discard the candidate; it may not reinterpret the whole
+    /// Effect graph on CPU.
+    #[error("Viewer heterogeneous GPU continuation failed: {0}")]
+    HeterogeneousContinuation(#[source] Box<HeterogeneousGpuContinuationError>),
     /// Display calibration was paired with a quantized output carrier.
     #[error("Viewer display calibration requires an encoded float16 output carrier")]
     DisplayCalibrationRequiresFloatOutput,
@@ -668,10 +1055,10 @@ pub enum ViewerGpuExecutionError {
         scopes_signal: mondrian_core::types::ColorSpace,
     },
     #[error("Viewer GPU working composite graph failed: {0:?}")]
-    WorkingComposite(RenderGpuCompositeGraphRecordError),
+    WorkingComposite(Box<RenderGpuCompositeGraphRecordError>),
     /// A typed two-input Transition could not be materialized exactly.
     #[error("Viewer GPU Transition execution failed: {0}")]
-    Transition(crate::GpuCompositeError),
+    Transition(#[source] Box<crate::GpuCompositeError>),
     #[error("Viewer GPU effect-domain processing failed: {0}")]
     EffectDomain(String),
     #[error("Viewer GPU working output is missing: {0}")]
@@ -683,11 +1070,11 @@ pub enum ViewerGpuExecutionError {
     #[error("Viewer GPU spatial resource transfer failed: {0}")]
     SpatialTransfer(String),
     #[error("Viewer GPU Program Output boundary failed: {0:?}")]
-    ProgramOutputBoundary(RenderGpuOutputBoundaryRuntimeRecordError),
+    ProgramOutputBoundary(Box<RenderGpuOutputBoundaryRuntimeRecordError>),
     #[error("Viewer GPU Program Output scopes failed: {0}")]
-    ProgramScopes(GpuProgramScopesError),
+    ProgramScopes(#[source] Box<GpuProgramScopesError>),
     #[error("Viewer GPU monitor adaptation failed: {0:?}")]
-    MonitorAdaptation(RenderGpuColorTransformRuntimeRecordError),
+    MonitorAdaptation(Box<RenderGpuColorTransformRuntimeRecordError>),
     #[error("Viewer GPU Program Output is missing: {0}")]
     ProgramOutputMissing(String),
     #[error("Viewer GPU display output is missing: {0}")]
@@ -741,6 +1128,7 @@ impl Default for ViewerGpuNativeVideoFacts {
 
 struct PreparedComposite<'a> {
     gpu_input_handles: Vec<GpuColorFrameHandle>,
+    heterogeneous_continuations: Vec<HeterogeneousGpuRecordedContinuation>,
     nodes: Vec<PreparedCompositeNode<'a>>,
     residency: ViewerGpuExecutionResidency,
     input_stage_diagnostics: RenderColorStageDiagnostics,
@@ -776,15 +1164,18 @@ enum PreparedCompositeNode<'a> {
 
 fn prepare_composite<'a>(
     request: &ViewerGpuExecutionRequest<'a>,
+    heterogeneous_inputs: &mut [Option<ViewerHeterogeneousGpuInput>],
     runtime: &mut RenderGpuOutputBoundaryRuntime,
     native_runtime: &mut ViewerNativeVideoImportRuntime,
     compositor: &GpuFrameCompositor,
+    resource_pool: &Arc<GpuColorFrameWgpuResourcePool>,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     encoder: &mut wgpu::CommandEncoder,
 ) -> Result<PreparedComposite<'a>, ViewerGpuExecutionError> {
     let mut prepared = PreparedComposite {
         gpu_input_handles: Vec::new(),
+        heterogeneous_continuations: Vec::new(),
         nodes: Vec::with_capacity(request.layers.len()),
         residency: ViewerGpuExecutionResidency::default(),
         input_stage_diagnostics: RenderColorStageDiagnostics::default(),
@@ -800,10 +1191,12 @@ fn prepare_composite<'a>(
                 let layer = prepare_source_layer(
                     source,
                     request,
+                    heterogeneous_inputs,
                     &mut prepared,
                     runtime,
                     native_runtime,
                     compositor,
+                    resource_pool,
                     device,
                     queue,
                     encoder,
@@ -830,23 +1223,27 @@ fn prepare_composite<'a>(
                     frame_seed: *frame_seed,
                 }));
             }
-            ViewerGpuExecutionLayer::CrossDissolve { left, right, progress } => {
+            ViewerGpuExecutionLayer::CrossDissolve(transition) => {
+                let crate::ViewerGpuCrossDissolveLayer { left, right, progress } =
+                    transition.as_ref();
                 if !progress.is_finite() {
-                    return Err(ViewerGpuExecutionError::Transition(
+                    return Err(ViewerGpuExecutionError::Transition(Box::new(
                         crate::GpuCompositeError::NonFiniteTransitionProgress {
                             progress_bits: progress.to_bits(),
                         },
-                    ));
+                    )));
                 }
                 let progress = progress.clamp(0.0, 1.0);
                 let left = prepare_transition_input(
                     left,
                     1.0 - progress,
                     request,
+                    heterogeneous_inputs,
                     &mut prepared,
                     runtime,
                     native_runtime,
                     compositor,
+                    resource_pool,
                     device,
                     queue,
                     encoder,
@@ -855,10 +1252,12 @@ fn prepare_composite<'a>(
                     right,
                     progress,
                     request,
+                    heterogeneous_inputs,
                     &mut prepared,
                     runtime,
                     native_runtime,
                     compositor,
+                    resource_pool,
                     device,
                     queue,
                     encoder,
@@ -882,10 +1281,12 @@ fn prepare_transition_input<'a>(
     input: &'a crate::ViewerGpuTransitionInput,
     weight: f32,
     request: &ViewerGpuExecutionRequest<'a>,
+    heterogeneous_inputs: &mut [Option<ViewerHeterogeneousGpuInput>],
     prepared: &mut PreparedComposite<'a>,
     runtime: &mut RenderGpuOutputBoundaryRuntime,
     native_runtime: &mut ViewerNativeVideoImportRuntime,
     compositor: &GpuFrameCompositor,
+    resource_pool: &Arc<GpuColorFrameWgpuResourcePool>,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     encoder: &mut wgpu::CommandEncoder,
@@ -903,10 +1304,12 @@ fn prepare_transition_input<'a>(
         crate::ViewerGpuTransitionInput::Source(source) => prepare_source_layer(
             source,
             request,
+            heterogeneous_inputs,
             prepared,
             runtime,
             native_runtime,
             compositor,
+            resource_pool,
             device,
             queue,
             encoder,
@@ -919,10 +1322,12 @@ fn prepare_transition_input<'a>(
 fn prepare_source_layer<'a>(
     source_layer: &'a crate::ViewerGpuSourceLayer,
     request: &ViewerGpuExecutionRequest<'a>,
+    heterogeneous_inputs: &mut [Option<ViewerHeterogeneousGpuInput>],
     prepared: &mut PreparedComposite<'a>,
     runtime: &mut RenderGpuOutputBoundaryRuntime,
     native_runtime: &mut ViewerNativeVideoImportRuntime,
     compositor: &GpuFrameCompositor,
+    resource_pool: &Arc<GpuColorFrameWgpuResourcePool>,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     encoder: &mut wgpu::CommandEncoder,
@@ -932,12 +1337,73 @@ fn prepare_source_layer<'a>(
             frame,
             gpu_source,
             native_source,
+            heterogeneous_input,
             opacity,
             transform,
             effect_plan,
             frame_seed,
         } => {
             prepared.residency.media_layers = prepared.residency.media_layers.saturating_add(1);
+            if let Some(address) = heterogeneous_input {
+                if frame.is_some() || gpu_source.is_some() || native_source.is_some() {
+                    return Err(ViewerGpuExecutionError::InvalidHeterogeneousInput {
+                        reason: "heterogeneous media source is not exclusive",
+                    });
+                }
+                if !effect_plan.node_ids().is_empty() {
+                    return Err(ViewerGpuExecutionError::InvalidHeterogeneousInput {
+                        reason: "heterogeneous media source retained a second Effect plan",
+                    });
+                }
+                let address = usize::try_from(*address).map_err(|_| {
+                    ViewerGpuExecutionError::InvalidHeterogeneousInput {
+                        reason: "heterogeneous media input address is not representable",
+                    }
+                })?;
+                let input = heterogeneous_inputs.get_mut(address).and_then(Option::take).ok_or(
+                    ViewerGpuExecutionError::InvalidHeterogeneousInput {
+                        reason: "heterogeneous media input address is missing or duplicated",
+                    },
+                )?;
+                let binding = input.request.binding();
+                if binding.working_color_space() != request.working_color_space
+                    || binding.frame_seed() != *frame_seed
+                {
+                    return Err(ViewerGpuExecutionError::InvalidHeterogeneousInput {
+                        reason:
+                            "heterogeneous media input does not match the Viewer working contract",
+                    });
+                }
+                let recorded = {
+                    let (frame_table, frame_ids) = runtime.frame_table_and_ids_mut();
+                    HeterogeneousGpuRecordResources::new(
+                        device,
+                        queue,
+                        encoder,
+                        frame_ids,
+                        frame_table,
+                        compositor,
+                        Some(resource_pool),
+                    )
+                    .record(input.request, input.completion)
+                    .map_err(|error| {
+                        ViewerGpuExecutionError::HeterogeneousContinuation(Box::new(error))
+                    })?
+                };
+                let index = prepared.gpu_input_handles.len();
+                prepared.gpu_input_handles.push(recorded.output().clone());
+                prepared.heterogeneous_continuations.push(recorded);
+                prepared.residency.gpu_input_layers =
+                    prepared.residency.gpu_input_layers.saturating_add(1);
+                return Ok(PreparedCompositeLayer {
+                    source: PreparedCompositeLayerSource::GpuFrame(index),
+                    opacity: *opacity,
+                    blend_mode: BlendMode::Normal,
+                    transform: *transform,
+                    effect_plan: None,
+                    frame_seed: *frame_seed,
+                });
+            }
             prepared.residency.record_source(gpu_source.as_ref(), native_source.as_ref());
             let mut native_import_error = None;
             let native_handle = match native_source.as_ref() {
@@ -1202,7 +1668,9 @@ fn execute_prepared_composite_nodes<'a>(
                                 progress,
                                 request.working_color_space,
                             )
-                            .map_err(ViewerGpuExecutionError::Transition)?;
+                            .map_err(|error| {
+                                ViewerGpuExecutionError::Transition(Box::new(error))
+                            })?;
                         diagnostics.accumulate(record.diagnostics);
                         (record.output, 1.0)
                     }
@@ -1244,7 +1712,7 @@ fn materialize_transition_source<'a>(
                 layers: std::slice::from_ref(&gpu_layer),
             },
         )
-        .map_err(ViewerGpuExecutionError::Transition)?;
+        .map_err(|error| ViewerGpuExecutionError::Transition(Box::new(error)))?;
     diagnostics.accumulate(record.diagnostics);
     Ok(Some(record.output))
 }
@@ -1325,6 +1793,8 @@ fn record_native_video_layer(
         color_runtime.frame_ids_mut(),
         source.source_color_space,
         &source.input_transform,
+        source.materialization_width,
+        source.materialization_height,
         &source.native_frame,
     )?;
     let handle = resource.handle().clone();
@@ -1463,22 +1933,124 @@ impl ViewerGpuNativeVideoFacts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
     use crate::{
-        CpuEncodedColorFrame, CpuSourceColorFrame, GpuContext, RenderInputTransform,
+        ColorFrameAlpha, ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding,
+        ColorFrameResidency, ColorFrameSpace, CpuEncodedColorFrame, CpuSourceColorFrame,
+        GpuColorFrameId, GpuContext, HeterogeneousCpuPrefixBatchExecutor,
+        HeterogeneousCpuPrefixBatchGrant, HeterogeneousCpuPrefixBatchItem,
+        HeterogeneousCpuPrefixBatchRequest, HeterogeneousGpuContinuationBinding,
+        HeterogeneousGpuContinuationRequest, HeterogeneousGpuResourceGrant, RenderInputTransform,
         TimelineSolidColorLayer,
     };
+    use mondrian_core::automation::{PropertyHost, PropertyMutation, PropertyValue};
+    use mondrian_core::display_calibration::{
+        IccProfileFingerprint, DEFAULT_DISPLAY_CALIBRATION_LUT_EDGE,
+    };
     use mondrian_core::{
-        ensure_mondrian_default_ocio_loaded, ColorEngine, ColorSpace, WaveformMode,
+        effect_data::{EffectNode, EffectType},
+        ensure_mondrian_default_ocio_loaded, ColorEngine, ColorSpace, TimelineTime, WaveformMode,
         WorkingRgbaF32Frame,
     };
     use mondrian_effects::{
-        compile_scheduled_effect_graph_in_domain, get_or_compile_scheduled_render_graph,
+        compile_reference_effect_graph_in_domain, compile_reference_render_graph,
         lower_effect_graph_to_gpu_plan, EffectColorDomain, EffectColorDomainContract,
-        EffectGraphBuilderState, EffectRenderOp, EffectRenderPlan,
+        EffectExecutionSessionConfig, EffectFrameExtent, EffectGraphBuilderState,
+        EffectGraphExecutionBudget, EffectNodeExt, EffectRenderOp, EffectRenderPlan,
+        PreparedEffectProgram,
     };
     use mondrian_media::{
         DecodedGpuFrameHandleKind, DecodedVideoSampling, DecodedVideoSurfaceFormat,
     };
+
+    fn identity_rec709_display_calibration() -> Arc<DisplayCalibrationLut3d> {
+        let edge = DEFAULT_DISPLAY_CALIBRATION_LUT_EDGE;
+        let denominator = f32::from(edge - 1);
+        let mut samples = Vec::with_capacity(usize::from(edge).pow(3) * 4);
+        for blue in 0..edge {
+            for green in 0..edge {
+                for red in 0..edge {
+                    samples.extend_from_slice(&[
+                        f32::from(red) / denominator,
+                        f32::from(green) / denominator,
+                        f32::from(blue) / denominator,
+                        1.0,
+                    ]);
+                }
+            }
+        }
+        Arc::new(
+            DisplayCalibrationLut3d::from_rgba32f_samples(
+                ColorSpace::Rec709,
+                IccProfileFingerprint::from_bytes(b"viewer-presentation-lease-test"),
+                edge,
+                samples,
+            )
+            .expect("identity Rec.709 display calibration"),
+        )
+    }
+
+    fn record_empty_viewer_frame(
+        context: &GpuContext,
+        runtime: &mut ViewerGpuExecutionRuntime,
+        timeline_frame: i64,
+        display_calibration: Option<Arc<DisplayCalibrationLut3d>>,
+    ) -> ViewerGpuExecutionRecord {
+        try_record_empty_viewer_frame(context, runtime, timeline_frame, display_calibration)
+            .expect("record Viewer presentation lease fixture")
+    }
+
+    fn try_record_empty_viewer_frame(
+        context: &GpuContext,
+        runtime: &mut ViewerGpuExecutionRuntime,
+        timeline_frame: i64,
+        display_calibration: Option<Arc<DisplayCalibrationLut3d>>,
+    ) -> Result<ViewerGpuExecutionRecord, ViewerGpuExecutionError> {
+        let output_boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let monitor_adaptation = RenderMonitorAdaptation::new(
+            ColorSpace::Rec709,
+            ColorSpace::Rec709,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("matching monitor adaptation");
+        let output_precision = if display_calibration.is_some() {
+            ViewerGpuOutputPrecision::EncodedFloat16
+        } else {
+            ViewerGpuOutputPrecision::Encoded8
+        };
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("viewer-presentation-output-lease-test"),
+        });
+        let record = runtime.record(
+            &context.device,
+            &context.queue,
+            &mut encoder,
+            ViewerGpuExecutionRequest {
+                sequence_id: SequenceId::new(),
+                timeline_frame,
+                width: 4,
+                height: 4,
+                working_color_space: WorkingColorSpace::LinearRec709,
+                layers: &[],
+                heterogeneous_inputs: Vec::new(),
+                program_output_boundary: &output_boundary,
+                monitor_adaptation: &monitor_adaptation,
+                source_rect: ViewerSourceRect::FULL,
+                output_width: 4,
+                output_height: 4,
+                output_precision,
+                display_calibration,
+                program_scopes: None,
+            },
+        )?;
+        context.queue.submit(std::iter::once(encoder.finish()));
+        Ok(record)
+    }
 
     #[test]
     fn terminal_native_import_failure_preserves_backend_error_detail() {
@@ -1490,6 +2062,80 @@ mod tests {
 
         assert!(message.contains("D3D11Texture2D P010"));
         assert!(message.contains("adapter LUID mismatch"));
+    }
+
+    #[test]
+    fn viewer_execution_error_keeps_typed_sources_without_large_result_payloads() {
+        assert!(std::mem::size_of::<ViewerGpuExecutionError>() <= 64);
+
+        let error = ViewerGpuExecutionError::Transition(Box::new(
+            crate::GpuCompositeError::NonFiniteTransitionProgress {
+                progress_bits: f32::NAN.to_bits(),
+            },
+        ));
+
+        assert!(matches!(
+            &error,
+            ViewerGpuExecutionError::Transition(source)
+                if matches!(
+                    source.as_ref(),
+                    crate::GpuCompositeError::NonFiniteTransitionProgress { .. }
+                )
+        ));
+        let source = std::error::Error::source(&error).expect("typed transition source");
+        let source = source
+            .downcast_ref::<Box<crate::GpuCompositeError>>()
+            .expect("boxed source retains the concrete transition error");
+        assert!(matches!(
+            source.as_ref(),
+            crate::GpuCompositeError::NonFiniteTransitionProgress { .. }
+        ));
+        assert!(error.to_string().contains("progress must be finite"));
+    }
+
+    #[test]
+    fn viewer_record_moves_native_import_candidate_receipt_out_exactly_once() {
+        let output = GpuColorFrameHandle::new(
+            GpuColorFrameId::from_raw(7),
+            ColorFrameDescriptor {
+                width: 1,
+                height: 1,
+                color_space: ColorFrameSpace::Working(WorkingColorSpace::LinearRec709),
+                domain: ColorFrameDomain::Working,
+                encoding: ColorFrameEncoding::LinearFloat,
+                residency: ColorFrameResidency::Gpu,
+                alpha: ColorFrameAlpha::StraightCoverage,
+            },
+            GpuColorFrameTextureFormat::Rgba16Float,
+            "candidate-receipt-fixture",
+        )
+        .expect("valid GPU output fixture");
+        let mut record = ViewerGpuExecutionRecord {
+            program_output: output.clone(),
+            program_scopes: None,
+            output,
+            output_owner: Some(ViewerGpuExecutionOutputOwner::ColorOutput),
+            stage_diagnostics: RenderColorStageDiagnostics::default(),
+            compositing_diagnostics: GpuCompositingDiagnostics::default(),
+            spatial_diagnostics: GpuViewerSpatialRuntimeDiagnostics::default(),
+            residency: ViewerGpuExecutionResidency::default(),
+            fallback_reasons: Vec::new(),
+            cpu_stage_timings: ViewerGpuExecutionCpuStageTimings::default(),
+            native_video_import_timing_receipt: Some(
+                NativeVideoImportCandidateTimingReceipt::fixture(9, 3, 1, 1, 1),
+            ),
+            heterogeneous_continuations: Vec::new(),
+        };
+
+        let receipt = record
+            .take_native_video_import_timing_receipt()
+            .expect("first take owns the receipt");
+        assert_eq!(receipt.candidate_token().get(), 9);
+        assert_eq!(receipt.submitted_imports(), 3);
+        assert_eq!(receipt.scheduled_samples(), 1);
+        assert_eq!(receipt.missing_samples(), 1);
+        assert_eq!(receipt.dropped_samples(), 1);
+        assert!(record.take_native_video_import_timing_receipt().is_none());
     }
 
     #[test]
@@ -1567,6 +2213,325 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn viewer_resource_grant_shrinks_the_live_idle_texture_pool() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping Viewer resource-grant test: no GPU adapter available");
+            return;
+        };
+        let output_boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let monitor_adaptation = RenderMonitorAdaptation::new(
+            ColorSpace::Rec709,
+            ColorSpace::Rec709,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("matching monitor adaptation");
+        let mut runtime =
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
+                .expect("Viewer GPU runtime");
+        let record_frame = |runtime: &mut ViewerGpuExecutionRuntime, timeline_frame| {
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("viewer-resource-grant-integration"),
+                });
+            runtime
+                .record(
+                    &context.device,
+                    &context.queue,
+                    &mut encoder,
+                    ViewerGpuExecutionRequest {
+                        sequence_id: SequenceId::new(),
+                        timeline_frame,
+                        width: 4,
+                        height: 4,
+                        working_color_space: WorkingColorSpace::LinearRec709,
+                        layers: &[],
+                        heterogeneous_inputs: Vec::new(),
+                        program_output_boundary: &output_boundary,
+                        monitor_adaptation: &monitor_adaptation,
+                        source_rect: ViewerSourceRect::FULL,
+                        output_width: 4,
+                        output_height: 4,
+                        output_precision: ViewerGpuOutputPrecision::Encoded8,
+                        display_calibration: None,
+                        program_scopes: None,
+                    },
+                )
+                .expect("Viewer GPU frame");
+            context.queue.submit(std::iter::once(encoder.finish()));
+        };
+
+        record_frame(&mut runtime, 0);
+        runtime.clear_frame_resources();
+        let retained_before = runtime.color_output_diagnostics().resource_pool.retained_resources;
+        assert!(retained_before > 0);
+
+        record_frame(&mut runtime, 1);
+        let active_before = runtime.color_output_diagnostics();
+        assert!(active_before.frame_table_entries > 0);
+        let zero_idle = ViewerGpuExecutionResourceGrant::new(0, 0);
+        assert!(runtime.reconfigure_resource_grant(zero_idle));
+        assert_eq!(runtime.resource_grant(), zero_idle);
+        assert_eq!(
+            runtime.color_output_diagnostics().resource_pool.retained_resources,
+            0
+        );
+        runtime.clear_frame_resources();
+        assert_eq!(
+            runtime.color_output_diagnostics().resource_pool.retained_resources,
+            0,
+            "resources checked out under the old grant must obey the new grant on release"
+        );
+        assert!(!runtime.reconfigure_resource_grant(zero_idle));
+        runtime.clear_idle_resources();
+        assert_eq!(
+            runtime.color_output_diagnostics().resource_pool.retained_resources,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn viewer_color_output_lease_survives_clear_and_returns_exactly_once() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping Viewer color-output lease test: no GPU adapter available");
+            return;
+        };
+        let mut runtime =
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
+                .expect("Viewer GPU runtime");
+        let mut record = record_empty_viewer_frame(&context, &mut runtime, 10, None);
+        let expected = record.output.clone();
+
+        let lease = runtime
+            .take_presentation_output(&mut record)
+            .expect("take color-output presentation resource");
+        let detached = runtime.color_output_diagnostics().resource_pool;
+        assert_eq!(detached.detached_presentation_resources, 1);
+        assert_eq!(detached.detached_presentation_bytes, 4 * 4 * 4);
+        assert_eq!(detached.detached_presentation_high_water_resources, 1);
+        assert_eq!(detached.detached_presentation_high_water_bytes, 4 * 4 * 4);
+        assert!(!detached.detached_presentation_accounting_overflowed);
+        assert_eq!(lease.handle(), &expected);
+        assert_eq!(lease.texture().width(), 4);
+        assert!(matches!(
+            runtime.take_presentation_output(&mut record),
+            Err(ViewerGpuPresentationOutputTakeError::AlreadyTaken { id })
+                if id == expected.id()
+        ));
+        assert!(runtime.output_texture_view(&record).is_err());
+
+        runtime.clear_frame_resources();
+        assert_eq!(lease.handle(), &expected);
+        assert_eq!(lease.texture().height(), 4);
+        let releases_before_drop = runtime.color_output_diagnostics().resource_pool.releases;
+        drop(lease);
+        let after_drop = runtime.color_output_diagnostics().resource_pool;
+        assert_eq!(after_drop.releases, releases_before_drop + 1);
+        assert_eq!(after_drop.detached_presentation_resources, 0);
+        assert_eq!(after_drop.detached_presentation_bytes, 0);
+        assert_eq!(after_drop.detached_presentation_high_water_resources, 1);
+        assert_eq!(after_drop.detached_presentation_high_water_bytes, 4 * 4 * 4);
+    }
+
+    #[tokio::test]
+    async fn viewer_active_grant_is_stable_before_and_after_first_presentation() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping Viewer detached-output admission test: no GPU adapter available");
+            return;
+        };
+        let mut runtime =
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
+                .expect("Viewer GPU runtime");
+
+        let warmup = record_empty_viewer_frame(&context, &mut runtime, 20, None);
+        let steady_state = runtime
+            .active_working_set_diagnostics()
+            .last_admitted
+            .expect("warmup admission");
+        assert_eq!(
+            steady_state.detached_presentations,
+            crate::ViewerGpuActiveTextureDemand::default()
+        );
+        assert_eq!(
+            steady_state.presentation_continuity_reserve,
+            steady_state.presentation_output
+        );
+        runtime.clear_frame_resources();
+        drop(warmup);
+
+        let original_grant = runtime.resource_grant();
+        let exact_steady_state_grant = ViewerGpuExecutionResourceGrant::new(
+            original_grant.max_idle_per_contract(),
+            original_grant.max_idle_bytes(),
+        )
+        .with_active_limits(steady_state.total().bytes, steady_state.total().textures);
+        assert!(runtime.reconfigure_resource_grant(exact_steady_state_grant));
+
+        let mut first = try_record_empty_viewer_frame(&context, &mut runtime, 21, None)
+            .expect("first frame fits its exact steady-state grant");
+        let lease = runtime
+            .take_presentation_output(&mut first)
+            .expect("detach first candidate output");
+        runtime.clear_frame_resources();
+
+        let second = try_record_empty_viewer_frame(&context, &mut runtime, 22, None)
+            .expect("identical second frame fits while the first output remains current");
+        let second_admission = runtime
+            .active_working_set_diagnostics()
+            .last_admitted
+            .expect("second-frame admission");
+        assert_eq!(
+            second_admission.detached_presentations,
+            steady_state.presentation_output
+        );
+        assert_eq!(
+            second_admission.presentation_continuity_reserve,
+            crate::ViewerGpuActiveTextureDemand::default()
+        );
+        assert_eq!(second_admission.total(), steady_state.total());
+        drop(second);
+        runtime.clear_frame_resources();
+
+        drop(lease);
+        assert_eq!(
+            runtime.color_output_diagnostics().resource_pool.detached_presentation_resources,
+            0
+        );
+        let third = try_record_empty_viewer_frame(&context, &mut runtime, 23, None)
+            .expect("the reserve returns after the current lease drops");
+        let third_admission = runtime
+            .active_working_set_diagnostics()
+            .last_admitted
+            .expect("third-frame admission");
+        assert_eq!(
+            third_admission.detached_presentations,
+            crate::ViewerGpuActiveTextureDemand::default()
+        );
+        assert_eq!(
+            third_admission.presentation_continuity_reserve,
+            steady_state.presentation_output
+        );
+        assert_eq!(third_admission.total(), steady_state.total());
+        drop(third);
+        runtime.clear_frame_resources();
+    }
+
+    #[tokio::test]
+    async fn viewer_multiple_detached_outputs_backpressure_before_recording() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping Viewer capacity-one admission test: no GPU adapter available");
+            return;
+        };
+        let mut runtime =
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
+                .expect("Viewer GPU runtime");
+
+        let mut first = record_empty_viewer_frame(&context, &mut runtime, 30, None);
+        let first_lease =
+            runtime.take_presentation_output(&mut first).expect("detach first output");
+        runtime.clear_frame_resources();
+        let mut second = record_empty_viewer_frame(&context, &mut runtime, 31, None);
+        let second_lease = runtime
+            .take_presentation_output(&mut second)
+            .expect("detach second output to simulate a broken multi-slot Adapter");
+        runtime.clear_frame_resources();
+        assert_eq!(
+            runtime.color_output_diagnostics().resource_pool.detached_presentation_resources,
+            2
+        );
+
+        assert!(matches!(
+            try_record_empty_viewer_frame(&context, &mut runtime, 32, None),
+            Err(ViewerGpuExecutionError::Backpressure(reason))
+                if reason.contains("2 live outputs")
+        ));
+
+        drop(second_lease);
+        let recovered = try_record_empty_viewer_frame(&context, &mut runtime, 33, None)
+            .expect("capacity-one admission resumes after one excess lease drops");
+        drop(recovered);
+        runtime.clear_frame_resources();
+        drop(first_lease);
+    }
+
+    #[tokio::test]
+    async fn viewer_calibrated_output_lease_survives_reset_without_repopulating_old_generation() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping Viewer calibrated-output lease test: no GPU adapter available");
+            return;
+        };
+        let mut runtime =
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
+                .expect("Viewer GPU runtime");
+        let mut record = record_empty_viewer_frame(
+            &context,
+            &mut runtime,
+            11,
+            Some(identity_rec709_display_calibration()),
+        );
+        let expected = record.output.clone();
+        let lease = runtime
+            .take_presentation_output(&mut record)
+            .expect("take calibrated presentation resource");
+        assert_eq!(lease.handle(), &expected);
+
+        let before_reset = runtime.color_output_diagnostics().resource_pool;
+        assert_eq!(before_reset.detached_presentation_resources, 1);
+        assert_eq!(before_reset.detached_presentation_bytes, 4 * 4 * 8);
+        runtime.reset();
+        let after_reset = runtime.color_output_diagnostics().resource_pool;
+        assert_eq!(after_reset.invalidations, before_reset.invalidations + 1);
+        assert_eq!(after_reset.detached_presentation_resources, 1);
+        assert_eq!(after_reset.detached_presentation_bytes, 4 * 4 * 8);
+        assert_eq!(lease.handle(), &expected);
+        assert_eq!(lease.texture().width(), 4);
+        let releases_before_drop = after_reset.releases;
+        let stale_before_drop = after_reset.stale_generation_releases;
+        drop(lease);
+        let after_drop = runtime.color_output_diagnostics().resource_pool;
+        assert_eq!(after_drop.releases, releases_before_drop);
+        assert_eq!(after_drop.stale_generation_releases, stale_before_drop + 1);
+        assert_eq!(after_drop.detached_presentation_resources, 0);
+        assert_eq!(after_drop.detached_presentation_bytes, 0);
+        assert_eq!(after_drop.retained_resources, 0);
+    }
+
+    #[tokio::test]
+    async fn viewer_missing_presentation_output_consumes_record_authority_fail_closed() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping Viewer missing-output lease test: no GPU adapter available");
+            return;
+        };
+        let mut runtime =
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
+                .expect("Viewer GPU runtime");
+        let mut record = record_empty_viewer_frame(&context, &mut runtime, 12, None);
+        let expected_id = record.output.id();
+        runtime.clear_frame_resources();
+
+        assert!(matches!(
+            runtime.take_presentation_output(&mut record),
+            Err(ViewerGpuPresentationOutputTakeError::ColorOutput(
+                GpuColorFrameResourceTableError::MissingFrame { id }
+            )) if id == expected_id
+        ));
+        assert!(matches!(
+            runtime.take_presentation_output(&mut record),
+            Err(ViewerGpuPresentationOutputTakeError::AlreadyTaken { id })
+                if id == expected_id
+        ));
+    }
+
+    #[tokio::test]
     async fn viewer_retains_program_output_before_gpu_monitor_adaptation() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let Ok(context) = GpuContext::new().await else {
@@ -1585,7 +2550,8 @@ mod tests {
         )
         .expect("SDR monitor adaptation");
         let mut runtime =
-            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue);
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
+                .expect("Viewer GPU runtime");
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewer-monitor-adaptation-integration"),
         });
@@ -1602,6 +2568,7 @@ mod tests {
                     height: 4,
                     working_color_space: WorkingColorSpace::LinearRec709,
                     layers: &[],
+                    heterogeneous_inputs: Vec::new(),
                     program_output_boundary: &program_output_boundary,
                     monitor_adaptation: &monitor_adaptation,
                     source_rect: ViewerSourceRect::FULL,
@@ -1651,7 +2618,7 @@ mod tests {
             return;
         };
         let domain = EffectColorDomain::DisplayEncodedRgb { color_space: ColorSpace::Rec709 };
-        let graph = compile_scheduled_effect_graph_in_domain(
+        let graph = compile_reference_effect_graph_in_domain(
             &EffectRenderPlan {
                 ops: vec![EffectRenderOp::ColorAdjust {
                     exposure: 0.25,
@@ -1680,7 +2647,8 @@ mod tests {
         )
         .expect("matching monitor adaptation");
         let mut runtime =
-            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue);
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
+                .expect("Viewer GPU runtime");
         for timeline_frame in 7..10 {
             let layer = ViewerGpuExecutionLayer::Source(crate::ViewerGpuSourceLayer::Media {
                 frame: None,
@@ -1697,6 +2665,7 @@ mod tests {
                     decoded_video_sampling: DecodedVideoSampling::default(),
                 }),
                 native_source: None,
+                heterogeneous_input: None,
                 opacity: 1.0,
                 transform: [0.5, 0.0, 1.0, 0.0, 0.5, 1.0],
                 effect_plan: Arc::clone(&effect_plan),
@@ -1719,6 +2688,7 @@ mod tests {
                         height: 4,
                         working_color_space: WorkingColorSpace::LinearRec709,
                         layers: &[layer],
+                        heterogeneous_inputs: Vec::new(),
                         program_output_boundary: &output_boundary,
                         monitor_adaptation: &monitor_adaptation,
                         source_rect: ViewerSourceRect::FULL,
@@ -1754,7 +2724,7 @@ mod tests {
             return;
         };
         let domain = EffectColorDomain::DisplayEncodedRgb { color_space: ColorSpace::Rec709 };
-        let graph = compile_scheduled_effect_graph_in_domain(
+        let graph = compile_reference_effect_graph_in_domain(
             &EffectRenderPlan {
                 ops: vec![EffectRenderOp::ColorAdjust {
                     exposure: 0.25,
@@ -1778,6 +2748,7 @@ mod tests {
             frame: Some(frame),
             gpu_source: None,
             native_source: None,
+            heterogeneous_input: None,
             opacity: 1.0,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan,
@@ -1795,7 +2766,8 @@ mod tests {
         )
         .expect("matching monitor adaptation");
         let mut runtime =
-            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue);
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
+                .expect("Viewer GPU runtime");
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewer-cpu-working-effect-domain"),
         });
@@ -1812,6 +2784,7 @@ mod tests {
                     height: 4,
                     working_color_space: WorkingColorSpace::LinearRec709,
                     layers: &[layer],
+                    heterogeneous_inputs: Vec::new(),
                     program_output_boundary: &output_boundary,
                     monitor_adaptation: &monitor_adaptation,
                     source_rect: ViewerSourceRect::FULL,
@@ -1840,7 +2813,7 @@ mod tests {
             return;
         };
         let domain = EffectColorDomain::DisplayEncodedRgb { color_space: ColorSpace::Rec709 };
-        let graph = compile_scheduled_effect_graph_in_domain(
+        let graph = compile_reference_effect_graph_in_domain(
             &EffectRenderPlan {
                 ops: vec![EffectRenderOp::ColorAdjust {
                     exposure: 0.25,
@@ -1864,6 +2837,7 @@ mod tests {
             frame: Some(frame),
             gpu_source: None,
             native_source: None,
+            heterogeneous_input: None,
             opacity: 0.0,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan,
@@ -1881,7 +2855,8 @@ mod tests {
         )
         .expect("matching monitor adaptation");
         let mut runtime =
-            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue);
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
+                .expect("Viewer GPU runtime");
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewer-zero-opacity-media"),
         });
@@ -1898,6 +2873,7 @@ mod tests {
                     height: 4,
                     working_color_space: WorkingColorSpace::LinearRec709,
                     layers: &[layer],
+                    heterogeneous_inputs: Vec::new(),
                     program_output_boundary: &output_boundary,
                     monitor_adaptation: &monitor_adaptation,
                     source_rect: ViewerSourceRect::FULL,
@@ -1930,7 +2906,7 @@ mod tests {
             return;
         };
         let domain = EffectColorDomain::DisplayEncodedRgb { color_space: ColorSpace::Rec709 };
-        let graph = compile_scheduled_effect_graph_in_domain(
+        let graph = compile_reference_effect_graph_in_domain(
             &EffectRenderPlan {
                 ops: vec![EffectRenderOp::ColorAdjust {
                     exposure: 0.25,
@@ -1967,7 +2943,8 @@ mod tests {
         )
         .expect("matching monitor adaptation");
         let mut runtime =
-            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue);
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
+                .expect("Viewer GPU runtime");
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewer-solid-effect-domain"),
         });
@@ -1984,6 +2961,7 @@ mod tests {
                     height: 4,
                     working_color_space: WorkingColorSpace::LinearRec709,
                     layers: &[layer],
+                    heterogeneous_inputs: Vec::new(),
                     program_output_boundary: &output_boundary,
                     monitor_adaptation: &monitor_adaptation,
                     source_rect: ViewerSourceRect::FULL,
@@ -2012,7 +2990,7 @@ mod tests {
             eprintln!("skipping Viewer affine solid test: no GPU adapter available");
             return;
         };
-        let graph = get_or_compile_scheduled_render_graph(EffectGraphBuilderState::new().finish())
+        let graph = compile_reference_render_graph(EffectGraphBuilderState::new().finish())
             .expect("valid scene-linear identity graph");
         let effect_plan =
             Arc::new(lower_effect_graph_to_gpu_plan(&graph).expect("GPU identity plan"));
@@ -2039,7 +3017,8 @@ mod tests {
         )
         .expect("matching monitor adaptation");
         let mut runtime =
-            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue);
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
+                .expect("Viewer GPU runtime");
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewer-affine-scene-solid"),
         });
@@ -2056,6 +3035,7 @@ mod tests {
                     height: 4,
                     working_color_space: WorkingColorSpace::LinearRec709,
                     layers: &[layer],
+                    heterogeneous_inputs: Vec::new(),
                     program_output_boundary: &output_boundary,
                     monitor_adaptation: &monitor_adaptation,
                     source_rect: ViewerSourceRect::FULL,
@@ -2086,7 +3066,7 @@ mod tests {
             eprintln!("skipping Viewer Cross Dissolve test: no GPU adapter available");
             return;
         };
-        let graph = get_or_compile_scheduled_render_graph(EffectGraphBuilderState::new().finish())
+        let graph = compile_reference_render_graph(EffectGraphBuilderState::new().finish())
             .expect("valid scene-linear identity graph");
         let effect_plan =
             Arc::new(lower_effect_graph_to_gpu_plan(&graph).expect("GPU identity plan"));
@@ -2103,11 +3083,12 @@ mod tests {
                 effect_plan: Arc::clone(&effect_plan),
             })
         };
-        let layer = ViewerGpuExecutionLayer::CrossDissolve {
-            left: source(Color { r: 1.0, g: 0.0, b: 0.0, a: 0.25 }, 7),
-            right: source(Color { r: 0.0, g: 0.0, b: 1.0, a: 0.75 }, 8),
-            progress: 0.4,
-        };
+        let layer =
+            ViewerGpuExecutionLayer::CrossDissolve(Box::new(crate::ViewerGpuCrossDissolveLayer {
+                left: source(Color { r: 1.0, g: 0.0, b: 0.0, a: 0.25 }, 7),
+                right: source(Color { r: 0.0, g: 0.0, b: 1.0, a: 0.75 }, 8),
+                progress: 0.4,
+            }));
         let output_boundary = RenderOutputColorBoundary::display(
             ColorSpace::Rec709,
             false,
@@ -2120,7 +3101,8 @@ mod tests {
         )
         .expect("matching monitor adaptation");
         let mut runtime =
-            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue);
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
+                .expect("Viewer GPU runtime");
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewer-cross-dissolve"),
         });
@@ -2137,6 +3119,7 @@ mod tests {
                     height: 4,
                     working_color_space: WorkingColorSpace::LinearRec709,
                     layers: &[layer],
+                    heterogeneous_inputs: Vec::new(),
                     program_output_boundary: &output_boundary,
                     monitor_adaptation: &monitor_adaptation,
                     source_rect: ViewerSourceRect::FULL,
@@ -2157,13 +3140,186 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn viewer_records_tracer_cpu_prefix_and_gpu_suffix_in_one_submission() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping Viewer heterogeneous tracer test: no GPU adapter available");
+            return;
+        };
+        const GENERATION: u64 = 41;
+        const FRAME_SEED: i64 = 73;
+        const WIDTH: u32 = 4;
+        const HEIGHT: u32 = 3;
+        const WORKING_SPACE: WorkingColorSpace = WorkingColorSpace::LinearRec2020;
+        let blur = EffectNode::with_defaults(EffectType::GaussianBlur);
+        let mut correction = EffectNode::with_defaults(EffectType::BasicCorrection);
+        correction
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::BasicCorrection.property_path("exposure"),
+                value: PropertyValue::Float(0.25),
+            })
+            .expect("set Basic Correction exposure");
+        let mut grain = EffectNode::with_defaults(EffectType::Grain);
+        grain
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Grain.property_path("amount"),
+                value: PropertyValue::Float(0.1),
+            })
+            .expect("set Grain amount");
+        let graph = PreparedEffectProgram::prepare(&[blur, correction, grain], &[], WORKING_SPACE)
+            .expect("prepare heterogeneous tracer")
+            .evaluate(TimelineTime::ZERO)
+            .expect("compile heterogeneous tracer");
+        let graph_budget = EffectGraphExecutionBudget::new(16 << 20, 16 << 20, 16 << 20, 32, 64);
+        let cpu_grant = HeterogeneousCpuPrefixBatchGrant::new(
+            EffectExecutionSessionConfig::uncached(16 << 20),
+            graph_budget,
+            1,
+            16 << 20,
+        );
+        let cpu_input = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: WIDTH,
+            height: HEIGHT,
+            color_space: WORKING_SPACE,
+            data: (0..WIDTH * HEIGHT)
+                .map(|index| {
+                    let value = index as f32 / (WIDTH * HEIGHT - 1) as f32;
+                    [value, 1.0 - value, 0.25 + 0.5 * value, 1.0]
+                })
+                .collect(),
+        });
+        let cpu_output = HeterogeneousCpuPrefixBatchExecutor::default()
+            .execute(
+                HeterogeneousCpuPrefixBatchRequest::new(
+                    cpu_grant,
+                    vec![HeterogeneousCpuPrefixBatchItem::new(
+                        0,
+                        Arc::clone(&graph),
+                        cpu_input,
+                        WORKING_SPACE,
+                        FRAME_SEED,
+                    )],
+                ),
+                GENERATION,
+                || None,
+            )
+            .expect("execute tracer CPU prefix");
+        let mut completions = cpu_output.into_completions().into_vec();
+        let (_, completion) = completions.pop().expect("one CPU prefix completion").into_parts();
+        let gpu_request = HeterogeneousGpuContinuationRequest::new(
+            HeterogeneousGpuContinuationBinding::new(
+                graph.semantic_fingerprint(),
+                GENERATION,
+                EffectFrameExtent::new(WIDTH, HEIGHT),
+                FRAME_SEED,
+                WORKING_SPACE,
+            ),
+            HeterogeneousGpuResourceGrant::new(16 << 20, 16 << 20, 0),
+        );
+        let identity_graph =
+            compile_reference_render_graph(EffectGraphBuilderState::new().finish())
+                .expect("compile Viewer identity graph");
+        let identity_plan = Arc::new(
+            lower_effect_graph_to_gpu_plan(&identity_graph).expect("lower Viewer identity plan"),
+        );
+        let layer = ViewerGpuExecutionLayer::Source(crate::ViewerGpuSourceLayer::Media {
+            frame: None,
+            gpu_source: None,
+            native_source: None,
+            heterogeneous_input: Some(0),
+            opacity: 1.0,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: identity_plan,
+            frame_seed: FRAME_SEED,
+        });
+        let output_boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let monitor_adaptation = RenderMonitorAdaptation::new(
+            ColorSpace::Rec709,
+            ColorSpace::Rec709,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("matching monitor adaptation");
+        let mut runtime =
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
+                .expect("Viewer GPU runtime");
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("viewer-heterogeneous-tracer"),
+        });
+        let mut record = runtime
+            .record(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                ViewerGpuExecutionRequest {
+                    sequence_id: SequenceId::new(),
+                    timeline_frame: FRAME_SEED,
+                    // Source-domain extent deliberately differs from the
+                    // Viewer canvas. Nested placements project through the
+                    // existing normalized layer transform.
+                    width: WIDTH * 2,
+                    height: HEIGHT * 2,
+                    working_color_space: WORKING_SPACE,
+                    layers: &[layer],
+                    heterogeneous_inputs: vec![ViewerHeterogeneousGpuInput {
+                        request: gpu_request,
+                        completion,
+                    }],
+                    program_output_boundary: &output_boundary,
+                    monitor_adaptation: &monitor_adaptation,
+                    source_rect: ViewerSourceRect::FULL,
+                    output_width: WIDTH * 2,
+                    output_height: HEIGHT * 2,
+                    output_precision: ViewerGpuOutputPrecision::Encoded8,
+                    display_calibration: None,
+                    program_scopes: None,
+                },
+            )
+            .expect("record Viewer heterogeneous tracer");
+        assert_eq!(record.heterogeneous_continuation_count(), 1);
+        let submission_index = context.queue.submit(std::iter::once(encoder.finish()));
+        let submitted = record.assert_adapter_submission(submission_index);
+        assert_eq!(submitted.len(), 1);
+        let completed = submitted
+            .wait_until(
+                &context.device,
+                std::time::Instant::now() + Duration::from_secs(5),
+            )
+            .expect("wait for exact heterogeneous Viewer submission");
+        assert_eq!(completed.len(), 1);
+        let evidence = completed.continuations()[0].evidence();
+        assert_eq!(evidence.recorded().generation(), GENERATION);
+        assert_eq!(
+            evidence.recorded().graph_fingerprint(),
+            graph.semantic_fingerprint()
+        );
+        assert_eq!(
+            evidence.submitted().authority(),
+            crate::HeterogeneousGpuSubmissionAuthority::TrustedAdapterAssertion
+        );
+        assert_eq!(evidence.batch_id(), evidence.recorded().batch_id());
+        assert_eq!(
+            evidence.completed_upload_token(),
+            evidence.recorded().upload_signal()
+        );
+        assert_eq!(
+            evidence.completed_output_token(),
+            evidence.recorded().output_signal()
+        );
+        assert_eq!(evidence.recorded().gpu_nodes().len(), 2);
+    }
+
+    #[tokio::test]
     async fn viewer_composite_to_program_output_matches_cpu_on_real_wgpu_device() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let Ok(context) = GpuContext::new().await else {
             eprintln!("skipping Viewer composite-to-output parity test: no GPU adapter");
             return;
         };
-        let graph = get_or_compile_scheduled_render_graph(EffectGraphBuilderState::new().finish())
+        let graph = compile_reference_render_graph(EffectGraphBuilderState::new().finish())
             .expect("valid scene-linear identity graph");
         let source = Arc::new(CpuSourceColorFrame::from(
             CpuEncodedColorFrame::source_rgba8(
@@ -2189,6 +3345,7 @@ mod tests {
                 decoded_video_sampling: DecodedVideoSampling::default(),
             }),
             native_source: None,
+            heterogeneous_input: None,
             opacity: 1.0,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan: Arc::new(
@@ -2220,7 +3377,8 @@ mod tests {
         let expected = crate::execute_cpu_output_boundary_rgba8(&working.result.frame, &boundary)
             .expect("CPU Program Output reference");
         let mut runtime =
-            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue);
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
+                .expect("Viewer GPU runtime");
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewer-composite-to-program-output-parity"),
         });
@@ -2237,6 +3395,7 @@ mod tests {
                     height: 4,
                     working_color_space: WorkingColorSpace::LinearRec2020,
                     layers: &[layer],
+                    heterogeneous_inputs: Vec::new(),
                     program_output_boundary: &boundary,
                     monitor_adaptation: &monitor_adaptation,
                     source_rect: ViewerSourceRect::FULL,
@@ -2259,8 +3418,9 @@ mod tests {
             &context.device,
             &mut encoder,
             &readback_plan,
-            output.resource(),
-        );
+            output,
+        )
+        .expect("record Viewer output readback");
         context.queue.submit(std::iter::once(encoder.finish()));
         let (sender, receiver) = std::sync::mpsc::channel();
         let slice = readback.slice(..);
@@ -2296,14 +3456,13 @@ mod tests {
             eprintln!("skipping Viewer adjustment effect-domain test: no GPU adapter available");
             return;
         };
-        let scene_graph =
-            get_or_compile_scheduled_render_graph(EffectGraphBuilderState::new().finish())
-                .expect("valid scene-linear identity graph");
+        let scene_graph = compile_reference_render_graph(EffectGraphBuilderState::new().finish())
+            .expect("valid scene-linear identity graph");
         let scene_plan = Arc::new(
             lower_effect_graph_to_gpu_plan(&scene_graph).expect("scene-linear GPU identity plan"),
         );
         let domain = EffectColorDomain::DisplayEncodedRgb { color_space: ColorSpace::Rec709 };
-        let adjustment_graph = compile_scheduled_effect_graph_in_domain(
+        let adjustment_graph = compile_reference_effect_graph_in_domain(
             &EffectRenderPlan {
                 ops: vec![EffectRenderOp::ColorAdjust {
                     exposure: 0.25,
@@ -2349,7 +3508,8 @@ mod tests {
         )
         .expect("matching monitor adaptation");
         let mut runtime =
-            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue);
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
+                .expect("Viewer GPU runtime");
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewer-adjustment-effect-domain"),
         });
@@ -2366,6 +3526,7 @@ mod tests {
                     height: 4,
                     working_color_space: WorkingColorSpace::LinearRec709,
                     layers: &layers,
+                    heterogeneous_inputs: Vec::new(),
                     program_output_boundary: &output_boundary,
                     monitor_adaptation: &monitor_adaptation,
                     source_rect: ViewerSourceRect::FULL,

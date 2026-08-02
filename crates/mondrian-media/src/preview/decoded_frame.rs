@@ -148,18 +148,9 @@ impl RgbaFrame {
     pub(super) fn with_temporal_selection(
         mut self,
         requested_pts: i64,
-        selected_pts: Option<i64>,
-        hit_tolerance_pts: i64,
-        policy: PreviewDecodeAccessPolicy,
+        selected_extent: Option<DecodedTemporalExtent>,
     ) -> Self {
-        self.diagnostics.requested_pts = Some(requested_pts);
-        self.diagnostics.selected_pts = selected_pts;
-        self.diagnostics.temporal_approximation = temporal_selection_is_approximate(
-            requested_pts,
-            selected_pts,
-            hit_tolerance_pts,
-            policy,
-        );
+        self.diagnostics = self.diagnostics.with_temporal_selection(requested_pts, selected_extent);
         self
     }
 
@@ -168,8 +159,11 @@ impl RgbaFrame {
         self
     }
 
-    pub(super) fn with_session_reused(mut self, session_reused: bool) -> Self {
-        self.diagnostics.session_reused = session_reused;
+    pub(super) fn with_session_disposition(
+        mut self,
+        disposition: super::PreviewDecodeSessionDisposition,
+    ) -> Self {
+        self.diagnostics.session_disposition = disposition;
         self
     }
 
@@ -235,25 +229,22 @@ impl RgbaFrame {
         self
     }
 
-    pub(super) fn into_cache_hit(
-        mut self,
-        elapsed: Duration,
-        access_mode: PreviewDecodeAccessMode,
-    ) -> Self {
-        let decoded_surface_format = self.diagnostics.decoded_surface_format;
-        let decoded_video_sampling = self.diagnostics.decoded_video_sampling;
-        self.diagnostics = PreviewDecodeDiagnostics::cache_hit_for_mode(elapsed, access_mode);
-        self.diagnostics.decoded_surface_format = decoded_surface_format;
-        self.diagnostics.decoded_video_sampling = decoded_video_sampling;
-        self
-    }
-
     pub(super) fn into_playback_ring_hit(mut self, elapsed: Duration) -> Self {
         let decoded_surface_format = self.diagnostics.decoded_surface_format;
         let decoded_video_sampling = self.diagnostics.decoded_video_sampling;
+        let requested_pts = self.diagnostics.requested_pts;
+        let selected_pts = self.diagnostics.selected_pts;
+        let selected_duration_pts = self.diagnostics.selected_duration_pts;
+        let selected_temporal_extent_source = self.diagnostics.selected_temporal_extent_source;
+        let temporal_approximation = self.diagnostics.temporal_approximation;
         self.diagnostics = PreviewDecodeDiagnostics::playback_ring_hit(elapsed);
         self.diagnostics.decoded_surface_format = decoded_surface_format;
         self.diagnostics.decoded_video_sampling = decoded_video_sampling;
+        self.diagnostics.requested_pts = requested_pts;
+        self.diagnostics.selected_pts = selected_pts;
+        self.diagnostics.selected_duration_pts = selected_duration_pts;
+        self.diagnostics.selected_temporal_extent_source = selected_temporal_extent_source;
+        self.diagnostics.temporal_approximation = temporal_approximation;
         self
     }
 }
@@ -304,8 +295,11 @@ impl FloatRgbaFrame {
         self
     }
 
-    pub(super) fn with_session_reused(mut self, session_reused: bool) -> Self {
-        self.diagnostics.session_reused = session_reused;
+    pub(super) fn with_session_disposition(
+        mut self,
+        disposition: super::PreviewDecodeSessionDisposition,
+    ) -> Self {
+        self.diagnostics.session_disposition = disposition;
         self
     }
 
@@ -322,18 +316,9 @@ impl FloatRgbaFrame {
     pub(super) fn with_temporal_selection(
         mut self,
         requested_pts: i64,
-        selected_pts: Option<i64>,
-        hit_tolerance_pts: i64,
-        policy: PreviewDecodeAccessPolicy,
+        selected_extent: Option<DecodedTemporalExtent>,
     ) -> Self {
-        self.diagnostics.requested_pts = Some(requested_pts);
-        self.diagnostics.selected_pts = selected_pts;
-        self.diagnostics.temporal_approximation = temporal_selection_is_approximate(
-            requested_pts,
-            selected_pts,
-            hit_tolerance_pts,
-            policy,
-        );
+        self.diagnostics = self.diagnostics.with_temporal_selection(requested_pts, selected_extent);
         self
     }
 
@@ -400,27 +385,23 @@ impl FloatRgbaFrame {
         self
     }
 
-    pub(super) fn into_cache_hit(
-        mut self,
-        elapsed: Duration,
-        access_mode: PreviewDecodeAccessMode,
-    ) -> Self {
-        let decoded_surface_format = self.diagnostics.decoded_surface_format;
-        let decoded_video_sampling = self.diagnostics.decoded_video_sampling;
-        self.diagnostics = PreviewDecodeDiagnostics::cache_hit_for_mode(elapsed, access_mode);
-        self.diagnostics.decoded_frame_residency = DecodedFrameResidency::CpuFloat;
-        self.diagnostics.decoded_surface_format = decoded_surface_format;
-        self.diagnostics.decoded_video_sampling = decoded_video_sampling;
-        self
-    }
-
     pub(super) fn into_playback_ring_hit(mut self, elapsed: Duration) -> Self {
         let decoded_surface_format = self.diagnostics.decoded_surface_format;
         let decoded_video_sampling = self.diagnostics.decoded_video_sampling;
+        let requested_pts = self.diagnostics.requested_pts;
+        let selected_pts = self.diagnostics.selected_pts;
+        let selected_duration_pts = self.diagnostics.selected_duration_pts;
+        let selected_temporal_extent_source = self.diagnostics.selected_temporal_extent_source;
+        let temporal_approximation = self.diagnostics.temporal_approximation;
         self.diagnostics = PreviewDecodeDiagnostics::playback_ring_hit(elapsed);
         self.diagnostics.decoded_frame_residency = DecodedFrameResidency::CpuFloat;
         self.diagnostics.decoded_surface_format = decoded_surface_format;
         self.diagnostics.decoded_video_sampling = decoded_video_sampling;
+        self.diagnostics.requested_pts = requested_pts;
+        self.diagnostics.selected_pts = selected_pts;
+        self.diagnostics.selected_duration_pts = selected_duration_pts;
+        self.diagnostics.selected_temporal_extent_source = selected_temporal_extent_source;
+        self.diagnostics.temporal_approximation = temporal_approximation;
         self
     }
 }

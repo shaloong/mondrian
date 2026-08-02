@@ -3,6 +3,9 @@ fn main() {
     println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
     println!("cargo:rerun-if-env-changed=VCPKG_DEFAULT_TRIPLET");
     println!("cargo:rerun-if-env-changed=FFMPEG_DIR");
+    println!("cargo:rerun-if-env-changed=PROFILE");
+    println!("cargo:rerun-if-env-changed=OPT_LEVEL");
+    emit_cargo_build_attestation();
 
     #[cfg(target_os = "windows")]
     {
@@ -12,6 +15,15 @@ fn main() {
         if let Err(err) = deploy_windows_runtime_dlls() {
             println!("cargo:warning=部署 Windows 媒体运行时失败: {err}");
         }
+    }
+}
+
+fn emit_cargo_build_attestation() {
+    if let Ok(profile) = std::env::var("PROFILE") {
+        println!("cargo:rustc-env=MONDRIAN_BUILD_CARGO_PROFILE={profile}");
+    }
+    if let Ok(opt_level) = std::env::var("OPT_LEVEL") {
+        println!("cargo:rustc-env=MONDRIAN_BUILD_RUSTC_OPT_LEVEL={opt_level}");
     }
 }
 

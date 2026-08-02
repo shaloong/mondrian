@@ -5,27 +5,43 @@ use std::time::Instant;
 
 use mondrian_media::{AudioSourceCache, WaveformEnvelopeBuilder};
 
-use super::state::{WaveformFailure, WaveformJob, WaveformResult, WaveformSource};
+use crate::app::single_worker_activity::SingleWorkerActivity;
+
+use super::state::{
+    WaveformFailure, WaveformJob, WaveformResult, WaveformSource, WaveformWorkerIdentity,
+};
 use super::{
-    WaveformFailureReason, WAVEFORM_DECODE_WINDOW_SECONDS, WAVEFORM_MAX_WIDTH, WAVEFORM_SAMPLE_RATE,
+    WaveformDispatchGate, WaveformFailureReason, WAVEFORM_DECODE_WINDOW_SECONDS,
+    WAVEFORM_MAX_WIDTH, WAVEFORM_SAMPLE_RATE,
 };
 
 pub(super) fn waveform_worker(
     jobs: mpsc::Receiver<WaveformJob>,
     results: mpsc::SyncSender<WaveformResult>,
     source_cache: Arc<AudioSourceCache>,
+    dispatch_gate: Arc<WaveformDispatchGate>,
+    activity: Arc<SingleWorkerActivity<WaveformWorkerIdentity>>,
 ) {
     for job in jobs {
+        let identity = job.worker_identity();
+        let mut activity_lease = activity.begin(identity);
         let started = Instant::now();
-        let source = build_waveform_source(&job, &source_cache);
+        let source = if dispatch_gate.wait_until_enabled(&job.cancellation) {
+            activity_lease.mark_running();
+            build_waveform_source(&job, &source_cache)
+        } else {
+            Err(canceled_failure())
+        };
         let result = WaveformResult {
             key: job.key,
             generation: job.generation,
             source,
             elapsed: started.elapsed(),
         };
-        if results.send(result).is_err() {
-            break;
+        activity_lease.finish_for_publication();
+        match results.send(result) {
+            Ok(()) => activity_lease.commit_publication(),
+            Err(_) => break,
         }
     }
 }
@@ -37,7 +53,7 @@ fn build_waveform_source(
     if job.cancellation.is_canceled() {
         return Err(canceled_failure());
     }
-    let reader = source_cache.open(&job.path, job.selection.clone()).map_err(|error| {
+    let reader = source_cache.open(&job.path, job.key.selection.clone()).map_err(|error| {
         WaveformFailure::new(WaveformFailureReason::DecodeFailed, error.to_string())
     })?;
     let width = usize::try_from(job.total_frames.min(u64::from(WAVEFORM_MAX_WIDTH)))

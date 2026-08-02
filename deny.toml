@@ -10,8 +10,6 @@ allow = [
     "CC0-1.0",
     "WTFPL",
     "Zlib",
-    "MPL-2.0",
-    "CDLA-Permissive-2.0",
     "ISC",
     "Unicode-3.0",
 ]
@@ -21,6 +19,11 @@ confidence-threshold = 0.8
 multiple-versions = "allow"
 wildcards = "allow"
 highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = ["https://github.com/shaloong/ocio-rs.git"]
 
 [advisories]
 version = 2

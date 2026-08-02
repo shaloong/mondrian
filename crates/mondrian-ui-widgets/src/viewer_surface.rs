@@ -1815,7 +1815,7 @@ mod tests {
         let mut viewer =
             ViewerSurface::new("Scene 01", 1920, 1080).on_control(|control| match control {
                 ViewerControl::PlayPause => Action::SaveProject,
-                _ => Action::NoOp,
+                _ => Action::Pause,
             });
         viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
         let position = viewer.control_rect(ViewerControl::PlayPause).center();

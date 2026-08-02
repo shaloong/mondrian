@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::execution_progress::{PreviewDecodeExecutionObserver, PreviewDecodeExecutionStage};
+use super::PreviewDecodeSessionDisposition;
 
 /// Execution point at which a Preview decode first observed cancellation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -85,6 +86,12 @@ pub struct PreviewDecodeCancellation {
     pub checkpoint: PreviewDecodeCancellationCheckpoint,
     /// Mechanism that observed cancellation at that point.
     pub source: PreviewDecodeCancellationSource,
+    /// Decoder-Session lifecycle work admitted by this request before cancellation.
+    #[serde(default)]
+    pub session_disposition: PreviewDecodeSessionDisposition,
+    /// Time spent opening or replacing the decoder Session before cancellation.
+    #[serde(default)]
+    pub session_open_us: u64,
 }
 
 impl PreviewDecodeCancellation {
@@ -92,6 +99,8 @@ impl PreviewDecodeCancellation {
         Self {
             checkpoint,
             source: PreviewDecodeCancellationSource::CooperativeCheckpoint,
+            session_disposition: PreviewDecodeSessionDisposition::Unspecified,
+            session_open_us: 0,
         }
     }
 
@@ -99,6 +108,8 @@ impl PreviewDecodeCancellation {
         Self {
             checkpoint,
             source: PreviewDecodeCancellationSource::FfmpegIoInterrupt,
+            session_disposition: PreviewDecodeSessionDisposition::Unspecified,
+            session_open_us: 0,
         }
     }
 
@@ -108,7 +119,19 @@ impl PreviewDecodeCancellation {
         Self {
             checkpoint,
             source: PreviewDecodeCancellationSource::IsolatedDemuxTermination,
+            session_disposition: PreviewDecodeSessionDisposition::Unspecified,
+            session_open_us: 0,
         }
+    }
+
+    pub(super) fn with_session_attempt(
+        mut self,
+        session_disposition: PreviewDecodeSessionDisposition,
+        session_open_us: u64,
+    ) -> Self {
+        self.session_disposition = session_disposition;
+        self.session_open_us = session_open_us;
+        self
     }
 }
 

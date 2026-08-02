@@ -1668,7 +1668,7 @@ mod tests {
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
         let mut list = PanelList::new("Assets", sample_items())
-            .on_drop(|_payload, _position| Some(Action::NoOp));
+            .on_drop(|_payload, _position| Some(Action::SaveProject));
         list.layout(Rect::new(0.0, 0.0, 240.0, 180.0));
 
         let mut focus = DummyFocus;

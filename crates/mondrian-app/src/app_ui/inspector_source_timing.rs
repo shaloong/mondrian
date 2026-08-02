@@ -98,36 +98,34 @@ const RATE_PERCENT_MAX: f64 = 10_000.0;
 pub(crate) fn inspector_forward_rate_action(
     selection: Option<SelectedClipRef>,
     rate_percent: f32,
-) -> Action {
+) -> Option<Action> {
     let rate_percent = f64::from(rate_percent);
     if !rate_percent.is_finite() || rate_percent <= 0.0 || rate_percent > RATE_PERCENT_MAX {
-        return Action::NoOp;
+        return None;
     }
     let basis_points = (rate_percent * RATE_PERCENT_QUANTIZATION).round();
     if basis_points < 1.0 || basis_points > i64::MAX as f64 {
-        return Action::NoOp;
+        return None;
     }
     let Ok(rate) = TimeScale::new(basis_points as i64, RATE_SCALE_DENOMINATOR) else {
-        return Action::NoOp;
+        return None;
     };
-    selection
-        .map(|selection| Action::SetClipForwardRate {
-            clip_id: selection.clip_id,
-            rate,
-            include_linked: true,
-        })
-        .unwrap_or(Action::NoOp)
+    selection.map(|selection| Action::SetClipForwardRate {
+        clip_id: selection.clip_id,
+        rate,
+        include_linked: true,
+    })
 }
 
 pub(crate) fn inspector_freeze_action(
     selection: Option<SelectedClipRef>,
     sequence_time: Option<FramePosition>,
-) -> Action {
+) -> Option<Action> {
     let (Some(selection), Some(sequence_time)) = (selection, sequence_time) else {
-        return Action::NoOp;
+        return None;
     };
     if !selection.is_video_track {
-        return Action::NoOp;
+        return None;
     }
-    Action::FreezeVideoClipAt { clip_id: selection.clip_id, sequence_time }
+    Some(Action::FreezeVideoClipAt { clip_id: selection.clip_id, sequence_time })
 }

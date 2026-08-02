@@ -25,8 +25,13 @@ placement model: it has no Track, range, source, speed, Route, or output fields.
 Copying into another independent edit/Sequence forks Scope, Processor,
 Keyframe, and Edit identities. Razor splitting forks placement-local Edit
 identities while retaining the Scope identity and advancing both edit-local and
-Scope-local origins. This preserves stateful processor continuity without
-duplicating placement truth.
+Scope-local origins. This preserves the shared processing definition and its
+author-time coordinate without duplicating placement truth. Scope identity
+alone never authorizes mutable DSP-state sharing: preparation derives a
+separate processor occurrence for each Contribution. Mutable state may be
+shared only when the complete signal projection, processor contract, parameter
+delivery, nested instance path, evaluation mode, and continuity epoch prove one
+identical Audio State Domain; absent that proof, execution remains independent.
 
 Duplicating a Sequence forks every Sequence-local Audio Role, Component Edit,
 Processing Scope, processor instance, Bus, Program Output, Route, Transition,
@@ -69,8 +74,9 @@ output ID and assigns parent-local semantics separately.
 - Moving, trimming, slipping, splitting, copying, overwriting, and nesting must
   mutate the Clip and its restricted audio coordinates atomically.
 - There is no compatibility author model or flat fallback graph in alpha.
-- Missing local entities reject validation. Missing media, nested Sequences, or
-  plugins remain preserved recoverable dependencies but block execution unless
-  an explicit consumer policy permits a reported degradation.
+- Missing Sequence-local entities and Project-contained nested Sequence or
+  public-output references reject validation. Missing media, plugin, or other
+  provider bindings preserve recoverable author intent but block execution
+  unless an explicit consumer policy permits a reported degradation.
 - Sends, sidechains, feedback, and richer layouts must extend typed ports and
   validation; they cannot introduce string connections or a parallel graph.

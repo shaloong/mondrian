@@ -159,49 +159,105 @@ impl ColorFrameDescriptor {
 
 /// Renderer-owned identifier for a GPU color frame resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GpuColorFrameId(u64);
+pub struct GpuColorFrameId {
+    allocator_authority: u64,
+    raw: u64,
+}
 
 impl GpuColorFrameId {
-    /// Create an identifier from a renderer resource table key.
-    pub fn from_raw(raw: u64) -> Self {
-        Self(raw)
+    /// Create a fixture identifier inside the renderer-owned crate boundary.
+    #[cfg(test)]
+    pub(crate) fn from_raw(raw: u64) -> Self {
+        Self { allocator_authority: 0, raw }
     }
 
-    /// Return the raw renderer resource table key.
+    fn from_allocator(allocator_authority: u64, raw: u64) -> Self {
+        Self { allocator_authority, raw }
+    }
+
+    /// Return the allocator authority that owns this identity.
+    pub fn allocator_authority(self) -> u64 {
+        self.allocator_authority
+    }
+
+    /// Return the authority-local raw renderer resource sequence.
     pub fn raw(self) -> u64 {
-        self.0
+        self.raw
     }
 }
 
 /// Monotonic allocator for renderer-owned GPU color frame ids.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Every allocator claims one process-unique non-zero authority. `u64::MAX` is
+/// reserved as the terminal sequence exhaustion sentinel. Allocators are not
+/// cloneable and never wrap, saturate, or reuse either identity component.
+#[derive(Debug, PartialEq, Eq)]
 pub struct GpuColorFrameIdAllocator {
+    authority: u64,
     next: u64,
 }
 
+/// Failure returned when the GPU frame identity space is exhausted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum GpuColorFrameIdAllocationError {
+    /// No new process-unique allocator authority remains.
+    #[error("renderer GPU color frame allocator authority space is exhausted")]
+    AllocatorAuthorityExhausted,
+    /// This allocator has consumed every permitted authority-local sequence.
+    #[error("renderer GPU color frame sequence is exhausted for allocator authority {authority}")]
+    SequenceExhausted {
+        /// Exhausted process-unique allocator authority.
+        authority: u64,
+    },
+}
+
+static NEXT_GPU_COLOR_FRAME_ALLOCATOR_AUTHORITY: AtomicU64 = AtomicU64::new(1);
+
 impl GpuColorFrameIdAllocator {
-    /// Create an allocator starting at the provided raw id.
-    pub fn new(first: u64) -> Self {
-        Self { next: first }
+    /// Create an allocator with a unique authority and the provided first raw id.
+    ///
+    /// Passing `u64::MAX` creates an allocator whose sequence is explicitly
+    /// exhausted. Process authority exhaustion rejects construction.
+    pub fn new(first: u64) -> Result<Self, GpuColorFrameIdAllocationError> {
+        let authority = claim_gpu_color_frame_allocator_authority()
+            .ok_or(GpuColorFrameIdAllocationError::AllocatorAuthorityExhausted)?;
+        Ok(Self { authority, next: first })
     }
 
-    /// Allocate the next frame id.
-    pub fn allocate(&mut self) -> GpuColorFrameId {
-        let id = GpuColorFrameId::from_raw(self.next);
-        self.next = self.next.saturating_add(1);
-        id
+    /// Allocate the next frame id, failing closed at identity exhaustion.
+    pub fn allocate(&mut self) -> Result<GpuColorFrameId, GpuColorFrameIdAllocationError> {
+        let authority = self.authority;
+        let raw = self.next;
+        let next = raw
+            .checked_add(1)
+            .ok_or(GpuColorFrameIdAllocationError::SequenceExhausted { authority })?;
+        let id = GpuColorFrameId::from_allocator(authority, raw);
+        self.next = next;
+        Ok(id)
     }
 
-    /// Return the next raw id that will be allocated.
+    /// Return this allocator's process-unique authority.
+    pub fn authority(&self) -> u64 {
+        self.authority
+    }
+
+    /// Return the next raw id, or the reserved exhaustion sentinel.
     pub fn next_raw(&self) -> u64 {
         self.next
     }
+
+    /// Whether no further unique identity can be allocated.
+    pub fn is_exhausted(&self) -> bool {
+        self.next == u64::MAX
+    }
 }
 
-impl Default for GpuColorFrameIdAllocator {
-    fn default() -> Self {
-        Self::new(1)
-    }
+fn claim_gpu_color_frame_allocator_authority() -> Option<u64> {
+    NEXT_GPU_COLOR_FRAME_ALLOCATOR_AUTHORITY
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current.checked_add(1)
+        })
+        .ok()
 }
 
 /// Texture format used by a GPU-resident color frame.
@@ -415,6 +471,21 @@ impl<R> GpuColorFrameResourceTable<R> {
         Ok(entry)
     }
 
+    /// Move the exact resource out of the table after validating its complete contract.
+    ///
+    /// A mismatched descriptor or texture format leaves the stored resource
+    /// untouched. Presentation adapters use this transition to detach one
+    /// output without exposing id-only removal as an ownership authority.
+    pub fn take(
+        &mut self,
+        handle: &GpuColorFrameHandle,
+    ) -> Result<GpuColorFrameResource<R>, GpuColorFrameResourceTableError> {
+        self.get(handle)?;
+        self.entries
+            .remove(&handle.id())
+            .ok_or(GpuColorFrameResourceTableError::MissingFrame { id: handle.id() })
+    }
+
     /// Remove a resource entry by frame id.
     pub fn remove(&mut self, id: GpuColorFrameId) -> Option<GpuColorFrameResource<R>> {
         self.entries.remove(&id)
@@ -464,10 +535,26 @@ static NEXT_GPU_COLOR_FRAME_BIND_GROUP_CACHE_KEY: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GpuColorFrameBindGroupCacheKey(u64);
 
+/// Failure returned when no unique GPU frame bind-group cache key remains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("renderer GPU color frame bind-group cache key space is exhausted")]
+pub struct GpuColorFrameBindGroupCacheKeyAllocationError;
+
 impl GpuColorFrameBindGroupCacheKey {
-    pub(crate) fn allocate() -> Self {
-        Self(NEXT_GPU_COLOR_FRAME_BIND_GROUP_CACHE_KEY.fetch_add(1, Ordering::Relaxed))
+    pub(crate) fn allocate() -> Result<Self, GpuColorFrameBindGroupCacheKeyAllocationError> {
+        allocate_gpu_color_frame_bind_group_cache_key(&NEXT_GPU_COLOR_FRAME_BIND_GROUP_CACHE_KEY)
     }
+}
+
+fn allocate_gpu_color_frame_bind_group_cache_key(
+    sequence: &AtomicU64,
+) -> Result<GpuColorFrameBindGroupCacheKey, GpuColorFrameBindGroupCacheKeyAllocationError> {
+    sequence
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current.checked_add(1)
+        })
+        .map(GpuColorFrameBindGroupCacheKey)
+        .map_err(|_| GpuColorFrameBindGroupCacheKeyAllocationError)
 }
 
 struct CachedGpuColorFrameBindGroup {
@@ -539,10 +626,14 @@ impl GpuColorFrameWgpuResourcePoolKey {
         }
     }
 
+    fn logical_byte_len(self) -> u128 {
+        u128::from(self.width)
+            * u128::from(self.height)
+            * u128::from(self.texture_format.bytes_per_pixel())
+    }
+
     fn byte_len(self) -> u64 {
-        u64::from(self.width)
-            .saturating_mul(u64::from(self.height))
-            .saturating_mul(u64::from(self.texture_format.bytes_per_pixel()))
+        saturating_u128_to_u64(self.logical_byte_len())
     }
 }
 
@@ -575,6 +666,22 @@ pub struct GpuColorFrameWgpuResourcePoolDiagnostics {
     pub releases: u64,
     /// Resources dropped to enforce per-contract or byte limits.
     pub evictions: u64,
+    /// Device/runtime invalidations that revoked all previously issued return generations.
+    pub invalidations: u64,
+    /// Detached resources dropped instead of re-entering an invalidated pool generation.
+    pub stale_generation_releases: u64,
+    /// Current presentation textures detached into move-only external leases.
+    pub detached_presentation_resources: u64,
+    /// Current logical bytes owned by detached presentation leases.
+    pub detached_presentation_bytes: u64,
+    /// Highest simultaneous detached-presentation texture count.
+    pub detached_presentation_high_water_resources: u64,
+    /// Highest simultaneous detached-presentation logical byte ownership.
+    pub detached_presentation_high_water_bytes: u64,
+    /// Transitions into a demand that cannot be represented by the public `u64` budget model.
+    pub detached_presentation_accounting_overflows: u64,
+    /// Whether the current detached-presentation demand exceeds the public budget model.
+    pub detached_presentation_accounting_overflowed: bool,
     /// Current number of idle retained resources.
     pub retained_resources: usize,
     /// Approximate bytes occupied by idle retained resources.
@@ -586,15 +693,53 @@ struct PooledGpuColorFrameWgpuResource {
     payload: GpuColorFrameWgpuResource,
 }
 
-#[derive(Default)]
 struct GpuColorFrameWgpuResourcePoolState {
+    options: GpuColorFrameWgpuResourcePoolOptions,
     idle: VecDeque<PooledGpuColorFrameWgpuResource>,
     retained_bytes: u64,
     hits: u64,
     misses: u64,
     releases: u64,
     evictions: u64,
+    generation: u64,
+    accepts_generation_returns: bool,
+    invalidations: u64,
+    stale_generation_releases: u64,
+    detached_presentation_resources: u128,
+    detached_presentation_bytes: u128,
+    detached_presentation_high_water_resources: u128,
+    detached_presentation_high_water_bytes: u128,
+    detached_presentation_accounting_overflows: u64,
+    detached_presentation_accounting_irrecoverable: bool,
 }
+
+impl Default for GpuColorFrameWgpuResourcePoolState {
+    fn default() -> Self {
+        Self {
+            options: GpuColorFrameWgpuResourcePoolOptions::default(),
+            idle: VecDeque::new(),
+            retained_bytes: 0,
+            hits: 0,
+            misses: 0,
+            releases: 0,
+            evictions: 0,
+            generation: 1,
+            accepts_generation_returns: true,
+            invalidations: 0,
+            stale_generation_releases: 0,
+            detached_presentation_resources: 0,
+            detached_presentation_bytes: 0,
+            detached_presentation_high_water_resources: 0,
+            detached_presentation_high_water_bytes: 0,
+            detached_presentation_accounting_overflows: 0,
+            detached_presentation_accounting_irrecoverable: false,
+        }
+    }
+}
+
+/// Opaque generation authorizing a detached resource to return to one pool epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GpuColorFrameWgpuResourcePoolGeneration(u64);
 
 /// Device-scoped, byte-bounded LRU pool for typed color-frame textures.
 ///
@@ -602,7 +747,6 @@ struct GpuColorFrameWgpuResourcePoolState {
 /// the same ordered GPU queue or the candidate was abandoned before submit.
 /// Reuse therefore adds no CPU completion wait and preserves queue ordering.
 pub struct GpuColorFrameWgpuResourcePool {
-    options: GpuColorFrameWgpuResourcePoolOptions,
     state: Mutex<GpuColorFrameWgpuResourcePoolState>,
 }
 
@@ -610,9 +754,33 @@ impl GpuColorFrameWgpuResourcePool {
     /// Create a pool with an explicit per-contract and retained-byte policy.
     pub fn new(options: GpuColorFrameWgpuResourcePoolOptions) -> Self {
         Self {
-            options,
-            state: Mutex::new(GpuColorFrameWgpuResourcePoolState::default()),
+            state: Mutex::new(GpuColorFrameWgpuResourcePoolState {
+                options,
+                ..GpuColorFrameWgpuResourcePoolState::default()
+            }),
         }
+    }
+
+    /// Replace the idle-retention policy and synchronously enforce it.
+    ///
+    /// Resources already checked out remain valid. A later release observes
+    /// the new policy, so shrinking a live execution owner cannot repopulate
+    /// residency beyond the new grant.
+    pub fn reconfigure(&self, options: GpuColorFrameWgpuResourcePoolOptions) {
+        let mut state = self.state.lock();
+        state.options = options;
+        enforce_gpu_color_frame_pool_limits(&mut state);
+    }
+
+    /// Return the currently enforced idle-retention policy.
+    pub fn options(&self) -> GpuColorFrameWgpuResourcePoolOptions {
+        self.state.lock().options
+    }
+
+    /// Capture the current return generation for a move-only detached resource.
+    #[cfg(test)]
+    pub(crate) fn generation(&self) -> GpuColorFrameWgpuResourcePoolGeneration {
+        GpuColorFrameWgpuResourcePoolGeneration(self.state.lock().generation)
     }
 
     /// Acquire an exact-contract texture or allocate one on a pool miss.
@@ -647,35 +815,74 @@ impl GpuColorFrameWgpuResourcePool {
 
     /// Return one renderer-owned texture after its previous queue use was ordered.
     pub fn release(&self, resource: GpuColorFrameResource<GpuColorFrameWgpuResource>) {
-        let key = GpuColorFrameWgpuResourcePoolKey::from_resource(&resource);
-        let byte_len = key.byte_len();
-        let (_, payload) = resource.into_parts();
         let mut state = self.state.lock();
-        state.releases = state.releases.saturating_add(1);
-        if self.options.max_per_contract == 0 || byte_len > self.options.max_retained_bytes {
-            state.evictions = state.evictions.saturating_add(1);
-            return;
+        release_gpu_color_frame_resource(&mut state, resource);
+    }
+
+    /// Register one presentation allocation and atomically capture its return generation.
+    fn register_detached_presentation(
+        &self,
+        byte_len: u128,
+    ) -> GpuColorFrameWgpuResourcePoolGeneration {
+        let mut state = self.state.lock();
+        register_detached_presentation_demand(&mut state, byte_len);
+        GpuColorFrameWgpuResourcePoolGeneration(state.generation)
+    }
+
+    /// Return a detached presentation resource and retire its active demand.
+    ///
+    /// A device/runtime reset invalidates earlier generations. Their late drops
+    /// release backend handles directly instead of repopulating the idle pool.
+    /// Demand retirement and either pool return or backend drop are atomic to
+    /// active-working-set observers.
+    fn release_detached_presentation(
+        &self,
+        generation: GpuColorFrameWgpuResourcePoolGeneration,
+        byte_len: u128,
+        resource: GpuColorFrameResource<GpuColorFrameWgpuResource>,
+    ) -> bool {
+        let mut state = self.state.lock();
+        unregister_detached_presentation_demand(&mut state, byte_len);
+        if !state.accepts_generation_returns || generation.0 != state.generation {
+            state.stale_generation_releases = state.stale_generation_releases.saturating_add(1);
+            drop(state);
+            drop(resource);
+            return false;
         }
-        while state.idle.iter().filter(|entry| entry.key == key).count()
-            >= self.options.max_per_contract
-        {
-            let Some(position) = state.idle.iter().position(|entry| entry.key == key) else {
-                break;
-            };
-            if let Some(evicted) = state.idle.remove(position) {
-                state.retained_bytes = state.retained_bytes.saturating_sub(evicted.key.byte_len());
-                state.evictions = state.evictions.saturating_add(1);
-            }
+        release_gpu_color_frame_resource(&mut state, resource);
+        true
+    }
+
+    /// Return exact active demand from every live detached presentation lease.
+    ///
+    /// `None` is a conservative overflow signal: Viewer admission must reject
+    /// instead of treating unrepresentable physical ownership as free.
+    pub(crate) fn detached_presentation_demand(&self) -> Option<(u64, u64)> {
+        let state = self.state.lock();
+        if detached_presentation_demand_overflowed(&state) {
+            return None;
         }
-        state.idle.push_back(PooledGpuColorFrameWgpuResource { key, payload });
-        state.retained_bytes = state.retained_bytes.saturating_add(byte_len);
-        while state.retained_bytes > self.options.max_retained_bytes {
-            let Some(evicted) = state.idle.pop_front() else {
-                break;
-            };
-            state.retained_bytes = state.retained_bytes.saturating_sub(evicted.key.byte_len());
-            state.evictions = state.evictions.saturating_add(1);
+        Some((
+            state.detached_presentation_resources as u64,
+            state.detached_presentation_bytes as u64,
+        ))
+    }
+
+    /// Revoke every outstanding return generation and drop all idle resources.
+    ///
+    /// Unlike [`Self::clear`], this is a device/runtime lifetime boundary.
+    /// Detached presentation leases from an older generation remain valid
+    /// owners, but their eventual drops cannot return resources to this pool.
+    pub fn invalidate(&self) {
+        let mut state = self.state.lock();
+        state.invalidations = state.invalidations.saturating_add(1);
+        match state.generation.checked_add(1) {
+            Some(next) => state.generation = next,
+            None => state.accepts_generation_returns = false,
         }
+        state.evictions = state.evictions.saturating_add(state.idle.len() as u64);
+        state.idle.clear();
+        state.retained_bytes = 0;
     }
 
     /// Return point-in-time pool reuse and memory-retention evidence.
@@ -686,6 +893,23 @@ impl GpuColorFrameWgpuResourcePool {
             misses: state.misses,
             releases: state.releases,
             evictions: state.evictions,
+            invalidations: state.invalidations,
+            stale_generation_releases: state.stale_generation_releases,
+            detached_presentation_resources: saturating_u128_to_u64(
+                state.detached_presentation_resources,
+            ),
+            detached_presentation_bytes: saturating_u128_to_u64(state.detached_presentation_bytes),
+            detached_presentation_high_water_resources: saturating_u128_to_u64(
+                state.detached_presentation_high_water_resources,
+            ),
+            detached_presentation_high_water_bytes: saturating_u128_to_u64(
+                state.detached_presentation_high_water_bytes,
+            ),
+            detached_presentation_accounting_overflows: state
+                .detached_presentation_accounting_overflows,
+            detached_presentation_accounting_overflowed: detached_presentation_demand_overflowed(
+                &state,
+            ),
             retained_resources: state.idle.len(),
             retained_bytes: state.retained_bytes,
         }
@@ -700,9 +924,204 @@ impl GpuColorFrameWgpuResourcePool {
     }
 }
 
+fn register_detached_presentation_demand(
+    state: &mut GpuColorFrameWgpuResourcePoolState,
+    byte_len: u128,
+) {
+    let was_overflowed = detached_presentation_demand_overflowed(state);
+    let next_resources = state.detached_presentation_resources.checked_add(1);
+    let next_bytes = state.detached_presentation_bytes.checked_add(byte_len);
+    match (next_resources, next_bytes) {
+        (Some(resources), Some(bytes)) => {
+            state.detached_presentation_resources = resources;
+            state.detached_presentation_bytes = bytes;
+            state.detached_presentation_high_water_resources =
+                state.detached_presentation_high_water_resources.max(resources);
+            state.detached_presentation_high_water_bytes =
+                state.detached_presentation_high_water_bytes.max(bytes);
+        }
+        _ => {
+            // A physical process cannot own enough Rust allocations to overflow
+            // this u128 ledger, but fail closed if that invariant ever changes.
+            state.detached_presentation_accounting_irrecoverable = true;
+        }
+    }
+    if !was_overflowed && detached_presentation_demand_overflowed(state) {
+        state.detached_presentation_accounting_overflows =
+            state.detached_presentation_accounting_overflows.saturating_add(1);
+    }
+}
+
+fn unregister_detached_presentation_demand(
+    state: &mut GpuColorFrameWgpuResourcePoolState,
+    byte_len: u128,
+) {
+    if state.detached_presentation_accounting_irrecoverable {
+        return;
+    }
+    let next_resources = state.detached_presentation_resources.checked_sub(1);
+    let next_bytes = state.detached_presentation_bytes.checked_sub(byte_len);
+    match (next_resources, next_bytes) {
+        (Some(resources), Some(bytes)) => {
+            state.detached_presentation_resources = resources;
+            state.detached_presentation_bytes = bytes;
+        }
+        _ => {
+            state.detached_presentation_accounting_irrecoverable = true;
+            state.detached_presentation_accounting_overflows =
+                state.detached_presentation_accounting_overflows.saturating_add(1);
+        }
+    }
+}
+
+fn detached_presentation_demand_overflowed(state: &GpuColorFrameWgpuResourcePoolState) -> bool {
+    state.detached_presentation_accounting_irrecoverable
+        || state.detached_presentation_resources > u128::from(u64::MAX)
+        || state.detached_presentation_bytes > u128::from(u64::MAX)
+}
+
+fn saturating_u128_to_u64(value: u128) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn release_gpu_color_frame_resource(
+    state: &mut GpuColorFrameWgpuResourcePoolState,
+    resource: GpuColorFrameResource<GpuColorFrameWgpuResource>,
+) {
+    let key = GpuColorFrameWgpuResourcePoolKey::from_resource(&resource);
+    let byte_len = key.byte_len();
+    let (_, payload) = resource.into_parts();
+    state.releases = state.releases.saturating_add(1);
+    if state.options.max_per_contract == 0 || byte_len > state.options.max_retained_bytes {
+        state.evictions = state.evictions.saturating_add(1);
+        return;
+    }
+    while state.idle.iter().filter(|entry| entry.key == key).count()
+        >= state.options.max_per_contract
+    {
+        let Some(position) = state.idle.iter().position(|entry| entry.key == key) else {
+            break;
+        };
+        if let Some(evicted) = state.idle.remove(position) {
+            state.retained_bytes = state.retained_bytes.saturating_sub(evicted.key.byte_len());
+            state.evictions = state.evictions.saturating_add(1);
+        }
+    }
+    state.idle.push_back(PooledGpuColorFrameWgpuResource { key, payload });
+    state.retained_bytes = state.retained_bytes.saturating_add(byte_len);
+    enforce_gpu_color_frame_pool_byte_limit(state);
+}
+
+fn enforce_gpu_color_frame_pool_limits(state: &mut GpuColorFrameWgpuResourcePoolState) {
+    let mut retained_per_contract = HashMap::new();
+    let mut index = state.idle.len();
+    while index > 0 {
+        index -= 1;
+        let key = state.idle[index].key;
+        let retained = retained_per_contract.entry(key).or_insert(0_usize);
+        if *retained >= state.options.max_per_contract {
+            if let Some(evicted) = state.idle.remove(index) {
+                state.retained_bytes = state.retained_bytes.saturating_sub(evicted.key.byte_len());
+                state.evictions = state.evictions.saturating_add(1);
+            }
+        } else {
+            *retained = retained.saturating_add(1);
+        }
+    }
+    enforce_gpu_color_frame_pool_byte_limit(state);
+}
+
+fn enforce_gpu_color_frame_pool_byte_limit(state: &mut GpuColorFrameWgpuResourcePoolState) {
+    while state.retained_bytes > state.options.max_retained_bytes {
+        let Some(evicted) = state.idle.pop_front() else {
+            break;
+        };
+        state.retained_bytes = state.retained_bytes.saturating_sub(evicted.key.byte_len());
+        state.evictions = state.evictions.saturating_add(1);
+    }
+}
+
 impl Default for GpuColorFrameWgpuResourcePool {
     fn default() -> Self {
         Self::new(GpuColorFrameWgpuResourcePoolOptions::default())
+    }
+}
+
+/// Move-only ownership of one Viewer presentation output detached from a runtime table.
+///
+/// The lease keeps the actual texture allocation out of the reusable pool for
+/// as long as a presentation adapter advertises or samples it. Dropping the
+/// lease returns the resource only when its captured pool generation remains
+/// valid; device/runtime invalidation instead drops the backend resource.
+pub struct ViewerGpuPresentationOutputLease {
+    resource: Option<GpuColorFrameResource<GpuColorFrameWgpuResource>>,
+    pool: Arc<GpuColorFrameWgpuResourcePool>,
+    pool_generation: GpuColorFrameWgpuResourcePoolGeneration,
+    byte_len: u128,
+}
+
+impl ViewerGpuPresentationOutputLease {
+    /// Bind one detached resource to the pool generation that produced it.
+    pub(crate) fn new(
+        resource: GpuColorFrameResource<GpuColorFrameWgpuResource>,
+        pool: Arc<GpuColorFrameWgpuResourcePool>,
+    ) -> Self {
+        let byte_len =
+            GpuColorFrameWgpuResourcePoolKey::from_resource(&resource).logical_byte_len();
+        let pool_generation = pool.register_detached_presentation(byte_len);
+        Self {
+            resource: Some(resource),
+            pool,
+            pool_generation,
+            byte_len,
+        }
+    }
+
+    /// Exact typed renderer handle owned by this presentation lease.
+    pub fn handle(&self) -> &GpuColorFrameHandle {
+        self.resource().handle()
+    }
+
+    /// Complete descriptor and texture-format contract of the detached output.
+    pub fn contract(&self) -> GpuColorFrameContract {
+        self.handle().contract()
+    }
+
+    /// Borrow the actual texture while this move-only lease remains alive.
+    pub fn texture(&self) -> &wgpu::Texture {
+        &self.resource().resource().texture
+    }
+
+    /// Borrow the default presentation view while this move-only lease remains alive.
+    pub fn texture_view(&self) -> &wgpu::TextureView {
+        &self.resource().resource().texture_view
+    }
+
+    fn resource(&self) -> &GpuColorFrameResource<GpuColorFrameWgpuResource> {
+        self.resource
+            .as_ref()
+            .expect("presentation output lease resource is present before Drop")
+    }
+}
+
+impl std::fmt::Debug for ViewerGpuPresentationOutputLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ViewerGpuPresentationOutputLease")
+            .field("handle", self.resource().handle())
+            .field("pool_generation", &self.pool_generation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for ViewerGpuPresentationOutputLease {
+    fn drop(&mut self) {
+        let Some(resource) = self.resource.take() else {
+            return;
+        };
+        let _ =
+            self.pool
+                .release_detached_presentation(self.pool_generation, self.byte_len, resource);
     }
 }
 
@@ -1335,6 +1754,10 @@ pub struct GpuNativeDecodedFrameImportContract {
     pub width: u32,
     /// Source frame height in pixels.
     pub height: u32,
+    /// Renderer materialization width after Preview-scale sampling.
+    pub output_width: u32,
+    /// Renderer materialization height after Preview-scale sampling.
+    pub output_height: u32,
     /// Color space represented by the decoded source surface.
     pub source_color_space: ColorSpace,
     /// Complete OCIO input-transform contract for source -> working conversion.
@@ -1358,6 +1781,10 @@ pub struct GpuNativeDecodedFrameImportContract {
 /// and the OCIO input transform.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GpuNativeDecodedFrameImportPlan {
+    /// Visible source width carried by the decoder surface.
+    pub source_width: u32,
+    /// Visible source height carried by the decoder surface.
+    pub source_height: u32,
     /// Decoder handle family consumed by the backend.
     pub handle_kind: DecodedGpuFrameHandleKind,
     /// Decoder source texture layout consumed by the backend.
@@ -1389,6 +1816,12 @@ impl GpuNativeDecodedFrameImportPlan {
                 height: contract.height,
             });
         }
+        if contract.output_width == 0 || contract.output_height == 0 {
+            return Err(GpuNativeDecodedFrameImportPlanError::EmptyOutputExtent {
+                width: contract.output_width,
+                height: contract.output_height,
+            });
+        }
         if !support.renderer_backend_ready {
             return Err(GpuNativeDecodedFrameImportPlanError::RendererBackendUnavailable);
         }
@@ -1417,8 +1850,8 @@ impl GpuNativeDecodedFrameImportPlan {
             );
         }
         let encoded_source_descriptor = ColorFrameDescriptor {
-            width: contract.width,
-            height: contract.height,
+            width: contract.output_width,
+            height: contract.output_height,
             color_space: contract.source_color_space.into(),
             domain: ColorFrameDomain::Source,
             encoding: ColorFrameEncoding::EncodedFloat,
@@ -1426,15 +1859,15 @@ impl GpuNativeDecodedFrameImportPlan {
             alpha: ColorFrameAlpha::Opaque,
         };
         let encoded_source_frame = GpuColorFrameHandle::new(
-            ids.allocate(),
+            ids.allocate()?,
             encoded_source_descriptor,
             GpuColorFrameTextureFormat::Rgba16Float,
             format!("{}.encoded-source", contract.label),
         )
         .map_err(GpuNativeDecodedFrameImportPlanError::EncodedSourceFrameHandle)?;
         let working_descriptor = ColorFrameDescriptor {
-            width: contract.width,
-            height: contract.height,
+            width: contract.output_width,
+            height: contract.output_height,
             color_space: contract.input_transform.working_color_space.into(),
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
@@ -1442,7 +1875,7 @@ impl GpuNativeDecodedFrameImportPlan {
             alpha: ColorFrameAlpha::StraightCoverage,
         };
         let working_frame = GpuColorFrameHandle::new(
-            ids.allocate(),
+            ids.allocate()?,
             working_descriptor,
             GpuColorFrameTextureFormat::Rgba32Float,
             contract.label,
@@ -1450,6 +1883,8 @@ impl GpuNativeDecodedFrameImportPlan {
         .map_err(GpuNativeDecodedFrameImportPlanError::WorkingFrameHandle)?;
 
         Ok(Self {
+            source_width: contract.width,
+            source_height: contract.height,
             handle_kind: contract.handle_kind,
             source_texture_format: contract.source_texture_format,
             source_color_space: contract.source_color_space,
@@ -1470,6 +1905,14 @@ pub enum GpuNativeDecodedFrameImportPlanError {
         /// Source width.
         width: u32,
         /// Source height.
+        height: u32,
+    },
+    /// Requested renderer materialization extent was empty.
+    #[error("native decoded frame output extent must be non-empty, got {width}x{height}")]
+    EmptyOutputExtent {
+        /// Invalid output width.
+        width: u32,
+        /// Invalid output height.
         height: u32,
     },
     /// No concrete renderer backend has connected native import code.
@@ -1501,6 +1944,9 @@ pub enum GpuNativeDecodedFrameImportPlanError {
         /// Stable validation reason.
         reason: String,
     },
+    /// Renderer frame identity allocation is exhausted.
+    #[error(transparent)]
+    FrameId(#[from] GpuColorFrameIdAllocationError),
     /// The renderer-owned encoded source frame handle could not be built.
     #[error("failed to create native decoded frame encoded source handle: {0}")]
     EncodedSourceFrameHandle(GpuColorFrameHandleError),
@@ -1569,7 +2015,7 @@ impl GpuNativeDecodedFrameImportSource for PreviewNativeDecodedFrame {
 /// backend resource type. The renderer-owned helper validates support,
 /// constructs the working-frame plan, asks the backend to import the native
 /// surface, then verifies the returned resource matches the planned working
-/// frame contract.
+/// frame handle identity and contract.
 pub trait GpuNativeDecodedFrameImportBackend {
     /// Native decoded-frame payload consumed by this backend.
     type NativeFrame: GpuNativeDecodedFrameImportSource;
@@ -1615,6 +2061,12 @@ where
             actual: resource.handle().contract(),
         });
     }
+    if resource.handle().id() != plan.working_frame.id() {
+        return Err(GpuNativeDecodedFrameImportError::ResourceHandleMismatch {
+            expected: plan.working_frame.id(),
+            actual: resource.handle().id(),
+        });
+    }
     Ok(GpuNativeDecodedFrameImportExecution { plan, resource })
 }
 
@@ -1643,6 +2095,16 @@ pub enum GpuNativeDecodedFrameImportError {
         /// Stable backend rejection reason.
         reason: String,
     },
+    /// The native decoder device reported physical removal while observing a
+    /// copy-ready fence.
+    ///
+    /// The backend clears only the source protected by that removed device;
+    /// this is typed retirement proof, not a generic backend rejection.
+    #[error("native decoded frame device was removed: {reason}")]
+    NativeDeviceRemoved {
+        /// Stable native-device diagnostic.
+        reason: String,
+    },
     /// The native payload does not match the import contract.
     #[error("native decoded frame payload does not match the import contract")]
     NativeFrameContractMismatch {
@@ -1659,12 +2121,27 @@ pub enum GpuNativeDecodedFrameImportError {
         /// Actual returned resource contract.
         actual: GpuColorFrameContract,
     },
+    /// Backend returned the right contract under a different renderer resource identity.
+    #[error(
+        "native decoded frame import backend returned resource id {actual:?}, expected {expected:?}"
+    )]
+    ResourceHandleMismatch {
+        /// Renderer-owned identity allocated by the import plan.
+        expected: GpuColorFrameId,
+        /// Identity attached to the backend-returned resource.
+        actual: GpuColorFrameId,
+    },
 }
 
 impl GpuNativeDecodedFrameImportError {
     /// Whether this failure is transient bounded-resource backpressure.
     pub fn is_backpressure(&self) -> bool {
         matches!(self, Self::Backpressure { .. })
+    }
+
+    /// Whether a native fence returned the D3D device-removed sentinel.
+    pub fn is_native_device_removed(&self) -> bool {
+        matches!(self, Self::NativeDeviceRemoved { .. })
     }
 }
 
@@ -1914,6 +2391,32 @@ impl GpuColorFrameReadback {
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         plan: &GpuColorFrameReadbackPlan,
+        resource: &GpuColorFrameResource<GpuColorFrameWgpuResource>,
+    ) -> Result<wgpu::Buffer, GpuColorFrameReadbackError> {
+        if resource.handle().contract() != plan.handle.contract() {
+            return Err(GpuColorFrameReadbackError::ResourceContractMismatch {
+                expected: plan.handle.contract(),
+                actual: resource.handle().contract(),
+            });
+        }
+        if resource.handle().id() != plan.handle.id() {
+            return Err(GpuColorFrameReadbackError::ResourceHandleMismatch {
+                expected: plan.handle.id(),
+                actual: resource.handle().id(),
+            });
+        }
+        Ok(Self::record_copy_unchecked(
+            device,
+            encoder,
+            plan,
+            resource.resource(),
+        ))
+    }
+
+    fn record_copy_unchecked(
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &GpuColorFrameReadbackPlan,
         resource: &GpuColorFrameWgpuResource,
     ) -> wgpu::Buffer {
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1961,6 +2464,20 @@ pub enum GpuColorFrameReadbackError {
         /// Actual frame color identity.
         color_space: ColorFrameSpace,
     },
+    /// Resolved resource metadata differs from the readback plan.
+    ResourceContractMismatch {
+        /// Contract captured by the readback plan.
+        expected: GpuColorFrameContract,
+        /// Contract carried by the supplied resource.
+        actual: GpuColorFrameContract,
+    },
+    /// Resolved resource belongs to another strong renderer frame identity.
+    ResourceHandleMismatch {
+        /// Identity captured by the readback plan.
+        expected: GpuColorFrameId,
+        /// Identity carried by the supplied resource.
+        actual: GpuColorFrameId,
+    },
     /// Row layout calculation overflowed.
     ReadbackLayoutOverflow,
     /// The mapped readback buffer is smaller than the plan requires.
@@ -1973,14 +2490,18 @@ pub enum GpuColorFrameReadbackError {
 }
 
 /// Error returned when resolving GPU color frame resources.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GpuColorFrameResourceTableError {
     /// No resource exists for the requested frame id.
+    #[error("GPU color frame resource {id:?} is missing")]
     MissingFrame {
         /// Missing frame id.
         id: GpuColorFrameId,
     },
     /// A resource id exists but its descriptor or texture format no longer matches.
+    #[error(
+        "GPU color frame resource {id:?} contract mismatch: expected {expected:?}, actual {actual:?}"
+    )]
     ContractMismatch {
         /// Resource id that mismatched.
         id: GpuColorFrameId,
@@ -2031,6 +2552,15 @@ impl CpuColorFrame {
     /// Clone the shared immutable linear-light frame backing this wrapper.
     pub fn rgba_f32_shared(&self) -> Arc<WorkingRgbaF32Frame> {
         Arc::clone(&self.frame)
+    }
+
+    /// Return whether two typed frames share the same immutable pixel storage.
+    ///
+    /// This is execution evidence for zero-copy routing. Pixel equality alone
+    /// cannot prove that a compositor or output adapter avoided allocating and
+    /// copying a frame.
+    pub fn shares_storage_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.frame, &other.frame)
     }
 
     /// Consume this wrapper and return the underlying linear-light frame.
@@ -2630,8 +3160,16 @@ mod tests {
     }
 
     #[test]
-    fn color_frame_space_stays_compact_for_hot_frame_handles() {
-        assert!(std::mem::size_of::<ColorFrameSpace>() <= 8);
+    fn color_frame_space_keeps_full_device_identity_in_bounded_inline_storage() {
+        assert_eq!(
+            std::mem::size_of::<DisplayCalibrationKey>(),
+            32,
+            "device-frame equality must retain the complete calibration identity"
+        );
+        assert!(
+            std::mem::size_of::<ColorFrameSpace>() <= 40,
+            "the full calibration identity must remain inline and bounded"
+        );
     }
 
     #[test]
@@ -2689,11 +3227,72 @@ mod tests {
 
     #[test]
     fn gpu_color_frame_id_allocator_is_monotonic() {
-        let mut allocator = GpuColorFrameIdAllocator::new(40);
+        let mut allocator = GpuColorFrameIdAllocator::new(40).expect("frame id allocator");
 
-        assert_eq!(allocator.allocate().raw(), 40);
-        assert_eq!(allocator.allocate().raw(), 41);
+        assert_eq!(allocator.allocate().expect("frame 40").raw(), 40);
+        assert_eq!(allocator.allocate().expect("frame 41").raw(), 41);
         assert_eq!(allocator.next_raw(), 42);
+    }
+
+    #[test]
+    fn gpu_color_frame_id_includes_allocator_authority() {
+        let mut left = GpuColorFrameIdAllocator::new(40).expect("left frame id allocator");
+        let mut right = GpuColorFrameIdAllocator::new(40).expect("right frame id allocator");
+
+        let left_id = left.allocate().expect("left frame id");
+        let right_id = right.allocate().expect("right frame id");
+
+        assert_eq!(left_id.raw(), right_id.raw());
+        assert_ne!(
+            left_id.allocator_authority(),
+            right_id.allocator_authority()
+        );
+        assert_ne!(left_id, right_id);
+    }
+
+    #[test]
+    fn gpu_color_frame_id_allocator_fails_closed_before_u64_reuse() {
+        let mut allocator =
+            GpuColorFrameIdAllocator::new(u64::MAX - 1).expect("boundary frame id allocator");
+        let authority = allocator.authority();
+
+        assert_eq!(
+            allocator.allocate().expect("last unique frame id").raw(),
+            u64::MAX - 1
+        );
+        assert_eq!(allocator.next_raw(), u64::MAX);
+        assert!(allocator.is_exhausted());
+        assert_eq!(
+            allocator.allocate(),
+            Err(GpuColorFrameIdAllocationError::SequenceExhausted { authority })
+        );
+        assert_eq!(
+            allocator.allocate(),
+            Err(GpuColorFrameIdAllocationError::SequenceExhausted { authority })
+        );
+        assert_eq!(allocator.next_raw(), u64::MAX);
+    }
+
+    #[test]
+    fn gpu_color_frame_bind_group_cache_key_fails_closed_before_u64_reuse() {
+        let sequence = AtomicU64::new(u64::MAX - 1);
+
+        assert_eq!(
+            allocate_gpu_color_frame_bind_group_cache_key(&sequence)
+                .expect("last unique cache key")
+                .0,
+            u64::MAX - 1
+        );
+        assert_eq!(sequence.load(Ordering::Acquire), u64::MAX);
+        assert_eq!(
+            allocate_gpu_color_frame_bind_group_cache_key(&sequence),
+            Err(GpuColorFrameBindGroupCacheKeyAllocationError)
+        );
+        assert_eq!(
+            allocate_gpu_color_frame_bind_group_cache_key(&sequence),
+            Err(GpuColorFrameBindGroupCacheKeyAllocationError)
+        );
+        assert_eq!(sequence.load(Ordering::Acquire), u64::MAX);
     }
 
     #[test]
@@ -2738,7 +3337,7 @@ mod tests {
 
     #[test]
     fn native_decoded_frame_import_defaults_to_fail_closed() {
-        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
         let err = GpuNativeDecodedFrameImportPlan::from_contract(
             &mut ids,
             native_import_contract(),
@@ -2771,7 +3370,7 @@ mod tests {
 
     #[test]
     fn native_decoded_frame_import_rejects_unsupported_handle_kind() {
-        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
         let support = GpuNativeDecodedFrameImportSupport::ready(
             vec![DecodedGpuFrameHandleKind::CVPixelBuffer],
             vec![GpuNativeDecodedFrameTextureFormat::Nv12],
@@ -2794,7 +3393,7 @@ mod tests {
 
     #[test]
     fn native_decoded_frame_import_rejects_unsupported_source_format() {
-        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
         let support = GpuNativeDecodedFrameImportSupport::ready(
             vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
             vec![GpuNativeDecodedFrameTextureFormat::P010],
@@ -2817,7 +3416,7 @@ mod tests {
 
     #[test]
     fn native_decoded_frame_import_requires_gpu_ocio_input_transform() {
-        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
         let support = GpuNativeDecodedFrameImportSupport::ready(
             vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
             vec![GpuNativeDecodedFrameTextureFormat::Nv12],
@@ -2843,7 +3442,7 @@ mod tests {
 
     #[test]
     fn native_decoded_frame_import_plan_produces_renderer_owned_working_frame() {
-        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
         let support = GpuNativeDecodedFrameImportSupport::ready(
             vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
             vec![GpuNativeDecodedFrameTextureFormat::Nv12],
@@ -2862,6 +3461,7 @@ mod tests {
             GpuNativeDecodedFrameTextureFormat::Nv12
         );
         assert_eq!(plan.source_color_space, ColorSpace::Rec2100Pq);
+        assert_eq!((plan.source_width, plan.source_height), (3840, 2160));
         assert_eq!(
             plan.input_transform,
             RenderInputTransform::to_working_gpu(
@@ -2884,8 +3484,8 @@ mod tests {
         assert_eq!(
             plan.encoded_source_frame.descriptor(),
             ColorFrameDescriptor {
-                width: 3840,
-                height: 2160,
+                width: 960,
+                height: 540,
                 color_space: ColorSpace::Rec2100Pq.into(),
                 domain: ColorFrameDomain::Source,
                 encoding: ColorFrameEncoding::EncodedFloat,
@@ -2901,8 +3501,8 @@ mod tests {
         assert_eq!(
             plan.working_frame.descriptor(),
             ColorFrameDescriptor {
-                width: 3840,
-                height: 2160,
+                width: 960,
+                height: 540,
                 color_space: WorkingColorSpace::LinearRec2020.into(),
                 domain: ColorFrameDomain::Working,
                 encoding: ColorFrameEncoding::LinearFloat,
@@ -2919,7 +3519,7 @@ mod tests {
 
     #[test]
     fn native_decoded_frame_import_preserves_decoder_matrix_independent_of_rgb_space() {
-        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
         let support = GpuNativeDecodedFrameImportSupport::ready(
             vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
             vec![GpuNativeDecodedFrameTextureFormat::Nv12],
@@ -2936,7 +3536,7 @@ mod tests {
 
     #[test]
     fn native_decoded_frame_import_rejects_sampling_transfer_color_space_mismatch() {
-        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
         let support = GpuNativeDecodedFrameImportSupport::ready(
             vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
             vec![GpuNativeDecodedFrameTextureFormat::Nv12],
@@ -2960,7 +3560,7 @@ mod tests {
 
     #[test]
     fn native_decoded_frame_import_rejects_p010_with_wrong_bit_depth() {
-        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
         let support = GpuNativeDecodedFrameImportSupport::ready(
             vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
             vec![GpuNativeDecodedFrameTextureFormat::P010],
@@ -2990,7 +3590,7 @@ mod tests {
 
     #[test]
     fn native_decoded_frame_import_rejects_ycbcr_without_chroma_location() {
-        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
         let support = GpuNativeDecodedFrameImportSupport::ready(
             vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
             vec![GpuNativeDecodedFrameTextureFormat::Nv12],
@@ -3011,7 +3611,7 @@ mod tests {
 
     #[test]
     fn native_decoded_frame_import_rejects_rgb_surface_with_ycbcr_matrix() {
-        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
         let support = GpuNativeDecodedFrameImportSupport::ready(
             vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
             vec![GpuNativeDecodedFrameTextureFormat::Rgba8Unorm],
@@ -3070,9 +3670,16 @@ mod tests {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct FakeImportedResource;
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum FakeNativeImportResult {
+        Exact,
+        MismatchedContract,
+        MismatchedIdentity,
+    }
+
     struct FakeNativeImportBackend {
         support: GpuNativeDecodedFrameImportSupport,
-        return_mismatched_resource: bool,
+        result: FakeNativeImportResult,
     }
 
     impl FakeNativeImportBackend {
@@ -3082,7 +3689,7 @@ mod tests {
                     vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
                     vec![GpuNativeDecodedFrameTextureFormat::Nv12],
                 ),
-                return_mismatched_resource: false,
+                result: FakeNativeImportResult::Exact,
             }
         }
     }
@@ -3101,8 +3708,9 @@ mod tests {
             _native_frame: &Self::NativeFrame,
         ) -> Result<GpuColorFrameResource<Self::Resource>, GpuNativeDecodedFrameImportError>
         {
-            let handle = if self.return_mismatched_resource {
-                gpu_handle(
+            let handle = match self.result {
+                FakeNativeImportResult::Exact => plan.working_frame.clone(),
+                FakeNativeImportResult::MismatchedContract => gpu_handle(
                     999,
                     ColorFrameDescriptor {
                         width: 1280,
@@ -3110,9 +3718,12 @@ mod tests {
                         ..plan.working_frame.descriptor()
                     },
                     plan.working_frame.texture_format(),
-                )
-            } else {
-                plan.working_frame.clone()
+                ),
+                FakeNativeImportResult::MismatchedIdentity => gpu_handle(
+                    999,
+                    plan.working_frame.descriptor(),
+                    plan.working_frame.texture_format(),
+                ),
             };
             Ok(GpuColorFrameResource::new(handle, FakeImportedResource))
         }
@@ -3120,10 +3731,10 @@ mod tests {
 
     #[test]
     fn native_decoded_frame_import_execution_fails_closed_without_backend_support() {
-        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
         let mut backend = FakeNativeImportBackend {
             support: GpuNativeDecodedFrameImportSupport::unavailable(),
-            return_mismatched_resource: false,
+            result: FakeNativeImportResult::Exact,
         };
 
         let err = execute_native_decoded_frame_import(
@@ -3145,7 +3756,7 @@ mod tests {
 
     #[test]
     fn native_decoded_frame_import_execution_returns_validated_working_resource() {
-        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
         let mut backend = FakeNativeImportBackend::ready();
 
         let execution = execute_native_decoded_frame_import(
@@ -3165,9 +3776,9 @@ mod tests {
 
     #[test]
     fn native_decoded_frame_import_execution_rejects_mismatched_backend_resource() {
-        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
         let mut backend = FakeNativeImportBackend::ready();
-        backend.return_mismatched_resource = true;
+        backend.result = FakeNativeImportResult::MismatchedContract;
 
         let err = execute_native_decoded_frame_import(
             &mut backend,
@@ -3179,7 +3790,7 @@ mod tests {
 
         match err {
             GpuNativeDecodedFrameImportError::ResourceContractMismatch { expected, actual } => {
-                assert_eq!(expected.descriptor.width, 3840);
+                assert_eq!(expected.descriptor.width, 960);
                 assert_eq!(actual.descriptor.width, 1280);
                 assert_eq!(
                     expected.texture_format,
@@ -3195,8 +3806,32 @@ mod tests {
     }
 
     #[test]
+    fn native_decoded_frame_import_rejects_same_contract_under_another_resource_id() {
+        let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
+        let mut backend = FakeNativeImportBackend::ready();
+        backend.result = FakeNativeImportResult::MismatchedIdentity;
+
+        let err = execute_native_decoded_frame_import(
+            &mut backend,
+            &mut ids,
+            native_import_contract(),
+            &FakeNativeDecodedFrame::matching_contract(),
+        )
+        .expect_err("backend cannot substitute a same-contract resource identity");
+
+        match err {
+            GpuNativeDecodedFrameImportError::ResourceHandleMismatch { expected, actual } => {
+                assert_eq!(expected.raw(), 501);
+                assert_eq!(actual.raw(), 999);
+                assert_ne!(expected, actual);
+            }
+            other => panic!("expected resource handle mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn native_decoded_frame_import_execution_rejects_mismatched_native_payload() {
-        let mut ids = GpuColorFrameIdAllocator::new(500);
+        let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
         let mut backend = FakeNativeImportBackend::ready();
 
         let err = execute_native_decoded_frame_import(
@@ -3290,6 +3925,51 @@ mod tests {
                 actual: stale_handle.contract()
             }
         );
+    }
+
+    #[test]
+    fn gpu_color_frame_resource_table_take_moves_only_an_exact_contract() {
+        let handle = gpu_handle(
+            106,
+            working_descriptor(),
+            GpuColorFrameTextureFormat::Rgba16Float,
+        );
+        let mut mismatched_descriptor = working_descriptor();
+        mismatched_descriptor.color_space = ColorSpace::Rec2020.into();
+        let mismatched_handle = gpu_handle(
+            106,
+            mismatched_descriptor,
+            GpuColorFrameTextureFormat::Rgba16Float,
+        );
+        let mut table = GpuColorFrameResourceTable::new();
+        table
+            .insert(GpuColorFrameResource::new(
+                handle.clone(),
+                "presentation-texture",
+            ))
+            .expect("insert presentation resource");
+
+        let error = table
+            .take(&mismatched_handle)
+            .expect_err("a mismatched contract must not transfer ownership");
+        assert_eq!(
+            error,
+            GpuColorFrameResourceTableError::ContractMismatch {
+                id: handle.id(),
+                expected: mismatched_handle.contract(),
+                actual: handle.contract(),
+            }
+        );
+        assert_eq!(table.len(), 1);
+        assert_eq!(
+            table.get(&handle).expect("failed take preserves the resource").resource(),
+            &"presentation-texture"
+        );
+
+        let resource = table.take(&handle).expect("exact take succeeds");
+        assert_eq!(resource.handle(), &handle);
+        assert_eq!(resource.resource(), &"presentation-texture");
+        assert!(table.is_empty());
     }
 
     #[test]
@@ -3411,6 +4091,137 @@ mod tests {
         assert!(plan.usage.contains(wgpu::TextureUsages::COPY_SRC));
         assert!(plan.usage.contains(wgpu::TextureUsages::TEXTURE_BINDING));
         assert!(plan.usage.contains(wgpu::TextureUsages::RENDER_ATTACHMENT));
+    }
+
+    #[test]
+    fn gpu_color_frame_pool_reconfigures_without_replacing_the_owner() {
+        let pool = GpuColorFrameWgpuResourcePool::default();
+        let reduced = GpuColorFrameWgpuResourcePoolOptions {
+            max_per_contract: 1,
+            max_retained_bytes: 32 * 1024 * 1024,
+        };
+
+        pool.reconfigure(reduced);
+
+        assert_eq!(pool.options(), reduced);
+        assert_eq!(pool.diagnostics().retained_resources, 0);
+    }
+
+    #[test]
+    fn gpu_color_frame_pool_invalidation_advances_the_return_generation() {
+        let pool = GpuColorFrameWgpuResourcePool::default();
+        let original = pool.generation();
+
+        pool.invalidate();
+
+        assert_ne!(pool.generation(), original);
+        assert_eq!(pool.diagnostics().invalidations, 1);
+        assert_eq!(pool.diagnostics().retained_resources, 0);
+    }
+
+    #[test]
+    fn detached_presentation_accounting_fails_closed_on_public_budget_overflow() {
+        let mut state = GpuColorFrameWgpuResourcePoolState::default();
+
+        register_detached_presentation_demand(&mut state, u128::from(u64::MAX));
+        assert!(!detached_presentation_demand_overflowed(&state));
+        register_detached_presentation_demand(&mut state, 1);
+        assert!(detached_presentation_demand_overflowed(&state));
+        assert_eq!(state.detached_presentation_accounting_overflows, 1);
+        assert_eq!(
+            state.detached_presentation_high_water_bytes,
+            u128::from(u64::MAX) + 1
+        );
+
+        unregister_detached_presentation_demand(&mut state, 1);
+        assert!(!detached_presentation_demand_overflowed(&state));
+        assert_eq!(state.detached_presentation_accounting_overflows, 1);
+        unregister_detached_presentation_demand(&mut state, u128::from(u64::MAX));
+        assert_eq!(state.detached_presentation_resources, 0);
+        assert_eq!(state.detached_presentation_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn presentation_output_lease_returns_once_to_its_current_pool_generation() {
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping presentation lease test: no GPU adapter");
+            return;
+        };
+        let pool = Arc::new(GpuColorFrameWgpuResourcePool::default());
+        let handle = gpu_handle(
+            107,
+            ColorFrameDescriptor { width: 2, height: 2, ..working_descriptor() },
+            GpuColorFrameTextureFormat::Rgba16Float,
+        );
+        let resource = pool.acquire(
+            &context.device,
+            &GpuColorFrameAllocationPlan::for_handle(handle.clone()),
+        );
+
+        {
+            let lease = ViewerGpuPresentationOutputLease::new(resource, Arc::clone(&pool));
+            assert_eq!(lease.handle(), &handle);
+            let detached = pool.diagnostics();
+            assert_eq!(detached.retained_resources, 0);
+            assert_eq!(detached.detached_presentation_resources, 1);
+            assert_eq!(detached.detached_presentation_bytes, 2 * 2 * 8);
+            assert_eq!(detached.detached_presentation_high_water_resources, 1);
+            assert_eq!(detached.detached_presentation_high_water_bytes, 2 * 2 * 8);
+            assert_eq!(detached.detached_presentation_accounting_overflows, 0);
+            assert!(!detached.detached_presentation_accounting_overflowed);
+        }
+
+        let released = pool.diagnostics();
+        assert_eq!(released.releases, 1);
+        assert_eq!(released.retained_resources, 1);
+        assert_eq!(released.detached_presentation_resources, 0);
+        assert_eq!(released.detached_presentation_bytes, 0);
+        assert_eq!(released.detached_presentation_high_water_resources, 1);
+        assert_eq!(released.detached_presentation_high_water_bytes, 2 * 2 * 8);
+        let reused = pool.acquire(
+            &context.device,
+            &GpuColorFrameAllocationPlan::for_handle(handle),
+        );
+        assert_eq!(pool.diagnostics().hits, 1);
+        drop(reused);
+    }
+
+    #[tokio::test]
+    async fn presentation_output_lease_cannot_repopulate_an_invalidated_pool() {
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping stale presentation lease test: no GPU adapter");
+            return;
+        };
+        let pool = Arc::new(GpuColorFrameWgpuResourcePool::default());
+        let handle = gpu_handle(
+            108,
+            ColorFrameDescriptor { width: 2, height: 2, ..working_descriptor() },
+            GpuColorFrameTextureFormat::Rgba16Float,
+        );
+        let resource = pool.acquire(
+            &context.device,
+            &GpuColorFrameAllocationPlan::for_handle(handle),
+        );
+        let lease = ViewerGpuPresentationOutputLease::new(resource, Arc::clone(&pool));
+
+        pool.invalidate();
+        let invalidated = pool.diagnostics();
+        assert_eq!(invalidated.detached_presentation_resources, 1);
+        assert_eq!(invalidated.detached_presentation_bytes, 2 * 2 * 8);
+        drop(lease);
+
+        let diagnostics = pool.diagnostics();
+        assert_eq!(diagnostics.invalidations, 1);
+        assert_eq!(diagnostics.stale_generation_releases, 1);
+        assert_eq!(diagnostics.releases, 0);
+        assert_eq!(diagnostics.detached_presentation_resources, 0);
+        assert_eq!(diagnostics.detached_presentation_bytes, 0);
+        assert_eq!(diagnostics.detached_presentation_high_water_resources, 1);
+        assert_eq!(
+            diagnostics.detached_presentation_high_water_bytes,
+            2 * 2 * 8
+        );
+        assert_eq!(diagnostics.retained_resources, 0);
     }
 
     #[test]
@@ -3692,6 +4503,8 @@ mod tests {
         GpuNativeDecodedFrameImportContract {
             width: 3840,
             height: 2160,
+            output_width: 960,
+            output_height: 540,
             source_color_space: ColorSpace::Rec2100Pq,
             input_transform: RenderInputTransform::to_working_gpu(
                 WorkingColorSpace::LinearRec2020,

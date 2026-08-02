@@ -9,6 +9,7 @@ mod built_in_processors;
 mod channel_mix;
 mod compiler;
 mod delay;
+mod dependency;
 mod dsp;
 mod latency;
 mod meter;
@@ -21,6 +22,9 @@ mod runtime;
 mod schedule;
 
 pub use compiler::{compile_audio_program, AudioCompileError};
+pub use dependency::{
+    compile_audio_dependency_closure, AudioDependencyClosure, AudioDependencyError,
+};
 pub use meter::{AudioChannelMeterReading, AudioMeterFrame, AudioMeterObserver};
 pub use plan::*;
 pub use processor::*;
@@ -30,9 +34,13 @@ pub use render::{
 };
 pub use runtime::{
     AudioDecodedSource, AudioMediaResolver, AudioProgramRuntime, AudioRuntimeBuildError,
+    AudioRuntimeResourceCategory, AudioRuntimeResourceFootprint, AudioRuntimeResourceGrant,
     ResolvedAudioSource,
 };
-pub use schedule::{AudioKernelBackend, PreparedAudioPlan, PreparedAudioScheduleSummary};
+pub use schedule::{
+    AudioKernelBackend, AudioResourceFootprintError, AudioSessionResourceFootprint,
+    PreparedAudioPlan, PreparedAudioScheduleSummary,
+};
 
 #[cfg(test)]
 mod tests;

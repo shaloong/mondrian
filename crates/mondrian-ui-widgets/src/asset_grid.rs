@@ -77,15 +77,43 @@ impl AssetGridVisualTokens {
 }
 
 /// Dynamic action factory for [`AssetGrid`] item selection or activation.
-pub type AssetGridAction = dyn Fn(usize, &AssetGridItem) -> Action;
+pub type AssetGridAction = dyn Fn(usize, &AssetGridItem) -> Option<Action>;
 /// Dynamic action factory for committing an item title edit.
-pub type AssetGridRenameAction = dyn Fn(usize, &AssetGridItem, &str) -> Action;
+pub type AssetGridRenameAction = dyn Fn(usize, &AssetGridItem, &str) -> Option<Action>;
 /// Dynamic action factory for payloads dropped on an [`AssetGrid`].
-pub type AssetGridDropAction = dyn Fn(&DragPayload, Point) -> Option<Action>;
+pub type AssetGridDropAction = dyn Fn(&DragPayload, Point) -> AssetGridDropOutcome;
 /// Dynamic action factory for payloads dropped on one [`AssetGridItem`].
-pub type AssetGridItemDropAction = dyn Fn(&DragPayload, usize, &AssetGridItem) -> Option<Action>;
+pub type AssetGridItemDropAction =
+    dyn Fn(&DragPayload, usize, &AssetGridItem) -> AssetGridDropOutcome;
 /// Dynamic menu factory for the current asset-grid selection.
 pub type AssetGridSelectionMenu = dyn Fn(&[usize], &[&AssetGridItem]) -> Vec<MenuItem>;
+
+/// Widget-local result of evaluating an asset-grid drop target.
+///
+/// This result deliberately remains outside the editor [`Action`] language:
+/// consuming a pointer gesture without forming an authoring command is an
+/// interaction outcome, not a serializable product command.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AssetGridDropOutcome {
+    /// This target declined the payload, so the caller may try a broader target.
+    Unhandled,
+    /// This target accepted the gesture but intentionally formed no command.
+    Consumed,
+    /// This target formed an editor command that must be dispatched once.
+    Dispatch(Action),
+}
+
+impl From<Option<Action>> for AssetGridDropOutcome {
+    fn from(action: Option<Action>) -> Self {
+        action.map_or(Self::Unhandled, Self::Dispatch)
+    }
+}
+
+impl From<Action> for AssetGridDropOutcome {
+    fn from(action: Action) -> Self {
+        Self::Dispatch(action)
+    }
+}
 
 /// Local browser state for preserving an [`AssetGrid`] across model refreshes.
 #[derive(Debug, Clone, PartialEq)]
@@ -512,44 +540,58 @@ impl AssetGrid {
     }
 
     /// Dispatch a dynamic action when selection changes.
-    pub fn on_select(mut self, action: impl Fn(usize, &AssetGridItem) -> Action + 'static) -> Self {
-        self.on_select = Some(Box::new(action));
+    pub fn on_select<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(usize, &AssetGridItem) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_select = Some(Box::new(move |index, item| action(index, item).into()));
         self
     }
 
     /// Dispatch a dynamic action when the current card is activated.
-    pub fn on_activate(
-        mut self,
-        action: impl Fn(usize, &AssetGridItem) -> Action + 'static,
-    ) -> Self {
-        self.on_activate = Some(Box::new(action));
+    pub fn on_activate<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(usize, &AssetGridItem) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_activate = Some(Box::new(move |index, item| action(index, item).into()));
         self
     }
 
     /// Dispatch a dynamic action when a card title inline edit is committed.
-    pub fn on_rename(
-        mut self,
-        action: impl Fn(usize, &AssetGridItem, &str) -> Action + 'static,
-    ) -> Self {
-        self.on_rename = Some(Box::new(action));
+    pub fn on_rename<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(usize, &AssetGridItem, &str) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_rename = Some(Box::new(move |index, item, title| {
+            action(index, item, title).into()
+        }));
         self
     }
 
     /// Dispatch a dynamic action when a drag payload is dropped on the grid.
-    pub fn on_drop(
-        mut self,
-        action: impl Fn(&DragPayload, Point) -> Option<Action> + 'static,
-    ) -> Self {
-        self.on_drop = Some(Box::new(action));
+    pub fn on_drop<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(&DragPayload, Point) -> R + 'static,
+        R: Into<AssetGridDropOutcome>,
+    {
+        self.on_drop = Some(Box::new(move |payload, point| {
+            action(payload, point).into()
+        }));
         self
     }
 
     /// Dispatch a dynamic action when a drag payload is dropped on a card.
-    pub fn on_item_drop(
-        mut self,
-        action: impl Fn(&DragPayload, usize, &AssetGridItem) -> Option<Action> + 'static,
-    ) -> Self {
-        self.on_item_drop = Some(Box::new(action));
+    pub fn on_item_drop<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(&DragPayload, usize, &AssetGridItem) -> R + 'static,
+        R: Into<AssetGridDropOutcome>,
+    {
+        self.on_item_drop = Some(Box::new(move |payload, index, item| {
+            action(payload, index, item).into()
+        }));
         self
     }
 
@@ -877,7 +919,7 @@ impl AssetGrid {
             if !item.enabled {
                 continue;
             }
-            if let Some(action) = item.action().cloned().filter(|action| *action != Action::NoOp) {
+            if let Some(action) = item.action().cloned() {
                 (ctx.dispatch)(action);
                 ctx.request_repaint();
                 return EventResult::Handled;
@@ -905,7 +947,9 @@ impl AssetGrid {
             (ctx.dispatch)(action);
         }
         if let Some(factory) = &self.on_select {
-            (ctx.dispatch)(factory(index, item));
+            if let Some(action) = factory(index, item) {
+                (ctx.dispatch)(action);
+            }
         }
     }
 
@@ -917,21 +961,30 @@ impl AssetGrid {
             (ctx.dispatch)(action);
         }
         if let Some(factory) = &self.on_activate {
-            (ctx.dispatch)(factory(index, item));
+            if let Some(action) = factory(index, item) {
+                (ctx.dispatch)(action);
+            }
         }
     }
 
     fn drop_payload(&self, payload: &DragPayload, position: Point, ctx: &mut EventContext) {
         if let Some(index) = self.index_at(position) {
             if let (Some(factory), Some(item)) = (&self.on_item_drop, self.items.get(index)) {
-                if let Some(action) = factory(payload, index, item) {
-                    dispatch_drop_action(action, ctx);
-                    return;
+                match factory(payload, index, item) {
+                    AssetGridDropOutcome::Unhandled => {}
+                    AssetGridDropOutcome::Consumed => return,
+                    AssetGridDropOutcome::Dispatch(action) => {
+                        (ctx.dispatch)(action);
+                        return;
+                    }
                 }
             }
         }
-        if let Some(action) = self.on_drop.as_ref().and_then(|factory| factory(payload, position)) {
-            dispatch_drop_action(action, ctx);
+        if let Some(factory) = &self.on_drop {
+            match factory(payload, position) {
+                AssetGridDropOutcome::Unhandled | AssetGridDropOutcome::Consumed => {}
+                AssetGridDropOutcome::Dispatch(action) => (ctx.dispatch)(action),
+            }
         }
     }
 
@@ -1114,7 +1167,9 @@ impl AssetGrid {
                 (self.items.get(editor.index), self.on_rename.as_ref())
             {
                 if text != item.title {
-                    (ctx.dispatch)(factory(editor.index, item, &text));
+                    if let Some(action) = factory(editor.index, item, &text) {
+                        (ctx.dispatch)(action);
+                    }
                 }
             }
         }
@@ -1894,12 +1949,6 @@ fn badge_colors(ctx: &PaintContext, badge: &AssetGridBadge) -> (Color, Color) {
         AssetGridBadgeTone::Success => (color_with_alpha(colors.success, 0.22), colors.success),
         AssetGridBadgeTone::Warning => (color_with_alpha(colors.warning, 0.22), colors.warning),
         AssetGridBadgeTone::Error => (color_with_alpha(colors.error, 0.22), colors.error),
-    }
-}
-
-fn dispatch_drop_action(action: Action, ctx: &mut EventContext) {
-    if !matches!(action, Action::NoOp) {
-        (ctx.dispatch)(action);
     }
 }
 
@@ -3295,9 +3344,9 @@ mod tests {
     }
 
     #[test]
-    fn noop_grid_drop_is_consumed_without_dispatch() {
-        let mut grid =
-            AssetGrid::new("Assets", vec![item("drop", "Drop")]).on_drop(|_, _| Some(Action::NoOp));
+    fn consumed_grid_drop_is_not_dispatched() {
+        let mut grid = AssetGrid::new("Assets", vec![item("drop", "Drop")])
+            .on_drop(|_, _| AssetGridDropOutcome::Consumed);
         grid.layout(Rect::new(0.0, 0.0, 320.0, 180.0));
         let actions = RefCell::new(Vec::<Action>::new());
         let dispatch = |action| actions.borrow_mut().push(action);
@@ -3326,10 +3375,10 @@ mod tests {
     }
 
     #[test]
-    fn noop_item_drop_blocks_grid_fallback_without_dispatch() {
+    fn consumed_item_drop_blocks_grid_fallback_without_dispatch() {
         let mut grid = AssetGrid::new("Assets", vec![item("folder:a", "Folder A")])
             .on_drop(|_, _| Some(Action::DeselectAll))
-            .on_item_drop(|_, _index, _item| Some(Action::NoOp));
+            .on_item_drop(|_, _index, _item| AssetGridDropOutcome::Consumed);
         grid.layout(Rect::new(0.0, 0.0, 320.0, 180.0));
         let card = grid.card_rect_for_index(0).expect("folder card");
         let actions = RefCell::new(Vec::<Action>::new());

@@ -1,13 +1,18 @@
 //! Non-blocking lifecycle owner for the concrete realtime audio output stream.
 
 use crate::audio::{
-    AudioBuffer, RealtimeAudioOutput, RealtimeAudioOutputHandle, RealtimeAudioOutputSnapshot,
+    AudioBuffer, RealtimeAudioOutput, RealtimeAudioOutputControlError,
+    RealtimeAudioOutputEnqueueError, RealtimeAudioOutputHandle, RealtimeAudioOutputQuiescenceToken,
+    RealtimeAudioOutputSnapshot,
 };
+use mondrian_core::AudioChannelLayout;
+use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use thiserror::Error;
 
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(250);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(5);
@@ -18,24 +23,72 @@ const DEVICE_HEALTH_POLL: Duration = Duration::from_millis(20);
 pub enum RealtimeAudioOutputEvent {
     /// A new concrete stream is ready but remains inactive for PCM preroll.
     Opened { stream_generation: u64 },
-    /// The concrete stream reported an asynchronous backend failure.
-    Lost { stream_generation: u64 },
+    /// The concrete stream was destroyed and its evidence is now frozen.
+    Lost {
+        reason: RealtimeAudioOutputLossReason,
+        final_snapshot: RealtimeAudioOutputSnapshot,
+    },
     /// One background open attempt failed and a bounded retry was scheduled.
+    OpenFailed {
+        retry_after: Duration,
+        reason: String,
+    },
+    /// The owned device lifecycle worker could not be created.
+    WorkerStartFailed { reason: String },
+    /// The owned device lifecycle worker exited without an explicit shutdown.
+    WorkerStoppedUnexpectedly { reason: String },
+}
+
+/// Why one concrete stream was retired before the lifecycle worker reopened it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RealtimeAudioOutputLossReason {
+    /// CPAL reported an asynchronous stream/backend failure.
+    BackendFailure,
+    /// A validation-only exact-generation recycle was accepted.
+    ControlledRecycle,
+    /// Callback deactivation failed, so retirement forced silence before drop.
+    DeactivationFailed,
+}
+
+/// Failure to create the owned realtime device lifecycle worker.
+#[derive(Debug, Error)]
+#[error("failed to spawn realtime audio device worker: {0}")]
+pub struct RealtimeAudioOutputWorkerStartError(#[source] io::Error);
+
+/// Failure while synchronously reclaiming the owned device lifecycle worker.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum RealtimeAudioOutputShutdownError {
+    /// The worker panicked before it could be joined.
+    #[error("realtime audio device worker panicked")]
+    WorkerPanicked,
+}
+
+enum WorkerEvent {
+    Opened(RealtimeAudioOutputHandle),
+    Lost {
+        reason: RealtimeAudioOutputLossReason,
+        final_snapshot: RealtimeAudioOutputSnapshot,
+    },
     OpenFailed {
         retry_after: Duration,
         reason: String,
     },
 }
 
-enum WorkerEvent {
-    Opened(RealtimeAudioOutputHandle),
-    Lost {
-        stream_generation: u64,
-    },
-    OpenFailed {
-        retry_after: Duration,
-        reason: String,
-    },
+enum WorkerCommand {
+    #[cfg(feature = "validation")]
+    ControlledRecycle { expected_stream_generation: u64 },
+}
+
+#[cfg(feature = "validation")]
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RealtimeAudioOutputRecycleError {
+    #[error("no concrete realtime output stream is available")]
+    OutputUnavailable,
+    #[error("expected stream generation {expected} but current generation is {actual}")]
+    StreamGenerationMismatch { expected: u64, actual: u64 },
+    #[error("realtime audio device worker command channel is unavailable")]
+    WorkerUnavailable,
 }
 
 /// Deep Module owning background open, failure detection, and bounded reopen.
@@ -46,88 +99,80 @@ enum WorkerEvent {
 /// device discovery, stream creation, failure polling, or retry delay.
 pub struct RealtimeAudioOutputManager {
     sample_rate: u32,
-    channels: u8,
+    channel_layout: AudioChannelLayout,
     handle: Option<RealtimeAudioOutputHandle>,
     event_rx: Option<Receiver<WorkerEvent>>,
+    command_tx: Option<Sender<WorkerCommand>>,
+    worker: Option<JoinHandle<()>>,
     shutdown: Arc<AtomicBool>,
 }
 
 impl RealtimeAudioOutputManager {
     /// Create a dormant manager. The first poll starts its device lifecycle thread.
-    pub fn new(sample_rate: u32, channels: u8) -> Self {
+    pub fn new(sample_rate: u32, channel_layout: AudioChannelLayout) -> Self {
         Self {
             sample_rate,
-            channels: channels.max(1),
+            channel_layout,
             handle: None,
             event_rx: None,
+            command_tx: None,
+            worker: None,
             shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    fn ensure_worker_started(&mut self) {
-        if self.event_rx.is_some() {
-            return;
+    /// Start the owned device lifecycle worker without blocking on device open.
+    pub fn start(&mut self) -> Result<(), RealtimeAudioOutputWorkerStartError> {
+        self.ensure_worker_started_with(spawn_device_worker)
+    }
+
+    fn ensure_worker_started_with(
+        &mut self,
+        spawner: impl FnOnce(
+            u32,
+            AudioChannelLayout,
+            Arc<AtomicBool>,
+            Sender<WorkerEvent>,
+            Receiver<WorkerCommand>,
+        ) -> io::Result<JoinHandle<()>>,
+    ) -> Result<(), RealtimeAudioOutputWorkerStartError> {
+        if self.worker.is_some() {
+            return Ok(());
         }
         let (event_tx, event_rx) = mpsc::channel();
+        let (command_tx, command_rx) = mpsc::channel();
         let worker_shutdown = Arc::clone(&self.shutdown);
-        let sample_rate = self.sample_rate;
-        let channels = self.channels;
-        let spawned =
-            thread::Builder::new().name("mondrian-audio-device".to_owned()).spawn(move || {
-                let mut consecutive_failures = 0_u32;
-                while !worker_shutdown.load(Ordering::Acquire) {
-                    match RealtimeAudioOutput::try_new(sample_rate, channels) {
-                        Ok(output) => {
-                            consecutive_failures = 0;
-                            let handle = output.handle();
-                            let stream_generation = handle.snapshot().stream_generation;
-                            if event_tx.send(WorkerEvent::Opened(handle)).is_err() {
-                                break;
-                            }
-                            while !worker_shutdown.load(Ordering::Acquire)
-                                && !output.snapshot().stream_failed
-                            {
-                                thread::sleep(DEVICE_HEALTH_POLL);
-                            }
-                            if worker_shutdown.load(Ordering::Acquire) {
-                                break;
-                            }
-                            if event_tx.send(WorkerEvent::Lost { stream_generation }).is_err() {
-                                break;
-                            }
-                        }
-                        Err(error) => {
-                            consecutive_failures = consecutive_failures.saturating_add(1);
-                            let retry_after = retry_delay(consecutive_failures);
-                            if event_tx
-                                .send(WorkerEvent::OpenFailed {
-                                    retry_after,
-                                    reason: error.to_string(),
-                                })
-                                .is_err()
-                            {
-                                break;
-                            }
-                            interruptible_sleep(retry_after, &worker_shutdown);
-                        }
-                    }
-                }
-            });
-        if spawned.is_ok() {
-            self.event_rx = Some(event_rx);
-        }
+        let worker = spawner(
+            self.sample_rate,
+            self.channel_layout,
+            worker_shutdown,
+            event_tx,
+            command_rx,
+        )
+        .map_err(RealtimeAudioOutputWorkerStartError)?;
+        self.event_rx = Some(event_rx);
+        self.command_tx = Some(command_tx);
+        self.worker = Some(worker);
+        Ok(())
     }
 
     /// Apply at most one pending lifecycle transition without blocking.
     pub fn poll(&mut self) -> Option<RealtimeAudioOutputEvent> {
-        self.ensure_worker_started();
+        if let Err(error) = self.start() {
+            return Some(RealtimeAudioOutputEvent::WorkerStartFailed { reason: error.to_string() });
+        }
         let event = match self.event_rx.as_ref()?.try_recv() {
             Ok(event) => event,
             Err(TryRecvError::Empty) => return None,
             Err(TryRecvError::Disconnected) => {
                 self.event_rx = None;
                 self.handle = None;
-                return None;
+                let reason = match self.worker.take().map(JoinHandle::join) {
+                    Some(Ok(())) => "device worker exited without shutdown".to_owned(),
+                    Some(Err(_)) => "device worker panicked".to_owned(),
+                    None => "device worker ownership was lost".to_owned(),
+                };
+                return Some(RealtimeAudioOutputEvent::WorkerStoppedUnexpectedly { reason });
             }
         };
         match event {
@@ -136,9 +181,9 @@ impl RealtimeAudioOutputManager {
                 self.handle = Some(handle);
                 Some(RealtimeAudioOutputEvent::Opened { stream_generation })
             }
-            WorkerEvent::Lost { stream_generation } => {
+            WorkerEvent::Lost { reason, final_snapshot } => {
                 self.handle = None;
-                Some(RealtimeAudioOutputEvent::Lost { stream_generation })
+                Some(RealtimeAudioOutputEvent::Lost { reason, final_snapshot })
             }
             WorkerEvent::OpenFailed { retry_after, reason } => {
                 Some(RealtimeAudioOutputEvent::OpenFailed { retry_after, reason })
@@ -146,11 +191,29 @@ impl RealtimeAudioOutputManager {
         }
     }
 
+    /// Signal shutdown and synchronously reclaim the owned device worker.
+    #[cfg(test)]
+    pub fn shutdown(mut self) -> Result<(), RealtimeAudioOutputShutdownError> {
+        self.stop_worker()
+    }
+
+    fn stop_worker(&mut self) -> Result<(), RealtimeAudioOutputShutdownError> {
+        self.shutdown.store(true, Ordering::Release);
+        self.handle = None;
+        self.event_rx = None;
+        self.command_tx = None;
+        let Some(worker) = self.worker.take() else {
+            return Ok(());
+        };
+        worker.join().map_err(|_| RealtimeAudioOutputShutdownError::WorkerPanicked)
+    }
+
     /// Queue rendered PCM on the current stream, if one exists.
-    pub fn enqueue(&self, buffer: &AudioBuffer) {
-        if let Some(handle) = &self.handle {
-            handle.enqueue(buffer);
-        }
+    pub fn enqueue(&mut self, buffer: &AudioBuffer) -> Result<(), RealtimeAudioOutputEnqueueError> {
+        let Some(handle) = self.handle.as_mut() else {
+            return Err(RealtimeAudioOutputEnqueueError::OutputUnavailable);
+        };
+        handle.enqueue(buffer)
     }
 
     /// Drop all queued PCM without affecting lifecycle retries.
@@ -160,18 +223,43 @@ impl RealtimeAudioOutputManager {
         }
     }
 
-    /// Enable or disable callback consumption on the current stream.
-    pub fn set_active(&self, active: bool) {
-        if let Some(handle) = &self.handle {
-            handle.set_active(active);
-        }
+    /// Request callback quiescence for the current stream, if one exists.
+    pub fn validate_deactivation(&self) -> Result<(), RealtimeAudioOutputControlError> {
+        self.handle
+            .as_ref()
+            .map(RealtimeAudioOutputHandle::validate_deactivation)
+            .transpose()
+            .map(|_| ())
     }
 
-    /// Apply output mute without conflating it with transport activation.
-    pub fn set_muted(&self, muted: bool) {
-        if let Some(handle) = &self.handle {
-            handle.set_muted(muted);
-        }
+    /// Request callback quiescence for the current stream, if one exists.
+    pub fn deactivate(
+        &self,
+    ) -> Result<Option<RealtimeAudioOutputQuiescenceToken>, RealtimeAudioOutputControlError> {
+        self.handle.as_ref().map(RealtimeAudioOutputHandle::deactivate).transpose()
+    }
+
+    /// Observe whether a deactivation token is fully acknowledged.
+    pub fn is_quiescent(
+        &self,
+        token: RealtimeAudioOutputQuiescenceToken,
+    ) -> Result<bool, RealtimeAudioOutputControlError> {
+        let Some(handle) = &self.handle else {
+            return Ok(false);
+        };
+        handle.is_quiescent(token)
+    }
+
+    /// Atomically trim an exact prefix and activate callback PCM consumption.
+    pub fn activate_after_discard(
+        &self,
+        token: RealtimeAudioOutputQuiescenceToken,
+        frames: usize,
+    ) -> Result<(), RealtimeAudioOutputControlError> {
+        let Some(handle) = &self.handle else {
+            return Err(RealtimeAudioOutputControlError::OutputUnavailable);
+        };
+        handle.activate_after_discard(token, frames)
     }
 
     /// Return PCM frames currently queued on the current stream.
@@ -179,16 +267,175 @@ impl RealtimeAudioOutputManager {
         self.handle.as_ref().map_or(0, RealtimeAudioOutputHandle::buffered_frames)
     }
 
+    /// Fixed complete-frame capacity of the current stream queue.
+    pub fn capacity_frames(&self) -> Option<usize> {
+        self.handle.as_ref().map(RealtimeAudioOutputHandle::capacity_frames)
+    }
+
+    pub(crate) fn configured_channel_layout(&self) -> AudioChannelLayout {
+        self.channel_layout
+    }
+
     /// Capture immutable callback and stream health evidence.
     pub fn snapshot(&self) -> Option<RealtimeAudioOutputSnapshot> {
         self.handle.as_ref().map(RealtimeAudioOutputHandle::snapshot)
     }
+
+    #[cfg(feature = "validation")]
+    pub(crate) fn request_controlled_recycle(
+        &self,
+        expected_stream_generation: u64,
+    ) -> Result<(), RealtimeAudioOutputRecycleError> {
+        validate_controlled_recycle_generation(
+            self.snapshot().map(|snapshot| snapshot.stream_generation),
+            expected_stream_generation,
+        )?;
+        self.command_tx
+            .as_ref()
+            .ok_or(RealtimeAudioOutputRecycleError::WorkerUnavailable)?
+            .send(WorkerCommand::ControlledRecycle { expected_stream_generation })
+            .map_err(|_| RealtimeAudioOutputRecycleError::WorkerUnavailable)
+    }
+}
+
+#[cfg(feature = "validation")]
+fn validate_controlled_recycle_generation(
+    current_stream_generation: Option<u64>,
+    expected_stream_generation: u64,
+) -> Result<(), RealtimeAudioOutputRecycleError> {
+    let current =
+        current_stream_generation.ok_or(RealtimeAudioOutputRecycleError::OutputUnavailable)?;
+    if current != expected_stream_generation {
+        return Err(RealtimeAudioOutputRecycleError::StreamGenerationMismatch {
+            expected: expected_stream_generation,
+            actual: current,
+        });
+    }
+    Ok(())
 }
 
 impl Drop for RealtimeAudioOutputManager {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
+        if let Err(error) = self.stop_worker() {
+            tracing::error!(%error, "failed to reclaim realtime audio device worker");
+        }
     }
+}
+
+fn spawn_device_worker(
+    sample_rate: u32,
+    channel_layout: AudioChannelLayout,
+    worker_shutdown: Arc<AtomicBool>,
+    event_tx: Sender<WorkerEvent>,
+    command_rx: Receiver<WorkerCommand>,
+) -> io::Result<JoinHandle<()>> {
+    thread::Builder::new().name("mondrian-audio-device".to_owned()).spawn(move || {
+        run_device_worker(
+            sample_rate,
+            channel_layout,
+            &worker_shutdown,
+            &event_tx,
+            &command_rx,
+        )
+    })
+}
+
+fn run_device_worker(
+    sample_rate: u32,
+    channel_layout: AudioChannelLayout,
+    worker_shutdown: &AtomicBool,
+    event_tx: &Sender<WorkerEvent>,
+    command_rx: &Receiver<WorkerCommand>,
+) {
+    let mut consecutive_failures = 0_u32;
+    while !worker_shutdown.load(Ordering::Acquire) {
+        match RealtimeAudioOutput::try_new(sample_rate, channel_layout) {
+            Ok((output, handle, observer)) => {
+                consecutive_failures = 0;
+                let stream_generation = handle.snapshot().stream_generation;
+                if event_tx.send(WorkerEvent::Opened(handle)).is_err() {
+                    break;
+                }
+                let Some(mut loss_reason) = wait_for_stream_retirement(
+                    &output,
+                    stream_generation,
+                    worker_shutdown,
+                    command_rx,
+                ) else {
+                    break;
+                };
+                if let Err(error) = output.deactivate() {
+                    output.force_inactive_for_retirement();
+                    tracing::error!(%error, "callback deactivation failed before concrete stream retirement");
+                    loss_reason = RealtimeAudioOutputLossReason::DeactivationFailed;
+                }
+                if drop_freeze_and_publish(
+                    output,
+                    || observer.snapshot(),
+                    |final_snapshot| {
+                        event_tx.send(WorkerEvent::Lost { reason: loss_reason, final_snapshot })
+                    },
+                )
+                .is_err()
+                {
+                    break;
+                }
+            }
+            Err(error) => {
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                let retry_after = retry_delay(consecutive_failures);
+                if event_tx
+                    .send(WorkerEvent::OpenFailed { retry_after, reason: error.to_string() })
+                    .is_err()
+                {
+                    break;
+                }
+                interruptible_sleep(retry_after, worker_shutdown);
+            }
+        }
+    }
+}
+
+fn wait_for_stream_retirement(
+    output: &RealtimeAudioOutput,
+    stream_generation: u64,
+    worker_shutdown: &AtomicBool,
+    command_rx: &Receiver<WorkerCommand>,
+) -> Option<RealtimeAudioOutputLossReason> {
+    #[cfg(not(feature = "validation"))]
+    let _ = stream_generation;
+    loop {
+        if worker_shutdown.load(Ordering::Acquire) {
+            return None;
+        }
+        if output.snapshot().stream_failed {
+            return Some(RealtimeAudioOutputLossReason::BackendFailure);
+        }
+        match command_rx.recv_timeout(DEVICE_HEALTH_POLL) {
+            #[cfg(feature = "validation")]
+            Ok(WorkerCommand::ControlledRecycle { expected_stream_generation })
+                if expected_stream_generation == stream_generation =>
+            {
+                return Some(RealtimeAudioOutputLossReason::ControlledRecycle);
+            }
+            #[cfg(feature = "validation")]
+            Ok(WorkerCommand::ControlledRecycle { .. }) => {}
+            #[cfg(not(feature = "validation"))]
+            Ok(command) => match command {},
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+        }
+    }
+}
+
+fn drop_freeze_and_publish<T, Snapshot, PublishError>(
+    concrete_output: T,
+    observe_after_drop: impl FnOnce() -> Snapshot,
+    publish: impl FnOnce(Snapshot) -> Result<(), PublishError>,
+) -> Result<(), PublishError> {
+    drop(concrete_output);
+    let final_snapshot = observe_after_drop();
+    publish(final_snapshot)
 }
 
 fn interruptible_sleep(duration: Duration, shutdown: &AtomicBool) {
@@ -208,6 +455,7 @@ fn retry_delay(consecutive_failures: u32) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex;
 
     #[test]
     fn retry_delay_is_exponential_and_bounded() {
@@ -215,5 +463,90 @@ mod tests {
         assert_eq!(retry_delay(2), Duration::from_millis(500));
         assert_eq!(retry_delay(3), Duration::from_secs(1));
         assert_eq!(retry_delay(10), MAX_RETRY_DELAY);
+    }
+
+    #[test]
+    fn injected_device_worker_spawn_failure_remains_a_structured_start_error() {
+        let mut manager = RealtimeAudioOutputManager::new(48_000, AudioChannelLayout::Stereo);
+
+        let result = manager.ensure_worker_started_with(|_, _, _, _, _| {
+            Err(io::Error::other("injected device-worker spawn failure"))
+        });
+
+        assert!(result.is_err());
+        assert!(manager.worker.is_none());
+        assert!(manager.event_rx.is_none());
+        assert!(manager.handle.is_none());
+    }
+
+    #[test]
+    fn shutdown_joins_the_owned_device_worker() {
+        let mut manager = RealtimeAudioOutputManager::new(48_000, AudioChannelLayout::Stereo);
+        let exited = Arc::new(AtomicBool::new(false));
+        let worker_exited = Arc::clone(&exited);
+        manager
+            .ensure_worker_started_with(move |_, _, shutdown, _, _| {
+                thread::Builder::new().name("mondrian-audio-device-test".to_owned()).spawn(
+                    move || {
+                        while !shutdown.load(Ordering::Acquire) {
+                            thread::yield_now();
+                        }
+                        worker_exited.store(true, Ordering::Release);
+                    },
+                )
+            })
+            .expect("spawn injected device worker");
+
+        manager.shutdown().expect("join device worker");
+
+        assert!(exited.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn concrete_output_is_dropped_before_final_observation_and_loss_publication() {
+        struct DropProbe(Arc<Mutex<Vec<&'static str>>>);
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.lock().push("drop");
+            }
+        }
+
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let observe_order = Arc::clone(&order);
+        let publish_order = Arc::clone(&order);
+
+        drop_freeze_and_publish(
+            DropProbe(Arc::clone(&order)),
+            move || {
+                observe_order.lock().push("observe");
+                42_u64
+            },
+            move |snapshot| {
+                assert_eq!(snapshot, 42);
+                publish_order.lock().push("publish");
+                Ok::<(), ()>(())
+            },
+        )
+        .expect("publish frozen loss evidence");
+
+        assert_eq!(&*order.lock(), &["drop", "observe", "publish"]);
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn controlled_recycle_preflight_accepts_only_the_exact_current_generation() {
+        assert_eq!(
+            validate_controlled_recycle_generation(None, 7),
+            Err(RealtimeAudioOutputRecycleError::OutputUnavailable)
+        );
+        assert_eq!(
+            validate_controlled_recycle_generation(Some(8), 7),
+            Err(RealtimeAudioOutputRecycleError::StreamGenerationMismatch {
+                expected: 7,
+                actual: 8,
+            })
+        );
+        assert_eq!(validate_controlled_recycle_generation(Some(7), 7), Ok(()));
     }
 }

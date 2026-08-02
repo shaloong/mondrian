@@ -4,14 +4,15 @@
 //! 让内建属性、效果参数和未来插件属性走同一条链路。
 
 use crate::{
+    authoring::AuthoringMap,
     error::{MondrianError, Result},
     types::{AnimationTrackId, AssetId, Color, KeyframeId},
-    ParameterId, TimelineTime, TimelineTimeRange,
+    AuthoringList, ParameterId, TimelineTime, TimelineTimeRange,
 };
 use glam::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     path::PathBuf,
 };
 
@@ -990,12 +991,12 @@ impl PropertyDescriptor {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnimationChannel {
     pub index: usize,
-    keyframes: Vec<Keyframe<f64>>,
+    keyframes: AuthoringList<Keyframe<f64>>,
 }
 
 impl AnimationChannel {
     pub fn new(index: usize) -> Self {
-        Self { index, keyframes: Vec::new() }
+        Self { index, keyframes: AuthoringList::new() }
     }
 
     pub fn keyframes(&self) -> &[Keyframe<f64>] {
@@ -1110,7 +1111,7 @@ pub struct AnimatedProperty {
     #[serde(default)]
     animation_enabled: bool,
     #[serde(default)]
-    channels: Vec<AnimationChannel>,
+    channels: AuthoringList<AnimationChannel>,
 }
 
 impl AnimatedProperty {
@@ -2135,7 +2136,7 @@ pub struct AnimationParameterAddress {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PropertyBag {
-    properties: BTreeMap<String, AnimatedProperty>,
+    properties: AuthoringMap<String, AnimatedProperty>,
 }
 
 impl PropertyBag {
@@ -2776,6 +2777,322 @@ fn segment_progress(
 
 mod interp;
 pub use interp::*;
+
+impl crate::AuthoringFootprint for InterpolationType {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        match self {
+            Self::Hold
+            | Self::Linear
+            | Self::Bezier
+            | Self::AutoBezier
+            | Self::ContinuousBezier
+            | Self::EaseIn
+            | Self::EaseOut => Ok(()),
+        }
+    }
+}
+
+impl crate::AuthoringFootprint for ParameterInterpolation {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        match self {
+            Self::Hold | Self::Linear | Self::Bezier => Ok(()),
+        }
+    }
+}
+
+impl crate::AuthoringFootprint for KeyframeInterpolation {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        match self {
+            Self::Hold | Self::Linear | Self::Bezier(_) => Ok(()),
+        }
+    }
+}
+
+impl crate::AuthoringFootprint for BezierHandle {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self { time_offset: _, value_offset: _ } = self;
+        Ok(())
+    }
+}
+
+impl crate::AuthoringFootprint for KeyframeTemporalFlags {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self { auto_bezier: _, continuous: _, broken_handles: _ } = self;
+        Ok(())
+    }
+}
+
+impl crate::AuthoringFootprint for PropertyValueType {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        match self {
+            Self::Bool
+            | Self::Int
+            | Self::Float
+            | Self::Double
+            | Self::Vec2
+            | Self::Vec3
+            | Self::Color
+            | Self::Vec4
+            | Self::Enum
+            | Self::Resource
+            | Self::Text => Ok(()),
+        }
+    }
+}
+
+impl crate::AuthoringFootprint for ParameterUnit {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        match self {
+            Self::Unitless
+            | Self::Pixels
+            | Self::Normalized
+            | Self::Percent
+            | Self::Degrees
+            | Self::TimelineTime
+            | Self::Stops
+            | Self::Nits
+            | Self::Decibels
+            | Self::Samples => Ok(()),
+        }
+    }
+}
+
+impl crate::AuthoringFootprint for ParameterNumericRange {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self { min: _, max: _ } = self;
+        Ok(())
+    }
+}
+
+impl crate::AuthoringFootprint for ParameterNumericContract {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self {
+            hard_range: _,
+            soft_range: _,
+            step: _,
+            invalid_value_policy: _,
+        } = self;
+        Ok(())
+    }
+}
+
+impl crate::AuthoringFootprint for ParameterInvalidValuePolicy {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        match self {
+            Self::Reject | Self::Clamp => Ok(()),
+        }
+    }
+}
+
+impl crate::AuthoringFootprint for ParameterCacheImpact {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        match self {
+            Self::None | Self::Value | Self::Resource | Self::Topology => Ok(()),
+        }
+    }
+}
+
+impl crate::AuthoringFootprint for PropertyValue {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        match self {
+            Self::Enum(value) | Self::Text(value) => collector.collect(value),
+            Self::Resource(reference) => collector.collect(reference),
+            Self::Bool(_)
+            | Self::Int(_)
+            | Self::Float(_)
+            | Self::Double(_)
+            | Self::Vec2(_)
+            | Self::Vec3(_)
+            | Self::Color(_)
+            | Self::Vec4(_) => Ok(()),
+        }
+    }
+}
+
+impl crate::AuthoringFootprint for ParameterEnumOption {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self { key, message_id } = self;
+        collector.collect(key)?;
+        collector.collect(message_id)
+    }
+}
+
+impl crate::AuthoringFootprint for ParameterResourceReference {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        match self {
+            Self::ExternalFile { path } => collector.collect(path),
+            Self::Uri { uri } => collector.collect(uri),
+            Self::Unbound | Self::ProjectAsset { asset_id: _ } => Ok(()),
+        }
+    }
+}
+
+impl crate::AuthoringFootprint for AnimatablePropertyUiMetadata {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self { group_name, supports_spatial: _ } = self;
+        collector.collect(group_name)
+    }
+}
+
+impl crate::AuthoringFootprint for ParameterSchema {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self {
+            parameter_id,
+            schema_version: _,
+            message_id,
+            value_type: _,
+            default_value,
+            is_animatable: _,
+            unit: _,
+            numeric: _,
+            allowed_interpolations,
+            enum_options,
+            cache_impact: _,
+        } = self;
+        collector.collect(parameter_id)?;
+        collector.collect(message_id)?;
+        collector.collect(default_value)?;
+        collector.collect(allowed_interpolations)?;
+        collector.collect(enum_options)
+    }
+}
+
+impl crate::AuthoringFootprint for PropertyDescriptor {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self { schema, path, display_name, ui_metadata } = self;
+        collector.collect(schema)?;
+        collector.collect(path)?;
+        collector.collect(display_name)?;
+        collector.collect(ui_metadata)
+    }
+}
+
+impl<T: crate::AuthoringFootprint> crate::AuthoringFootprint for Keyframe<T> {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self {
+            id: _,
+            time: _,
+            value,
+            interp_in: _,
+            interp_out: _,
+            temporal_flags: _,
+        } = self;
+        collector.collect(value)
+    }
+}
+
+impl<T: Interpolatable + crate::AuthoringFootprint> crate::AuthoringFootprint for KeyframeTrack<T> {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self { keyframes, static_value, enabled: _ } = self;
+        collector.collect(keyframes)?;
+        collector.collect(static_value)
+    }
+}
+
+impl crate::AuthoringFootprint for AnimationChannel {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self { index: _, keyframes } = self;
+        collector.collect(keyframes)
+    }
+}
+
+impl crate::AuthoringFootprint for AnimatedProperty {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self {
+            track_id: _,
+            descriptor,
+            static_value,
+            animation_enabled: _,
+            channels,
+        } = self;
+        collector.collect(descriptor)?;
+        collector.collect(static_value)?;
+        collector.collect(channels)
+    }
+}
+
+impl crate::AuthoringFootprint for AnimationParameterAddress {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self { animation_track_id: _, parameter_id } = self;
+        collector.collect(parameter_id)
+    }
+}
+
+impl crate::AuthoringFootprint for PropertyBag {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self { properties } = self;
+        collector.collect(properties)
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -140,7 +140,9 @@ impl DeclaredViewerLayerCounts {
                     self.procedural_layers = self.procedural_layers.saturating_add(1);
                 }
             }
-            ViewerGpuExecutionLayer::CrossDissolve { left, right, progress } => {
+            ViewerGpuExecutionLayer::CrossDissolve(transition) => {
+                let mondrian_renderer::ViewerGpuCrossDissolveLayer { left, right, progress } =
+                    transition.as_ref();
                 let progress = progress.clamp(0.0, 1.0);
                 self.record_transition_input(left, 1.0 - progress);
                 self.record_transition_input(right, progress);

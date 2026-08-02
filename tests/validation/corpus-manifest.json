@@ -107,6 +107,8 @@
       "purposes": [
         "professional-audio-playback",
         "device-clock",
+        "controlled-device-recovery",
+        "proven-av-phase",
         "av-drift",
         "decoded-window-cache",
         "whole-process-memory",

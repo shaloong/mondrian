@@ -211,15 +211,15 @@ impl AppState {
         }
 
         let mut pasted_selection = Vec::<SelectedClipRef>::with_capacity(entries.len());
-        let (pasted_count, sequence_id, before, after) = {
-            let before = self.active_sequence().cloned().ok_or_else(|| {
-                mondrian_core::MondrianError::WorkflowStepFailed {
-                    step_id: "paste_clip_clipboard".to_string(),
-                    reason: "当前无序列".to_string(),
-                }
-            })?;
-            let mut after = before.clone();
-            let seq = &mut after;
+        let sequence = self.active_sequence().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "paste_clip_clipboard".to_string(),
+                reason: "当前无序列".to_string(),
+            }
+        })?;
+        let sequence_id = sequence.id;
+        let frame_rate = sequence.settings.frame_rate;
+        let pasted_count = self.commit_sequence_edit(sequence_id, description, |seq| {
             validate_clip_clipboard_targets(seq, &entries)?;
             let destination = destination.max(TimelineTime::ZERO);
             let mut id_map = HashMap::<ClipId, ClipId>::new();
@@ -319,20 +319,15 @@ impl AppState {
                 )?;
             }
             compact_sequence_references(seq);
-            let sequence_id = seq.id;
             let pasted_count = pasted_selection.len();
-            (pasted_count, sequence_id, before, after)
-        };
+            Ok(pasted_count)
+        })?;
 
         if pasted_count > 0 {
-            let seek_frame = destination
-                .to_frame_position(after.settings.frame_rate, FrameRounding::Nearest)?
-                .frame
-                .max(0);
-            self.record_sequence_snapshot_command(description, before, after)?;
-            self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
+            let seek_frame =
+                destination.to_frame_position(frame_rate, FrameRounding::Nearest)?.frame.max(0);
             self.replace_clip_selection(pasted_selection);
-            self.seek(seek_frame);
+            self.reconcile_playhead_after_committed_authoring_change(seek_frame, "paste_clipboard");
         }
         Ok(pasted_count)
     }

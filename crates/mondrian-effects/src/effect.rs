@@ -1,12 +1,15 @@
 //! 效果节点抽象
 
-use crate::execution::{register_custom_render_processor, CustomEffectRenderProcessor};
+use crate::execution::CustomEffectRenderProcessor;
 use crate::graph::{CompiledEffectGraph, EffectGraphBuilderState, EffectRenderGraph};
-use crate::lut::Lut3D;
+use crate::lut::{Lut3D, LutPreparationCache};
 use crate::mask::MaskComponent;
 use crate::plugin_contract::{
-    effect_plugin_is_library_visible, effect_plugin_is_runtime_available,
-    record_plugin_runtime_failure, register_plugin_contract, EffectPluginContract,
+    effect_plugin_is_library_visible, record_plugin_runtime_failure, EffectPluginContract,
+};
+use crate::{
+    EffectExecutionContract, EffectExecutionContractViolation, EffectGraphTopology,
+    EffectResourceLifetime, EffectRoiPropagation,
 };
 use mondrian_core::{
     automation::{
@@ -20,11 +23,20 @@ use mondrian_core::{
 // Re-export effect data types from mondrian-core.
 pub use mondrian_core::effect_data::{namespaced_effect_path, EffectNode, EffectType};
 
+pub(crate) const GAUSSIAN_BLUR_AUTHOR_MAX_RADIUS_PIXELS: u32 = 200;
+pub(crate) const SHARPEN_BLUR_RADIUS_PIXELS: f32 = 1.0;
+const OPAQUE_EFFECT_EVALUATOR_BASE_CHARGE_BYTES: usize = 512;
+
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     panic::{catch_unwind, AssertUnwindSafe},
-    sync::{Arc, OnceLock, RwLock},
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, OnceLock, RwLock,
+    },
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -32,6 +44,19 @@ pub struct EffectEvalContext {
     pub time: TimelineTime,
     /// Sequence working identity used by scene-linear effect algorithms.
     pub working_color_space: WorkingColorSpace,
+}
+
+/// Recovery owner for one unresolved effect resource.
+///
+/// The distinction prevents production callers from polling immutable author
+/// errors as though the outside world could repair them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectResourceRecovery {
+    /// The authored effect must change before preparation can succeed.
+    AuthorEdit,
+    /// The authored intent is valid and an external change may make the same
+    /// immutable state executable.
+    ExternalChange,
 }
 
 /// Failure to turn an enabled authored effect into an executable render graph.
@@ -66,7 +91,54 @@ pub enum EffectGraphBuildError {
         effect_key: String,
         effect_id: EffectId,
         parameter_id: ParameterId,
+        recovery: EffectResourceRecovery,
         reason: String,
+    },
+    /// The definition has not admitted any processing backend.
+    #[error("effect `{effect_key}` ({effect_id}) has no admitted execution backend")]
+    ExecutionContractUnavailable {
+        effect_key: String,
+        effect_id: EffectId,
+    },
+    /// A prepared-program resource contract was paired with a frame evaluator.
+    #[error("effect `{effect_key}` ({effect_id}) requires a prepared resource evaluator")]
+    ResourcePreparationUnsupported {
+        effect_key: String,
+        effect_id: EffectId,
+    },
+    /// Authored parameter schemas do not exactly match the bound definition.
+    #[error("effect `{effect_key}` ({effect_id}) has invalid author state: {reason}")]
+    InvalidAuthorState {
+        effect_key: String,
+        effect_id: EffectId,
+        reason: String,
+    },
+    /// A frame evaluator emitted topology beyond its declared contract.
+    #[error("effect `{effect_key}` ({effect_id}) violated its graph topology contract")]
+    TopologyContractViolation {
+        effect_key: String,
+        effect_id: EffectId,
+    },
+    /// The emitted graph or prepared dependency is more demanding than the
+    /// definition-owned execution contract.
+    #[error("effect `{effect_key}` ({effect_id}) violated its execution contract: {violation}")]
+    ExecutionContractViolation {
+        effect_key: String,
+        effect_id: EffectId,
+        violation: Box<EffectExecutionContractViolation>,
+    },
+    /// Sequential temporal, ROI, state, or lifetime contracts cannot be
+    /// represented. A heterogeneous backend chain is valid and is retained in
+    /// its ordered execution envelope.
+    #[error("effect stack execution contract is invalid: {reason}")]
+    InvalidExecutionContract { reason: String },
+    /// Definitions changed while one immutable stack was being bound.
+    #[error("effect definition registry changed during preparation ({before} -> {after})")]
+    DefinitionRegistryChanged {
+        /// Revision sampled before definition/resource binding.
+        before: u64,
+        /// Revision sampled after initial graph validation.
+        after: u64,
     },
     /// Third-party evaluator code panicked while producing its graph.
     #[error("effect graph builder `{effect_key}` ({effect_id}) panicked")]
@@ -77,6 +149,24 @@ pub enum EffectGraphBuildError {
     /// The produced graph violated graph or color-domain invariants.
     #[error("compiled effect graph is invalid")]
     InvalidGraph,
+}
+
+impl EffectGraphBuildError {
+    /// Report whether unchanged author state may recover after an external
+    /// dependency changes.
+    ///
+    /// This is intended for a low-frequency dependency observer, never for a
+    /// per-frame retry loop.
+    #[must_use]
+    pub const fn dependency_refresh_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::ResourceUnavailable {
+                recovery: EffectResourceRecovery::ExternalChange,
+                ..
+            }
+        )
+    }
 }
 
 /// Fallible graph builder shared by built-in and plugin effect definitions.
@@ -104,11 +194,163 @@ pub type EffectRenderParamsBuilder = Arc<
 pub type EffectCacheKeyBuilder =
     Arc<dyn Fn(&EffectNode, EffectEvalContext) -> Option<String> + Send + Sync>;
 
+/// One immutable dependency retained by a prepared effect evaluator.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum EffectResourceDependency {
+    /// A parsed `.cube` file identified by its complete semantic payload.
+    CubeLut {
+        /// Author-resolved source path.
+        path: PathBuf,
+        /// Stable fingerprint of the complete parsed LUT semantics.
+        semantic_fingerprint: [u8; 32],
+    },
+    /// Plugin-owned immutable resource identity.
+    ///
+    /// The plugin must re-register its definition when this identity changes.
+    /// Registration advances the global definition revision and invalidates
+    /// prepared programs conservatively.
+    PluginManaged {
+        /// Stable plugin-defined resource key.
+        identity: String,
+    },
+}
+
+/// Evaluator and immutable dependencies produced once during preparation.
+#[derive(Clone)]
+pub struct PreparedEffectEvaluator {
+    evaluator: EffectGraphBuilder,
+    dependencies: Vec<EffectResourceDependency>,
+    retained_resource_bytes: usize,
+}
+
+impl PreparedEffectEvaluator {
+    /// Bind a frame evaluator without immutable dependencies.
+    pub fn new(evaluator: EffectGraphBuilder) -> Self {
+        Self {
+            evaluator,
+            dependencies: Vec::new(),
+            retained_resource_bytes: 0,
+        }
+    }
+
+    /// Retain one dependency in the prepared program identity.
+    pub fn with_dependency(mut self, dependency: EffectResourceDependency) -> Self {
+        self.dependencies.push(dependency);
+        self
+    }
+
+    /// Add conservative logical bytes for immutable resources captured by the
+    /// evaluator.
+    ///
+    /// This charge is used by Prepared Program cache admission. It is not
+    /// allocator or process-resident-memory evidence.
+    pub fn with_retained_resource_bytes(mut self, retained_bytes: usize) -> Self {
+        self.retained_resource_bytes = self.retained_resource_bytes.saturating_add(retained_bytes);
+        self
+    }
+
+    pub(crate) fn evaluator(&self) -> &EffectGraphBuilder {
+        &self.evaluator
+    }
+
+    pub(crate) fn dependencies(&self) -> &[EffectResourceDependency] {
+        &self.dependencies
+    }
+
+    pub(crate) fn retained_bytes_estimate(&self) -> usize {
+        std::mem::size_of::<Self>()
+            .saturating_add(OPAQUE_EFFECT_EVALUATOR_BASE_CHARGE_BYTES)
+            .saturating_add(
+                self.dependencies
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<EffectResourceDependency>()),
+            )
+            .saturating_add(
+                self.dependencies
+                    .iter()
+                    .map(effect_resource_dependency_retained_bytes)
+                    .fold(0_usize, usize::saturating_add),
+            )
+            .saturating_add(self.retained_resource_bytes)
+    }
+}
+
+fn effect_resource_dependency_retained_bytes(dependency: &EffectResourceDependency) -> usize {
+    match dependency {
+        EffectResourceDependency::CubeLut { path, .. } => path.as_os_str().len(),
+        EffectResourceDependency::PluginManaged { identity } => identity.capacity(),
+    }
+}
+
+/// Owner-scoped immutable resource preparation seam.
+///
+/// The context may be used only while building a `PreparedEffectEvaluator`.
+/// Evaluators retain the returned immutable resource `Arc`, never this
+/// borrowed context or its cache owner.
+#[derive(Clone, Copy)]
+pub struct EffectPreparationContext<'a> {
+    lut_cache: &'a LutPreparationCache,
+}
+
+impl<'a> EffectPreparationContext<'a> {
+    pub(crate) const fn new(lut_cache: &'a LutPreparationCache) -> Self {
+        Self { lut_cache }
+    }
+
+    /// Prepare one external `.cube` LUT through the caller-owned bounded cache.
+    pub fn prepare_cube_lut(
+        self,
+        path: &std::path::Path,
+    ) -> mondrian_core::Result<Arc<PreparedLut3D>> {
+        self.lut_cache.load_cube(path)
+    }
+}
+
+/// Prepare immutable resources and bind one effect evaluator.
+pub type EffectGraphPreparer = Arc<
+    dyn for<'a> Fn(
+            &EffectNode,
+            WorkingColorSpace,
+            EffectPreparationContext<'a>,
+        ) -> Result<PreparedEffectEvaluator, EffectGraphBuildError>
+        + Send
+        + Sync,
+>;
+
+/// Cross-call reuse contract for one effect operation or compiled subtree.
+///
+/// This is execution evidence, not merely a cache hint: callers must never
+/// construct a reusable key for [`Self::Uncacheable`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EffectCachePolicy {
+    /// Equal input pixels and parameters reproduce equal output.
     #[default]
     Deterministic,
+    /// Output additionally depends on the explicit frame seed.
     FrameDependent,
+    /// The operation cannot promise reproducible output across invocations.
+    Uncacheable,
+}
+
+impl EffectCachePolicy {
+    pub(crate) const fn combine(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Uncacheable, _) | (_, Self::Uncacheable) => Self::Uncacheable,
+            (Self::FrameDependent, _) | (_, Self::FrameDependent) => Self::FrameDependent,
+            (Self::Deterministic, Self::Deterministic) => Self::Deterministic,
+        }
+    }
+
+    /// Whether a caller may create a key that can be reused by a later
+    /// invocation.
+    pub const fn permits_cross_call_reuse(self) -> bool {
+        !matches!(self, Self::Uncacheable)
+    }
+
+    /// Whether a reusable key must include the explicit frame seed.
+    pub const fn requires_frame_seed(self) -> bool {
+        matches!(self, Self::FrameDependent)
+    }
 }
 
 /// Color domain in which an effect consumes or produces pixel values.
@@ -182,7 +424,101 @@ impl Default for EffectColorDomainContract {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One immutable, prepared LUT payload shared by every evaluated frame graph.
+///
+/// The semantic fingerprint is computed once when the resource enters a
+/// prepared program. Graph signatures therefore never clone or hash the full
+/// cube table on the frame path.
+#[derive(Debug, Clone)]
+pub struct PreparedLut3D {
+    lut: Arc<Lut3D>,
+    semantic_fingerprint: [u8; 32],
+}
+
+impl PreparedLut3D {
+    /// Prepare one parsed LUT for shared frame execution.
+    pub fn new(lut: Lut3D) -> Self {
+        let semantic_fingerprint = lut_semantic_fingerprint(&lut);
+        Self { lut: Arc::new(lut), semantic_fingerprint }
+    }
+
+    /// Borrow the parsed immutable LUT payload.
+    pub fn lut(&self) -> &Lut3D {
+        &self.lut
+    }
+
+    /// Stable digest of the complete parsed LUT semantics.
+    pub const fn semantic_fingerprint(&self) -> &[u8; 32] {
+        &self.semantic_fingerprint
+    }
+
+    /// Conservative logical bytes retained by this prepared payload.
+    ///
+    /// This includes the complete allocated cube table and name storage plus
+    /// fixed Rust values. It is a scheduling/cache charge, not allocator or
+    /// process-resident-memory evidence.
+    pub fn retained_bytes_estimate(&self) -> usize {
+        std::mem::size_of::<Self>()
+            .saturating_add(std::mem::size_of::<Lut3D>())
+            .saturating_add(self.lut.name.capacity())
+            .saturating_add(
+                self.lut.data.capacity().saturating_mul(std::mem::size_of::<[f32; 3]>()),
+            )
+            .saturating_add(std::mem::size_of::<usize>().saturating_mul(2))
+    }
+}
+
+impl From<Lut3D> for PreparedLut3D {
+    fn from(lut: Lut3D) -> Self {
+        Self::new(lut)
+    }
+}
+
+impl Serialize for PreparedLut3D {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.lut.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PreparedLut3D {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Lut3D::deserialize(deserializer).map(Self::new)
+    }
+}
+
+impl std::ops::Deref for PreparedLut3D {
+    type Target = Lut3D;
+
+    fn deref(&self) -> &Self::Target {
+        self.lut()
+    }
+}
+
+fn lut_semantic_fingerprint(lut: &Lut3D) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mondrian.prepared-lut-3d.v1");
+    hasher.update((lut.name.len() as u64).to_le_bytes());
+    hasher.update(lut.name.as_bytes());
+    hasher.update(lut.size.to_le_bytes());
+    for value in lut.domain_min.into_iter().chain(lut.domain_max) {
+        hasher.update(value.to_bits().to_le_bytes());
+    }
+    hasher.update((lut.data.len() as u64).to_le_bytes());
+    for rgb in &lut.data {
+        for value in rgb {
+            hasher.update(value.to_bits().to_le_bytes());
+        }
+    }
+    hasher.finalize().into()
+}
+
+#[derive(Clone)]
 pub enum EffectRenderOp {
     ColorAdjust {
         exposure: f32,
@@ -206,8 +542,22 @@ pub enum EffectRenderOp {
     Grain {
         amount: f32,
     },
+    /// Deterministic finite-history proof processor.
+    ///
+    /// The output coverage-correctly mixes the current upstream frame and the
+    /// upstream frame at `time - past_offset`: straight-alpha inputs are
+    /// premultiplied for interpolation, then returned as straight alpha. At the
+    /// non-negative effect-domain boundary, the past sample holds exact time
+    /// zero. A temporal executor must provide both frames; single-frame
+    /// executors fail admission before reaching this operation.
+    TemporalFrameMix {
+        /// Exact non-negative history offset in the Clip visual author domain.
+        past_offset: TimelineTime,
+        /// Weight of the historical frame in `[0, 1]`.
+        mix: f32,
+    },
     Lut3D {
-        lut: Lut3D,
+        lut: Arc<PreparedLut3D>,
         intensity: f32,
     },
     Custom {
@@ -215,10 +565,154 @@ pub enum EffectRenderOp {
         params: serde_json::Value,
         cache_key: Option<String>,
         cache_policy: EffectCachePolicy,
+        /// Immutable implementation bound during Definition preparation.
+        ///
+        /// Definition/Builder evaluation is the only supported binding path.
+        /// Raw graph utilities may leave this empty only to exercise rejection:
+        /// compilation fails closed when a reachable Custom node is unbound.
+        processor: Option<CustomEffectProcessorBinding>,
     },
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+impl std::fmt::Debug for EffectRenderOp {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ColorAdjust {
+                exposure,
+                contrast,
+                saturation,
+                working_color_space,
+            } => formatter
+                .debug_struct("ColorAdjust")
+                .field("exposure", exposure)
+                .field("contrast", contrast)
+                .field("saturation", saturation)
+                .field("working_color_space", working_color_space)
+                .finish(),
+            Self::GaussianBlur { radius } => {
+                formatter.debug_struct("GaussianBlur").field("radius", radius).finish()
+            }
+            Self::Sharpen { amount } => {
+                formatter.debug_struct("Sharpen").field("amount", amount).finish()
+            }
+            Self::Vignette { intensity, feather } => formatter
+                .debug_struct("Vignette")
+                .field("intensity", intensity)
+                .field("feather", feather)
+                .finish(),
+            Self::ChromaticAberration { amount } => {
+                formatter.debug_struct("ChromaticAberration").field("amount", amount).finish()
+            }
+            Self::Grain { amount } => {
+                formatter.debug_struct("Grain").field("amount", amount).finish()
+            }
+            Self::TemporalFrameMix { past_offset, mix } => formatter
+                .debug_struct("TemporalFrameMix")
+                .field("past_offset", past_offset)
+                .field("mix", mix)
+                .finish(),
+            Self::Lut3D { lut, intensity } => formatter
+                .debug_struct("Lut3D")
+                .field("semantic_fingerprint", lut.semantic_fingerprint())
+                .field("intensity", intensity)
+                .finish(),
+            Self::Custom { key, params, cache_key, cache_policy, processor } => formatter
+                .debug_struct("Custom")
+                .field("key", key)
+                .field("params", params)
+                .field("cache_key", cache_key)
+                .field("cache_policy", cache_policy)
+                .field(
+                    "processor_revision",
+                    &processor.as_ref().map(CustomEffectProcessorBinding::revision),
+                )
+                .finish(),
+        }
+    }
+}
+
+/// Immutable in-process processor implementation retained by executable IR.
+#[derive(Clone)]
+pub struct CustomEffectProcessorBinding {
+    revision: u64,
+    processor: CustomEffectRenderProcessor,
+    runtime_owner: Option<CustomEffectRuntimeOwner>,
+}
+
+#[derive(Clone)]
+struct CustomEffectRuntimeOwner {
+    effect_key: String,
+    definition_registry_revision: u64,
+    contract: EffectPluginContract,
+}
+
+impl CustomEffectProcessorBinding {
+    pub(crate) fn new(processor: CustomEffectRenderProcessor) -> Self {
+        static NEXT_REVISION: AtomicU64 = AtomicU64::new(1);
+        Self {
+            revision: NEXT_REVISION.fetch_add(1, Ordering::AcqRel),
+            processor,
+            runtime_owner: None,
+        }
+    }
+
+    /// Process-local implementation revision used by graph/cache identity.
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub(crate) fn processor(&self) -> &CustomEffectRenderProcessor {
+        &self.processor
+    }
+
+    pub(crate) fn with_runtime_owner(
+        &self,
+        effect_key: &str,
+        definition_registry_revision: u64,
+        contract: Option<&EffectPluginContract>,
+    ) -> Self {
+        Self {
+            revision: self.revision,
+            processor: Arc::clone(&self.processor),
+            runtime_owner: contract.cloned().map(|contract| CustomEffectRuntimeOwner {
+                effect_key: effect_key.to_owned(),
+                definition_registry_revision,
+                contract,
+            }),
+        }
+    }
+
+    pub(crate) fn record_runtime_failure(&self, reason: impl Into<String>) {
+        let Some(owner) = &self.runtime_owner else {
+            return;
+        };
+        record_plugin_runtime_failure(
+            owner.effect_key.as_str(),
+            owner.definition_registry_revision,
+            Some(&owner.contract),
+            reason,
+        );
+    }
+
+    const fn runtime_owner_revision(&self) -> Option<u64> {
+        match &self.runtime_owner {
+            Some(owner) => Some(owner.definition_registry_revision),
+            None => None,
+        }
+    }
+}
+
+impl std::fmt::Debug for CustomEffectProcessorBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CustomEffectProcessorBinding")
+            .field("revision", &self.revision)
+            .field("runtime_owner_revision", &self.runtime_owner_revision())
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct EffectRenderPlan {
     pub ops: Vec<EffectRenderOp>,
 }
@@ -277,30 +771,35 @@ impl EffectRenderOp {
                 5u8.hash(state);
                 amount.to_bits().hash(state);
             }
+            EffectRenderOp::TemporalFrameMix { past_offset, mix } => {
+                8u8.hash(state);
+                past_offset.hash(state);
+                mix.to_bits().hash(state);
+            }
             EffectRenderOp::Lut3D { lut, intensity } => {
                 6u8.hash(state);
-                lut.name.hash(state);
-                lut.size.hash(state);
-                for value in lut.domain_min.into_iter().chain(lut.domain_max) {
-                    value.to_bits().hash(state);
-                }
+                lut.semantic_fingerprint().hash(state);
                 intensity.to_bits().hash(state);
-                for rgb in &lut.data {
-                    rgb[0].to_bits().hash(state);
-                    rgb[1].to_bits().hash(state);
-                    rgb[2].to_bits().hash(state);
-                }
             }
-            EffectRenderOp::Custom { key, params, cache_key, cache_policy } => {
+            EffectRenderOp::Custom { key, params, cache_key, cache_policy, processor } => {
                 7u8.hash(state);
                 key.hash(state);
+                processor.as_ref().map(CustomEffectProcessorBinding::revision).hash(state);
+                processor
+                    .as_ref()
+                    .and_then(CustomEffectProcessorBinding::runtime_owner_revision)
+                    .hash(state);
                 cache_policy.hash(state);
+                // `cache_key` identifies stable external/custom implementation
+                // semantics; it never replaces the evaluated frame parameters.
+                // Omitting `params` here would let animated values reuse a
+                // compiled graph containing an earlier frame's payload.
+                hash_json_value(params, state);
                 if let Some(cache_key) = cache_key {
                     1u8.hash(state);
                     cache_key.hash(state);
                 } else {
                     0u8.hash(state);
-                    hash_json_value(params, state);
                 }
             }
         }
@@ -323,6 +822,7 @@ impl EffectRenderOp {
             EffectRenderOp::GaussianBlur { .. } => 4,
             EffectRenderOp::Sharpen { .. } => 4,
             EffectRenderOp::ChromaticAberration { .. } => 4,
+            EffectRenderOp::TemporalFrameMix { .. } => 2,
             EffectRenderOp::Custom { .. } => 5,
         }
     }
@@ -367,12 +867,10 @@ fn hash_json_value<H: std::hash::Hasher>(value: &serde_json::Value, state: &mut 
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct EffectCapabilities {
-    pub supports_render_graph: bool,
-    pub supports_branching_render_graph: bool,
-    pub supports_custom_render_processor: bool,
-    pub supports_cache_key_contract: bool,
+#[derive(Clone)]
+enum EffectEvaluatorFactory {
+    Frame(EffectGraphBuilder),
+    Prepared(EffectGraphPreparer),
 }
 
 #[derive(Clone)]
@@ -381,10 +879,11 @@ pub struct EffectDefinition {
     display_name: String,
     category_path: Vec<String>,
     default_properties: PropertyBag,
-    graph_builder: Option<EffectGraphBuilder>,
-    capabilities: EffectCapabilities,
+    evaluator_factory: Option<EffectEvaluatorFactory>,
+    execution_contract: EffectExecutionContract,
     plugin_contract: Option<EffectPluginContract>,
     color_domain_contract: EffectColorDomainContract,
+    definition_registry_revision: u64,
 }
 
 /// Invalid effect definition rejected before it can enter the registry.
@@ -410,6 +909,12 @@ pub enum EffectDefinitionError {
         first_address: String,
         second_address: String,
     },
+    /// The typed execution contract is internally inconsistent.
+    #[error("effect `{effect_key}` has an invalid execution contract: {reason}")]
+    InvalidExecutionContract { effect_key: String, reason: String },
+    /// Process-local registry generation can no longer advance safely.
+    #[error("effect definition registry revision exhausted")]
+    RegistryRevisionExhausted,
 }
 
 impl EffectDefinition {
@@ -428,10 +933,11 @@ impl EffectDefinition {
             display_name: display_name.into(),
             category_path: Vec::new(),
             default_properties,
-            graph_builder: None,
-            capabilities: EffectCapabilities::default(),
+            evaluator_factory: None,
+            execution_contract: EffectExecutionContract::default(),
             plugin_contract: None,
             color_domain_contract,
+            definition_registry_revision: 0,
         }
     }
 
@@ -453,15 +959,26 @@ impl EffectDefinition {
     }
 
     pub fn with_graph_builder(mut self, graph_builder: EffectGraphBuilder) -> Self {
-        self.graph_builder = Some(graph_builder);
-        self.capabilities.supports_render_graph = true;
+        self.evaluator_factory = Some(EffectEvaluatorFactory::Frame(graph_builder));
+        self.execution_contract.topology = EffectGraphTopology::LinearChain;
         self
     }
 
     pub fn with_branching_graph_builder(mut self, graph_builder: EffectGraphBuilder) -> Self {
-        self.graph_builder = Some(graph_builder);
-        self.capabilities.supports_render_graph = true;
-        self.capabilities.supports_branching_render_graph = true;
+        self.evaluator_factory = Some(EffectEvaluatorFactory::Frame(graph_builder));
+        self.execution_contract.topology = EffectGraphTopology::GeneralDag;
+        self
+    }
+
+    /// Bind a preparation function that resolves immutable resources once.
+    pub fn with_prepared_graph_builder(mut self, graph_preparer: EffectGraphPreparer) -> Self {
+        self.evaluator_factory = Some(EffectEvaluatorFactory::Prepared(graph_preparer));
+        self
+    }
+
+    /// Declare the complete typed execution contract.
+    pub fn with_execution_contract(mut self, execution_contract: EffectExecutionContract) -> Self {
+        self.execution_contract = execution_contract;
         self
     }
 
@@ -486,27 +1003,28 @@ impl EffectDefinition {
         processor: CustomEffectRenderProcessor,
     ) -> Self {
         let effect_key = self.key.clone();
-        register_custom_render_processor(effect_key.clone(), processor);
+        let processor = CustomEffectProcessorBinding::new(processor);
         let params_builder_for_graph = Arc::clone(&params_builder);
         let effect_key_for_graph = effect_key.clone();
         let cache_key_builder_for_graph = cache_key_builder.clone();
-        self.graph_builder = Some(Arc::new(move |effect, context, graph| {
-            if let Some(params) = params_builder_for_graph(effect, context)? {
-                let cache_key = cache_key_builder_for_graph
-                    .as_ref()
-                    .and_then(|builder| builder(effect, context));
-                graph.append_unary(EffectRenderOp::Custom {
-                    key: effect_key_for_graph.clone(),
-                    params,
-                    cache_key,
-                    cache_policy,
-                });
-            }
-            Ok(())
-        }));
-        self.capabilities.supports_render_graph = true;
-        self.capabilities.supports_custom_render_processor = true;
-        self.capabilities.supports_cache_key_contract = cache_key_builder.is_some();
+        self.evaluator_factory = Some(EffectEvaluatorFactory::Frame(Arc::new(
+            move |effect, context, graph| {
+                if let Some(params) = params_builder_for_graph(effect, context)? {
+                    let cache_key = cache_key_builder_for_graph
+                        .as_ref()
+                        .and_then(|builder| builder(effect, context));
+                    graph.append_unary(EffectRenderOp::Custom {
+                        key: effect_key_for_graph.clone(),
+                        params,
+                        cache_key,
+                        cache_policy,
+                        processor: Some(processor.clone()),
+                    });
+                }
+                Ok(())
+            },
+        )));
+        self.execution_contract.topology = EffectGraphTopology::LinearChain;
         self
     }
 
@@ -527,8 +1045,17 @@ impl EffectDefinition {
         &self.category_path
     }
 
-    pub fn capabilities(&self) -> EffectCapabilities {
-        self.capabilities
+    pub(crate) fn default_properties(&self) -> &PropertyBag {
+        &self.default_properties
+    }
+
+    pub(crate) fn has_evaluator(&self) -> bool {
+        self.evaluator_factory.is_some()
+    }
+
+    /// Complete execution contract owned by this definition.
+    pub fn execution_contract(&self) -> EffectExecutionContract {
+        self.execution_contract
     }
 
     /// Exact input/output processing domain declared by this definition.
@@ -537,12 +1064,47 @@ impl EffectDefinition {
     }
 
     pub fn supports_visual_evaluation(&self) -> bool {
-        self.capabilities.supports_render_graph
-            && effect_plugin_is_library_visible(self.key(), self.plugin_contract())
+        self.evaluator_factory.is_some()
+            && !self.execution_contract.execution_modes.is_empty()
+            && self.execution_contract.state_model == crate::EffectStateModel::Stateless
+            && effect_plugin_is_library_visible(
+                self.key(),
+                self.definition_registry_revision,
+                self.plugin_contract(),
+            )
     }
 
     pub fn plugin_contract(&self) -> Option<&EffectPluginContract> {
         self.plugin_contract.as_ref()
+    }
+
+    pub(crate) const fn definition_registry_revision(&self) -> u64 {
+        self.definition_registry_revision
+    }
+
+    pub(crate) fn retained_bytes_estimate(&self) -> usize {
+        let category_bytes = self
+            .category_path
+            .iter()
+            .map(String::capacity)
+            .fold(0_usize, usize::saturating_add);
+        let property_floor = self.default_properties.iter().count().saturating_mul(512);
+        let property_bytes = serde_json::to_vec(&self.default_properties)
+            .map_or(property_floor, |bytes| bytes.len().max(property_floor));
+        let plugin_bytes = self
+            .plugin_contract
+            .as_ref()
+            .map_or(0, |contract| contract.plugin_version.capacity());
+        std::mem::size_of::<Self>()
+            .saturating_add(self.key.capacity())
+            .saturating_add(self.display_name.capacity())
+            .saturating_add(
+                self.category_path.capacity().saturating_mul(std::mem::size_of::<String>()),
+            )
+            .saturating_add(category_bytes)
+            .saturating_add(property_bytes)
+            .saturating_add(plugin_bytes)
+            .saturating_add(OPAQUE_EFFECT_EVALUATOR_BASE_CHARGE_BYTES)
     }
 
     /// Validate stable schema identity before registry publication.
@@ -550,6 +1112,12 @@ impl EffectDefinition {
         if self.key.trim().is_empty() {
             return Err(EffectDefinitionError::EmptyKey);
         }
+        self.execution_contract.validate().map_err(|error| {
+            EffectDefinitionError::InvalidExecutionContract {
+                effect_key: self.key.clone(),
+                reason: error.to_string(),
+            }
+        })?;
         let mut parameter_addresses = HashMap::<ParameterId, String>::new();
         for (address, property) in self.default_properties.iter() {
             let schema = &property.descriptor.schema;
@@ -572,6 +1140,52 @@ impl EffectDefinition {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn prepare_evaluator(
+        &self,
+        effect: &EffectNode,
+        working_color_space: WorkingColorSpace,
+        resources: EffectPreparationContext<'_>,
+    ) -> Result<PreparedEffectEvaluator, EffectGraphBuildError> {
+        let factory = self.evaluator_factory.as_ref().ok_or_else(|| {
+            EffectGraphBuildError::EvaluationUnsupported {
+                effect_key: self.key.clone(),
+                effect_id: effect.id,
+            }
+        })?;
+        if self.execution_contract.resource_lifetime == EffectResourceLifetime::PreparedProgram
+            && matches!(factory, EffectEvaluatorFactory::Frame(_))
+        {
+            return Err(EffectGraphBuildError::ResourcePreparationUnsupported {
+                effect_key: self.key.clone(),
+                effect_id: effect.id,
+            });
+        }
+        match factory {
+            EffectEvaluatorFactory::Frame(evaluator) => {
+                Ok(PreparedEffectEvaluator::new(Arc::clone(evaluator)))
+            }
+            EffectEvaluatorFactory::Prepared(preparer) => {
+                match catch_unwind(AssertUnwindSafe(|| {
+                    preparer(effect, working_color_space, resources)
+                })) {
+                    Ok(result) => result,
+                    Err(_) => {
+                        record_plugin_runtime_failure(
+                            self.key(),
+                            self.definition_registry_revision,
+                            self.plugin_contract(),
+                            "effect resource preparer panicked",
+                        );
+                        Err(EffectGraphBuildError::BuilderPanicked {
+                            effect_key: self.key.clone(),
+                            effect_id: effect.id,
+                        })
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -601,7 +1215,8 @@ fn effect_registry() -> &'static RwLock<HashMap<String, Arc<EffectDefinition>>> 
     REGISTRY.get_or_init(|| {
         let mut definitions = HashMap::new();
         for effect_type in builtin_effect_types() {
-            let definition = builtin_effect_definition(effect_type);
+            let mut definition = builtin_effect_definition(effect_type);
+            definition.definition_registry_revision = 1;
             definition
                 .validate()
                 .unwrap_or_else(|error| panic!("invalid built-in effect definition: {error}"));
@@ -611,18 +1226,32 @@ fn effect_registry() -> &'static RwLock<HashMap<String, Arc<EffectDefinition>>> 
     })
 }
 
+fn effect_registry_revision_counter() -> &'static AtomicU64 {
+    static REVISION: AtomicU64 = AtomicU64::new(1);
+    &REVISION
+}
+
+/// Process-local revision of the bound definition/plugin registry.
+///
+/// Prepared-program cache identity includes this value so replacing any plugin
+/// definition conservatively invalidates previously bound code and resources.
+pub fn effect_registry_revision() -> u64 {
+    effect_registry_revision_counter().load(Ordering::Acquire)
+}
+
 pub fn register_effect_definition(
-    definition: EffectDefinition,
+    mut definition: EffectDefinition,
 ) -> Result<(), EffectDefinitionError> {
     definition.validate()?;
-    if let Some(contract) = definition.plugin_contract().cloned() {
-        register_plugin_contract(definition.key(), contract);
-    }
     let key = definition.key.clone();
-    effect_registry()
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(key, Arc::new(definition));
+    let mut registry = effect_registry().write().unwrap_or_else(|e| e.into_inner());
+    let previous_revision = effect_registry_revision_counter()
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |revision| {
+            revision.checked_add(1)
+        })
+        .map_err(|_| EffectDefinitionError::RegistryRevisionExhausted)?;
+    definition.definition_registry_revision = previous_revision + 1;
+    registry.insert(key, Arc::new(definition));
     Ok(())
 }
 
@@ -732,12 +1361,7 @@ pub fn build_effect_render_graph(
     time: TimelineTime,
     working_color_space: WorkingColorSpace,
 ) -> Result<EffectRenderGraph, EffectGraphBuildError> {
-    let mut builder = EffectGraphBuilderState::new();
-    let context = EffectEvalContext { time, working_color_space };
-    for effect in effects.iter().filter(|effect| effect.is_enabled) {
-        effect.evaluate_graph_into(context, &mut builder)?;
-    }
-    Ok(builder.finish())
+    crate::PreparedEffectStack::prepare(effects, working_color_space)?.evaluate_graph(time)
 }
 
 /// Build, mask-inject, and compile the effect graph for a clip.
@@ -751,64 +1375,14 @@ pub fn compile_clip_effect_graph(
     time: TimelineTime,
     working_color_space: WorkingColorSpace,
 ) -> Result<Arc<CompiledEffectGraph>, EffectGraphBuildError> {
-    use crate::graph::{get_or_compile_scheduled_render_graph, identity_compiled_effect_graph};
-    use crate::graph::{EffectGraphNode, EffectGraphNodeId, EffectGraphNodeKind};
-    if effects.iter().all(|effect| !effect.is_enabled) && masks.iter().all(|mask| !mask.enabled) {
-        return identity_compiled_effect_graph().ok_or(EffectGraphBuildError::InvalidGraph);
-    }
-
-    let mut graph = build_effect_render_graph(effects, time, working_color_space)?;
-
-    // Inject mask nodes after effects for each enabled mask.
-    let mut current_output = graph.output;
-    let mut next_id = graph.nodes.len() as u32;
-    for mask in masks {
-        if !mask.enabled {
-            continue;
-        }
-        let params = mask.evaluate_at(time);
-
-        // MaskSource — rasterizes the shape into an alpha buffer.
-        let src_id = EffectGraphNodeId(next_id);
-        next_id += 1;
-        graph.nodes.push(EffectGraphNode {
-            id: src_id,
-            kind: EffectGraphNodeKind::MaskSource {
-                shape: params.shape,
-                feather: params.feather,
-                expansion: params.expansion,
-                opacity: params.opacity,
-            },
-        });
-
-        // Mask — applies the alpha buffer to the current output.
-        let mask_id = EffectGraphNodeId(next_id);
-        next_id += 1;
-        let input_id = current_output.unwrap_or(EffectGraphNodeId(0));
-        graph.nodes.push(EffectGraphNode {
-            id: mask_id,
-            kind: EffectGraphNodeKind::Mask {
-                input: input_id,
-                mask: src_id,
-                invert: params.invert,
-                mask_op: params.mask_op,
-            },
-        });
-        current_output = Some(mask_id);
-    }
-
-    graph.output = current_output;
-    get_or_compile_scheduled_render_graph(graph).ok_or(EffectGraphBuildError::InvalidGraph)
+    crate::PreparedEffectProgram::prepare(effects, masks, working_color_space)?.evaluate(time)
 }
 
 /// Extension trait for EffectNode methods that require the effect registry.
 pub trait EffectNodeExt {
+    /// Construct an author instance from the currently registered
+    /// definition's canonical parameter defaults.
     fn with_defaults(effect_type: EffectType) -> Self;
-    fn evaluate_graph_into(
-        &self,
-        context: EffectEvalContext,
-        builder: &mut EffectGraphBuilderState,
-    ) -> Result<(), EffectGraphBuildError>;
 }
 
 impl EffectNodeExt for EffectNode {
@@ -822,51 +1396,6 @@ impl EffectNodeExt for EffectNode {
             effect_type,
             params: serde_json::json!({}),
             is_enabled: true,
-        }
-    }
-
-    fn evaluate_graph_into(
-        &self,
-        context: EffectEvalContext,
-        builder: &mut EffectGraphBuilderState,
-    ) -> Result<(), EffectGraphBuildError> {
-        let effect_key = self.effect_type.key();
-        let definition = effect_definition(&self.effect_type).ok_or_else(|| {
-            EffectGraphBuildError::DefinitionUnavailable {
-                effect_key: effect_key.clone(),
-                effect_id: self.id,
-            }
-        })?;
-        if !effect_plugin_is_runtime_available(definition.key(), definition.plugin_contract()) {
-            return Err(EffectGraphBuildError::RuntimeUnavailable {
-                effect_key,
-                effect_id: self.id,
-            });
-        }
-        let graph_builder = definition.graph_builder.as_ref().ok_or_else(|| {
-            EffectGraphBuildError::EvaluationUnsupported {
-                effect_key: effect_key.clone(),
-                effect_id: self.id,
-            }
-        })?;
-        let mut staged = builder.clone();
-        staged.set_active_domain_contract(definition.color_domain_contract());
-        match catch_unwind(AssertUnwindSafe(|| {
-            graph_builder(self, context, &mut staged)
-        })) {
-            Ok(Ok(())) => {
-                *builder = staged;
-                Ok(())
-            }
-            Ok(Err(error)) => Err(error),
-            Err(_) => {
-                record_plugin_runtime_failure(
-                    definition.key(),
-                    definition.plugin_contract(),
-                    "effect graph builder panicked",
-                );
-                Err(EffectGraphBuildError::BuilderPanicked { effect_key, effect_id: self.id })
-            }
         }
     }
 }
@@ -1061,7 +1590,7 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 "模糊半径",
                 PropertyValue::Float(12.0),
                 Some(0.0),
-                Some(200.0),
+                Some(GAUSSIAN_BLUR_AUTHOR_MAX_RADIUS_PIXELS as f64),
                 Some(0.1),
             );
         }
@@ -1374,12 +1903,140 @@ fn builtin_effect_definition(effect_type: EffectType) -> EffectDefinition {
         default_properties_for(effect_type.clone()),
         EffectColorDomainContract::SCENE_LINEAR,
     )
-    .with_category(category);
-    if let Some(graph_builder) = builtin_graph_builder_for(&effect_type) {
+    .with_category(category)
+    .with_execution_contract(builtin_effect_execution_contract(&effect_type));
+    if let Some(graph_preparer) = builtin_graph_preparer_for(&effect_type) {
+        definition.with_prepared_graph_builder(graph_preparer)
+    } else if let Some(graph_builder) = builtin_graph_builder_for(&effect_type) {
         definition.with_graph_builder(graph_builder)
     } else {
         definition
     }
+}
+
+fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutionContract {
+    use crate::{
+        EffectDeterminism, EffectExecutionModes, EffectRoiPropagation, EffectStateModel,
+        EffectTemporalInputExtent,
+    };
+
+    let cpu_linear = EffectExecutionContract {
+        execution_modes: EffectExecutionModes::CPU_F32,
+        determinism: EffectDeterminism::Deterministic,
+        state_model: EffectStateModel::Stateless,
+        temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+        roi_propagation: EffectRoiPropagation::PixelLocal,
+        resource_lifetime: EffectResourceLifetime::Frame,
+        topology: EffectGraphTopology::LinearChain,
+    };
+    match effect_type {
+        EffectType::BasicCorrection | EffectType::Vignette => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::Grain => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            determinism: EffectDeterminism::FrameSeeded,
+            ..cpu_linear
+        },
+        EffectType::Lut3D => EffectExecutionContract {
+            resource_lifetime: EffectResourceLifetime::PreparedProgram,
+            ..cpu_linear
+        },
+        EffectType::GaussianBlur => EffectExecutionContract {
+            roi_propagation: finite_kernel_roi_contract(
+                GAUSSIAN_BLUR_AUTHOR_MAX_RADIUS_PIXELS as f32,
+            ),
+            ..cpu_linear
+        },
+        EffectType::Sharpen => EffectExecutionContract {
+            roi_propagation: finite_kernel_roi_contract(SHARPEN_BLUR_RADIUS_PIXELS),
+            ..cpu_linear
+        },
+        EffectType::ChromaticAberration => EffectExecutionContract {
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::WhiteBalance
+        | EffectType::ColorWheel
+        | EffectType::Curves
+        | EffectType::HueSaturationLightness
+        | EffectType::ChromaKey
+        | EffectType::LumaKey
+        | EffectType::Plugin(_) => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::NONE,
+            ..cpu_linear
+        },
+    }
+}
+
+fn finite_kernel_roi_contract(radius: f32) -> EffectRoiPropagation {
+    let halo = crate::adjustment::gaussian_blur_input_halo(radius)
+        .expect("built-in Gaussian radius must have a finite implementation halo");
+    EffectRoiPropagation::Expand { horizontal_pixels: halo, vertical_pixels: halo }
+}
+
+fn builtin_graph_preparer_for(effect_type: &EffectType) -> Option<EffectGraphPreparer> {
+    if !matches!(effect_type, EffectType::Lut3D) {
+        return None;
+    }
+    let processing_space_id = builtin_parameter_id(effect_type, "processing_space");
+    let path_id = builtin_parameter_id(effect_type, "path");
+    let intensity_id = builtin_parameter_id(effect_type, "intensity");
+    Some(Arc::new(move |effect, _working_color_space, resources| {
+        let processing_key = effect
+            .evaluate_enum_parameter(&processing_space_id, TimelineTime::ZERO)
+            .unwrap_or_else(|| "unassigned".to_owned());
+        let Some(processing_domain) = lut_processing_domain(&processing_key) else {
+            return Err(EffectGraphBuildError::ResourceUnavailable {
+                effect_key: effect.effect_type.key(),
+                effect_id: effect.id,
+                parameter_id: processing_space_id.clone(),
+                recovery: EffectResourceRecovery::AuthorEdit,
+                reason: "LUT processing color space is unassigned".to_owned(),
+            });
+        };
+        let Some(ParameterResourceReference::ExternalFile { path }) =
+            effect.evaluate_resource_parameter(&path_id, TimelineTime::ZERO)
+        else {
+            return Err(EffectGraphBuildError::ResourceUnavailable {
+                effect_key: effect.effect_type.key(),
+                effect_id: effect.id,
+                parameter_id: path_id.clone(),
+                recovery: EffectResourceRecovery::AuthorEdit,
+                reason: "resource is not bound to an external LUT file".to_string(),
+            });
+        };
+        let prepared_lut = resources.prepare_cube_lut(&path).map_err(|error| {
+            EffectGraphBuildError::ResourceUnavailable {
+                effect_key: effect.effect_type.key(),
+                effect_id: effect.id,
+                parameter_id: path_id.clone(),
+                recovery: EffectResourceRecovery::ExternalChange,
+                reason: format!("{}: {error}", path.display()),
+            }
+        })?;
+        let fingerprint = *prepared_lut.semantic_fingerprint();
+        let evaluator_lut = Arc::clone(&prepared_lut);
+        let evaluator_intensity_id = intensity_id.clone();
+        let evaluator: EffectGraphBuilder = Arc::new(move |effect, context, graph| {
+            let intensity =
+                effect.evaluate_f32_parameter(&evaluator_intensity_id, context.time, 1.0);
+            if intensity > 1.0e-4 {
+                graph.append_unary_in_domain(
+                    EffectRenderOp::Lut3D { lut: Arc::clone(&evaluator_lut), intensity },
+                    EffectColorDomainContract::preserving(processing_domain),
+                );
+            }
+            Ok(())
+        });
+        Ok(PreparedEffectEvaluator::new(evaluator)
+            .with_retained_resource_bytes(prepared_lut.retained_bytes_estimate())
+            .with_dependency(EffectResourceDependency::CubeLut {
+                path,
+                semantic_fingerprint: fingerprint,
+            }))
+    }))
 }
 
 fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuilder> {
@@ -1404,53 +2061,6 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                     });
                 }
                 Ok(())
-            }))
-        }
-        EffectType::Lut3D => {
-            let processing_space_id = builtin_parameter_id(effect_type, "processing_space");
-            let path_id = builtin_parameter_id(effect_type, "path");
-            let intensity_id = builtin_parameter_id(effect_type, "intensity");
-            Some(Arc::new(move |effect, context, graph| {
-                let intensity = effect.evaluate_f32_parameter(&intensity_id, context.time, 1.0);
-                if intensity <= 1.0e-4 {
-                    return Ok(());
-                }
-                let processing_key = effect
-                    .evaluate_enum_parameter(&processing_space_id, context.time)
-                    .unwrap_or_else(|| "unassigned".to_owned());
-                let Some(processing_domain) = lut_processing_domain(&processing_key) else {
-                    return Err(EffectGraphBuildError::ResourceUnavailable {
-                        effect_key: effect.effect_type.key(),
-                        effect_id: effect.id,
-                        parameter_id: processing_space_id.clone(),
-                        reason: "LUT processing color space is unassigned".to_owned(),
-                    });
-                };
-                let Some(ParameterResourceReference::ExternalFile { path }) =
-                    effect.evaluate_resource_parameter(&path_id, context.time)
-                else {
-                    return Err(EffectGraphBuildError::ResourceUnavailable {
-                        effect_key: effect.effect_type.key(),
-                        effect_id: effect.id,
-                        parameter_id: path_id.clone(),
-                        reason: "resource is not bound to an external LUT file".to_string(),
-                    });
-                };
-                match Lut3D::from_cube_file_cached(&path) {
-                    Ok(lut) => {
-                        graph.append_unary_in_domain(
-                            EffectRenderOp::Lut3D { lut, intensity },
-                            EffectColorDomainContract::preserving(processing_domain),
-                        );
-                        Ok(())
-                    }
-                    Err(error) => Err(EffectGraphBuildError::ResourceUnavailable {
-                        effect_key: effect.effect_type.key(),
-                        effect_id: effect.id,
-                        parameter_id: path_id.clone(),
-                        reason: format!("{}: {error}", path.display()),
-                    }),
-                }
             }))
         }
         EffectType::GaussianBlur => {
@@ -1545,7 +2155,6 @@ pub fn effect_display_name(effect_type: &EffectType) -> String {
 mod tests {
     use super::*;
     use crate::graph::EffectGraphNodeKind;
-    use crate::LutCache;
     use mondrian_core::{
         automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue},
         TimelineTime, WorkingColorSpace,
@@ -1557,6 +2166,58 @@ mod tests {
         TimelineTime::new(frame, 25).expect("valid test time")
     }
 
+    fn test_plugin_execution_contract() -> EffectExecutionContract {
+        EffectExecutionContract {
+            execution_modes: crate::EffectExecutionModes::CPU_F32,
+            determinism: crate::EffectDeterminism::Deterministic,
+            state_model: crate::EffectStateModel::Stateless,
+            temporal_input: crate::EffectTemporalInputExtent::CURRENT_FRAME,
+            roi_propagation: crate::EffectRoiPropagation::PixelLocal,
+            resource_lifetime: crate::EffectResourceLifetime::Frame,
+            topology: crate::EffectGraphTopology::LinearChain,
+        }
+    }
+
+    fn test_custom_execution_contract() -> EffectExecutionContract {
+        EffectExecutionContract {
+            roi_propagation: crate::EffectRoiPropagation::UnknownRequiresFullFrame,
+            execution_modes: crate::EffectExecutionModes::CPU_U8,
+            ..test_plugin_execution_contract()
+        }
+    }
+
+    fn emitted_op_contract_violation(
+        key: &str,
+        contract: EffectExecutionContract,
+        op: EffectRenderOp,
+    ) -> crate::EffectExecutionContractViolation {
+        let effect_type = EffectType::Plugin(key.to_owned());
+        register_effect_definition(
+            EffectDefinition::new(
+                effect_type.key(),
+                "Contract Validation",
+                PropertyBag::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(contract)
+            .with_graph_builder(Arc::new(move |_, _, graph| {
+                graph.append_unary(op.clone());
+                Ok(())
+            })),
+        )
+        .expect("register contract validation definition");
+        match build_effect_render_graph(
+            &[EffectNode::new(effect_type)],
+            TimelineTime::ZERO,
+            TEST_WORKING_SPACE,
+        )
+        .expect_err("optimistic declaration must fail closed")
+        {
+            EffectGraphBuildError::ExecutionContractViolation { violation, .. } => *violation,
+            other => panic!("unexpected graph error: {other:?}"),
+        }
+    }
+
     #[test]
     fn compile_clip_effect_graph_reuses_static_identity_for_empty_clip() {
         let first =
@@ -1565,7 +2226,7 @@ mod tests {
             .expect("identity graph");
 
         assert!(Arc::ptr_eq(&first, &second));
-        assert!(first.graph.is_identity());
+        assert!(first.graph().is_identity());
     }
 
     #[test]
@@ -1579,7 +2240,7 @@ mod tests {
             compile_clip_effect_graph(&[], &[], tt(0), TEST_WORKING_SPACE).expect("identity graph");
 
         assert!(Arc::ptr_eq(&first, &second));
-        assert!(first.graph.is_identity());
+        assert!(first.graph().is_identity());
     }
 
     #[test]
@@ -1676,6 +2337,43 @@ mod tests {
     }
 
     #[test]
+    fn builtin_spatial_roi_contract_tracks_author_and_kernel_bounds() {
+        let blur = effect_definition(&EffectType::GaussianBlur).expect("blur definition");
+        let radius_id = builtin_parameter_id(&EffectType::GaussianBlur, "radius");
+        let authored_max = blur
+            .default_properties()
+            .iter()
+            .find(|(_, property)| property.descriptor.parameter_id() == &radius_id)
+            .and_then(|(_, property)| property.descriptor.schema.numeric)
+            .map(|numeric| numeric.hard_range.max)
+            .expect("blur radius hard maximum");
+        assert_eq!(
+            blur.execution_contract().roi_propagation,
+            crate::EffectRoiPropagation::Expand {
+                horizontal_pixels: crate::adjustment::gaussian_blur_input_halo(authored_max as f32)
+                    .expect("finite maximum blur halo"),
+                vertical_pixels: crate::adjustment::gaussian_blur_input_halo(authored_max as f32)
+                    .expect("finite maximum blur halo"),
+            }
+        );
+
+        let sharpen = effect_definition(&EffectType::Sharpen).expect("sharpen definition");
+        assert_eq!(
+            sharpen.execution_contract().roi_propagation,
+            crate::EffectRoiPropagation::Expand {
+                horizontal_pixels: crate::adjustment::gaussian_blur_input_halo(
+                    SHARPEN_BLUR_RADIUS_PIXELS
+                )
+                .expect("finite sharpen halo"),
+                vertical_pixels: crate::adjustment::gaussian_blur_input_halo(
+                    SHARPEN_BLUR_RADIUS_PIXELS
+                )
+                .expect("finite sharpen halo"),
+            }
+        );
+    }
+
+    #[test]
     fn enabled_modeled_only_effect_fails_instead_of_rendering_identity() {
         let effect = EffectNode::with_defaults(EffectType::ColorWheel);
 
@@ -1700,13 +2398,15 @@ mod tests {
             .expect_err("unassigned LUT processing space must fail");
 
         assert!(matches!(
-            error,
+            &error,
             EffectGraphBuildError::ResourceUnavailable {
                 effect_key,
                 parameter_id,
+                recovery: EffectResourceRecovery::AuthorEdit,
                 ..
-            } if effect_key == "builtin.lut_3d" && parameter_id == processing_space_id
+            } if effect_key == "builtin.lut_3d" && *parameter_id == processing_space_id
         ));
+        assert!(!error.dependency_refresh_retryable());
     }
 
     #[test]
@@ -1727,10 +2427,51 @@ mod tests {
             .expect_err("unbound LUT resource must fail");
 
         assert!(matches!(
-            error,
-            EffectGraphBuildError::ResourceUnavailable { parameter_id, .. }
-                if parameter_id == path_id
+            &error,
+            EffectGraphBuildError::ResourceUnavailable {
+                parameter_id,
+                recovery: EffectResourceRecovery::AuthorEdit,
+                ..
+            }
+                if *parameter_id == path_id
         ));
+        assert!(!error.dependency_refresh_retryable());
+    }
+
+    #[test]
+    fn bound_missing_lut_is_retryable_external_dependency_failure() {
+        let mut effect = EffectNode::with_defaults(EffectType::Lut3D);
+        let processing_space_id = EffectType::Lut3D
+            .parameter_id("processing_space")
+            .expect("processing-space parameter ID");
+        let path_id = EffectType::Lut3D.parameter_id("path").expect("path parameter ID");
+        let path = std::env::temp_dir().join(format!("mondrian-missing-{}.cube", effect.id));
+        let _ = std::fs::remove_file(&path);
+        effect
+            .set_static_value_by_parameter(
+                &processing_space_id,
+                PropertyValue::Enum("scene_linear".to_owned()),
+            )
+            .expect("set processing space");
+        effect
+            .set_static_value_by_parameter(
+                &path_id,
+                PropertyValue::Resource(ParameterResourceReference::ExternalFile { path }),
+            )
+            .expect("bind missing LUT path");
+
+        let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect_err("bound missing LUT must fail closed");
+
+        assert!(matches!(
+            &error,
+            EffectGraphBuildError::ResourceUnavailable {
+                parameter_id,
+                recovery: EffectResourceRecovery::ExternalChange,
+                ..
+            } if *parameter_id == path_id
+        ));
+        assert!(error.dependency_refresh_retryable());
     }
 
     #[test]
@@ -1754,7 +2495,7 @@ mod tests {
             compile_clip_effect_graph(&[effect], &[], tt(0), WorkingColorSpace::LinearRec2020)
                 .expect("compile Rec.2020 graph");
 
-        assert_ne!(rec709.signature_hash, rec2020.signature_hash);
+        assert_ne!(rec709.signature_hash(), rec2020.signature_hash());
     }
 
     #[test]
@@ -1797,9 +2538,9 @@ mod tests {
         let second = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
             .expect("compile second graph");
 
-        assert_ne!(first.signature_hash, second.signature_hash);
+        assert_ne!(first.signature_hash(), second.signature_hash());
         let blur_radius = |graph: &CompiledEffectGraph| {
-            graph.graph.nodes.iter().find_map(|node| match &node.kind {
+            graph.graph().nodes.iter().find_map(|node| match &node.kind {
                 EffectGraphNodeKind::UnaryEffect {
                     op: EffectRenderOp::GaussianBlur { radius },
                     ..
@@ -1817,7 +2558,6 @@ mod tests {
 
     #[test]
     fn builtin_lut_effect_builds_render_op_from_cube_path() {
-        LutCache::global().clear();
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
@@ -1872,7 +2612,6 @@ mod tests {
         )));
 
         let _ = std::fs::remove_file(path);
-        LutCache::global().clear();
     }
 
     #[test]
@@ -1896,6 +2635,7 @@ mod tests {
                 properties,
                 EffectColorDomainContract::SCENE_LINEAR,
             )
+            .with_execution_contract(test_plugin_execution_contract())
             .with_graph_builder(Arc::new(move |effect, context, graph| {
                 let exposure = effect.evaluate_f32_parameter(&exposure_id, context.time, 0.0);
                 if exposure.abs() > 1e-4 {
@@ -1952,6 +2692,7 @@ mod tests {
                 properties,
                 EffectColorDomainContract::SCENE_LINEAR,
             )
+            .with_execution_contract(test_custom_execution_contract())
             .with_custom_render_processor(
                 Arc::new(move |effect, context| {
                     let amount = effect.evaluate_f32_parameter(&amount_id, context.time, 0.0);
@@ -1977,7 +2718,7 @@ mod tests {
         });
         assert!(custom_node.is_some(), "expected custom render op node");
         if let EffectGraphNodeKind::UnaryEffect {
-            op: EffectRenderOp::Custom { key, params, cache_key, cache_policy },
+            op: EffectRenderOp::Custom { key, params, cache_key, cache_policy, .. },
             ..
         } = &custom_node.unwrap().kind
         {
@@ -1988,6 +2729,88 @@ mod tests {
                 (params["amount"].as_f64().expect("amount should be numeric") - 0.4).abs() < 1.0e-6
             );
         }
+    }
+
+    #[test]
+    fn emitted_graph_rejects_optimistic_mode_determinism_and_roi_contracts() {
+        let backend = emitted_op_contract_violation(
+            "plugin.contract.backend",
+            EffectExecutionContract {
+                execution_modes: crate::EffectExecutionModes::GPU_F32,
+                roi_propagation: crate::EffectRoiPropagation::Expand {
+                    horizontal_pixels: 1,
+                    vertical_pixels: 1,
+                },
+                ..test_plugin_execution_contract()
+            },
+            EffectRenderOp::GaussianBlur { radius: 1.0 },
+        );
+        assert!(matches!(
+            backend,
+            crate::EffectExecutionContractViolation::ExecutionModesTooOptimistic { .. }
+        ));
+
+        let determinism = emitted_op_contract_violation(
+            "plugin.contract.determinism",
+            EffectExecutionContract {
+                execution_modes: crate::EffectExecutionModes::CPU_F32
+                    .union(crate::EffectExecutionModes::GPU_F32),
+                ..test_plugin_execution_contract()
+            },
+            EffectRenderOp::Grain { amount: 0.5 },
+        );
+        assert!(matches!(
+            determinism,
+            crate::EffectExecutionContractViolation::DeterminismTooOptimistic { .. }
+        ));
+
+        let roi = emitted_op_contract_violation(
+            "plugin.contract.roi",
+            test_plugin_execution_contract(),
+            EffectRenderOp::GaussianBlur { radius: 7.25 },
+        );
+        assert!(matches!(
+            roi,
+            crate::EffectExecutionContractViolation::RoiTooOptimistic { .. }
+        ));
+
+        let unsupported_gpu_representation = emitted_op_contract_violation(
+            "plugin.contract.gpu_u8",
+            EffectExecutionContract {
+                execution_modes: crate::EffectExecutionModes::GPU_U8,
+                ..test_plugin_execution_contract()
+            },
+            EffectRenderOp::ColorAdjust {
+                exposure: 0.0,
+                contrast: 1.0,
+                saturation: 1.0,
+                working_color_space: TEST_WORKING_SPACE,
+            },
+        );
+        assert!(matches!(
+            unsupported_gpu_representation,
+            crate::EffectExecutionContractViolation::ExecutionModesTooOptimistic { .. }
+        ));
+
+        let unsupported_custom_representation = emitted_op_contract_violation(
+            "plugin.contract.custom_precision",
+            EffectExecutionContract {
+                execution_modes: crate::EffectExecutionModes::CPU_F32,
+                roi_propagation: crate::EffectRoiPropagation::UnknownRequiresFullFrame,
+                ..test_plugin_execution_contract()
+            },
+            EffectRenderOp::Custom {
+                key: "plugin.contract.custom_precision".to_owned(),
+                params: serde_json::json!({}),
+                cache_key: None,
+                cache_policy: EffectCachePolicy::Deterministic,
+                processor: None,
+            },
+        );
+        assert!(matches!(
+            unsupported_custom_representation,
+            crate::EffectExecutionContractViolation::ExecutionModesTooOptimistic { .. }
+        ));
     }
 
     #[test]
@@ -2019,6 +2842,13 @@ mod tests {
                 properties,
                 EffectColorDomainContract::SCENE_LINEAR,
             )
+            .with_execution_contract(EffectExecutionContract {
+                roi_propagation: crate::EffectRoiPropagation::Expand {
+                    horizontal_pixels: 4,
+                    vertical_pixels: 4,
+                },
+                ..test_plugin_execution_contract()
+            })
             .with_branching_graph_builder(Arc::new(move |effect, context, graph| {
                 let radius = effect.evaluate_f32_parameter(&radius_id, context.time, 0.0);
                 let opacity =
@@ -2053,9 +2883,12 @@ mod tests {
         ));
 
         let definition = effect_definition(&plugin_type).expect("effect definition");
-        let caps = definition.capabilities();
-        assert!(caps.supports_render_graph);
-        assert!(caps.supports_branching_render_graph);
+        let contract = definition.execution_contract();
+        assert_eq!(contract.topology, EffectGraphTopology::GeneralDag);
+        assert!(contract.execution_modes.contains(
+            crate::EffectProcessingBackend::Cpu,
+            crate::EffectWorkingPrecision::Float32,
+        ));
     }
 
     #[test]
@@ -2081,6 +2914,7 @@ mod tests {
                 properties,
                 EffectColorDomainContract::SCENE_LINEAR,
             )
+            .with_execution_contract(test_custom_execution_contract())
             .with_custom_render_backend(
                 Arc::new(move |effect, context| {
                     let path = effect
@@ -2121,9 +2955,32 @@ mod tests {
         assert_eq!(cache_key.as_deref(), Some("lut:looks/teal_orange.cube"));
         assert_eq!(cache_policy, EffectCachePolicy::Deterministic);
 
-        let caps = effect_definition(&plugin_type).expect("effect definition").capabilities();
-        assert!(caps.supports_custom_render_processor);
-        assert!(caps.supports_cache_key_contract);
+        let contract =
+            effect_definition(&plugin_type).expect("effect definition").execution_contract();
+        assert_eq!(contract.topology, EffectGraphTopology::LinearChain);
+        assert!(contract.execution_modes.contains(
+            crate::EffectProcessingBackend::Cpu,
+            crate::EffectWorkingPrecision::NormalizedU8,
+        ));
+    }
+
+    #[test]
+    fn custom_cache_key_does_not_hide_dynamic_parameters_from_graph_identity() {
+        let plan = |amount| EffectRenderPlan {
+            ops: vec![EffectRenderOp::Custom {
+                key: "plugin.render.animated".to_owned(),
+                params: serde_json::json!({ "amount": amount }),
+                cache_key: Some("stable-resource-v1".to_owned()),
+                cache_policy: EffectCachePolicy::Deterministic,
+                processor: None,
+            }],
+        };
+
+        assert_ne!(
+            plan(0.25).signature_hash(),
+            plan(0.75).signature_hash(),
+            "a stable external-resource key must not freeze animated parameters"
+        );
     }
 
     #[test]
@@ -2136,6 +2993,7 @@ mod tests {
                 PropertyBag::default(),
                 EffectColorDomainContract::SCENE_LINEAR,
             )
+            .with_execution_contract(test_plugin_execution_contract())
             .with_plugin_contract(
                 crate::EffectPluginContract::new("1.0.0")
                     .with_runtime_failure_policy(

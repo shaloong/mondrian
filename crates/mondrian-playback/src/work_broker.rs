@@ -11,9 +11,10 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::{
-    FrameDemandIdentity, FrameExecutionCancellation, FrameRequestBinding, FrameRequestCompletion,
-    FrameRequestResolution, FrameWorkClass, FrameWorkDeadline, FrameWorkDeadlineStatus,
-    FrameWorkPriority, MonotonicRuntimeClock, MonotonicTimestamp, SystemMonotonicRuntimeClock,
+    FrameDemandIdentity, FrameExecutionCancellation, FrameInFlightDeadlinePolicy,
+    FrameRequestBinding, FrameRequestCompletion, FrameRequestResolution, FrameWorkClass,
+    FrameWorkDeadline, FrameWorkDeadlineStatus, FrameWorkPriority, FrameWorkResourceScope,
+    MonotonicRuntimeClock, MonotonicTimestamp, SystemMonotonicRuntimeClock,
 };
 
 /// Stable identity for one dequeued execution attempt.
@@ -66,12 +67,51 @@ pub struct FrameWorkRequest<K, D, P> {
     pub priority: FrameWorkPriority,
     /// Playback, interactive, or still execution semantics.
     pub work_class: FrameWorkClass,
+    /// Exact physical resource-ownership scope eligible for work reuse.
+    pub resource_scope: FrameWorkResourceScope,
     /// Playback demand identity when demand-backed.
     pub demand_identity: Option<FrameDemandIdentity>,
     /// Adapter deadline plus remaining budget lowered by the Broker at admission.
     pub deadline: Option<FrameWorkDeadline<D>>,
+    /// Whether an already-running lease is canceled when that deadline expires.
+    ///
+    /// Queue expiry and completion lateness are unaffected by this policy.
+    pub in_flight_deadline_policy: FrameInFlightDeadlinePolicy,
+    /// Optional cancellation budget measured from execution dequeue.
+    ///
+    /// Unlike `deadline`, this budget is independent of presentation timing
+    /// and always requests cooperative cancellation when exhausted.
+    pub execution_cancellation_budget: Option<Duration>,
     /// Opaque Adapter execution payload.
     pub payload: P,
+}
+
+/// Payload-free metadata used to rebind already-owned frame work.
+///
+/// This request can update a queued payload or compatible execution lease only
+/// when the exact semantic key and physical resource scope already exist. It
+/// never admits new work and therefore cannot manufacture payload ownership.
+#[derive(Debug)]
+pub struct FrameWorkBindingRequest<K, D> {
+    /// Opaque semantic frame key.
+    pub key: K,
+    /// Latest-wins generation.
+    pub generation: u64,
+    /// Current or speculative priority.
+    pub priority: FrameWorkPriority,
+    /// Playback, interactive, or still execution semantics.
+    pub work_class: FrameWorkClass,
+    /// Exact physical resource-ownership scope required for reuse.
+    pub resource_scope: FrameWorkResourceScope,
+    /// Playback demand identity when demand-backed.
+    pub demand_identity: Option<FrameDemandIdentity>,
+    /// Adapter deadline plus remaining budget lowered by the Broker at binding.
+    pub deadline: Option<FrameWorkDeadline<D>>,
+    /// Deadline-expiry behavior for an already-running compatible lease.
+    pub in_flight_deadline_policy: FrameInFlightDeadlinePolicy,
+    /// Optional cancellation budget measured from the compatible lease's
+    /// original execution dequeue.
+    pub execution_cancellation_budget: Option<Duration>,
 }
 
 /// Result of atomically submitting frame work.
@@ -95,11 +135,37 @@ pub enum FrameWorkSubmission<K> {
     },
     /// Compatible work is already in flight and may bind to this latest request.
     ReusedInFlight,
+    /// The request generation was already older than Broker authority.
+    DroppedObsoleteGeneration,
     /// Bounded pending/queued capacity could not admit the request.
     DroppedBackpressure,
     /// The priority/class pair violates semantic policy.
     DroppedInvalidClass,
     /// The broker is closed and cannot accept work.
+    Closed,
+}
+
+/// Result of atomically rebinding already-owned frame work without a payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrameWorkBindingSubmission {
+    /// An existing queued payload was retained while its metadata changed.
+    UpdatedQueued {
+        /// Whether prefetch was promoted to current.
+        priority_promoted: bool,
+        /// Whether the semantic work class changed.
+        work_class_changed: bool,
+        /// Whether the generation changed.
+        generation_changed: bool,
+    },
+    /// A compatible execution lease now owns the latest binding.
+    ReusedInFlight,
+    /// No same-key, same-scope queued payload or compatible lease exists.
+    NeedsPayload,
+    /// The request generation was already older than Broker authority.
+    DroppedObsoleteGeneration,
+    /// The priority/class pair violates semantic policy.
+    DroppedInvalidClass,
+    /// The broker is closed and cannot update work.
     Closed,
 }
 
@@ -116,6 +182,8 @@ pub struct FrameWorkExecution<K, D, P> {
     pub priority: FrameWorkPriority,
     /// Captured semantic work class.
     pub work_class: FrameWorkClass,
+    /// Captured physical resource-ownership scope.
+    pub resource_scope: FrameWorkResourceScope,
     /// Captured demand identity; final completion must resolve through the broker.
     pub demand_identity: Option<FrameDemandIdentity>,
     /// Captured Adapter deadline.
@@ -152,13 +220,34 @@ pub enum FrameWorkReceiveWait<K, D, P> {
     Closed,
 }
 
-/// Binding canceled by residency expiration before completion.
+/// Terminal observation from a bounded execution-lifecycle wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameExecutionWaitStatus {
+    /// Cooperative cancellation was requested before completion.
+    Canceled(crate::FrameExecutionCancellationEvidence),
+    /// The worker stamped completion before any cancellation request.
+    Completed,
+    /// The execution lease no longer exists.
+    Missing,
+    /// No terminal state was observed within the caller's bound.
+    Timeout,
+}
+
+/// Presentation binding expired before completion.
+///
+/// Expiration terminates the binding's publication authority. Queued work is
+/// removed, while a matching already-running locality-preserving execution may
+/// remain alive without reacquiring that authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpiredFrameWork<K, D> {
     /// Opaque semantic key.
     pub key: K,
     /// Latest binding removed by expiration.
     pub binding: FrameRequestBinding<D>,
+    /// Queued payloads actually removed for this binding.
+    pub removed_queued_work: usize,
+    /// Matching in-flight attempts retained solely for execution locality.
+    pub retained_in_flight_work: usize,
 }
 
 /// Stable broker evidence independent of Adapter payloads.
@@ -166,6 +255,8 @@ pub struct ExpiredFrameWork<K, D> {
 pub struct FrameWorkBrokerDiagnostics {
     /// Latest generation observed.
     pub latest_generation: u64,
+    /// Playback demand whose unstarted current work owns queue authority.
+    pub active_playback_demand: Option<FrameDemandIdentity>,
     /// Runtime-clock regression episodes clamped to the last observation.
     pub clock_regressions: u64,
     /// Semantic keys awaiting a terminal resolution.
@@ -244,13 +335,15 @@ pub struct FrameWorkBrokerDiagnostics {
     pub canceled_requests: u64,
     /// Queued payloads pruned as obsolete.
     pub pruned_queued: u64,
+    /// Older unstarted playback-current payloads superseded by a newer demand.
+    pub superseded_queued_playback_current: u64,
     /// Execution completions accepted as current.
     pub completed_current: u64,
     /// Execution completions admitted for cache only.
     pub completed_cache_only: u64,
     /// Execution completions rejected as stale.
     pub completed_stale: u64,
-    /// Cache-only completions with no pending binding.
+    /// Cache-only completions without an eligible publication binding.
     pub completed_cache_only_missing: u64,
     /// Cache-only completions whose semantic class no longer matched.
     pub completed_cache_only_class_mismatch: u64,
@@ -275,6 +368,8 @@ struct PendingBinding<D> {
     binding: FrameRequestBinding<D>,
     requested_at: MonotonicTimestamp,
     deadline_at: Option<MonotonicTimestamp>,
+    in_flight_deadline_policy: FrameInFlightDeadlinePolicy,
+    execution_cancellation_budget: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -289,17 +384,27 @@ struct InFlightWork<K> {
     generation: u64,
     priority: FrameWorkPriority,
     work_class: FrameWorkClass,
+    resource_scope: FrameWorkResourceScope,
     worker_lane: Option<FrameWorkerLane>,
     demand_identity: Option<FrameDemandIdentity>,
     started_at: MonotonicTimestamp,
     deadline_at: Option<MonotonicTimestamp>,
+    in_flight_deadline_policy: FrameInFlightDeadlinePolicy,
+    execution_cancellation_deadline_at: Option<MonotonicTimestamp>,
     completed_at: Option<MonotonicTimestamp>,
     preempted_at: Option<MonotonicTimestamp>,
     invalidated_at: Option<MonotonicTimestamp>,
+    /// The presentation binding that admitted this attempt reached a terminal
+    /// expiration while execution was retained solely for stateful locality.
+    ///
+    /// Once detached, this attempt can never bind to a later presentation
+    /// demand, even if the semantic key and generation happen to match.
+    presentation_binding_expired: bool,
 }
 
 struct BrokerState<K, D, P> {
     latest_generation: u64,
+    active_playback_demand: Option<FrameDemandIdentity>,
     next_execution_id: u64,
     pending: HashMap<K, PendingBinding<D>>,
     queue: VecDeque<QueuedWork<K, D, P>>,
@@ -327,6 +432,7 @@ struct FrameWorkBrokerMetrics {
     evicted_still: u64,
     canceled_requests: u64,
     pruned_queued: u64,
+    superseded_queued_playback_current: u64,
     completed_current: u64,
     completed_cache_only: u64,
     completed_stale: u64,
@@ -382,6 +488,7 @@ where
             shared: Arc::new(BrokerShared {
                 state: Mutex::new(BrokerState {
                     latest_generation: 0,
+                    active_playback_demand: None,
                     next_execution_id: 1,
                     pending: HashMap::new(),
                     queue: VecDeque::new(),
@@ -405,7 +512,12 @@ where
         let mut state = lock_state(&self.shared.state);
         let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
         state.latest_generation = state.latest_generation.saturating_add(1);
+        let queued_before = state.queue.len();
+        prune_obsolete_locked(&mut state);
+        let pruned = queued_before.saturating_sub(state.queue.len());
+        state.metrics.pruned_queued = state.metrics.pruned_queued.saturating_add(pruned as u64);
         refresh_in_flight_invalidations_locked(&mut state, now);
+        self.shared.changed.notify_all();
         state.latest_generation
     }
 
@@ -419,6 +531,7 @@ where
         refresh_in_flight_invalidations_locked(&mut state, now);
         let pruned = before.saturating_sub(state.queue.len());
         state.metrics.pruned_queued = state.metrics.pruned_queued.saturating_add(pruned as u64);
+        self.shared.changed.notify_all();
         pruned
     }
 
@@ -433,9 +546,8 @@ where
             return FrameWorkSubmission::DroppedInvalidClass;
         }
         if request.generation < state.latest_generation {
-            bump(&mut state.metrics.dropped_backpressure);
             bump(&mut state.metrics.dropped_obsolete_generation);
-            return FrameWorkSubmission::DroppedBackpressure;
+            return FrameWorkSubmission::DroppedObsoleteGeneration;
         }
         let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
         let deadline_at = lowered_deadline_at(request.deadline, now);
@@ -444,12 +556,26 @@ where
             let previous_binding = previous.binding;
             let requested_priority = request.priority;
             let requested_class = request.work_class;
+            let requested_deadline_policy = request.in_flight_deadline_policy;
+            let requested_execution_budget = request.execution_cancellation_budget;
             request.priority = promote_priority(previous_binding.priority, requested_priority);
             request.work_class = promote_class(
                 previous_binding.priority,
                 previous_binding.work_class,
                 requested_priority,
                 requested_class,
+            );
+            request.in_flight_deadline_policy = promote_in_flight_deadline_policy(
+                previous_binding.priority,
+                previous.in_flight_deadline_policy,
+                requested_priority,
+                requested_deadline_policy,
+            );
+            request.execution_cancellation_budget = promote_execution_cancellation_budget(
+                previous_binding.priority,
+                previous.execution_cancellation_budget,
+                requested_priority,
+                requested_execution_budget,
             );
             let binding = binding_for(&request);
             if let Some(index) =
@@ -468,6 +594,8 @@ where
                             previous.requested_at
                         },
                         deadline_at,
+                        in_flight_deadline_policy: request.in_flight_deadline_policy,
+                        execution_cancellation_budget: request.execution_cancellation_budget,
                     },
                 );
                 state.queue[index] = QueuedWork { request, deadline_at };
@@ -484,7 +612,11 @@ where
                 };
             }
 
-            if previous_binding.work_class == binding.work_class {
+            let compatible_in_flight = state
+                .in_flight
+                .values()
+                .any(|execution| execution_matches_binding(execution, &request.key, binding));
+            if previous_binding.work_class == binding.work_class && compatible_in_flight {
                 state.pending.insert(
                     request.key.clone(),
                     PendingBinding {
@@ -495,10 +627,13 @@ where
                             previous.requested_at
                         },
                         deadline_at,
+                        in_flight_deadline_policy: request.in_flight_deadline_policy,
+                        execution_cancellation_budget: request.execution_cancellation_budget,
                     },
                 );
                 refresh_in_flight_invalidations_locked(&mut state, now);
                 bump(&mut state.metrics.submitted_reused_in_flight);
+                self.shared.changed.notify_all();
                 return FrameWorkSubmission::ReusedInFlight;
             }
 
@@ -510,9 +645,17 @@ where
             let (evicted_prefetch, evicted_still) = apply_eviction(&mut state, eviction);
             state.pending.insert(
                 request.key.clone(),
-                PendingBinding { binding, requested_at: now, deadline_at },
+                PendingBinding {
+                    binding,
+                    requested_at: now,
+                    deadline_at,
+                    in_flight_deadline_policy: request.in_flight_deadline_policy,
+                    execution_cancellation_budget: request.execution_cancellation_budget,
+                },
             );
-            bump(&mut state.metrics.submitted_work_class_changes);
+            if previous_binding.work_class != binding.work_class {
+                bump(&mut state.metrics.submitted_work_class_changes);
+            }
             state.queue.push_back(QueuedWork { request, deadline_at });
             refresh_in_flight_invalidations_locked(&mut state, now);
             bump(&mut state.metrics.submitted_queued);
@@ -538,6 +681,8 @@ where
                 binding: binding_for(&request),
                 requested_at: now,
                 deadline_at,
+                in_flight_deadline_policy: request.in_flight_deadline_policy,
+                execution_cancellation_budget: request.execution_cancellation_budget,
             },
         );
         state.queue.push_back(QueuedWork { request, deadline_at });
@@ -545,6 +690,129 @@ where
         bump(&mut state.metrics.submitted_queued);
         self.shared.changed.notify_all();
         FrameWorkSubmission::Queued { evicted_prefetch, evicted_still }
+    }
+
+    /// Atomically update already-owned work without replacing its payload.
+    ///
+    /// The update succeeds only for a same-key, same-resource-scope queued
+    /// payload or compatible in-flight lease. [`FrameWorkBindingSubmission::NeedsPayload`]
+    /// leaves the Broker unchanged and tells the Adapter to acquire physical
+    /// ownership before using [`Self::submit`].
+    pub fn bind_existing(
+        &self,
+        mut request: FrameWorkBindingRequest<K, D>,
+    ) -> FrameWorkBindingSubmission {
+        let mut state = lock_state(&self.shared.state);
+        if state.closed_at.is_some() {
+            return FrameWorkBindingSubmission::Closed;
+        }
+        if !priority_accepts(request.priority, request.work_class) {
+            bump(&mut state.metrics.dropped_invalid_class);
+            return FrameWorkBindingSubmission::DroppedInvalidClass;
+        }
+        if request.generation < state.latest_generation {
+            bump(&mut state.metrics.dropped_obsolete_generation);
+            return FrameWorkBindingSubmission::DroppedObsoleteGeneration;
+        }
+        let Some(previous) = state.pending.get(&request.key).copied() else {
+            return FrameWorkBindingSubmission::NeedsPayload;
+        };
+        if previous.binding.resource_scope != request.resource_scope {
+            return FrameWorkBindingSubmission::NeedsPayload;
+        }
+
+        let previous_binding = previous.binding;
+        let requested_priority = request.priority;
+        let requested_class = request.work_class;
+        let requested_deadline_policy = request.in_flight_deadline_policy;
+        let requested_execution_budget = request.execution_cancellation_budget;
+        request.priority = promote_priority(previous_binding.priority, requested_priority);
+        request.work_class = promote_class(
+            previous_binding.priority,
+            previous_binding.work_class,
+            requested_priority,
+            requested_class,
+        );
+        request.in_flight_deadline_policy = promote_in_flight_deadline_policy(
+            previous_binding.priority,
+            previous.in_flight_deadline_policy,
+            requested_priority,
+            requested_deadline_policy,
+        );
+        request.execution_cancellation_budget = promote_execution_cancellation_budget(
+            previous_binding.priority,
+            previous.execution_cancellation_budget,
+            requested_priority,
+            requested_execution_budget,
+        );
+        let binding = binding_for_metadata(
+            request.generation,
+            request.priority,
+            request.work_class,
+            request.resource_scope,
+            request.demand_identity,
+            request.deadline,
+        );
+        let queued_index = state.queue.iter().position(|queued| {
+            queued.request.key == request.key
+                && queued.request.resource_scope == request.resource_scope
+        });
+        let compatible_in_flight = state
+            .in_flight
+            .values()
+            .any(|execution| execution_matches_binding(execution, &request.key, binding));
+        if queued_index.is_none() && !compatible_in_flight {
+            return FrameWorkBindingSubmission::NeedsPayload;
+        }
+
+        let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
+        let deadline_at = lowered_deadline_at(request.deadline, now);
+        let priority_promoted = previous_binding.priority != binding.priority;
+        let work_class_changed = previous_binding.work_class != binding.work_class;
+        let generation_changed = previous_binding.generation != binding.generation;
+        state.pending.insert(
+            request.key.clone(),
+            PendingBinding {
+                binding,
+                requested_at: if previous_binding != binding {
+                    now
+                } else {
+                    previous.requested_at
+                },
+                deadline_at,
+                in_flight_deadline_policy: request.in_flight_deadline_policy,
+                execution_cancellation_budget: request.execution_cancellation_budget,
+            },
+        );
+
+        if let Some(index) = queued_index {
+            let queued = &mut state.queue[index];
+            queued.request.generation = request.generation;
+            queued.request.priority = request.priority;
+            queued.request.work_class = request.work_class;
+            queued.request.resource_scope = request.resource_scope;
+            queued.request.demand_identity = request.demand_identity;
+            queued.request.deadline = request.deadline;
+            queued.request.in_flight_deadline_policy = request.in_flight_deadline_policy;
+            queued.request.execution_cancellation_budget = request.execution_cancellation_budget;
+            queued.deadline_at = deadline_at;
+            refresh_in_flight_invalidations_locked(&mut state, now);
+            bump(&mut state.metrics.submitted_updated_queued);
+            if work_class_changed {
+                bump(&mut state.metrics.submitted_work_class_changes);
+            }
+            self.shared.changed.notify_all();
+            FrameWorkBindingSubmission::UpdatedQueued {
+                priority_promoted,
+                work_class_changed,
+                generation_changed,
+            }
+        } else {
+            refresh_in_flight_invalidations_locked(&mut state, now);
+            bump(&mut state.metrics.submitted_reused_in_flight);
+            self.shared.changed.notify_all();
+            FrameWorkBindingSubmission::ReusedInFlight
+        }
     }
 
     /// Block until eligible work or closure, then create one execution lease.
@@ -558,7 +826,12 @@ where
             if state.closed_at.is_some() {
                 return None;
             }
-            state = wait_state(&self.shared.changed, state);
+            if let Some(wait_for) = next_non_playback_current_failover_wait(&state, lane, now) {
+                let (next_state, _) = wait_state_timeout(&self.shared.changed, state, wait_for);
+                state = next_state;
+            } else {
+                state = wait_state(&self.shared.changed, state);
+            }
         }
     }
 
@@ -585,10 +858,12 @@ where
             if remaining.is_zero() {
                 return FrameWorkReceiveWait::TimedOut;
             }
-            let (next_state, timed_out) =
-                wait_state_timeout(&self.shared.changed, state, remaining);
+            let failover_wait =
+                next_non_playback_current_failover_wait(&state, lane, now).unwrap_or(remaining);
+            let wait_for = remaining.min(failover_wait);
+            let (next_state, timed_out) = wait_state_timeout(&self.shared.changed, state, wait_for);
             state = next_state;
-            if timed_out && wait_started.elapsed() >= timeout {
+            if timed_out && wait_for == remaining && wait_started.elapsed() >= timeout {
                 return FrameWorkReceiveWait::TimedOut;
             }
         }
@@ -624,10 +899,12 @@ where
             if remaining.is_zero() {
                 return FrameWorkReceiveWait::TimedOut;
             }
-            let (next_state, timed_out) =
-                wait_state_timeout(&self.shared.changed, state, remaining);
+            let failover_wait =
+                next_non_playback_current_failover_wait(&state, lane, now).unwrap_or(remaining);
+            let wait_for = remaining.min(failover_wait);
+            let (next_state, timed_out) = wait_state_timeout(&self.shared.changed, state, wait_for);
             state = next_state;
-            if timed_out && wait_started.elapsed() >= timeout {
+            if timed_out && wait_for == remaining && wait_started.elapsed() >= timeout {
                 return FrameWorkReceiveWait::TimedOut;
             }
         }
@@ -663,61 +940,51 @@ where
     ) -> Option<crate::FrameExecutionCancellationEvidence> {
         let mut state = lock_state(&self.shared.state);
         let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
-        if let Some(closed_at) = state.closed_at {
-            let execution_age = state.in_flight.get(&id).map_or(Duration::ZERO, |execution| {
-                elapsed_since(now, execution.started_at)
-            });
-            return Some(crate::FrameExecutionCancellationEvidence {
-                cancellation: FrameExecutionCancellation::BrokerClosed {
-                    age: elapsed_since(now, closed_at),
-                },
-                execution_age,
-            });
-        }
-        let Some(execution) = state.in_flight.get(&id) else {
-            return Some(crate::FrameExecutionCancellationEvidence {
-                cancellation: FrameExecutionCancellation::Superseded { age: None },
-                execution_age: Duration::ZERO,
-            });
-        };
-        let execution_age = elapsed_since(now, execution.started_at);
-        let mut candidate = None;
-        if current_pending_binding(state.latest_generation, &state.pending, execution).is_none() {
-            let Some(invalidated_at) = execution.invalidated_at else {
-                return Some(crate::FrameExecutionCancellationEvidence {
-                    cancellation: FrameExecutionCancellation::Superseded { age: None },
-                    execution_age,
-                });
+        execution_cancellation_evidence_locked(&state, id, now)
+    }
+
+    /// Wait for cancellation, completion, disappearance, or the caller's timeout.
+    ///
+    /// The predicate and condition variable share the Broker lifecycle lock,
+    /// so an event published immediately before or during the wait cannot be
+    /// lost. Execution and presentation deadlines also bound the sleep.
+    pub fn wait_for_execution_terminal_state(
+        &self,
+        id: FrameExecutionId,
+        timeout: Duration,
+    ) -> FrameExecutionWaitStatus {
+        let wait_started = Instant::now();
+        let mut state = lock_state(&self.shared.state);
+        loop {
+            let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
+            refresh_in_flight_invalidations_locked(&mut state, now);
+            let Some(execution) = state.in_flight.get(&id) else {
+                return FrameExecutionWaitStatus::Missing;
             };
-            candidate = Some(ExecutionCancellationCandidate {
-                requested_at: invalidated_at,
-                cause: ExecutionCancellationCause::Superseded,
-            });
+            if let Some(evidence) = execution_cancellation_evidence_locked(&state, id, now) {
+                let cancellation_precedes_completion =
+                    execution.completed_at.is_none_or(|completed_at| {
+                        evidence.cancellation.request_age().is_some_and(|request_age| {
+                            request_age >= elapsed_since(now, completed_at)
+                        })
+                    });
+                if cancellation_precedes_completion {
+                    return FrameExecutionWaitStatus::Canceled(evidence);
+                }
+            }
+            if execution.completed_at.is_some() {
+                return FrameExecutionWaitStatus::Completed;
+            }
+            let remaining = timeout.saturating_sub(wait_started.elapsed());
+            if remaining.is_zero() {
+                return FrameExecutionWaitStatus::Timeout;
+            }
+            let cancellation_wait =
+                next_execution_cancellation_wait(execution, now).unwrap_or(remaining);
+            let wait_for = remaining.min(cancellation_wait);
+            let (next_state, _) = wait_state_timeout(&self.shared.changed, state, wait_for);
+            state = next_state;
         }
-        if let Some(requested_at) = execution.preempted_at {
-            let cause = if execution.priority == FrameWorkPriority::Prefetch {
-                ExecutionCancellationCause::PrefetchPreemptedByCurrent
-            } else {
-                ExecutionCancellationCause::StillPreemptedByRealtimeCurrent
-            };
-            candidate = earlier_cancellation(
-                candidate,
-                ExecutionCancellationCandidate { requested_at, cause },
-            );
-        }
-        if let Some(deadline_at) = execution.deadline_at.filter(|deadline| *deadline <= now) {
-            candidate = earlier_cancellation(
-                candidate,
-                ExecutionCancellationCandidate {
-                    requested_at: deadline_at,
-                    cause: ExecutionCancellationCause::DeadlineExpired,
-                },
-            );
-        }
-        candidate.map(|candidate| crate::FrameExecutionCancellationEvidence {
-            cancellation: candidate.into_cancellation(now),
-            execution_age,
-        })
     }
 
     /// Record the worker-return instant without resolving its latest binding.
@@ -734,6 +1001,7 @@ where
         if execution.completed_at.is_none() {
             execution.completed_at = Some(now);
         }
+        self.shared.changed.notify_all();
         true
     }
 
@@ -744,20 +1012,26 @@ where
         reusable: bool,
     ) -> FrameRequestResolution<D> {
         let mut state = lock_state(&self.shared.state);
-        let Some(execution) = state.in_flight.remove(&id) else {
+        let Some(mut execution) = state.in_flight.remove(&id) else {
             return FrameRequestResolution {
                 completion: FrameRequestCompletion::Stale,
                 binding: None,
                 deadline: FrameWorkDeadlineStatus::NotApplicable,
             };
         };
+        let key = execution.key.clone();
         let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
+        if execution.completed_at.is_none() {
+            execution.completed_at = Some(now);
+        }
         let deadline =
             deadline_status(execution.deadline_at, execution.completed_at.unwrap_or(now));
         let cause = completion_cause(&state, &execution, reusable);
         let resolution = resolve_locked(&mut state, execution, reusable, deadline);
+        remove_orphaned_pending_binding_locked(&mut state, &key);
         refresh_in_flight_invalidations_locked(&mut state, now);
         record_completion(&mut state.metrics, resolution.completion, cause);
+        self.shared.changed.notify_all();
         resolution
     }
 
@@ -767,23 +1041,29 @@ where
         key: K,
         generation: u64,
         work_class: FrameWorkClass,
+        resource_scope: FrameWorkResourceScope,
         demand_identity: Option<FrameDemandIdentity>,
         reusable: bool,
     ) -> FrameRequestResolution<D> {
         let mut state = lock_state(&self.shared.state);
         let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
+        let execution_key = key.clone();
         let mut execution = InFlightWork {
             key,
             generation,
             priority: FrameWorkPriority::Current,
             work_class,
+            resource_scope,
             worker_lane: None,
             demand_identity,
             started_at: now,
             deadline_at: None,
+            in_flight_deadline_policy: FrameInFlightDeadlinePolicy::Cancel,
+            execution_cancellation_deadline_at: None,
             completed_at: Some(now),
             preempted_at: None,
             invalidated_at: None,
+            presentation_binding_expired: false,
         };
         if let Some(current) =
             current_pending_binding(state.latest_generation, &state.pending, &execution)
@@ -793,14 +1073,68 @@ where
         let deadline = deadline_status(execution.deadline_at, now);
         let cause = completion_cause(&state, &execution, reusable);
         let resolution = resolve_locked(&mut state, execution, reusable, deadline);
+        remove_orphaned_pending_binding_locked(&mut state, &execution_key);
         refresh_in_flight_invalidations_locked(&mut state, now);
         record_completion(&mut state.metrics, resolution.completion, cause);
+        self.shared.changed.notify_all();
         resolution
     }
 
     /// Abandon a lease whose result cannot reach the completion Adapter.
     pub fn abandon_execution(&self, id: FrameExecutionId) -> bool {
-        lock_state(&self.shared.state).in_flight.remove(&id).is_some()
+        let mut state = lock_state(&self.shared.state);
+        let removed = state.in_flight.remove(&id);
+        if let Some(execution) = &removed {
+            remove_orphaned_pending_binding_locked(&mut state, &execution.key);
+            self.shared.changed.notify_all();
+        }
+        removed.is_some()
+    }
+
+    /// Fail one execution and atomically consume the latest compatible binding.
+    ///
+    /// A failed execution has no reusable value, so it must not pass through
+    /// [`Self::resolve_execution`]. Returning the latest binding gives the
+    /// domain Adapter exact terminal-delivery authority, including a demand
+    /// rebound to compatible in-flight work. `None` means the execution was
+    /// already gone or superseded; in that case no terminal delivery is legal.
+    pub fn fail_execution(&self, id: FrameExecutionId) -> Option<FrameRequestBinding<D>> {
+        let mut state = lock_state(&self.shared.state);
+        let execution = state.in_flight.remove(&id)?;
+        let preserve_preempted_fallback =
+            execution.preempted_at.is_some() && has_preempted_fallback(&state, &execution);
+        let exact_binding =
+            exact_pending_binding(state.latest_generation, &state.pending, &execution)
+                .map(|pending| pending.binding);
+        let superseded_playback_binding = exact_binding.is_some_and(|binding| {
+            playback_current_binding_is_superseded(state.active_playback_demand, binding)
+        });
+        let binding = if execution.presentation_binding_expired
+            || preserve_preempted_fallback
+            || superseded_playback_binding
+        {
+            None
+        } else {
+            exact_binding
+        };
+        if binding.is_some() || superseded_playback_binding {
+            state.pending.remove(&execution.key);
+        }
+        let inactive_orphan = state.pending.get(&execution.key).is_some_and(|pending| {
+            playback_current_binding_is_superseded(state.active_playback_demand, pending.binding)
+        }) && !state
+            .queue
+            .iter()
+            .any(|queued| queued.request.key == execution.key)
+            && !state.in_flight.values().any(|candidate| candidate.key == execution.key);
+        if inactive_orphan {
+            state.pending.remove(&execution.key);
+        }
+        remove_orphaned_pending_binding_locked(&mut state, &execution.key);
+        let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
+        refresh_in_flight_invalidations_locked(&mut state, now);
+        self.shared.changed.notify_all();
+        binding
     }
 
     /// Cancel one key across pending and queued state; in-flight leases become stale.
@@ -810,11 +1144,14 @@ where
         let pending = usize::from(state.pending.remove(key).is_some());
         let before = state.queue.len();
         state.queue.retain(|queued| &queued.request.key != key);
+        for execution in state.in_flight.values_mut().filter(|execution| &execution.key == key) {
+            execution.presentation_binding_expired = false;
+        }
         let queued = before.saturating_sub(state.queue.len());
         state.metrics.canceled_requests =
             state.metrics.canceled_requests.saturating_add(pending as u64);
         refresh_in_flight_invalidations_locked(&mut state, now);
-        if queued > 0 {
+        if pending > 0 || queued > 0 {
             self.shared.changed.notify_all();
         }
         queued
@@ -828,6 +1165,7 @@ where
         let queued = state.queue.len();
         state.pending.clear();
         state.queue.clear();
+        state.active_playback_demand = None;
         state.latest_generation = state.latest_generation.saturating_add(1);
         refresh_in_flight_invalidations_locked(&mut state, now);
         state.metrics.canceled_requests = state.metrics.canceled_requests.saturating_add(canceled);
@@ -844,7 +1182,69 @@ where
         refresh_in_flight_invalidations_locked(&mut state, now);
         let pruned = before.saturating_sub(state.queue.len());
         state.metrics.pruned_queued = state.metrics.pruned_queued.saturating_add(pruned as u64);
+        if pruned > 0 {
+            self.shared.changed.notify_all();
+        }
         pruned
+    }
+
+    /// Synchronize the one active Playback demand and discard older unstarted current work.
+    ///
+    /// All media keys carrying `active` remain eligible so a multi-layer
+    /// current frame is never collapsed to one payload. Prefetch,
+    /// interactive/still work, and work without Playback demand identity are
+    /// outside this authority. A superseded binding already represented by a
+    /// compatible in-flight lease is retained only as a locality/completion
+    /// seam; [`Self::resolve_execution`] prevents that old identity from
+    /// regaining current publication authority.
+    pub fn synchronize_playback_current_demand(&self, active: FrameDemandIdentity) -> usize {
+        let mut state = lock_state(&self.shared.state);
+        state.active_playback_demand = Some(active);
+        let superseded_keys = state
+            .queue
+            .iter()
+            .filter(|queued| {
+                queued.request.priority == FrameWorkPriority::Current
+                    && queued.request.work_class == FrameWorkClass::Playback
+                    && queued.request.demand_identity.is_some_and(|identity| identity != active)
+            })
+            .map(|queued| queued.request.key.clone())
+            .collect::<Vec<_>>();
+        if superseded_keys.is_empty() {
+            return 0;
+        }
+        state.queue.retain(|queued| {
+            !(queued.request.priority == FrameWorkPriority::Current
+                && queued.request.work_class == FrameWorkClass::Playback
+                && queued.request.demand_identity.is_some_and(|identity| identity != active))
+        });
+        let mut removed_pending = 0usize;
+        for key in &superseded_keys {
+            let Some(pending) = state.pending.get(key).copied() else {
+                continue;
+            };
+            if !playback_current_binding_is_superseded(Some(active), pending.binding) {
+                continue;
+            }
+            let compatible_in_flight = state.in_flight.values().any(|execution| {
+                &execution.key == key
+                    && execution.work_class == pending.binding.work_class
+                    && execution.resource_scope == pending.binding.resource_scope
+            });
+            if !compatible_in_flight {
+                state.pending.remove(key);
+                removed_pending = removed_pending.saturating_add(1);
+            }
+        }
+        let removed = superseded_keys.len();
+        state.metrics.canceled_requests =
+            state.metrics.canceled_requests.saturating_add(removed_pending as u64);
+        state.metrics.superseded_queued_playback_current =
+            state.metrics.superseded_queued_playback_current.saturating_add(removed as u64);
+        let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
+        refresh_in_flight_invalidations_locked(&mut state, now);
+        self.shared.changed.notify_all();
+        removed
     }
 
     /// Expire latest realtime current bindings older than `max_age`.
@@ -855,7 +1255,7 @@ where
         let mut state = lock_state(&self.shared.state);
         let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
         let latest = state.latest_generation;
-        let expired = state
+        let mut expired = state
             .pending
             .iter()
             .filter(|(_, pending)| {
@@ -864,17 +1264,41 @@ where
                     && pending.binding.generation >= latest
                     && elapsed_since(now, pending.requested_at) >= max_age
             })
-            .map(|(key, pending)| ExpiredFrameWork { key: key.clone(), binding: pending.binding })
+            .map(|(key, pending)| ExpiredFrameWork {
+                key: key.clone(),
+                binding: pending.binding,
+                removed_queued_work: 0,
+                retained_in_flight_work: 0,
+            })
             .collect::<Vec<_>>();
-        for request in &expired {
+        for request in &mut expired {
             state.pending.remove(&request.key);
+            let queued_before = state.queue.len();
+            state.queue.retain(|queued| queued.request.key != request.key);
+            request.removed_queued_work = queued_before.saturating_sub(state.queue.len());
+            let mut retained_in_flight_work = 0usize;
+            for execution in state.in_flight.values_mut().filter(|execution| {
+                execution.key == request.key
+                    && execution.generation == request.binding.generation
+                    && execution.generation >= latest
+                    && execution.work_class == request.binding.work_class
+                    && execution.resource_scope == request.binding.resource_scope
+                    && execution.in_flight_deadline_policy
+                        == FrameInFlightDeadlinePolicy::FinishForLocality
+                    && execution.invalidated_at.is_none()
+                    && execution.preempted_at.is_none()
+            }) {
+                execution.presentation_binding_expired = true;
+                retained_in_flight_work = retained_in_flight_work.saturating_add(1);
+            }
+            request.retained_in_flight_work = retained_in_flight_work;
         }
-        state
-            .queue
-            .retain(|queued| !expired.iter().any(|item| item.key == queued.request.key));
         state.metrics.canceled_requests =
             state.metrics.canceled_requests.saturating_add(expired.len() as u64);
         refresh_in_flight_invalidations_locked(&mut state, now);
+        if !expired.is_empty() {
+            self.shared.changed.notify_all();
+        }
         expired
     }
 
@@ -885,6 +1309,7 @@ where
         if state.closed_at.is_none() {
             state.closed_at = Some(now);
         }
+        state.active_playback_demand = None;
         state.pending.clear();
         state.queue.clear();
         refresh_in_flight_invalidations_locked(&mut state, now);
@@ -896,14 +1321,142 @@ where
         lock_state(&self.shared.state).pending.contains_key(key)
     }
 
-    /// Return whether one key/generation/class remains compatible with latest work.
-    pub fn key_current(&self, key: &K, generation: u64, work_class: FrameWorkClass) -> bool {
+    /// Return whether one exact latest binding still has queued or in-flight ownership.
+    ///
+    /// This is the level predicate for an Adapter that atomically reused work
+    /// through [`Self::bind_existing`]. Unlike aggregate diagnostics, it cannot
+    /// be kept alive by unrelated work, and unlike [`Self::has_pending_key`],
+    /// it refuses an orphaned binding whose physical execution owner vanished.
+    pub fn binding_has_execution_owner(
+        &self,
+        key: &K,
+        generation: u64,
+        work_class: FrameWorkClass,
+        resource_scope: FrameWorkResourceScope,
+        demand_identity: Option<FrameDemandIdentity>,
+    ) -> bool {
+        let state = lock_state(&self.shared.state);
+        let Some(pending) = state.pending.get(key) else {
+            return false;
+        };
+        let binding = pending.binding;
+        if binding.generation != generation
+            || binding.generation < state.latest_generation
+            || binding.work_class != work_class
+            || binding.resource_scope != resource_scope
+            || binding.demand_identity != demand_identity
+        {
+            return false;
+        }
+
+        pending_binding_has_execution_owner_locked(&state, key, binding)
+    }
+
+    /// Snapshot every semantic key with a live latest-generation binding.
+    ///
+    /// Payload ownership remains inside the Broker. Coordinators use this
+    /// read-only identity projection to reserve downstream residency before
+    /// admitting more speculative work.
+    pub fn pending_keys(&self) -> Vec<K> {
+        let state = lock_state(&self.shared.state);
+        state
+            .pending
+            .iter()
+            .filter(|(_, pending)| pending.binding.generation >= state.latest_generation)
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+
+    /// Snapshot every key that still owns queued or in-flight execution work.
+    ///
+    /// Unlike [`Self::pending_keys`], this retains canceled or superseded
+    /// in-flight attempts until their worker lease actually returns. Resource
+    /// coordinators use this projection to avoid releasing physical execution
+    /// reservations merely because publication authority was canceled.
+    pub fn active_keys(&self) -> Vec<K> {
+        let state = lock_state(&self.shared.state);
+        let mut keys = state.pending.keys().cloned().collect::<Vec<_>>();
+        for execution in state.in_flight.values() {
+            if !keys.contains(&execution.key) {
+                keys.push(execution.key.clone());
+            }
+        }
+        keys
+    }
+
+    /// Cancel one queued speculative key that has no in-flight execution.
+    ///
+    /// This is the safe preemption seam for a visible current request that
+    /// needs to reclaim an outstanding speculative resource reservation.
+    /// In-flight work is never reported as reclaimable.
+    pub fn cancel_one_queued_prefetch(&self) -> Option<K> {
+        let mut state = lock_state(&self.shared.state);
+        let index = state.queue.iter().position(|queued| {
+            queued.request.priority == FrameWorkPriority::Prefetch
+                && !state.in_flight.values().any(|execution| execution.key == queued.request.key)
+        })?;
+        let queued = state.queue.remove(index)?;
+        let key = queued.request.key;
+        let removed_pending = state.pending.remove(&key).is_some();
+        if removed_pending {
+            state.metrics.canceled_requests = state.metrics.canceled_requests.saturating_add(1);
+            state.metrics.evicted_prefetch = state.metrics.evicted_prefetch.saturating_add(1);
+        }
+        self.shared.changed.notify_all();
+        Some(key)
+    }
+
+    /// Request cooperative cancellation from at most one in-flight Prefetch.
+    ///
+    /// This Seam exists for a visible Current request whose physical resource
+    /// reservation is blocked after queued Prefetch reclamation. It marks only
+    /// a live, not-yet-completed, not-already-preempted lease. Ownership and
+    /// resource charges remain with the worker until normal completion/failure
+    /// resolution drops its payload; completed work remains completion-pump
+    /// responsibility.
+    pub fn request_one_in_flight_prefetch_preemption(&self) -> bool {
+        let mut state = lock_state(&self.shared.state);
+        if state.closed_at.is_some() {
+            return false;
+        }
+        let candidate = state
+            .in_flight
+            .iter()
+            .filter(|(_, execution)| {
+                execution.priority == FrameWorkPriority::Prefetch
+                    && execution.completed_at.is_none()
+                    && execution.preempted_at.is_none()
+            })
+            .min_by_key(|(id, execution)| (execution.started_at, id.get()))
+            .map(|(id, _)| *id);
+        let Some(candidate) = candidate else {
+            return false;
+        };
+        let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
+        let Some(execution) = state.in_flight.get_mut(&candidate) else {
+            return false;
+        };
+        execution.preempted_at = Some(now.max(execution.started_at));
+        self.shared.changed.notify_all();
+        true
+    }
+
+    /// Return whether one key/generation/class/scope remains compatible with latest work.
+    pub fn key_current(
+        &self,
+        key: &K,
+        generation: u64,
+        work_class: FrameWorkClass,
+        resource_scope: FrameWorkResourceScope,
+    ) -> bool {
         let mut state = lock_state(&self.shared.state);
         let Some(pending) = state.pending.get(key).copied() else {
             bump(&mut state.metrics.skipped_missing);
             return false;
         };
-        if pending.binding.work_class != work_class {
+        if pending.binding.work_class != work_class
+            || pending.binding.resource_scope != resource_scope
+        {
             bump(&mut state.metrics.skipped_class_mismatch);
             return false;
         }
@@ -916,28 +1469,38 @@ where
         remove_key_locked(&mut state, key);
         refresh_in_flight_invalidations_locked(&mut state, now);
         bump(&mut state.metrics.skipped_obsolete);
+        self.shared.changed.notify_all();
         false
     }
 
-    /// Return whether current work other than `key` is pending.
-    pub fn has_other_current_key(&self, key: &K, realtime_only: bool) -> bool {
+    /// Return whether current work other than the protected key/scope is pending.
+    pub fn has_other_current_key(
+        &self,
+        key: &K,
+        resource_scope: FrameWorkResourceScope,
+        realtime_only: bool,
+    ) -> bool {
         let state = lock_state(&self.shared.state);
         state.pending.iter().any(|(pending_key, pending)| {
-            pending_key != key
+            (pending_key != key || pending.binding.resource_scope != resource_scope)
                 && pending.binding.priority == FrameWorkPriority::Current
                 && (!realtime_only || pending.binding.work_class != FrameWorkClass::Still)
                 && pending.binding.generation >= state.latest_generation
         })
     }
 
-    /// Return latest still keys that realtime current work may preempt.
-    pub fn pending_still_except(&self, protected_key: &K) -> Vec<K> {
+    /// Return latest still keys outside one protected key/scope that realtime work may preempt.
+    pub fn pending_still_except(
+        &self,
+        protected_key: &K,
+        protected_scope: FrameWorkResourceScope,
+    ) -> Vec<K> {
         let state = lock_state(&self.shared.state);
         state
             .pending
             .iter()
             .filter(|(key, pending)| {
-                *key != protected_key
+                (*key != protected_key || pending.binding.resource_scope != protected_scope)
                     && pending.binding.priority == FrameWorkPriority::Current
                     && pending.binding.work_class == FrameWorkClass::Still
                     && pending.binding.generation >= state.latest_generation
@@ -946,12 +1509,13 @@ where
             .collect()
     }
 
-    /// Cancel one still key only while it remains eligible for realtime preemption.
-    pub fn cancel_preempted_still(&self, key: &K) -> bool {
+    /// Cancel one still key/scope only while it remains eligible for realtime preemption.
+    pub fn cancel_preempted_still(&self, key: &K, resource_scope: FrameWorkResourceScope) -> bool {
         let mut state = lock_state(&self.shared.state);
         let eligible = state.pending.get(key).is_some_and(|pending| {
             pending.binding.priority == FrameWorkPriority::Current
                 && pending.binding.work_class == FrameWorkClass::Still
+                && pending.binding.resource_scope == resource_scope
                 && pending.binding.generation >= state.latest_generation
         });
         if !eligible {
@@ -961,6 +1525,7 @@ where
         remove_key_locked(&mut state, key);
         refresh_in_flight_invalidations_locked(&mut state, now);
         bump(&mut state.metrics.evicted_still);
+        self.shared.changed.notify_all();
         true
     }
 
@@ -970,6 +1535,7 @@ where
         let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
         let mut diagnostics = FrameWorkBrokerDiagnostics {
             latest_generation: state.latest_generation,
+            active_playback_demand: state.active_playback_demand,
             clock_regressions: state.metrics.clock_regressions,
             pending_requests: state.pending.len(),
             queued_work: state.queue.len(),
@@ -987,6 +1553,7 @@ where
             evicted_still: state.metrics.evicted_still,
             canceled_requests: state.metrics.canceled_requests,
             pruned_queued: state.metrics.pruned_queued,
+            superseded_queued_playback_current: state.metrics.superseded_queued_playback_current,
             completed_current: state.metrics.completed_current,
             completed_cache_only: state.metrics.completed_cache_only,
             completed_stale: state.metrics.completed_stale,
@@ -1033,7 +1600,10 @@ where
                     .then_some(execution.invalidated_at)
                     .flatten(),
                 execution.preempted_at,
-                execution.deadline_at.filter(|deadline| *deadline <= now),
+                (execution.in_flight_deadline_policy == FrameInFlightDeadlinePolicy::Cancel)
+                    .then(|| execution.deadline_at.filter(|deadline| *deadline <= now))
+                    .flatten(),
+                execution.execution_cancellation_deadline_at.filter(|deadline| *deadline <= now),
             ]
             .into_iter()
             .flatten()
@@ -1075,12 +1645,95 @@ where
 }
 
 fn binding_for<K, D: Copy, P>(request: &FrameWorkRequest<K, D, P>) -> FrameRequestBinding<D> {
+    binding_for_metadata(
+        request.generation,
+        request.priority,
+        request.work_class,
+        request.resource_scope,
+        request.demand_identity,
+        request.deadline,
+    )
+}
+
+fn binding_for_metadata<D: Copy>(
+    generation: u64,
+    priority: FrameWorkPriority,
+    work_class: FrameWorkClass,
+    resource_scope: FrameWorkResourceScope,
+    demand_identity: Option<FrameDemandIdentity>,
+    deadline: Option<FrameWorkDeadline<D>>,
+) -> FrameRequestBinding<D> {
     FrameRequestBinding {
-        generation: request.generation,
-        priority: request.priority,
-        work_class: request.work_class,
-        demand_identity: request.demand_identity,
-        deadline: request.deadline.map(FrameWorkDeadline::adapter_deadline),
+        generation,
+        priority,
+        work_class,
+        resource_scope,
+        demand_identity,
+        deadline: deadline.map(FrameWorkDeadline::adapter_deadline),
+    }
+}
+
+fn playback_current_binding_is_superseded<D>(
+    active: Option<FrameDemandIdentity>,
+    binding: FrameRequestBinding<D>,
+) -> bool {
+    binding.priority == FrameWorkPriority::Current
+        && binding.work_class == FrameWorkClass::Playback
+        && binding
+            .demand_identity
+            .zip(active)
+            .is_some_and(|(identity, active)| identity != active)
+}
+
+fn execution_matches_binding<K, D>(
+    execution: &InFlightWork<K>,
+    key: &K,
+    binding: FrameRequestBinding<D>,
+) -> bool
+where
+    K: Eq,
+{
+    &execution.key == key
+        && execution.work_class == binding.work_class
+        && execution.resource_scope == binding.resource_scope
+        && execution.generation == binding.generation
+        && execution.demand_identity == binding.demand_identity
+        && !execution.presentation_binding_expired
+        && execution.preempted_at.is_none()
+}
+
+fn pending_binding_has_execution_owner_locked<K, D, P>(
+    state: &BrokerState<K, D, P>,
+    key: &K,
+    binding: FrameRequestBinding<D>,
+) -> bool
+where
+    K: Eq,
+    D: Copy,
+{
+    state.queue.iter().any(|queued| {
+        &queued.request.key == key
+            && queued.request.generation == binding.generation
+            && queued.request.work_class == binding.work_class
+            && queued.request.resource_scope == binding.resource_scope
+            && queued.request.demand_identity == binding.demand_identity
+    }) || state
+        .in_flight
+        .values()
+        .any(|execution| execution_matches_binding(execution, key, binding))
+}
+
+/// Enforce that every pending publication binding retains one physical owner.
+fn remove_orphaned_pending_binding_locked<K, D, P>(state: &mut BrokerState<K, D, P>, key: &K)
+where
+    K: Eq + Hash,
+    D: Copy,
+{
+    let orphaned = state.pending.get(key).is_some_and(|pending| {
+        !pending_binding_has_execution_owner_locked(state, key, pending.binding)
+    });
+    if orphaned {
+        state.pending.remove(key);
     }
 }
 
@@ -1107,6 +1760,36 @@ fn promote_priority(
         FrameWorkPriority::Current
     } else {
         FrameWorkPriority::Prefetch
+    }
+}
+
+fn promote_in_flight_deadline_policy(
+    existing_priority: FrameWorkPriority,
+    existing: FrameInFlightDeadlinePolicy,
+    requested_priority: FrameWorkPriority,
+    requested: FrameInFlightDeadlinePolicy,
+) -> FrameInFlightDeadlinePolicy {
+    if existing_priority == FrameWorkPriority::Current
+        && requested_priority == FrameWorkPriority::Prefetch
+    {
+        existing
+    } else {
+        requested
+    }
+}
+
+fn promote_execution_cancellation_budget(
+    existing_priority: FrameWorkPriority,
+    existing: Option<Duration>,
+    requested_priority: FrameWorkPriority,
+    requested: Option<Duration>,
+) -> Option<Duration> {
+    if existing_priority == FrameWorkPriority::Current
+        && requested_priority == FrameWorkPriority::Prefetch
+    {
+        existing
+    } else {
+        requested
     }
 }
 
@@ -1278,6 +1961,9 @@ where
 {
     state.pending.remove(key);
     state.queue.retain(|queued| &queued.request.key != key);
+    for execution in state.in_flight.values_mut().filter(|execution| &execution.key == key) {
+        execution.presentation_binding_expired = false;
+    }
 }
 
 fn prune_obsolete_locked<K, D, P>(state: &mut BrokerState<K, D, P>) {
@@ -1296,9 +1982,54 @@ where
 {
     pending.get(&execution.key).filter(|pending| {
         pending.binding.work_class == execution.work_class
+            && pending.binding.resource_scope == execution.resource_scope
             && pending.binding.generation >= execution.generation
             && pending.binding.generation >= latest_generation
     })
+}
+
+fn exact_pending_binding<'a, K, D>(
+    latest_generation: u64,
+    pending: &'a HashMap<K, PendingBinding<D>>,
+    execution: &InFlightWork<K>,
+) -> Option<&'a PendingBinding<D>>
+where
+    K: Eq + Hash,
+{
+    pending.get(&execution.key).filter(|pending| {
+        pending.binding.work_class == execution.work_class
+            && pending.binding.resource_scope == execution.resource_scope
+            && pending.binding.generation == execution.generation
+            && pending.binding.demand_identity == execution.demand_identity
+            && pending.binding.generation >= latest_generation
+    })
+}
+
+fn has_preempted_fallback<K, D, P>(
+    state: &BrokerState<K, D, P>,
+    execution: &InFlightWork<K>,
+) -> bool
+where
+    K: Eq + Hash,
+{
+    let Some(pending) = state.pending.get(&execution.key) else {
+        return false;
+    };
+    let queued_fallback = state.queue.iter().any(|queued| {
+        queued.request.key == execution.key
+            && queued.request.work_class == pending.binding.work_class
+            && queued.request.resource_scope == pending.binding.resource_scope
+            && queued.request.generation == pending.binding.generation
+            && queued.request.demand_identity == pending.binding.demand_identity
+    });
+    queued_fallback
+        || state.in_flight.values().any(|fallback| {
+            fallback.key == execution.key
+                && fallback.preempted_at.is_none()
+                && !fallback.presentation_binding_expired
+                && exact_pending_binding(state.latest_generation, &state.pending, fallback)
+                    .is_some()
+        })
 }
 
 fn oldest_other_current_request<K, D>(
@@ -1313,7 +2044,7 @@ where
     pending
         .iter()
         .filter(|(key, pending)| {
-            *key != &execution.key
+            (*key != &execution.key || pending.binding.resource_scope != execution.resource_scope)
                 && pending.binding.priority == FrameWorkPriority::Current
                 && (!realtime_only || pending.binding.work_class != FrameWorkClass::Still)
                 && pending.binding.generation >= latest_generation
@@ -1328,6 +2059,7 @@ enum ExecutionCancellationCause {
     PrefetchPreemptedByCurrent,
     StillPreemptedByRealtimeCurrent,
     DeadlineExpired,
+    ExecutionBudgetExpired,
 }
 
 #[derive(Clone, Copy)]
@@ -1352,6 +2084,9 @@ impl ExecutionCancellationCandidate {
             ExecutionCancellationCause::DeadlineExpired => {
                 FrameExecutionCancellation::DeadlineExpired { age }
             }
+            ExecutionCancellationCause::ExecutionBudgetExpired => {
+                FrameExecutionCancellation::ExecutionBudgetExpired { age }
+            }
         }
     }
 }
@@ -1366,6 +2101,104 @@ fn earlier_cancellation(
     }
 }
 
+fn execution_cancellation_evidence_locked<K, D, P>(
+    state: &BrokerState<K, D, P>,
+    id: FrameExecutionId,
+    now: MonotonicTimestamp,
+) -> Option<crate::FrameExecutionCancellationEvidence>
+where
+    K: Eq + Hash,
+{
+    if let Some(closed_at) = state.closed_at {
+        let execution_age = state.in_flight.get(&id).map_or(Duration::ZERO, |execution| {
+            elapsed_since(now, execution.started_at)
+        });
+        return Some(crate::FrameExecutionCancellationEvidence {
+            cancellation: FrameExecutionCancellation::BrokerClosed {
+                age: elapsed_since(now, closed_at),
+            },
+            execution_age,
+        });
+    }
+    let Some(execution) = state.in_flight.get(&id) else {
+        return Some(crate::FrameExecutionCancellationEvidence {
+            cancellation: FrameExecutionCancellation::Superseded { age: None },
+            execution_age: Duration::ZERO,
+        });
+    };
+    let execution_age = elapsed_since(now, execution.started_at);
+    let mut candidate = None;
+    let publication_binding_missing = execution.presentation_binding_expired
+        || current_pending_binding(state.latest_generation, &state.pending, execution).is_none();
+    if publication_binding_missing {
+        if let Some(invalidated_at) = execution.invalidated_at {
+            candidate = Some(ExecutionCancellationCandidate {
+                requested_at: invalidated_at,
+                cause: ExecutionCancellationCause::Superseded,
+            });
+        } else if !execution.presentation_binding_expired {
+            return Some(crate::FrameExecutionCancellationEvidence {
+                cancellation: FrameExecutionCancellation::Superseded { age: None },
+                execution_age,
+            });
+        }
+    }
+    if let Some(requested_at) = execution.preempted_at {
+        let cause = if execution.priority == FrameWorkPriority::Prefetch {
+            ExecutionCancellationCause::PrefetchPreemptedByCurrent
+        } else {
+            ExecutionCancellationCause::StillPreemptedByRealtimeCurrent
+        };
+        candidate = earlier_cancellation(
+            candidate,
+            ExecutionCancellationCandidate { requested_at, cause },
+        );
+    }
+    if execution.in_flight_deadline_policy == FrameInFlightDeadlinePolicy::Cancel {
+        if let Some(deadline_at) = execution.deadline_at.filter(|deadline| *deadline <= now) {
+            candidate = earlier_cancellation(
+                candidate,
+                ExecutionCancellationCandidate {
+                    requested_at: deadline_at,
+                    cause: ExecutionCancellationCause::DeadlineExpired,
+                },
+            );
+        }
+    }
+    if let Some(deadline_at) =
+        execution.execution_cancellation_deadline_at.filter(|deadline| *deadline <= now)
+    {
+        candidate = earlier_cancellation(
+            candidate,
+            ExecutionCancellationCandidate {
+                requested_at: deadline_at,
+                cause: ExecutionCancellationCause::ExecutionBudgetExpired,
+            },
+        );
+    }
+    candidate.map(|candidate| crate::FrameExecutionCancellationEvidence {
+        cancellation: candidate.into_cancellation(now),
+        execution_age,
+    })
+}
+
+fn next_execution_cancellation_wait<K>(
+    execution: &InFlightWork<K>,
+    now: MonotonicTimestamp,
+) -> Option<Duration> {
+    let presentation_deadline = (execution.in_flight_deadline_policy
+        == FrameInFlightDeadlinePolicy::Cancel)
+        .then_some(execution.deadline_at)
+        .flatten();
+    presentation_deadline
+        .into_iter()
+        .chain(execution.execution_cancellation_deadline_at)
+        .map(|deadline| {
+            deadline.duration_since_origin().saturating_sub(now.duration_since_origin())
+        })
+        .min()
+}
+
 fn dequeue_work_locked<K, D, P>(
     state: &mut BrokerState<K, D, P>,
     lane: FrameWorkerLane,
@@ -1375,7 +2208,10 @@ where
     K: Clone + Eq + Hash,
     D: Copy,
 {
-    let index = next_work_index(&state.queue, lane, now)?;
+    refresh_in_flight_invalidations_locked(state, now);
+    let allow_current_playback_failover = non_playback_current_failover_allowed(state, lane, now);
+    let index =
+        next_work_index_with_failover(&state.queue, lane, now, allow_current_playback_failover)?;
     let queued = state.queue.remove(index)?;
     let request = queued.request;
     let id = FrameExecutionId(state.next_execution_id);
@@ -1387,13 +2223,19 @@ where
             generation: request.generation,
             priority: request.priority,
             work_class: request.work_class,
+            resource_scope: request.resource_scope,
             worker_lane: Some(lane),
             demand_identity: request.demand_identity,
             started_at: now,
             deadline_at: queued.deadline_at,
+            in_flight_deadline_policy: request.in_flight_deadline_policy,
+            execution_cancellation_deadline_at: request
+                .execution_cancellation_budget
+                .map(|budget| now.saturating_add(budget)),
             completed_at: None,
             preempted_at: None,
             invalidated_at: None,
+            presentation_binding_expired: false,
         },
     );
     refresh_in_flight_invalidations_locked(state, now);
@@ -1412,6 +2254,7 @@ where
         generation: request.generation,
         priority: request.priority,
         work_class: request.work_class,
+        resource_scope: request.resource_scope,
         demand_identity: request.demand_identity,
         deadline: request.deadline.map(FrameWorkDeadline::adapter_deadline),
         payload: request.payload,
@@ -1431,8 +2274,18 @@ fn refresh_in_flight_invalidations_locked<K, D, P>(
 {
     let BrokerState { latest_generation, pending, in_flight, .. } = state;
     for execution in in_flight.values_mut() {
-        if let Some(current) = current_pending_binding(*latest_generation, pending, execution) {
+        if execution.presentation_binding_expired {
+            if execution.generation < *latest_generation && execution.invalidated_at.is_none() {
+                execution.invalidated_at = Some(now);
+            }
+        } else if let Some(current) =
+            current_pending_binding(*latest_generation, pending, execution)
+        {
             execution.deadline_at = current.deadline_at;
+            execution.in_flight_deadline_policy = current.in_flight_deadline_policy;
+            execution.execution_cancellation_deadline_at = current
+                .execution_cancellation_budget
+                .map(|budget| execution.started_at.saturating_add(budget));
             execution.invalidated_at = None;
         } else if execution.invalidated_at.is_none() {
             execution.invalidated_at = Some(now);
@@ -1449,7 +2302,7 @@ fn refresh_in_flight_invalidations_locked<K, D, P>(
             // acts on. A current binding may legitimately remain pending for
             // presentation while a later prefetch lease begins; clamp that
             // inherited request time to lease start instead of manufacturing
-            // a negative request-to-checkpoint interval.
+            // a negative request-to-logical-cancellation interval.
             let preempted_at = preempted_at.max(execution.started_at);
             execution.preempted_at = Some(
                 execution
@@ -1460,22 +2313,37 @@ fn refresh_in_flight_invalidations_locked<K, D, P>(
     }
 }
 
+#[cfg(test)]
 fn next_work_index<K, D, P>(
     queue: &VecDeque<QueuedWork<K, D, P>>,
     lane: FrameWorkerLane,
     now: MonotonicTimestamp,
+) -> Option<usize> {
+    next_work_index_with_failover(queue, lane, now, false)
+}
+
+fn next_work_index_with_failover<K, D, P>(
+    queue: &VecDeque<QueuedWork<K, D, P>>,
+    lane: FrameWorkerLane,
+    now: MonotonicTimestamp,
+    allow_current_playback_failover: bool,
 ) -> Option<usize> {
     queue
         .iter()
         .enumerate()
         .filter(|(_, queued)| {
             queued.request.priority == FrameWorkPriority::Current
-                && lane.accepts(queued.request.work_class)
+                && (lane.accepts(queued.request.work_class)
+                    || (allow_current_playback_failover
+                        && queued.request.work_class == FrameWorkClass::Playback))
         })
         .min_by_key(|(_, queued)| {
+            let authorized_playback_failover = allow_current_playback_failover
+                && queued.request.work_class == FrameWorkClass::Playback
+                && !lane.accepts(queued.request.work_class);
             (
+                !authorized_playback_failover,
                 deadline_expired(queued.deadline_at, now),
-                !lane.accepts(queued.request.work_class),
                 work_rank(queued.request.work_class),
             )
         })
@@ -1491,6 +2359,73 @@ fn next_work_index<K, D, P>(
                 .min_by_key(|(_, queued)| deadline_expired(queued.deadline_at, now))
                 .map(|(index, _)| index)
         })
+}
+
+fn non_playback_current_failover_allowed<K, D, P>(
+    state: &BrokerState<K, D, P>,
+    lane: FrameWorkerLane,
+    now: MonotonicTimestamp,
+) -> bool
+where
+    K: Eq + Hash,
+{
+    if lane != FrameWorkerLane::NonPlayback {
+        return false;
+    }
+    let failover_already_running = state.in_flight.values().any(|execution| {
+        execution.worker_lane == Some(FrameWorkerLane::NonPlayback)
+            && execution.work_class == FrameWorkClass::Playback
+            && execution.completed_at.is_none()
+    });
+    if failover_already_running {
+        return false;
+    }
+    state.in_flight.iter().any(|(id, execution)| {
+        execution.worker_lane == Some(FrameWorkerLane::Playback)
+            && execution.work_class == FrameWorkClass::Playback
+            && execution.completed_at.is_none()
+            && execution_cancellation_evidence_locked(state, *id, now).is_some()
+    })
+}
+
+fn next_non_playback_current_failover_wait<K, D, P>(
+    state: &BrokerState<K, D, P>,
+    lane: FrameWorkerLane,
+    now: MonotonicTimestamp,
+) -> Option<Duration>
+where
+    K: Eq + Hash,
+{
+    if lane != FrameWorkerLane::NonPlayback
+        || !state.queue.iter().any(|queued| {
+            queued.request.priority == FrameWorkPriority::Current
+                && queued.request.work_class == FrameWorkClass::Playback
+        })
+        || state.in_flight.values().any(|execution| {
+            execution.worker_lane == Some(FrameWorkerLane::NonPlayback)
+                && execution.work_class == FrameWorkClass::Playback
+                && execution.completed_at.is_none()
+        })
+    {
+        return None;
+    }
+
+    state
+        .in_flight
+        .iter()
+        .filter(|(_, execution)| {
+            execution.worker_lane == Some(FrameWorkerLane::Playback)
+                && execution.work_class == FrameWorkClass::Playback
+                && execution.completed_at.is_none()
+        })
+        .filter_map(|(id, execution)| {
+            if execution_cancellation_evidence_locked(state, *id, now).is_some() {
+                Some(Duration::ZERO)
+            } else {
+                next_execution_cancellation_wait(execution, now)
+            }
+        })
+        .min()
 }
 
 fn work_rank(class: FrameWorkClass) -> u8 {
@@ -1518,11 +2453,26 @@ where
     K: Eq + Hash,
     D: Copy,
 {
+    if execution_budget_expired_before_completion(execution) {
+        return CompletionCause::Obsolete;
+    }
+    if execution.preempted_at.is_some() {
+        return CompletionCause::Obsolete;
+    }
+    if execution.presentation_binding_expired {
+        return CompletionCause::Missing;
+    }
     let Some(pending) = state.pending.get(&execution.key) else {
         return CompletionCause::Missing;
     };
     if pending.binding.work_class != execution.work_class {
         return CompletionCause::ClassMismatch;
+    }
+    if pending.binding.resource_scope != execution.resource_scope {
+        return CompletionCause::Obsolete;
+    }
+    if playback_current_binding_is_superseded(state.active_playback_demand, pending.binding) {
+        return CompletionCause::Obsolete;
     }
     let changed = pending.binding.generation != execution.generation
         || pending.binding.demand_identity != execution.demand_identity;
@@ -1574,6 +2524,39 @@ where
     K: Eq + Hash,
     D: Copy,
 {
+    if execution_budget_expired_before_completion(&execution) {
+        if exact_pending_binding(state.latest_generation, &state.pending, &execution).is_some()
+            && !has_preempted_fallback(state, &execution)
+        {
+            state.pending.remove(&execution.key);
+        }
+        return FrameRequestResolution {
+            completion: FrameRequestCompletion::Stale,
+            binding: None,
+            deadline,
+        };
+    }
+    if execution.preempted_at.is_some() {
+        if !has_preempted_fallback(state, &execution) {
+            state.pending.remove(&execution.key);
+        }
+        return FrameRequestResolution {
+            completion: FrameRequestCompletion::Stale,
+            binding: None,
+            deadline,
+        };
+    }
+    if execution.presentation_binding_expired {
+        return FrameRequestResolution {
+            completion: if execution.generation >= state.latest_generation {
+                FrameRequestCompletion::CacheOnly
+            } else {
+                FrameRequestCompletion::Stale
+            },
+            binding: None,
+            deadline,
+        };
+    }
     let Some(pending) = state.pending.get(&execution.key).copied() else {
         return FrameRequestResolution {
             completion: if execution.generation >= state.latest_generation {
@@ -1596,6 +2579,30 @@ where
             deadline,
         };
     }
+    if pending.binding.resource_scope != execution.resource_scope {
+        return FrameRequestResolution {
+            completion: if execution.generation >= state.latest_generation {
+                FrameRequestCompletion::CacheOnly
+            } else {
+                FrameRequestCompletion::Stale
+            },
+            binding: None,
+            deadline,
+        };
+    }
+    if playback_current_binding_is_superseded(state.active_playback_demand, pending.binding) {
+        state.pending.remove(&execution.key);
+        state.queue.retain(|queued| queued.request.key != execution.key);
+        return FrameRequestResolution {
+            completion: if execution.generation >= state.latest_generation {
+                FrameRequestCompletion::CacheOnly
+            } else {
+                FrameRequestCompletion::Stale
+            },
+            binding: None,
+            deadline,
+        };
+    }
     let changed = pending.binding.generation != execution.generation
         || pending.binding.demand_identity != execution.demand_identity;
     if changed && !reusable {
@@ -1606,6 +2613,7 @@ where
         };
     }
     state.pending.remove(&execution.key);
+    state.queue.retain(|queued| queued.request.key != execution.key);
     if pending.binding.generation >= state.latest_generation
         || execution.generation >= state.latest_generation
     {
@@ -1621,6 +2629,13 @@ where
             deadline,
         }
     }
+}
+
+fn execution_budget_expired_before_completion<K>(execution: &InFlightWork<K>) -> bool {
+    execution
+        .execution_cancellation_deadline_at
+        .zip(execution.completed_at)
+        .is_some_and(|(deadline_at, completed_at)| deadline_at <= completed_at)
 }
 
 fn deadline_status(

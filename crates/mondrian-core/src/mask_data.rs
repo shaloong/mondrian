@@ -5,7 +5,7 @@
 
 use crate::automation::{PropertyBag, PropertyValue};
 use crate::types::MaskId;
-use crate::TimelineTime;
+use crate::{AuthoringList, TimelineTime};
 use glam::Vec2;
 use serde::{Deserialize, Serialize};
 
@@ -138,7 +138,7 @@ pub struct MaskComponent {
     pub name: String,
     /// Shape keyframes. When `shape_animation_enabled` is false, only the first
     /// entry is used (static shape). When enabled, shapes are interpolated by time.
-    pub shape_keyframes: Vec<(TimelineTime, MaskShape)>,
+    pub shape_keyframes: AuthoringList<(TimelineTime, MaskShape)>,
     /// Scalar animatable properties (feather, opacity, expansion, invert, mask_op).
     pub properties: PropertyBag,
     pub enabled: bool,
@@ -151,6 +151,7 @@ impl PartialEq for MaskComponent {
         self.id == other.id
             && self.name == other.name
             && self.shape_keyframes == other.shape_keyframes
+            && self.properties == other.properties
             && self.enabled == other.enabled
             && self.locked == other.locked
             && self.shape_animation_enabled == other.shape_animation_enabled
@@ -248,7 +249,7 @@ impl MaskComponent {
         Self {
             id,
             name,
-            shape_keyframes: vec![(TimelineTime::ZERO, initial.shape)],
+            shape_keyframes: vec![(TimelineTime::ZERO, initial.shape)].into(),
             properties,
             enabled: true,
             locked: false,
@@ -496,6 +497,66 @@ pub fn interpolate_shape(a: &MaskShape, b: &MaskShape, t: f32) -> MaskShape {
     }
 }
 
+impl crate::AuthoringFootprint for MaskShape {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        match self {
+            Self::Rectangle { x: _, y: _, width: _, height: _, corner_radius: _ }
+            | Self::Ellipse { center: _, radii: _ } => Ok(()),
+            Self::Path { points, closed: _ } => collector.collect(points),
+        }
+    }
+}
+
+impl crate::AuthoringFootprint for BezierPoint {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self { position: _, control_in: _, control_out: _ } = self;
+        Ok(())
+    }
+}
+
+impl crate::AuthoringFootprint for MaskKeyframe {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self {
+            shape,
+            feather: _,
+            opacity: _,
+            expansion: _,
+            invert: _,
+            mask_op: _,
+        } = self;
+        collector.collect(shape)
+    }
+}
+
+impl crate::AuthoringFootprint for MaskComponent {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self {
+            id: _,
+            name,
+            shape_keyframes,
+            properties,
+            enabled: _,
+            locked: _,
+            shape_animation_enabled: _,
+        } = self;
+        collector.collect(name)?;
+        collector.collect(shape_keyframes)?;
+        collector.collect(properties)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,12 +623,30 @@ mod tests {
     #[test]
     fn mask_component_partial_eq_includes_animation_toggle() {
         let kf = MaskKeyframe::default();
-        let mut a = MaskComponent::new("A".into(), kf.clone());
-        let mut b = MaskComponent::new("A".into(), kf);
-        a.id = b.id; // make ids match for comparison
+        let a = MaskComponent::new("A".into(), kf);
+        let mut b = a.clone();
         assert_eq!(a, b);
         b.shape_animation_enabled = true;
         assert_ne!(a, b, "shape_animation_enabled should affect equality");
+    }
+
+    #[test]
+    fn mask_component_partial_eq_includes_property_author_state() {
+        let mut original = MaskComponent::new("A".into(), MaskKeyframe::default());
+        let mut edited = original.clone();
+        assert_eq!(original, edited);
+
+        edited
+            .properties
+            .set_static_value(MASK_PROP_FEATHER, PropertyValue::Float(12.0))
+            .expect("edit mask feather");
+
+        assert_ne!(original, edited, "mask PropertyBag must affect equality");
+        original
+            .properties
+            .set_static_value(MASK_PROP_FEATHER, PropertyValue::Float(12.0))
+            .expect("match mask feather");
+        assert_eq!(original, edited);
     }
 
     #[test]

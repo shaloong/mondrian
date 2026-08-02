@@ -32,6 +32,24 @@ pub(super) struct ThumbnailJob {
     pub(super) cancellation: ExecutionCancellationToken,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct ThumbnailWorkerIdentity {
+    pub(super) key: ThumbnailRequestKey,
+    pub(super) generation: u64,
+}
+
+impl ThumbnailJob {
+    pub(super) fn worker_identity(&self) -> ThumbnailWorkerIdentity {
+        ThumbnailWorkerIdentity { key: self.key.clone(), generation: self.generation }
+    }
+}
+
+impl ThumbnailResult {
+    pub(super) fn worker_identity(&self) -> ThumbnailWorkerIdentity {
+        ThumbnailWorkerIdentity { key: self.key.clone(), generation: self.generation }
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct ThumbnailResult {
     pub(super) key: ThumbnailRequestKey,
@@ -80,6 +98,9 @@ pub(super) struct ThumbnailCounters {
 pub(super) struct ThumbnailState {
     pub(super) generation: u64,
     pub(super) color_context: Option<ProgramColorContext>,
+    pub(super) admit_automatic: bool,
+    pub(super) dispatch_enabled: bool,
+    pub(super) cache_byte_budget: usize,
     pub(super) cache: HashMap<AssetId, ThumbnailCacheEntry>,
     pub(super) cache_lru: VecDeque<AssetId>,
     pub(super) cached_bytes: usize,
@@ -97,6 +118,9 @@ impl Default for ThumbnailState {
         Self {
             generation: 1,
             color_context: None,
+            admit_automatic: true,
+            dispatch_enabled: true,
+            cache_byte_budget: super::THUMBNAIL_CACHE_BYTE_BUDGET,
             cache: HashMap::new(),
             cache_lru: VecDeque::new(),
             cached_bytes: 0,

@@ -21,7 +21,7 @@ const EAGAIN_RETRY_DELAY: Duration = Duration::from_millis(1);
 /// Run the isolated Preview demux worker over stdin/stdout.
 ///
 /// The helper owns exactly one `AVFormatContext`. Stdout is exclusively the
-/// bounded v2 binary protocol; diagnostics belong on stderr. The parent may
+/// bounded versioned binary protocol; diagnostics belong on stderr. The parent may
 /// terminate the process at any point to recover a blocked FFmpeg format call.
 pub fn run_preview_demux_worker() -> anyhow::Result<()> {
     let stdin = io::stdin();
@@ -35,6 +35,7 @@ pub fn run_preview_demux_worker() -> anyhow::Result<()> {
     if let Err(error) = run_worker(
         &request.path,
         request.source_revision,
+        request.video_stream_index,
         &mut reader,
         &mut writer,
     ) {
@@ -47,6 +48,7 @@ pub fn run_preview_demux_worker() -> anyhow::Result<()> {
 fn run_worker(
     path: &Path,
     source_revision: MediaFileFingerprint,
+    video_stream_index: Option<u32>,
     reader: &mut impl io::Read,
     writer: &mut impl Write,
 ) -> anyhow::Result<()> {
@@ -61,15 +63,33 @@ fn run_worker(
         return send_failure(writer, 0, error);
     }
     let (stream_index, parameters, time_base, start_pts, frame_rate, seek_index, truncated) = {
-        let stream = match input.streams().best(ffmpeg::media::Type::Video) {
-            Some(stream) => stream,
-            None => {
-                return send_failure(
-                    writer,
-                    0,
-                    anyhow::anyhow!("Preview demux input has no video stream"),
-                )
-            }
+        let stream = match video_stream_index {
+            Some(index) => match input
+                .streams()
+                .find(|stream| stream.index() == index as usize)
+                .filter(|stream| stream.parameters().medium() == ffmpeg::media::Type::Video)
+            {
+                Some(stream) => stream,
+                None => {
+                    return send_failure(
+                        writer,
+                        0,
+                        anyhow::anyhow!(
+                            "requested Preview video stream {index} is missing or is not video"
+                        ),
+                    )
+                }
+            },
+            None => match input.streams().best(ffmpeg::media::Type::Video) {
+                Some(stream) => stream,
+                None => {
+                    return send_failure(
+                        writer,
+                        0,
+                        anyhow::anyhow!("Preview demux input has no video stream"),
+                    )
+                }
+            },
         };
         let start_pts = match stream.start_time() {
             value if value == ffmpeg::ffi::AV_NOPTS_VALUE => 0,

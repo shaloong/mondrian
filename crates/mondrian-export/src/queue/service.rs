@@ -6,22 +6,125 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use mondrian_audio::AudioRuntimeResourceGrant;
 use mondrian_core::{
     ExecutionCancellationToken, ExecutionDeadlineStatus, ExecutionPriority,
     ExecutionTerminalDisposition, ExecutionTerminalEvidence, JobId,
 };
+use mondrian_media::AudioSourceCacheConfig;
+use mondrian_renderer::{
+    PreparedBasicTitleFontSet, RenderGpuOutputExecutionResourceGrant, TimelineCpuWorkingSetGrant,
+};
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 
-use crate::preset::ExportConfig;
+use crate::preset::{AudioCodecConfig, ExportConfig, ExportOutputPolicy};
+use crate::{prepare_timeline_export_dependencies, validate_timeline_export_execution_snapshot};
 
-use super::{ExportExecutor, ExportJobDiagnostics, JobExecutionResult};
+use super::{ExportExecutor, ExportJobDiagnostics, ExportPublicationFailure, JobExecutionResult};
 
 /// Maximum number of admitted jobs that may be pending or executing.
 pub const EXPORT_IN_FLIGHT_CAPACITY: usize = 64;
 /// Maximum number of lightweight terminal snapshots retained without user cleanup.
 pub const EXPORT_TERMINAL_HISTORY_CAPACITY: usize = 256;
+/// Conservative logical charge of one immutable heterogeneous route contract.
+pub const EXPORT_HETEROGENEOUS_ROUTE_CONTRACT_LOGICAL_BYTES: usize = 128;
 const EXPORT_FAILURE_DETAIL_CHARS: usize = 4_096;
+
+/// Immutable resource grant frozen when one Export attempt starts.
+///
+/// The queue owns policy publication; the executor snapshots it exactly once
+/// after crossing the Preparing gate. Preview resources are never borrowed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExportExecutionResourcePolicy {
+    /// Maximum prepared Sequence visual programs in the frozen reachable closure.
+    pub visual_program_entries: usize,
+    /// Maximum aggregate conservative logical bytes for that visual closure.
+    pub visual_program_bytes: usize,
+    /// Maximum prepared LUT resources retained by this visual attempt.
+    pub lut_cache_entries: usize,
+    /// Maximum conservative logical bytes retained by prepared LUT resources.
+    pub lut_cache_bytes: usize,
+    /// Maximum retained Effect pixel/node entries.
+    pub effect_cache_entries: usize,
+    /// Aggregate retained Effect pixel/node bytes.
+    pub effect_cache_bytes: usize,
+    /// Maximum transient Temporal/ROI working bytes for one frame.
+    pub effect_working_bytes: usize,
+    /// Hard compositor-owned transient and retained working-set grant.
+    ///
+    /// This is frozen per attempt and does not shrink with cache pressure.
+    pub cpu_composite_working_set: TimelineCpuWorkingSetGrant,
+    /// Maximum retained GPU Effect plans or deterministic blockers.
+    pub effect_gpu_plan_entries: usize,
+    /// Conservative retained bytes for GPU Effect planning.
+    pub effect_gpu_plan_bytes: usize,
+    /// Maximum immutable heterogeneous route contracts frozen by preflight.
+    ///
+    /// This is a correctness/admission grant and must not shrink with cache
+    /// pressure after an Export snapshot has been accepted.
+    pub heterogeneous_route_contract_entries: usize,
+    /// Maximum logical bytes for the immutable heterogeneous route ledger.
+    ///
+    /// This is independent of retained GPU-plan cache bytes.
+    pub heterogeneous_route_contract_bytes: usize,
+    /// Maximum OCIO CPU processors retained by this job.
+    pub cpu_color_processor_capacity: usize,
+    /// Maximum idle GPU output textures retained per exact contract.
+    pub gpu_output_idle_per_contract: usize,
+    /// Aggregate approximate idle GPU output texture bytes.
+    pub gpu_output_idle_bytes: u64,
+    /// Hard active texture/readback grant for one final GPU output boundary.
+    ///
+    /// Unlike idle retention, this grant is frozen for the accepted Export
+    /// attempt and must not shrink in response to online memory pressure.
+    pub gpu_output_active: RenderGpuOutputExecutionResourceGrant,
+    /// Maximum retained Basic Title raster identities.
+    pub title_cache_entries: usize,
+    /// Aggregate Basic Title frame and glyph cache bytes.
+    pub title_cache_bytes: usize,
+    /// Aggregate byte-frozen font-source bytes admitted for Basic Titles.
+    pub title_font_bytes: usize,
+    /// Job-local decoded-audio source cache residency.
+    pub audio_source_cache: AudioSourceCacheConfig,
+    /// Closure-wide hard grant for the immutable attempt's Audio Runtime.
+    pub audio_runtime_grant: AudioRuntimeResourceGrant,
+}
+
+impl Default for ExportExecutionResourcePolicy {
+    fn default() -> Self {
+        Self {
+            visual_program_entries: 32,
+            visual_program_bytes: 64 * 1024 * 1024,
+            lut_cache_entries: 8,
+            lut_cache_bytes: 32 * 1024 * 1024,
+            effect_cache_entries: 32,
+            effect_cache_bytes: 96 * 1024 * 1024,
+            effect_working_bytes: 384 * 1024 * 1024,
+            cpu_composite_working_set: TimelineCpuWorkingSetGrant {
+                max_active_bytes: 1024 * 1024 * 1024,
+                max_retained_scratch_bytes: 512 * 1024 * 1024,
+            },
+            effect_gpu_plan_entries: 32,
+            effect_gpu_plan_bytes: 2 * 1024 * 1024,
+            heterogeneous_route_contract_entries: 32,
+            heterogeneous_route_contract_bytes: 4 * 1024,
+            cpu_color_processor_capacity: 32,
+            gpu_output_idle_per_contract: 1,
+            gpu_output_idle_bytes: 96 * 1024 * 1024,
+            gpu_output_active: RenderGpuOutputExecutionResourceGrant::new(1024 * 1024 * 1024, 4),
+            title_cache_entries: 16,
+            title_cache_bytes: 64 * 1024 * 1024,
+            title_font_bytes: 128 * 1024 * 1024,
+            audio_source_cache: AudioSourceCacheConfig::new(16, 64 * 1024 * 1024, 2),
+            audio_runtime_grant: AudioRuntimeResourceGrant::new(
+                64,
+                768 * 1024 * 1024,
+                128 * 1024 * 1024,
+            ),
+        }
+    }
+}
 
 /// Coarse production phase for one offline export attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +289,15 @@ impl Default for ExportProgress {
 pub enum ExportFailureReason {
     /// The prepared render/encode/validation execution failed.
     ExecutionFailed,
+    /// Publication failed before any irreversible namespace operation was
+    /// observed.
+    PublicationBeforeNamespace,
+    /// The final path names the new deliverable, but containing-directory
+    /// crash durability could not be confirmed.
+    PublicationDurabilityUnconfirmed,
+    /// Publication crossed the commit gate but the final namespace
+    /// postcondition could not be proven.
+    PublicationNamespaceIndeterminate,
     /// The executor panicked and was isolated at the queue boundary.
     ExecutorPanicked,
 }
@@ -212,6 +324,16 @@ impl ExportFailure {
             reason: ExportFailureReason::ExecutorPanicked,
             detail: "export executor panicked; the attempt was isolated".to_owned(),
         }
+    }
+
+    fn publication(reason: ExportFailureReason, detail: impl Into<String>) -> Self {
+        debug_assert!(matches!(
+            reason,
+            ExportFailureReason::PublicationBeforeNamespace
+                | ExportFailureReason::PublicationDurabilityUnconfirmed
+                | ExportFailureReason::PublicationNamespaceIndeterminate
+        ));
+        Self { reason, detail: bounded_detail(detail.into()) }
     }
 }
 
@@ -247,8 +369,79 @@ impl JobStatus {
 
     /// Whether a new cancellation request is meaningful.
     pub const fn can_cancel(&self) -> bool {
-        matches!(self, Self::Pending | Self::Running { .. })
+        matches!(self, Self::Pending)
+            || matches!(
+                self,
+                Self::Running {
+                    phase: ExportProgressPhase::Preparing
+                        | ExportProgressPhase::Rendering
+                        | ExportProgressPhase::Encoding
+                        | ExportProgressPhase::Validating
+                }
+            )
     }
+}
+
+/// Publication authority for one exact export attempt.
+///
+/// `Committing` is the queue-locked irreversible boundary. Cancellation and
+/// resource-yield requests arriving in that state are explicitly too late;
+/// they must not mutate the shared cancellation token or claim success.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportPublicationState {
+    /// The attempt has not crossed atomic deliverable publication.
+    #[default]
+    Reversible,
+    /// The attempt owns the irreversible publication section.
+    Committing,
+    /// The validated deliverable was published.
+    Published,
+    /// The target names the validated deliverable, but directory durability
+    /// was not confirmed. This is not a successful publication and requires
+    /// operator-visible recovery before retry.
+    DurabilityUnconfirmed,
+    /// The attempt ended before publication.
+    NotPublished,
+    /// Execution failed after committing publication authority, so a final
+    /// artifact observation is required before retry or cleanup.
+    OutcomeUnknown,
+}
+
+/// Typed terminal evidence for the deliverable namespace of one exact export
+/// attempt.
+///
+/// Paths are absolute routes frozen at queue admission. `Durable` is the only
+/// variant that authorizes `JobStatus::Completed` and
+/// `ExportPublicationState::Published`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum ExportArtifactPublicationEvidence {
+    /// The validated deliverable is durably published at the admitted route.
+    Durable {
+        /// Absolute final output route.
+        output_path: PathBuf,
+    },
+    /// No irreversible namespace operation is known to have completed.
+    BeforeNamespace {
+        /// Absolute intended final output route.
+        output_path: PathBuf,
+        /// Exact validated partial object retained for diagnosis or retry.
+        retained_partial_path: Option<PathBuf>,
+    },
+    /// The final route names the new object, but directory crash durability is
+    /// unconfirmed.
+    DurabilityUnconfirmed {
+        /// Absolute final output route.
+        output_path: PathBuf,
+    },
+    /// The final namespace postcondition cannot be proven.
+    NamespaceIndeterminate {
+        /// Absolute intended final output route.
+        output_path: PathBuf,
+        /// Verified surviving route to the new bytes, when one was observed.
+        retained_partial_path: Option<PathBuf>,
+    },
 }
 
 /// Immutable heavy submission consumed exactly once by the export worker.
@@ -280,12 +473,16 @@ pub struct ExportJobSnapshot {
     pub generation: u64,
     /// Final output path, without retaining the heavy timeline payload.
     pub output_path: PathBuf,
+    /// Final namespace policy frozen at admission.
+    pub output_policy: ExportOutputPolicy,
     /// Human-readable preset identity captured at admission.
     pub preset_name: String,
     /// Current lifecycle state.
     pub status: JobStatus,
     /// Latest monotonic progress.
     pub progress: ExportProgress,
+    /// Typed publication authority and terminal outcome.
+    pub publication: ExportPublicationState,
     /// Bounded execution diagnostics.
     pub diagnostics: ExportJobDiagnostics,
     /// Admission timestamp.
@@ -296,6 +493,9 @@ pub struct ExportJobSnapshot {
     pub completed_at: Option<DateTime<Utc>>,
     /// Shared terminal evidence, present only after completion.
     pub terminal_evidence: Option<ExecutionTerminalEvidence>,
+    /// Deliverable publication evidence, present after an attempted
+    /// publication reaches a typed terminal result.
+    pub artifact_publication: Option<ExportArtifactPublicationEvidence>,
     /// Whether this attempt crossed the worker execution boundary.
     pub executed: bool,
 }
@@ -311,6 +511,8 @@ pub enum ExportAdmissionError {
     OutputPathBusy { path: PathBuf },
     /// The supplied final output path cannot name a deliverable.
     InvalidOutputPath { path: PathBuf },
+    /// Create-only publication was requested for an already occupied route.
+    OutputAlreadyExists { path: PathBuf },
     /// The dedicated worker could not be started.
     WorkerUnavailable { detail: String },
     /// The queue can no longer issue a unique monotonic attempt generation.
@@ -333,6 +535,13 @@ impl std::fmt::Display for ExportAdmissionError {
             Self::InvalidOutputPath { path } => {
                 write!(formatter, "invalid export output path {}", path.display())
             }
+            Self::OutputAlreadyExists { path } => {
+                write!(
+                    formatter,
+                    "export output already exists: {}",
+                    path.display()
+                )
+            }
             Self::WorkerUnavailable { detail } => formatter.write_str(detail),
             Self::GenerationExhausted => {
                 formatter.write_str("export attempt generation space is exhausted")
@@ -350,6 +559,8 @@ pub enum ExportCancelOutcome {
     Requested,
     /// Cancellation was already requested.
     AlreadyRequested,
+    /// Publication already crossed the irreversible queue-locked boundary.
+    TooLateCommitting,
     /// The identity exists but is already terminal.
     AlreadyTerminal,
     /// No retained job has this identity.
@@ -359,14 +570,29 @@ pub enum ExportCancelOutcome {
 /// Bounded Headless diagnostics for the offline export Module.
 #[derive(Debug, Clone, Default)]
 pub struct ExportQueueDiagnostics {
-    /// Monotonic state revision.
+    /// Wrapping observation token for all queue state exposed here.
+    ///
+    /// Consumers compare this token only for equality; it is not a job
+    /// generation, event count, or linearizable snapshot version.
     pub revision: u64,
+    /// Bounded worker-start failure, if the queue could not create its executor.
+    pub worker_failure: Option<String>,
+    /// Whether pending dispatch and running safe-boundary execution are admitted.
+    pub dispatch_enabled: bool,
+    /// Resource grant that the next dispatched attempt will freeze.
+    pub resource_policy: ExportExecutionResourcePolicy,
+    /// Whether running attempts have been asked to yield at their next safe boundary.
+    pub running_yield_requested: bool,
+    /// Running or cancelling attempts currently blocked at a safe execution boundary.
+    pub running_yielded: usize,
     /// Jobs waiting for the worker.
     pub pending: usize,
     /// Jobs executing normally.
     pub running: usize,
     /// Jobs awaiting cooperative cancellation.
     pub cancelling: usize,
+    /// Jobs inside the irreversible publication section.
+    pub committing: usize,
     /// Lightweight terminal history retained.
     pub terminal: usize,
     /// Successful admissions since queue creation.
@@ -375,6 +601,8 @@ pub struct ExportQueueDiagnostics {
     pub rejections: u64,
     /// Accepted cancellation requests.
     pub cancellation_requests: u64,
+    /// Cancellation requests rejected at the irreversible publication boundary.
+    pub too_late_cancellation_requests: u64,
     /// Successful publications.
     pub completions: u64,
     /// Failed admitted attempts.
@@ -390,6 +618,7 @@ struct ExportQueueCounters {
     admissions: u64,
     rejections: u64,
     cancellation_requests: u64,
+    too_late_cancellation_requests: u64,
     completions: u64,
     failures: u64,
     cancellations: u64,
@@ -400,12 +629,15 @@ struct ExportJobEntry {
     payload: Option<RenderJob>,
     cancellation: ExecutionCancellationToken,
     output_key: String,
+    execution_yielded: bool,
 }
 
 #[derive(Default)]
 struct ExportQueueState {
     jobs: VecDeque<ExportJobEntry>,
     next_generation: u64,
+    dispatch_enabled: bool,
+    resource_policy: ExportExecutionResourcePolicy,
     worker_failure: Option<String>,
     counters: ExportQueueCounters,
 }
@@ -415,6 +647,165 @@ struct RenderQueueInner {
     wake: Condvar,
     shutdown: AtomicBool,
     revision: AtomicU64,
+    jobs_revision: AtomicU64,
+}
+
+impl RenderQueueInner {
+    fn mark_diagnostics_changed(&self) {
+        self.revision.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn mark_jobs_changed(&self) {
+        self.revision.fetch_add(1, Ordering::AcqRel);
+        self.jobs_revision.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+/// Queue-owned cooperative execution authority for one exact export attempt.
+///
+/// The handle is intentionally crate-private: every executor is owned by the
+/// export Module and must rendezvous here at frame, audio-block, or phase
+/// boundaries. Entering `Publishing` atomically commits the attempt while
+/// dispatch is enabled; after that irreversible point neither a later yield
+/// request nor queue shutdown may interrupt publication.
+pub(crate) struct ExportExecutionGate {
+    authority: ExportExecutionGateAuthority,
+}
+
+enum ExportExecutionGateAuthority {
+    Queue {
+        inner: Arc<RenderQueueInner>,
+        job_id: JobId,
+        generation: u64,
+        resource_policy: Box<ExportExecutionResourcePolicy>,
+    },
+    #[cfg(test)]
+    AlwaysOpen,
+}
+
+impl ExportExecutionGate {
+    fn for_attempt(
+        inner: Arc<RenderQueueInner>,
+        job_id: JobId,
+        generation: u64,
+        resource_policy: ExportExecutionResourcePolicy,
+    ) -> Self {
+        Self {
+            authority: ExportExecutionGateAuthority::Queue {
+                inner,
+                job_id,
+                generation,
+                resource_policy: Box::new(resource_policy),
+            },
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn always_open_for_test() -> Self {
+        Self {
+            authority: ExportExecutionGateAuthority::AlwaysOpen,
+        }
+    }
+
+    /// Monotonic identity of the exact admitted export attempt.
+    ///
+    /// Execution-owned caches use this as a generation barrier. Test-only
+    /// always-open gates use generation zero inside their isolated Sessions.
+    pub(crate) fn attempt_generation(&self) -> u64 {
+        match &self.authority {
+            ExportExecutionGateAuthority::Queue { generation, .. } => *generation,
+            #[cfg(test)]
+            ExportExecutionGateAuthority::AlwaysOpen => 0,
+        }
+    }
+
+    /// Freeze the queue's current resource grant for this attempt.
+    ///
+    /// Callers invoke this once after the Preparing gate opens and retain the
+    /// returned value for the complete attempt.
+    pub(crate) fn resource_policy(&self) -> ExportExecutionResourcePolicy {
+        match &self.authority {
+            ExportExecutionGateAuthority::Queue { resource_policy, .. } => **resource_policy,
+            #[cfg(test)]
+            ExportExecutionGateAuthority::AlwaysOpen => ExportExecutionResourcePolicy::default(),
+        }
+    }
+
+    /// Wait until execution is admitted at this safe boundary.
+    ///
+    /// `false` means cancellation or queue shutdown was observed before the
+    /// irreversible publication point. A `Publishing` checkpoint waits for an
+    /// already-requested yield, then atomically commits publication. Every
+    /// later checkpoint for that attempt remains open.
+    #[must_use = "a closed export execution gate requires the executor to stop cooperatively"]
+    pub(crate) fn wait_at_boundary(
+        &self,
+        phase: ExportProgressPhase,
+        cancellation: &ExecutionCancellationToken,
+    ) -> bool {
+        match &self.authority {
+            ExportExecutionGateAuthority::Queue { inner, job_id, generation, .. } => {
+                wait_at_queue_execution_boundary(inner, *job_id, *generation, phase, cancellation)
+            }
+            #[cfg(test)]
+            ExportExecutionGateAuthority::AlwaysOpen => {
+                phase == ExportProgressPhase::Publishing || !cancellation.is_canceled()
+            }
+        }
+    }
+}
+
+fn wait_at_queue_execution_boundary(
+    inner: &RenderQueueInner,
+    job_id: JobId,
+    generation: u64,
+    phase: ExportProgressPhase,
+    cancellation: &ExecutionCancellationToken,
+) -> bool {
+    let mut state = inner.state.lock();
+    loop {
+        let Some(index) = state.jobs.iter().position(|entry| {
+            entry.snapshot.id == job_id && entry.snapshot.generation == generation
+        }) else {
+            return false;
+        };
+        if state.jobs[index].snapshot.publication == ExportPublicationState::Committing {
+            return true;
+        }
+        if state.jobs[index].snapshot.status.is_terminal()
+            || cancellation.is_canceled()
+            || inner.shutdown.load(Ordering::Acquire)
+        {
+            if state.jobs[index].execution_yielded {
+                state.jobs[index].execution_yielded = false;
+                inner.mark_diagnostics_changed();
+            }
+            return false;
+        }
+        if state.dispatch_enabled {
+            let entry = &mut state.jobs[index];
+            let changed = entry.execution_yielded;
+            entry.execution_yielded = false;
+            if phase == ExportProgressPhase::Publishing {
+                entry.snapshot.publication = ExportPublicationState::Committing;
+                entry.snapshot.progress =
+                    ExportProgress::publishing(entry.snapshot.progress.fraction);
+                entry.snapshot.status =
+                    JobStatus::Running { phase: ExportProgressPhase::Publishing };
+            }
+            if phase == ExportProgressPhase::Publishing {
+                inner.mark_jobs_changed();
+            } else if changed {
+                inner.mark_diagnostics_changed();
+            }
+            return true;
+        }
+        if !state.jobs[index].execution_yielded {
+            state.jobs[index].execution_yielded = true;
+            inner.mark_diagnostics_changed();
+        }
+        inner.wake.wait(&mut state);
+    }
 }
 
 /// Instance-owned bounded offline export queue.
@@ -433,11 +824,14 @@ impl RenderQueue {
             inner: Arc::new(RenderQueueInner {
                 state: Mutex::new(ExportQueueState {
                     next_generation: 1,
+                    dispatch_enabled: true,
+                    resource_policy: ExportExecutionResourcePolicy::default(),
                     ..ExportQueueState::default()
                 }),
                 wake: Condvar::new(),
                 shutdown: AtomicBool::new(false),
-                revision: AtomicU64::new(1),
+                revision: AtomicU64::new(0),
+                jobs_revision: AtomicU64::new(0),
             }),
         });
         queue.spawn_worker(executor);
@@ -451,32 +845,139 @@ impl RenderQueue {
             .spawn(move || export_worker_loop(inner, executor))
         {
             let mut state = self.inner.state.lock();
-            state.worker_failure = Some(format!("failed to start export worker: {error}"));
+            state.worker_failure = Some(bounded_detail(format!(
+                "failed to start export worker: {error}"
+            )));
             drop(state);
-            self.mark_changed();
+            self.mark_diagnostics_changed();
         }
     }
 
     /// Admit a heavy immutable submission or return a structured rejection.
-    pub fn enqueue(&self, job: RenderJob) -> Result<JobId, ExportAdmissionError> {
+    pub fn enqueue(&self, mut job: RenderJob) -> Result<JobId, ExportAdmissionError> {
+        let include_audio = !matches!(job.config.preset.audio, AudioCodecConfig::Disabled);
+        let resource_policy = self.inner.state.lock().resource_policy;
+        if job.config.timeline.prepared_execution().is_none() {
+            let prepared = match prepare_timeline_export_dependencies(
+                &job.config.timeline.sequence,
+                &job.config.timeline.sequences,
+                job.config.timeline.range,
+                include_audio,
+            ) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    return self.reject(ExportAdmissionError::InvalidDelivery {
+                        detail: format!(
+                            "failed to prepare immutable export execution snapshot: {error}"
+                        ),
+                    });
+                }
+            };
+            let root_sequence_id = job.config.timeline.sequence.id;
+            job.config.timeline.sequences.retain(|sequence| {
+                sequence.id != root_sequence_id && prepared.sequence_ids().contains(&sequence.id)
+            });
+            job.config.timeline.media.retain(|asset_id, dependency| {
+                let Some(components) = prepared.media_components().get(asset_id) else {
+                    return false;
+                };
+                dependency
+                    .audio_components
+                    .retain(|component_id, _| components.contains(component_id));
+                true
+            });
+            job.config
+                .timeline
+                .install_prepared_execution(prepared.execution_snapshot().clone());
+        }
+        for sequence in std::iter::once(&job.config.timeline.sequence)
+            .chain(job.config.timeline.sequences.iter())
+        {
+            if let Err(error) =
+                sequence.validate_author_contract(&job.config.timeline.color_environment)
+            {
+                return self.reject(ExportAdmissionError::InvalidDelivery {
+                    detail: format!(
+                        "selected Sequence {} has invalid author state: {error}",
+                        sequence.id
+                    ),
+                });
+            }
+        }
+        let Some(prepared_execution) = job.config.timeline.prepared_execution() else {
+            return self.reject(ExportAdmissionError::InvalidDelivery {
+                detail: "immutable export visual execution snapshot is unavailable".to_owned(),
+            });
+        };
+        let prepared_visual = prepared_execution.visual();
+        if prepared_visual.title_fonts().is_none() {
+            let title_fonts = match PreparedBasicTitleFontSet::prepare(
+                prepared_visual.basic_title_font_queries().iter().cloned(),
+                resource_policy.title_font_bytes,
+            ) {
+                Ok(title_fonts) => title_fonts,
+                Err(error) => {
+                    return self.reject(ExportAdmissionError::InvalidDelivery {
+                        detail: format!("failed to freeze Basic Title font dependencies: {error}"),
+                    });
+                }
+            };
+            if let Err(error) = job.config.timeline.install_prepared_title_fonts(title_fonts) {
+                return self.reject(ExportAdmissionError::InvalidDelivery {
+                    detail: format!("failed to seal Basic Title font dependency closure: {error}"),
+                });
+            }
+        }
+        let Some(prepared_execution) = job.config.timeline.prepared_execution() else {
+            return self.reject(ExportAdmissionError::InvalidDelivery {
+                detail: "immutable export visual execution snapshot is unavailable".to_owned(),
+            });
+        };
+        if let Err(error) = validate_timeline_export_execution_snapshot(
+            &job.config.timeline.sequence,
+            &job.config.timeline.sequences,
+            &job.config.timeline.color_environment,
+            job.config.timeline.range,
+            include_audio,
+            prepared_execution,
+            &job.config.timeline.media,
+        ) {
+            return self.reject(ExportAdmissionError::InvalidDelivery {
+                detail: format!("invalid immutable export execution snapshot: {error}"),
+            });
+        }
         if let Err(detail) =
             super::resolve_timeline_export_delivery(&job.config, job.config.timeline.as_ref())
         {
             return self.reject(ExportAdmissionError::InvalidDelivery { detail });
         }
-        let output_path = job.config.output_path.clone();
-        let Some(output_key) =
-            output_reservation_key(&output_path).filter(|_| !output_path.is_dir())
-        else {
-            return self.reject(ExportAdmissionError::InvalidOutputPath { path: output_path });
+        let requested_output_path = job.config.output_path.clone();
+        let Some((output_path, output_key)) = resolve_output_route(&requested_output_path) else {
+            return self
+                .reject(ExportAdmissionError::InvalidOutputPath { path: requested_output_path });
         };
+        match std::fs::symlink_metadata(&output_path) {
+            Ok(metadata) if !metadata.file_type().is_file() => {
+                return self.reject(ExportAdmissionError::InvalidOutputPath { path: output_path });
+            }
+            Ok(_) if job.config.output_policy == ExportOutputPolicy::CreateNew => {
+                return self
+                    .reject(ExportAdmissionError::OutputAlreadyExists { path: output_path });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return self.reject(ExportAdmissionError::InvalidOutputPath { path: output_path });
+            }
+        }
+        job.config.output_path = output_path.clone();
 
         let mut state = self.inner.state.lock();
         if let Some(detail) = &state.worker_failure {
             let error = ExportAdmissionError::WorkerUnavailable { detail: detail.clone() };
             state.counters.rejections = state.counters.rejections.saturating_add(1);
             drop(state);
-            self.mark_changed();
+            self.mark_diagnostics_changed();
             return Err(error);
         }
         let in_flight =
@@ -486,7 +987,7 @@ impl RenderQueue {
                 ExportAdmissionError::CapacityExceeded { capacity: EXPORT_IN_FLIGHT_CAPACITY };
             state.counters.rejections = state.counters.rejections.saturating_add(1);
             drop(state);
-            self.mark_changed();
+            self.mark_diagnostics_changed();
             return Err(error);
         }
         if state
@@ -497,7 +998,7 @@ impl RenderQueue {
             let error = ExportAdmissionError::OutputPathBusy { path: output_path };
             state.counters.rejections = state.counters.rejections.saturating_add(1);
             drop(state);
-            self.mark_changed();
+            self.mark_diagnostics_changed();
             return Err(error);
         }
 
@@ -505,7 +1006,7 @@ impl RenderQueue {
         let Some(next_generation) = generation.checked_add(1) else {
             state.counters.rejections = state.counters.rejections.saturating_add(1);
             drop(state);
-            self.mark_changed();
+            self.mark_diagnostics_changed();
             return Err(ExportAdmissionError::GenerationExhausted);
         };
         state.next_generation = next_generation;
@@ -514,14 +1015,17 @@ impl RenderQueue {
             id,
             generation,
             output_path: job.config.output_path.clone(),
+            output_policy: job.config.output_policy,
             preset_name: job.config.preset.name.clone(),
             status: JobStatus::Pending,
             progress: ExportProgress::default(),
+            publication: ExportPublicationState::Reversible,
             diagnostics: ExportJobDiagnostics::default(),
             created_at: job.created_at,
             started_at: None,
             completed_at: None,
             terminal_evidence: None,
+            artifact_publication: None,
             executed: false,
         };
         state.jobs.push_back(ExportJobEntry {
@@ -529,10 +1033,11 @@ impl RenderQueue {
             payload: Some(job),
             cancellation: ExecutionCancellationToken::new(),
             output_key,
+            execution_yielded: false,
         });
         state.counters.admissions = state.counters.admissions.saturating_add(1);
         drop(state);
-        self.mark_changed();
+        self.mark_jobs_changed();
         self.inner.wake.notify_one();
         Ok(id)
     }
@@ -541,7 +1046,7 @@ impl RenderQueue {
         let mut state = self.inner.state.lock();
         state.counters.rejections = state.counters.rejections.saturating_add(1);
         drop(state);
-        self.mark_changed();
+        self.mark_diagnostics_changed();
         Err(error)
     }
 
@@ -568,6 +1073,7 @@ impl RenderQueue {
                 entry.cancellation.cancel();
                 entry.payload = None;
                 entry.snapshot.status = JobStatus::Cancelled;
+                entry.snapshot.publication = ExportPublicationState::NotPublished;
                 entry.snapshot.completed_at = Some(Utc::now());
                 entry.snapshot.terminal_evidence = Some(ExecutionTerminalEvidence {
                     generation: entry.snapshot.generation,
@@ -582,12 +1088,18 @@ impl RenderQueue {
                 ExportCancelOutcome::Requested
             }
             JobStatus::Running { phase } => {
-                let entry = &mut state.jobs[index];
-                entry.cancellation.cancel();
-                entry.snapshot.status = JobStatus::Cancelling { phase };
-                state.counters.cancellation_requests =
-                    state.counters.cancellation_requests.saturating_add(1);
-                ExportCancelOutcome::Requested
+                if state.jobs[index].snapshot.publication == ExportPublicationState::Committing {
+                    state.counters.too_late_cancellation_requests =
+                        state.counters.too_late_cancellation_requests.saturating_add(1);
+                    ExportCancelOutcome::TooLateCommitting
+                } else {
+                    let entry = &mut state.jobs[index];
+                    entry.cancellation.cancel();
+                    entry.snapshot.status = JobStatus::Cancelling { phase };
+                    state.counters.cancellation_requests =
+                        state.counters.cancellation_requests.saturating_add(1);
+                    ExportCancelOutcome::Requested
+                }
             }
             JobStatus::Cancelling { .. } => ExportCancelOutcome::AlreadyRequested,
             JobStatus::Completed | JobStatus::Failed(_) | JobStatus::Cancelled => {
@@ -596,8 +1108,10 @@ impl RenderQueue {
         };
         drop(state);
         if outcome == ExportCancelOutcome::Requested {
-            self.mark_changed();
+            self.mark_jobs_changed();
             self.inner.wake.notify_all();
+        } else if outcome == ExportCancelOutcome::TooLateCommitting {
+            self.mark_diagnostics_changed();
         }
         outcome
     }
@@ -610,13 +1124,59 @@ impl RenderQueue {
         let changed = state.jobs.len() != before;
         drop(state);
         if changed {
-            self.mark_changed();
+            self.mark_jobs_changed();
         }
     }
 
-    /// Current monotonic observation revision.
+    /// Current wrapping observation token for all queue state and diagnostics.
+    ///
+    /// Only equality comparison is meaningful. The token is a non-consuming
+    /// dirty hint, not a job generation, event count, or snapshot version.
     pub fn revision(&self) -> u64 {
         self.inner.revision.load(Ordering::Acquire)
+    }
+
+    /// Current wrapping observation token for the retained job snapshots.
+    ///
+    /// Resource policy, dispatch admission, and execution-yield diagnostics do
+    /// not advance this revision. Presentation observers can therefore update
+    /// export jobs without invalidating unrelated editor or Preview state.
+    /// Only equality comparison is meaningful.
+    pub fn jobs_revision(&self) -> u64 {
+        self.inner.jobs_revision.load(Ordering::Acquire)
+    }
+
+    /// Pause or resume pending dispatch and running cooperative execution.
+    ///
+    /// Admission remains bounded and available while paused, so an explicit
+    /// user export is retained and visible rather than silently discarded.
+    /// Running attempts yield at their next declared safe boundary. An attempt
+    /// that atomically entered `Publishing` is already irreversible and is
+    /// never interrupted by this policy.
+    pub fn set_dispatch_enabled(&self, enabled: bool) {
+        let mut state = self.inner.state.lock();
+        if state.dispatch_enabled == enabled {
+            return;
+        }
+        state.dispatch_enabled = enabled;
+        drop(state);
+        self.mark_diagnostics_changed();
+        self.inner.wake.notify_all();
+    }
+
+    /// Publish the resource grant that the next dispatched attempt will freeze.
+    ///
+    /// An already-running attempt retains its prior immutable grant. This
+    /// avoids silently changing temporal admission or cache residency halfway
+    /// through one deterministic offline render.
+    pub fn set_resource_policy(&self, policy: ExportExecutionResourcePolicy) {
+        let mut state = self.inner.state.lock();
+        if state.resource_policy == policy {
+            return;
+        }
+        state.resource_policy = policy;
+        drop(state);
+        self.mark_diagnostics_changed();
     }
 
     /// Snapshot bounded queue health and lightweight job evidence.
@@ -624,18 +1184,32 @@ impl RenderQueue {
         let state = self.inner.state.lock();
         let mut diagnostics = ExportQueueDiagnostics {
             revision: self.revision(),
+            worker_failure: state.worker_failure.clone(),
+            dispatch_enabled: state.dispatch_enabled,
+            resource_policy: state.resource_policy,
             admissions: state.counters.admissions,
             rejections: state.counters.rejections,
             cancellation_requests: state.counters.cancellation_requests,
+            too_late_cancellation_requests: state.counters.too_late_cancellation_requests,
             completions: state.counters.completions,
             failures: state.counters.failures,
             cancellations: state.counters.cancellations,
             jobs: state.jobs.iter().map(|entry| entry.snapshot.clone()).collect(),
             ..ExportQueueDiagnostics::default()
         };
+        diagnostics.running_yield_requested = !state.dispatch_enabled
+            && state.jobs.iter().any(|entry| {
+                matches!(entry.snapshot.status, JobStatus::Running { .. })
+                    && entry.snapshot.publication == ExportPublicationState::Reversible
+            });
         for entry in &state.jobs {
+            diagnostics.running_yielded += usize::from(entry.execution_yielded);
+            diagnostics.committing +=
+                usize::from(entry.snapshot.publication == ExportPublicationState::Committing);
             match entry.snapshot.status {
                 JobStatus::Pending => diagnostics.pending += 1,
+                JobStatus::Running { .. }
+                    if entry.snapshot.publication == ExportPublicationState::Committing => {}
                 JobStatus::Running { .. } => diagnostics.running += 1,
                 JobStatus::Cancelling { .. } => diagnostics.cancelling += 1,
                 JobStatus::Completed | JobStatus::Failed(_) | JobStatus::Cancelled => {
@@ -646,8 +1220,12 @@ impl RenderQueue {
         diagnostics
     }
 
-    fn mark_changed(&self) {
-        self.inner.revision.fetch_add(1, Ordering::AcqRel);
+    fn mark_diagnostics_changed(&self) {
+        self.inner.mark_diagnostics_changed();
+    }
+
+    fn mark_jobs_changed(&self) {
+        self.inner.mark_jobs_changed();
     }
 }
 
@@ -656,7 +1234,9 @@ impl Drop for RenderQueue {
         self.inner.shutdown.store(true, Ordering::Release);
         let state = self.inner.state.lock();
         for entry in &state.jobs {
-            if !entry.snapshot.status.is_terminal() {
+            if !entry.snapshot.status.is_terminal()
+                && entry.snapshot.publication != ExportPublicationState::Committing
+            {
                 entry.cancellation.cancel();
             }
         }
@@ -669,6 +1249,7 @@ struct ExportWork {
     job: RenderJob,
     generation: u64,
     cancellation: ExecutionCancellationToken,
+    resource_policy: ExportExecutionResourcePolicy,
 }
 
 fn export_worker_loop(inner: Arc<RenderQueueInner>, executor: Arc<dyn ExportExecutor>) {
@@ -683,10 +1264,17 @@ fn export_worker_loop(inner: Arc<RenderQueueInner>, executor: Arc<dyn ExportExec
         let mut report_diagnostics = move |diagnostics: ExportJobDiagnostics| {
             update_job_diagnostics(&diagnostics_inner, job_id, generation, diagnostics);
         };
+        let execution_gate = ExportExecutionGate::for_attempt(
+            Arc::clone(&inner),
+            job_id,
+            generation,
+            work.resource_policy,
+        );
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             executor.execute(
                 &work.job,
                 &work.cancellation,
+                &execution_gate,
                 &mut report,
                 &mut report_diagnostics,
             )
@@ -708,17 +1296,20 @@ fn take_next_pending_job(inner: &RenderQueueInner) -> Option<ExportWork> {
         if inner.shutdown.load(Ordering::Acquire) {
             return None;
         }
-        if let Some(index) = state
-            .jobs
-            .iter()
-            .position(|entry| matches!(entry.snapshot.status, JobStatus::Pending))
-        {
+        let pending_index = state.dispatch_enabled.then(|| {
+            state
+                .jobs
+                .iter()
+                .position(|entry| matches!(entry.snapshot.status, JobStatus::Pending))
+        });
+        if let Some(index) = pending_index.flatten() {
             let Some(job) = state.jobs[index].payload.take() else {
                 let generation = state.jobs[index].snapshot.generation;
                 let entry = &mut state.jobs[index];
                 entry.snapshot.status = JobStatus::Failed(ExportFailure::execution(
                     "admitted export payload was unavailable at dispatch",
                 ));
+                entry.snapshot.publication = ExportPublicationState::NotPublished;
                 entry.snapshot.completed_at = Some(Utc::now());
                 entry.snapshot.terminal_evidence = Some(ExecutionTerminalEvidence {
                     generation,
@@ -728,9 +1319,10 @@ fn take_next_pending_job(inner: &RenderQueueInner) -> Option<ExportWork> {
                 });
                 state.counters.failures = state.counters.failures.saturating_add(1);
                 trim_terminal_history(&mut state);
-                inner.revision.fetch_add(1, Ordering::AcqRel);
+                inner.mark_jobs_changed();
                 continue;
             };
+            let resource_policy = state.resource_policy;
             let entry = &mut state.jobs[index];
             entry.snapshot.status = JobStatus::Running { phase: ExportProgressPhase::Preparing };
             entry.snapshot.started_at = Some(Utc::now());
@@ -739,9 +1331,10 @@ fn take_next_pending_job(inner: &RenderQueueInner) -> Option<ExportWork> {
                 job,
                 generation: entry.snapshot.generation,
                 cancellation: entry.cancellation.clone(),
+                resource_policy,
             };
             drop(state);
-            inner.revision.fetch_add(1, Ordering::AcqRel);
+            inner.mark_jobs_changed();
             return Some(work);
         }
         inner.wake.wait(&mut state);
@@ -762,17 +1355,24 @@ fn update_job_progress(
     else {
         return;
     };
-    if !matches!(entry.snapshot.status, JobStatus::Running { .. }) {
+    if !matches!(entry.snapshot.status, JobStatus::Running { .. })
+        || entry.snapshot.publication == ExportPublicationState::Committing
+        || progress.phase == ExportProgressPhase::Publishing
+    {
         return;
     }
     if progress.phase.rank() < entry.snapshot.progress.phase.rank() {
         return;
     }
     let progress = progress.normalized(entry.snapshot.progress);
+    let status = JobStatus::Running { phase: progress.phase };
+    if entry.snapshot.progress == progress && entry.snapshot.status == status {
+        return;
+    }
     entry.snapshot.progress = progress;
-    entry.snapshot.status = JobStatus::Running { phase: progress.phase };
+    entry.snapshot.status = status;
     drop(state);
-    inner.revision.fetch_add(1, Ordering::AcqRel);
+    inner.mark_jobs_changed();
 }
 
 fn update_job_diagnostics(
@@ -792,9 +1392,12 @@ fn update_job_diagnostics(
     if entry.snapshot.status.is_terminal() {
         return;
     }
+    if entry.snapshot.diagnostics == diagnostics {
+        return;
+    }
     entry.snapshot.diagnostics = diagnostics;
     drop(state);
-    inner.revision.fetch_add(1, Ordering::AcqRel);
+    inner.mark_jobs_changed();
 }
 
 fn publish_terminal(
@@ -814,12 +1417,93 @@ fn publish_terminal(
     if state.jobs[index].snapshot.status.is_terminal() {
         return;
     }
-    let (status, disposition) = match outcome {
-        ExportWorkerOutcome::Execution(JobExecutionResult::Completed) => {
+    let publication_was_committing =
+        state.jobs[index].snapshot.publication == ExportPublicationState::Committing;
+    let (status, disposition, publication, artifact_publication) = match outcome {
+        ExportWorkerOutcome::Execution(JobExecutionResult::Published(evidence))
+            if !publication_was_committing =>
+        {
+            state.counters.failures = state.counters.failures.saturating_add(1);
+            (
+                JobStatus::Failed(ExportFailure::execution(
+                    "export executor reported completion without entering the irreversible publication gate",
+                )),
+                ExecutionTerminalDisposition::Failed,
+                ExportPublicationState::Published,
+                Some(evidence.into_terminal_evidence()),
+            )
+        }
+        ExportWorkerOutcome::Execution(JobExecutionResult::Published(evidence)) => {
             state.counters.completions = state.counters.completions.saturating_add(1);
             (
                 JobStatus::Completed,
                 ExecutionTerminalDisposition::Completed,
+                ExportPublicationState::Published,
+                Some(evidence.into_terminal_evidence()),
+            )
+        }
+        ExportWorkerOutcome::Execution(JobExecutionResult::PublicationFailed(failure)) => {
+            state.counters.failures = state.counters.failures.saturating_add(1);
+            let (failure, publication, evidence) = match failure {
+                ExportPublicationFailure::BeforeNamespace {
+                    output_path,
+                    retained_partial_path,
+                    detail,
+                } => (
+                    ExportFailure::publication(
+                        ExportFailureReason::PublicationBeforeNamespace,
+                        detail,
+                    ),
+                    ExportPublicationState::NotPublished,
+                    ExportArtifactPublicationEvidence::BeforeNamespace {
+                        output_path,
+                        retained_partial_path,
+                    },
+                ),
+                ExportPublicationFailure::DurabilityUnconfirmed { output_path, detail } => (
+                    ExportFailure::publication(
+                        ExportFailureReason::PublicationDurabilityUnconfirmed,
+                        detail,
+                    ),
+                    ExportPublicationState::DurabilityUnconfirmed,
+                    ExportArtifactPublicationEvidence::DurabilityUnconfirmed { output_path },
+                ),
+                ExportPublicationFailure::NamespaceIndeterminate {
+                    output_path,
+                    retained_partial_path,
+                    detail,
+                } => (
+                    ExportFailure::publication(
+                        ExportFailureReason::PublicationNamespaceIndeterminate,
+                        detail,
+                    ),
+                    ExportPublicationState::OutcomeUnknown,
+                    ExportArtifactPublicationEvidence::NamespaceIndeterminate {
+                        output_path,
+                        retained_partial_path,
+                    },
+                ),
+            };
+            (
+                JobStatus::Failed(failure),
+                ExecutionTerminalDisposition::Failed,
+                publication,
+                Some(evidence),
+            )
+        }
+        ExportWorkerOutcome::Execution(JobExecutionResult::ReversibleWorkCompleted) => {
+            state.counters.failures = state.counters.failures.saturating_add(1);
+            (
+                JobStatus::Failed(ExportFailure::execution(
+                    "export executor returned reversible work completion as a terminal queue outcome",
+                )),
+                ExecutionTerminalDisposition::Failed,
+                if publication_was_committing {
+                    ExportPublicationState::OutcomeUnknown
+                } else {
+                    ExportPublicationState::NotPublished
+                },
+                None,
             )
         }
         ExportWorkerOutcome::Execution(JobExecutionResult::Failed(detail)) => {
@@ -827,6 +1511,12 @@ fn publish_terminal(
             (
                 JobStatus::Failed(ExportFailure::execution(detail)),
                 ExecutionTerminalDisposition::Failed,
+                if publication_was_committing {
+                    ExportPublicationState::OutcomeUnknown
+                } else {
+                    ExportPublicationState::NotPublished
+                },
+                None,
             )
         }
         ExportWorkerOutcome::Panicked => {
@@ -834,17 +1524,44 @@ fn publish_terminal(
             (
                 JobStatus::Failed(ExportFailure::panic()),
                 ExecutionTerminalDisposition::Failed,
+                if publication_was_committing {
+                    ExportPublicationState::OutcomeUnknown
+                } else {
+                    ExportPublicationState::NotPublished
+                },
+                None,
+            )
+        }
+        ExportWorkerOutcome::Execution(JobExecutionResult::Cancelled)
+            if publication_was_committing =>
+        {
+            state.counters.failures = state.counters.failures.saturating_add(1);
+            (
+                JobStatus::Failed(ExportFailure::execution(
+                    "export executor reported cancellation after irreversible publication authority was committed",
+                )),
+                ExecutionTerminalDisposition::Failed,
+                ExportPublicationState::OutcomeUnknown,
+                None,
             )
         }
         ExportWorkerOutcome::Execution(JobExecutionResult::Cancelled) => {
             state.counters.cancellations = state.counters.cancellations.saturating_add(1);
-            (JobStatus::Cancelled, ExecutionTerminalDisposition::Canceled)
+            (
+                JobStatus::Cancelled,
+                ExecutionTerminalDisposition::Canceled,
+                ExportPublicationState::NotPublished,
+                None,
+            )
         }
     };
     let entry = &mut state.jobs[index];
     if matches!(status, JobStatus::Completed) {
         entry.snapshot.progress = ExportProgress::publishing(1.0);
     }
+    entry.execution_yielded = false;
+    entry.snapshot.publication = publication;
+    entry.snapshot.artifact_publication = artifact_publication;
     entry.snapshot.status = status;
     entry.snapshot.completed_at = Some(Utc::now());
     entry.snapshot.terminal_evidence = Some(ExecutionTerminalEvidence {
@@ -855,7 +1572,7 @@ fn publish_terminal(
     });
     trim_terminal_history(&mut state);
     drop(state);
-    inner.revision.fetch_add(1, Ordering::AcqRel);
+    inner.mark_jobs_changed();
     inner.wake.notify_all();
 }
 
@@ -871,7 +1588,7 @@ fn trim_terminal_history(state: &mut ExportQueueState) {
     }
 }
 
-fn output_reservation_key(path: &Path) -> Option<String> {
+fn resolve_output_route(path: &Path) -> Option<(PathBuf, String)> {
     if path.as_os_str().is_empty() || path.file_name().is_none() {
         return None;
     }
@@ -890,21 +1607,19 @@ fn output_reservation_key(path: &Path) -> Option<String> {
             other => normalized.push(other.as_os_str()),
         }
     }
-    let normalized = if normalized.exists() {
-        std::fs::canonicalize(&normalized).unwrap_or(normalized)
-    } else if let (Some(parent), Some(file_name)) = (normalized.parent(), normalized.file_name()) {
-        std::fs::canonicalize(parent)
-            .map(|canonical_parent| canonical_parent.join(file_name))
-            .unwrap_or(normalized)
-    } else {
-        normalized
-    };
+    let (parent, file_name) = (normalized.parent()?, normalized.file_name()?);
+    let canonical_parent = std::fs::canonicalize(parent).ok()?;
+    if !std::fs::metadata(&canonical_parent).ok()?.is_dir() {
+        return None;
+    }
+    let normalized = canonical_parent.join(file_name);
     let key = normalized.to_string_lossy().replace('/', "\\");
-    Some(if cfg!(windows) {
+    let key = if cfg!(windows) {
         key.to_lowercase()
     } else {
         key
-    })
+    };
+    Some((normalized, key))
 }
 
 fn bounded_detail(detail: String) -> String {

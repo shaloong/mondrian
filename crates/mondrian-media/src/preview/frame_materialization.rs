@@ -16,7 +16,6 @@ use super::{
 use crate::decoder::DecodedVideoSurfaceFormat;
 use ffmpeg_next as ffmpeg;
 use mondrian_core::{MondrianError, Result};
-use rayon::prelude::*;
 use std::path::Path;
 use std::ptr::NonNull;
 use std::time::Instant;
@@ -205,7 +204,7 @@ pub(super) fn resize_float_rgba(
     let scale_x = source_width as f32 / target_width as f32;
     let scale_y = source_height as f32 / target_height as f32;
     let mut output = vec![0.0_f32; target_width * target_height * 4];
-    output.par_chunks_mut(target_width * 4).enumerate().for_each(|(target_y, row)| {
+    for (target_y, row) in output.chunks_mut(target_width * 4).enumerate() {
         let source_y = ((target_y as f32 + 0.5) * scale_y - 0.5)
             .clamp(0.0, source_height.saturating_sub(1) as f32);
         let y0 = source_y.floor() as usize;
@@ -227,7 +226,7 @@ pub(super) fn resize_float_rgba(
                 row[target_x * 4 + channel] = top + (bottom - top) * fy;
             }
         }
-    });
+    }
     output
 }
 

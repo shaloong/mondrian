@@ -1,66 +1,107 @@
 //! 后台渲染队列
 
 use crate::delivery::ResolvedExportDeliveryContract;
+#[cfg(test)]
+use crate::preset::TimelineExportRange;
 use crate::preset::{
-    AudioCodecConfig, Container, ExportAlphaMode, ExportConfig, TimelineExportRange,
-    TimelineExportSnapshot, VideoCodecConfig,
+    AudioCodecConfig, Container, ExportAlphaMode, ExportConfig, ExportOutputPolicy,
+    ResolvedTimelineExportRange, TimelineExportSnapshot, VideoCodecConfig,
 };
 use crate::validator::{
     delivery_bit_depth_value, expected_audio_constraints, expected_video_encoding,
-    validate_export_output, ExpectedStream, ExpectedVideoConstraints, ExportValidationExpectations,
+    validate_export_output_cancellable, ExpectedStream, ExpectedVideoConstraints,
+    ExportValidationExpectations,
 };
+use crate::{PreparedTimelineAudioSnapshot, PreparedTimelineVisualSnapshot};
 use mondrian_audio::{
-    compile_audio_program, AudioCompileRequest, AudioContinuityEpoch, AudioDecodedSource,
-    AudioKernelBackend, AudioMediaResolver, AudioProcessingMode, AudioProgramRuntime,
-    AudioRenderContract, AudioRenderRequest, AudioStateEntry, PreparedAudioChannelMixer,
-    ResolvedAudioSource,
+    AudioContinuityEpoch, AudioDecodedSource, AudioKernelBackend, AudioMediaResolver,
+    AudioProcessingMode, AudioProgramRuntime, AudioRenderContract, AudioRenderRequest,
+    AudioStateEntry, PreparedAudioChannelMixer, ResolvedAudioSource,
 };
-use mondrian_core::timeline_data::AlphaInterpretation;
-use mondrian_core::types::{AssetId, ColorEngine, ColorSpace, FramePosition, JobId, Rational};
+use mondrian_core::timeline_data::{AlphaInterpretation, TimelineClipExecutionRef};
+#[cfg(test)]
+use mondrian_core::types::ColorEngine;
+use mondrian_core::types::{AssetId, ColorSpace, FramePosition, Rational};
 use mondrian_core::{
     AudioChannelLayout, AudioChannelMixMatrix, AudioSamplePosition, AudioSampleRate,
-    AudioSampleRounding, AudioSourceComponentId, ExecutionCancellationToken, FrameRounding,
-    Resolution, TimelineTime, WorkingColorSpace, WorkingRgbaF32Frame,
+    AudioSampleRounding, AudioSourceComponentId, ExecutionCancellationToken, Resolution,
+    SequenceId, TimelineTime, TimelineTimeRange, WorkingColorSpace, WorkingRgbaF32Frame,
+};
+use mondrian_effects::{
+    identity_compiled_effect_graph, EffectExecutionContinuity, EffectExecutionSessionConfig,
+    EffectFrameExtent, EffectFrameTileF32, EffectTemporalSourceIdentity, PreparedTemporalFrameSet,
 };
 use mondrian_media::AudioSourceCache;
+#[cfg(test)]
+use mondrian_media::PreviewDecodeSessionDisposition;
 use mondrian_media::{
-    decode_preview_frame_cancellable, DecodedVideoRange, DecodedVideoRangeContract,
-    MediaFileFingerprint, PreviewDecodeAccessMode, PreviewDecodeOutcome, PreviewDecodeRequest,
-    PreviewSourceColorContract, VideoColorDiagnosticIssueAggregate,
+    DecodedVideoRange, DecodedVideoRangeContract, MediaFileFingerprint, PreviewDecodeAccessMode,
+    PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodeRequest,
+    PreviewDecodeSessionContext, PreviewSourceColorContract, SupervisedChild,
+    SupervisedProcessError, SupervisedProcessPolicy, SupervisedStreamCapture,
+    VideoColorDiagnosticIssueAggregate,
 };
 use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
-    evaluate_timeline_render_plan, execute_cpu_output_boundary_float,
-    execute_cpu_output_boundary_rgba8, execute_cpu_source_input_stage,
-    execute_cpu_working_transform, project_affine_to_sampled_extents,
-    project_basic_title_transform, BasicTitleRasterizer, ColorFrameResidency, CpuColorFrame,
-    CpuEncodedColorFrame, CpuSourceColorFrame, GpuColorFrameReadbackPlan,
-    GpuColorFrameTextureFormat, GpuContext, LinearFloatSource, RenderColorStageDiagnostics,
+    execute_cpu_output_boundary_float_with_session, execute_cpu_output_boundary_rgba8_with_session,
+    execute_cpu_source_input_stage_with_session, execute_cpu_working_transform_with_session,
+    prepare_timeline_temporal_execution, prepare_visual_frame_closure,
+    project_affine_to_sampled_extents, project_basic_title_transform, BasicTitleRasterizer,
+    ColorFrameResidency, CpuColorFrame, CpuEncodedColorFrame, CpuSourceColorFrame,
+    GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat, GpuColorFrameWgpuResourcePool,
+    GpuColorFrameWgpuResourcePoolOptions, GpuContext, HeterogeneousGpuCompletedEvidence,
+    HeterogeneousGpuCompletedFrame, HeterogeneousGpuContinuationError,
+    HeterogeneousGpuContinuationRequest, HeterogeneousGpuContinuationRuntime,
+    HeterogeneousGpuExecutionCapability, LinearFloatSource, PreparedVisualChildCanvasPolicy,
+    PreparedVisualFrameClosure, PreparedVisualFrameClosureRequest, PreparedVisualFrameEvaluation,
+    PreparedVisualFrameNode, PreparedVisualFrameNodeId, PreparedVisualMaterializationContract,
+    PreparedVisualNestedSample, PreparedVisualProgram, RenderColorStageDiagnostics,
     RenderColorStageGpuBlockerBreakdown, RenderColorTransformGpuOptions,
     RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
+    RenderGpuOutputBoundaryRuntimeRecordError, RenderGpuOutputExecutionResourceGrant,
     RenderInputTransform, RenderOutputColorBoundary, TimelineAdjustmentLayer,
     TimelineBasicTitlePlan, TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
     TimelineCompositeDomainBlockerBreakdown, TimelineCompositeElement,
     TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineCrossDissolveLayer, TimelineEffectColorRuntime, TimelineEvaluationRequest,
-    TimelineMediaLayer, TimelineMediaPlan, TimelineNestedSequencePlan, TimelineRenderPlanElement,
-    TimelineSolidColorLayer, TimelineTransitionInput, TimelineTransitionInputPlan,
+    TimelineCpuCompositePrecision, TimelineCrossDissolveLayer, TimelineEffectColorRuntime,
+    TimelineEvaluationRequest, TimelineMediaLayer, TimelineMediaPlan, TimelineRenderPlan,
+    TimelineRenderPlanElement, TimelineSolidColorLayer, TimelineTemporalDemandBatch,
+    TimelineTemporalSource, TimelineTransitionInput, TimelineTransitionInputPlan,
+};
+#[cfg(test)]
+use mondrian_renderer::{PreparedVisualProgramCache, PreparedVisualProgramCacheConfig};
+use mondrian_storage::{
+    FilePublicationEvidence, FilePublicationFailure, FilePublicationMode, OwnedPublicationFile,
 };
 use mondrian_timeline::sequence::{
     DeliveryBitDepth, InputColorResolutionSourceCounts, ProgramColorContext, ResolvedInputColor,
-    SequenceSettings, VideoRange, MAX_NESTED_SEQUENCE_RENDER_DEPTH,
+    SequenceSettings, VideoRange,
 };
-use mondrian_timeline::PreparedVisualScheduleCache;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::HashSet;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::process::{ChildStdin, Command, Stdio};
-use std::sync::{mpsc, Arc, Mutex as StdMutex, OnceLock};
+use std::process::Command;
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 
 mod service;
+#[cfg(feature = "validation")]
+mod validation;
+mod visual_effect_execution;
 pub use service::*;
+#[cfg(feature = "validation")]
+pub use validation::{export_visual_frame_validation, ExportVisualFrameValidation};
+use visual_effect_execution::{
+    prepare_export_effect_frame_plan, ExportHeterogeneousRouteContract,
+    PreparedExportHeterogeneousElement,
+};
+#[cfg(test)]
+use visual_effect_execution::{ExportHeterogeneousEffectError, ExportHeterogeneousPlacement};
 
 /// Internal pipe contract selected from the requested delivery bit depth.
 ///
@@ -159,6 +200,7 @@ fn export_frame_contract(bit_depth: DeliveryBitDepth) -> ExportFrameContract {
 fn cpu_output_boundary_float(
     frame: &CpuColorFrame,
     boundary: &RenderOutputColorBoundary,
+    session: &mut mondrian_renderer::RenderCpuColorExecutionSession,
 ) -> Result<
     mondrian_renderer::RenderOutputColorBoundaryFloat,
     mondrian_renderer::RenderColorTransformError,
@@ -173,7 +215,7 @@ fn cpu_output_boundary_float(
             );
         }
     }
-    execute_cpu_output_boundary_float(frame, boundary)
+    execute_cpu_output_boundary_float_with_session(frame, boundary, session)
 }
 
 #[cfg(test)]
@@ -277,7 +319,8 @@ fn fill_canvas_black_opaque(
 
 struct ExportGpuOutputBackend {
     context: Arc<GpuContext>,
-    runtime: StdMutex<RenderGpuOutputBoundaryRuntime>,
+    runtime: RenderGpuOutputBoundaryRuntime,
+    heterogeneous_runtime: HeterogeneousGpuContinuationRuntime,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -286,10 +329,219 @@ struct ExportGpuOutputAttemptOutcome {
     stage_diagnostics: RenderColorStageDiagnostics,
 }
 
-static EXPORT_GPU_OUTPUT_RUNTIME: OnceLock<Result<Arc<ExportGpuOutputBackend>, String>> =
-    OnceLock::new();
+const EXPORT_GPU_READBACK_TIMEOUT: Duration = Duration::from_secs(30);
+const EXPORT_GPU_READBACK_POLL_SLICE: Duration = Duration::from_millis(10);
 
-fn build_export_gpu_output_runtime() -> Result<Arc<ExportGpuOutputBackend>, String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExportGpuOutputExecutionError {
+    Fallback(ExportGpuOutputFallbackReason),
+    Canceled,
+    DeviceTimedOut,
+}
+
+impl From<ExportGpuOutputFallbackReason> for ExportGpuOutputExecutionError {
+    fn from(reason: ExportGpuOutputFallbackReason) -> Self {
+        Self::Fallback(reason)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ExportHeterogeneousGpuExecutionError {
+    #[error("export heterogeneous GPU backend is unavailable: {reason:?}")]
+    BackendUnavailable {
+        reason: ExportGpuOutputFallbackReason,
+    },
+    #[error(transparent)]
+    Continuation(Box<HeterogeneousGpuContinuationError>),
+}
+
+impl From<HeterogeneousGpuContinuationError> for ExportHeterogeneousGpuExecutionError {
+    fn from(error: HeterogeneousGpuContinuationError) -> Self {
+        Self::Continuation(Box::new(error))
+    }
+}
+
+enum ExportGpuExecutionRuntimeState {
+    Cold,
+    Ready {
+        device_generation: u64,
+        backend: Box<ExportGpuOutputBackend>,
+    },
+    Backoff {
+        attempt_generation: u64,
+    },
+}
+
+struct ExportGpuExecutionRuntime {
+    attempt_generation: u64,
+    next_device_generation: u64,
+    resource_pool_options: GpuColorFrameWgpuResourcePoolOptions,
+    active_output_grant: RenderGpuOutputExecutionResourceGrant,
+    state: ExportGpuExecutionRuntimeState,
+}
+
+impl Default for ExportGpuExecutionRuntime {
+    fn default() -> Self {
+        Self {
+            attempt_generation: 0,
+            next_device_generation: 1,
+            resource_pool_options: GpuColorFrameWgpuResourcePoolOptions {
+                max_per_contract: 1,
+                max_retained_bytes: 96 * 1024 * 1024,
+            },
+            active_output_grant: RenderGpuOutputExecutionResourceGrant::new(1024 * 1024 * 1024, 4),
+            state: ExportGpuExecutionRuntimeState::Cold,
+        }
+    }
+}
+
+impl ExportGpuExecutionRuntime {
+    fn configure(&mut self, policy: service::ExportExecutionResourcePolicy) {
+        let options = GpuColorFrameWgpuResourcePoolOptions {
+            max_per_contract: policy.gpu_output_idle_per_contract,
+            max_retained_bytes: policy.gpu_output_idle_bytes,
+        };
+        self.active_output_grant = policy.gpu_output_active;
+        if self.resource_pool_options == options {
+            return;
+        }
+        self.resource_pool_options = options;
+        self.state = ExportGpuExecutionRuntimeState::Cold;
+    }
+
+    fn begin_attempt(&mut self, attempt_generation: u64) {
+        if self.attempt_generation == attempt_generation {
+            return;
+        }
+        self.attempt_generation = attempt_generation;
+        self.state = ExportGpuExecutionRuntimeState::Cold;
+    }
+
+    fn ensure_ready(&mut self) -> Result<(), ExportGpuOutputFallbackReason> {
+        match self.state {
+            ExportGpuExecutionRuntimeState::Ready { .. } => return Ok(()),
+            ExportGpuExecutionRuntimeState::Backoff { attempt_generation }
+                if attempt_generation == self.attempt_generation =>
+            {
+                return Err(ExportGpuOutputFallbackReason::ContextUnavailable);
+            }
+            ExportGpuExecutionRuntimeState::Cold
+            | ExportGpuExecutionRuntimeState::Backoff { .. } => {}
+        }
+
+        let Some(next_device_generation) = self.next_device_generation.checked_add(1) else {
+            self.state = ExportGpuExecutionRuntimeState::Backoff {
+                attempt_generation: self.attempt_generation,
+            };
+            return Err(ExportGpuOutputFallbackReason::ContextUnavailable);
+        };
+        let device_generation = self.next_device_generation;
+        match build_export_gpu_output_runtime(self.resource_pool_options) {
+            Ok(backend) => {
+                self.next_device_generation = next_device_generation;
+                self.state = ExportGpuExecutionRuntimeState::Ready { device_generation, backend };
+                Ok(())
+            }
+            Err(_) => {
+                self.state = ExportGpuExecutionRuntimeState::Backoff {
+                    attempt_generation: self.attempt_generation,
+                };
+                Err(ExportGpuOutputFallbackReason::ContextUnavailable)
+            }
+        }
+    }
+
+    fn execute(
+        &mut self,
+        frame: &CpuColorFrame,
+        boundary: &RenderOutputColorBoundary,
+        frame_contract: ExportFrameContract,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<ExportGpuOutputAttemptOutcome, ExportGpuOutputExecutionError> {
+        #[cfg(test)]
+        if FORCE_GPU_BOUNDARY_FAILURE.with(|cell| cell.get()) {
+            return Err(ExportGpuOutputFallbackReason::ContextUnavailable.into());
+        }
+        self.ensure_ready().map_err(ExportGpuOutputExecutionError::from)?;
+        let result = match &mut self.state {
+            ExportGpuExecutionRuntimeState::Ready { device_generation, backend } => {
+                let _device_generation = *device_generation;
+                let result = execute_export_gpu_output_boundary_with_backend(
+                    backend,
+                    frame,
+                    boundary,
+                    frame_contract,
+                    self.active_output_grant,
+                    cancellation,
+                );
+                if result.is_err() {
+                    // Output-boundary recording owns a distinct frame table but
+                    // shares the device texture pool with required
+                    // heterogeneous execution. A route-local failure must not
+                    // leave partially materialized output resources visible to
+                    // the next required-GPU request.
+                    backend.runtime.clear_frame_resources();
+                }
+                result
+            }
+            ExportGpuExecutionRuntimeState::Cold
+            | ExportGpuExecutionRuntimeState::Backoff { .. } => {
+                Err(ExportGpuOutputFallbackReason::ContextUnavailable.into())
+            }
+        };
+        if result
+            .as_ref()
+            .is_err_and(|error| export_gpu_error_requires_backend_backoff(*error))
+        {
+            self.state = ExportGpuExecutionRuntimeState::Backoff {
+                attempt_generation: self.attempt_generation,
+            };
+        }
+        result
+    }
+
+    fn execute_heterogeneous(
+        &mut self,
+        request: HeterogeneousGpuContinuationRequest,
+        completion: mondrian_effects::PreparedHeterogeneousCpuCompletion,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<HeterogeneousGpuCompletedFrame, ExportHeterogeneousGpuExecutionError> {
+        #[cfg(test)]
+        if FORCE_GPU_BOUNDARY_FAILURE.with(|cell| cell.get()) {
+            return Err(ExportHeterogeneousGpuExecutionError::BackendUnavailable {
+                reason: ExportGpuOutputFallbackReason::ContextUnavailable,
+            });
+        }
+        self.ensure_ready().map_err(|reason| {
+            ExportHeterogeneousGpuExecutionError::BackendUnavailable { reason }
+        })?;
+        let deadline = Instant::now().checked_add(EXPORT_GPU_READBACK_TIMEOUT).ok_or(
+            ExportHeterogeneousGpuExecutionError::from(
+                HeterogeneousGpuContinuationError::DeadlineExceeded,
+            ),
+        )?;
+        match &mut self.state {
+            ExportGpuExecutionRuntimeState::Ready { backend, .. } => backend
+                .heterogeneous_runtime
+                .execute_to_cpu(request, completion, cancellation, deadline)
+                .map_err(Into::into),
+            ExportGpuExecutionRuntimeState::Cold
+            | ExportGpuExecutionRuntimeState::Backoff { .. } => {
+                Err(ExportHeterogeneousGpuExecutionError::BackendUnavailable {
+                    reason: ExportGpuOutputFallbackReason::ContextUnavailable,
+                })
+            }
+        }
+    }
+}
+
+const fn export_gpu_error_requires_backend_backoff(error: ExportGpuOutputExecutionError) -> bool {
+    matches!(error, ExportGpuOutputExecutionError::DeviceTimedOut)
+}
+
+fn build_export_gpu_output_runtime(
+    resource_pool_options: GpuColorFrameWgpuResourcePoolOptions,
+) -> Result<Box<ExportGpuOutputBackend>, String> {
     let runtime = TokioRuntimeBuilder::new_current_thread()
         .enable_all()
         .build()
@@ -297,69 +549,124 @@ fn build_export_gpu_output_runtime() -> Result<Arc<ExportGpuOutputBackend>, Stri
     let context = runtime
         .block_on(GpuContext::new())
         .map_err(|err| format!("create gpu context failed: {err}"))?;
-    Ok(Arc::new(ExportGpuOutputBackend {
+    let resource_pool = Arc::new(GpuColorFrameWgpuResourcePool::new(resource_pool_options));
+    let heterogeneous_runtime = HeterogeneousGpuContinuationRuntime::with_resource_pool(
+        Arc::clone(&context),
+        Arc::clone(&resource_pool),
+    )
+    .map_err(|err| format!("create heterogeneous GPU continuation runtime failed: {err}"))?;
+    Ok(Box::new(ExportGpuOutputBackend {
         context,
-        runtime: StdMutex::new(RenderGpuOutputBoundaryRuntime::default()),
+        runtime: RenderGpuOutputBoundaryRuntime::with_resource_pool(resource_pool)
+            .map_err(|err| format!("create GPU output runtime failed: {err}"))?,
+        heterogeneous_runtime,
     }))
 }
 
-fn export_gpu_output_runtime() -> Result<&'static Arc<ExportGpuOutputBackend>, String> {
-    if let Some(result) = EXPORT_GPU_OUTPUT_RUNTIME.get() {
-        return result.as_ref().map_err(|err| err.clone());
-    }
+struct ExportGpuReadbackMapLease<'a> {
+    buffer: &'a wgpu::Buffer,
+}
 
-    let result = match EXPORT_GPU_OUTPUT_RUNTIME.set(build_export_gpu_output_runtime()) {
-        Ok(()) => EXPORT_GPU_OUTPUT_RUNTIME.get().expect("runtime init must be set"),
-        Err(_already_set) => EXPORT_GPU_OUTPUT_RUNTIME
-            .get()
-            .expect("runtime state must be available after concurrent init"),
-    };
-    result.as_ref().map_err(|err| err.clone())
+impl<'a> ExportGpuReadbackMapLease<'a> {
+    fn new(buffer: &'a wgpu::Buffer) -> Self {
+        Self { buffer }
+    }
+}
+
+impl Drop for ExportGpuReadbackMapLease<'_> {
+    fn drop(&mut self) {
+        self.buffer.unmap();
+    }
 }
 
 fn map_readback_buffer_sync(
     device: &wgpu::Device,
     readback: &wgpu::Buffer,
-) -> Result<Vec<u8>, String> {
+    submission_index: &wgpu::SubmissionIndex,
+    cancellation: &ExecutionCancellationToken,
+    deadline: Instant,
+) -> Result<Vec<u8>, ExportGpuOutputExecutionError> {
     let slice = readback.slice(..);
     let (tx, rx) = mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |result| {
         let _ = tx.send(result);
     });
-    let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+    let _map_lease = ExportGpuReadbackMapLease::new(readback);
 
-    let _ = rx
-        .recv()
-        .map_err(|err| format!("readback map callback channel closed: {err}"))?;
+    loop {
+        match rx.try_recv() {
+            Ok(Ok(())) => break,
+            Ok(Err(_)) | Err(mpsc::TryRecvError::Disconnected) => {
+                return Err(ExportGpuOutputFallbackReason::ReadbackMapFailed.into());
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        let poll_timeout =
+            export_gpu_readback_poll_timeout(cancellation.is_canceled(), Instant::now(), deadline)?;
+        accept_export_gpu_readback_poll(device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission_index.clone()),
+            timeout: Some(poll_timeout),
+        }))?;
+    }
     let mapped = slice
         .get_mapped_range()
-        .map_err(|err| format!("readback mapped range unavailable: {err:?}"))?;
-    Ok(mapped.to_vec())
+        .map_err(|_| ExportGpuOutputFallbackReason::ReadbackMapFailed)?;
+    let bytes = mapped.to_vec();
+    drop(mapped);
+    if cancellation.is_canceled() {
+        return Err(ExportGpuOutputExecutionError::Canceled);
+    }
+    Ok(bytes)
 }
 
-fn execute_export_gpu_output_boundary(
+fn accept_export_gpu_readback_poll(
+    result: Result<wgpu::PollStatus, wgpu::PollError>,
+) -> Result<(), ExportGpuOutputExecutionError> {
+    match result {
+        Ok(_) | Err(wgpu::PollError::Timeout) => Ok(()),
+        Err(wgpu::PollError::WrongSubmissionIndex(_, _)) => {
+            Err(ExportGpuOutputFallbackReason::ReadbackMapFailed.into())
+        }
+    }
+}
+
+fn export_gpu_readback_poll_timeout(
+    canceled: bool,
+    now: Instant,
+    deadline: Instant,
+) -> Result<Duration, ExportGpuOutputExecutionError> {
+    if canceled {
+        return Err(ExportGpuOutputExecutionError::Canceled);
+    }
+    let remaining = deadline
+        .checked_duration_since(now)
+        .ok_or(ExportGpuOutputExecutionError::DeviceTimedOut)?;
+    let poll_timeout = remaining.min(EXPORT_GPU_READBACK_POLL_SLICE);
+    if poll_timeout.is_zero() {
+        return Err(ExportGpuOutputExecutionError::DeviceTimedOut);
+    }
+    Ok(poll_timeout)
+}
+
+fn execute_export_gpu_output_boundary_with_backend(
+    backend: &mut ExportGpuOutputBackend,
     frame: &CpuColorFrame,
     boundary: &RenderOutputColorBoundary,
     frame_contract: ExportFrameContract,
-) -> Result<ExportGpuOutputAttemptOutcome, ExportGpuOutputFallbackReason> {
-    #[cfg(test)]
-    if FORCE_GPU_BOUNDARY_FAILURE.with(|cell| cell.get()) {
-        return Err(ExportGpuOutputFallbackReason::ContextUnavailable);
+    active_grant: RenderGpuOutputExecutionResourceGrant,
+    cancellation: &ExecutionCancellationToken,
+) -> Result<ExportGpuOutputAttemptOutcome, ExportGpuOutputExecutionError> {
+    if cancellation.is_canceled() {
+        return Err(ExportGpuOutputExecutionError::Canceled);
     }
-    let backend = export_gpu_output_runtime()
-        .map_err(|_| ExportGpuOutputFallbackReason::ContextUnavailable)?;
-    let mut runtime = backend
-        .runtime
-        .lock()
-        .map_err(|_| ExportGpuOutputFallbackReason::ContextUnavailable)?;
-
     let mut encoder =
         backend.context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mondrian-export-gpu-output-boundary"),
         });
 
-    let record = runtime
-        .record_wgpu_output_boundary_owned_backend(
+    let record = backend
+        .runtime
+        .record_wgpu_output_boundary_owned_backend_with_grant(
             boundary,
             frame,
             frame_contract.gpu_texture_format(),
@@ -367,6 +674,7 @@ fn execute_export_gpu_output_boundary(
                 output_residency: ColorFrameResidency::Cpu,
                 ..RenderColorTransformGpuOptions::default()
             },
+            active_grant,
             RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
                 device: &backend.context.device,
                 queue: &backend.context.queue,
@@ -374,12 +682,21 @@ fn execute_export_gpu_output_boundary(
                 load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
             },
         )
-        .map_err(|_| ExportGpuOutputFallbackReason::RecordBoundaryFailed)?;
+        .map_err(|error| match error {
+            RenderGpuOutputBoundaryRuntimeRecordError::ActiveWorkingSet(_) => {
+                ExportGpuOutputExecutionError::Fallback(
+                    ExportGpuOutputFallbackReason::ActiveWorkingSetRejected,
+                )
+            }
+            _ => ExportGpuOutputExecutionError::Fallback(
+                ExportGpuOutputFallbackReason::RecordBoundaryFailed,
+            ),
+        })?;
 
-    backend.context.queue.submit(std::iter::once(encoder.finish()));
-    let readback_buffer = record
-        .readback_buffer
-        .ok_or(ExportGpuOutputFallbackReason::MissingReadbackBuffer)?;
+    let submission_index = backend.context.queue.submit(std::iter::once(encoder.finish()));
+    let readback_buffer = record.readback_buffer.ok_or(ExportGpuOutputExecutionError::Fallback(
+        ExportGpuOutputFallbackReason::MissingReadbackBuffer,
+    ))?;
     let readback_plan = match frame_contract.gpu_texture_format() {
         GpuColorFrameTextureFormat::Rgba8Unorm => {
             GpuColorFrameReadbackPlan::encoded_rgba8(record.materialized.output)
@@ -394,24 +711,35 @@ fn execute_export_gpu_output_boundary(
                 .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?
         }
     };
-    let mapped = map_readback_buffer_sync(&backend.context.device, &readback_buffer)
-        .map_err(|_| ExportGpuOutputFallbackReason::ReadbackMapFailed)?;
+    let deadline = Instant::now()
+        .checked_add(EXPORT_GPU_READBACK_TIMEOUT)
+        .ok_or(ExportGpuOutputExecutionError::DeviceTimedOut)?;
+    let mapped = map_readback_buffer_sync(
+        &backend.context.device,
+        &readback_buffer,
+        &submission_index,
+        cancellation,
+        deadline,
+    )?;
     let rgba = match frame_contract.gpu_texture_format() {
         GpuColorFrameTextureFormat::Rgba8Unorm => {
             let actual = readback_plan
                 .unpack_mapped_rgba8(&mapped)
-                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
-            frame_contract.pack_rgba8(actual.rgba())
+                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed);
+            actual.map(|actual| frame_contract.pack_rgba8(actual.rgba()))
         }
         GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float => {
             let f32_data = readback_plan
                 .unpack_mapped_rgba16float(&mapped)
-                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
-            frame_contract.pack_rgba_f32(&f32_data)
+                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed);
+            f32_data.map(|f32_data| frame_contract.pack_rgba_f32(&f32_data))
         }
     };
-    readback_buffer.unmap();
-    runtime.clear_frame_resources();
+    let rgba = rgba?;
+    if cancellation.is_canceled() {
+        return Err(ExportGpuOutputExecutionError::Canceled);
+    }
+    backend.runtime.clear_frame_resources();
 
     Ok(ExportGpuOutputAttemptOutcome { rgba, stage_diagnostics: record.stage_diagnostics })
 }
@@ -421,6 +749,8 @@ fn execute_export_gpu_output_boundary(
 pub struct ExportJobDiagnostics {
     /// Color-management diagnostics observed while rendering this job.
     pub color: ExportJobColorDiagnostics,
+    /// Visual execution diagnostics observed by the immutable export attempt.
+    pub visual: ExportJobVisualDiagnostics,
 }
 
 impl ExportJobDiagnostics {
@@ -428,6 +758,73 @@ impl ExportJobDiagnostics {
     pub fn color_report(self, profile: impl Into<String>) -> Option<ExportColorHealthReport> {
         self.color.health_report(profile)
     }
+}
+
+/// Bounded evidence for the most recent completed heterogeneous Effect frame.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExportHeterogeneousCompletionEvidence {
+    /// Complete compiled Effect graph fingerprint.
+    pub graph_fingerprint: [u8; 32],
+    /// Queue-owned immutable attempt generation.
+    pub generation: u64,
+    /// Exact Effect input/output width.
+    pub width: u32,
+    /// Exact Effect input/output height.
+    pub height: u32,
+    /// Deterministic frame seed bound to the GPU suffix.
+    pub frame_seed: i64,
+    /// Exact linear working-space identity proved across CPU and GPU execution.
+    pub working_color_space: WorkingColorSpace,
+    /// Upload completion token proved by the renderer.
+    pub completed_upload_token: u32,
+    /// Final graph-output completion token proved by the renderer.
+    pub completed_output_token: u32,
+    /// Raw CPU-to-GPU transfer bytes proved by the graph-value plan.
+    pub upload_bytes: u64,
+    /// Padded GPU-to-CPU readback bytes that completed.
+    pub readback_bytes: u64,
+}
+
+impl ExportHeterogeneousCompletionEvidence {
+    fn from_renderer(
+        evidence: &HeterogeneousGpuCompletedEvidence,
+        working_color_space: WorkingColorSpace,
+    ) -> Option<Self> {
+        let recorded = evidence.recorded();
+        Some(Self {
+            graph_fingerprint: recorded.graph_fingerprint(),
+            generation: recorded.generation(),
+            width: recorded.frame_extent().width(),
+            height: recorded.frame_extent().height(),
+            frame_seed: recorded.frame_seed(),
+            working_color_space,
+            completed_upload_token: evidence.completed_upload_token().get(),
+            completed_output_token: evidence.completed_output_token().get(),
+            upload_bytes: recorded.upload_bytes(),
+            readback_bytes: evidence.readback_bytes()?,
+        })
+    }
+}
+
+/// UI-independent visual execution evidence for one Export attempt.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ExportJobVisualDiagnostics {
+    /// Distinct conservative heterogeneous route contracts frozen by preflight.
+    pub heterogeneous_route_contracts: u64,
+    /// Frames whose heterogeneous attempt crossed into CPU-prefix execution.
+    pub heterogeneous_frames_started: u64,
+    /// Frames whose upload, exact GPU suffix, wait, and readback all completed.
+    pub heterogeneous_frames_completed: u64,
+    /// Terminal post-start heterogeneous failures.
+    pub heterogeneous_terminal_failures: u64,
+    /// Frames retained on a complete CPU route before heterogeneous work started.
+    pub cpu_routes_selected_before_start: u64,
+    /// Aggregate completed CPU-to-GPU bytes.
+    pub heterogeneous_upload_bytes: u64,
+    /// Aggregate completed GPU-to-CPU readback bytes.
+    pub heterogeneous_readback_bytes: u64,
+    /// Most recent exact completion evidence, bounded to one value.
+    pub last_heterogeneous_completion: Option<ExportHeterogeneousCompletionEvidence>,
 }
 
 /// Export color diagnostics observed on the real render path.
@@ -494,10 +891,14 @@ pub enum ExportGpuOutputFallbackReason {
     ContextUnavailable,
     /// GPU recording failed before command submission.
     RecordBoundaryFailed,
+    /// Exact active texture/readback demand exceeded the frozen Export grant.
+    ActiveWorkingSetRejected,
     /// GPU output path lacked an explicit readback buffer.
     MissingReadbackBuffer,
     /// GPU output readback map failed.
     ReadbackMapFailed,
+    /// GPU output readback exceeded its monotonic bounded wait.
+    ReadbackTimedOut,
     /// GPU output readback unpacking failed.
     ReadbackUnpackFailed,
 }
@@ -508,10 +909,14 @@ pub struct ExportGpuOutputFallbackBreakdown {
     pub context_unavailable: u64,
     /// GPU recording failed before submission.
     pub record_boundary_failed: u64,
+    /// Active texture/readback admission rejected the exact output plan.
+    pub active_working_set_rejected: u64,
     /// GPU output planned readback buffer missing.
     pub missing_readback_buffer: u64,
     /// Readback map failed.
     pub readback_map_failed: u64,
+    /// Readback exceeded its monotonic deadline.
+    pub readback_timed_out: u64,
     /// Unpacking readback bytes failed.
     pub readback_unpack_failed: u64,
 }
@@ -521,8 +926,10 @@ impl ExportGpuOutputFallbackBreakdown {
     pub fn total(&self) -> u64 {
         self.context_unavailable
             .saturating_add(self.record_boundary_failed)
+            .saturating_add(self.active_working_set_rejected)
             .saturating_add(self.missing_readback_buffer)
             .saturating_add(self.readback_map_failed)
+            .saturating_add(self.readback_timed_out)
             .saturating_add(self.readback_unpack_failed)
     }
 
@@ -533,10 +940,14 @@ impl ExportGpuOutputFallbackBreakdown {
             record_boundary_failed: self
                 .record_boundary_failed
                 .saturating_add(other.record_boundary_failed),
+            active_working_set_rejected: self
+                .active_working_set_rejected
+                .saturating_add(other.active_working_set_rejected),
             missing_readback_buffer: self
                 .missing_readback_buffer
                 .saturating_add(other.missing_readback_buffer),
             readback_map_failed: self.readback_map_failed.saturating_add(other.readback_map_failed),
+            readback_timed_out: self.readback_timed_out.saturating_add(other.readback_timed_out),
             readback_unpack_failed: self
                 .readback_unpack_failed
                 .saturating_add(other.readback_unpack_failed),
@@ -552,11 +963,18 @@ impl ExportGpuOutputFallbackBreakdown {
             ExportGpuOutputFallbackReason::RecordBoundaryFailed => {
                 self.record_boundary_failed = self.record_boundary_failed.saturating_add(1)
             }
+            ExportGpuOutputFallbackReason::ActiveWorkingSetRejected => {
+                self.active_working_set_rejected =
+                    self.active_working_set_rejected.saturating_add(1)
+            }
             ExportGpuOutputFallbackReason::MissingReadbackBuffer => {
                 self.missing_readback_buffer = self.missing_readback_buffer.saturating_add(1)
             }
             ExportGpuOutputFallbackReason::ReadbackMapFailed => {
                 self.readback_map_failed = self.readback_map_failed.saturating_add(1)
+            }
+            ExportGpuOutputFallbackReason::ReadbackTimedOut => {
+                self.readback_timed_out = self.readback_timed_out.saturating_add(1)
             }
             ExportGpuOutputFallbackReason::ReadbackUnpackFailed => {
                 self.readback_unpack_failed = self.readback_unpack_failed.saturating_add(1)
@@ -711,7 +1129,7 @@ pub struct ExportJobColorDiagnosticsSummary {
 }
 
 /// Schema version for export color health reports.
-pub const EXPORT_COLOR_HEALTH_REPORT_SCHEMA_VERSION: u32 = 4;
+pub const EXPORT_COLOR_HEALTH_REPORT_SCHEMA_VERSION: u32 = 6;
 
 /// Versioned export color health report for UI, telemetry, perf, and job artifacts.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -1098,13 +1516,15 @@ fn push_export_root_causes_and_actions(
             "export_gpu_output_fallback",
             ExportColorHealthSeverity::Fail,
             format!(
-                "gpu_output_attempts={} cpu_fallbacks={} context_unavailable={} record_failed={} missing_readback_buffer={} readback_map_failed={} readback_unpack_failed={}",
+                "gpu_output_attempts={} cpu_fallbacks={} context_unavailable={} record_failed={} active_working_set_rejected={} missing_readback_buffer={} readback_map_failed={} readback_timed_out={} readback_unpack_failed={}",
                 summary.gpu_output_attempts,
                 summary.gpu_output_cpu_fallbacks,
                 summary.gpu_output_fallback_reasons.context_unavailable,
                 summary.gpu_output_fallback_reasons.record_boundary_failed,
+                summary.gpu_output_fallback_reasons.active_working_set_rejected,
                 summary.gpu_output_fallback_reasons.missing_readback_buffer,
                 summary.gpu_output_fallback_reasons.readback_map_failed,
+                summary.gpu_output_fallback_reasons.readback_timed_out,
                 summary.gpu_output_fallback_reasons.readback_unpack_failed
             ),
             "inspect_export_gpu_output_fallback",
@@ -1306,20 +1726,107 @@ impl ExportJobColorDiagnostics {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct DurableExportPublication {
+    output_path: PathBuf,
+}
+
+impl DurableExportPublication {
+    fn from_storage(evidence: FilePublicationEvidence) -> Self {
+        Self {
+            output_path: evidence.published_path().to_path_buf(),
+        }
+    }
+
+    #[cfg(test)]
+    fn synthetic(output_path: &Path) -> Self {
+        Self {
+            output_path: std::path::absolute(output_path)
+                .unwrap_or_else(|_| output_path.to_path_buf()),
+        }
+    }
+
+    fn into_terminal_evidence(self) -> ExportArtifactPublicationEvidence {
+        ExportArtifactPublicationEvidence::Durable { output_path: self.output_path }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum ExportPublicationFailure {
+    BeforeNamespace {
+        output_path: PathBuf,
+        retained_partial_path: Option<PathBuf>,
+        detail: String,
+    },
+    DurabilityUnconfirmed {
+        output_path: PathBuf,
+        detail: String,
+    },
+    NamespaceIndeterminate {
+        output_path: PathBuf,
+        retained_partial_path: Option<PathBuf>,
+        detail: String,
+    },
+}
+
+impl ExportPublicationFailure {
+    fn from_storage(
+        failure: FilePublicationFailure,
+        output_path: &Path,
+        retained_partial_path: Option<PathBuf>,
+    ) -> Self {
+        match failure {
+            FilePublicationFailure::BeforeNamespace(error) => Self::BeforeNamespace {
+                output_path: output_path.to_path_buf(),
+                retained_partial_path,
+                detail: format!("{error:#}"),
+            },
+            FilePublicationFailure::DurabilityUnconfirmed(error) => Self::DurabilityUnconfirmed {
+                output_path: error.published_path().to_path_buf(),
+                detail: error.to_string(),
+            },
+            FilePublicationFailure::NamespaceIndeterminate(error) => Self::NamespaceIndeterminate {
+                output_path: error.intended_path().to_path_buf(),
+                retained_partial_path: error
+                    .retained_new_path()
+                    .map(Path::to_path_buf)
+                    .or(retained_partial_path),
+                detail: error.to_string(),
+            },
+        }
+    }
+}
+
+#[derive(Debug)]
 pub(crate) enum JobExecutionResult {
-    /// The validated deliverable crossed its irreversible publication point.
-    Completed,
+    /// A reversible preparation/render/encode sub-operation succeeded.
+    ///
+    /// This is never a terminal queue outcome and cannot authorize a
+    /// deliverable or `Completed` job state.
+    ReversibleWorkCompleted,
+    /// The validated deliverable was durably published. The contained
+    /// evidence is the only authority for a successful terminal state.
+    Published(DurableExportPublication),
+    /// Publication reached one typed non-success terminal result.
+    PublicationFailed(ExportPublicationFailure),
     /// Execution ended without publishing a new deliverable.
     Failed(String),
     /// Cancellation was observed before the irreversible publication point.
     Cancelled,
 }
 
+/// Queue-internal execution adapter.
+///
+/// Implementations must visit the supplied execution Gate at every declared
+/// safe frame, audio-block, and phase boundary. After the Gate admits
+/// `Publishing`, cancellation must no longer change the terminal disposition
+/// from the result of irreversible publication.
 pub(crate) trait ExportExecutor: Send + Sync + 'static {
     fn execute(
         &self,
         job: &RenderJob,
         cancel: &ExecutionCancellationToken,
+        execution_gate: &service::ExportExecutionGate,
         report: &mut dyn FnMut(ExportProgress),
         report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
     ) -> JobExecutionResult;
@@ -1333,55 +1840,82 @@ impl ExportExecutor for FfmpegExportExecutor {
         &self,
         job: &RenderJob,
         cancel: &ExecutionCancellationToken,
+        execution_gate: &service::ExportExecutionGate,
         report: &mut dyn FnMut(ExportProgress),
         report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
     ) -> JobExecutionResult {
-        if cancel.is_canceled() {
+        if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
             return JobExecutionResult::Cancelled;
         }
         report(ExportProgress::preparing(0.01));
 
         let final_output = job.config.output_path.as_path();
-        if let Some(parent) = final_output.parent().filter(|parent| !parent.as_os_str().is_empty())
-        {
-            if let Err(err) = std::fs::create_dir_all(parent) {
+        let staging = match OwnedPublicationFile::create_sibling(
+            final_output,
+            &format!("export-{}", job.id()),
+        ) {
+            Ok(staging) => staging,
+            Err(error) => {
                 return JobExecutionResult::Failed(format!(
-                    "无法创建导出目录 {}: {}",
-                    parent.display(),
-                    err
+                    "failed to reserve an exact sibling export object for {}: {error:#}",
+                    final_output.display()
                 ));
             }
-        }
-
-        let partial_output = export_partial_output_path(final_output, job.id());
-        let _ = std::fs::remove_file(&partial_output);
+        };
+        let partial_output = staging.path().to_path_buf();
+        let reservation = staging.release_for_external_writer();
+        let mut validation_expectations = None;
         let outcome = execute_timeline_export(
             job,
             &job.config.timeline,
             partial_output.as_path(),
+            &mut validation_expectations,
             cancel,
+            execution_gate,
             report,
             report_diagnostics,
         );
-        if !matches!(outcome, JobExecutionResult::Completed) {
-            let _ = std::fs::remove_file(&partial_output);
+        if !matches!(outcome, JobExecutionResult::ReversibleWorkCompleted) {
             return outcome;
         }
         if cancel.is_canceled() {
-            let _ = std::fs::remove_file(&partial_output);
             return JobExecutionResult::Cancelled;
         }
+        let staging = match reservation.reclaim() {
+            Ok(staging) => staging,
+            Err(error) => {
+                return JobExecutionResult::Failed(format!(
+                    "encoded export no longer names its reserved partial object {}: {error:#}",
+                    partial_output.display()
+                ));
+            }
+        };
+        let Some(validation_expectations) = validation_expectations else {
+            return JobExecutionResult::Failed(
+                "encoded export completed without a validation contract".to_owned(),
+            );
+        };
+        if !execution_gate.wait_at_boundary(ExportProgressPhase::Validating, cancel) {
+            return JobExecutionResult::Cancelled;
+        }
+        report(ExportProgress::validating(0.99));
+        match validate_export_output_cancellable(staging.path(), &validation_expectations, cancel) {
+            Ok(_) => {}
+            Err(_) if cancel.is_canceled() => return JobExecutionResult::Cancelled,
+            Err(error) => {
+                return JobExecutionResult::Failed(format!("导出结果校验失败: {error}"));
+            }
+        }
         if let Err(reason) = validate_snapshot_media_revisions(&job.config.timeline) {
-            let _ = std::fs::remove_file(&partial_output);
             return JobExecutionResult::Failed(reason);
         }
+        if !execution_gate.wait_at_boundary(ExportProgressPhase::Publishing, cancel) {
+            return JobExecutionResult::Cancelled;
+        }
         report(ExportProgress::publishing(0.995));
-        match finalize_export_output(partial_output.as_path(), final_output) {
-            Ok(()) => JobExecutionResult::Completed,
-            Err(reason) => {
-                let _ = std::fs::remove_file(&partial_output);
-                JobExecutionResult::Failed(reason)
-            }
+        match finalize_export_output(staging, final_output, job.config.output_policy) {
+            Ok(evidence) => JobExecutionResult::Published(evidence),
+            Err(failure) => JobExecutionResult::PublicationFailed(failure),
         }
     }
 }
@@ -1392,6 +1926,21 @@ struct TimelineRenderRange {
     total_frames: u64,
     fps_num: i64,
     fps_den: i64,
+}
+
+impl TimelineRenderRange {
+    fn resolved(self) -> ResolvedTimelineExportRange {
+        ResolvedTimelineExportRange {
+            start_frame: self.start_frame,
+            total_frames: self.total_frames,
+            fps_num: self.fps_num,
+            fps_den: self.fps_den,
+        }
+    }
+
+    fn time_range(self) -> Result<TimelineTimeRange, String> {
+        self.resolved().time_range().map_err(|error| error.to_string())
+    }
 }
 
 enum TimelineAudioInput {
@@ -1407,10 +1956,14 @@ enum TimelineAudioInput {
     Disabled,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct DecodedVideoLayer {
     frame: CpuColorFrame,
     source_resolution: Resolution,
+    source_fingerprint: MediaFileFingerprint,
+    video_stream_index: u32,
+    #[cfg_attr(not(test), allow(dead_code))]
+    decode_diagnostics: Option<PreviewDecodeDiagnostics>,
     stage_diagnostics: RenderColorStageDiagnostics,
 }
 
@@ -1418,24 +1971,22 @@ fn execute_timeline_export(
     job: &RenderJob,
     timeline: &TimelineExportSnapshot,
     output_path: &Path,
+    validation_expectations_out: &mut Option<ExportValidationExpectations>,
     cancel: &ExecutionCancellationToken,
+    execution_gate: &service::ExportExecutionGate,
     report: &mut dyn FnMut(ExportProgress),
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
 ) -> JobExecutionResult {
     let mut temp_audio_path_to_cleanup: Option<PathBuf> = None;
     let result = (|| {
-        if cancel.is_canceled() {
+        if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
             return JobExecutionResult::Cancelled;
         }
+        let resource_policy = execution_gate.resource_policy();
 
         if let Err(reason) = validate_snapshot_media_revisions(timeline) {
             return JobExecutionResult::Failed(reason);
         }
-        let delivery = match resolve_timeline_export_delivery(&job.config, timeline) {
-            Ok(delivery) => delivery,
-            Err(error) => return JobExecutionResult::Failed(error),
-        };
-
         let range = match compute_timeline_render_range(timeline) {
             Ok(range) => range,
             Err(error) => return JobExecutionResult::Failed(error),
@@ -1443,8 +1994,56 @@ fn execute_timeline_export(
         if range.total_frames == 0 {
             return JobExecutionResult::Failed("时间线导出范围为空".to_string());
         }
+        let delivery = match crate::delivery::resolve_export_delivery(
+            &job.config.preset,
+            &timeline.sequence.settings,
+            &timeline.color_environment,
+        ) {
+            Ok(delivery) => delivery,
+            Err(error) => return JobExecutionResult::Failed(error.to_string()),
+        };
 
-        let audio_input = prepare_timeline_audio_input(job, timeline, range, cancel, report);
+        let Some(prepared_visual) =
+            timeline.prepared_execution().map(|execution| execution.visual())
+        else {
+            return JobExecutionResult::Failed(
+                "immutable export visual execution snapshot was not admitted".to_owned(),
+            );
+        };
+        let mut visual_session = match ExportVisualRenderSession::for_execution_generation(
+            execution_gate.attempt_generation(),
+            resource_policy,
+            prepared_visual,
+        ) {
+            Ok(session) => session,
+            Err(error) => return JobExecutionResult::Failed(error),
+        };
+        if let Err(outcome) = preflight_timeline_visual_range_at_resolution(
+            timeline,
+            range,
+            Resolution {
+                width: delivery.resolution.width,
+                height: delivery.resolution.height,
+            },
+            resolved_export_color_context(timeline, &delivery),
+            cancel,
+            execution_gate,
+            &mut visual_session,
+        ) {
+            return outcome;
+        }
+        let media_diagnostics = match export_media_diagnostic_set(timeline) {
+            Ok(diagnostics) => diagnostics,
+            Err(error) => return JobExecutionResult::Failed(error),
+        };
+        if let Err(error) =
+            validate_timeline_dynamic_hdr_delivery(timeline, media_diagnostics.issue_summary)
+        {
+            return JobExecutionResult::Failed(error);
+        }
+
+        let audio_input =
+            prepare_timeline_audio_input(job, timeline, range, cancel, execution_gate, report);
         let audio_input = match audio_input {
             Ok(input) => input,
             Err(outcome) => return outcome,
@@ -1577,26 +2176,27 @@ fn execute_timeline_export(
         }
         cmd.arg("-f")
             .arg(container_format(&job.config.preset.container))
-            .arg(output_path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
+            .arg(output_path);
 
-        let mut child = match cmd.spawn() {
+        if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
+            return JobExecutionResult::Cancelled;
+        }
+        let process_policy = SupervisedProcessPolicy {
+            pipe_stdin: true,
+            stdout: SupervisedStreamCapture::Drain,
+            stderr: SupervisedStreamCapture::Tail { limit_bytes: 64 * 1024 },
+            deadline: None,
+            ..SupervisedProcessPolicy::default()
+        };
+        let mut child = match SupervisedChild::spawn(&mut cmd, process_policy) {
             Ok(child) => child,
             Err(err) => {
-                return JobExecutionResult::Failed(format!("无法启动 ffmpeg: {}", err));
+                return process_supervision_failure("启动 ffmpeg", err);
             }
         };
 
-        let Some(stdin) = child.stdin.take() else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return JobExecutionResult::Failed("ffmpeg stdin 管道不可用".to_string());
-        };
-
         match write_timeline_frames(
-            stdin,
+            &mut child,
             timeline,
             range,
             width,
@@ -1604,40 +2204,40 @@ fn execute_timeline_export(
             job.config.preset.alpha_mode,
             &delivery,
             cancel,
+            execution_gate,
             report,
             report_diagnostics,
+            &mut visual_session,
+            media_diagnostics.issue_summary,
         ) {
-            JobExecutionResult::Completed => {}
+            JobExecutionResult::ReversibleWorkCompleted => {}
+            JobExecutionResult::Published(_) | JobExecutionResult::PublicationFailed(_) => {
+                return JobExecutionResult::Failed(
+                    "frame writer crossed publication authority inside reversible export work"
+                        .to_owned(),
+                );
+            }
             JobExecutionResult::Cancelled => {
-                let _ = child.kill();
-                let _ = child.wait();
                 return JobExecutionResult::Cancelled;
             }
             JobExecutionResult::Failed(reason) => {
-                let _ = child.kill();
-                let _ = child.wait();
                 return JobExecutionResult::Failed(reason);
             }
         }
 
-        if cancel.is_canceled() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if !execution_gate.wait_at_boundary(ExportProgressPhase::Encoding, cancel) {
             return JobExecutionResult::Cancelled;
         }
 
         report(ExportProgress::encoding(0.98));
-        match wait_for_ffmpeg_child(child, cancel) {
+        match child.finish(cancel) {
             Ok(output) if output.status.success() => {
-                report(ExportProgress::validating(0.99));
-                match validate_export_output(output_path, &validation_expectations) {
-                    Ok(_) => JobExecutionResult::Completed,
-                    Err(err) => JobExecutionResult::Failed(format!("导出结果校验失败: {err}")),
-                }
+                *validation_expectations_out = Some(validation_expectations);
+                JobExecutionResult::ReversibleWorkCompleted
             }
             Ok(output) => {
-                let reason = output
-                    .stderr_tail
+                let stderr_tail = String::from_utf8_lossy(&output.stderr);
+                let reason = stderr_tail
                     .lines()
                     .rev()
                     .find(|line| !line.trim().is_empty())
@@ -1645,7 +2245,7 @@ fn execute_timeline_export(
                     .unwrap_or_else(|| format!("ffmpeg 退出码：{}", output.status));
                 JobExecutionResult::Failed(format!("时间线编码失败：{reason}"))
             }
-            Err(outcome) => outcome,
+            Err(error) => process_supervision_failure("等待 ffmpeg 编码完成", error),
         }
     })();
 
@@ -1657,7 +2257,23 @@ fn execute_timeline_export(
 
 fn validate_snapshot_media_revisions(timeline: &TimelineExportSnapshot) -> Result<(), String> {
     for (asset_id, dependency) in &timeline.media {
+        if !dependency.source_fingerprint.authorizes_reuse() {
+            return Err(format!(
+                "export source revision evidence admitted for the snapshot is incomplete: asset={} path={} admitted={:?}",
+                asset_id,
+                dependency.path.display(),
+                dependency.source_fingerprint
+            ));
+        }
         let actual = MediaFileFingerprint::capture(dependency.path.as_path());
+        if !actual.authorizes_reuse() {
+            return Err(format!(
+                "export source revision evidence cannot be observed completely: asset={} path={} actual={:?}",
+                asset_id,
+                dependency.path.display(),
+                actual
+            ));
+        }
         if actual != dependency.source_fingerprint {
             return Err(format!(
                 "export source revision changed: asset={} path={} admitted={:?} actual={:?}",
@@ -1671,109 +2287,29 @@ fn validate_snapshot_media_revisions(timeline: &TimelineExportSnapshot) -> Resul
     Ok(())
 }
 
-fn export_partial_output_path(final_output: &Path, job_id: JobId) -> PathBuf {
-    let mut file_name = final_output
-        .file_name()
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| "mondrian-export".into());
-    file_name.push(format!(".mondrian-{job_id}.partial"));
-    final_output.with_file_name(file_name)
-}
-
-fn finalize_export_output(partial_output: &Path, final_output: &Path) -> Result<(), String> {
-    if !partial_output.is_file() {
-        return Err(format!(
-            "validated export temporary output is unavailable: {}",
-            partial_output.display()
-        ));
-    }
-
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(partial_output)
-        .and_then(|file| file.sync_all())
-        .map_err(|error| {
-            format!(
-                "failed to durably flush validated export {} before publication: {error}",
-                partial_output.display()
-            )
-        })?;
-    replace_validated_output(partial_output, final_output).map_err(|error| {
-        format!(
-            "failed to publish validated export {}: {error}",
-            final_output.display()
-        )
-    })?;
-
-    if let Err(error) = sync_output_directory(final_output) {
-        tracing::warn!(
-            path = %final_output.display(),
-            %error,
-            "export was atomically published but its directory durability sync failed"
-        );
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn replace_validated_output(partial_output: &Path, final_output: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, ReplaceFileW, MOVEFILE_WRITE_THROUGH, REPLACEFILE_WRITE_THROUGH,
+fn finalize_export_output(
+    staging: OwnedPublicationFile,
+    final_output: &Path,
+    output_policy: ExportOutputPolicy,
+) -> Result<DurableExportPublication, ExportPublicationFailure> {
+    let partial_output = staging.path().to_path_buf();
+    let publication_mode = match output_policy {
+        ExportOutputPolicy::CreateNew => FilePublicationMode::CreateNew,
+        ExportOutputPolicy::OverwriteExisting => FilePublicationMode::ReplaceExisting,
     };
-
-    fn wide(path: &Path) -> Vec<u16> {
-        path.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
-    }
-
-    let partial = wide(partial_output);
-    let final_path = wide(final_output);
-    let succeeded = if final_output.exists() {
-        // SAFETY: All pointers reference live, NUL-terminated UTF-16 buffers for
-        // the duration of the call. The reserved pointers are required to be null.
-        unsafe {
-            ReplaceFileW(
-                final_path.as_ptr(),
-                partial.as_ptr(),
-                std::ptr::null(),
-                REPLACEFILE_WRITE_THROUGH,
-                std::ptr::null(),
-                std::ptr::null(),
-            )
+    match staging.preserve_source_on_before_namespace_failure().publish(publication_mode) {
+        Ok(evidence) => Ok(DurableExportPublication::from_storage(evidence)),
+        Err(failure) => {
+            let retained_partial_path =
+                matches!(&failure, FilePublicationFailure::BeforeNamespace(_))
+                    .then_some(partial_output);
+            Err(ExportPublicationFailure::from_storage(
+                failure,
+                final_output,
+                retained_partial_path,
+            ))
         }
-    } else {
-        // SAFETY: Both pointers reference live, NUL-terminated UTF-16 buffers.
-        unsafe {
-            MoveFileExW(
-                partial.as_ptr(),
-                final_path.as_ptr(),
-                MOVEFILE_WRITE_THROUGH,
-            )
-        }
-    };
-    if succeeded == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
     }
-}
-
-#[cfg(not(windows))]
-fn replace_validated_output(partial_output: &Path, final_output: &Path) -> std::io::Result<()> {
-    std::fs::rename(partial_output, final_output)
-}
-
-#[cfg(unix)]
-fn sync_output_directory(final_output: &Path) -> std::io::Result<()> {
-    let Some(parent) = final_output.parent().filter(|parent| !parent.as_os_str().is_empty()) else {
-        return Ok(());
-    };
-    std::fs::File::open(parent)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_output_directory(_final_output: &Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 fn prepare_timeline_audio_input(
@@ -1781,15 +2317,27 @@ fn prepare_timeline_audio_input(
     timeline: &TimelineExportSnapshot,
     range: TimelineRenderRange,
     cancel: &ExecutionCancellationToken,
+    execution_gate: &service::ExportExecutionGate,
     report: &mut dyn FnMut(ExportProgress),
 ) -> Result<TimelineAudioInput, JobExecutionResult> {
+    if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
+        return Err(JobExecutionResult::Cancelled);
+    }
     if matches!(job.config.preset.audio, AudioCodecConfig::Disabled) {
         return Ok(TimelineAudioInput::Disabled);
     }
 
     let sample_rate = timeline.sequence.settings.audio_sample_rate.max(8_000);
     let channel_layout = timeline.sequence.settings.audio_channel_layout;
-    if !timeline_has_audio_content(timeline, range).map_err(JobExecutionResult::Failed)? {
+    let prepared_audio = timeline
+        .prepared_execution()
+        .and_then(|execution| execution.audio())
+        .ok_or_else(|| {
+            JobExecutionResult::Failed(
+                "immutable export audio Program evidence was not admitted".to_owned(),
+            )
+        })?;
+    if !prepared_audio.execution_demand().requires_execution() {
         return Ok(TimelineAudioInput::Silent { sample_rate, channel_layout });
     }
 
@@ -1798,63 +2346,56 @@ fn prepare_timeline_audio_input(
         job.id(),
         chrono::Utc::now().timestamp_millis()
     ));
+    let resource_policy = execution_gate.resource_policy();
 
     match render_timeline_audio_to_pcm_f32(
         temp_path.as_path(),
         timeline,
+        prepared_audio,
         range,
         sample_rate,
         channel_layout,
+        resource_policy,
         cancel,
+        execution_gate,
         report,
     ) {
-        JobExecutionResult::Completed => {
+        JobExecutionResult::ReversibleWorkCompleted => {
             Ok(TimelineAudioInput::PcmFile { path: temp_path, sample_rate, channel_layout })
         }
-        JobExecutionResult::Cancelled => Err(JobExecutionResult::Cancelled),
-        JobExecutionResult::Failed(reason) => Err(JobExecutionResult::Failed(reason)),
+        JobExecutionResult::Published(_) | JobExecutionResult::PublicationFailed(_) => {
+            let _ = std::fs::remove_file(&temp_path);
+            Err(JobExecutionResult::Failed(
+                "audio preparation crossed publication authority inside reversible export work"
+                    .to_owned(),
+            ))
+        }
+        JobExecutionResult::Cancelled => {
+            let _ = std::fs::remove_file(&temp_path);
+            Err(JobExecutionResult::Cancelled)
+        }
+        JobExecutionResult::Failed(reason) => {
+            let _ = std::fs::remove_file(&temp_path);
+            Err(JobExecutionResult::Failed(reason))
+        }
     }
-}
-
-fn timeline_has_audio_content(
-    timeline: &TimelineExportSnapshot,
-    range: TimelineRenderRange,
-) -> Result<bool, String> {
-    let time_base = timeline.sequence.time_base();
-    let start = TimelineTime::from_frame_position(FramePosition::new(range.start_frame, time_base))
-        .map_err(|error| error.to_string())?;
-    let end = TimelineTime::from_frame_position(FramePosition::new(
-        range.start_frame.saturating_add(range.total_frames as i64),
-        time_base,
-    ))
-    .map_err(|error| error.to_string())?;
-    let output_id = timeline
-        .sequence
-        .audio_program
-        .outputs
-        .first()
-        .map(|output| output.id)
-        .ok_or_else(|| "Sequence has no audio Program Output".to_owned())?;
-    let program =
-        compile_audio_program(&timeline.sequence, AudioCompileRequest::program(output_id))
-            .map_err(|error| error.to_string())?;
-    Ok(program.contributions().iter().any(|contribution| {
-        contribution
-            .sequence_range
-            .end()
-            .is_ok_and(|clip_end| clip_end > start && contribution.sequence_range.start < end)
-    }))
 }
 
 fn render_timeline_audio_to_pcm_f32(
     output_path: &Path,
     timeline: &TimelineExportSnapshot,
+    prepared_audio: &PreparedTimelineAudioSnapshot,
     range: TimelineRenderRange,
     sample_rate: u32,
     channel_layout: AudioChannelLayout,
+    resource_policy: service::ExportExecutionResourcePolicy,
     cancel: &ExecutionCancellationToken,
+    execution_gate: &service::ExportExecutionGate,
     report: &mut dyn FnMut(ExportProgress),
 ) -> JobExecutionResult {
+    if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
+        return JobExecutionResult::Cancelled;
+    }
     let file = match std::fs::File::create(output_path) {
         Ok(file) => file,
         Err(err) => {
@@ -1865,7 +2406,14 @@ fn render_timeline_audio_to_pcm_f32(
             ));
         }
     };
-    let cache = Arc::new(AudioSourceCache::new(sample_rate));
+    let audio_cache = resource_policy.audio_source_cache;
+    let cache = Arc::new(AudioSourceCache::new_bounded_with_sessions(
+        sample_rate,
+        10,
+        audio_cache.entry_capacity,
+        audio_cache.byte_budget,
+        audio_cache.decoder_session_capacity,
+    ));
     let resolver = ExportAudioMediaResolver { timeline, cache: Arc::clone(&cache) };
     let program_channel_layout = timeline.sequence.settings.audio_channel_layout;
     let contract = AudioRenderContract {
@@ -1880,20 +2428,34 @@ fn render_timeline_audio_to_pcm_f32(
         compensation_delay_scratch_budget_bytes:
             AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
     };
-    let mut runtime = match AudioProgramRuntime::build(
-        &timeline.sequence,
-        &timeline.sequences,
-        &resolver,
-        contract,
-        None,
-    ) {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            return JobExecutionResult::Failed(format!(
-                "编译导出音频 Program 失败（未使用降级混音）: {error}"
-            ));
-        }
+    let public_time_range = match range.time_range() {
+        Ok(range) => range,
+        Err(error) => return JobExecutionResult::Failed(error),
     };
+    let mut runtime =
+        match AudioProgramRuntime::build_from_precompiled_closure_for_range_with_resource_grant(
+            &timeline.sequence,
+            &timeline.sequences,
+            &resolver,
+            contract,
+            Some(prepared_audio.root_program().output_id()),
+            public_time_range,
+            prepared_audio.closure(),
+            resource_policy.audio_runtime_grant,
+        ) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                return JobExecutionResult::Failed(format!(
+                    "编译导出音频 Program 失败（未使用降级混音）: {error}"
+                ));
+            }
+        };
+    if runtime.execution_demand() != prepared_audio.execution_demand() {
+        return JobExecutionResult::Failed(
+            "prepared audio Runtime execution demand differs from admitted root Program evidence"
+                .to_owned(),
+        );
+    }
     let delivery_mixer =
         match AudioChannelMixMatrix::standard(program_channel_layout, channel_layout) {
             Ok(matrix) => PreparedAudioChannelMixer::new(matrix),
@@ -1907,7 +2469,7 @@ fn render_timeline_audio_to_pcm_f32(
         Err(error) => return JobExecutionResult::Failed(error),
     };
     if total_samples == 0 {
-        return JobExecutionResult::Completed;
+        return JobExecutionResult::ReversibleWorkCompleted;
     }
     if runtime.requires_state_entry() {
         if let Err(error) = runtime
@@ -1927,7 +2489,7 @@ fn render_timeline_audio_to_pcm_f32(
     let mut program_pcm = vec![0.0_f32; chunk_frames_target * program_channels];
 
     while rendered_samples < total_samples {
-        if cancel.is_canceled() {
+        if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
             return JobExecutionResult::Cancelled;
         }
 
@@ -1947,10 +2509,14 @@ fn render_timeline_audio_to_pcm_f32(
         };
         let chunk_samples = chunk_frames * channels;
         let program_samples = chunk_frames * program_channels;
-        if let Err(error) = runtime.render_into(
+        if let Err(error) = runtime.render_into_cancellable(
             AudioRenderRequest { start_sample: chunk_start, frames: chunk_frames },
             &mut program_pcm[..program_samples],
+            cancel,
         ) {
+            if cancel.is_canceled() {
+                return JobExecutionResult::Cancelled;
+            }
             return JobExecutionResult::Failed(format!("执行导出音频 Program 失败: {error}"));
         }
         if let Err(error) = delivery_mixer.mix_into(
@@ -1980,7 +2546,7 @@ fn render_timeline_audio_to_pcm_f32(
     if let Err(err) = writer.flush() {
         return JobExecutionResult::Failed(format!("刷新临时音频文件失败: {}", err));
     }
-    JobExecutionResult::Completed
+    JobExecutionResult::ReversibleWorkCompleted
 }
 
 fn timeline_audio_sample_range(
@@ -2065,16 +2631,143 @@ impl AudioDecodedSource for ExportDecodedAudioSource {
         start_frame: i64,
         frames: usize,
         destination: &mut [f32],
-        _cancellation: &mondrian_core::ExecutionCancellationToken,
+        cancellation: &mondrian_core::ExecutionCancellationToken,
     ) -> Result<(), String> {
         self.0
-            .read_interleaved(start_frame, frames, destination)
+            .read_interleaved_cancellable(start_frame, frames, destination, cancellation)
             .map_err(|error| error.to_string())
     }
 }
 
+fn preflight_timeline_visual_range_at_resolution(
+    timeline: &TimelineExportSnapshot,
+    range: TimelineRenderRange,
+    root_resolution: Resolution,
+    root_color_context: ProgramColorContext,
+    cancel: &ExecutionCancellationToken,
+    execution_gate: &service::ExportExecutionGate,
+    visual_session: &mut ExportVisualRenderSession,
+) -> Result<(), JobExecutionResult> {
+    if visual_session.route_contracts_sealed {
+        return preflight_timeline_visual_range_once(
+            timeline,
+            range,
+            root_resolution,
+            root_color_context,
+            cancel,
+            execution_gate,
+            visual_session,
+        );
+    }
+    preflight_timeline_visual_range_once(
+        timeline,
+        range,
+        root_resolution,
+        root_color_context,
+        cancel,
+        execution_gate,
+        visual_session,
+    )?;
+    visual_session.route_contracts_sealed = true;
+    Ok(())
+}
+
+fn preflight_timeline_visual_range_once(
+    timeline: &TimelineExportSnapshot,
+    range: TimelineRenderRange,
+    root_resolution: Resolution,
+    root_color_context: ProgramColorContext,
+    cancel: &ExecutionCancellationToken,
+    execution_gate: &service::ExportExecutionGate,
+    visual_session: &mut ExportVisualRenderSession,
+) -> Result<(), JobExecutionResult> {
+    for index in 0..range.total_frames {
+        if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
+            return Err(JobExecutionResult::Cancelled);
+        }
+        let index = i64::try_from(index).map_err(|_| {
+            JobExecutionResult::Failed(
+                "export visual preflight frame range exceeds signed coordinate capacity".to_owned(),
+            )
+        })?;
+        let timeline_frame = range.start_frame.checked_add(index).ok_or_else(|| {
+            JobExecutionResult::Failed(
+                "export visual preflight frame coordinate overflowed signed capacity".to_owned(),
+            )
+        })?;
+        let closure = prepare_export_visual_frame_closure(
+            timeline,
+            visual_session,
+            cancel,
+            &timeline.sequence,
+            timeline_frame,
+            root_resolution,
+            root_color_context.clone(),
+        )
+        .map_err(|reason| {
+            if cancel.is_canceled() {
+                JobExecutionResult::Cancelled
+            } else {
+                JobExecutionResult::Failed(format!(
+                    "export visual closure preflight failed at root frame {timeline_frame}: {reason}"
+                ))
+            }
+        })?;
+        let materialization_bytes = closure
+            .conservative_cpu_materialization_active_bytes()
+            .map_err(|error| JobExecutionResult::Failed(error.to_string()))?;
+        visual_session
+            .composite_scratch
+            .admit_cpu_active_working_set(
+                materialization_bytes,
+                TimelineCpuCompositePrecision::Float32,
+            )
+            .map_err(|error| {
+                JobExecutionResult::Failed(format!(
+                    "export visual closure exceeds its CPU working-set grant at root frame {timeline_frame}: {error}"
+                ))
+            })?;
+        if cancel.is_canceled() {
+            return Err(JobExecutionResult::Cancelled);
+        }
+    }
+    Ok(())
+}
+
+fn prepare_export_temporal_plan(
+    program: &PreparedVisualProgram,
+    render_plan: &TimelineRenderPlan,
+    resolution: Resolution,
+    generation: u64,
+    cancellation: &ExecutionCancellationToken,
+) -> Result<(TimelineRenderPlan, Vec<TimelineTemporalDemandBatch>), String> {
+    let extent = EffectFrameExtent::new(resolution.width, resolution.height);
+    let prepared = prepare_timeline_temporal_execution(
+        program,
+        render_plan,
+        generation,
+        EffectExecutionContinuity::Discontinuous,
+        extent,
+        extent.full_frame_roi(),
+        cancellation.clone(),
+    )
+    .map_err(|error| format!("export temporal preparation failed closed: {error}"))?;
+    Ok(prepared.into_parts())
+}
+
+fn process_supervision_failure(
+    operation: &str,
+    error: SupervisedProcessError,
+) -> JobExecutionResult {
+    if error.is_canceled() {
+        JobExecutionResult::Cancelled
+    } else {
+        JobExecutionResult::Failed(format!("{operation}失败: {error}"))
+    }
+}
+
 fn write_timeline_frames(
-    stdin: ChildStdin,
+    child: &mut SupervisedChild,
     timeline: &TimelineExportSnapshot,
     range: TimelineRenderRange,
     width: u32,
@@ -2082,12 +2775,13 @@ fn write_timeline_frames(
     alpha_mode: ExportAlphaMode,
     delivery: &ResolvedExportDeliveryContract,
     cancel: &ExecutionCancellationToken,
+    execution_gate: &service::ExportExecutionGate,
     report: &mut dyn FnMut(ExportProgress),
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+    visual_session: &mut ExportVisualRenderSession,
+    asset_issue_summary: VideoColorDiagnosticIssueAggregate,
 ) -> JobExecutionResult {
-    let mut writer = BufWriter::new(stdin);
-    write_timeline_frames_to_writer(
-        &mut writer,
+    render_timeline_frames_with_sink(
         timeline,
         range,
         width,
@@ -2095,13 +2789,25 @@ fn write_timeline_frames(
         alpha_mode,
         delivery,
         cancel,
+        execution_gate,
         report,
         report_diagnostics,
+        visual_session,
+        asset_issue_summary,
+        &mut |canvas| {
+            let owned = std::mem::take(canvas);
+            match child.write_owned(owned, cancel) {
+                Ok(returned) => {
+                    *canvas = returned;
+                    Ok(())
+                }
+                Err(error) => Err(process_supervision_failure("写入 ffmpeg 视频管道", error)),
+            }
+        },
     )
 }
 
-fn write_timeline_frames_to_writer<W: Write>(
-    writer: &mut W,
+fn render_timeline_frames_with_sink(
     timeline: &TimelineExportSnapshot,
     range: TimelineRenderRange,
     width: u32,
@@ -2109,21 +2815,22 @@ fn write_timeline_frames_to_writer<W: Write>(
     alpha_mode: ExportAlphaMode,
     delivery: &ResolvedExportDeliveryContract,
     cancel: &ExecutionCancellationToken,
+    execution_gate: &service::ExportExecutionGate,
     report: &mut dyn FnMut(ExportProgress),
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+    visual_session: &mut ExportVisualRenderSession,
+    asset_issue_summary: VideoColorDiagnosticIssueAggregate,
+    write_frame: &mut dyn FnMut(&mut Vec<u8>) -> Result<(), JobExecutionResult>,
 ) -> JobExecutionResult {
     let frame_contract = export_frame_contract(delivery.bit_depth);
     let root_color_context = resolved_export_color_context(timeline, delivery);
     let total = range.total_frames.max(1);
     let mut canvas = vec![0u8; frame_contract.canvas_len(width, height)];
     let mut diagnostics = ExportJobDiagnostics::default();
-    diagnostics
-        .color
-        .record_asset_issue_summary(export_asset_issue_summary(timeline));
-    let mut visual_session = ExportVisualRenderSession::default();
+    diagnostics.color.record_asset_issue_summary(asset_issue_summary);
 
     for index in 0..total {
-        if cancel.is_canceled() {
+        if !execution_gate.wait_at_boundary(ExportProgressPhase::Rendering, cancel) {
             return JobExecutionResult::Cancelled;
         }
 
@@ -2131,7 +2838,7 @@ fn write_timeline_frames_to_writer<W: Write>(
         let mut frame_color_counts = InputColorResolutionSourceCounts::default();
         let mut frame_stage_diagnostics = RenderColorStageDiagnostics::default();
         let mut frame_composite_diagnostics = TimelineCompositeDiagnostics::default();
-        let render_result = render_timeline_frame_into_with_session(
+        let render_result = render_timeline_frame_into_with_session_cancellable(
             timeline,
             timeline_frame,
             width,
@@ -2144,16 +2851,21 @@ fn write_timeline_frames_to_writer<W: Write>(
             Some(&mut frame_stage_diagnostics),
             Some(&mut frame_composite_diagnostics),
             Some(&mut diagnostics.color),
-            &mut visual_session,
+            visual_session,
+            cancel,
         );
         diagnostics.color.record_frame_diagnostics(
             frame_color_counts,
             frame_stage_diagnostics,
             frame_composite_diagnostics,
         );
+        diagnostics.visual = visual_session.visual_diagnostics();
         report_diagnostics(diagnostics);
         match render_result {
             Ok(()) => {}
+            Err(_) if cancel.is_canceled() => {
+                return JobExecutionResult::Cancelled;
+            }
             Err(err) => {
                 return JobExecutionResult::Failed(format!(
                     "渲染时间线帧失败（frame={}）: {}",
@@ -2162,8 +2874,8 @@ fn write_timeline_frames_to_writer<W: Write>(
             }
         }
 
-        if let Err(err) = writer.write_all(&canvas) {
-            return JobExecutionResult::Failed(format!("写入编码管道失败: {}", err));
+        if let Err(outcome) = write_frame(&mut canvas) {
+            return outcome;
         }
 
         let rendered = index + 1;
@@ -2172,11 +2884,7 @@ fn write_timeline_frames_to_writer<W: Write>(
         report(ExportProgress::rendering(progress, rendered, total));
     }
 
-    if let Err(err) = writer.flush() {
-        return JobExecutionResult::Failed(format!("刷新编码管道失败: {}", err));
-    }
-
-    JobExecutionResult::Completed
+    JobExecutionResult::ReversibleWorkCompleted
 }
 
 /// Build the export output boundary from the resolved color context.
@@ -2226,7 +2934,11 @@ fn render_timeline_frame_into(
     composite_diagnostics: Option<&mut TimelineCompositeDiagnostics>,
     export_diagnostics: Option<&mut ExportJobColorDiagnostics>,
 ) -> Result<(), String> {
-    let mut visual_session = ExportVisualRenderSession::default();
+    let mut visual_session = ExportVisualRenderSession::for_timeline(
+        0,
+        service::ExportExecutionResourcePolicy::default(),
+        timeline,
+    )?;
     let frame_contract = export_frame_contract(timeline.sequence.settings.delivery.bit_depth);
     let color_context = timeline
         .sequence
@@ -2264,13 +2976,49 @@ fn render_timeline_frame_into_with_session(
     export_diagnostics: Option<&mut ExportJobColorDiagnostics>,
     visual_session: &mut ExportVisualRenderSession,
 ) -> Result<(), String> {
+    render_timeline_frame_into_with_session_cancellable(
+        timeline,
+        timeline_frame,
+        width,
+        height,
+        alpha_mode,
+        color_context,
+        frame_contract,
+        canvas,
+        input_color_counts,
+        stage_diagnostics,
+        composite_diagnostics,
+        export_diagnostics,
+        visual_session,
+        &ExecutionCancellationToken::new(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_timeline_frame_into_with_session_cancellable(
+    timeline: &TimelineExportSnapshot,
+    timeline_frame: i64,
+    width: u32,
+    height: u32,
+    alpha_mode: ExportAlphaMode,
+    color_context: ProgramColorContext,
+    frame_contract: ExportFrameContract,
+    canvas: &mut Vec<u8>,
+    input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
+    stage_diagnostics: Option<&mut RenderColorStageDiagnostics>,
+    composite_diagnostics: Option<&mut TimelineCompositeDiagnostics>,
+    export_diagnostics: Option<&mut ExportJobColorDiagnostics>,
+    visual_session: &mut ExportVisualRenderSession,
+    cancellation: &ExecutionCancellationToken,
+) -> Result<(), String> {
     let required_len = frame_contract.canvas_len(width, height);
     if canvas.len() != required_len {
         canvas.resize(required_len, 0);
     }
 
     let mut render_context = ExportFrameRenderContext {
-        timeline,
+        media: &timeline.media,
+        color_environment: &timeline.color_environment,
         alpha_mode,
         frame_contract,
         input_color_counts,
@@ -2278,16 +3026,17 @@ fn render_timeline_frame_into_with_session(
         composite_diagnostics,
         export_diagnostics,
         visual_session,
+        cancellation,
     };
 
     render_sequence_frame_into(
+        timeline,
         &mut render_context,
         &timeline.sequence,
         timeline_frame,
         Resolution { width, height },
         color_context,
         SequenceRenderTarget::Deliverable(canvas),
-        0,
     )
 }
 
@@ -2296,12 +3045,19 @@ enum SequenceRenderTarget<'a> {
     Deliverable(&'a mut Vec<u8>),
 }
 
+#[derive(Clone)]
+struct PreparedExportTemporalLayer {
+    frame: CpuColorFrame,
+    source_resolution: Resolution,
+}
+
 enum ResolvedExportTransitionInput {
     Transparent,
     Decoded(Arc<DecodedVideoLayer>),
     Nested(CpuColorFrame),
     BasicTitle(ResolvedExportTitle),
     SolidColor,
+    Temporal(PreparedExportTemporalLayer),
 }
 
 struct ResolvedExportTitle {
@@ -2309,20 +3065,260 @@ struct ResolvedExportTitle {
     transform: [f32; 6],
 }
 
-#[derive(Default)]
 struct ExportVisualRenderSession {
     title_rasterizer: BasicTitleRasterizer,
-    visual_schedules: PreparedVisualScheduleCache,
+    decode_context: PreviewDecodeSessionContext,
+    prepared_visual: PreparedTimelineVisualSnapshot,
+    #[cfg(test)]
+    reference_visual_programs: Option<PreparedVisualProgramCache>,
+    #[cfg(test)]
+    reference_programs_by_sequence: HashMap<SequenceId, Arc<PreparedVisualProgram>>,
+    composite_scratch: TimelineCompositeScratch,
+    gpu_output: ExportGpuExecutionRuntime,
+    heterogeneous_capability: Result<HeterogeneousGpuExecutionCapability, String>,
+    heterogeneous_route_contracts: Vec<ExportHeterogeneousRouteContract>,
+    visual_diagnostics: ExportJobVisualDiagnostics,
+    resource_policy: service::ExportExecutionResourcePolicy,
+    effect_execution_generation: u64,
+    route_contracts_sealed: bool,
+}
+
+impl ExportVisualRenderSession {
+    fn for_execution_generation(
+        effect_execution_generation: u64,
+        resource_policy: service::ExportExecutionResourcePolicy,
+        prepared_visual: &PreparedTimelineVisualSnapshot,
+    ) -> Result<Self, String> {
+        let program_count = prepared_visual.program_count();
+        let retained_bytes = prepared_visual.retained_bytes();
+        if program_count > resource_policy.visual_program_entries
+            || retained_bytes > resource_policy.visual_program_bytes
+        {
+            return Err(format!(
+                "prepared export visual closure exceeds its frozen grant: programs={program_count}/{} logical_bytes={retained_bytes}/{}",
+                resource_policy.visual_program_entries,
+                resource_policy.visual_program_bytes
+            ));
+        }
+        let mut composite_scratch = TimelineCompositeScratch::default();
+        composite_scratch.reconfigure_effect_execution(EffectExecutionSessionConfig {
+            max_cache_entries: resource_policy.effect_cache_entries,
+            max_cache_bytes: resource_policy.effect_cache_bytes,
+            max_working_bytes: resource_policy.effect_working_bytes,
+            max_gpu_plan_entries: resource_policy.effect_gpu_plan_entries,
+            max_gpu_plan_bytes: resource_policy.effect_gpu_plan_bytes,
+        });
+        composite_scratch.reconfigure_cpu_working_set(resource_policy.cpu_composite_working_set);
+        composite_scratch.reconfigure_color_execution(resource_policy.cpu_color_processor_capacity);
+        let mut gpu_output = ExportGpuExecutionRuntime::default();
+        gpu_output.configure(resource_policy);
+        gpu_output.begin_attempt(effect_execution_generation);
+        let heterogeneous_capability = HeterogeneousGpuExecutionCapability::scene_linear_f32()
+            .map_err(|error| {
+                format!("renderer heterogeneous capability construction failed: {error}")
+            });
+        let title_fonts = prepared_visual.title_fonts().ok_or_else(|| {
+            "immutable export Basic Title font dependency closure is unavailable".to_owned()
+        })?;
+        if title_fonts.retained_bytes() > resource_policy.title_font_bytes {
+            return Err(format!(
+                "prepared Basic Title font closure exceeds its frozen grant: bytes={}/{}",
+                title_fonts.retained_bytes(),
+                resource_policy.title_font_bytes
+            ));
+        }
+        Ok(Self {
+            title_rasterizer: BasicTitleRasterizer::with_prepared_font_set(
+                resource_policy.title_cache_entries,
+                resource_policy.title_cache_bytes,
+                title_fonts,
+            )
+            .map_err(|error| format!("failed to load frozen Basic Title font closure: {error}"))?,
+            decode_context: PreviewDecodeSessionContext::default(),
+            prepared_visual: prepared_visual.clone(),
+            #[cfg(test)]
+            reference_visual_programs: None,
+            #[cfg(test)]
+            reference_programs_by_sequence: HashMap::new(),
+            composite_scratch,
+            gpu_output,
+            heterogeneous_capability,
+            heterogeneous_route_contracts: Vec::new(),
+            visual_diagnostics: ExportJobVisualDiagnostics::default(),
+            resource_policy,
+            effect_execution_generation,
+            route_contracts_sealed: false,
+        })
+    }
+
+    #[cfg(test)]
+    fn for_reference_generation(
+        effect_execution_generation: u64,
+        resource_policy: service::ExportExecutionResourcePolicy,
+    ) -> Self {
+        let sequence = mondrian_timeline::sequence::Sequence::new("export visual test reference");
+        let prepared = crate::prepare_timeline_export_dependencies(
+            &sequence,
+            &[],
+            TimelineExportRange::EntireSequence,
+            false,
+        )
+        .expect("prepare Export test reference Program");
+        let mut prepared_visual = prepared.execution_snapshot().visual().clone();
+        prepared_visual
+            .install_title_fonts(mondrian_renderer::PreparedBasicTitleFontSet::default())
+            .expect("seal empty Export test title-font closure");
+        let mut session = Self::for_execution_generation(
+            effect_execution_generation,
+            resource_policy,
+            &prepared_visual,
+        )
+        .expect("admit Export test reference Program");
+        session.reference_visual_programs = Some(PreparedVisualProgramCache::with_config(
+            PreparedVisualProgramCacheConfig::new(
+                resource_policy.visual_program_entries,
+                resource_policy.visual_program_bytes,
+            )
+            .with_lut_cache(mondrian_effects::LutPreparationCacheConfig::new(
+                resource_policy.lut_cache_entries,
+                resource_policy.lut_cache_bytes,
+            )),
+        ));
+        session
+    }
+
+    fn for_timeline(
+        effect_execution_generation: u64,
+        resource_policy: service::ExportExecutionResourcePolicy,
+        timeline: &TimelineExportSnapshot,
+    ) -> Result<Self, String> {
+        if let Some(prepared_visual) =
+            timeline.prepared_execution().map(|execution| execution.visual())
+        {
+            return Self::for_execution_generation(
+                effect_execution_generation,
+                resource_policy,
+                prepared_visual,
+            );
+        }
+        #[cfg(test)]
+        {
+            Ok(Self::for_reference_generation(
+                effect_execution_generation,
+                resource_policy,
+            ))
+        }
+        #[cfg(not(test))]
+        {
+            Err("immutable export visual execution snapshot is unavailable".to_owned())
+        }
+    }
+
+    /// Release every decoder Session owned by this exact export job.
+    ///
+    /// Export never borrows the media convenience thread-local. A job-local
+    /// context travels through every prepared root, child, Transition, and
+    /// temporal materialization and is retired before the executor returns to
+    /// terminal publication.
+    fn release_decode_sessions(&mut self) {
+        self.decode_context.clear();
+    }
+
+    fn visual_diagnostics(&self) -> ExportJobVisualDiagnostics {
+        self.visual_diagnostics
+    }
+
+    fn prepare_program(
+        &mut self,
+        sequence: &mondrian_timeline::sequence::Sequence,
+    ) -> Result<Arc<PreparedVisualProgram>, String> {
+        if let Some(program) = self.prepared_visual.program(sequence.id, sequence.revision) {
+            return Ok(program);
+        }
+        #[cfg(test)]
+        if let Some(programs) = self.reference_visual_programs.as_mut() {
+            let program = programs.prepare(sequence).map_err(|error| error.to_string())?;
+            self.reference_programs_by_sequence.insert(sequence.id, Arc::clone(&program));
+            return Ok(program);
+        }
+        Err(format!(
+            "Sequence {} revision {:?} was not captured by the immutable export visual snapshot",
+            sequence.id, sequence.revision
+        ))
+    }
+
+    fn materialization_contract_for_sequence(
+        &self,
+        sequence_id: SequenceId,
+    ) -> Result<PreparedVisualMaterializationContract, String> {
+        if let Some(program) = self.prepared_visual.program_by_id(sequence_id) {
+            return Ok(program.materialization_contract());
+        }
+        #[cfg(test)]
+        if let Some(program) = self.reference_programs_by_sequence.get(&sequence_id) {
+            return Ok(program.materialization_contract());
+        }
+        Err(format!(
+            "Sequence {sequence_id} has no frozen visual materialization contract"
+        ))
+    }
+
+    #[cfg(test)]
+    fn prepare_reference_range(
+        &mut self,
+        root: &mondrian_timeline::sequence::Sequence,
+        sequences: &[mondrian_timeline::sequence::Sequence],
+        range: TimelineRenderRange,
+    ) -> Result<(), String> {
+        if self.reference_visual_programs.is_none() {
+            return Ok(());
+        }
+        let total_frames = i64::try_from(range.total_frames)
+            .map_err(|_| "reference visual range exceeds signed frame capacity".to_owned())?;
+        let end_frame_exclusive = range
+            .start_frame
+            .checked_add(total_frames)
+            .ok_or_else(|| "reference visual range end exceeds signed frame capacity".to_owned())?;
+        let dependencies = crate::prepare_timeline_export_dependencies(
+            root,
+            sequences,
+            TimelineExportRange::WorkArea {
+                start_frame: range.start_frame,
+                end_frame_exclusive,
+            },
+            false,
+        )
+        .map_err(|error| error.to_string())?;
+        self.prepared_visual = dependencies.execution_snapshot().visual().clone();
+        self.reference_programs_by_sequence.clear();
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl Default for ExportVisualRenderSession {
+    fn default() -> Self {
+        Self::for_reference_generation(0, service::ExportExecutionResourcePolicy::default())
+    }
+}
+
+impl Drop for ExportVisualRenderSession {
+    fn drop(&mut self) {
+        self.release_decode_sessions();
+    }
 }
 
 /// Frame-scoped execution dependencies shared by root, nested, and Transition
 /// rendering.
 ///
-/// The admitted Timeline and alpha policy are immutable for one frame. Mutable
-/// diagnostics and the job-owned visual Session travel through the same
-/// recursion so nested Sequences cannot create parallel execution semantics.
+/// The admitted physical media/color facts and alpha policy are immutable for
+/// one frame. Raw Sequence snapshots remain outside this materialization
+/// context at the closure-preparation Seam. Mutable diagnostics and the
+/// job-owned visual Session travel through the renderer-owned prepared closure,
+/// so nested Sequences cannot create a parallel semantic evaluator.
 struct ExportFrameRenderContext<'a> {
-    timeline: &'a TimelineExportSnapshot,
+    media: &'a HashMap<AssetId, crate::preset::ExportMediaDependency>,
+    color_environment: &'a mondrian_core::ProjectColorEnvironment,
     alpha_mode: ExportAlphaMode,
     frame_contract: ExportFrameContract,
     input_color_counts: Option<&'a mut InputColorResolutionSourceCounts>,
@@ -2330,41 +3326,141 @@ struct ExportFrameRenderContext<'a> {
     composite_diagnostics: Option<&'a mut TimelineCompositeDiagnostics>,
     export_diagnostics: Option<&'a mut ExportJobColorDiagnostics>,
     visual_session: &'a mut ExportVisualRenderSession,
+    cancellation: &'a ExecutionCancellationToken,
 }
 
-type ExportDecodeCacheKey = (
-    AssetId,
-    TimelineTime,
-    ColorSpace,
-    DecodedVideoRangeContract,
-    AlphaInterpretation,
-    u32,
-    u32,
-);
+/// Complete identity of one decoded-and-transformed media layer.
+///
+/// This key is cache authority, not a diagnostic fingerprint. It therefore
+/// retains every exact input that can change either the decoded source sample
+/// or the source-to-working result and relies on `Eq` to resolve ordinary
+/// `HashMap` hash collisions.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ExportDecodeCacheKey {
+    asset_id: AssetId,
+    source_path: PathBuf,
+    source_fingerprint: MediaFileFingerprint,
+    video_stream_index: u32,
+    source_time: TimelineTime,
+    input_color_space: ColorSpace,
+    input_video_range: DecodedVideoRangeContract,
+    alpha_interpretation: AlphaInterpretation,
+    media_input_color: mondrian_timeline::sequence::MediaInputColorContext,
+    decode_resolution: Resolution,
+    source_resolution: Resolution,
+}
+
+impl ExportDecodeCacheKey {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        asset_id: AssetId,
+        dependency: &crate::preset::ExportMediaDependency,
+        source_time: TimelineTime,
+        input_color_space: ColorSpace,
+        input_video_range: DecodedVideoRangeContract,
+        alpha_interpretation: AlphaInterpretation,
+        color_context: &ProgramColorContext,
+        auto_tone_map: bool,
+        decode_resolution: Resolution,
+        source_resolution: Resolution,
+    ) -> Result<Self, String> {
+        if !dependency.source_fingerprint.authorizes_reuse() {
+            return Err(format!(
+                "asset={} path={} cannot enter the export decode cache because its admitted source revision evidence is incomplete",
+                asset_id,
+                dependency.path.display()
+            ));
+        }
+        let video_stream_index = dependency.video_stream_index.ok_or_else(|| {
+            format!(
+                "asset={} path={} cannot enter the export decode cache because no physical video stream was frozen",
+                asset_id,
+                dependency.path.display()
+            )
+        })?;
+        Ok(Self {
+            asset_id,
+            source_path: dependency.path.clone(),
+            source_fingerprint: dependency.source_fingerprint,
+            video_stream_index,
+            source_time,
+            input_color_space,
+            input_video_range,
+            alpha_interpretation,
+            media_input_color: color_context.media_input(auto_tone_map),
+            decode_resolution,
+            source_resolution,
+        })
+    }
+}
 
 /// Collect input color-resolution source counts for one export timeline frame.
 ///
-/// This uses the same render-plan evaluation path as timeline export, including
-/// nested sequence recursion and composition of the Project color environment
-/// with each Sequence's program semantics. It is the export-side diagnostic
-/// counterpart to preview's per-frame source counters.
+/// This iterates the same renderer-owned prepared closure as Timeline export,
+/// including each child's bound Program color context. It is the export-side
+/// diagnostic counterpart to Preview's per-frame source counters.
 pub fn export_input_color_resolution_counts_for_frame(
     timeline: &TimelineExportSnapshot,
     timeline_frame: i64,
 ) -> Result<InputColorResolutionSourceCounts, String> {
-    let mut visual_schedules = PreparedVisualScheduleCache::default();
+    let cancellation = ExecutionCancellationToken::new();
+    let mut visual_session = ExportVisualRenderSession::for_timeline(
+        0,
+        service::ExportExecutionResourcePolicy::default(),
+        timeline,
+    )?;
     let color_context = timeline
         .sequence
         .settings
         .root_program_color_context(&timeline.color_environment);
-    export_sequence_input_color_resolution_counts(
+    let closure = prepare_export_visual_frame_closure(
         timeline,
+        &mut visual_session,
+        &cancellation,
         &timeline.sequence,
         timeline_frame,
+        timeline.sequence.settings.resolution,
         color_context,
-        0,
-        &mut visual_schedules,
-    )
+    )?;
+    let mut counts = InputColorResolutionSourceCounts::default();
+    for node in closure.nodes() {
+        let color_context = node.color_context();
+        for element in &node.evaluation().plan().elements {
+            match element {
+                TimelineRenderPlanElement::Media(media) => {
+                    record_export_media_input_color_count(
+                        timeline,
+                        media,
+                        color_context,
+                        &mut counts,
+                    )?;
+                }
+                TimelineRenderPlanElement::CrossDissolve(transition) => {
+                    if let TimelineTransitionInputPlan::Media(media) = &transition.left {
+                        record_export_media_input_color_count(
+                            timeline,
+                            media,
+                            color_context,
+                            &mut counts,
+                        )?;
+                    }
+                    if let TimelineTransitionInputPlan::Media(media) = &transition.right {
+                        record_export_media_input_color_count(
+                            timeline,
+                            media,
+                            color_context,
+                            &mut counts,
+                        )?;
+                    }
+                }
+                TimelineRenderPlanElement::Adjustment(_)
+                | TimelineRenderPlanElement::SolidColor(_)
+                | TimelineRenderPlanElement::BasicTitle(_)
+                | TimelineRenderPlanElement::NestedSequence(_) => {}
+            }
+        }
+    }
+    Ok(counts)
 }
 
 /// Collect timeline composite color-path diagnostics for one export frame.
@@ -2421,210 +3517,215 @@ pub fn export_color_stage_diagnostics_for_frame(
     Ok(stage_diagnostics)
 }
 
-/// Aggregate media color-diagnostic issues for assets actually referenced by this export timeline.
-pub fn export_asset_issue_summary(
-    timeline: &TimelineExportSnapshot,
-) -> VideoColorDiagnosticIssueAggregate {
-    let mut asset_ids = HashSet::new();
-    collect_sequence_asset_ids(timeline, &timeline.sequence, 0, &mut asset_ids);
+/// Immutable media diagnostics selected by the exact export range.
+///
+/// This set is frozen beside the exact prepared visual Programs rather than
+/// reconstructed from the author model or live Effect registry.
+#[derive(Debug, Clone)]
+pub struct ExportMediaDiagnosticSet {
+    /// Stable, deduplicated file-backed media identities that may contribute.
+    pub asset_ids: Arc<[AssetId]>,
+    /// Frozen aggregate consumed by both delivery validation and job reports.
+    pub issue_summary: VideoColorDiagnosticIssueAggregate,
+}
 
-    let mut summary = VideoColorDiagnosticIssueAggregate::default();
-    for asset_id in asset_ids {
+/// Prepare selected-range media diagnostics without enumerating program frames.
+pub fn export_media_diagnostic_set(
+    timeline: &TimelineExportSnapshot,
+) -> Result<ExportMediaDiagnosticSet, String> {
+    let prepared = timeline
+        .prepared_execution()
+        .map(|execution| execution.visual())
+        .ok_or_else(|| "immutable export visual execution snapshot is unavailable".to_owned())?;
+    let asset_ids = prepared.media_asset_ids().iter().copied().collect::<Vec<_>>();
+    let mut issue_summary = VideoColorDiagnosticIssueAggregate::default();
+    for asset_id in &asset_ids {
         if let Some(diagnostic) = timeline
             .media
-            .get(&asset_id)
+            .get(asset_id)
             .and_then(|dependency| dependency.color_diagnostic.as_ref())
         {
-            summary.observe(diagnostic);
+            issue_summary.observe(diagnostic);
         }
     }
-    summary
+    Ok(ExportMediaDiagnosticSet { asset_ids: Arc::from(asset_ids), issue_summary })
 }
 
-fn collect_sequence_asset_ids(
+fn record_export_media_input_color_count(
     timeline: &TimelineExportSnapshot,
-    sequence: &mondrian_timeline::sequence::Sequence,
-    depth: usize,
-    asset_ids: &mut HashSet<AssetId>,
-) {
-    if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
-        return;
-    }
-
-    for track in &sequence.video_tracks {
-        for clip in &track.clips {
-            if clip.is_disabled {
-                continue;
-            }
-            if clip.is_nested_sequence() {
-                let Some(nested_sequence_id) = clip.nested_sequence_id() else {
-                    continue;
-                };
-                let Some(nested_sequence) =
-                    timeline.sequences.iter().find(|sequence| sequence.id == nested_sequence_id)
-                else {
-                    continue;
-                };
-                collect_sequence_asset_ids(timeline, nested_sequence, depth + 1, asset_ids);
-                continue;
-            }
-            if let Some(asset_id) = clip.media_asset_id() {
-                asset_ids.insert(asset_id);
-            }
-        }
-    }
+    media: &TimelineMediaPlan,
+    color_context: &ProgramColorContext,
+    counts: &mut InputColorResolutionSourceCounts,
+) -> Result<(), String> {
+    let dependency = timeline
+        .media
+        .get(&media.asset_id)
+        .ok_or_else(|| format!("导出快照缺少素材依赖: {}", media.asset_id))?;
+    let resolution = color_context.missing_metadata_policy.resolve_asset_input_decision(
+        media.color_space_override,
+        dependency.interpretation,
+        dependency
+            .color_diagnostic
+            .as_ref()
+            .and_then(mondrian_media::VideoColorDiagnostic::executable_color_space),
+        color_context.working_color_space,
+    );
+    counts.record(resolution.source);
+    Ok(())
 }
 
-fn export_sequence_input_color_resolution_counts(
-    timeline: &TimelineExportSnapshot,
-    sequence: &mondrian_timeline::sequence::Sequence,
-    timeline_frame: i64,
-    color_context: ProgramColorContext,
-    depth: usize,
-    visual_schedules: &mut PreparedVisualScheduleCache,
-) -> Result<InputColorResolutionSourceCounts, String> {
-    if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
-        return Err("序列嵌套层级过深，已停止统计输入色彩解析以避免循环".to_string());
-    }
+type PreparedExportVisualClosure =
+    PreparedVisualFrameClosure<Vec<PreparedExportHeterogeneousElement>>;
 
-    let schedule = visual_schedules.prepare(sequence).map_err(|error| error.to_string())?;
-    let render_plan = evaluate_timeline_render_plan(
-        schedule.as_ref(),
-        TimelineEvaluationRequest::export(timeline_frame),
+fn export_visual_node(
+    closure: &PreparedExportVisualClosure,
+    node_id: PreparedVisualFrameNodeId,
+) -> Result<&PreparedVisualFrameNode<Vec<PreparedExportHeterogeneousElement>>, String> {
+    closure.node(node_id).ok_or_else(|| {
+        format!(
+            "prepared export visual closure references missing node {}",
+            node_id.index()
+        )
+    })
+}
+
+fn export_nested_child(
+    closure: &PreparedExportVisualClosure,
+    parent_id: PreparedVisualFrameNodeId,
+    placement: TimelineClipExecutionRef,
+    sample: PreparedVisualNestedSample,
+) -> Result<PreparedVisualFrameNodeId, String> {
+    export_visual_node(closure, parent_id)?
+        .nested_child(placement, sample)
+        .ok_or_else(|| {
+            format!(
+                "prepared export visual closure has no {sample:?} child binding for Clip {}",
+                placement.clip_id
+            )
+        })
+}
+
+fn prepare_export_visual_frame_closure(
+    timeline: &TimelineExportSnapshot,
+    visual_session: &mut ExportVisualRenderSession,
+    cancellation: &ExecutionCancellationToken,
+    root_sequence: &mondrian_timeline::sequence::Sequence,
+    root_frame: i64,
+    root_resolution: Resolution,
+    root_color_context: ProgramColorContext,
+) -> Result<PreparedExportVisualClosure, String> {
+    let visual_session = std::cell::RefCell::new(visual_session);
+    prepare_visual_frame_closure(
+        PreparedVisualFrameClosureRequest {
+            root_sequence,
+            sequences: &timeline.sequences,
+            root_frame,
+            root_resolution,
+            root_color_context,
+            child_canvas_policy: PreparedVisualChildCanvasPolicy::Authored,
+        },
+        |sequence| visual_session.borrow_mut().prepare_program(sequence),
+        |program, frame, resolution, _color_context, _normalized_preview_resolution_scale| {
+            if cancellation.is_canceled() {
+                return Err("export visual execution canceled".to_owned());
+            }
+            let mut visual_session = visual_session.borrow_mut();
+            let effect_execution_generation = visual_session.effect_execution_generation;
+            visual_session
+                .composite_scratch
+                .bind_effect_execution_generation(effect_execution_generation);
+            let authored_render_plan = visual_session
+                .composite_scratch
+                .evaluate_prepared_visual_program(
+                    program.as_ref(),
+                    TimelineEvaluationRequest::export(FramePosition::new(
+                        frame,
+                        program.evaluation_time_base(),
+                    )),
+                )
+                .map_err(|error| error.to_string())?;
+            if authored_render_plan.is_empty() {
+                return Ok(PreparedVisualFrameEvaluation::new(
+                    authored_render_plan,
+                    Vec::new(),
+                    Vec::new(),
+                ));
+            }
+            let (temporal_render_plan, temporal_batches) = prepare_export_temporal_plan(
+                program.as_ref(),
+                &authored_render_plan,
+                resolution,
+                visual_session.effect_execution_generation,
+                cancellation,
+            )?;
+            let effect_frame_plan = prepare_export_effect_frame_plan(
+                program.as_ref(),
+                &temporal_render_plan,
+                resolution,
+                &mut visual_session,
+            )
+            .map_err(|error| error.to_string())?;
+            let (render_plan, heterogeneous) = effect_frame_plan.into_parts();
+            Ok(PreparedVisualFrameEvaluation::new(
+                render_plan,
+                temporal_batches,
+                heterogeneous,
+            ))
+        },
     )
-    .map_err(|error| error.to_string())?;
-    let mut counts = InputColorResolutionSourceCounts::default();
-    for element in &render_plan.elements {
-        match element {
-            TimelineRenderPlanElement::Media(media) => {
-                let dependency = timeline
-                    .media
-                    .get(&media.asset_id)
-                    .ok_or_else(|| format!("导出快照缺少素材依赖: {}", media.asset_id))?;
-                let resolution =
-                    color_context.missing_metadata_policy.resolve_asset_input_decision(
-                        media.color_space_override,
-                        dependency.interpretation,
-                        dependency.detected_color_space,
-                        color_context.working_color_space,
-                    );
-                counts.record(resolution.source);
-            }
-            TimelineRenderPlanElement::NestedSequence(nested) => {
-                let Some(nested_sequence) =
-                    timeline.sequences.iter().find(|sequence| sequence.id == nested.sequence_id)
-                else {
-                    return Err(format!("嵌套序列不存在: {}", nested.sequence_id));
-                };
-                let nested_frame = nested
-                    .source_time
-                    .to_frame_position(nested_sequence.settings.frame_rate, FrameRounding::Floor)
-                    .map_err(|error| error.to_string())?
-                    .frame
-                    .max(0);
-                let nested_context = nested_sequence
-                    .settings
-                    .nested_render_color_context(color_context.clone(), nested.color_processing);
-                let nested_counts = export_sequence_input_color_resolution_counts(
-                    timeline,
-                    nested_sequence,
-                    nested_frame,
-                    nested_context,
-                    depth + 1,
-                    visual_schedules,
-                )?;
-                counts.accumulate(nested_counts);
-            }
-            TimelineRenderPlanElement::Adjustment(_)
-            | TimelineRenderPlanElement::SolidColor(_)
-            | TimelineRenderPlanElement::BasicTitle(_) => {}
-            TimelineRenderPlanElement::CrossDissolve(transition) => {
-                counts.accumulate(export_transition_input_color_resolution_counts(
-                    timeline,
-                    &transition.left,
-                    color_context.clone(),
-                    depth,
-                    visual_schedules,
-                )?);
-                counts.accumulate(export_transition_input_color_resolution_counts(
-                    timeline,
-                    &transition.right,
-                    color_context.clone(),
-                    depth,
-                    visual_schedules,
-                )?);
-            }
-        }
-    }
-    Ok(counts)
-}
-
-fn export_transition_input_color_resolution_counts(
-    timeline: &TimelineExportSnapshot,
-    input: &TimelineTransitionInputPlan,
-    color_context: ProgramColorContext,
-    depth: usize,
-    visual_schedules: &mut PreparedVisualScheduleCache,
-) -> Result<InputColorResolutionSourceCounts, String> {
-    let mut counts = InputColorResolutionSourceCounts::default();
-    match input {
-        TimelineTransitionInputPlan::Transparent
-        | TimelineTransitionInputPlan::SolidColor(_)
-        | TimelineTransitionInputPlan::BasicTitle(_) => {}
-        TimelineTransitionInputPlan::Media(media) => {
-            let dependency = timeline
-                .media
-                .get(&media.asset_id)
-                .ok_or_else(|| format!("导出快照缺少素材依赖: {}", media.asset_id))?;
-            let resolution = color_context.missing_metadata_policy.resolve_asset_input_decision(
-                media.color_space_override,
-                dependency.interpretation,
-                dependency.detected_color_space,
-                color_context.working_color_space,
-            );
-            counts.record(resolution.source);
-        }
-        TimelineTransitionInputPlan::NestedSequence(nested) => {
-            let sequence = timeline
-                .sequences
-                .iter()
-                .find(|sequence| sequence.id == nested.sequence_id)
-                .ok_or_else(|| format!("嵌套序列不存在: {}", nested.sequence_id))?;
-            let frame = nested
-                .source_time
-                .to_frame_position(sequence.settings.frame_rate, FrameRounding::Floor)
-                .map_err(|error| error.to_string())?
-                .frame;
-            let nested_context = sequence
-                .settings
-                .nested_render_color_context(color_context, nested.color_processing);
-            counts.accumulate(export_sequence_input_color_resolution_counts(
-                timeline,
-                sequence,
-                frame,
-                nested_context,
-                depth + 1,
-                visual_schedules,
-            )?);
-        }
-    }
-    Ok(counts)
+    .map_err(|error| error.to_string())
 }
 
 fn render_sequence_frame_into(
+    timeline: &TimelineExportSnapshot,
     context: &mut ExportFrameRenderContext<'_>,
     sequence: &mondrian_timeline::sequence::Sequence,
     timeline_frame: i64,
     resolution: Resolution,
     color_context: ProgramColorContext,
-    mut target: SequenceRenderTarget<'_>,
-    depth: usize,
+    target: SequenceRenderTarget<'_>,
 ) -> Result<(), String> {
-    if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
-        return Err("序列嵌套层级过深，已停止渲染以避免循环".to_string());
+    let closure = prepare_export_visual_frame_closure(
+        timeline,
+        context.visual_session,
+        context.cancellation,
+        sequence,
+        timeline_frame,
+        resolution,
+        color_context,
+    )?;
+    let materialization_bytes = closure
+        .conservative_cpu_materialization_active_bytes()
+        .map_err(|error| error.to_string())?;
+    context
+        .visual_session
+        .composite_scratch
+        .admit_cpu_active_working_set(
+            materialization_bytes,
+            TimelineCpuCompositePrecision::Float32,
+        )
+        .map_err(|error| {
+            format!("export visual closure exceeds its CPU working-set grant: {error}")
+        })?;
+    render_prepared_visual_node_into(context, &closure, closure.root(), target)
+}
+
+fn render_prepared_visual_node_into(
+    context: &mut ExportFrameRenderContext<'_>,
+    closure: &PreparedExportVisualClosure,
+    node_id: PreparedVisualFrameNodeId,
+    mut target: SequenceRenderTarget<'_>,
+) -> Result<(), String> {
+    if context.cancellation.is_canceled() {
+        return Err("export visual execution canceled".to_owned());
     }
+    let node = export_visual_node(closure, node_id)?;
+    let materialization = node.materialization_contract();
+    let author_resolution = materialization.author_resolution();
+    let resolution = node.execution_resolution();
+    let color_context = node.color_context().clone();
     let Resolution { width, height } = resolution;
-    let timeline = context.timeline;
+    let media_dependencies = context.media;
 
     let frame_contract = context.frame_contract;
     if let SequenceRenderTarget::Deliverable(canvas) = &mut target {
@@ -2634,17 +3735,7 @@ fn render_sequence_frame_into(
         }
     }
 
-    let schedule = context.visual_session.visual_schedules.prepare(sequence).map_err(|error| {
-        format!(
-            "Sequence {} visual-schedule preparation failed: {error}",
-            sequence.id
-        )
-    })?;
-    let render_plan = evaluate_timeline_render_plan(
-        schedule.as_ref(),
-        TimelineEvaluationRequest::export(timeline_frame),
-    )
-    .map_err(|error| error.to_string())?;
+    let render_plan = node.evaluation().plan();
     if render_plan.is_empty() {
         finish_empty_sequence_target(
             &mut target,
@@ -2656,10 +3747,24 @@ fn render_sequence_frame_into(
         );
         return Ok(());
     }
+    let temporal_batches = node.evaluation().temporal_batches();
+    let heterogeneous = node.evaluation().payload();
 
     let mut decode_cache = HashMap::<ExportDecodeCacheKey, Arc<DecodedVideoLayer>>::with_capacity(
         render_plan.len().saturating_mul(2),
     );
+    let temporal_generation = context.visual_session.effect_execution_generation;
+    context
+        .visual_session
+        .composite_scratch
+        .bind_effect_execution_generation(temporal_generation);
+    let temporal_layers = resolve_export_temporal_batches(
+        context,
+        closure,
+        node_id,
+        temporal_batches,
+        &mut decode_cache,
+    )?;
     let mut decoded_media =
         std::iter::repeat_with(|| None).take(render_plan.len()).collect::<Vec<_>>();
     let mut nested_media = std::iter::repeat_with(|| None)
@@ -2675,21 +3780,25 @@ fn render_sequence_frame_into(
     for (index, element) in render_plan.elements.iter().enumerate() {
         match element {
             TimelineRenderPlanElement::Media(media) => {
-                decoded_media[index] = Some(decode_export_media_plan(
-                    timeline,
-                    media,
-                    width,
-                    height,
-                    &color_context,
-                    &mut decode_cache,
-                    context.input_color_counts.as_deref_mut(),
-                    context.stage_diagnostics.as_deref_mut(),
-                )?);
+                if !temporal_layers.contains_key(&media.placement) {
+                    decoded_media[index] = Some(decode_export_media_plan(
+                        media_dependencies,
+                        media,
+                        width,
+                        height,
+                        &color_context,
+                        &mut decode_cache,
+                        context.input_color_counts.as_deref_mut(),
+                        context.stage_diagnostics.as_deref_mut(),
+                        context.visual_session,
+                        context.cancellation,
+                    )?);
+                }
             }
             TimelineRenderPlanElement::BasicTitle(title) => {
                 title_media[index] = Some(render_export_basic_title_plan(
                     context.visual_session,
-                    sequence,
+                    materialization,
                     title,
                     width,
                     height,
@@ -2699,21 +3808,25 @@ fn render_sequence_frame_into(
             TimelineRenderPlanElement::CrossDissolve(transition) => {
                 let left = resolve_export_transition_input(
                     context,
-                    sequence,
+                    closure,
+                    node_id,
+                    materialization,
                     &transition.left,
                     resolution,
                     &color_context,
-                    depth,
                     &mut decode_cache,
+                    &temporal_layers,
                 )?;
                 let right = resolve_export_transition_input(
                     context,
-                    sequence,
+                    closure,
+                    node_id,
+                    materialization,
                     &transition.right,
                     resolution,
                     &color_context,
-                    depth,
                     &mut decode_cache,
+                    &temporal_layers,
                 )?;
                 transition_inputs[index] = Some((left, right));
             }
@@ -2727,12 +3840,86 @@ fn render_sequence_frame_into(
         let TimelineRenderPlanElement::NestedSequence(nested) = element else {
             continue;
         };
-        nested_media[index] = Some(render_export_nested_plan(
-            context,
-            nested,
-            &color_context,
-            depth,
-        )?);
+        if !temporal_layers.contains_key(&nested.placement) {
+            nested_media[index] = Some(materialize_export_nested_node(
+                context,
+                closure,
+                node_id,
+                nested.placement,
+                PreparedVisualNestedSample::Current,
+                &color_context,
+            )?);
+        }
+    }
+
+    let mut heterogeneous_media = std::iter::repeat_with(|| None)
+        .take(render_plan.len())
+        .collect::<Vec<Option<CpuColorFrame>>>();
+    for route in heterogeneous {
+        let element = render_plan.elements.get(route.element_index).ok_or_else(|| {
+            format!(
+                "heterogeneous route references missing render-plan element {}",
+                route.element_index
+            )
+        })?;
+        let input = match element {
+            TimelineRenderPlanElement::Media(media) => {
+                if let Some(temporal) = temporal_layers.get(&media.placement) {
+                    &temporal.frame
+                } else {
+                    &decoded_media[route.element_index]
+                        .as_ref()
+                        .ok_or_else(|| {
+                            "heterogeneous media plan was not resolved before Effect execution"
+                                .to_owned()
+                        })?
+                        .frame
+                }
+            }
+            TimelineRenderPlanElement::BasicTitle(_) => {
+                &title_media[route.element_index]
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "heterogeneous Basic Title was not resolved before Effect execution"
+                            .to_owned()
+                    })?
+                    .frame
+            }
+            TimelineRenderPlanElement::NestedSequence(nested) => {
+                if let Some(temporal) = temporal_layers.get(&nested.placement) {
+                    &temporal.frame
+                } else {
+                    nested_media[route.element_index].as_ref().ok_or_else(|| {
+                        "heterogeneous nested Sequence was not resolved before Effect execution"
+                            .to_owned()
+                    })?
+                }
+            }
+            TimelineRenderPlanElement::Adjustment(_)
+            | TimelineRenderPlanElement::SolidColor(_)
+            | TimelineRenderPlanElement::CrossDissolve(_) => {
+                return Err(format!(
+                    "unsupported heterogeneous route escaped preflight at {}",
+                    route.placement.label()
+                ));
+            }
+        };
+        let output = context
+            .visual_session
+            .execute_heterogeneous_element(
+                route,
+                input,
+                color_context.working_color_space,
+                context.cancellation,
+            )
+            .map_err(|error| error.to_string())?;
+        let slot = heterogeneous_media.get_mut(route.element_index).ok_or_else(|| {
+            format!(
+                "heterogeneous output references missing render-plan element {}",
+                route.element_index
+            )
+        })?;
+        *slot = Some(output);
     }
 
     let mut composite_elements = Vec::with_capacity(render_plan.len());
@@ -2749,19 +3936,26 @@ fn render_sequence_frame_into(
                 ));
             }
             TimelineRenderPlanElement::Media(media) => {
-                let decoded = decoded_media[index]
-                    .as_ref()
-                    .ok_or_else(|| "media plan was not resolved before compositing".to_owned())?;
+                let (resolved_frame, source_resolution) =
+                    if let Some(temporal) = temporal_layers.get(&media.placement) {
+                        (&temporal.frame, temporal.source_resolution)
+                    } else {
+                        let decoded = decoded_media[index].as_ref().ok_or_else(|| {
+                            "media plan was not resolved before compositing".to_owned()
+                        })?;
+                        (&decoded.frame, decoded.source_resolution)
+                    };
+                let frame = heterogeneous_media[index].as_ref().unwrap_or(resolved_frame);
                 let transform = project_export_affine(
                     media.transform,
-                    decoded.source_resolution,
-                    decoded_frame_resolution(&decoded.frame),
-                    sequence.settings.resolution,
+                    source_resolution,
+                    decoded_frame_resolution(frame),
+                    author_resolution,
                     resolution,
                     "media",
                 )?;
                 composite_elements.push(TimelineCompositeElement::Media(TimelineMediaLayer {
-                    frame: &decoded.frame,
+                    frame,
                     opacity: media.opacity,
                     blend_mode: media.blend_mode,
                     transform,
@@ -2773,8 +3967,9 @@ fn render_sequence_frame_into(
                 let resolved = title_media[index].as_ref().ok_or_else(|| {
                     "Basic Title plan was not resolved before compositing".to_owned()
                 })?;
+                let frame = heterogeneous_media[index].as_ref().unwrap_or(&resolved.frame);
                 composite_elements.push(TimelineCompositeElement::Media(TimelineMediaLayer {
-                    frame: &resolved.frame,
+                    frame,
                     opacity: title.opacity,
                     blend_mode: title.blend_mode,
                     transform: resolved.transform,
@@ -2783,20 +3978,29 @@ fn render_sequence_frame_into(
                 }));
             }
             TimelineRenderPlanElement::NestedSequence(nested) => {
-                let frame = nested_media[index].as_ref().ok_or_else(|| {
-                    "nested-Sequence plan was not resolved before compositing".to_owned()
-                })?;
-                let source_resolution = timeline
-                    .sequences
-                    .iter()
-                    .find(|candidate| candidate.id == nested.sequence_id)
-                    .map(|candidate| candidate.settings.resolution)
-                    .ok_or_else(|| format!("嵌套序列不存在: {}", nested.sequence_id))?;
+                let (resolved_frame, source_resolution) =
+                    if let Some(temporal) = temporal_layers.get(&nested.placement) {
+                        (&temporal.frame, temporal.source_resolution)
+                    } else {
+                        let frame = nested_media[index].as_ref().ok_or_else(|| {
+                            "nested-Sequence plan was not resolved before compositing".to_owned()
+                        })?;
+                        let child_id = export_nested_child(
+                            closure,
+                            node_id,
+                            nested.placement,
+                            PreparedVisualNestedSample::Current,
+                        )?;
+                        let source_resolution =
+                            export_visual_node(closure, child_id)?.author_resolution();
+                        (frame, source_resolution)
+                    };
+                let frame = heterogeneous_media[index].as_ref().unwrap_or(resolved_frame);
                 let transform = project_export_affine(
                     nested.transform,
                     source_resolution,
                     decoded_frame_resolution(frame),
-                    sequence.settings.resolution,
+                    author_resolution,
                     resolution,
                     "nested Sequence",
                 )?;
@@ -2812,22 +4016,33 @@ fn render_sequence_frame_into(
             TimelineRenderPlanElement::SolidColor(solid) => {
                 let transform = project_export_affine(
                     solid.transform,
-                    sequence.settings.resolution,
+                    author_resolution,
                     resolution,
-                    sequence.settings.resolution,
+                    author_resolution,
                     resolution,
                     "solid color",
                 )?;
-                composite_elements.push(TimelineCompositeElement::SolidColor(
-                    TimelineSolidColorLayer {
-                        color: solid.color,
+                if let Some(temporal) = temporal_layers.get(&solid.placement) {
+                    composite_elements.push(TimelineCompositeElement::Media(TimelineMediaLayer {
+                        frame: &temporal.frame,
                         opacity: solid.opacity,
                         blend_mode: solid.blend_mode,
                         transform,
                         effect_graph: solid.effect_graph.clone(),
                         frame_seed: solid.frame_seed,
-                    },
-                ));
+                    }));
+                } else {
+                    composite_elements.push(TimelineCompositeElement::SolidColor(
+                        TimelineSolidColorLayer {
+                            color: solid.color,
+                            opacity: solid.opacity,
+                            blend_mode: solid.blend_mode,
+                            transform,
+                            effect_graph: solid.effect_graph.clone(),
+                            frame_seed: solid.frame_seed,
+                        },
+                    ));
+                }
             }
             TimelineRenderPlanElement::CrossDissolve(transition) => {
                 let Some((left, right)) = transition_inputs[index].as_ref() else {
@@ -2836,15 +4051,17 @@ fn render_sequence_frame_into(
                 composite_elements.push(TimelineCompositeElement::CrossDissolve(
                     TimelineCrossDissolveLayer {
                         left: lower_export_transition_input(
-                            timeline,
-                            sequence,
+                            closure,
+                            node_id,
+                            materialization,
                             resolution,
                             &transition.left,
                             left,
                         )?,
                         right: lower_export_transition_input(
-                            timeline,
-                            sequence,
+                            closure,
+                            node_id,
+                            materialization,
                             resolution,
                             &transition.right,
                             right,
@@ -2868,7 +4085,11 @@ fn render_sequence_frame_into(
         return Ok(());
     }
 
-    let mut scratch = TimelineCompositeScratch::default();
+    let effect_execution_generation = context.visual_session.effect_execution_generation;
+    context
+        .visual_session
+        .composite_scratch
+        .bind_effect_execution_generation(effect_execution_generation);
     let composite_options = if matches!(&target, SequenceRenderTarget::Deliverable(_))
         && context.alpha_mode == ExportAlphaMode::FlattenBlack
     {
@@ -2882,17 +4103,34 @@ fn render_sequence_frame_into(
         &composite_elements,
         composite_options,
         TimelineEffectColorRuntime::new(&color_context.engine, color_context.working_color_space),
-        &mut scratch,
+        &mut context.visual_session.composite_scratch,
     )
     .map_err(|error| format!("timeline composite failed: {error}"))?;
     if let Some(diagnostics) = context.composite_diagnostics.as_deref_mut() {
         diagnostics.accumulate(rendered.diagnostics);
     }
-
-    if let SequenceRenderTarget::Working(output) = target {
-        *output = Some(rendered.frame);
-        return Ok(());
+    if rendered.diagnostics.uses_legacy_rgba8() {
+        let breakdown = rendered.diagnostics.legacy_breakdown();
+        return Err(format!(
+            "final export working composite failed closed; renderer selected the legacy RGBA8 route (media_effect={}, solid_effect={}, adjustment_effect={}, other={})",
+            breakdown.media_effect,
+            breakdown.solid_effect,
+            breakdown.adjustment_effect,
+            breakdown
+                .total()
+                .saturating_sub(breakdown.media_effect)
+                .saturating_sub(breakdown.solid_effect)
+                .saturating_sub(breakdown.adjustment_effect),
+        ));
     }
+
+    let canvas = match target {
+        SequenceRenderTarget::Working(output) => {
+            *output = Some(rendered.frame);
+            return Ok(());
+        }
+        SequenceRenderTarget::Deliverable(canvas) => canvas,
+    };
 
     let mut gpu_output_fallback_reasons = ExportGpuOutputFallbackBreakdown::default();
     let mut gpu_output_attempts = 0u64;
@@ -2905,12 +4143,28 @@ fn render_sequence_frame_into(
             );
         }
     }
-    let attempt = execute_export_gpu_output_boundary(&rendered.frame, &boundary, frame_contract)
-        .inspect_err(|reason| {
+    let attempt = match context.visual_session.gpu_output.execute(
+        &rendered.frame,
+        &boundary,
+        frame_contract,
+        context.cancellation,
+    ) {
+        Ok(attempt) => Some(attempt),
+        Err(ExportGpuOutputExecutionError::Canceled) => {
+            return Err("export GPU output readback canceled".to_owned());
+        }
+        Err(ExportGpuOutputExecutionError::DeviceTimedOut) => {
             gpu_output_cpu_fallbacks = gpu_output_cpu_fallbacks.saturating_add(1);
-            gpu_output_fallback_reasons = gpu_output_fallback_reasons.add_reason(*reason);
-        })
-        .ok();
+            gpu_output_fallback_reasons = gpu_output_fallback_reasons
+                .add_reason(ExportGpuOutputFallbackReason::ReadbackTimedOut);
+            None
+        }
+        Err(ExportGpuOutputExecutionError::Fallback(reason)) => {
+            gpu_output_cpu_fallbacks = gpu_output_cpu_fallbacks.saturating_add(1);
+            gpu_output_fallback_reasons = gpu_output_fallback_reasons.add_reason(reason);
+            None
+        }
+    };
     gpu_output_attempts = gpu_output_attempts.saturating_add(1);
 
     let final_bytes = match attempt {
@@ -2922,7 +4176,11 @@ fn render_sequence_frame_into(
         }
         None => {
             if frame_contract.requires_high_precision_boundary() {
-                match cpu_output_boundary_float(&rendered.frame, &boundary) {
+                match cpu_output_boundary_float(
+                    &rendered.frame,
+                    &boundary,
+                    context.visual_session.composite_scratch.color_execution_mut(),
+                ) {
                     Ok(float_result) => {
                         if let Some(diagnostics) = context.stage_diagnostics.as_deref_mut() {
                             diagnostics.accumulate(float_result.stage_diagnostics);
@@ -2953,8 +4211,12 @@ fn render_sequence_frame_into(
                     }
                 }
             } else {
-                let encoded = execute_cpu_output_boundary_rgba8(&rendered.frame, &boundary)
-                    .map_err(|err| format!("final color transform failed: {err}"))?;
+                let encoded = execute_cpu_output_boundary_rgba8_with_session(
+                    &rendered.frame,
+                    &boundary,
+                    context.visual_session.composite_scratch.color_execution_mut(),
+                )
+                .map_err(|err| format!("final color transform failed: {err}"))?;
                 if let Some(diagnostics) = context.stage_diagnostics.as_deref_mut() {
                     diagnostics.accumulate(encoded.stage_diagnostics);
                 }
@@ -2970,16 +4232,13 @@ fn render_sequence_frame_into(
             gpu_output_fallback_reasons,
         );
     }
-    let SequenceRenderTarget::Deliverable(canvas) = target else {
-        unreachable!("working target returned before output boundary");
-    };
     canvas.clear();
     canvas.extend_from_slice(&final_bytes);
     Ok(())
 }
 
 fn decode_export_media_plan(
-    timeline: &TimelineExportSnapshot,
+    media_dependencies: &HashMap<AssetId, crate::preset::ExportMediaDependency>,
     media: &TimelineMediaPlan,
     width: u32,
     height: u32,
@@ -2987,16 +4246,20 @@ fn decode_export_media_plan(
     cache: &mut HashMap<ExportDecodeCacheKey, Arc<DecodedVideoLayer>>,
     input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
     stage_diagnostics: Option<&mut RenderColorStageDiagnostics>,
+    visual_session: &mut ExportVisualRenderSession,
+    cancellation: &ExecutionCancellationToken,
 ) -> Result<Arc<DecodedVideoLayer>, String> {
-    let dependency = timeline
-        .media
+    let dependency = media_dependencies
         .get(&media.asset_id)
         .ok_or_else(|| format!("导出快照缺少素材依赖: {}", media.asset_id))?;
     let input_color_resolution =
         color_context.missing_metadata_policy.resolve_asset_input_decision(
             media.color_space_override,
             dependency.interpretation,
-            dependency.detected_color_space,
+            dependency
+                .color_diagnostic
+                .as_ref()
+                .and_then(mondrian_media::VideoColorDiagnostic::executable_color_space),
             color_context.working_color_space,
         );
     if let Some(counts) = input_color_counts {
@@ -3017,45 +4280,75 @@ fn decode_export_media_plan(
                 color_context.missing_metadata_policy,
                 input_color_resolution.source,
                 input_color_resolution.override_color_space,
-                input_color_resolution.detected_color_space,
+                input_color_resolution.executable_color_space,
                 input_color_resolution.working_color_space,
                 diagnostic
             ));
         }
     };
-    let input_video_range =
-        resolve_export_input_video_range(timeline, media.asset_id, dependency.interpretation);
-    let key = (
+    let input_video_range = resolve_export_input_video_range(
+        media_dependencies,
         media.asset_id,
+        dependency.interpretation,
+    );
+    let source_resolution = dependency.source_resolution.ok_or_else(|| {
+        format!(
+            "asset={} export snapshot has no source extent",
+            media.asset_id
+        )
+    })?;
+    let key = ExportDecodeCacheKey::new(
+        media.asset_id,
+        dependency,
         media.source_time,
         input_color_space,
         input_video_range,
         media.alpha_interpretation,
-        width,
-        height,
-    );
+        color_context,
+        media.auto_tone_map,
+        Resolution { width, height },
+        source_resolution,
+    )?;
     if let Some(decoded) = cache.get(&key) {
+        if decoded.source_fingerprint != dependency.source_fingerprint
+            || decoded.video_stream_index != key.video_stream_index
+        {
+            return Err(format!(
+                "asset={} export decode cache evidence diverged from admitted source revision",
+                media.asset_id
+            ));
+        }
         return Ok(Arc::clone(decoded));
     }
     let decoded = decode_video_layer_scaled(
-        media.asset_id,
-        dependency.path.as_path(),
-        input_color_space,
-        input_video_range,
-        media.alpha_interpretation,
-        color_context.working_color_space,
-        &color_context.engine,
-        media.auto_tone_map,
-        media.source_time,
-        width,
-        height,
-        dependency.source_resolution.ok_or_else(|| {
-            format!(
-                "asset={} export snapshot has no source extent",
-                media.asset_id
-            )
-        })?,
+        ExportVideoLayerDecodeRequest {
+            asset_id: media.asset_id,
+            dependency,
+            source_time: media.source_time,
+            decode_resolution: Resolution { width, height },
+            source_resolution,
+            source_color: PreviewSourceColorContract::new(input_color_space, input_video_range),
+            alpha_interpretation: media.alpha_interpretation,
+            input_transform: RenderInputTransform::to_working(
+                color_context.working_color_space,
+                media.auto_tone_map,
+                color_context.engine.clone(),
+            ),
+        },
+        ExportVideoLayerDecodeExecutionContext {
+            color_session: visual_session.composite_scratch.color_execution_mut(),
+            decode_context: &mut visual_session.decode_context,
+            cancellation,
+        },
     )?;
+    if decoded.source_fingerprint != key.source_fingerprint
+        || decoded.video_stream_index != key.video_stream_index
+    {
+        return Err(format!(
+            "asset={} export decode result did not prove the cache-authorizing source revision",
+            media.asset_id
+        ));
+    }
     if let Some(diagnostics) = stage_diagnostics {
         diagnostics.accumulate(decoded.stage_diagnostics);
     }
@@ -3063,58 +4356,36 @@ fn decode_export_media_plan(
     Ok(decoded)
 }
 
-fn render_export_nested_plan(
+fn materialize_export_nested_node(
     context: &mut ExportFrameRenderContext<'_>,
-    nested: &TimelineNestedSequencePlan,
+    closure: &PreparedExportVisualClosure,
+    parent_node_id: PreparedVisualFrameNodeId,
+    placement: TimelineClipExecutionRef,
+    sample: PreparedVisualNestedSample,
     parent_color_context: &ProgramColorContext,
-    depth: usize,
 ) -> Result<CpuColorFrame, String> {
-    let timeline = context.timeline;
-    let sequence = timeline
-        .sequences
-        .iter()
-        .find(|sequence| sequence.id == nested.sequence_id)
-        .ok_or_else(|| format!("嵌套序列不存在: {}", nested.sequence_id))?;
-    // Nested Sequences are working-domain images, not subsampled deliverables.
-    // Preserve their authored raster exactly; only the root delivery resolver
-    // may impose codec-specific dimension constraints.
-    let width = sequence.settings.resolution.width;
-    let height = sequence.settings.resolution.height;
-    let frame = nested
-        .source_time
-        .to_frame_position(sequence.settings.frame_rate, FrameRounding::Floor)
-        .map_err(|error| error.to_string())?
-        .frame;
-    if frame < 0 {
-        return Err(format!(
-            "nested Sequence {} has insufficient source handle for target {}",
-            nested.sequence_id, nested.source_time
-        ));
-    }
+    let child_id = export_nested_child(closure, parent_node_id, placement, sample)?;
+    let child_node = export_visual_node(closure, child_id)?;
+    let child_sequence_id = child_node.sequence_id();
     let mut output = None;
-    let nested_context = sequence
-        .settings
-        .nested_render_color_context(parent_color_context.clone(), nested.color_processing);
-    render_sequence_frame_into(
+    render_prepared_visual_node_into(
         context,
-        sequence,
-        frame,
-        Resolution { width, height },
-        nested_context,
+        closure,
+        child_id,
         SequenceRenderTarget::Working(&mut output),
-        depth + 1,
     )?;
     let mut frame = output.ok_or_else(|| {
         format!(
             "nested sequence produced no working frame: {}",
-            nested.sequence_id
+            child_sequence_id
         )
     })?;
     if frame.descriptor().color_space.working() != Some(parent_color_context.working_color_space) {
-        let converted = execute_cpu_working_transform(
+        let converted = execute_cpu_working_transform_with_session(
             &frame,
             parent_color_context.working_color_space,
             parent_color_context.engine.clone(),
+            context.visual_session.composite_scratch.color_execution_mut(),
         )
         .map_err(|error| format!("nested working-space transform failed: {error}"))?;
         if let Some(diagnostics) = context.stage_diagnostics.as_deref_mut() {
@@ -3127,51 +4398,414 @@ fn render_export_nested_plan(
 
 fn render_export_basic_title_plan(
     visual_session: &mut ExportVisualRenderSession,
-    sequence: &mondrian_timeline::sequence::Sequence,
+    materialization: PreparedVisualMaterializationContract,
     title: &TimelineBasicTitlePlan,
     width: u32,
     height: u32,
     working_color_space: WorkingColorSpace,
 ) -> Result<ResolvedExportTitle, String> {
     let target_resolution = mondrian_core::Resolution { width, height };
+    let author_resolution = materialization.author_resolution();
     let raster = visual_session
         .title_rasterizer
         .rasterize(
             &title.title,
-            sequence.settings.resolution,
-            sequence.settings.title_safe_margin,
+            author_resolution,
+            materialization.title_safe_margin(),
             target_resolution,
             working_color_space,
         )
         .map_err(|error| format!("Basic Title generation failed closed: {error}"))?;
     let transform = project_basic_title_transform(
         title.transform,
-        raster.sampled_source_to_author,
-        sequence.settings.resolution,
+        raster.sampled_source_to_author(),
+        author_resolution,
         target_resolution,
     )
     .ok_or_else(|| "Basic Title export transform geometry is invalid".to_owned())?;
-    Ok(ResolvedExportTitle { frame: raster.frame, transform })
+    Ok(ResolvedExportTitle { frame: raster.into_frame(), transform })
+}
+
+fn resolve_export_temporal_batches(
+    context: &mut ExportFrameRenderContext<'_>,
+    closure: &PreparedExportVisualClosure,
+    node_id: PreparedVisualFrameNodeId,
+    batches: &[TimelineTemporalDemandBatch],
+    decode_cache: &mut HashMap<ExportDecodeCacheKey, Arc<DecodedVideoLayer>>,
+) -> Result<HashMap<TimelineClipExecutionRef, PreparedExportTemporalLayer>, String> {
+    let node = export_visual_node(closure, node_id)?;
+    let materialization = node.materialization_contract();
+    let color_context = node.color_context().clone();
+    let resolution = node.execution_resolution();
+    let mut layers = HashMap::with_capacity(batches.len());
+    for batch in batches {
+        if context.cancellation.is_canceled() {
+            return Err("export temporal dependency preparation was canceled".to_owned());
+        }
+        let mut source_resolution = None;
+        let mut resolved = Vec::with_capacity(batch.source_demands().len());
+        for demand in batch.source_demands() {
+            let (frame, current_source_resolution) = resolve_export_temporal_source(
+                context,
+                closure,
+                node_id,
+                materialization,
+                &color_context,
+                resolution,
+                batch,
+                demand,
+                decode_cache,
+            )?;
+            if source_resolution
+                .replace(current_source_resolution)
+                .is_some_and(|previous| previous != current_source_resolution)
+            {
+                return Err(format!(
+                    "Clip {} temporal requests resolved with inconsistent authoring extents",
+                    batch.placement().clip_id
+                ));
+            }
+            resolved.push((
+                demand.effect_request,
+                export_temporal_tile(&frame, demand.effect_request)?,
+            ));
+        }
+        let source_identity =
+            export_temporal_source_identity(context, closure, batch, &color_context)?;
+        let mut prepared = PreparedTemporalFrameSet::prepare(
+            source_identity,
+            batch.effect_demands().clone(),
+            resolved,
+        )
+        .map_err(|error| format!("export temporal frame set is invalid: {error}"))?;
+        let output = context
+            .visual_session
+            .composite_scratch
+            .execute_prepared_temporal_batch(batch, &mut prepared)
+            .map_err(|error| format!("export temporal Effect execution failed: {error}"))?;
+        let tile = output.tile();
+        if tile.roi() != tile.frame_extent().full_frame_roi() {
+            return Err(
+                "export temporal execution did not produce the required full-frame result"
+                    .to_owned(),
+            );
+        }
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: tile.frame_extent().width(),
+            height: tile.frame_extent().height(),
+            data: tile.pixels().to_vec(),
+            color_space: color_context.working_color_space,
+        });
+        let layer = PreparedExportTemporalLayer {
+            frame,
+            source_resolution: source_resolution.unwrap_or(resolution),
+        };
+        if layers.insert(batch.placement(), layer).is_some() {
+            return Err(format!(
+                "Clip {} produced more than one temporal execution batch",
+                batch.placement().clip_id
+            ));
+        }
+    }
+    Ok(layers)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_export_temporal_source(
+    context: &mut ExportFrameRenderContext<'_>,
+    closure: &PreparedExportVisualClosure,
+    parent_node_id: PreparedVisualFrameNodeId,
+    materialization: PreparedVisualMaterializationContract,
+    color_context: &ProgramColorContext,
+    resolution: Resolution,
+    batch: &TimelineTemporalDemandBatch,
+    demand: &mondrian_renderer::TimelineTemporalSourceDemand,
+    decode_cache: &mut HashMap<ExportDecodeCacheKey, Arc<DecodedVideoLayer>>,
+) -> Result<(CpuColorFrame, Resolution), String> {
+    if context.cancellation.is_canceled() {
+        return Err("export temporal source resolution was canceled".to_owned());
+    }
+    let identity = identity_compiled_effect_graph()
+        .ok_or_else(|| "renderer could not prepare the identity Effect graph".to_owned())?;
+    let (frame, source_resolution) = match &demand.source {
+        TimelineTemporalSource::Media {
+            asset_id,
+            source_time,
+            color_space_override,
+            alpha_interpretation,
+            auto_tone_map,
+        } => {
+            let plan = TimelineMediaPlan {
+                placement: demand.placement,
+                asset_id: *asset_id,
+                color_space_override: *color_space_override,
+                pixel_aspect_ratio_override: None,
+                field_order_override: None,
+                alpha_interpretation: *alpha_interpretation,
+                frame_rate_override: None,
+                source_time: *source_time,
+                opacity: 1.0,
+                blend_mode: mondrian_core::BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_graph: Arc::clone(&identity),
+                frame_seed: demand.effect_request.time().numerator(),
+                auto_tone_map: *auto_tone_map,
+            };
+            let decoded = decode_export_media_plan(
+                context.media,
+                &plan,
+                resolution.width,
+                resolution.height,
+                color_context,
+                decode_cache,
+                context.input_color_counts.as_deref_mut(),
+                context.stage_diagnostics.as_deref_mut(),
+                context.visual_session,
+                context.cancellation,
+            )?;
+            (decoded.frame.clone(), decoded.source_resolution)
+        }
+        TimelineTemporalSource::NestedSequence { sequence_id, .. } => {
+            let child_id = export_nested_child(
+                closure,
+                parent_node_id,
+                demand.placement,
+                PreparedVisualNestedSample::Temporal(demand.effect_request),
+            )?;
+            let child_node = export_visual_node(closure, child_id)?;
+            if child_node.sequence_id() != *sequence_id {
+                return Err(format!(
+                    "prepared temporal binding for Clip {} resolved Sequence {}, expected {sequence_id}",
+                    demand.placement.clip_id,
+                    child_node.sequence_id()
+                ));
+            }
+            let child_resolution = child_node.execution_resolution();
+            let child_author_resolution = child_node.author_resolution();
+            if child_resolution != resolution {
+                return Err(format!(
+                    "nested Sequence {sequence_id} temporal source extent {:?} differs from admitted Effect extent {:?}; resampling before Effects is not permitted",
+                    child_resolution, resolution
+                ));
+            }
+            (
+                materialize_export_nested_node(
+                    context,
+                    closure,
+                    parent_node_id,
+                    demand.placement,
+                    PreparedVisualNestedSample::Temporal(demand.effect_request),
+                    color_context,
+                )?,
+                child_author_resolution,
+            )
+        }
+        TimelineTemporalSource::SolidColor { color } => {
+            let extent = demand.effect_request.frame_extent();
+            let pixel = [color.r, color.g, color.b, color.a];
+            (
+                CpuColorFrame::working(WorkingRgbaF32Frame {
+                    width: extent.width(),
+                    height: extent.height(),
+                    data: vec![pixel; extent.width() as usize * extent.height() as usize],
+                    color_space: color_context.working_color_space,
+                }),
+                materialization.author_resolution(),
+            )
+        }
+    };
+    let descriptor = frame.descriptor();
+    let expected = demand.effect_request.frame_extent();
+    if descriptor.width != expected.width() || descriptor.height != expected.height() {
+        return Err(format!(
+            "Clip {} temporal source resolved to {}x{}, expected {}x{}",
+            batch.placement().clip_id,
+            descriptor.width,
+            descriptor.height,
+            expected.width(),
+            expected.height()
+        ));
+    }
+    if descriptor.color_space.working() != Some(color_context.working_color_space)
+        || descriptor.alpha != mondrian_renderer::ColorFrameAlpha::StraightCoverage
+    {
+        return Err(format!(
+            "Clip {} temporal source did not resolve to parent working-space straight alpha",
+            batch.placement().clip_id
+        ));
+    }
+    Ok((frame, source_resolution))
+}
+
+fn export_temporal_tile(
+    frame: &CpuColorFrame,
+    request: mondrian_effects::EffectTemporalFrameRequest,
+) -> Result<EffectFrameTileF32, String> {
+    let roi = request.input_roi().region();
+    let source = frame.rgba_f32();
+    let mut pixels = Vec::with_capacity(roi.width() as usize * roi.height() as usize);
+    for y in roi.y()..roi.y().saturating_add(roi.height()) {
+        let start = y as usize * source.width as usize + roi.x() as usize;
+        let end = start.saturating_add(roi.width() as usize);
+        let row = source
+            .data
+            .get(start..end)
+            .ok_or_else(|| "temporal ROI exceeded the resolved export frame".to_owned())?;
+        pixels.extend_from_slice(row);
+    }
+    EffectFrameTileF32::new(
+        request.time(),
+        request.frame_extent(),
+        roi,
+        request.time().numerator(),
+        pixels,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn export_temporal_source_identity(
+    context: &ExportFrameRenderContext<'_>,
+    closure: &PreparedExportVisualClosure,
+    batch: &TimelineTemporalDemandBatch,
+    color_context: &ProgramColorContext,
+) -> Result<EffectTemporalSourceIdentity, String> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mondrian.export-temporal-source.v2");
+    hasher.update(batch.graph().semantic_fingerprint());
+    hasher.update(batch.placement().sequence_id.0.as_bytes());
+    hasher.update(batch.placement().sequence_revision.get().to_le_bytes());
+    hasher.update(batch.placement().clip_id.0.as_bytes());
+    hasher.update(batch.placement().clip_time.numerator().to_le_bytes());
+    hasher.update(batch.placement().clip_time.denominator().to_le_bytes());
+    match batch.placement().endpoint {
+        mondrian_core::timeline_data::TimelineClipEndpointContext::Ordinary => {
+            hasher.update([0]);
+        }
+        mondrian_core::timeline_data::TimelineClipEndpointContext::TransitionLeft {
+            transition_id,
+        } => {
+            hasher.update([1]);
+            hasher.update(transition_id.0.as_bytes());
+        }
+        mondrian_core::timeline_data::TimelineClipEndpointContext::TransitionRight {
+            transition_id,
+        } => {
+            hasher.update([2]);
+            hasher.update(transition_id.0.as_bytes());
+        }
+    }
+    hasher.update(batch.execution_request().output_frame_seed().to_le_bytes());
+    hasher.update(
+        serde_json::to_vec(&color_context.working_color_space)
+            .map_err(|error| error.to_string())?,
+    );
+    hasher
+        .update(serde_json::to_vec(context.color_environment).map_err(|error| error.to_string())?);
+
+    let mut programs = closure
+        .nodes()
+        .iter()
+        .map(|node| {
+            (
+                node.sequence_id(),
+                node.sequence_revision(),
+                node.program().visual_author_fingerprint(),
+                node.program().effect_registry_revision(),
+            )
+        })
+        .collect::<Vec<_>>();
+    programs.sort_by_key(|(sequence_id, revision, fingerprint, registry_revision)| {
+        (
+            sequence_id.to_string(),
+            revision.get(),
+            *fingerprint,
+            *registry_revision,
+        )
+    });
+    programs.dedup();
+    for (sequence_id, revision, fingerprint, registry_revision) in programs {
+        hasher.update(sequence_id.0.as_bytes());
+        hasher.update(revision.get().to_le_bytes());
+        hasher.update(fingerprint);
+        hasher.update(registry_revision.to_le_bytes());
+    }
+    let mut media = context.media.iter().collect::<Vec<_>>();
+    media.sort_by_key(|(asset_id, _)| asset_id.to_string());
+    for (asset_id, dependency) in media {
+        hasher.update(asset_id.0.as_bytes());
+        hasher.update(serde_json::to_vec(dependency).map_err(|error| error.to_string())?);
+    }
+    for demand in batch.source_demands() {
+        hasher.update(demand.effect_request.time().numerator().to_le_bytes());
+        hasher.update(demand.effect_request.time().denominator().to_le_bytes());
+        match &demand.source {
+            TimelineTemporalSource::Media {
+                asset_id,
+                source_time,
+                color_space_override,
+                alpha_interpretation,
+                auto_tone_map,
+            } => {
+                hasher.update([0]);
+                hasher.update(asset_id.0.as_bytes());
+                hasher.update(source_time.numerator().to_le_bytes());
+                hasher.update(source_time.denominator().to_le_bytes());
+                hasher.update(
+                    serde_json::to_vec(color_space_override).map_err(|error| error.to_string())?,
+                );
+                hasher.update(
+                    serde_json::to_vec(alpha_interpretation).map_err(|error| error.to_string())?,
+                );
+                hasher.update([u8::from(*auto_tone_map)]);
+            }
+            TimelineTemporalSource::NestedSequence {
+                sequence_id,
+                source_time,
+                color_processing,
+            } => {
+                hasher.update([1]);
+                hasher.update(sequence_id.0.as_bytes());
+                hasher.update(source_time.numerator().to_le_bytes());
+                hasher.update(source_time.denominator().to_le_bytes());
+                hasher.update(
+                    serde_json::to_vec(color_processing).map_err(|error| error.to_string())?,
+                );
+            }
+            TimelineTemporalSource::SolidColor { color } => {
+                hasher.update([2]);
+                for component in [color.r, color.g, color.b, color.a] {
+                    hasher.update(component.to_bits().to_le_bytes());
+                }
+            }
+        }
+    }
+    Ok(EffectTemporalSourceIdentity::from_complete_semantic_fingerprint(hasher.finalize().into()))
 }
 
 fn resolve_export_transition_input(
     context: &mut ExportFrameRenderContext<'_>,
-    sequence: &mondrian_timeline::sequence::Sequence,
+    closure: &PreparedExportVisualClosure,
+    parent_node_id: PreparedVisualFrameNodeId,
+    materialization: PreparedVisualMaterializationContract,
     input: &TimelineTransitionInputPlan,
     resolution: Resolution,
     color_context: &ProgramColorContext,
-    depth: usize,
     decode_cache: &mut HashMap<ExportDecodeCacheKey, Arc<DecodedVideoLayer>>,
+    temporal_layers: &HashMap<TimelineClipExecutionRef, PreparedExportTemporalLayer>,
 ) -> Result<ResolvedExportTransitionInput, String> {
-    let timeline = context.timeline;
     let Resolution { width, height } = resolution;
+    if let Some(placement) = transition_input_placement(input) {
+        if let Some(temporal) = temporal_layers.get(&placement) {
+            return Ok(ResolvedExportTransitionInput::Temporal(temporal.clone()));
+        }
+    }
     Ok(match input {
         TimelineTransitionInputPlan::Transparent => ResolvedExportTransitionInput::Transparent,
         TimelineTransitionInputPlan::SolidColor(_) => ResolvedExportTransitionInput::SolidColor,
         TimelineTransitionInputPlan::BasicTitle(title) => {
             ResolvedExportTransitionInput::BasicTitle(render_export_basic_title_plan(
                 context.visual_session,
-                sequence,
+                materialization,
                 title,
                 width,
                 height,
@@ -3180,7 +4814,7 @@ fn resolve_export_transition_input(
         }
         TimelineTransitionInputPlan::Media(media) => {
             ResolvedExportTransitionInput::Decoded(decode_export_media_plan(
-                timeline,
+                context.media,
                 media,
                 width,
                 height,
@@ -3188,17 +4822,33 @@ fn resolve_export_transition_input(
                 decode_cache,
                 context.input_color_counts.as_deref_mut(),
                 context.stage_diagnostics.as_deref_mut(),
+                context.visual_session,
+                context.cancellation,
             )?)
         }
         TimelineTransitionInputPlan::NestedSequence(nested) => {
-            ResolvedExportTransitionInput::Nested(render_export_nested_plan(
+            ResolvedExportTransitionInput::Nested(materialize_export_nested_node(
                 context,
-                nested,
+                closure,
+                parent_node_id,
+                nested.placement,
+                PreparedVisualNestedSample::Current,
                 color_context,
-                depth,
             )?)
         }
     })
+}
+
+fn transition_input_placement(
+    input: &TimelineTransitionInputPlan,
+) -> Option<TimelineClipExecutionRef> {
+    match input {
+        TimelineTransitionInputPlan::Transparent => None,
+        TimelineTransitionInputPlan::Media(media) => Some(media.placement),
+        TimelineTransitionInputPlan::SolidColor(solid) => Some(solid.placement),
+        TimelineTransitionInputPlan::BasicTitle(title) => Some(title.placement),
+        TimelineTransitionInputPlan::NestedSequence(nested) => Some(nested.placement),
+    }
 }
 
 fn decoded_frame_resolution(frame: &CpuColorFrame) -> Resolution {
@@ -3225,12 +4875,14 @@ fn project_export_affine(
 }
 
 fn lower_export_transition_input<'a>(
-    timeline: &TimelineExportSnapshot,
-    sequence: &mondrian_timeline::sequence::Sequence,
+    closure: &PreparedExportVisualClosure,
+    parent_node_id: PreparedVisualFrameNodeId,
+    materialization: PreparedVisualMaterializationContract,
     resolution: Resolution,
     plan: &'a TimelineTransitionInputPlan,
     resolved: &'a ResolvedExportTransitionInput,
 ) -> Result<TimelineTransitionInput<'a>, String> {
+    let author_resolution = materialization.author_resolution();
     Ok(match (plan, resolved) {
         (TimelineTransitionInputPlan::Transparent, ResolvedExportTransitionInput::Transparent) => {
             TimelineTransitionInput::Transparent
@@ -3243,7 +4895,7 @@ fn lower_export_transition_input<'a>(
                 media.transform,
                 frame.source_resolution,
                 decoded_frame_resolution(&frame.frame),
-                sequence.settings.resolution,
+                author_resolution,
                 resolution,
                 "Transition media",
             )?;
@@ -3260,17 +4912,18 @@ fn lower_export_transition_input<'a>(
             TimelineTransitionInputPlan::NestedSequence(nested),
             ResolvedExportTransitionInput::Nested(frame),
         ) => {
-            let source_resolution = timeline
-                .sequences
-                .iter()
-                .find(|candidate| candidate.id == nested.sequence_id)
-                .map(|candidate| candidate.settings.resolution)
-                .ok_or_else(|| format!("嵌套序列不存在: {}", nested.sequence_id))?;
+            let child_id = export_nested_child(
+                closure,
+                parent_node_id,
+                nested.placement,
+                PreparedVisualNestedSample::Current,
+            )?;
+            let source_resolution = export_visual_node(closure, child_id)?.author_resolution();
             let transform = project_export_affine(
                 nested.transform,
                 source_resolution,
                 decoded_frame_resolution(frame),
-                sequence.settings.resolution,
+                author_resolution,
                 resolution,
                 "Transition nested Sequence",
             )?;
@@ -3300,9 +4953,9 @@ fn lower_export_transition_input<'a>(
         ) => {
             let transform = project_export_affine(
                 solid.transform,
-                sequence.settings.resolution,
+                author_resolution,
                 resolution,
-                sequence.settings.resolution,
+                author_resolution,
                 resolution,
                 "Transition solid color",
             )?;
@@ -3315,6 +4968,43 @@ fn lower_export_transition_input<'a>(
                 frame_seed: solid.frame_seed,
             })
         }
+        (plan, ResolvedExportTransitionInput::Temporal(temporal)) => {
+            let (opacity, blend_mode, transform) = match plan {
+                TimelineTransitionInputPlan::Media(media) => {
+                    (media.opacity, media.blend_mode, media.transform)
+                }
+                TimelineTransitionInputPlan::NestedSequence(nested) => {
+                    (nested.opacity, nested.blend_mode, nested.transform)
+                }
+                TimelineTransitionInputPlan::SolidColor(solid) => {
+                    (solid.opacity, solid.blend_mode, solid.transform)
+                }
+                TimelineTransitionInputPlan::BasicTitle(title) => {
+                    (title.opacity, title.blend_mode, title.transform)
+                }
+                TimelineTransitionInputPlan::Transparent => {
+                    return Err("transparent Transition input cannot own temporal pixels".to_owned())
+                }
+            };
+            let transform = project_export_affine(
+                transform,
+                temporal.source_resolution,
+                decoded_frame_resolution(&temporal.frame),
+                author_resolution,
+                resolution,
+                "Transition temporal source",
+            )?;
+            TimelineTransitionInput::Media(TimelineMediaLayer {
+                frame: &temporal.frame,
+                opacity,
+                blend_mode,
+                transform,
+                effect_graph: identity_compiled_effect_graph().ok_or_else(|| {
+                    "renderer could not prepare the identity Effect graph".to_owned()
+                })?,
+                frame_seed: 0,
+            })
+        }
         _ => {
             return Err("Transition plan and resolved input diverged before compositing".to_owned())
         }
@@ -3322,12 +5012,11 @@ fn lower_export_transition_input<'a>(
 }
 
 fn resolve_export_input_video_range(
-    timeline: &TimelineExportSnapshot,
+    media_dependencies: &HashMap<AssetId, crate::preset::ExportMediaDependency>,
     asset_id: AssetId,
     interpretation: mondrian_core::timeline_data::AssetMediaInterpretation,
 ) -> DecodedVideoRangeContract {
-    let detected = timeline
-        .media
+    let detected = media_dependencies
         .get(&asset_id)
         .and_then(|dependency| dependency.color_diagnostic.as_ref())
         .map(|diagnostic| diagnostic.color_range)
@@ -3361,69 +5050,133 @@ fn finish_empty_sequence_target(
     }
 }
 
-fn decode_video_layer_scaled(
+/// Immutable author and delivery facts for one export still-frame decode.
+///
+/// The request owns the renderer input transform so media decode cannot
+/// reinterpret working-space, tone-map, or color-engine policy while a job is
+/// executing. Source revision and physical stream authority remain frozen in
+/// `dependency`.
+struct ExportVideoLayerDecodeRequest<'a> {
     asset_id: AssetId,
-    path: &Path,
-    input_color_space: ColorSpace,
-    input_video_range: DecodedVideoRangeContract,
-    alpha_interpretation: AlphaInterpretation,
-    working_color_space: WorkingColorSpace,
-    engine: &ColorEngine,
-    tone_map: bool,
+    dependency: &'a crate::preset::ExportMediaDependency,
     source_time: TimelineTime,
-    width: u32,
-    height: u32,
+    decode_resolution: Resolution,
     source_resolution: Resolution,
+    source_color: PreviewSourceColorContract,
+    alpha_interpretation: AlphaInterpretation,
+    input_transform: RenderInputTransform,
+}
+
+/// Job-owned mutable execution services for one export still-frame decode.
+///
+/// Keeping these borrows outside `ExportVideoLayerDecodeRequest` makes the
+/// immutable cache-authorizing request reusable without obscuring mutation of
+/// the decoder and CPU color sessions.
+struct ExportVideoLayerDecodeExecutionContext<'a> {
+    color_session: &'a mut mondrian_renderer::RenderCpuColorExecutionSession,
+    decode_context: &'a mut PreviewDecodeSessionContext,
+    cancellation: &'a ExecutionCancellationToken,
+}
+
+fn decode_video_layer_scaled(
+    request: ExportVideoLayerDecodeRequest<'_>,
+    execution: ExportVideoLayerDecodeExecutionContext<'_>,
 ) -> Result<Arc<DecodedVideoLayer>, String> {
-    let request = PreviewDecodeRequest::new(
+    let ExportVideoLayerDecodeRequest {
+        asset_id,
+        dependency,
+        source_time,
+        decode_resolution,
+        source_resolution,
+        source_color,
+        alpha_interpretation,
+        input_transform,
+    } = request;
+    let ExportVideoLayerDecodeExecutionContext { color_session, decode_context, cancellation } =
+        execution;
+    let path = dependency.path.as_path();
+    if !dependency.source_fingerprint.authorizes_reuse() {
+        return Err(format!(
+            "asset={} path={} err=export decode request has incomplete source revision evidence",
+            asset_id,
+            path.display()
+        ));
+    }
+    let video_stream_index = dependency.video_stream_index.ok_or_else(|| {
+        format!(
+            "asset={} path={} err=export decode request has no frozen physical video stream",
+            asset_id,
+            path.display()
+        )
+    })?;
+    let media_request = PreviewDecodeRequest::new(
         path,
         source_time,
         PreviewDecodeAccessMode::RandomAccessStillFrame,
-        PreviewSourceColorContract::new(input_color_space, input_video_range),
+        source_color,
     )
-    .with_max_size(Some(width), Some(height));
-    let input_transform =
-        RenderInputTransform::to_working(working_color_space, tone_map, engine.clone());
-    let source: CpuSourceColorFrame = match decode_preview_frame_cancellable(request, || false) {
-        Ok(PreviewDecodeOutcome::Frame(frame)) => CpuEncodedColorFrame::source_rgba8_shared(
-            frame.width,
-            frame.height,
-            input_color_space,
-            frame.into_shared_data(),
-        )
-        .into(),
-        Ok(PreviewDecodeOutcome::FloatFrame(frame)) => LinearFloatSource::new(
-            frame.width,
-            frame.height,
-            input_color_space,
-            frame.into_data(),
-        )
-        .into(),
-        Ok(PreviewDecodeOutcome::Canceled(_)) => {
-            return Err(format!(
-                "asset={} path={} err=export still-frame decode canceled unexpectedly",
-                asset_id,
-                path.display()
-            ));
-        }
-        Ok(PreviewDecodeOutcome::NativeGpuFrame(frame)) => {
-            return Err(format!(
+    .with_max_size(
+        Some(decode_resolution.width),
+        Some(decode_resolution.height),
+    )
+    .with_video_stream_index(video_stream_index)
+    .with_fingerprint(dependency.source_fingerprint);
+    let decode_cancellation = cancellation.clone();
+    let outcome =
+        decode_context.decode_cancellable(media_request, move || decode_cancellation.is_canceled());
+    let (source, decode_diagnostics): (CpuSourceColorFrame, PreviewDecodeDiagnostics) =
+        match outcome {
+            Ok(PreviewDecodeOutcome::Frame(frame)) => {
+                let diagnostics = frame.diagnostics;
+                (
+                    CpuEncodedColorFrame::source_rgba8_shared(
+                        frame.width,
+                        frame.height,
+                        source_color.color_space,
+                        frame.into_shared_data(),
+                    )
+                    .into(),
+                    diagnostics,
+                )
+            }
+            Ok(PreviewDecodeOutcome::FloatFrame(frame)) => {
+                let diagnostics = frame.diagnostics;
+                (
+                    LinearFloatSource::new(
+                        frame.width,
+                        frame.height,
+                        source_color.color_space,
+                        frame.into_data(),
+                    )
+                    .into(),
+                    diagnostics,
+                )
+            }
+            Ok(PreviewDecodeOutcome::Canceled(_)) => {
+                return Err(format!(
+                    "asset={} path={} err=export still-frame decode canceled unexpectedly",
+                    asset_id,
+                    path.display()
+                ));
+            }
+            Ok(PreviewDecodeOutcome::NativeGpuFrame(frame)) => {
+                return Err(format!(
                 "asset={} path={} err=export still-frame CPU fallback requires CPU RGBA, got native GPU {} {:?}",
                 asset_id,
                 path.display(),
                 frame.handle_kind().as_str(),
                 frame.surface_format
             ));
-        }
-        Err(err) => {
-            return Err(format!(
-                "asset={} path={} err={}",
-                asset_id,
-                path.display(),
-                err
-            ));
-        }
-    };
+            }
+            Err(err) => {
+                return Err(format!(
+                    "asset={} path={} err={}",
+                    asset_id,
+                    path.display(),
+                    err
+                ));
+            }
+        };
     let source = source.normalize_alpha(alpha_interpretation).map_err(|err| {
         format!(
             "asset={} path={} alpha interpretation failed: {}",
@@ -3432,11 +5185,15 @@ fn decode_video_layer_scaled(
             err
         )
     })?;
-    let execution = execute_cpu_source_input_stage(&source, &input_transform)
-        .map_err(|err| format!("asset={asset_id} color transform failed: {err}"))?;
+    let execution =
+        execute_cpu_source_input_stage_with_session(&source, &input_transform, color_session)
+            .map_err(|err| format!("asset={asset_id} color transform failed: {err}"))?;
     Ok(Arc::new(DecodedVideoLayer {
         frame: execution.result.frame,
         source_resolution,
+        source_fingerprint: dependency.source_fingerprint,
+        video_stream_index,
+        decode_diagnostics: Some(decode_diagnostics),
         stage_diagnostics: execution.stage_diagnostics,
     }))
 }
@@ -3444,47 +5201,13 @@ fn decode_video_layer_scaled(
 fn compute_timeline_render_range(
     timeline: &TimelineExportSnapshot,
 ) -> Result<TimelineRenderRange, String> {
-    let sequence = &timeline.sequence;
-    let frame_rate = sequence.settings.frame_rate;
-    let sequence_end_exclusive = sequence
-        .total_duration()
-        .map_err(|error| error.to_string())?
-        .to_frame_position(frame_rate, FrameRounding::Ceil)
-        .map_err(|error| error.to_string())?
-        .frame
-        .max(1);
-    let (start, requested_end_exclusive) = match timeline.range {
-        TimelineExportRange::EntireSequence => (0, sequence_end_exclusive),
-        TimelineExportRange::SequenceInOut => {
-            let start = sequence
-                .in_point()
-                .to_frame_position(frame_rate, FrameRounding::Floor)
-                .map_err(|error| error.to_string())?
-                .frame;
-            (
-                start,
-                sequence
-                    .out_point()
-                    .map(|time| {
-                        time.to_frame_position(frame_rate, FrameRounding::Floor)
-                            .map(|frame| frame.frame.saturating_add(1))
-                    })
-                    .transpose()
-                    .map_err(|error| error.to_string())?
-                    .unwrap_or(sequence_end_exclusive),
-            )
-        }
-        TimelineExportRange::WorkArea { start_frame, end_frame_exclusive } => {
-            (start_frame.max(0), end_frame_exclusive.max(0))
-        }
-    };
-    let max_end_exclusive = sequence_end_exclusive.max(start.saturating_add(1));
-    let end_exclusive = requested_end_exclusive.max(start.saturating_add(1)).min(max_end_exclusive);
-    let total_frames = end_exclusive.saturating_sub(start) as u64;
-
-    let fps_num = sequence.settings.frame_rate.num.max(1);
-    let fps_den = sequence.settings.frame_rate.den.max(1);
-    Ok(TimelineRenderRange { start_frame: start, total_frames, fps_num, fps_den })
+    let resolved = timeline.range.resolve(&timeline.sequence).map_err(|error| error.to_string())?;
+    Ok(TimelineRenderRange {
+        start_frame: resolved.start_frame,
+        total_frames: resolved.total_frames,
+        fps_num: resolved.fps_num,
+        fps_den: resolved.fps_den,
+    })
 }
 
 fn ffmpeg_channel_layout(layout: AudioChannelLayout) -> Option<&'static str> {
@@ -3505,15 +5228,20 @@ mod tests {
     use super::*;
     use crate::preset::{
         Av1Profile, ExportChromaSampling, ExportParameter, ExportVideoSignal, HevcProfile,
-        ProResProfile, VideoRateControl,
+        ProResProfile, TimelineExportRange, VideoRateControl,
     };
+    use mondrian_core::automation::{PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::timeline_data::{
         AssetColorPayload, AssetMediaInterpretation, MediaColorInterpretation,
         MediaRangeInterpretation, MediaSignalRange,
     };
     use mondrian_core::types::{AssetId, BlendMode, FramePosition};
-    use mondrian_core::{VideoContentLightMetadata, VideoMasteringDisplayMetadata};
-    use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
+    use mondrian_core::{JobId, VideoContentLightMetadata, VideoMasteringDisplayMetadata};
+    use mondrian_effects::{
+        apply_compiled_effect_graph_rgba_f32, compile_reference_effect_graph,
+        compiled_effect_graph_supports_rgba_f32_with_domain_processor, CompiledEffectGraph,
+        EffectNodeExt, EffectRenderPlan, PreparedEffectProgram,
+    };
     use mondrian_renderer::RenderOutputColorBoundaryTarget;
     use mondrian_timeline::clip::Clip;
     use mondrian_timeline::sequence::{
@@ -3522,11 +5250,207 @@ mod tests {
     use mondrian_timeline::track::Track;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Barrier, Mutex as StdMutex};
     use std::time::Duration;
 
     fn tt(frame: i64, time_base: Rational) -> TimelineTime {
         TimelineTime::from_frame_position(FramePosition::new(frame, time_base))
             .expect("valid test time")
+    }
+
+    fn open_execution_gate() -> service::ExportExecutionGate {
+        service::ExportExecutionGate::always_open_for_test()
+    }
+
+    fn preflight_timeline_visual_range(
+        timeline: &TimelineExportSnapshot,
+        range: TimelineRenderRange,
+        cancel: &ExecutionCancellationToken,
+        execution_gate: &service::ExportExecutionGate,
+        visual_session: &mut ExportVisualRenderSession,
+    ) -> Result<(), JobExecutionResult> {
+        visual_session
+            .prepare_reference_range(&timeline.sequence, &timeline.sequences, range)
+            .map_err(JobExecutionResult::Failed)?;
+        preflight_timeline_visual_range_at_resolution(
+            timeline,
+            range,
+            timeline.sequence.settings.resolution,
+            timeline
+                .sequence
+                .settings
+                .root_program_color_context(&timeline.color_environment),
+            cancel,
+            execution_gate,
+            visual_session,
+        )
+    }
+
+    #[test]
+    fn export_materializer_has_no_raw_sequence_relookup_seam() {
+        let queue_source = include_str!("mod.rs");
+        let context = queue_source
+            .split("struct ExportFrameRenderContext")
+            .nth(1)
+            .and_then(|suffix| suffix.split("struct ExportDecodeCacheKey").next())
+            .expect("Export materialization context source");
+        let materializer = queue_source
+            .split("fn render_prepared_visual_node_into")
+            .nth(1)
+            .and_then(|suffix| suffix.split("fn resolve_export_input_video_range").next())
+            .expect("Export materializer source");
+        let effect_planner = include_str!("visual_effect_execution.rs");
+
+        for source in [context, materializer, effect_planner] {
+            assert!(!source.contains("TimelineExportSnapshot"));
+            assert!(!source.contains("mondrian_timeline::sequence::Sequence"));
+            assert!(!source.contains("context.timeline"));
+            assert!(!source.contains("export_sequence_by_id"));
+            assert!(!source.contains(".settings.resolution"));
+            assert!(!source.contains(".settings.preview.resolution_scale"));
+            assert!(!source.contains(".settings.title_safe_margin"));
+        }
+    }
+
+    #[test]
+    fn export_gpu_backoff_is_scoped_to_one_queue_attempt() {
+        let mut runtime = ExportGpuExecutionRuntime {
+            attempt_generation: 7,
+            next_device_generation: 3,
+            resource_pool_options: GpuColorFrameWgpuResourcePoolOptions::default(),
+            active_output_grant: RenderGpuOutputExecutionResourceGrant::default(),
+            state: ExportGpuExecutionRuntimeState::Backoff { attempt_generation: 7 },
+        };
+
+        runtime.begin_attempt(7);
+        assert!(matches!(
+            runtime.state,
+            ExportGpuExecutionRuntimeState::Backoff { attempt_generation: 7 }
+        ));
+
+        runtime.begin_attempt(8);
+        assert_eq!(runtime.attempt_generation, 8);
+        assert_eq!(runtime.next_device_generation, 3);
+        assert!(matches!(
+            runtime.state,
+            ExportGpuExecutionRuntimeState::Cold
+        ));
+    }
+
+    #[test]
+    fn export_gpu_active_working_set_rejection_remains_explicit() {
+        let breakdown = ExportGpuOutputFallbackBreakdown::default()
+            .add_reason(ExportGpuOutputFallbackReason::ActiveWorkingSetRejected);
+
+        assert_eq!(breakdown.active_working_set_rejected, 1);
+        assert_eq!(breakdown.record_boundary_failed, 0);
+        assert_eq!(breakdown.total(), 1);
+    }
+
+    #[test]
+    fn route_local_gpu_output_failures_do_not_poison_required_gpu_execution() {
+        for reason in [
+            ExportGpuOutputFallbackReason::RecordBoundaryFailed,
+            ExportGpuOutputFallbackReason::ActiveWorkingSetRejected,
+            ExportGpuOutputFallbackReason::MissingReadbackBuffer,
+            ExportGpuOutputFallbackReason::ReadbackMapFailed,
+            ExportGpuOutputFallbackReason::ReadbackUnpackFailed,
+        ] {
+            assert!(!export_gpu_error_requires_backend_backoff(
+                ExportGpuOutputExecutionError::Fallback(reason)
+            ));
+        }
+        assert!(!export_gpu_error_requires_backend_backoff(
+            ExportGpuOutputExecutionError::Canceled
+        ));
+        assert!(export_gpu_error_requires_backend_backoff(
+            ExportGpuOutputExecutionError::DeviceTimedOut
+        ));
+    }
+
+    #[test]
+    fn gpu_readback_wait_is_cancellable_and_bounded_by_monotonic_deadline() {
+        assert_eq!(EXPORT_GPU_READBACK_TIMEOUT, Duration::from_secs(30));
+        let now = Instant::now();
+        assert_eq!(
+            export_gpu_readback_poll_timeout(true, now, now + Duration::from_secs(1)),
+            Err(ExportGpuOutputExecutionError::Canceled)
+        );
+        assert_eq!(
+            export_gpu_readback_poll_timeout(false, now, now),
+            Err(ExportGpuOutputExecutionError::DeviceTimedOut)
+        );
+        assert_eq!(
+            export_gpu_readback_poll_timeout(false, now, now + EXPORT_GPU_READBACK_POLL_SLICE * 2,),
+            Ok(EXPORT_GPU_READBACK_POLL_SLICE)
+        );
+        assert_eq!(
+            export_gpu_readback_poll_timeout(false, now, now + EXPORT_GPU_READBACK_POLL_SLICE / 2,),
+            Ok(EXPORT_GPU_READBACK_POLL_SLICE / 2)
+        );
+        assert_eq!(
+            accept_export_gpu_readback_poll(Err(wgpu::PollError::Timeout)),
+            Ok(()),
+            "one bounded device-poll slice timing out is not the 30-second readback deadline"
+        );
+        assert_eq!(
+            accept_export_gpu_readback_poll(Err(wgpu::PollError::WrongSubmissionIndex(2, 1))),
+            Err(ExportGpuOutputExecutionError::Fallback(
+                ExportGpuOutputFallbackReason::ReadbackMapFailed
+            ))
+        );
+    }
+
+    #[test]
+    fn export_gpu_active_grant_reconfigures_without_reclassifying_backend_state() {
+        let mut runtime = ExportGpuExecutionRuntime {
+            attempt_generation: 7,
+            next_device_generation: 3,
+            resource_pool_options: GpuColorFrameWgpuResourcePoolOptions::default(),
+            active_output_grant: RenderGpuOutputExecutionResourceGrant::default(),
+            state: ExportGpuExecutionRuntimeState::Backoff { attempt_generation: 7 },
+        };
+        let policy = ExportExecutionResourcePolicy {
+            gpu_output_active: RenderGpuOutputExecutionResourceGrant::new(512 * 1024 * 1024, 4),
+            gpu_output_idle_per_contract: runtime.resource_pool_options.max_per_contract,
+            gpu_output_idle_bytes: runtime.resource_pool_options.max_retained_bytes,
+            ..ExportExecutionResourcePolicy::default()
+        };
+
+        runtime.configure(policy);
+
+        assert_eq!(runtime.active_output_grant, policy.gpu_output_active);
+        assert!(matches!(
+            runtime.state,
+            ExportGpuExecutionRuntimeState::Backoff { attempt_generation: 7 }
+        ));
+    }
+
+    #[test]
+    fn export_visual_closure_fails_closed_when_one_program_exceeds_frozen_grant() {
+        let policy = service::ExportExecutionResourcePolicy {
+            visual_program_entries: 1,
+            visual_program_bytes: 1,
+            ..service::ExportExecutionResourcePolicy::default()
+        };
+        let sequence = Sequence::new("oversized visual closure");
+        let prepared = crate::prepare_timeline_export_dependencies(
+            &sequence,
+            &[],
+            TimelineExportRange::EntireSequence,
+            false,
+        )
+        .expect("prepare oversized visual closure");
+        let error = match ExportVisualRenderSession::for_execution_generation(
+            11,
+            policy,
+            prepared.execution_snapshot().visual(),
+        ) {
+            Ok(_) => panic!("one oversized visual program must not bypass the attempt grant"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("frozen grant"));
     }
 
     fn test_working_frame(
@@ -3553,6 +5477,330 @@ mod tests {
         .frame
     }
 
+    fn heterogeneous_tracer_graph(
+        middle: mondrian_effects::EffectType,
+    ) -> Arc<CompiledEffectGraph> {
+        let blur =
+            mondrian_effects::EffectNode::with_defaults(mondrian_effects::EffectType::GaussianBlur);
+        let mut middle_node = mondrian_effects::EffectNode::with_defaults(middle.clone());
+        let middle_property = match &middle {
+            mondrian_effects::EffectType::BasicCorrection => Some(("exposure", 0.25)),
+            mondrian_effects::EffectType::Vignette => Some(("intensity", 0.45)),
+            _ => None,
+        };
+        if let Some((property, value)) = middle_property {
+            middle_node
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: middle.property_path(property),
+                    value: PropertyValue::Float(value),
+                })
+                .expect("configure heterogeneous Export middle Effect");
+        }
+        let mut grain =
+            mondrian_effects::EffectNode::with_defaults(mondrian_effects::EffectType::Grain);
+        grain
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: mondrian_effects::EffectType::Grain.property_path("amount"),
+                value: PropertyValue::Float(0.1),
+            })
+            .expect("configure heterogeneous Export Grain");
+        let effects = [blur, middle_node, grain];
+        PreparedEffectProgram::prepare(&effects, &[], WorkingColorSpace::LinearRec709)
+            .expect("prepare heterogeneous Export test program")
+            .evaluate(TimelineTime::ZERO)
+            .expect("compile heterogeneous Export test graph")
+    }
+
+    fn freeze_test_heterogeneous_route(
+        session: &mut ExportVisualRenderSession,
+        graph: &Arc<CompiledEffectGraph>,
+        placement: ExportHeterogeneousPlacement,
+        extent: EffectFrameExtent,
+    ) {
+        let (prepared, budget) = session
+            .prepare_heterogeneous_work(graph, extent, placement)
+            .expect("prepare heterogeneous Export test route");
+        session
+            .register_or_validate_route_contract(graph, &prepared, placement, extent, budget)
+            .expect("freeze heterogeneous Export test route");
+    }
+
+    #[test]
+    fn export_complete_cpu_route_wins_when_heterogeneous_route_is_also_preparable() {
+        let graph = heterogeneous_tracer_graph(mondrian_effects::EffectType::BasicCorrection);
+        let extent = EffectFrameExtent::new(4, 3);
+        let mut session = ExportVisualRenderSession::for_reference_generation(
+            71,
+            service::ExportExecutionResourcePolicy::default(),
+        );
+
+        assert!(compiled_effect_graph_supports_rgba_f32_with_domain_processor(&graph));
+        session
+            .prepare_heterogeneous_work(&graph, extent, ExportHeterogeneousPlacement::Media)
+            .expect("the same graph also has a heterogeneous route");
+        assert!(
+            !session
+                .select_heterogeneous_route(&graph, ExportHeterogeneousPlacement::Media, extent,)
+                .expect("select complete CPU route"),
+            "a complete exact CPU route must win before any heterogeneous work starts"
+        );
+        assert!(session.heterogeneous_route_contracts.is_empty());
+        assert_eq!(
+            session.visual_diagnostics().cpu_routes_selected_before_start,
+            1
+        );
+    }
+
+    #[test]
+    fn export_heterogeneous_route_admission_is_independent_of_gpu_plan_cache_pressure() {
+        let graph = heterogeneous_tracer_graph(mondrian_effects::EffectType::BasicCorrection);
+        let extent = EffectFrameExtent::new(4, 3);
+        let nominal_policy = service::ExportExecutionResourcePolicy::default();
+        let elevated_policy = service::ExportExecutionResourcePolicy {
+            effect_gpu_plan_entries: 1,
+            effect_gpu_plan_bytes: 1,
+            ..nominal_policy
+        };
+
+        assert_eq!(
+            elevated_policy.heterogeneous_route_contract_entries,
+            nominal_policy.heterogeneous_route_contract_entries
+        );
+        assert_eq!(
+            elevated_policy.heterogeneous_route_contract_bytes,
+            nominal_policy.heterogeneous_route_contract_bytes
+        );
+        assert!(elevated_policy.effect_gpu_plan_entries < nominal_policy.effect_gpu_plan_entries);
+        assert!(elevated_policy.effect_gpu_plan_bytes < nominal_policy.effect_gpu_plan_bytes);
+
+        for (generation, policy) in [(72, nominal_policy), (73, elevated_policy)] {
+            let mut session =
+                ExportVisualRenderSession::for_reference_generation(generation, policy);
+            freeze_test_heterogeneous_route(
+                &mut session,
+                &graph,
+                ExportHeterogeneousPlacement::Media,
+                extent,
+            );
+
+            assert_eq!(session.heterogeneous_route_contracts.len(), 1);
+            assert_eq!(
+                session.heterogeneous_route_logical_bytes(),
+                service::EXPORT_HETEROGENEOUS_ROUTE_CONTRACT_LOGICAL_BYTES
+            );
+        }
+    }
+
+    #[test]
+    fn export_heterogeneous_route_contract_rejects_unpreflighted_shape_drift() {
+        let extent = EffectFrameExtent::new(4, 3);
+        let admitted = heterogeneous_tracer_graph(mondrian_effects::EffectType::BasicCorrection);
+        let drifted = heterogeneous_tracer_graph(mondrian_effects::EffectType::Vignette);
+        let mut session = ExportVisualRenderSession::for_reference_generation(
+            72,
+            service::ExportExecutionResourcePolicy::default(),
+        );
+        freeze_test_heterogeneous_route(
+            &mut session,
+            &admitted,
+            ExportHeterogeneousPlacement::Media,
+            extent,
+        );
+        session.route_contracts_sealed = true;
+        let (drifted_work, budget) = session
+            .prepare_heterogeneous_work(&drifted, extent, ExportHeterogeneousPlacement::Media)
+            .expect("prepare shape-drift probe");
+
+        let error = session
+            .register_or_validate_route_contract(
+                &drifted,
+                &drifted_work,
+                ExportHeterogeneousPlacement::Media,
+                extent,
+                budget,
+            )
+            .expect_err("runtime route shape not frozen by preflight must fail closed");
+        assert!(matches!(
+            error,
+            ExportHeterogeneousEffectError::RouteContractNotPreflighted { .. }
+        ));
+        assert_eq!(session.heterogeneous_route_contracts.len(), 1);
+    }
+
+    #[test]
+    fn export_heterogeneous_suffix_failure_is_terminal_after_cpu_prefix() {
+        let generation = 73;
+        let extent = EffectFrameExtent::new(4, 3);
+        let frame_seed = 19;
+        let graph = heterogeneous_tracer_graph(mondrian_effects::EffectType::BasicCorrection);
+        let mut session = ExportVisualRenderSession::for_reference_generation(
+            generation,
+            service::ExportExecutionResourcePolicy::default(),
+        );
+        freeze_test_heterogeneous_route(
+            &mut session,
+            &graph,
+            ExportHeterogeneousPlacement::Media,
+            extent,
+        );
+        session.route_contracts_sealed = true;
+        session.composite_scratch.bind_effect_execution_generation(generation);
+        let input = test_working_frame(
+            &[64, 128, 192, 255].repeat(12),
+            extent.width(),
+            extent.height(),
+        );
+        let route = PreparedExportHeterogeneousElement {
+            element_index: 0,
+            placement: ExportHeterogeneousPlacement::Media,
+            graph,
+            frame_seed,
+        };
+        let _failure = GpuBoundaryFailureGuard::activate();
+
+        let error = session
+            .execute_heterogeneous_element(
+                &route,
+                &input,
+                WorkingColorSpace::LinearRec709,
+                &ExecutionCancellationToken::new(),
+            )
+            .expect_err("a selected suffix failure must not restart the complete graph on CPU");
+        assert!(matches!(
+            error,
+            ExportHeterogeneousEffectError::GpuContinuation { .. }
+        ));
+        let diagnostics = session.visual_diagnostics();
+        assert_eq!(diagnostics.heterogeneous_frames_started, 1);
+        assert_eq!(diagnostics.heterogeneous_frames_completed, 0);
+        assert_eq!(diagnostics.heterogeneous_terminal_failures, 1);
+        assert!(diagnostics.last_heterogeneous_completion.is_none());
+    }
+
+    #[test]
+    fn export_heterogeneous_prestart_cancellation_never_starts_cpu_prefix() {
+        let generation = 75;
+        let extent = EffectFrameExtent::new(4, 3);
+        let graph = heterogeneous_tracer_graph(mondrian_effects::EffectType::BasicCorrection);
+        let mut session = ExportVisualRenderSession::for_reference_generation(
+            generation,
+            service::ExportExecutionResourcePolicy::default(),
+        );
+        freeze_test_heterogeneous_route(
+            &mut session,
+            &graph,
+            ExportHeterogeneousPlacement::Media,
+            extent,
+        );
+        session.route_contracts_sealed = true;
+        session.composite_scratch.bind_effect_execution_generation(generation);
+        let input = test_working_frame(
+            &[48, 112, 208, 255].repeat(12),
+            extent.width(),
+            extent.height(),
+        );
+        let route = PreparedExportHeterogeneousElement {
+            element_index: 0,
+            placement: ExportHeterogeneousPlacement::Media,
+            graph,
+            frame_seed: 29,
+        };
+        let cancellation = ExecutionCancellationToken::new();
+        cancellation.cancel();
+
+        let error = session
+            .execute_heterogeneous_element(
+                &route,
+                &input,
+                WorkingColorSpace::LinearRec709,
+                &cancellation,
+            )
+            .expect_err("pre-start cancellation must stop before Effect pixels");
+        assert!(matches!(
+            error,
+            ExportHeterogeneousEffectError::Canceled { checkpoint: "before_cpu_prefix" }
+        ));
+        let diagnostics = session.visual_diagnostics();
+        assert_eq!(diagnostics.heterogeneous_frames_started, 0);
+        assert_eq!(diagnostics.heterogeneous_terminal_failures, 0);
+    }
+
+    #[test]
+    fn export_heterogeneous_completion_preserves_frame_contract_and_matches_cpu_reference() {
+        let generation = 74;
+        let extent = EffectFrameExtent::new(4, 3);
+        let frame_seed = 23;
+        let graph = heterogeneous_tracer_graph(mondrian_effects::EffectType::BasicCorrection);
+        let mut session = ExportVisualRenderSession::for_reference_generation(
+            generation,
+            service::ExportExecutionResourcePolicy::default(),
+        );
+        if session.gpu_output.ensure_ready().is_err() {
+            eprintln!("skipping Export heterogeneous integration test: no GPU adapter available");
+            return;
+        }
+        freeze_test_heterogeneous_route(
+            &mut session,
+            &graph,
+            ExportHeterogeneousPlacement::Media,
+            extent,
+        );
+        session.route_contracts_sealed = true;
+        session.composite_scratch.bind_effect_execution_generation(generation);
+        let input = test_working_frame(
+            &[32, 96, 224, 255].repeat(12),
+            extent.width(),
+            extent.height(),
+        );
+        let expected = apply_compiled_effect_graph_rgba_f32(
+            &input.rgba_f32().data,
+            extent.width(),
+            extent.height(),
+            &graph,
+            frame_seed,
+        )
+        .expect("complete CPU reference");
+        let route = PreparedExportHeterogeneousElement {
+            element_index: 0,
+            placement: ExportHeterogeneousPlacement::Media,
+            graph,
+            frame_seed,
+        };
+
+        let output = session
+            .execute_heterogeneous_element(
+                &route,
+                &input,
+                WorkingColorSpace::LinearRec709,
+                &ExecutionCancellationToken::new(),
+            )
+            .expect("complete Export heterogeneous route");
+        assert_eq!(output.descriptor(), input.descriptor());
+        for (actual, expected) in output.rgba_f32().data.iter().zip(expected.iter()) {
+            for channel in 0..4 {
+                assert!(
+                    (actual[channel] - expected[channel]).abs() <= 2.0e-5,
+                    "channel {channel}: actual={} expected={}",
+                    actual[channel],
+                    expected[channel]
+                );
+            }
+        }
+        let diagnostics = session.visual_diagnostics();
+        assert_eq!(diagnostics.heterogeneous_frames_started, 1);
+        assert_eq!(diagnostics.heterogeneous_frames_completed, 1);
+        assert_eq!(diagnostics.heterogeneous_terminal_failures, 0);
+        assert!(diagnostics.heterogeneous_upload_bytes > 0);
+        assert!(diagnostics.heterogeneous_readback_bytes > 0);
+        assert_eq!(
+            diagnostics
+                .last_heterogeneous_completion
+                .expect("bounded completion evidence")
+                .working_color_space,
+            WorkingColorSpace::LinearRec709
+        );
+    }
+
     struct FakeExecutor {
         calls: Arc<AtomicUsize>,
         delay_ms: u64,
@@ -3561,8 +5809,9 @@ mod tests {
     impl ExportExecutor for FakeExecutor {
         fn execute(
             &self,
-            _job: &RenderJob,
+            job: &RenderJob,
             cancel: &ExecutionCancellationToken,
+            execution_gate: &service::ExportExecutionGate,
             report: &mut dyn FnMut(ExportProgress),
             _report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
         ) -> JobExecutionResult {
@@ -3572,7 +5821,7 @@ mod tests {
             let step = 20u64;
             let mut elapsed = 0u64;
             while elapsed < self.delay_ms {
-                if cancel.is_canceled() {
+                if !execution_gate.wait_at_boundary(ExportProgressPhase::Encoding, cancel) {
                     return JobExecutionResult::Cancelled;
                 }
                 std::thread::sleep(Duration::from_millis(step));
@@ -3580,7 +5829,13 @@ mod tests {
             }
 
             report(ExportProgress::rendering(0.95, 1_000, 1_000));
-            JobExecutionResult::Completed
+            if execution_gate.wait_at_boundary(ExportProgressPhase::Publishing, cancel) {
+                JobExecutionResult::Published(DurableExportPublication::synthetic(
+                    &job.config.output_path,
+                ))
+            } else {
+                JobExecutionResult::Cancelled
+            }
         }
     }
 
@@ -3591,22 +5846,80 @@ mod tests {
     impl ExportExecutor for DiagnosticExecutor {
         fn execute(
             &self,
-            _job: &RenderJob,
-            _cancel: &ExecutionCancellationToken,
+            job: &RenderJob,
+            cancel: &ExecutionCancellationToken,
+            execution_gate: &service::ExportExecutionGate,
             report: &mut dyn FnMut(ExportProgress),
             report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
         ) -> JobExecutionResult {
+            if !execution_gate.wait_at_boundary(ExportProgressPhase::Rendering, cancel) {
+                return JobExecutionResult::Cancelled;
+            }
             report(ExportProgress::rendering(0.5, 1, 1));
             report_diagnostics(self.diagnostics);
-            JobExecutionResult::Completed
+            if execution_gate.wait_at_boundary(ExportProgressPhase::Publishing, cancel) {
+                JobExecutionResult::Published(DurableExportPublication::synthetic(
+                    &job.config.output_path,
+                ))
+            } else {
+                JobExecutionResult::Cancelled
+            }
+        }
+    }
+
+    type ResourcePolicyObservation = (
+        service::ExportExecutionResourcePolicy,
+        service::ExportExecutionResourcePolicy,
+    );
+
+    struct ResourcePolicyProbeExecutor {
+        calls: AtomicUsize,
+        observations: Arc<StdMutex<Vec<ResourcePolicyObservation>>>,
+        first_started: Arc<Barrier>,
+        first_continue: Arc<Barrier>,
+    }
+
+    impl ExportExecutor for ResourcePolicyProbeExecutor {
+        fn execute(
+            &self,
+            job: &RenderJob,
+            cancel: &ExecutionCancellationToken,
+            execution_gate: &service::ExportExecutionGate,
+            _report: &mut dyn FnMut(ExportProgress),
+            _report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+        ) -> JobExecutionResult {
+            let call = self.calls.fetch_add(1, Ordering::Relaxed);
+            let before = execution_gate.resource_policy();
+            if call == 0 {
+                self.first_started.wait();
+                self.first_continue.wait();
+            }
+            let after = execution_gate.resource_policy();
+            self.observations
+                .lock()
+                .expect("resource-policy observations")
+                .push((before, after));
+            if execution_gate.wait_at_boundary(ExportProgressPhase::Publishing, cancel) {
+                JobExecutionResult::Published(DurableExportPublication::synthetic(
+                    &job.config.output_path,
+                ))
+            } else {
+                JobExecutionResult::Cancelled
+            }
         }
     }
 
     fn dummy_config(output_name: &str) -> ExportConfig {
+        let mut timeline = timeline_input_with_output_color(ColorSpace::Rec709);
+        // Queue tests exercise admission itself. Leave the attachment absent so
+        // the AAC preset freezes exact root/nested audio Programs, including
+        // ProvenSilent root evidence, from the same delivery configuration.
+        timeline.prepared_execution = None;
         ExportConfig {
             preset: crate::preset::ExportPreset::h264_aac_sdr_1080p(),
-            timeline: Box::new(timeline_input_with_output_color(ColorSpace::Rec709)),
+            timeline: Box::new(timeline),
             output_path: PathBuf::from(output_name),
+            output_policy: ExportOutputPolicy::CreateNew,
         }
     }
 
@@ -3633,27 +5946,157 @@ mod tests {
     fn timeline_input_with_output_color(output_color_space: ColorSpace) -> TimelineExportSnapshot {
         let mut sequence = Sequence::new("color-validation");
         sequence.settings.color.program_output.color_space = output_color_space;
+        let mut prepared_execution = crate::prepare_timeline_export_dependencies(
+            &sequence,
+            &[],
+            TimelineExportRange::SequenceInOut,
+            false,
+        )
+        .expect("prepare test visual snapshot")
+        .execution_snapshot()
+        .clone();
+        prepared_execution
+            .visual_mut()
+            .install_title_fonts(mondrian_renderer::PreparedBasicTitleFontSet::default())
+            .expect("seal empty test title-font closure");
         TimelineExportSnapshot {
             sequence,
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: Some(prepared_execution),
             range: TimelineExportRange::SequenceInOut,
+        }
+    }
+
+    fn refresh_test_execution_snapshot(timeline: &mut TimelineExportSnapshot, include_audio: bool) {
+        let resource_policy = service::ExportExecutionResourcePolicy::default();
+        let mut execution = crate::prepare_timeline_export_dependencies(
+            &timeline.sequence,
+            &timeline.sequences,
+            timeline.range,
+            include_audio,
+        )
+        .expect("prepare exact test execution snapshot")
+        .execution_snapshot()
+        .clone();
+        let title_fonts = mondrian_renderer::PreparedBasicTitleFontSet::prepare(
+            execution.visual().basic_title_font_queries().iter().cloned(),
+            resource_policy.title_font_bytes,
+        )
+        .expect("freeze exact test Basic Title font closure");
+        execution
+            .visual_mut()
+            .install_title_fonts(title_fonts)
+            .expect("seal exact test Basic Title font closure");
+        timeline.install_prepared_execution(execution);
+    }
+
+    fn captured_visual_session_for_test(
+        timeline: &mut TimelineExportSnapshot,
+    ) -> ExportVisualRenderSession {
+        let resource_policy = service::ExportExecutionResourcePolicy::default();
+        refresh_test_execution_snapshot(timeline, false);
+        ExportVisualRenderSession::for_timeline(0, resource_policy, timeline)
+            .expect("admit exact test visual execution snapshot")
+    }
+
+    #[derive(Clone, Copy)]
+    enum TestCicpTagKind {
+        Primaries,
+        Transfer,
+        Matrix,
+    }
+
+    fn exact_test_cicp_tag(
+        kind: TestCicpTagKind,
+        ffmpeg_name: &'static str,
+    ) -> mondrian_media::VideoColorTag {
+        let (code, canonical_name) = match (kind, ffmpeg_name) {
+            (TestCicpTagKind::Primaries, "bt709") => (1, "bt709"),
+            (TestCicpTagKind::Primaries, "bt470bg") => (5, "bt470bg"),
+            (TestCicpTagKind::Primaries, "smpte170m") => (6, "smpte170m"),
+            (TestCicpTagKind::Primaries, "bt2020") => (9, "bt2020"),
+            (TestCicpTagKind::Primaries, "smpte432") => (12, "smpte432"),
+            (TestCicpTagKind::Transfer, "bt709") => (1, "bt709"),
+            (TestCicpTagKind::Transfer, "bt470bg") => (5, "bt470bg"),
+            (TestCicpTagKind::Transfer, "smpte170m") => (6, "smpte170m"),
+            (TestCicpTagKind::Transfer, "iec61966-2-1") => (13, "iec61966-2-1"),
+            (TestCicpTagKind::Transfer, "smpte2084") => (16, "smpte2084"),
+            (TestCicpTagKind::Transfer, "arib-std-b67") => (18, "arib-std-b67"),
+            (TestCicpTagKind::Matrix, "rgb" | "gbr") => (0, "gbr"),
+            (TestCicpTagKind::Matrix, "bt709") => (1, "bt709"),
+            (TestCicpTagKind::Matrix, "fcc") => (4, "fcc"),
+            (TestCicpTagKind::Matrix, "bt470bg") => (5, "bt470bg"),
+            (TestCicpTagKind::Matrix, "smpte170m") => (6, "smpte170m"),
+            (TestCicpTagKind::Matrix, "smpte240m") => (7, "smpte240m"),
+            (TestCicpTagKind::Matrix, "bt2020nc") => (9, "bt2020nc"),
+            _ => panic!("unsupported exact test CICP {ffmpeg_name}"),
+        };
+        mondrian_media::VideoColorTag {
+            code,
+            name: Some(canonical_name.to_owned()),
+            specified: true,
         }
     }
 
     fn test_media_dependency(
         path: PathBuf,
-        detected_color_space: Option<ColorSpace>,
+        executable_color_space: Option<ColorSpace>,
         interpretation: AssetMediaInterpretation,
         color_diagnostic: Option<mondrian_media::VideoColorDiagnostic>,
     ) -> crate::preset::ExportMediaDependency {
+        let color_diagnostic = color_diagnostic.or_else(|| {
+            executable_color_space.map(|color_space| {
+                let tags = color_space
+                    .ffmpeg_tags()
+                    .expect("test executable source must have exact standardized tags");
+                let metadata = mondrian_media::VideoColorMetadata {
+                    primaries: exact_test_cicp_tag(
+                        TestCicpTagKind::Primaries,
+                        tags.color_primaries,
+                    ),
+                    transfer: exact_test_cicp_tag(TestCicpTagKind::Transfer, tags.color_trc),
+                    matrix: exact_test_cicp_tag(TestCicpTagKind::Matrix, tags.colorspace),
+                };
+                let pixel_format = if matches!(tags.colorspace, "rgb" | "gbr") {
+                    mondrian_media::info::PixelFormat::Rgb24
+                } else {
+                    mondrian_media::info::PixelFormat::Yuv420p
+                };
+                let sampling = mondrian_core::ProvenVideoSampling {
+                    pixel_format,
+                    bit_depth: 8,
+                    has_alpha: false,
+                };
+                let interpretation =
+                    mondrian_media::interpret_video_color_metadata(&metadata, Some(sampling), &[]);
+                assert_eq!(
+                    interpretation.executable_color_space_from_probe(
+                        Some(sampling),
+                        Some(&metadata),
+                        &[],
+                    ),
+                    Some(color_space),
+                    "test dependency must carry closed executable CICP evidence"
+                );
+                mondrian_media::VideoColorDiagnostic {
+                    color_range: mondrian_media::DecodedVideoRange::Unknown,
+                    sampling: Some(sampling),
+                    interpretation,
+                    metadata: Some(metadata),
+                    metadata_hints: Vec::new(),
+                    hdr_metadata: Vec::new(),
+                }
+            })
+        });
         crate::preset::ExportMediaDependency {
             source_fingerprint: MediaFileFingerprint::capture(path.as_path()),
             path,
+            video_stream_index: Some(0),
+            picture_source_extent: Some(mondrian_timeline::PictureSourceExtent::Still),
             source_resolution: Some(Resolution { width: 1, height: 1 }),
             audio_components: HashMap::new(),
-            detected_color_space,
             interpretation,
             color_diagnostic,
         }
@@ -3676,13 +6119,386 @@ mod tests {
                 None,
             ),
         );
-        std::fs::write(&source, b"source revision changed").expect("replace source");
+        let replacement = root.join("replacement.mov");
+        std::fs::write(&replacement, b"replaced").expect("write same-length replacement");
+        std::fs::remove_file(&source).expect("unlink admitted source");
+        std::fs::rename(&replacement, &source).expect("install same-length replacement");
 
         let error = validate_snapshot_media_revisions(&timeline)
             .expect_err("changed source revision must fail closed");
         assert!(error.contains(&asset_id.to_string()));
         assert!(error.contains(source.to_string_lossy().as_ref()));
+        assert_eq!(
+            std::fs::metadata(&source).expect("replacement metadata").len(),
+            b"admitted".len() as u64,
+            "the revision gate must not rely on length changes"
+        );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn export_source_revision_validation_rejects_incomplete_evidence() {
+        let root = std::env::temp_dir().join(format!(
+            "mondrian-export-incomplete-revision-{}",
+            JobId::new()
+        ));
+        std::fs::create_dir_all(&root).expect("create export revision root");
+        let source = root.join("source.mov");
+        std::fs::write(&source, b"admitted source").expect("write admitted source");
+        let asset_id = AssetId::new();
+        let mut timeline = timeline_input_with_output_color(ColorSpace::Rec709);
+        let mut dependency = test_media_dependency(
+            source.clone(),
+            Some(ColorSpace::Rec709),
+            AssetMediaInterpretation::default(),
+            None,
+        );
+        dependency.source_fingerprint = MediaFileFingerprint::default();
+        timeline.media.insert(asset_id, dependency);
+
+        let admitted_error = validate_snapshot_media_revisions(&timeline)
+            .expect_err("incomplete admitted revision must fail closed");
+        assert!(admitted_error.contains("admitted"));
+        assert!(admitted_error.contains("incomplete"));
+        assert!(admitted_error.contains(&asset_id.to_string()));
+
+        timeline.media.get_mut(&asset_id).expect("dependency").source_fingerprint =
+            MediaFileFingerprint::capture(&source);
+        std::fs::remove_file(&source).expect("remove admitted source");
+        let actual_error = validate_snapshot_media_revisions(&timeline)
+            .expect_err("unobservable current revision must fail closed");
+        assert!(actual_error.contains("cannot be observed completely"));
+        assert!(actual_error.contains(&asset_id.to_string()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn export_decode_cache_does_not_cross_root_and_nested_color_contracts() {
+        let source = tempfile::NamedTempFile::new().expect("temporary media source");
+        std::fs::write(source.path(), b"decode identity").expect("write media source");
+        let asset_id = AssetId::new();
+        let dependency = test_media_dependency(
+            source.path().to_path_buf(),
+            Some(ColorSpace::Rec709),
+            AssetMediaInterpretation::default(),
+            None,
+        );
+        let root_sequence = Sequence::new("root color context");
+        let root_context = root_sequence
+            .settings
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default());
+        let mut nested_working_context = root_context.clone();
+        nested_working_context.working_color_space = match root_context.working_color_space {
+            WorkingColorSpace::LinearRec709 => WorkingColorSpace::LinearRec2020,
+            _ => WorkingColorSpace::LinearRec709,
+        };
+        let mut nested_engine_context = root_context.clone();
+        nested_engine_context.engine = ColorEngine::Aces {
+            preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+        };
+        let source_resolution = Resolution { width: 3_840, height: 2_160 };
+        let decode_resolution = Resolution { width: 1_920, height: 1_080 };
+        let build_key = |context: &ProgramColorContext, auto_tone_map: bool| {
+            ExportDecodeCacheKey::new(
+                asset_id,
+                &dependency,
+                TimelineTime::ZERO,
+                ColorSpace::Rec709,
+                DecodedVideoRangeContract::OverrideFull,
+                AlphaInterpretation::Straight,
+                context,
+                auto_tone_map,
+                decode_resolution,
+                source_resolution,
+            )
+            .expect("complete cache identity")
+        };
+        let root_key = build_key(&root_context, false);
+        let nested_working_key = build_key(&nested_working_context, false);
+        let nested_engine_key = build_key(&nested_engine_context, false);
+        let nested_tone_map_key = build_key(&root_context, true);
+        let mut cache = HashMap::new();
+        cache.insert(root_key.clone(), "root working pixels");
+
+        assert_eq!(cache.get(&root_key), Some(&"root working pixels"));
+        assert_ne!(root_key, nested_working_key);
+        assert_ne!(root_key, nested_engine_key);
+        assert_ne!(root_key, nested_tone_map_key);
+        assert!(!cache.contains_key(&nested_working_key));
+        assert!(!cache.contains_key(&nested_engine_key));
+        assert!(!cache.contains_key(&nested_tone_map_key));
+    }
+
+    #[test]
+    fn canceled_export_video_decode_yields_before_opening_the_source() {
+        let source = tempfile::NamedTempFile::new().expect("temporary canceled media source");
+        std::fs::write(source.path(), b"not opened").expect("write canceled media source");
+        let dependency = test_media_dependency(
+            source.path().to_path_buf(),
+            Some(ColorSpace::Rec709),
+            AssetMediaInterpretation::default(),
+            None,
+        );
+        let mut decode_context = PreviewDecodeSessionContext::new();
+        let mut color_session = mondrian_renderer::RenderCpuColorExecutionSession::new(0);
+        let cancellation = ExecutionCancellationToken::new();
+        cancellation.cancel();
+        let result = decode_video_layer_scaled(
+            ExportVideoLayerDecodeRequest {
+                asset_id: AssetId::new(),
+                dependency: &dependency,
+                source_time: TimelineTime::ZERO,
+                decode_resolution: Resolution { width: 16, height: 16 },
+                source_resolution: Resolution { width: 16, height: 16 },
+                source_color: PreviewSourceColorContract::new(
+                    ColorSpace::Rec709,
+                    DecodedVideoRangeContract::OverrideLimited,
+                ),
+                alpha_interpretation: AlphaInterpretation::Straight,
+                input_transform: RenderInputTransform::to_working(
+                    WorkingColorSpace::LinearRec709,
+                    false,
+                    ColorEngine::mondrian_standard(),
+                ),
+            },
+            ExportVideoLayerDecodeExecutionContext {
+                color_session: &mut color_session,
+                decode_context: &mut decode_context,
+                cancellation: &cancellation,
+            },
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("canceled export decode must not open the missing source"),
+        };
+
+        assert!(error.contains("canceled"));
+        assert_eq!(decode_context.resident_session_count(), 0);
+    }
+
+    #[test]
+    fn export_decode_context_reuses_across_frames_and_retires_at_job_boundary() {
+        const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+        let root =
+            std::env::temp_dir().join(format!("mondrian-export-decode-context-{}", JobId::new()));
+        std::fs::create_dir_all(&root).expect("create export decode context root");
+        let source = root.join("two-frames.mp4");
+        std::fs::write(&source, FIXTURE).expect("write synthetic H.264 fixture");
+        let dependency = test_media_dependency(
+            source,
+            Some(ColorSpace::Rec709),
+            AssetMediaInterpretation::default(),
+            None,
+        );
+        let asset_id = AssetId::new();
+        let mut session = ExportVisualRenderSession::default();
+        let cancellation = ExecutionCancellationToken::new();
+        let decode = |source_time: TimelineTime,
+                      session: &mut ExportVisualRenderSession|
+         -> Arc<DecodedVideoLayer> {
+            decode_video_layer_scaled(
+                ExportVideoLayerDecodeRequest {
+                    asset_id,
+                    dependency: &dependency,
+                    source_time,
+                    decode_resolution: Resolution { width: 16, height: 16 },
+                    source_resolution: Resolution { width: 16, height: 16 },
+                    source_color: PreviewSourceColorContract::new(
+                        ColorSpace::Rec709,
+                        DecodedVideoRangeContract::OverrideLimited,
+                    ),
+                    alpha_interpretation: AlphaInterpretation::Straight,
+                    input_transform: RenderInputTransform::to_working(
+                        WorkingColorSpace::LinearRec709,
+                        false,
+                        ColorEngine::mondrian_standard(),
+                    ),
+                },
+                ExportVideoLayerDecodeExecutionContext {
+                    color_session: session.composite_scratch.color_execution_mut(),
+                    decode_context: &mut session.decode_context,
+                    cancellation: &cancellation,
+                },
+            )
+            .unwrap_or_else(|error| {
+                panic!("decode export frame at source time {source_time:?}: {error}")
+            })
+        };
+
+        let first = decode(TimelineTime::ZERO, &mut session);
+        let second = decode(tt(1, Rational::new(1, 25)), &mut session);
+        assert_eq!(
+            first
+                .decode_diagnostics
+                .as_ref()
+                .expect("real decode diagnostics")
+                .session_disposition,
+            PreviewDecodeSessionDisposition::Opened
+        );
+        assert_eq!(
+            second
+                .decode_diagnostics
+                .as_ref()
+                .expect("real decode diagnostics")
+                .session_disposition,
+            PreviewDecodeSessionDisposition::Reused
+        );
+        assert_eq!(second.source_fingerprint, dependency.source_fingerprint);
+        assert_eq!(second.video_stream_index, 0);
+        assert_eq!(session.decode_context.resident_session_count(), 1);
+
+        session.release_decode_sessions();
+        assert_eq!(session.decode_context.resident_session_count(), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn export_decode_rejects_same_length_source_replacement_before_session_open() {
+        let root =
+            std::env::temp_dir().join(format!("mondrian-export-decode-revision-{}", JobId::new()));
+        std::fs::create_dir_all(&root).expect("create export decode revision root");
+        let source = root.join("source.mov");
+        std::fs::write(&source, b"old-revision").expect("write admitted revision");
+        let dependency = test_media_dependency(
+            source.clone(),
+            Some(ColorSpace::Rec709),
+            AssetMediaInterpretation::default(),
+            None,
+        );
+        let replacement = root.join("replacement.mov");
+        std::fs::write(&replacement, b"new-revision").expect("write equal-length replacement");
+        std::fs::remove_file(&source).expect("unlink admitted revision");
+        std::fs::rename(&replacement, &source).expect("install equal-length replacement");
+        assert_eq!(
+            Some(std::fs::metadata(&source).expect("replacement metadata").len()),
+            dependency.source_fingerprint.len
+        );
+
+        let mut decode_context = PreviewDecodeSessionContext::new();
+        let mut color_session = mondrian_renderer::RenderCpuColorExecutionSession::new(0);
+        let cancellation = ExecutionCancellationToken::new();
+        let error = decode_video_layer_scaled(
+            ExportVideoLayerDecodeRequest {
+                asset_id: AssetId::new(),
+                dependency: &dependency,
+                source_time: TimelineTime::ZERO,
+                decode_resolution: Resolution { width: 16, height: 16 },
+                source_resolution: Resolution { width: 16, height: 16 },
+                source_color: PreviewSourceColorContract::new(
+                    ColorSpace::Rec709,
+                    DecodedVideoRangeContract::OverrideLimited,
+                ),
+                alpha_interpretation: AlphaInterpretation::Straight,
+                input_transform: RenderInputTransform::to_working(
+                    WorkingColorSpace::LinearRec709,
+                    false,
+                    ColorEngine::mondrian_standard(),
+                ),
+            },
+            ExportVideoLayerDecodeExecutionContext {
+                color_session: &mut color_session,
+                decode_context: &mut decode_context,
+                cancellation: &cancellation,
+            },
+        )
+        .expect_err("stale export dependency must fail before decoder setup");
+        assert!(error.contains("revision"));
+        assert_eq!(decode_context.resident_session_count(), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn export_decode_cache_identity_covers_physical_decode_inputs() {
+        let source = tempfile::NamedTempFile::new().expect("temporary media source");
+        std::fs::write(source.path(), b"decode identity").expect("write media source");
+        let asset_id = AssetId::new();
+        let dependency = test_media_dependency(
+            source.path().to_path_buf(),
+            Some(ColorSpace::Rec709),
+            AssetMediaInterpretation::default(),
+            None,
+        );
+        let context = Sequence::new("cache identity")
+            .settings
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default());
+        let original = ExportDecodeCacheKey::new(
+            asset_id,
+            &dependency,
+            TimelineTime::ZERO,
+            ColorSpace::Rec709,
+            DecodedVideoRangeContract::OverrideFull,
+            AlphaInterpretation::Straight,
+            &context,
+            false,
+            Resolution { width: 1_920, height: 1_080 },
+            Resolution { width: 3_840, height: 2_160 },
+        )
+        .expect("complete cache identity");
+
+        let mut changed = original.clone();
+        changed.asset_id = AssetId::new();
+        assert_ne!(original, changed);
+        let mut changed = original.clone();
+        changed.source_path = source.path().with_extension("proxy.mov");
+        assert_ne!(original, changed);
+        let mut changed = original.clone();
+        changed.source_fingerprint.modified_nanos =
+            changed.source_fingerprint.modified_nanos.map(|value| value.wrapping_add(1));
+        assert_ne!(original, changed);
+        let mut changed = original.clone();
+        changed.video_stream_index = changed.video_stream_index.saturating_add(1);
+        assert_ne!(original, changed);
+        let mut changed = original.clone();
+        changed.source_time = tt(1, Rational::new(1, 25));
+        assert_ne!(original, changed);
+        let mut changed = original.clone();
+        changed.input_color_space = ColorSpace::Srgb;
+        assert_ne!(original, changed);
+        let mut changed = original.clone();
+        changed.input_video_range = DecodedVideoRangeContract::OverrideLimited;
+        assert_ne!(original, changed);
+        let mut changed = original.clone();
+        changed.alpha_interpretation = AlphaInterpretation::Premultiplied;
+        assert_ne!(original, changed);
+        let mut changed = original.clone();
+        changed.decode_resolution.width /= 2;
+        assert_ne!(original, changed);
+        let mut changed = original.clone();
+        changed.source_resolution.width /= 2;
+        assert_ne!(original, changed);
+    }
+
+    #[test]
+    fn export_picture_dependency_without_physical_stream_fails_closed() {
+        let source = tempfile::NamedTempFile::new().expect("temporary media source");
+        std::fs::write(source.path(), b"decode identity").expect("write media source");
+        let asset_id = AssetId::new();
+        let mut dependency = test_media_dependency(
+            source.path().to_path_buf(),
+            Some(ColorSpace::Rec709),
+            AssetMediaInterpretation::default(),
+            None,
+        );
+        dependency.video_stream_index = None;
+        let context = Sequence::new("missing physical stream")
+            .settings
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default());
+
+        let error = ExportDecodeCacheKey::new(
+            asset_id,
+            &dependency,
+            TimelineTime::ZERO,
+            ColorSpace::Rec709,
+            DecodedVideoRangeContract::OverrideLimited,
+            AlphaInterpretation::Straight,
+            &context,
+            false,
+            Resolution { width: 1, height: 1 },
+            Resolution { width: 1, height: 1 },
+        )
+        .expect_err("picture dependency without exact stream must be rejected");
+        assert!(error.contains("physical video stream"));
+        assert!(error.contains(&asset_id.to_string()));
     }
 
     #[test]
@@ -3690,40 +6506,175 @@ mod tests {
         let root = std::env::temp_dir().join(format!("mondrian-export-publish-{}", JobId::new()));
         std::fs::create_dir_all(&root).expect("create export publication root");
         let final_output = root.join("deliverable.mp4");
-        let job_id = JobId::new();
-        let partial_output = export_partial_output_path(&final_output, job_id);
         std::fs::write(&final_output, b"prior deliverable").expect("write prior output");
-        std::fs::write(&partial_output, b"validated deliverable").expect("write partial output");
+        let mut staging = OwnedPublicationFile::create_sibling(&final_output, "export-test")
+            .expect("reserve partial output");
+        let partial_output = staging.path().to_path_buf();
+        staging
+            .file_mut()
+            .expect("partial writer")
+            .write_all(b"validated deliverable")
+            .expect("write partial output");
 
-        finalize_export_output(&partial_output, &final_output).expect("publish validated output");
+        let evidence = finalize_export_output(
+            staging,
+            &final_output,
+            ExportOutputPolicy::OverwriteExisting,
+        )
+        .expect("publish validated output");
 
         assert_eq!(
             std::fs::read(&final_output).expect("read published output"),
             b"validated deliverable"
+        );
+        assert_eq!(
+            evidence.output_path,
+            std::path::absolute(&final_output).expect("absolute")
         );
         assert!(!partial_output.exists());
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn missing_partial_never_disturbs_existing_deliverable() {
+    fn publication_reservation_does_not_overwrite_colliding_legacy_partial() {
         let root = std::env::temp_dir().join(format!("mondrian-export-preserve-{}", JobId::new()));
         std::fs::create_dir_all(&root).expect("create export preservation root");
         let final_output = root.join("deliverable.mp4");
-        let job_id = JobId::new();
-        std::fs::write(&final_output, b"prior deliverable").expect("write prior output");
-
-        finalize_export_output(
-            export_partial_output_path(&final_output, job_id).as_path(),
-            &final_output,
-        )
-        .expect_err("missing partial must fail");
+        let colliding_partial = root.join("deliverable.mp4.mondrian-collision.partial");
+        std::fs::write(&colliding_partial, b"unowned collision").expect("write collision");
+        let mut staging = OwnedPublicationFile::create_sibling(&final_output, "export-test")
+            .expect("reserve unique partial output");
+        assert_ne!(staging.path(), colliding_partial);
+        staging
+            .file_mut()
+            .expect("partial writer")
+            .write_all(b"validated deliverable")
+            .expect("write partial output");
+        finalize_export_output(staging, &final_output, ExportOutputPolicy::CreateNew)
+            .expect("publish exact reserved object");
 
         assert_eq!(
-            std::fs::read(&final_output).expect("read preserved output"),
+            std::fs::read(&colliding_partial).expect("read preserved collision"),
+            b"unowned collision"
+        );
+        assert_eq!(
+            std::fs::read(&final_output).expect("read published output"),
+            b"validated deliverable"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn before_namespace_failure_retains_validated_partial_object() {
+        let root = std::env::temp_dir().join(format!("mondrian-export-retained-{}", JobId::new()));
+        std::fs::create_dir_all(&root).expect("create export preservation root");
+        let final_output = root.join("deliverable.mp4");
+        std::fs::create_dir(&final_output).expect("create invalid target directory");
+        let mut staging = OwnedPublicationFile::create_sibling(&final_output, "export-test")
+            .expect("reserve partial output");
+        let partial_output = staging.path().to_path_buf();
+        staging
+            .file_mut()
+            .expect("partial writer")
+            .write_all(b"validated deliverable")
+            .expect("write partial output");
+
+        let failure = finalize_export_output(staging, &final_output, ExportOutputPolicy::CreateNew)
+            .expect_err("directory target must fail before namespace publication");
+        let ExportPublicationFailure::BeforeNamespace {
+            output_path, retained_partial_path, ..
+        } = failure
+        else {
+            panic!("expected typed pre-namespace publication failure");
+        };
+        assert_eq!(
+            output_path,
+            std::path::absolute(&final_output).expect("absolute")
+        );
+        assert_eq!(
+            retained_partial_path.as_deref(),
+            Some(partial_output.as_path())
+        );
+        assert_eq!(
+            std::fs::read(&partial_output).expect("read retained validated partial"),
+            b"validated deliverable"
+        );
+        assert!(final_output.is_dir());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn create_only_publication_preserves_file_created_during_export() {
+        let root =
+            std::env::temp_dir().join(format!("mondrian-export-late-collision-{}", JobId::new()));
+        std::fs::create_dir_all(&root).expect("create export collision root");
+        let final_output = root.join("deliverable.mp4");
+        let mut staging = OwnedPublicationFile::create_sibling(&final_output, "export-test")
+            .expect("reserve partial output");
+        let partial_output = staging.path().to_path_buf();
+        staging
+            .file_mut()
+            .expect("partial writer")
+            .write_all(b"validated deliverable")
+            .expect("write partial output");
+        std::fs::write(&final_output, b"external deliverable").expect("create competing output");
+
+        let failure = finalize_export_output(staging, &final_output, ExportOutputPolicy::CreateNew)
+            .expect_err("create-only publication must not overwrite a late collision");
+        let ExportPublicationFailure::BeforeNamespace { retained_partial_path, .. } = failure
+        else {
+            panic!("late create-only collision must fail before namespace mutation");
+        };
+        assert_eq!(
+            retained_partial_path.as_deref(),
+            Some(partial_output.as_path())
+        );
+        assert_eq!(
+            std::fs::read(&final_output).expect("read competing output"),
+            b"external deliverable"
+        );
+        assert_eq!(
+            std::fs::read(&partial_output).expect("read retained validated output"),
+            b"validated deliverable"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replaced_reserved_partial_is_rejected_without_deleting_replacement() {
+        let root = std::env::temp_dir().join(format!("mondrian-export-identity-{}", JobId::new()));
+        std::fs::create_dir_all(&root).expect("create export identity root");
+        let final_output = root.join("deliverable.mp4");
+        std::fs::write(&final_output, b"prior deliverable").expect("write prior output");
+        let staging = OwnedPublicationFile::create_sibling(&final_output, "export-test")
+            .expect("reserve partial output");
+        let reservation = staging.release_for_external_writer();
+        let partial_output = reservation.path().to_path_buf();
+        std::fs::remove_file(&partial_output).expect("remove reserved name");
+        std::fs::write(&partial_output, b"foreign replacement").expect("write replacement");
+
+        assert!(
+            reservation.reclaim().is_err(),
+            "replacement identity must be rejected"
+        );
+        assert_eq!(
+            std::fs::read(&partial_output).expect("read foreign replacement"),
+            b"foreign replacement"
+        );
+        assert_eq!(
+            std::fs::read(&final_output).expect("read preserved prior output"),
             b"prior deliverable"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn export_module_has_no_private_windows_publication_implementation() {
+        let source = include_str!("mod.rs");
+        let forbidden = ["Replace", "FileW"].concat();
+        assert!(!source.contains(&forbidden));
+        let forbidden = ["REPLACEFILE", "_WRITE_THROUGH"].concat();
+        assert!(!source.contains(&forbidden));
     }
 
     fn test_color_diagnostic(
@@ -3733,10 +6684,10 @@ mod tests {
     ) -> mondrian_media::VideoColorDiagnostic {
         let warnings = warning.into_iter().collect::<Vec<_>>();
         mondrian_media::VideoColorDiagnostic {
-            detected_color_space: None,
             color_range: mondrian_media::DecodedVideoRange::Unknown,
+            sampling: None,
             interpretation: mondrian_media::DetectedColorInterpretation {
-                color_space: None,
+                candidate_color_space: None,
                 confidence: mondrian_media::VideoColorInterpretationConfidence::None,
                 source,
                 method,
@@ -3744,8 +6695,6 @@ mod tests {
                 warnings: warnings.clone(),
                 user_overridable: true,
             },
-            source,
-            method,
             metadata: None,
             metadata_hints: Vec::new(),
             hdr_metadata: Vec::new(),
@@ -3785,6 +6734,58 @@ mod tests {
 
         assert!(done, "job should complete within timeout");
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn queue_freezes_resource_policy_per_attempt_and_next_attempt_observes_update() {
+        let observations = Arc::new(StdMutex::new(Vec::new()));
+        let first_started = Arc::new(Barrier::new(2));
+        let first_continue = Arc::new(Barrier::new(2));
+        let queue = RenderQueue::new_with_executor(Arc::new(ResourcePolicyProbeExecutor {
+            calls: AtomicUsize::new(0),
+            observations: Arc::clone(&observations),
+            first_started: Arc::clone(&first_started),
+            first_continue: Arc::clone(&first_continue),
+        }));
+        let first_policy = service::ExportExecutionResourcePolicy {
+            effect_cache_entries: 7,
+            ..service::ExportExecutionResourcePolicy::default()
+        };
+        let second_policy = service::ExportExecutionResourcePolicy {
+            effect_cache_entries: 19,
+            ..service::ExportExecutionResourcePolicy::default()
+        };
+        queue.set_resource_policy(first_policy);
+        let first_id = queue
+            .enqueue(RenderJob::new(dummy_config("resource-policy-first.mp4")))
+            .expect("admit first export");
+        first_started.wait();
+        queue.set_resource_policy(second_policy);
+        first_continue.wait();
+        assert!(wait_until(2_000, || {
+            queue
+                .list_jobs()
+                .iter()
+                .find(|job| job.id == first_id)
+                .is_some_and(|job| job.status.is_terminal())
+        }));
+
+        let second_id = queue
+            .enqueue(RenderJob::new(dummy_config("resource-policy-second.mp4")))
+            .expect("admit second export");
+        assert!(wait_until(2_000, || {
+            queue
+                .list_jobs()
+                .iter()
+                .find(|job| job.id == second_id)
+                .is_some_and(|job| job.status.is_terminal())
+        }));
+
+        assert_eq!(
+            observations.lock().expect("resource-policy observations").as_slice(),
+            &[(first_policy, first_policy), (second_policy, second_policy)]
+        );
+        assert_eq!(queue.diagnostics().resource_policy, second_policy);
     }
 
     #[test]
@@ -4185,6 +7186,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
 
@@ -4376,6 +7378,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
         let ctx = ProgramColorContext {
@@ -4398,8 +7401,10 @@ mod tests {
         let mut diagnostics = ExportJobColorDiagnostics::default();
         let mut canvas = vec![0u8; 2 * 2 * 4];
         let mut visual_session = ExportVisualRenderSession::default();
+        let cancellation = ExecutionCancellationToken::new();
         let mut render_context = ExportFrameRenderContext {
-            timeline: &timeline,
+            media: &timeline.media,
+            color_environment: &timeline.color_environment,
             alpha_mode: ExportAlphaMode::FlattenBlack,
             frame_contract: ExportFrameContract::Rgba8,
             input_color_counts: None,
@@ -4407,15 +7412,16 @@ mod tests {
             composite_diagnostics: None,
             export_diagnostics: Some(&mut diagnostics),
             visual_session: &mut visual_session,
+            cancellation: &cancellation,
         };
         render_sequence_frame_into(
+            &timeline,
             &mut render_context,
             &timeline.sequence,
             0,
             Resolution { width: 2, height: 2 },
             ctx,
             SequenceRenderTarget::Deliverable(&mut canvas),
-            0,
         )
         .expect("render with engine-owned output intent");
 
@@ -4457,18 +7463,21 @@ mod tests {
         let color_context = sequence
             .settings
             .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default());
-        let timeline = TimelineExportSnapshot {
+        let mut timeline = TimelineExportSnapshot {
             sequence,
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
         let mut output = None;
         let mut composite_diagnostics = TimelineCompositeDiagnostics::default();
-        let mut visual_session = ExportVisualRenderSession::default();
+        let mut visual_session = captured_visual_session_for_test(&mut timeline);
+        let cancellation = ExecutionCancellationToken::new();
         let mut render_context = ExportFrameRenderContext {
-            timeline: &timeline,
+            media: &timeline.media,
+            color_environment: &timeline.color_environment,
             alpha_mode: ExportAlphaMode::Preserve,
             frame_contract: ExportFrameContract::Rgba8,
             input_color_counts: None,
@@ -4476,16 +7485,17 @@ mod tests {
             composite_diagnostics: Some(&mut composite_diagnostics),
             export_diagnostics: None,
             visual_session: &mut visual_session,
+            cancellation: &cancellation,
         };
 
         render_sequence_frame_into(
+            &timeline,
             &mut render_context,
             &timeline.sequence,
             2,
             Resolution { width: 1, height: 1 },
             color_context,
             SequenceRenderTarget::Working(&mut output),
-            0,
         )
         .expect("render Cross Dissolve");
 
@@ -4522,18 +7532,21 @@ mod tests {
         let color_context = sequence
             .settings
             .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default());
-        let timeline = TimelineExportSnapshot {
+        let mut timeline = TimelineExportSnapshot {
             sequence,
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
         let mut output = None;
         let mut composite_diagnostics = TimelineCompositeDiagnostics::default();
-        let mut visual_session = ExportVisualRenderSession::default();
+        let mut visual_session = captured_visual_session_for_test(&mut timeline);
+        let cancellation = ExecutionCancellationToken::new();
         let mut render_context = ExportFrameRenderContext {
-            timeline: &timeline,
+            media: &timeline.media,
+            color_environment: &timeline.color_environment,
             alpha_mode: ExportAlphaMode::Preserve,
             frame_contract: ExportFrameContract::Rgba8,
             input_color_counts: None,
@@ -4541,16 +7554,17 @@ mod tests {
             composite_diagnostics: Some(&mut composite_diagnostics),
             export_diagnostics: None,
             visual_session: &mut visual_session,
+            cancellation: &cancellation,
         };
 
         render_sequence_frame_into(
+            &timeline,
             &mut render_context,
             &timeline.sequence,
             0,
             Resolution { width: 320, height: 180 },
             color_context,
             SequenceRenderTarget::Working(&mut output),
-            0,
         )
         .expect("render Basic Title");
 
@@ -4600,17 +7614,20 @@ mod tests {
         let color_context = root
             .settings
             .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default());
-        let timeline = TimelineExportSnapshot {
+        let mut timeline = TimelineExportSnapshot {
             sequence: root,
             sequences: vec![child],
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
         let mut output = None;
-        let mut visual_session = ExportVisualRenderSession::default();
+        let mut visual_session = captured_visual_session_for_test(&mut timeline);
+        let cancellation = ExecutionCancellationToken::new();
         let mut render_context = ExportFrameRenderContext {
-            timeline: &timeline,
+            media: &timeline.media,
+            color_environment: &timeline.color_environment,
             alpha_mode: ExportAlphaMode::Preserve,
             frame_contract: ExportFrameContract::Rgba8,
             input_color_counts: None,
@@ -4618,16 +7635,17 @@ mod tests {
             composite_diagnostics: None,
             export_diagnostics: None,
             visual_session: &mut visual_session,
+            cancellation: &cancellation,
         };
 
         render_sequence_frame_into(
+            &timeline,
             &mut render_context,
             &timeline.sequence,
             0,
             Resolution { width: 320, height: 180 },
             color_context,
             SequenceRenderTarget::Working(&mut output),
-            0,
         )
         .expect("render nested Basic Title");
 
@@ -4659,12 +7677,15 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
         let mut output = None;
         let mut visual_session = ExportVisualRenderSession::default();
+        let cancellation = ExecutionCancellationToken::new();
         let mut render_context = ExportFrameRenderContext {
-            timeline: &timeline,
+            media: &timeline.media,
+            color_environment: &timeline.color_environment,
             alpha_mode: ExportAlphaMode::Preserve,
             frame_contract: ExportFrameContract::Rgba8,
             input_color_counts: None,
@@ -4672,16 +7693,17 @@ mod tests {
             composite_diagnostics: None,
             export_diagnostics: None,
             visual_session: &mut visual_session,
+            cancellation: &cancellation,
         };
 
         let error = render_sequence_frame_into(
+            &timeline,
             &mut render_context,
             &timeline.sequence,
             0,
             Resolution { width: 320, height: 180 },
             color_context,
             SequenceRenderTarget::Working(&mut output),
-            0,
         )
         .expect_err("missing font must fail closed");
 
@@ -4746,7 +7768,7 @@ mod tests {
     }
 
     #[test]
-    fn export_asset_issue_summary_scopes_to_referenced_assets_only() {
+    fn export_media_diagnostic_set_scopes_to_referenced_assets_only() {
         let mut sequence = Sequence::new("export-asset-issue-scope");
         let tb = sequence.time_base();
         let direct_id = AssetId::new();
@@ -4824,16 +7846,30 @@ mod tests {
                 )
             })
             .collect();
-        let timeline = TimelineExportSnapshot {
+        let mut timeline = TimelineExportSnapshot {
             sequence,
             sequences: vec![nested],
             media,
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
+        timeline.prepared_execution = Some(
+            crate::prepare_timeline_export_dependencies(
+                &timeline.sequence,
+                &timeline.sequences,
+                timeline.range,
+                false,
+            )
+            .expect("prepare immutable visual diagnostic snapshot")
+            .execution_snapshot()
+            .clone(),
+        );
 
         assert_eq!(
-            export_asset_issue_summary(&timeline),
+            export_media_diagnostic_set(&timeline)
+                .expect("prepare selected media diagnostics")
+                .issue_summary,
             VideoColorDiagnosticIssueAggregate {
                 diagnostics: 2,
                 diagnostics_with_warnings: 2,
@@ -4847,6 +7883,109 @@ mod tests {
                 ..VideoColorDiagnosticIssueAggregate::default()
             }
         );
+    }
+
+    #[test]
+    fn export_media_diagnostics_exclude_hidden_muted_and_out_of_range_dependencies() {
+        let mut sequence = Sequence::new("selected media diagnostics");
+        let rate = sequence.time_base();
+        let selected_asset = AssetId::new();
+        let range_outside_asset = AssetId::new();
+        let hidden_asset = AssetId::new();
+        let muted_asset = AssetId::new();
+        let nested_selected_asset = AssetId::new();
+        let nested_outside_asset = AssetId::new();
+        let nested_id = SequenceId::new();
+
+        sequence.video_tracks[0]
+            .add_clip(Clip::new(selected_asset, tt(0, rate), tt(10, rate)).expect("selected Clip"))
+            .expect("add selected Clip");
+        sequence.video_tracks[0]
+            .add_clip(
+                Clip::new(range_outside_asset, tt(20, rate), tt(10, rate))
+                    .expect("range-outside Clip"),
+            )
+            .expect("add range-outside Clip");
+        sequence.video_tracks[0]
+            .add_clip(
+                Clip::new_nested_sequence(
+                    nested_id,
+                    tt(0, rate),
+                    tt(10, rate),
+                    Some("nested".to_owned()),
+                )
+                .expect("nested Clip"),
+            )
+            .expect("add nested Clip");
+
+        let mut hidden = Track::new_video("hidden");
+        hidden.is_visible = false;
+        hidden
+            .add_clip(Clip::new(hidden_asset, tt(0, rate), tt(10, rate)).expect("hidden Clip"))
+            .expect("add hidden Clip");
+        sequence.video_tracks.push(hidden);
+        let mut muted = Track::new_video("muted");
+        muted.is_muted = true;
+        muted
+            .add_clip(Clip::new(muted_asset, tt(0, rate), tt(10, rate)).expect("muted Clip"))
+            .expect("add muted Clip");
+        sequence.video_tracks.push(muted);
+
+        let mut nested = Sequence::new("nested selected diagnostics");
+        nested.id = nested_id;
+        let nested_rate = nested.time_base();
+        nested.video_tracks[0]
+            .add_clip(
+                Clip::new(
+                    nested_selected_asset,
+                    tt(0, nested_rate),
+                    tt(10, nested_rate),
+                )
+                .expect("nested selected Clip"),
+            )
+            .expect("add nested selected Clip");
+        nested.video_tracks[0]
+            .add_clip(
+                Clip::new(
+                    nested_outside_asset,
+                    tt(20, nested_rate),
+                    tt(10, nested_rate),
+                )
+                .expect("nested outside Clip"),
+            )
+            .expect("add nested outside Clip");
+
+        let mut timeline = TimelineExportSnapshot {
+            sequence,
+            sequences: vec![nested],
+            media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
+            range: TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 10 },
+        };
+        timeline.prepared_execution = Some(
+            crate::prepare_timeline_export_dependencies(
+                &timeline.sequence,
+                &timeline.sequences,
+                timeline.range,
+                false,
+            )
+            .expect("prepare immutable selected-range diagnostic snapshot")
+            .execution_snapshot()
+            .clone(),
+        );
+        let diagnostics =
+            export_media_diagnostic_set(&timeline).expect("selected media diagnostic set");
+        let actual = diagnostics.asset_ids.iter().copied().collect::<HashSet<_>>();
+
+        assert_eq!(
+            actual,
+            HashSet::from([selected_asset, nested_selected_asset])
+        );
+        assert!(!actual.contains(&range_outside_asset));
+        assert!(!actual.contains(&hidden_asset));
+        assert!(!actual.contains(&muted_asset));
+        assert!(!actual.contains(&nested_outside_asset));
     }
 
     #[test]
@@ -5065,6 +8204,7 @@ mod tests {
                 Some(diagnostic),
             ),
         );
+        refresh_test_execution_snapshot(&mut timeline, false);
         let mut config = dummy_config("hdr-dynamic-passthrough.mp4");
         config.preset = crate::preset::ExportPreset::hevc_main10_aac();
 
@@ -5073,6 +8213,75 @@ mod tests {
         assert!(error.contains("HDR10+ 动态 metadata（1 个）"));
         assert!(error.contains("不能安全透传"));
         assert!(error.contains("动态 HDR 重新制作流程"));
+    }
+
+    #[test]
+    fn static_hdr_delivery_ignores_dynamic_metadata_that_cannot_contribute() {
+        let mut timeline = timeline_input_with_output_color(ColorSpace::Rec2100Pq);
+        timeline.sequence.settings.delivery.bit_depth = DeliveryBitDepth::Ten;
+        timeline.sequence.settings.delivery.static_hdr_metadata_policy =
+            StaticHdrMetadataPolicy::WriteAuthored;
+        timeline.sequence.settings.delivery.hdr_mastering_display =
+            Some(VideoMasteringDisplayMetadata::rec2100_1000_nit_reference());
+        timeline.sequence.settings.delivery.hdr_content_light =
+            Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
+        let rate = timeline.sequence.time_base();
+        timeline.sequence.video_tracks[0]
+            .add_clip(
+                Clip::new(AssetId::new(), tt(0, rate), tt(10, rate))
+                    .expect("selected ordinary Clip"),
+            )
+            .expect("add selected ordinary Clip");
+
+        let outside_id = AssetId::new();
+        timeline.sequence.video_tracks[0]
+            .add_clip(
+                Clip::new(outside_id, tt(20, rate), tt(10, rate)).expect("range-outside HDR Clip"),
+            )
+            .expect("add range-outside HDR Clip");
+        let hidden_id = AssetId::new();
+        let mut hidden = Track::new_video("hidden HDR");
+        hidden.is_visible = false;
+        hidden
+            .add_clip(Clip::new(hidden_id, tt(0, rate), tt(10, rate)).expect("hidden HDR Clip"))
+            .expect("add hidden HDR Clip");
+        timeline.sequence.video_tracks.push(hidden);
+        let muted_id = AssetId::new();
+        let mut muted = Track::new_video("muted HDR");
+        muted.is_muted = true;
+        muted
+            .add_clip(Clip::new(muted_id, tt(0, rate), tt(10, rate)).expect("muted HDR Clip"))
+            .expect("add muted HDR Clip");
+        timeline.sequence.video_tracks.push(muted);
+
+        for asset_id in [outside_id, hidden_id, muted_id] {
+            let mut diagnostic = test_color_diagnostic(
+                mondrian_media::VideoColorSpaceSource::Metadata,
+                mondrian_media::VideoColorDetectionMethod::CicpTags,
+                None,
+            );
+            diagnostic.hdr_metadata.push(mondrian_media::VideoHdrMetadataSummary {
+                kind: mondrian_media::VideoHdrSideDataKind::DynamicHdr10Plus,
+                payload_size: 32,
+                payload: None,
+            });
+            timeline.media.insert(
+                asset_id,
+                test_media_dependency(
+                    PathBuf::from(format!("{asset_id}-dynamic-hdr.mov")),
+                    None,
+                    AssetMediaInterpretation::default(),
+                    Some(diagnostic),
+                ),
+            );
+        }
+        timeline.range = TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 10 };
+        refresh_test_execution_snapshot(&mut timeline, false);
+        let mut config = dummy_config("hdr-selected-range.mp4");
+        config.preset = crate::preset::ExportPreset::hevc_main10_aac();
+
+        resolve_timeline_export_delivery(&config, &timeline)
+            .expect("non-contributing dynamic HDR metadata must not block static HDR delivery");
     }
 
     #[test]
@@ -5109,6 +8318,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
 
@@ -5131,12 +8341,811 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
             range: TimelineExportRange::EntireSequence,
         };
 
         let range = compute_timeline_render_range(&timeline).expect("valid render range");
         assert_eq!(range.start_frame, 0);
         assert_eq!(range.total_frames, 200);
+    }
+
+    #[test]
+    fn export_visual_preflight_follows_only_selected_nested_frame_closure() {
+        let mut child = Sequence::new("preflight child");
+        let child_time_base = child.time_base();
+        child.video_tracks[0]
+            .add_clip(
+                Clip::new_solid_color(
+                    AssetId::new(),
+                    mondrian_core::Color::BLACK,
+                    tt(0, child_time_base),
+                    tt(10, child_time_base),
+                )
+                .expect("safe child Clip"),
+            )
+            .expect("add safe child Clip");
+        let mut blocked = Clip::new_solid_color(
+            AssetId::new(),
+            mondrian_core::Color::WHITE,
+            tt(20, child_time_base),
+            tt(10, child_time_base),
+        )
+        .expect("blocked child Clip");
+        let blocked_id = blocked.id;
+        blocked.add_effect_node(mondrian_effects::EffectNode::new(
+            mondrian_effects::EffectType::Plugin("vendor.missing.child.effect".to_owned()),
+        ));
+        child.video_tracks[0].add_clip(blocked).expect("add blocked child Clip");
+
+        let mut root = Sequence::new("preflight root");
+        let root_time_base = root.time_base();
+        root.video_tracks[0]
+            .add_clip(
+                Clip::new_nested_sequence(
+                    child.id,
+                    tt(0, root_time_base),
+                    tt(30, root_time_base),
+                    None,
+                )
+                .expect("nested Clip"),
+            )
+            .expect("add nested Clip");
+        let mut timeline = TimelineExportSnapshot {
+            sequence: root,
+            sequences: vec![child],
+            media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
+            range: TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 10 },
+        };
+        let cancel = ExecutionCancellationToken::new();
+        let execution_gate = open_execution_gate();
+        let mut session = ExportVisualRenderSession::default();
+        let safe_range = compute_timeline_render_range(&timeline).expect("safe export range");
+        let safe_result = preflight_timeline_visual_range(
+            &timeline,
+            safe_range,
+            &cancel,
+            &execution_gate,
+            &mut session,
+        );
+        assert!(
+            safe_result.is_ok(),
+            "range outside child blocker must preflight: {safe_result:?}"
+        );
+
+        timeline.range = TimelineExportRange::WorkArea { start_frame: 20, end_frame_exclusive: 21 };
+        let blocked_range = compute_timeline_render_range(&timeline).expect("blocked export range");
+        let result = preflight_timeline_visual_range(
+            &timeline,
+            blocked_range,
+            &cancel,
+            &execution_gate,
+            &mut session,
+        );
+        let Err(JobExecutionResult::Failed(reason)) = result else {
+            panic!("reachable child blocker must fail export visual preflight");
+        };
+        assert!(reason.contains(&blocked_id.to_string()), "{reason}");
+    }
+
+    #[test]
+    fn export_visual_preflight_ignores_unavailable_transition_outside_range() {
+        let mut sequence = Sequence::new("range-scoped Transition preflight");
+        let time_base = sequence.time_base();
+        sequence.video_tracks[0]
+            .add_clip(
+                Clip::new_solid_color(
+                    AssetId::new(),
+                    mondrian_core::Color::BLACK,
+                    tt(0, time_base),
+                    tt(10, time_base),
+                )
+                .expect("safe Clip"),
+            )
+            .expect("add safe Clip");
+        let left = Clip::new_solid_color(
+            AssetId::new(),
+            mondrian_core::Color::BLACK,
+            tt(20, time_base),
+            tt(10, time_base),
+        )
+        .expect("left Clip");
+        let right = Clip::new_solid_color(
+            AssetId::new(),
+            mondrian_core::Color::WHITE,
+            tt(30, time_base),
+            tt(10, time_base),
+        )
+        .expect("right Clip");
+        let (left_id, right_id) = (left.id, right.id);
+        sequence.video_tracks[0].add_clip(left).expect("add left Clip");
+        sequence.video_tracks[0].add_clip(right).expect("add right Clip");
+        let mut transition = mondrian_timeline::VideoTransition::cross_dissolve(
+            left_id,
+            right_id,
+            mondrian_core::TimelineTimeRange::new(tt(28, time_base), tt(4, time_base))
+                .expect("Transition range"),
+        );
+        transition.transition_type = mondrian_timeline::VideoTransitionType::Plugin {
+            definition_id: "vendor.missing.transition".to_owned(),
+        };
+        let transition_id = transition.id;
+        sequence.video_transitions.push(transition);
+
+        let mut timeline = TimelineExportSnapshot {
+            sequence,
+            sequences: Vec::new(),
+            media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
+            range: TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 10 },
+        };
+        let cancel = ExecutionCancellationToken::new();
+        let execution_gate = open_execution_gate();
+        let mut session = ExportVisualRenderSession::default();
+        let safe_range = compute_timeline_render_range(&timeline).expect("safe range");
+        assert!(
+            preflight_timeline_visual_range(
+                &timeline,
+                safe_range,
+                &cancel,
+                &execution_gate,
+                &mut session,
+            )
+            .is_ok(),
+            "range before unavailable Transition must preflight"
+        );
+
+        timeline.range = TimelineExportRange::WorkArea { start_frame: 29, end_frame_exclusive: 30 };
+        let blocked_range = compute_timeline_render_range(&timeline).expect("blocked range");
+        let result = preflight_timeline_visual_range(
+            &timeline,
+            blocked_range,
+            &cancel,
+            &execution_gate,
+            &mut session,
+        );
+        let Err(JobExecutionResult::Failed(reason)) = result else {
+            panic!("reachable unavailable Transition must fail export visual preflight");
+        };
+        assert!(reason.contains(&transition_id.to_string()), "{reason}");
+    }
+
+    #[test]
+    fn export_visual_preflight_does_not_prepare_unrelated_sequence() {
+        use mondrian_effects::{
+            register_effect_definition, EffectColorDomainContract, EffectDefinition,
+            EffectDeterminism, EffectExecutionContract, EffectExecutionModes, EffectGraphTopology,
+            EffectNode, EffectResourceLifetime, EffectRoiPropagation, EffectStateModel,
+            EffectTemporalInputExtent, EffectType,
+        };
+
+        let evaluations = Arc::new(AtomicUsize::new(0));
+        let evaluations_for_builder = Arc::clone(&evaluations);
+        let effect_type = EffectType::Plugin(format!(
+            "test.export.preflight.unrelated.{}",
+            AssetId::new()
+        ));
+        register_effect_definition(
+            EffectDefinition::new(
+                effect_type.key(),
+                "Unrelated Sequence probe",
+                Default::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32,
+                determinism: EffectDeterminism::Deterministic,
+                state_model: EffectStateModel::Stateless,
+                temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+                roi_propagation: EffectRoiPropagation::PixelLocal,
+                resource_lifetime: EffectResourceLifetime::Frame,
+                topology: EffectGraphTopology::LinearChain,
+            })
+            .with_graph_builder(Arc::new(move |_, _, _| {
+                evaluations_for_builder.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })),
+        )
+        .expect("register unrelated Sequence probe");
+
+        let mut root = Sequence::new("selected root");
+        let root_time_base = root.time_base();
+        root.video_tracks[0]
+            .add_clip(
+                Clip::new_solid_color(
+                    AssetId::new(),
+                    mondrian_core::Color::BLACK,
+                    tt(0, root_time_base),
+                    tt(10, root_time_base),
+                )
+                .expect("root solid"),
+            )
+            .expect("add root solid");
+
+        let mut unrelated = Sequence::new("unrelated Sequence");
+        let unrelated_time_base = unrelated.time_base();
+        let mut unrelated_clip = Clip::new_solid_color(
+            AssetId::new(),
+            mondrian_core::Color::WHITE,
+            tt(0, unrelated_time_base),
+            tt(10, unrelated_time_base),
+        )
+        .expect("unrelated solid");
+        unrelated_clip.add_effect_node(EffectNode::new(effect_type));
+        unrelated.video_tracks[0].add_clip(unrelated_clip).expect("add unrelated solid");
+
+        let timeline = TimelineExportSnapshot {
+            sequence: root,
+            sequences: vec![unrelated],
+            media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
+            range: TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 1 },
+        };
+        let range = compute_timeline_render_range(&timeline).expect("selected range");
+        let execution_gate = open_execution_gate();
+        let mut session = ExportVisualRenderSession::default();
+        assert!(
+            preflight_timeline_visual_range(
+                &timeline,
+                range,
+                &ExecutionCancellationToken::new(),
+                &execution_gate,
+                &mut session,
+            )
+            .is_ok(),
+            "selected range must preflight"
+        );
+        assert_eq!(
+            evaluations.load(Ordering::SeqCst),
+            0,
+            "the range-local capture must not bind Effects from an unrelated Sequence"
+        );
+    }
+
+    #[test]
+    fn admitted_visual_snapshot_survives_live_definition_replacement() {
+        use mondrian_effects::{
+            register_effect_definition, EffectColorDomainContract, EffectDefinition,
+            EffectDeterminism, EffectExecutionContract, EffectExecutionModes, EffectGraphTopology,
+            EffectNode, EffectResourceLifetime, EffectRoiPropagation, EffectStateModel,
+            EffectTemporalInputExtent, EffectTemporalSpan, EffectType,
+        };
+
+        let first_builds = Arc::new(AtomicUsize::new(0));
+        let first_builds_for_definition = Arc::clone(&first_builds);
+        let replacement_builds = Arc::new(AtomicUsize::new(0));
+        let replacement_builds_for_definition = Arc::clone(&replacement_builds);
+        let effect_type =
+            EffectType::Plugin(format!("test.export.frozen-definition.{}", AssetId::new()));
+        let definition = |temporal_input, builder: mondrian_effects::EffectGraphBuilder| {
+            EffectDefinition::new(
+                effect_type.key(),
+                "Frozen export definition",
+                Default::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32,
+                determinism: EffectDeterminism::Deterministic,
+                state_model: EffectStateModel::Stateless,
+                temporal_input,
+                roi_propagation: EffectRoiPropagation::PixelLocal,
+                resource_lifetime: EffectResourceLifetime::Frame,
+                topology: EffectGraphTopology::LinearChain,
+            })
+            .with_graph_builder(builder)
+        };
+        register_effect_definition(definition(
+            EffectTemporalInputExtent::CURRENT_FRAME,
+            Arc::new(move |_, _, _| {
+                first_builds_for_definition.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }),
+        ))
+        .expect("register admitted definition");
+
+        let mut sequence = Sequence::new("frozen visual definition");
+        sequence.video_tracks.clear();
+        let time_base = sequence.time_base();
+        let outside_asset = AssetId::new();
+        let selected_asset = AssetId::new();
+        let mut child = Sequence::new("frozen definition child");
+        child.video_tracks.clear();
+        let child_time_base = child.time_base();
+        let mut child_track = Track::new_video("V1");
+        child_track
+            .add_clip(
+                Clip::new(
+                    outside_asset,
+                    tt(0, child_time_base),
+                    tt(5, child_time_base),
+                )
+                .expect("outside child Clip"),
+            )
+            .expect("add outside child Clip");
+        child_track
+            .add_clip(
+                Clip::new(
+                    selected_asset,
+                    tt(10, child_time_base),
+                    tt(5, child_time_base),
+                )
+                .expect("selected child Clip"),
+            )
+            .expect("add selected child Clip");
+        child.video_tracks.push(child_track);
+        let mut track = Track::new_video("V1");
+        let mut nested = Clip::new_nested_sequence(
+            child.id,
+            tt(0, time_base),
+            tt(15, time_base),
+            Some("child".to_owned()),
+        )
+        .expect("nested Clip");
+        nested.add_effect_node(EffectNode::new(effect_type.clone()));
+        track.add_clip(nested).expect("add nested Clip");
+        sequence.video_tracks.push(track);
+        let range = TimelineExportRange::WorkArea { start_frame: 10, end_frame_exclusive: 11 };
+
+        let admitted = crate::prepare_timeline_export_dependencies(
+            &sequence,
+            std::slice::from_ref(&child),
+            range,
+            false,
+        )
+        .expect("capture admitted visual closure");
+        assert!(admitted.media_components().contains_key(&selected_asset));
+        assert!(!admitted.media_components().contains_key(&outside_asset));
+        assert_eq!(first_builds.load(Ordering::SeqCst), 1);
+        let admitted_program = admitted
+            .execution_snapshot()
+            .visual()
+            .program(sequence.id, sequence.revision)
+            .expect("admitted root Program");
+
+        register_effect_definition(definition(
+            EffectTemporalInputExtent {
+                past: EffectTemporalSpan::Finite(tt(10, time_base)),
+                future: EffectTemporalSpan::None,
+            },
+            Arc::new(move |_, _, _| {
+                replacement_builds_for_definition.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }),
+        ))
+        .expect("replace live definition");
+        let live = crate::prepare_timeline_export_dependencies(
+            &sequence,
+            std::slice::from_ref(&child),
+            range,
+            false,
+        )
+        .expect("capture replacement visual closure");
+        assert!(
+            live.media_components().contains_key(&outside_asset),
+            "replacement temporal extent must prove that live reinterpretation differs"
+        );
+        let replacement_build_count = replacement_builds.load(Ordering::SeqCst);
+        assert!(replacement_build_count > 0);
+
+        let mut admitted_execution = admitted.execution_snapshot().clone();
+        admitted_execution
+            .visual_mut()
+            .install_title_fonts(mondrian_renderer::PreparedBasicTitleFontSet::default())
+            .expect("seal empty title-font closure");
+        let mut timeline = TimelineExportSnapshot {
+            sequence,
+            sequences: vec![child],
+            media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: Some(admitted_execution),
+            range,
+        };
+        let mut session = ExportVisualRenderSession::for_execution_generation(
+            0,
+            service::ExportExecutionResourcePolicy::default(),
+            timeline
+                .prepared_execution
+                .as_ref()
+                .expect("frozen execution snapshot")
+                .visual(),
+        )
+        .expect("install admitted Programs");
+        let worker_program =
+            session.prepare_program(&timeline.sequence).expect("worker frozen Program");
+        assert!(Arc::ptr_eq(&worker_program, &admitted_program));
+        assert_eq!(
+            replacement_builds.load(Ordering::SeqCst),
+            replacement_build_count,
+            "worker must not rebuild from the replacement registry definition"
+        );
+        let diagnostic_assets = export_media_diagnostic_set(&timeline)
+            .expect("frozen diagnostic identities")
+            .asset_ids;
+        assert_eq!(diagnostic_assets.as_ref(), &[selected_asset]);
+
+        timeline.prepared_execution = Some(live.execution_snapshot().clone());
+        assert!(
+            export_media_diagnostic_set(&timeline)
+                .expect("replacement diagnostic identities")
+                .asset_ids
+                .contains(&outside_asset),
+            "control snapshot must expose replacement temporal reachability"
+        );
+    }
+
+    #[test]
+    fn export_visual_preflight_rejects_dynamic_identity_execution_before_rendering() {
+        use mondrian_effects::{
+            register_effect_definition, EffectColorDomainContract, EffectDefinition,
+            EffectDeterminism, EffectExecutionContract, EffectExecutionModes, EffectGraphTopology,
+            EffectNode, EffectResourceLifetime, EffectRoiPropagation, EffectStateModel,
+            EffectTemporalInputExtent, EffectType,
+        };
+
+        let effect_type = EffectType::Plugin(format!(
+            "test.export.preflight.stateful_identity.{}",
+            AssetId::new()
+        ));
+        register_effect_definition(
+            EffectDefinition::new(
+                effect_type.key(),
+                "Stateful identity",
+                Default::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32,
+                determinism: EffectDeterminism::Deterministic,
+                state_model: EffectStateModel::StatefulSequential,
+                temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+                roi_propagation: EffectRoiPropagation::PixelLocal,
+                resource_lifetime: EffectResourceLifetime::ContinuitySession,
+                topology: EffectGraphTopology::LinearChain,
+            })
+            .with_graph_builder(Arc::new(|_, _, _| Ok(()))),
+        )
+        .expect("register stateful identity");
+
+        let mut sequence = Sequence::new("dynamic execution preflight");
+        let time_base = sequence.time_base();
+        let mut blocked = Clip::new_solid_color(
+            AssetId::new(),
+            mondrian_core::Color::BLACK,
+            tt(20, time_base),
+            tt(10, time_base),
+        )
+        .expect("blocked Clip");
+        blocked.add_effect_node(EffectNode::new(effect_type));
+        sequence.video_tracks[0].add_clip(blocked).expect("add blocked Clip");
+        let mut timeline = TimelineExportSnapshot {
+            sequence,
+            sequences: Vec::new(),
+            media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
+            range: TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 10 },
+        };
+        let cancel = ExecutionCancellationToken::new();
+        let execution_gate = open_execution_gate();
+        let mut session = ExportVisualRenderSession::default();
+        let safe_range = compute_timeline_render_range(&timeline).expect("safe range");
+        assert!(
+            preflight_timeline_visual_range(
+                &timeline,
+                safe_range,
+                &cancel,
+                &execution_gate,
+                &mut session,
+            )
+            .is_ok(),
+            "unreached dynamic execution obligation must not block a selected range"
+        );
+
+        timeline.range = TimelineExportRange::WorkArea { start_frame: 20, end_frame_exclusive: 21 };
+        let blocked_range = compute_timeline_render_range(&timeline).expect("blocked range");
+        let Err(JobExecutionResult::Failed(reason)) = preflight_timeline_visual_range(
+            &timeline,
+            blocked_range,
+            &cancel,
+            &execution_gate,
+            &mut session,
+        ) else {
+            panic!("reachable stateful identity must fail CPU single-frame admission");
+        };
+        assert!(
+            reason.contains("current export compositor"),
+            "unexpected preflight diagnostic: {reason}"
+        );
+    }
+
+    #[test]
+    fn ten_bit_export_preflight_rejects_u8_only_working_composite() {
+        use mondrian_effects::{
+            register_effect_definition, EffectColorDomainContract, EffectDefinition,
+            EffectDeterminism, EffectExecutionContract, EffectExecutionModes, EffectGraphTopology,
+            EffectNode, EffectResourceLifetime, EffectRoiPropagation, EffectStateModel,
+            EffectTemporalInputExtent, EffectType,
+        };
+
+        let effect_type = EffectType::Plugin(format!(
+            "test.export.preflight.u8_only_identity.{}",
+            AssetId::new()
+        ));
+        register_effect_definition(
+            EffectDefinition::new(
+                effect_type.key(),
+                "U8-only identity",
+                Default::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_U8,
+                determinism: EffectDeterminism::Deterministic,
+                state_model: EffectStateModel::Stateless,
+                temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+                roi_propagation: EffectRoiPropagation::PixelLocal,
+                resource_lifetime: EffectResourceLifetime::Frame,
+                topology: EffectGraphTopology::LinearChain,
+            })
+            .with_graph_builder(Arc::new(|_, _, _| Ok(()))),
+        )
+        .expect("register U8-only identity");
+
+        let mut sequence = Sequence::new("ten-bit U8 working-composite rejection");
+        sequence.settings.delivery.bit_depth = DeliveryBitDepth::Ten;
+        let time_base = sequence.time_base();
+        let mut clip = Clip::new_solid_color(
+            AssetId::new(),
+            mondrian_core::Color::BLACK,
+            tt(0, time_base),
+            tt(1, time_base),
+        )
+        .expect("solid Clip");
+        clip.add_effect_node(EffectNode::new(effect_type));
+        sequence.video_tracks[0].add_clip(clip).expect("add solid Clip");
+        let timeline = TimelineExportSnapshot {
+            sequence,
+            sequences: Vec::new(),
+            media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
+            range: TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 1 },
+        };
+
+        let range = compute_timeline_render_range(&timeline).expect("selected range");
+        let result = preflight_timeline_visual_range(
+            &timeline,
+            range,
+            &ExecutionCancellationToken::new(),
+            &open_execution_gate(),
+            &mut ExportVisualRenderSession::default(),
+        );
+        let Err(JobExecutionResult::Failed(reason)) = result else {
+            panic!("ten-bit export must fail before an implicit RGBA8 working composite");
+        };
+        assert!(
+            reason.contains("requires a Float32 working composite")
+                && reason.contains("legacy NormalizedU8 route"),
+            "unexpected high-precision rejection: {reason}"
+        );
+    }
+
+    #[test]
+    fn export_visual_preflight_evaluates_animated_builders_before_audio_or_encoder_work() {
+        use mondrian_effects::{
+            register_effect_definition, EffectColorDomainContract, EffectDefinition,
+            EffectDeterminism, EffectExecutionContract, EffectExecutionModes, EffectGraphTopology,
+            EffectNode, EffectResourceLifetime, EffectRoiPropagation, EffectStateModel,
+            EffectTemporalInputExtent, EffectType,
+        };
+
+        let effect_type = EffectType::Plugin(format!(
+            "test.export.preflight.dynamic_panic.{}",
+            AssetId::new()
+        ));
+        register_effect_definition(
+            EffectDefinition::new(
+                effect_type.key(),
+                "Dynamic builder failure",
+                Default::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32,
+                determinism: EffectDeterminism::Deterministic,
+                state_model: EffectStateModel::Stateless,
+                temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+                roi_propagation: EffectRoiPropagation::PixelLocal,
+                resource_lifetime: EffectResourceLifetime::Frame,
+                topology: EffectGraphTopology::LinearChain,
+            })
+            .with_graph_builder(Arc::new(|_, context, _| {
+                if context.time != TimelineTime::ZERO {
+                    panic!("intentional dynamic builder failure");
+                }
+                Ok(())
+            })),
+        )
+        .expect("register dynamic builder");
+
+        let mut sequence = Sequence::new("dynamic builder preflight");
+        let time_base = sequence.time_base();
+        let mut clip = Clip::new_solid_color(
+            AssetId::new(),
+            mondrian_core::Color::BLACK,
+            tt(0, time_base),
+            tt(10, time_base),
+        )
+        .expect("dynamic Clip");
+        clip.add_effect_node(EffectNode::new(effect_type));
+        sequence.video_tracks[0].add_clip(clip).expect("add dynamic Clip");
+        let mut timeline = TimelineExportSnapshot {
+            sequence,
+            sequences: Vec::new(),
+            media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
+            range: TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 1 },
+        };
+        let cancel = ExecutionCancellationToken::new();
+        let execution_gate = open_execution_gate();
+        let mut session = ExportVisualRenderSession::default();
+        let zero_range = compute_timeline_render_range(&timeline).expect("frame-zero range");
+        assert!(
+            preflight_timeline_visual_range(
+                &timeline,
+                zero_range,
+                &cancel,
+                &execution_gate,
+                &mut session,
+            )
+            .is_ok(),
+            "the canonical zero-time graph is valid"
+        );
+
+        timeline.range = TimelineExportRange::WorkArea { start_frame: 1, end_frame_exclusive: 2 };
+        let dynamic_range = compute_timeline_render_range(&timeline).expect("dynamic range");
+        let Err(JobExecutionResult::Failed(reason)) = preflight_timeline_visual_range(
+            &timeline,
+            dynamic_range,
+            &cancel,
+            &execution_gate,
+            &mut session,
+        ) else {
+            panic!("animated builder panic must fail visual preflight");
+        };
+        assert!(
+            reason.contains("visual evaluation failed")
+                && reason.contains("Effect evaluation failed")
+                && reason.contains("panicked"),
+            "unexpected preflight diagnostic: {reason}"
+        );
+    }
+
+    #[test]
+    fn export_render_readmits_dynamic_plan_before_media_resolution() {
+        use mondrian_effects::{
+            register_effect_definition, EffectColorDomain, EffectColorDomainContract,
+            EffectDefinition, EffectDeterminism, EffectExecutionContract, EffectExecutionModes,
+            EffectGraphTopology, EffectNode, EffectRenderOp, EffectResourceLifetime,
+            EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent, EffectType,
+        };
+
+        let evaluations = Arc::new(AtomicUsize::new(0));
+        let evaluations_for_builder = Arc::clone(&evaluations);
+        let effect_type = EffectType::Plugin(format!(
+            "test.export.render.dynamic_readmission.{}",
+            AssetId::new()
+        ));
+        register_effect_definition(
+            EffectDefinition::new(
+                effect_type.key(),
+                "Dynamic readmission probe",
+                Default::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32,
+                determinism: EffectDeterminism::Deterministic,
+                state_model: EffectStateModel::Stateless,
+                temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+                roi_propagation: EffectRoiPropagation::PixelLocal,
+                resource_lifetime: EffectResourceLifetime::Frame,
+                topology: EffectGraphTopology::LinearChain,
+            })
+            .with_graph_builder(Arc::new(move |_, _, graph| {
+                let operation = EffectRenderOp::ColorAdjust {
+                    exposure: 0.0,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                };
+                if evaluations_for_builder.fetch_add(1, Ordering::SeqCst) < 2 {
+                    graph.append_unary(operation);
+                } else {
+                    graph.append_unary_in_domain(
+                        operation,
+                        EffectColorDomainContract::preserving(EffectColorDomain::Data),
+                    );
+                }
+                Ok(())
+            })),
+        )
+        .expect("register dynamic readmission probe");
+
+        let asset_id = AssetId::new();
+        let mut sequence = Sequence::new("dynamic render readmission");
+        let time_base = sequence.time_base();
+        let mut clip =
+            Clip::new(asset_id, tt(0, time_base), tt(10, time_base)).expect("media Clip");
+        clip.add_effect_node(EffectNode::new(effect_type));
+        sequence.video_tracks[0].add_clip(clip).expect("add media Clip");
+        let timeline = TimelineExportSnapshot {
+            sequence,
+            sequences: Vec::new(),
+            // Deliberately absent: reaching media resolution would fail with a
+            // different diagnostic and prove admission happened too late.
+            media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
+            range: TimelineExportRange::WorkArea { start_frame: 1, end_frame_exclusive: 2 },
+        };
+        let range = compute_timeline_render_range(&timeline).expect("single-frame range");
+        let execution_gate = open_execution_gate();
+        let mut session = ExportVisualRenderSession::default();
+        preflight_timeline_visual_range(
+            &timeline,
+            range,
+            &ExecutionCancellationToken::new(),
+            &execution_gate,
+            &mut session,
+        )
+        .expect("first dynamic graph is admitted");
+        assert_eq!(
+            evaluations.load(Ordering::SeqCst),
+            2,
+            "preparation and selected-frame preflight must each evaluate once"
+        );
+
+        let color_context = timeline
+            .sequence
+            .settings
+            .root_program_color_context(&timeline.color_environment);
+        let mut canvas = Vec::new();
+        let error = render_timeline_frame_into_with_session(
+            &timeline,
+            1,
+            16,
+            16,
+            ExportAlphaMode::FlattenBlack,
+            color_context,
+            ExportFrameContract::Rgba8,
+            &mut canvas,
+            None,
+            None,
+            None,
+            None,
+            &mut session,
+        )
+        .expect_err("changed dynamic graph must be re-admitted");
+        assert!(
+            error.contains("cannot enter the current export compositor"),
+            "unexpected render diagnostic: {error}"
+        );
+        assert!(
+            !error.contains("缺少素材依赖"),
+            "media resolution ran before dynamic-plan admission: {error}"
+        );
+        assert_eq!(
+            evaluations.load(Ordering::SeqCst),
+            3,
+            "render must evaluate the pinned dynamic program exactly once"
+        );
     }
 
     #[test]
@@ -5170,6 +9179,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
         timeline.media.insert(
@@ -5258,12 +9268,12 @@ mod tests {
         };
 
         assert_eq!(
-            resolve_export_input_video_range(&timeline, asset_id, interpretation),
+            resolve_export_input_video_range(&timeline.media, asset_id, interpretation),
             DecodedVideoRangeContract::OverrideFull
         );
         assert_eq!(
             resolve_export_input_video_range(
-                &timeline,
+                &timeline.media,
                 asset_id,
                 AssetMediaInterpretation::default()
             ),
@@ -5272,7 +9282,7 @@ mod tests {
     }
 
     #[test]
-    fn timeline_has_audio_content_detects_overlap() {
+    fn admitted_audio_demand_preserves_mute_and_visibility_semantics() {
         let mut seq = Sequence::new("audio-range-test");
         let tb = seq.time_base();
         let asset_id = AssetId::new();
@@ -5282,27 +9292,107 @@ mod tests {
             .expect("add audio clip");
         seq.in_point = Some(tt(30, tb));
         seq.out_point = Some(tt(40, tb));
-
-        let mut media = HashMap::new();
-        media.insert(
-            asset_id,
-            test_media_dependency(
-                PathBuf::from("dummy-audio.wav"),
-                None,
-                AssetMediaInterpretation::default(),
-                None,
-            ),
-        );
-        let timeline = TimelineExportSnapshot {
-            sequence: seq,
-            sequences: Vec::new(),
-            media,
-            color_environment: mondrian_core::ProjectColorEnvironment::default(),
-            range: TimelineExportRange::SequenceInOut,
+        let demand = |sequence: &Sequence| {
+            crate::prepare_timeline_export_dependencies(
+                sequence,
+                &[],
+                TimelineExportRange::SequenceInOut,
+                true,
+            )
+            .expect("prepare exact audio closure")
+            .execution_snapshot()
+            .audio()
+            .expect("audio evidence")
+            .execution_demand()
         };
 
-        let range = compute_timeline_render_range(&timeline).expect("valid render range");
-        assert!(timeline_has_audio_content(&timeline, range).expect("audio presence"));
+        assert!(demand(&seq).requires_execution());
+        seq.audio_tracks[0].is_muted = true;
+        assert!(
+            !demand(&seq).requires_execution(),
+            "a muted post-mute source is proven silent"
+        );
+        seq.audio_tracks[0].is_muted = false;
+        seq.audio_tracks[0].is_visible = false;
+        assert!(
+            demand(&seq).requires_execution(),
+            "audio Track UI visibility must not gate Program signal"
+        );
+    }
+
+    #[test]
+    fn admitted_audio_demand_retains_muted_pre_mute_send_and_processor_only_bus() {
+        let mut sequence = Sequence::new("muted pre-mute Export demand");
+        let time_base = sequence.time_base();
+        let track_id = sequence.audio_tracks[0].id;
+        sequence
+            .add_media_audio_clip(
+                track_id,
+                Clip::new(AssetId::new(), tt(0, time_base), tt(10, time_base)).expect("audio Clip"),
+                AudioSourceComponentId::primary(),
+            )
+            .expect("add audio Clip");
+        sequence.audio_tracks[0].is_muted = true;
+        sequence.audio_program.routes[0].source = mondrian_timeline::AudioRouteSource::Track {
+            track_id,
+            port: mondrian_timeline::AudioChannelStripOutputPort::PreFader,
+        };
+        let pre_mute = crate::prepare_timeline_export_dependencies(
+            &sequence,
+            &[],
+            TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 10 },
+            true,
+        )
+        .expect("prepare pre-mute Export closure");
+        assert!(
+            pre_mute
+                .execution_snapshot()
+                .audio()
+                .expect("pre-mute audio evidence")
+                .execution_demand()
+                .requires_execution(),
+            "a muted Track's selected pre-mute Route still requires canonical execution"
+        );
+
+        let mut processor_only = Sequence::new("processor-only Bus Export demand");
+        let output_id = processor_only.audio_program.outputs[0].id;
+        let bus_id = mondrian_core::MixBusId::new();
+        let mut strip = mondrian_timeline::AudioChannelStrip::default();
+        strip.pre_fader.processors.push(mondrian_timeline::AudioProcessorInstance {
+            id: mondrian_core::AudioProcessorInstanceId::new(),
+            definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
+                plugin_id: "test.mondrian.generator-capable".to_owned(),
+                schema_version: 1,
+            },
+            bypassed: false,
+            parameters: Default::default(),
+            opaque_state: None,
+        });
+        processor_only.audio_program.buses.push(mondrian_timeline::AudioMixBus {
+            id: bus_id,
+            name: "Generator-capable Bus".to_owned(),
+            strip,
+        });
+        processor_only.audio_program.routes.push(mondrian_timeline::AudioRoute::new(
+            mondrian_timeline::AudioRouteSource::Bus {
+                bus_id,
+                port: mondrian_timeline::AudioChannelStripOutputPort::PreFader,
+            },
+            mondrian_timeline::AudioRouteDestination::Output(output_id),
+        ));
+        let bus = crate::prepare_timeline_export_dependencies(
+            &processor_only,
+            &[],
+            TimelineExportRange::EntireSequence,
+            true,
+        )
+        .expect("prepare processor-only Bus closure");
+        let audio = bus.execution_snapshot().audio().expect("processor-only audio evidence");
+        assert!(audio.media_components().is_empty());
+        assert!(
+            audio.execution_demand().requires_execution(),
+            "empty media reachability cannot authorize silence when a selected processor may generate signal or tail"
+        );
     }
 
     #[test]
@@ -5623,6 +9713,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
 
@@ -5685,6 +9776,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
 
@@ -5748,6 +9840,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
 
@@ -5811,6 +9904,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
 
@@ -5848,10 +9942,10 @@ mod tests {
         std::fs::write(&temp_path, []).expect("create placeholder media path");
 
         let color_diagnostic = mondrian_media::VideoColorDiagnostic {
-            detected_color_space: None,
             color_range: mondrian_media::DecodedVideoRange::Unknown,
+            sampling: None,
             interpretation: mondrian_media::DetectedColorInterpretation {
-                color_space: None,
+                candidate_color_space: None,
                 confidence: mondrian_media::VideoColorInterpretationConfidence::None,
                 source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
                 method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
@@ -5859,8 +9953,6 @@ mod tests {
                 warnings: vec![mondrian_media::VideoColorInterpretationWarning::MissingCicpTags],
                 user_overridable: true,
             },
-            source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
-            method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
             metadata: Some(mondrian_media::VideoColorMetadata {
                 primaries: mondrian_media::VideoColorTag { code: 2, name: None, specified: false },
                 transfer: mondrian_media::VideoColorTag { code: 2, name: None, specified: false },
@@ -5884,6 +9976,7 @@ mod tests {
             sequences: Vec::new(),
             media,
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
 
@@ -5915,6 +10008,161 @@ mod tests {
     }
 
     #[test]
+    fn filename_log_suggestion_cannot_change_export_pixels_but_override_does() {
+        let root = std::env::temp_dir().join(format!(
+            "mondrian-export-filename-color-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("create filename-color root");
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/small/h264-bframes.mp4");
+        let plain_path = root.join("camera-original.mp4");
+        let suggested_path = root.join("camera-S-Log3_S-Gamut3.Cine.mp4");
+        std::fs::copy(&fixture, &plain_path).expect("copy plain synthetic source");
+        std::fs::copy(&fixture, &suggested_path).expect("copy renamed synthetic source");
+        assert_eq!(
+            std::fs::read(&plain_path).expect("read plain source"),
+            std::fs::read(&suggested_path).expect("read renamed source"),
+            "the regression must vary only the file name"
+        );
+
+        let missing_metadata = mondrian_media::VideoColorMetadata {
+            primaries: mondrian_media::VideoColorTag { code: 2, name: None, specified: false },
+            transfer: mondrian_media::VideoColorTag { code: 2, name: None, specified: false },
+            matrix: mondrian_media::VideoColorTag { code: 2, name: None, specified: false },
+        };
+        let suggestion = mondrian_media::parse_video_color_metadata_hint(
+            mondrian_media::VideoColorMetadataHintScope::FileName,
+            "filename",
+            suggested_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("UTF-8 test name"),
+        )
+        .expect("complete camera pair remains visible as a suggestion");
+        let plain_interpretation =
+            mondrian_media::interpret_video_color_metadata(&missing_metadata, None, &[]);
+        let suggested_interpretation = mondrian_media::interpret_video_color_metadata(
+            &missing_metadata,
+            None,
+            std::slice::from_ref(&suggestion),
+        );
+        assert_eq!(
+            suggested_interpretation.candidate_color_space,
+            Some(ColorSpace::SonySLog3SGamut3Cine)
+        );
+        assert_eq!(
+            suggested_interpretation.executable_color_space_from_probe(
+                Some(mondrian_media::ProvenVideoSampling {
+                    pixel_format: mondrian_core::PixelFormat::Yuv420p,
+                    bit_depth: 8,
+                    has_alpha: false,
+                }),
+                Some(&missing_metadata),
+                std::slice::from_ref(&suggestion),
+            ),
+            None
+        );
+
+        let diagnostic =
+            |interpretation: mondrian_media::DetectedColorInterpretation,
+             hints: Vec<mondrian_media::VideoColorMetadataHint>| {
+                mondrian_media::VideoColorDiagnostic {
+                    color_range: mondrian_media::DecodedVideoRange::Limited,
+                    sampling: None,
+                    interpretation,
+                    metadata: Some(missing_metadata.clone()),
+                    metadata_hints: hints,
+                    hdr_metadata: Vec::new(),
+                }
+            };
+        let snapshot = |path: PathBuf,
+                        color_diagnostic: mondrian_media::VideoColorDiagnostic,
+                        override_color_space: Option<ColorSpace>| {
+            let mut sequence = Sequence::new("filename color authority");
+            let time_base = sequence.time_base();
+            let asset_id = AssetId::new();
+            let mut clip =
+                Clip::new(asset_id, tt(0, time_base), tt(10, time_base)).expect("valid media clip");
+            clip.media_interpretation_mut()
+                .expect("media interpretation")
+                .color_space_override = override_color_space;
+            sequence.video_tracks[0].add_clip(clip).expect("add media clip");
+            sequence.in_point = Some(tt(0, time_base));
+            sequence.out_point = Some(tt(10, time_base));
+            let mut dependency = test_media_dependency(
+                path,
+                None,
+                AssetMediaInterpretation::default(),
+                Some(color_diagnostic),
+            );
+            dependency.source_resolution = Some(Resolution { width: 64, height: 64 });
+            TimelineExportSnapshot {
+                sequence,
+                sequences: Vec::new(),
+                media: HashMap::from([(asset_id, dependency)]),
+                color_environment: mondrian_core::ProjectColorEnvironment::default(),
+                prepared_execution: None,
+                range: TimelineExportRange::SequenceInOut,
+            }
+        };
+
+        let plain = snapshot(
+            plain_path,
+            diagnostic(plain_interpretation, Vec::new()),
+            None,
+        );
+        let suggested = snapshot(
+            suggested_path.clone(),
+            diagnostic(suggested_interpretation.clone(), vec![suggestion.clone()]),
+            None,
+        );
+        let overridden = snapshot(
+            suggested_path,
+            diagnostic(suggested_interpretation, vec![suggestion]),
+            Some(ColorSpace::SonySLog3SGamut3Cine),
+        );
+        let render = |timeline: &TimelineExportSnapshot| {
+            let mut canvas = Vec::new();
+            let mut counts = InputColorResolutionSourceCounts::default();
+            render_timeline_frame_into(
+                timeline,
+                0,
+                16,
+                16,
+                ExportAlphaMode::FlattenBlack,
+                &mut canvas,
+                Some(&mut counts),
+                None,
+                None,
+                None,
+            )
+            .expect("render synthetic source");
+            (canvas, counts)
+        };
+
+        let (plain_pixels, plain_counts) = render(&plain);
+        let (suggested_pixels, suggested_counts) = render(&suggested);
+        let (override_pixels, override_counts) = render(&overridden);
+        assert_eq!(plain_pixels, suggested_pixels);
+        assert_eq!(plain_counts, suggested_counts);
+        assert_eq!(
+            plain_counts.count(InputColorResolutionSource::MissingPolicyAssumeRec709),
+            1
+        );
+        assert_ne!(override_pixels, plain_pixels);
+        assert_eq!(
+            override_counts.count(InputColorResolutionSource::Override),
+            1
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn shared_compositor_applies_media_effects_for_export() {
         let mut scratch = mondrian_renderer::TimelineCompositeScratch::default();
         let media = test_working_frame(&[120, 80, 40, 255], 1, 1);
@@ -5927,7 +10175,7 @@ mod tests {
                     opacity: 1.0,
                     blend_mode: BlendMode::Normal,
                     transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                    effect_graph: get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+                    effect_graph: compile_reference_effect_graph(&EffectRenderPlan {
                         ops: vec![mondrian_effects::EffectRenderOp::ColorAdjust {
                             exposure: 0.0,
                             contrast: 1.0,
@@ -5964,16 +10212,14 @@ mod tests {
                         opacity: 1.0,
                         blend_mode: BlendMode::Normal,
                         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                        effect_graph: get_or_compile_scheduled_effect_graph(
-                            &EffectRenderPlan::default(),
-                        )
-                        .expect("compile identity graph"),
+                        effect_graph: compile_reference_effect_graph(&EffectRenderPlan::default())
+                            .expect("compile identity graph"),
                         frame_seed: 0,
                     },
                 ),
                 mondrian_renderer::TimelineCompositeElement::Adjustment(
                     mondrian_renderer::TimelineAdjustmentLayer {
-                        effect_graph: get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+                        effect_graph: compile_reference_effect_graph(&EffectRenderPlan {
                             ops: vec![mondrian_effects::EffectRenderOp::ColorAdjust {
                                 exposure: 0.0,
                                 contrast: 1.0,
@@ -5993,10 +10239,8 @@ mod tests {
                         opacity: 1.0,
                         blend_mode: BlendMode::Normal,
                         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                        effect_graph: get_or_compile_scheduled_effect_graph(
-                            &EffectRenderPlan::default(),
-                        )
-                        .expect("compile identity graph"),
+                        effect_graph: compile_reference_effect_graph(&EffectRenderPlan::default())
+                            .expect("compile identity graph"),
                         frame_seed: 0,
                     },
                 ),
@@ -6071,6 +10315,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
 
@@ -6123,6 +10368,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
 

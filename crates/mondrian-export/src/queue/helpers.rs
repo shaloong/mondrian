@@ -1,83 +1,5 @@
 //! Export helpers: codec arguments, transactional process monitoring, and validation.
 use super::*;
-use std::collections::VecDeque;
-use std::io::Read;
-use std::process::{Child, ExitStatus};
-use std::time::Duration;
-
-const FFMPEG_ERROR_TAIL_CAPACITY: usize = 64 * 1024;
-
-pub(crate) struct FfmpegExit {
-    pub(crate) status: ExitStatus,
-    pub(crate) stderr_tail: String,
-}
-
-pub(crate) fn wait_for_ffmpeg_child(
-    mut child: Child,
-    cancellation: &ExecutionCancellationToken,
-) -> Result<FfmpegExit, JobExecutionResult> {
-    let Some(mut stderr) = child.stderr.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(JobExecutionResult::Failed(
-            "ffmpeg stderr pipe is unavailable".to_owned(),
-        ));
-    };
-    let stderr_reader = match std::thread::Builder::new()
-        .name("mondrian-export-ffmpeg-stderr".to_owned())
-        .spawn(move || {
-            let mut tail = VecDeque::with_capacity(FFMPEG_ERROR_TAIL_CAPACITY);
-            let mut buffer = [0_u8; 4_096];
-            loop {
-                match stderr.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(count) => {
-                        for byte in &buffer[..count] {
-                            if tail.len() == FFMPEG_ERROR_TAIL_CAPACITY {
-                                tail.pop_front();
-                            }
-                            tail.push_back(*byte);
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            String::from_utf8_lossy(&tail.into_iter().collect::<Vec<_>>()).into_owned()
-        }) {
-        Ok(handle) => handle,
-        Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(JobExecutionResult::Failed(format!(
-                "failed to start bounded ffmpeg diagnostic reader: {error}"
-            )));
-        }
-    };
-
-    loop {
-        if cancellation.is_canceled() {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = stderr_reader.join();
-            return Err(JobExecutionResult::Cancelled);
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let stderr_tail = stderr_reader.join().unwrap_or_default();
-                return Ok(FfmpegExit { status, stderr_tail });
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = stderr_reader.join();
-                return Err(JobExecutionResult::Failed(format!(
-                    "failed to observe ffmpeg process: {error}"
-                )));
-            }
-        }
-    }
-}
 
 pub(crate) fn apply_video_codec_args(cmd: &mut Command, codec: &VideoCodecConfig) {
     match codec {
@@ -366,25 +288,32 @@ pub(crate) fn resolve_timeline_export_delivery(
         &timeline.color_environment,
     )
     .map_err(|error| error.to_string())?;
+    let source_issues = export_media_diagnostic_set(timeline)?.issue_summary;
+    validate_timeline_dynamic_hdr_delivery(timeline, source_issues)?;
+    Ok(delivery)
+}
+
+pub(crate) fn validate_timeline_dynamic_hdr_delivery(
+    timeline: &TimelineExportSnapshot,
+    source_issues: VideoColorDiagnosticIssueAggregate,
+) -> Result<(), String> {
     let write_static_hdr = timeline
         .sequence
         .settings
         .delivery
         .static_hdr_metadata_policy
         .writes_authored_metadata();
-    if write_static_hdr {
-        let source_issues = export_asset_issue_summary(timeline);
-        if source_issues.diagnostics_with_dynamic_hdr10_plus > 0
-            || source_issues.diagnostics_with_dolby_vision_config > 0
-        {
-            return Err(format!(
-                "当前 HDR metadata 后端只写入项目级 ST 2086/MaxCLL/MaxFALL；引用素材包含 HDR10+ 动态 metadata（{} 个）或 Dolby Vision 配置（{} 个），渲染后不能安全透传，请使用经过验证的动态 HDR 重新制作流程",
-                source_issues.diagnostics_with_dynamic_hdr10_plus,
-                source_issues.diagnostics_with_dolby_vision_config
-            ));
-        }
+    if write_static_hdr
+        && (source_issues.diagnostics_with_dynamic_hdr10_plus > 0
+            || source_issues.diagnostics_with_dolby_vision_config > 0)
+    {
+        return Err(format!(
+            "当前 HDR metadata 后端只写入项目级 ST 2086/MaxCLL/MaxFALL；引用素材包含 HDR10+ 动态 metadata（{} 个）或 Dolby Vision 配置（{} 个），渲染后不能安全透传，请使用经过验证的动态 HDR 重新制作流程",
+            source_issues.diagnostics_with_dynamic_hdr10_plus,
+            source_issues.diagnostics_with_dolby_vision_config
+        ));
     }
-    Ok(delivery)
+    Ok(())
 }
 
 pub(crate) const fn prores_profile_variant(profile: crate::preset::ProResProfile) -> &'static str {

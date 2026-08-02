@@ -13,21 +13,25 @@ use mondrian_media::{
 };
 use mondrian_playback::FramePresentationQuality;
 use mondrian_renderer::{
-    execute_cpu_source_input_stage, project_affine_to_sampled_extents, CpuColorFrame,
+    execute_cpu_source_input_stage_with_session, project_affine_to_sampled_extents, CpuColorFrame,
     CpuSourceColorFrame, RenderColorStageDiagnostics, RenderColorTransformDiagnostics,
-    RenderColorTransformError, RenderInputTransform, ViewerGpuMediaSource, ViewerGpuNativeSource,
+    RenderColorTransformError, RenderCpuColorExecutionSession, RenderInputTransform,
+    ViewerGpuMediaSource, ViewerGpuNativeSource,
 };
 
-use super::preview_execution::PreviewDecodeExecutionSummary;
+use super::preview_execution::{PreviewDecodeExecutionSummary, PreviewSemanticIdentity};
 
 #[derive(Debug, Clone)]
 pub(crate) struct MediaPreviewFrame {
     payload: MediaPreviewPayload,
     sampled_resolution: Resolution,
     logical_resolution: Resolution,
-    signature: u64,
+    identity: PreviewSemanticIdentity,
+    cross_call_reusable: bool,
     presentation_quality: FramePresentationQuality,
     decode_execution: PreviewDecodeExecutionSummary,
+    residency_resource: Option<mondrian_playback::MediaFrameResourceLease>,
+    residency_protection: Option<mondrian_playback::MediaFrameProtectionLease>,
 }
 
 #[derive(Debug, Clone)]
@@ -41,7 +45,7 @@ impl MediaPreviewFrame {
     pub(crate) fn from_working(
         frame: CpuColorFrame,
         logical_resolution: Resolution,
-        signature: u64,
+        identity: PreviewSemanticIdentity,
         presentation_quality: FramePresentationQuality,
         decode_execution: PreviewDecodeExecutionSummary,
     ) -> Self {
@@ -50,16 +54,19 @@ impl MediaPreviewFrame {
             payload: MediaPreviewPayload::Working(frame),
             sampled_resolution: Resolution { width: descriptor.width, height: descriptor.height },
             logical_resolution,
-            signature,
+            identity,
+            cross_call_reusable: true,
             presentation_quality,
             decode_execution,
+            residency_resource: None,
+            residency_protection: None,
         }
     }
 
     pub(crate) fn from_source(
         source: MediaPreviewGpuSourceFrame,
         logical_resolution: Resolution,
-        signature: u64,
+        identity: PreviewSemanticIdentity,
         presentation_quality: FramePresentationQuality,
         decode_execution: PreviewDecodeExecutionSummary,
     ) -> Self {
@@ -68,30 +75,33 @@ impl MediaPreviewFrame {
             payload: MediaPreviewPayload::Source(source),
             sampled_resolution: Resolution { width: descriptor.width, height: descriptor.height },
             logical_resolution,
-            signature,
+            identity,
+            cross_call_reusable: true,
             presentation_quality,
             decode_execution,
+            residency_resource: None,
+            residency_protection: None,
         }
     }
 
     pub(crate) fn from_native(
         source: MediaPreviewNativeSourceFrame,
+        sampled_resolution: Resolution,
         logical_resolution: Resolution,
-        signature: u64,
+        identity: PreviewSemanticIdentity,
         presentation_quality: FramePresentationQuality,
         decode_execution: PreviewDecodeExecutionSummary,
     ) -> Self {
-        let sampled_resolution = Resolution {
-            width: source.native_frame.width,
-            height: source.native_frame.height,
-        };
         Self {
             payload: MediaPreviewPayload::Native(source),
             sampled_resolution,
             logical_resolution,
-            signature,
+            identity,
+            cross_call_reusable: true,
             presentation_quality,
             decode_execution,
+            residency_resource: None,
+            residency_protection: None,
         }
     }
     pub(crate) fn reserved_cpu_bytes(&self) -> usize {
@@ -114,6 +124,43 @@ impl MediaPreviewFrame {
         usize::from(matches!(self.payload, MediaPreviewPayload::Native(_)))
     }
 
+    /// Attach the Store-owned physical allocation shared by every frame clone.
+    pub(crate) fn with_residency_resource(
+        mut self,
+        resource: mondrian_playback::MediaFrameResourceLease,
+    ) -> Self {
+        self.residency_resource = Some(resource);
+        self
+    }
+
+    /// Strip caller-held residency before this payload enters Store ownership.
+    ///
+    /// The Store retains its allocation lease separately and reattaches a
+    /// clone on fetch. Keeping a lease inside the cached payload would make the
+    /// Store appear permanently non-exclusive and defeat bounded eviction.
+    pub(crate) fn into_unbound_store_payload(mut self) -> Self {
+        self.residency_resource = None;
+        self.residency_protection = None;
+        self
+    }
+
+    /// Attach Store-owned protection while this frame participates in a
+    /// current Viewer candidate or GPU continuation.
+    pub(crate) fn with_residency_protection(
+        mut self,
+        protection: mondrian_playback::MediaFrameProtectionLease,
+    ) -> Self {
+        self.residency_protection = Some(protection);
+        self
+    }
+
+    /// Clone the protection carried by this current-frame payload.
+    pub(crate) fn residency_protection(
+        &self,
+    ) -> Option<mondrian_playback::MediaFrameProtectionLease> {
+        self.residency_protection.clone()
+    }
+
     pub(crate) fn width(&self) -> u32 {
         self.sampled_resolution.width
     }
@@ -122,12 +169,25 @@ impl MediaPreviewFrame {
         self.sampled_resolution.height
     }
 
-    fn logical_resolution(&self) -> Resolution {
+    pub(crate) fn logical_resolution(&self) -> Resolution {
         self.logical_resolution
     }
 
-    pub(crate) fn signature(&self) -> u64 {
-        self.signature
+    /// Complete semantic identity of the decoded or generated source frame.
+    pub(crate) fn identity(&self) -> PreviewSemanticIdentity {
+        self.identity
+    }
+
+    /// Whether this frame may participate in semantic cross-call cache reuse.
+    pub(crate) const fn permits_cross_call_reuse(&self) -> bool {
+        self.cross_call_reusable
+    }
+
+    /// Restrict this frame to one concrete execution when an upstream nested
+    /// plan contains stateful or explicitly uncacheable work.
+    pub(crate) fn with_cross_call_reuse(mut self, reusable: bool) -> Self {
+        self.cross_call_reusable = reusable;
+        self
     }
 
     pub(crate) fn working_payload(&self) -> Option<CpuColorFrame> {
@@ -184,12 +244,15 @@ impl MediaPreviewFrame {
         Some(ViewerGpuNativeSource {
             source_color_space: source.source_color_space,
             input_transform: source.input_transform.clone(),
+            materialization_width: self.sampled_resolution.width,
+            materialization_height: self.sampled_resolution.height,
             native_frame: source.native_frame.clone(),
         })
     }
 
-    pub(crate) fn working_frame(
+    pub(crate) fn working_frame_with_session(
         &self,
+        color_session: &mut RenderCpuColorExecutionSession,
     ) -> Result<MediaPreviewWorkingFrame, MediaPreviewWorkingFrameError> {
         match &self.payload {
             MediaPreviewPayload::Working(frame) => Ok(MediaPreviewWorkingFrame {
@@ -208,9 +271,10 @@ impl MediaPreviewFrame {
                 let entry = source
                     .working_cache
                     .get_or_init(|| {
-                        execute_cpu_source_input_stage(
+                        execute_cpu_source_input_stage_with_session(
                             source.source.as_ref(),
                             &source.input_transform,
+                            color_session,
                         )
                         .map(|output| MediaPreviewWorkingFrameCacheEntry {
                             frame: output.result.frame,
@@ -236,6 +300,14 @@ impl MediaPreviewFrame {
                 })
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn working_frame(
+        &self,
+    ) -> Result<MediaPreviewWorkingFrame, MediaPreviewWorkingFrameError> {
+        let mut session = RenderCpuColorExecutionSession::new(0);
+        self.working_frame_with_session(&mut session)
     }
 }
 

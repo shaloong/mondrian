@@ -76,57 +76,50 @@ impl EffectPluginContract {
 
 ```rust
 pub struct EffectPluginRuntimeStatus {
+    pub definition_registry_revision: u64,
     pub disabled: bool,
     pub last_error: Option<String>,
     pub api_compatible: bool,
 }
 ```
 
-## 注册与查询
+`definition_registry_revision` 指明状态属于哪一次 Definition 注册。相同持久化 key 的
+替换 Definition 使用新修订；旧 Program 的迟到失败不会隔离新代。
+
+## 绑定与查询
 
 ```rust
-pub fn register_plugin_contract(
-    key: impl Into<String>,
-    contract: EffectPluginContract,
-);
-pub fn plugin_contract(key: &str) -> Option<EffectPluginContract>;
+EffectDefinition::with_plugin_contract(contract: EffectPluginContract) -> Self;
+register_effect_definition(definition: EffectDefinition)
+    -> Result<(), EffectDefinitionError>;
 pub fn effect_plugin_runtime_status(key: &str) -> Option<EffectPluginRuntimeStatus>;
-pub fn effect_plugin_is_runtime_available(
-    key: &str,
-    contract: Option<&EffectPluginContract>,
-) -> bool;
-pub fn effect_plugin_is_library_visible(
-    key: &str,
-    contract: Option<&EffectPluginContract>,
-) -> bool;
-pub fn record_plugin_runtime_failure(
-    key: &str,
-    contract: Option<&EffectPluginContract>,
-    reason: impl Into<String>,
-);
 ```
 
-`effect_plugin_is_runtime_available` 只证明 API 兼容且定义未禁用；`effect_plugin_is_library_visible` 只投影库策略。两者都不证明构图、CPU/GPU 执行或 preview/export 验证成功。
+Contract 只能随 Definition 注册。运行时可用性、库可见性和失败记录是 Effects
+执行器的内部职责：它们都使用已冻结的 Definition Registry Revision，插件代码不能按
+字符串另建或改写 Contract Authority。状态查询也不证明构图、CPU/GPU 执行或
+Preview/Export 验证成功。
 
 ## 使用示例
 
 ```rust
 use mondrian_effects::{
-    effect_plugin_runtime_status, register_plugin_contract,
+    effect_plugin_runtime_status, register_effect_definition,
     EffectPluginContract, EffectPluginLibraryPolicy,
     EffectPluginRuntimeFailurePolicy,
 };
 
-register_plugin_contract(
-    "plugin.example.my_effect",
-    EffectPluginContract::new("1.2.0")
+register_effect_definition(
+    definition.with_plugin_contract(
+        EffectPluginContract::new("1.2.0")
         .with_runtime_failure_policy(
             EffectPluginRuntimeFailurePolicy::DisableDefinition,
         )
         .with_library_policy(
             EffectPluginLibraryPolicy::HideWhenUnavailable,
         ),
-);
+    ),
+)?;
 
 if let Some(status) = effect_plugin_runtime_status("plugin.example.my_effect") {
     if status.disabled {

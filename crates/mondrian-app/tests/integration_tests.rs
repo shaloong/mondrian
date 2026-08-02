@@ -2,8 +2,8 @@
 //! Sequence → Clip → Effect Graph → Timeline Render Plan.
 
 use mondrian_core::types::Color;
-use mondrian_core::Rational;
-use mondrian_effects::EffectType;
+use mondrian_core::{FramePosition, Rational};
+use mondrian_effects::{EffectNode, EffectNodeExt, EffectType};
 use mondrian_timeline::clip::Clip;
 use mondrian_timeline::sequence::Sequence;
 
@@ -54,7 +54,7 @@ fn clip_with_effect_graph_compiles() {
     )
     .expect("valid clip");
 
-    clip.add_effect(EffectType::GaussianBlur);
+    clip.add_effect_node(EffectNode::with_defaults(EffectType::GaussianBlur));
 
     let _ = seq.video_tracks[0].add_clip(clip);
 
@@ -89,11 +89,13 @@ fn build_render_plan_from_sequence() {
 
     let _ = seq.video_tracks[0].add_clip(clip);
 
-    let plan = mondrian_renderer::timeline_render_plan::evaluate_timeline_render_plan(
-        &seq,
-        mondrian_renderer::timeline_render_plan::TimelineEvaluationRequest::analysis(30),
+    let program =
+        mondrian_renderer::PreparedVisualProgram::prepare(&seq).expect("prepared visual program");
+    let plan = mondrian_renderer::evaluate_prepared_visual_program(
+        &program,
+        mondrian_renderer::TimelineEvaluationRequest::analysis(FramePosition::new(30, time_base)),
     )
-    .expect("render plan");
+    .expect("prepared render plan");
 
     assert!(
         !plan.elements.is_empty(),

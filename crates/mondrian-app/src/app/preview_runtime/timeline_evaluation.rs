@@ -1,36 +1,73 @@
-//! Production Adapter for UI-independent recursive Preview Timeline execution.
+//! Production Adapter for UI-independent prepared Preview materialization.
 
 use super::*;
 use crate::app::preview_timeline_execution::{
-    resolve_preview_timeline_with_schedules, PreviewTimelineExecutionFact,
-    PreviewTimelineMediaRequest, PreviewTimelinePendingDependency, PreviewTimelineResolution,
+    resolve_preview_timeline_with_programs_and_observer, PreviewTimelineExecutionBinding,
+    PreviewTimelineExecutionFact, PreviewTimelineFrameRequest, PreviewTimelineMediaRequest,
+    PreviewTimelinePendingDependency, PreviewTimelineResolution, PreviewTimelineSourceAdapters,
     PreviewTimelineTitleRequest,
 };
 
 impl<O: Clone> PreviewProductionRuntime<O> {
     pub(super) fn resolve_timeline(
         &self,
-        state: &AppState,
+        snapshot: &PreviewExecutionSnapshot<'_>,
+        proxy_demands: &dyn PreviewProxyDemandSink,
         sequence: &Sequence,
         frame: i64,
         width: u32,
         height: u32,
         color_context: ProgramColorContext,
     ) -> PreviewTimelineResolution {
-        let mut media_frame =
-            |request: PreviewTimelineMediaRequest| self.media_frame_for_plan(state, request);
+        self.synchronize_visual_program_authoring_session(snapshot);
+        let transport = snapshot.transport();
+        if transport.is_playing() {
+            if let Some(active) = transport.demand().map(PreviewFrameDemandSnapshot::identity) {
+                self.scheduler.synchronize_playback_current_demand(active);
+            }
+        }
+        let mut media_frame = |request: PreviewTimelineMediaRequest| {
+            self.media_frame_for_plan(snapshot, proxy_demands, request)
+        };
         let mut title_frame =
             |request: PreviewTimelineTitleRequest| self.title_frame_for_plan(request);
-        let resolution = resolve_preview_timeline_with_schedules(
-            sequence,
-            state.sequences(),
-            frame,
-            Resolution { width, height },
-            state.playback_preview_resolution_scale(),
-            color_context,
-            &mut media_frame,
-            &mut title_frame,
-            &self.visual_schedules,
+        let sequences = snapshot
+            .authoring()
+            .map(PreviewAuthoringSnapshot::sequences)
+            .unwrap_or_default();
+        let Some(author_snapshot) = snapshot
+            .authoring()
+            .map(PreviewAuthoringSnapshot::visual_author_snapshot_identity)
+        else {
+            return PreviewTimelineResolution::Unavailable {
+                reason: PreviewUnavailability::no_content(
+                    PreviewOutputStage::Project,
+                    "Timeline resolution requires an Authoring Snapshot",
+                ),
+            };
+        };
+        let (generation, cancellation) = {
+            let execution = self.execution.borrow();
+            (execution.generation(), execution.generation_cancellation())
+        };
+        let resolution = resolve_preview_timeline_with_programs_and_observer(
+            PreviewTimelineFrameRequest::new(
+                sequence,
+                sequences,
+                frame,
+                Resolution { width, height },
+                snapshot.transport().runtime_scale(),
+                color_context,
+            ),
+            PreviewTimelineSourceAdapters::new(&mut media_frame, &mut title_frame),
+            PreviewTimelineExecutionBinding::new(
+                &self.visual_programs,
+                &self.scratch,
+                generation,
+                cancellation,
+                author_snapshot,
+                &self.visual_dependencies,
+            ),
         );
         match &resolution {
             PreviewTimelineResolution::Ready(resolved) => {
@@ -42,10 +79,17 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 PreviewTimelinePendingDependency::Media(asset_id) => {
                     tracing::trace!(%asset_id, "viewer Timeline is waiting for media");
                 }
-                PreviewTimelinePendingDependency::BasicTitle(request_key) => {
+                PreviewTimelinePendingDependency::BasicTitle(request_identity) => {
                     tracing::trace!(
-                        request_key = format_args!("{request_key:016x}"),
+                        request_identity = %request_identity,
                         "viewer Timeline is waiting for Basic Title generation"
+                    );
+                }
+                PreviewTimelinePendingDependency::Temporal { clip_id, pending_sources } => {
+                    tracing::trace!(
+                        %clip_id,
+                        pending_sources,
+                        "viewer Timeline is waiting for a complete temporal source set"
                     );
                 }
             },

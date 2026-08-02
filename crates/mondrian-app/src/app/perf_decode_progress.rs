@@ -203,4 +203,57 @@ mod tests {
         assert_eq!(value["terminal"], true);
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn journal_schema_v3_serializes_worker_and_isolated_demux_evidence() {
+        let record = PreviewDecodeExecutionJournalRecord {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            scenario: "schema-test",
+            observed_at_us: 7,
+            terminal: false,
+            workers: PreviewDecodeWorkerExecutionDiagnostics {
+                any: None,
+                playback: Some(mondrian_media::PreviewDecodeExecutionProgress::default()),
+                non_playback: None,
+            },
+        };
+
+        let value = serde_json::to_value(record).expect("serialize journal record");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "schema_version": 3,
+                "scenario": "schema-test",
+                "observed_at_us": 7,
+                "terminal": false,
+                "workers": {
+                    "any": null,
+                    "playback": {
+                        "stage": "Idle",
+                        "request_sequence": 0,
+                        "progress_sequence": 0,
+                        "interrupt_poll_sequence": 0,
+                        "interrupt_cancel_sequence": 0,
+                        "interrupt_last_cancel_request_sequence": 0,
+                        "isolated_demux": {
+                            "session_launches": 0,
+                            "ready_sessions": 0,
+                            "cross_request_reused_sessions": 0,
+                            "completed_seeks": 0,
+                            "completed_reads": 0,
+                            "packet_responses": 0,
+                            "end_responses": 0,
+                            "clean_closes": 0,
+                            "cancellation_terminations": 0,
+                            "failure_terminations": 0,
+                            "forced_close_terminations": 0,
+                            "active_sessions": 0,
+                            "peak_active_sessions": 0
+                        }
+                    },
+                    "non_playback": null
+                }
+            })
+        );
+    }
 }

@@ -5,13 +5,13 @@
 //! factories so typed `AppState` view-model adapters can replace it without
 //! changing dock layout or widget construction.
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use mondrian_assets::library::FolderRecord;
+#[cfg(test)]
+use mondrian_assets::AssetMediaProbeCandidate;
 use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
 use mondrian_core::automation::{
     AnimationParameterAddress, ParameterResourceReference, ParameterSchema, PropertyValue,
@@ -62,19 +62,19 @@ use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::dock_tab_bar::TabInfo;
 use mondrian_ui_widgets::NumberInput;
 use mondrian_ui_widgets::{
-    AssetGrid, AssetGridBadgeTone, AssetGridItem, Button, Checkbox, ColorPickerAreaMode,
-    ColorPickerTrigger, CurveEdit, CurveEditor, CurvePoint, CurvePointPolicy, DockPanel,
-    DockPanelDropArea, Dropdown, FlexChild, FlexContainer, Label, MenuItem, MultilineTextInput,
-    NodeGraphEdge, NodeGraphNode, NodeGraphView, PanelList, PanelListItem, PropertyPanel,
-    PropertyPanelOptions, PropertyRow, PropertySection, RasterImage, ScrollView, Slider, TextInput,
-    TimelineAssetDrop, TimelineClip, TimelineClipKind, TimelineClipMove, TimelineClipRef,
-    TimelineClipSelectionMode, TimelineClipTrim, TimelineCutRef, TimelineEditCommand,
-    TimelineInOutPoint, TimelineSeek, TimelineSeekSource as WidgetTimelineSeekSource,
-    TimelineToolbarIconSlot, TimelineTrack, TimelineTrackControl, TimelineTrackControlIconSlot,
-    TimelineTrackMove, TimelineTrackRef, TimelineTransition, TimelineTransitionRef,
-    TimelineTransitionResize, TimelineTrimEdge, TimelineView, VideoScopesSurface,
-    VideoScopesTextureSet, ViewerCanvasBackground, ViewerControl, ViewerFrameContent,
-    ViewerStatusTone, ViewerSurface, WaveformDisplay,
+    AssetGrid, AssetGridBadgeTone, AssetGridDropOutcome, AssetGridItem, Button, Checkbox,
+    ColorPickerAreaMode, ColorPickerTrigger, CurveEdit, CurveEditor, CurvePoint, CurvePointPolicy,
+    DockPanel, DockPanelDropArea, Dropdown, FlexChild, FlexContainer, Label, MenuItem,
+    MultilineTextInput, NodeGraphEdge, NodeGraphNode, NodeGraphView, PanelList, PanelListItem,
+    PropertyPanel, PropertyPanelOptions, PropertyRow, PropertySection, RasterImage, ScrollView,
+    Slider, TextInput, TimelineAssetDrop, TimelineClip, TimelineClipKind, TimelineClipMove,
+    TimelineClipRef, TimelineClipSelectionMode, TimelineClipTrim, TimelineCutRef,
+    TimelineEditCommand, TimelineInOutPoint, TimelineSeek,
+    TimelineSeekSource as WidgetTimelineSeekSource, TimelineToolbarIconSlot, TimelineTrack,
+    TimelineTrackControl, TimelineTrackControlIconSlot, TimelineTrackMove, TimelineTrackRef,
+    TimelineTransition, TimelineTransitionRef, TimelineTransitionResize, TimelineTrimEdge,
+    TimelineView, VideoScopesSurface, VideoScopesTextureSet, ViewerCanvasBackground, ViewerControl,
+    ViewerFrameContent, ViewerStatusTone, ViewerSurface, WaveformDisplay,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -193,6 +193,9 @@ pub enum ViewerPreviewState {
     Unavailable(PreviewUnavailability),
     /// The active Sequence evaluates to a valid transparent canvas.
     Transparent,
+    /// A previously presented transparent canvas remains visible while the
+    /// current demand awaits exact presentation authority.
+    StaleTransparent,
     /// A frame request has been queued or is currently rendering/decoding.
     Loading,
     /// The requested frame is not ready, so the viewer may keep the previous frame visible.
@@ -225,8 +228,8 @@ pub struct ViewerPreviewColorRejectionModel {
     pub source: InputColorResolutionSource,
     /// Clip/media color-space override in effect, if any.
     pub override_color_space: Option<ColorSpace>,
-    /// Explicitly detected media color space, if any.
-    pub detected_color_space: Option<ColorSpace>,
+    /// Validated metadata identity that was eligible to drive pixels.
+    pub executable_color_space: Option<ColorSpace>,
     /// Sequence working color space active during the decision.
     pub working_color_space: WorkingColorSpace,
     /// Compact media diagnostic summary.
@@ -385,7 +388,7 @@ pub fn demo_app_state() -> AppState {
         state.replace_clip_selection(vec![selection]);
     }
     state.test_set_sequence(Some(sequence));
-    state.seek(76);
+    state.seek(76).expect("seek");
     state
 }
 
@@ -794,7 +797,7 @@ impl ViewerPanelModel {
         let color_rejection = preview.and_then(ViewerPreviewSource::viewer_color_rejection);
         let preview_unavailability = preview_state.as_ref().and_then(|state| match state {
             ViewerPreviewState::Unavailable(reason) => Some(reason.clone()),
-            ViewerPreviewState::Transparent => None,
+            ViewerPreviewState::Transparent | ViewerPreviewState::StaleTransparent => None,
             ViewerPreviewState::Loading
             | ViewerPreviewState::Stale(_)
             | ViewerPreviewState::Ready(_) => None,
@@ -805,15 +808,23 @@ impl ViewerPanelModel {
             }
             ViewerPreviewState::Unavailable(_)
             | ViewerPreviewState::Transparent
+            | ViewerPreviewState::StaleTransparent
             | ViewerPreviewState::Loading => None,
         });
-        let transparent_canvas = matches!(preview_state, Some(ViewerPreviewState::Transparent));
+        let transparent_canvas = matches!(
+            preview_state,
+            Some(ViewerPreviewState::Transparent | ViewerPreviewState::StaleTransparent)
+        );
         let preview_resolution_scale =
             normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale);
         let preview_quality_label = viewer_preview_quality_label(preview_resolution_scale);
         let preview_waiting = matches!(
             preview_state.as_ref(),
-            Some(ViewerPreviewState::Loading | ViewerPreviewState::Stale(_))
+            Some(
+                ViewerPreviewState::Loading
+                    | ViewerPreviewState::Stale(_)
+                    | ViewerPreviewState::StaleTransparent
+            )
         );
         let color_rejected = matches!(
             preview_state.as_ref(),
@@ -2130,6 +2141,7 @@ impl ExportPanelModel {
             sequence_id: Some(sequence_id),
             range: self.range,
             output_path: output_path.into(),
+            output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
         })
     }
 
@@ -2702,36 +2714,21 @@ fn timeline_clip_from_sequence_clip(
         if let Some(lib) = library {
             if let Some(asset_id) = clip.media_asset_id() {
                 if let Ok(Some(record)) = lib.get_asset(asset_id) {
-                    view = view.with_source_identity(
-                        record.id,
-                        waveform_source_revision(&record),
-                        clip.source_origin().to_f64(),
-                        clip.source_terminal_boundary().ok()?.to_f64(),
-                    );
+                    if let Some(selection) =
+                        record.admitted_audio_source_selection(AudioSourceComponentId::primary())
+                    {
+                        view = view.with_source_identity(
+                            record.id,
+                            selection,
+                            clip.source_origin().to_f64(),
+                            clip.source_terminal_boundary().ok()?.to_f64(),
+                        );
+                    }
                 }
             }
         }
     }
     Some(view)
-}
-
-fn waveform_source_revision(record: &AssetRecord) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    record.id.hash(&mut hasher);
-    record.path.hash(&mut hasher);
-    record.updated_at.hash(&mut hasher);
-    record.media_info.file_size.hash(&mut hasher);
-    if let Ok(metadata) = std::fs::metadata(&record.path) {
-        metadata.len().hash(&mut hasher);
-        metadata.modified().ok().hash(&mut hasher);
-    }
-    if let Some(audio) = record.media_info.primary_audio() {
-        audio.index.hash(&mut hasher);
-        audio.duration.hash(&mut hasher);
-        audio.sample_rate.hash(&mut hasher);
-        audio.channels.hash(&mut hasher);
-    }
-    hasher.finish()
 }
 
 fn default_clip_label(clip: &Clip) -> String {
@@ -2873,7 +2870,10 @@ fn asset_grid_item_from_asset(
         asset_grid_asset_context_menu_items(&asset, proxy_mode, input_pipeline);
     let offline = asset_is_offline(&asset);
     let proxied = proxy_mode && matches!(asset.kind, AssetKind::Video);
-    let duration_label = asset_duration_label(asset.media_info.duration);
+    let duration_label = asset
+        .media_probe()
+        .map(|probe| asset_duration_label(probe.duration))
+        .unwrap_or_default();
     let mut item = AssetGridItem::new(asset.id.to_string(), asset.name, accent)
         .with_subtitle(duration_label)
         .with_badge(badge)
@@ -2905,7 +2905,8 @@ fn asset_grid_asset_context_menu_items(
     input_pipeline: Option<&AppShellInputColorPipelineDiagnostics>,
 ) -> Vec<MenuItem> {
     let mut items = Vec::new();
-    if asset_has_file_manager_target(asset) {
+    if let Some(file_path) = asset.file_path() {
+        let media_probe = asset.media_probe();
         items.push(asset_menu_item(
             MenuItem::new(
                 "解释素材...",
@@ -2913,16 +2914,17 @@ fn asset_grid_asset_context_menu_items(
                     asset_id: asset.id,
                     asset_name: asset.name.clone(),
                     interpretation: asset.interpretation,
-                    auto_interpretation: asset
-                        .media_info
-                        .primary_video()
+                    auto_interpretation: media_probe
+                        .and_then(|probe| probe.primary_video())
                         .map(|video| video.color_interpretation.clone()),
-                    video_signal: asset.media_info.primary_video().map(|video| {
-                        AppShellVideoSignalDiagnostics {
+                    video_signal: media_probe.and_then(|probe| probe.primary_video()).map(
+                        |video| AppShellVideoSignalDiagnostics {
                             range: video.color_range,
+                            sampling: video.proven_sampling(),
                             color_metadata: video.color_metadata.clone(),
-                        }
-                    }),
+                            color_metadata_hints: video.color_metadata_hints.clone(),
+                        },
+                    ),
                     input_pipeline: input_pipeline.cloned(),
                 }),
             ),
@@ -2932,7 +2934,7 @@ fn asset_grid_asset_context_menu_items(
             MenuItem::new(
                 "在文件管理器中显示",
                 app_shell_reveal_in_file_manager_action(AppShellRevealInFileManagerPayload {
-                    path: asset.path.clone(),
+                    path: file_path.to_path_buf(),
                 }),
             ),
             AppIcon::FolderOpenFilled,
@@ -2976,15 +2978,8 @@ fn asset_grid_asset_context_menu_items(
     items
 }
 
-fn asset_has_file_manager_target(asset: &AssetRecord) -> bool {
-    matches!(
-        asset.kind,
-        AssetKind::Video | AssetKind::StillImage | AssetKind::Audio
-    )
-}
-
 fn asset_is_offline(asset: &AssetRecord) -> bool {
-    asset_has_file_manager_target(asset) && !asset.path.exists()
+    asset.file_path().is_some_and(|path| !path.exists())
 }
 
 fn asset_grid_items_from_library_records(
@@ -3098,7 +3093,7 @@ fn effect_icon_button(
     fallback_label: &'static str,
     tooltip: &'static str,
     enabled: bool,
-    action: Action,
+    action: Option<Action>,
 ) -> Box<dyn Widget> {
     match icon.icon_button() {
         Ok(button) => Box::new(button.with_tooltip(tooltip).enabled(enabled).on_click(action)),
@@ -3282,15 +3277,19 @@ fn inspector_audio_components(state: &AppState, clip: &Clip) -> Vec<InspectorAud
                         component_id,
                         label: asset_audio_binding_label(asset, component_id),
                         options: asset
-                            .media_info
-                            .audio_streams
-                            .iter()
-                            .map(|stream| InspectorAudioStreamOptionModel {
-                                label: audio_stream_label(stream),
-                                stream_index: stream.index,
-                                selected: component.binding.matches_stream(stream),
+                            .media_probe()
+                            .map(|probe| {
+                                probe
+                                    .audio_streams
+                                    .iter()
+                                    .map(|stream| InspectorAudioStreamOptionModel {
+                                        label: audio_stream_label(stream),
+                                        stream_index: stream.index,
+                                        selected: component.binding.matches_stream(stream),
+                                    })
+                                    .collect()
                             })
-                            .collect(),
+                            .unwrap_or_default(),
                     });
                 inspector_audio_component_model(
                     edit,
@@ -3369,11 +3368,12 @@ fn asset_audio_component_label(
         return format!("Component {component_id}（目录中不存在）");
     };
     let primary = (component_id == AudioSourceComponentId::primary()).then_some("Primary · ");
-    let stream = asset
-        .media_info
-        .audio_streams
-        .iter()
-        .find(|stream| component.binding.matches_stream(stream));
+    let stream = asset.media_probe().and_then(|probe| {
+        probe
+            .audio_streams
+            .iter()
+            .find(|stream| component.binding.matches_stream(stream))
+    });
     match stream {
         Some(stream) => format!(
             "{}{}",
@@ -3397,10 +3397,13 @@ fn asset_audio_binding_label(asset: &AssetRecord, component_id: AudioSourceCompo
         .find(|component| component.id == component_id)
         .map(|component| {
             asset
-                .media_info
-                .audio_streams
-                .iter()
-                .find(|stream| component.binding.matches_stream(stream))
+                .media_probe()
+                .and_then(|probe| {
+                    probe
+                        .audio_streams
+                        .iter()
+                        .find(|stream| component.binding.matches_stream(stream))
+                })
                 .map(audio_stream_label)
                 .unwrap_or_else(|| format!("流 #{}（需重绑定）", component.binding.stream_index))
         })
@@ -3530,28 +3533,36 @@ fn asset_grid(model: &AssetGridModel) -> AssetGrid {
                 _ => None,
             })
             .on_item_drop(|payload, _index, item| {
-                let target_folder_id = item.id.strip_prefix("folder:")?.to_string();
+                let Some(target_folder_id) = item.id.strip_prefix("folder:").map(str::to_owned)
+                else {
+                    return AssetGridDropOutcome::Unhandled;
+                };
                 match payload {
-                    DragPayload::Asset(asset_id) => {
-                        Some(assets_move_asset_action(AssetsMoveAssetPayload {
+                    DragPayload::Asset(asset_id) => AssetGridDropOutcome::Dispatch(
+                        assets_move_asset_action(AssetsMoveAssetPayload {
                             asset_id: *asset_id,
                             folder_id: Some(target_folder_id),
-                        }))
-                    }
+                        }),
+                    ),
                     DragPayload::AssetFolder(folder_id) => {
                         if folder_id == &target_folder_id {
-                            Some(Action::NoOp)
+                            AssetGridDropOutcome::Consumed
                         } else {
-                            Some(assets_move_folder_action(AssetsMoveFolderPayload {
-                                folder_id: folder_id.clone(),
-                                parent_folder_id: Some(target_folder_id),
-                            }))
+                            AssetGridDropOutcome::Dispatch(assets_move_folder_action(
+                                AssetsMoveFolderPayload {
+                                    folder_id: folder_id.clone(),
+                                    parent_folder_id: Some(target_folder_id),
+                                },
+                            ))
                         }
                     }
                     DragPayload::AssetSelection { assets, folders } => {
-                        move_asset_selection_action(assets, folders, Some(target_folder_id))
+                        move_asset_selection_action(assets, folders, Some(target_folder_id)).map_or(
+                            AssetGridDropOutcome::Consumed,
+                            AssetGridDropOutcome::Dispatch,
+                        )
                     }
-                    _ => None,
+                    _ => AssetGridDropOutcome::Unhandled,
                 }
             })
             .with_context_menu(asset_grid_context_menu_items(
@@ -3562,21 +3573,21 @@ fn asset_grid(model: &AssetGridModel) -> AssetGrid {
     grid
 }
 
-fn asset_grid_rename_action(_index: usize, item: &AssetGridItem, name: &str) -> Action {
+fn asset_grid_rename_action(_index: usize, item: &AssetGridItem, name: &str) -> Option<Action> {
     match item.drag_payload.as_ref() {
         Some(DragPayload::Asset(asset_id)) => {
-            assets_rename_asset_action(AssetsRenameAssetPayload {
+            Some(assets_rename_asset_action(AssetsRenameAssetPayload {
                 asset_id: *asset_id,
                 name: name.to_owned(),
-            })
+            }))
         }
         Some(DragPayload::AssetFolder(folder_id)) => {
-            assets_rename_folder_action(AssetsRenameFolderPayload {
+            Some(assets_rename_folder_action(AssetsRenameFolderPayload {
                 folder_id: folder_id.clone(),
                 name: name.to_owned(),
-            })
+            }))
         }
-        _ => Action::NoOp,
+        _ => None,
     }
 }
 
@@ -3626,7 +3637,7 @@ fn move_asset_selection_action(
         .cloned()
         .collect();
     if assets.is_empty() && folder_ids.is_empty() {
-        return Some(Action::NoOp);
+        return None;
     }
     Some(assets_move_selection_action(AssetsMoveSelectionPayload {
         asset_ids: assets.to_vec(),
@@ -3869,10 +3880,7 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
         .on_clip_select({
             let action_model = action_model.clone();
             move |clip_ref, _clip, mode| {
-                action_model
-                    .clip_identity(clip_ref, mode)
-                    .map(timeline_select_clip_action)
-                    .unwrap_or(Action::NoOp)
+                action_model.clip_identity(clip_ref, mode).map(timeline_select_clip_action)
             }
         })
         .on_transition_select({
@@ -3881,7 +3889,6 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
                 action_model
                     .transition_identity(transition_ref)
                     .map(timeline_select_video_transition_action)
-                    .unwrap_or(Action::NoOp)
             }
         })
         .on_transition_resize({
@@ -3890,7 +3897,6 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
                 action_model
                     .transition_resize_payload(resize)
                     .map(timeline_set_video_transition_range_action)
-                    .unwrap_or(Action::NoOp)
             }
         })
         .on_cut_transition_create({
@@ -3899,29 +3905,22 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
                 action_model
                     .cut_transition_payload(cut_ref)
                     .map(timeline_create_cross_dissolve_action)
-                    .unwrap_or(Action::NoOp)
             }
         })
         .on_track_select({
             let action_model = action_model.clone();
             move |track_ref, _track| {
-                action_model
-                    .track_identity(track_ref)
-                    .map(|track| {
-                        Action::Select(mondrian_editor_state::action::SelectionTarget::Track(
-                            track.track_id,
-                        ))
-                    })
-                    .unwrap_or(Action::NoOp)
+                action_model.track_identity(track_ref).map(|track| {
+                    Action::Select(mondrian_editor_state::action::SelectionTarget::Track(
+                        track.track_id,
+                    ))
+                })
             }
         })
         .on_track_move({
             let action_model = action_model.clone();
             move |movement, _track| {
-                action_model
-                    .track_move_payload(movement)
-                    .map(timeline_move_track_action)
-                    .unwrap_or(Action::NoOp)
+                action_model.track_move_payload(movement).map(timeline_move_track_action)
             }
         })
         .on_track_control({
@@ -3934,12 +3933,10 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
                     action_model
                         .track_targeting_payload(control, track_ref, track)
                         .map(timeline_set_track_targeting_action)
-                        .unwrap_or(Action::NoOp)
                 } else {
                     action_model
                         .track_control_payload(control, track_ref, track)
                         .map(timeline_set_track_control_action)
-                        .unwrap_or(Action::NoOp)
                 }
             }
         })
@@ -3953,10 +3950,7 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
         .on_asset_drop({
             let action_model = action_model.clone();
             move |drop, _track| {
-                action_model
-                    .asset_drop_payload(drop)
-                    .map(timeline_drop_asset_action)
-                    .unwrap_or(Action::NoOp)
+                action_model.asset_drop_payload(drop).map(timeline_drop_asset_action)
             }
         })
         .on_edit_command({
@@ -3971,20 +3965,12 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
         .on_clip_move({
             let action_model = action_model.clone();
             move |movement, _clip| {
-                action_model
-                    .move_payload(movement)
-                    .map(timeline_move_clip_action)
-                    .unwrap_or(Action::NoOp)
+                action_model.move_payload(movement).map(timeline_move_clip_action)
             }
         })
         .on_clip_trim({
             let action_model = action_model.clone();
-            move |trim, _clip| {
-                action_model
-                    .trim_payload(trim)
-                    .map(timeline_trim_clips_action)
-                    .unwrap_or_else(|| Action::NoOp)
-            }
+            move |trim, _clip| action_model.trim_payload(trim).map(timeline_trim_clips_action)
         })
         .on_in_out_point(|point, frame| {
             timeline_set_in_out_point_action(TimelineSetInOutPointPayload {
@@ -3996,8 +3982,8 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
         .with_waveform_display(model.waveform_display);
     let timeline = if let Some(source) = model.waveform_source.clone() {
         timeline.with_waveform_lookup(
-            move |asset_id, revision, start_secs, end_secs, pixel_width| {
-                source.lookup(asset_id, revision, start_secs, end_secs, pixel_width)
+            move |asset_id, selection, start_secs, end_secs, pixel_width| {
+                source.lookup(asset_id, selection, start_secs, end_secs, pixel_width)
             },
         )
     } else {
@@ -4032,50 +4018,45 @@ fn timeline_in_out_point_payload_kind(point: TimelineInOutPoint) -> TimelineInOu
 fn timeline_edit_command_action(
     model: &TimelinePanelModel,
     command: TimelineEditCommand,
-) -> Action {
+) -> Option<Action> {
     match command {
-        TimelineEditCommand::CutSelection => Action::Cut,
-        TimelineEditCommand::CopySelection => Action::Copy,
-        TimelineEditCommand::PasteAtPlayhead => Action::Paste,
-        TimelineEditCommand::DuplicateSelection => Action::Duplicate,
-        TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
-        TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
-        TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
+        TimelineEditCommand::CutSelection => Some(Action::Cut),
+        TimelineEditCommand::CopySelection => Some(Action::Copy),
+        TimelineEditCommand::PasteAtPlayhead => Some(Action::Paste),
+        TimelineEditCommand::DuplicateSelection => Some(Action::Duplicate),
+        TimelineEditCommand::DeleteSelection => Some(Action::DeleteSelection),
+        TimelineEditCommand::RippleDeleteSelection => Some(Action::RippleDeleteSelection),
+        TimelineEditCommand::SplitAtPlayhead => Some(Action::SplitClipAtPlayhead),
         TimelineEditCommand::TrimSelectionInToPlayhead => {
-            timeline_trim_selected_clips_to_playhead_action(
+            Some(timeline_trim_selected_clips_to_playhead_action(
                 TimelineTrimSelectedClipsToPlayheadPayload { edge: TimelineTrimPayloadEdge::In },
-            )
+            ))
         }
         TimelineEditCommand::TrimSelectionOutToPlayhead => {
-            timeline_trim_selected_clips_to_playhead_action(
+            Some(timeline_trim_selected_clips_to_playhead_action(
                 TimelineTrimSelectedClipsToPlayheadPayload { edge: TimelineTrimPayloadEdge::Out },
-            )
+            ))
         }
         TimelineEditCommand::RollSelectedCutToPlayhead => {
-            timeline_roll_selected_cut_to_playhead_action()
+            Some(timeline_roll_selected_cut_to_playhead_action())
         }
-        TimelineEditCommand::EnableSelection => {
-            timeline_set_selected_clips_enabled_action(TimelineSetSelectedClipsEnabledPayload {
-                enabled: true,
-            })
+        TimelineEditCommand::EnableSelection => Some(timeline_set_selected_clips_enabled_action(
+            TimelineSetSelectedClipsEnabledPayload { enabled: true },
+        )),
+        TimelineEditCommand::DisableSelection => Some(timeline_set_selected_clips_enabled_action(
+            TimelineSetSelectedClipsEnabledPayload { enabled: false },
+        )),
+        TimelineEditCommand::LinkSelection => Some(timeline_link_selected_clips_action()),
+        TimelineEditCommand::UnlinkSelection => Some(timeline_unlink_selected_clips_action()),
+        TimelineEditCommand::LiftInOutRange => Some(timeline_lift_range_action()),
+        TimelineEditCommand::ExtractInOutRange => Some(timeline_extract_range_action()),
+        TimelineEditCommand::OpenNestedSequence(clip_ref) => {
+            model.open_nested_payload(clip_ref).map(timeline_open_nested_sequence_action)
         }
-        TimelineEditCommand::DisableSelection => {
-            timeline_set_selected_clips_enabled_action(TimelineSetSelectedClipsEnabledPayload {
-                enabled: false,
-            })
-        }
-        TimelineEditCommand::LinkSelection => timeline_link_selected_clips_action(),
-        TimelineEditCommand::UnlinkSelection => timeline_unlink_selected_clips_action(),
-        TimelineEditCommand::LiftInOutRange => timeline_lift_range_action(),
-        TimelineEditCommand::ExtractInOutRange => timeline_extract_range_action(),
-        TimelineEditCommand::OpenNestedSequence(clip_ref) => model
-            .open_nested_payload(clip_ref)
-            .map(timeline_open_nested_sequence_action)
-            .unwrap_or(Action::NoOp),
-        TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
-        TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
-        TimelineEditCommand::ClearInOutPoints => timeline_clear_in_out_points_action(),
-        TimelineEditCommand::TogglePlayback => Action::TogglePlay,
+        TimelineEditCommand::MarkInAtPlayhead => Some(Action::MarkInAtPlayhead),
+        TimelineEditCommand::MarkOutAtPlayhead => Some(Action::MarkOutAtPlayhead),
+        TimelineEditCommand::ClearInOutPoints => Some(timeline_clear_in_out_points_action()),
+        TimelineEditCommand::TogglePlayback => Some(Action::TogglePlay),
     }
 }
 
@@ -4690,7 +4671,7 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         FlexChild::fixed(Box::new(output_browse)),
     ])
     .with_gap(8.0);
-    let enqueue_action = model.enqueue_payload().map(export_enqueue_action).unwrap_or(Action::NoOp);
+    let enqueue_action = model.enqueue_payload().map(export_enqueue_action);
     let enqueue_button = AppIcon::Export
         .text_button_or_label("Add to queue")
         .enabled(model.can_enqueue())
@@ -5739,22 +5720,25 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
     )
 }
 
-fn numeric_slider_input_control(
+fn numeric_slider_input_control<R>(
     value: f32,
     min: f32,
     max: f32,
     step: Option<f32>,
     decimals: usize,
     enabled: bool,
-    action: impl Fn(f32) -> Action + 'static,
-) -> Box<dyn Widget> {
+    action: impl Fn(f32) -> R + 'static,
+) -> Box<dyn Widget>
+where
+    R: Into<Option<Action>>,
+{
     numeric_slider_input_control_with_hard_range(
         value, min, max, min, max, step, decimals, enabled, action,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn numeric_slider_input_control_with_hard_range(
+fn numeric_slider_input_control_with_hard_range<R>(
     value: f32,
     soft_min: f32,
     soft_max: f32,
@@ -5763,9 +5747,12 @@ fn numeric_slider_input_control_with_hard_range(
     step: Option<f32>,
     decimals: usize,
     enabled: bool,
-    action: impl Fn(f32) -> Action + 'static,
-) -> Box<dyn Widget> {
-    let action: Rc<dyn Fn(f32) -> Action> = Rc::new(action);
+    action: impl Fn(f32) -> R + 'static,
+) -> Box<dyn Widget>
+where
+    R: Into<Option<Action>>,
+{
+    let action: Rc<dyn Fn(f32) -> Option<Action>> = Rc::new(move |value| action(value).into());
     let mut slider =
         Slider::new(value.clamp(soft_min, soft_max), soft_min, soft_max).enabled(enabled);
     if let Some(step) = step.filter(|step| step.is_finite() && *step > 0.0) {
@@ -5797,60 +5784,60 @@ fn inspector_value_action(
     selection: Option<SelectedClipRef>,
     name: &'static str,
     value: f32,
-) -> Action {
+) -> Option<Action> {
     if name == "opacity" {
         if let Some(selection) = selection {
-            return inspector_set_clip_opacity_action(InspectorSetClipOpacityPayload {
-                clip: inspector_clip_payload(selection),
-                opacity_percent: value,
-            });
+            return Some(inspector_set_clip_opacity_action(
+                InspectorSetClipOpacityPayload {
+                    clip: inspector_clip_payload(selection),
+                    opacity_percent: value,
+                },
+            ));
         }
     }
-    Action::NoOp
+    None
 }
 
-fn inspector_bool_action(selection: Option<SelectedClipRef>, value: bool) -> Action {
+fn inspector_bool_action(selection: Option<SelectedClipRef>, value: bool) -> Option<Action> {
     if let Some(selection) = selection {
-        return inspector_set_clip_enabled_action(InspectorSetClipEnabledPayload {
-            clip: inspector_clip_payload(selection),
-            enabled: value,
-        });
+        return Some(inspector_set_clip_enabled_action(
+            InspectorSetClipEnabledPayload {
+                clip: inspector_clip_payload(selection),
+                enabled: value,
+            },
+        ));
     }
-    Action::NoOp
+    None
 }
 
 fn inspector_audio_source_action(
     selection: Option<SelectedClipRef>,
     edit_id: AudioComponentEditId,
     source: InspectorAudioComponentSourcePayload,
-) -> Action {
-    selection
-        .map(|selection| {
-            inspector_set_audio_component_source_action(InspectorSetAudioComponentSourcePayload {
-                clip: inspector_clip_payload(selection),
-                edit_id,
-                source,
-            })
+) -> Option<Action> {
+    selection.map(|selection| {
+        inspector_set_audio_component_source_action(InspectorSetAudioComponentSourcePayload {
+            clip: inspector_clip_payload(selection),
+            edit_id,
+            source,
         })
-        .unwrap_or(Action::NoOp)
+    })
 }
 
 fn inspector_audio_edit_field_action(
     selection: Option<SelectedClipRef>,
     edit_id: AudioComponentEditId,
     field: InspectorAudioComponentEditField,
-) -> Action {
-    selection
-        .map(|selection| {
-            inspector_set_audio_component_edit_field_action(
-                InspectorSetAudioComponentEditFieldPayload {
-                    clip: inspector_clip_payload(selection),
-                    edit_id,
-                    field,
-                },
-            )
-        })
-        .unwrap_or(Action::NoOp)
+) -> Option<Action> {
+    selection.map(|selection| {
+        inspector_set_audio_component_edit_field_action(
+            InspectorSetAudioComponentEditFieldPayload {
+                clip: inspector_clip_payload(selection),
+                edit_id,
+                field,
+            },
+        )
+    })
 }
 
 const INSPECTOR_AUDIO_FADE_TIMESCALE: u32 = 1_000;
@@ -5861,9 +5848,9 @@ fn inspector_audio_fade_duration_action(
     fade_in: bool,
     seconds: f32,
     curve: AudioFadeCurve,
-) -> Action {
+) -> Option<Action> {
     if !seconds.is_finite() {
-        return Action::NoOp;
+        return None;
     }
     let fade = if seconds <= 0.0 {
         None
@@ -5871,7 +5858,7 @@ fn inspector_audio_fade_duration_action(
         let Ok(duration) =
             TimelineTime::from_f64_quantized(f64::from(seconds), INSPECTOR_AUDIO_FADE_TIMESCALE)
         else {
-            return Action::NoOp;
+            return None;
         };
         (duration > TimelineTime::ZERO).then_some(AudioFade { duration, curve })
     };
@@ -5933,139 +5920,134 @@ fn inspector_audio_refresh_action(asset_id: AssetId) -> Action {
     assets_refresh_audio_components_action(AssetsRefreshAudioComponentsPayload { asset_id })
 }
 
-fn inspector_color_action(selection: Option<SelectedClipRef>, color: Color) -> Action {
+fn inspector_color_action(selection: Option<SelectedClipRef>, color: Color) -> Option<Action> {
     if let Some(selection) = selection {
-        return inspector_set_clip_tint_action(InspectorSetClipTintPayload {
-            clip: inspector_clip_payload(selection),
-            color,
-        });
+        return Some(inspector_set_clip_tint_action(
+            InspectorSetClipTintPayload { clip: inspector_clip_payload(selection), color },
+        ));
     }
-    Action::NoOp
+    None
 }
 
 fn inspector_transform_action(
     selection: Option<SelectedClipRef>,
     field: InspectorClipTransformField,
     value: f32,
-) -> Action {
+) -> Option<Action> {
     if let Some(selection) = selection {
-        return inspector_set_clip_transform_field_action(InspectorSetClipTransformFieldPayload {
-            clip: inspector_clip_payload(selection),
-            field,
-            value,
-        });
+        return Some(inspector_set_clip_transform_field_action(
+            InspectorSetClipTransformFieldPayload {
+                clip: inspector_clip_payload(selection),
+                field,
+                value,
+            },
+        ));
     }
-    Action::NoOp
+    None
 }
 
 fn inspector_timing_action(
     selection: Option<SelectedClipRef>,
     edge: TimelineTrimPayloadEdge,
     frame: f32,
-) -> Action {
+) -> Option<Action> {
     let frame = if frame.is_finite() {
         frame.round() as i64
     } else {
         0
     };
     if let Some(selection) = selection {
-        return timeline_trim_clips_action(TimelineTrimClipsPayload {
+        return Some(timeline_trim_clips_action(TimelineTrimClipsPayload {
             clip_ids: vec![selection.clip_id],
             edge,
             frame: frame.max(0),
-        });
+        }));
     }
-    Action::NoOp
+    None
 }
 
 fn inspector_effect_enabled_action(
     selection: Option<SelectedClipRef>,
     effect_id: EffectId,
     enabled: bool,
-) -> Action {
+) -> Option<Action> {
     if let Some(selection) = selection {
-        return inspector_set_effect_enabled_action(InspectorSetEffectEnabledPayload {
-            clip: inspector_clip_payload(selection),
-            effect_id,
-            enabled,
-        });
+        return Some(inspector_set_effect_enabled_action(
+            InspectorSetEffectEnabledPayload {
+                clip: inspector_clip_payload(selection),
+                effect_id,
+                enabled,
+            },
+        ));
     }
-    Action::NoOp
+    None
 }
 
 fn inspector_effect_select_action(
     selection: Option<SelectedClipRef>,
     effect_id: EffectId,
-) -> Action {
+) -> Option<Action> {
     if let Some(selection) = selection {
-        return inspector_select_effect_action(InspectorSelectEffectPayload {
-            clip: inspector_clip_payload(selection),
-            effect_id,
-        });
+        return Some(inspector_select_effect_action(
+            InspectorSelectEffectPayload { clip: inspector_clip_payload(selection), effect_id },
+        ));
     }
-    Action::NoOp
+    None
 }
 
 fn inspector_remove_effect_row_action(
     selection: Option<SelectedClipRef>,
     effect_id: EffectId,
-) -> Action {
+) -> Option<Action> {
     if let Some(selection) = selection {
-        return inspector_remove_effect_action(InspectorRemoveEffectPayload {
-            clip: inspector_clip_payload(selection),
-            effect_id,
-        });
+        return Some(inspector_remove_effect_action(
+            InspectorRemoveEffectPayload { clip: inspector_clip_payload(selection), effect_id },
+        ));
     }
-    Action::NoOp
+    None
 }
 
 fn inspector_reorder_effect_action(
     selection: Option<SelectedClipRef>,
     from: usize,
     to: usize,
-) -> Action {
+) -> Option<Action> {
     if from == to {
-        return Action::NoOp;
+        return None;
     }
-    selection
-        .map(|selection| Action::ReorderEffects { clip_id: selection.clip_id, from, to })
-        .unwrap_or(Action::NoOp)
+    selection.map(|selection| Action::ReorderEffects { clip_id: selection.clip_id, from, to })
 }
 
 fn inspector_curve_edit_action(
     selection: Option<SelectedClipRef>,
     model: &InspectorCurveModel,
     edit: CurveEdit,
-) -> Action {
-    let Some(selection) = selection else {
-        return Action::NoOp;
-    };
+) -> Option<Action> {
+    let selection = selection?;
     let edit = match edit {
         CurveEdit::Insert { point, .. } => InspectorCurveEditPayload::Upsert {
             keyframe_id: None,
             point: inspector_curve_point_payload(point),
         },
         CurveEdit::Move { index, point } => {
-            let Some(key) = model.keys.get(index) else {
-                return Action::NoOp;
-            };
+            let key = model.keys.get(index)?;
             InspectorCurveEditPayload::Upsert {
                 keyframe_id: key.keyframe_id,
                 point: inspector_curve_point_payload(point),
             }
         }
         CurveEdit::Delete { index } => {
-            let Some(keyframe_id) = model.keys.get(index).and_then(|key| key.keyframe_id) else {
-                return Action::NoOp;
-            };
+            let keyframe_id = model.keys.get(index).and_then(|key| key.keyframe_id)?;
             InspectorCurveEditPayload::Remove { keyframe_id }
         }
     };
-    inspector_edit_clip_curve_action(InspectorEditClipCurvePayload {
-        clip: inspector_clip_payload(selection),
-        property: model.property.clone(),
-        edit,
-    })
+    Some(inspector_edit_clip_curve_action(
+        InspectorEditClipCurvePayload {
+            clip: inspector_clip_payload(selection),
+            property: model.property.clone(),
+            edit,
+        },
+    ))
 }
 
 fn inspector_curve_point_payload(point: CurvePoint) -> InspectorCurvePointPayload {
@@ -6079,36 +6061,29 @@ fn node_graph_node_action(
     selection: Option<SelectedClipRef>,
     targets: &[NodeGraphNodeTarget],
     node_id: &str,
-) -> Action {
-    let Some(selection) = selection else {
-        return Action::NoOp;
-    };
+) -> Option<Action> {
+    let selection = selection?;
     match targets
         .iter()
         .find_map(|entry| (entry.node_id == node_id).then_some(entry.target))
     {
-        Some(NodeGraphTarget::Effect(effect_id)) => {
-            inspector_select_effect_action(InspectorSelectEffectPayload {
-                clip: inspector_clip_payload(selection),
-                effect_id,
-            })
-        }
+        Some(NodeGraphTarget::Effect(effect_id)) => Some(inspector_select_effect_action(
+            InspectorSelectEffectPayload { clip: inspector_clip_payload(selection), effect_id },
+        )),
         Some(NodeGraphTarget::Clip | NodeGraphTarget::Output) => {
             node_graph_clip_action(Some(selection))
         }
-        None => Action::NoOp,
+        None => None,
     }
 }
 
-fn node_graph_clip_action(selection: Option<SelectedClipRef>) -> Action {
-    selection
-        .map(|selection| {
-            timeline_select_clip_action(TimelineSelectClipPayload {
-                clip_id: selection.clip_id,
-                mode: TimelineClipSelectionModePayload::Replace,
-            })
+fn node_graph_clip_action(selection: Option<SelectedClipRef>) -> Option<Action> {
+    selection.map(|selection| {
+        timeline_select_clip_action(TimelineSelectClipPayload {
+            clip_id: selection.clip_id,
+            mode: TimelineClipSelectionModePayload::Replace,
         })
-        .unwrap_or(Action::NoOp)
+    })
 }
 
 fn inspector_clip_payload(selection: SelectedClipRef) -> InspectorClipRefPayload {
@@ -6558,7 +6533,7 @@ fn inspector_effect_property_action(
     effect_id: EffectId,
     path: &str,
     value: PropertyValue,
-) -> Action {
+) -> Option<Action> {
     inspector_property_action(
         selection,
         InspectorPropertyTarget::Effect(effect_id),
@@ -6572,11 +6547,9 @@ fn inspector_property_action(
     target: InspectorPropertyTarget,
     path: &str,
     value: PropertyValue,
-) -> Action {
-    let Some(selection) = selection else {
-        return Action::NoOp;
-    };
-    match target {
+) -> Option<Action> {
+    let selection = selection?;
+    Some(match target {
         InspectorPropertyTarget::Clip => {
             inspector_set_clip_property_action(InspectorSetClipPropertyPayload {
                 clip: inspector_clip_payload(selection),
@@ -6592,7 +6565,7 @@ fn inspector_property_action(
                 value,
             })
         }
-    }
+    })
 }
 
 #[cfg(test)]
@@ -6779,7 +6752,6 @@ mod tests {
             avg_bitrate: 256_000,
         };
         let info = mondrian_media::MediaInfo {
-            path: media_path.clone(),
             duration: std::time::Duration::from_secs(1),
             file_size: 1,
             container: "mov".to_owned(),
@@ -6788,8 +6760,7 @@ mod tests {
             has_video: false,
             has_audio: true,
         };
-        let asset_id =
-            library.upsert_media_file_with_info(&media_path, info).expect("register Asset");
+        let asset_id = commit_test_media_asset(&library, media_path.clone(), info);
         let mut sequence = Sequence::new("Inspector audio");
         let track_id = sequence.audio_tracks[0].id;
         let clip = Clip::new(asset_id, TimelineTime::ZERO, tt(25, sequence.time_base()))
@@ -6850,10 +6821,8 @@ mod tests {
         let library = AssetLibrary::open(root.join("library")).expect("asset library");
         let media_path = root.join("retime-source.mp4");
         std::fs::write(&media_path, [0u8]).expect("media fixture");
-        let media_info = test_video_asset(AssetId::new(), media_path.clone()).media_info;
-        let asset_id = library
-            .upsert_media_file_with_info(&media_path, media_info)
-            .expect("register video Asset");
+        let media_info = test_video_media_info(&media_path);
+        let asset_id = commit_test_media_asset(&library, media_path.clone(), media_info);
         let mut sequence = Sequence::new("Inspector source timing");
         let time_base = sequence.time_base();
         let track_id = sequence.video_tracks[0].id;
@@ -6871,7 +6840,7 @@ mod tests {
         state.test_set_asset_library(Some(library));
         state.selection.selected_clips =
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
-        state.seek(4);
+        state.seek(4).expect("seek");
 
         let model = InspectorPanelModel::from_app_state(&state);
         let source_timing = model.source_timing.expect("source-timing model");
@@ -6924,11 +6893,9 @@ mod tests {
         let library = AssetLibrary::open(root.join("library")).expect("asset library");
         let media_path = root.join("still.png");
         std::fs::write(&media_path, [0u8]).expect("media fixture");
-        let mut media_info = test_video_asset(AssetId::new(), media_path.clone()).media_info;
+        let mut media_info = test_video_media_info(&media_path);
         media_info.video_streams[0].total_frames = Some(1);
-        let asset_id = library
-            .upsert_media_file_with_info(&media_path, media_info)
-            .expect("register still Asset");
+        let asset_id = commit_test_media_asset(&library, media_path.clone(), media_info);
         let mut sequence = Sequence::new("Inspector still");
         let time_base = sequence.time_base();
         let track_id = sequence.video_tracks[0].id;
@@ -6958,40 +6925,40 @@ mod tests {
         };
         assert_eq!(
             inspector_forward_rate_action(Some(selection), 150.0),
-            Action::SetClipForwardRate {
+            Some(Action::SetClipForwardRate {
                 clip_id: selection.clip_id,
                 rate: TimeScale::new(3, 2).expect("exact 150 percent rate"),
                 include_linked: true,
-            }
+            })
         );
         assert_eq!(
             inspector_forward_rate_action(Some(selection), 33.33),
-            Action::SetClipForwardRate {
+            Some(Action::SetClipForwardRate {
                 clip_id: selection.clip_id,
                 rate: TimeScale::new(3_333, 10_000).expect("basis-point rate"),
                 include_linked: true,
-            }
+            })
         );
-        assert_eq!(inspector_forward_rate_action(None, 100.0), Action::NoOp);
+        assert_eq!(inspector_forward_rate_action(None, 100.0), None);
         for invalid in [f32::NAN, f32::INFINITY, -1.0, 0.0, 10_000.01] {
             assert_eq!(
                 inspector_forward_rate_action(Some(selection), invalid),
-                Action::NoOp
+                None
             );
         }
 
         let sequence_time = FramePosition::new(42, Rational::new(1, 25));
         assert_eq!(
             inspector_freeze_action(Some(selection), Some(sequence_time)),
-            Action::FreezeVideoClipAt { clip_id: selection.clip_id, sequence_time }
+            Some(Action::FreezeVideoClipAt { clip_id: selection.clip_id, sequence_time })
         );
-        assert_eq!(inspector_freeze_action(Some(selection), None), Action::NoOp);
+        assert_eq!(inspector_freeze_action(Some(selection), None), None);
         assert_eq!(
             inspector_freeze_action(
                 Some(SelectedClipRef { is_video_track: false, ..selection }),
                 Some(sequence_time),
             ),
-            Action::NoOp
+            None
         );
     }
 
@@ -8080,10 +8047,13 @@ mod tests {
 
     #[test]
     fn assets_panel_file_card_context_menu_dispatches_interpret_first() {
-        let asset_id = AssetId::new();
-        let path = PathBuf::from("E:/media/shot.mov");
-        let item =
-            asset_grid_item_from_asset(test_video_asset(asset_id, path.clone()), None, false, None);
+        let root = unique_temp_dir("asset-panel-file-context-menu");
+        std::fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("shot.mov");
+        std::fs::write(&path, b"fixture").expect("write media");
+        let asset = test_video_asset(path.clone());
+        let asset_id = asset.id;
+        let item = asset_grid_item_from_asset(asset, None, false, None);
         let model = AssetGridModel::new("Assets", vec![item]);
         let mut grid = asset_grid(&model);
         grid.layout(Rect::new(0.0, 0.0, 360.0, 240.0));
@@ -8141,6 +8111,7 @@ mod tests {
             serde_json::from_value(payload.clone()).expect("interpret payload");
         assert_eq!(payload.asset_id, asset_id);
         assert_eq!(payload.asset_name, "shot.mov");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -8203,17 +8174,18 @@ mod tests {
 
     #[test]
     fn assets_panel_offline_file_card_context_menu_includes_relink() {
-        let asset_id = AssetId::new();
+        let root = unique_temp_dir("asset-panel-offline-context-menu");
+        std::fs::create_dir_all(&root).expect("create temp root");
+        let media_path = root.join("shot.mov");
+        std::fs::write(&media_path, b"fixture").expect("write media");
+        let asset = test_video_asset(media_path.clone());
+        let asset_id = asset.id;
+        std::fs::remove_file(&media_path).expect("make fixture offline");
         let input_pipeline = AppShellInputColorPipelineDiagnostics {
             engine: mondrian_core::ColorEngine::mondrian_standard(),
             working_color_space: WorkingColorSpace::LinearP3D65,
         };
-        let item = asset_grid_item_from_asset(
-            test_video_asset(asset_id, PathBuf::from("E:/missing/shot.mov")),
-            None,
-            false,
-            Some(&input_pipeline),
-        );
+        let item = asset_grid_item_from_asset(asset, None, false, Some(&input_pipeline));
 
         assert_eq!(badge_labels(&item), ["视频", "离线"]);
         assert_eq!(item.badges[1].tone, AssetGridBadgeTone::Warning);
@@ -8255,6 +8227,7 @@ mod tests {
             payload.input_pipeline.expect("effective input pipeline").working_color_space,
             WorkingColorSpace::LinearP3D65
         );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -8263,13 +8236,9 @@ mod tests {
         std::fs::create_dir_all(&root).expect("create temp root");
         let media_path = root.join("shot.mov");
         std::fs::write(&media_path, b"not decoded in this view-model test").expect("write media");
-        let asset_id = AssetId::new();
-        let item = asset_grid_item_from_asset(
-            test_video_asset(asset_id, media_path.clone()),
-            None,
-            false,
-            None,
-        );
+        let asset = test_video_asset(media_path.clone());
+        let asset_id = asset.id;
+        let item = asset_grid_item_from_asset(asset.clone(), None, false, None);
 
         assert_eq!(badge_labels(&item), ["视频"]);
         assert_eq!(item.context_menu_items.len(), 5);
@@ -8289,8 +8258,7 @@ mod tests {
         assert_eq!(payload.asset_id, asset_id);
         assert!(payload.enabled);
 
-        let proxied =
-            asset_grid_item_from_asset(test_video_asset(asset_id, media_path), None, true, None);
+        let proxied = asset_grid_item_from_asset(asset, None, true, None);
         assert_eq!(badge_labels(&proxied), ["视频", "代理"]);
         assert_eq!(proxied.badges[1].tone, AssetGridBadgeTone::Success);
         assert_eq!(proxied.context_menu_items[2].label, "关闭代理模式");
@@ -9468,23 +9436,23 @@ mod tests {
         let model = TimelinePanelModel::default();
         assert_eq!(
             timeline_edit_command_action(&model, TimelineEditCommand::CutSelection),
-            Action::Cut
+            Some(Action::Cut)
         );
         assert_eq!(
             timeline_edit_command_action(&model, TimelineEditCommand::CopySelection),
-            Action::Copy
+            Some(Action::Copy)
         );
         assert_eq!(
             timeline_edit_command_action(&model, TimelineEditCommand::PasteAtPlayhead),
-            Action::Paste
+            Some(Action::Paste)
         );
         assert_eq!(
             timeline_edit_command_action(&model, TimelineEditCommand::DuplicateSelection),
-            Action::Duplicate
+            Some(Action::Duplicate)
         );
         assert_eq!(
             timeline_edit_command_action(&model, TimelineEditCommand::TogglePlayback),
-            Action::TogglePlay
+            Some(Action::TogglePlay)
         );
         assert_eq!(
             timeline_edit_command_shortcut_label(TimelineEditCommand::CopySelection).as_deref(),
@@ -9506,7 +9474,7 @@ mod tests {
 
         let trim_action =
             timeline_edit_command_action(&model, TimelineEditCommand::TrimSelectionInToPlayhead);
-        let Action::Custom { namespace, name, payload } = trim_action else {
+        let Some(Action::Custom { namespace, name, payload }) = trim_action else {
             panic!("expected selected trim action");
         };
         assert_eq!(namespace, TIMELINE_NAMESPACE);
@@ -9517,7 +9485,7 @@ mod tests {
 
         let roll_action =
             timeline_edit_command_action(&model, TimelineEditCommand::RollSelectedCutToPlayhead);
-        let Action::Custom { namespace, name, payload } = roll_action else {
+        let Some(Action::Custom { namespace, name, payload }) = roll_action else {
             panic!("expected roll cut action");
         };
         assert_eq!(namespace, TIMELINE_NAMESPACE);
@@ -9529,7 +9497,7 @@ mod tests {
 
         let disable_action =
             timeline_edit_command_action(&model, TimelineEditCommand::DisableSelection);
-        let Action::Custom { namespace, name, payload } = disable_action else {
+        let Some(Action::Custom { namespace, name, payload }) = disable_action else {
             panic!("expected selected enable action");
         };
         assert_eq!(namespace, TIMELINE_NAMESPACE);
@@ -9540,7 +9508,7 @@ mod tests {
 
         let clear_action =
             timeline_edit_command_action(&model, TimelineEditCommand::ClearInOutPoints);
-        let Action::Custom { namespace, name, payload } = clear_action else {
+        let Some(Action::Custom { namespace, name, payload }) = clear_action else {
             panic!("expected clear in/out custom action");
         };
         assert_eq!(namespace, TIMELINE_NAMESPACE);
@@ -9575,7 +9543,7 @@ mod tests {
             }),
         );
 
-        let Action::Custom { namespace, name, payload } = action else {
+        let Some(Action::Custom { namespace, name, payload }) = action else {
             panic!("expected open nested custom action");
         };
         assert_eq!(namespace, TIMELINE_NAMESPACE);
@@ -9583,6 +9551,17 @@ mod tests {
         let payload: TimelineOpenNestedSequencePayload =
             serde_json::from_value(payload).expect("open nested payload");
         assert_eq!(payload.sequence_id, nested_id);
+
+        assert_eq!(
+            timeline_edit_command_action(
+                &model,
+                TimelineEditCommand::OpenNestedSequence(TimelineClipRef {
+                    track_index: usize::MAX,
+                    clip_index: usize::MAX,
+                }),
+            ),
+            None
+        );
     }
 
     #[test]
@@ -9651,7 +9630,7 @@ mod tests {
             state.select_effect_by_id(clip_id, effect_id).is_some(),
             "seed selected effect"
         );
-        state.seek(7);
+        state.seek(7).expect("seek");
 
         let models = AppUiPanelModels::from_app_state(&state);
         let colors = current_theme().colors.clone();
@@ -9683,7 +9662,7 @@ mod tests {
             vec![CurvePoint::new(0.0, 1.0), CurvePoint::new(1.0, 1.0)]
         );
 
-        state.play();
+        state.play().expect("play");
         let playing_models = AppUiPanelModels::from_app_state(&state);
         assert_eq!(playing_models.viewer.status, "播放中");
         assert_eq!(playing_models.viewer.status_tone, ViewerStatusTone::Accent);
@@ -9775,7 +9754,7 @@ mod tests {
         sequence.settings.timeline_display =
             TimelineDisplaySettings::timecode(SmpteCountingMode::DropFrame, 107_892);
         state.test_set_sequence(Some(sequence));
-        state.seek(1_800);
+        state.seek(1_800).expect("seek");
 
         let models = AppUiPanelModels::from_app_state(&state);
 
@@ -9968,11 +9947,11 @@ mod tests {
                     missing_metadata_policy: MissingColorMetadataPolicy::RejectMedia,
                     source: InputColorResolutionSource::MissingPolicyRejectMedia,
                     override_color_space: None,
-                    detected_color_space: None,
+                    executable_color_space: None,
                     working_color_space: WorkingColorSpace::LinearRec2020,
                     diagnostic_summary: "source=MissingMetadata,warnings=missing_cicp".to_string(),
                     diagnostic_issue_summary: VideoColorDiagnosticIssueSummary {
-                        detected_color_space: None,
+                        executable_color_space: None,
                         source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
                         method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
                         confidence: mondrian_media::VideoColorInterpretationConfidence::None,
@@ -11248,7 +11227,7 @@ mod tests {
             PropertyValue::Color(color),
         );
 
-        let Action::Custom { namespace, name, payload } = action else {
+        let Some(Action::Custom { namespace, name, payload }) = action else {
             panic!("expected inspector set effect property action");
         };
         assert_eq!(namespace, INSPECTOR_NAMESPACE);
@@ -11419,7 +11398,7 @@ mod tests {
             is_video_track: true,
             clip_id,
         });
-        state.seek(15);
+        state.seek(15).expect("seek");
 
         let model = TimelinePanelModel::from_app_state(&state);
 
@@ -11456,7 +11435,7 @@ mod tests {
             clip_id,
         });
 
-        state.seek(10);
+        state.seek(10).expect("seek");
         let at_clip_start = TimelinePanelModel::from_app_state(&state);
         assert!(
             !at_clip_start.edit_command_available(TimelineEditCommand::TrimSelectionInToPlayhead)
@@ -11465,7 +11444,7 @@ mod tests {
             at_clip_start.edit_command_available(TimelineEditCommand::TrimSelectionOutToPlayhead)
         );
 
-        state.seek(29);
+        state.seek(29).expect("seek");
         let at_clip_end = TimelinePanelModel::from_app_state(&state);
         assert!(at_clip_end.edit_command_available(TimelineEditCommand::TrimSelectionInToPlayhead));
         assert!(
@@ -11660,7 +11639,7 @@ mod tests {
         );
 
         match action {
-            Action::Custom { namespace, name, payload } => {
+            Some(Action::Custom { namespace, name, payload }) => {
                 assert_eq!(namespace, INSPECTOR_NAMESPACE);
                 assert_eq!(name, INSPECTOR_EDIT_CLIP_CURVE);
                 let payload: InspectorEditClipCurvePayload =
@@ -11698,7 +11677,7 @@ mod tests {
             &boundary_model,
             CurveEdit::Delete { index: 0 },
         );
-        let Action::Custom { payload, .. } = boundary_delete else {
+        let Some(Action::Custom { payload, .. }) = boundary_delete else {
             panic!("expected boundary keyframe removal action");
         };
         let payload: InspectorEditClipCurvePayload =
@@ -11723,7 +11702,7 @@ mod tests {
             edit_id,
             InspectorAudioComponentSourcePayload::Media { component_id },
         );
-        let Action::Custom { namespace, name, payload } = source_action else {
+        let Some(Action::Custom { namespace, name, payload }) = source_action else {
             panic!("expected typed Inspector audio source action");
         };
         assert_eq!(namespace, INSPECTOR_NAMESPACE);
@@ -11742,7 +11721,7 @@ mod tests {
             edit_id,
             InspectorAudioComponentEditField::VolumeDb(-3.5),
         );
-        let Action::Custom { namespace, name, payload } = field_action else {
+        let Some(Action::Custom { namespace, name, payload }) = field_action else {
             panic!("expected typed Inspector audio field action");
         };
         assert_eq!(namespace, INSPECTOR_NAMESPACE);
@@ -11763,7 +11742,7 @@ mod tests {
             0.0,
             AudioFadeCurve::EqualPower,
         );
-        let Action::Custom { payload, .. } = zero_fade_action else {
+        let Some(Action::Custom { payload, .. }) = zero_fade_action else {
             panic!("expected typed zero-fade action");
         };
         let payload: InspectorSetAudioComponentEditFieldPayload =
@@ -11798,9 +11777,9 @@ mod tests {
     }
 
     #[test]
-    fn inspector_actions_without_selection_are_noops() {
-        assert_eq!(inspector_value_action(None, "opacity", 42.0), Action::NoOp);
-        assert_eq!(inspector_bool_action(None, true), Action::NoOp);
+    fn inspector_actions_without_selection_produce_no_command() {
+        assert_eq!(inspector_value_action(None, "opacity", 42.0), None);
+        assert_eq!(inspector_bool_action(None, true), None);
         assert_eq!(
             inspector_audio_source_action(
                 None,
@@ -11809,7 +11788,7 @@ mod tests {
                     component_id: AudioSourceComponentId::new(),
                 },
             ),
-            Action::NoOp
+            None
         );
         assert_eq!(
             inspector_audio_edit_field_action(
@@ -11817,29 +11796,29 @@ mod tests {
                 AudioComponentEditId::new(),
                 InspectorAudioComponentEditField::Enabled(false),
             ),
-            Action::NoOp
+            None
         );
         assert_eq!(
             inspector_color_action(None, Color::from_rgba8(1, 2, 3, 4)),
-            Action::NoOp
+            None
         );
         assert_eq!(
             inspector_transform_action(None, InspectorClipTransformField::PositionX, 12.0),
-            Action::NoOp
+            None
         );
         assert_eq!(
             inspector_timing_action(None, TimelineTrimPayloadEdge::In, 10.0),
-            Action::NoOp
+            None
         );
         assert_eq!(
             inspector_effect_enabled_action(None, EffectId::new(), false),
-            Action::NoOp
+            None
         );
         assert_eq!(
             inspector_remove_effect_row_action(None, EffectId::new()),
-            Action::NoOp
+            None
         );
-        assert_eq!(inspector_reorder_effect_action(None, 1, 0), Action::NoOp);
+        assert_eq!(inspector_reorder_effect_action(None, 1, 0), None);
         assert_eq!(
             inspector_effect_property_action(
                 None,
@@ -11847,7 +11826,7 @@ mod tests {
                 "color.tint",
                 PropertyValue::Color(Color::from_rgba8(1, 2, 3, 4)),
             ),
-            Action::NoOp
+            None
         );
         let curve_model = InspectorCurveModel {
             property: AnimationParameterAddress {
@@ -11863,7 +11842,7 @@ mod tests {
                 &curve_model,
                 CurveEdit::Insert { index: 0, point: CurvePoint::new(0.0, 1.0) },
             ),
-            Action::NoOp
+            None
         );
     }
 
@@ -12030,12 +12009,9 @@ mod tests {
 
         assert_eq!(
             inspector_reorder_effect_action(Some(selection), 2, 0),
-            Action::ReorderEffects { clip_id: selection.clip_id, from: 2, to: 0 }
+            Some(Action::ReorderEffects { clip_id: selection.clip_id, from: 2, to: 0 })
         );
-        assert_eq!(
-            inspector_reorder_effect_action(Some(selection), 1, 1),
-            Action::NoOp
-        );
+        assert_eq!(inspector_reorder_effect_action(Some(selection), 1, 1), None);
     }
 
     #[test]
@@ -12047,7 +12023,7 @@ mod tests {
         };
 
         match node_graph_clip_action(Some(selection)) {
-            Action::Custom { namespace, name, payload } => {
+            Some(Action::Custom { namespace, name, payload }) => {
                 assert_eq!(namespace, TIMELINE_NAMESPACE);
                 assert_eq!(name, TIMELINE_SELECT_CLIP);
                 let payload: TimelineSelectClipPayload =
@@ -12058,7 +12034,7 @@ mod tests {
             other => panic!("expected timeline select action, got {other:?}"),
         }
 
-        assert_eq!(node_graph_clip_action(None), Action::NoOp);
+        assert_eq!(node_graph_clip_action(None), None);
     }
 
     #[test]
@@ -12081,7 +12057,7 @@ mod tests {
         ];
 
         match node_graph_node_action(Some(selection), &targets, "effect-node") {
-            Action::Custom { namespace, name, payload } => {
+            Some(Action::Custom { namespace, name, payload }) => {
                 assert_eq!(namespace, INSPECTOR_NAMESPACE);
                 assert_eq!(name, INSPECTOR_SELECT_EFFECT);
                 let payload: InspectorSelectEffectPayload =
@@ -12094,12 +12070,9 @@ mod tests {
 
         assert_eq!(
             node_graph_node_action(Some(selection), &targets, "missing-node"),
-            Action::NoOp
+            None
         );
-        assert_eq!(
-            node_graph_node_action(None, &targets, "effect-node"),
-            Action::NoOp
-        );
+        assert_eq!(node_graph_node_action(None, &targets, "effect-node"), None);
     }
 
     #[test]
@@ -12441,7 +12414,7 @@ mod tests {
         std::env::temp_dir().join(format!("mondrian-{prefix}-{suffix}"))
     }
 
-    fn test_video_asset(asset_id: AssetId, path: PathBuf) -> AssetRecord {
+    fn test_video_media_info(path: &Path) -> mondrian_media::MediaInfo {
         let primaries = mondrian_media::VideoColorTag {
             code: 1,
             name: Some("bt709".to_owned()),
@@ -12454,60 +12427,71 @@ mod tests {
             transfer: transfer.clone(),
             matrix: matrix.clone(),
         };
-        let mut media_info = mondrian_media::MediaInfo::synthetic_solid_color();
-        media_info.has_video = true;
-        media_info.video_streams.push(mondrian_media::VideoStreamInfo {
-            index: 0,
-            codec: mondrian_media::info::VideoCodec::H264,
-            duration: Some(std::time::Duration::from_secs(1)),
-            codec_profile: mondrian_media::VideoCodecProfile::Unknown,
-            width: 1920,
-            height: 1080,
-            frame_rate: Rational::FPS_24,
-            frame_rate_proven: true,
-            pixel_format: mondrian_media::info::PixelFormat::Yuv420p,
-            pixel_format_proven: true,
-            color_range: mondrian_media::DecodedVideoRange::Limited,
-            detected_color_space: Some(ColorSpace::Rec709),
-            color_interpretation: mondrian_media::DetectedColorInterpretation {
-                color_space: Some(ColorSpace::Rec709),
-                confidence: mondrian_media::VideoColorInterpretationConfidence::High,
-                source: mondrian_media::VideoColorSpaceSource::Metadata,
-                method: mondrian_media::VideoColorDetectionMethod::CicpTags,
-                evidence: vec![
-                    mondrian_media::VideoColorInterpretationEvidence::ExactCicpTags {
-                        primaries,
-                        transfer,
-                        matrix,
-                        detected_color_space: ColorSpace::Rec709,
-                    },
-                ],
-                warnings: Vec::new(),
-                user_overridable: true,
-            },
-            color_space_source: mondrian_media::VideoColorSpaceSource::Metadata,
-            color_detection_method: mondrian_media::VideoColorDetectionMethod::CicpTags,
-            color_metadata: Some(color_metadata),
-            color_metadata_hints: Vec::new(),
-            hdr_metadata: Vec::new(),
-            bit_depth: 8,
-            has_alpha: false,
-            avg_bitrate: 10_000_000,
-            total_frames: Some(240),
-        });
-        AssetRecord {
-            id: asset_id,
-            name: path.file_name().and_then(|name| name.to_str()).unwrap_or("shot.mov").to_owned(),
-            kind: AssetKind::Video,
-            path,
-            source: None,
-            folder_id: None,
-            interpretation: mondrian_core::timeline_data::AssetMediaInterpretation::default(),
-            audio_components: Default::default(),
-            media_info,
-            created_at: "2026-06-19T00:00:00Z".to_owned(),
-            updated_at: "2026-06-19T00:00:00Z".to_owned(),
+        let duration = std::time::Duration::from_secs(10);
+        mondrian_media::MediaInfo {
+            duration,
+            file_size: std::fs::metadata(path).expect("media fixture metadata").len(),
+            container: "mov".to_owned(),
+            video_streams: vec![mondrian_media::VideoStreamInfo {
+                index: 0,
+                codec: mondrian_media::info::VideoCodec::H264,
+                duration: Some(duration),
+                codec_profile: mondrian_media::VideoCodecProfile::Unknown,
+                width: 1920,
+                height: 1080,
+                frame_rate: Rational::FPS_24,
+                frame_rate_proven: true,
+                pixel_format: mondrian_media::info::PixelFormat::Yuv420p,
+                pixel_format_proven: true,
+                color_range: mondrian_media::DecodedVideoRange::Limited,
+                color_interpretation: mondrian_media::DetectedColorInterpretation {
+                    candidate_color_space: Some(ColorSpace::Rec709),
+                    confidence: mondrian_media::VideoColorInterpretationConfidence::High,
+                    source: mondrian_media::VideoColorSpaceSource::Metadata,
+                    method: mondrian_media::VideoColorDetectionMethod::CicpTags,
+                    evidence: vec![
+                        mondrian_media::VideoColorInterpretationEvidence::ExactCicpTags {
+                            primaries,
+                            transfer,
+                            matrix,
+                            detected_color_space: ColorSpace::Rec709,
+                        },
+                    ],
+                    warnings: Vec::new(),
+                    user_overridable: true,
+                },
+                color_metadata: Some(color_metadata),
+                color_metadata_hints: Vec::new(),
+                hdr_metadata: Vec::new(),
+                bit_depth: 8,
+                has_alpha: false,
+                avg_bitrate: 10_000_000,
+                total_frames: Some(240),
+            }],
+            audio_streams: Vec::new(),
+            has_video: true,
+            has_audio: false,
         }
+    }
+
+    fn commit_test_media_asset(
+        library: &AssetLibrary,
+        path: PathBuf,
+        media_info: mondrian_media::MediaInfo,
+    ) -> AssetId {
+        let path = std::fs::canonicalize(path).expect("canonical panel test media fixture");
+        let fingerprint = mondrian_media::MediaFileFingerprint::capture(&path);
+        let candidate =
+            AssetMediaProbeCandidate::new(path, fingerprint, media_info).expect("media candidate");
+        library.commit_media_probe(candidate, None).expect("register Asset")
+    }
+
+    fn test_video_asset(path: PathBuf) -> AssetRecord {
+        let library_root = path.parent().expect("media fixture parent").join("asset-library");
+        let library = AssetLibrary::open(library_root).expect("fixture Asset Library");
+        let media_info = test_video_media_info(&path);
+        let asset_id = commit_test_media_asset(&library, path, media_info);
+        library.get_asset(asset_id).expect("read fixture Asset").expect("fixture Asset")
     }
 
     fn assert_shell_action(action: Option<&Action>, name: &str) {

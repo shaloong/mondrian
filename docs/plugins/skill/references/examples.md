@@ -1,5 +1,29 @@
 # Complete Examples
 
+The snippets below assume this conservative helper is in scope. Select only an
+exact mode the emitted operations really implement. The high-level plugin SDK
+currently admits only stateless current-frame examples here; author-selected
+external resources and continuity state must remain fail-closed until their
+real preparation or Session Interface is exposed.
+
+```rust
+fn current_frame_contract(
+    execution_modes: EffectExecutionModes,
+    topology: EffectGraphTopology,
+    resource_lifetime: EffectResourceLifetime,
+) -> EffectExecutionContract {
+    EffectExecutionContract {
+        execution_modes,
+        determinism: EffectDeterminism::Deterministic,
+        state_model: EffectStateModel::Stateless,
+        temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+        roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+        resource_lifetime,
+        topology,
+    }
+}
+```
+
 ## Example 1: Simple blur effect
 
 A linear chain effect with one parameter.
@@ -13,18 +37,28 @@ use mondrian_effects::{
 
 pub fn register() {
     let plugin_type = EffectType::Plugin("plugin.example.soft_blur".to_string());
+    let radius_id = plugin_type
+        .parameter_id("radius")
+        .expect("static parameter ID");
 
-    let definition = EffectPluginDefinitionBuilder::new(plugin_type.key(), "Soft Blur")
+    let definition = EffectPluginDefinitionBuilder::new(
+        plugin_type.key(),
+        "Soft Blur",
+        EffectColorDomainContract::SCENE_LINEAR,
+    )
+        .with_execution_contract(current_frame_contract(
+            EffectExecutionModes::CPU_F32,
+            EffectGraphTopology::LinearChain,
+            EffectResourceLifetime::Frame,
+        ))
         .with_plugin_contract(EffectPluginContract::new("0.1.0"))
         .property(PropertyDescriptor::new(
             "plugin.example.soft_blur.radius",
             "Radius",
             PropertyValue::Float(4.0),
-        ))
-        .with_graph(|effect, context, graph| {
-            let radius = effect.evaluate_f32_by_suffix(
-                "plugin.example.soft_blur.radius", context.time, 4.0
-            );
+        ).with_parameter_id(radius_id.clone()))
+        .with_graph(move |effect, context, graph| {
+            let radius = effect.evaluate_f32_parameter(&radius_id, context.time, 4.0);
             if radius <= 0.0 {
                 return;
             }
@@ -32,7 +66,7 @@ pub fn register() {
         })
         .build();
 
-    register_effect_definition(definition);
+    register_effect_definition(definition).expect("register Soft Blur");
 }
 ```
 
@@ -52,207 +86,98 @@ use mondrian_effects::{
 
 pub fn register() {
     let plugin_type = EffectType::Plugin("plugin.example.glow".to_string());
+    let radius_id = plugin_type
+        .parameter_id("radius")
+        .expect("static parameter ID");
+    let opacity_id = plugin_type
+        .parameter_id("opacity")
+        .expect("static parameter ID");
 
-    let definition = EffectPluginDefinitionBuilder::new(plugin_type.key(), "Glow")
+    let definition = EffectPluginDefinitionBuilder::new(
+        plugin_type.key(),
+        "Glow",
+        EffectColorDomainContract::SCENE_LINEAR,
+    )
+        .with_execution_contract(current_frame_contract(
+            EffectExecutionModes::CPU_F32,
+            EffectGraphTopology::GeneralDag,
+            EffectResourceLifetime::Frame,
+        ))
         .with_plugin_contract(EffectPluginContract::new("0.1.0"))
         .property(PropertyDescriptor::new(
             "plugin.example.glow.radius",
             "Radius",
             PropertyValue::Float(8.0),
-        ))
+        ).with_parameter_id(radius_id.clone()))
         .property(PropertyDescriptor::new(
             "plugin.example.glow.opacity",
             "Opacity",
             PropertyValue::Float(0.4),
-        ))
-        .property(PropertyDescriptor::new(
-            "plugin.example.glow.threshold",
-            "Threshold",
-            PropertyValue::Float(0.5),
-        ))
-        .with_branching_graph(|effect, context, graph| {
-            let radius = effect.evaluate_f32_by_suffix(
-                "plugin.example.glow.radius", context.time, 8.0
-            );
-            let opacity = effect.evaluate_f32_by_suffix(
-                "plugin.example.glow.opacity", context.time, 0.4
-            );
+        ).with_parameter_id(opacity_id.clone()))
+        .with_branching_graph(move |effect, context, graph| {
+            let radius = effect.evaluate_f32_parameter(&radius_id, context.time, 8.0);
+            let opacity = effect.evaluate_f32_parameter(&opacity_id, context.time, 0.4);
 
             if radius <= 1.0e-4 || opacity <= 1.0e-4 {
                 return;
             }
 
             graph.blend_current(BlendMode::Screen, opacity, |graph, source| {
-                graph.apply_to(source, EffectRenderOp::GaussianBlur { radius });
+                graph.apply_to(source, EffectRenderOp::GaussianBlur { radius })
             });
         })
         .build();
 
-    register_effect_definition(definition);
+    register_effect_definition(definition).expect("register Glow");
 }
 ```
 
-## Example 3: LUT loader with custom render backend
+## Example 3: External LUT boundary
 
-A custom render backend that loads a 3D LUT file and applies it.
+Do not implement an author-selected LUT by carrying its path into
+`with_custom_render_backend`, using that path as a deterministic cache key, or
+opening the file from a graph/cache-key/processor closure. A path is not content
+identity, and all three closures may run on the frame path.
 
-```rust
-use std::sync::Arc;
-use mondrian_core::automation::{PropertyDescriptor, PropertyValue};
-use mondrian_effects::{
-    EffectCachePolicy, EffectPluginContract, EffectPluginDefinitionBuilder, EffectType,
-    register_effect_definition,
-};
+The high-level `EffectPluginDefinitionBuilder` currently has no complete,
+versioned “author path → immutable prepared LUT + dependency revalidation”
+Interface. Such an instance must therefore return a structured
+`EffectGraphBuildError::ResourceUnavailable` and remain blocked. A future
+example may be added only when it can bind an immutable LUT payload, exact
+content/revision identity, low-frequency revalidation, and the declared
+resource lifetime without inventing another cache or filesystem authority.
 
-pub fn register() {
-    let plugin_type = EffectType::Plugin("plugin.example.lut_loader".to_string());
+## Example 4: Mask boundary
 
-    let definition = EffectPluginDefinitionBuilder::new(plugin_type.key(), "LUT Loader")
-        .with_plugin_contract(
-            EffectPluginContract::new("0.1.0")
-                .with_runtime_failure_policy(
-                    mondrian_effects::EffectPluginRuntimeFailurePolicy::KeepDefinitionAvailable,
-                )
-                .with_library_policy(
-                    mondrian_effects::EffectPluginLibraryPolicy::KeepVisible,
-                ),
-        )
-        .property(PropertyDescriptor::new(
-            "plugin.example.lut_loader.path",
-            "LUT Path",
-            PropertyValue::String(String::new()),
-        ))
-        .property(PropertyDescriptor::new(
-            "plugin.example.lut_loader.intensity",
-            "Intensity",
-            PropertyValue::Float(1.0),
-        ))
-        .with_custom_render_backend(
-            // Params builder
-            Arc::new(|effect, context| {
-                let path_id = effect.effect_type.parameter_id("path")
-                    .expect("definition parameter ID");
-                let path = effect.evaluate_parameter(&path_id, context.time)
-                    .and_then(|value| value.as_str().map(str::to_owned))
-                    .ok_or_else(|| EffectGraphBuildError::ResourceUnavailable {
-                        effect_key: effect.effect_type.key(),
-                        effect_id: effect.id,
-                        parameter_id: path_id,
-                        reason: "LUT path is unbound".to_string(),
-                    })?;
-                let intensity = effect.evaluate_f32_by_suffix(
-                    "plugin.example.lut_loader.intensity", context.time, 1.0
-                );
-                Ok(Some(serde_json::json!({
-                    "lut_path": path,
-                    "intensity": intensity,
-                })))
-            }),
-            // Cache key builder
-            Some(Arc::new(|effect, context| {
-                let path = effect.evaluate_property(
-                    "plugin.example.lut_loader.path", context.time
-                )?.as_str()?.to_string();
-                Some(format!("lut:{}", path))
-            })),
-            EffectCachePolicy::Deterministic,
-            // Processor
-            Arc::new(|buffer, width, height, params, frame_seed| {
-                let lut_path = params["lut_path"].as_str().unwrap_or("");
-                let intensity = params["intensity"].as_f64().unwrap_or(1.0) as f32;
+`mask(...)` / `mask_current(...)` take `invert`, an explicit
+`MaskOp::{Add, Subtract, Intersect, Difference}`, and a closure returning an
+`EffectGraphValue`. That value must have `EffectColorDomain::AlphaMask`.
 
-                if lut_path.is_empty() {
-                    return Ok(()); // No LUT → identity
-                }
-
-                // Apply LUT to buffer pixels...
-                // buffer is RGBA, width * height * 4 bytes
-                Ok(())
-            }),
-        )
-        .build();
-
-    register_effect_definition(definition);
-}
-```
-
-## Example 4: Vignette with mask
-
-Using mask_current to create a vignette effect.
-
-```rust
-use mondrian_core::automation::{PropertyDescriptor, PropertyValue};
-use mondrian_effects::{
-    EffectCachePolicy, EffectPluginContract, EffectPluginDefinitionBuilder,
-    EffectRenderOp, EffectType, register_effect_definition,
-};
-
-pub fn register() {
-    let plugin_type = EffectType::Plugin("plugin.example.vignette".to_string());
-
-    let definition = EffectPluginDefinitionBuilder::new(plugin_type.key(), "Vignette")
-        .with_plugin_contract(EffectPluginContract::new("0.1.0"))
-        .property(PropertyDescriptor::new(
-            "plugin.example.vignette.intensity",
-            "Intensity",
-            PropertyValue::Float(0.5),
-        ))
-        .with_branching_graph(|effect, context, graph| {
-            let intensity = effect.evaluate_f32_by_suffix(
-                "plugin.example.vignette.intensity", context.time, 0.5
-            );
-
-            if intensity <= 0.0 {
-                return;
-            }
-
-            // Darken: multiply with a darkened version
-            graph.blend_current(
-                mondrian_core::types::BlendMode::Multiply,
-                intensity,
-                |graph, source| {
-                    graph.apply_to(source, EffectRenderOp::Vignette {
-                        intensity: 1.0,
-                        feather: 0.3,
-                    });
-                },
-            );
-        })
-        .build();
-
-    register_effect_definition(definition);
-}
-```
+The current high-level plugin DSL does not expose `MaskSource` or a typed
+RGB-to-matte producer. Do not fabricate one with raw `EffectRenderOp::Custom`:
+it would be missing the Definition-bound processor and an AlphaMask domain
+proof, so compilation correctly fails closed. Clip author masks are injected
+by the engine; a plugin mask example should be added only when a typed producer
+is part of the public SDK.
 
 ## Example 5: Registering multiple effects from one plugin
 
 A plugin crate can register multiple effects:
 
 ```rust
-pub fn register() {
-    register_glow_effect();
-    register_sharpen_effect();
-    register_vignette_effect();
-}
-
-fn register_glow_effect() {
-    let plugin_type = EffectType::Plugin("plugin.example.glow".to_string());
-    let definition = EffectPluginDefinitionBuilder::new(plugin_type.key(), "Glow")
-        .with_plugin_contract(EffectPluginContract::new("0.1.0"))
-        // ... build and register
-        .build();
-    register_effect_definition(definition);
-}
-
-fn register_sharpen_effect() {
-    let plugin_type = EffectType::Plugin("plugin.example.sharpen".to_string());
-    let definition = EffectPluginDefinitionBuilder::new(plugin_type.key(), "Sharpen Pro")
-        .with_plugin_contract(EffectPluginContract::new("0.1.0"))
-        // ... build and register
-        .build();
-    register_effect_definition(definition);
+pub fn register_all()
+    -> Result<(), mondrian_effects::effect::EffectDefinitionError>
+{
+    // Each function builds a complete definition: color domain, exact execution
+    // contract, parameter schema, graph builder, and plugin contract.
+    register_glow_effect()?;
+    register_sharpen_effect()?;
+    register_vignette_effect()
 }
 ```
+
+Do not register placeholder definitions that omit their execution contract or
+graph builder. The conservative plugin default is intentionally not executable.
 
 ## Testing a plugin
 
@@ -260,58 +185,36 @@ fn register_sharpen_effect() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_core::types::{Rational, TimeCode};
+    use mondrian_core::{TimelineTime, WorkingColorSpace};
     use mondrian_effects::{
-        build_effect_render_graph, effect_definition, EffectNode,
+        build_effect_render_graph, effect_definition, EffectGraphTopology,
+        EffectNode, EffectNodeExt, EffectProcessingBackend,
+        EffectWorkingPrecision,
     };
 
     #[test]
     fn glow_effect_produces_valid_graph() {
-        register();
+        register_glow_effect().expect("register Glow");
 
         let plugin_type = EffectType::Plugin("plugin.example.glow".to_string());
-        let effect = EffectNode::new(plugin_type);
-        let time = TimeCode::new(0, Rational::new(1, 30));
+        let effect = EffectNode::with_defaults(plugin_type.clone());
 
-        let graph = build_effect_render_graph(&[effect], time);
+        let graph = build_effect_render_graph(
+            &[effect],
+            TimelineTime::ZERO,
+            WorkingColorSpace::LinearRec709,
+        )
+        .expect("build Glow graph");
         // Glow with blend creates at least 3 nodes: source → blur → blend
         assert!(graph.nodes.len() >= 3);
         assert!(graph.output.is_some());
-    }
-
-    #[test]
-    fn glow_effect_is_identity_when_params_zero() {
-        register();
-
-        let plugin_type = EffectType::Plugin("plugin.example.glow".to_string());
-        let mut effect = EffectNode::new(plugin_type);
-        let time = TimeCode::new(0, Rational::new(1, 30));
-
-        // Set both params to zero
-        effect.set_static_value_by_suffix(
-            "glow.radius",
-            mondrian_core::automation::PropertyValue::Float(0.0),
-        ).ok();
-        effect.set_static_value_by_suffix(
-            "glow.opacity",
-            mondrian_core::automation::PropertyValue::Float(0.0),
-        ).ok();
-
-        let graph = build_effect_render_graph(&[effect], time);
-        // With zero params, graph builder returns early → identity graph
-        assert!(graph.is_identity());
-    }
-
-    #[test]
-    fn effect_definition_has_correct_capabilities() {
-        register();
-
-        let plugin_type = EffectType::Plugin("plugin.example.glow".to_string());
         let def = effect_definition(&plugin_type).expect("effect definition should exist");
-        let caps = def.capabilities();
-
-        assert!(caps.supports_render_graph);
-        assert!(caps.supports_branching_render_graph);
+        let contract = def.execution_contract();
+        assert!(contract.execution_modes.contains(
+            EffectProcessingBackend::Cpu,
+            EffectWorkingPrecision::Float32,
+        ));
+        assert_eq!(contract.topology, EffectGraphTopology::GeneralDag);
     }
 }
 ```

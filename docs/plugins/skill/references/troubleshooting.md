@@ -9,7 +9,7 @@
 1. Verify `register_effect_definition()` is actually called at startup
 2. Check `effect_library_types()` return value — does it include your EffectType?
 3. Check `effect_definition(&your_type)` returns `Some(...)`
-4. Check `effect_plugin_is_library_visible(key, contract)` returns `true`
+4. Check the registered Definition's Contract uses the intended library policy
 5. Verify API version compatibility: `contract.is_api_compatible()` returns `true`
 6. Check runtime status: `effect_plugin_runtime_status(key)` — is `disabled` false?
 
@@ -28,12 +28,11 @@
 1. Check `EffectNode.is_enabled` is `true`
 2. Check parameters — zero/edge values may cause the graph builder to return early (identity)
 3. Check `graph.is_identity()` on the built graph — true means all ops were skipped
-4. Check `EffectRenderPlan.is_identity()` — true means no ops in the plan
 
 **Common causes:**
 - Parameters default to values that produce no visual effect (e.g., radius=0, opacity=0)
 - Graph builder returns early when parameters are below threshold — check the early-return condition
-- Effect's `evaluate_into` path is taken but evaluator is not set up correctly
+- Definition has no admitted execution mode or the prepared graph failed its contract
 - For custom render: `params_builder` returns `Ok(None)`, the definition's explicit identity result
 
 ## Custom processor not being called
@@ -42,15 +41,18 @@
 
 **Checklist:**
 
-1. Verify `register_custom_render_processor()` was called (done automatically by `with_custom_render_backend`)
+1. Use `with_custom_render_backend(...)`, the sole supported path that embeds
+   the processor directly; an unbound manually constructed raw Custom node is
+   intentionally rejected at compilation
 2. Check `params_builder` returns `Ok(Some(...))`; `Ok(None)` intentionally skips the processor and `Err` fails graph construction
-3. Check `effect_plugin_is_runtime_available()` — disabled plugins skip all execution
-4. Check that the `EffectRenderOp::Custom` node appears in the compiled graph
+3. Check `effect_plugin_runtime_status(key)` — a quarantined current Definition generation is rejected before execution
+4. Inspect whether the engine-emitted, Definition-bound internal
+   `EffectRenderOp::Custom` node appears in the compiled graph; never construct it manually
 
 **Common causes:**
 - `params_builder` returns `Ok(None)` because the definition deliberately treats current parameters as identity; missing required state should instead return `EffectGraphBuildError`
 - Plugin was disabled by a previous failure (check runtime status)
-- The effect's `evaluate_render_into` is never called because the graph builder path is preferred
+- The prepared graph was rejected before execution because its Definition contract was too optimistic
 
 ## Performance issues
 
@@ -58,14 +60,14 @@
 
 **Diagnosis:**
 
-1. Check `CompiledEffectGraph.estimated_cost` — high values mean expensive graph
-2. Check `CompiledEffectNodeProfile.estimated_cost` per node to find bottlenecks
-3. Check if `node.output_cache_enabled` is `true` for expensive nodes
+1. Check `CompiledEffectGraph::estimated_cost()` — high values mean expensive graph
+2. Check `CompiledEffectGraph::node_profiles()` and each profile's `estimated_cost`
+3. Check `CompiledEffectGraph::output_cache_enabled()` / profile `output_cache_enabled`
 4. For custom render: check that cache_key is provided and stable
 
 **Fixes:**
-- Add `cache_key` for deterministic custom processors that depend on external resources
-- Split large custom processors into smaller subtrees (runtime can cache subtrees independently)
+- For an already prepared immutable external resource, include its exact content/revision identity in `cache_key`; otherwise fail closed
+- Express built-in work as Graph DSL nodes so the runtime can reason about subtrees; do not fabricate raw Custom nodes
 - Use `EffectCachePolicy::Deterministic` instead of `FrameDependent` if the effect is truly deterministic
 - For linear chains: consider whether ops can be merged or simplified
 - Check that early-return (identity when params are zero) is implemented
@@ -93,9 +95,9 @@
 **Symptom:** Plugin compiles but panics or produces errors at runtime.
 
 **Key guarantees:**
-- Panics in evaluator/graph builder/render builder are caught by `catch_unwind`
+- Panics in Definition preparation and graph builders are caught by `catch_unwind`
 - Panics in custom processor result in staged buffer being discarded
-- Errors are recorded via `record_plugin_runtime_failure()`
+- Errors are recorded internally against the immutable Definition generation
 - Semi-finished pixels never leak to the output frame
 
 **Debugging:**
@@ -111,12 +113,12 @@
 **Possible causes (code issues):**
 - Frame-dependent effect declared as `Deterministic`
 - Custom processor uses `frame_seed` but cache policy is `Deterministic`
-- File paths differ between dev and export environments (use relative or content-hash-based cache keys)
+- An external dependency was not bound to one immutable content/revision identity
 
 **Possible causes (expected behavior):**
 - Preview may use lower resolution for performance — this is normal
 - Export uses full resolution — visual difference from resolution change is expected
-- Cache TTL may differ between preview and export modes — this is a runtime scheduling difference, not a bug
+- Preview and Export have separate owner-scoped Sessions and budgets, but cache ownership must not change effect semantics
 
 ## Parameter persistence issues
 
@@ -124,11 +126,11 @@
 
 **Checklist:**
 
-1. Parameter keys are stable and don't change between plugin versions
-2. Property paths use the `plugin.<author>.<name>.<param>` convention
-3. Default values are reasonable (project stores only deviations from defaults)
+1. Every product descriptor explicitly binds a stable `ParameterId`
+2. Property paths use the `plugin.<author>.<name>.<param>` convention as current UI/authoring aliases
+3. Parameter value types and schema revisions remain compatible
 
 **Common causes:**
-- Renamed a parameter key without migration — old projects lose the value
+- Changed `ParameterId` without migration — old projects lose the stable identity
 - Changed a parameter type (Float → Int) — old values can't be deserialized
 - Changed the plugin key — old projects can't find the effect definition

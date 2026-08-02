@@ -18,6 +18,19 @@ video evaluation/snap grid and display-timecode input, not the universal storage
 time base; audio edits may therefore retain sample-accurate boundaries without
 creating a second Timeline model.
 
+The `Action::MoveClipToTrack` and `Action::Seek` semantic inputs may receive a
+`FramePosition` from an input Adapter, but its `time_base` is never discarded.
+The App Action Adapter first converts the complete value to exact
+Sequence-local `TimelineTime`, then lowers it exactly once onto the active
+Sequence video evaluation grid with
+`FrameRounding::Nearest`; invalid or negative coordinates fail before transport
+or author mutation. A source-edge trim similarly maps the exact source-local
+coordinate through the Clip source-time scale to an exact Sequence-local target
+and only then applies the same Sequence-grid quantization. The source frame rate
+must never quantize a Sequence position. This single lowering Seam makes mixed
+24 and 30000/1001 inputs deterministic while keeping the persisted author model
+independent of either grid.
+
 ## Sequence
 
 A `Sequence` contains:
@@ -34,6 +47,64 @@ Default sequences create `V1..V3` and `A1..A3`. `SequenceSettings` validates
 resolution, frame rate, audio sample rate/layout, preview settings, and
 color-management constraints. Audio layout is the sole persisted channel
 authority; no parallel channel-count field can diverge from it.
+
+### Structurally Shared Author Collections
+
+Large ordered author collections use `mondrian_core::AuthoringList<T>`, an
+owned copy-on-write list backed by an immutable shared allocation. This applies
+at each high-cardinality author seam: the Project's Sequence collection;
+Sequence video/audio Tracks, video Transitions, and audio Roles; Track Clips;
+Clip Effects, Masks, and audio Component Edits; and Audio Program Scopes,
+Transitions, Buses, Outputs, and Routes. Ordered audio processor Racks use the
+same list contract. Keyed audio Track channels and processor-parameter
+snapshots use the serde-transparent `AuthoringMap<K, V>` counterpart, while
+Project proxy-mode membership uses the representation-transparent
+`AuthoringSet<T>` counterpart and opaque plugin-state bytes use
+`AuthoringList<u8>`. A Sequence candidate
+therefore does not deep-copy every Track processor and unavailable plugin blob
+before the edit reaches the relevant audio branch.
+
+Cloning a detached Sequence candidate therefore shares these list allocations.
+The first mutable access to one list detaches only that list through
+copy-on-write; nested lists remain shared until their own mutation seam is
+crossed. Callers still edit through ordinary `&mut Sequence`, Track, and Clip
+Interfaces, and no interior mutability or shared mutable author state is
+introduced.
+
+Candidate transformations must determine no-op cleanup and affected ownership
+before requesting mutable COW access. A multi-Track edit may detach only the
+Track Clip lists whose authored contents change; validation or compaction that
+finds nothing to remove preserves every allocation identity. This is a
+long-project locality invariant, not an optional History optimization.
+
+`AuthoringList` and `AuthoringSet` serialize and deserialize exactly as JSON
+arrays; `AuthoringMap` remains exactly a JSON object. The Set preserves
+`BTreeSet`'s canonical order while making Project clones and typed History
+snapshots share one immutable membership allocation. A real insert/remove
+detaches it once; a no-op membership request returns before creating a detached
+candidate. Allocation sharing, reference counts, allocation identities, and
+copy-on-write state never enter `.mdp` author data, canonical fingerprints, or
+execution snapshots. Timeline tests require byte-equivalent serialization,
+structured round-trip equality, and clone isolation through the full Sequence
+→ Track → Clip, audio-processing, and Project proxy-membership hierarchies.
+
+Every shared allocation has a process-local identity used only by the
+versioned `AuthoringFootprint` evidence contract. History can traverse several
+typed immutable roots, charge a shared allocation once, and conservatively
+include retained String/Vec/map/JSON/plugin-state capacity. Footprint
+implementations fully destructure author structs and exhaustively match closed
+enums so a newly added author field cannot silently escape the retained-memory
+budget. This logical payload evidence is not allocator overhead or process RSS;
+native memory remains a separate gate.
+
+The same boundary continues inside automation payloads rather than stopping at
+the Clip shell. `PropertyBag` shares its private ordered property map;
+`AnimatedProperty` and its Channels share their private ordered collections;
+exact audio-parameter keyframes and Mask shape keyframes use
+`AuthoringList`. A candidate edit therefore detaches only the property, curve,
+or shape collection it actually mutates. These containers preserve the
+existing JSON object/array shapes and stable author identities; they are an
+allocation strategy, not another automation model or mutable-state authority.
 
 ### Position Display
 
@@ -86,6 +157,8 @@ Clip link groups, duplicate effect-local
 Parameter identities, duplicate animation-track identities in one property
 owner, and duplicate keyframe identities in one exact automation curve. Audio
 Program validation owns the corresponding typed audio-entity uniqueness rules.
+Persisted Track height must be finite and greater than zero, so structured
+author equality and editor layout never admit NaN or a non-renderable lane.
 `AudioProcessorInstanceId` is unique across all Scope, Track, Bus, and Output
 Racks in one Sequence; a shared Scope is referenced once in author data and may
 materialize several independent generated execution occurrences.
@@ -93,24 +166,222 @@ Copy and razor operations must fork the identities specified by the Sequence
 audio ADR; Sequence duplication forks every Sequence-owned identity and resets
 only the new Sequence revision.
 
+`Sequence::validate_author_contract(ProjectColorEnvironment)` centralizes the
+complete local body contract. Project open/edit wraps it with collection-wide
+strong-reference and cycle checks; selected-range execution admission applies
+it only to the captured root/nested closure before an immutable execution
+attachment becomes worker authority. A renderer or exporter must not grow a
+second Track/Clip schema validator.
+
 `AuthoringSession` is the only production owner of a mutable
-`ProjectDocument`. An edit operates on a cloned Sequence or Project candidate;
-only after the candidate validates is it installed, assigned the next
-`AuthorGeneration`/`SequenceRevision`, and recorded in project-wide history.
+`ProjectDocument`. An ordinary edit clones only the target Sequence into a
+detached candidate; it does not clone or install a replacement Project.
+Structural operations that can add/remove Sequences, change Project-owned
+settings, or require a valid navigation fallback operate on a detached
+complete-Project candidate. That complete candidate remains the Project
+transaction Interface; it is not retained wholesale merely because the
+operation needs Undo. Active-Sequence navigation and its stack are
+editor state: Project Undo/Redo preserves the currently viewed Sequence while
+it still exists, and selects the restore point's valid fallback only when
+the current Sequence was removed. The next `AuthorGeneration` and every affected
+`SequenceRevision` are computed before any live authority changes.
+
+One Sequence snapshot commit verifies identity, revision, and complete
+canonical `before` content, then assigns a newer Session-owned revision.
+`SequenceAuthorContractCertificate` is opaque and non-serialized. It strongly
+retains `AuthoringSnapshot<Sequence>` plus the exact Project color environment;
+replacement preparation rejects a stale baseline, same/older revision, changed
+identity, or changed color context before reuse. The sole full
+`Sequence::validate_author_contract` Implementation creates initial evidence.
+Incremental preparation always reruns revision/settings/color, Track-domain,
+complete identity/link, visual Transition, and Audio Program validation. It may
+skip only unchanged local Track, Clip, Basic Title, Transform, Effect, and Mask
+validators. Detached-but-equal deserialized storage is compared structurally,
+so allocation identity is a locality hint rather than correctness authority.
+
+Cross-Sequence validation uses one opaque, non-serialized
+`SequenceDependencyCertificate`. It contains private derived nesting/output
+facts and strongly retains the exact canonical `AuthoringList<Sequence>` COW
+root plus default Sequence identity that produced them. This strong baseline
+makes allocation-keyed per-Track fact reuse safe: while a certificate exists,
+mutating a referenced Clip list must detach; any direct mutation elsewhere also
+fails exact baseline comparison. Active navigation is not anchored, but every
+reuse verifies that its target still exists. Each Sequence fact stores
+deduplicated nesting edges, exact nested-output obligations
+(parent/Clip/edit/child/output/optional explicit matrix source layout), public
+output IDs/layouts, and derived per-Track facts keyed by domain and Clip-list
+allocation. Public outputs and channel layout are recomputed for every
+replacement. Preparing one replacement detaches only private fact/reverse-edge
+map spines and affected parent sets.
+
+Full collection validation and incremental replacement use the same facts
+extractor and dependency-contract checker. A replacement extracts only changed
+Track Clip-list bodies plus its current Sequence-level output contract. It
+checks the candidate's outgoing references and output
+bindings, checks existing direct parents whose nested-output contracts consume
+the candidate, and rejects a new cycle by walking the existing reverse
+ancestors of the replaced identity. It never visits an unrelated Clip body.
+Exact author-baseline freshness fails closed before History preparation if the
+certificate does not match the canonical Session state. The general stateless
+`ProjectDocument::validate_sequence_replacement` Interface remains available;
+it builds the same derived facts from its supplied collection rather than
+becoming a second interpretation.
+
+`ProjectAuthoringValidationCertificate::prepare_sequence_replacement` consumes
+the candidate and constructs the next outer Sequence-list COW root exactly
+once. The returned `PreparedProjectSequenceReplacement` retains the complete
+next document and Project certificate; the dependency certificate clones that
+same outer root. Only after this semantic ticket succeeds does History prepare
+its typed endpoint and footprint descriptors from the ticket's read-only
+replacement. History commit is followed by infallible ticket consumption and
+installation. Thus validation failure cannot change History descriptor state,
+and no validation, JSON conversion, allocation, or footprint discovery occurs
+between History commit and installing the paired document/certificate.
+Sequence snapshot commits compare the complete canonical `before` content as
+well as its revision, so a caller cannot forge same-revision History that would
+later Undo to a state that never existed.
+Project candidate commits likewise treat every Sequence revision as Session
+authority: changed existing Sequences receive the checked successor, new
+Sequences receive the initial revision, and unchanged Sequences retain the
+canonical prior revision even if a caller supplied a forged candidate value.
+After revision and persistence-field normalization, a candidate with no
+authored change returns no commit, advances no Generation, and creates no
+History entry; an active-Sequence-only change belongs to the navigation
+Interface. Real candidates validate the complete Project, rebuild the complete
+Project authoring-validation certificate, prove that the declared affected Sequence set equals the
+actual body/presence difference, and project before/after
+`ProjectRestorePoint` endpoints before History admission; the Session still
+installs the complete detached candidate.
 UI and execution code receive read-only references or immutable snapshots.
 There is no production API for “mutate first, record later”, so an edit error,
-validation error, history serialization failure, or oversize-history outcome
-cannot leak a partial canonical state.
+validation error, History preparation/accounting failure, or oversize-history
+outcome cannot leak a partial canonical state.
 
-The default history budget is 200 commands and 128 MiB across Undo and Redo.
-Sequence and Project snapshots are retained as bounded serialized payloads,
-not unaccounted heap clones. Oldest entries are evicted in constant time; a new
-branch accounts for discarded Redo entries; an oversize edit remains committed
-but is explicitly reported as not retained. Undo and Redo are project-wide and
-remain valid while navigating between Sequences. Restored Sequences receive a
-new monotonic revision rather than reusing the historical revision. Opening or
-replacing a Project creates a new `AuthoringSessionId`, preventing an old
-persistence completion or history entry from targeting the new lifetime.
+The default History budget is 200 commands and 256 MiB across Undo and Redo.
+Sequence commands retain typed before/after `AuthoringSnapshot<Sequence>`
+endpoints; structural Project commands retain typed
+`AuthoringSnapshot<ProjectRestorePoint>` endpoints. A Project restore point
+contains Project identity and Project-owned authored fields, canonical Sequence
+order/default and the structural active fallback, plus exact body-or-absence
+state only for affected Sequence identities. It deliberately excludes
+`document_revision` and `ProjectMeta.updated_at`; JSON serialization is neither
+the endpoint representation nor the restoration path.
+
+Every copy-on-write author allocation has a process-local immutable footprint
+descriptor containing its local conservative logical charge and child edges.
+One retained-allocation index reference-counts the descriptor graph reachable
+from all typed endpoints in both stacks. Shared allocations are therefore
+charged once, even when adjacent commands or both endpoint directions retain
+them, and a descriptor leaves the cache when its final History reference
+reaches zero. History metadata charges the complete inline
+`AuthoringHistoryEntry`, one four-word Arc control/allocation allowance, one
+logical Undo/Redo Arc slot, description bytes, and affected-Sequence-ID bytes.
+The command is already inside the entry and is never charged a second time.
+Tests independently cold-recompute this formula and require it to equal the
+incremental retained index.
+
+Record preparation uses an overlay over that live index. It adds the candidate
+roots before removing branched Redo entries or evicting old entries, which
+preserves sharing while calculating the exact post-operation union. It then
+reserves every stack, reference-count, and descriptor-cache change and verifies
+the complete budget without publishing any of them. Commit first rejects a
+stale History revision and then applies the prepared state and footprint plan
+once. Oldest entries use `VecDeque` constant-time removal; a new branch reports
+discarded Redo entries. An individually oversize edit remains committed but is
+explicitly reported as not retained. Because contiguous typed state-endpoint
+History cannot safely jump across an unretained committed state, that outcome
+also establishes a correctness barrier: all older Undo entries are discarded
+and reported
+separately rather than being allowed to overwrite the gap. Later retained
+commands start a new contiguous Undo segment. This is one History
+interpretation, not a delta-command system.
+
+History entry compilation asks `mondrian-core` only for immutable descriptor
+roots; it does not rebuild a redundant standalone manifest. A descriptor-cache
+hit records the cached root edge without recursively merging that root's DAG.
+The retained-allocation index remains the sole exact union and byte authority:
+adding or removing an already active root changes only that root's reference
+count, while child edges are visited only on a `0 -> 1` activation or `1 -> 0`
+release. Repeated edges and shared diamonds therefore retain their exact
+multiplicity without storing a flattened closure per endpoint. A cold
+allocation subgraph must still be visited once to construct and validate its
+descriptors; final release must still visit it once to retire the cache.
+Undo/Redo only moves the same retained entry between stacks and does not
+recompile descriptors or change the footprint index.
+
+Undo and Redo are project-wide and remain valid while navigating between
+Sequences, but preparation preserves the command scope. A Sequence entry is
+cloned from its typed endpoint into one detached Sequence, receives a new
+monotonic revision, and prepares the same validated replacement ticket without
+moving either History stack. The restored Sequence, paired Project certificate,
+revision high-water mark, and History cursor cross one commit
+boundary; any preparation failure changes none of them. A Project entry first
+checks that the current
+Project-owned author state/order/default and every affected Sequence body or
+absence still match the opposite source endpoint. It then materializes the
+target as one complete detached document: current unaffected Sequence
+allocations are reused in the captured order, affected bodies/presence and
+Project-owned author fields are restored, and the current
+`document_revision`, `ProjectMeta.updated_at`, and still-valid active navigation
+are preserved. The structural active fallback is used only when the current
+target no longer exists. The candidate then receives checked Sequence revisions
+and passes complete-document validation. A Project-only restore whose ordered
+Sequence bodies, default Sequence, and Project color environment are exactly
+unchanged issues a new outer Project certificate while reusing their strongly
+anchored validation evidence. Any change to those inputs rebuilds the complete
+certificate through the same document rules. This preserves one validation
+path without making unrelated Project metadata or defaults traverse every
+Sequence body.
+Only then is the prepared stack entry moved and the corresponding Sequence slot
+or complete document installed.
+Exhausted generations/revisions, corrupt snapshots, missing targets, and
+validation errors therefore leave the document, Generation, stack cursor,
+retained bytes, and History counters unchanged. Opening or replacing a Project
+creates a new `AuthoringSessionId`, preventing an old persistence completion or
+history entry from targeting the new lifetime.
+
+Large-Project authoring acceptance uses the source-attested schema-10,
+protocol-v1 5/30/120-minute matrix. Paired active-heavy and project-heavy
+fixtures keep the active Sequence and workload equivalent while adding only
+unrelated Project payload, so the gate measures target-Sequence locality. It
+exercises interactive edits, structural edits, Sequence and Project Undo/Redo,
+snapshot capture, manual save, and autosave through ordinary App and Session
+Interfaces.
+
+The deterministic History stream reports active Sequence bytes, unrelated
+Project bytes, complete canonical Project JSON, deduplicated retained History
+charge, and entry count. It is logical post-state evidence, not transient
+allocation, allocator-exact, or process-memory evidence. Native process memory
+is an independent stream: each enforced report takes three valid Private
+Commit baselines before fixture construction, samples through construction,
+operations, and the History-depth probe, then stops the sampler and takes one
+final observation. Missing probes, incomplete lifecycle, inconsistent samples,
+or absent final/peak evidence fail closed.
+
+Only Private Commit participates in the process-memory gate. The observed peak
+must satisfy the 4 GiB absolute ceiling and the active-heavy/project-heavy
+delta budgets: 256/384 MiB for CI-light, 512/768 MiB at 5 minutes, 1/1.5 GiB
+at 30 minutes, and 2/3 GiB at 120 minutes. Working Set and process-lifetime
+resident peaks remain diagnostics and cannot weaken deterministic History
+charge.
+
+Reference budget v4 and Locality budget v3 are independent. For every measured
+operation, project-heavy median must be at most
+`2 * active-heavy median + 5,000 us`, and project-heavy nearest-rank p95 must
+not exceed the reference-v4 p95 budget. Every measured mutation must change the
+complete structured `ProjectDocument`, retain Undo, restore the normalized
+pre-operation document after Undo, and restore the pre-Undo state after Redo.
+Only monotonic `SequenceRevision` is normalized. The History-depth probe must
+retain and Undo all 200 edits.
+
+One qualifying invocation emits exactly six consecutively ordered
+scale/profile reports plus one completion record under one run identity and
+one content-addressed, unchanged source revision. Enforced runs require a fresh
+durably completed output destination. Missing, duplicate, partial, mixed-source,
+overrun, or source-mutated evidence cannot satisfy the matrix. A passing record
+applies only to its attested source revision and is not copied into this
+architecture document as a permanent implementation result.
+
 `validate_with_color_environment` additionally validates a Sequence against the
 Project's exact `ColorEngine`. Mondrian Standard Sequences use the exact
 Linear Rec.2020 working identity pinned by the immutable package; Custom OCIO
@@ -248,6 +519,15 @@ owns one placement range, one closed `ClipSourceTimeMap`, a stable
 membership, blend mode, and placement-local audio Component Edits. Its content
 is one closed `ClipContent` payload:
 
+Visual-effect insertion accepts a complete `EffectNode`, not only an
+`EffectType`. The effects domain owns registered definitions and canonical
+parameter defaults, while Timeline owns placement, ordered instance storage,
+instance namespacing, and identity. Product commands therefore construct an
+instance with the currently bound definition before calling
+`Clip::add_effect_node`/`insert_effect_node_at`. Timeline neither depends on the
+execution registry nor creates an empty parameter bag that compilation would
+later guess how to repair.
+
 - `Media { asset_id, interpretation }`
 - `AdjustmentLayer { asset_id }`
 - `NestedSequence { sequence_id }`
@@ -264,6 +544,14 @@ Media, Adjustment Layer, and Solid Color records in the Asset Library, while
 `media_asset_id()` returns only file-backed Media dependencies. There is no
 generic `asset_id()` because treating a generated library identity as a file
 dependency made valid Solid Color/Adjustment exports fail as offline media.
+
+Every value returned by `library_asset_id()` is a strong Project-contained
+Asset record reference. Removing an item from the Library panel retires only
+its visible membership and cannot remove this Clip, an inactive/nested
+Sequence placement, Transition relation, audio edit, or a History endpoint.
+The retained row continues to provide its exact expected contract and
+recoverable binding. A missing row is structural invalidity and must never be
+manufactured into an offline-media placeholder.
 
 Every Clip-owned visual processor uses one exact Clip-local author coordinate:
 Transform, Opacity, visual Effects, Masks, and generated visual content.
@@ -345,6 +633,16 @@ references such as Asset ID or nested Sequence ID remain references. Sequence
 duplication additionally remaps Track-keyed routes, Transition endpoints, and
 link groups, producing a disjoint author graph rather than two aggregates that
 share mutable instance identity.
+
+Precompose is a structural Project transaction because it replaces one parent
+Sequence and creates one nested Sequence atomically. Its candidate construction
+must nevertheless preserve copy-on-write locality: only Tracks containing a
+selected placement may detach their Clip lists. Post-edit compaction first
+derives singleton link groups, invalid visual/audio Transitions, and unreferenced
+audio processing scopes through shared reads; it enters mutable COW storage only
+when that exact collection contains something to remove. A no-op compaction
+therefore preserves every Track, Clip, Transition, and Scope allocation identity
+instead of making History retain a second copy of an unaffected long program.
 
 ### Link Groups
 
@@ -524,23 +822,128 @@ edits. Container duration is never substituted for a missing video-stream
 extent because a longer audio stream could admit nonexistent video handles. Insufficient
 handles reject by default. `ShortenToAvailable` is an explicit product command,
 intersects both exact source extents while retaining the edit, and commits the
-shortened range in the same single Undo transaction. Export snapshot capture
-repeats the preflight because relink or child edits can change a recoverable
-external dependency without making the author graph structurally illegal.
+shortened range in the same single Undo transaction.
+
+Execution admission represents this authority as
+`PictureSourceExtent::{Still, TimelineRange}`. A probe-proven Still is one
+atemporal picture and satisfies arbitrary outgoing or incoming Transition
+handle demand without a fabricated duration. A time-varying media source uses
+the selected video stream's exact positive range; container duration is never a
+fallback. A nested Sequence is always a timed zero-based range derived from the
+same immutable child revision, even when its output pixels happen to be static.
+
+`validate_selected_video_transition_source_handles` is the pure common
+validator for Export and other immutable execution captures. It consumes one
+owner Sequence, only the renderer-selected `VideoTransitionId` set, and a
+`PictureSourceRef` resolver over already-captured extent facts. It revalidates
+strong endpoints and exact unclamped demands, rejects missing/disabled selected
+Transitions, missing or contradictory extents, and insufficient handles, and
+never reads App state, the Asset Library, Project, filesystem, or FFmpeg.
+File-backed Export storage must bind the extent to the same source fingerprint
+and physical video-stream index as the decoder dependency before calling this
+Interface; nested storage must resolve from the captured child Sequence rather
+than a live Project lookup.
 
 `PreparedVisualSchedule` compiles each exact `SequenceId + SequenceRevision`
-into immutable per-Track interval indexes while retaining authored Track and
-Clip order. Preview and Export production Sessions own bounded schedule caches
-and query this representation at exact Timeline Time; they do not scan every
-Clip placement for each frame. Preparation validates all visual Transition
-references and intervals before publication. A failed preparation cannot enter
+into immutable per-Track interval indexes plus one global visible-Track activity
+index. A Track's activity is the sorted, merged union of its enabled Clip and
+enabled Transition half-open intervals; adjacent intervals merge, while a real
+gap remains a gap. Hidden and muted Tracks contribute no activity. Each frame
+first queries that global index, sorts and deduplicates the selected authored
+Track indices, and only then evaluates Track opacity and the selected Tracks'
+Clip/Transition indexes. Thus a thousand empty Tracks do not become a
+thousand-Track frame cost, while authored stack order remains exact. Query
+diagnostics report the number of Tracks actually queried and the global
+activity entries inspected rather than presenting the authored Track total as
+execution work. Preview and Export production Sessions own bounded Visual
+Program caches whose programs query this representation at exact Timeline Time;
+they do not scan every Track or Clip placement for each frame. Preparation
+validates every Clip's complete placement, Clip-local, and canonical source-time
+mapping state, including its derived terminal source boundary, together with all
+visual Transition references and intervals before publication. This prevents a
+deserialized or otherwise invalid source mapping from passing admission and
+failing only in a Preview or Export worker. A failed preparation cannot enter
 the cache, and a revision change cannot reuse or retain an older schedule for
 the same Sequence identity.
 
+The schedule owns placement selection only, but it snapshots enabled Clip
+Effect and Mask author payloads behind shared immutable `Arc` slices. Repeated
+queries therefore sample dynamic properties without cloning every Property Bag.
+It applies the same rule to visual Transition definition state: definition
+identity, Transition-local Property Bag, and opaque parameters form one
+immutable shared snapshot, while progress and endpoint source/Clip time remain
+exact per-query values. Preparation retains only the Transition identity,
+range, endpoint indices, and that snapshot rather than a second mutable author
+entity.
+`mondrian-renderer::PreparedVisualProgram` composes that schedule with
+resource-bound per-Clip Effect programs for the exact Effect-definition
+registry revision plus prepared Transition readiness/blockers. This
+higher-level compiler is intentionally allowed to read one immutable Sequence
+revision; repeated production frame lowering receives only the validated
+Prepared Visual Program. The renderer keeps raw-Sequence projection
+crate-private as a scalar parity Implementation, not a callable product
+Interface.
+Range-level dependency queries use the same schedule's interval indexes. They
+return visible ordinary Clip and Transition-endpoint occurrences with exact
+Clip-local bounds, excluding hidden/muted Tracks and disabled placements
+without constructing another timeline walker. Renderer preparation combines
+those bounds with each Clip's temporal Effect contract before projecting nested
+child windows. Export diagnostics and delivery preflight must consume this
+prepared reachability; they must not reinterpret Track/Clip placement or
+enumerate every frame in a long selected range.
+
+`mondrian-renderer::PreparedVisualRangeClosure` is the sole recursive
+composition of those per-Sequence range queries. It pins one exact Program set
+and Effect registry revision, validates each Program's versioned conservative
+visual-author fingerprint, and owns nested range projection, cycle/depth
+admission, selected media, selected Transition identities, and static Basic
+Title font queries. Export capture consumes this immutable closure directly.
+Preview's cold-start lookahead asks the same Module whether an inclusive frame
+prefix can demand file-backed picture and binary-searches the earliest such
+frame; it does not scan author Tracks/Clips or special-case nested blank
+leaders and Transition endpoints.
+
+Temporal Effect input does not create another placement or source-time model.
+Every lowered Clip contribution retains a `TimelineClipExecutionRef` containing
+the exact Sequence identity and revision, Clip identity, signed Clip-local
+sample time, and ordinary or exact Transition-side endpoint context. A temporal
+request is expressed in that Clip visual Authoring Time Domain. The production
+provider asks the same Prepared Visual Program to sample that execution
+reference at the requested signed Clip time, and the schedule applies the
+Clip's canonical time transform exactly once to obtain media source time or a
+child Sequence request. A stale revision, unknown Clip, or mismatched
+Transition endpoint fails closed. The provider never reads a legacy
+range/speed field, holds the current decoded frame as history, or scans
+`Track`/`Clip` author collections behind `RenderPlanSource`.
+
+The effects Module collects one exact finite-history demand batch from the same
+`CompiledEffectGraph` that is later executed. A `PreparedTemporalFrameSet`
+freezes a complete, generation-bound set of source tiles before scalar
+execution; missing, duplicate, unexpected, stale-generation, or wrongly sized
+tiles fail before the graph can observe a partial provider. The first admitted
+production graph shape is deliberately narrow:
+`Source -> TemporalFrameMix -> current-time unary tail`. Temporal input with an
+upstream Effect, generated or animated upstream content, Adjustment Clip,
+future/unbounded history, stateful continuity, or unsupported color/ROI
+semantics is rejected rather than rendered approximately.
+
+Export connects this first tracer to job-local synchronous media and nested
+resolution, reusing the ordinary input color/alpha preparation and nested
+Program Color Context. Its provider identity conservatively includes placement,
+source transform, graph, dependency, geometry, and color facts. Window and
+Headless Preview use the same Timeline tracer and the same production media
+Adapter: every signed source demand is submitted through the asynchronous
+Preview Scheduler with CPU-working representation in its key, and only
+generation-matching values already present in the Preview Frame Store may enter
+the frozen set. Any missing value yields typed Temporal Pending after the
+complete demand list has been visited. Preview never performs blocking decode
+or substitutes its currently displayed frame as history.
+
 `RenderPlanSource::flat_visual_items_at` projects ordinary Clips and explicit
-two-input Transitions from either the direct Sequence reference Adapter or its
-Prepared Visual Schedule as ordered visual items. The two Implementations must
-remain semantically identical at every half-open interval edge. During the
+two-input Transitions from either the crate-private direct Sequence reference
+Adapter or its Prepared Visual Schedule as ordered visual items. Renderer
+scalar parity tests require both Implementations to remain semantically
+identical at every half-open interval edge. During the
 Transition interval, one Transition replaces both endpoint placements at that
 Track stack position.
 Both endpoint source times remain unclamped, so Preview/Export either obtain
@@ -555,9 +958,12 @@ Track membership continues to derive from the strong Clip endpoints. Timeline
 overlays now create Cross Dissolve at an exact adjacent unlocked video cut,
 select/delete by stable identity, and resize either exact range edge through one
 typed App action. The view Adapter reports current insufficient or unresolved
-source handles without modifying author state. A GPU Transition lowering remains
-separate M1 work; until it exists, shared CPU Preview/Export execution remains
-the only normative Cross Dissolve backend.
+source handles without modifying author state. Cross Dissolve now also lowers
+to a typed working-linear GPU pass whose real readback is checked against the
+shared straight-alpha scalar reference. CPU remains the scalar reference and a
+valid fallback; backend choice cannot change Transition semantics. This closes
+the current Cross Dissolve backend split only and does not imply generic GPU
+support for every future Transition kind.
 
 `RenderPlanSource` also projects the Sequence working color space as a required
 typed value. Effect compilation consumes that value for every ordinary Clip and
@@ -628,10 +1034,18 @@ candidate is then fully validated and atomically committed by
 ## Render Projection
 
 Timeline internals are projected into `FlatVisualItem` through
-`RenderPlanSource`. `mondrian-renderer` consumes that Interface and must not
-depend on `Sequence`, `Track`, or `Clip` internals. Direct Sequence projection
-is the scalar semantic reference; Preview and Export production paths consume
-the revision-bound Prepared Visual Schedule Implementation. The schedule owns
-selection acceleration only—effect compilation, exact property evaluation,
-media adaptation, compositing, and consumer scheduling remain in their
-existing Modules.
+`RenderPlanSource`. The renderer's frame-lowering Implementation consumes that
+Interface and never traverses `Sequence`, `Track`, or `Clip`. Direct Sequence
+projection is a crate-private scalar semantic reference. A separate renderer-owned
+compiler accepts one immutable Sequence revision and publishes a
+`PreparedVisualProgram` containing the Prepared Visual Schedule plus per-Clip
+prepared Effect programs. The renderer then builds a transient
+`PreparedVisualFrameClosure`, which is the sole owner of recursive visual
+semantics: nested source-time mapping, cycle/depth admission, child canvas and
+color context, Transition and temporal bindings, and placement-instance paths.
+It resolves and fingerprint-validates one exact `Arc<PreparedVisualProgram>`
+per Sequence before any frame callback; that callback receives no raw Sequence.
+Preview and Export consume that closure. Their Modules retain media adaptation,
+pixel materialization/compositing, and consumer-specific scheduling, but may
+only resolve the closure's typed child bindings; they cannot own another nested
+Timeline walker or reinterpret recursion.

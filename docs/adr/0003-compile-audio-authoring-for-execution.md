@@ -99,7 +99,7 @@ renderer; a stateful generation fails as a whole. That scheduling protection
 is not a second DSP interpretation. Offline export fails the job and reports
 the reason.
 
-## Mutable state and future processors
+## Mutable state and processor contracts
 
 Stateful processor identity is the resolved signal closure plus continuity
 epoch, processor origin, nested instance path, time mapping, direction, and
@@ -123,18 +123,14 @@ Adapter. A latency, tail, layout, or Session-storage capability change causes
 re-preparation and controlled re-entry; it cannot mutate the live graph inside
 a block.
 
-The current executable built-ins are canonical Gain and stateful Sample Delay.
-Sample Delay owns an exact non-negative integer-sample parameter, bounded
-Session storage, explicit fresh-epoch reset, and block-partition-invariant
-history; it reports zero compensable latency so PDC cannot erase its audible
-effect, and a finite tail equal to that delay so a Scope occurrence can flush
-after source silence. A non-zero-latency test Adapter proves generic Host instantiation, PDC,
-mode admission, entry failure, and partition invariance, but is not a product
-processor claim. Public-output lookahead normalization is now common Host
-semantics: Playback, Export, and nested pull evaluation receive Timeline-aligned
-samples rather than leading silence or a truncated tail. The first production
-lookahead or group-delay Processor must prove that existing contract rather
-than create a processor-specific output path.
+Built-in, hosted, and test processors use the same prepared Host contract.
+Intentional audible delay reports signal history and tail without claiming
+compensable latency; algorithmic lookahead reports compensable latency without
+changing public Timeline alignment. Every processor must prove bounded Session
+storage, fresh-epoch behavior, block-partition invariance, mode admission, and
+failure semantics through that common contract. A new processor may deepen the
+Host but must not introduce a processor-specific playback, export, or nested
+output path.
 
 Preparation solves checked Contribution and port-specific Route compensation
 at every sum. Each prepared stage retains its input-signal delay, and all

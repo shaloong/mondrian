@@ -345,7 +345,7 @@ impl AppState {
         selection: SelectedClipRef,
         interpretation: mondrian_timeline::clip::MediaInterpretation,
     ) -> mondrian_core::Result<bool> {
-        let sequence_id = self.commit_active_sequence_edit("解释素材", |seq| {
+        let changed = self.commit_active_sequence_edit("解释素材", |seq| {
             let Some((track_id, _is_video, is_locked)) =
                 find_clip_track_lock(seq, selection.clip_id)
             else {
@@ -376,16 +376,9 @@ impl AppState {
             *current = interpretation;
             Ok(true)
         })?;
-        if !sequence_id {
+        if !changed {
             return Ok(false);
         }
-        let sequence_id = self.active_sequence_id().ok_or_else(|| {
-            mondrian_core::MondrianError::WorkflowStepFailed {
-                step_id: "set_clip_media_interpretation".to_owned(),
-                reason: "提交后活动序列丢失".to_owned(),
-            }
-        })?;
-        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         Ok(true)
     }
 
@@ -395,7 +388,7 @@ impl AppState {
         selection: SelectedClipRef,
         pos: glam::Vec2,
     ) -> mondrian_core::Result<bool> {
-        let sequence_id = self.commit_active_sequence_edit("move clip", |seq| {
+        let _sequence_id = self.commit_active_sequence_edit("move clip", |seq| {
             let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
                 mondrian_core::MondrianError::ClipNotFound {
                     clip_id: selection.clip_id.to_string(),
@@ -404,7 +397,6 @@ impl AppState {
             clip.transform.set_position(pos);
             Ok(seq.id)
         })?;
-        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         Ok(true)
     }
 
@@ -414,7 +406,7 @@ impl AppState {
         selection: SelectedClipRef,
         new_anchor: glam::Vec2,
     ) -> mondrian_core::Result<bool> {
-        let sequence_id = self.commit_active_sequence_edit("move anchor", |seq| {
+        let _sequence_id = self.commit_active_sequence_edit("move anchor", |seq| {
             let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
                 mondrian_core::MondrianError::ClipNotFound {
                     clip_id: selection.clip_id.to_string(),
@@ -431,7 +423,6 @@ impl AppState {
             clip.transform.set_position(new_pos);
             Ok(seq.id)
         })?;
-        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         Ok(true)
     }
 
@@ -441,7 +432,7 @@ impl AppState {
         selection: SelectedClipRef,
         scale: glam::Vec2,
     ) -> mondrian_core::Result<bool> {
-        let sequence_id = self.commit_active_sequence_edit("scale clip", |seq| {
+        let _sequence_id = self.commit_active_sequence_edit("scale clip", |seq| {
             let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
                 mondrian_core::MondrianError::ClipNotFound {
                     clip_id: selection.clip_id.to_string(),
@@ -450,7 +441,6 @@ impl AppState {
             clip.transform.set_scale(scale);
             Ok(seq.id)
         })?;
-        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         Ok(true)
     }
 
@@ -473,7 +463,7 @@ impl AppState {
         if mutations.is_empty() {
             return Ok(false);
         }
-        let sequence_id = self.commit_active_sequence_edit(description, |seq| {
+        let _sequence_id = self.commit_active_sequence_edit(description, |seq| {
             let Some((track_id, _is_video, is_locked)) =
                 find_clip_track_lock(seq, selection.clip_id)
             else {
@@ -497,7 +487,6 @@ impl AppState {
             }
             Ok(seq.id)
         })?;
-        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         Ok(true)
     }
 
@@ -523,7 +512,7 @@ impl AppState {
         }
 
         let description = format!("添加{}", effect_type.display_name());
-        let (sequence_id, effect_id) = self.commit_active_sequence_edit(description, |seq| {
+        let (_sequence_id, effect_id) = self.commit_active_sequence_edit(description, |seq| {
             let Some((track_id, _is_video, is_locked)) =
                 find_clip_track_lock(seq, selection.clip_id)
             else {
@@ -546,7 +535,6 @@ impl AppState {
             let effect_id = clip.insert_effect_node_at(index, effect);
             Ok((seq.id, effect_id))
         })?;
-        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         Ok(effect_id)
     }
 
@@ -567,7 +555,7 @@ impl AppState {
         if current.is_enabled == enabled {
             return Ok(false);
         }
-        let sequence_id = self.commit_active_sequence_edit("切换特效启用状态", |seq| {
+        let _sequence_id = self.commit_active_sequence_edit("切换特效启用状态", |seq| {
             let Some((track_id, _is_video, is_locked)) =
                 find_clip_track_lock(seq, selection.clip_id)
             else {
@@ -589,7 +577,6 @@ impl AppState {
             clip.set_effect_enabled(effect_id, enabled)?;
             Ok(seq.id)
         })?;
-        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         Ok(true)
     }
 
@@ -598,7 +585,7 @@ impl AppState {
         selection: SelectedClipRef,
         effect_id: EffectId,
     ) -> mondrian_core::Result<bool> {
-        let sequence_id = self.commit_active_sequence_edit("删除特效", |seq| {
+        let _sequence_id = self.commit_active_sequence_edit("删除特效", |seq| {
             let Some((track_id, _is_video, is_locked)) =
                 find_clip_track_lock(seq, selection.clip_id)
             else {
@@ -620,7 +607,6 @@ impl AppState {
             clip.remove_effect(effect_id)?;
             Ok(seq.id)
         })?;
-        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         Ok(true)
     }
 
@@ -648,7 +634,7 @@ impl AppState {
         if from == to.min(current_clip.effects.len().saturating_sub(1)) {
             return Ok(false);
         }
-        let sequence_id = self.commit_active_sequence_edit("调整特效顺序", |seq| {
+        let _sequence_id = self.commit_active_sequence_edit("调整特效顺序", |seq| {
             let Some((track_id, _is_video, is_locked)) =
                 find_clip_track_lock(seq, selection.clip_id)
             else {
@@ -672,7 +658,6 @@ impl AppState {
             clip.effects.insert(target_index, effect);
             Ok(seq.id)
         })?;
-        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         Ok(true)
     }
 }

@@ -49,6 +49,90 @@ fn sequence_revision_advances_on_edit_undo_and_redo_without_reusing_snapshots() 
 }
 
 #[test]
+fn sequence_commit_publishes_one_canonical_invalidation() {
+    let mut state = create_state_with_sequence();
+    let sequence_id = state.active_sequence_id().expect("active Sequence");
+    let events = state.event_bus.subscribe();
+
+    state.add_video_track().expect("add Track");
+
+    let invalidations = events
+        .try_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                AppEvent::TimelineModified {
+                    sequence_id: changed
+                } if *changed == sequence_id
+            )
+        })
+        .count();
+    assert_eq!(invalidations, 1);
+}
+
+#[test]
+fn project_commit_invalidates_every_sequence_through_the_same_receipt_adapter() {
+    let mut state = create_state_with_sequence();
+    let secondary = Sequence::new("secondary");
+    state.test_add_sequence(secondary);
+    let expected = state.sequences().iter().map(|sequence| sequence.id).collect::<BTreeSet<_>>();
+    let events = state.event_bus.subscribe();
+    let mut settings = state.new_sequence_defaults().clone();
+    settings.resolution.width = settings.resolution.width.saturating_add(2);
+
+    state.update_new_sequence_defaults(settings).expect("Project setting");
+
+    let invalidated = events
+        .try_iter()
+        .filter_map(|event| match event {
+            AppEvent::TimelineModified { sequence_id } => Some(sequence_id),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(invalidated, expected);
+}
+
+#[test]
+fn commit_receipt_reports_an_unretained_project_edit() {
+    let mut state = create_state_with_sequence();
+    let mut commit = {
+        let session = state.authoring.as_mut().expect("Authoring Session");
+        let before = session.document().clone();
+        let mut after = before.clone();
+        after.settings.auto_save_interval = after.settings.auto_save_interval.saturating_add(1);
+        session
+            .commit_project_snapshot("unretained receipt fixture", before, after)
+            .expect("Project transaction")
+            .expect("Project commit")
+    };
+    commit.undo_retained = false;
+
+    state.consume_authoring_commit(commit);
+
+    assert!(
+        state.status_hint.as_ref().is_some_and(|(message, is_error)| {
+            *is_error && message.contains("编辑已提交但未保留撤销记录")
+        })
+    );
+}
+
+#[test]
+fn commit_receipt_reconciles_removed_track_targeting() {
+    let mut state = create_state_with_sequence();
+    let sequence_id = state.active_sequence_id().expect("active Sequence");
+    let track_id = state.active_sequence().expect("Sequence").video_tracks[0].id;
+    state.set_timeline_track_targeted(track_id, false).expect("untarget Track");
+    assert!(!state.timeline_track_targeted(sequence_id, track_id));
+
+    state.remove_track(track_id, true).expect("remove Track");
+
+    assert!(
+        state.timeline_track_targeted(sequence_id, track_id),
+        "removed Track overrides must be released by commit reconciliation"
+    );
+}
+
+#[test]
 fn exhausted_sequence_revision_rolls_back_the_author_mutation() {
     let mut state = create_state_with_sequence();
     state.active_sequence_mut_uncommitted().expect("sequence").revision =
@@ -286,12 +370,47 @@ fn precompose_clips_creates_nested_sequence_and_replacement_clip() {
     let track_id = state.active_sequence().expect("sequence should exist").video_tracks[0].id;
     let clip = Clip::new(AssetId::new(), tt(12, tb), tt(30, tb)).expect("valid clip");
     let clip_id = clip.id;
+    let unaffected_video =
+        Clip::new(AssetId::new(), tt(60, tb), tt(20, tb)).expect("unaffected video clip");
+    let unaffected_video_id = unaffected_video.id;
+    let unaffected_audio =
+        Clip::new(AssetId::new(), tt(90, tb), tt(20, tb)).expect("unaffected audio clip");
+    let unaffected_audio_id = unaffected_audio.id;
+    let unaffected_audio_track_id =
+        state.active_sequence().expect("sequence should exist").audio_tracks[1].id;
     state
         .active_sequence_mut_uncommitted()
         .expect("sequence should exist")
         .video_tracks[0]
         .add_clip(clip)
         .expect("add clip");
+    state
+        .active_sequence_mut_uncommitted()
+        .expect("sequence should exist")
+        .video_tracks[1]
+        .add_clip(unaffected_video)
+        .expect("add unaffected video clip");
+    state
+        .active_sequence_mut_uncommitted()
+        .expect("sequence should exist")
+        .add_media_audio_clip(
+            unaffected_audio_track_id,
+            unaffected_audio,
+            AudioSourceComponentId::new(),
+        )
+        .expect("add unaffected audio clip");
+    let (
+        unaffected_video_clip_allocation,
+        unaffected_audio_tracks_allocation,
+        unaffected_audio_clip_allocation,
+    ) = {
+        let sequence = state.active_sequence().expect("sequence should exist");
+        (
+            sequence.video_tracks[1].clips.allocation_id(),
+            sequence.audio_tracks.allocation_id(),
+            sequence.audio_tracks[1].clips.allocation_id(),
+        )
+    };
 
     let nested_clip_id = state
         .precompose_clips_as_sequence(&[(track_id, true, clip_id)], "Precomp 01")
@@ -315,6 +434,23 @@ fn precompose_clips_creates_nested_sequence_and_replacement_clip() {
     );
     assert_eq!(nested.video_tracks[0].clips.len(), 1);
     assert_eq!(nested.video_tracks[0].clips[0].position, tt(0, tb));
+    assert_eq!(
+        parent.video_tracks[1].clips.allocation_id(),
+        unaffected_video_clip_allocation,
+        "Precompose must not detach an unaffected video Track's Clip allocation"
+    );
+    assert_eq!(
+        parent.audio_tracks.allocation_id(),
+        unaffected_audio_tracks_allocation,
+        "video-only Precompose must not detach the parent audio Track collection"
+    );
+    assert_eq!(
+        parent.audio_tracks[1].clips.allocation_id(),
+        unaffected_audio_clip_allocation,
+        "Precompose must not detach an unaffected audio Track's Clip allocation"
+    );
+    assert!(parent.video_tracks[1].clips.iter().any(|clip| clip.id == unaffected_video_id));
+    assert!(parent.audio_tracks[1].clips.iter().any(|clip| clip.id == unaffected_audio_id));
 }
 
 #[test]
@@ -516,7 +652,7 @@ fn split_at_playhead_records_single_undo_step() {
         )
         .expect("add audio clip");
 
-    state.seek(10);
+    state.seek(10).expect("seek");
 
     let split_count = state.split_at_playhead().expect("split should succeed");
     assert_eq!(split_count, 2);
@@ -610,6 +746,77 @@ fn move_clip_conflict_respects_insert_mode() {
     assert_eq!(clips[0].position, tt(0, tb));
     assert_eq!(clips[1].id, clip_b_id);
     assert_eq!(clips[1].position, tt(10, tb));
+}
+
+#[test]
+fn same_track_move_preserves_unaffected_track_allocations() {
+    let mut state = create_state_with_sequence();
+    let time_base = state.active_sequence().expect("Sequence").time_base();
+    let moved =
+        Clip::new(AssetId::new(), tt(0, time_base), tt(10, time_base)).expect("valid moved Clip");
+    let moved_id = moved.id;
+    let neighbor = Clip::new(AssetId::new(), tt(20, time_base), tt(10, time_base))
+        .expect("valid neighbor Clip");
+    let unrelated_video = Clip::new(AssetId::new(), tt(0, time_base), tt(10, time_base))
+        .expect("valid unrelated video Clip");
+    let mut unrelated_audio = Clip::new(AssetId::new(), tt(0, time_base), tt(10, time_base))
+        .expect("valid unrelated audio Clip");
+    let target_track_id;
+    {
+        let sequence = state.active_sequence_mut_uncommitted().expect("Sequence");
+        target_track_id = sequence.video_tracks[0].id;
+        sequence.video_tracks[0].add_clip(moved).expect("add moved Clip");
+        sequence.video_tracks[0].add_clip(neighbor).expect("add neighbor Clip");
+        sequence.video_tracks[1]
+            .add_clip(unrelated_video)
+            .expect("add unrelated video Clip");
+        sequence
+            .attach_default_media_audio_component(
+                &mut unrelated_audio,
+                AudioSourceComponentId::primary(),
+            )
+            .expect("author unrelated audio Clip");
+        sequence.audio_tracks[1]
+            .add_clip(unrelated_audio)
+            .expect("add unrelated audio Clip");
+    }
+    let sequence = state.active_sequence().expect("Sequence");
+    let unrelated_video_allocation = sequence.video_tracks[1].clips.allocation_id();
+    let audio_tracks_allocation = sequence.audio_tracks.allocation_id();
+    let unrelated_audio_allocation = sequence.audio_tracks[1].clips.allocation_id();
+
+    state
+        .move_clip_in_track_with_mode(
+            target_track_id,
+            true,
+            moved_id,
+            1,
+            ClipOverlapMode::Overwrite,
+        )
+        .expect("move Clip");
+
+    let sequence = state.active_sequence().expect("Sequence");
+    assert_eq!(
+        sequence.video_tracks[0]
+            .clips
+            .iter()
+            .find(|clip| clip.id == moved_id)
+            .expect("moved Clip")
+            .position,
+        tt(1, time_base)
+    );
+    assert_eq!(
+        sequence.video_tracks[1].clips.allocation_id(),
+        unrelated_video_allocation
+    );
+    assert_eq!(
+        sequence.audio_tracks.allocation_id(),
+        audio_tracks_allocation
+    );
+    assert_eq!(
+        sequence.audio_tracks[1].clips.allocation_id(),
+        unrelated_audio_allocation
+    );
 }
 
 #[test]

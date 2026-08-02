@@ -7,23 +7,25 @@ use mondrian_core::types::{FramePosition, Rational, TrackId};
 use mondrian_core::TimelineTime;
 use mondrian_editor_state::Action;
 
+use crate::app::product_action::ProductAction;
 use crate::app::ui_actions::{
-    TimelineCreateCrossDissolvePayload, TimelineInsertAssetPayload, TimelineMoveClipPayload,
-    TimelineMoveTrackPayload, TimelineSelectClipPayload, TimelineSelectVideoTransitionPayload,
+    AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveSelectionPayload,
+    ProjectCreateWithSettingsPayload, TimelineCreateCrossDissolvePayload,
+    TimelineInsertAssetPayload, TimelineMoveTrackPayload, TimelineSelectVideoTransitionPayload,
     TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
     TimelineSetTrackControlPayload, TimelineSetTrackTargetingPayload,
-    TimelineSetVideoTransitionRangePayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+    TimelineSetVideoTransitionRangePayload, TimelineTrimPayloadEdge,
     TimelineTrimSelectedClipsToPlayheadPayload, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
     APP_SHELL_PROJECT_SETTINGS, APP_SHELL_SAVE_PROJECT_AS_DIALOG, APP_SHELL_SEQUENCE_SETTINGS,
-    SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE, SEQUENCE_RETURN_TO_PARENT,
-    SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE, TIMELINE_ADD_TRACK,
-    TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_CREATE_BASIC_TITLE, TIMELINE_CREATE_CROSS_DISSOLVE,
-    TIMELINE_EXTRACT_RANGE, TIMELINE_INSERT_ASSET, TIMELINE_LIFT_RANGE,
-    TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
-    TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
-    TIMELINE_SELECT_VIDEO_TRANSITION, TIMELINE_SET_IN_OUT_POINT,
-    TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL, TIMELINE_SET_TRACK_TARGETING,
-    TIMELINE_SET_VIDEO_TRANSITION_RANGE, TIMELINE_TRIM_CLIPS,
+    ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
+    PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE, SEQUENCE_DELETE, SEQUENCE_DUPLICATE,
+    SEQUENCE_NAMESPACE, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT,
+    SEQUENCE_SWITCH_ACTIVE, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
+    TIMELINE_CREATE_BASIC_TITLE, TIMELINE_CREATE_CROSS_DISSOLVE, TIMELINE_EXTRACT_RANGE,
+    TIMELINE_INSERT_ASSET, TIMELINE_LIFT_RANGE, TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_MOVE_TRACK,
+    TIMELINE_NAMESPACE, TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SELECT_VIDEO_TRANSITION,
+    TIMELINE_SET_IN_OUT_POINT, TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
+    TIMELINE_SET_TRACK_TARGETING, TIMELINE_SET_VIDEO_TRANSITION_RANGE,
     TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, TIMELINE_UNLINK_SELECTED_CLIPS,
 };
 use crate::app::AppState;
@@ -36,13 +38,26 @@ use mondrian_timeline::{assess_clip_link_edit, ClipLinkEditKind, ClipLinkEditReq
 /// Whether a shell-dispatched action can produce a useful editor operation for
 /// the supplied application state snapshot.
 pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
+    match ProductAction::decode_external(action) {
+        Ok(Some(ProductAction::Timeline(action))) => {
+            return state.timeline_interaction_projection().allows(&action);
+        }
+        Err(_) => return false,
+        Ok(None) => {}
+    }
+
     match action {
+        Action::OpenProject(path) => !path.as_os_str().is_empty(),
         Action::SaveProject => state.has_open_project(),
-        Action::SaveProjectAs(_) => state.active_sequence().is_some(),
+        Action::SaveProjectAs(path) => !path.as_os_str().is_empty() && state.has_open_project(),
         Action::CloseProject => {
             state.active_sequence().is_some() || state.current_project_path().is_some()
         }
-        Action::ImportMedia(_) => state.asset_library().is_some(),
+        Action::ImportMedia(paths) => {
+            state.asset_library().is_some()
+                && !paths.is_empty()
+                && paths.iter().all(|path| !path.as_os_str().is_empty())
+        }
         Action::Undo => state.can_undo_action(),
         Action::Redo => state.can_redo_action(),
         Action::Cut => state.can_cut_to_app_clipboard(),
@@ -54,6 +69,12 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
                 && has_deletable_clip_or_track_selection(state)
         }
         Action::Duplicate => state.can_cut_to_app_clipboard(),
+        Action::NudgeClip { clip_id, delta_frames } => {
+            *delta_frames != 0 && clip_is_editable(state, *clip_id)
+        }
+        Action::Play => state.active_sequence().is_some() && !state.is_playing(),
+        Action::Pause => state.active_sequence().is_some() && state.is_playing(),
+        Action::Seek(position) => valid_transport_seek(state, *position),
         Action::SplitClipAtPlayhead => can_split_at_playhead(state),
         Action::MarkInAtPlayhead
         | Action::MarkOutAtPlayhead
@@ -84,6 +105,37 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         {
             state.active_sequence().is_some()
         }
+        Action::Custom { namespace, name, payload }
+            if namespace == PROJECT_NAMESPACE && name == PROJECT_CREATE_WITH_SETTINGS =>
+        {
+            parse_payload::<ProjectCreateWithSettingsPayload>(payload)
+                .is_some_and(|payload| !payload.project_file.as_os_str().is_empty())
+        }
+        Action::Custom { namespace, name, payload }
+            if namespace == ASSETS_NAMESPACE && name == ASSETS_IMPORT_FILES =>
+        {
+            state.asset_library().is_some()
+                && parse_payload::<AssetsImportFilesPayload>(payload).is_some_and(|payload| {
+                    !payload.paths.is_empty()
+                        && payload.paths.iter().all(|path| !path.as_os_str().is_empty())
+                })
+        }
+        Action::Custom { namespace, name, payload }
+            if namespace == ASSETS_NAMESPACE && name == ASSETS_DELETE_SELECTION =>
+        {
+            state.asset_library().is_some()
+                && parse_payload::<AssetsDeleteSelectionPayload>(payload).is_some_and(|payload| {
+                    !payload.asset_ids.is_empty() || !payload.folder_ids.is_empty()
+                })
+        }
+        Action::Custom { namespace, name, payload }
+            if namespace == ASSETS_NAMESPACE && name == ASSETS_MOVE_SELECTION =>
+        {
+            state.asset_library().is_some()
+                && parse_payload::<AssetsMoveSelectionPayload>(payload).is_some_and(|payload| {
+                    !payload.asset_ids.is_empty() || !payload.folder_ids.is_empty()
+                })
+        }
         Action::Custom { namespace, name, .. }
             if namespace == TIMELINE_NAMESPACE && name == TIMELINE_CLEAR_IN_OUT_POINTS =>
         {
@@ -98,12 +150,6 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
             if namespace == TIMELINE_NAMESPACE && name == TIMELINE_EXTRACT_RANGE =>
         {
             state.can_apply_timeline_range_edit(mondrian_timeline::RangeEditKind::Extract)
-        }
-        Action::Custom { namespace, name, payload }
-            if namespace == TIMELINE_NAMESPACE && name == TIMELINE_SELECT_CLIP =>
-        {
-            parse_payload::<TimelineSelectClipPayload>(payload)
-                .is_some_and(|payload| sequence_has_clip(state, payload.clip_id))
         }
         Action::Custom { namespace, name, .. }
             if namespace == TIMELINE_NAMESPACE && name == TIMELINE_LINK_SELECTED_CLIPS =>
@@ -146,18 +192,6 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
             )
         }
         Action::Custom { namespace, name, payload }
-            if namespace == TIMELINE_NAMESPACE && name == TIMELINE_MOVE_CLIP =>
-        {
-            parse_payload::<TimelineMoveClipPayload>(payload)
-                .is_some_and(|payload| timeline_move_clip_target_is_available(state, payload))
-        }
-        Action::Custom { namespace, name, payload }
-            if namespace == TIMELINE_NAMESPACE && name == TIMELINE_TRIM_CLIPS =>
-        {
-            parse_payload::<TimelineTrimClipsPayload>(payload)
-                .is_some_and(|payload| timeline_trim_targets_are_available(state, &payload))
-        }
-        Action::Custom { namespace, name, payload }
             if namespace == TIMELINE_NAMESPACE
                 && name == TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD =>
         {
@@ -182,11 +216,6 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         {
             parse_payload::<TimelineSetSelectedClipsEnabledPayload>(payload).is_some()
                 && selected_clips_are_editable(state)
-        }
-        Action::Custom { namespace, name, .. }
-            if namespace == TIMELINE_NAMESPACE && name == TIMELINE_SEEK =>
-        {
-            state.active_sequence().is_some()
         }
         Action::Custom { namespace, name, payload }
             if namespace == TIMELINE_NAMESPACE && name == TIMELINE_SET_TRACK_CONTROL =>
@@ -250,6 +279,23 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         }
         _ => true,
     }
+}
+
+fn valid_transport_seek(state: &AppState, position: FramePosition) -> bool {
+    let Some(sequence) = state.active_sequence() else {
+        return false;
+    };
+    TimelineTime::from_frame_position(position)
+        .ok()
+        .filter(|time| !time.is_negative())
+        .and_then(|time| {
+            time.to_frame_position(
+                sequence.settings.frame_rate,
+                mondrian_core::FrameRounding::Nearest,
+            )
+            .ok()
+        })
+        .is_some_and(|position| position.frame >= 0)
 }
 
 fn timeline_insert_scope_is_available(
@@ -396,14 +442,13 @@ fn selected_clips_are_editable(state: &AppState) -> bool {
     })
 }
 
-fn sequence_has_clip(state: &AppState, clip_id: ClipId) -> bool {
+fn clip_is_editable(state: &AppState, clip_id: ClipId) -> bool {
     state.active_sequence().is_some_and(|sequence| {
         sequence
             .video_tracks
             .iter()
             .chain(&sequence.audio_tracks)
-            .flat_map(|track| &track.clips)
-            .any(|clip| clip.id == clip_id)
+            .any(|track| !track.is_locked && track.clips.iter().any(|clip| clip.id == clip_id))
     })
 }
 
@@ -432,42 +477,6 @@ fn sequence_has_any_track(state: &AppState, track_id: TrackId) -> bool {
             .iter()
             .chain(&sequence.audio_tracks)
             .any(|track| track.id == track_id)
-    })
-}
-
-fn timeline_move_clip_target_is_available(
-    state: &AppState,
-    payload: TimelineMoveClipPayload,
-) -> bool {
-    let Some(sequence) = state.active_sequence() else {
-        return false;
-    };
-    let source_unlocked = sequence
-        .video_tracks
-        .iter()
-        .chain(sequence.audio_tracks.iter())
-        .find(|track| track.clips.iter().any(|clip| clip.id == payload.clip_id))
-        .is_some_and(|track| !track.is_locked);
-    let target_unlocked = track_for_ref(sequence, payload.target_track_id, payload.is_video_track)
-        .is_some_and(|track| !track.is_locked);
-    source_unlocked && target_unlocked
-}
-
-fn timeline_trim_targets_are_available(
-    state: &AppState,
-    payload: &TimelineTrimClipsPayload,
-) -> bool {
-    if payload.clip_ids.is_empty() {
-        return false;
-    }
-    let Some(sequence) = state.active_sequence() else {
-        return false;
-    };
-    payload.clip_ids.iter().all(|clip_id| {
-        clip_with_track(sequence, *clip_id).is_some_and(|(track, clip)| {
-            !track.is_locked
-                && clip_can_trim_to_frame(clip, payload.edge, payload.frame, sequence.time_base())
-        })
     })
 }
 
@@ -501,16 +510,6 @@ fn track_for_ref(sequence: &Sequence, track_id: TrackId, is_video_track: bool) -
     } else {
         sequence.audio_tracks.iter().find(|track| track.id == track_id)
     }
-}
-
-fn clip_with_track(sequence: &Sequence, clip_id: ClipId) -> Option<(&Track, &Clip)> {
-    sequence
-        .video_tracks
-        .iter()
-        .chain(sequence.audio_tracks.iter())
-        .find_map(|track| {
-            track.clips.iter().find(|clip| clip.id == clip_id).map(|clip| (track, clip))
-        })
 }
 
 fn clip_can_trim_to_frame(
@@ -613,19 +612,23 @@ mod tests {
         mondrian_core::TimelineTime::new(numerator, time_base.den).expect("valid test time")
     }
     use crate::app::ui_actions::{
-        app_shell_project_settings_action, timeline_add_track_action,
+        app_shell_project_settings_action, assets_delete_selection_action,
+        assets_import_files_action, assets_move_selection_action,
+        project_create_with_settings_action, timeline_add_track_action,
         timeline_clear_in_out_points_action, timeline_extract_range_action,
         timeline_lift_range_action, timeline_move_clip_action, timeline_move_track_action,
         timeline_roll_selected_cut_to_playhead_action, timeline_seek_action,
         timeline_select_clip_action, timeline_set_in_out_point_action,
         timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
         timeline_set_track_targeting_action, timeline_trim_clips_action,
-        timeline_trim_selected_clips_to_playhead_action, TimelineAddTrackKind,
-        TimelineAddTrackPayload, TimelineInOutPointPayloadKind, TimelineMoveClipPayload,
-        TimelineMoveTrackPayload, TimelineSelectClipPayload, TimelineSetInOutPointPayload,
-        TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
-        TimelineSetTrackTargetingPayload, TimelineTrackControlPayloadKind,
-        TimelineTrackTargetingControl, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+        timeline_trim_selected_clips_to_playhead_action, AssetsDeleteSelectionPayload,
+        AssetsImportFilesPayload, AssetsMoveSelectionPayload, ProjectCreateWithSettingsPayload,
+        TimelineAddTrackKind, TimelineAddTrackPayload, TimelineInOutPointPayloadKind,
+        TimelineMoveClipPayload, TimelineMoveTrackPayload, TimelineSelectClipPayload,
+        TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
+        TimelineSetTrackControlPayload, TimelineSetTrackTargetingPayload,
+        TimelineTrackControlPayloadKind, TimelineTrackTargetingControl, TimelineTrimClipsPayload,
+        TimelineTrimPayloadEdge,
     };
     use crate::app::SelectedClipRef;
     use mondrian_core::types::{AssetId, ClipId, TrackId};
@@ -663,14 +666,27 @@ mod tests {
         let state = AppState::new();
         let clear_in_out_action = timeline_clear_in_out_points_action();
         let roll_cut_action = timeline_roll_selected_cut_to_playhead_action();
+        let trim_action = timeline_trim_selected_clips_to_playhead_action(
+            TimelineTrimSelectedClipsToPlayheadPayload { edge: TimelineTrimPayloadEdge::In },
+        );
+        let enable_action =
+            timeline_set_selected_clips_enabled_action(TimelineSetSelectedClipsEnabledPayload {
+                enabled: false,
+            });
 
         for action in [
+            Action::Cut,
+            Action::Copy,
+            Action::Paste,
             Action::DeleteSelection,
             Action::RippleDeleteSelection,
             Action::Duplicate,
             Action::SplitClipAtPlayhead,
             Action::MarkInAtPlayhead,
             Action::MarkOutAtPlayhead,
+            Action::Play,
+            Action::Pause,
+            Action::Seek(FramePosition::new(0, Rational::new(1, 25))),
             Action::TogglePlay,
             Action::StepBack,
             Action::StepForward,
@@ -680,16 +696,76 @@ mod tests {
             Action::DeselectAll,
         ]
         .iter()
-        .chain([&clear_in_out_action, &roll_cut_action])
-        {
+        .chain([
+            &clear_in_out_action,
+            &roll_cut_action,
+            &trim_action,
+            &enable_action,
+        ]) {
             assert!(!app_state_action_enabled(action, &state), "{action:?}");
         }
     }
 
     #[test]
+    fn app_state_action_gate_rejects_structurally_empty_intents() {
+        let mut state = state_with_selected_clip();
+        let clip_id = state.selection.selected_clips[0].clip_id;
+        let library_root = std::env::temp_dir().join(format!(
+            "mondrian-action-availability-{}",
+            mondrian_core::AssetId::new()
+        ));
+        state.test_set_asset_library(Some(
+            mondrian_assets::AssetLibrary::open(library_root.clone()).expect("asset library"),
+        ));
+
+        let invalid_actions = [
+            Action::OpenProject(std::path::PathBuf::new()),
+            Action::SaveProjectAs(std::path::PathBuf::new()),
+            Action::ImportMedia(Vec::new()),
+            Action::ImportMedia(vec![std::path::PathBuf::new()]),
+            Action::NudgeClip { clip_id, delta_frames: 0 },
+            assets_import_files_action(AssetsImportFilesPayload {
+                paths: Vec::new(),
+                folder_id: None,
+            }),
+            assets_delete_selection_action(AssetsDeleteSelectionPayload {
+                asset_ids: Vec::new(),
+                folder_ids: Vec::new(),
+            }),
+            assets_move_selection_action(AssetsMoveSelectionPayload {
+                asset_ids: Vec::new(),
+                folder_ids: Vec::new(),
+                target_folder_id: None,
+            }),
+            project_create_with_settings_action(ProjectCreateWithSettingsPayload {
+                project_file: std::path::PathBuf::new(),
+                name: "Invalid".into(),
+                sequence_settings: mondrian_timeline::sequence::SequenceSettings::default(),
+                color_environment: mondrian_core::ProjectColorEnvironment::default(),
+                project_settings: mondrian_core::ProjectSettings::default(),
+            }),
+        ];
+
+        for action in invalid_actions {
+            assert!(!app_state_action_enabled(&action, &state), "{action:?}");
+        }
+        assert!(app_state_action_enabled(
+            &Action::NudgeClip { clip_id, delta_frames: 1 },
+            &state
+        ));
+        assert!(app_state_action_enabled(
+            &Action::ImportMedia(vec![std::path::PathBuf::from("clip.mov")]),
+            &state
+        ));
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(library_root);
+    }
+
+    #[test]
     fn app_state_action_gate_enables_timeline_editing_with_valid_targets() {
         let mut state = state_with_selected_clip();
-        state.seek(15);
+        state.seek(15).expect("seek");
 
         for action in [
             Action::DeleteSelection,
@@ -698,6 +774,8 @@ mod tests {
             Action::SplitClipAtPlayhead,
             Action::MarkInAtPlayhead,
             Action::MarkOutAtPlayhead,
+            Action::Play,
+            Action::Seek(FramePosition::new(15, Rational::new(1, 25))),
             Action::TogglePlay,
             Action::StepBack,
             Action::StepForward,
@@ -717,7 +795,7 @@ mod tests {
     #[test]
     fn app_state_action_gate_enables_typed_timeline_actions_with_valid_targets() {
         let mut state = state_with_selected_clip();
-        state.seek(15);
+        state.seek(15).expect("seek");
         let selection = state.selection.selected_clips[0];
         let clip_id = selection.clip_id;
         let track_id = selection.track_id;
@@ -776,7 +854,7 @@ mod tests {
     #[test]
     fn app_state_action_gate_disables_typed_timeline_actions_with_stale_targets() {
         let mut state = state_with_selected_clip();
-        state.seek(15);
+        state.seek(15).expect("seek");
         let stale_clip = ClipId::new();
         let stale_track = TrackId::new();
 
@@ -815,6 +893,18 @@ mod tests {
         ] {
             assert!(!app_state_action_enabled(&action, &state), "{action:?}");
         }
+    }
+
+    #[test]
+    fn app_state_action_gate_disables_malformed_recognized_product_action() {
+        let state = state_with_selected_clip();
+        let action = Action::Custom {
+            namespace: crate::app::product_action::TIMELINE_NAMESPACE.to_owned(),
+            name: crate::app::product_action::TIMELINE_TRIM_CLIPS.to_owned(),
+            payload: serde_json::json!({"clip_ids": []}),
+        };
+
+        assert!(!app_state_action_enabled(&action, &state));
     }
 
     #[test]
@@ -860,7 +950,7 @@ mod tests {
     #[test]
     fn app_state_action_gate_disables_typed_clip_edits_on_locked_tracks() {
         let mut state = state_with_selected_clip();
-        state.seek(15);
+        state.seek(15).expect("seek");
         let selection = state.selection.selected_clips[0];
         state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked = true;
 
@@ -890,13 +980,13 @@ mod tests {
     #[test]
     fn app_state_action_gate_disables_split_outside_unlocked_clip_body() {
         let mut state = state_with_selected_clip();
-        state.seek(10);
+        state.seek(10).expect("seek");
         assert!(!app_state_action_enabled(
             &Action::SplitClipAtPlayhead,
             &state
         ));
 
-        state.seek(15);
+        state.seek(15).expect("seek");
         assert!(app_state_action_enabled(
             &Action::SplitClipAtPlayhead,
             &state
@@ -919,11 +1009,11 @@ mod tests {
             TimelineTrimSelectedClipsToPlayheadPayload { edge: TimelineTrimPayloadEdge::Out },
         );
 
-        state.seek(10);
+        state.seek(10).expect("seek");
         assert!(!app_state_action_enabled(&trim_in, &state));
         assert!(app_state_action_enabled(&trim_out, &state));
 
-        state.seek(29);
+        state.seek(29).expect("seek");
         assert!(app_state_action_enabled(&trim_in, &state));
         assert!(!app_state_action_enabled(&trim_out, &state));
     }

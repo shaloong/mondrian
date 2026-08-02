@@ -17,7 +17,10 @@ use mondrian_core::{
 use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
 use mondrian_export::preset::{ExportPreset, TimelineExportRange};
-use mondrian_media::{DecodedVideoRange, DetectedColorInterpretation, VideoColorMetadata};
+use mondrian_media::{
+    DecodedVideoRange, DetectedColorInterpretation, ProvenVideoSampling, VideoColorMetadata,
+    VideoColorMetadataHint,
+};
 use mondrian_timeline::{
     audio::AudioFade,
     sequence::{ColorWorkflow, DeliveryBitDepth, MissingColorMetadataPolicy, VideoRange},
@@ -29,11 +32,15 @@ use mondrian_ui_widgets::{ViewerCanvasBackground, WaveformDisplay};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Custom action namespace for timeline UI operations.
-pub const TIMELINE_NAMESPACE: &str = "ui.timeline";
+use super::product_action::{ProductAction, TimelineProductAction};
+pub use super::product_action::{
+    TimelineClipSelectionModePayload, TimelineMoveClipPayload, TimelineSeekPayload,
+    TimelineSeekSource, TimelineSelectClipPayload, TimelineTrimClipsPayload,
+    TimelineTrimPayloadEdge, TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK,
+    TIMELINE_SELECT_CLIP, TIMELINE_TRIM_CLIPS,
+};
+use super::CrashRecoveryCandidate;
 
-/// Action name for selecting a timeline clip.
-pub const TIMELINE_SELECT_CLIP: &str = "select_clip";
 /// Action name for linking the current Clip selection.
 pub const TIMELINE_LINK_SELECTED_CLIPS: &str = "link_selected_clips";
 /// Action name for unlinking the current Clip selection.
@@ -46,10 +53,6 @@ pub const TIMELINE_CREATE_CROSS_DISSOLVE: &str = "create_cross_dissolve";
 pub const TIMELINE_CREATE_BASIC_TITLE: &str = "create_basic_title";
 /// Action name for changing one visual Transition range on the frame grid.
 pub const TIMELINE_SET_VIDEO_TRANSITION_RANGE: &str = "set_video_transition_range";
-/// Action name for moving a timeline clip.
-pub const TIMELINE_MOVE_CLIP: &str = "move_clip";
-/// Action name for trimming timeline clips.
-pub const TIMELINE_TRIM_CLIPS: &str = "trim_clips";
 /// Action name for trimming the current clip selection to the playhead.
 pub const TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD: &str = "trim_selected_clips_to_playhead";
 /// Action name for rolling the selected timeline cut to the playhead.
@@ -64,8 +67,6 @@ pub const TIMELINE_LIFT_RANGE: &str = "lift_range";
 pub const TIMELINE_EXTRACT_RANGE: &str = "extract_range";
 /// Action name for toggling the current timeline clip selection.
 pub const TIMELINE_SET_SELECTED_CLIPS_ENABLED: &str = "set_selected_clips_enabled";
-/// Action name for seeking the active timeline.
-pub const TIMELINE_SEEK: &str = "seek";
 /// Action name for changing one timeline track header control.
 pub const TIMELINE_SET_TRACK_CONTROL: &str = "set_track_control";
 /// Action name for changing Track Targeting or Sync-Lock session policy.
@@ -367,10 +368,8 @@ pub struct AppShellOpenRecentProjectPayload {
 /// Project autosave candidate selected from the app UI startup surface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectRecoverFromAutosavePayload {
-    /// Original Mondrian project file represented by the autosave snapshot.
-    pub project_file: PathBuf,
-    /// Autosave snapshot archive to recover.
-    pub autosave_file: PathBuf,
+    /// Exact discovery evidence selected by the user.
+    pub candidate: CrashRecoveryCandidate,
 }
 
 /// File-system path to reveal through the native file manager.
@@ -418,33 +417,6 @@ pub struct AppShellRelocatePanelPayload {
     pub tab_index: Option<usize>,
 }
 
-/// Clip edge being trimmed by a timeline UI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TimelineTrimPayloadEdge {
-    In,
-    Out,
-}
-
-/// Select a clip in the active sequence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TimelineClipSelectionModePayload {
-    /// Replace the current Clip selection.
-    Replace,
-    /// Toggle the complete Clip selection unit.
-    Toggle,
-    /// Preserve an existing multi-selection for a context command.
-    Preserve,
-}
-
-/// Select a clip in the active sequence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimelineSelectClipPayload {
-    /// Clip selected by the UI.
-    pub clip_id: ClipId,
-    /// Selection-set operation requested by the input Adapter.
-    pub mode: TimelineClipSelectionModePayload,
-}
-
 /// Select one visual Transition in the active Sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineSelectVideoTransitionPayload {
@@ -470,30 +442,6 @@ pub struct TimelineSetVideoTransitionRangePayload {
     pub start_frame: i64,
     /// Exclusive range end in Sequence evaluation frames.
     pub end_frame: i64,
-}
-
-/// Move a clip to a target track and frame in the active sequence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimelineMoveClipPayload {
-    /// Track that should own the clip after the move.
-    pub target_track_id: TrackId,
-    /// Whether `target_track_id` is a video track rather than an audio track.
-    pub is_video_track: bool,
-    /// Clip being moved.
-    pub clip_id: ClipId,
-    /// Target timeline frame for the clip start.
-    pub frame: i64,
-}
-
-/// Trim one or more clip edges to a target timeline frame.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimelineTrimClipsPayload {
-    /// Clips being trimmed.
-    pub clip_ids: Vec<ClipId>,
-    /// Edge that should be trimmed.
-    pub edge: TimelineTrimPayloadEdge,
-    /// Target timeline frame for the selected edge.
-    pub frame: i64,
 }
 
 /// Trim the current timeline clip selection to the playhead.
@@ -592,24 +540,6 @@ pub struct ViewerSetClipTransformPayload {
     pub scale_percent: Option<f32>,
     /// Optional rotation in degrees.
     pub rotation_degrees: Option<f32>,
-}
-
-/// Seek the active timeline to a frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimelineSeekPayload {
-    /// Target timeline frame.
-    pub frame: i64,
-    /// User interaction source for this seek.
-    pub source: TimelineSeekSource,
-}
-
-/// User interaction source for timeline seek actions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TimelineSeekSource {
-    /// Continuous playhead/ruler pointer drag.
-    PointerDrag,
-    /// Stable click, keyboard command, programmatic seek, or drag release.
-    Settled,
 }
 
 /// Track control targeted by the timeline header.
@@ -1116,8 +1046,13 @@ pub struct AppShellInterpretAssetDialogPayload {
 pub struct AppShellVideoSignalDiagnostics {
     /// Decoder-proven full/limited range, or explicit unknown.
     pub range: DecodedVideoRange,
+    /// Probe-proven physical sampling family, bit depth, and Alpha presence.
+    pub sampling: Option<ProvenVideoSampling>,
     /// Raw CICP primaries/transfer/matrix triplet when FFmpeg exposed it.
     pub color_metadata: Option<VideoColorMetadata>,
+    /// Raw container/stream/file-name hints captured by the same media probe.
+    #[serde(default)]
+    pub color_metadata_hints: Vec<VideoColorMetadataHint>,
 }
 
 /// Effective input-to-working identities resolved before opening Interpret Footage.
@@ -1147,6 +1082,9 @@ pub struct ExportEnqueuePayload {
     pub range: TimelineExportRange,
     /// Output media file path.
     pub output_path: PathBuf,
+    /// Final namespace policy. Missing legacy payloads default to create-only.
+    #[serde(default)]
+    pub output_policy: mondrian_export::preset::ExportOutputPolicy,
 }
 
 /// Target one export queue job from a UI frontend.
@@ -1303,7 +1241,7 @@ pub enum SequenceSettingsTabPayload {
 
 /// Build an action that selects a clip in the active timeline.
 pub fn timeline_select_clip_action(payload: TimelineSelectClipPayload) -> Action {
-    custom_timeline_action(TIMELINE_SELECT_CLIP, payload)
+    ProductAction::Timeline(TimelineProductAction::SelectClip(payload)).into_external_action()
 }
 
 /// Build an action that links the current Clip selection.
@@ -1344,12 +1282,12 @@ pub fn timeline_set_video_transition_range_action(
 
 /// Build an action that moves a clip in the active timeline.
 pub fn timeline_move_clip_action(payload: TimelineMoveClipPayload) -> Action {
-    custom_timeline_action(TIMELINE_MOVE_CLIP, payload)
+    ProductAction::Timeline(TimelineProductAction::MoveClip(payload)).into_external_action()
 }
 
 /// Build an action that trims clip edges in the active timeline.
 pub fn timeline_trim_clips_action(payload: TimelineTrimClipsPayload) -> Action {
-    custom_timeline_action(TIMELINE_TRIM_CLIPS, payload)
+    ProductAction::Timeline(TimelineProductAction::TrimClips(payload)).into_external_action()
 }
 
 /// Build an action that trims the current clip selection to the playhead.
@@ -1398,10 +1336,11 @@ pub fn timeline_seek_action(frame: i64) -> Action {
 
 /// Build an action that seeks the active timeline with explicit interaction source.
 pub fn timeline_seek_with_source_action(frame: i64, source: TimelineSeekSource) -> Action {
-    custom_timeline_action(
-        TIMELINE_SEEK,
-        TimelineSeekPayload { frame: frame.max(0), source },
-    )
+    ProductAction::Timeline(TimelineProductAction::Seek(TimelineSeekPayload {
+        frame,
+        source,
+    }))
+    .into_external_action()
 }
 
 /// Build an action that changes a timeline track header control.

@@ -13,7 +13,7 @@ use mondrian_core::{
 };
 use mondrian_media::{
     MediaFileFingerprint, ProxyCodec, ProxyColorContract, ProxyConfig, ProxyGenerationOutcome,
-    ProxyResolution, ProxyStatus,
+    ProxyPublicationFailureKind, ProxyResolution, ProxyStatus,
 };
 use parking_lot::{Condvar, Mutex};
 
@@ -51,7 +51,16 @@ impl ProxyGenerationRequest {
         source_fingerprint: MediaFileFingerprint,
         config: ProxyConfig,
         color: ProxyColorContract,
-    ) -> Self {
+    ) -> Result<Self, ProxyGenerationFailure> {
+        if !config.cache_dir.is_absolute() {
+            return Err(ProxyGenerationFailure::new(
+                ProxyGenerationFailureReason::InvalidProxyContract,
+                format!(
+                    "proxy admission requires an absolute frozen cache root: {}",
+                    config.cache_dir.display()
+                ),
+            ));
+        }
         let key = ProxyGenerationKey {
             asset_id,
             source_path,
@@ -62,7 +71,7 @@ impl ProxyGenerationRequest {
             cache_dir: config.cache_dir.clone(),
             color,
         };
-        Self { key, config, color }
+        Ok(Self { key, config, color })
     }
 }
 
@@ -70,6 +79,13 @@ impl ProxyGenerationRequest {
 enum ProxyAttemptPhase {
     Queued,
     Running,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RunningResourceYieldScope {
+    None,
+    AutomaticOnly,
+    All,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +96,7 @@ struct PendingProxyAttempt {
     cancellation: ExecutionCancellationToken,
     phase: ProxyAttemptPhase,
     queue_revision: u64,
+    resource_yield_requested: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -93,6 +110,16 @@ struct RetainedProxyFailure {
     failure: ProxyGenerationFailure,
 }
 
+fn is_publication_quarantine(failure: &ProxyGenerationFailure) -> bool {
+    failure.publication.as_ref().is_some_and(|publication| {
+        matches!(
+            publication.kind,
+            ProxyPublicationFailureKind::DurabilityUnconfirmed
+                | ProxyPublicationFailureKind::NamespaceIndeterminate
+        )
+    })
+}
+
 #[derive(Default)]
 pub(super) struct ProxyGenerationCounters {
     pub(super) admissions: u64,
@@ -102,6 +129,7 @@ pub(super) struct ProxyGenerationCounters {
     pub(super) completions: u64,
     pub(super) failures: u64,
     pub(super) cancellations: u64,
+    pub(super) resource_yields: u64,
     pub(super) superseded: u64,
     pub(super) rejections: u64,
 }
@@ -116,11 +144,15 @@ pub(super) struct ProxyGenerationState {
     recovery_queue: VecDeque<QueueEntry>,
     import_queue: VecDeque<QueueEntry>,
     foreground_streak: usize,
+    pub(super) dispatch_enabled: bool,
+    pub(super) automatic_dispatch_enabled: bool,
+    pub(super) dispatch_parallelism: usize,
     running: usize,
     running_by_cache_root: HashMap<PathBuf, usize>,
     failures: HashMap<ProxyGenerationKey, RetainedProxyFailure>,
     failure_lru: VecDeque<ProxyGenerationKey>,
     terminal_records: VecDeque<ProxyGenerationTerminalRecord>,
+    latest_terminal_sequence: u64,
     pub(super) counters: ProxyGenerationCounters,
 }
 
@@ -136,11 +168,15 @@ impl Default for ProxyGenerationState {
             recovery_queue: VecDeque::new(),
             import_queue: VecDeque::new(),
             foreground_streak: 0,
+            dispatch_enabled: true,
+            automatic_dispatch_enabled: true,
+            dispatch_parallelism: usize::MAX,
             running: 0,
             running_by_cache_root: HashMap::new(),
             failures: HashMap::new(),
             failure_lru: VecDeque::new(),
             terminal_records: VecDeque::new(),
+            latest_terminal_sequence: 0,
             counters: ProxyGenerationCounters::default(),
         }
     }
@@ -158,6 +194,11 @@ impl ProxyGenerationState {
         attempt_id
     }
 
+    fn allocate_terminal_sequence(&mut self) -> u64 {
+        self.latest_terminal_sequence = self.latest_terminal_sequence.saturating_add(1).max(1);
+        self.latest_terminal_sequence
+    }
+
     fn enqueue(&mut self, attempt_id: u64, origin: ProxyGenerationOrigin, revision: u64) {
         let entry = QueueEntry { attempt_id, revision };
         match origin {
@@ -168,16 +209,23 @@ impl ProxyGenerationState {
     }
 
     fn pop_next(&mut self) -> Option<WorkerProxyAttempt> {
-        let background_due =
-            !self.import_queue.is_empty() && self.foreground_streak >= PROXY_FOREGROUND_BURST;
-        let entry = if background_due {
-            self.pop_eligible(ProxyGenerationOrigin::Import)
-                .or_else(|| self.pop_eligible(ProxyGenerationOrigin::User))
-                .or_else(|| self.pop_eligible(ProxyGenerationOrigin::PlaybackRecovery))
-        } else {
+        if !self.dispatch_enabled || self.running >= self.dispatch_parallelism {
+            return None;
+        }
+        let entry = if !self.automatic_dispatch_enabled {
             self.pop_eligible(ProxyGenerationOrigin::User)
-                .or_else(|| self.pop_eligible(ProxyGenerationOrigin::PlaybackRecovery))
-                .or_else(|| self.pop_eligible(ProxyGenerationOrigin::Import))
+        } else {
+            let background_due =
+                !self.import_queue.is_empty() && self.foreground_streak >= PROXY_FOREGROUND_BURST;
+            if background_due {
+                self.pop_eligible(ProxyGenerationOrigin::Import)
+                    .or_else(|| self.pop_eligible(ProxyGenerationOrigin::User))
+                    .or_else(|| self.pop_eligible(ProxyGenerationOrigin::PlaybackRecovery))
+            } else {
+                self.pop_eligible(ProxyGenerationOrigin::User)
+                    .or_else(|| self.pop_eligible(ProxyGenerationOrigin::PlaybackRecovery))
+                    .or_else(|| self.pop_eligible(ProxyGenerationOrigin::Import))
+            }
         }?;
         let pending = self.pending.get_mut(&entry.attempt_id)?;
         pending.phase = ProxyAttemptPhase::Running;
@@ -239,13 +287,19 @@ pub(super) struct ProxyGenerationInner {
     pub(super) state: Mutex<ProxyGenerationState>,
     pub(super) available: Condvar,
     pub(super) backend: Arc<dyn ProxyGenerationBackend>,
-    pub(super) changed_revision: AtomicU64,
+    pub(super) diagnostics_revision: AtomicU64,
+    pub(super) model_revision: AtomicU64,
     pub(super) shutdown: AtomicBool,
 }
 
 impl ProxyGenerationInner {
-    pub(super) fn mark_changed(&self) {
-        self.changed_revision.fetch_add(1, Ordering::AcqRel);
+    pub(super) fn mark_diagnostics_changed(&self) {
+        self.diagnostics_revision.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(super) fn mark_model_changed(&self) {
+        self.diagnostics_revision.fetch_add(1, Ordering::AcqRel);
+        self.model_revision.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -283,6 +337,7 @@ pub(super) fn request_admission(
             Duration::ZERO,
             false,
             Some(&failure),
+            None,
         );
         return ProxyGenerationRequestOutcome::Failed(failure);
     }
@@ -296,12 +351,41 @@ pub(super) fn request_admission(
         cancellation: ExecutionCancellationToken::new(),
         phase: ProxyAttemptPhase::Queued,
         queue_revision: 1,
+        resource_yield_requested: false,
     };
     state.pending.insert(attempt_id, pending);
     state.active_by_key.insert(request.key, attempt_id);
     state.enqueue(attempt_id, origin, 1);
     state.counters.admissions = state.counters.admissions.saturating_add(1);
     ProxyGenerationRequestOutcome::Admitted { prior_status }
+}
+
+pub(super) fn request_running_resource_yield(
+    state: &mut ProxyGenerationState,
+    scope: RunningResourceYieldScope,
+) -> bool {
+    if scope == RunningResourceYieldScope::None {
+        return false;
+    }
+    let mut changed = false;
+    for pending in state.pending.values_mut() {
+        let origin_is_eligible = match scope {
+            RunningResourceYieldScope::None => false,
+            RunningResourceYieldScope::AutomaticOnly => {
+                pending.origin != ProxyGenerationOrigin::User
+            }
+            RunningResourceYieldScope::All => true,
+        };
+        if pending.phase == ProxyAttemptPhase::Running
+            && origin_is_eligible
+            && !pending.resource_yield_requested
+        {
+            pending.resource_yield_requested = true;
+            pending.cancellation.cancel();
+            changed = true;
+        }
+    }
+    changed
 }
 
 pub(super) fn preflight_request(
@@ -312,23 +396,41 @@ pub(super) fn preflight_request(
     if let Some(attempt_id) = state.active_by_key.get(key).copied() {
         state.counters.deduplications = state.counters.deduplications.saturating_add(1);
         let mut promoted = false;
-        let promotion = state.pending.get_mut(&attempt_id).and_then(|pending| {
-            (pending.phase == ProxyAttemptPhase::Queued && origin.rank() < pending.origin.rank())
-                .then(|| {
-                    pending.origin = origin;
+        let mut queued_promotion = None;
+        if let Some(pending) = state.pending.get_mut(&attempt_id) {
+            if origin.rank() < pending.origin.rank() {
+                pending.origin = origin;
+                if pending.phase == ProxyAttemptPhase::Queued {
                     pending.queue_revision = pending.queue_revision.saturating_add(1).max(1);
-                    (pending.origin, pending.queue_revision)
-                })
-        });
-        if let Some((promoted_origin, revision)) = promotion {
+                    queued_promotion = Some((pending.origin, pending.queue_revision));
+                }
+                promoted = true;
+            }
+        }
+        if let Some((promoted_origin, revision)) = queued_promotion {
             state.enqueue(attempt_id, promoted_origin, revision);
+        }
+        if promoted {
             state.counters.promotions = state.counters.promotions.saturating_add(1);
-            promoted = true;
         }
         return Some(ProxyGenerationRequestOutcome::Deduplicated { promoted });
     }
 
     if let Some(retained) = state.failures.get(key) {
+        if retained
+            .failure
+            .publication
+            .as_ref()
+            .is_some_and(|failure| failure.kind == ProxyPublicationFailureKind::BeforeNamespace)
+        {
+            state.remove_failure(key);
+            return None;
+        }
+        if is_publication_quarantine(&retained.failure) {
+            return Some(ProxyGenerationRequestOutcome::RetainedFailure(
+                retained.failure.clone(),
+            ));
+        }
         if origin != ProxyGenerationOrigin::User {
             return Some(ProxyGenerationRequestOutcome::RetainedFailure(
                 retained.failure.clone(),
@@ -343,7 +445,7 @@ pub(super) fn bind_project_generation(
     state: &mut ProxyGenerationState,
     project_id: Option<ProjectId>,
 ) -> bool {
-    if state.project_id == project_id {
+    if state.project_id.is_none() && project_id.is_none() {
         return false;
     }
     state.project_id = project_id;
@@ -352,8 +454,11 @@ pub(super) fn bind_project_generation(
     state.user_queue.clear();
     state.recovery_queue.clear();
     state.import_queue.clear();
-    state.failures.clear();
-    state.failure_lru.clear();
+    state
+        .failures
+        .retain(|_, retained| is_publication_quarantine(&retained.failure));
+    let quarantined_keys = state.failures.keys().cloned().collect::<Vec<_>>();
+    state.failure_lru.retain(|key| quarantined_keys.contains(key));
 
     let queued: Vec<_> = state
         .pending
@@ -374,6 +479,7 @@ pub(super) fn bind_project_generation(
             ExecutionTerminalDisposition::Canceled,
             Duration::ZERO,
             false,
+            None,
             None,
         );
     }
@@ -402,7 +508,9 @@ pub(super) fn record_immediate_failure(
     if let Some(key) = key {
         retain_failure(state, key, failure.clone());
     }
+    let terminal_sequence = state.allocate_terminal_sequence();
     state.terminal_records.push_back(ProxyGenerationTerminalRecord {
+        terminal_sequence,
         evidence: ExecutionTerminalEvidence {
             generation: state.generation,
             priority: origin.priority(),
@@ -417,6 +525,8 @@ pub(super) fn record_immediate_failure(
         executed: false,
         failure: Some(failure.reason),
         failure_detail: Some(failure.detail),
+        publication_failure: failure.publication.map(|publication| *publication),
+        publication: None,
     });
     trim_terminals(state);
 }
@@ -438,6 +548,7 @@ pub(super) fn proxy_generation_worker(
                 inner.available.wait(&mut state);
             }
         };
+        inner.mark_model_changed();
         let started = Instant::now();
         let result =
             inner.backend.execute(&runtime, &attempt.request, attempt.cancellation.clone());
@@ -452,7 +563,7 @@ fn publish_worker_result(
     elapsed: Duration,
 ) {
     let mut state = inner.state.lock();
-    let Some(pending) = state.pending.remove(&attempt.attempt_id) else {
+    let Some(mut pending) = state.pending.remove(&attempt.attempt_id) else {
         return;
     };
     state.running = state.running.saturating_sub(1);
@@ -465,10 +576,33 @@ fn publish_worker_result(
     }
     let current = state.generation == attempt.generation
         && state.active_by_key.get(&pending.request.key) == Some(&attempt.attempt_id);
+    let resource_yield_completed = current
+        && pending.resource_yield_requested
+        && matches!(&result, Ok(ProxyGenerationOutcome::Canceled))
+        && !inner.shutdown.load(Ordering::Acquire);
+    if resource_yield_completed {
+        pending.phase = ProxyAttemptPhase::Queued;
+        pending.cancellation = ExecutionCancellationToken::new();
+        pending.resource_yield_requested = false;
+        pending.queue_revision = pending.queue_revision.saturating_add(1).max(1);
+        let origin = pending.origin;
+        let revision = pending.queue_revision;
+        state.pending.insert(attempt.attempt_id, pending);
+        state.enqueue(attempt.attempt_id, origin, revision);
+        state.counters.resource_yields = state.counters.resource_yields.saturating_add(1);
+        drop(state);
+        inner.mark_diagnostics_changed();
+        inner.available.notify_all();
+        return;
+    }
     if current {
         state.active_by_key.remove(&pending.request.key);
     }
 
+    let publication = match &result {
+        Ok(ProxyGenerationOutcome::Completed(evidence)) => Some(evidence.clone()),
+        _ => None,
+    };
     let (disposition, terminal_failure) = match result {
         Ok(ProxyGenerationOutcome::Canceled) => {
             state.counters.cancellations = state.counters.cancellations.saturating_add(1);
@@ -503,9 +637,10 @@ fn publish_worker_result(
         elapsed,
         true,
         terminal_failure.as_ref(),
+        publication,
     );
     drop(state);
-    inner.mark_changed();
+    inner.mark_model_changed();
     inner.available.notify_all();
 }
 
@@ -543,8 +678,11 @@ fn push_terminal(
     elapsed: Duration,
     executed: bool,
     failure: Option<&ProxyGenerationFailure>,
+    publication: Option<mondrian_media::ProxyPublicationEvidence>,
 ) {
+    let terminal_sequence = state.allocate_terminal_sequence();
     state.terminal_records.push_back(ProxyGenerationTerminalRecord {
+        terminal_sequence,
         evidence: ExecutionTerminalEvidence {
             generation,
             priority: origin.priority(),
@@ -559,6 +697,8 @@ fn push_terminal(
         executed,
         failure: failure.map(|failure| failure.reason),
         failure_detail: failure.map(|failure| failure.detail.clone()),
+        publication_failure: failure.and_then(|failure| failure.publication.as_deref()).cloned(),
+        publication,
     });
     trim_terminals(state);
 }
@@ -571,13 +711,40 @@ fn trim_terminals(state: &mut ProxyGenerationState) {
 
 pub(super) fn diagnostics_snapshot(state: &ProxyGenerationState) -> ProxyGenerationDiagnostics {
     ProxyGenerationDiagnostics {
+        revision: 0,
         generation: state.generation,
+        dispatch_enabled: state.dispatch_enabled,
+        automatic_dispatch_enabled: state.automatic_dispatch_enabled,
+        dispatch_parallelism: state.dispatch_parallelism,
         queued: state
             .pending
             .values()
             .filter(|pending| pending.phase == ProxyAttemptPhase::Queued)
             .count(),
+        queued_user: state
+            .pending
+            .values()
+            .filter(|pending| {
+                pending.phase == ProxyAttemptPhase::Queued
+                    && pending.origin == ProxyGenerationOrigin::User
+            })
+            .count(),
         running: state.running,
+        yielding: state
+            .pending
+            .values()
+            .filter(|pending| {
+                pending.phase == ProxyAttemptPhase::Running && pending.resource_yield_requested
+            })
+            .count(),
+        running_user: state
+            .pending
+            .values()
+            .filter(|pending| {
+                pending.phase == ProxyAttemptPhase::Running
+                    && pending.origin == ProxyGenerationOrigin::User
+            })
+            .count(),
         retained_failures: state.failures.len(),
         admissions: state.counters.admissions,
         deduplications: state.counters.deduplications,
@@ -586,8 +753,35 @@ pub(super) fn diagnostics_snapshot(state: &ProxyGenerationState) -> ProxyGenerat
         completions: state.counters.completions,
         failures: state.counters.failures,
         cancellations: state.counters.cancellations,
+        resource_yields: state.counters.resource_yields,
         superseded: state.counters.superseded,
         rejections: state.counters.rejections,
+        oldest_terminal_sequence: state
+            .terminal_records
+            .front()
+            .map(|record| record.terminal_sequence),
+        latest_terminal_sequence: state.latest_terminal_sequence,
         terminal_records: state.terminal_records.iter().cloned().collect(),
+    }
+}
+
+pub(super) fn terminal_delta_snapshot(
+    state: &ProxyGenerationState,
+    cursor: u64,
+) -> super::ProxyGenerationTerminalDelta {
+    let oldest_terminal_sequence =
+        state.terminal_records.front().map(|record| record.terminal_sequence);
+    let retention_gap = cursor < state.latest_terminal_sequence
+        && oldest_terminal_sequence.is_some_and(|oldest| oldest > cursor.saturating_add(1));
+    super::ProxyGenerationTerminalDelta {
+        generation: state.generation,
+        next_cursor: state.latest_terminal_sequence.max(cursor),
+        retention_gap,
+        records: state
+            .terminal_records
+            .iter()
+            .filter(|record| record.terminal_sequence > cursor)
+            .cloned()
+            .collect(),
     }
 }

@@ -82,14 +82,12 @@ plugin.<author>.<name>
 插件在加载时调用注册函数，将定义注册到全局注册表中：
 
 ```rust
-// 注册特效定义
-register_effect_definition(definition);
-
-// 注册插件契约
-register_plugin_contract("plugin.example.hello", contract);
+// Contract 是 Definition 的组成部分；非法 schema/合同必须显式处理
+register_effect_definition(definition.with_plugin_contract(contract))?;
 ```
 
-注册表是进程级全局状态，由 `OnceLock<RwLock<HashMap<...>>>` 支持，线程安全。
+Definition 注册表是唯一的进程级发现 Authority。Contract 不存在可独立改写的第二个
+Registry；替换 Definition 会推进同一 Registry Revision，并形成新的运行时隔离代。
 
 ### 4.2 发现
 
@@ -108,7 +106,7 @@ let status = effect_plugin_runtime_status("plugin.example.hello");
 插件在 Mondrian 中的生命周期：
 
 ```text
-  加载 crate → 调用 register() → 注册到全局表
+  加载 crate → 调用 register() → 注册 Definition + Contract
                                     │
                     ┌───────────────┴───────────────┐
                     ▼                               ▼
@@ -137,11 +135,15 @@ let status = effect_plugin_runtime_status("plugin.example.hello");
 
 ### 6.2 能力显式声明
 
-不要依赖调用方"猜测"插件能做什么。通过 `EffectCapabilities` 显式声明：
-- 是否支持渲染图
-- 是否支持分支图
-- 是否提供自定义渲染处理器
-- 是否提供缓存 key
+不要依赖调用方“猜测”插件能做什么。Definition 必须显式声明：
+
+- `EffectColorDomainContract`：精确输入/输出处理域；
+- `EffectExecutionContract`：精确 backend/representation mode、determinism、
+  state、temporal extent、ROI、resource lifetime 与最大 topology；
+- 线性或分支 graph builder，以及需要时的一次性资源 preparer。
+
+这些不是乐观元数据。每次 emitted graph 都会反向校验实际 operation requirements；
+默认插件合同不准入任何 backend，也不会因为存在 graph builder 就自动变成“可用”。
 
 ### 6.3 参数路径稳定
 

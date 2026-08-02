@@ -3,15 +3,20 @@
 //! 后台将高码率原始素材转码为低码率代理文件，用于编辑时的流畅预览。
 //! 导出时自动切换回原始文件。
 
-use crate::{DecodedVideoRange, MediaFileFingerprint};
+use crate::{
+    DecodedVideoRange, MediaFileChangeStamp, MediaFileFingerprint, MediaFileObjectIdentity,
+    SupervisedProcessPolicy, SupervisedStreamCapture,
+};
 use mondrian_core::{
     types::AssetId, types::ColorSpace, ExecutionCancellationToken, MondrianError, Result,
 };
+use mondrian_storage::{FilePublicationFailure, FilePublicationMode, OwnedPublicationFile};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::Read;
+use std::fmt;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -74,8 +79,31 @@ impl Default for ProxyConfig {
     }
 }
 
+impl ProxyConfig {
+    /// Freeze the cache namespace as one normalized absolute root.
+    ///
+    /// Admission code must call this before the config participates in demand
+    /// identity, concurrency accounting, or artifact planning.
+    pub fn freeze_cache_root(mut self) -> Result<Self> {
+        self.cache_dir = std::path::absolute(&self.cache_dir).map_err(|error| {
+            MondrianError::ProxyGenerationFailed {
+                reason: format!(
+                    "proxy cache root could not be made absolute ({}): {error}",
+                    self.cache_dir.display()
+                ),
+            }
+        })?;
+        Ok(self)
+    }
+}
+
 const PROXY_COLOR_CONTRACT_VERSION: u16 = 2;
-const PROXY_MANIFEST_VERSION: u16 = 2;
+pub(crate) const PROXY_MANIFEST_VERSION: u16 = 3;
+/// Generated proxy commands map their sole picture stream before optional audio.
+///
+/// `PreviewDecodeSource::from_proxy_artifact` consumes this same contract so a
+/// proxy can never inherit the original container's absolute stream index.
+pub(crate) const PROXY_PRIMARY_VIDEO_STREAM_INDEX: u32 = 0;
 
 /// Invalid source sampling metadata for proxy generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -195,7 +223,7 @@ impl ProxyEncodingProfile {
     }
 }
 
-/// Stable source file identity persisted in a proxy manifest.
+/// Bounded source file-revision evidence persisted in a proxy manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProxySourceFingerprint {
     /// Source file length in bytes.
@@ -204,6 +232,10 @@ pub struct ProxySourceFingerprint {
     pub modified_secs: Option<u64>,
     /// Source modification time nanosecond fraction.
     pub modified_nanos: Option<u32>,
+    /// Filesystem object identity of the admitted source.
+    pub object_identity: Option<MediaFileObjectIdentity>,
+    /// Filesystem-owned change generation of that object.
+    pub change_stamp: Option<MediaFileChangeStamp>,
 }
 
 impl From<MediaFileFingerprint> for ProxySourceFingerprint {
@@ -212,6 +244,8 @@ impl From<MediaFileFingerprint> for ProxySourceFingerprint {
             len: value.len,
             modified_secs: value.modified_secs,
             modified_nanos: value.modified_nanos,
+            object_identity: value.object_identity,
+            change_stamp: value.change_stamp,
         }
     }
 }
@@ -258,11 +292,111 @@ pub struct ProxyProgress {
     pub error: Option<String>,
 }
 
+/// Publication phase that failed while committing one proxy artifact pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProxyPublicationPhase {
+    /// Encoded media artifact publication.
+    Media,
+    /// Exact sidecar manifest publication.
+    Manifest,
+}
+
+impl ProxyPublicationPhase {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Media => "media",
+            Self::Manifest => "manifest",
+        }
+    }
+}
+
+/// Namespace/durability classification of a proxy publication failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProxyPublicationFailureKind {
+    /// No irreversible namespace operation is known to have completed.
+    BeforeNamespace,
+    /// The target names the intended bytes, but crash durability is not proven.
+    DurabilityUnconfirmed,
+    /// Target ownership cannot be proven from postconditions.
+    NamespaceIndeterminate,
+}
+
+/// Domain-owned proxy publication failure without storage implementation types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyPublicationFailure {
+    /// Artifact phase that failed.
+    pub phase: ProxyPublicationPhase,
+    /// Exhaustive namespace/durability classification.
+    pub kind: ProxyPublicationFailureKind,
+    /// Intended absolute target path.
+    pub target_path: PathBuf,
+    /// Verified surviving source name for new bytes, when available.
+    pub retained_new_path: Option<PathBuf>,
+    /// Human-readable implementation diagnostic.
+    pub detail: String,
+}
+
+impl fmt::Display for ProxyPublicationFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "proxy {} publication {:?} at {}: {}",
+            self.phase.label(),
+            self.kind,
+            self.target_path.display(),
+            self.detail
+        )?;
+        if let Some(path) = &self.retained_new_path {
+            write!(formatter, " (verified retained bytes: {})", path.display())?;
+        }
+        if matches!(
+            self.kind,
+            ProxyPublicationFailureKind::DurabilityUnconfirmed
+                | ProxyPublicationFailureKind::NamespaceIndeterminate
+        ) {
+            write!(
+                formatter,
+                "; publication is quarantined pending exact artifact-pair revalidation"
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ProxyPublicationFailure {}
+
+/// Durable evidence that both proxy media and its exact sidecar are published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyPublicationEvidence {
+    /// Absolute published media path.
+    pub media_path: PathBuf,
+    /// Absolute published sidecar path.
+    pub manifest_path: PathBuf,
+}
+
+impl ProxyPublicationEvidence {
+    /// Construct evidence after both storage publications returned durable success.
+    pub fn durable(media_path: PathBuf, manifest_path: PathBuf) -> Self {
+        Self { media_path, manifest_path }
+    }
+}
+
+/// Typed proxy execution failure.
+#[derive(Debug, thiserror::Error)]
+pub enum ProxyGenerationError {
+    /// Generation failed outside namespace publication.
+    #[error(transparent)]
+    Execution(#[from] MondrianError),
+    /// Artifact publication reached a classified terminal state.
+    #[error(transparent)]
+    Publication(#[from] ProxyPublicationFailure),
+}
+
 /// Terminal result of one cancellable proxy-generation execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProxyGenerationOutcome {
-    /// A new artifact and matching manifest were published.
-    Completed(PathBuf),
+    /// A new artifact and matching manifest were durably published.
+    Completed(ProxyPublicationEvidence),
     /// The exact artifact was already fresh and no transcode ran.
     Reused(PathBuf),
     /// Cooperative cancellation won before artifact publication.
@@ -287,12 +421,85 @@ impl ProxyStatus {
     }
 }
 
-fn stable_proxy_hash(bytes: &[u8]) -> u64 {
-    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-    bytes.iter().fold(FNV_OFFSET_BASIS, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
+const STABLE_PROXY_HASH_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const STABLE_PROXY_HASH_PRIME: u64 = 0x0000_0100_0000_01b3;
+const PROXY_SOURCE_PATH_IDENTITY_DOMAIN_V1: &[u8] = b"mondrian.proxy.source-path.v1";
+
+fn extend_stable_proxy_hash(seed: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(seed, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(STABLE_PROXY_HASH_PRIME)
     })
+}
+
+fn stable_proxy_hash(bytes: &[u8]) -> u64 {
+    extend_stable_proxy_hash(STABLE_PROXY_HASH_OFFSET_BASIS, bytes)
+}
+
+#[cfg(unix)]
+fn stable_proxy_source_path_hash(source_path: &Path) -> Result<u64> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let hash = extend_stable_proxy_hash(
+        STABLE_PROXY_HASH_OFFSET_BASIS,
+        PROXY_SOURCE_PATH_IDENTITY_DOMAIN_V1,
+    );
+    let hash = extend_stable_proxy_hash(hash, b"\0unix-bytes\0");
+    Ok(extend_stable_proxy_hash(
+        hash,
+        source_path.as_os_str().as_bytes(),
+    ))
+}
+
+#[cfg(windows)]
+fn stable_proxy_source_path_hash(source_path: &Path) -> Result<u64> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let mut hash = extend_stable_proxy_hash(
+        STABLE_PROXY_HASH_OFFSET_BASIS,
+        PROXY_SOURCE_PATH_IDENTITY_DOMAIN_V1,
+    );
+    hash = extend_stable_proxy_hash(hash, b"\0windows-utf16le\0");
+    for unit in source_path.as_os_str().encode_wide() {
+        hash = extend_stable_proxy_hash(hash, &unit.to_le_bytes());
+    }
+    Ok(hash)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn stable_proxy_source_path_hash(source_path: &Path) -> Result<u64> {
+    let source_path =
+        source_path
+            .as_os_str()
+            .to_str()
+            .ok_or_else(|| {
+                MondrianError::ProxyGenerationFailed {
+            reason:
+                "proxy source path identity is unsupported for non-Unicode paths on this platform"
+                    .to_owned(),
+        }
+            })?;
+    let hash = extend_stable_proxy_hash(
+        STABLE_PROXY_HASH_OFFSET_BASIS,
+        PROXY_SOURCE_PATH_IDENTITY_DOMAIN_V1,
+    );
+    let hash = extend_stable_proxy_hash(hash, b"\0other-utf8\0");
+    Ok(extend_stable_proxy_hash(hash, source_path.as_bytes()))
+}
+
+fn canonical_proxy_source_identity(source_path: &Path) -> Result<PathBuf> {
+    match std::fs::canonicalize(source_path) {
+        Ok(path) => Ok(path),
+        // `proxy_path` is also a pure planning seam used before a source has
+        // materialized. Preserve that use while requiring every observable
+        // physical source alias to converge on its canonical identity.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(source_path.to_path_buf()),
+        Err(error) => Err(MondrianError::ProxyGenerationFailed {
+            reason: format!(
+                "canonical proxy source identity unavailable ({}): {error}",
+                source_path.display()
+            ),
+        }),
+    }
 }
 
 fn proxy_manifest_path(proxy_path: &Path) -> PathBuf {
@@ -304,21 +511,78 @@ fn proxy_manifest_path(proxy_path: &Path) -> PathBuf {
 
 fn write_proxy_manifest(
     manifest: &ProxyArtifactManifest,
-    tmp_path: &Path,
     output_path: &Path,
-) -> Result<()> {
+) -> std::result::Result<(), ProxyGenerationError> {
     let bytes = serde_json::to_vec_pretty(manifest).map_err(|err| {
-        MondrianError::ProxyGenerationFailed {
+        ProxyGenerationError::Execution(MondrianError::ProxyGenerationFailed {
             reason: format!("proxy manifest serialization failed: {err}"),
+        })
+    })?;
+    let mut staging =
+        OwnedPublicationFile::create_sibling(output_path, "proxy-manifest").map_err(|error| {
+            proxy_before_namespace_failure(ProxyPublicationPhase::Manifest, output_path, error)
+        })?;
+    staging
+        .file_mut()
+        .and_then(|file| file.write_all(&bytes).map_err(Into::into))
+        .map_err(|error| {
+            proxy_before_namespace_failure(ProxyPublicationPhase::Manifest, output_path, error)
+        })?;
+    publish_proxy_staging(staging, ProxyPublicationPhase::Manifest, output_path)
+}
+
+fn publish_proxy_staging(
+    staging: OwnedPublicationFile,
+    phase: ProxyPublicationPhase,
+    output_path: &Path,
+) -> std::result::Result<(), ProxyGenerationError> {
+    let evidence = staging
+        .publish(FilePublicationMode::ReplaceExisting)
+        .map_err(|failure| proxy_publication_failure(phase, output_path, failure))?;
+    debug_assert_eq!(evidence.published_path(), output_path);
+    Ok(())
+}
+
+fn proxy_before_namespace_failure(
+    phase: ProxyPublicationPhase,
+    output_path: &Path,
+    error: impl std::fmt::Display,
+) -> ProxyGenerationError {
+    ProxyPublicationFailure {
+        phase,
+        kind: ProxyPublicationFailureKind::BeforeNamespace,
+        target_path: output_path.to_path_buf(),
+        retained_new_path: None,
+        detail: format!("staging failed before namespace publication: {error}"),
+    }
+    .into()
+}
+
+fn proxy_publication_failure(
+    phase: ProxyPublicationPhase,
+    output_path: &Path,
+    failure: FilePublicationFailure,
+) -> ProxyGenerationError {
+    let (kind, retained_new_path) = match &failure {
+        FilePublicationFailure::BeforeNamespace(_) => {
+            (ProxyPublicationFailureKind::BeforeNamespace, None)
         }
-    })?;
-    std::fs::write(tmp_path, bytes).map_err(|err| MondrianError::ProxyGenerationFailed {
-        reason: format!(
-            "proxy manifest write failed ({}): {err}",
-            tmp_path.display()
+        FilePublicationFailure::DurabilityUnconfirmed(_) => {
+            (ProxyPublicationFailureKind::DurabilityUnconfirmed, None)
+        }
+        FilePublicationFailure::NamespaceIndeterminate(evidence) => (
+            ProxyPublicationFailureKind::NamespaceIndeterminate,
+            evidence.retained_new_path().map(Path::to_path_buf),
         ),
-    })?;
-    finalize_proxy_output(tmp_path, output_path)
+    };
+    ProxyPublicationFailure {
+        phase,
+        kind,
+        target_path: output_path.to_path_buf(),
+        retained_new_path,
+        detail: failure.to_string(),
+    }
+    .into()
 }
 
 /// 代理文件生成器
@@ -353,14 +617,18 @@ impl ProxyGenerator {
 
     /// 计算指定素材的代理文件路径
     pub fn proxy_path(&self, source_path: &Path, color: ProxyColorContract) -> Result<PathBuf> {
+        let cache_root = self.config.clone().freeze_cache_root()?.cache_dir;
         let encoding = self.encoding_profile(color)?;
-        let source_hash = stable_proxy_hash(source_path.to_string_lossy().as_bytes());
+        let canonical_source = canonical_proxy_source_identity(source_path)?;
+        let source_hash = stable_proxy_source_path_hash(&canonical_source)?;
         let identity = ProxyArtifactManifest {
             version: PROXY_MANIFEST_VERSION,
             source: ProxySourceFingerprint {
                 len: None,
                 modified_secs: None,
                 modified_nanos: None,
+                object_identity: None,
+                change_stamp: None,
             },
             color,
             settings: self.artifact_settings(),
@@ -372,7 +640,7 @@ impl ProxyGenerator {
             })?;
         let contract_hash = stable_proxy_hash(&identity_bytes);
         let height = self.config.resolution.height();
-        Ok(self.config.cache_dir.join(format!(
+        Ok(cache_root.join(format!(
             "{source_hash:016x}_{contract_hash:016x}_{height}p_{}.{}",
             encoding.identity_label(),
             encoding.output_extension()
@@ -392,9 +660,11 @@ impl ProxyGenerator {
         source_path: &Path,
         color: ProxyColorContract,
     ) -> Result<ProxyArtifactManifest> {
+        let source_revision = MediaFileFingerprint::capture(source_path);
+        require_proxy_source_revision(source_path, source_revision)?;
         Ok(ProxyArtifactManifest {
             version: PROXY_MANIFEST_VERSION,
-            source: MediaFileFingerprint::capture(source_path).into(),
+            source: source_revision.into(),
             color,
             settings: self.artifact_settings(),
             encoding: self.encoding_profile(color)?,
@@ -446,6 +716,7 @@ impl ProxyGenerator {
         admitted_source: MediaFileFingerprint,
         color: ProxyColorContract,
     ) -> Result<ProxyStatus> {
+        require_proxy_source_revision(source_path, admitted_source)?;
         let proxy_path = self.proxy_path(source_path, color)?;
         if !proxy_path.exists() {
             return Ok(ProxyStatus::Missing);
@@ -492,11 +763,11 @@ impl ProxyGenerator {
                 progress_tx,
                 ExecutionCancellationToken::new(),
             )
-            .await?
+            .await
+            .map_err(|error| MondrianError::ProxyGenerationFailed { reason: error.to_string() })?
         {
-            ProxyGenerationOutcome::Completed(path) | ProxyGenerationOutcome::Reused(path) => {
-                Ok(path)
-            }
+            ProxyGenerationOutcome::Completed(evidence) => Ok(evidence.media_path),
+            ProxyGenerationOutcome::Reused(path) => Ok(path),
             ProxyGenerationOutcome::Canceled => Err(MondrianError::ProxyGenerationFailed {
                 reason: "proxy generation was canceled".to_owned(),
             }),
@@ -513,7 +784,7 @@ impl ProxyGenerator {
         color: ProxyColorContract,
         progress_tx: mpsc::Sender<ProxyProgress>,
         cancellation: ExecutionCancellationToken,
-    ) -> Result<ProxyGenerationOutcome> {
+    ) -> std::result::Result<ProxyGenerationOutcome, ProxyGenerationError> {
         if cancellation.is_canceled() {
             return Ok(ProxyGenerationOutcome::Canceled);
         }
@@ -521,33 +792,37 @@ impl ProxyGenerator {
             return Err(mondrian_core::MondrianError::MediaOpen {
                 path: source_path.display().to_string(),
                 reason: "source file not found".to_string(),
-            });
+            }
+            .into());
         }
+        require_proxy_source_revision(&source_path, admitted_source)?;
         let execution_source = MediaFileFingerprint::capture(&source_path);
+        require_proxy_source_revision(&source_path, execution_source)?;
         if execution_source != admitted_source {
             return Err(MondrianError::ProxyGenerationFailed {
                 reason: format!(
                     "source file changed before proxy execution (admitted={admitted_source:?}, execution={execution_source:?})"
                 ),
-            });
+            }
+            .into());
         }
 
         let encoding = self.encoding_profile(color)?;
         let output_path = self.proxy_path(&source_path, color)?;
-        let tmp_output_path =
-            output_path.with_extension(format!("{}.part", encoding.output_extension()));
         let manifest_path = proxy_manifest_path(&output_path);
-        let tmp_manifest_path = manifest_path.with_extension("json.part");
         let manifest = self.expected_manifest(&source_path, color)?;
         if manifest.source != admitted_source.into() {
             return Err(MondrianError::ProxyGenerationFailed {
                 reason: "source file changed while proxy request was entering execution".to_owned(),
-            });
+            }
+            .into());
         }
 
         // 确保输出目录存在
         if let Some(parent) = output_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+            tokio::fs::create_dir_all(parent).await.map_err(|error| {
+                proxy_before_namespace_failure(ProxyPublicationPhase::Media, &output_path, error)
+            })?;
         }
 
         if self.proxy_status_for_source_fingerprint(&source_path, admitted_source, color)?
@@ -564,12 +839,12 @@ impl ProxyGenerator {
             return Ok(ProxyGenerationOutcome::Reused(output_path));
         }
 
-        if tmp_output_path.exists() {
-            let _ = std::fs::remove_file(&tmp_output_path);
-        }
-        if tmp_manifest_path.exists() {
-            let _ = std::fs::remove_file(&tmp_manifest_path);
-        }
+        let output_staging = OwnedPublicationFile::create_sibling(&output_path, "proxy-media")
+            .map_err(|error| {
+                proxy_before_namespace_failure(ProxyPublicationPhase::Media, &output_path, error)
+            })?;
+        let output_reservation = output_staging.release_for_external_writer();
+        let tmp_output_path = output_reservation.path().to_path_buf();
 
         tracing::info!(
             "Generating proxy for asset {asset_id}: {:?} → {:?}",
@@ -591,13 +866,18 @@ impl ProxyGenerator {
         let source_for_cmd = source_path.clone();
         let output_for_cmd = tmp_output_path.clone();
         let concurrent_jobs = self.config.concurrent_jobs;
-        let limiter = proxy_generation_limiter(self.config.cache_dir.clone());
+        let limiter = proxy_generation_limiter(
+            output_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| output_path.clone()),
+        );
         let permit_cancellation = cancellation.clone();
         let permit = tokio::task::spawn_blocking(move || {
             limiter.acquire(concurrent_jobs, &permit_cancellation)
         })
         .await
-        .map_err(|e| mondrian_core::MondrianError::ProxyGenerationFailed {
+        .map_err(|e| MondrianError::ProxyGenerationFailed {
             reason: format!("proxy concurrency permit task join failed: {e}"),
         })?;
         let Some(permit) = permit else {
@@ -618,7 +898,7 @@ impl ProxyGenerator {
             )
         })
         .await
-        .map_err(|e| mondrian_core::MondrianError::ProxyGenerationFailed {
+        .map_err(|e| MondrianError::ProxyGenerationFailed {
             reason: format!("proxy task join failed: {e}"),
         })?;
 
@@ -638,13 +918,11 @@ impl ProxyGenerator {
         match transcode_result {
             Ok(ProxyTranscodeOutcome::Completed) => {}
             Ok(ProxyTranscodeOutcome::Canceled) => {
-                let _ = std::fs::remove_file(&tmp_output_path);
-                let _ = std::fs::remove_file(&tmp_manifest_path);
+                drop(output_reservation);
                 return Ok(ProxyGenerationOutcome::Canceled);
             }
             Err(err) => {
-                let _ = std::fs::remove_file(&tmp_output_path);
-                let _ = std::fs::remove_file(&tmp_manifest_path);
+                drop(output_reservation);
                 let _ = progress_tx
                     .send(ProxyProgress {
                         asset_id,
@@ -653,18 +931,20 @@ impl ProxyGenerator {
                         error: Some(err.to_string()),
                     })
                     .await;
-                return Err(err);
+                return Err(err.into());
             }
         }
 
         if cancellation.is_canceled() {
-            let _ = std::fs::remove_file(&tmp_output_path);
-            let _ = std::fs::remove_file(&tmp_manifest_path);
+            drop(output_reservation);
             return Ok(ProxyGenerationOutcome::Canceled);
         }
 
-        finalize_proxy_output(&tmp_output_path, &output_path)?;
-        write_proxy_manifest(&manifest, &tmp_manifest_path, &manifest_path)?;
+        let output_staging = output_reservation.reclaim().map_err(|error| {
+            proxy_before_namespace_failure(ProxyPublicationPhase::Media, &output_path, error)
+        })?;
+        publish_proxy_staging(output_staging, ProxyPublicationPhase::Media, &output_path)?;
+        write_proxy_manifest(&manifest, &manifest_path)?;
 
         let _ = progress_tx
             .send(ProxyProgress {
@@ -675,7 +955,22 @@ impl ProxyGenerator {
             })
             .await;
 
-        Ok(ProxyGenerationOutcome::Completed(output_path))
+        Ok(ProxyGenerationOutcome::Completed(
+            ProxyPublicationEvidence::durable(output_path, manifest_path),
+        ))
+    }
+}
+
+fn require_proxy_source_revision(source_path: &Path, revision: MediaFileFingerprint) -> Result<()> {
+    if revision.authorizes_reuse() {
+        Ok(())
+    } else {
+        Err(MondrianError::MediaSourceRevisionUnavailable {
+            path: source_path.display().to_string(),
+            reason:
+                "proxy freshness requires filesystem object identity and change-generation evidence"
+                    .to_owned(),
+        })
     }
 }
 
@@ -766,7 +1061,6 @@ enum ProxyTranscodeOutcome {
     Canceled,
 }
 
-const PROXY_FFMPEG_CANCEL_POLL: Duration = Duration::from_millis(10);
 const PROXY_FFMPEG_STDERR_TAIL_CAPACITY: usize = 64 * 1024;
 
 fn run_ffmpeg_proxy_transcode_cancellable(
@@ -782,52 +1076,33 @@ fn run_ffmpeg_proxy_transcode_cancellable(
         return Ok(ProxyTranscodeOutcome::Canceled);
     }
     let mut cmd = ffmpeg_proxy_command(encoding, crf, height, color, source_path, output_path)?;
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
-    let mut child =
-        cmd.spawn().map_err(|e| mondrian_core::MondrianError::ProxyGenerationFailed {
-            reason: format!("failed to invoke ffmpeg (is ffmpeg in PATH?): {}", e),
-        })?;
-    let stderr = child.stderr.take().ok_or_else(|| MondrianError::ProxyGenerationFailed {
-        reason: "failed to capture proxy FFmpeg stderr".to_owned(),
-    })?;
-    let stderr_reader = std::thread::Builder::new()
-        .name("mondrian-proxy-stderr".to_owned())
-        .spawn(move || read_bounded_stderr_tail(stderr))
-        .map_err(|error| {
-            let _ = child.kill();
-            let _ = child.wait();
-            MondrianError::ProxyGenerationFailed {
-                reason: format!("failed to start proxy FFmpeg stderr drain: {error}"),
-            }
-        })?;
-
-    let status = loop {
-        if cancellation.is_canceled() {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = stderr_reader.join();
-            return Ok(ProxyTranscodeOutcome::Canceled);
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => std::thread::sleep(PROXY_FFMPEG_CANCEL_POLL),
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = stderr_reader.join();
-                return Err(MondrianError::ProxyGenerationFailed {
-                    reason: format!("failed while waiting for proxy FFmpeg: {error}"),
-                });
-            }
+    let output = match crate::run_supervised_command(
+        &mut cmd,
+        None,
+        SupervisedProcessPolicy {
+            stdout: SupervisedStreamCapture::Drain,
+            stderr: SupervisedStreamCapture::Tail {
+                limit_bytes: PROXY_FFMPEG_STDERR_TAIL_CAPACITY,
+            },
+            ..SupervisedProcessPolicy::default()
+        },
+        cancellation,
+    ) {
+        Ok(output) => output,
+        Err(error) if error.is_canceled() => return Ok(ProxyTranscodeOutcome::Canceled),
+        Err(error) => {
+            return Err(MondrianError::ProxyGenerationFailed {
+                reason: format!("proxy FFmpeg process failed: {error}"),
+            });
         }
     };
-    let stderr = stderr_reader.join().map_err(|_| MondrianError::ProxyGenerationFailed {
-        reason: "proxy FFmpeg stderr drain panicked".to_owned(),
-    })??;
 
-    if !status.success() {
+    if !output.status.success() {
         return Err(mondrian_core::MondrianError::ProxyGenerationFailed {
-            reason: format!("ffmpeg failed: {}", stderr.trim()),
+            reason: format!(
+                "ffmpeg failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
         });
     }
 
@@ -838,33 +1113,6 @@ fn run_ffmpeg_proxy_transcode_cancellable(
     }
 
     Ok(ProxyTranscodeOutcome::Completed)
-}
-
-fn read_bounded_stderr_tail(mut stderr: impl Read) -> std::io::Result<String> {
-    let mut tail = Vec::with_capacity(PROXY_FFMPEG_STDERR_TAIL_CAPACITY);
-    let mut buffer = [0_u8; 4096];
-    loop {
-        let read = stderr.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        if read >= PROXY_FFMPEG_STDERR_TAIL_CAPACITY {
-            tail.clear();
-            tail.extend_from_slice(
-                &buffer[read - PROXY_FFMPEG_STDERR_TAIL_CAPACITY.min(read)..read],
-            );
-            continue;
-        }
-        let overflow = tail
-            .len()
-            .saturating_add(read)
-            .saturating_sub(PROXY_FFMPEG_STDERR_TAIL_CAPACITY);
-        if overflow > 0 {
-            tail.drain(..overflow);
-        }
-        tail.extend_from_slice(&buffer[..read]);
-    }
-    Ok(String::from_utf8_lossy(&tail).into_owned())
 }
 
 fn ffmpeg_proxy_command(
@@ -991,84 +1239,18 @@ fn proxy_color_contract_error(error: ProxyColorContractError) -> MondrianError {
     MondrianError::ProxyGenerationFailed { reason: error.to_string() }
 }
 
-fn finalize_proxy_output(tmp_output_path: &Path, output_path: &Path) -> Result<()> {
-    if !output_path.exists() {
-        return std::fs::rename(tmp_output_path, output_path).map_err(|e| {
-            mondrian_core::MondrianError::ProxyGenerationFailed {
-                reason: format!(
-                    "proxy finalize rename failed ({} -> {}): {}",
-                    tmp_output_path.display(),
-                    output_path.display(),
-                    e
-                ),
-            }
-        });
-    }
-
-    let backup_path = output_path.with_extension(format!(
-        "{}.replace-backup",
-        output_path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or("proxy")
-    ));
-    if backup_path.exists() {
-        std::fs::remove_file(&backup_path).map_err(|e| {
-            mondrian_core::MondrianError::ProxyGenerationFailed {
-                reason: format!(
-                    "proxy finalize remove old backup failed ({}): {}",
-                    backup_path.display(),
-                    e
-                ),
-            }
-        })?;
-    }
-
-    std::fs::rename(output_path, &backup_path).map_err(|e| {
-        mondrian_core::MondrianError::ProxyGenerationFailed {
-            reason: format!(
-                "proxy finalize backup existing output failed ({} -> {}): {}",
-                output_path.display(),
-                backup_path.display(),
-                e
-            ),
-        }
-    })?;
-
-    match std::fs::rename(tmp_output_path, output_path) {
-        Ok(()) => {
-            let _ = std::fs::remove_file(&backup_path);
-            Ok(())
-        }
-        Err(rename_err) => {
-            let restore_result = std::fs::rename(&backup_path, output_path);
-            let restore_message = match restore_result {
-                Ok(()) => "previous proxy restored".to_string(),
-                Err(restore_err) => format!("previous proxy restore failed: {restore_err}"),
-            };
-            Err(mondrian_core::MondrianError::ProxyGenerationFailed {
-                reason: format!(
-                    "proxy finalize rename failed ({} -> {}): {}; {}",
-                    tmp_output_path.display(),
-                    output_path.display(),
-                    rename_err,
-                    restore_message
-                ),
-            })
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        ffmpeg_proxy_command, finalize_proxy_output, read_bounded_stderr_tail, ProxyCodec,
-        ProxyColorContract, ProxyColorContractError, ProxyConcurrencyLimiter, ProxyConfig,
-        ProxyEncodingProfile, ProxyGenerationOutcome, ProxyGenerator, ProxyStatus,
-        PROXY_COLOR_CONTRACT_VERSION, PROXY_FFMPEG_STDERR_TAIL_CAPACITY,
+        ffmpeg_proxy_command, publish_proxy_staging, ProxyCodec, ProxyColorContract,
+        ProxyColorContractError, ProxyConcurrencyLimiter, ProxyConfig, ProxyEncodingProfile,
+        ProxyGenerationOutcome, ProxyGenerator, ProxyPublicationFailureKind, ProxyPublicationPhase,
+        ProxyStatus, PROXY_COLOR_CONTRACT_VERSION, PROXY_PRIMARY_VIDEO_STREAM_INDEX,
     };
     use crate::{DecodedVideoRange, MediaFileFingerprint};
     use mondrian_core::{types::ColorSpace, ExecutionCancellationToken};
+    use mondrian_storage::OwnedPublicationFile;
+    use std::io::Write;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -1149,14 +1331,18 @@ mod tests {
     fn proxy_status_reports_stale_when_source_is_newer_than_proxy() {
         let root = tempfile::tempdir().expect("tempdir");
         let source = root.path().join("source.mp4");
+        std::fs::write(&source, b"source-v1").expect("initial source revision");
         let generator = ProxyGenerator::new(test_proxy_config(root.path().join("proxy")));
         let color = rec709_contract();
         let proxy = generator.proxy_path(&source, color).expect("proxy path");
         std::fs::create_dir_all(proxy.parent().expect("proxy parent")).expect("proxy parent");
         std::fs::write(&proxy, b"proxy").expect("proxy");
         generator.install_test_manifest(&source, color);
+        assert_eq!(generator.proxy_status(&source, color), ProxyStatus::Fresh);
         std::thread::sleep(Duration::from_millis(20));
-        std::fs::write(&source, b"source").expect("source");
+        // Preserve the length and path so freshness depends on the strong
+        // object/change-generation revision rather than the legacy size check.
+        std::fs::write(&source, b"source-v2").expect("new source revision");
 
         assert_eq!(generator.proxy_status(&source, color), ProxyStatus::Stale);
         assert!(!generator.proxy_is_fresh(&source, color));
@@ -1211,6 +1397,61 @@ mod tests {
     }
 
     #[test]
+    fn proxy_planning_normalizes_relative_cache_root_to_absolute_namespace() {
+        let generator = ProxyGenerator::new(test_proxy_config(
+            std::path::PathBuf::from("target").join("relative-proxy-cache"),
+        ));
+
+        let path = generator
+            .proxy_path(
+                std::path::Path::new("unmaterialized-source.mov"),
+                rec709_contract(),
+            )
+            .expect("absolute proxy plan");
+
+        assert!(path.is_absolute());
+        assert!(path
+            .parent()
+            .expect("cache parent")
+            .ends_with(std::path::Path::new("target").join("relative-proxy-cache")));
+    }
+
+    #[test]
+    fn proxy_identity_canonicalizes_an_observable_source_path() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let source = root.path().join("source.mov");
+        std::fs::write(&source, b"source").expect("source");
+        let canonical_source = std::fs::canonicalize(&source).expect("canonical source");
+        let generator = ProxyGenerator::new(test_proxy_config(root.path().join("proxy")));
+        let color = rec709_contract();
+
+        assert_eq!(
+            generator.proxy_path(&source, color).expect("lexical proxy path"),
+            generator.proxy_path(&canonical_source, color).expect("canonical proxy path")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proxy_identity_preserves_non_utf8_native_path_units() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let first = root.path().join(std::ffi::OsString::from_vec(b"source-\x80.mov".to_vec()));
+        let second = root.path().join(std::ffi::OsString::from_vec(b"source-\x81.mov".to_vec()));
+        std::fs::write(&first, b"first").expect("first non-UTF8 source");
+        std::fs::write(&second, b"second").expect("second non-UTF8 source");
+        let generator = ProxyGenerator::new(test_proxy_config(root.path().join("proxy")));
+        let color = rec709_contract();
+
+        assert_ne!(
+            generator.proxy_path(&first, color).expect("first proxy path"),
+            generator.proxy_path(&second, color).expect("second proxy path"),
+            "distinct native path units must not collapse through a lossy Unicode projection"
+        );
+    }
+
+    #[test]
     fn hdr_proxy_command_declares_main10_and_cicp_tags() {
         let color =
             ProxyColorContract::try_new(ColorSpace::Rec2100Pq, 10, DecodedVideoRange::Limited)
@@ -1243,6 +1484,26 @@ mod tests {
         assert!(filter.contains("color_trc=smpte2084"));
         assert!(filter.contains("colorspace=bt2020nc"));
         assert!(filter.contains("in_range=tv:out_range=tv"));
+    }
+
+    #[test]
+    fn proxy_command_and_physical_contract_bind_output_video_stream_zero() {
+        let command = ffmpeg_proxy_command(
+            ProxyEncodingProfile::H264High8,
+            20,
+            720,
+            rec709_contract(),
+            std::path::Path::new("source.mov"),
+            std::path::Path::new("proxy.mp4.part"),
+        )
+        .expect("valid FFmpeg proxy command");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(args.windows(2).any(|pair| pair == ["-map", "0:v:0"]));
+        assert_eq!(PROXY_PRIMARY_VIDEO_STREAM_INDEX, 0);
     }
 
     #[test]
@@ -1302,32 +1563,78 @@ mod tests {
     }
 
     #[test]
-    fn finalize_proxy_output_replaces_existing_proxy_after_tmp_is_ready() {
+    fn proxy_publication_replaces_existing_file_without_backup_namespace() {
         let root = tempfile::tempdir().expect("tempdir");
         let output = root.path().join("proxy.mp4");
-        let tmp = root.path().join("proxy.mp4.part");
         std::fs::write(&output, b"old proxy").expect("old proxy");
-        std::fs::write(&tmp, b"new proxy").expect("new proxy");
+        let mut staging =
+            OwnedPublicationFile::create_sibling(&output, "proxy-test").expect("staging");
+        let staging_path = staging.path().to_path_buf();
+        staging.file_mut().expect("writer").write_all(b"new proxy").expect("write");
 
-        finalize_proxy_output(&tmp, &output).expect("finalize");
+        publish_proxy_staging(staging, ProxyPublicationPhase::Media, &output).expect("publish");
 
         assert_eq!(std::fs::read(&output).expect("output"), b"new proxy");
-        assert!(!tmp.exists());
-        assert!(!root.path().join("proxy.mp4.replace-backup").exists());
+        assert!(!staging_path.exists());
+        assert_eq!(
+            std::fs::read_dir(root.path()).expect("read root").count(),
+            1,
+            "publication must not expose an intermediate backup namespace"
+        );
     }
 
     #[test]
-    fn finalize_proxy_output_restores_existing_proxy_when_new_file_is_missing() {
+    fn external_proxy_writer_reclaims_reserved_file_identity_before_publish() {
         let root = tempfile::tempdir().expect("tempdir");
         let output = root.path().join("proxy.mp4");
-        let tmp = root.path().join("missing-proxy.mp4.part");
-        std::fs::write(&output, b"old proxy").expect("old proxy");
+        let staging = OwnedPublicationFile::create_sibling(&output, "proxy-test").expect("staging");
+        let reservation = staging.release_for_external_writer();
+        let staging_path = reservation.path().to_path_buf();
 
-        let err = finalize_proxy_output(&tmp, &output).expect_err("finalize should fail");
+        std::fs::write(&staging_path, b"ffmpeg output").expect("external writer");
+        let staging = reservation.reclaim().expect("same reserved file identity");
+        publish_proxy_staging(staging, ProxyPublicationPhase::Media, &output).expect("publish");
 
-        assert!(err.to_string().contains("previous proxy restored"));
-        assert_eq!(std::fs::read(&output).expect("output"), b"old proxy");
-        assert!(!root.path().join("proxy.mp4.replace-backup").exists());
+        assert_eq!(std::fs::read(&output).expect("output"), b"ffmpeg output");
+        assert!(!staging_path.exists());
+    }
+
+    #[test]
+    fn pre_namespace_proxy_failure_preserves_existing_target() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let output = root.path().join("proxy.mp4");
+        std::fs::create_dir(&output).expect("foreign target directory");
+        let mut staging =
+            OwnedPublicationFile::create_sibling(&output, "proxy-test").expect("staging");
+        let staging_path = staging.path().to_path_buf();
+        staging.file_mut().expect("writer").write_all(b"new proxy").expect("write");
+
+        let error = publish_proxy_staging(staging, ProxyPublicationPhase::Media, &output)
+            .expect_err("shape must be rejected");
+
+        let super::ProxyGenerationError::Publication(failure) = error else {
+            panic!("expected typed publication failure");
+        };
+        assert_eq!(failure.phase, ProxyPublicationPhase::Media);
+        assert_eq!(failure.kind, ProxyPublicationFailureKind::BeforeNamespace);
+        assert_eq!(failure.target_path, output);
+        assert!(output.is_dir(), "foreign target must remain untouched");
+        assert!(
+            !staging_path.exists(),
+            "identity-owned pre-namespace staging should be safely cleaned"
+        );
+    }
+
+    #[test]
+    fn proxy_source_bans_legacy_backup_and_restore_publication() {
+        let source = include_str!("proxy.rs");
+        let backup_marker = ["replace", "-backup"].concat();
+        let legacy_finalize = ["fn finalize_", "proxy_output"].concat();
+        let direct_target_rename = ["std::fs::rename(output_", "path"].concat();
+
+        assert!(!source.contains(&backup_marker));
+        assert!(!source.contains(&legacy_finalize));
+        assert!(!source.contains(&direct_target_rename));
     }
 
     #[test]
@@ -1417,6 +1724,7 @@ mod tests {
                     len: None,
                     modified_secs: None,
                     modified_nanos: None,
+                    ..MediaFileFingerprint::default()
                 },
                 rec709_contract(),
                 progress_tx,
@@ -1450,12 +1758,5 @@ mod tests {
             ))
             .expect_err("source revision drift must fail before FFmpeg");
         assert!(error.to_string().contains("changed before proxy execution"));
-    }
-
-    #[test]
-    fn ffmpeg_stderr_capture_retains_only_bounded_tail() {
-        let input = vec![b'x'; PROXY_FFMPEG_STDERR_TAIL_CAPACITY + 4096];
-        let tail = read_bounded_stderr_tail(input.as_slice()).expect("stderr tail");
-        assert_eq!(tail.len(), PROXY_FFMPEG_STDERR_TAIL_CAPACITY);
     }
 }

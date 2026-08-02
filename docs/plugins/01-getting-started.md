@@ -49,37 +49,56 @@ members = [
 
 ```rust
 use mondrian_core::automation::{PropertyDescriptor, PropertyValue};
+use mondrian_effects::effect::EffectDefinitionError;
 use mondrian_effects::{
-    EffectPluginContract, EffectPluginDefinitionBuilder, EffectRenderOp, EffectType,
-    register_effect_definition,
+    register_effect_definition, EffectColorDomainContract, EffectDeterminism,
+    EffectExecutionContract, EffectExecutionModes, EffectGraphTopology, EffectPluginContract,
+    EffectPluginDefinitionBuilder, EffectRenderOp, EffectResourceLifetime,
+    EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent, EffectType,
 };
 
 /// 插件入口：在库加载时注册特效定义
-pub fn register() {
+pub fn register() -> Result<(), EffectDefinitionError> {
     let plugin_type = EffectType::Plugin("plugin.example.hello".to_string());
+    let amount_id = plugin_type
+        .parameter_id("amount")
+        .expect("static parameter ID");
 
-    let definition = EffectPluginDefinitionBuilder::new(plugin_type.key(), "Hello Effect")
+    let definition = EffectPluginDefinitionBuilder::new(
+        plugin_type.key(),
+        "Hello Effect",
+        EffectColorDomainContract::SCENE_LINEAR,
+    )
+        .with_execution_contract(EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            determinism: EffectDeterminism::Deterministic,
+            state_model: EffectStateModel::Stateless,
+            temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+            roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+            resource_lifetime: EffectResourceLifetime::Frame,
+            topology: EffectGraphTopology::LinearChain,
+        })
         .with_plugin_contract(EffectPluginContract::new("0.1.0"))
         .property(PropertyDescriptor::new(
             "plugin.example.hello.amount",
             "Amount",
             PropertyValue::Float(0.5),
-        ))
-        .with_graph(|effect, context, graph| {
-            let amount = effect.evaluate_f32_by_suffix(
-                "plugin.example.hello.amount",
-                context.time,
-                0.5,
-            );
+        ).with_parameter_id(amount_id.clone()))
+        .with_graph(move |effect, context, graph| {
+            let amount = effect.evaluate_f32_parameter(&amount_id, context.time, 0.5);
             graph.apply(EffectRenderOp::GaussianBlur {
                 radius: amount * 10.0,
             });
         })
         .build();
 
-    register_effect_definition(definition);
+    register_effect_definition(definition)
 }
 ```
+
+上面的合同只声明当前实现真实具备的 CPU Float32、单帧和无状态能力，并对 ROI
+保持保守。声明 GPU、额外 precision 或更小 ROI 之前，必须先有对应实现并通过 emitted
+graph 合同校验；缺省合同会保守地让插件保持不可执行。
 
 ## 5. 在应用中加载插件
 
@@ -87,7 +106,7 @@ pub fn register() {
 
 ```rust
 // 在 mondrian-app 初始化代码中
-mondrian_plugin_hello::register();
+mondrian_plugin_hello::register()?;
 ```
 
 ## 6. 验证

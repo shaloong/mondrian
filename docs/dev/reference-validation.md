@@ -493,9 +493,12 @@ pwsh -File scripts/validation/invoke-playback-reference-gates.ps1 `
   -RegenerateGeneratedFixtures
 ```
 
-Each plan-v3 gate has an external 45-minute process deadline. Timeout kills the
-complete Cargo/test descendant tree and fails the run even if a partial report
-exists. The Video gate additionally writes a flushed
+Each plan-v4 gate first performs a separately bounded release test prebuild and
+retains its log, exit status, timeout status, and elapsed time. The external
+45-minute process deadline starts only after that prebuild, so a cold compiler
+cache cannot consume the gate's normative 30-minute wall-clock observation
+window. Execution timeout kills the complete Cargo/test descendant tree and
+fails the run even if a partial report exists. The Video gate additionally writes a flushed
 `video-decode-progress.jsonl` artifact beside its report; its last record
 identifies the most recently observed media call without granting recovery
 authority. Evidence records the
@@ -536,6 +539,18 @@ and passing structured profiles. A loose cargo log is not acceptance evidence.
   silently converting precision, or accepting visibly wrong color is a failure.
 - HDR-to-SDR fallback is allowed only where the scenario declares it and the
   capability report records the actual path.
+
+Realtime observation count and authored Sequence extent are independent.
+External development probes reserve bounded startup headroom, capped by the
+probed source frame count, so cold decoder/GPU priming cannot consume the
+declared observation window. The measured Playback Evidence window begins
+after the first exact-current presentation and preroll qualification. Because
+that first observation may occur at any phase inside a frame, the conservative
+wall-clock lower bound for `N` subsequent frame-boundary crossings is
+`(N - 1) * frame_interval`; exact start/end coordinates and Engine displacement
+evidence independently prove the full number of crossings. Missed intermediate
+frames count once against the fixed opportunity denominator, and a gap crossing
+the terminal boundary cannot grow that denominator.
 
 ## Current coverage status
 

@@ -1,15 +1,16 @@
-use crate::execution::custom_render_processor_registry;
-use crate::{effect_definition, plugin_contract, record_plugin_runtime_failure};
 use crate::{EffectExecutionError, EffectRenderOp};
 use mondrian_core::types::{BlendMode, WorkingColorSpace};
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
+const GAUSSIAN_BOX_PASS_COUNT: usize = 3;
+
 pub use crate::execution::{
-    apply_compiled_effect_graph, apply_compiled_effect_graph_pass, apply_effect_render_graph,
-    apply_effect_render_graph_pass, apply_effect_render_plan, apply_effect_render_plan_pass,
-    register_custom_render_processor, CustomEffectRenderProcessor,
+    apply_compiled_effect_graph, apply_compiled_effect_graph_pass, CustomEffectRenderProcessor,
 };
+#[cfg(test)]
+use crate::execution::{apply_effect_render_graph, apply_effect_render_plan};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AdjustmentLayerParams {
@@ -76,17 +77,22 @@ pub fn apply_adjustment_layer(
     height: u32,
     params: AdjustmentLayerParams,
     frame_seed: i64,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, EffectExecutionError> {
     if params.is_identity() || input.is_empty() || width == 0 || height == 0 {
-        return input.to_vec();
+        return Ok(input.to_vec());
     }
 
     let mut working = input.to_vec();
     apply_primary_color_adjustments(&mut working, params);
 
-    let blur_radius = params.blur_radius.round().clamp(0.0, 24.0) as usize;
-    if blur_radius > 0 {
-        working = box_blur_rgb(&working, width as usize, height as usize, blur_radius);
+    let Some(blur_radius) = valid_gaussian_radius(params.blur_radius) else {
+        return Err(EffectExecutionError::InvalidRenderParameter {
+            op: "adjustment_layer",
+            parameter: "blur_radius",
+        });
+    };
+    if blur_radius > 1.0e-4 {
+        working = gaussian_blur_rgba8(&working, width as usize, height as usize, blur_radius);
     }
 
     if params.sharpen_amount > 1.0e-4 {
@@ -121,7 +127,7 @@ pub fn apply_adjustment_layer(
         );
     }
 
-    working
+    Ok(working)
 }
 
 pub(crate) fn apply_render_op(
@@ -150,9 +156,14 @@ pub(crate) fn apply_render_op(
             );
         }
         EffectRenderOp::GaussianBlur { radius } => {
-            let blur_radius = radius.round().clamp(0.0, 24.0) as usize;
-            if blur_radius > 0 {
-                *working = box_blur_rgb(working, width as usize, height as usize, blur_radius);
+            let Some(radius) = valid_gaussian_radius(*radius) else {
+                return Err(EffectExecutionError::InvalidRenderParameter {
+                    op: "gaussian_blur",
+                    parameter: "radius",
+                });
+            };
+            if radius > 1.0e-4 {
+                *working = gaussian_blur_rgba8(working, width as usize, height as usize, radius);
             }
         }
         EffectRenderOp::Sharpen { amount } => {
@@ -196,26 +207,23 @@ pub(crate) fn apply_render_op(
                 );
             }
         }
+        EffectRenderOp::TemporalFrameMix { .. } => {
+            return Err(EffectExecutionError::TemporalFrameProviderRequired);
+        }
         EffectRenderOp::Lut3D { lut, intensity } => {
             lut.apply_rgba8_in_place(working, *intensity);
         }
-        EffectRenderOp::Custom { key, params, .. } => {
-            let contract = plugin_contract(key);
-            if let Some(processor) = custom_render_processor_registry()
-                .read()
-                .expect("custom render processor registry poisoned")
-                .get(key)
-                .cloned()
-            {
+        EffectRenderOp::Custom { key, params, processor, .. } => {
+            if let Some(processor) = processor {
                 let mut staged = working.clone();
                 let result = catch_unwind(AssertUnwindSafe(|| {
-                    processor(&mut staged, width, height, params, frame_seed)
+                    (processor.processor())(&mut staged, width, height, params, frame_seed)
                 }));
                 match result {
                     Ok(Ok(())) => *working = staged,
                     Ok(Err(error)) => {
                         let reason = error.to_string();
-                        record_plugin_runtime_failure(key, contract.as_ref(), reason.clone());
+                        processor.record_runtime_failure(reason.clone());
                         return Err(EffectExecutionError::CustomProcessorFailed {
                             key: key.clone(),
                             reason,
@@ -223,7 +231,7 @@ pub(crate) fn apply_render_op(
                     }
                     Err(_) => {
                         let reason = "custom render processor panicked".to_string();
-                        record_plugin_runtime_failure(key, contract.as_ref(), reason.clone());
+                        processor.record_runtime_failure(reason.clone());
                         return Err(EffectExecutionError::CustomProcessorFailed {
                             key: key.clone(),
                             reason,
@@ -231,13 +239,6 @@ pub(crate) fn apply_render_op(
                     }
                 }
             } else {
-                if let Some(definition) = effect_definition(&crate::EffectType::from_key(key)) {
-                    record_plugin_runtime_failure(
-                        key,
-                        definition.plugin_contract(),
-                        "custom render processor missing",
-                    );
-                }
                 return Err(EffectExecutionError::CustomProcessorUnavailable { key: key.clone() });
             }
         }
@@ -252,6 +253,30 @@ pub(crate) fn apply_render_op_f32(
     op: &EffectRenderOp,
     frame_seed: i64,
 ) -> bool {
+    match apply_render_op_f32_controlled(working, width, height, op, frame_seed, &mut || {
+        Ok::<(), Infallible>(())
+    }) {
+        Ok(supported) => supported,
+        Err(never) => match never {},
+    }
+}
+
+/// Execute one Float32 render operation with caller-owned cooperative
+/// checkpoints.
+///
+/// `checkpoint` is invoked before work and at deterministic row/block
+/// boundaries inside long-running scalar kernels. An error aborts the
+/// operation immediately; callers own the partially mutated private buffer and
+/// must not publish it.
+pub(crate) fn apply_render_op_f32_controlled<E>(
+    working: &mut Vec<[f32; 4]>,
+    width: u32,
+    height: u32,
+    op: &EffectRenderOp,
+    frame_seed: i64,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<bool, E> {
+    checkpoint()?;
     match op {
         EffectRenderOp::ColorAdjust {
             exposure,
@@ -259,7 +284,7 @@ pub(crate) fn apply_render_op_f32(
             saturation,
             working_color_space,
         } => {
-            apply_primary_color_adjustments_f32(
+            apply_primary_color_adjustments_f32_controlled(
                 working.as_mut_slice(),
                 AdjustmentLayerParams {
                     exposure: *exposure,
@@ -268,61 +293,86 @@ pub(crate) fn apply_render_op_f32(
                     working_color_space: *working_color_space,
                     ..AdjustmentLayerParams::default()
                 },
-            );
-            true
+                checkpoint,
+            )?;
+            Ok(true)
         }
         EffectRenderOp::GaussianBlur { radius } => {
-            let radius = radius.clamp(0.0, 24.0);
+            let Some(radius) = valid_gaussian_radius(*radius) else {
+                return Ok(false);
+            };
             if radius > 1.0e-4 {
-                *working = gaussian_blur_rgba_f32(working, width as usize, height as usize, radius);
+                gaussian_blur_rgba_f32_in_place_controlled(
+                    working.as_mut_slice(),
+                    width as usize,
+                    height as usize,
+                    radius,
+                    checkpoint,
+                )?;
             }
-            true
+            Ok(true)
         }
         EffectRenderOp::Sharpen { amount } => {
             let amount = amount.clamp(0.0, 2.0);
             if amount > 1.0e-4 {
-                let blurred = gaussian_blur_rgba_f32(working, width as usize, height as usize, 1.0);
-                apply_unsharp_mask_f32(working, &blurred, amount);
+                let blurred = gaussian_blur_rgba_f32_controlled(
+                    working,
+                    width as usize,
+                    height as usize,
+                    crate::effect::SHARPEN_BLUR_RADIUS_PIXELS,
+                    checkpoint,
+                )?;
+                apply_unsharp_mask_f32_controlled(working, &blurred, amount, checkpoint)?;
             }
-            true
+            Ok(true)
         }
         EffectRenderOp::Vignette { intensity, feather } => {
             let intensity = intensity.clamp(0.0, 1.0);
             if intensity > 1.0e-4 {
-                apply_vignette_f32(
+                apply_vignette_f32_controlled(
                     working,
                     width as usize,
                     height as usize,
                     intensity,
                     *feather,
-                );
+                    checkpoint,
+                )?;
             }
-            true
+            Ok(true)
         }
         EffectRenderOp::ChromaticAberration { amount } => {
             let amount = amount.clamp(0.0, 1.0);
             if amount > 1.0e-4 {
-                *working = apply_chromatic_aberration_f32(
+                *working = apply_chromatic_aberration_f32_controlled(
                     working,
                     width as usize,
                     height as usize,
                     amount,
-                );
+                    checkpoint,
+                )?;
             }
-            true
+            Ok(true)
         }
         EffectRenderOp::Grain { amount } => {
             let amount = amount.clamp(0.0, 1.0);
             if amount > 1.0e-4 {
-                apply_grain_f32(working, width as usize, height as usize, amount, frame_seed);
+                apply_grain_f32_controlled(
+                    working,
+                    width as usize,
+                    height as usize,
+                    amount,
+                    frame_seed,
+                    checkpoint,
+                )?;
             }
-            true
+            Ok(true)
         }
+        EffectRenderOp::TemporalFrameMix { .. } => Ok(false),
         EffectRenderOp::Lut3D { lut, intensity } => {
-            lut.apply_rgba_f32_in_place(working, *intensity);
-            true
+            lut.apply_rgba_f32_in_place_controlled(working, *intensity, checkpoint)?;
+            Ok(true)
         }
-        EffectRenderOp::Custom { .. } => false,
+        EffectRenderOp::Custom { .. } => Ok(false),
     }
 }
 
@@ -513,7 +563,7 @@ pub fn apply_adjustment_pass(
     blend_mode: Option<BlendMode>,
     frame_seed: i64,
     out: &mut Vec<u8>,
-) {
+) -> Result<(), EffectExecutionError> {
     let required_len = width as usize * height as usize * 4;
     if out.len() != required_len {
         out.resize(required_len, 0);
@@ -521,16 +571,17 @@ pub fn apply_adjustment_pass(
 
     if required_len == 0 || base.len() != required_len {
         out.clear();
-        return;
+        return Ok(());
     }
 
     if opacity <= 1.0e-4 || params.is_identity() {
         out.copy_from_slice(base);
-        return;
+        return Ok(());
     }
 
-    let processed = apply_adjustment_layer(base, width, height, params, frame_seed);
+    let processed = apply_adjustment_layer(base, width, height, params, frame_seed)?;
     blend_adjustment_result(base, &processed, width, height, opacity, blend_mode, out);
+    Ok(())
 }
 
 fn apply_primary_color_adjustments(buffer: &mut [u8], params: AdjustmentLayerParams) {
@@ -562,33 +613,70 @@ fn apply_primary_color_adjustments(buffer: &mut [u8], params: AdjustmentLayerPar
     }
 }
 
-fn apply_primary_color_adjustments_f32(buffer: &mut [[f32; 4]], params: AdjustmentLayerParams) {
+fn apply_primary_color_adjustments_f32_controlled<E>(
+    buffer: &mut [[f32; 4]],
+    params: AdjustmentLayerParams,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
     let exposure_scale = 2.0f32.powf(params.exposure.clamp(-4.0, 4.0));
     let contrast = params.contrast.clamp(0.0, 3.0);
     let saturation = params.saturation.clamp(0.0, 3.0);
     let luma_coefficients = params.working_color_space.luminance_coefficients();
     const CONTRAST_PIVOT: f32 = 0.18;
 
-    for px in buffer {
-        if px[3] <= 1.0e-6 {
-            continue;
-        }
+    for chunk in buffer.chunks_mut(4_096) {
+        checkpoint()?;
+        for px in chunk {
+            if px[3] <= 1.0e-6 {
+                continue;
+            }
 
-        let mut rgb = [px[0], px[1], px[2]];
-        for channel in &mut rgb {
-            *channel *= exposure_scale;
-            *channel = (*channel - CONTRAST_PIVOT) * contrast + CONTRAST_PIVOT;
-        }
+            let mut rgb = [px[0], px[1], px[2]];
+            for channel in &mut rgb {
+                *channel *= exposure_scale;
+                *channel = (*channel - CONTRAST_PIVOT) * contrast + CONTRAST_PIVOT;
+            }
 
-        let luma = dot3(rgb, luma_coefficients);
-        px[0] = luma + (rgb[0] - luma) * saturation;
-        px[1] = luma + (rgb[1] - luma) * saturation;
-        px[2] = luma + (rgb[2] - luma) * saturation;
+            let luma = dot3(rgb, luma_coefficients);
+            px[0] = luma + (rgb[0] - luma) * saturation;
+            px[1] = luma + (rgb[1] - luma) * saturation;
+            px[2] = luma + (rgb[2] - luma) * saturation;
+        }
     }
+    checkpoint()
 }
 
 fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn valid_gaussian_radius(radius: f32) -> Option<f32> {
+    (radius.is_finite()
+        && (0.0..=crate::effect::GAUSSIAN_BLUR_AUTHOR_MAX_RADIUS_PIXELS as f32).contains(&radius))
+    .then_some(radius)
+}
+
+fn gaussian_blur_rgba8(input: &[u8], width: usize, height: usize, radius: f32) -> Vec<u8> {
+    let required_len = width.saturating_mul(height).saturating_mul(4);
+    if radius <= 1.0e-4 || required_len == 0 || input.len() != required_len {
+        return input.to_vec();
+    }
+
+    let float_input = input
+        .chunks_exact(4)
+        .map(|pixel| {
+            [
+                pixel[0] as f32 / 255.0,
+                pixel[1] as f32 / 255.0,
+                pixel[2] as f32 / 255.0,
+                pixel[3] as f32 / 255.0,
+            ]
+        })
+        .collect::<Vec<_>>();
+    gaussian_blur_rgba_f32(&float_input, width, height, radius)
+        .into_iter()
+        .flat_map(|pixel| pixel.map(unit_to_u8))
+        .collect()
 }
 
 fn gaussian_blur_rgba_f32(
@@ -597,102 +685,264 @@ fn gaussian_blur_rgba_f32(
     height: usize,
     radius: f32,
 ) -> Vec<[f32; 4]> {
-    if radius <= 1.0e-4 || width == 0 || height == 0 || input.len() != width * height {
-        return input.to_vec();
+    match gaussian_blur_rgba_f32_controlled(input, width, height, radius, &mut || {
+        Ok::<(), Infallible>(())
+    }) {
+        Ok(output) => output,
+        Err(never) => match never {},
+    }
+}
+
+fn gaussian_blur_rgba_f32_controlled<E>(
+    input: &[[f32; 4]],
+    width: usize,
+    height: usize,
+    radius: f32,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Vec<[f32; 4]>, E> {
+    checkpoint()?;
+    let mut output = input.to_vec();
+    checkpoint()?;
+    gaussian_blur_rgba_f32_in_place_controlled(
+        output.as_mut_slice(),
+        width,
+        height,
+        radius,
+        checkpoint,
+    )?;
+    Ok(output)
+}
+
+fn gaussian_blur_rgba_f32_in_place_controlled<E>(
+    pixels: &mut [[f32; 4]],
+    width: usize,
+    height: usize,
+    radius: f32,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    checkpoint()?;
+    if radius <= 1.0e-4 || width == 0 || height == 0 || pixels.len() != width * height {
+        return Ok(());
     }
 
-    let kernel_radius = radius.ceil().clamp(1.0, 24.0) as isize;
-    let sigma = (radius / 3.0).max(0.5);
-    let mut kernel = (-kernel_radius..=kernel_radius)
-        .map(|offset| {
-            let distance = offset as f32;
-            (-distance * distance / (2.0 * sigma * sigma)).exp()
-        })
-        .collect::<Vec<_>>();
-    let weight_sum = kernel.iter().sum::<f32>().max(f32::EPSILON);
-    for weight in &mut kernel {
-        *weight /= weight_sum;
-    }
-
-    let mut premultiplied = input
-        .iter()
-        .map(|pixel| {
+    for chunk in pixels.chunks_mut(4_096) {
+        checkpoint()?;
+        for pixel in chunk {
             let alpha = pixel[3].clamp(0.0, 1.0);
-            [pixel[0] * alpha, pixel[1] * alpha, pixel[2] * alpha, alpha]
-        })
-        .collect::<Vec<_>>();
-    let mut horizontal = vec![[0.0; 4]; input.len()];
-    for y in 0..height {
-        for x in 0..width {
-            let mut output = [0.0; 4];
-            for (kernel_index, weight) in kernel.iter().enumerate() {
-                let offset = kernel_index as isize - kernel_radius;
-                let sample_x = (x as isize + offset).clamp(0, width as isize - 1) as usize;
-                let sample = premultiplied[y * width + sample_x];
-                for channel in 0..4 {
-                    output[channel] += sample[channel] * weight;
-                }
-            }
-            horizontal[y * width + x] = output;
+            pixel[0] *= alpha;
+            pixel[1] *= alpha;
+            pixel[2] *= alpha;
+            pixel[3] = alpha;
         }
+    }
+    let mut scratch = vec![[0.0; 4]; pixels.len()];
+    checkpoint()?;
+
+    let kernel = gaussian_fractional_box_kernel(radius);
+    for _ in 0..GAUSSIAN_BOX_PASS_COUNT {
+        apply_fractional_box_blur_pass_controlled(
+            pixels,
+            &mut scratch,
+            width,
+            height,
+            kernel,
+            checkpoint,
+        )?;
     }
 
-    premultiplied.fill([0.0; 4]);
-    for y in 0..height {
-        for x in 0..width {
-            let mut output = [0.0; 4];
-            for (kernel_index, weight) in kernel.iter().enumerate() {
-                let offset = kernel_index as isize - kernel_radius;
-                let sample_y = (y as isize + offset).clamp(0, height as isize - 1) as usize;
-                let sample = horizontal[sample_y * width + x];
-                for channel in 0..4 {
-                    output[channel] += sample[channel] * weight;
-                }
-            }
-            premultiplied[y * width + x] = output;
-        }
-    }
-
-    for pixel in &mut premultiplied {
-        let alpha = pixel[3].clamp(0.0, 1.0);
-        if alpha > 1.0e-6 {
-            pixel[0] /= alpha;
-            pixel[1] /= alpha;
-            pixel[2] /= alpha;
-        } else {
-            pixel[0] = 0.0;
-            pixel[1] = 0.0;
-            pixel[2] = 0.0;
-        }
-        pixel[3] = alpha;
-    }
-    premultiplied
+    unpremultiply_rgba_controlled(pixels, checkpoint)
 }
 
-fn apply_unsharp_mask_f32(buffer: &mut [[f32; 4]], blurred: &[[f32; 4]], amount: f32) {
-    for (pixel, softened) in buffer.iter_mut().zip(blurred) {
-        if pixel[3] <= 1.0e-6 {
-            continue;
+#[derive(Debug, Clone, Copy)]
+struct FractionalBoxKernel {
+    whole_radius: usize,
+    edge_weight: f32,
+}
+
+fn gaussian_fractional_box_kernel(radius: f32) -> FractionalBoxKernel {
+    let sigma = radius / 3.0;
+    let target_pass_variance = sigma * sigma / GAUSSIAN_BOX_PASS_COUNT as f32;
+    let whole_radius = (((1.0 + 12.0 * target_pass_variance).sqrt() - 1.0) * 0.5).floor() as usize;
+    let whole = whole_radius as f32;
+    let whole_weight = whole.mul_add(2.0, 1.0);
+    let whole_second_moment = whole * (whole + 1.0) * whole.mul_add(2.0, 1.0) / 3.0;
+    let edge_distance = whole + 1.0;
+    let denominator = 2.0 * (edge_distance * edge_distance - target_pass_variance);
+    let edge_weight = if denominator > f32::EPSILON {
+        ((target_pass_variance * whole_weight - whole_second_moment) / denominator).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    FractionalBoxKernel { whole_radius, edge_weight }
+}
+
+/// Exact one-axis input halo consumed by the current three-pass Gaussian
+/// implementation.
+///
+/// ROI contracts call this same kernel function instead of approximating the
+/// dependency from the author-facing radius. Fractional outer taps extend the
+/// finite support even when their weight is below one.
+pub(crate) fn gaussian_blur_input_halo(radius: f32) -> Option<u32> {
+    let radius = valid_gaussian_radius(radius)?;
+    if radius <= 1.0e-4 {
+        return Some(0);
+    }
+    let kernel = gaussian_fractional_box_kernel(radius);
+    if kernel.whole_radius == 0 && kernel.edge_weight <= f32::EPSILON {
+        return Some(0);
+    }
+    let per_pass = kernel.whole_radius.checked_add(usize::from(kernel.edge_weight > 0.0))?;
+    u32::try_from(per_pass.checked_mul(GAUSSIAN_BOX_PASS_COUNT)?).ok()
+}
+
+fn apply_fractional_box_blur_pass_controlled<E>(
+    pixels: &mut [[f32; 4]],
+    scratch: &mut [[f32; 4]],
+    width: usize,
+    height: usize,
+    kernel: FractionalBoxKernel,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    let radius = kernel.whole_radius;
+    let edge_weight = kernel.edge_weight;
+    if radius == 0 && edge_weight <= f32::EPSILON {
+        return checkpoint();
+    }
+
+    // Keep the sliding accumulator wider than the stored frame. ROI execution
+    // deliberately replaces pixels outside the exact finite halo with zero.
+    // A Float32 accumulator can retain cancellation residue from those
+    // irrelevant pixels and make a cropped result differ from the same pixels
+    // in a full-frame execution. Float64 accumulation keeps that residue below
+    // the final Float32 rounding threshold without changing the public working
+    // precision or the admitted halo.
+    let normalization =
+        1.0 / (radius.saturating_mul(2).saturating_add(1) as f64 + 2.0 * f64::from(edge_weight));
+    for y in 0..height {
+        checkpoint()?;
+        let row_start = y * width;
+        let mut sum = [0.0_f64; 4];
+        for offset in -(radius as isize)..=radius as isize {
+            let sample_x = offset.clamp(0, width as isize - 1) as usize;
+            add_rgba(&mut sum, pixels[row_start + sample_x]);
         }
-        for channel in 0..3 {
-            pixel[channel] += (pixel[channel] - softened[channel]) * amount;
+        for x in 0..width {
+            let left_edge =
+                (x as isize - radius as isize - 1).clamp(0, width as isize - 1) as usize;
+            let right_edge =
+                (x as isize + radius as isize + 1).clamp(0, width as isize - 1) as usize;
+            let mut weighted = sum;
+            add_scaled_rgba(&mut weighted, pixels[row_start + left_edge], edge_weight);
+            add_scaled_rgba(&mut weighted, pixels[row_start + right_edge], edge_weight);
+            scratch[row_start + x] = weighted.map(|channel| (channel * normalization) as f32);
+            let remove_x = (x as isize - radius as isize).clamp(0, width as isize - 1) as usize;
+            let add_x = (x as isize + radius as isize + 1).clamp(0, width as isize - 1) as usize;
+            subtract_rgba(&mut sum, pixels[row_start + remove_x]);
+            add_rgba(&mut sum, pixels[row_start + add_x]);
         }
+    }
+
+    for x in 0..width {
+        checkpoint()?;
+        let mut sum = [0.0_f64; 4];
+        for offset in -(radius as isize)..=radius as isize {
+            let sample_y = offset.clamp(0, height as isize - 1) as usize;
+            add_rgba(&mut sum, scratch[sample_y * width + x]);
+        }
+        for y in 0..height {
+            let upper_edge =
+                (y as isize - radius as isize - 1).clamp(0, height as isize - 1) as usize;
+            let lower_edge =
+                (y as isize + radius as isize + 1).clamp(0, height as isize - 1) as usize;
+            let mut weighted = sum;
+            add_scaled_rgba(&mut weighted, scratch[upper_edge * width + x], edge_weight);
+            add_scaled_rgba(&mut weighted, scratch[lower_edge * width + x], edge_weight);
+            pixels[y * width + x] = weighted.map(|channel| (channel * normalization) as f32);
+            let remove_y = (y as isize - radius as isize).clamp(0, height as isize - 1) as usize;
+            let add_y = (y as isize + radius as isize + 1).clamp(0, height as isize - 1) as usize;
+            subtract_rgba(&mut sum, scratch[remove_y * width + x]);
+            add_rgba(&mut sum, scratch[add_y * width + x]);
+        }
+    }
+    checkpoint()
+}
+
+fn add_rgba(sum: &mut [f64; 4], pixel: [f32; 4]) {
+    for channel in 0..4 {
+        sum[channel] += f64::from(pixel[channel]);
     }
 }
 
-fn apply_vignette_f32(
+fn add_scaled_rgba(sum: &mut [f64; 4], pixel: [f32; 4], scale: f32) {
+    for channel in 0..4 {
+        sum[channel] += f64::from(pixel[channel]) * f64::from(scale);
+    }
+}
+
+fn subtract_rgba(sum: &mut [f64; 4], pixel: [f32; 4]) {
+    for channel in 0..4 {
+        sum[channel] -= f64::from(pixel[channel]);
+    }
+}
+
+fn unpremultiply_rgba_controlled<E>(
+    pixels: &mut [[f32; 4]],
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    for chunk in pixels.chunks_mut(4_096) {
+        checkpoint()?;
+        for pixel in chunk {
+            let alpha = pixel[3].clamp(0.0, 1.0);
+            if alpha > 1.0e-6 {
+                pixel[0] /= alpha;
+                pixel[1] /= alpha;
+                pixel[2] /= alpha;
+            } else {
+                pixel[0] = 0.0;
+                pixel[1] = 0.0;
+                pixel[2] = 0.0;
+            }
+            pixel[3] = alpha;
+        }
+    }
+    checkpoint()
+}
+
+fn apply_unsharp_mask_f32_controlled<E>(
+    buffer: &mut [[f32; 4]],
+    blurred: &[[f32; 4]],
+    amount: f32,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    for (buffer_chunk, blurred_chunk) in buffer.chunks_mut(4_096).zip(blurred.chunks(4_096)) {
+        checkpoint()?;
+        for (pixel, softened) in buffer_chunk.iter_mut().zip(blurred_chunk) {
+            if pixel[3] <= 1.0e-6 {
+                continue;
+            }
+            for channel in 0..3 {
+                pixel[channel] += (pixel[channel] - softened[channel]) * amount;
+            }
+        }
+    }
+    checkpoint()
+}
+
+fn apply_vignette_f32_controlled<E>(
     buffer: &mut [[f32; 4]],
     width: usize,
     height: usize,
     intensity: f32,
     feather: f32,
-) {
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
     let center_x = width.saturating_sub(1) as f32 * 0.5;
     let center_y = height.saturating_sub(1) as f32 * 0.5;
     let feather = feather.clamp(0.05, 1.0);
     let inner = 1.0 - feather * 0.85;
 
     for y in 0..height {
+        checkpoint()?;
         for x in 0..width {
             let pixel = &mut buffer[y * width + x];
             if pixel[3] <= 1.0e-6 {
@@ -708,20 +958,24 @@ fn apply_vignette_f32(
             pixel[2] *= gain;
         }
     }
+    checkpoint()
 }
 
-fn apply_chromatic_aberration_f32(
+fn apply_chromatic_aberration_f32_controlled<E>(
     input: &[[f32; 4]],
     width: usize,
     height: usize,
     amount: f32,
-) -> Vec<[f32; 4]> {
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Vec<[f32; 4]>, E> {
     let mut output = input.to_vec();
+    checkpoint()?;
     let center_x = width.saturating_sub(1) as f32 * 0.5;
     let center_y = height.saturating_sub(1) as f32 * 0.5;
     let maximum_shift = amount * 5.0;
 
     for y in 0..height {
+        checkpoint()?;
         for x in 0..width {
             let index = y * width + x;
             if input[index][3] <= 1.0e-6 {
@@ -751,7 +1005,8 @@ fn apply_chromatic_aberration_f32(
             );
         }
     }
-    output
+    checkpoint()?;
+    Ok(output)
 }
 
 fn sample_premultiplied_channel_f32(
@@ -797,14 +1052,16 @@ fn sample_premultiplied_channel_f32(
     }
 }
 
-fn apply_grain_f32(
+fn apply_grain_f32_controlled<E>(
     buffer: &mut [[f32; 4]],
     width: usize,
     height: usize,
     amount: f32,
     frame_seed: i64,
-) {
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
     for y in 0..height {
+        checkpoint()?;
         for x in 0..width {
             let pixel = &mut buffer[y * width + x];
             if pixel[3] <= 1.0e-6 {
@@ -816,6 +1073,7 @@ fn apply_grain_f32(
             pixel[2] += noise;
         }
     }
+    checkpoint()
 }
 
 fn box_blur_rgb(input: &[u8], width: usize, height: usize, radius: usize) -> Vec<u8> {
@@ -1185,8 +1443,8 @@ fn sample_channel(input: &[u8], width: usize, height: usize, x: f32, y: f32, cha
 mod tests {
     use super::*;
     use crate::{
-        get_or_compile_scheduled_effect_graph, EffectGraphNode, EffectGraphNodeId,
-        EffectGraphNodeKind, EffectRenderGraph, EffectRenderPlan,
+        compile_reference_effect_graph, EffectGraphNode, EffectGraphNodeId, EffectGraphNodeKind,
+        EffectRenderGraph, EffectRenderPlan,
     };
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -1196,7 +1454,8 @@ mod tests {
     #[test]
     fn identity_adjustment_leaves_frame_unchanged() {
         let input = vec![32, 64, 96, 255, 12, 24, 36, 255];
-        let output = apply_adjustment_layer(&input, 2, 1, AdjustmentLayerParams::default(), 0);
+        let output = apply_adjustment_layer(&input, 2, 1, AdjustmentLayerParams::default(), 0)
+            .expect("identity adjustment");
         assert_eq!(output, input);
     }
 
@@ -1300,7 +1559,8 @@ mod tests {
             Some(BlendMode::Normal),
             0,
             &mut out,
-        );
+        )
+        .expect("apply adjustment pass");
 
         assert_eq!(out[3], 255);
         assert!(out[0] < base[0]);
@@ -1350,17 +1610,113 @@ mod tests {
     }
 
     #[test]
+    fn large_gaussian_radius_is_executed_instead_of_clamped_to_legacy_limit() {
+        const WIDTH: usize = 401;
+        let mut impulse = vec![[0.0; 4]; WIDTH];
+        impulse[WIDTH / 2] = [1.0, 0.0, 0.0, 1.0];
+
+        let legacy_limit = gaussian_blur_rgba_f32(&impulse, WIDTH, 1, 24.0);
+        let large = gaussian_blur_rgba_f32(&impulse, WIDTH, 1, 100.0);
+        let sample = WIDTH / 2 + 50;
+
+        assert!(legacy_limit[sample][3].abs() <= 1.0e-8);
+        assert!(
+            large[sample][3] > legacy_limit[sample][3].abs() * 100.0,
+            "a 100 px authored radius must contribute beyond the old 24 px support"
+        );
+        assert!((large[sample][0] - 1.0).abs() <= 1.0e-5);
+    }
+
+    #[test]
+    fn gaussian_radius_is_continuous_across_the_removed_legacy_threshold() {
+        const WIDTH: usize = 201;
+        let mut impulse = vec![[0.0; 4]; WIDTH];
+        impulse[WIDTH / 2] = [1.0, 0.0, 0.0, 1.0];
+
+        let before = gaussian_blur_rgba_f32(&impulse, WIDTH, 1, 23.99);
+        let after = gaussian_blur_rgba_f32(&impulse, WIDTH, 1, 24.01);
+        let maximum_delta = before
+            .iter()
+            .zip(after.iter())
+            .map(|(left, right)| (left[3] - right[3]).abs())
+            .fold(0.0f32, f32::max);
+
+        assert!(
+            maximum_delta < 1.0e-3,
+            "animated blur radius must not cross an implementation discontinuity: {maximum_delta}"
+        );
+    }
+
+    #[test]
+    fn gaussian_blur_uses_premultiplied_alpha_without_transparent_color_contamination() {
+        let input = vec![
+            [0.0, 1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ];
+        let output = gaussian_blur_rgba_f32(&input, 3, 1, 1.0);
+
+        for pixel in output {
+            if pixel[3] > 1.0e-6 {
+                assert!((pixel[0] - 1.0).abs() <= 1.0e-5);
+                assert!(pixel[1].abs() <= 1.0e-5);
+                assert!(pixel[2].abs() <= 1.0e-5);
+            }
+        }
+    }
+
+    #[test]
+    fn large_gaussian_radius_preserves_a_constant_field() {
+        let input = vec![[1.75, 0.25, -0.5, 0.4]; 37 * 11];
+        let output = gaussian_blur_rgba_f32(&input, 37, 11, 200.0);
+
+        for pixel in output {
+            for (actual, expected) in pixel.into_iter().zip([1.75, 0.25, -0.5, 0.4]) {
+                assert!((actual - expected).abs() <= 2.0e-4);
+            }
+        }
+    }
+
+    #[test]
+    fn gaussian_execution_rejects_values_outside_the_author_contract() {
+        let mut rgba8 = vec![0, 0, 0, 255];
+        let error = apply_render_op(
+            &mut rgba8,
+            1,
+            1,
+            &EffectRenderOp::GaussianBlur { radius: 201.0 },
+            0,
+        )
+        .expect_err("out-of-contract radius must fail closed");
+        assert_eq!(
+            error,
+            EffectExecutionError::InvalidRenderParameter {
+                op: "gaussian_blur",
+                parameter: "radius",
+            }
+        );
+
+        let mut float = vec![[0.0, 0.0, 0.0, 1.0]];
+        assert!(!apply_render_op_f32(
+            &mut float,
+            1,
+            1,
+            &EffectRenderOp::GaussianBlur { radius: f32::NAN },
+            0,
+        ));
+    }
+
+    #[test]
     fn custom_render_processor_can_modify_effect_render_plan_output() {
-        register_custom_render_processor(
-            "plugin.render.glow",
-            Arc::new(|buffer, _width, _height, params, _frame_seed| {
+        let processor = crate::CustomEffectProcessorBinding::new(Arc::new(
+            |buffer, _width, _height, params, _frame_seed| {
                 let amount = params["amount"].as_f64().unwrap_or(0.0) as f32;
                 for px in buffer.chunks_exact_mut(4) {
                     px[0] = unit_to_u8((px[0] as f32 / 255.0 + amount).clamp(0.0, 1.0));
                 }
                 Ok(())
-            }),
-        );
+            },
+        ));
 
         let input = vec![0u8, 0, 0, 255];
         let output = apply_effect_render_plan(
@@ -1373,6 +1729,7 @@ mod tests {
                     params: serde_json::json!({ "amount": 0.5 }),
                     cache_key: None,
                     cache_policy: crate::effect::EffectCachePolicy::Deterministic,
+                    processor: Some(processor),
                 }],
             },
             0,
@@ -1415,7 +1772,7 @@ mod tests {
             ],
             output: Some(EffectGraphNodeId(2)),
         };
-        let schedule = crate::schedule_effect_render_graph(&graph).expect("schedule graph");
+        let schedule = crate::graph::schedule_effect_render_graph(&graph).expect("schedule graph");
         let input = vec![200u8, 40, 20, 255];
 
         let output = apply_effect_render_graph(&input, 1, 1, &graph, &schedule, 0)
@@ -1427,6 +1784,14 @@ mod tests {
 
     #[test]
     fn mask_graph_node_modulates_alpha() {
+        let processor = crate::CustomEffectProcessorBinding::new(Arc::new(
+            |buffer, _width, _height, _params, _frame_seed| {
+                for px in buffer.chunks_exact_mut(4) {
+                    px[3] = 64;
+                }
+                Ok(())
+            },
+        ));
         let graph = EffectRenderGraph {
             nodes: vec![
                 EffectGraphNode {
@@ -1442,6 +1807,7 @@ mod tests {
                             params: serde_json::json!({}),
                             cache_key: None,
                             cache_policy: crate::effect::EffectCachePolicy::Deterministic,
+                            processor: Some(processor),
                         },
                         domain_contract: crate::EffectColorDomainContract {
                             input: crate::EffectColorDomain::SceneLinearRgb,
@@ -1462,17 +1828,7 @@ mod tests {
             output: Some(EffectGraphNodeId(2)),
         };
 
-        register_custom_render_processor(
-            "plugin.render.alpha_mask",
-            Arc::new(|buffer, _width, _height, _params, _frame_seed| {
-                for px in buffer.chunks_exact_mut(4) {
-                    px[3] = 64;
-                }
-                Ok(())
-            }),
-        );
-
-        let schedule = crate::schedule_effect_render_graph(&graph).expect("schedule graph");
+        let schedule = crate::graph::schedule_effect_render_graph(&graph).expect("schedule graph");
         let input = vec![20u8, 30, 40, 255];
         let output = apply_effect_render_graph(&input, 1, 1, &graph, &schedule, 0)
             .expect("execute alpha-mask effect graph");
@@ -1518,7 +1874,7 @@ mod tests {
             output: Some(EffectGraphNodeId(2)),
         };
 
-        let schedule = crate::schedule_effect_render_graph(&graph).expect("schedule graph");
+        let schedule = crate::graph::schedule_effect_render_graph(&graph).expect("schedule graph");
         let input = vec![100u8, 150, 200, 200];
         let output = apply_effect_render_graph(&input, 1, 1, &graph, &schedule, 0)
             .expect("execute mask graph");
@@ -1568,7 +1924,7 @@ mod tests {
             output: Some(EffectGraphNodeId(2)),
         };
 
-        let schedule = crate::schedule_effect_render_graph(&graph).expect("schedule graph");
+        let schedule = crate::graph::schedule_effect_render_graph(&graph).expect("schedule graph");
         // 2x1 image: left pixel inside rect, right pixel outside.
         let input = vec![255u8, 255, 255, 255, 255, 255, 255, 255];
         let output = apply_effect_render_graph(&input, 2, 1, &graph, &schedule, 0)
@@ -1600,7 +1956,7 @@ mod tests {
             output: Some(EffectGraphNodeId(1)),
         };
 
-        let schedule = crate::schedule_effect_render_graph(&graph).expect("schedule graph");
+        let schedule = crate::graph::schedule_effect_render_graph(&graph).expect("schedule graph");
         let input = vec![64u8, 96, 128, 255];
         let output = apply_effect_render_graph(&input, 1, 1, &graph, &schedule, 0)
             .expect("execute blend graph");
@@ -1614,18 +1970,17 @@ mod tests {
     fn deterministic_custom_effect_output_hits_shared_cache() {
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_for_processor = Arc::clone(&calls);
-        register_custom_render_processor(
-            "plugin.render.cache_counter",
-            Arc::new(move |buffer, _width, _height, _params, _frame_seed| {
+        let processor = crate::CustomEffectProcessorBinding::new(Arc::new(
+            move |buffer, _width, _height, _params, _frame_seed| {
                 calls_for_processor.fetch_add(1, Ordering::SeqCst);
                 for px in buffer.chunks_exact_mut(4) {
                     px[0] = px[0].saturating_add(10);
                 }
                 Ok(())
-            }),
-        );
+            },
+        ));
 
-        let compiled = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+        let compiled = compile_reference_effect_graph(&EffectRenderPlan {
             ops: vec![
                 EffectRenderOp::GaussianBlur { radius: 2.0 },
                 EffectRenderOp::Custom {
@@ -1633,15 +1988,19 @@ mod tests {
                     params: serde_json::json!({}),
                     cache_key: Some("cache-counter".to_string()),
                     cache_policy: crate::effect::EffectCachePolicy::Deterministic,
+                    processor: Some(processor),
                 },
             ],
         })
         .expect("compile effect graph");
 
         let input = vec![12u8, 24, 36, 255];
-        let first = apply_compiled_effect_graph(&input, 1, 1, compiled.as_ref(), 0)
+        let mut session = crate::EffectExecutionSession::default();
+        let first = session
+            .apply_compiled_rgba8(&input, 1, 1, compiled.as_ref(), 0)
             .expect("execute first cached graph");
-        let second = apply_compiled_effect_graph(&input, 1, 1, compiled.as_ref(), 0)
+        let second = session
+            .apply_compiled_rgba8(&input, 1, 1, compiled.as_ref(), 0)
             .expect("execute second cached graph");
 
         assert_eq!(first, second);
@@ -1650,7 +2009,7 @@ mod tests {
 
     #[test]
     fn frame_dependent_effect_output_cache_respects_frame_seed() {
-        let compiled = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+        let compiled = compile_reference_effect_graph(&EffectRenderPlan {
             ops: vec![
                 EffectRenderOp::GaussianBlur { radius: 2.0 },
                 EffectRenderOp::Grain { amount: 0.5 },
@@ -1668,27 +2027,27 @@ mod tests {
     }
 
     #[test]
-    fn expensive_deterministic_subtree_cache_reuses_output_across_graphs() {
+    fn deterministic_node_cache_does_not_cross_compiled_graph_identity() {
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_for_processor = Arc::clone(&calls);
-        register_custom_render_processor(
-            "plugin.render.shared_subtree",
-            Arc::new(move |buffer, _width, _height, _params, _frame_seed| {
+        let processor = crate::CustomEffectProcessorBinding::new(Arc::new(
+            move |buffer, _width, _height, _params, _frame_seed| {
                 calls_for_processor.fetch_add(1, Ordering::SeqCst);
                 for px in buffer.chunks_exact_mut(4) {
                     px[0] = px[0].saturating_add(20);
                 }
                 Ok(())
-            }),
-        );
+            },
+        ));
 
-        let first_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+        let first_graph = compile_reference_effect_graph(&EffectRenderPlan {
             ops: vec![
                 EffectRenderOp::Custom {
                     key: "plugin.render.shared_subtree".to_string(),
                     params: serde_json::json!({}),
                     cache_key: Some("shared-subtree".to_string()),
                     cache_policy: crate::effect::EffectCachePolicy::Deterministic,
+                    processor: Some(processor.clone()),
                 },
                 EffectRenderOp::ColorAdjust {
                     exposure: 0.0,
@@ -1700,13 +2059,14 @@ mod tests {
         })
         .expect("compile first graph");
 
-        let second_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+        let second_graph = compile_reference_effect_graph(&EffectRenderPlan {
             ops: vec![
                 EffectRenderOp::Custom {
                     key: "plugin.render.shared_subtree".to_string(),
                     params: serde_json::json!({}),
                     cache_key: Some("shared-subtree".to_string()),
                     cache_policy: crate::effect::EffectCachePolicy::Deterministic,
+                    processor: Some(processor),
                 },
                 EffectRenderOp::Sharpen { amount: 0.25 },
             ],
@@ -1714,26 +2074,26 @@ mod tests {
         .expect("compile second graph");
 
         let input = vec![30u8, 60, 90, 255];
-        apply_compiled_effect_graph(&input, 1, 1, first_graph.as_ref(), 0)
+        let mut session = crate::EffectExecutionSession::default();
+        session
+            .apply_compiled_rgba8(&input, 1, 1, first_graph.as_ref(), 0)
             .expect("execute first shared-subtree graph");
-        apply_compiled_effect_graph(&input, 1, 1, second_graph.as_ref(), 0)
+        session
+            .apply_compiled_rgba8(&input, 1, 1, second_graph.as_ref(), 0)
             .expect("execute second shared-subtree graph");
 
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "diagnostic subtree signatures cannot authorize cross-graph pixel reuse"
+        );
     }
 
     #[test]
     fn failing_custom_processor_does_not_commit_partial_frame_changes() {
         let key = "plugin.render.fail_safe";
-        crate::register_plugin_contract(
-            key,
-            crate::EffectPluginContract::new("1.0.0").with_runtime_failure_policy(
-                crate::EffectPluginRuntimeFailurePolicy::KeepDefinitionAvailable,
-            ),
-        );
-        register_custom_render_processor(
-            key,
-            Arc::new(|buffer, _width, _height, _params, _frame_seed| {
+        let processor = crate::CustomEffectProcessorBinding::new(Arc::new(
+            |buffer, _width, _height, _params, _frame_seed| {
                 for px in buffer.chunks_exact_mut(4) {
                     px[0] = 255;
                 }
@@ -1741,8 +2101,8 @@ mod tests {
                     step_id: "plugin.render.fail_safe".to_string(),
                     reason: "intentional failure".to_string(),
                 })
-            }),
-        );
+            },
+        ));
 
         let input = vec![32u8, 48, 64, 255];
         let error = apply_effect_render_plan(
@@ -1755,6 +2115,7 @@ mod tests {
                     params: serde_json::json!({}),
                     cache_key: None,
                     cache_policy: crate::effect::EffectCachePolicy::Deterministic,
+                    processor: Some(processor),
                 }],
             },
             0,
@@ -1766,6 +2127,105 @@ mod tests {
             crate::EffectExecutionError::CustomProcessorFailed { ref key, .. }
                 if key == "plugin.render.fail_safe"
         ));
+    }
+
+    #[test]
+    fn failure_from_old_compiled_custom_binding_does_not_quarantine_replacement_definition() {
+        let key = "plugin.render.generation_isolation";
+        let effect_type = crate::EffectType::Plugin(key.to_owned());
+        let contract = crate::EffectExecutionContract {
+            execution_modes: crate::EffectExecutionModes::CPU_U8,
+            determinism: crate::EffectDeterminism::Deterministic,
+            state_model: crate::EffectStateModel::Stateless,
+            temporal_input: crate::EffectTemporalInputExtent::CURRENT_FRAME,
+            roi_propagation: crate::EffectRoiPropagation::UnknownRequiresFullFrame,
+            resource_lifetime: crate::EffectResourceLifetime::Frame,
+            topology: crate::EffectGraphTopology::LinearChain,
+        };
+        let plugin_contract = crate::EffectPluginContract::new("1.0.0")
+            .with_runtime_failure_policy(
+                crate::EffectPluginRuntimeFailurePolicy::DisableDefinition,
+            );
+        crate::register_effect_definition(
+            crate::EffectDefinition::new(
+                key,
+                "Old failing definition",
+                Default::default(),
+                crate::EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(contract)
+            .with_custom_render_backend(
+                Arc::new(|_, _| Ok(Some(serde_json::json!({})))),
+                None,
+                crate::EffectCachePolicy::Deterministic,
+                Arc::new(|_, _, _, _, _| {
+                    Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                        step_id: "old_custom_generation".to_owned(),
+                        reason: "intentional old-generation failure".to_owned(),
+                    })
+                }),
+            )
+            .with_plugin_contract(plugin_contract.clone()),
+        )
+        .expect("register old definition");
+        let old_graph = crate::PreparedEffectProgram::prepare(
+            &[crate::EffectNode::new(effect_type.clone())],
+            &[],
+            WorkingColorSpace::LinearRec709,
+        )
+        .expect("prepare old definition")
+        .evaluate(mondrian_core::TimelineTime::ZERO)
+        .expect("compile old definition");
+
+        crate::register_effect_definition(
+            crate::EffectDefinition::new(
+                key,
+                "Replacement definition",
+                Default::default(),
+                crate::EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(contract)
+            .with_custom_render_backend(
+                Arc::new(|_, _| Ok(Some(serde_json::json!({})))),
+                None,
+                crate::EffectCachePolicy::Deterministic,
+                Arc::new(|buffer, _, _, _, _| {
+                    buffer[0] = 91;
+                    Ok(())
+                }),
+            )
+            .with_plugin_contract(plugin_contract),
+        )
+        .expect("register replacement definition");
+        let current_before =
+            crate::effect_plugin_runtime_status(key).expect("replacement runtime status");
+        assert!(!current_before.disabled);
+
+        let error = apply_compiled_effect_graph(&[0, 0, 0, 255], 1, 1, old_graph.as_ref(), 0)
+            .expect_err("old processor must report its own failure");
+        assert!(matches!(
+            error,
+            crate::EffectExecutionError::CustomProcessorFailed { .. }
+        ));
+        let current_after =
+            crate::effect_plugin_runtime_status(key).expect("replacement runtime status");
+        assert_eq!(
+            current_after, current_before,
+            "old Program failure must not mutate replacement Definition quarantine"
+        );
+
+        let replacement_graph = crate::PreparedEffectProgram::prepare(
+            &[crate::EffectNode::new(effect_type)],
+            &[],
+            WorkingColorSpace::LinearRec709,
+        )
+        .expect("prepare replacement definition")
+        .evaluate(mondrian_core::TimelineTime::ZERO)
+        .expect("compile replacement definition");
+        let output =
+            apply_compiled_effect_graph(&[0, 0, 0, 255], 1, 1, replacement_graph.as_ref(), 0)
+                .expect("execute replacement definition");
+        assert_eq!(output[0], 91);
     }
 
     #[test]
@@ -1791,7 +2251,10 @@ mod tests {
             1,
             1,
             &EffectRenderPlan {
-                ops: vec![EffectRenderOp::Lut3D { lut, intensity: 1.0 }],
+                ops: vec![EffectRenderOp::Lut3D {
+                    lut: Arc::new(crate::PreparedLut3D::new(lut)),
+                    intensity: 1.0,
+                }],
             },
             0,
         )

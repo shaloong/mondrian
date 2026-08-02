@@ -16,7 +16,7 @@ mod model;
 use model::NumberInputModel;
 
 /// Adapter that maps the current numeric value to an editor [`Action`].
-pub type NumberInputChangeAction = dyn Fn(f64) -> Action;
+pub type NumberInputChangeAction = dyn Fn(f64) -> Option<Action>;
 
 /// Single-line numeric input.
 pub struct NumberInput {
@@ -82,8 +82,12 @@ impl NumberInput {
     }
 
     /// Dispatch an action whenever user input parses as a valid numeric value.
-    pub fn on_change(mut self, action: impl Fn(f64) -> Action + 'static) -> Self {
-        self.on_change = Some(Box::new(action));
+    pub fn on_change<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(f64) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_change = Some(Box::new(move |value| action(value).into()));
         self
     }
 
@@ -99,7 +103,9 @@ impl NumberInput {
 
     fn dispatch_value(&self, value: f64, ctx: &mut EventContext) {
         if let Some(factory) = &self.on_change {
-            (ctx.dispatch)(factory(value));
+            if let Some(action) = factory(value) {
+                (ctx.dispatch)(action);
+            }
         }
     }
 
@@ -234,7 +240,7 @@ mod tests {
         move |value| {
             assert!(value.is_finite());
             values.borrow_mut().push(value);
-            Action::NoOp
+            Action::ToggleFullscreen
         }
     }
 

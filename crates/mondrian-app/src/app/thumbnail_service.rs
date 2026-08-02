@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
@@ -15,13 +16,15 @@ use mondrian_core::{
 };
 use mondrian_media::MediaFileFingerprint;
 use mondrian_timeline::sequence::ProgramColorContext;
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
+
+use crate::app::single_worker_activity::{SingleWorkerActivity, SingleWorkerPhase};
 
 use analysis::{thumbnail_worker, ThumbnailColorContract};
 use state::{
     push_terminal, push_terminal_identity, retain_failure, retain_failure_entry, retire_deferred,
     touch_asset, PendingThumbnail, ThumbnailCacheEntry, ThumbnailFailureKey, ThumbnailJob,
-    ThumbnailRequestKey, ThumbnailResult, ThumbnailState,
+    ThumbnailRequestKey, ThumbnailResult, ThumbnailState, ThumbnailWorkerIdentity,
 };
 
 mod analysis;
@@ -189,6 +192,10 @@ pub struct ThumbnailTerminalRecord {
 pub struct ThumbnailDiagnostics {
     /// Current color-context generation.
     pub generation: u64,
+    /// Whether lookup may admit new automatic thumbnail work.
+    pub automatic_admission_enabled: bool,
+    /// Whether deferred work may enter the dedicated worker.
+    pub dispatch_enabled: bool,
     /// Resident successful rasters.
     pub cached_entries: usize,
     /// Resident raster bytes.
@@ -197,8 +204,16 @@ pub struct ThumbnailDiagnostics {
     pub cache_byte_budget: usize,
     /// Admitted requests without a terminal result.
     pub pending_requests: usize,
+    /// Admitted requests waiting before physical execution.
+    pub queued_requests: usize,
     /// Admitted requests waiting for worker transport capacity.
     pub deferred_requests: usize,
+    /// Requests physically executing inside the thumbnail worker.
+    pub running_requests: usize,
+    /// Current physical worker phase.
+    pub worker_phase: ThumbnailWorkerPhase,
+    /// Completed worker results waiting for service publication.
+    pub awaiting_publication: usize,
     /// Retained deduplicated failures.
     pub retained_failures: usize,
     /// Service-capacity rejections.
@@ -219,11 +234,54 @@ pub struct ThumbnailDiagnostics {
     pub terminal_records: Vec<ThumbnailTerminalRecord>,
 }
 
+/// Physical phase of the dedicated thumbnail worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThumbnailWorkerPhase {
+    /// No request currently owns the worker.
+    #[default]
+    Idle,
+    /// A request was dequeued but has not crossed the dispatch gate.
+    WaitingForDispatch,
+    /// A request is executing deterministic decode/color work.
+    Running,
+}
+
 /// Production owner for asset-thumbnail execution.
 pub struct AssetThumbnailService {
     state: Mutex<ThumbnailState>,
     jobs: mpsc::SyncSender<ThumbnailJob>,
     results: Mutex<mpsc::Receiver<ThumbnailResult>>,
+    dispatch_gate: Arc<ThumbnailDispatchGate>,
+    worker_activity: Arc<SingleWorkerActivity<ThumbnailWorkerIdentity>>,
+}
+
+struct ThumbnailDispatchGate {
+    enabled: Mutex<bool>,
+    changed: Condvar,
+    shutdown: AtomicBool,
+}
+
+impl ThumbnailDispatchGate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            enabled: Mutex::new(true),
+            changed: Condvar::new(),
+            shutdown: AtomicBool::new(false),
+        })
+    }
+
+    fn set_enabled(&self, enabled: bool) {
+        *self.enabled.lock() = enabled;
+        self.changed.notify_all();
+    }
+
+    fn wait_until_enabled(&self, cancellation: &ExecutionCancellationToken) -> bool {
+        let mut enabled = self.enabled.lock();
+        while !*enabled && !self.shutdown.load(Ordering::Acquire) && !cancellation.is_canceled() {
+            self.changed.wait_for(&mut enabled, Duration::from_millis(5));
+        }
+        *enabled && !self.shutdown.load(Ordering::Acquire) && !cancellation.is_canceled()
+    }
 }
 
 impl AssetThumbnailService {
@@ -231,9 +289,20 @@ impl AssetThumbnailService {
     pub fn new() -> Arc<Self> {
         let (job_tx, job_rx) = mpsc::sync_channel(THUMBNAIL_JOB_QUEUE_CAPACITY);
         let (result_tx, result_rx) = mpsc::sync_channel(THUMBNAIL_JOB_QUEUE_CAPACITY + 1);
+        let dispatch_gate = ThumbnailDispatchGate::new();
+        let worker_dispatch_gate = Arc::clone(&dispatch_gate);
+        let worker_activity = Arc::new(SingleWorkerActivity::default());
+        let physical_worker_activity = Arc::clone(&worker_activity);
         if let Err(error) = std::thread::Builder::new()
             .name("mondrian-asset-thumbnails".to_owned())
-            .spawn(move || thumbnail_worker(job_rx, result_tx))
+            .spawn(move || {
+                thumbnail_worker(
+                    job_rx,
+                    result_tx,
+                    worker_dispatch_gate,
+                    physical_worker_activity,
+                )
+            })
         {
             tracing::error!(%error, "failed to start asset thumbnail worker");
         }
@@ -241,6 +310,8 @@ impl AssetThumbnailService {
             state: Mutex::new(ThumbnailState::default()),
             jobs: job_tx,
             results: Mutex::new(result_rx),
+            dispatch_gate,
+            worker_activity,
         })
     }
 
@@ -265,6 +336,35 @@ impl AssetThumbnailService {
         state.active.clear();
     }
 
+    /// Apply product resource policy while preserving thumbnail-owned
+    /// identity, cancellation, queue bounds, and terminal evidence.
+    pub(crate) fn set_resource_policy(
+        &self,
+        admit_automatic: bool,
+        dispatch_enabled: bool,
+        cache_byte_budget: usize,
+    ) {
+        let should_dispatch = {
+            let mut state = self.state.lock();
+            let cache_byte_budget = cache_byte_budget.max(1);
+            if state.admit_automatic == admit_automatic
+                && state.dispatch_enabled == dispatch_enabled
+                && state.cache_byte_budget == cache_byte_budget
+            {
+                return;
+            }
+            state.admit_automatic = admit_automatic;
+            state.dispatch_enabled = dispatch_enabled;
+            state.cache_byte_budget = cache_byte_budget;
+            trim_thumbnail_cache_to_budget(&mut state);
+            dispatch_enabled
+        };
+        self.dispatch_gate.set_enabled(dispatch_enabled);
+        if should_dispatch {
+            self.dispatch_deferred(THUMBNAIL_MAX_DEFERRED_DISPATCH_PER_POLL);
+        }
+    }
+
     /// Resolve or admit the exact thumbnail request without waiting for media work.
     pub fn thumbnail_for_asset(&self, asset: &AssetRecord) -> ThumbnailLookupState {
         if !matches!(asset.kind, AssetKind::Video | AssetKind::StillImage) {
@@ -277,44 +377,35 @@ impl AssetThumbnailService {
             };
             (state.generation, context)
         };
-        let metadata = match std::fs::metadata(&asset.path) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                return self.retain_immediate_failure(
-                    asset.id,
-                    asset.path.clone(),
-                    MediaFileFingerprint {
-                        len: None,
-                        modified_secs: None,
-                        modified_nanos: None,
-                    },
-                    None,
-                    ThumbnailFailure::new(
-                        ThumbnailFailureReason::MissingSourceFile,
-                        format!("thumbnail source is unavailable: {error}"),
-                    ),
-                );
-            }
+        let Some(path) = asset.file_path().map(std::path::Path::to_path_buf) else {
+            return ThumbnailLookupState::Unavailable;
         };
-        let fingerprint = MediaFileFingerprint::from_metadata(&metadata);
+        if let Err(error) = std::fs::metadata(&path) {
+            return self.retain_immediate_failure(
+                asset.id,
+                path.clone(),
+                MediaFileFingerprint::default(),
+                None,
+                ThumbnailFailure::new(
+                    ThumbnailFailureReason::MissingSourceFile,
+                    format!("thumbnail source is unavailable: {error}"),
+                ),
+            );
+        }
+        let fingerprint = MediaFileFingerprint::capture(&path);
         let color = match ThumbnailColorContract::resolve(asset, &context) {
             Ok(color) => color,
             Err(failure) => {
                 return self.retain_immediate_failure(
                     asset.id,
-                    asset.path.clone(),
+                    path.clone(),
                     fingerprint,
                     None,
                     failure,
                 );
             }
         };
-        let key = ThumbnailRequestKey {
-            asset_id: asset.id,
-            path: asset.path.clone(),
-            fingerprint,
-            color,
-        };
+        let key = ThumbnailRequestKey { asset_id: asset.id, path, fingerprint, color };
         {
             let mut state = self.state.lock();
             if let Some(entry) = state.cache.get(&asset.id).cloned() {
@@ -335,6 +426,9 @@ impl AssetThumbnailService {
                 }
             }
             if state.pending.contains_key(&key) {
+                return ThumbnailLookupState::Loading;
+            }
+            if !state.admit_automatic {
                 return ThumbnailLookupState::Loading;
             }
         }
@@ -376,13 +470,39 @@ impl AssetThumbnailService {
     /// Snapshot bounded execution, cache, failure, and terminal evidence.
     pub fn diagnostics(&self) -> ThumbnailDiagnostics {
         let state = self.state.lock();
+        let activity = self.worker_activity.snapshot();
+        let running_owned = activity.current.as_ref().is_some_and(|(identity, phase)| {
+            *phase == SingleWorkerPhase::Running
+                && pending_thumbnail_owns_identity(&state, identity)
+        });
+        let awaiting_publication_owned = activity
+            .awaiting_publication
+            .iter()
+            .filter(|identity| pending_thumbnail_owns_identity(&state, identity))
+            .count();
+        let awaiting_publication = activity.awaiting_publication.len();
+        let worker_phase = match activity.current.as_ref().map(|(_, phase)| *phase) {
+            None => ThumbnailWorkerPhase::Idle,
+            Some(SingleWorkerPhase::WaitingForDispatch) => ThumbnailWorkerPhase::WaitingForDispatch,
+            Some(SingleWorkerPhase::Running) => ThumbnailWorkerPhase::Running,
+        };
         ThumbnailDiagnostics {
             generation: state.generation,
+            automatic_admission_enabled: state.admit_automatic,
+            dispatch_enabled: state.dispatch_enabled,
             cached_entries: state.cache.len(),
             cached_bytes: state.cached_bytes,
-            cache_byte_budget: THUMBNAIL_CACHE_BYTE_BUDGET,
+            cache_byte_budget: state.cache_byte_budget,
             pending_requests: state.pending.len(),
+            queued_requests: state
+                .pending
+                .len()
+                .saturating_sub(usize::from(running_owned))
+                .saturating_sub(awaiting_publication_owned),
             deferred_requests: state.deferred.len(),
+            running_requests: usize::from(worker_phase == ThumbnailWorkerPhase::Running),
+            worker_phase,
+            awaiting_publication,
             retained_failures: state.failures.len(),
             rejections: state.counters.rejections,
             completions: state.counters.completions,
@@ -430,6 +550,10 @@ impl AssetThumbnailService {
             }
         }
         state.pending.insert(key.clone(), PendingThumbnail { generation, cancellation });
+        if !state.dispatch_enabled {
+            state.deferred.push_back(job);
+            return ThumbnailLookupState::Loading;
+        }
         match self.jobs.try_send(job) {
             Ok(()) => ThumbnailLookupState::Loading,
             Err(mpsc::TrySendError::Full(job)) => {
@@ -460,6 +584,9 @@ impl AssetThumbnailService {
     fn dispatch_deferred(&self, max_jobs: usize) {
         for _ in 0..max_jobs {
             let mut state = self.state.lock();
+            if !state.dispatch_enabled {
+                break;
+            }
             let Some(job) = state.deferred.pop_front() else {
                 break;
             };
@@ -506,6 +633,7 @@ impl AssetThumbnailService {
     }
 
     fn publish(&self, result: ThumbnailResult) -> bool {
+        self.worker_activity.acknowledge_publication(&result.worker_identity());
         let mut state = self.state.lock();
         let owns = state
             .pending
@@ -554,7 +682,7 @@ impl AssetThumbnailService {
                 }
                 while !state.cache.is_empty()
                     && (state.cache.len() >= THUMBNAIL_CACHE_ENTRY_CAPACITY
-                        || state.cached_bytes.saturating_add(bytes) > THUMBNAIL_CACHE_BYTE_BUDGET)
+                        || state.cached_bytes.saturating_add(bytes) > state.cache_byte_budget)
                 {
                     let Some(asset_id) = state.cache_lru.pop_back() else {
                         break;
@@ -565,7 +693,7 @@ impl AssetThumbnailService {
                         state.counters.evictions = state.counters.evictions.saturating_add(1);
                     }
                 }
-                if bytes <= THUMBNAIL_CACHE_BYTE_BUDGET {
+                if bytes <= state.cache_byte_budget {
                     state.cached_bytes = state.cached_bytes.saturating_add(bytes);
                     touch_asset(&mut state.cache_lru, result.key.asset_id);
                     state.cache.insert(
@@ -635,5 +763,36 @@ impl AssetThumbnailService {
             );
         }
         ThumbnailLookupState::Failed(failure)
+    }
+}
+
+impl Drop for AssetThumbnailService {
+    fn drop(&mut self) {
+        self.dispatch_gate.shutdown.store(true, Ordering::Release);
+        self.dispatch_gate.changed.notify_all();
+    }
+}
+
+fn pending_thumbnail_owns_identity(
+    state: &ThumbnailState,
+    identity: &ThumbnailWorkerIdentity,
+) -> bool {
+    state
+        .pending
+        .get(&identity.key)
+        .is_some_and(|pending| pending.generation == identity.generation)
+}
+
+fn trim_thumbnail_cache_to_budget(state: &mut ThumbnailState) {
+    while state.cached_bytes > state.cache_byte_budget
+        || state.cache.len() > THUMBNAIL_CACHE_ENTRY_CAPACITY
+    {
+        let Some(asset_id) = state.cache_lru.pop_back() else {
+            break;
+        };
+        if let Some(evicted) = state.cache.remove(&asset_id) {
+            state.cached_bytes = state.cached_bytes.saturating_sub(evicted.frame.reserved_bytes());
+            state.counters.evictions = state.counters.evictions.saturating_add(1);
+        }
     }
 }

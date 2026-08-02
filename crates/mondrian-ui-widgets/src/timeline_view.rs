@@ -94,23 +94,23 @@ impl TimelineMetrics {
 
 /// Action factory for clip selection.
 pub type TimelineClipAction =
-    dyn Fn(TimelineClipRef, &TimelineClip, TimelineClipSelectionMode) -> Action;
+    dyn Fn(TimelineClipRef, &TimelineClip, TimelineClipSelectionMode) -> Option<Action>;
 
 /// Action factory for track selection.
-pub type TimelineTrackAction = dyn Fn(TimelineTrackRef, &TimelineTrack) -> Action;
+pub type TimelineTrackAction = dyn Fn(TimelineTrackRef, &TimelineTrack) -> Option<Action>;
 
 /// Action factory for track reorder commits.
-pub type TimelineTrackMoveAction = dyn Fn(TimelineTrackMove, &TimelineTrack) -> Action;
+pub type TimelineTrackMoveAction = dyn Fn(TimelineTrackMove, &TimelineTrack) -> Option<Action>;
 
 /// Action factory for track header control commits.
 pub type TimelineTrackControlAction =
-    dyn Fn(TimelineTrackControl, TimelineTrackRef, &TimelineTrack) -> Action;
+    dyn Fn(TimelineTrackControl, TimelineTrackRef, &TimelineTrack) -> Option<Action>;
 
 /// Action factory for adding a track from timeline menu entries.
-pub type TimelineTrackAddAction = dyn Fn(TimelineTrackKind) -> Action;
+pub type TimelineTrackAddAction = dyn Fn(TimelineTrackKind) -> Option<Action>;
 
 /// Action factory for timeline-scoped editing commands.
-pub type TimelineEditCommandAction = dyn Fn(TimelineEditCommand) -> Action;
+pub type TimelineEditCommandAction = dyn Fn(TimelineEditCommand) -> Option<Action>;
 
 /// Availability factory for timeline-scoped editing commands.
 pub type TimelineEditCommandAvailability = dyn Fn(TimelineEditCommand) -> bool;
@@ -119,7 +119,7 @@ pub type TimelineEditCommandAvailability = dyn Fn(TimelineEditCommand) -> bool;
 pub type TimelineEditCommandShortcut = dyn Fn(TimelineEditCommand) -> Option<String>;
 
 /// Action factory for playhead seeking.
-pub type TimelineSeekAction = dyn Fn(TimelineSeek) -> Action;
+pub type TimelineSeekAction = dyn Fn(TimelineSeek) -> Option<Action>;
 
 /// User interaction source for a timeline seek.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,26 +140,27 @@ pub struct TimelineSeek {
 }
 
 /// Action factory for dropping an asset onto a timeline track.
-pub type TimelineAssetDropAction = dyn Fn(TimelineAssetDrop, &TimelineTrack) -> Action;
+pub type TimelineAssetDropAction = dyn Fn(TimelineAssetDrop, &TimelineTrack) -> Option<Action>;
 
 /// Action factory for clip move commits.
-pub type TimelineClipMoveAction = dyn Fn(TimelineClipMove, &TimelineClip) -> Action;
+pub type TimelineClipMoveAction = dyn Fn(TimelineClipMove, &TimelineClip) -> Option<Action>;
 
 /// Action factory for clip trim commits.
-pub type TimelineClipTrimAction = dyn Fn(TimelineClipTrim, &TimelineClip) -> Action;
+pub type TimelineClipTrimAction = dyn Fn(TimelineClipTrim, &TimelineClip) -> Option<Action>;
 
 /// Action factory for visual-Transition selection.
-pub type TimelineTransitionAction = dyn Fn(TimelineTransitionRef, &TimelineTransition) -> Action;
+pub type TimelineTransitionAction =
+    dyn Fn(TimelineTransitionRef, &TimelineTransition) -> Option<Action>;
 
 /// Action factory for visual-Transition range commits.
 pub type TimelineTransitionResizeAction =
-    dyn Fn(TimelineTransitionResize, &TimelineTransition) -> Action;
+    dyn Fn(TimelineTransitionResize, &TimelineTransition) -> Option<Action>;
 
 /// Action factory for creating a visual Transition at an adjacent edit.
-pub type TimelineCutAction = dyn Fn(TimelineCutRef) -> Action;
+pub type TimelineCutAction = dyn Fn(TimelineCutRef) -> Option<Action>;
 
 /// Action factory for in/out point changes.
-pub type TimelineInOutPointAction = dyn Fn(TimelineInOutPoint, i64) -> Action;
+pub type TimelineInOutPointAction = dyn Fn(TimelineInOutPoint, i64) -> Option<Action>;
 
 /// Stable view reference to a clip inside the timeline surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -447,7 +448,7 @@ pub enum TimelineClipKind {
 /// layer stays decoupled from the audio infrastructure.
 pub type WaveformLookupFn = dyn Fn(
     mondrian_core::AssetId,
-    u64, // source_revision
+    &mondrian_core::AudioSourceSelection,
     f64, // source_start_secs
     f64, // source_end_secs
     u32, // pixel_width
@@ -485,8 +486,8 @@ pub struct TimelineClip {
     /// Audio source identity for paint-time waveform lookup.
     /// `None` for non-audio or unlinked clips.
     pub asset_id: Option<AssetId>,
-    /// App-resolved media revision used to reject stale waveform artifacts.
-    pub source_revision: u64,
+    /// App-resolved physical stream and exact media revision.
+    pub source_selection: Option<mondrian_core::AudioSourceSelection>,
     /// Source time range (seconds) covered by this clip.
     /// Used to extract the correct portion of the waveform envelope.
     pub source_start_secs: f64,
@@ -513,7 +514,7 @@ impl TimelineClip {
             link_group_size: 1,
             link_group_editable: true,
             asset_id: None,
-            source_revision: 0,
+            source_selection: None,
             source_start_secs: 0.0,
             source_end_secs: 1.0,
             waveform_peaks: Vec::new(),
@@ -569,12 +570,12 @@ impl TimelineClip {
     pub fn with_source_identity(
         mut self,
         asset_id: AssetId,
-        source_revision: u64,
+        source_selection: mondrian_core::AudioSourceSelection,
         source_start_secs: f64,
         source_end_secs: f64,
     ) -> Self {
         self.asset_id = Some(asset_id);
-        self.source_revision = source_revision;
+        self.source_selection = Some(source_selection);
         self.source_start_secs = source_start_secs;
         self.source_end_secs = source_end_secs;
         self
@@ -1088,44 +1089,60 @@ impl TimelineView {
     }
 
     /// Set a dynamic clip-selection action factory.
-    pub fn on_clip_select(
-        mut self,
-        action: impl Fn(TimelineClipRef, &TimelineClip, TimelineClipSelectionMode) -> Action + 'static,
-    ) -> Self {
-        self.on_clip_select = Some(Box::new(action));
+    pub fn on_clip_select<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(TimelineClipRef, &TimelineClip, TimelineClipSelectionMode) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_clip_select = Some(Box::new(move |clip_ref, clip, mode| {
+            action(clip_ref, clip, mode).into()
+        }));
         self
     }
 
     /// Set a dynamic track-selection action factory.
-    pub fn on_track_select(
-        mut self,
-        action: impl Fn(TimelineTrackRef, &TimelineTrack) -> Action + 'static,
-    ) -> Self {
-        self.on_track_select = Some(Box::new(action));
+    pub fn on_track_select<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(TimelineTrackRef, &TimelineTrack) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_track_select = Some(Box::new(move |track_ref, track| {
+            action(track_ref, track).into()
+        }));
         self
     }
 
     /// Set a dynamic track-reorder action factory.
-    pub fn on_track_move(
-        mut self,
-        action: impl Fn(TimelineTrackMove, &TimelineTrack) -> Action + 'static,
-    ) -> Self {
-        self.on_track_move = Some(Box::new(action));
+    pub fn on_track_move<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(TimelineTrackMove, &TimelineTrack) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_track_move = Some(Box::new(move |movement, track| {
+            action(movement, track).into()
+        }));
         self
     }
 
     /// Set a dynamic track-control action factory.
-    pub fn on_track_control(
-        mut self,
-        action: impl Fn(TimelineTrackControl, TimelineTrackRef, &TimelineTrack) -> Action + 'static,
-    ) -> Self {
-        self.on_track_control = Some(Box::new(action));
+    pub fn on_track_control<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(TimelineTrackControl, TimelineTrackRef, &TimelineTrack) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_track_control = Some(Box::new(move |control, track_ref, track| {
+            action(control, track_ref, track).into()
+        }));
         self
     }
 
     /// Set a dynamic add-track action factory for timeline menu entries.
-    pub fn on_track_add(mut self, action: impl Fn(TimelineTrackKind) -> Action + 'static) -> Self {
-        self.on_track_add = Some(Box::new(action));
+    pub fn on_track_add<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(TimelineTrackKind) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_track_add = Some(Box::new(move |kind| action(kind).into()));
         self
     }
 
@@ -1166,7 +1183,14 @@ impl TimelineView {
     /// Set a paint-time waveform lookup callback for rendering audio clip peaks.
     pub fn with_waveform_lookup(
         mut self,
-        lookup: impl Fn(mondrian_core::AssetId, u64, f64, f64, u32) -> Option<Vec<f32>> + 'static,
+        lookup: impl Fn(
+                mondrian_core::AssetId,
+                &mondrian_core::AudioSourceSelection,
+                f64,
+                f64,
+                u32,
+            ) -> Option<Vec<f32>>
+            + 'static,
     ) -> Self {
         self.waveform_lookup = Some(Box::new(lookup));
         self
@@ -1180,11 +1204,12 @@ impl TimelineView {
     }
 
     /// Set a dynamic edit-command action factory.
-    pub fn on_edit_command(
-        mut self,
-        action: impl Fn(TimelineEditCommand) -> Action + 'static,
-    ) -> Self {
-        self.on_edit_command = Some(Box::new(action));
+    pub fn on_edit_command<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(TimelineEditCommand) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_edit_command = Some(Box::new(move |command| action(command).into()));
         self
     }
 
@@ -1207,71 +1232,88 @@ impl TimelineView {
     }
 
     /// Set a dynamic seek action factory.
-    pub fn on_seek(mut self, action: impl Fn(TimelineSeek) -> Action + 'static) -> Self {
-        self.on_seek = Some(Box::new(action));
+    pub fn on_seek<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(TimelineSeek) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_seek = Some(Box::new(move |seek| action(seek).into()));
         self
     }
 
     /// Set a dynamic action factory for asset drops onto timeline tracks.
-    pub fn on_asset_drop(
-        mut self,
-        action: impl Fn(TimelineAssetDrop, &TimelineTrack) -> Action + 'static,
-    ) -> Self {
-        self.on_asset_drop = Some(Box::new(action));
+    pub fn on_asset_drop<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(TimelineAssetDrop, &TimelineTrack) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_asset_drop = Some(Box::new(move |drop, track| action(drop, track).into()));
         self
     }
 
     /// Set a dynamic clip-move action factory.
-    pub fn on_clip_move(
-        mut self,
-        action: impl Fn(TimelineClipMove, &TimelineClip) -> Action + 'static,
-    ) -> Self {
-        self.on_clip_move = Some(Box::new(action));
+    pub fn on_clip_move<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(TimelineClipMove, &TimelineClip) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_clip_move = Some(Box::new(move |movement, clip| {
+            action(movement, clip).into()
+        }));
         self
     }
 
     /// Set a dynamic clip-trim action factory.
-    pub fn on_clip_trim(
-        mut self,
-        action: impl Fn(TimelineClipTrim, &TimelineClip) -> Action + 'static,
-    ) -> Self {
-        self.on_clip_trim = Some(Box::new(action));
+    pub fn on_clip_trim<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(TimelineClipTrim, &TimelineClip) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_clip_trim = Some(Box::new(move |trim, clip| action(trim, clip).into()));
         self
     }
 
     /// Set a dynamic visual-Transition selection action factory.
-    pub fn on_transition_select(
-        mut self,
-        action: impl Fn(TimelineTransitionRef, &TimelineTransition) -> Action + 'static,
-    ) -> Self {
-        self.on_transition_select = Some(Box::new(action));
+    pub fn on_transition_select<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(TimelineTransitionRef, &TimelineTransition) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_transition_select = Some(Box::new(move |transition_ref, transition| {
+            action(transition_ref, transition).into()
+        }));
         self
     }
 
     /// Set a dynamic visual-Transition resize action factory.
-    pub fn on_transition_resize(
-        mut self,
-        action: impl Fn(TimelineTransitionResize, &TimelineTransition) -> Action + 'static,
-    ) -> Self {
-        self.on_transition_resize = Some(Box::new(action));
+    pub fn on_transition_resize<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(TimelineTransitionResize, &TimelineTransition) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_transition_resize = Some(Box::new(move |resize, transition| {
+            action(resize, transition).into()
+        }));
         self
     }
 
     /// Set an action factory for creating a Transition at an adjacent edit.
-    pub fn on_cut_transition_create(
-        mut self,
-        action: impl Fn(TimelineCutRef) -> Action + 'static,
-    ) -> Self {
-        self.on_cut_transition_create = Some(Box::new(action));
+    pub fn on_cut_transition_create<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(TimelineCutRef) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_cut_transition_create = Some(Box::new(move |cut_ref| action(cut_ref).into()));
         self
     }
 
     /// Set an action factory for ruler in/out point edits.
-    pub fn on_in_out_point(
-        mut self,
-        action: impl Fn(TimelineInOutPoint, i64) -> Action + 'static,
-    ) -> Self {
-        self.on_in_out_point = Some(Box::new(action));
+    pub fn on_in_out_point<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(TimelineInOutPoint, i64) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_in_out_point = Some(Box::new(move |point, frame| action(point, frame).into()));
         self
     }
 
@@ -2222,7 +2264,9 @@ impl TimelineView {
                 }
             }
             if let Some(factory) = &self.on_clip_select {
-                (ctx.dispatch)(factory(clip_ref, clip, mode));
+                if let Some(action) = factory(clip_ref, clip, mode) {
+                    (ctx.dispatch)(action);
+                }
             }
         }
         ctx.request_repaint();
@@ -2239,7 +2283,9 @@ impl TimelineView {
         self.selected_transition = Some(transition_ref);
         if let Some(transition) = self.transition(transition_ref) {
             if let Some(factory) = &self.on_transition_select {
-                (ctx.dispatch)(factory(transition_ref, transition));
+                if let Some(action) = factory(transition_ref, transition) {
+                    (ctx.dispatch)(action);
+                }
             }
         }
         ctx.request_repaint();
@@ -2259,7 +2305,9 @@ impl TimelineView {
                 (ctx.dispatch)(action);
             }
             if let Some(factory) = &self.on_track_select {
-                (ctx.dispatch)(factory(track_ref, track));
+                if let Some(action) = factory(track_ref, track) {
+                    (ctx.dispatch)(action);
+                }
             }
         }
         ctx.request_repaint();
@@ -2274,7 +2322,9 @@ impl TimelineView {
     ) -> EventResult {
         if let Some(track) = self.track(track_ref) {
             if let Some(factory) = &self.on_track_control {
-                (ctx.dispatch)(factory(control, track_ref, track));
+                if let Some(action) = factory(control, track_ref, track) {
+                    (ctx.dispatch)(action);
+                }
             }
         }
         ctx.request_repaint();
@@ -2335,7 +2385,9 @@ impl TimelineView {
             new_track_index: drag.current_track_index,
         };
         if let Some(factory) = &self.on_track_move {
-            (ctx.dispatch)(factory(movement, track));
+            if let Some(action) = factory(movement, track) {
+                (ctx.dispatch)(action);
+            }
         }
         ctx.request_repaint();
         true
@@ -2523,7 +2575,9 @@ impl TimelineView {
             || movement.clip_ref.track_index != movement.new_track_index
         {
             if let Some(factory) = &self.on_clip_move {
-                (ctx.dispatch)(factory(movement, clip));
+                if let Some(action) = factory(movement, clip) {
+                    (ctx.dispatch)(action);
+                }
             }
         }
         ctx.request_repaint();
@@ -2553,7 +2607,9 @@ impl TimelineView {
             || trim.old_duration_frames != trim.new_duration_frames
         {
             if let Some(factory) = &self.on_clip_trim {
-                (ctx.dispatch)(factory(trim, clip));
+                if let Some(action) = factory(trim, clip) {
+                    (ctx.dispatch)(action);
+                }
             }
         }
         ctx.request_repaint();
@@ -2579,7 +2635,9 @@ impl TimelineView {
             new_duration_frames: drag.current_duration_frames,
         };
         if let Some(factory) = &self.on_transition_resize {
-            (ctx.dispatch)(factory(resize, transition));
+            if let Some(action) = factory(resize, transition) {
+                (ctx.dispatch)(action);
+            }
         }
         ctx.request_repaint();
         true
@@ -2630,7 +2688,9 @@ impl TimelineView {
             return true;
         }
         if let Some(factory) = &self.on_in_out_point {
-            (ctx.dispatch)(factory(drag.point, drag.current_frame));
+            if let Some(action) = factory(drag.point, drag.current_frame) {
+                (ctx.dispatch)(action);
+            }
         }
         ctx.request_repaint();
         true
@@ -2638,7 +2698,9 @@ impl TimelineView {
 
     fn dispatch_seek(&self, frame: i64, source: TimelineSeekSource, ctx: &mut EventContext) {
         if let Some(factory) = &self.on_seek {
-            (ctx.dispatch)(factory(TimelineSeek { frame: frame.max(0), source }));
+            if let Some(action) = factory(TimelineSeek { frame: frame.max(0), source }) {
+                (ctx.dispatch)(action);
+            }
         }
     }
 
@@ -2705,14 +2767,16 @@ impl TimelineView {
             return EventResult::Handled;
         };
         if let Some(factory) = &self.on_asset_drop {
-            (ctx.dispatch)(factory(
+            if let Some(action) = factory(
                 TimelineAssetDrop {
                     asset_id,
                     track_ref: TimelineTrackRef { track_index },
                     frame,
                 },
                 track,
-            ));
+            ) {
+                (ctx.dispatch)(action);
+            }
         }
         ctx.request_repaint();
         EventResult::Handled
@@ -2739,13 +2803,16 @@ impl TimelineView {
         let Some(factory) = &self.on_edit_command else {
             return false;
         };
-        (ctx.dispatch)(factory(command));
+        let Some(action) = factory(command) else {
+            return false;
+        };
+        (ctx.dispatch)(action);
         ctx.request_repaint();
         true
     }
 
-    fn edit_command_action(&self, command: TimelineEditCommand) -> Action {
-        self.on_edit_command.as_ref().map_or(Action::NoOp, |factory| factory(command))
+    fn edit_command_action(&self, command: TimelineEditCommand) -> Option<Action> {
+        self.on_edit_command.as_ref().and_then(|factory| factory(command))
     }
 
     fn edit_command_shortcut(&self, command: TimelineEditCommand) -> Option<String> {
@@ -2831,17 +2898,15 @@ impl TimelineView {
         )
     }
 
-    fn track_add_action(&self, kind: TimelineTrackKind) -> Action {
-        self.on_track_add.as_ref().map_or(Action::NoOp, |factory| factory(kind))
+    fn track_add_action(&self, kind: TimelineTrackKind) -> Option<Action> {
+        self.on_track_add.as_ref().and_then(|factory| factory(kind))
     }
 
-    fn menu_item(label: &str, action: Action) -> MenuItem {
-        let item = MenuItem::new(label, action.clone());
-        if matches!(action, Action::NoOp) {
-            item.disabled()
-        } else {
-            item
-        }
+    fn menu_item(label: &str, action: Option<Action>) -> MenuItem {
+        action.map_or_else(
+            || MenuItem::inert(label),
+            |action| MenuItem::new(label, action),
+        )
     }
 
     fn edit_menu_item(&self, label: &str, command: TimelineEditCommand) -> MenuItem {
@@ -2936,10 +3001,7 @@ impl TimelineView {
     }
 
     fn cut_context_menu_items(&self, cut_ref: TimelineCutRef) -> Vec<MenuItem> {
-        let action = self
-            .on_cut_transition_create
-            .as_ref()
-            .map_or(Action::NoOp, |factory| factory(cut_ref));
+        let action = self.on_cut_transition_create.as_ref().and_then(|factory| factory(cut_ref));
         vec![
             Self::menu_item("添加交叉溶解", action),
             MenuItem::separator(),
@@ -4218,12 +4280,14 @@ impl TimelineView {
         if clip.kind == TimelineClipKind::Audio {
             let peaks: Option<Vec<f32>> = if !clip.waveform_peaks.is_empty() {
                 Some(clip.waveform_peaks.clone())
-            } else if let (Some(asset_id), Some(lookup)) =
-                (clip.asset_id, self.waveform_lookup.as_ref())
-            {
+            } else if let (Some(asset_id), Some(source_selection), Some(lookup)) = (
+                clip.asset_id,
+                clip.source_selection.as_ref(),
+                self.waveform_lookup.as_ref(),
+            ) {
                 lookup(
                     asset_id,
-                    clip.source_revision,
+                    source_selection,
                     clip.source_start_secs,
                     clip.source_end_secs,
                     rect.width as u32,
@@ -5813,11 +5877,8 @@ mod tests {
             timeline()
                 .with_header_width(128.0)
                 .on_track_control(|control, track_ref, _track| {
-                    if control == TimelineTrackControl::Mute && track_ref.track_index == 1 {
-                        Action::Pause
-                    } else {
-                        Action::NoOp
-                    }
+                    (control == TimelineTrackControl::Mute && track_ref.track_index == 1)
+                        .then_some(Action::Pause)
                 });
         view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
 
@@ -7903,10 +7964,10 @@ mod tests {
         let mut view = timeline().on_edit_command(move |command| {
             recorded.borrow_mut().push(command);
             match command {
-                TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
-                TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
-                TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
-                _ => Action::NoOp,
+                TimelineEditCommand::SplitAtPlayhead => Some(Action::SplitClipAtPlayhead),
+                TimelineEditCommand::MarkInAtPlayhead => Some(Action::MarkInAtPlayhead),
+                TimelineEditCommand::MarkOutAtPlayhead => Some(Action::MarkOutAtPlayhead),
+                _ => None,
             }
         });
         view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
@@ -7980,9 +8041,9 @@ mod tests {
         let dispatch = |action| actions.borrow_mut().push(action);
         let mut view = timeline()
             .on_edit_command(|command| match command {
-                TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
-                TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
-                _ => Action::NoOp,
+                TimelineEditCommand::SplitAtPlayhead => Some(Action::SplitClipAtPlayhead),
+                TimelineEditCommand::DeleteSelection => Some(Action::DeleteSelection),
+                _ => None,
             })
             .on_edit_command_available(|command| {
                 !matches!(
@@ -8240,29 +8301,27 @@ mod tests {
         let mut view = timeline().on_edit_command(move |command| {
             command_log.borrow_mut().push(command);
             match command {
-                TimelineEditCommand::CutSelection => Action::Cut,
-                TimelineEditCommand::CopySelection => Action::Copy,
-                TimelineEditCommand::PasteAtPlayhead => Action::Paste,
-                TimelineEditCommand::DuplicateSelection => Action::Duplicate,
-                TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
-                TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
-                TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
-                TimelineEditCommand::TrimSelectionInToPlayhead => Action::Cut,
-                TimelineEditCommand::TrimSelectionOutToPlayhead => Action::Copy,
-                TimelineEditCommand::RollSelectedCutToPlayhead => Action::SaveProject,
-                TimelineEditCommand::EnableSelection => Action::Play,
-                TimelineEditCommand::DisableSelection => Action::Pause,
-                TimelineEditCommand::LinkSelection | TimelineEditCommand::UnlinkSelection => {
-                    Action::NoOp
-                }
-                TimelineEditCommand::LiftInOutRange | TimelineEditCommand::ExtractInOutRange => {
-                    Action::NoOp
-                }
-                TimelineEditCommand::OpenNestedSequence(_) => Action::NoOp,
-                TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
-                TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
-                TimelineEditCommand::ClearInOutPoints => Action::NoOp,
-                TimelineEditCommand::TogglePlayback => Action::TogglePlay,
+                TimelineEditCommand::CutSelection => Some(Action::Cut),
+                TimelineEditCommand::CopySelection => Some(Action::Copy),
+                TimelineEditCommand::PasteAtPlayhead => Some(Action::Paste),
+                TimelineEditCommand::DuplicateSelection => Some(Action::Duplicate),
+                TimelineEditCommand::DeleteSelection => Some(Action::DeleteSelection),
+                TimelineEditCommand::RippleDeleteSelection => Some(Action::RippleDeleteSelection),
+                TimelineEditCommand::SplitAtPlayhead => Some(Action::SplitClipAtPlayhead),
+                TimelineEditCommand::TrimSelectionInToPlayhead => Some(Action::Cut),
+                TimelineEditCommand::TrimSelectionOutToPlayhead => Some(Action::Copy),
+                TimelineEditCommand::RollSelectedCutToPlayhead => Some(Action::SaveProject),
+                TimelineEditCommand::EnableSelection => Some(Action::Play),
+                TimelineEditCommand::DisableSelection => Some(Action::Pause),
+                TimelineEditCommand::MarkInAtPlayhead => Some(Action::MarkInAtPlayhead),
+                TimelineEditCommand::MarkOutAtPlayhead => Some(Action::MarkOutAtPlayhead),
+                TimelineEditCommand::TogglePlayback => Some(Action::TogglePlay),
+                TimelineEditCommand::LinkSelection
+                | TimelineEditCommand::UnlinkSelection
+                | TimelineEditCommand::LiftInOutRange
+                | TimelineEditCommand::ExtractInOutRange
+                | TimelineEditCommand::OpenNestedSequence(_)
+                | TimelineEditCommand::ClearInOutPoints => None,
             }
         });
         view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
@@ -8308,12 +8367,12 @@ mod tests {
         let mut view = timeline().on_edit_command(move |command| {
             command_log.borrow_mut().push(command);
             match command {
-                TimelineEditCommand::CutSelection => Action::Cut,
-                TimelineEditCommand::CopySelection => Action::Copy,
-                TimelineEditCommand::PasteAtPlayhead => Action::Paste,
-                TimelineEditCommand::DuplicateSelection => Action::Duplicate,
-                TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
-                _ => Action::NoOp,
+                TimelineEditCommand::CutSelection => Some(Action::Cut),
+                TimelineEditCommand::CopySelection => Some(Action::Copy),
+                TimelineEditCommand::PasteAtPlayhead => Some(Action::Paste),
+                TimelineEditCommand::DuplicateSelection => Some(Action::Duplicate),
+                TimelineEditCommand::SplitAtPlayhead => Some(Action::SplitClipAtPlayhead),
+                _ => None,
             }
         });
         view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
@@ -8368,29 +8427,27 @@ mod tests {
         let actions = RefCell::new(Vec::new());
         let dispatch = |action| actions.borrow_mut().push(action);
         let mut view = timeline().on_edit_command(|command| match command {
-            TimelineEditCommand::CutSelection => Action::Cut,
-            TimelineEditCommand::CopySelection => Action::Copy,
-            TimelineEditCommand::PasteAtPlayhead => Action::Paste,
-            TimelineEditCommand::DuplicateSelection => Action::Duplicate,
-            TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
-            TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
-            TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
-            TimelineEditCommand::TrimSelectionInToPlayhead => Action::Cut,
-            TimelineEditCommand::TrimSelectionOutToPlayhead => Action::Copy,
-            TimelineEditCommand::RollSelectedCutToPlayhead => Action::SaveProject,
-            TimelineEditCommand::EnableSelection => Action::Play,
-            TimelineEditCommand::DisableSelection => Action::Pause,
-            TimelineEditCommand::LinkSelection | TimelineEditCommand::UnlinkSelection => {
-                Action::NoOp
-            }
-            TimelineEditCommand::LiftInOutRange | TimelineEditCommand::ExtractInOutRange => {
-                Action::NoOp
-            }
-            TimelineEditCommand::OpenNestedSequence(_) => Action::NoOp,
-            TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
-            TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
-            TimelineEditCommand::ClearInOutPoints => Action::NoOp,
-            TimelineEditCommand::TogglePlayback => Action::TogglePlay,
+            TimelineEditCommand::CutSelection => Some(Action::Cut),
+            TimelineEditCommand::CopySelection => Some(Action::Copy),
+            TimelineEditCommand::PasteAtPlayhead => Some(Action::Paste),
+            TimelineEditCommand::DuplicateSelection => Some(Action::Duplicate),
+            TimelineEditCommand::DeleteSelection => Some(Action::DeleteSelection),
+            TimelineEditCommand::RippleDeleteSelection => Some(Action::RippleDeleteSelection),
+            TimelineEditCommand::SplitAtPlayhead => Some(Action::SplitClipAtPlayhead),
+            TimelineEditCommand::TrimSelectionInToPlayhead => Some(Action::Cut),
+            TimelineEditCommand::TrimSelectionOutToPlayhead => Some(Action::Copy),
+            TimelineEditCommand::RollSelectedCutToPlayhead => Some(Action::SaveProject),
+            TimelineEditCommand::EnableSelection => Some(Action::Play),
+            TimelineEditCommand::DisableSelection => Some(Action::Pause),
+            TimelineEditCommand::MarkInAtPlayhead => Some(Action::MarkInAtPlayhead),
+            TimelineEditCommand::MarkOutAtPlayhead => Some(Action::MarkOutAtPlayhead),
+            TimelineEditCommand::TogglePlayback => Some(Action::TogglePlay),
+            TimelineEditCommand::LinkSelection
+            | TimelineEditCommand::UnlinkSelection
+            | TimelineEditCommand::LiftInOutRange
+            | TimelineEditCommand::ExtractInOutRange
+            | TimelineEditCommand::OpenNestedSequence(_)
+            | TimelineEditCommand::ClearInOutPoints => None,
         });
         view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
 
@@ -8465,29 +8522,27 @@ mod tests {
     #[test]
     fn empty_timeline_context_menu_disables_selection_only_commands() {
         let view = timeline().on_edit_command(|command| match command {
-            TimelineEditCommand::CutSelection => Action::Cut,
-            TimelineEditCommand::CopySelection => Action::Copy,
-            TimelineEditCommand::PasteAtPlayhead => Action::Paste,
-            TimelineEditCommand::DuplicateSelection => Action::Duplicate,
-            TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
-            TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
-            TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
-            TimelineEditCommand::TrimSelectionInToPlayhead => Action::Cut,
-            TimelineEditCommand::TrimSelectionOutToPlayhead => Action::Copy,
-            TimelineEditCommand::RollSelectedCutToPlayhead => Action::SaveProject,
-            TimelineEditCommand::EnableSelection => Action::Play,
-            TimelineEditCommand::DisableSelection => Action::Pause,
-            TimelineEditCommand::LinkSelection | TimelineEditCommand::UnlinkSelection => {
-                Action::NoOp
-            }
-            TimelineEditCommand::LiftInOutRange | TimelineEditCommand::ExtractInOutRange => {
-                Action::NoOp
-            }
-            TimelineEditCommand::OpenNestedSequence(_) => Action::NoOp,
-            TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
-            TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
-            TimelineEditCommand::ClearInOutPoints => Action::CloseProject,
-            TimelineEditCommand::TogglePlayback => Action::TogglePlay,
+            TimelineEditCommand::CutSelection => Some(Action::Cut),
+            TimelineEditCommand::CopySelection => Some(Action::Copy),
+            TimelineEditCommand::PasteAtPlayhead => Some(Action::Paste),
+            TimelineEditCommand::DuplicateSelection => Some(Action::Duplicate),
+            TimelineEditCommand::DeleteSelection => Some(Action::DeleteSelection),
+            TimelineEditCommand::RippleDeleteSelection => Some(Action::RippleDeleteSelection),
+            TimelineEditCommand::SplitAtPlayhead => Some(Action::SplitClipAtPlayhead),
+            TimelineEditCommand::TrimSelectionInToPlayhead => Some(Action::Cut),
+            TimelineEditCommand::TrimSelectionOutToPlayhead => Some(Action::Copy),
+            TimelineEditCommand::RollSelectedCutToPlayhead => Some(Action::SaveProject),
+            TimelineEditCommand::EnableSelection => Some(Action::Play),
+            TimelineEditCommand::DisableSelection => Some(Action::Pause),
+            TimelineEditCommand::MarkInAtPlayhead => Some(Action::MarkInAtPlayhead),
+            TimelineEditCommand::MarkOutAtPlayhead => Some(Action::MarkOutAtPlayhead),
+            TimelineEditCommand::ClearInOutPoints => Some(Action::CloseProject),
+            TimelineEditCommand::TogglePlayback => Some(Action::TogglePlay),
+            TimelineEditCommand::LinkSelection
+            | TimelineEditCommand::UnlinkSelection
+            | TimelineEditCommand::LiftInOutRange
+            | TimelineEditCommand::ExtractInOutRange
+            | TimelineEditCommand::OpenNestedSequence(_) => None,
         });
 
         let items = view.timeline_context_menu_items();
@@ -8517,8 +8572,8 @@ mod tests {
     #[test]
     fn timeline_context_menu_disables_split_when_playhead_misses_clips() {
         let view = timeline().with_playhead(200).on_edit_command(|command| match command {
-            TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
-            _ => Action::NoOp,
+            TimelineEditCommand::SplitAtPlayhead => Some(Action::SplitClipAtPlayhead),
+            _ => None,
         });
 
         let items = view.timeline_context_menu_items();
@@ -8530,17 +8585,17 @@ mod tests {
     #[test]
     fn clip_context_menu_keeps_clip_edit_commands_enabled_for_selected_clip() {
         let mut view = timeline().on_edit_command(|command| match command {
-            TimelineEditCommand::CutSelection => Action::Cut,
-            TimelineEditCommand::CopySelection => Action::Copy,
-            TimelineEditCommand::DuplicateSelection => Action::Duplicate,
-            TimelineEditCommand::DeleteSelection => Action::DeleteSelection,
-            TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
-            TimelineEditCommand::TrimSelectionInToPlayhead => Action::Cut,
-            TimelineEditCommand::TrimSelectionOutToPlayhead => Action::Copy,
-            TimelineEditCommand::RollSelectedCutToPlayhead => Action::SaveProject,
-            TimelineEditCommand::EnableSelection => Action::Play,
-            TimelineEditCommand::DisableSelection => Action::Pause,
-            _ => Action::NoOp,
+            TimelineEditCommand::CutSelection => Some(Action::Cut),
+            TimelineEditCommand::CopySelection => Some(Action::Copy),
+            TimelineEditCommand::DuplicateSelection => Some(Action::Duplicate),
+            TimelineEditCommand::DeleteSelection => Some(Action::DeleteSelection),
+            TimelineEditCommand::RippleDeleteSelection => Some(Action::RippleDeleteSelection),
+            TimelineEditCommand::TrimSelectionInToPlayhead => Some(Action::Cut),
+            TimelineEditCommand::TrimSelectionOutToPlayhead => Some(Action::Copy),
+            TimelineEditCommand::RollSelectedCutToPlayhead => Some(Action::SaveProject),
+            TimelineEditCommand::EnableSelection => Some(Action::Play),
+            TimelineEditCommand::DisableSelection => Some(Action::Pause),
+            _ => None,
         });
         view.selected_clip = Some(TimelineClipRef { track_index: 0, clip_index: 0 });
 
@@ -8573,9 +8628,9 @@ mod tests {
         let view = timeline().with_in_out_points(0, Some(30)).on_edit_command(move |command| {
             command_log.borrow_mut().push(command);
             match command {
-                TimelineEditCommand::ClearInOutPoints => Action::SaveProject,
-                TimelineEditCommand::TogglePlayback => Action::TogglePlay,
-                _ => Action::NoOp,
+                TimelineEditCommand::ClearInOutPoints => Some(Action::SaveProject),
+                TimelineEditCommand::TogglePlayback => Some(Action::TogglePlay),
+                _ => None,
             }
         });
 
@@ -8596,8 +8651,10 @@ mod tests {
             vec![TimelineClip::new("Nested", 0, 24).nested(true)],
         )])
         .on_edit_command(|command| match command {
-            TimelineEditCommand::OpenNestedSequence(_) => Action::OpenProject("nested".into()),
-            _ => Action::NoOp,
+            TimelineEditCommand::OpenNestedSequence(_) => {
+                Some(Action::OpenProject("nested".into()))
+            }
+            _ => None,
         });
         view.selected_clip = Some(TimelineClipRef { track_index: 0, clip_index: 0 });
 
@@ -8908,9 +8965,9 @@ mod tests {
         let mut view = timeline().on_edit_command(move |command| {
             command_log.borrow_mut().push(command);
             match command {
-                TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
-                TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
-                _ => Action::NoOp,
+                TimelineEditCommand::MarkInAtPlayhead => Some(Action::MarkInAtPlayhead),
+                TimelineEditCommand::MarkOutAtPlayhead => Some(Action::MarkOutAtPlayhead),
+                _ => None,
             }
         });
         view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
@@ -8965,8 +9022,8 @@ mod tests {
         let mut view = timeline().on_edit_command(move |command| {
             command_log.borrow_mut().push(command);
             match command {
-                TimelineEditCommand::TogglePlayback => Action::TogglePlay,
-                _ => Action::NoOp,
+                TimelineEditCommand::TogglePlayback => Some(Action::TogglePlay),
+                _ => None,
             }
         });
         view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));

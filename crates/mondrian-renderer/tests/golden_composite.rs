@@ -57,7 +57,7 @@ fn gradient_rgba(w: u32, h: u32, seed: u8) -> Vec<u8> {
 
 fn identity_graph() -> Arc<mondrian_effects::CompiledEffectGraph> {
     let g = mondrian_effects::EffectRenderGraph::identity();
-    mondrian_effects::get_or_compile_scheduled_render_graph(g).expect("compile identity graph")
+    mondrian_effects::compile_reference_render_graph(g).expect("compile identity graph")
 }
 
 fn encode_rec709(frame: &CpuColorFrame) -> Vec<u8> {

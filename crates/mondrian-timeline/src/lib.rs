@@ -18,6 +18,7 @@ pub mod keyframe;
 pub mod range_edit;
 pub mod retime;
 pub mod sequence;
+mod sequence_dependency;
 mod sequence_time_edit;
 pub mod track;
 pub mod video_transition;
@@ -46,13 +47,17 @@ pub use retime::{
 };
 pub use sequence::{
     AudioChannelLayout, AudioDisplayFormat, EditingMode, FieldOrder, PixelAspectRatio,
-    PreviewRenderFormat, Sequence, SequenceCollection, SequencePreset, SequencePreviewSettings,
-    SequenceRole, SequenceSettings,
+    PreviewRenderFormat, Sequence, SequenceAuthorContractCertificate, SequenceCollection,
+    SequencePreset, SequencePreviewSettings, SequenceRole, SequenceSettings,
 };
+pub use sequence_dependency::SequenceDependencyCertificate;
 pub use track::{Track, TrackType};
-pub use video_transition::{VideoTransition, VideoTransitionSourceDemand, VideoTransitionType};
+pub use video_transition::{
+    validate_selected_video_transition_source_handles, PictureSourceExtent, PictureSourceRef,
+    VideoTransition, VideoTransitionEndpointSide, VideoTransitionSourceDemand,
+    VideoTransitionSourceHandleValidationError, VideoTransitionType,
+};
 pub use visual_schedule::{
-    PreparedVisualSchedule, PreparedVisualScheduleCache, PreparedVisualScheduleCacheDiagnostics,
-    PreparedVisualScheduleDiagnostics, PreparedVisualScheduleQueryDiagnostics,
-    DEFAULT_PREPARED_VISUAL_SCHEDULE_CACHE_CAPACITY,
+    PreparedVisualSchedule, PreparedVisualScheduleDiagnostics,
+    PreparedVisualScheduleQueryDiagnostics, PreparedVisualScheduleRangeClip,
 };

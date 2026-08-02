@@ -42,7 +42,7 @@ impl AppState {
             .max(1);
         let font_family = default_basic_title_font_family().to_owned();
 
-        let (sequence_id, clip_id) =
+        let (_sequence_id, clip_id) =
             self.commit_active_sequence_edit("创建基础标题", move |sequence| {
                 let time_base = sequence.time_base();
                 let position =
@@ -88,7 +88,6 @@ impl AppState {
                 Ok((sequence.id, clip_id))
             })?;
         self.select_clip_by_id(clip_id);
-        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         self.set_status_hint("已创建基础标题", false);
         Ok(clip_id)
     }

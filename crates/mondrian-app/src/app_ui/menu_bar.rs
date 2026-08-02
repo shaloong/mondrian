@@ -1128,7 +1128,7 @@ mod tests {
     #[test]
     fn app_state_menu_items_enable_cut_copy_for_selected_clip() {
         let mut state = state_with_selected_clip();
-        state.seek(15);
+        state.seek(15).expect("seek");
 
         let menu_items = default_menu_items_for_app_state(&state);
 

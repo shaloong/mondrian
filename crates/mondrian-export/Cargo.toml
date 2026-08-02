@@ -5,7 +5,11 @@ edition.workspace    = true
 authors.workspace    = true
 license.workspace    = true
 
+[features]
+validation = ["mondrian-renderer/validation"]
+
 [dependencies]
+mondrian-storage  = { workspace = true }
 mondrian-core     = { workspace = true }
 mondrian-audio    = { workspace = true }
 mondrian-media    = { workspace = true }
@@ -23,9 +27,7 @@ tracing     = { workspace = true }
 uuid        = { workspace = true }
 chrono      = { workspace = true }
 parking_lot = { workspace = true }
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
+sha2       = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

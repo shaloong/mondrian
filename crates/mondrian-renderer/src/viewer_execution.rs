@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use mondrian_core::{types::BlendMode, ColorMatrixCoefficients, ColorSpace};
-use mondrian_effects::CompiledEffectGpuPlan;
+use mondrian_effects::{CompiledEffectGpuPlan, PreparedHeterogeneousCpuCompletion};
 use mondrian_media::{
     DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,
     DecodedVideoMatrix, DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
@@ -24,8 +24,24 @@ use crate::{
     GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool, GpuNativeDecodedFrameImportContract,
     GpuNativeDecodedFrameImportError, GpuNativeDecodedFrameImportSupport,
     GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuVideoChromaLocation,
-    GpuVideoRange, NativeVideoImportCpuTimings, RenderInputTransform, TimelineSolidColorLayer,
+    GpuVideoRange, HeterogeneousGpuContinuationRequest, NativeVideoImportCandidateTimingReceipt,
+    NativeVideoImportCandidateToken, NativeVideoImportCpuTimings,
+    NativeVideoImportGpuTimingDiagnostics, NativeVideoImportGpuTimingPolicy,
+    NativeVideoImportGpuTimingSample, RenderInputTransform, TimelineSolidColorLayer,
 };
+
+/// One exact CPU-prefix completion consumed by a Viewer GPU continuation.
+///
+/// The layer points at this frame-local table by address. Separating the
+/// move-only completion from the reusable Viewer layer plan keeps render
+/// topology immutable while ensuring the CPU value can be consumed exactly
+/// once during command recording.
+pub struct ViewerHeterogeneousGpuInput {
+    /// Exact graph/generation/frame/resource binding expected by the renderer.
+    pub request: HeterogeneousGpuContinuationRequest,
+    /// Private CPU-prefix pixels and pending GPU suffix token chain.
+    pub completion: PreparedHeterogeneousCpuCompletion,
+}
 
 /// One renderer-neutral source branch entering Viewer GPU execution.
 ///
@@ -40,6 +56,14 @@ pub enum ViewerGpuSourceLayer {
         gpu_source: Option<ViewerGpuMediaSource>,
         /// Native decoder surface for low-copy renderer import.
         native_source: Option<ViewerGpuNativeSource>,
+        /// Address into
+        /// [`crate::ViewerGpuExecutionRequest::heterogeneous_inputs`] when this
+        /// source begins at an already-completed CPU Effect prefix.
+        ///
+        /// A heterogeneous source is exclusive with the ordinary CPU/GPU/native
+        /// source fields and requires an identity `effect_plan`: the exact GPU
+        /// suffix is already carried by the addressed completion.
+        heterogeneous_input: Option<u32>,
         /// Layer opacity.
         opacity: f32,
         /// Timeline affine transform.
@@ -66,6 +90,19 @@ pub enum ViewerGpuTransitionInput {
     Source(ViewerGpuSourceLayer),
 }
 
+/// Complete payload for one typed two-input Viewer visual Transition.
+///
+/// Execution layers box this payload once so ordinary source and adjustment
+/// nodes do not inherit the combined inline size of both Transition endpoints.
+pub struct ViewerGpuCrossDissolveLayer {
+    /// Earlier edit endpoint.
+    pub left: ViewerGpuTransitionInput,
+    /// Later edit endpoint.
+    pub right: ViewerGpuTransitionInput,
+    /// Normalized interpolation coefficient.
+    pub progress: f32,
+}
+
 /// One renderer-neutral layer or graph node entering Viewer GPU execution.
 pub enum ViewerGpuExecutionLayer {
     /// Ordinary source occupying one position in the bottom-to-top stack.
@@ -83,14 +120,7 @@ pub enum ViewerGpuExecutionLayer {
     },
     /// Two independently prepared sources replacing their endpoint Clips at
     /// one Track-stack position.
-    CrossDissolve {
-        /// Earlier edit endpoint.
-        left: ViewerGpuTransitionInput,
-        /// Later edit endpoint.
-        right: ViewerGpuTransitionInput,
-        /// Normalized interpolation coefficient.
-        progress: f32,
-    },
+    CrossDissolve(Box<ViewerGpuCrossDissolveLayer>),
 }
 
 /// CPU media source plus its exact GPU input transform contract.
@@ -117,6 +147,10 @@ pub struct ViewerGpuNativeSource {
     pub source_color_space: ColorSpace,
     /// Complete source-to-working input transform.
     pub input_transform: RenderInputTransform,
+    /// Width materialized into the renderer working graph.
+    pub materialization_width: u32,
+    /// Height materialized into the renderer working graph.
+    pub materialization_height: u32,
     /// Media-owned native frame payload consumed by renderer import.
     pub native_frame: Arc<PreviewNativeDecodedFrame>,
 }
@@ -131,11 +165,27 @@ pub struct ViewerNativeVideoImportRuntime {
 impl ViewerNativeVideoImportRuntime {
     /// Create the backend implementation selected for one renderer device.
     pub fn new(adapter: &wgpu::Adapter, device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
-        Self::new_with_resource_pool(
+        Self::new_with_gpu_timing_policy(
+            adapter,
+            device,
+            queue,
+            NativeVideoImportGpuTimingPolicy::default(),
+        )
+    }
+
+    /// Create the backend with an explicit native-import timing policy.
+    pub fn new_with_gpu_timing_policy(
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        gpu_timing_policy: NativeVideoImportGpuTimingPolicy,
+    ) -> Self {
+        Self::new_with_resource_pool_and_gpu_timing_policy(
             adapter,
             device,
             queue,
             Arc::new(GpuColorFrameWgpuResourcePool::default()),
+            gpu_timing_policy,
         )
     }
 
@@ -146,13 +196,31 @@ impl ViewerNativeVideoImportRuntime {
         queue: &wgpu::Queue,
         resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
     ) -> Self {
+        Self::new_with_resource_pool_and_gpu_timing_policy(
+            adapter,
+            device,
+            queue,
+            resource_pool,
+            NativeVideoImportGpuTimingPolicy::default(),
+        )
+    }
+
+    /// Create a shared-resource backend with an explicit timing policy.
+    pub fn new_with_resource_pool_and_gpu_timing_policy(
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
+        gpu_timing_policy: NativeVideoImportGpuTimingPolicy,
+    ) -> Self {
         #[cfg(target_os = "windows")]
         {
-            match D3D12NativeVideoImportBackend::new_with_resource_pool(
+            match D3D12NativeVideoImportBackend::new_with_resource_pool_and_gpu_timing_policy(
                 adapter,
                 device,
                 queue,
                 resource_pool,
+                gpu_timing_policy,
             ) {
                 Ok(backend) => Self {
                     support: backend.support().clone(),
@@ -169,7 +237,7 @@ impl ViewerNativeVideoImportRuntime {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            let _ = (device, queue, resource_pool);
+            let _ = (device, queue, resource_pool, gpu_timing_policy);
             Self {
                 support: unavailable_native_import_support(adapter, device.features()),
             }
@@ -181,12 +249,30 @@ impl ViewerNativeVideoImportRuntime {
         self.support.clone()
     }
 
-    /// Reset native-import CPU attribution before one Viewer candidate.
-    pub fn reset_frame_cpu_timings(&mut self) {
+    /// Begin one explicit Viewer-candidate attribution scope.
+    pub fn begin_viewer_candidate(&mut self) -> Option<NativeVideoImportCandidateToken> {
         #[cfg(target_os = "windows")]
         if let Some(backend) = self.backend.as_mut() {
-            backend.reset_frame_cpu_timings();
+            return backend.begin_viewer_candidate();
         }
+        None
+    }
+
+    /// End the exact Viewer-candidate scope on success or failure.
+    ///
+    /// Active timing returns a move-only receipt only for a successful record.
+    pub fn end_viewer_candidate(
+        &mut self,
+        candidate: Option<NativeVideoImportCandidateToken>,
+        viewer_record_succeeded: bool,
+    ) -> Option<NativeVideoImportCandidateTimingReceipt> {
+        #[cfg(target_os = "windows")]
+        if let Some(backend) = self.backend.as_mut() {
+            return backend.end_viewer_candidate(candidate, viewer_record_succeeded);
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = (candidate, viewer_record_succeeded);
+        None
     }
 
     /// Return accumulated native-import CPU attribution for the current candidate.
@@ -196,6 +282,38 @@ impl ViewerNativeVideoImportRuntime {
             return backend.frame_cpu_timings();
         }
         NativeVideoImportCpuTimings::default()
+    }
+
+    /// Collect callbacks after the execution owner has polled the device.
+    pub fn collect_gpu_timings_after_device_poll(&mut self) {
+        #[cfg(target_os = "windows")]
+        if let Some(backend) = self.backend.as_mut() {
+            backend.collect_gpu_timings_after_device_poll();
+        }
+    }
+
+    /// Drain completed native-import hardware timestamp samples.
+    pub fn take_completed_gpu_timings(&mut self) -> Vec<NativeVideoImportGpuTimingSample> {
+        #[cfg(target_os = "windows")]
+        if let Some(backend) = self.backend.as_mut() {
+            return backend.take_completed_gpu_timings();
+        }
+        Vec::new()
+    }
+
+    /// Cumulative native-import GPU timing coverage and availability.
+    pub fn gpu_timing_diagnostics(&self) -> NativeVideoImportGpuTimingDiagnostics {
+        #[cfg(target_os = "windows")]
+        if let Some(backend) = self.backend.as_ref() {
+            return backend.gpu_timing_diagnostics();
+        }
+        NativeVideoImportGpuTimingDiagnostics::inactive(
+            false,
+            self.support
+                .unavailable_reason
+                .clone()
+                .unwrap_or_else(|| "native video import backend is unavailable".to_owned()),
+        )
     }
 
     /// Bounded native-import contract-pool and bridge-entry residency.
@@ -233,6 +351,8 @@ impl ViewerNativeVideoImportRuntime {
         ids: &mut GpuColorFrameIdAllocator,
         source_color_space: ColorSpace,
         input_transform: &RenderInputTransform,
+        output_width: u32,
+        output_height: u32,
         native_frame: &PreviewNativeDecodedFrame,
     ) -> Result<GpuColorFrameResource<GpuColorFrameWgpuResource>, GpuNativeDecodedFrameImportError>
     {
@@ -256,6 +376,8 @@ impl ViewerNativeVideoImportRuntime {
         let contract = GpuNativeDecodedFrameImportContract {
             width: native_frame.width,
             height: native_frame.height,
+            output_width,
+            output_height,
             source_color_space,
             input_transform: input_transform.clone(),
             handle_kind: native_frame.handle_kind(),
@@ -315,15 +437,15 @@ pub fn native_video_sampling_from_decoded(
     let (matrix, chroma_location) = match source_texture_format {
         GpuNativeDecodedFrameTextureFormat::Nv12 | GpuNativeDecodedFrameTextureFormat::P010 => {
             let matrix = match decoded.matrix {
-                DecodedVideoMatrix::Unknown => source_color_space.encoding().matrix,
-                DecodedVideoMatrix::Unsupported => return None,
+                DecodedVideoMatrix::Unknown
+                | DecodedVideoMatrix::Unsupported
+                | DecodedVideoMatrix::Rgb => return None,
                 DecodedVideoMatrix::Bt709 => ColorMatrixCoefficients::Bt709,
                 DecodedVideoMatrix::Bt2020NonConstant => ColorMatrixCoefficients::Bt2020NonConstant,
                 DecodedVideoMatrix::Fcc => ColorMatrixCoefficients::Fcc,
                 DecodedVideoMatrix::Bt470Bg => ColorMatrixCoefficients::Bt470Bg,
                 DecodedVideoMatrix::Smpte170M => ColorMatrixCoefficients::Smpte170M,
                 DecodedVideoMatrix::Smpte240M => ColorMatrixCoefficients::Smpte240M,
-                DecodedVideoMatrix::Rgb => return None,
             };
             (
                 matrix,
@@ -500,5 +622,22 @@ mod tests {
             },
         )
         .is_none());
+
+        for matrix in [DecodedVideoMatrix::Unknown, DecodedVideoMatrix::Rgb] {
+            assert!(
+                native_video_sampling_from_decoded(
+                    ColorSpace::Rec2100Pq,
+                    GpuNativeDecodedFrameTextureFormat::P010,
+                    DecodedVideoSampling {
+                        matrix,
+                        range: DecodedVideoRange::Limited,
+                        chroma_location: DecodedVideoChromaLocation::Left,
+                        bit_depth: 10,
+                    },
+                )
+                .is_none(),
+                "YUV sampling must not infer or accept matrix {matrix:?}"
+            );
+        }
     }
 }

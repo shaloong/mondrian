@@ -4,7 +4,7 @@ use crate::decoder::{
     DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
 };
 use ffmpeg_next as ffmpeg;
-use mondrian_core::{ColorMatrixCoefficients, MondrianError, Result};
+use mondrian_core::{MondrianError, Result};
 use std::path::Path;
 
 pub(super) fn decoded_surface_format_from_pixel(
@@ -85,19 +85,6 @@ fn decoded_video_matrix_from_ffmpeg(
     Ok(matrix)
 }
 
-fn source_video_matrix(source: PreviewSourceColorContract) -> Option<DecodedVideoMatrix> {
-    match source.color_space.encoding().matrix {
-        ColorMatrixCoefficients::Bt709 => Some(DecodedVideoMatrix::Bt709),
-        ColorMatrixCoefficients::Fcc => Some(DecodedVideoMatrix::Fcc),
-        ColorMatrixCoefficients::Bt470Bg => Some(DecodedVideoMatrix::Bt470Bg),
-        ColorMatrixCoefficients::Smpte170M => Some(DecodedVideoMatrix::Smpte170M),
-        ColorMatrixCoefficients::Smpte240M => Some(DecodedVideoMatrix::Smpte240M),
-        ColorMatrixCoefficients::Bt2020NonConstant => Some(DecodedVideoMatrix::Bt2020NonConstant),
-        ColorMatrixCoefficients::Rgb => Some(DecodedVideoMatrix::Rgb),
-        ColorMatrixCoefficients::Unspecified => None,
-    }
-}
-
 pub(super) fn resolve_cpu_rgba_contract(
     decoded: &ffmpeg::util::frame::video::Video,
     source: PreviewSourceColorContract,
@@ -131,20 +118,25 @@ pub(super) fn resolve_cpu_rgba_contract_from_metadata(
         decoded_video_matrix_from_ffmpeg(decoded_color_space).map_err(|reason| {
             MondrianError::DecodeFailed { asset_id: path.display().to_string(), reason }
         })?;
-    let expected_matrix =
-        source_video_matrix(source).filter(|matrix| *matrix != DecodedVideoMatrix::Rgb);
-    // CICP permits the encoded YCbCr matrix and RGB color-space identity to
-    // differ. Explicit decoder metadata therefore remains authoritative; the
-    // source contract is only a fallback when the frame omits its matrix.
-    let matrix = decoded_matrix
-        .or(expected_matrix)
-        .ok_or_else(|| MondrianError::DecodeFailed {
+    // CICP RGB colorimetry and YCbCr sampling matrices are independent facts.
+    // The source identity therefore cannot authorize a guessed matrix when the
+    // decoded frame omits it. A future authored fallback must be explicit and
+    // participate in diagnostics and cache identity.
+    let matrix = decoded_matrix.ok_or_else(|| MondrianError::DecodeFailed {
+        asset_id: path.display().to_string(),
+        reason: format!(
+            "YUV matrix is unspecified for resolved source color space {:?}; refusing implicit swscale defaults",
+            source.color_space
+        ),
+    })?;
+    if matrix == DecodedVideoMatrix::Rgb {
+        return Err(MondrianError::DecodeFailed {
             asset_id: path.display().to_string(),
-            reason: format!(
-                "YUV matrix is unspecified for resolved source color space {:?}; refusing implicit swscale defaults",
-                source.color_space
-            ),
-        })?;
+            reason:
+                "YUV pixel sampling cannot use RGB/GBR matrix metadata; refusing implicit swscale defaults"
+                    .to_owned(),
+        });
+    }
     // Auto accepts a more local frame fact; an authored range override remains
     // authoritative over incorrect source tags.
     let range = source

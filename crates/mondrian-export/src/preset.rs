@@ -2,7 +2,10 @@
 
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, ColorSpace};
-use mondrian_core::AudioSourceComponentId;
+use mondrian_core::{
+    AudioSourceComponentId, FramePosition, FrameRounding, Rational, TimelineTime,
+    TimelineTimeError, TimelineTimeRange,
+};
 use mondrian_media::{AudioSourceSelection, MediaFileFingerprint, VideoColorDiagnostic};
 use mondrian_timeline::sequence::{DeliveryBitDepth, Sequence, VideoRange};
 use serde::{Deserialize, Serialize};
@@ -454,6 +457,30 @@ pub struct ExportConfig {
     /// Immutable timeline and media-dependency snapshot captured at admission.
     pub timeline: Box<TimelineExportSnapshot>,
     pub output_path: std::path::PathBuf,
+    /// Final namespace policy frozen with this job at queue admission.
+    #[serde(default)]
+    pub output_policy: ExportOutputPolicy,
+}
+
+/// Namespace policy for the final export deliverable.
+///
+/// This is deliberately independent from FFmpeg's own overwrite flags because
+/// FFmpeg writes only an identity-bound sibling object. The policy is applied
+/// once, after that object has been reclaimed and validated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ExportOutputPolicy {
+    /// Publish only when the final route is still absent.
+    ///
+    /// This is the safe default. A file created by another actor while a long
+    /// export is running wins the route; publication fails before namespace
+    /// mutation and retains the validated partial.
+    #[default]
+    CreateNew,
+    /// Unconditionally replace the direct file present at publication time.
+    ///
+    /// This is explicit last-writer-wins overwrite authority, not
+    /// compare-and-swap against the object observed at admission.
+    OverwriteExisting,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -467,6 +494,127 @@ pub enum TimelineExportRange {
     },
 }
 
+/// Exact frame-grid selection resolved from one immutable Sequence snapshot.
+///
+/// Snapshot capture and execution consume this same value so in/out rounding,
+/// explicit blank-tail selection, and the minimum one-frame contract cannot
+/// drift between App admission and the offline worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedTimelineExportRange {
+    /// First selected frame on the root Sequence Evaluation Grid.
+    pub start_frame: i64,
+    /// Number of selected root frames.
+    pub total_frames: u64,
+    /// Root Sequence frame-rate numerator.
+    pub fps_num: i64,
+    /// Root Sequence frame-rate denominator.
+    pub fps_den: i64,
+}
+
+impl ResolvedTimelineExportRange {
+    /// Exact half-open root Sequence-time interval covered by the selection.
+    pub fn time_range(self) -> Result<TimelineTimeRange, TimelineExportRangeError> {
+        let time_base = Rational::new(self.fps_den, self.fps_num);
+        let start =
+            TimelineTime::from_frame_position(FramePosition::new(self.start_frame, time_base))?;
+        let frame_count = i64::try_from(self.total_frames)
+            .map_err(|_| TimelineExportRangeError::FrameCountOverflow)?;
+        let end_frame = self
+            .start_frame
+            .checked_add(frame_count)
+            .ok_or(TimelineExportRangeError::FrameCountOverflow)?;
+        let end = TimelineTime::from_frame_position(FramePosition::new(end_frame, time_base))?;
+        Ok(TimelineTimeRange::new(start, end.checked_sub(start)?)?)
+    }
+
+    /// Inclusive frame-start bounds used by prepared visual range queries.
+    pub fn visual_bounds(
+        self,
+    ) -> Result<Option<(TimelineTime, TimelineTime)>, TimelineExportRangeError> {
+        if self.total_frames == 0 {
+            return Ok(None);
+        }
+        let time_base = Rational::new(self.fps_den, self.fps_num);
+        let last_offset = i64::try_from(self.total_frames.saturating_sub(1))
+            .map_err(|_| TimelineExportRangeError::FrameCountOverflow)?;
+        let last_frame = self
+            .start_frame
+            .checked_add(last_offset)
+            .ok_or(TimelineExportRangeError::FrameCountOverflow)?;
+        Ok(Some((
+            TimelineTime::from_frame_position(FramePosition::new(self.start_frame, time_base))?,
+            TimelineTime::from_frame_position(FramePosition::new(last_frame, time_base))?,
+        )))
+    }
+}
+
+/// Failure while resolving an authored export range on a Sequence frame grid.
+#[derive(Debug, thiserror::Error)]
+pub enum TimelineExportRangeError {
+    /// Sequence duration or in/out author state could not be evaluated.
+    #[error("failed to resolve Sequence export range: {0}")]
+    Sequence(String),
+    /// Exact frame/time conversion failed.
+    #[error(transparent)]
+    Time(#[from] TimelineTimeError),
+    /// Selected frame count cannot be represented by the exact-time seam.
+    #[error("selected export frame count exceeds supported signed capacity")]
+    FrameCountOverflow,
+}
+
+impl TimelineExportRange {
+    /// Resolve this author choice against one immutable Sequence snapshot.
+    pub fn resolve(
+        self,
+        sequence: &Sequence,
+    ) -> Result<ResolvedTimelineExportRange, TimelineExportRangeError> {
+        let frame_rate = sequence.settings.frame_rate;
+        let sequence_end_exclusive = sequence
+            .total_duration()
+            .map_err(|error| TimelineExportRangeError::Sequence(error.to_string()))?
+            .to_frame_position(frame_rate, FrameRounding::Ceil)?
+            .frame
+            .max(1);
+        let (start, requested_end_exclusive) = match self {
+            Self::EntireSequence => (0, sequence_end_exclusive),
+            Self::SequenceInOut => {
+                let start =
+                    sequence.in_point().to_frame_position(frame_rate, FrameRounding::Floor)?.frame;
+                let end = sequence
+                    .out_point()
+                    .map(|time| {
+                        time.to_frame_position(frame_rate, FrameRounding::Floor)?
+                            .frame
+                            .checked_add(1)
+                            .ok_or(TimelineExportRangeError::FrameCountOverflow)
+                    })
+                    .transpose()?
+                    .unwrap_or(sequence_end_exclusive);
+                (start, end)
+            }
+            Self::WorkArea { start_frame, end_frame_exclusive } => {
+                (start_frame.max(0), end_frame_exclusive.max(0))
+            }
+        };
+        // Sequence duration is derived from authored content, not a fixed
+        // canvas boundary. An explicit Work Area or Out point may therefore
+        // select a valid blank tail; only an implicit end follows content.
+        let minimum_end_exclusive =
+            start.checked_add(1).ok_or(TimelineExportRangeError::FrameCountOverflow)?;
+        let end_exclusive = requested_end_exclusive.max(minimum_end_exclusive);
+        let total_frames = end_exclusive
+            .checked_sub(start)
+            .and_then(|frames| u64::try_from(frames).ok())
+            .ok_or(TimelineExportRangeError::FrameCountOverflow)?;
+        Ok(ResolvedTimelineExportRange {
+            start_frame: start,
+            total_frames,
+            fps_num: sequence.settings.frame_rate.num.max(1),
+            fps_den: sequence.settings.frame_rate.den.max(1),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimelineExportSnapshot {
     /// Exact Project color engine frozen when the job is admitted.
@@ -474,11 +622,93 @@ pub struct TimelineExportSnapshot {
     pub sequence: Sequence,
     #[serde(default)]
     pub sequences: Vec<Sequence>,
-    /// Closed dependency set for every real media asset reachable from the sequence graph.
+    /// Closed physical dependency set selected by prepared visual schedules and
+    /// the encoded audio Program Output over `range`.
     #[serde(default)]
     pub media: HashMap<AssetId, ExportMediaDependency>,
     #[serde(default)]
     pub range: TimelineExportRange,
+    /// Non-persistent immutable visual/audio Programs and font bytes that
+    /// produced the selected dependency closure.
+    ///
+    /// Deserialized or manually assembled snapshots are incomplete until the
+    /// queue admission boundary prepares and validates this execution
+    /// attachment. Workers never reinterpret the snapshot from the live
+    /// Effect-definition registry.
+    #[serde(skip)]
+    pub(crate) prepared_execution: Option<crate::PreparedTimelineExecutionSnapshot>,
+}
+
+impl TimelineExportSnapshot {
+    /// Assemble an author/media snapshot whose exact execution closure will be
+    /// prepared and validated atomically at queue admission.
+    pub fn unprepared(
+        color_environment: mondrian_core::ProjectColorEnvironment,
+        sequence: Sequence,
+        sequences: Vec<Sequence>,
+        media: HashMap<AssetId, ExportMediaDependency>,
+        range: TimelineExportRange,
+    ) -> Self {
+        Self {
+            color_environment,
+            sequence,
+            sequences,
+            media,
+            range,
+            prepared_execution: None,
+        }
+    }
+
+    /// Assemble an author/media snapshot with the exact selected visual/audio
+    /// Programs used to resolve its physical dependency closure.
+    ///
+    /// Queue admission still validates author fingerprints, reachability,
+    /// resource grants, and byte-freezes any selected Basic Title fonts.
+    pub fn captured(
+        color_environment: mondrian_core::ProjectColorEnvironment,
+        sequence: Sequence,
+        sequences: Vec<Sequence>,
+        media: HashMap<AssetId, ExportMediaDependency>,
+        range: TimelineExportRange,
+        prepared_execution: crate::PreparedTimelineExecutionSnapshot,
+    ) -> Self {
+        Self {
+            color_environment,
+            sequence,
+            sequences,
+            media,
+            range,
+            prepared_execution: Some(prepared_execution),
+        }
+    }
+
+    /// Exact non-persistent execution closure, when queue admission has
+    /// prepared or retained one.
+    pub fn prepared_execution(&self) -> Option<&crate::PreparedTimelineExecutionSnapshot> {
+        self.prepared_execution.as_ref()
+    }
+
+    pub(crate) fn install_prepared_execution(
+        &mut self,
+        prepared_execution: crate::PreparedTimelineExecutionSnapshot,
+    ) {
+        self.prepared_execution = Some(prepared_execution);
+    }
+
+    pub(crate) fn install_prepared_title_fonts(
+        &mut self,
+        title_fonts: mondrian_renderer::PreparedBasicTitleFontSet,
+    ) -> Result<(), crate::TimelineExportDependencyError> {
+        self.prepared_execution
+            .as_mut()
+            .ok_or(
+                crate::TimelineExportDependencyError::VisualClosureEvidenceMismatch {
+                    detail: "visual execution closure is unavailable".to_owned(),
+                },
+            )?
+            .visual_mut()
+            .install_title_fonts(title_fonts)
+    }
 }
 
 /// One internally consistent media dependency frozen into an export snapshot.
@@ -488,6 +718,20 @@ pub struct ExportMediaDependency {
     pub path: PathBuf,
     /// Exact source revision that the export is allowed to publish from.
     pub source_fingerprint: MediaFileFingerprint,
+    /// Exact physical video stream selected by the admitted media probe.
+    ///
+    /// Audio-only dependencies retain `None`. Every picture render plan
+    /// requires `Some` and carries it through cache and decoder identity.
+    #[serde(default)]
+    pub video_stream_index: Option<u32>,
+    /// Exact picture-time availability for Transition source-handle
+    /// validation, frozen from the same physical source revision.
+    ///
+    /// A one-picture asset is [`mondrian_timeline::PictureSourceExtent::Still`].
+    /// Moving media publishes the selected video stream's exact half-open
+    /// source range. Audio-only dependencies retain `None`.
+    #[serde(default)]
+    pub picture_source_extent: Option<mondrian_timeline::PictureSourceExtent>,
     /// Full-resolution picture extent frozen with the source revision.
     ///
     /// Export may decode a delivery-sized sample, but authored Clip transforms
@@ -496,10 +740,9 @@ pub struct ExportMediaDependency {
     /// Frozen physical bindings for the audio Components used by this snapshot.
     #[serde(default)]
     pub audio_components: HashMap<AudioSourceComponentId, AudioSourceSelection>,
-    /// Color space explicitly detected from source metadata, when reliable.
-    pub detected_color_space: Option<ColorSpace>,
     /// Persistent user interpretation captured with the source revision.
     pub interpretation: AssetMediaInterpretation,
-    /// Source color evidence captured with the source revision.
+    /// Source color evidence and the sole metadata-derived execution identity
+    /// captured with the source revision.
     pub color_diagnostic: Option<VideoColorDiagnostic>,
 }

@@ -43,6 +43,7 @@ pub(super) fn decode_media(
         proxy_config: &proxy_config,
         proxy_color: None,
         hardware_admission: PreviewHardwareDecodeAdmissionState::default(),
+        cpu_working_required: request.cpu_working_required,
     }) {
         PreviewMediaSourceOutcome::Ready(resolved) => resolved,
         PreviewMediaSourceOutcome::ColorRejected(rejected) => {
@@ -69,6 +70,7 @@ pub(super) fn decode_media(
             deadline_at: None,
             demand_identity: None,
             execution_id: None,
+            residency_work: None,
         },
         0,
         decode_context,

@@ -4,32 +4,43 @@
 //!
 //! 提供：
 //! - `GpuContext`：wgpu Device/Queue/Adapter 管理
-//! - `FrameCompositor`：多层实时帧合成
-//! - `RenderPipeline`：YUV→RGB + 层混合 Shader 管线
-//! - `ShaderRegistry`：可扩展效果 Shader 注册
+//! - `PreparedVisualProgram`：不可变视觉作者状态编译
+//! - `GpuFrameCompositor`：类型化工作域合成
+//! - `ViewerGpuExecutionRuntime`：有界 Viewer GPU 执行
 
-pub mod batched_pipeline;
 pub mod color_accuracy;
 pub mod color_frame;
 pub mod color_reference;
 pub mod color_report_vocab;
 pub mod color_stage;
 pub mod color_transform;
-pub mod compositor;
 pub mod context;
 pub mod display_calibration;
 pub mod gpu_compositor;
+pub mod gpu_output_working_set;
+mod heterogeneous_cpu;
+pub mod heterogeneous_gpu;
 pub mod native_video;
 pub mod ocio_gpu;
-pub mod pipeline;
+pub mod prepared_visual_frame_closure;
+pub mod prepared_visual_program;
+pub mod prepared_visual_range_closure;
 pub mod profile;
 pub mod program_scopes_gpu;
-pub mod shaders;
-pub mod texture_pool;
 pub mod timeline_composite;
 pub mod timeline_render_plan;
+pub mod timeline_temporal;
 pub mod viewer_execution;
 pub mod viewer_runtime;
+pub mod viewer_working_set;
+#[cfg(feature = "validation")]
+mod visual_execution_validation;
+pub use heterogeneous_cpu::{
+    HeterogeneousCpuPrefixBatchCompletion, HeterogeneousCpuPrefixBatchError,
+    HeterogeneousCpuPrefixBatchExecutor, HeterogeneousCpuPrefixBatchGrant,
+    HeterogeneousCpuPrefixBatchItem, HeterogeneousCpuPrefixBatchOutput,
+    HeterogeneousCpuPrefixBatchRequest, HeterogeneousCpuPrefixFrameContractViolation,
+};
 pub mod viewer_spatial;
 
 pub use color_accuracy::{
@@ -44,8 +55,9 @@ pub use color_frame::{
     execute_native_decoded_frame_import, ColorFrameAlpha, ColorFrameDescriptor, ColorFrameDomain,
     ColorFrameEncoding, ColorFrameResidency, ColorFrameSpace, CpuColorFrame, CpuEncodedColorFrame,
     CpuEncodedFloatColorFrame, CpuSourceColorFrame, EncodedRgbaF32Frame,
-    GpuColorFrameAllocationPlan, GpuColorFrameContract, GpuColorFrameHandle,
-    GpuColorFrameHandleError, GpuColorFrameId, GpuColorFrameIdAllocator, GpuColorFrameReadback,
+    GpuColorFrameAllocationPlan, GpuColorFrameBindGroupCacheKeyAllocationError,
+    GpuColorFrameContract, GpuColorFrameHandle, GpuColorFrameHandleError, GpuColorFrameId,
+    GpuColorFrameIdAllocationError, GpuColorFrameIdAllocator, GpuColorFrameReadback,
     GpuColorFrameReadbackError, GpuColorFrameReadbackPlan, GpuColorFrameResource,
     GpuColorFrameResourceTable, GpuColorFrameResourceTableError, GpuColorFrameTextureFormat,
     GpuColorFrameUploadError, GpuColorFrameUploadPlan, GpuColorFrameUploader,
@@ -58,6 +70,7 @@ pub use color_frame::{
     GpuNativeDecodedFrameSourceDescriptor, GpuNativeDecodedFrameSourceFormatError,
     GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuVideoChromaLocation,
     GpuVideoRange, LinearFloatSource, SourceAlphaInterpretationError,
+    ViewerGpuPresentationOutputLease,
 };
 pub use color_reference::{
     import_external_color_reference, ColorReferenceDecoder, ColorReferenceDescriptor,
@@ -65,15 +78,22 @@ pub use color_reference::{
     ColorReferencePixels, ColorReferenceValidationError,
 };
 pub use color_stage::{
-    execute_cpu_input_stage, execute_cpu_input_stage_float, execute_cpu_output_boundary,
-    execute_cpu_output_boundary_float, execute_cpu_output_boundary_rgba8, execute_cpu_output_stage,
-    execute_cpu_program_monitor_boundary_rgba8, execute_cpu_source_input_stage,
-    execute_cpu_working_transform, CpuRenderColorStageExecutor, RenderColorStage,
+    execute_cpu_input_stage, execute_cpu_input_stage_float,
+    execute_cpu_input_stage_float_with_session, execute_cpu_input_stage_with_session,
+    execute_cpu_output_boundary, execute_cpu_output_boundary_float,
+    execute_cpu_output_boundary_float_with_session, execute_cpu_output_boundary_rgba8,
+    execute_cpu_output_boundary_rgba8_with_session, execute_cpu_output_boundary_with_session,
+    execute_cpu_output_stage, execute_cpu_output_stage_with_session,
+    execute_cpu_program_monitor_boundary_rgba8,
+    execute_cpu_program_monitor_boundary_rgba8_with_session,
+    execute_cpu_program_monitor_presentation_rgba8,
+    execute_cpu_program_monitor_presentation_rgba8_with_session, execute_cpu_source_input_stage,
+    execute_cpu_source_input_stage_with_session, execute_cpu_working_transform,
+    execute_cpu_working_transform_with_session, CpuRenderColorStageExecutor, RenderColorStage,
     RenderColorStageDiagnostics, RenderColorStageExecution, RenderColorStageGpuBlockerBreakdown,
     RenderColorStageMode, RenderColorStagePlan, RenderColorStagePlanner,
-    RenderGpuColorPassExecutionError, RenderGpuColorPassInputView,
-    RenderGpuColorPassResolvedResources, RenderGpuColorPassSchedule,
-    RenderGpuColorPassScheduleError, RenderGpuColorPassTargetView, RenderGpuColorTransformRecord,
+    RenderGpuColorPassExecutionError, RenderGpuColorPassResolvedResources,
+    RenderGpuColorPassSchedule, RenderGpuColorPassScheduleError, RenderGpuColorTransformRecord,
     RenderGpuColorTransformResourcePlan, RenderGpuColorTransformResourcePlanError,
     RenderGpuColorTransformRuntimeRecordError, RenderGpuCompositeGraphRecord,
     RenderGpuCompositeGraphRecordError, RenderGpuEffectDomainRecord,
@@ -97,18 +117,18 @@ pub use color_stage::{
     RenderOutputColorBoundaryGpuRecordError, RenderOutputColorBoundaryPlanner,
     RenderOutputColorBoundaryRgba8, RenderOutputColorBoundaryStagePlan,
     RenderOutputColorBoundaryTarget, RenderProgramMonitorBoundaryRgba8,
-    RENDER_GPU_OUTPUT_HEALTH_REPORT_SCHEMA_VERSION,
+    RenderProgramMonitorPresentationRgba8, RENDER_GPU_OUTPUT_HEALTH_REPORT_SCHEMA_VERSION,
 };
 pub use color_transform::{
     CpuColorTransformExecutor, RenderColorTransform, RenderColorTransformBackend,
     RenderColorTransformDiagnostics, RenderColorTransformDirection, RenderColorTransformError,
-    RenderColorTransformGpuOptions, RenderColorTransformGpuPlan, RenderColorTransformGpuPlanner,
+    RenderColorTransformExecutionFailure, RenderColorTransformGpuOptions,
+    RenderColorTransformGpuPlan, RenderColorTransformGpuPlanner, RenderCpuColorExecutionSession,
     RenderEffectColorDomainGpuPlan, RenderEffectColorDomainGpuPlanError,
     RenderEffectColorDomainGpuPlanner, RenderInputTransform, RenderInputTransformResult,
     RenderIntermediateColorTransform, RenderMonitorAdaptation, RenderMonitorAdaptationError,
     RenderOcioDisplayView, RenderOutputTransformFloatResult, RenderOutputTransformResult,
 };
-pub use compositor::{CompositorConfig, FrameCompositor};
 pub use context::GpuContext;
 pub use context::{
     native_video_texture_device_features, ocio_lut_filtering_device_features,
@@ -128,6 +148,23 @@ pub use gpu_compositor::{
     GpuCompositorUniformArenaDiagnostics, GpuFrameCompositor, GpuPointEffectRecord,
     GpuSolidSourceRecord,
 };
+pub use gpu_output_working_set::{
+    estimate_render_gpu_output_active_working_set, RenderGpuOutputActiveResourceDemand,
+    RenderGpuOutputActiveWorkingSetAdmissionError, RenderGpuOutputActiveWorkingSetEstimate,
+    RenderGpuOutputActiveWorkingSetEstimateError, RenderGpuOutputActiveWorkingSetStage,
+    RenderGpuOutputExecutionResourceGrant,
+};
+pub use heterogeneous_gpu::{
+    record_heterogeneous_gpu_continuation, HeterogeneousGpuBatchId,
+    HeterogeneousGpuCompletedContinuation, HeterogeneousGpuCompletedEvidence,
+    HeterogeneousGpuCompletedFrame, HeterogeneousGpuContinuationBinding,
+    HeterogeneousGpuContinuationError, HeterogeneousGpuContinuationRequest,
+    HeterogeneousGpuContinuationRuntime, HeterogeneousGpuExecutionCapability,
+    HeterogeneousGpuRecordResources, HeterogeneousGpuRecordedContinuation,
+    HeterogeneousGpuRecordedEvidence, HeterogeneousGpuResourceGrant, HeterogeneousGpuResourceKind,
+    HeterogeneousGpuSubmissionAuthority, HeterogeneousGpuSubmittedContinuation,
+    HeterogeneousGpuSubmittedEvidence,
+};
 #[cfg(target_os = "windows")]
 pub use native_video::{
     inspect_d3d12_native_decoded_frame, D3D12NativeDecodedFrameInspection,
@@ -138,7 +175,12 @@ pub use native_video::{
 pub use native_video::{
     GpuNativeVideoExtent, GpuNativeYuvDecodePlan, GpuNativeYuvDecodePlanError,
     GpuNativeYuvDecodeRecordError, GpuNativeYuvDecoder, GpuNativeYuvPlaneViews,
-    GpuNativeYuvPreparedPass, NativeVideoImportCpuTimings,
+    GpuNativeYuvPreparedPass, NativeVideoImportCandidateTimingReceipt,
+    NativeVideoImportCandidateToken, NativeVideoImportCpuTimings,
+    NativeVideoImportGpuTimingDiagnostics, NativeVideoImportGpuTimingPolicy,
+    NativeVideoImportGpuTimingSample, NativeVideoImportToken,
+    GPU_NATIVE_IMPORT_MAX_STORAGE_PIXEL_RATIO, NATIVE_VIDEO_IMPORT_GPU_TIMING_MAX_CAPACITY,
+    NATIVE_VIDEO_IMPORT_GPU_TIMING_SCHEMA_VERSION,
 };
 pub use ocio_gpu::{
     OcioGpuBindingContract, OcioGpuBindingContractValidationError,
@@ -168,8 +210,7 @@ pub use ocio_gpu::{
     OcioGpuWgpuPipelineLayoutPreparer, OcioGpuWgpuPreparedBackendObjects,
     OcioGpuWgpuPreparedResources, OcioGpuWgpuPreparedStaticPipeline,
     OcioGpuWgpuPreparedWrapperInputLayout, OcioGpuWgpuRenderPassError,
-    OcioGpuWgpuRenderPassNodePlan, OcioGpuWgpuRenderPassRecorder, OcioGpuWgpuRenderPassTarget,
-    OcioGpuWgpuRenderPipeline, OcioGpuWgpuRenderPipelineCache,
+    OcioGpuWgpuRenderPassNodePlan, OcioGpuWgpuRenderPipeline, OcioGpuWgpuRenderPipelineCache,
     OcioGpuWgpuRenderPipelineCacheDiagnostics, OcioGpuWgpuRenderPipelineDescriptorPlan,
     OcioGpuWgpuRenderPipelineError, OcioGpuWgpuResourceCache, OcioGpuWgpuResourceCacheDiagnostics,
     OcioGpuWgpuResourcePlan, OcioGpuWgpuSamplerBinding, OcioGpuWgpuSamplerBindingPolicy,
@@ -181,9 +222,9 @@ pub use ocio_gpu::{
     OcioGpuWgpuUniformUploadPlan, OcioGpuWgpuUniformUploadResource, OcioGpuWgpuUniformUploader,
     OcioGpuWgpuUploadedLutTexture, OcioGpuWgpuUploadedLuts, OcioGpuWgpuUploadedTextureMismatch,
     OcioGpuWgpuUploadedUniformBuffer, OcioGpuWgpuUploadedUniformMismatch,
-    OcioGpuWgpuWrapperBindGroup, OcioGpuWgpuWrapperBindingEntry, OcioGpuWgpuWrapperBindingPlan,
+    OcioGpuWgpuWrapperBindingEntry, OcioGpuWgpuWrapperBindingPlan,
     OcioGpuWgpuWrapperBindingResource, OcioGpuWgpuWrapperInputBindingCacheDiagnostics,
-    OcioGpuWgpuWrapperInputResources, OcioGpuWgpuWrapperLinkBlocker, OcioGpuWgpuWrapperLinkPlan,
+    OcioGpuWgpuWrapperLinkBlocker, OcioGpuWgpuWrapperLinkPlan,
     OcioGpuWgpuWrapperShaderArtifactError, OcioGpuWgpuWrapperShaderModuleArtifact,
     OcioGpuWgpuWrapperShaderModuleArtifactCache,
     OcioGpuWgpuWrapperShaderModuleArtifactCacheDiagnostics,
@@ -191,50 +232,96 @@ pub use ocio_gpu::{
     OcioGpuWgpuWrapperShaderModuleCacheDiagnostics, OcioGpuWgpuWrapperShaderModules,
     OcioGpuWgpuWrapperShaderSourceArtifact,
 };
-pub use pipeline::{CpuRgbaLayer, RenderPipeline};
+pub use prepared_visual_frame_closure::{
+    prepare_bound_visual_frame_closure, prepare_visual_frame_closure,
+    PreparedVisualChildCanvasPolicy, PreparedVisualFrameClosure, PreparedVisualFrameClosureError,
+    PreparedVisualFrameClosureRequest, PreparedVisualFrameEvaluation, PreparedVisualFrameNode,
+    PreparedVisualFrameNodeId, PreparedVisualNestedBinding, PreparedVisualNestedInstanceStep,
+    PreparedVisualNestedSample,
+};
+pub use prepared_visual_program::{
+    prepared_visual_author_fingerprint, PreparedVisualAuthorFingerprintError,
+    PreparedVisualAuthorSnapshotIdentity, PreparedVisualEffectBlocker,
+    PreparedVisualFrameReachability, PreparedVisualMaterializationContract,
+    PreparedVisualNestedDemand, PreparedVisualNestedRange, PreparedVisualNestedRangeDemand,
+    PreparedVisualProgram, PreparedVisualProgramBindError, PreparedVisualProgramBinding,
+    PreparedVisualProgramBindingError, PreparedVisualProgramCache,
+    PreparedVisualProgramCacheConfig, PreparedVisualProgramCacheDiagnostics,
+    PreparedVisualProgramDependencyError, PreparedVisualProgramDiagnostics,
+    PreparedVisualProgramError, PreparedVisualRangeReachability, PreparedVisualTransitionBlocker,
+    DEFAULT_PREPARED_VISUAL_PROGRAM_CACHE_BYTES, DEFAULT_PREPARED_VISUAL_PROGRAM_CACHE_CAPACITY,
+};
+pub use prepared_visual_range_closure::{
+    next_bound_prepared_visual_media_demand_frame, next_prepared_visual_media_demand_frame,
+    prepare_bound_visual_range_closure, prepare_visual_range_closure, PreparedVisualRangeClosure,
+    PreparedVisualRangeClosureError,
+};
 pub use program_scopes_gpu::{
     GpuProgramScopesBufferLayout, GpuProgramScopesError, GpuProgramScopesRecord,
     GpuProgramScopesRequest, GpuProgramScopesRuntime, GpuProgramScopesRuntimeDiagnostics,
 };
 pub use timeline_composite::{
-    composite_path_diagnostics, composite_timeline_elements,
-    composite_timeline_elements_color_frame,
+    admit_timeline_render_plan_for_cpu_compositor, composite_path_diagnostics,
+    composite_timeline_elements, composite_timeline_elements_color_frame,
     composite_timeline_elements_color_frame_with_diagnostics, composite_timeline_elements_into,
-    is_identity_transform, quantize_transform_signature, TimelineAdjustmentLayer,
-    TimelineCompositeBackground, TimelineCompositeColorPath, TimelineCompositeColorPathSummary,
-    TimelineCompositeDiagnostics, TimelineCompositeDomainBlockerBreakdown,
-    TimelineCompositeElement, TimelineCompositeError, TimelineCompositeFrame,
+    estimate_timeline_cpu_working_set, is_identity_transform, quantize_transform_signature,
+    TimelineAdjustmentLayer, TimelineCompositeBackground, TimelineCompositeColorPath,
+    TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
+    TimelineCompositeDomainBlockerBreakdown, TimelineCompositeElement, TimelineCompositeError,
+    TimelineCompositeExecutionDiagnostics, TimelineCompositeFrame,
     TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
+    TimelineCpuCompositeAdmission, TimelineCpuCompositePrecision, TimelineCpuWorkingSetDiagnostics,
+    TimelineCpuWorkingSetError, TimelineCpuWorkingSetEstimate, TimelineCpuWorkingSetGrant,
     TimelineCrossDissolveLayer, TimelineEffectColorRuntime, TimelineMediaLayer,
     TimelineSolidColorLayer, TimelineTransitionInput,
 };
 pub use timeline_render_plan::{
-    collect_timeline_color_diagnostics, collect_timeline_color_diagnostics_with_display_view,
-    evaluate_timeline_render_plan, mat3_to_affine, project_affine_to_sampled_extents,
-    TimelineAdjustmentPlan, TimelineBasicTitlePlan, TimelineColorDiagnostic,
-    TimelineCrossDissolvePlan, TimelineEvaluationDiagnostics, TimelineEvaluationRequest,
-    TimelineMediaPlan, TimelineNestedSequencePlan, TimelineRenderColorTarget, TimelineRenderIntent,
+    evaluate_prepared_visual_program, evaluate_prepared_visual_program_with_session,
+    mat3_to_affine, project_affine_to_sampled_extents, TimelineAdjustmentPlan,
+    TimelineBasicTitlePlan, TimelineColorDiagnostic, TimelineCrossDissolvePlan,
+    TimelineEvaluationDiagnostics, TimelineEvaluationRequest, TimelineMediaPlan,
+    TimelineNestedSequencePlan, TimelineRenderColorTarget, TimelineRenderIntent,
     TimelineRenderPlan, TimelineRenderPlanElement, TimelineRenderQuality, TimelineRenderSettings,
     TimelineSolidColorPlan, TimelineTransitionInputPlan,
 };
+pub use timeline_temporal::{
+    collect_timeline_temporal_demands, execute_prepared_timeline_temporal_batch,
+    prepare_timeline_temporal_execution, PreparedTimelineTemporalExecution,
+    TimelineTemporalDemandBatch, TimelineTemporalPreparationError, TimelineTemporalSource,
+    TimelineTemporalSourceDemand,
+};
 pub use viewer_execution::{
     native_source_texture_format_from_decoded, native_video_sampling_from_decoded,
-    ViewerGpuExecutionLayer, ViewerGpuMediaSource, ViewerGpuNativeSource, ViewerGpuSourceLayer,
-    ViewerGpuTransitionInput, ViewerNativeVideoImportRuntime,
+    ViewerGpuCrossDissolveLayer, ViewerGpuExecutionLayer, ViewerGpuMediaSource,
+    ViewerGpuNativeSource, ViewerGpuSourceLayer, ViewerGpuTransitionInput,
+    ViewerHeterogeneousGpuInput, ViewerNativeVideoImportRuntime,
 };
 pub use viewer_runtime::{
     ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionError, ViewerGpuExecutionGpuStage,
     ViewerGpuExecutionRecord, ViewerGpuExecutionRequest, ViewerGpuExecutionResidency,
-    ViewerGpuExecutionRuntime, ViewerGpuExecutionStageMarker, ViewerGpuNativeVideoFacts,
-    ViewerGpuOutputPrecision,
+    ViewerGpuExecutionRuntime, ViewerGpuExecutionRuntimeCreateError, ViewerGpuExecutionStageMarker,
+    ViewerGpuNativeVideoFacts, ViewerGpuOutputPrecision, ViewerGpuPresentationOutputTakeError,
+    ViewerHeterogeneousGpuCompletedBatch, ViewerHeterogeneousGpuSubmissionBatch,
 };
-pub use viewer_spatial::{
-    GpuViewerSpatialPlan, GpuViewerSpatialPlanError, GpuViewerSpatialRecord,
-    GpuViewerSpatialRuntime, GpuViewerSpatialRuntimeDiagnostics, GpuViewerSpatialRuntimeError,
-    ViewerSourceRect,
+pub use viewer_spatial::{GpuViewerSpatialRuntimeDiagnostics, ViewerSourceRect};
+pub use viewer_working_set::{
+    estimate_viewer_gpu_active_working_set, ViewerGpuActiveTextureDemand,
+    ViewerGpuActiveWorkingSetAdmissionError, ViewerGpuActiveWorkingSetDiagnostics,
+    ViewerGpuActiveWorkingSetEstimate, ViewerGpuActiveWorkingSetEstimateError,
+    ViewerGpuActiveWorkingSetStage, ViewerGpuExecutionResourceGrant,
+};
+#[cfg(feature = "validation")]
+pub use visual_execution_validation::{
+    prepared_visual_execution_semantic_trace, PreparedVisualExecutionEffectRequestTrace,
+    PreparedVisualExecutionInstanceStepTrace, PreparedVisualExecutionNestedBindingTrace,
+    PreparedVisualExecutionNodeTrace, PreparedVisualExecutionSampleTrace,
+    PreparedVisualExecutionSemanticTrace, PreparedVisualExecutionTemporalBatchTrace,
+    PreparedVisualExecutionTemporalSourceKindTrace, PreparedVisualExecutionTemporalSourceTrace,
 };
 mod basic_title;
 pub use basic_title::{
-    basic_title_raster_request_key, project_basic_title_transform, BasicTitleRasterDiagnostics,
-    BasicTitleRasterError, BasicTitleRasterFrame, BasicTitleRasterizer,
+    basic_title_raster_request_identity, project_basic_title_transform, BasicTitleFontQuery,
+    BasicTitleRasterDiagnostics, BasicTitleRasterError, BasicTitleRasterFrame,
+    BasicTitleRasterIdentity, BasicTitleRasterRequestIdentity, BasicTitleRasterizer,
+    PreparedBasicTitleFontFace, PreparedBasicTitleFontSet,
 };

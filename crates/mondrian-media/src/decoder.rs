@@ -7,9 +7,11 @@
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::ptr::{self, NonNull};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use ffmpeg_next as ffmpeg;
+pub use mondrian_core::DecodedVideoRange;
 
 /// GPU hardware acceleration backend family.
 #[derive(
@@ -69,12 +71,490 @@ impl HwAccelDeviceSelector {
 }
 
 type HwAccelDeviceProbeKey = (HwAccelBackend, Option<HwAccelDeviceSelector>);
-type HwAccelDeviceProbeCache = Mutex<HashMap<HwAccelDeviceProbeKey, HwAccelDeviceContextProbe>>;
-type HwAccelDeviceContextCache =
-    Mutex<HashMap<HwAccelDeviceProbeKey, Arc<SharedHwAccelDeviceContext>>>;
+const HW_DEVICE_FAILURE_BACKOFF_BASE: Duration = Duration::from_millis(250);
+const HW_DEVICE_FAILURE_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// Idle-residency policy for one explicit hardware-device context pool.
+///
+/// Active decoder Sessions are never revoked to satisfy this policy. A zero
+/// limit makes every context cold after the last Session releases it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HwDeviceContextPoolPolicy {
+    /// Maximum idle device contexts retained for future decoder Sessions.
+    pub max_idle_contexts: usize,
+}
+
+impl HwDeviceContextPoolPolicy {
+    /// Construct one explicit idle-residency policy.
+    pub const fn new(max_idle_contexts: usize) -> Self {
+        Self { max_idle_contexts }
+    }
+}
+
+impl Default for HwDeviceContextPoolPolicy {
+    fn default() -> Self {
+        Self { max_idle_contexts: 2 }
+    }
+}
+
+/// Point-in-time evidence for one hardware-device context pool.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HwDeviceContextPoolDiagnostics {
+    /// Effective idle-residency policy.
+    pub policy: HwDeviceContextPoolPolicy,
+    /// Current policy revision.
+    pub policy_revision: u64,
+    /// Context generations currently addressable by new Sessions.
+    pub entries: usize,
+    /// Entries with at least one active Session lease.
+    pub active_contexts: usize,
+    /// Entries retained only as idle acceleration resources.
+    pub idle_contexts: usize,
+    /// Most recently allocated device generation.
+    pub latest_generation: u64,
+    /// Acquisitions that reused one current generation.
+    pub hits: u64,
+    /// Acquisitions that created a new generation.
+    pub misses: u64,
+    /// Current generations retired after setup or execution failure.
+    pub retirements: u64,
+    /// Idle generations released by policy or explicit pressure.
+    pub evictions: u64,
+    /// Driver/device creation failures.
+    pub creation_failures: u64,
+    /// Codec-attachment or decoder-open failures that retired a device generation.
+    pub setup_failures: u64,
+    /// Backend/adapter keys currently under a bounded retry delay.
+    pub failure_backoffs: usize,
+    /// Acquisitions deferred without driver work while a retry delay was active.
+    pub backoff_rejections: u64,
+}
+
+struct HwDeviceContextPoolEntry {
+    generation: u64,
+    last_used: u64,
+    owner: Arc<SharedHwAccelDeviceContext>,
+}
+
+struct HwDeviceContextFailureBackoff {
+    probe: HwAccelDeviceContextProbe,
+    consecutive_failures: u32,
+    retry_after: Instant,
+}
+
+struct HwDeviceContextPoolState {
+    policy: HwDeviceContextPoolPolicy,
+    policy_revision: u64,
+    next_generation: u64,
+    recency_clock: u64,
+    entries: HashMap<HwAccelDeviceProbeKey, HwDeviceContextPoolEntry>,
+    failures: HashMap<HwAccelDeviceProbeKey, HwDeviceContextFailureBackoff>,
+    hits: u64,
+    misses: u64,
+    retirements: u64,
+    evictions: u64,
+    creation_failures: u64,
+    setup_failures: u64,
+    backoff_rejections: u64,
+}
+
+impl HwDeviceContextPoolState {
+    fn new(policy: HwDeviceContextPoolPolicy) -> Self {
+        Self {
+            policy,
+            policy_revision: 1,
+            next_generation: 1,
+            recency_clock: 0,
+            entries: HashMap::new(),
+            failures: HashMap::new(),
+            hits: 0,
+            misses: 0,
+            retirements: 0,
+            evictions: 0,
+            creation_failures: 0,
+            setup_failures: 0,
+            backoff_rejections: 0,
+        }
+    }
+
+    fn next_recency(&mut self) -> u64 {
+        self.recency_clock = self.recency_clock.saturating_add(1);
+        self.recency_clock
+    }
+
+    fn allocate_generation(&mut self) -> Option<u64> {
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.checked_add(1)?;
+        Some(generation)
+    }
+
+    fn idle_count(&self) -> usize {
+        self.entries
+            .values()
+            .filter(|entry| Arc::strong_count(&entry.owner) == 1)
+            .count()
+    }
+
+    fn trim_idle_to(&mut self, max_idle_contexts: usize) {
+        while self.idle_count() > max_idle_contexts {
+            let Some(key) = self
+                .entries
+                .iter()
+                .filter(|(_, entry)| Arc::strong_count(&entry.owner) == 1)
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| *key)
+            else {
+                break;
+            };
+            self.entries.remove(&key);
+            self.evictions = self.evictions.saturating_add(1);
+        }
+    }
+
+    fn diagnostics(&self) -> HwDeviceContextPoolDiagnostics {
+        let idle_contexts = self.idle_count();
+        HwDeviceContextPoolDiagnostics {
+            policy: self.policy,
+            policy_revision: self.policy_revision,
+            entries: self.entries.len(),
+            active_contexts: self.entries.len().saturating_sub(idle_contexts),
+            idle_contexts,
+            latest_generation: self.next_generation.saturating_sub(1),
+            hits: self.hits,
+            misses: self.misses,
+            retirements: self.retirements,
+            evictions: self.evictions,
+            creation_failures: self.creation_failures,
+            setup_failures: self.setup_failures,
+            failure_backoffs: self.failures.len(),
+            backoff_rejections: self.backoff_rejections,
+        }
+    }
+
+    fn record_failure(
+        &mut self,
+        key: HwAccelDeviceProbeKey,
+        probe: HwAccelDeviceContextProbe,
+        setup_failure: bool,
+    ) -> HwAccelDeviceContextProbe {
+        let consecutive_failures = self
+            .failures
+            .get(&key)
+            .map_or(1, |failure| failure.consecutive_failures.saturating_add(1));
+        let shift = consecutive_failures.saturating_sub(1).min(7);
+        let multiplier = 1u32.checked_shl(shift).unwrap_or(u32::MAX);
+        let delay = HW_DEVICE_FAILURE_BACKOFF_BASE
+            .checked_mul(multiplier)
+            .unwrap_or(HW_DEVICE_FAILURE_BACKOFF_MAX)
+            .min(HW_DEVICE_FAILURE_BACKOFF_MAX);
+        self.failures.insert(
+            key,
+            HwDeviceContextFailureBackoff {
+                probe: probe.clone(),
+                consecutive_failures,
+                retry_after: Instant::now() + delay,
+            },
+        );
+        if setup_failure {
+            self.setup_failures = self.setup_failures.saturating_add(1);
+        } else {
+            self.creation_failures = self.creation_failures.saturating_add(1);
+        }
+        probe
+    }
+}
+
+struct HwDeviceContextPoolInner {
+    state: Mutex<HwDeviceContextPoolState>,
+}
+
+/// Explicit worker-family owner of shared FFmpeg hardware device contexts.
+///
+/// The pool shares only immutable device roots for an exact backend/adapter.
+/// Codec contexts, DPB state, frame pools, and decoded surfaces remain
+/// Session-owned. Retiring a generation removes it from future lookup while
+/// active leases safely keep its `AVBufferRef` alive.
+#[derive(Clone)]
+pub struct HwDeviceContextPool {
+    inner: Arc<HwDeviceContextPoolInner>,
+}
+
+impl std::fmt::Debug for HwDeviceContextPool {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HwDeviceContextPool")
+            .field("diagnostics", &self.diagnostics())
+            .finish()
+    }
+}
+
+impl HwDeviceContextPool {
+    /// Create a pool with one explicit idle-residency policy.
+    pub fn new(policy: HwDeviceContextPoolPolicy) -> Self {
+        Self {
+            inner: Arc::new(HwDeviceContextPoolInner {
+                state: Mutex::new(HwDeviceContextPoolState::new(policy)),
+            }),
+        }
+    }
+
+    /// Apply an idle-residency policy online and immediately release excess idle contexts.
+    pub fn reconfigure(&self, policy: HwDeviceContextPoolPolicy) {
+        let mut state = self.lock_state();
+        if state.policy == policy {
+            return;
+        }
+        state.policy = policy;
+        state.policy_revision = state.policy_revision.saturating_add(1);
+        state.trim_idle_to(policy.max_idle_contexts);
+    }
+
+    /// Release every idle context while preserving all active Session leases.
+    pub fn release_idle(&self) {
+        self.lock_state().trim_idle_to(0);
+    }
+
+    /// Clear transient setup-failure delays, for example after an explicit
+    /// adapter/device-generation change notification.
+    pub fn invalidate_failure_backoff(&self) {
+        self.lock_state().failures.clear();
+    }
+
+    /// Return current generation and residency evidence.
+    pub fn diagnostics(&self) -> HwDeviceContextPoolDiagnostics {
+        self.lock_state().diagnostics()
+    }
+
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, HwDeviceContextPoolState> {
+        match self.inner.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "hardware device context pool lock was poisoned; retaining explicit state"
+                );
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    fn retire(&self, key: HwAccelDeviceProbeKey, generation: u64) {
+        let mut state = self.lock_state();
+        let current_generation = state.entries.get(&key).map(|entry| entry.generation);
+        if current_generation == Some(generation) {
+            state.entries.remove(&key);
+            state.retirements = state.retirements.saturating_add(1);
+        }
+    }
+
+    fn retire_after_setup_failure(
+        &self,
+        key: HwAccelDeviceProbeKey,
+        generation: u64,
+        probe: HwAccelDeviceContextProbe,
+    ) {
+        let mut state = self.lock_state();
+        let current_generation = state.entries.get(&key).map(|entry| entry.generation);
+        if current_generation == Some(generation) {
+            state.entries.remove(&key);
+            state.retirements = state.retirements.saturating_add(1);
+        }
+        let _ = state.record_failure(key, probe, true);
+    }
+
+    fn release(
+        &self,
+        key: HwAccelDeviceProbeKey,
+        generation: u64,
+        owner: &Arc<SharedHwAccelDeviceContext>,
+    ) {
+        let mut state = self.lock_state();
+        let is_last_active_lease = state.entries.get(&key).is_some_and(|entry| {
+            entry.generation == generation
+                && Arc::ptr_eq(&entry.owner, owner)
+                && Arc::strong_count(owner) == 2
+        });
+        if !is_last_active_lease {
+            return;
+        }
+
+        let max_idle_contexts = state.policy.max_idle_contexts;
+        if state.idle_count() >= max_idle_contexts {
+            state.entries.remove(&key);
+            state.evictions = state.evictions.saturating_add(1);
+        }
+        state.trim_idle_to(max_idle_contexts);
+    }
+
+    pub(crate) fn acquire(
+        &self,
+        backend: HwAccelBackend,
+        selector: Option<HwAccelDeviceSelector>,
+    ) -> std::result::Result<HwAccelDeviceContext, HwAccelDeviceContextProbe> {
+        if let Some(selector) = selector.filter(|selector| !selector.selects_backend(backend)) {
+            return Err(HwAccelDeviceContextProbe::unavailable(
+                backend,
+                format!(
+                    "hardware device selector {selector:?} does not select {}",
+                    backend.as_str()
+                ),
+            ));
+        }
+        let Some(device_type) = backend.to_ffmpeg_device_type() else {
+            return Err(HwAccelDeviceContextProbe::unavailable(
+                backend,
+                format!(
+                    "{} does not map to an FFmpeg hardware device",
+                    backend.as_str()
+                ),
+            ));
+        };
+        let _ = ffmpeg::init();
+        let ffmpeg_device_type_available = ffmpeg_hwdevice_type_available(device_type);
+        if !ffmpeg_device_type_available {
+            return Err(HwAccelDeviceContextProbe {
+                backend,
+                backend_maps_to_ffmpeg_device: true,
+                ffmpeg_device_type_available,
+                device_create_attempted: false,
+                device_context_created: false,
+                device_create_error_code: None,
+                reason: format!(
+                    "linked FFmpeg build does not list {} hardware device type",
+                    backend.as_str()
+                ),
+            });
+        }
+
+        let key = (backend, selector);
+        let mut state = self.lock_state();
+        let now = Instant::now();
+        if let Some(failure) = state.failures.get(&key) {
+            if now < failure.retry_after {
+                let retry_after = failure.retry_after.saturating_duration_since(now);
+                let mut probe = failure.probe.clone();
+                probe.device_create_attempted = false;
+                probe.device_context_created = false;
+                probe.reason = format!(
+                    "{}; retry deferred for {} ms after {} consecutive failures",
+                    probe.reason,
+                    retry_after.as_millis(),
+                    failure.consecutive_failures
+                );
+                state.backoff_rejections = state.backoff_rejections.saturating_add(1);
+                return Err(probe);
+            }
+            state.failures.remove(&key);
+        }
+        let recency = state.next_recency();
+        if let Some(entry) = state.entries.get_mut(&key) {
+            entry.last_used = recency;
+            let generation = entry.generation;
+            let owner = Arc::clone(&entry.owner);
+            state.hits = state.hits.saturating_add(1);
+            state.failures.remove(&key);
+            return Ok(HwAccelDeviceContext {
+                owner,
+                pool: self.clone(),
+                key,
+                generation,
+                newly_created: false,
+            });
+        }
+
+        let Some(generation) = state.allocate_generation() else {
+            return Err(HwAccelDeviceContextProbe {
+                backend,
+                backend_maps_to_ffmpeg_device: true,
+                ffmpeg_device_type_available,
+                device_create_attempted: false,
+                device_context_created: false,
+                device_create_error_code: None,
+                reason: "hardware device generation space is exhausted".to_owned(),
+            });
+        };
+        let mut device_context: *mut ffmpeg::ffi::AVBufferRef = ptr::null_mut();
+        let device_name = selector.and_then(|selector| selector.device_name_for(backend));
+        let result = unsafe {
+            ffmpeg::ffi::av_hwdevice_ctx_create(
+                &mut device_context,
+                device_type,
+                device_name.as_ref().map_or(ptr::null(), |name| name.as_ptr()),
+                ptr::null_mut(),
+                0,
+            )
+        };
+        if result < 0 {
+            if !device_context.is_null() {
+                // SAFETY: FFmpeg returned this partial AVBufferRef through the
+                // exclusive out pointer; no owner was published.
+                unsafe {
+                    ffmpeg::ffi::av_buffer_unref(&mut device_context);
+                }
+            }
+            let probe = HwAccelDeviceContextProbe {
+                backend,
+                backend_maps_to_ffmpeg_device: true,
+                ffmpeg_device_type_available,
+                device_create_attempted: true,
+                device_context_created: false,
+                device_create_error_code: Some(result),
+                reason: format!(
+                    "FFmpeg could not create {} hardware device context: {}",
+                    backend.as_str(),
+                    ffmpeg::Error::from(result)
+                ),
+            };
+            return Err(state.record_failure(key, probe, false));
+        }
+        let Some(device_context) = NonNull::new(device_context) else {
+            let probe = HwAccelDeviceContextProbe {
+                backend,
+                backend_maps_to_ffmpeg_device: true,
+                ffmpeg_device_type_available,
+                device_create_attempted: true,
+                device_context_created: false,
+                device_create_error_code: None,
+                reason: format!(
+                    "FFmpeg reported success but returned no {} hardware device context",
+                    backend.as_str()
+                ),
+            };
+            return Err(state.record_failure(key, probe, false));
+        };
+
+        let owner = Arc::new(SharedHwAccelDeviceContext { backend, ptr: device_context });
+        state.entries.insert(
+            key,
+            HwDeviceContextPoolEntry {
+                generation,
+                last_used: recency,
+                owner: Arc::clone(&owner),
+            },
+        );
+        state.failures.remove(&key);
+        state.misses = state.misses.saturating_add(1);
+        let max_idle_contexts = state.policy.max_idle_contexts;
+        state.trim_idle_to(max_idle_contexts);
+        Ok(HwAccelDeviceContext {
+            owner,
+            pool: self.clone(),
+            key,
+            generation,
+            newly_created: true,
+        })
+    }
+}
+
+impl Default for HwDeviceContextPool {
+    fn default() -> Self {
+        Self::new(HwDeviceContextPoolPolicy::default())
+    }
+}
 
 /// Residency of frames produced by the media decode boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+)]
 pub enum DecodedFrameResidency {
     /// Decoder output is CPU RGBA memory.
     #[default]
@@ -89,7 +569,9 @@ pub enum DecodedFrameResidency {
 ///
 /// This is a media-layer fact. Renderer-native import formats are modeled by
 /// `mondrian-renderer` and must be mapped at the app/readiness boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+)]
 pub enum DecodedVideoSurfaceFormat {
     /// The decoder surface format is unknown or not yet reported.
     #[default]
@@ -108,20 +590,6 @@ pub enum DecodedVideoSurfaceFormat {
     Bgra8,
     /// A known but currently non-native preview surface format.
     Other,
-}
-
-/// Encoded quantization range reported by the decoder for a video frame.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
-)]
-pub enum DecodedVideoRange {
-    /// No reliable range metadata was reported.
-    #[default]
-    Unknown,
-    /// Studio/legal range, reported by FFmpeg as MPEG range.
-    Limited,
-    /// Full range, reported by FFmpeg as JPEG range.
-    Full,
 }
 
 /// Authority-aware quantization-range contract carried into frame decode.
@@ -203,7 +671,9 @@ pub(crate) fn decoded_video_range_from_ffmpeg(
 }
 
 /// Chroma sample location reported by the decoder for a video frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+)]
 pub enum DecodedVideoChromaLocation {
     /// No reliable chroma-location metadata was reported.
     #[default]
@@ -227,7 +697,9 @@ pub enum DecodedVideoChromaLocation {
 /// These are media payload facts, not color-interpretation decisions. The app
 /// combines them with the resolved source color space before asking the renderer
 /// to import a native video surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+)]
 pub struct DecodedVideoSampling {
     /// Decoder-reported YCbCr-to-RGB matrix.
     pub matrix: DecodedVideoMatrix,
@@ -454,18 +926,54 @@ impl HwAccelDeviceContextProbe {
             reason: reason.into(),
         }
     }
+
+    pub(crate) fn deferred(
+        backend: HwAccelBackend,
+        ffmpeg_device_type_available: bool,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            backend,
+            backend_maps_to_ffmpeg_device: backend.to_ffmpeg_device_type().is_some(),
+            ffmpeg_device_type_available,
+            device_create_attempted: false,
+            device_context_created: false,
+            device_create_error_code: None,
+            reason: reason.into(),
+        }
+    }
+
+    pub(crate) fn acquired(
+        backend: HwAccelBackend,
+        newly_created: bool,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            backend,
+            backend_maps_to_ffmpeg_device: true,
+            ffmpeg_device_type_available: true,
+            device_create_attempted: newly_created,
+            device_context_created: true,
+            device_create_error_code: None,
+            reason: reason.into(),
+        }
+    }
 }
 
-/// Session lease on one process-shared FFmpeg hardware device context.
+/// Session lease on one worker-family-shared FFmpeg hardware device context.
 ///
 /// The device is shared only for the same backend and renderer-selected
 /// adapter. Codec contexts, DPB state, hardware frame pools, and decoded
 /// surfaces remain session-owned.
 pub(crate) struct HwAccelDeviceContext {
     owner: Arc<SharedHwAccelDeviceContext>,
+    pool: HwDeviceContextPool,
+    key: HwAccelDeviceProbeKey,
+    generation: u64,
+    newly_created: bool,
 }
 
-/// Immutable owner retained by the bounded process device cache.
+/// Immutable owner retained by an explicit hardware-device context pool.
 struct SharedHwAccelDeviceContext {
     backend: HwAccelBackend,
     ptr: NonNull<ffmpeg::ffi::AVBufferRef>,
@@ -475,6 +983,29 @@ impl HwAccelDeviceContext {
     /// Backend used to create this device context.
     pub(crate) fn backend(&self) -> HwAccelBackend {
         self.owner.backend
+    }
+
+    /// Whether this acquisition created the current pool generation.
+    pub(crate) fn newly_created(&self) -> bool {
+        self.newly_created
+    }
+
+    /// Retire this exact generation from future pool acquisitions.
+    ///
+    /// Other active Sessions remain safe because they retain independent Arc
+    /// leases; a later acquisition creates a new generation.
+    pub(crate) fn retire(&self) {
+        self.pool.retire(self.key, self.generation);
+    }
+
+    /// Retire this generation and apply a bounded owner-local retry delay
+    /// after codec attachment or decoder-open failure.
+    pub(crate) fn retire_after_setup_failure(&self, reason: impl Into<String>) {
+        self.pool.retire_after_setup_failure(
+            self.key,
+            self.generation,
+            HwAccelDeviceContextProbe::acquired(self.owner.backend, self.newly_created, reason),
+        );
     }
 
     /// Attach a ref-counted hardware device context reference to an unopened
@@ -499,6 +1030,17 @@ impl HwAccelDeviceContext {
     #[cfg(test)]
     fn shares_device_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.owner, &other.owner)
+    }
+
+    #[cfg(test)]
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+impl Drop for HwAccelDeviceContext {
+    fn drop(&mut self) {
+        self.pool.release(self.key, self.generation, &self.owner);
     }
 }
 
@@ -667,33 +1209,6 @@ impl HwAccelBackend {
         }
     }
 
-    /// Cached runtime probe for FFmpeg hardware device context creation.
-    ///
-    /// Device creation can touch GPU drivers. The result is process-stable for
-    /// Mondrian's playback lifetime, so preview planning uses this cached
-    /// variant instead of probing on every session open.
-    pub fn cached_ffmpeg_device_context_probe(self) -> HwAccelDeviceContextProbe {
-        self.cached_ffmpeg_device_context_probe_for(None)
-    }
-
-    pub(crate) fn cached_ffmpeg_device_context_probe_for(
-        self,
-        selector: Option<HwAccelDeviceSelector>,
-    ) -> HwAccelDeviceContextProbe {
-        static PROBES: OnceLock<HwAccelDeviceProbeCache> = OnceLock::new();
-        let probes = PROBES.get_or_init(|| Mutex::new(HashMap::new()));
-        if let Ok(guard) = probes.lock() {
-            if let Some(probe) = guard.get(&(self, selector)) {
-                return probe.clone();
-            }
-        }
-        let probe = self.probe_ffmpeg_device_context_for(selector);
-        if let Ok(mut guard) = probes.lock() {
-            guard.insert((self, selector), probe.clone());
-        }
-        probe
-    }
-
     /// Probe whether FFmpeg can create a hardware device context for this
     /// backend. This creates and immediately releases an `AVHWDeviceContext`;
     /// it does not modify decoder negotiation or allocate hardware frames.
@@ -781,101 +1296,6 @@ impl HwAccelBackend {
                 )
             },
         }
-    }
-
-    pub(crate) fn shared_ffmpeg_device_context(
-        self,
-        selector: Option<HwAccelDeviceSelector>,
-    ) -> std::result::Result<HwAccelDeviceContext, HwAccelDeviceContextProbe> {
-        if let Some(selector) = selector.filter(|selector| !selector.selects_backend(self)) {
-            return Err(HwAccelDeviceContextProbe::unavailable(
-                self,
-                format!(
-                    "hardware device selector {selector:?} does not select {}",
-                    self.as_str()
-                ),
-            ));
-        }
-        let Some(device_type) = self.to_ffmpeg_device_type() else {
-            return Err(HwAccelDeviceContextProbe::unavailable(
-                self,
-                format!(
-                    "{} does not map to an FFmpeg hardware device",
-                    self.as_str()
-                ),
-            ));
-        };
-        let _ = ffmpeg::init();
-        let ffmpeg_device_type_available = ffmpeg_hwdevice_type_available(device_type);
-        if !ffmpeg_device_type_available {
-            return Err(HwAccelDeviceContextProbe {
-                backend: self,
-                backend_maps_to_ffmpeg_device: true,
-                ffmpeg_device_type_available,
-                device_create_attempted: false,
-                device_context_created: false,
-                device_create_error_code: None,
-                reason: format!(
-                    "linked FFmpeg build does not list {} hardware device type",
-                    self.as_str()
-                ),
-            });
-        }
-
-        static DEVICES: OnceLock<HwAccelDeviceContextCache> = OnceLock::new();
-        let devices = DEVICES.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut devices = match devices.lock() {
-            Ok(devices) => devices,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if let Some(owner) = devices.get(&(self, selector)) {
-            return Ok(HwAccelDeviceContext { owner: Arc::clone(owner) });
-        }
-
-        let mut device_context: *mut ffmpeg::ffi::AVBufferRef = ptr::null_mut();
-        let device_name = selector.and_then(|selector| selector.device_name_for(self));
-        let result = unsafe {
-            ffmpeg::ffi::av_hwdevice_ctx_create(
-                &mut device_context,
-                device_type,
-                device_name.as_ref().map_or(ptr::null(), |name| name.as_ptr()),
-                ptr::null_mut(),
-                0,
-            )
-        };
-        if result < 0 {
-            return Err(HwAccelDeviceContextProbe {
-                backend: self,
-                backend_maps_to_ffmpeg_device: true,
-                ffmpeg_device_type_available,
-                device_create_attempted: true,
-                device_context_created: false,
-                device_create_error_code: Some(result),
-                reason: format!(
-                    "FFmpeg could not create {} hardware device context: {}",
-                    self.as_str(),
-                    ffmpeg::Error::from(result)
-                ),
-            });
-        }
-        let Some(device_context) = NonNull::new(device_context) else {
-            return Err(HwAccelDeviceContextProbe {
-                backend: self,
-                backend_maps_to_ffmpeg_device: true,
-                ffmpeg_device_type_available,
-                device_create_attempted: true,
-                device_context_created: false,
-                device_create_error_code: None,
-                reason: format!(
-                    "FFmpeg reported success but returned no {} hardware device context",
-                    self.as_str()
-                ),
-            });
-        };
-
-        let owner = Arc::new(SharedHwAccelDeviceContext { backend: self, ptr: device_context });
-        devices.insert((self, selector), Arc::clone(&owner));
-        Ok(HwAccelDeviceContext { owner })
     }
 
     /// Preferred hardware backend for the current platform before runtime
@@ -1279,23 +1699,74 @@ mod tests {
     }
 
     #[test]
-    fn ffmpeg_hw_device_context_cache_reuses_backend_and_adapter_device() {
+    fn hardware_device_context_pool_reuses_and_safely_retires_generations() {
         let backend = HwAccelBackend::platform_candidate().unwrap_or(HwAccelBackend::D3D11VA);
         let probe = backend.probe_ffmpeg_device_context();
         if !probe.device_context_created {
             return;
         }
 
-        let first = backend.shared_ffmpeg_device_context(None).expect("first device lease");
-        let second = backend.shared_ffmpeg_device_context(None).expect("second device lease");
+        let pool = HwDeviceContextPool::default();
+        let first = pool.acquire(backend, None).expect("first device lease");
+        let second = pool.acquire(backend, None).expect("second device lease");
 
         assert!(first.shares_device_with(&second));
+        assert_eq!(first.generation(), second.generation());
+        first.retire();
+
+        let replacement = pool.acquire(backend, None).expect("replacement device lease");
+        assert!(replacement.generation() > first.generation());
+        assert!(!first.shares_device_with(&replacement));
+        assert!(first.shares_device_with(&second));
+        assert_eq!(pool.diagnostics().retirements, 1);
+
+        pool.reconfigure(HwDeviceContextPoolPolicy::new(0));
+        drop(first);
+        drop(second);
+        drop(replacement);
+        let diagnostics = pool.diagnostics();
+        assert_eq!(diagnostics.entries, 0);
+        assert_eq!(diagnostics.idle_contexts, 0);
+        assert_eq!(diagnostics.policy.max_idle_contexts, 0);
+        assert_eq!(diagnostics.evictions, 1);
+    }
+
+    #[test]
+    fn hardware_device_context_pool_backs_off_failed_setup_and_can_be_invalidated() {
+        let backend = HwAccelBackend::platform_candidate().unwrap_or(HwAccelBackend::D3D11VA);
+        let probe = backend.probe_ffmpeg_device_context();
+        if !probe.device_context_created {
+            return;
+        }
+
+        let pool = HwDeviceContextPool::default();
+        let lease = pool.acquire(backend, None).expect("device lease");
+        lease.retire_after_setup_failure("test decoder-open failure");
+        drop(lease);
+
+        let deferred = match pool.acquire(backend, None) {
+            Ok(_) => panic!("retry must be delayed"),
+            Err(probe) => probe,
+        };
+        assert!(!deferred.device_create_attempted);
+        assert!(deferred.reason.contains("retry deferred"));
+        let diagnostics = pool.diagnostics();
+        assert_eq!(diagnostics.setup_failures, 1);
+        assert_eq!(diagnostics.failure_backoffs, 1);
+        assert_eq!(diagnostics.backoff_rejections, 1);
+
+        pool.invalidate_failure_backoff();
+        let replacement = pool.acquire(backend, None).expect("explicit invalidation permits retry");
+        assert!(replacement.generation() > 0);
     }
 
     #[test]
     fn mismatched_hardware_device_selector_is_rejected_before_driver_creation() {
-        let error = HwAccelBackend::D3D12VA
-            .shared_ffmpeg_device_context(Some(HwAccelDeviceSelector::D3D11VaAdapterIndex(0)))
+        let error = HwDeviceContextPool::default()
+            .acquire(
+                HwAccelBackend::D3D12VA,
+                Some(HwAccelDeviceSelector::D3D11VaAdapterIndex(0)),
+            )
             .err()
             .expect("mismatched selector must fail");
 

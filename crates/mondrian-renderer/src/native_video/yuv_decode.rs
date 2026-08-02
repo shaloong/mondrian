@@ -35,8 +35,24 @@ fn load_chroma(coordinate: vec2<i32>, dimensions: vec2<i32>) -> vec2<f32> {
     return textureLoad(chroma_texture, clamped, 0).rg;
 }
 
-fn sample_chroma(pixel: vec2<i32>) -> vec2<f32> {
-    let source_center = vec2<f32>(pixel) + vec2<f32>(0.5);
+fn load_luma(coordinate: vec2<i32>, dimensions: vec2<i32>) -> f32 {
+    let clamped = clamp(coordinate, vec2<i32>(0), dimensions - vec2<i32>(1));
+    return textureLoad(luma_texture, clamped, 0).r;
+}
+
+fn sample_luma(source_center: vec2<f32>) -> f32 {
+    let sample_coordinate = source_center - vec2<f32>(0.5);
+    let base = vec2<i32>(floor(sample_coordinate));
+    let weight = fract(sample_coordinate);
+    let dimensions = vec2<i32>(textureDimensions(luma_texture));
+    let y00 = load_luma(base, dimensions);
+    let y10 = load_luma(base + vec2<i32>(1, 0), dimensions);
+    let y01 = load_luma(base + vec2<i32>(0, 1), dimensions);
+    let y11 = load_luma(base + vec2<i32>(1, 1), dimensions);
+    return mix(mix(y00, y10, weight.x), mix(y01, y11, weight.x), weight.y);
+}
+
+fn sample_chroma(source_center: vec2<f32>) -> vec2<f32> {
     let sample_coordinate =
         (source_center - uniforms.chroma_matrix0.yz) * vec2<f32>(0.5);
     let base = vec2<i32>(floor(sample_coordinate));
@@ -51,9 +67,11 @@ fn sample_chroma(pixel: vec2<i32>) -> vec2<f32> {
 
 @fragment
 fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
-    let pixel = vec2<i32>(position.xy);
-    let y_code = textureLoad(luma_texture, pixel, 0).r * uniforms.code_range.x;
-    let chroma_code = sample_chroma(pixel) * uniforms.code_range.x;
+    let source_extent = vec2<f32>(uniforms.extent.xy);
+    let output_extent = vec2<f32>(uniforms.extent.zw);
+    let source_center = position.xy * source_extent / output_extent;
+    let y_code = sample_luma(source_center) * uniforms.code_range.x;
+    let chroma_code = sample_chroma(source_center) * uniforms.code_range.x;
     let y = (y_code - uniforms.code_range.y) * uniforms.code_range.z;
     let chroma = (chroma_code - vec2<f32>(uniforms.code_range.w))
         * uniforms.chroma_matrix0.x;
@@ -92,7 +110,9 @@ pub struct GpuNativeYuvDecodePlan {
     /// Native decoder texture layout.
     pub source_texture_format: GpuNativeDecodedFrameTextureFormat,
     /// Visible frame extent written to the encoded RGB output.
-    pub visible_extent: GpuNativeVideoExtent,
+    pub source_visible_extent: GpuNativeVideoExtent,
+    /// Renderer materialization extent written to encoded RGB.
+    pub output_extent: GpuNativeVideoExtent,
     /// Codec-aligned decoder surface extent sampled by the shader.
     pub storage_extent: GpuNativeVideoExtent,
     /// Range, matrix, bit-depth, transfer, and siting contract.
@@ -110,6 +130,10 @@ impl GpuNativeYuvDecodePlan {
         let descriptor = import.encoded_source_frame.descriptor();
         Self::new(
             import.source_texture_format,
+            GpuNativeVideoExtent {
+                width: import.source_width,
+                height: import.source_height,
+            },
             GpuNativeVideoExtent { width: descriptor.width, height: descriptor.height },
             storage_extent,
             import.video_sampling,
@@ -120,19 +144,23 @@ impl GpuNativeYuvDecodePlan {
     /// Build and validate a native YUV decode plan.
     pub fn new(
         source_texture_format: GpuNativeDecodedFrameTextureFormat,
-        visible_extent: GpuNativeVideoExtent,
+        source_visible_extent: GpuNativeVideoExtent,
+        output_extent: GpuNativeVideoExtent,
         storage_extent: GpuNativeVideoExtent,
         video_sampling: GpuNativeDecodedFrameVideoSampling,
         output: GpuColorFrameHandle,
     ) -> Result<Self, GpuNativeYuvDecodePlanError> {
-        if visible_extent.width == 0 || visible_extent.height == 0 {
+        if source_visible_extent.width == 0 || source_visible_extent.height == 0 {
             return Err(GpuNativeYuvDecodePlanError::EmptyVisibleExtent);
         }
-        if storage_extent.width < visible_extent.width
-            || storage_extent.height < visible_extent.height
+        if output_extent.width == 0 || output_extent.height == 0 {
+            return Err(GpuNativeYuvDecodePlanError::EmptyOutputExtent);
+        }
+        if storage_extent.width < source_visible_extent.width
+            || storage_extent.height < source_visible_extent.height
         {
             return Err(GpuNativeYuvDecodePlanError::StorageSmallerThanVisible {
-                visible: visible_extent,
+                visible: source_visible_extent,
                 storage: storage_extent,
             });
         }
@@ -170,8 +198,8 @@ impl GpuNativeYuvDecodePlan {
             return Err(GpuNativeYuvDecodePlanError::UnspecifiedChromaLocation);
         }
         let descriptor = output.descriptor();
-        if descriptor.width != visible_extent.width
-            || descriptor.height != visible_extent.height
+        if descriptor.width != output_extent.width
+            || descriptor.height != output_extent.height
             || descriptor.domain != ColorFrameDomain::Source
             || descriptor.encoding != ColorFrameEncoding::EncodedFloat
             || descriptor.residency != ColorFrameResidency::Gpu
@@ -195,7 +223,8 @@ impl GpuNativeYuvDecodePlan {
         }
         Ok(Self {
             source_texture_format,
-            visible_extent,
+            source_visible_extent,
+            output_extent,
             storage_extent,
             video_sampling,
             output,
@@ -205,7 +234,8 @@ impl GpuNativeYuvDecodePlan {
     fn sampling_contract(&self) -> GpuNativeYuvSamplingContract {
         GpuNativeYuvSamplingContract {
             source_texture_format: self.source_texture_format,
-            visible_extent: self.visible_extent,
+            source_visible_extent: self.source_visible_extent,
+            output_extent: self.output_extent,
             storage_extent: self.storage_extent,
             video_sampling: self.video_sampling,
         }
@@ -218,6 +248,9 @@ pub enum GpuNativeYuvDecodePlanError {
     /// Visible output extent is empty.
     #[error("native YUV decode requires a non-empty visible extent")]
     EmptyVisibleExtent,
+    /// Renderer output extent is empty.
+    #[error("native YUV decode requires a non-empty output extent")]
+    EmptyOutputExtent,
     /// Decoder storage is smaller than the visible frame.
     #[error("native YUV storage {storage:?} is smaller than visible extent {visible:?}")]
     StorageSmallerThanVisible {
@@ -278,7 +311,8 @@ pub enum GpuNativeYuvDecodePlanError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GpuNativeYuvSamplingContract {
     source_texture_format: GpuNativeDecodedFrameTextureFormat,
-    visible_extent: GpuNativeVideoExtent,
+    source_visible_extent: GpuNativeVideoExtent,
+    output_extent: GpuNativeVideoExtent,
     storage_extent: GpuNativeVideoExtent,
     video_sampling: GpuNativeDecodedFrameVideoSampling,
 }
@@ -333,10 +367,10 @@ impl GpuNativeYuvDecodeUniforms {
         let g_cr = -2.0 * kr * (1.0 - kr) / kg;
         Self {
             extent: [
-                plan.visible_extent.width,
-                plan.visible_extent.height,
-                plan.storage_extent.width,
-                plan.storage_extent.height,
+                plan.source_visible_extent.width,
+                plan.source_visible_extent.height,
+                plan.output_extent.width,
+                plan.output_extent.height,
             ],
             code_range: [code_scale, y_offset, y_scale, chroma_offset],
             chroma_matrix0: [chroma_scale, chroma_origin[0], chroma_origin[1], r_cr],
@@ -500,6 +534,12 @@ impl GpuNativeYuvDecoder {
                 actual: output.handle().contract(),
             });
         }
+        if output.handle().id() != plan.output.id() {
+            return Err(GpuNativeYuvDecodeRecordError::OutputHandleMismatch {
+                expected: plan.output.id(),
+                actual: output.handle().id(),
+            });
+        }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("mondrian.native-video.yuv-decode.pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -536,6 +576,14 @@ pub enum GpuNativeYuvDecodeRecordError {
         expected: GpuColorFrameContract,
         /// Actual target contract.
         actual: GpuColorFrameContract,
+    },
+    /// Render target has the planned contract but belongs to another strong frame identity.
+    #[error("native YUV output resource id {actual:?} does not match planned id {expected:?}")]
+    OutputHandleMismatch {
+        /// Planned renderer-owned target identity.
+        expected: crate::GpuColorFrameId,
+        /// Identity attached to the actual target resource.
+        actual: crate::GpuColorFrameId,
     },
 }
 
@@ -627,7 +675,7 @@ mod tests {
 
     #[test]
     fn import_plan_has_distinct_encoded_and_working_frames() {
-        let mut ids = GpuColorFrameIdAllocator::new(40);
+        let mut ids = GpuColorFrameIdAllocator::new(40).expect("frame id allocator");
         let import = GpuNativeDecodedFrameImportPlan::from_contract(
             &mut ids,
             import_contract(),
@@ -675,6 +723,7 @@ mod tests {
         .expect("handle structure is independently valid");
         let error = GpuNativeYuvDecodePlan::new(
             GpuNativeDecodedFrameTextureFormat::P010,
+            GpuNativeVideoExtent { width: 1920, height: 1080 },
             GpuNativeVideoExtent { width: 1920, height: 1080 },
             GpuNativeVideoExtent { width: 1920, height: 1088 },
             sampling(
@@ -739,6 +788,7 @@ mod tests {
             GpuNativeDecodedFrameTextureFormat::Nv12,
             GpuNativeVideoExtent { width: 2, height: 2 },
             GpuNativeVideoExtent { width: 2, height: 2 },
+            GpuNativeVideoExtent { width: 2, height: 2 },
             GpuNativeDecodedFrameVideoSampling {
                 range: GpuVideoRange::Limited,
                 matrix: ColorMatrixCoefficients::Bt709,
@@ -761,18 +811,51 @@ mod tests {
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mondrian-test-native-yuv-decode"),
         });
+        let substitute_handle = GpuColorFrameHandle::new(
+            GpuColorFrameId::from_raw(81),
+            output.handle().descriptor(),
+            output.handle().texture_format(),
+            "same-contract-wrong-native-yuv-output",
+        )
+        .expect("substitute output handle");
+        let substitute_output = GpuColorFrameUploader::allocate(
+            &context.device,
+            &GpuColorFrameAllocationPlan::for_handle(substitute_handle),
+        );
+        assert!(matches!(
+            decoder.record(&mut encoder, &plan, &prepared, &substitute_output),
+            Err(GpuNativeYuvDecodeRecordError::OutputHandleMismatch {
+                expected,
+                actual
+            }) if expected == plan.output.id()
+                && actual == substitute_output.handle().id()
+        ));
         decoder
             .record(&mut encoder, &plan, &prepared, &output)
             .expect("record YUV decode");
         let readback_plan =
             crate::GpuColorFrameReadbackPlan::encoded_rgba16float(output.handle().clone())
                 .expect("Rgba16Float readback plan");
+        assert!(matches!(
+            crate::GpuColorFrameReadback::record_copy(
+                &context.device,
+                &mut encoder,
+                &readback_plan,
+                &substitute_output,
+            ),
+            Err(crate::GpuColorFrameReadbackError::ResourceHandleMismatch {
+                expected,
+                actual
+            }) if expected == output.handle().id()
+                && actual == substitute_output.handle().id()
+        ));
         let readback = crate::GpuColorFrameReadback::record_copy(
             &context.device,
             &mut encoder,
             &readback_plan,
-            output.resource(),
-        );
+            &output,
+        )
+        .expect("record native YUV readback");
         context.queue.submit(std::iter::once(encoder.finish()));
         let mapped = map_readback_buffer(&context.device, &readback);
         let actual =
@@ -785,6 +868,117 @@ mod tests {
                 assert!(
                     (*channel - expected).abs() < 0.0015,
                     "expected neutral {expected}, got {pixel:?}"
+                );
+            }
+            assert!((pixel[3] - 1.0).abs() < 0.001);
+        }
+    }
+
+    #[tokio::test]
+    async fn native_yuv_materialization_scales_the_complete_source_raster() {
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping native YUV scale test: no GPU adapter available");
+            return;
+        };
+        let luma = context.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("mondrian-test-native-yuv-scale-luma"),
+            size: wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let chroma = context.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("mondrian-test-native-yuv-scale-chroma"),
+            size: wgpu::Extent3d { width: 2, height: 2, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rg8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let luma_codes = [
+            16, 16, 235, 235, 16, 16, 235, 235, 16, 16, 235, 235, 16, 16, 235, 235,
+        ];
+        write_test_texture(&context.queue, &luma, 4, 4, 4, &luma_codes);
+        write_test_texture(
+            &context.queue,
+            &chroma,
+            2,
+            2,
+            4,
+            &[128, 128, 128, 128, 128, 128, 128, 128],
+        );
+        let output_handle = GpuColorFrameHandle::new(
+            GpuColorFrameId::from_raw(82),
+            ColorFrameDescriptor {
+                width: 2,
+                height: 2,
+                color_space: ColorSpace::Rec709.into(),
+                domain: ColorFrameDomain::Source,
+                encoding: ColorFrameEncoding::EncodedFloat,
+                residency: ColorFrameResidency::Gpu,
+                alpha: crate::ColorFrameAlpha::Opaque,
+            },
+            GpuColorFrameTextureFormat::Rgba16Float,
+            "native-yuv-scaled-output",
+        )
+        .expect("scaled output handle");
+        let plan = GpuNativeYuvDecodePlan::new(
+            GpuNativeDecodedFrameTextureFormat::Nv12,
+            GpuNativeVideoExtent { width: 4, height: 4 },
+            GpuNativeVideoExtent { width: 2, height: 2 },
+            GpuNativeVideoExtent { width: 4, height: 4 },
+            GpuNativeDecodedFrameVideoSampling {
+                range: GpuVideoRange::Limited,
+                matrix: ColorMatrixCoefficients::Bt709,
+                transfer: ColorTransferCharacteristic::Bt709,
+                bit_depth: 8,
+                chroma_location: GpuVideoChromaLocation::Left,
+            },
+            output_handle,
+        )
+        .expect("valid scaled decode plan");
+        let decoder = GpuNativeYuvDecoder::new(&context.device);
+        let output = GpuNativeYuvDecoder::allocate_output(&context.device, &plan);
+        let luma_view = luma.create_view(&wgpu::TextureViewDescriptor::default());
+        let chroma_view = chroma.create_view(&wgpu::TextureViewDescriptor::default());
+        let prepared = decoder.prepare_pass(
+            &context.device,
+            &plan,
+            GpuNativeYuvPlaneViews { luma: &luma_view, chroma: &chroma_view },
+        );
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-test-native-yuv-scale"),
+        });
+        decoder
+            .record(&mut encoder, &plan, &prepared, &output)
+            .expect("record scaled YUV decode");
+        let readback_plan =
+            crate::GpuColorFrameReadbackPlan::encoded_rgba16float(output.handle().clone())
+                .expect("scaled Rgba16Float readback plan");
+        let readback = crate::GpuColorFrameReadback::record_copy(
+            &context.device,
+            &mut encoder,
+            &readback_plan,
+            &output,
+        )
+        .expect("record scaled native YUV readback");
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let mapped = map_readback_buffer(&context.device, &readback);
+        let actual = readback_plan
+            .unpack_mapped_rgba16float(&mapped)
+            .expect("unpack scaled shader output");
+        readback.unmap();
+
+        for (pixel, expected) in actual.chunks_exact(4).zip([0.0, 1.0, 0.0, 1.0]) {
+            for channel in &pixel[..3] {
+                assert!(
+                    (*channel - expected).abs() < 0.0015,
+                    "expected scaled neutral {expected}, got {pixel:?}"
                 );
             }
             assert!((pixel[3] - 1.0).abs() < 0.001);
@@ -820,12 +1014,14 @@ mod tests {
         });
         write_test_texture(&context.queue, &luma, 2, 2, 2, &[16, 235, 126, 71]);
         write_test_texture(&context.queue, &chroma, 1, 1, 2, &[128, 128]);
-        let mut ids = GpuColorFrameIdAllocator::new(100);
+        let mut ids = GpuColorFrameIdAllocator::new(100).expect("frame id allocator");
         let import = GpuNativeDecodedFrameImportPlan::from_contract(
             &mut ids,
             GpuNativeDecodedFrameImportContract {
                 width: 2,
                 height: 2,
+                output_width: 2,
+                output_height: 2,
                 source_color_space: ColorSpace::Rec601Ntsc,
                 input_transform: crate::RenderInputTransform::to_working_gpu(
                     WorkingColorSpace::LinearRec709,
@@ -868,7 +1064,7 @@ mod tests {
         decoder
             .record(&mut encoder, &decode_plan, &prepared, &encoded)
             .expect("record YUV pass");
-        let mut runtime = crate::RenderGpuOutputBoundaryRuntime::new();
+        let mut runtime = crate::RenderGpuOutputBoundaryRuntime::new().expect("GPU output runtime");
         runtime.frame_table_mut().insert(encoded).expect("insert encoded source");
         let record = runtime
             .record_wgpu_input_stage_gpu_frame_owned_backend(
@@ -897,8 +1093,9 @@ mod tests {
             &context.device,
             &mut encoder,
             &readback_plan,
-            working.resource(),
-        );
+            working,
+        )
+        .expect("record native working readback");
         context.queue.submit(std::iter::once(encoder.finish()));
         let mapped = map_readback_buffer(&context.device, &readback);
         let actual =
@@ -940,6 +1137,7 @@ mod tests {
         };
         GpuNativeYuvDecodePlan::new(
             format,
+            GpuNativeVideoExtent { width: 1920, height: 1080 },
             GpuNativeVideoExtent { width: 1920, height: 1080 },
             GpuNativeVideoExtent { width: 1920, height: 1088 },
             GpuNativeDecodedFrameVideoSampling {
@@ -987,6 +1185,8 @@ mod tests {
         GpuNativeDecodedFrameImportContract {
             width: 1920,
             height: 1080,
+            output_width: 1920,
+            output_height: 1080,
             source_color_space: ColorSpace::Rec2100Pq,
             input_transform: crate::RenderInputTransform::to_working_gpu(
                 WorkingColorSpace::LinearRec2020,

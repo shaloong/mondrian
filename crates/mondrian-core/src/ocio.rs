@@ -35,10 +35,8 @@ use ocio_rs::{
     ViewTransformDirection,
 };
 use sha2::{Digest, Sha256};
-use std::cell::RefCell;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 // ── Global OCIO state ──────────────────────────────────────────────────────────
 
@@ -2567,13 +2565,6 @@ pub fn ensure_color_engine_ocio_loaded(engine: &ColorEngine) -> Result<(), Strin
     ensure_custom_ocio_identity_loaded_locked(identity, true)
 }
 
-fn current_ocio_generation_for_source(source: &OcioConfigSource) -> Option<u64> {
-    OCIO_STATE
-        .lock()
-        .ok()
-        .and_then(|state| (state.source.as_ref() == Some(source)).then_some(state.generation))
-}
-
 /// Return the OCIO source used by Mondrian Standard/Simple mode.
 pub fn mondrian_default_ocio_source() -> OcioConfigSource {
     OcioConfigSource::MondrianStandard { package: MondrianStandardPackageIdentity::V3 }
@@ -3089,7 +3080,7 @@ fn ocio_display_cpu_processor_from_config(
         .map_err(|e| format!("OCIO CPU display processor '{src_name}' → {display}/{view}: {e}"))
 }
 
-const OCIO_CPU_PROCESSOR_CACHE_CAPACITY: usize = 64;
+const DEFAULT_OCIO_CPU_PROCESSOR_CAPACITY: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum OcioCpuProcessorRequest {
@@ -3111,66 +3102,19 @@ struct OcioCpuProcessorCacheKey {
     request: OcioCpuProcessorRequest,
 }
 
-fn ocio_cpu_processor_config_revision(_source: &OcioConfigSource, _generation: u64) -> u64 {
-    0
-}
-
-thread_local! {
-    static OCIO_CPU_PROCESSOR_CACHE: RefCell<LruCache<OcioCpuProcessorCacheKey, CPUProcessor>> =
-        RefCell::new(LruCache::new(
-            NonZeroUsize::new(OCIO_CPU_PROCESSOR_CACHE_CAPACITY)
-                .unwrap_or(NonZeroUsize::MIN),
-        ));
-}
-
-static OCIO_CPU_PROCESSOR_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
-static OCIO_CPU_PROCESSOR_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
-static OCIO_CPU_PROCESSOR_CACHE_EVICTIONS: AtomicU64 = AtomicU64::new(0);
-
-/// Process-wide counters plus current-thread occupancy for the CPU processor cache.
+/// Point-in-time evidence for one explicitly owned CPU processor Session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OcioCpuProcessorCacheDiagnostics {
     /// Warm processor lookups served without config selection or reconstruction.
     pub hits: u64,
     /// Processor constructions performed after a cache miss.
     pub misses: u64,
-    /// Least-recently-used processors evicted from thread-local caches.
+    /// Processors evicted by LRU admission, reconfiguration, or explicit clear.
     pub evictions: u64,
-    /// Entries in the calling thread's bounded cache.
-    pub current_thread_entries: usize,
-    /// Per-thread entry capacity.
-    pub per_thread_capacity: usize,
-}
-
-/// Return CPU OCIO processor cache diagnostics.
-pub fn ocio_cpu_processor_cache_diagnostics() -> OcioCpuProcessorCacheDiagnostics {
-    OcioCpuProcessorCacheDiagnostics {
-        hits: OCIO_CPU_PROCESSOR_CACHE_HITS.load(Ordering::Relaxed),
-        misses: OCIO_CPU_PROCESSOR_CACHE_MISSES.load(Ordering::Relaxed),
-        evictions: OCIO_CPU_PROCESSOR_CACHE_EVICTIONS.load(Ordering::Relaxed),
-        current_thread_entries: OCIO_CPU_PROCESSOR_CACHE.with(|cache| cache.borrow().len()),
-        per_thread_capacity: OCIO_CPU_PROCESSOR_CACHE_CAPACITY,
-    }
-}
-
-#[cfg(test)]
-fn clear_ocio_cpu_processor_cache_for_current_thread() {
-    OCIO_CPU_PROCESSOR_CACHE.with(|cache| cache.borrow_mut().clear());
-}
-
-fn try_apply_cached_cpu_processor(key: &OcioCpuProcessorCacheKey, data: &mut [f32]) -> bool {
-    OCIO_CPU_PROCESSOR_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        let Some(processor) = cache.get(key) else {
-            return false;
-        };
-        apply_cpu_processor_float(processor, data);
-        true
-    })
-}
-
-fn has_cached_cpu_processor(key: &OcioCpuProcessorCacheKey) -> bool {
-    OCIO_CPU_PROCESSOR_CACHE.with(|cache| cache.borrow().contains(key))
+    /// Processor objects currently retained.
+    pub entries: usize,
+    /// Maximum processor resource units retained; zero disables caching.
+    pub capacity: usize,
 }
 
 fn build_cpu_processor(
@@ -3187,57 +3131,165 @@ fn build_cpu_processor(
     }
 }
 
-fn apply_cached_cpu_processor(
+/// Owner-scoped cache of immutable OCIO CPU processors.
+///
+/// One Preview, Export, Thumbnail, or other execution worker owns a Session and
+/// applies pressure changes on that same thread. The `Rc` marker deliberately
+/// prevents sharing the opaque OCIO processors across worker lifetimes.
+pub struct OcioCpuProcessorSession {
+    cache: Option<LruCache<OcioCpuProcessorCacheKey, CPUProcessor>>,
+    capacity: usize,
+    hits: u64,
+    misses: u64,
+    evictions: u64,
+    owner_thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl Default for OcioCpuProcessorSession {
+    fn default() -> Self {
+        Self::new(DEFAULT_OCIO_CPU_PROCESSOR_CAPACITY)
+    }
+}
+
+impl OcioCpuProcessorSession {
+    /// Create a Session with a processor-resource-unit limit.
+    ///
+    /// Zero selects the uncached reference path.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            cache: NonZeroUsize::new(capacity).map(LruCache::new),
+            capacity,
+            hits: 0,
+            misses: 0,
+            evictions: 0,
+            owner_thread: std::marker::PhantomData,
+        }
+    }
+
+    /// Apply a color-space processor through this Session.
+    pub fn convert_identity_float(
+        &mut self,
+        engine: &ColorEngine,
+        data: &mut [f32],
+        src: OcioColorSpaceIdentity,
+        dst: OcioColorSpaceIdentity,
+    ) -> Result<(), String> {
+        validate_engine_working_identities(engine, &[src, dst])?;
+        if data.is_empty() || src == dst {
+            return Ok(());
+        }
+        self.apply(
+            engine,
+            OcioCpuProcessorRequest::ColorSpace { src, dst },
+            data,
+        )
+    }
+
+    /// Apply a display/view processor through this Session.
+    pub fn display_transform_identity_float(
+        &mut self,
+        engine: &ColorEngine,
+        data: &mut [f32],
+        src: OcioColorSpaceIdentity,
+        display: &str,
+        view: &str,
+    ) -> Result<(), String> {
+        validate_engine_display_view_selection(engine, display, view)?;
+        validate_engine_working_identities(engine, &[src])?;
+        if data.is_empty() {
+            return Ok(());
+        }
+        self.apply(
+            engine,
+            OcioCpuProcessorRequest::DisplayView {
+                src,
+                display: display.to_owned(),
+                view: view.to_owned(),
+            },
+            data,
+        )
+    }
+
+    /// Replace the resource-unit policy and synchronously release old processors.
+    pub fn reconfigure(&mut self, capacity: usize) {
+        if self.capacity == capacity {
+            return;
+        }
+        self.clear();
+        self.capacity = capacity;
+        self.cache = NonZeroUsize::new(capacity).map(LruCache::new);
+    }
+
+    /// Release all retained processors while preserving cumulative counters.
+    pub fn clear(&mut self) {
+        if let Some(cache) = &mut self.cache {
+            self.evictions = self.evictions.saturating_add(cache.len() as u64);
+            cache.clear();
+        }
+    }
+
+    /// Return bounded cache occupancy and cumulative reuse evidence.
+    pub fn diagnostics(&self) -> OcioCpuProcessorCacheDiagnostics {
+        OcioCpuProcessorCacheDiagnostics {
+            hits: self.hits,
+            misses: self.misses,
+            evictions: self.evictions,
+            entries: self.cache.as_ref().map_or(0, LruCache::len),
+            capacity: self.capacity,
+        }
+    }
+
+    fn apply(
+        &mut self,
+        engine: &ColorEngine,
+        request: OcioCpuProcessorRequest,
+        data: &mut [f32],
+    ) -> Result<(), String> {
+        // ColorEngine is the complete canonical config identity, including a
+        // Custom OCIO digest. A processor baked for that key remains valid
+        // when another Sequence temporarily selects a different process-global
+        // config; only a miss needs to acquire/select the corresponding config.
+        let key = OcioCpuProcessorCacheKey {
+            engine: engine.clone(),
+            revision: 0,
+            request: request.clone(),
+        };
+        if let Some(processor) = self.cache.as_mut().and_then(|cache| cache.get(&key)) {
+            self.hits = self.hits.saturating_add(1);
+            apply_cpu_processor_float(processor, data);
+            return Ok(());
+        }
+
+        let processor = with_ocio_config_for_engine(engine, |config, _generation| {
+            build_cpu_processor(config, &request)
+        })?;
+        self.misses = self.misses.saturating_add(1);
+        let Some(cache) = &mut self.cache else {
+            apply_cpu_processor_float(&processor, data);
+            return Ok(());
+        };
+        if cache.len() == self.capacity {
+            self.evictions = self.evictions.saturating_add(1);
+        }
+        cache.put(key.clone(), processor);
+        let processor = cache
+            .get(&key)
+            .ok_or_else(|| "OCIO CPU processor Session lost a selected processor".to_owned())?;
+        apply_cpu_processor_float(processor, data);
+        Ok(())
+    }
+}
+
+fn apply_uncached_cpu_processor(
     engine: &ColorEngine,
     request: OcioCpuProcessorRequest,
     data: &mut [f32],
 ) -> Result<(), String> {
-    let source = engine.ocio_source();
-    if ocio_engine_is_validated(engine) {
-        let generation = current_ocio_generation_for_source(&source).unwrap_or_default();
-        let key = OcioCpuProcessorCacheKey {
-            engine: engine.clone(),
-            revision: ocio_cpu_processor_config_revision(&source, generation),
-            request: request.clone(),
-        };
-        if try_apply_cached_cpu_processor(&key, data) {
-            OCIO_CPU_PROCESSOR_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
-            return Ok(());
-        }
-    }
-
-    let (key, processor) = with_ocio_config_for_engine(engine, |config, generation| {
-        let key = OcioCpuProcessorCacheKey {
-            engine: engine.clone(),
-            revision: ocio_cpu_processor_config_revision(&source, generation),
-            request: request.clone(),
-        };
-        let processor = if has_cached_cpu_processor(&key) {
-            None
-        } else {
-            Some(build_cpu_processor(config, &request)?)
-        };
-        Ok((key, processor))
+    let processor = with_ocio_config_for_engine(engine, |config, _generation| {
+        build_cpu_processor(config, &request)
     })?;
-
-    if let Some(processor) = processor {
-        OCIO_CPU_PROCESSOR_CACHE.with(|cache| {
-            let mut cache = cache.borrow_mut();
-            if cache.len() == OCIO_CPU_PROCESSOR_CACHE_CAPACITY {
-                OCIO_CPU_PROCESSOR_CACHE_EVICTIONS.fetch_add(1, Ordering::Relaxed);
-            }
-            cache.put(key.clone(), processor);
-        });
-        OCIO_CPU_PROCESSOR_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
-    } else {
-        OCIO_CPU_PROCESSOR_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
-    }
-
-    if try_apply_cached_cpu_processor(&key, data) {
-        Ok(())
-    } else {
-        Err("OCIO CPU processor cache lost a selected processor".to_owned())
-    }
+    apply_cpu_processor_float(&processor, data);
+    Ok(())
 }
 
 fn validate_engine_display_view_selection(
@@ -3301,7 +3353,10 @@ fn validate_engine_working_identities(
 
 // ── Public entry points ────────────────────────────────────────────────────────
 
-/// Apply an engine-qualified OCIO conversion using the bounded CPU processor cache.
+/// Apply an engine-qualified OCIO conversion through the uncached reference path.
+///
+/// Realtime and repeated offline execution should own an
+/// [`OcioCpuProcessorSession`] and call it explicitly.
 pub(crate) fn apply_ocio_identity_float(
     engine: &ColorEngine,
     data: &mut [f32],
@@ -3312,14 +3367,14 @@ pub(crate) fn apply_ocio_identity_float(
     if data.is_empty() || src == dst {
         return Ok(());
     }
-    apply_cached_cpu_processor(
+    apply_uncached_cpu_processor(
         engine,
         OcioCpuProcessorRequest::ColorSpace { src, dst },
         data,
     )
 }
 
-/// Apply an engine-qualified OCIO display/view transform using the CPU cache.
+/// Apply an engine-qualified OCIO display/view transform through the uncached reference path.
 pub(crate) fn apply_ocio_display_identity_float(
     engine: &ColorEngine,
     data: &mut [f32],
@@ -3332,7 +3387,7 @@ pub(crate) fn apply_ocio_display_identity_float(
     if data.is_empty() {
         return Ok(());
     }
-    apply_cached_cpu_processor(
+    apply_uncached_cpu_processor(
         engine,
         OcioCpuProcessorRequest::DisplayView {
             src,
@@ -4383,17 +4438,18 @@ mod tests {
     }
 
     #[test]
-    fn cpu_processor_cache_reuses_engine_qualified_processor() {
-        clear_ocio_cpu_processor_cache_for_current_thread();
-        let before = ocio_cpu_processor_cache_diagnostics();
+    fn cpu_processor_session_reuses_engine_qualified_processor() {
+        let mut session = OcioCpuProcessorSession::new(4);
+        let before = session.diagnostics();
         let engine = ColorEngine::mondrian_standard();
         let original = [0.18, 0.42, 0.73, 0.375];
         let mut reference = None;
 
         for _ in 0..4 {
             let mut sample = original;
-            engine
+            session
                 .convert_identity_float(
+                    &engine,
                     &mut sample,
                     OcioColorSpaceIdentity::Color(ColorSpace::SonySLog3SGamut3Cine),
                     OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
@@ -4407,28 +4463,26 @@ mod tests {
             }
         }
 
-        let after = ocio_cpu_processor_cache_diagnostics();
+        let after = session.diagnostics();
         assert!(after.misses > before.misses);
         assert!(after.hits > before.hits);
-        assert!((1..=after.per_thread_capacity).contains(&after.current_thread_entries));
+        assert!((1..=after.capacity).contains(&after.entries));
     }
 
     #[test]
-    fn immutable_cpu_processor_survives_switch_to_another_engine() {
-        clear_ocio_cpu_processor_cache_for_current_thread();
+    fn session_owned_immutable_processor_survives_switch_to_another_engine() {
+        let mut session = OcioCpuProcessorSession::new(4);
         let standard = ColorEngine::mondrian_standard();
         let mut first = [0.18, 0.42, 0.73, 0.375];
-        standard
+        session
             .convert_identity_float(
+                &standard,
                 &mut first,
                 OcioColorSpaceIdentity::Color(ColorSpace::SonySLog3SGamut3Cine),
                 OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
             )
             .expect("first Standard input processor");
-        assert_eq!(
-            ocio_cpu_processor_cache_diagnostics().current_thread_entries,
-            1
-        );
+        assert_eq!(session.diagnostics().entries, 1);
 
         ColorEngine::Aces {
             preset: crate::types::AcesConfigPreset::StudioV4Aces2Ocio25,
@@ -4436,20 +4490,56 @@ mod tests {
         .default_display_view()
         .expect("ACES config switch");
 
-        let hits_before = ocio_cpu_processor_cache_diagnostics().hits;
+        let hits_before = session.diagnostics().hits;
         let mut second = [0.18, 0.42, 0.73, 0.375];
-        standard
+        session
             .convert_identity_float(
+                &standard,
                 &mut second,
                 OcioColorSpaceIdentity::Color(ColorSpace::SonySLog3SGamut3Cine),
                 OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
             )
             .expect("reselected Standard input processor");
 
-        let after = ocio_cpu_processor_cache_diagnostics();
+        let after = session.diagnostics();
         assert_eq!(second, first);
         assert!(after.hits > hits_before);
-        assert_eq!(after.current_thread_entries, 1);
+        assert_eq!(after.entries, 1);
+    }
+
+    #[test]
+    fn cpu_processor_session_reconfigure_is_an_immediate_residency_barrier() {
+        let mut session = OcioCpuProcessorSession::new(2);
+        let engine = ColorEngine::mondrian_standard();
+        let mut sample = [0.18, 0.42, 0.73, 1.0];
+        session
+            .convert_identity_float(
+                &engine,
+                &mut sample,
+                OcioColorSpaceIdentity::Color(ColorSpace::SonySLog3SGamut3Cine),
+                OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
+            )
+            .expect("cached Standard input processor");
+        assert_eq!(session.diagnostics().entries, 1);
+
+        session.reconfigure(0);
+        let after_trim = session.diagnostics();
+        assert_eq!(after_trim.capacity, 0);
+        assert_eq!(after_trim.entries, 0);
+        assert!(after_trim.evictions >= 1);
+
+        let misses_before = after_trim.misses;
+        session
+            .convert_identity_float(
+                &engine,
+                &mut sample,
+                OcioColorSpaceIdentity::Color(ColorSpace::SonySLog3SGamut3Cine),
+                OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
+            )
+            .expect("uncached Standard input processor");
+        let uncached = session.diagnostics();
+        assert_eq!(uncached.entries, 0);
+        assert!(uncached.misses > misses_before);
     }
 
     #[test]

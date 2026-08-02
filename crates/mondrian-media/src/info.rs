@@ -5,10 +5,20 @@
 //! `AVFrameSideData` 的静态/动态 HDR 元数据。图片文件在容器未报告
 //! 帧数时最多解码到第二帧或 EOF，以区分已证明单帧与动画/未知输入。
 
-use crate::decoder::{decoded_video_range_from_ffmpeg, DecodedVideoRange};
+use crate::decoder::decoded_video_range_from_ffmpeg;
 use ffmpeg_next as ffmpeg;
 use mondrian_core::icc::parse_icc_display_profile;
 use mondrian_core::types::*;
+pub use mondrian_core::{
+    is_picture_file_extension, resolve_video_color_metadata_declarations, AudioCodec,
+    AudioStreamInfo, ChannelLayout, DecodedVideoRange, DetectedColorInterpretation, MediaInfo,
+    MediaProbeSnapshot, PixelFormat, ProResVariant, ProvenVideoSampling, VideoCodec,
+    VideoCodecProfile, VideoColorDetectionMethod, VideoColorInterpretationConfidence,
+    VideoColorInterpretationEvidence, VideoColorInterpretationWarning, VideoColorMetadata,
+    VideoColorMetadataDeclaration, VideoColorMetadataDeclarationResolution, VideoColorMetadataHint,
+    VideoColorMetadataHintAuthority, VideoColorMetadataHintScope, VideoColorSpaceSource,
+    VideoColorTag, VideoHdrMetadataSummary, VideoHdrSideDataKind, VideoStreamInfo,
+};
 use mondrian_core::{
     VideoContentLightMetadata, VideoHdrChromaticity, VideoHdrMetadataPayload, VideoHdrRational,
     VideoIccProfileMetadata, VideoMasteringDisplayLuminance, VideoMasteringDisplayMetadata,
@@ -16,199 +26,11 @@ use mondrian_core::{
 };
 use serde::{Deserialize, Serialize};
 use std::os::raw::c_int;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
-
-// ─── 视频编解码器 ──────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum VideoCodec {
-    H264,
-    H265,
-    Av1,
-    Vp9,
-    ProRes(ProResVariant),
-    DnxHd,
-    DnxHr,
-    Cineform,
-    Raw,
-    Other(String),
-}
-
-/// Whether a path uses a supported picture-file extension.
-///
-/// This is only a bounded-probe admission hint. It never proves that the file
-/// contains one frame; animated and multi-page formats share several of these
-/// extensions.
-pub fn is_picture_file_extension(path: &Path) -> bool {
-    let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
-        return false;
-    };
-    matches!(
-        extension.to_ascii_lowercase().as_str(),
-        "bmp"
-            | "dpx"
-            | "exr"
-            | "gif"
-            | "heic"
-            | "heif"
-            | "jpeg"
-            | "jpg"
-            | "jxl"
-            | "png"
-            | "tga"
-            | "tif"
-            | "tiff"
-            | "webp"
-    )
-}
-
-/// Codec profile proven by the opened FFmpeg decoder context.
-///
-/// `Unknown` is an explicit absence of evidence. Callers must not infer a
-/// profile from codec, bit depth, filename, or container extension.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum VideoCodecProfile {
-    /// Decoder did not prove a codec profile.
-    #[default]
-    Unknown,
-    /// H.264 constrained profile.
-    H264Constrained,
-    /// H.264 Intra profile.
-    H264Intra,
-    /// H.264 Baseline Profile.
-    H264Baseline,
-    /// H.264 Constrained Baseline Profile.
-    H264ConstrainedBaseline,
-    /// H.264 Main Profile.
-    H264Main,
-    /// H.264 Extended Profile.
-    H264Extended,
-    /// H.264 High Profile.
-    H264High,
-    /// H.264 High 10 Profile.
-    H264High10,
-    /// H.264 High 10 Intra Profile.
-    H264High10Intra,
-    /// H.264 High 4:2:2 Profile.
-    H264High422,
-    /// H.264 High 4:2:2 Intra Profile.
-    H264High422Intra,
-    /// H.264 High 4:4:4 Profile.
-    H264High444,
-    /// H.264 High 4:4:4 Predictive Profile.
-    H264High444Predictive,
-    /// H.264 High 4:4:4 Intra Profile.
-    H264High444Intra,
-    /// H.264 CAVLC 4:4:4 Intra Profile.
-    H264Cavlc444,
-    /// HEVC Main Profile.
-    HevcMain,
-    /// HEVC Main 10 Profile.
-    HevcMain10,
-    /// HEVC Main Still Picture Profile.
-    HevcMainStillPicture,
-    /// HEVC Range Extensions profile family.
-    HevcRangeExtensions,
-    /// Decoder proved a profile not represented by this product version.
-    Other,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ProResVariant {
-    Proxy,
-    Lt,
-    Standard,
-    Hq,
-    R4444,
-    R4444Xq,
-}
-
-// ─── 音频编解码器 ──────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AudioCodec {
-    Aac,
-    Mp3,
-    Flac,
-    Pcm { bit_depth: u8 },
-    Opus,
-    Vorbis,
-    Other(String),
-}
-
-// ─── 像素格式 ─────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PixelFormat {
-    Yuv420p,
-    Yuv422p,
-    Yuv444p,
-    Yuv420p10le,
-    Yuv422p10le,
-    Yuv444p10le,
-    Rgb24,
-    Rgba,
-    Nv12, // GPU 硬解常见格式
-    P010, // 10-bit NV12
-}
-
-impl PixelFormat {
-    pub fn bit_depth(self) -> u8 {
-        match self {
-            Self::Yuv420p10le | Self::Yuv422p10le | Self::Yuv444p10le | Self::P010 => 10,
-            _ => 8,
-        }
-    }
-
-    pub fn has_alpha(self) -> bool {
-        matches!(self, Self::Rgba)
-    }
-}
-
-/// How a video stream's input color metadata was resolved by media probing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum VideoColorSpaceSource {
-    /// Media evidence identified or inferred the color space.
-    Metadata,
-    /// No color metadata was present; callers must apply missing-metadata policy.
-    MissingMetadata,
-    /// Color metadata was present but did not describe a supported product color space.
-    UnsupportedMetadata,
-    /// FFmpeg could not open a decoder; callers must apply missing-metadata policy.
-    DecoderUnavailable,
-}
-
-/// Method that produced a video stream's color metadata decision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum VideoColorDetectionMethod {
-    /// An acquisition/log metadata hint won; confidence distinguishes declarations from inference.
-    MetadataHint,
-    /// An embedded ICC profile identified the input color family.
-    IccProfile,
-    /// Raw CICP/FFmpeg color tags resolved to a supported color space.
-    CicpTags,
-    /// No supported color metadata was found.
-    MissingMetadata,
-    /// CICP tags were present but did not resolve to one supported product color space.
-    UnsupportedCicpTags,
-    /// Decoder could not be opened, so no color metadata could be inspected.
-    DecoderUnavailable,
-}
-
-/// Confidence level for an automatic video color interpretation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum VideoColorInterpretationConfidence {
-    /// No supported interpretation was available.
-    None,
-    /// A complete transfer/gamut pair appeared only in descriptive text or a file name.
-    Low,
-    /// Partial CICP tags or a mapped ICC profile identified a likely color space.
-    Medium,
-    /// Exact CICP tags or a declared acquisition metadata field identified a supported color space.
-    High,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IccColorProfileHint {
@@ -216,230 +38,17 @@ struct IccColorProfileHint {
     profile_name: Option<String>,
 }
 
-/// One raw CICP-style color tag reported by FFmpeg.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VideoColorTag {
-    /// Numeric CICP/FFmpeg enum value.
-    pub code: i32,
-    /// Stable FFmpeg tag name when FFmpeg exposes one.
-    pub name: Option<String>,
-    /// Whether this tag carries an explicit value rather than `unspecified`.
-    pub specified: bool,
-}
-
-/// Raw container/codec color metadata for a decoded video stream.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VideoColorMetadata {
-    /// Color primaries tag.
-    pub primaries: VideoColorTag,
-    /// Transfer characteristic tag.
-    pub transfer: VideoColorTag,
-    /// Matrix coefficients tag.
-    pub matrix: VideoColorTag,
-}
-
-/// Evidence that contributed to a video color interpretation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum VideoColorInterpretationEvidence {
-    /// A container or stream metadata hint identified an acquisition/log color space.
-    MetadataHint {
-        /// Scope where the hint was found.
-        scope: VideoColorMetadataHintScope,
-        /// Original metadata key.
-        key: String,
-        /// Original metadata value.
-        value: String,
-        /// Color space identified by the hint.
-        detected_color_space: ColorSpace,
-    },
-    /// Complete CICP/FFmpeg primaries and transfer tags matched a supported RGB identity.
-    ExactCicpTags {
-        /// Color primaries tag.
-        primaries: VideoColorTag,
-        /// Transfer characteristic tag.
-        transfer: VideoColorTag,
-        /// Matrix coefficients tag.
-        matrix: VideoColorTag,
-        /// Color space identified by the exact triplet.
-        detected_color_space: ColorSpace,
-    },
-    /// Partial CICP/FFmpeg tags identified a likely supported delivery space.
-    PartialCicpTags {
-        /// Color primaries tag.
-        primaries: VideoColorTag,
-        /// Transfer characteristic tag.
-        transfer: VideoColorTag,
-        /// Matrix coefficients tag.
-        matrix: VideoColorTag,
-        /// Color space identified by partial tags.
-        detected_color_space: ColorSpace,
-    },
-    /// CICP/FFmpeg tags were present but did not map to a supported Mondrian color space.
-    UnsupportedCicpTags {
-        /// Color primaries tag.
-        primaries: VideoColorTag,
-        /// Transfer characteristic tag.
-        transfer: VideoColorTag,
-        /// Matrix coefficients tag.
-        matrix: VideoColorTag,
-    },
-    /// FFmpeg could not open the decoder, so no decoder-side color tags were available.
-    DecoderUnavailable,
-    /// An ICC profile was present in the media.
-    IccProfile {
-        /// Explicitly mapped color space, if supported.
-        mapped_color_space: Option<ColorSpace>,
-        /// ICC profile name, if available.
-        profile_name: Option<String>,
-    },
-}
-
-/// Warning emitted while interpreting video color metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum VideoColorInterpretationWarning {
-    /// Conflicting metadata hints were found; the highest-priority declaration was selected.
-    MultipleMetadataHints {
-        /// Selected metadata hint.
-        selected: VideoColorMetadataHint,
-        /// Ignored metadata hints, in probe order.
-        ignored: Vec<VideoColorMetadataHint>,
-    },
-    /// A metadata hint took precedence over CICP tags that indicated another color space.
-    MetadataHintOverridesCicpTags {
-        /// Selected metadata hint.
-        selected: VideoColorMetadataHint,
-        /// CICP-selected color space.
-        cicp_color_space: ColorSpace,
-        /// Raw CICP metadata that conflicted with the selected hint.
-        cicp_metadata: VideoColorMetadata,
-    },
-    /// A free-form metadata field was used only because no stronger color evidence existed.
-    DescriptiveMetadataHintInference {
-        /// Low-confidence hint selected as the fallback interpretation.
-        selected: VideoColorMetadataHint,
-    },
-    /// Stronger structured evidence won over conflicting free-form metadata hints.
-    LowerPriorityMetadataHints {
-        /// Detection method that supplied the selected interpretation.
-        selected_method: VideoColorDetectionMethod,
-        /// Color space selected by the stronger evidence.
-        selected_color_space: ColorSpace,
-        /// Conflicting metadata hints that were retained but not selected.
-        ignored: Vec<VideoColorMetadataHint>,
-    },
-    /// The result came from partial CICP tags instead of a complete exact triplet.
-    PartialCicpTags {
-        /// Color space inferred from partial tags.
-        detected_color_space: ColorSpace,
-    },
-    /// No CICP tags were present.
-    MissingCicpTags,
-    /// CICP tags were present but did not resolve to a supported product color space.
-    UnsupportedCicpTags,
-    /// Decoder metadata was unavailable.
-    DecoderUnavailable,
-    /// ICC profile parsed but could not be mapped to a supported OCIO identity.
-    IccProfileUnmapped {
-        /// ICC profile name, if available.
-        profile_name: Option<String>,
-        /// Structured mapping failure reason.
-        reason: String,
-    },
-    /// ICC profile color space conflicts with CICP-detected color space.
-    IccCicpMismatch {
-        /// Color space inferred from ICC profile.
-        icc_color_space: ColorSpace,
-        /// Color space detected from CICP tags.
-        cicp_color_space: ColorSpace,
-    },
-}
-
-/// Structured interpretation of a video stream's input color metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DetectedColorInterpretation {
-    /// Explicitly detected Mondrian color space, if one was identified.
-    pub color_space: Option<ColorSpace>,
-    /// Confidence of the automatic interpretation.
-    pub confidence: VideoColorInterpretationConfidence,
-    /// Source state for the color metadata decision.
-    pub source: VideoColorSpaceSource,
-    /// Method that produced the color metadata decision.
-    pub method: VideoColorDetectionMethod,
-    /// Evidence used to make the interpretation.
-    #[serde(default)]
-    pub evidence: Vec<VideoColorInterpretationEvidence>,
-    /// Non-fatal warnings describing ambiguity or missing evidence.
-    #[serde(default)]
-    pub warnings: Vec<VideoColorInterpretationWarning>,
-    /// Whether the interpretation is designed to be overridden by the user.
-    pub user_overridable: bool,
-}
-
-/// Scope where an acquisition/color metadata hint was found.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum VideoColorMetadataHintScope {
-    /// Container-level metadata.
-    Container,
-    /// Video stream-level metadata.
-    Stream,
-    /// Complete transfer-and-gamut pair parsed from the source file name.
-    FileName,
-}
-
-/// Metadata hint that identifies an acquisition or camera-log color space.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VideoColorMetadataHint {
-    /// Metadata scope.
-    pub scope: VideoColorMetadataHintScope,
-    /// Original metadata key.
-    pub key: String,
-    /// Original metadata value.
-    pub value: String,
-    /// Color space identified by the hint.
-    pub detected_color_space: ColorSpace,
-}
-
-/// HDR-related stream side-data kind detected during media probing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum VideoHdrSideDataKind {
-    /// SMPTE ST 2086 mastering display metadata.
-    MasteringDisplayMetadata,
-    /// MaxCLL / MaxFALL content light level metadata.
-    ContentLightLevel,
-    /// HDR10+ dynamic metadata.
-    DynamicHdr10Plus,
-    /// Dolby Vision configuration metadata.
-    DolbyVisionConfig,
-    /// ICC profile side data.
-    IccProfile,
-}
-
-/// Summary of HDR-related side data on a video stream.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VideoHdrMetadataSummary {
-    /// HDR side-data kind.
-    pub kind: VideoHdrSideDataKind,
-    /// Side-data payload size in bytes.
-    pub payload_size: usize,
-    /// Parsed HDR metadata payload when FFmpeg exposes a stable ABI for the side data.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub payload: Option<VideoHdrMetadataPayload>,
-}
-
 /// Diagnostic snapshot of a video stream's color metadata interpretation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VideoColorDiagnostic {
-    /// Explicitly detected Mondrian color space, if one was identified.
-    pub detected_color_space: Option<ColorSpace>,
     /// Encoded quantization range reported by FFmpeg.
     #[serde(default)]
     pub color_range: DecodedVideoRange,
+    /// Proven physical sampling family used to validate matrix obligations.
+    #[serde(default)]
+    pub sampling: Option<ProvenVideoSampling>,
     /// Structured interpretation of automatic color metadata.
     pub interpretation: DetectedColorInterpretation,
-    /// Source state for the color metadata decision.
-    pub source: VideoColorSpaceSource,
-    /// Method that produced the color metadata decision.
-    pub method: VideoColorDetectionMethod,
     /// Raw CICP-style metadata captured from FFmpeg, when available.
     pub metadata: Option<VideoColorMetadata>,
     /// Metadata hints that contributed to identifying acquisition/log color space.
@@ -453,8 +62,8 @@ pub struct VideoColorDiagnostic {
 /// Machine-readable issue summary for a probed video stream's color metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VideoColorDiagnosticIssueSummary {
-    /// Explicitly detected Mondrian color space, if one was identified.
-    pub detected_color_space: Option<ColorSpace>,
+    /// Executable metadata identity, excluding diagnostic-only suggestions.
+    pub executable_color_space: Option<ColorSpace>,
     /// Confidence of the automatic interpretation.
     pub confidence: VideoColorInterpretationConfidence,
     /// Source state for the color metadata decision.
@@ -515,7 +124,7 @@ pub struct VideoColorDiagnosticIssueAggregate {
     /// Number of diagnostics aggregated.
     pub diagnostics: u64,
     /// Diagnostics that resolved to an explicit Mondrian color space.
-    pub diagnostics_with_detected_color_space: u64,
+    pub diagnostics_with_executable_color_space: u64,
     /// Diagnostics that carried one or more user-visible warnings.
     pub diagnostics_with_warnings: u64,
     /// Diagnostics that preserved raw CICP/FFmpeg metadata.
@@ -589,45 +198,37 @@ pub struct VideoColorDiagnosticIssueAggregate {
     pub diagnostics_with_icc_profile_unmapped: u64,
 }
 
-impl VideoColorTag {
-    /// Compact diagnostic representation for logs and export errors.
-    pub fn summary(&self) -> String {
-        let name = self.name.as_deref().unwrap_or("unspecified");
-        format!("{name}(code={},specified={})", self.code, self.specified)
-    }
-}
-
-impl VideoColorMetadata {
-    /// Compact diagnostic representation for logs and export errors.
-    pub fn summary(&self) -> String {
-        format!(
-            "primaries={},transfer={},matrix={}",
-            self.primaries.summary(),
-            self.transfer.summary(),
-            self.matrix.summary()
-        )
-    }
-}
-
 impl VideoColorDiagnostic {
     /// Build a color diagnostic snapshot from probed stream metadata.
     pub fn from_stream(stream: &VideoStreamInfo) -> Self {
         Self {
-            detected_color_space: stream.detected_color_space,
             color_range: stream.color_range,
+            sampling: stream.proven_sampling(),
             interpretation: stream.color_interpretation.clone(),
-            source: stream.color_space_source,
-            method: stream.color_detection_method,
             metadata: stream.color_metadata.clone(),
             metadata_hints: stream.color_metadata_hints.clone(),
             hdr_metadata: stream.hdr_metadata.clone(),
         }
     }
 
+    /// Return the sole metadata-derived identity allowed to drive pixels.
+    pub fn executable_color_space(&self) -> Option<ColorSpace> {
+        self.interpretation.executable_color_space_from_probe(
+            self.sampling,
+            self.metadata.as_ref(),
+            &self.metadata_hints,
+        )
+    }
+
     /// Compact diagnostic representation for logs and export errors.
     pub fn summary(&self) -> String {
-        let detected = self
-            .detected_color_space
+        let candidate = self
+            .interpretation
+            .candidate_color_space
+            .map(|color_space| format!("{color_space:?}"))
+            .unwrap_or_else(|| "None".to_string());
+        let executable = self
+            .executable_color_space()
             .map(|color_space| format!("{color_space:?}"))
             .unwrap_or_else(|| "None".to_string());
         let metadata = self
@@ -664,10 +265,11 @@ impl VideoColorDiagnostic {
                 .join("|")
         };
         format!(
-            "source={:?},method={:?},detected={},range={:?},confidence={:?},overridable={},warnings={},metadata={},hints={},hdr={}",
-            self.source,
-            self.method,
-            detected,
+            "source={:?},method={:?},candidate={},executable={},range={:?},confidence={:?},overridable={},warnings={},metadata={},hints={},hdr={}",
+            self.interpretation.source,
+            self.interpretation.method,
+            candidate,
+            executable,
             self.color_range,
             self.interpretation.confidence,
             self.interpretation.user_overridable,
@@ -681,10 +283,10 @@ impl VideoColorDiagnostic {
     /// Machine-readable issue summary for UI, export reports, and telemetry.
     pub fn issue_summary(&self) -> VideoColorDiagnosticIssueSummary {
         let mut summary = VideoColorDiagnosticIssueSummary {
-            detected_color_space: self.detected_color_space,
+            executable_color_space: self.executable_color_space(),
             confidence: self.interpretation.confidence,
-            source: self.source,
-            method: self.method,
+            source: self.interpretation.source,
+            method: self.interpretation.method,
             has_raw_cicp_metadata: self.metadata.is_some(),
             metadata_hint_count: self.metadata_hints.len() as u64,
             evidence_count: self.interpretation.evidence.len() as u64,
@@ -778,9 +380,9 @@ impl VideoColorDiagnosticIssueAggregate {
     /// Observe one diagnostic summary.
     pub fn observe_summary(&mut self, summary: VideoColorDiagnosticIssueSummary) {
         self.diagnostics = self.diagnostics.saturating_add(1);
-        self.diagnostics_with_detected_color_space = self
-            .diagnostics_with_detected_color_space
-            .saturating_add(u64::from(summary.detected_color_space.is_some()));
+        self.diagnostics_with_executable_color_space = self
+            .diagnostics_with_executable_color_space
+            .saturating_add(u64::from(summary.executable_color_space.is_some()));
         self.diagnostics_with_warnings = self
             .diagnostics_with_warnings
             .saturating_add(u64::from(summary.has_user_visible_warnings));
@@ -896,562 +498,270 @@ impl VideoColorDiagnosticIssueAggregate {
     }
 }
 
-impl VideoColorMetadataHint {
-    /// Compact diagnostic representation for logs and export errors.
-    pub fn summary(&self) -> String {
-        format!(
-            "{:?}:{}={}->{:?}",
-            self.scope, self.key, self.value, self.detected_color_space
-        )
-    }
-}
-
-impl VideoColorInterpretationWarning {
-    /// Compact diagnostic representation for logs and export errors.
-    pub fn summary(&self) -> String {
-        match self {
-            Self::MultipleMetadataHints { selected, ignored } => {
-                let ignored_summary = if ignored.is_empty() {
-                    "none".to_string()
-                } else {
-                    ignored
-                        .iter()
-                        .map(VideoColorMetadataHint::summary)
-                        .collect::<Vec<_>>()
-                        .join("|")
-                };
-                format!(
-                    "multiple_hints(selected={},ignored={})",
-                    selected.summary(),
-                    ignored_summary
-                )
-            }
-            Self::MetadataHintOverridesCicpTags { selected, cicp_color_space, cicp_metadata } => {
-                format!(
-                    "hint_overrides_cicp(selected={},cicp={:?},metadata={})",
-                    selected.summary(),
-                    cicp_color_space,
-                    cicp_metadata.summary()
-                )
-            }
-            Self::DescriptiveMetadataHintInference { selected } => {
-                format!(
-                    "descriptive_hint_inference(selected={})",
-                    selected.summary()
-                )
-            }
-            Self::LowerPriorityMetadataHints { selected_method, selected_color_space, ignored } => {
-                let ignored = ignored
-                    .iter()
-                    .map(VideoColorMetadataHint::summary)
-                    .collect::<Vec<_>>()
-                    .join("|");
-                format!(
-                    "lower_priority_hints(selected_method={selected_method:?},selected={selected_color_space:?},ignored={ignored})"
-                )
-            }
-            Self::PartialCicpTags { detected_color_space } => {
-                format!("partial_cicp(detected={detected_color_space:?})")
-            }
-            Self::MissingCicpTags => "missing_cicp".to_string(),
-            Self::UnsupportedCicpTags => "unsupported_cicp".to_string(),
-            Self::DecoderUnavailable => "decoder_unavailable".to_string(),
-            Self::IccCicpMismatch { icc_color_space, cicp_color_space } => {
-                format!("icc_cicp_mismatch(icc={icc_color_space:?},cicp={cicp_color_space:?})")
-            }
-            Self::IccProfileUnmapped { profile_name, reason } => {
-                format!("icc_profile_unmapped(profile={profile_name:?},reason={reason})")
-            }
-        }
-    }
-}
-
-impl VideoHdrMetadataSummary {
-    /// Compact diagnostic representation for logs and export errors.
-    pub fn summary(&self) -> String {
-        let payload = self
-            .payload
-            .as_ref()
-            .map(VideoHdrMetadataPayload::summary)
-            .unwrap_or_else(|| "unparsed".to_string());
-        format!(
-            "{:?}(bytes={},payload={})",
-            self.kind, self.payload_size, payload
-        )
-    }
-}
-
-// ─── 声道布局 ─────────────────────────────────────────────────────────────────
-
-/// Decoder-probed native channel layout.
+/// Probe one file into the stable, immutable media contract.
 ///
-/// This is source evidence, not a requested render layout. Unsupported or
-/// unspecified layouts remain explicit and must not be inferred from their
-/// channel count.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ChannelLayout {
-    /// FFmpeg exposed no semantic channel layout; the count is retained only
-    /// as diagnostic evidence.
-    Unspecified(u8),
-    /// One mono program channel.
-    Mono,
-    /// Front-left and front-right.
-    Stereo,
-    /// FL, FR, FC, LFE, SL, SR (`5.1(side)`).
-    Surround51Side,
-    /// FL, FR, FC, LFE, BL, BR (`5.1`).
-    Surround51Back,
-    /// FL, FR, FC, LFE, BL, BR, SL, SR.
-    Surround71,
-    /// A declared layout not currently represented by the product contract.
-    /// The count is evidence only and never authorizes a guessed mapping.
-    Other(u8),
-}
+/// This synchronous FFmpeg Adapter must run on bounded media execution owned
+/// by its caller. It performs no Asset Library mutation.
+pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot> {
+    let started_at = Instant::now();
+    tracing::info!("Probing media file: {:?}", path);
 
-impl ChannelLayout {
-    /// Channel extent reported for this native layout.
-    pub const fn channel_count(&self) -> u8 {
-        match self {
-            Self::Unspecified(channels) | Self::Other(channels) => *channels,
-            Self::Mono => 1,
-            Self::Stereo => 2,
-            Self::Surround51Side | Self::Surround51Back => 6,
-            Self::Surround71 => 8,
-        }
+    if !path.exists() {
+        return Err(mondrian_core::MondrianError::MediaOpen {
+            path: path.display().to_string(),
+            reason: "文件不存在".to_string(),
+        });
     }
 
-    /// Preserve probe semantics in the shared signal-layout value.
-    ///
-    /// This proves representation only. Decode, plugin, device, and export
-    /// Adapters must still negotiate an explicit mapping before execution.
-    pub const fn exact_signal_layout(&self) -> Option<mondrian_core::AudioChannelLayout> {
-        match self {
-            Self::Mono => Some(mondrian_core::AudioChannelLayout::Mono),
-            Self::Stereo => Some(mondrian_core::AudioChannelLayout::Stereo),
-            Self::Surround51Side => Some(mondrian_core::AudioChannelLayout::Surround51Side),
-            Self::Surround51Back => Some(mondrian_core::AudioChannelLayout::Surround51Back),
-            Self::Surround71 => Some(mondrian_core::AudioChannelLayout::Surround71),
-            Self::Unspecified(channels)
-                if *channels > 0 && *channels <= mondrian_core::MAX_AUDIO_CHANNELS =>
-            {
-                match mondrian_core::AudioChannelLayout::discrete(*channels) {
-                    Ok(layout) => Some(layout),
-                    Err(_) => None,
-                }
-            }
-            Self::Unspecified(_) | Self::Other(_) => None,
-        }
-    }
-}
+    let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
-// ─── 流信息 ───────────────────────────────────────────────────────────────────
+    crate::ffmpeg_runtime::ensure_ffmpeg_initialized(path)?;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VideoStreamInfo {
-    pub index: u32,
-    pub codec: VideoCodec,
-    /// Declared duration of this video stream, independent of container duration.
-    #[serde(default)]
-    pub duration: Option<Duration>,
-    /// Decoder-proven codec profile, or explicit `Unknown`.
-    #[serde(default)]
-    pub codec_profile: VideoCodecProfile,
-    pub width: u32,
-    pub height: u32,
-    pub frame_rate: Rational,
-    /// Whether `frame_rate` came from a positive FFmpeg stream rational.
-    ///
-    /// Container time-base quantization within 100 ppm of a standard nominal
-    /// rate is canonicalized to that exact rational.
-    #[serde(default)]
-    pub frame_rate_proven: bool,
-    pub pixel_format: PixelFormat,
-    /// Whether FFmpeg reported this exact pixel format rather than a storage fallback.
-    #[serde(default)]
-    pub pixel_format_proven: bool,
-    /// Encoded quantization range reported by FFmpeg for the primary decoder.
-    #[serde(default)]
-    pub color_range: DecodedVideoRange,
-    /// Color space explicitly detected from container/codec metadata, if present.
-    pub detected_color_space: Option<ColorSpace>,
-    /// Structured automatic color interpretation with evidence and warnings.
-    pub color_interpretation: DetectedColorInterpretation,
-    /// Source of the detected color-space result.
-    pub color_space_source: VideoColorSpaceSource,
-    /// Method that produced the detected color-space result.
-    pub color_detection_method: VideoColorDetectionMethod,
-    /// Raw CICP-style color metadata reported by FFmpeg when the decoder opens.
-    pub color_metadata: Option<VideoColorMetadata>,
-    /// Acquisition/log hints captured from stream, container, or complete file-name pairs.
-    #[serde(default)]
-    pub color_metadata_hints: Vec<VideoColorMetadataHint>,
-    /// HDR-related stream side-data summaries.
-    #[serde(default)]
-    pub hdr_metadata: Vec<VideoHdrMetadataSummary>,
-    pub bit_depth: u8,
-    pub has_alpha: bool,
-    pub avg_bitrate: u64, // bits/s
-    /// Exact frame count when supplied by the stream or proven as one by the
-    /// bounded picture-file decoder probe.
-    pub total_frames: Option<u64>,
-}
+    let input =
+        ffmpeg::format::input(path).map_err(|e| mondrian_core::MondrianError::MediaOpen {
+            path: path.display().to_string(),
+            reason: e.to_string(),
+        })?;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AudioStreamInfo {
-    /// Absolute stream index used by an explicit FFmpeg `-map 0:<index>`.
-    pub index: u32,
-    /// Container stream identifier when FFmpeg reports a nonnegative value.
-    pub stream_id: Option<i32>,
-    /// Normalized stream language metadata, if declared.
-    pub language: Option<String>,
-    /// Human-readable stream title metadata, if declared.
-    pub title: Option<String>,
-    /// Whether the container marks this stream as its default selection.
-    pub is_default: bool,
-    pub codec: AudioCodec,
-    /// Declared duration of this audio stream, independent of container duration.
-    #[serde(default)]
-    pub duration: Option<Duration>,
-    pub sample_rate: u32,
-    pub channels: u8,
-    pub channel_layout: ChannelLayout,
-    pub bit_depth: u16,
-    pub avg_bitrate: u64,
-}
+    let duration = if input.duration() > 0 {
+        Duration::from_micros(input.duration() as u64)
+    } else {
+        Duration::ZERO
+    };
 
-// ─── MediaInfo ────────────────────────────────────────────────────────────────
+    let container = input.format().name().to_lowercase();
+    let container_color_hints =
+        collect_color_metadata_hints(VideoColorMetadataHintScope::Container, &input.metadata());
+    let file_name_color_hint =
+        path.file_name().and_then(|file_name| file_name.to_str()).and_then(|file_name| {
+            parse_video_color_metadata_hint(
+                VideoColorMetadataHintScope::FileName,
+                "filename",
+                file_name,
+            )
+        });
 
-/// 媒体文件完整元数据
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MediaInfo {
-    pub path: PathBuf,
-    pub duration: Duration,
-    pub file_size: u64,
-    pub container: String, // "mp4", "mov", "mkv", ...
-    pub video_streams: Vec<VideoStreamInfo>,
-    pub audio_streams: Vec<AudioStreamInfo>,
-    /// 是否有视频流
-    pub has_video: bool,
-    /// 是否有音频流
-    pub has_audio: bool,
-}
+    let mut video_streams = Vec::new();
+    let mut audio_streams = Vec::new();
 
-impl MediaInfo {
-    pub fn synthetic_adjustment_layer() -> Self {
-        Self {
-            path: PathBuf::from("mondrian://adjustment-layer"),
-            duration: Duration::ZERO,
-            file_size: 0,
-            container: "adjustment-layer".to_string(),
-            video_streams: Vec::new(),
-            audio_streams: Vec::new(),
-            has_video: false,
-            has_audio: false,
-        }
-    }
+    for stream in input.streams() {
+        let params = stream.parameters();
+        match params.medium() {
+            ffmpeg::media::Type::Video => {
+                let stream_duration =
+                    duration_from_stream_ticks(stream.duration(), stream.time_base());
+                let mut color_metadata_hints = collect_color_metadata_hints(
+                    VideoColorMetadataHintScope::Stream,
+                    &stream.metadata(),
+                );
+                color_metadata_hints.extend(container_color_hints.clone());
+                color_metadata_hints.extend(file_name_color_hint.clone());
+                color_metadata_hints.sort_by(metadata_hint_diagnostic_order);
+                let hdr_metadata = collect_hdr_metadata_summaries(&stream);
+                let mut width = 0;
+                let mut height = 0;
+                let mut pixel_format = PixelFormat::Yuv420p;
+                let mut pixel_format_proven = false;
+                let mut bit_depth = 8;
+                let mut has_alpha = false;
 
-    pub fn synthetic_solid_color() -> Self {
-        Self {
-            path: PathBuf::from("mondrian://solid-color"),
-            duration: Duration::ZERO,
-            file_size: 0,
-            container: "solid-color".to_string(),
-            video_streams: Vec::new(),
-            audio_streams: Vec::new(),
-            has_video: false,
-            has_audio: false,
-        }
-    }
-
-    /// 探针媒体文件（同步，通过 FFmpeg AVFormatContext）
-    ///
-    /// # 注意
-    /// 此函数在后台线程调用，避免阻塞 UI 线程。
-    pub fn probe(path: &Path) -> mondrian_core::Result<Self> {
-        let started_at = Instant::now();
-        tracing::info!("Probing media file: {:?}", path);
-
-        if !path.exists() {
-            return Err(mondrian_core::MondrianError::MediaOpen {
-                path: path.display().to_string(),
-                reason: "文件不存在".to_string(),
-            });
-        }
-
-        let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-
-        crate::ffmpeg_runtime::ensure_ffmpeg_initialized(path)?;
-
-        let input =
-            ffmpeg::format::input(path).map_err(|e| mondrian_core::MondrianError::MediaOpen {
-                path: path.display().to_string(),
-                reason: e.to_string(),
-            })?;
-
-        let duration = if input.duration() > 0 {
-            Duration::from_micros(input.duration() as u64)
-        } else {
-            Duration::ZERO
-        };
-
-        let container = input.format().name().to_lowercase();
-        let container_color_hints =
-            collect_color_metadata_hints(VideoColorMetadataHintScope::Container, &input.metadata());
-        let file_name_color_hint =
-            path.file_name().and_then(|file_name| file_name.to_str()).and_then(|file_name| {
-                parse_video_color_metadata_hint(
-                    VideoColorMetadataHintScope::FileName,
-                    "filename",
-                    file_name,
-                )
-            });
-
-        let mut video_streams = Vec::new();
-        let mut audio_streams = Vec::new();
-
-        for stream in input.streams() {
-            let params = stream.parameters();
-            match params.medium() {
-                ffmpeg::media::Type::Video => {
-                    let stream_duration =
-                        duration_from_stream_ticks(stream.duration(), stream.time_base());
-                    let mut color_metadata_hints = collect_color_metadata_hints(
-                        VideoColorMetadataHintScope::Stream,
-                        &stream.metadata(),
-                    );
-                    color_metadata_hints.extend(container_color_hints.clone());
-                    color_metadata_hints.extend(file_name_color_hint.clone());
-                    let hdr_metadata = collect_hdr_metadata_summaries(&stream);
-                    let mut width = 0;
-                    let mut height = 0;
-                    let mut pixel_format = PixelFormat::Yuv420p;
-                    let mut pixel_format_proven = false;
-                    let mut bit_depth = 8;
-                    let mut has_alpha = false;
-
-                    if let Ok(context) =
-                        ffmpeg::codec::context::Context::from_parameters(params.clone())
-                    {
-                        if let Ok(decoder) = context.decoder().video() {
-                            width = decoder.width();
-                            height = decoder.height();
-                            if let Some(probed_pixel_format) = map_pixel_format(decoder.format()) {
-                                pixel_format = probed_pixel_format;
-                                pixel_format_proven = true;
-                            }
-                            let color_range =
-                                decoded_video_range_from_ffmpeg(decoder.color_range());
-                            bit_depth = pixel_format.bit_depth();
-                            has_alpha = pixel_format.has_alpha();
-                            let raw_color_metadata = capture_color_metadata(
-                                decoder.color_primaries(),
-                                decoder.color_transfer_characteristic(),
-                                decoder.color_space(),
-                            );
-                            let color_interpretation = detect_color_space_from_metadata(
-                                &raw_color_metadata,
-                                &color_metadata_hints,
-                                icc_color_profile_hint(&hdr_metadata).as_ref(),
-                            );
-                            let detected_color_space = color_interpretation.color_space;
-                            let color_space_source = color_interpretation.source;
-                            let color_detection_method = color_interpretation.method;
-                            let (frame_rate, frame_rate_proven) =
-                                map_rational(stream.avg_frame_rate());
-                            video_streams.push(VideoStreamInfo {
-                                index: stream.index() as u32,
-                                codec: map_video_codec(params.id()),
-                                duration: stream_duration,
-                                codec_profile: map_video_codec_profile(decoder.profile()),
-                                width,
-                                height,
-                                frame_rate,
-                                frame_rate_proven,
+                if let Ok(context) =
+                    ffmpeg::codec::context::Context::from_parameters(params.clone())
+                {
+                    if let Ok(decoder) = context.decoder().video() {
+                        width = decoder.width();
+                        height = decoder.height();
+                        if let Some(probed_pixel_format) = map_pixel_format(decoder.format()) {
+                            pixel_format = probed_pixel_format;
+                            pixel_format_proven = true;
+                        }
+                        let color_range = decoded_video_range_from_ffmpeg(decoder.color_range());
+                        bit_depth = pixel_format.bit_depth();
+                        has_alpha = pixel_format.has_alpha();
+                        let raw_color_metadata = capture_color_metadata(
+                            decoder.color_primaries(),
+                            decoder.color_transfer_characteristic(),
+                            decoder.color_space(),
+                        );
+                        let color_interpretation = detect_color_space_from_metadata(
+                            &raw_color_metadata,
+                            &color_metadata_hints,
+                            icc_color_profile_hint(&hdr_metadata).as_ref(),
+                            pixel_format_proven.then_some(ProvenVideoSampling {
                                 pixel_format,
-                                pixel_format_proven,
-                                color_range,
-                                detected_color_space,
-                                color_interpretation,
-                                color_space_source,
-                                color_detection_method,
-                                color_metadata: Some(raw_color_metadata),
-                                color_metadata_hints,
-                                hdr_metadata,
                                 bit_depth,
                                 has_alpha,
-                                avg_bitrate: 0,
-                                total_frames: if stream.frames() > 0 {
-                                    Some(stream.frames() as u64)
-                                } else {
-                                    None
-                                },
-                            });
-                            continue;
-                        }
+                            }),
+                        );
+                        let (frame_rate, frame_rate_proven) = map_rational(stream.avg_frame_rate());
+                        video_streams.push(VideoStreamInfo {
+                            index: stream.index() as u32,
+                            codec: map_video_codec(params.id()),
+                            duration: stream_duration,
+                            codec_profile: map_video_codec_profile(decoder.profile()),
+                            width,
+                            height,
+                            frame_rate,
+                            frame_rate_proven,
+                            pixel_format,
+                            pixel_format_proven,
+                            color_range,
+                            color_interpretation,
+                            color_metadata: Some(raw_color_metadata),
+                            color_metadata_hints,
+                            hdr_metadata,
+                            bit_depth,
+                            has_alpha,
+                            avg_bitrate: 0,
+                            total_frames: if stream.frames() > 0 {
+                                Some(stream.frames() as u64)
+                            } else {
+                                None
+                            },
+                        });
+                        continue;
                     }
-
-                    let (frame_rate, frame_rate_proven) = map_rational(stream.avg_frame_rate());
-                    let total_frames = if stream.frames() > 0 {
-                        Some(stream.frames() as u64)
-                    } else {
-                        None
-                    };
-
-                    video_streams.push(VideoStreamInfo {
-                        index: stream.index() as u32,
-                        codec: map_video_codec(params.id()),
-                        duration: stream_duration,
-                        codec_profile: VideoCodecProfile::Unknown,
-                        width,
-                        height,
-                        frame_rate,
-                        frame_rate_proven,
-                        pixel_format,
-                        pixel_format_proven,
-                        color_range: DecodedVideoRange::Unknown,
-                        detected_color_space: None,
-                        color_interpretation: DetectedColorInterpretation::decoder_unavailable(),
-                        color_space_source: VideoColorSpaceSource::DecoderUnavailable,
-                        color_detection_method: VideoColorDetectionMethod::DecoderUnavailable,
-                        color_metadata: None,
-                        color_metadata_hints,
-                        hdr_metadata,
-                        bit_depth,
-                        has_alpha,
-                        avg_bitrate: 0,
-                        total_frames,
-                    });
                 }
-                ffmpeg::media::Type::Audio => {
-                    let stream_duration =
-                        duration_from_stream_ticks(stream.duration(), stream.time_base());
-                    let mut sample_rate = 0u32;
-                    let mut channels = 0u8;
-                    let mut channel_layout = ChannelLayout::Unspecified(0);
-                    let mut bit_depth = 16u16;
 
-                    if let Ok(context) =
-                        ffmpeg::codec::context::Context::from_parameters(params.clone())
-                    {
-                        if let Ok(decoder) = context.decoder().audio() {
-                            sample_rate = decoder.rate();
-                            channels = decoder.channels() as u8;
-                            channel_layout = map_channel_layout(decoder.channel_layout(), channels);
-                            bit_depth = 16;
-                        }
-                    }
+                let (frame_rate, frame_rate_proven) = map_rational(stream.avg_frame_rate());
+                let total_frames = if stream.frames() > 0 {
+                    Some(stream.frames() as u64)
+                } else {
+                    None
+                };
 
-                    let metadata = stream.metadata();
-                    let language = normalized_stream_metadata(metadata.get("language"));
-                    let title = normalized_stream_metadata(metadata.get("title"));
-                    let stream_id = (stream.id() >= 0).then_some(stream.id());
-                    let is_default =
-                        stream.disposition().contains(ffmpeg::format::stream::Disposition::DEFAULT);
-
-                    audio_streams.push(AudioStreamInfo {
-                        index: stream.index() as u32,
-                        stream_id,
-                        language,
-                        title,
-                        is_default,
-                        codec: map_audio_codec(params.id()),
-                        duration: stream_duration,
-                        sample_rate,
-                        channels,
-                        channel_layout,
-                        bit_depth,
-                        avg_bitrate: 0,
-                    });
-                }
-                _ => {}
+                video_streams.push(VideoStreamInfo {
+                    index: stream.index() as u32,
+                    codec: map_video_codec(params.id()),
+                    duration: stream_duration,
+                    codec_profile: VideoCodecProfile::Unknown,
+                    width,
+                    height,
+                    frame_rate,
+                    frame_rate_proven,
+                    pixel_format,
+                    pixel_format_proven,
+                    color_range: DecodedVideoRange::Unknown,
+                    color_interpretation: DetectedColorInterpretation::decoder_unavailable(),
+                    color_metadata: None,
+                    color_metadata_hints,
+                    hdr_metadata,
+                    bit_depth,
+                    has_alpha,
+                    avg_bitrate: 0,
+                    total_frames,
+                });
             }
-        }
+            ffmpeg::media::Type::Audio => {
+                let stream_duration =
+                    duration_from_stream_ticks(stream.duration(), stream.time_base());
+                let mut sample_rate = 0u32;
+                let mut channels = 0u8;
+                let mut channel_layout = ChannelLayout::Unspecified(0);
+                let mut bit_depth = 16u16;
 
-        if is_picture_file_extension(path) {
-            for video in &mut video_streams {
-                if video.total_frames.is_some() {
-                    continue;
+                if let Ok(context) =
+                    ffmpeg::codec::context::Context::from_parameters(params.clone())
+                {
+                    if let Ok(decoder) = context.decoder().audio() {
+                        sample_rate = decoder.rate();
+                        channels = decoder.channels() as u8;
+                        channel_layout = map_channel_layout(decoder.channel_layout(), channels);
+                        bit_depth = 16;
+                    }
                 }
-                match probe_exactly_one_video_frame(path, video.index) {
-                    Ok(true) => video.total_frames = Some(1),
-                    Ok(false) => {}
-                    Err(reason) => {
-                        tracing::warn!(
+
+                let metadata = stream.metadata();
+                let language = normalized_stream_metadata(metadata.get("language"));
+                let title = normalized_stream_metadata(metadata.get("title"));
+                let stream_id = (stream.id() >= 0).then_some(stream.id());
+                let is_default =
+                    stream.disposition().contains(ffmpeg::format::stream::Disposition::DEFAULT);
+
+                audio_streams.push(AudioStreamInfo {
+                    index: stream.index() as u32,
+                    stream_id,
+                    language,
+                    title,
+                    is_default,
+                    codec: map_audio_codec(params.id()),
+                    duration: stream_duration,
+                    sample_rate,
+                    channels,
+                    channel_layout,
+                    bit_depth,
+                    avg_bitrate: 0,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    if is_picture_file_extension(path) {
+        for video in &mut video_streams {
+            if video.total_frames.is_some() {
+                continue;
+            }
+            match probe_exactly_one_video_frame(path, video.index) {
+                Ok(true) => video.total_frames = Some(1),
+                Ok(false) => {}
+                Err(reason) => {
+                    tracing::warn!(
                             "[media-probe] picture frame-count evidence unavailable: path={:?} stream={} reason={}",
                             path,
                             video.index,
                             reason
                         );
-                    }
                 }
             }
         }
+    }
 
-        for video in &mut video_streams {
-            if !video_stream_needs_frame_hdr_probe(video) {
-                continue;
+    for video in &mut video_streams {
+        if !video_stream_needs_frame_hdr_probe(video) {
+            continue;
+        }
+        match probe_first_frame_hdr_metadata(path, video.index) {
+            Ok(frame_metadata) => {
+                merge_hdr_metadata(&mut video.hdr_metadata, frame_metadata);
             }
-            match probe_first_frame_hdr_metadata(path, video.index) {
-                Ok(frame_metadata) => {
-                    merge_hdr_metadata(&mut video.hdr_metadata, frame_metadata);
-                }
-                Err(reason) => {
-                    tracing::warn!(
+            Err(reason) => {
+                tracing::warn!(
                         "[media-probe] first-frame HDR metadata unavailable: path={:?} stream={} reason={}",
                         path,
                         video.index,
                         reason
                     );
-                }
             }
         }
-
-        let info = Self {
-            path: path.to_path_buf(),
-            duration,
-            file_size,
-            container,
-            has_video: !video_streams.is_empty(),
-            has_audio: !audio_streams.is_empty(),
-            video_streams,
-            audio_streams,
-        };
-
-        let elapsed_ms = started_at.elapsed().as_millis() as u64;
-        if elapsed_ms >= media_probe_slow_threshold_ms() {
-            tracing::warn!(
-                "[media-probe] slow probe: {}ms path={:?} has_video={} has_audio={} streams(v/a)={}/{}",
-                elapsed_ms,
-                path,
-                info.has_video,
-                info.has_audio,
-                info.video_streams.len(),
-                info.audio_streams.len(),
-            );
-        } else {
-            tracing::info!("[media-probe] done: {}ms path={:?}", elapsed_ms, path);
-        }
-
-        Ok(info)
     }
 
-    /// 获取主要视频流（第一个视频流）
-    pub fn primary_video(&self) -> Option<&VideoStreamInfo> {
-        self.video_streams.first()
+    let info = MediaProbeSnapshot {
+        duration,
+        file_size,
+        container,
+        has_video: !video_streams.is_empty(),
+        has_audio: !audio_streams.is_empty(),
+        video_streams,
+        audio_streams,
+    };
+
+    let elapsed_ms = started_at.elapsed().as_millis() as u64;
+    if elapsed_ms >= media_probe_slow_threshold_ms() {
+        tracing::warn!(
+            "[media-probe] slow probe: {}ms path={:?} has_video={} has_audio={} streams(v/a)={}/{}",
+            elapsed_ms,
+            path,
+            info.has_video,
+            info.has_audio,
+            info.video_streams.len(),
+            info.audio_streams.len(),
+        );
+    } else {
+        tracing::info!("[media-probe] done: {}ms path={:?}", elapsed_ms, path);
     }
 
-    /// 获取主要音频流（第一个音频流）
-    pub fn primary_audio(&self) -> Option<&AudioStreamInfo> {
-        self.audio_streams.first()
-    }
-
-    /// 获取视频总帧数（估算）
-    pub fn estimated_frames(&self) -> Option<u64> {
-        let video = self.primary_video()?;
-        let fps = video.frame_rate.to_f64();
-        let secs = self.duration.as_secs_f64();
-        Some((secs * fps).ceil() as u64)
-    }
+    Ok(info)
 }
 
 #[cfg(test)]
@@ -1461,15 +771,33 @@ fn detect_color_space(
     matrix: ffmpeg::util::color::Space,
 ) -> DetectedColorInterpretation {
     let metadata = capture_color_metadata(primaries, transfer, matrix);
-    detect_color_space_from_metadata(&metadata, &[], None)
+    let pixel_format = if matrix == ffmpeg::util::color::Space::RGB {
+        PixelFormat::Rgb24
+    } else {
+        PixelFormat::Yuv420p
+    };
+    detect_color_space_from_metadata(
+        &metadata,
+        &[],
+        None,
+        Some(ProvenVideoSampling {
+            pixel_format,
+            bit_depth: pixel_format.bit_depth(),
+            has_alpha: pixel_format.has_alpha(),
+        }),
+    )
 }
 
 fn detect_color_space_from_metadata(
     metadata: &VideoColorMetadata,
     metadata_hints: &[VideoColorMetadataHint],
     icc_profile: Option<&IccColorProfileHint>,
+    sampling: Option<ProvenVideoSampling>,
 ) -> DetectedColorInterpretation {
-    let exact_cicp = exact_cicp_color_space(metadata);
+    let mut canonical_metadata_hints = metadata_hints.to_vec();
+    canonical_metadata_hints.sort_by(metadata_hint_diagnostic_order);
+    let metadata_hints = canonical_metadata_hints.as_slice();
+    let exact_cicp = metadata.exact_cicp_candidate_for_sampling(sampling);
     let hinted_cicp = ColorSpace::from_ffmpeg_tag_hints(
         metadata.primaries.name.as_deref(),
         metadata.transfer.name.as_deref(),
@@ -1478,15 +806,78 @@ fn detect_color_space_from_metadata(
     let cicp_color_space = exact_cicp.or(hinted_cicp);
     let unresolved_cicp = UnresolvedCicpMetadata::from_metadata(metadata);
 
-    if let Some((selected_index, selected_hint)) = metadata_hints
-        .iter()
-        .enumerate()
-        .filter(|(_, hint)| metadata_hint_is_explicit_declaration(hint))
-        .min_by_key(|(index, hint)| (metadata_hint_scope_priority(hint.scope), *index))
+    let declaration_resolution = resolve_video_color_metadata_declarations(metadata_hints);
+    if let VideoColorMetadataDeclarationResolution::Conflicting { scope } = declaration_resolution {
+        let Some((selected_index, selected_hint)) = metadata_hints
+            .iter()
+            .enumerate()
+            .filter(|(_, hint)| hint.scope == scope && hint.is_executable_declaration())
+            .min_by(|(_, left), (_, right)| metadata_hint_diagnostic_order(left, right))
+        else {
+            return unresolved_color_interpretation(
+                metadata,
+                metadata_hints,
+                icc_profile,
+                unresolved_cicp,
+            );
+        };
+        let color_space = selected_hint.detected_color_space;
+        let mut ignored = metadata_hints
+            .iter()
+            .enumerate()
+            .filter(|(index, hint)| {
+                *index != selected_index && hint.detected_color_space != color_space
+            })
+            .map(|(_, hint)| hint.clone())
+            .collect::<Vec<_>>();
+        ignored.sort_by(metadata_hint_diagnostic_order);
+        let mut interpretation = DetectedColorInterpretation {
+            candidate_color_space: Some(color_space),
+            confidence: VideoColorInterpretationConfidence::Medium,
+            source: VideoColorSpaceSource::Metadata,
+            method: VideoColorDetectionMethod::MetadataHint,
+            evidence: metadata_hints.iter().map(metadata_hint_evidence).collect(),
+            warnings: vec![VideoColorInterpretationWarning::MultipleMetadataHints {
+                selected: selected_hint.clone(),
+                ignored,
+            }],
+            user_overridable: true,
+        };
+        append_icc_profile_evidence_and_warnings(
+            &mut interpretation,
+            icc_profile,
+            cicp_color_space,
+        );
+        if cicp_color_space.is_none() && unresolved_cicp == UnresolvedCicpMetadata::Unsupported {
+            unresolved_cicp.append_evidence(&mut interpretation.evidence, metadata);
+            interpretation.warnings.push(unresolved_cicp.warning());
+        }
+        return interpretation;
+    }
+
+    if let VideoColorMetadataDeclarationResolution::Unique { scope, color_space } =
+        declaration_resolution
     {
+        let Some((selected_index, selected_hint)) = metadata_hints
+            .iter()
+            .enumerate()
+            .filter(|(_, hint)| {
+                hint.scope == scope
+                    && hint.detected_color_space == color_space
+                    && hint.is_executable_declaration()
+            })
+            .min_by(|(_, left), (_, right)| metadata_hint_diagnostic_order(left, right))
+        else {
+            return unresolved_color_interpretation(
+                metadata,
+                metadata_hints,
+                icc_profile,
+                unresolved_cicp,
+            );
+        };
         let color_space = selected_hint.detected_color_space;
         let mut interpretation = DetectedColorInterpretation {
-            color_space: Some(color_space),
+            candidate_color_space: Some(color_space),
             confidence: VideoColorInterpretationConfidence::High,
             source: VideoColorSpaceSource::Metadata,
             method: VideoColorDetectionMethod::MetadataHint,
@@ -1499,7 +890,7 @@ fn detect_color_space_from_metadata(
             icc_profile,
             cicp_color_space,
         );
-        let conflicting_hints = metadata_hints
+        let mut conflicting_hints = metadata_hints
             .iter()
             .enumerate()
             .filter(|(index, hint)| {
@@ -1507,6 +898,7 @@ fn detect_color_space_from_metadata(
             })
             .map(|(_, hint)| hint.clone())
             .collect::<Vec<_>>();
+        conflicting_hints.sort_by(metadata_hint_diagnostic_order);
         if !conflicting_hints.is_empty() {
             interpretation
                 .warnings
@@ -1540,7 +932,7 @@ fn detect_color_space_from_metadata(
         }];
         evidence.extend(metadata_hints.iter().map(metadata_hint_evidence));
         let mut interpretation = DetectedColorInterpretation {
-            color_space: Some(color_space),
+            candidate_color_space: Some(color_space),
             confidence: VideoColorInterpretationConfidence::High,
             source: VideoColorSpaceSource::Metadata,
             method: VideoColorDetectionMethod::CicpTags,
@@ -1572,7 +964,7 @@ fn detect_color_space_from_metadata(
         }];
         evidence.extend(metadata_hints.iter().map(metadata_hint_evidence));
         let mut interpretation = DetectedColorInterpretation {
-            color_space: Some(color_space),
+            candidate_color_space: Some(color_space),
             confidence: VideoColorInterpretationConfidence::Medium,
             source: VideoColorSpaceSource::Metadata,
             method: VideoColorDetectionMethod::CicpTags,
@@ -1606,7 +998,7 @@ fn detect_color_space_from_metadata(
             unresolved_cicp.append_evidence(&mut evidence, metadata);
             evidence.extend(metadata_hints.iter().map(metadata_hint_evidence));
             let mut interpretation = DetectedColorInterpretation {
-                color_space: Some(color_space),
+                candidate_color_space: Some(color_space),
                 confidence: VideoColorInterpretationConfidence::Medium,
                 source: VideoColorSpaceSource::Metadata,
                 method: VideoColorDetectionMethod::IccProfile,
@@ -1627,7 +1019,7 @@ fn detect_color_space_from_metadata(
             let mut evidence = vec![icc_profile_evidence(icc_profile)];
             unresolved_cicp.append_evidence(&mut evidence, metadata);
             let mut interpretation = DetectedColorInterpretation {
-                color_space: None,
+                candidate_color_space: None,
                 confidence: VideoColorInterpretationConfidence::None,
                 source: unresolved_cicp.source(),
                 method: unresolved_cicp.method(),
@@ -1654,10 +1046,30 @@ fn detect_color_space_from_metadata(
         );
     }
 
-    let mut evidence = Vec::new();
+    unresolved_color_interpretation(metadata, metadata_hints, icc_profile, unresolved_cicp)
+}
+
+fn metadata_hint_diagnostic_order(
+    left: &VideoColorMetadataHint,
+    right: &VideoColorMetadataHint,
+) -> std::cmp::Ordering {
+    metadata_hint_scope_priority(left.scope)
+        .cmp(&metadata_hint_scope_priority(right.scope))
+        .then_with(|| left.key.cmp(&right.key))
+        .then_with(|| left.value.cmp(&right.value))
+        .then_with(|| (left.detected_color_space as u8).cmp(&(right.detected_color_space as u8)))
+}
+
+fn unresolved_color_interpretation(
+    metadata: &VideoColorMetadata,
+    metadata_hints: &[VideoColorMetadataHint],
+    icc_profile: Option<&IccColorProfileHint>,
+    unresolved_cicp: UnresolvedCicpMetadata,
+) -> DetectedColorInterpretation {
+    let mut evidence = metadata_hints.iter().map(metadata_hint_evidence).collect::<Vec<_>>();
     unresolved_cicp.append_evidence(&mut evidence, metadata);
     let mut interpretation = DetectedColorInterpretation {
-        color_space: None,
+        candidate_color_space: None,
         confidence: VideoColorInterpretationConfidence::None,
         source: unresolved_cicp.source(),
         method: unresolved_cicp.method(),
@@ -1679,7 +1091,7 @@ fn descriptive_metadata_hint_interpretation(
     let mut evidence = metadata_hints.iter().map(metadata_hint_evidence).collect::<Vec<_>>();
     unresolved_cicp.append_evidence(&mut evidence, metadata);
     let mut interpretation = DetectedColorInterpretation {
-        color_space: Some(selected_hint.detected_color_space),
+        candidate_color_space: Some(selected_hint.detected_color_space),
         confidence: VideoColorInterpretationConfidence::Low,
         source: VideoColorSpaceSource::Metadata,
         method: VideoColorDetectionMethod::MetadataHint,
@@ -1771,13 +1183,15 @@ impl UnresolvedCicpMetadata {
 /// Interpret structured video color metadata without applying project policy.
 ///
 /// This entry point is shared by decoder integrations that already captured
-/// CICP tags and acquisition metadata hints. Missing metadata remains unresolved;
-/// the timeline's missing-metadata policy owns any later assumption.
+/// CICP tags, proven physical sampling when available, and acquisition metadata
+/// hints. Missing or unproven facts remain unresolved; the timeline's
+/// missing-metadata policy owns any later assumption.
 pub fn interpret_video_color_metadata(
     metadata: &VideoColorMetadata,
+    sampling: Option<ProvenVideoSampling>,
     metadata_hints: &[VideoColorMetadataHint],
 ) -> DetectedColorInterpretation {
-    detect_color_space_from_metadata(metadata, metadata_hints, None)
+    detect_color_space_from_metadata(metadata, metadata_hints, None, sampling)
 }
 
 fn append_icc_profile_evidence_and_warnings(
@@ -1826,33 +1240,13 @@ fn append_unmapped_icc_warning(
         });
 }
 
-impl DetectedColorInterpretation {
-    fn decoder_unavailable() -> Self {
-        Self {
-            color_space: None,
-            confidence: VideoColorInterpretationConfidence::None,
-            source: VideoColorSpaceSource::DecoderUnavailable,
-            method: VideoColorDetectionMethod::DecoderUnavailable,
-            evidence: vec![VideoColorInterpretationEvidence::DecoderUnavailable],
-            warnings: vec![VideoColorInterpretationWarning::DecoderUnavailable],
-            user_overridable: true,
-        }
-    }
-}
-
-fn exact_cicp_color_space(metadata: &VideoColorMetadata) -> Option<ColorSpace> {
-    ColorSpace::from_ffmpeg_colorimetry(
-        metadata.primaries.name.as_deref()?,
-        metadata.transfer.name.as_deref()?,
-    )
-}
-
 fn metadata_hint_evidence(hint: &VideoColorMetadataHint) -> VideoColorInterpretationEvidence {
     VideoColorInterpretationEvidence::MetadataHint {
         scope: hint.scope,
         key: hint.key.clone(),
         value: hint.value.clone(),
         detected_color_space: hint.detected_color_space,
+        authority: hint.authority,
     }
 }
 
@@ -1873,22 +1267,6 @@ fn lower_priority_metadata_hints_warning(
             ignored,
         },
     )
-}
-
-fn metadata_hint_is_explicit_declaration(hint: &VideoColorMetadataHint) -> bool {
-    const DECLARATION_KEY_SUFFIXES: [&str; 9] = [
-        "cameraprofile",
-        "cameralog",
-        "cameracolorspace",
-        "colorprofile",
-        "colorspace",
-        "gammagamut",
-        "inputcolorspace",
-        "logprofile",
-        "sourcecolorspace",
-    ];
-    let key = normalize_metadata_hint_text(&hint.key);
-    DECLARATION_KEY_SUFFIXES.iter().any(|suffix| key.ends_with(suffix))
 }
 
 fn metadata_hint_scope_priority(scope: VideoColorMetadataHintScope) -> u8 {
@@ -1975,7 +1353,29 @@ pub fn parse_video_color_metadata_hint(
         key: key.to_string(),
         value: value.to_string(),
         detected_color_space,
+        authority: metadata_hint_authority(scope, key),
     })
+}
+
+fn metadata_hint_authority(
+    scope: VideoColorMetadataHintScope,
+    key: &str,
+) -> VideoColorMetadataHintAuthority {
+    let declaration = if key.eq_ignore_ascii_case("com.sony.colorProfile") {
+        Some(VideoColorMetadataDeclaration::SonyColorProfile)
+    } else if key.eq_ignore_ascii_case("com.apple.proapps.cameraLog") {
+        Some(VideoColorMetadataDeclaration::AppleProAppsCameraLog)
+    } else {
+        None
+    };
+
+    match (scope, declaration) {
+        (
+            VideoColorMetadataHintScope::Container | VideoColorMetadataHintScope::Stream,
+            Some(declaration),
+        ) => VideoColorMetadataHintAuthority::SourceDeclaration(declaration),
+        _ => VideoColorMetadataHintAuthority::DiagnosticSuggestion,
+    }
 }
 
 fn normalize_metadata_hint_text(value: &str) -> String {
@@ -2083,7 +1483,7 @@ fn probe_exactly_one_video_frame(path: &Path, stream_index: u32) -> Result<bool,
 }
 
 fn video_stream_needs_frame_hdr_probe(stream: &VideoStreamInfo) -> bool {
-    stream.detected_color_space.is_some_and(ColorSpace::is_hdr)
+    stream.executable_color_space().is_some_and(ColorSpace::is_hdr)
         || stream.hdr_metadata.iter().any(|metadata| {
             matches!(
                 metadata.kind,
@@ -2525,6 +1925,53 @@ mod tests {
     use super::*;
     use ffmpeg::util::color::{Primaries, Space, TransferCharacteristic};
 
+    fn cicp_metadata_from_interpretation(
+        interpretation: &DetectedColorInterpretation,
+    ) -> Option<VideoColorMetadata> {
+        interpretation.evidence.iter().find_map(|evidence| match evidence {
+            VideoColorInterpretationEvidence::ExactCicpTags {
+                primaries, transfer, matrix, ..
+            }
+            | VideoColorInterpretationEvidence::PartialCicpTags {
+                primaries,
+                transfer,
+                matrix,
+                ..
+            } => Some(VideoColorMetadata {
+                primaries: primaries.clone(),
+                transfer: transfer.clone(),
+                matrix: matrix.clone(),
+            }),
+            _ => None,
+        })
+    }
+
+    fn executable_for_yuv(interpretation: &DetectedColorInterpretation) -> Option<ColorSpace> {
+        let metadata = cicp_metadata_from_interpretation(interpretation)?;
+        interpretation.executable_color_space_from_probe(Some(yuv_sampling()), Some(&metadata), &[])
+    }
+
+    fn executable_for_rgb(interpretation: &DetectedColorInterpretation) -> Option<ColorSpace> {
+        let metadata = cicp_metadata_from_interpretation(interpretation)?;
+        interpretation.executable_color_space_from_probe(Some(rgb_sampling()), Some(&metadata), &[])
+    }
+
+    fn yuv_sampling() -> ProvenVideoSampling {
+        ProvenVideoSampling {
+            pixel_format: PixelFormat::Yuv420p,
+            bit_depth: 8,
+            has_alpha: false,
+        }
+    }
+
+    fn rgb_sampling() -> ProvenVideoSampling {
+        ProvenVideoSampling {
+            pixel_format: PixelFormat::Rgb24,
+            bit_depth: 8,
+            has_alpha: false,
+        }
+    }
+
     #[test]
     fn picture_probe_proves_one_frame_when_png_metadata_omits_count() {
         const ONE_PIXEL_PNG: &[u8] = &[
@@ -2538,7 +1985,7 @@ mod tests {
         let path = root.path().join("single.png");
         std::fs::write(&path, ONE_PIXEL_PNG).expect("write PNG fixture");
 
-        let info = MediaInfo::probe(&path).expect("probe PNG");
+        let info = probe_media_info(&path).expect("probe PNG");
 
         assert_eq!(
             info.primary_video().and_then(|video| video.total_frames),
@@ -2593,7 +2040,7 @@ mod tests {
     fn probe_preserves_primary_video_stream_duration() {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures/small/h264-bframes.mp4");
-        let info = MediaInfo::probe(&path).expect("probe checked-in video fixture");
+        let info = probe_media_info(&path).expect("probe checked-in video fixture");
         let duration = info
             .primary_video()
             .and_then(|video| video.duration)
@@ -2642,7 +2089,8 @@ mod tests {
             TransferCharacteristic::SMPTE2084,
             Space::BT2020NCL,
         );
-        assert_eq!(pq.color_space, Some(ColorSpace::Rec2100Pq));
+        assert_eq!(pq.candidate_color_space, Some(ColorSpace::Rec2100Pq));
+        assert_eq!(executable_for_yuv(&pq), Some(ColorSpace::Rec2100Pq));
         assert_eq!(pq.confidence, VideoColorInterpretationConfidence::High);
         assert_eq!(pq.source, VideoColorSpaceSource::Metadata);
         assert_eq!(pq.method, VideoColorDetectionMethod::CicpTags);
@@ -2659,7 +2107,8 @@ mod tests {
             TransferCharacteristic::ARIB_STD_B67,
             Space::BT2020NCL,
         );
-        assert_eq!(hlg.color_space, Some(ColorSpace::Rec2100Hlg));
+        assert_eq!(hlg.candidate_color_space, Some(ColorSpace::Rec2100Hlg));
+        assert_eq!(executable_for_yuv(&hlg), Some(ColorSpace::Rec2100Hlg));
         assert_eq!(hlg.confidence, VideoColorInterpretationConfidence::High);
         assert_eq!(hlg.source, VideoColorSpaceSource::Metadata);
         assert_eq!(hlg.method, VideoColorDetectionMethod::CicpTags);
@@ -2672,9 +2121,10 @@ mod tests {
             TransferCharacteristic::SMPTE2084,
             Space::RGB,
         );
-        let detection = detect_color_space_from_metadata(&metadata, &[], None);
+        let detection =
+            detect_color_space_from_metadata(&metadata, &[], None, Some(rgb_sampling()));
 
-        assert_eq!(detection.color_space, None);
+        assert_eq!(detection.candidate_color_space, None);
         assert_eq!(
             detection.confidence,
             VideoColorInterpretationConfidence::None
@@ -2703,10 +2153,8 @@ mod tests {
         )));
 
         let diagnostic = VideoColorDiagnostic {
-            detected_color_space: detection.color_space,
             color_range: DecodedVideoRange::Full,
-            source: detection.source,
-            method: detection.method,
+            sampling: None,
             interpretation: detection,
             metadata: Some(metadata),
             metadata_hints: Vec::new(),
@@ -2738,9 +2186,16 @@ mod tests {
         )
         .expect("declared camera profile");
 
-        let detection = interpret_video_color_metadata(&metadata, std::slice::from_ref(&hint));
+        let detection = interpret_video_color_metadata(
+            &metadata,
+            Some(rgb_sampling()),
+            std::slice::from_ref(&hint),
+        );
 
-        assert_eq!(detection.color_space, Some(ColorSpace::ArriLogC4WideGamut4));
+        assert_eq!(
+            detection.candidate_color_space,
+            Some(ColorSpace::ArriLogC4WideGamut4)
+        );
         assert_eq!(detection.source, VideoColorSpaceSource::Metadata);
         assert_eq!(detection.method, VideoColorDetectionMethod::MetadataHint);
         assert!(detection
@@ -2760,7 +2215,7 @@ mod tests {
             Space::RGB,
         );
 
-        assert_eq!(detection.color_space, None);
+        assert_eq!(detection.candidate_color_space, None);
         assert_eq!(
             detection.confidence,
             VideoColorInterpretationConfidence::None
@@ -2780,9 +2235,14 @@ mod tests {
         let detection =
             detect_color_space(Primaries::BT709, TransferCharacteristic::BT709, Space::RGB);
 
-        assert_eq!(detection.color_space, Some(ColorSpace::Rec709));
+        assert_eq!(detection.candidate_color_space, Some(ColorSpace::Rec709));
         assert_eq!(detection.source, VideoColorSpaceSource::Metadata);
         assert_eq!(detection.method, VideoColorDetectionMethod::CicpTags);
+        assert_eq!(
+            executable_for_rgb(&detection),
+            Some(ColorSpace::Rec709),
+            "complete CICP plus proven RGB sampling is executable without a YCbCr matrix"
+        );
     }
 
     #[test]
@@ -2792,7 +2252,7 @@ mod tests {
             TransferCharacteristic::GAMMA28,
             Space::BT470BG,
         );
-        assert_eq!(pal.color_space, Some(ColorSpace::Rec601Pal));
+        assert_eq!(pal.candidate_color_space, Some(ColorSpace::Rec601Pal));
         assert_eq!(pal.confidence, VideoColorInterpretationConfidence::High);
 
         let ntsc = detect_color_space(
@@ -2800,7 +2260,7 @@ mod tests {
             TransferCharacteristic::SMPTE170M,
             Space::SMPTE170M,
         );
-        assert_eq!(ntsc.color_space, Some(ColorSpace::Rec601Ntsc));
+        assert_eq!(ntsc.candidate_color_space, Some(ColorSpace::Rec601Ntsc));
         assert_eq!(ntsc.confidence, VideoColorInterpretationConfidence::High);
     }
 
@@ -2812,13 +2272,81 @@ mod tests {
             Space::BT709,
         );
 
-        assert_eq!(detection.color_space, Some(ColorSpace::Rec709));
+        assert_eq!(detection.candidate_color_space, Some(ColorSpace::Rec709));
         assert_eq!(
             detection.confidence,
             VideoColorInterpretationConfidence::Medium
         );
         assert_eq!(detection.source, VideoColorSpaceSource::Metadata);
         assert_eq!(detection.method, VideoColorDetectionMethod::CicpTags);
+        assert!(matches!(
+            detection.evidence.first(),
+            Some(VideoColorInterpretationEvidence::PartialCicpTags {
+                detected_color_space: ColorSpace::Rec709,
+                ..
+            })
+        ));
+        assert_eq!(executable_for_rgb(&detection), None);
+
+        let mut unproven = detection.clone();
+        unproven.evidence.clear();
+        assert_eq!(
+            executable_for_rgb(&unproven),
+            None,
+            "partial CICP remains non-executable regardless of confidence"
+        );
+        let mut contradictory = detection;
+        contradictory.candidate_color_space = Some(ColorSpace::Rec2020);
+        assert_eq!(executable_for_rgb(&contradictory), None);
+    }
+
+    #[test]
+    fn complete_colorimetry_requires_explicit_supported_matrix_for_yuv() {
+        let metadata = capture_color_metadata(
+            Primaries::BT709,
+            TransferCharacteristic::BT709,
+            Space::Unspecified,
+        );
+        let detection = detect_color_space_from_metadata(&metadata, &[], None, None);
+
+        assert_eq!(detection.candidate_color_space, Some(ColorSpace::Rec709));
+        assert_eq!(detection.method, VideoColorDetectionMethod::CicpTags);
+        assert_eq!(
+            detection.executable_color_space_from_probe(
+                Some(ProvenVideoSampling {
+                    pixel_format: PixelFormat::Yuv420p,
+                    bit_depth: 8,
+                    has_alpha: false,
+                }),
+                Some(&metadata),
+                &[],
+            ),
+            None
+        );
+
+        let rgb_sampling = ProvenVideoSampling {
+            pixel_format: PixelFormat::Rgb24,
+            bit_depth: 8,
+            has_alpha: false,
+        };
+        let rgb = detect_color_space_from_metadata(&metadata, &[], None, Some(rgb_sampling));
+        assert_eq!(
+            rgb.executable_color_space_from_probe(Some(rgb_sampling), Some(&metadata), &[]),
+            Some(ColorSpace::Rec709),
+            "proven RGB sampling has no YCbCr matrix obligation"
+        );
+    }
+
+    #[test]
+    fn explicit_supported_yuv_matrix_is_independent_of_rgb_colorimetry() {
+        let detection = detect_color_space(
+            Primaries::BT709,
+            TransferCharacteristic::BT709,
+            Space::BT2020NCL,
+        );
+
+        assert_eq!(detection.candidate_color_space, Some(ColorSpace::Rec709));
+        assert_eq!(executable_for_yuv(&detection), Some(ColorSpace::Rec709));
     }
 
     #[test]
@@ -2829,7 +2357,7 @@ mod tests {
             Space::Unspecified,
         );
 
-        assert_eq!(detection.color_space, None);
+        assert_eq!(detection.candidate_color_space, None);
         assert_eq!(
             detection.confidence,
             VideoColorInterpretationConfidence::None
@@ -2854,15 +2382,26 @@ mod tests {
             profile_name: Some("Display P3".to_owned()),
         };
 
-        let detection = detect_color_space_from_metadata(&metadata, &[], Some(&icc_profile));
+        let detection = detect_color_space_from_metadata(
+            &metadata,
+            &[],
+            Some(&icc_profile),
+            Some(rgb_sampling()),
+        );
 
-        assert_eq!(detection.color_space, Some(ColorSpace::DisplayP3));
+        assert_eq!(detection.candidate_color_space, Some(ColorSpace::DisplayP3));
         assert_eq!(
             detection.confidence,
             VideoColorInterpretationConfidence::Medium
         );
         assert_eq!(detection.source, VideoColorSpaceSource::Metadata);
         assert_eq!(detection.method, VideoColorDetectionMethod::IccProfile);
+        assert_eq!(
+            detection
+                .executable_color_space_from_probe(Some(rgb_sampling()), Some(&metadata), &[],),
+            None,
+            "a profile description is not verified chromaticity/TRC evidence"
+        );
         assert!(
             detection.evidence.contains(&VideoColorInterpretationEvidence::IccProfile {
                 mapped_color_space: Some(ColorSpace::DisplayP3),
@@ -2882,8 +2421,9 @@ mod tests {
         let hint = VideoColorMetadataHint {
             scope: VideoColorMetadataHintScope::Container,
             key: "comment".to_string(),
-            value: "converted from S-Log3 / S-Gamut3.Cine".to_string(),
-            detected_color_space: ColorSpace::SonySLog3SGamut3Cine,
+            value: "converted from Apple Log".to_string(),
+            detected_color_space: ColorSpace::AppleLogBt2020,
+            authority: VideoColorMetadataHintAuthority::DiagnosticSuggestion,
         };
         let icc_profile = IccColorProfileHint {
             mapping: mondrian_core::icc::IccColorSpaceMapping::Mapped {
@@ -2897,9 +2437,10 @@ mod tests {
             &metadata,
             std::slice::from_ref(&hint),
             Some(&icc_profile),
+            Some(rgb_sampling()),
         );
 
-        assert_eq!(detection.color_space, Some(ColorSpace::DisplayP3));
+        assert_eq!(detection.candidate_color_space, Some(ColorSpace::DisplayP3));
         assert_eq!(detection.method, VideoColorDetectionMethod::IccProfile);
         assert!(detection.evidence.contains(&metadata_hint_evidence(&hint)));
         assert!(detection.warnings.contains(
@@ -2926,9 +2467,14 @@ mod tests {
             profile_name: Some("Generic Monitor Profile".to_owned()),
         };
 
-        let detection = detect_color_space_from_metadata(&metadata, &[], Some(&icc_profile));
+        let detection = detect_color_space_from_metadata(
+            &metadata,
+            &[],
+            Some(&icc_profile),
+            Some(rgb_sampling()),
+        );
 
-        assert_eq!(detection.color_space, None);
+        assert_eq!(detection.candidate_color_space, None);
         assert_eq!(
             detection.confidence,
             VideoColorInterpretationConfidence::None
@@ -2948,10 +2494,8 @@ mod tests {
         )));
 
         let diagnostic = VideoColorDiagnostic {
-            detected_color_space: detection.color_space,
             color_range: DecodedVideoRange::Unknown,
-            source: detection.source,
-            method: detection.method,
+            sampling: None,
             interpretation: detection,
             metadata: Some(metadata),
             metadata_hints: Vec::new(),
@@ -2979,6 +2523,7 @@ mod tests {
             key: "filename".to_owned(),
             value: "A001_Sony_S-Log3_S-Gamut3.Cine.mov".to_owned(),
             detected_color_space: ColorSpace::SonySLog3SGamut3Cine,
+            authority: VideoColorMetadataHintAuthority::DiagnosticSuggestion,
         };
         let icc_profile = IccColorProfileHint {
             mapping: mondrian_core::icc::IccColorSpaceMapping::Unmapped {
@@ -2992,15 +2537,24 @@ mod tests {
             &metadata,
             std::slice::from_ref(&hint),
             Some(&icc_profile),
+            Some(rgb_sampling()),
         );
 
         assert_eq!(
-            detection.color_space,
+            detection.candidate_color_space,
             Some(ColorSpace::SonySLog3SGamut3Cine)
         );
         assert_eq!(
             detection.confidence,
             VideoColorInterpretationConfidence::Low
+        );
+        assert_eq!(
+            detection.executable_color_space_from_probe(
+                Some(rgb_sampling()),
+                Some(&metadata),
+                std::slice::from_ref(&hint),
+            ),
+            None
         );
         assert!(detection.evidence.contains(&icc_profile_evidence(&icc_profile)));
         assert!(detection.warnings.iter().any(|warning| matches!(
@@ -3024,9 +2578,14 @@ mod tests {
             profile_name: Some("Display P3".to_owned()),
         };
 
-        let detection = detect_color_space_from_metadata(&metadata, &[], Some(&icc_profile));
+        let detection = detect_color_space_from_metadata(
+            &metadata,
+            &[],
+            Some(&icc_profile),
+            Some(yuv_sampling()),
+        );
 
-        assert_eq!(detection.color_space, Some(ColorSpace::Rec709));
+        assert_eq!(detection.candidate_color_space, Some(ColorSpace::Rec709));
         assert_eq!(
             detection.confidence,
             VideoColorInterpretationConfidence::High
@@ -3055,6 +2614,7 @@ mod tests {
         )
         .expect("slog3 metadata hint");
         assert_eq!(slog3.detected_color_space, ColorSpace::SonySLog3SGamut3Cine);
+        assert!(slog3.is_executable_declaration());
 
         let apple_log = parse_video_color_metadata_hint(
             VideoColorMetadataHintScope::Container,
@@ -3063,6 +2623,7 @@ mod tests {
         )
         .expect("apple log metadata hint");
         assert_eq!(apple_log.detected_color_space, ColorSpace::AppleLogBt2020);
+        assert!(apple_log.is_executable_declaration());
 
         let logc4 = parse_video_color_metadata_hint(
             VideoColorMetadataHintScope::Stream,
@@ -3071,6 +2632,58 @@ mod tests {
         )
         .expect("arri logc4 metadata hint");
         assert_eq!(logc4.detected_color_space, ColorSpace::ArriLogC4WideGamut4);
+        assert_eq!(
+            logc4.authority,
+            VideoColorMetadataHintAuthority::DiagnosticSuggestion,
+            "a generic dictionary key has no acquisition-source semantics"
+        );
+    }
+
+    #[test]
+    fn arbitrary_key_with_declaration_suffix_stays_diagnostic_only() {
+        let metadata = capture_color_metadata(
+            Primaries::Unspecified,
+            TransferCharacteristic::Unspecified,
+            Space::Unspecified,
+        );
+        let hint = parse_video_color_metadata_hint(
+            VideoColorMetadataHintScope::Stream,
+            "not_a_color_space",
+            "S-Log3 / S-Gamut3.Cine",
+        )
+        .expect("recognized value remains visible as a diagnostic candidate");
+
+        assert_eq!(
+            hint.authority,
+            VideoColorMetadataHintAuthority::DiagnosticSuggestion
+        );
+        let mut detection = interpret_video_color_metadata(
+            &metadata,
+            Some(rgb_sampling()),
+            std::slice::from_ref(&hint),
+        );
+        assert_eq!(
+            detection.candidate_color_space,
+            Some(ColorSpace::SonySLog3SGamut3Cine)
+        );
+        assert_eq!(
+            detection.executable_color_space_from_probe(
+                Some(rgb_sampling()),
+                Some(&metadata),
+                std::slice::from_ref(&hint),
+            ),
+            None
+        );
+        detection.confidence = VideoColorInterpretationConfidence::High;
+        assert_eq!(
+            detection.executable_color_space_from_probe(
+                Some(rgb_sampling()),
+                Some(&metadata),
+                std::slice::from_ref(&hint),
+            ),
+            None,
+            "confidence cannot upgrade a free-form field into execution authority"
+        );
     }
 
     #[test]
@@ -3087,15 +2700,28 @@ mod tests {
         )
         .expect("complete Sony color profile declaration");
 
-        let detection = interpret_video_color_metadata(&metadata, std::slice::from_ref(&hint));
+        let detection = interpret_video_color_metadata(
+            &metadata,
+            Some(yuv_sampling()),
+            std::slice::from_ref(&hint),
+        );
 
         assert_eq!(
-            detection.color_space,
+            detection.candidate_color_space,
             Some(ColorSpace::SonySLog3SGamut3Cine)
         );
         assert_eq!(
             detection.confidence,
             VideoColorInterpretationConfidence::High
+        );
+        assert_eq!(
+            detection.executable_color_space_from_probe(
+                Some(yuv_sampling()),
+                Some(&metadata),
+                std::slice::from_ref(&hint),
+            ),
+            Some(ColorSpace::SonySLog3SGamut3Cine),
+            "an exact namespaced declaration may override contradictory CICP color identity once the raw sampling and matrix are proven"
         );
         assert!(detection.warnings.contains(
             &VideoColorInterpretationWarning::MetadataHintOverridesCicpTags {
@@ -3191,15 +2817,27 @@ mod tests {
         )
         .expect("complete filename pair should be preserved as evidence");
 
-        let detection = interpret_video_color_metadata(&metadata, std::slice::from_ref(&hint));
+        let detection = interpret_video_color_metadata(
+            &metadata,
+            Some(yuv_sampling()),
+            std::slice::from_ref(&hint),
+        );
 
         assert_eq!(
-            detection.color_space,
+            detection.candidate_color_space,
             Some(ColorSpace::SonySLog3SGamut3Cine)
         );
         assert_eq!(
             detection.confidence,
             VideoColorInterpretationConfidence::Low
+        );
+        assert_eq!(
+            detection.executable_color_space_from_probe(
+                Some(rgb_sampling()),
+                Some(&metadata),
+                std::slice::from_ref(&hint),
+            ),
+            None
         );
         assert!(detection.warnings.contains(
             &VideoColorInterpretationWarning::DescriptiveMetadataHintInference { selected: hint }
@@ -3243,23 +2881,30 @@ mod tests {
     }
 
     #[test]
-    fn metadata_hint_overrides_cicp_delivery_tags_for_camera_log() {
+    fn exact_vendor_declaration_overrides_cicp_delivery_tags_for_camera_log() {
         let metadata = capture_color_metadata(
             Primaries::BT709,
             TransferCharacteristic::BT709,
             Space::BT709,
         );
-        let hint = VideoColorMetadataHint {
-            scope: VideoColorMetadataHintScope::Stream,
-            key: "camera_profile".to_string(),
-            value: "ARRI LogC4".to_string(),
-            detected_color_space: ColorSpace::ArriLogC4WideGamut4,
-        };
+        let hint = parse_video_color_metadata_hint(
+            VideoColorMetadataHintScope::Stream,
+            "com.sony.colorProfile",
+            "S-Log3 / S-Gamut3.Cine",
+        )
+        .expect("Sony declaration");
 
-        let detection =
-            detect_color_space_from_metadata(&metadata, std::slice::from_ref(&hint), None);
+        let detection = detect_color_space_from_metadata(
+            &metadata,
+            std::slice::from_ref(&hint),
+            None,
+            Some(yuv_sampling()),
+        );
 
-        assert_eq!(detection.color_space, Some(ColorSpace::ArriLogC4WideGamut4));
+        assert_eq!(
+            detection.candidate_color_space,
+            Some(ColorSpace::SonySLog3SGamut3Cine)
+        );
         assert_eq!(
             detection.confidence,
             VideoColorInterpretationConfidence::High
@@ -3269,7 +2914,7 @@ mod tests {
         assert!(matches!(
             detection.evidence.first(),
             Some(VideoColorInterpretationEvidence::MetadataHint {
-                detected_color_space: ColorSpace::ArriLogC4WideGamut4,
+                detected_color_space: ColorSpace::SonySLog3SGamut3Cine,
                 ..
             })
         ));
@@ -3294,11 +2939,16 @@ mod tests {
             key: "comment".to_string(),
             value: "graded from S-Log3 / S-Gamut3.Cine".to_string(),
             detected_color_space: ColorSpace::SonySLog3SGamut3Cine,
+            authority: VideoColorMetadataHintAuthority::DiagnosticSuggestion,
         };
 
-        let detection = interpret_video_color_metadata(&metadata, std::slice::from_ref(&hint));
+        let detection = interpret_video_color_metadata(
+            &metadata,
+            Some(yuv_sampling()),
+            std::slice::from_ref(&hint),
+        );
 
-        assert_eq!(detection.color_space, Some(ColorSpace::Rec709));
+        assert_eq!(detection.candidate_color_space, Some(ColorSpace::Rec709));
         assert_eq!(
             detection.confidence,
             VideoColorInterpretationConfidence::High
@@ -3313,11 +2963,9 @@ mod tests {
             }
         ));
         let diagnostic = VideoColorDiagnostic {
-            detected_color_space: detection.color_space,
             color_range: DecodedVideoRange::Unknown,
+            sampling: None,
             interpretation: detection.clone(),
-            source: detection.source,
-            method: detection.method,
             metadata: Some(metadata),
             metadata_hints: vec![hint],
             hdr_metadata: Vec::new(),
@@ -3339,17 +2987,40 @@ mod tests {
             key: "comment".to_string(),
             value: "source is S-Log3 / S-Gamut3.Cine".to_string(),
             detected_color_space: ColorSpace::SonySLog3SGamut3Cine,
+            authority: VideoColorMetadataHintAuthority::DiagnosticSuggestion,
         };
 
-        let detection = interpret_video_color_metadata(&metadata, std::slice::from_ref(&hint));
+        let mut detection = interpret_video_color_metadata(
+            &metadata,
+            Some(rgb_sampling()),
+            std::slice::from_ref(&hint),
+        );
 
         assert_eq!(
-            detection.color_space,
+            detection.candidate_color_space,
             Some(ColorSpace::SonySLog3SGamut3Cine)
         );
         assert_eq!(
             detection.confidence,
             VideoColorInterpretationConfidence::Low
+        );
+        assert_eq!(
+            detection.executable_color_space_from_probe(
+                Some(rgb_sampling()),
+                Some(&metadata),
+                std::slice::from_ref(&hint),
+            ),
+            None
+        );
+        detection.confidence = VideoColorInterpretationConfidence::High;
+        assert_eq!(
+            detection.executable_color_space_from_probe(
+                Some(rgb_sampling()),
+                Some(&metadata),
+                std::slice::from_ref(&hint),
+            ),
+            None,
+            "descriptive provenance must remain non-executable if confidence scoring changes"
         );
         assert_eq!(detection.method, VideoColorDetectionMethod::MetadataHint);
         assert!(detection.warnings.contains(
@@ -3369,28 +3040,50 @@ mod tests {
             key: "comment".to_string(),
             value: "converted from S-Log3 / S-Gamut3.Cine".to_string(),
             detected_color_space: ColorSpace::SonySLog3SGamut3Cine,
+            authority: VideoColorMetadataHintAuthority::DiagnosticSuggestion,
         };
-        let declared = VideoColorMetadataHint {
-            scope: VideoColorMetadataHintScope::Stream,
-            key: "camera_profile".to_string(),
-            value: "ARRI LogC4".to_string(),
-            detected_color_space: ColorSpace::ArriLogC4WideGamut4,
-        };
+        let declared = parse_video_color_metadata_hint(
+            VideoColorMetadataHintScope::Stream,
+            "com.sony.colorProfile",
+            "S-Log3 / S-Gamut3.Cine",
+        )
+        .expect("Sony declaration");
 
-        let detection =
-            interpret_video_color_metadata(&metadata, &[descriptive.clone(), declared.clone()]);
-
-        assert_eq!(detection.color_space, Some(ColorSpace::ArriLogC4WideGamut4));
-        assert_eq!(
-            detection.confidence,
-            VideoColorInterpretationConfidence::High
+        let forward = interpret_video_color_metadata(
+            &metadata,
+            Some(rgb_sampling()),
+            &[descriptive.clone(), declared.clone()],
         );
-        assert!(detection.warnings.contains(
-            &VideoColorInterpretationWarning::MultipleMetadataHints {
-                selected: declared,
-                ignored: vec![descriptive],
-            }
-        ));
+        let reverse = interpret_video_color_metadata(
+            &metadata,
+            Some(rgb_sampling()),
+            &[declared.clone(), descriptive.clone()],
+        );
+
+        assert_eq!(
+            forward, reverse,
+            "probe interpretation must not depend on metadata dictionary order"
+        );
+        assert_eq!(
+            forward.candidate_color_space,
+            Some(ColorSpace::SonySLog3SGamut3Cine)
+        );
+        assert_eq!(forward.confidence, VideoColorInterpretationConfidence::High);
+        assert_eq!(
+            forward.executable_color_space_from_probe(
+                Some(rgb_sampling()),
+                Some(&metadata),
+                &[descriptive.clone(), declared],
+            ),
+            Some(ColorSpace::SonySLog3SGamut3Cine)
+        );
+        assert!(
+            !forward.warnings.iter().any(|warning| matches!(
+                warning,
+                VideoColorInterpretationWarning::MultipleMetadataHints { .. }
+            )),
+            "a corroborating diagnostic comment is evidence, not an ambiguity"
+        );
     }
 
     #[test]
@@ -3405,24 +3098,123 @@ mod tests {
             key: "camera_profile".to_string(),
             value: "Apple Log".to_string(),
             detected_color_space: ColorSpace::AppleLogBt2020,
+            authority: VideoColorMetadataHintAuthority::SourceDeclaration(
+                VideoColorMetadataDeclaration::SourceColorSpace,
+            ),
         };
         let stream = VideoColorMetadataHint {
             scope: VideoColorMetadataHintScope::Stream,
             key: "camera_profile".to_string(),
             value: "ARRI LogC4".to_string(),
             detected_color_space: ColorSpace::ArriLogC4WideGamut4,
+            authority: VideoColorMetadataHintAuthority::SourceDeclaration(
+                VideoColorMetadataDeclaration::SourceColorSpace,
+            ),
         };
 
-        let detection =
-            interpret_video_color_metadata(&metadata, &[container.clone(), stream.clone()]);
+        let detection = interpret_video_color_metadata(
+            &metadata,
+            Some(yuv_sampling()),
+            &[container.clone(), stream.clone()],
+        );
 
-        assert_eq!(detection.color_space, Some(ColorSpace::ArriLogC4WideGamut4));
+        assert_eq!(
+            detection.candidate_color_space,
+            Some(ColorSpace::ArriLogC4WideGamut4)
+        );
         assert!(detection.warnings.contains(
             &VideoColorInterpretationWarning::MultipleMetadataHints {
                 selected: stream,
                 ignored: vec![container],
             }
         ));
+    }
+
+    #[test]
+    fn conflicting_stream_declarations_are_diagnostic_only_in_any_probe_order() {
+        let metadata = capture_color_metadata(
+            Primaries::BT709,
+            TransferCharacteristic::BT709,
+            Space::BT709,
+        );
+        let sony = parse_video_color_metadata_hint(
+            VideoColorMetadataHintScope::Stream,
+            "com.sony.colorProfile",
+            "S-Log3 / S-Gamut3.Cine",
+        )
+        .expect("Sony declaration");
+        let apple = parse_video_color_metadata_hint(
+            VideoColorMetadataHintScope::Stream,
+            "com.apple.proapps.cameraLog",
+            "Apple Log",
+        )
+        .expect("Apple declaration");
+
+        let forward_hints = vec![sony.clone(), apple.clone()];
+        let reverse_hints = vec![apple.clone(), sony.clone()];
+        let forward =
+            interpret_video_color_metadata(&metadata, Some(yuv_sampling()), &forward_hints);
+        let reverse =
+            interpret_video_color_metadata(&metadata, Some(yuv_sampling()), &reverse_hints);
+        assert_eq!(
+            forward.candidate_color_space, reverse.candidate_color_space,
+            "even the diagnostic representative must not depend on dictionary order"
+        );
+
+        for (hints, detection) in [(forward_hints, forward), (reverse_hints, reverse)] {
+            assert_eq!(
+                detection.confidence,
+                VideoColorInterpretationConfidence::Medium
+            );
+            assert_eq!(
+                detection.executable_color_space_from_probe(
+                    Some(yuv_sampling()),
+                    Some(&metadata),
+                    &hints,
+                ),
+                None,
+                "probe dictionary order cannot select a pixel identity"
+            );
+            assert!(detection.evidence.contains(&metadata_hint_evidence(&sony)));
+            assert!(detection.evidence.contains(&metadata_hint_evidence(&apple)));
+            assert!(detection.warnings.iter().any(|warning| matches!(
+                warning,
+                VideoColorInterpretationWarning::MultipleMetadataHints { .. }
+            )));
+        }
+    }
+
+    #[test]
+    fn agreeing_stream_declarations_merge_and_override_container_scope() {
+        let metadata = capture_color_metadata(
+            Primaries::BT709,
+            TransferCharacteristic::BT709,
+            Space::BT709,
+        );
+        let sony = parse_video_color_metadata_hint(
+            VideoColorMetadataHintScope::Stream,
+            "com.sony.colorProfile",
+            "S-Log3 / S-Gamut3.Cine",
+        )
+        .expect("Sony declaration");
+        let apple = parse_video_color_metadata_hint(
+            VideoColorMetadataHintScope::Container,
+            "com.apple.proapps.cameraLog",
+            "Apple Log",
+        )
+        .expect("Apple declaration");
+        let hints = vec![apple, sony.clone(), sony];
+
+        let detection = interpret_video_color_metadata(&metadata, Some(yuv_sampling()), &hints);
+
+        assert_eq!(
+            detection.executable_color_space_from_probe(
+                Some(yuv_sampling()),
+                Some(&metadata),
+                &hints,
+            ),
+            Some(ColorSpace::SonySLog3SGamut3Cine)
+        );
     }
 
     #[test]
@@ -3433,24 +3225,25 @@ mod tests {
             Space::Unspecified,
         );
         let hints = vec![
-            VideoColorMetadataHint {
-                scope: VideoColorMetadataHintScope::Stream,
-                key: "camera_profile".to_string(),
-                value: "S-Log3 / S-Gamut3.Cine".to_string(),
-                detected_color_space: ColorSpace::SonySLog3SGamut3Cine,
-            },
-            VideoColorMetadataHint {
-                scope: VideoColorMetadataHintScope::Container,
-                key: "camera_profile".to_string(),
-                value: "Apple Log".to_string(),
-                detected_color_space: ColorSpace::AppleLogBt2020,
-            },
+            parse_video_color_metadata_hint(
+                VideoColorMetadataHintScope::Stream,
+                "com.sony.colorProfile",
+                "S-Log3 / S-Gamut3.Cine",
+            )
+            .expect("Sony declaration"),
+            parse_video_color_metadata_hint(
+                VideoColorMetadataHintScope::Container,
+                "com.apple.proapps.cameraLog",
+                "Apple Log",
+            )
+            .expect("Apple declaration"),
         ];
 
-        let detection = detect_color_space_from_metadata(&metadata, &hints, None);
+        let detection =
+            detect_color_space_from_metadata(&metadata, &hints, None, Some(yuv_sampling()));
 
         assert_eq!(
-            detection.color_space,
+            detection.candidate_color_space,
             Some(ColorSpace::SonySLog3SGamut3Cine)
         );
         assert_eq!(detection.evidence.len(), 2);
@@ -3469,20 +3262,22 @@ mod tests {
             TransferCharacteristic::BT709,
             Space::BT709,
         );
-        let hint = VideoColorMetadataHint {
-            scope: VideoColorMetadataHintScope::Stream,
-            key: "camera_profile".to_string(),
-            value: "ARRI LogC4".to_string(),
-            detected_color_space: ColorSpace::ArriLogC4WideGamut4,
-        };
-        let interpretation =
-            detect_color_space_from_metadata(&metadata, std::slice::from_ref(&hint), None);
+        let hint = parse_video_color_metadata_hint(
+            VideoColorMetadataHintScope::Stream,
+            "com.sony.colorProfile",
+            "S-Log3 / S-Gamut3.Cine",
+        )
+        .expect("Sony declaration");
+        let interpretation = detect_color_space_from_metadata(
+            &metadata,
+            std::slice::from_ref(&hint),
+            None,
+            Some(yuv_sampling()),
+        );
         let diagnostic = VideoColorDiagnostic {
-            detected_color_space: interpretation.color_space,
             color_range: DecodedVideoRange::Limited,
+            sampling: Some(yuv_sampling()),
             interpretation,
-            source: VideoColorSpaceSource::Metadata,
-            method: VideoColorDetectionMethod::MetadataHint,
             metadata: Some(metadata),
             metadata_hints: vec![hint],
             hdr_metadata: Vec::new(),
@@ -3491,7 +3286,9 @@ mod tests {
         let summary = diagnostic.summary();
 
         assert!(summary.contains("hint_overrides_cicp"));
-        assert!(summary.contains("Stream:camera_profile=ARRI LogC4->ArriLogC4WideGamut4"));
+        assert!(summary.contains(
+            "Stream:SourceDeclaration(SonyColorProfile):com.sony.colorProfile=S-Log3 / S-Gamut3.Cine->SonySLog3SGamut3Cine"
+        ));
         assert!(summary.contains("cicp=Rec709"));
         assert!(summary.contains("primaries=bt709"));
     }
@@ -3504,26 +3301,25 @@ mod tests {
             Space::BT709,
         );
         let hints = vec![
-            VideoColorMetadataHint {
-                scope: VideoColorMetadataHintScope::Stream,
-                key: "camera_profile".to_string(),
-                value: "ARRI LogC4".to_string(),
-                detected_color_space: ColorSpace::ArriLogC4WideGamut4,
-            },
-            VideoColorMetadataHint {
-                scope: VideoColorMetadataHintScope::Container,
-                key: "camera_profile".to_string(),
-                value: "S-Log3 / S-Gamut3.Cine".to_string(),
-                detected_color_space: ColorSpace::SonySLog3SGamut3Cine,
-            },
+            parse_video_color_metadata_hint(
+                VideoColorMetadataHintScope::Stream,
+                "com.sony.colorProfile",
+                "S-Log3 / S-Gamut3.Cine",
+            )
+            .expect("Sony declaration"),
+            parse_video_color_metadata_hint(
+                VideoColorMetadataHintScope::Container,
+                "com.apple.proapps.cameraLog",
+                "Apple Log",
+            )
+            .expect("Apple declaration"),
         ];
-        let interpretation = detect_color_space_from_metadata(&metadata, &hints, None);
+        let interpretation =
+            detect_color_space_from_metadata(&metadata, &hints, None, Some(yuv_sampling()));
         let diagnostic = VideoColorDiagnostic {
-            detected_color_space: interpretation.color_space,
             color_range: DecodedVideoRange::Limited,
+            sampling: Some(yuv_sampling()),
             interpretation,
-            source: VideoColorSpaceSource::Metadata,
-            method: VideoColorDetectionMethod::MetadataHint,
             metadata: Some(metadata),
             metadata_hints: hints,
             hdr_metadata: vec![
@@ -3548,7 +3344,7 @@ mod tests {
         assert_eq!(
             diagnostic.issue_summary(),
             VideoColorDiagnosticIssueSummary {
-                detected_color_space: Some(ColorSpace::ArriLogC4WideGamut4),
+                executable_color_space: Some(ColorSpace::SonySLog3SGamut3Cine),
                 confidence: VideoColorInterpretationConfidence::High,
                 source: VideoColorSpaceSource::Metadata,
                 method: VideoColorDetectionMethod::MetadataHint,
@@ -3586,18 +3382,16 @@ mod tests {
             Space::Unspecified,
         );
         let missing_diagnostic = VideoColorDiagnostic {
-            detected_color_space: missing_interpretation.color_space,
             color_range: DecodedVideoRange::Unknown,
+            sampling: None,
             interpretation: missing_interpretation,
-            source: VideoColorSpaceSource::MissingMetadata,
-            method: VideoColorDetectionMethod::MissingMetadata,
             metadata: None,
             metadata_hints: Vec::new(),
             hdr_metadata: Vec::new(),
         };
         let missing_summary = missing_diagnostic.issue_summary();
 
-        assert_eq!(missing_summary.detected_color_space, None);
+        assert_eq!(missing_summary.executable_color_space, None);
         assert_eq!(
             missing_summary.confidence,
             VideoColorInterpretationConfidence::None
@@ -3610,11 +3404,9 @@ mod tests {
 
         let unavailable_interpretation = DetectedColorInterpretation::decoder_unavailable();
         let unavailable_diagnostic = VideoColorDiagnostic {
-            detected_color_space: unavailable_interpretation.color_space,
             color_range: DecodedVideoRange::Unknown,
+            sampling: None,
             interpretation: unavailable_interpretation,
-            source: VideoColorSpaceSource::DecoderUnavailable,
-            method: VideoColorDetectionMethod::DecoderUnavailable,
             metadata: None,
             metadata_hints: Vec::new(),
             hdr_metadata: Vec::new(),
@@ -3639,26 +3431,25 @@ mod tests {
             Space::BT709,
         );
         let hints = vec![
-            VideoColorMetadataHint {
-                scope: VideoColorMetadataHintScope::Stream,
-                key: "camera_profile".to_string(),
-                value: "ARRI LogC4".to_string(),
-                detected_color_space: ColorSpace::ArriLogC4WideGamut4,
-            },
-            VideoColorMetadataHint {
-                scope: VideoColorMetadataHintScope::Container,
-                key: "camera_profile".to_string(),
-                value: "S-Log3 / S-Gamut3.Cine".to_string(),
-                detected_color_space: ColorSpace::SonySLog3SGamut3Cine,
-            },
+            parse_video_color_metadata_hint(
+                VideoColorMetadataHintScope::Stream,
+                "com.sony.colorProfile",
+                "S-Log3 / S-Gamut3.Cine",
+            )
+            .expect("Sony declaration"),
+            parse_video_color_metadata_hint(
+                VideoColorMetadataHintScope::Container,
+                "com.apple.proapps.cameraLog",
+                "Apple Log",
+            )
+            .expect("Apple declaration"),
         ];
-        let metadata_interpretation = detect_color_space_from_metadata(&metadata, &hints, None);
+        let metadata_interpretation =
+            detect_color_space_from_metadata(&metadata, &hints, None, Some(yuv_sampling()));
         let metadata_diagnostic = VideoColorDiagnostic {
-            detected_color_space: metadata_interpretation.color_space,
             color_range: DecodedVideoRange::Limited,
+            sampling: Some(yuv_sampling()),
             interpretation: metadata_interpretation,
-            source: VideoColorSpaceSource::Metadata,
-            method: VideoColorDetectionMethod::MetadataHint,
             metadata: Some(metadata),
             metadata_hints: hints,
             hdr_metadata: vec![
@@ -3676,11 +3467,9 @@ mod tests {
         };
         let unavailable_interpretation = DetectedColorInterpretation::decoder_unavailable();
         let unavailable_diagnostic = VideoColorDiagnostic {
-            detected_color_space: unavailable_interpretation.color_space,
             color_range: DecodedVideoRange::Unknown,
+            sampling: None,
             interpretation: unavailable_interpretation,
-            source: VideoColorSpaceSource::DecoderUnavailable,
-            method: VideoColorDetectionMethod::DecoderUnavailable,
             metadata: None,
             metadata_hints: Vec::new(),
             hdr_metadata: vec![VideoHdrMetadataSummary {
@@ -3699,7 +3488,7 @@ mod tests {
             aggregate,
             VideoColorDiagnosticIssueAggregate {
                 diagnostics: 2,
-                diagnostics_with_detected_color_space: 1,
+                diagnostics_with_executable_color_space: 1,
                 diagnostics_with_warnings: 2,
                 diagnostics_with_raw_cicp_metadata: 1,
                 diagnostics_with_metadata_hints: 1,
@@ -3864,17 +3653,23 @@ mod tests {
             Space::BT2020NCL,
         );
         let diagnostic = VideoColorDiagnostic {
-            detected_color_space: Some(ColorSpace::Rec2100Pq),
             color_range: DecodedVideoRange::Limited,
-            interpretation: detect_color_space_from_metadata(&metadata, &[], None),
-            source: VideoColorSpaceSource::Metadata,
-            method: VideoColorDetectionMethod::CicpTags,
+            sampling: Some(yuv_sampling()),
+            interpretation: detect_color_space_from_metadata(
+                &metadata,
+                &[],
+                None,
+                Some(yuv_sampling()),
+            ),
             metadata: Some(metadata),
             metadata_hints: vec![VideoColorMetadataHint {
                 scope: VideoColorMetadataHintScope::Stream,
                 key: "camera_profile".to_string(),
                 value: "S-Log3 / S-Gamut3.Cine".to_string(),
                 detected_color_space: ColorSpace::SonySLog3SGamut3Cine,
+                authority: VideoColorMetadataHintAuthority::SourceDeclaration(
+                    VideoColorMetadataDeclaration::SourceColorSpace,
+                ),
             }],
             hdr_metadata: vec![VideoHdrMetadataSummary {
                 kind: VideoHdrSideDataKind::MasteringDisplayMetadata,
@@ -3889,7 +3684,8 @@ mod tests {
 
         assert!(summary.contains("source=Metadata"));
         assert!(summary.contains("method=CicpTags"));
-        assert!(summary.contains("detected=Rec2100Pq"));
+        assert!(summary.contains("candidate=Rec2100Pq"));
+        assert!(summary.contains("executable=Rec2100Pq"));
         assert!(summary.contains("range=Limited"));
         assert!(summary.contains("confidence=High"));
         assert!(summary.contains("overridable=true"));
@@ -3942,7 +3738,7 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
 
-        let info = MediaInfo::probe(&path).expect("probe encoded HDR fixture");
+        let info = probe_media_info(&path).expect("probe encoded HDR fixture");
         let video = info.primary_video().expect("video stream");
         let mastering = video
             .hdr_metadata

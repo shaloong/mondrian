@@ -15,7 +15,8 @@ use mondrian_assets::AssetRecord;
 use mondrian_core::types::{AssetId, ProjectId};
 use mondrian_core::{ExecutionPriority, ExecutionTerminalEvidence};
 use mondrian_media::{
-    resolve_decoded_video_range, MediaFileFingerprint, ProxyColorContract, ProxyConfig, ProxyStatus,
+    resolve_decoded_video_range, MediaFileFingerprint, ProxyColorContract, ProxyConfig,
+    ProxyPublicationEvidence, ProxyPublicationFailure, ProxyStatus,
 };
 use mondrian_timeline::sequence::{MediaInputColorContext, ResolvedInputColor};
 use parking_lot::{Condvar, Mutex};
@@ -23,8 +24,9 @@ use parking_lot::{Condvar, Mutex};
 use self::backend::{MediaProxyGenerationBackend, ProxyGenerationBackend};
 use self::state::{
     bind_project_generation, cancel_for_shutdown, diagnostics_snapshot, preflight_request,
-    record_immediate_failure, request_admission, ProxyGenerationInner, ProxyGenerationKey,
-    ProxyGenerationRequest, ProxyGenerationState,
+    record_immediate_failure, request_admission, request_running_resource_yield,
+    terminal_delta_snapshot, ProxyGenerationInner, ProxyGenerationKey, ProxyGenerationRequest,
+    ProxyGenerationState, RunningResourceYieldScope,
 };
 use super::AppState;
 
@@ -80,6 +82,8 @@ pub enum ProxyGenerationFailureReason {
     AdmissionRejected,
     /// Media generation failed after admission.
     GenerationFailed,
+    /// Media or sidecar namespace publication did not return durable success.
+    PublicationFailed,
 }
 
 impl ProxyGenerationFailureReason {
@@ -91,6 +95,7 @@ impl ProxyGenerationFailureReason {
             Self::WorkerUnavailable => "worker_unavailable",
             Self::AdmissionRejected => "admission_rejected",
             Self::GenerationFailed => "generation_failed",
+            Self::PublicationFailed => "publication_failed",
         }
     }
 }
@@ -100,11 +105,20 @@ impl ProxyGenerationFailureReason {
 pub(crate) struct ProxyGenerationFailure {
     pub(crate) reason: ProxyGenerationFailureReason,
     pub(crate) detail: String,
+    pub(crate) publication: Option<Box<ProxyPublicationFailure>>,
 }
 
 impl ProxyGenerationFailure {
     fn new(reason: ProxyGenerationFailureReason, detail: impl Into<String>) -> Self {
-        Self { reason, detail: detail.into() }
+        Self { reason, detail: detail.into(), publication: None }
+    }
+
+    fn publication(failure: ProxyPublicationFailure) -> Self {
+        Self {
+            reason: ProxyGenerationFailureReason::PublicationFailed,
+            detail: failure.to_string(),
+            publication: Some(Box::new(failure)),
+        }
     }
 }
 
@@ -126,6 +140,11 @@ pub(crate) enum ProxyGenerationRequestOutcome {
 /// One bounded terminal record for Headless and product diagnostics.
 #[derive(Debug, Clone)]
 pub struct ProxyGenerationTerminalRecord {
+    /// Monotonic publication identity used by event-loop delta consumers.
+    ///
+    /// This is deliberately independent of `attempt_id`: concurrent attempts
+    /// may finish in a different order from admission.
+    pub terminal_sequence: u64,
     /// Shared priority, generation, disposition, and deadline classification.
     pub evidence: ExecutionTerminalEvidence,
     /// Module-local monotonic attempt identity.
@@ -144,24 +163,45 @@ pub struct ProxyGenerationTerminalRecord {
     pub failure: Option<ProxyGenerationFailureReason>,
     /// Bounded human-readable diagnostic detail, when applicable.
     pub failure_detail: Option<String>,
+    /// Typed media-owned publication terminal state, when applicable.
+    pub publication_failure: Option<ProxyPublicationFailure>,
+    /// Durable publication evidence for newly generated media and sidecar.
+    pub publication: Option<ProxyPublicationEvidence>,
 }
 
 /// Immutable bounded proxy execution evidence.
 #[derive(Debug, Clone, Default)]
 pub struct ProxyGenerationDiagnostics {
+    /// Wrapping observation token for every diagnostic field exposed here.
+    ///
+    /// Consumers compare this token only for equality. It is not an attempt
+    /// identity, event count, or linearizable snapshot version.
+    pub revision: u64,
     /// Current project execution generation.
     pub generation: u64,
+    /// Whether queued attempts may cross the worker dispatch Seam.
+    pub dispatch_enabled: bool,
+    /// Whether automatic Import/Playback Recovery attempts may dispatch.
+    pub automatic_dispatch_enabled: bool,
+    /// Product-requested global running-attempt limit.
+    pub dispatch_parallelism: usize,
     /// Admitted attempts waiting for a worker.
     pub queued: usize,
+    /// Explicit user attempts waiting for a worker.
+    pub queued_user: usize,
     /// Attempts currently executing in a worker.
     pub running: usize,
+    /// Running attempts currently stopping at the resource-yield boundary.
+    pub yielding: usize,
+    /// Explicit user attempts currently executing in a worker.
+    pub running_user: usize,
     /// Exact failures suppressing automatic retry storms.
     pub retained_failures: usize,
     /// Newly admitted attempts.
     pub admissions: u64,
     /// Exact requests joined to existing attempts.
     pub deduplications: u64,
-    /// Queued requests promoted by a higher-priority origin.
+    /// Exact Queued or Running attempts promoted by a higher-priority origin.
     pub promotions: u64,
     /// Requests satisfied by an already-fresh artifact.
     pub fresh_hits: u64,
@@ -171,12 +211,33 @@ pub struct ProxyGenerationDiagnostics {
     pub failures: u64,
     /// Cooperatively canceled attempts.
     pub cancellations: u64,
+    /// Running attempts safely returned to the queue by product resource
+    /// policy without losing explicit demand.
+    pub resource_yields: u64,
     /// Completed work made ineligible by a newer binding.
     pub superseded: u64,
     /// Attempts rejected by bounded admission.
     pub rejections: u64,
+    /// Oldest terminal publication still retained by the bounded service.
+    pub oldest_terminal_sequence: Option<u64>,
+    /// Latest terminal publication issued by this service lifetime.
+    pub latest_terminal_sequence: u64,
     /// Bounded terminal attempt evidence.
     pub terminal_records: Vec<ProxyGenerationTerminalRecord>,
+}
+
+/// Ordered terminal publications newer than one event-loop cursor.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ProxyGenerationTerminalDelta {
+    /// Current Project execution generation at snapshot time.
+    pub(crate) generation: u64,
+    /// Cursor to persist after consuming every record in this delta.
+    pub(crate) next_cursor: u64,
+    /// Whether bounded retention discarded one or more publications after the
+    /// supplied cursor before this poll could observe them.
+    pub(crate) retention_gap: bool,
+    /// Retained terminal publications in strict publication order.
+    pub(crate) records: Vec<ProxyGenerationTerminalRecord>,
 }
 
 /// Lazily-started, instance-owned proxy execution service.
@@ -185,7 +246,7 @@ pub(crate) struct ProxyGenerationService {
     requested_worker_count: usize,
     started_workers: OnceLock<usize>,
     worker_handles: Mutex<Vec<JoinHandle<()>>>,
-    observed_revision: AtomicU64,
+    observed_model_revision: AtomicU64,
 }
 
 impl ProxyGenerationService {
@@ -205,13 +266,14 @@ impl ProxyGenerationService {
                 state: Mutex::new(ProxyGenerationState::default()),
                 available: Condvar::new(),
                 backend,
-                changed_revision: AtomicU64::new(0),
+                diagnostics_revision: AtomicU64::new(0),
+                model_revision: AtomicU64::new(0),
                 shutdown: AtomicBool::new(false),
             }),
             requested_worker_count,
             started_workers: OnceLock::new(),
             worker_handles: Mutex::new(Vec::new()),
-            observed_revision: AtomicU64::new(0),
+            observed_model_revision: AtomicU64::new(0),
         }
     }
 
@@ -222,7 +284,46 @@ impl ProxyGenerationService {
             bind_project_generation(&mut state, project_id)
         };
         if changed {
-            self.inner.mark_changed();
+            self.inner.mark_model_changed();
+            self.inner.available.notify_all();
+        }
+    }
+
+    /// Apply product resource policy while preserving domain-owned admission,
+    /// queue ordering, attempt identity, and terminal evidence.
+    ///
+    /// Running work cooperatively yields at the backend cancellation Seam when
+    /// global dispatch closes. Closing only automatic dispatch yields
+    /// Import/Playback Recovery attempts while User work remains runnable.
+    pub(crate) fn set_resource_policy(
+        &self,
+        dispatch_enabled: bool,
+        max_parallelism: usize,
+        automatic_dispatch_enabled: bool,
+    ) {
+        let changed = {
+            let mut state = self.inner.state.lock();
+            let max_parallelism = max_parallelism.max(1);
+            let policy_changed = !(state.dispatch_enabled == dispatch_enabled
+                && state.dispatch_parallelism == max_parallelism
+                && state.automatic_dispatch_enabled == automatic_dispatch_enabled);
+            if policy_changed {
+                state.dispatch_enabled = dispatch_enabled;
+                state.dispatch_parallelism = max_parallelism;
+                state.automatic_dispatch_enabled = automatic_dispatch_enabled;
+            }
+            let yield_scope = if !dispatch_enabled {
+                RunningResourceYieldScope::All
+            } else if !automatic_dispatch_enabled {
+                RunningResourceYieldScope::AutomaticOnly
+            } else {
+                RunningResourceYieldScope::None
+            };
+            let running_yield_requested = request_running_resource_yield(&mut state, yield_scope);
+            policy_changed || running_yield_requested
+        };
+        if changed {
+            self.inner.mark_diagnostics_changed();
             self.inner.available.notify_all();
         }
     }
@@ -236,36 +337,72 @@ impl ProxyGenerationService {
         color: ProxyColorContract,
         origin: ProxyGenerationOrigin,
     ) -> ProxyGenerationRequestOutcome {
-        let metadata = match std::fs::metadata(&source_path) {
-            Ok(metadata) => metadata,
+        if let Err(error) = std::fs::metadata(&source_path) {
+            return self.immediate_failure(
+                None,
+                asset_id,
+                MediaFileFingerprint::default(),
+                origin,
+                ProxyGenerationFailure::new(
+                    ProxyGenerationFailureReason::MissingSourceFile,
+                    format!("proxy source is unavailable: {error}"),
+                ),
+            );
+        }
+        let source_fingerprint = MediaFileFingerprint::capture(&source_path);
+        let config = match config.freeze_cache_root() {
+            Ok(config) => config,
             Err(error) => {
                 return self.immediate_failure(
                     None,
                     asset_id,
-                    MediaFileFingerprint {
-                        len: None,
-                        modified_secs: None,
-                        modified_nanos: None,
-                    },
+                    source_fingerprint,
                     origin,
                     ProxyGenerationFailure::new(
-                        ProxyGenerationFailureReason::MissingSourceFile,
-                        format!("proxy source is unavailable: {error}"),
+                        ProxyGenerationFailureReason::InvalidProxyContract,
+                        error.to_string(),
                     ),
                 );
             }
         };
-        let request = ProxyGenerationRequest::new(
+        let request = match ProxyGenerationRequest::new(
             asset_id,
             source_path,
-            MediaFileFingerprint::from_metadata(&metadata),
+            source_fingerprint,
             config,
             color,
-        );
+        ) {
+            Ok(request) => request,
+            Err(failure) => {
+                return self.immediate_failure(None, asset_id, source_fingerprint, origin, failure);
+            }
+        };
         if let Some(outcome) = {
             let mut state = self.inner.state.lock();
             preflight_request(&mut state, &request.key, origin)
         } {
+            if let ProxyGenerationRequestOutcome::RetainedFailure(failure) = &outcome {
+                if failure.publication.is_some()
+                    && matches!(self.inner.backend.status(&request), Ok(ProxyStatus::Fresh))
+                {
+                    let mut state = self.inner.state.lock();
+                    state.remove_failure(&request.key);
+                    state.counters.fresh_hits = state.counters.fresh_hits.saturating_add(1);
+                    drop(state);
+                    self.inner.mark_diagnostics_changed();
+                    return ProxyGenerationRequestOutcome::AlreadyFresh;
+                }
+            }
+            match &outcome {
+                ProxyGenerationRequestOutcome::Deduplicated { promoted: true } => {
+                    self.inner.mark_model_changed();
+                    self.inner.available.notify_all();
+                }
+                ProxyGenerationRequestOutcome::Deduplicated { promoted: false } => {
+                    self.inner.mark_diagnostics_changed();
+                }
+                _ => {}
+            }
             return outcome;
         }
         let prior_status = match self.inner.backend.status(&request) {
@@ -273,6 +410,8 @@ impl ProxyGenerationService {
                 let mut state = self.inner.state.lock();
                 state.remove_failure(&request.key);
                 state.counters.fresh_hits = state.counters.fresh_hits.saturating_add(1);
+                drop(state);
+                self.inner.mark_diagnostics_changed();
                 return ProxyGenerationRequestOutcome::AlreadyFresh;
             }
             Ok(status) => status,
@@ -303,24 +442,49 @@ impl ProxyGenerationService {
             let mut state = self.inner.state.lock();
             request_admission(&mut state, request, origin, prior_status)
         };
-        if matches!(outcome, ProxyGenerationRequestOutcome::Admitted { .. }) {
-            self.inner.available.notify_one();
-        }
-        if matches!(outcome, ProxyGenerationRequestOutcome::Failed(_)) {
-            self.inner.mark_changed();
+        match &outcome {
+            ProxyGenerationRequestOutcome::Admitted { .. } => {
+                self.inner.mark_model_changed();
+                self.inner.available.notify_one();
+            }
+            ProxyGenerationRequestOutcome::Deduplicated { promoted: true } => {
+                self.inner.mark_model_changed();
+                self.inner.available.notify_all();
+            }
+            ProxyGenerationRequestOutcome::Deduplicated { promoted: false } => {
+                self.inner.mark_diagnostics_changed();
+            }
+            ProxyGenerationRequestOutcome::Failed(_) => {
+                self.inner.mark_model_changed();
+            }
+            ProxyGenerationRequestOutcome::AlreadyFresh
+            | ProxyGenerationRequestOutcome::RetainedFailure(_) => {}
         }
         outcome
     }
 
-    /// Observe service changes since the previous event-loop poll.
+    /// Observe product-model changes since the previous event-loop poll.
+    ///
+    /// Project binding, demand admission or promotion, real execution phase
+    /// changes, and terminal publication advance this cursor. Resource policy,
+    /// cooperative yield, deduplication counters, and freshness-hit diagnostics
+    /// do not claim a user-visible completion or model change.
     pub(crate) fn poll_finished(&self) -> bool {
-        let current = self.inner.changed_revision.load(Ordering::Acquire);
-        let previous = self.observed_revision.swap(current, Ordering::AcqRel);
+        let current = self.inner.model_revision.load(Ordering::Acquire);
+        let previous = self.observed_model_revision.swap(current, Ordering::AcqRel);
         current != previous
     }
 
     pub(crate) fn diagnostics(&self) -> ProxyGenerationDiagnostics {
-        diagnostics_snapshot(&self.inner.state.lock())
+        let state = self.inner.state.lock();
+        let mut diagnostics = diagnostics_snapshot(&state);
+        diagnostics.revision = self.inner.diagnostics_revision.load(Ordering::Acquire);
+        diagnostics
+    }
+
+    /// Return terminal publications newer than `cursor` in publication order.
+    pub(crate) fn terminal_delta_after(&self, cursor: u64) -> ProxyGenerationTerminalDelta {
+        terminal_delta_snapshot(&self.inner.state.lock(), cursor)
     }
 
     fn immediate_failure(
@@ -341,7 +505,7 @@ impl ProxyGenerationService {
             failure.clone(),
         );
         drop(state);
-        self.inner.mark_changed();
+        self.inner.mark_model_changed();
         ProxyGenerationRequestOutcome::Failed(failure)
     }
 
@@ -404,7 +568,10 @@ pub(crate) fn resolve_asset_proxy_color_contract(
     asset: &AssetRecord,
     input_color: &MediaInputColorContext,
 ) -> Result<ProxyColorContract, String> {
-    let detected = asset.media_info.primary_video().and_then(|video| video.detected_color_space);
+    let media_probe = asset
+        .media_probe()
+        .ok_or_else(|| "proxy generation requires media probe facts".to_owned())?;
+    let detected = media_probe.primary_video().and_then(|video| video.executable_color_space());
     let resolution = input_color.missing_metadata_policy.resolve_asset_input_decision(
         None,
         asset.interpretation,
@@ -423,12 +590,14 @@ pub(crate) fn resolve_asset_proxy_color_contract(
             ));
         }
     };
-    let video = asset
-        .media_info
+    let video = media_probe
         .primary_video()
         .ok_or_else(|| "proxy generation requires a probed primary video stream".to_owned())?;
+    let sampling = video.proven_sampling().ok_or_else(|| {
+        "proxy generation requires proven, internally consistent video sampling facts".to_owned()
+    })?;
     let source_range = resolve_decoded_video_range(asset.interpretation.range, video.color_range);
-    ProxyColorContract::try_new(source_color_space, video.bit_depth, source_range)
+    ProxyColorContract::try_new(source_color_space, sampling.bit_depth, source_range)
         .map_err(|error| error.to_string())
 }
 

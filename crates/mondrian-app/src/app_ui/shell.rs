@@ -277,7 +277,6 @@ fn status_bar_model(state: &AppState) -> StatusBarModel {
     } else {
         ("就绪".to_owned(), false, false)
     };
-
     let context = state
         .active_sequence()
         .map(|sequence| sequence.name.clone())
@@ -2042,6 +2041,7 @@ mod tests {
         PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_UPDATE_COLOR_ENVIRONMENT, SEQUENCE_NAMESPACE,
         SEQUENCE_UPDATE_SETTINGS,
     };
+    use crate::app::CrashRecoveryCandidate;
     use crate::app_ui::panels::ViewerPreviewState;
     use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use crate::app_ui::window_controls::WindowControl;
@@ -2049,7 +2049,7 @@ mod tests {
     use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
     use mondrian_core::types::AssetId;
     use mondrian_core::{
-        ColorSpace, Rational, Resolution, SmpteCountingMode, TimelineDisplayFormat,
+        ColorSpace, ProjectId, Rational, Resolution, SmpteCountingMode, TimelineDisplayFormat,
         VideoContentLightMetadata, VideoMasteringDisplayMetadata, WorkingColorSpace,
     };
     use mondrian_platform::ClipboardError;
@@ -2859,8 +2859,18 @@ mod tests {
     fn resolve_app_shell_recover_project_returns_project_recovery_action() {
         let platform = FakePlatform::default();
         let payload = ProjectRecoverFromAutosavePayload {
-            project_file: PathBuf::from("E:/projects/recover.mdp"),
-            autosave_file: PathBuf::from("E:/runtime/autosave/project.autosave.mdp"),
+            candidate: CrashRecoveryCandidate {
+                project_id: ProjectId::new(),
+                runtime_root: PathBuf::from("E:/runtime"),
+                project_file: PathBuf::from("E:/projects/recover.mdp"),
+                autosave_file: PathBuf::from("E:/runtime/autosave/project.autosave.mdp"),
+                author_generation: 4,
+                asset_library_revision: 2,
+                document_revision: 8,
+                archive_sha256: "b".repeat(64),
+                saved_at_unix_ms: 19,
+                total_snapshots: 1,
+            },
         };
 
         let action = resolve_app_shell_action(
@@ -3848,9 +3858,9 @@ mod tests {
 
         for transition in 0..100 {
             if transition % 2 == 0 {
-                state.play();
+                state.play().expect("play");
             } else {
-                state.pause();
+                state.pause().expect("pause");
             }
             root.refresh_transport_intent_from_app_state(&state);
 

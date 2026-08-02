@@ -14,4 +14,4 @@ synchronization failures remain distinct outcomes; exact-duration silence may
 protect realtime sample position but is evidence of degradation, never proof of
 successful rendering.
 
-Automatic temporary preview-resolution reduction is permitted under sustained pressure, but proxy/original selection, color processing, and project settings never change silently. The architecture reserves rational playback rate and direction, while the first implementation exposes only forward `1x` playback.
+Automatic temporary preview-resolution reduction is permitted under sustained pressure, but proxy/original selection, color processing, and project settings never change silently. The transport contract reserves rational playback rate and direction; the supported realtime mode is forward `1x` until additional modes satisfy the same Clock Master, continuity, and recovery invariants.
