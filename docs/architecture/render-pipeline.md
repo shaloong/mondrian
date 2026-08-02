@@ -425,21 +425,27 @@ terminal delivery. No CPU rerun is allowed after the prefix starts.
 
 `EffectExecutionDemand` derives a checked signed finite/unbounded temporal
 window and exact-or-conservative input ROI from the same prepared execution
-envelope. `collect_temporal_frame_demands` accepts only the first closed
-production shape—one source, one finite past mixer, then a current-time unary
-tail—and `PreparedTemporalFrameSet` is the decode-free provider used by the
-bounded CPU-Float32 scalar reference. Crossing owner-domain zero is not a
-boundary event. The exact `TimelineClipExecutionRef` and prepared placement
-mapping decide whether a requested source handle exists.
+envelope. `collect_temporal_frame_demands` accepts one closed production
+shape—one Source-fed finite-past mixer followed by a current-time DAG. Unary
+branches may fan out and rejoin through Blend/MultiInput; Mask remains blocked
+until rasterization has exact tile-coordinate and cancellation contracts.
+`PreparedTemporalFrameSet` is the decode-free provider used by the bounded
+CPU-Float32 scalar reference. Crossing owner-domain zero is not a boundary
+event. The exact `TimelineClipExecutionRef` and prepared placement mapping
+decide whether a requested source handle exists.
 
 That scalar reference keeps the exact input ROI rather than expanding it into
 a zero-filled complete frame. Its raster-region contract preserves global
 frame coordinates for coordinate-dependent kernels, finite-support kernels
 consume only their implementation-derived halo, and complete-frame-only
-kernels fail closed on a partial region. Resident graph values and concrete
-kernel scratch are admitted against the Effect Session byte budget before the
-executor allocates them; an already materialized provider tile is charged as
-transient residency while it is cloned. Preview and Export use this same
+kernels fail closed on a partial region. The compiled schedule/use counts are
+the liveness authority: last-use values move, fan-out clones only remain while
+needed, and joins release inputs immediately. Resident graph values and
+concrete kernel scratch, output crop, and possible Arc publication target are
+admitted against the Effect Session byte budget before the executor allocates
+them; an already materialized provider tile is charged as transient residency
+while it is cloned. Over/under-consumed edges or a byte-ledger mismatch fail
+closed. Preview and Export use this same
 execution boundary, but their current complete-frame delivery normally
 requests a complete output ROI; the executor's exact tile behavior is not
 evidence of scheduler-level full-frame tiling or GPU temporal execution.

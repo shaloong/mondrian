@@ -310,7 +310,7 @@ semantic reference for finite-history, stateless CPU-Float32 work. One request
 binds the scheduler generation, continuity evidence, exact Clip visual-domain
 `TimelineTime`, the ordinary Render Plan's deterministic output-frame seed,
 complete frame coordinates, output ROI, and cooperative cancellation. The seed
-is part of cache identity and directly drives the current-time unary tail; it
+is part of cache identity and directly drives the current-time Effect DAG; it
 is never inferred from a retimed source coordinate. The provider identity must
 fingerprint the complete source revision, stream, Clip-to-source or nested
 mapping, color/alpha interpretation, geometry, and any source-generation seed
@@ -319,13 +319,16 @@ representation exactly; cancellation is checked before and after fetch and
 before cache publication.
 
 `collect_temporal_frame_demands` walks that same compiled graph without
-fetching pixels. The first production tracer admits exactly one
-`Source -> TemporalFrameMix -> current-time unary tail`: history with upstream
-Effect values is rejected because the compiled upstream parameters are bound
-at the output Clip time. `PreparedTemporalFrameSet` freezes one complete,
-de-duplicated batch and proves generation, request, ROI, extent, and tile
-equality before it can implement the provider. Its lookup performs no decode,
-nested rendering, color conversion, or title work.
+fetching pixels. The bounded production tracer admits exactly one
+`Source -> TemporalFrameMix` and a current-time DAG after it. Unary branches may
+fan out and rejoin through Blend or MultiInput, and a current Source branch may
+bypass the mixer; history with upstream Effect values is rejected because the
+compiled upstream parameters are bound at the output Clip time.
+`PreparedTemporalFrameSet` freezes one complete, de-duplicated batch and proves
+generation, request, ROI, extent, and tile equality before it can implement the
+provider. Its lookup performs no decode, nested rendering, color conversion,
+or title work. Mask/MaskSource remains blocked because its current rasterizer
+does not yet expose exact tile coordinates and cooperative cancellation.
 
 The scalar reference consumes the existing `CompiledEffectGraph`; it does not
 introduce another Render Graph. It retains only the exact expanded source tile
@@ -344,19 +347,27 @@ not a second working-precision contract. `UnknownRequiresFullFrame` remains a
 conservative full-frame request with no exact-halo evidence, so an optimized
 tile backend cannot present fallback as proved tiling.
 
-Every memoized graph value, output crop, and implementation-owned same-sized
+The scalar executor consumes the compiled topological schedule and use counts
+as its sole liveness authority. A last-use value moves into its consumer, a
+fan-out value is cloned only while another edge remains, and Blend/MultiInput
+releases each joined overlay immediately. It fails if an edge is over- or
+under-consumed, a non-output value survives, or the owned-byte ledger does not
+end with exactly one output. Every live graph value, output crop, possible
+reference-counted publication target, and implementation-owned same-sized
 kernel scratch allocation is included in one Session working-set model. The
 already materialized provider tile is charged as transient residency while the
 executor clones it; every executor-owned allocation is admitted before it is
 created. Gaussian Blur accounts for its separable scratch, Sharpen for the
-simultaneously live blurred result plus Gaussian scratch, and full-frame
-Chromatic Aberration for its replacement buffer. A small exact ROI therefore
-scales with its expanded input tile rather than allocating a zero-filled
-complete-frame buffer, while exceeding the exact byte budget fails before the
-kernel starts. Regression references require expanded Blur,
-Vignette, and frame-seeded Grain tile output to equal the corresponding crop of
-full-frame execution. This proves the scalar executor boundary; it does not
-claim that a complete Preview or Export frame is already split into tiles.
+simultaneously live blurred result plus
+Gaussian scratch, and full-frame Chromatic Aberration for its replacement
+buffer. A small exact ROI therefore scales with its expanded input tile rather
+than allocating a zero-filled complete-frame buffer, while exceeding the exact
+byte budget fails before the kernel starts. Regression references require
+expanded Blur, Vignette, frame-seeded Grain, and a finite-history
+fan-out/Blend/MultiInput DAG (including coordinate-seeded Dissolve) to equal the
+corresponding full-frame/current-frame reference crop. This proves the scalar
+executor boundary; it does not claim that a complete Preview or Export frame
+is already split into tiles.
 
 `TemporalFrameMix` is the finite-history proof Processor. It coverage-correctly
 interpolates the current upstream frame with an exact signed past sample.
@@ -388,8 +399,9 @@ closure node/binding identities; Preview has no second recursive Timeline
 resolver. Only a complete set is frozen and passed to the retained Preview
 Effect Session under that generation's monotonic cancellation token; no
 current/displayed frame can stand in for absent history. Future/unbounded input,
-stateful continuity, animated/effected upstream history, and heterogeneous
-temporal execution remain outside this first tracer.
+stateful continuity, animated/effected upstream history, Mask raster execution,
+and heterogeneous temporal execution remain outside the bounded production
+contract.
 
 Prepared dependency identity combines the definition-registry revision with
 semantic fingerprints of immutable resources. `.cube` files are parsed,

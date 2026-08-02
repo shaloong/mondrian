@@ -621,7 +621,7 @@ mod tests {
     use super::*;
     use crate::evaluate_prepared_visual_program;
     use mondrian_core::timeline_data::{ClipContent, MediaInterpretation};
-    use mondrian_core::{ColorSpace, FramePosition, Rational, TimeScale};
+    use mondrian_core::{BlendMode, ColorSpace, FramePosition, Rational, TimeScale};
     use mondrian_effects::{
         register_effect_definition, EffectColorDomainContract, EffectDefinition, EffectDeterminism,
         EffectExecutionContract, EffectExecutionModes, EffectGraphTopology, EffectNode,
@@ -663,6 +663,56 @@ mod tests {
             })),
         )
         .expect("register temporal test definition");
+        EffectNode::new(effect_type)
+    }
+
+    fn temporal_dag_effect(offset: TimelineTime) -> EffectNode {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let effect_type = EffectType::Plugin(format!("test.timeline.temporal-dag.{id}"));
+        register_effect_definition(
+            EffectDefinition::new(
+                effect_type.key(),
+                "Timeline temporal DAG test",
+                Default::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32,
+                determinism: EffectDeterminism::Deterministic,
+                state_model: EffectStateModel::Stateless,
+                temporal_input: EffectTemporalInputExtent {
+                    past: EffectTemporalSpan::Finite(offset),
+                    future: EffectTemporalSpan::None,
+                },
+                roi_propagation: EffectRoiPropagation::PixelLocal,
+                resource_lifetime: EffectResourceLifetime::Frame,
+                topology: EffectGraphTopology::GeneralDag,
+            })
+            .with_branching_graph_builder(Arc::new(move |_, _, graph| {
+                let mixed = graph.append_unary(EffectRenderOp::TemporalFrameMix {
+                    past_offset: offset,
+                    mix: 0.25,
+                });
+                let left = graph.add_unary_from(
+                    mixed,
+                    EffectRenderOp::ColorAdjust {
+                        exposure: 0.25,
+                        contrast: 1.0,
+                        saturation: 1.0,
+                        working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
+                    },
+                );
+                let right = graph.add_unary_from(
+                    mixed,
+                    EffectRenderOp::Vignette { intensity: 0.4, feather: 0.6 },
+                );
+                let output = graph.add_blend(left, right, BlendMode::Normal, 0.5);
+                graph.set_current_output(output);
+                Ok(())
+            })),
+        )
+        .expect("register temporal DAG test definition");
         EffectNode::new(effect_type)
     }
 
@@ -739,6 +789,57 @@ mod tests {
             assert_eq!(*color_space_override, Some(ColorSpace::Rec2100Pq));
             assert_eq!(*alpha_interpretation, AlphaInterpretation::Premultiplied);
         }
+    }
+
+    #[test]
+    fn prepared_visual_program_admits_current_time_dag_after_history() {
+        let rate = Rational::new(24, 1);
+        let offset = TimelineTime::new(1, 2).expect("offset");
+        let mut sequence = Sequence::new("temporal DAG");
+        sequence.settings.frame_rate = rate;
+        sequence.video_tracks.clear();
+        let mut track = Track::new_video("V1");
+        let asset_id = AssetId::new();
+        let mut clip = Clip::new(
+            asset_id,
+            TimelineTime::ZERO,
+            TimelineTime::new(5, 1).expect("duration"),
+        )
+        .expect("Clip");
+        clip.add_effect_node(temporal_dag_effect(offset));
+        track.add_clip(clip).expect("add Clip");
+        sequence.video_tracks.push(track);
+
+        let program = PreparedVisualProgram::prepare(&sequence).expect("program");
+        let plan = evaluate_prepared_visual_program(
+            &program,
+            crate::TimelineEvaluationRequest::export(FramePosition::new(24, sequence.time_base())),
+        )
+        .expect("plan");
+        let extent = EffectFrameExtent::new(8, 4);
+        let prepared = prepare_timeline_temporal_execution(
+            &program,
+            &plan,
+            73,
+            EffectExecutionContinuity::Continuous,
+            extent,
+            extent.full_frame_roi(),
+            ExecutionCancellationToken::new(),
+        )
+        .expect("prepared temporal DAG");
+
+        assert_eq!(prepared.batches().len(), 1);
+        let batch = &prepared.batches()[0];
+        assert_eq!(batch.source_demands().len(), 2);
+        assert_eq!(batch.graph().graph().nodes.len(), 5);
+        assert!(batch.graph().node_use_counts().values().any(|uses| *uses == 2));
+        assert!(
+            prepared.execution_plan().elements.iter().all(|element| match element {
+                TimelineRenderPlanElement::Media(media) =>
+                    !graph_requires_temporal(&media.effect_graph),
+                _ => true,
+            })
+        );
     }
 
     #[test]

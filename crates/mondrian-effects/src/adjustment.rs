@@ -327,7 +327,15 @@ impl EffectRasterRegion {
             && self.height == self.frame_height
     }
 
-    fn is_valid_for(self, pixel_count: usize) -> bool {
+    pub(crate) const fn row_width(self) -> usize {
+        self.width as usize
+    }
+
+    pub(crate) fn global_row_start(self, local_y: usize) -> u64 {
+        (u64::from(self.y) + local_y as u64) * u64::from(self.frame_width) + u64::from(self.x)
+    }
+
+    pub(crate) fn is_valid_for(self, pixel_count: usize) -> bool {
         let right = u64::from(self.x) + u64::from(self.width);
         let bottom = u64::from(self.y) + u64::from(self.height);
         let expected = usize::try_from(self.width).ok().and_then(|width| {

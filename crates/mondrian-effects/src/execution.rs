@@ -1,6 +1,6 @@
 use crate::adjustment::{
     apply_render_op, apply_render_op_f32, blend_adjustment_result, blend_rgba_f32_pixel_seeded,
-    blend_rgba_pixel_seeded, unit_to_u8,
+    blend_rgba_pixel_seeded, unit_to_u8, EffectRasterRegion,
 };
 #[cfg(test)]
 use crate::{
@@ -1617,6 +1617,55 @@ fn blend_rgba_f32_in_place(
     }
 }
 
+pub(crate) fn blend_rgba_f32_region_controlled<E>(
+    base: &mut [[f32; 4]],
+    overlay: &[[f32; 4]],
+    region: EffectRasterRegion,
+    opacity: f32,
+    blend_mode: BlendMode,
+    frame_seed: i64,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<bool, E> {
+    if base.len() != overlay.len() || !region.is_valid_for(base.len()) {
+        return Ok(false);
+    }
+    if base.is_empty() {
+        checkpoint()?;
+        return Ok(true);
+    }
+    let opacity = opacity.clamp(0.0, 1.0);
+    if opacity <= 1.0e-4 {
+        checkpoint()?;
+        return Ok(true);
+    }
+
+    let row_width = region.row_width();
+    for (row_index, (base_row, overlay_row)) in
+        base.chunks_mut(row_width).zip(overlay.chunks(row_width)).enumerate()
+    {
+        let row_start = region.global_row_start(row_index);
+        for (chunk_index, (base_chunk, overlay_chunk)) in
+            base_row.chunks_mut(4_096).zip(overlay_row.chunks(4_096)).enumerate()
+        {
+            checkpoint()?;
+            let chunk_start = row_start + (chunk_index * 4_096) as u64;
+            for (index, (base_px, overlay_px)) in
+                base_chunk.iter_mut().zip(overlay_chunk.iter()).enumerate()
+            {
+                *base_px = blend_rgba_f32_pixel_seeded(
+                    *base_px,
+                    *overlay_px,
+                    opacity,
+                    blend_mode,
+                    effect_graph_dither_seed((chunk_start + index as u64) as u32, frame_seed),
+                );
+            }
+        }
+    }
+    checkpoint()?;
+    Ok(true)
+}
+
 fn effect_graph_dither_seed(pixel_index: u32, frame_seed: i64) -> u32 {
     pixel_index ^ (frame_seed as u32).rotate_left(13) ^ ((frame_seed >> 32) as u32).rotate_right(7)
 }
@@ -1671,6 +1720,32 @@ fn apply_alpha_mask_f32_in_place(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn region_blend_checks_cancellation_at_bounded_pixel_chunks() {
+        let mut base = vec![[0.0, 0.0, 0.0, 1.0]; 8_193];
+        let overlay = vec![[1.0, 1.0, 1.0, 1.0]; 8_193];
+        let mut checkpoints = 0_u32;
+        let result = blend_rgba_f32_region_controlled(
+            &mut base,
+            &overlay,
+            EffectRasterRegion::full_frame(8_193, 1),
+            0.5,
+            BlendMode::Dissolve,
+            17,
+            &mut || {
+                checkpoints = checkpoints.saturating_add(1);
+                if checkpoints == 2 {
+                    Err(())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+
+        assert_eq!(result, Err(()));
+        assert_eq!(checkpoints, 2);
+    }
 
     fn color_adjust(exposure: f32, contrast: f32, saturation: f32) -> EffectRenderOp {
         EffectRenderOp::ColorAdjust {
