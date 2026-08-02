@@ -128,9 +128,11 @@ Library identity. Relative paths, dot/parent traversal components, device
 namespaces, non-file verbatim namespaces, and non-lossless encodings fail
 closed when a row is read.
 
-Manual close/quit waits for its required save result. Autosave remains
-asynchronous and coalesced by the App so it cannot create an unbounded request
-queue.
+Manual save-before-close places the save request and a FIFO quiescence barrier
+in one worker order. The Window thread never waits for either: it retains a
+move-only pause ticket and polls it from bounded event-loop turns. Autosave
+remains asynchronous and coalesced by the App so it cannot create an unbounded
+request queue.
 
 Each exact `AuthoringSessionId` also owns a checked Persistence Generation.
 Admission follows `Open(g) -> Pausing(g) -> Paused(g)`. A matching pause token
@@ -142,6 +144,35 @@ the worker destroyed its request-owned Asset Library and runtime-lease Arcs.
 Timeout, disconnect, or inconsistent acknowledgement poisons that Session
 closed; lifecycle mutation aborts rather than guessing that a pending counter
 or empty completion queue means quiescence.
+
+The synchronous Headless/open-replacement helper and the non-blocking Window
+path share exactly one `begin pause -> barrier acknowledgement -> complete
+pause` implementation. A ticket binds the persistence service identity,
+`AuthoringSessionId`, Persistence Generation, sole acknowledgement receiver,
+and timeout budget. Beginning the ticket closes admission before publishing the
+barrier and returns immediately. Only the matching acknowledgement changes
+`Pausing` to `Paused`; polling an empty channel changes no state. Once paused,
+the App applies already-queued scalar completions while the old Session remains
+authoritative, retires that exact generation, and only then removes author and
+runtime ownership.
+
+While a Window ticket is pending, the Project remains readable for projection
+but all product Actions and Project-scoped result application are frozen. The
+event loop checks at a bounded 16 ms cadence without `ControlFlow::Poll` busy
+spinning. A protocol timeout/disconnect retains the in-memory Project and keeps
+it fail-closed instead of resuming edits against poisoned persistence
+admission. The close guard then requires an explicit user Discard: the service
+marks the exact Session `Retired` without claiming quiescence, eventual worker
+completions remain stale, and their request-owned Library/runtime-lease Arcs
+survive until actual worker return. A dropped or stale ticket is never
+interpreted as quiescence.
+
+Save-before-close binds the close operation to the exact manual request ID it
+just admitted. Reaching the FIFO barrier is insufficient: that request must be
+the applied durable baseline. A failed publication resumes admission at a new
+Persistence Generation, keeps the Project open, and permits correction/retry;
+it is distinct from a handoff protocol fault and never silently degrades to
+Discard.
 
 ## Live Project and Runtime Authority
 

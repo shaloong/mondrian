@@ -40,6 +40,7 @@ use mondrian_timeline::clip::{Clip, TrimEdge};
 use mondrian_timeline::sequence::{
     ProgramColorContext, Sequence, SequenceCollection, SequenceSettings,
 };
+pub(crate) use project_persistence::ProjectPersistenceRequestId;
 use project_persistence::{
     AutosaveArchiveDestination, ManualProjectFileDestination, ProjectPersistencePurpose,
     ProjectPersistenceService,
@@ -149,6 +150,7 @@ pub(crate) mod preview_work_notification;
 pub mod product_action;
 mod project_library_generation;
 mod project_lifecycle;
+pub(crate) use project_lifecycle::ProjectClosePoll;
 mod project_persistence;
 mod project_recovery;
 pub(crate) mod project_runtime;
@@ -329,6 +331,15 @@ pub struct AppState {
     retired_project_libraries: Vec<project_library_generation::RetiredProjectLibraryGeneration>,
     /// UI-independent single-writer durable archive publisher.
     project_persistence: ProjectPersistenceService,
+    /// Non-blocking Project-close handoff owned by the application lifecycle.
+    ///
+    /// While present, the Authoring Session remains readable for projection,
+    /// but no new product Action may mutate or enqueue work against it.
+    pending_project_close: Option<project_lifecycle::PendingProjectClose>,
+    /// Fail-closed lifecycle fault after a quiescence protocol violation.
+    /// The in-memory Project is retained for diagnosis; mutation and further
+    /// persistence remain disabled because worker ownership is unproven.
+    project_close_fault: Option<project_lifecycle::ProjectCloseFault>,
     /// Latest admitted canonical manual-save destination for the open Session.
     ///
     /// This may lead `AuthoringSession::project_file` while Save As is in
@@ -430,6 +441,8 @@ impl AppState {
             project_runtime_lease: None,
             retired_project_libraries: Vec::new(),
             project_persistence: ProjectPersistenceService::new(),
+            pending_project_close: None,
+            project_close_fault: None,
             manual_project_file_destination: None,
             manual_project_file_applied_request: None,
             autosave_last_requested_at: Instant::now(),

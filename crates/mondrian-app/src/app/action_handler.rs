@@ -99,6 +99,13 @@ impl AppState {
     pub fn dispatch_action(&mut self, action: mondrian_editor_state::Action) -> Result<()> {
         use mondrian_editor_state::Action;
 
+        if self.project_close_blocks_actions() {
+            return Err(MondrianError::ActionNotExecuted {
+                action: "project_lifecycle_handoff".to_owned(),
+                reason: "项目正在安全关闭，或持久化所有权未能证明；作者操作保持冻结".to_owned(),
+            });
+        }
+
         if let Some(product_action) = ProductAction::decode_external(&action).map_err(|error| {
             let step_id = error.dispatch_step_id();
             MondrianError::WorkflowStepFailed { step_id, reason: error.to_string() }

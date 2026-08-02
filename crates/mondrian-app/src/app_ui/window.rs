@@ -1526,6 +1526,9 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                 let drain_target_revision = preview_work_watch.revision();
                 let background_tasks =
                     poll_window_background_tasks(&mut host, &mut session);
+                if background_tasks.quit_requested {
+                    elwt.exit();
+                }
                 rearm_preview_work_event(
                     &preview_work_event_pending,
                     drain_target_revision,
@@ -2014,6 +2017,9 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 let background_tasks =
                     poll_window_background_tasks(&mut host, &mut session);
+                if background_tasks.quit_requested {
+                    elwt.exit();
+                }
                 if playback_changed || background_tasks.repaint_required {
                     sync_window_session_role(
                         &mut host,

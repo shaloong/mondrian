@@ -1005,6 +1005,25 @@ clears preview caches/failure caches, and leaves workers alive for the next
 project. Application quit additionally closes the preview worker queue and must
 not perform a workspace-to-startup native-window role sync on the way out.
 
+Guarded close and quit are asynchronous Window lifecycle operations. Choosing
+Save queues the immutable save snapshot and immediately starts the same
+Persistence Module FIFO barrier used by discard-close; it never calls the
+synchronous Headless save helper. `AppUiHost` retains only the close/quit intent,
+while `AppState` owns the exact Session pause ticket and fail-closed state. The
+workspace remains paintable while quiescing, but action availability and final
+dispatch both reject author/transport/project work, and Host polling does not
+apply Import, relink/Component mutation, or Proxy completions to the frozen
+Session. The Window merges a 16 ms close-progress deadline with its existing
+resource/timer wake deadline, avoiding both an indefinite sleep and an
+unbounded `ControlFlow::Poll` loop. Only a successful barrier may switch to the
+startup surface or arm process exit. If the barrier protocol faults, Host
+reopens the guarded dialog and preserves the close/quit intent. Only an
+explicit Discard performs the typed unquiesced detach; Cancel leaves the
+Project visible but frozen, and Save remains unavailable until persistence can
+be proven. A required save publication failure is different: admission is
+resumed, the Project remains ordinarily editable, and no force-discard is
+implied.
+
 Preview worker progress is event-driven through one UI-independent,
 payload-free work watch owned by `PreviewProductionRuntime`. Media decode,
 heterogeneous visual execution, Basic Title raster, and external visual

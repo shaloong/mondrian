@@ -19,9 +19,9 @@ use mondrian_storage::{ensure_durable_directory_chain, DirectoryPublicationFailu
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const PERSISTENCE_QUEUE_CAPACITY: usize = 4;
 const MAX_COMPLETIONS_PER_POLL: usize = 8;
@@ -76,6 +76,20 @@ pub(super) struct ProjectPersistencePauseToken {
     service_id: ProjectPersistenceServiceId,
     session_id: AuthoringSessionId,
     admission_generation: ProjectPersistenceGeneration,
+}
+
+/// Non-blocking FIFO quiescence request for one Authoring Session.
+///
+/// The ticket owns the sole acknowledgement receiver. While it exists, the
+/// exact Session generation is `Pausing`: new persistence work is rejected,
+/// but the UI thread may continue pumping events while the worker finishes all
+/// earlier admitted requests. A caller must drive the ticket to a terminal
+/// result; dropping it would intentionally leave admission closed.
+pub(super) struct ProjectPersistencePauseTicket {
+    token: ProjectPersistencePauseToken,
+    acknowledgement_rx: Receiver<ProjectPersistenceBarrierAcknowledgement>,
+    started_at: Instant,
+    timeout: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -629,6 +643,40 @@ impl ProjectPersistenceService {
         session_id: AuthoringSessionId,
         timeout: Duration,
     ) -> Result<ProjectPersistencePauseToken, String> {
+        let ticket = self.begin_pause_and_quiesce_with_timeout(session_id, timeout)?;
+        let acknowledgement = match ticket.acknowledgement_rx.recv_timeout(timeout) {
+            Ok(acknowledgement) => acknowledgement,
+            Err(RecvTimeoutError::Timeout) => {
+                self.poison_pausing_session(
+                    ticket.token.session_id,
+                    ticket.token.admission_generation,
+                );
+                return Err(Self::quiescence_timeout_error(timeout));
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                self.poison_pausing_session(
+                    ticket.token.session_id,
+                    ticket.token.admission_generation,
+                );
+                return Err(Self::quiescence_disconnected_error());
+            }
+        };
+        self.complete_pause(ticket.token, acknowledgement)
+    }
+
+    /// Begin a FIFO persistence barrier without waiting on the calling thread.
+    pub(super) fn begin_pause_and_quiesce(
+        &mut self,
+        session_id: AuthoringSessionId,
+    ) -> Result<ProjectPersistencePauseTicket, String> {
+        self.begin_pause_and_quiesce_with_timeout(session_id, PERSISTENCE_QUIESCENCE_TIMEOUT)
+    }
+
+    fn begin_pause_and_quiesce_with_timeout(
+        &mut self,
+        session_id: AuthoringSessionId,
+        timeout: Duration,
+    ) -> Result<ProjectPersistencePauseTicket, String> {
         let admission_generation = self.begin_pause(session_id)?;
         let token = ProjectPersistencePauseToken {
             service_id: self.service_id,
@@ -641,7 +689,11 @@ impl ProjectPersistenceService {
             return Err(error);
         }
 
-        let (acknowledgement_tx, acknowledgement_rx) = mpsc::sync_channel(0);
+        // Capacity one lets the worker publish the terminal barrier fact and
+        // continue teardown even when the event loop is temporarily asleep.
+        // The ticket remains the sole consumer and therefore the sole
+        // authority capable of moving Pausing -> Paused.
+        let (acknowledgement_tx, acknowledgement_rx) = mpsc::sync_channel(1);
         let barrier = ProjectPersistenceBarrier {
             session_id,
             admission_generation,
@@ -656,36 +708,70 @@ impl ProjectPersistenceService {
             let _ = observer.send(());
         }
 
-        let acknowledgement = match acknowledgement_rx.recv_timeout(timeout) {
+        Ok(ProjectPersistencePauseTicket {
+            token,
+            acknowledgement_rx,
+            started_at: Instant::now(),
+            timeout,
+        })
+    }
+
+    /// Poll one non-blocking quiescence ticket.
+    ///
+    /// `Ok(None)` means the FIFO barrier has not reached the worker yet. A
+    /// terminal acknowledgement is validated against the service, Session,
+    /// and admission generation before the pause token becomes usable.
+    pub(super) fn poll_pause_and_quiesce(
+        &mut self,
+        ticket: &ProjectPersistencePauseTicket,
+    ) -> Result<Option<ProjectPersistencePauseToken>, String> {
+        let acknowledgement = match ticket.acknowledgement_rx.try_recv() {
             Ok(acknowledgement) => acknowledgement,
-            Err(RecvTimeoutError::Timeout) => {
-                self.poison_pausing_session(session_id, admission_generation);
-                return Err(format!(
-                    "project persistence quiescence timed out after {} seconds; Session admission remains poisoned",
-                    timeout.as_secs()
-                ));
+            Err(TryRecvError::Empty) if ticket.started_at.elapsed() < ticket.timeout => {
+                return Ok(None);
             }
-            Err(RecvTimeoutError::Disconnected) => {
-                self.poison_pausing_session(session_id, admission_generation);
-                return Err(
-                    "project persistence worker disconnected during quiescence; Session admission remains poisoned"
-                        .to_owned(),
+            Err(TryRecvError::Empty) => {
+                self.poison_pausing_session(
+                    ticket.token.session_id,
+                    ticket.token.admission_generation,
                 );
+                return Err(Self::quiescence_timeout_error(ticket.timeout));
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.poison_pausing_session(
+                    ticket.token.session_id,
+                    ticket.token.admission_generation,
+                );
+                return Err(Self::quiescence_disconnected_error());
             }
         };
-        if acknowledgement.session_id != session_id
-            || acknowledgement.admission_generation != admission_generation
+        self.complete_pause(ticket.token, acknowledgement).map(Some)
+    }
+
+    /// Fail closed a ticket whose caller-side lifecycle invariants were
+    /// violated before the worker acknowledgement could be consumed.
+    pub(super) fn poison_pause_ticket(&mut self, ticket: &ProjectPersistencePauseTicket) {
+        self.poison_pausing_session(ticket.token.session_id, ticket.token.admission_generation);
+    }
+
+    fn complete_pause(
+        &mut self,
+        token: ProjectPersistencePauseToken,
+        acknowledgement: ProjectPersistenceBarrierAcknowledgement,
+    ) -> Result<ProjectPersistencePauseToken, String> {
+        if acknowledgement.session_id != token.session_id
+            || acknowledgement.admission_generation != token.admission_generation
         {
-            self.poison_pausing_session(session_id, admission_generation);
+            self.poison_pausing_session(token.session_id, token.admission_generation);
             return Err(
                 "project persistence worker returned the wrong quiescence acknowledgement; Session admission remains poisoned"
                     .to_owned(),
             );
         }
-        let Some(admission) = self.session_admission.get_mut(&session_id) else {
+        let Some(admission) = self.session_admission.get_mut(&token.session_id) else {
             return Err("project persistence Session admission disappeared".to_owned());
         };
-        if admission.generation != admission_generation
+        if admission.generation != token.admission_generation
             || admission.phase != SessionAdmissionPhase::Pausing
         {
             admission.phase = SessionAdmissionPhase::Poisoned;
@@ -696,6 +782,18 @@ impl ProjectPersistenceService {
         }
         admission.phase = SessionAdmissionPhase::Paused;
         Ok(token)
+    }
+
+    fn quiescence_timeout_error(timeout: Duration) -> String {
+        format!(
+            "project persistence quiescence timed out after {} seconds; Session admission remains poisoned",
+            timeout.as_secs()
+        )
+    }
+
+    fn quiescence_disconnected_error() -> String {
+        "project persistence worker disconnected during quiescence; Session admission remains poisoned"
+            .to_owned()
     }
 
     /// Reopen exactly the paused admission generation represented by `token`.
@@ -712,6 +810,35 @@ impl ProjectPersistenceService {
         let admission = self.validate_pause_token(token)?;
         admission.phase = SessionAdmissionPhase::Retired;
         Ok(())
+    }
+
+    /// Irrevocably detach a failed lifecycle from one exact Session without
+    /// claiming worker quiescence.
+    ///
+    /// Outstanding requests retain their own heavy Arcs and may finish their
+    /// filesystem attempt, but every later completion is rejected because the
+    /// Session admission is `Retired`. This is the explicit user-authorized
+    /// escape from a poisoned/hung close protocol, not a successful barrier.
+    pub(super) fn abandon_session(&mut self, session_id: AuthoringSessionId) -> Result<(), String> {
+        let admission = self
+            .session_admission
+            .get_mut(&session_id)
+            .ok_or_else(|| "cannot abandon an unknown Project persistence Session".to_owned())?;
+        match admission.phase {
+            SessionAdmissionPhase::Pausing
+            | SessionAdmissionPhase::Paused
+            | SessionAdmissionPhase::Poisoned => {
+                admission.phase = SessionAdmissionPhase::Retired;
+                Ok(())
+            }
+            SessionAdmissionPhase::Open => Err(
+                "cannot abandon an open Project persistence Session without a failed close"
+                    .to_owned(),
+            ),
+            SessionAdmissionPhase::Retired => {
+                Err("Project persistence Session is already retired".to_owned())
+            }
+        }
     }
 
     /// Drain a bounded number of terminal completions.
@@ -1949,6 +2076,73 @@ mod tests {
     }
 
     #[test]
+    fn asynchronous_quiescence_never_waits_on_the_calling_thread() {
+        let root = unique_root("async-quiescence-ticket");
+        let (authoring, lease) = session(&root);
+        let session_id = authoring.session_id();
+        let mut service = ProjectPersistenceService::new();
+        let gate = service.gate_next_request();
+        service
+            .submit(
+                authoring.snapshot().expect("snapshot"),
+                ProjectPersistencePurpose::Manual {
+                    destination: ManualProjectFileDestination::initial(
+                        session_id,
+                        root.join("slow-save.mdp"),
+                    )
+                    .expect("manual destination"),
+                },
+                Arc::clone(&lease),
+            )
+            .expect("submit gated save");
+        gate.wait_until_running();
+
+        let started = Instant::now();
+        let ticket = service.begin_pause_and_quiesce(session_id).expect("begin non-blocking pause");
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "beginning a FIFO barrier must not wait for the gated worker"
+        );
+        assert_eq!(
+            service.poll_pause_and_quiesce(&ticket).expect("poll pending barrier"),
+            None
+        );
+        let pausing_error = service
+            .submit(
+                authoring.snapshot().expect("second snapshot"),
+                ProjectPersistencePurpose::Manual {
+                    destination: ManualProjectFileDestination::initial(
+                        session_id,
+                        root.join("must-not-enter.mdp"),
+                    )
+                    .expect("second destination"),
+                },
+                Arc::clone(&lease),
+            )
+            .expect_err("Pausing admission must reject later work");
+        assert!(pausing_error.contains("closing"));
+
+        gate.release();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let token = loop {
+            if let Some(token) =
+                service.poll_pause_and_quiesce(&ticket).expect("poll asynchronous barrier")
+            {
+                break token;
+            }
+            assert!(Instant::now() < deadline, "asynchronous barrier timed out");
+            std::thread::yield_now();
+        };
+        assert_eq!(service.pending_requests(), 0);
+        service.retire(token).expect("retire quiesced Session");
+
+        drop(authoring);
+        drop(lease);
+        drop(service);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn paused_and_retired_sessions_reject_submit() {
         let root = unique_root("paused-retired-admission");
         let (authoring, lease) = session(&root);
@@ -2151,6 +2345,70 @@ mod tests {
                 Arc::clone(&lease),
             )
             .expect_err("timed-out barrier must leave admission closed");
+        assert!(poisoned_error.contains("poisoned"));
+
+        service
+            .abandon_session(session_id)
+            .expect("explicit abandon retires poisoned admission");
+        gate.release();
+        let completion = service
+            .completion_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("gated request completes after release");
+        assert!(
+            !service.accepts_completion(&completion),
+            "abandoned Session completion must never regain publication authority"
+        );
+        drop(authoring);
+        drop(lease);
+        drop(service);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn timed_out_asynchronous_barrier_fails_closed_without_waiting() {
+        let root = unique_root("async-barrier-timeout-poisons");
+        let (authoring, lease) = session(&root);
+        let session_id = authoring.session_id();
+        let mut service = ProjectPersistenceService::new();
+        let gate = service.gate_next_request();
+        service
+            .submit(
+                authoring.snapshot().expect("snapshot"),
+                ProjectPersistencePurpose::Manual {
+                    destination: ManualProjectFileDestination::initial(
+                        session_id,
+                        root.join("timed-out.mdp"),
+                    )
+                    .expect("manual destination"),
+                },
+                Arc::clone(&lease),
+            )
+            .expect("submit gated request");
+        gate.wait_until_running();
+
+        let ticket = service
+            .begin_pause_and_quiesce_with_timeout(session_id, Duration::ZERO)
+            .expect("begin asynchronous barrier");
+        let started = Instant::now();
+        let error = service
+            .poll_pause_and_quiesce(&ticket)
+            .expect_err("zero-budget asynchronous barrier must time out");
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert!(error.contains("timed out"));
+        let poisoned_error = service
+            .submit(
+                authoring.snapshot().expect("snapshot after timeout"),
+                ProjectPersistencePurpose::Manual {
+                    destination: ManualProjectFileDestination::initial(
+                        session_id,
+                        root.join("must-reject.mdp"),
+                    )
+                    .expect("rejected destination"),
+                },
+                Arc::clone(&lease),
+            )
+            .expect_err("timed-out asynchronous barrier must poison admission");
         assert!(poisoned_error.contains("poisoned"));
 
         gate.release();

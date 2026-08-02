@@ -4,7 +4,8 @@ use super::project_library_generation::{
     ProjectLibraryGenerationCandidate, RetiredProjectLibraryGeneration,
 };
 use super::project_persistence::{
-    ProjectPersistenceCompletion, ProjectPersistencePauseToken, ProjectPersistenceRequestId,
+    ProjectPersistenceCompletion, ProjectPersistencePauseTicket, ProjectPersistencePauseToken,
+    ProjectPersistenceRequestId,
 };
 #[cfg(test)]
 use super::project_recovery::recovery_manifest_path;
@@ -34,6 +35,35 @@ enum PersistenceCompletionDisposition {
     SatisfiedByNewerPublication,
     IgnoredSupersededDestination,
     IgnoredStaleSession,
+}
+
+/// App-owned pending close operation over one exact persistence generation.
+pub(super) struct PendingProjectClose {
+    session_id: AuthoringSessionId,
+    ticket: ProjectPersistencePauseTicket,
+    required_manual_save: Option<ProjectPersistenceRequestId>,
+}
+
+/// Retained fail-closed authority after Project Session Handoff failure.
+pub(super) struct ProjectCloseFault {
+    session_id: AuthoringSessionId,
+    reason: String,
+}
+
+/// Result of one bounded Project-close lifecycle poll.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProjectClosePoll {
+    /// No asynchronous close operation exists.
+    Inactive,
+    /// Earlier persistence work still owns the FIFO barrier.
+    Pending,
+    /// The exact Session was quiesced, retired, and removed from AppState.
+    Closed,
+    /// A required manual save was not durable, so admission was resumed and
+    /// the still-open Project may be corrected or retried.
+    SaveRejected(String),
+    /// Ownership could not be proven; author state is retained fail-closed.
+    Faulted(String),
 }
 
 fn autosave_archive_leaf(saved_at_unix_ms: u64, generation: u64) -> String {
@@ -289,6 +319,153 @@ impl AppState {
         self.retire_project_session_handoff(&mut handoff).map_err(anyhow::Error::msg)?;
         self.retain_current_project_library_generation();
         Ok(())
+    }
+
+    /// Start closing the current Project without waiting for durable work on
+    /// the caller's thread.
+    ///
+    /// `Ok(false)` means no Project was open. Once admitted, the exact
+    /// Authoring Session remains installed only as a read-only projection
+    /// source until [`Self::poll_project_close`] observes the FIFO barrier.
+    pub fn begin_project_close(&mut self) -> anyhow::Result<bool> {
+        self.begin_project_close_with_requirement(None)
+    }
+
+    /// Start Project close and require one exact already-admitted manual save
+    /// to become the applied durable baseline before the Session may retire.
+    pub(crate) fn begin_project_close_after_save(
+        &mut self,
+        request_id: ProjectPersistenceRequestId,
+    ) -> anyhow::Result<bool> {
+        self.begin_project_close_with_requirement(Some(request_id))
+    }
+
+    fn begin_project_close_with_requirement(
+        &mut self,
+        required_manual_save: Option<ProjectPersistenceRequestId>,
+    ) -> anyhow::Result<bool> {
+        if let Some(fault) = &self.project_close_fault {
+            anyhow::bail!(
+                "Project lifecycle is fail-closed after an earlier persistence handoff failure: {}",
+                fault.reason
+            );
+        }
+        if self.pending_project_close.is_some() {
+            anyhow::bail!("Project close is already waiting for persistence quiescence");
+        }
+        let Some(session_id) = self.authoring.as_ref().map(AuthoringSession::session_id) else {
+            return Ok(false);
+        };
+        self.stop().map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let ticket = self
+            .project_persistence
+            .begin_pause_and_quiesce(session_id)
+            .map_err(anyhow::Error::msg)?;
+        self.pending_project_close =
+            Some(PendingProjectClose { session_id, ticket, required_manual_save });
+        self.set_status_hint("正在完成后台保存并安全关闭项目…", false);
+        Ok(true)
+    }
+
+    /// Whether the current Project is frozen behind an asynchronous close
+    /// handoff or a fail-closed ownership fault.
+    pub fn project_close_blocks_actions(&self) -> bool {
+        self.pending_project_close.is_some() || self.project_close_fault.is_some()
+    }
+
+    /// Whether a failed handoff awaits an explicit user-authorized detach.
+    pub(crate) fn has_project_close_fault(&self) -> bool {
+        self.project_close_fault.is_some()
+    }
+
+    /// Abandon a failed persistence handoff without claiming quiescence.
+    ///
+    /// The worker retains its own payload/lease ownership. Retiring admission
+    /// makes every eventual completion stale before author state is removed.
+    pub(crate) fn force_close_project_after_fault(&mut self) -> anyhow::Result<()> {
+        let fault = self
+            .project_close_fault
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Project close has no retained lifecycle fault"))?;
+        if self.authoring.as_ref().map(AuthoringSession::session_id) != Some(fault.session_id) {
+            self.project_close_fault = Some(fault);
+            anyhow::bail!("failed Project close authority belongs to another Authoring Session");
+        }
+        if let Err(reason) = self.project_persistence.abandon_session(fault.session_id) {
+            self.project_close_fault = Some(fault);
+            anyhow::bail!(reason);
+        }
+        self.retain_current_project_library_generation();
+        self.finalize_project_close_state();
+        Ok(())
+    }
+
+    fn retain_project_close_fault(&mut self, session_id: AuthoringSessionId, reason: String) {
+        self.project_close_fault = Some(ProjectCloseFault { session_id, reason });
+    }
+
+    /// Poll the asynchronous Project-close handoff once without blocking.
+    pub(crate) fn poll_project_close(&mut self) -> ProjectClosePoll {
+        let Some(pending) = self.pending_project_close.take() else {
+            return ProjectClosePoll::Inactive;
+        };
+        if self.authoring.as_ref().map(AuthoringSession::session_id) != Some(pending.session_id) {
+            self.project_persistence.poison_pause_ticket(&pending.ticket);
+            let reason =
+                "active Authoring Session changed while Project close was quiescing".to_owned();
+            self.retain_project_close_fault(pending.session_id, reason.clone());
+            self.set_status_hint(format!("项目关闭失败：{reason}"), true);
+            return ProjectClosePoll::Faulted(reason);
+        }
+
+        match self.project_persistence.poll_pause_and_quiesce(&pending.ticket) {
+            Ok(None) => {
+                self.pending_project_close = Some(pending);
+                ProjectClosePoll::Pending
+            }
+            Ok(Some(token)) => {
+                // The barrier proves all earlier requests have destroyed their
+                // heavy payloads and queued any scalar completion. Apply those
+                // completions while the exact Session generation is still the
+                // current authority, then retire it permanently.
+                self.drain_quiesced_project_persistence_completions();
+                if let Some(required_request) = pending.required_manual_save {
+                    let save_is_durable = self
+                        .manual_project_file_applied_request
+                        .as_ref()
+                        .is_some_and(|(_, applied_request)| *applied_request == required_request);
+                    if !save_is_durable {
+                        let reason = format!(
+                            "required manual save request {} did not establish the durable baseline; Project remains open",
+                            required_request.get()
+                        );
+                        if let Err(resume_error) = self.project_persistence.resume(token) {
+                            let combined = format!(
+                                "{reason}; additionally failed to resume persistence admission: {resume_error}"
+                            );
+                            self.retain_project_close_fault(pending.session_id, combined.clone());
+                            self.set_status_hint(format!("项目关闭失败：{combined}"), true);
+                            return ProjectClosePoll::Faulted(combined);
+                        }
+                        self.set_status_hint(format!("保存后关闭已取消：{reason}"), true);
+                        return ProjectClosePoll::SaveRejected(reason);
+                    }
+                }
+                if let Err(reason) = self.project_persistence.retire(token) {
+                    self.retain_project_close_fault(pending.session_id, reason.clone());
+                    self.set_status_hint(format!("项目关闭失败：{reason}"), true);
+                    return ProjectClosePoll::Faulted(reason);
+                }
+                self.retain_current_project_library_generation();
+                self.finalize_project_close_state();
+                ProjectClosePoll::Closed
+            }
+            Err(reason) => {
+                self.retain_project_close_fault(pending.session_id, reason.clone());
+                self.set_status_hint(format!("项目关闭失败：{reason}"), true);
+                ProjectClosePoll::Faulted(reason)
+            }
+        }
     }
 
     pub(super) fn collect_released_project_libraries(&mut self) {
@@ -664,7 +841,7 @@ impl AppState {
                 }
             }
         }
-        if self.maybe_request_autosave() {
+        if !self.project_close_blocks_actions() && self.maybe_request_autosave() {
             changed = true;
         }
         changed
@@ -1280,6 +1457,131 @@ mod persistence_lifecycle_tests {
         state.authoring = Some(session);
         state.project_runtime_lease = Some(lease);
         state
+    }
+
+    #[test]
+    fn app_project_close_keeps_the_caller_responsive_and_freezes_author_actions() {
+        let root = unique_root("nonblocking-app-close");
+        let mut state = test_state(&root);
+        let gate = state.project_persistence.gate_next_request();
+        state.request_project_save().expect("admit slow save");
+        gate.wait_until_running();
+
+        let started = Instant::now();
+        assert!(state.begin_project_close().expect("begin asynchronous close"));
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "Project close initiation must never wait for durable publication"
+        );
+        assert!(state.has_open_project());
+        assert!(state.project_close_blocks_actions());
+        assert!(matches!(
+            state.poll_project_close(),
+            ProjectClosePoll::Pending
+        ));
+        let action_error = state
+            .dispatch_action(mondrian_editor_state::Action::DeselectAll)
+            .expect_err("author actions must remain frozen during close");
+        assert!(action_error.to_string().contains("安全关闭"));
+
+        gate.release();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match state.poll_project_close() {
+                ProjectClosePoll::Pending => {
+                    assert!(Instant::now() < deadline, "Project close timed out");
+                    std::thread::yield_now();
+                }
+                ProjectClosePoll::Closed => break,
+                unexpected => panic!("unexpected Project close result: {unexpected:?}"),
+            }
+        }
+        assert!(!state.has_open_project());
+        assert!(!state.project_close_blocks_actions());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn save_before_close_never_retires_the_project_when_required_publication_fails() {
+        let root = unique_root("required-save-close-failure");
+        let mut state = test_state(&root);
+        let original_path = state.current_project_path().expect("Project path").to_path_buf();
+        let target = root.join("new-save-as-target.mdp");
+        let competing_bytes = b"must survive failed save-before-close";
+        let gate = state.project_persistence.gate_next_request();
+        let required_save =
+            state.request_project_save_as(target.clone()).expect("admit required Save As");
+        gate.wait_until_running();
+        assert!(state
+            .begin_project_close_after_save(required_save)
+            .expect("begin save-before-close"));
+        fs::write(&target, competing_bytes).expect("create competing destination");
+        gate.release();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let failure = loop {
+            match state.poll_project_close() {
+                ProjectClosePoll::Pending => {
+                    assert!(Instant::now() < deadline, "Project close timed out");
+                    std::thread::yield_now();
+                }
+                ProjectClosePoll::SaveRejected(reason) => break reason,
+                unexpected => panic!("unexpected Project close result: {unexpected:?}"),
+            }
+        };
+        assert!(failure.contains("did not establish the durable baseline"));
+        assert!(
+            state.has_open_project(),
+            "failed required save keeps Project open"
+        );
+        assert!(!state.project_close_blocks_actions());
+        assert_eq!(state.current_project_path(), Some(original_path.as_path()));
+        assert_eq!(
+            fs::read(&target).expect("competing file survives"),
+            competing_bytes
+        );
+
+        fs::remove_file(&target).expect("remove competing target");
+        let retry = state
+            .request_project_save()
+            .expect("resumed persistence admission accepts retry");
+        state
+            .wait_for_persistence_request(retry)
+            .expect("retry establishes the retained Save As destination");
+        assert_eq!(state.current_project_path(), Some(target.as_path()));
+        state.close_project().expect("close retried Project");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn explicit_force_close_retires_a_faulted_session_without_accepting_completion() {
+        let root = unique_root("force-close-faulted-handoff");
+        let mut state = test_state(&root);
+        assert!(state.begin_project_close().expect("begin Project close"));
+        state.test_poison_project_persistence_admission();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match state.poll_project_close() {
+                ProjectClosePoll::Pending => {
+                    assert!(Instant::now() < deadline, "faulted close timed out");
+                    std::thread::yield_now();
+                }
+                ProjectClosePoll::Faulted(reason) => {
+                    assert!(reason.contains("changed during quiescence"));
+                    break;
+                }
+                unexpected => panic!("unexpected faulted close result: {unexpected:?}"),
+            }
+        }
+        assert!(state.has_open_project());
+        assert!(state.has_project_close_fault());
+        state
+            .force_close_project_after_fault()
+            .expect("explicit force close abandons poisoned Session");
+        assert!(!state.has_open_project());
+        assert!(!state.project_close_blocks_actions());
+        let _ = fs::remove_dir_all(root);
     }
 
     fn wait_for_completions(

@@ -415,8 +415,20 @@ impl AppState {
     }
 
     pub fn close_project(&mut self) -> anyhow::Result<()> {
+        if self.project_close_blocks_actions() {
+            anyhow::bail!("Project close is already active or fail-closed");
+        }
         self.stop().map_err(|error| anyhow::anyhow!(error.to_string()))?;
         self.prepare_project_session_close()?;
+        self.finalize_project_close_state();
+        Ok(())
+    }
+
+    /// Remove the already-quiesced Authoring Session and invalidate every
+    /// Project-scoped execution Adapter.
+    ///
+    /// Persistence ownership must be retired before this method is called.
+    pub(super) fn finalize_project_close_state(&mut self) {
         self.audio_idle_warmup.set_dispatch_enabled(false);
         self.audio_idle_warmup.bind_authoring(None);
         self.proxy_generation.bind_project(None);
@@ -435,7 +447,7 @@ impl AppState {
         self.settle_preview_access_source();
         self.dragging_asset = None;
         self.clear_status_hint();
-        Ok(())
+        self.project_close_fault = None;
     }
 
     pub fn add_video_track(&mut self) -> anyhow::Result<()> {

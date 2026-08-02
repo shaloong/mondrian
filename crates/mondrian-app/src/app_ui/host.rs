@@ -53,6 +53,7 @@ use crate::app::waveform_service::AudioWaveformService;
 use crate::app::{
     discover_crash_recovery_candidates, AppState, CrashRecoveryCandidate,
     FramePresentationDisposition, FramePresentationPreflight, FramePresentationPublication,
+    ProjectClosePoll,
 };
 use crate::app_ui::action_availability::app_state_action_enabled;
 use crate::app_ui::action_queue::PendingUiActions;
@@ -110,6 +111,8 @@ pub(crate) struct AppUiBackgroundTaskPollOutcome {
     pub(crate) repaint_required: bool,
     /// A bounded completion source still has immediately drainable work.
     pub(crate) needs_follow_up_poll: bool,
+    /// The guarded asynchronous Project close completed a pending app quit.
+    pub(crate) quit_requested: bool,
 }
 
 impl AppUiBackgroundTaskPollOutcome {
@@ -120,6 +123,7 @@ impl AppUiBackgroundTaskPollOutcome {
                 || preview.transport_change
                 || preview.candidate_retry_required,
             needs_follow_up_poll: preview.needs_follow_up_poll,
+            quit_requested: false,
         }
     }
 }
@@ -142,6 +146,9 @@ pub struct AppUiHost {
     ui_dirty: Cell<bool>,
     preview_dirty: Cell<bool>,
     pending_close_action: Option<PendingCloseAction>,
+    /// Guarded close/quit intent whose Project persistence barrier is still
+    /// progressing outside the UI thread.
+    quiescing_close_action: Option<PendingCloseAction>,
 }
 
 fn window_preview_state_retains_external_gpu(state: &ViewerPreviewState) -> bool {
@@ -240,6 +247,7 @@ impl AppUiHost {
             ui_dirty: Cell::new(false),
             preview_dirty: Cell::new(false),
             pending_close_action: None,
+            quiescing_close_action: None,
         }
     }
 
@@ -836,8 +844,12 @@ impl AppUiHost {
     pub(crate) fn poll_background_tasks(&mut self, bounds: Rect) -> AppUiBackgroundTaskPollOutcome {
         // Keep the waveform service's library reference in sync with the
         // current app state (e.g. when a new project opens).
-        self.waveform_service
-            .set_library(self.app_state.borrow().asset_library_handle());
+        if self.quiescing_close_action.is_some() {
+            self.waveform_service.set_library(None);
+        } else {
+            self.waveform_service
+                .set_library(self.app_state.borrow().asset_library_handle());
+        }
         apply_execution_resource_policy(
             &self.app_state.borrow(),
             &self.asset_thumbnails,
@@ -859,10 +871,22 @@ impl AppUiHost {
                 self.refresh_recovery_candidates();
             }
         }
-        let media_imports_changed = self.app_state.borrow_mut().poll_media_imports();
-        let media_asset_mutations_changed =
-            self.app_state.borrow_mut().poll_media_asset_mutations();
-        let proxy_generation_changed = self.app_state.borrow_mut().poll_proxy_generation();
+        let (project_close_changed, quit_requested) = self.poll_quiescing_project_close();
+        // A quiescing Project remains readable for UI projection, but no
+        // Project-scoped worker result may commit while its Session admission
+        // is frozen. Final close invalidates their generations in one place.
+        let project_execution_frozen = self.app_state.borrow().project_close_blocks_actions();
+        let (media_imports_changed, media_asset_mutations_changed, proxy_generation_changed) =
+            if project_execution_frozen {
+                (false, false, false)
+            } else {
+                let mut state = self.app_state.borrow_mut();
+                (
+                    state.poll_media_imports(),
+                    state.poll_media_asset_mutations(),
+                    state.poll_proxy_generation(),
+                )
+            };
         let export_queue_changed = self.app_state.borrow_mut().poll_export_queue();
         let thumbnails_changed = self.asset_thumbnails.poll_finished();
         let preview_outcome =
@@ -876,14 +900,16 @@ impl AppUiHost {
             self.preview_dirty.set(true);
         }
         let full_model_changed = persistence_changed
+            || project_close_changed
             || media_imports_changed
             || media_asset_mutations_changed
             || proxy_generation_changed
             || export_queue_changed
             || thumbnails_changed
             || waveform_changed;
-        let outcome =
+        let mut outcome =
             AppUiBackgroundTaskPollOutcome::from_changes(full_model_changed, preview_outcome);
+        outcome.quit_requested = quit_requested;
         if !full_model_changed {
             if preview_outcome.visible_change {
                 self.refresh_if_dirty(bounds);
@@ -896,12 +922,63 @@ impl AppUiHost {
         outcome
     }
 
+    fn poll_quiescing_project_close(&mut self) -> (bool, bool) {
+        if self.quiescing_close_action.is_none() {
+            return (false, false);
+        }
+        let close_poll = self.app_state.borrow_mut().poll_project_close();
+        match close_poll {
+            ProjectClosePoll::Inactive | ProjectClosePoll::Pending => (false, false),
+            ProjectClosePoll::Closed => {
+                let Some(action) = self.quiescing_close_action.take() else {
+                    return (true, false);
+                };
+                self.refresh_recovery_candidates();
+                self.mark_dirty();
+                match action {
+                    PendingCloseAction::CloseProject => (true, false),
+                    PendingCloseAction::QuitApp => {
+                        self.preview_service.shutdown();
+                        #[cfg(not(test))]
+                        super::window::arm_process_exit_watchdog();
+                        (true, true)
+                    }
+                }
+            }
+            ProjectClosePoll::SaveRejected(reason) => {
+                tracing::warn!(%reason, "save-before-close was rejected; Project remains open");
+                self.quiescing_close_action = None;
+                self.waveform_service
+                    .set_library(self.app_state.borrow().asset_library_handle());
+                self.mark_dirty();
+                (true, false)
+            }
+            ProjectClosePoll::Faulted(reason) => {
+                tracing::error!(%reason, "asynchronous Project close failed closed");
+                if let Some(action) = self.quiescing_close_action.take() {
+                    self.pending_close_action = Some(action);
+                    self.root.show_pending_close_dialog(action.dialog_action());
+                }
+                self.waveform_service
+                    .set_library(self.app_state.borrow().asset_library_handle());
+                self.mark_dirty();
+                (true, false)
+            }
+        }
+    }
+
     /// Earliest monotonic deadline for the next native resource observation.
     ///
     /// Window scheduling merges this with UI and playback timers so a fully
     /// idle editor cannot leave pressure evidence stale indefinitely.
     pub(crate) fn next_execution_resource_observation_deadline(&self) -> Instant {
-        self.app_state.borrow().next_execution_resource_observation_deadline()
+        let resource_deadline =
+            self.app_state.borrow().next_execution_resource_observation_deadline();
+        if self.quiescing_close_action.is_some() {
+            resource_deadline.min(Instant::now() + Duration::from_millis(16))
+        } else {
+            resource_deadline
+        }
     }
 
     /// Advance active playback and refresh UI models when the visible frame changes.
@@ -1435,6 +1512,9 @@ impl AppUiHost {
         let Some(pending) = close_request_from_action(action) else {
             return false;
         };
+        if self.quiescing_close_action.is_some() {
+            return true;
+        }
         self.preview_service.cancel_all_work_for_lifecycle();
 
         let has_unsaved_changes = self.app_state.borrow().has_unsaved_project_changes();
@@ -1444,7 +1524,7 @@ impl AppUiHost {
             return true;
         }
 
-        self.execute_pending_close_action(commands, pending);
+        self.execute_pending_close_action(commands, pending, None);
         true
     }
 
@@ -1466,17 +1546,23 @@ impl AppUiHost {
                     self.root.close_pending_close_dialog();
                     return true;
                 };
-                if let Err(err) = self.app_state.borrow_mut().save_project() {
-                    tracing::warn!("closing project after save failed: {err}");
-                    self.app_state
-                        .borrow_mut()
-                        .set_status_hint(format!("保存项目失败：{err}"), true);
-                    self.mark_dirty();
-                    return true;
-                }
+                // Queue the save and immediately place a FIFO close barrier
+                // behind it. The barrier, not a UI-thread wait loop, proves
+                // the save has published and released its heavy ownership.
+                let save_request = match self.app_state.borrow_mut().request_project_save() {
+                    Ok(request_id) => request_id,
+                    Err(err) => {
+                        tracing::warn!("closing project after save failed: {err}");
+                        self.app_state
+                            .borrow_mut()
+                            .set_status_hint(format!("保存项目失败：{err}"), true);
+                        self.mark_dirty();
+                        return true;
+                    }
+                };
                 self.pending_close_action = None;
                 self.root.close_pending_close_dialog();
-                self.execute_pending_close_action(commands, pending);
+                self.execute_pending_close_action(commands, pending, Some(save_request));
                 true
             }
             APP_SHELL_PENDING_CLOSE_DISCARD => {
@@ -1485,7 +1571,7 @@ impl AppUiHost {
                     return true;
                 };
                 self.root.close_pending_close_dialog();
-                self.execute_pending_close_action(commands, pending);
+                self.execute_pending_close_action(commands, pending, None);
                 true
             }
             APP_SHELL_PENDING_CLOSE_CANCEL => {
@@ -1501,45 +1587,70 @@ impl AppUiHost {
         &mut self,
         commands: &mut AppUiShellCommands,
         pending: PendingCloseAction,
+        required_save: Option<crate::app::ProjectPersistenceRequestId>,
     ) {
-        match pending {
-            PendingCloseAction::CloseProject => {
-                self.preview_service.cancel_all_work_for_lifecycle();
-                self.waveform_service.set_library(None);
-                if let Err(err) = self.dispatch_editor_action(Action::CloseProject) {
-                    tracing::warn!("close project failed: {err}");
+        if self.quiescing_close_action.is_some() {
+            return;
+        }
+        self.preview_service.cancel_all_work_for_lifecycle();
+        self.waveform_service.set_library(None);
+        if self.app_state.borrow().has_project_close_fault() {
+            let forced = self.app_state.borrow_mut().force_close_project_after_fault();
+            match forced {
+                Ok(()) => {
+                    self.pending_close_action = None;
+                    self.root.close_pending_close_dialog();
+                    if pending == PendingCloseAction::QuitApp {
+                        self.preview_service.shutdown();
+                        #[cfg(not(test))]
+                        super::window::arm_process_exit_watchdog();
+                        commands.quit = true;
+                    } else {
+                        self.refresh_recovery_candidates();
+                        self.mark_dirty();
+                    }
+                }
+                Err(err) => {
                     self.waveform_service
                         .set_library(self.app_state.borrow().asset_library_handle());
                     self.app_state
                         .borrow_mut()
-                        .set_status_hint(format!("关闭项目失败：{err}"), true);
+                        .set_status_hint(format!("无法放弃失败的项目关闭操作：{err}"), true);
                     self.mark_dirty();
-                    return;
                 }
-                self.refresh_recovery_candidates();
+            }
+            return;
+        }
+        let close_start = match required_save {
+            Some(request_id) => {
+                self.app_state.borrow_mut().begin_project_close_after_save(request_id)
+            }
+            None => self.app_state.borrow_mut().begin_project_close(),
+        };
+        match close_start {
+            Ok(true) => {
+                self.quiescing_close_action = Some(pending);
                 self.mark_dirty();
             }
-            PendingCloseAction::QuitApp => {
-                self.preview_service.cancel_all_work_for_lifecycle();
-                self.waveform_service.set_library(None);
-                if self.app_state.borrow().has_open_project() {
-                    if let Err(err) = self.dispatch_editor_action(Action::CloseProject) {
-                        tracing::warn!("close project before quit failed: {err}");
-                        self.waveform_service
-                            .set_library(self.app_state.borrow().asset_library_handle());
-                        self.app_state
-                            .borrow_mut()
-                            .set_status_hint(format!("退出前关闭项目失败：{err}"), true);
-                        self.mark_dirty();
-                        return;
-                    }
+            Ok(false) => {
+                if pending == PendingCloseAction::QuitApp {
+                    self.preview_service.shutdown();
+                    #[cfg(not(test))]
+                    super::window::arm_process_exit_watchdog();
+                    commands.quit = true;
+                } else {
                     self.refresh_recovery_candidates();
                     self.mark_dirty();
                 }
-                self.preview_service.shutdown();
-                #[cfg(not(test))]
-                super::window::arm_process_exit_watchdog();
-                commands.quit = true;
+            }
+            Err(err) => {
+                tracing::warn!("guarded Project close failed to start: {err}");
+                self.waveform_service
+                    .set_library(self.app_state.borrow().asset_library_handle());
+                self.app_state
+                    .borrow_mut()
+                    .set_status_hint(format!("无法开始安全关闭项目：{err}"), true);
+                self.mark_dirty();
             }
         }
     }
@@ -2563,6 +2674,21 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    fn poll_host_until_project_close_finishes(host: &mut AppUiHost) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut quit_requested = false;
+        while host.quiescing_close_action.is_some() {
+            let outcome = host.poll_background_tasks(Rect::new(0.0, 0.0, 1280.0, 720.0));
+            quit_requested |= outcome.quit_requested;
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for Project close"
+            );
+            std::thread::yield_now();
+        }
+        quit_requested
     }
 
     #[test]
@@ -3734,6 +3860,12 @@ mod tests {
         );
 
         assert_eq!(commands, AppUiShellCommands::default());
+        assert!(host.app_state().has_open_project());
+        assert_eq!(
+            host.quiescing_close_action,
+            Some(PendingCloseAction::CloseProject)
+        );
+        assert!(!poll_host_until_project_close_finishes(&mut host));
         assert!(!host.app_state().has_open_project());
         assert!(!host.root.has_pending_close_dialog());
     }
@@ -3759,6 +3891,12 @@ mod tests {
         );
 
         assert_eq!(commands, AppUiShellCommands::default());
+        assert!(host.app_state().has_open_project());
+        assert_eq!(
+            host.quiescing_close_action,
+            Some(PendingCloseAction::CloseProject)
+        );
+        assert!(!poll_host_until_project_close_finishes(&mut host));
         assert!(!host.app_state().has_open_project());
         assert!(!host.root.has_pending_close_dialog());
     }
@@ -3789,6 +3927,47 @@ mod tests {
     }
 
     #[test]
+    fn host_requires_explicit_discard_before_quitting_a_faulted_handoff() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut state = saved_workspace_app_state("quit-fault-force-discard");
+        state.save_project_file().expect("establish clean baseline");
+        let project_file =
+            state.authoring.as_ref().expect("open project").project_file().to_path_buf();
+        let mut host = AppUiHost::new(state);
+        let pending = PendingUiActions::default();
+
+        pending.push(crate::app::ui_actions::app_shell_quit_action());
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+        assert_eq!(commands, AppUiShellCommands::default());
+        assert_eq!(
+            host.quiescing_close_action,
+            Some(PendingCloseAction::QuitApp)
+        );
+        host.app_state.borrow_mut().test_poison_project_persistence_admission();
+        assert!(!poll_host_until_project_close_finishes(&mut host));
+        assert!(host.app_state().has_open_project());
+        assert!(host.root.has_pending_close_dialog());
+        assert_eq!(host.pending_close_action, Some(PendingCloseAction::QuitApp));
+
+        pending.push(crate::app::ui_actions::app_shell_pending_close_discard_action());
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+        assert_eq!(
+            commands,
+            AppUiShellCommands { quit: true, ..AppUiShellCommands::default() }
+        );
+        assert!(!host.app_state().has_open_project());
+        cleanup_project_file(&project_file);
+    }
+
+    #[test]
     fn host_guards_unsaved_quit_until_discarded() {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let mut host = AppUiHost::new(workspace_app_state());
@@ -3811,10 +3990,13 @@ mod tests {
             &NoopPlatformService,
         );
 
+        assert_eq!(commands, AppUiShellCommands::default());
+        assert!(host.app_state().has_open_project());
         assert_eq!(
-            commands,
-            AppUiShellCommands { quit: true, ..AppUiShellCommands::default() }
+            host.quiescing_close_action,
+            Some(PendingCloseAction::QuitApp)
         );
+        assert!(poll_host_until_project_close_finishes(&mut host));
         assert!(!host.app_state().has_open_project());
     }
 
