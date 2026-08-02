@@ -312,11 +312,11 @@ contract and is not shrunk underneath an in-flight frame. Export uses its
 job-owned Effect Session and must receive an offline job budget at that Seam;
 Preview's grant cannot be borrowed as an implicit cross-domain pool.
 
-Finite-history execution exposes checked Float32 source-coverage bytes before
+Finite temporal execution exposes checked Float32 source-coverage bytes before
 materialization. Preview and Export first admit the complete frozen coverage
 against their CPU active-working-set grant; the Effect Session then includes
 that retained coverage, immutable prepared Mask geometry, maximum Path
-row-crossing scratch, one final output and one proved scalar tile live set in
+row-crossing scratch, exact shared-sample liveness, one final output and one proved scalar tile live set in
 its hard per-execution peak. Prepared Path segments and their spatial index are
 built once per evaluated graph and shared by every tile. When direct execution
 does not fit, deterministic tiling reduces only the tile live set. It cannot

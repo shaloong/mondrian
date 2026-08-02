@@ -211,12 +211,12 @@ impl PreparedVisualSchedule {
         self.diagnostics
     }
 
-    /// Map one exact historical Clip-local Effect request through the sole
+    /// Map one exact signed temporal Clip-local Effect request through the sole
     /// prepared placement/retime authority.
     ///
     /// This method deliberately does not clamp to the visible placement. A
-    /// finite-history Effect may use a valid hidden source handle before a
-    /// trimmed in-edge. Media interpretation grids are applied by the concrete
+    /// finite temporal Effect may use valid hidden source handles before a
+    /// trimmed in-edge or after a trimmed out-edge. Media interpretation grids are applied by the concrete
     /// media Adapter after this exact author-domain result.
     pub fn sample_clip_source(
         &self,

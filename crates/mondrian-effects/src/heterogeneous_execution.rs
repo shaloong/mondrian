@@ -2214,7 +2214,7 @@ fn cpu_prefix_working_bytes(
             | crate::EffectRenderOp::Vignette { .. }
             | crate::EffectRenderOp::Grain { .. }
             | crate::EffectRenderOp::Lut3D { .. } => 1 + render_op_f32_scratch_frames(operation),
-            crate::EffectRenderOp::TemporalFrameMix { .. }
+            crate::EffectRenderOp::TemporalFrameBlend { .. }
             | crate::EffectRenderOp::Custom { .. } => {
                 return Err(
                     PreparedHeterogeneousEffectWorkError::UnsupportedCpuOperation {

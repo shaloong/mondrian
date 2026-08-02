@@ -1,4 +1,4 @@
-//! Two-phase finite-history preparation for Timeline visual execution.
+//! Two-phase finite temporal preparation for Timeline visual execution.
 //!
 //! Graph demand collection is pure and decode-free. Concrete Preview and
 //! Export Adapters resolve every [`TimelineTemporalSourceDemand`] through
@@ -199,7 +199,7 @@ pub enum TimelineTemporalPreparationError {
     SourceCoverageSizeOverflow,
 }
 
-/// Collect finite-history demands and remove their already-accounted graphs
+/// Collect finite temporal demands and remove their already-accounted graphs
 /// from one cloned ordinary compositing plan.
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_timeline_temporal_execution(
@@ -241,7 +241,7 @@ pub fn prepare_timeline_temporal_execution(
     Ok(PreparedTimelineTemporalExecution { execution_plan, batches, source_coverage_bytes })
 }
 
-/// Collect all admitted finite-history source batches in deterministic render
+/// Collect all admitted finite temporal source batches in deterministic render
 /// order without resolving media.
 pub fn collect_timeline_temporal_demands(
     program: &PreparedVisualProgram,
@@ -650,9 +650,30 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     fn temporal_effect(offset: TimelineTime) -> EffectNode {
+        temporal_sample_effect(TimelineTime::ZERO.checked_sub(offset).expect("past offset"))
+    }
+
+    fn temporal_sample_effect(sample_offset: TimelineTime) -> EffectNode {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
         let effect_type = EffectType::Plugin(format!("test.timeline.temporal.{id}"));
+        let temporal_input = if sample_offset.is_negative() {
+            EffectTemporalInputExtent {
+                past: EffectTemporalSpan::Finite(
+                    TimelineTime::ZERO.checked_sub(sample_offset).expect("finite past duration"),
+                ),
+                future: EffectTemporalSpan::None,
+            }
+        } else {
+            EffectTemporalInputExtent {
+                past: EffectTemporalSpan::None,
+                future: if sample_offset.is_zero() {
+                    EffectTemporalSpan::None
+                } else {
+                    EffectTemporalSpan::Finite(sample_offset)
+                },
+            }
+        };
         register_effect_definition(
             EffectDefinition::new(
                 effect_type.key(),
@@ -664,19 +685,13 @@ mod tests {
                 execution_modes: EffectExecutionModes::CPU_F32,
                 determinism: EffectDeterminism::Deterministic,
                 state_model: EffectStateModel::Stateless,
-                temporal_input: EffectTemporalInputExtent {
-                    past: EffectTemporalSpan::Finite(offset),
-                    future: EffectTemporalSpan::None,
-                },
+                temporal_input,
                 roi_propagation: EffectRoiPropagation::PixelLocal,
                 resource_lifetime: EffectResourceLifetime::Frame,
                 topology: EffectGraphTopology::LinearChain,
             })
             .with_graph_builder(Arc::new(move |_, _, graph| {
-                graph.append_unary(EffectRenderOp::TemporalFrameMix {
-                    past_offset: offset,
-                    mix: 0.25,
-                });
+                graph.append_unary(EffectRenderOp::TemporalFrameBlend { sample_offset, mix: 0.25 });
                 Ok(())
             })),
         )
@@ -708,8 +723,8 @@ mod tests {
                 topology: EffectGraphTopology::GeneralDag,
             })
             .with_branching_graph_builder(Arc::new(move |_, _, graph| {
-                let mixed = graph.append_unary(EffectRenderOp::TemporalFrameMix {
-                    past_offset: offset,
+                let mixed = graph.append_unary(EffectRenderOp::TemporalFrameBlend {
+                    sample_offset: TimelineTime::ZERO.checked_sub(offset).expect("past offset"),
                     mix: 0.25,
                 });
                 let left = graph.add_unary_from(
@@ -807,6 +822,66 @@ mod tests {
             assert_eq!(*color_space_override, Some(ColorSpace::Rec2100Pq));
             assert_eq!(*alpha_interpretation, AlphaInterpretation::Premultiplied);
         }
+    }
+
+    #[test]
+    fn future_media_demand_crosses_the_clip_retime_seam_exactly_once() {
+        let rate = Rational::new(30, 1);
+        let offset = TimelineTime::new(1, 2).expect("offset");
+        let mut sequence = Sequence::new("future temporal media");
+        sequence.settings.frame_rate = rate;
+        sequence.video_tracks.clear();
+        let mut track = Track::new_video("V1");
+        let asset_id = AssetId::new();
+        let mut clip = Clip::new(
+            asset_id,
+            TimelineTime::ZERO,
+            TimelineTime::new(5, 1).expect("duration"),
+        )
+        .expect("Clip");
+        clip.set_constant_source_time_map(
+            TimelineTime::new(10, 1).expect("origin"),
+            TimeScale::new(2, 1).expect("2x"),
+        )
+        .expect("retime");
+        clip.add_effect_node(temporal_sample_effect(offset));
+        track.add_clip(clip).expect("add Clip");
+        sequence.video_tracks.push(track);
+
+        let program = PreparedVisualProgram::prepare(&sequence).expect("program");
+        let plan = evaluate_prepared_visual_program(
+            &program,
+            crate::TimelineEvaluationRequest::export(FramePosition::new(30, sequence.time_base())),
+        )
+        .expect("plan");
+        let extent = EffectFrameExtent::new(4, 2);
+        let batches = collect_timeline_temporal_demands(
+            &program,
+            &plan,
+            43,
+            EffectExecutionContinuity::Discontinuous,
+            extent,
+            extent.full_frame_roi(),
+            ExecutionCancellationToken::new(),
+        )
+        .expect("future demands");
+        let batch = batches.first().expect("one temporal batch");
+        assert_eq!(batch.source_demands().len(), 2);
+        let source_times = batch
+            .source_demands()
+            .iter()
+            .map(|demand| match demand.source {
+                TimelineTemporalSource::Media { source_time, .. } => source_time,
+                _ => panic!("media demand"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            source_times,
+            vec![
+                TimelineTime::new(12, 1).expect("current source time"),
+                TimelineTime::new(13, 1).expect("future source time"),
+            ]
+        );
     }
 
     #[test]

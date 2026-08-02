@@ -75,7 +75,7 @@ Sharpen { amount: f32 }
 Vignette { intensity: f32, feather: f32 }
 ChromaticAberration { amount: f32 }
 Grain { amount: f32 }
-TemporalFrameMix { past_offset: TimelineTime, mix: f32 }
+TemporalFrameBlend { sample_offset: TimelineTime, mix: f32 }
 Lut3D { lut: Arc<PreparedLut3D>, intensity: f32 }
 ```
 

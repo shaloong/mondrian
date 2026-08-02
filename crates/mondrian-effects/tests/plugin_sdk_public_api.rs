@@ -129,8 +129,8 @@ fn public_plugin_sdk_contract_compiles_from_crate_reexports() {
         PropertyValue::Text("text".to_owned()),
     ];
 
-    let past_offset = TimelineTime::new(1, 24).expect("valid temporal offset");
-    let _temporal = EffectRenderOp::TemporalFrameMix { past_offset, mix: 0.5 };
+    let sample_offset = TimelineTime::new(-1, 24).expect("valid temporal offset");
+    let _temporal = EffectRenderOp::TemporalFrameBlend { sample_offset, mix: 0.5 };
     let lut = Lut3D::identity(2).expect("identity LUT");
     let _lut = EffectRenderOp::Lut3D {
         lut: Arc::new(PreparedLut3D::new(lut)),

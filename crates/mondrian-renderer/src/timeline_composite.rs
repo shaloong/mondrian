@@ -276,7 +276,7 @@ impl TimelineCompositeScratch {
         self.effect_execution.diagnostics()
     }
 
-    /// Execute one completely resolved finite-history Timeline batch through
+    /// Execute one completely resolved finite temporal Timeline batch through
     /// this Preview/Export owner's Effect Session.
     pub fn execute_prepared_temporal_batch(
         &mut self,

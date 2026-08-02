@@ -340,7 +340,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::Vignette { .. } => 4,
         EffectRenderOp::ChromaticAberration { .. } => 5,
         EffectRenderOp::Grain { .. } => 6,
-        EffectRenderOp::TemporalFrameMix { .. } => 7,
+        EffectRenderOp::TemporalFrameBlend { .. } => 7,
         EffectRenderOp::Lut3D { .. } => 8,
         EffectRenderOp::Custom { .. } => 9,
     }

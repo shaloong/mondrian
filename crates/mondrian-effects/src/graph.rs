@@ -1356,14 +1356,13 @@ fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequiremen
             determinism: EffectDeterminism::FrameSeeded,
             ..cpu_float
         },
-        EffectRenderOp::TemporalFrameMix { past_offset, .. } => EffectImplementationRequirements {
-            execution_modes: EffectExecutionModes::CPU_F32,
-            temporal_input: EffectTemporalInputExtent {
-                past: crate::EffectTemporalSpan::Finite(*past_offset),
-                future: crate::EffectTemporalSpan::None,
-            },
-            ..cpu_float
-        },
+        EffectRenderOp::TemporalFrameBlend { sample_offset, .. } => {
+            EffectImplementationRequirements {
+                execution_modes: EffectExecutionModes::CPU_F32,
+                temporal_input: temporal_input_extent_for_sample_offset(*sample_offset),
+                ..cpu_float
+            }
+        }
         EffectRenderOp::Lut3D { .. } => EffectImplementationRequirements {
             resource_lifetime: EffectResourceLifetime::PreparedProgram,
             ..cpu_float
@@ -1379,6 +1378,27 @@ fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequiremen
             roi_from_effect_input: EffectRoiPropagation::UnknownRequiresFullFrame,
             resource_lifetime: EffectResourceLifetime::Frame,
         },
+    }
+}
+
+fn temporal_input_extent_for_sample_offset(
+    sample_offset: TimelineTime,
+) -> EffectTemporalInputExtent {
+    if sample_offset.is_zero() {
+        return EffectTemporalInputExtent::CURRENT_FRAME;
+    }
+    if sample_offset.is_negative() {
+        return EffectTemporalInputExtent {
+            past: TimelineTime::ZERO
+                .checked_sub(sample_offset)
+                .map(crate::EffectTemporalSpan::Finite)
+                .unwrap_or(crate::EffectTemporalSpan::Unbounded),
+            future: crate::EffectTemporalSpan::None,
+        };
+    }
+    EffectTemporalInputExtent {
+        past: crate::EffectTemporalSpan::None,
+        future: crate::EffectTemporalSpan::Finite(sample_offset),
     }
 }
 
@@ -2093,6 +2113,33 @@ fn shape_variant_hash(shape: &crate::mask::MaskShape, state: &mut impl std::hash
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::EffectTemporalSpan;
+
+    #[test]
+    fn signed_temporal_sample_offsets_derive_exact_directional_extents() {
+        let past = TimelineTime::new(-1, 2).expect("past offset");
+        let past_duration = TimelineTime::new(1, 2).expect("past duration");
+        let future = TimelineTime::new(3, 4).expect("future offset");
+
+        assert_eq!(
+            temporal_input_extent_for_sample_offset(past),
+            EffectTemporalInputExtent {
+                past: EffectTemporalSpan::Finite(past_duration),
+                future: EffectTemporalSpan::None,
+            }
+        );
+        assert_eq!(
+            temporal_input_extent_for_sample_offset(TimelineTime::ZERO),
+            EffectTemporalInputExtent::CURRENT_FRAME
+        );
+        assert_eq!(
+            temporal_input_extent_for_sample_offset(future),
+            EffectTemporalInputExtent {
+                past: EffectTemporalSpan::None,
+                future: EffectTemporalSpan::Finite(future),
+            }
+        );
+    }
 
     #[test]
     fn compiled_graph_identity_distinguishes_parameters_and_topology() {

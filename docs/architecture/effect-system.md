@@ -219,8 +219,8 @@ valid heterogeneous chain, not invalid author state; execution then requires
 explicit representation and/or backend transitions.
 
 The envelope now provides checked execution-demand planning for an exact
-`TimelineTime`, complete frame extent, and requested output ROI. Finite history
-is subtracted in that signed owner domain without inventing a zero boundary;
+`TimelineTime`, complete frame extent, and requested output ROI. Finite past
+and future extents are projected in that signed owner domain without inventing a zero boundary;
 exact rational overflow fails with direction-bearing typed evidence, and
 unbounded history or lookahead remains explicitly unbounded for an enclosing
 source provider to resolve. Clip handles, transparent/missing source policy,
@@ -306,7 +306,7 @@ continuity Session.
 
 `EffectTemporalFrameProvider` and
 `EffectExecutionSession::execute_temporal_f32` form the exact budget-aware
-scalar semantic reference for finite-history, stateless CPU-Float32 work. One request
+scalar semantic reference for finite, stateless CPU-Float32 temporal work. One request
 binds the scheduler generation, continuity evidence, exact Clip visual-domain
 `TimelineTime`, the ordinary Render Plan's deterministic output-frame seed,
 complete frame coordinates, output ROI, and cooperative cancellation. The seed
@@ -321,11 +321,15 @@ bounded copies, between planned tiles, inside kernels and stitching, and before
 cache publication.
 
 `collect_temporal_frame_demands` walks that same compiled graph without
-fetching pixels. The bounded production tracer admits exactly one
-`Source -> TemporalFrameMix` and a current-time DAG after it. Unary branches may
-fan out and rejoin through Blend or MultiInput, and a current Source branch may
-bypass the mixer; history with upstream Effect values is rejected because the
-compiled upstream parameters are bound at the output Clip time.
+fetching pixels. The bounded production tracer admits any finite number of
+`Source -> TemporalFrameBlend` taps with exact signed `sample_offset` values,
+followed by a current-time DAG. Negative offsets request history, positive
+offsets request lookahead, and zero reuses the current source value. Unary
+branches may fan out and rejoin through Blend or MultiInput, and a current
+Source branch may bypass all taps. Exact duplicate sample times are requested
+and frozen once, retained until their last compiled tap use, and charged by the
+same dry-run and runtime liveness ledger. A tap with upstream Effect values is
+rejected because those upstream parameters are bound at the output Clip time.
 `PreparedTemporalFrameSet` freezes one complete, de-duplicated batch and proves
 generation, request, ROI, extent, and tile equality before it can implement the
 provider. The demand batch computes checked exact Float32 coverage bytes before
@@ -393,19 +397,23 @@ its expanded input tile rather than
 allocating a zero-filled complete-frame buffer, while a complete Preview or
 Export request now automatically uses this bounded scalar tiling when direct
 execution does not fit. Regression references require
-expanded Blur, Vignette, frame-seeded Grain, Mask/MaskSource, and a finite-history
+expanded Blur, Vignette, frame-seeded Grain, Mask/MaskSource, and a finite temporal
 fan-out/Blend/MultiInput DAG (including coordinate-seeded Dissolve) to equal the
 corresponding full-frame/current-frame reference crop in direct and tiled
-production execution. This does not claim GPU temporal tiling, history with
-upstream Effects, future input, or stateful continuity execution.
+production execution. Signed past/future and duplicate-sample multi-tap gates
+also prove deterministic request order, exact de-duplication, scalar reference
+output, and direct/tiled parity. This does not claim GPU temporal tiling,
+temporal input with upstream Effects, unbounded input, or stateful continuity
+execution.
 
-`TemporalFrameMix` is the finite-history proof Processor. It coverage-correctly
-interpolates the current upstream frame with an exact signed past sample.
-Crossing zero remains ordinary exact arithmetic; only the prepared placement
-and its source Adapter may decide whether that sample is a valid hidden handle,
-transparent, or unavailable. Tests require exact signed request times and
-require an expanded Gaussian ROI result to equal the crop of the scalar
-full-frame result. Stateful/continuity-owned resources, unbounded
+`TemporalFrameBlend` is the finite signed-tap proof Processor. It
+coverage-correctly interpolates the current Source frame with the exact sample
+at `output_time + sample_offset`. Crossing zero remains ordinary exact
+arithmetic; only the prepared placement and its source Adapter may decide
+whether that sample is a valid hidden handle, transparent, or unavailable.
+Tests require exact signed request times, retime mapping, duplicate-time
+de-duplication, and an expanded Gaussian ROI result equal to the crop of the
+scalar full-frame result. Stateful/continuity-owned resources, unbounded
 temporal demand, unresolved color domains, unsupported graph-value shapes, and
 unsupported operations return typed failures rather than current-frame,
 identity, or cropped output.
@@ -428,9 +436,9 @@ Frame Store value is missing. Nested demands are materialized from the same
 closure node/binding identities; Preview has no second recursive Timeline
 resolver. Only a complete set is frozen and passed to the retained Preview
 Effect Session under that generation's monotonic cancellation token; no
-current/displayed frame can stand in for absent history. Current-time Masks are
-prepared once and run in this same production contract. Future/unbounded input,
-stateful continuity, animated/effected upstream history, and heterogeneous
+current/displayed frame can stand in for an absent sample. Current-time Masks are
+prepared once and run in this same production contract. Unbounded input,
+stateful continuity, animated/effected upstream temporal input, and heterogeneous
 temporal execution remain outside it.
 
 Prepared dependency identity combines the definition-registry revision with

@@ -426,9 +426,12 @@ terminal delivery. No CPU rerun is allowed after the prefix starts.
 `EffectExecutionDemand` derives a checked signed finite/unbounded temporal
 window and exact-or-conservative input ROI from the same prepared execution
 envelope. `collect_temporal_frame_demands` accepts one closed production
-shape—one Source-fed finite-past mixer followed by a current-time DAG. Unary
-branches may fan out and rejoin through Blend/MultiInput, and current-time
-Mask/MaskSource nodes are valid PixelLocal stages. Their immutable prepared
+shape: finite Source-fed `TemporalFrameBlend` taps with signed offsets followed
+by a current-time DAG. Negative history and positive lookahead coexist; exact
+duplicate sample times are requested and frozen once, then retained through
+their last compiled tap use. Unary branches may fan out and rejoin through
+Blend/MultiInput, and current-time Mask/MaskSource nodes are valid PixelLocal
+stages. Their immutable prepared
 geometry uses global frame coordinates for every region and is shared by direct
 or tiled execution; retained geometry and bounded row scratch are admitted as
 part of the Effect working set.
@@ -463,7 +466,8 @@ cancellation all stop before partial publication. Internal tiles are
 attempt-local and never enter the Effect output cache; only the complete frame
 may publish there. Direct and tiled production
 paths have exact pixel-parity and peak-budget tests, including a Path Mask after
-a finite-history fan-out/join DAG. This evidence applies only to the bounded
+a finite temporal fan-out/join DAG and a signed past/future multi-tap DAG with
+duplicate samples. This evidence applies only to the bounded
 CPU-Float32 temporal scalar contract; it is not evidence of GPU temporal tiling,
 arbitrary temporal graphs, or stateful continuity execution.
 
@@ -473,9 +477,9 @@ straight-alpha parent working pixels, freezes the complete batch, and executes
 under the export generation/cancellation Session before replacing that graph
 with identity for ordinary compositing. Media and Solid Color are admitted; a
 nested source is admitted only when its closure-bound exact raster already
-matches the Effect extent. Basic Title history, Adjustment-stack history,
-future/unbounded input, stateful continuity, and any Effect upstream of the
-temporal mixer fail closed. Preview emits the same exact batch into its existing
+matches the Effect extent. Basic Title temporal input, Adjustment-stack temporal
+input, unbounded input, stateful continuity, and any Effect upstream of a
+temporal tap fail closed. Preview emits the same exact batch into its existing
 asynchronous media Scheduler. Temporal media keys require CPU-working output
 and therefore cannot coalesce with an opaque native-surface request. A missing
 Frame Store value returns typed Temporal Pending after all demands have been

@@ -324,8 +324,8 @@ pub enum EffectRenderOp {
     Vignette { intensity: f32, feather: f32 },
     ChromaticAberration { amount: f32 },
     Grain { amount: f32 },
-    TemporalFrameMix {
-        past_offset: TimelineTime,
+    TemporalFrameBlend {
+        sample_offset: TimelineTime,
         mix: f32,
     },
     Lut3D { lut: Arc<PreparedLut3D>, intensity: f32 },
@@ -339,8 +339,9 @@ pub enum EffectRenderOp {
 `EffectRenderOp::Custom`（尤其是令 processor 为空）会在编译时失败关闭，也绕过了
 Definition revision 与 processor identity。
 
-`TemporalFrameMix` 需要精确声明有限历史窗口，并由 temporal executor 提供当前帧和
-`time - past_offset`；单帧执行器不会静默降级。`Lut3D` 只接受 preparation 阶段产生的
+`TemporalFrameBlend` 需要精确声明有限 past/future 窗口，并由 temporal executor
+提供当前帧和 `time + sample_offset`；负值表示历史，正值表示 lookahead，零值复用
+当前帧。单帧执行器不会静默降级。`Lut3D` 只接受 preparation 阶段产生的
 不可变 `PreparedLut3D`，不能在逐帧构图时读取文件。
 ### 方法
 

@@ -322,7 +322,7 @@ EffectRenderOp::Sharpen { amount: f32 }
 EffectRenderOp::Vignette { intensity: f32, feather: f32 }
 EffectRenderOp::ChromaticAberration { amount: f32 }
 EffectRenderOp::Grain { amount: f32 }
-EffectRenderOp::TemporalFrameMix { past_offset: TimelineTime, mix: f32 }
+EffectRenderOp::TemporalFrameBlend { sample_offset: TimelineTime, mix: f32 }
 EffectRenderOp::Lut3D { lut: Arc<PreparedLut3D>, intensity: f32 }
 ```
 

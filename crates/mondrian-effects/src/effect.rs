@@ -542,18 +542,21 @@ pub enum EffectRenderOp {
     Grain {
         amount: f32,
     },
-    /// Deterministic finite-history proof processor.
+    /// Deterministic finite temporal-sample proof processor.
     ///
     /// The output coverage-correctly mixes the current upstream frame and the
-    /// upstream frame at `time - past_offset`: straight-alpha inputs are
+    /// source frame at `time + sample_offset`: straight-alpha inputs are
     /// premultiplied for interpolation, then returned as straight alpha. At the
-    /// non-negative effect-domain boundary, the past sample holds exact time
-    /// zero. A temporal executor must provide both frames; single-frame
-    /// executors fail admission before reaching this operation.
-    TemporalFrameMix {
-        /// Exact non-negative history offset in the Clip visual author domain.
-        past_offset: TimelineTime,
-        /// Weight of the historical frame in `[0, 1]`.
+    /// effect-domain zero crossing the signed time remains exact; source-handle
+    /// policy belongs to the prepared placement Adapter. A temporal executor
+    /// must provide both frames; single-frame executors fail admission before
+    /// reaching this operation.
+    TemporalFrameBlend {
+        /// Exact signed sample offset in the Clip visual author domain.
+        /// Negative values request history and positive values request
+        /// lookahead.
+        sample_offset: TimelineTime,
+        /// Weight of the offset sample in `[0, 1]`.
         mix: f32,
     },
     Lut3D {
@@ -606,9 +609,9 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::Grain { amount } => {
                 formatter.debug_struct("Grain").field("amount", amount).finish()
             }
-            Self::TemporalFrameMix { past_offset, mix } => formatter
-                .debug_struct("TemporalFrameMix")
-                .field("past_offset", past_offset)
+            Self::TemporalFrameBlend { sample_offset, mix } => formatter
+                .debug_struct("TemporalFrameBlend")
+                .field("sample_offset", sample_offset)
                 .field("mix", mix)
                 .finish(),
             Self::Lut3D { lut, intensity } => formatter
@@ -771,9 +774,9 @@ impl EffectRenderOp {
                 5u8.hash(state);
                 amount.to_bits().hash(state);
             }
-            EffectRenderOp::TemporalFrameMix { past_offset, mix } => {
+            EffectRenderOp::TemporalFrameBlend { sample_offset, mix } => {
                 8u8.hash(state);
-                past_offset.hash(state);
+                sample_offset.hash(state);
                 mix.to_bits().hash(state);
             }
             EffectRenderOp::Lut3D { lut, intensity } => {
@@ -822,7 +825,7 @@ impl EffectRenderOp {
             EffectRenderOp::GaussianBlur { .. } => 4,
             EffectRenderOp::Sharpen { .. } => 4,
             EffectRenderOp::ChromaticAberration { .. } => 4,
-            EffectRenderOp::TemporalFrameMix { .. } => 2,
+            EffectRenderOp::TemporalFrameBlend { .. } => 2,
             EffectRenderOp::Custom { .. } => 5,
         }
     }

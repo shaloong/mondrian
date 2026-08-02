@@ -34,7 +34,11 @@ fn color_context(sequence: &Sequence) -> ProgramColorContext {
         .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
 }
 
-fn temporal_mix_effect(offset: TimelineTime) -> mondrian_effects::EffectNode {
+fn temporal_blend_effect(offset: TimelineTime) -> mondrian_effects::EffectNode {
+    temporal_sample_effect(TimelineTime::ZERO.checked_sub(offset).expect("past offset"))
+}
+
+fn temporal_sample_effect(sample_offset: TimelineTime) -> mondrian_effects::EffectNode {
     use mondrian_effects::{
         register_effect_definition, EffectColorDomainContract, EffectDefinition, EffectDeterminism,
         EffectExecutionContract, EffectExecutionModes, EffectGraphTopology, EffectRenderOp,
@@ -44,11 +48,28 @@ fn temporal_mix_effect(offset: TimelineTime) -> mondrian_effects::EffectNode {
 
     static NEXT_TEMPORAL_EFFECT: AtomicU64 = AtomicU64::new(1);
     let serial = NEXT_TEMPORAL_EFFECT.fetch_add(1, Ordering::Relaxed);
-    let effect_type = EffectType::Plugin(format!("test.preview.temporal-mix.{serial}"));
+    let effect_type = EffectType::Plugin(format!("test.preview.temporal-blend.{serial}"));
+    let temporal_input = if sample_offset.is_negative() {
+        EffectTemporalInputExtent {
+            past: EffectTemporalSpan::Finite(
+                TimelineTime::ZERO.checked_sub(sample_offset).expect("past duration"),
+            ),
+            future: EffectTemporalSpan::None,
+        }
+    } else {
+        EffectTemporalInputExtent {
+            past: EffectTemporalSpan::None,
+            future: if sample_offset.is_zero() {
+                EffectTemporalSpan::None
+            } else {
+                EffectTemporalSpan::Finite(sample_offset)
+            },
+        }
+    };
     register_effect_definition(
         EffectDefinition::new(
             effect_type.key(),
-            "Preview temporal mix test",
+            "Preview temporal blend test",
             Default::default(),
             EffectColorDomainContract::SCENE_LINEAR,
         )
@@ -56,16 +77,13 @@ fn temporal_mix_effect(offset: TimelineTime) -> mondrian_effects::EffectNode {
             execution_modes: EffectExecutionModes::CPU_F32,
             determinism: EffectDeterminism::Deterministic,
             state_model: EffectStateModel::Stateless,
-            temporal_input: EffectTemporalInputExtent {
-                past: EffectTemporalSpan::Finite(offset),
-                future: EffectTemporalSpan::None,
-            },
+            temporal_input,
             roi_propagation: EffectRoiPropagation::PixelLocal,
             resource_lifetime: EffectResourceLifetime::Frame,
             topology: EffectGraphTopology::LinearChain,
         })
         .with_graph_builder(Arc::new(move |_, _, graph| {
-            graph.append_unary(EffectRenderOp::TemporalFrameMix { past_offset: offset, mix: 0.25 });
+            graph.append_unary(EffectRenderOp::TemporalFrameBlend { sample_offset, mix: 0.25 });
             Ok(())
         })),
     )
@@ -81,7 +99,7 @@ fn temporal_media_sequence() -> (Sequence, AssetId, mondrian_core::ClipId) {
     let asset_id = AssetId::new();
     let mut clip =
         Clip::new(asset_id, TimelineTime::ZERO, tt(60, time_base)).expect("temporal media Clip");
-    clip.add_effect_node(temporal_mix_effect(
+    clip.add_effect_node(temporal_blend_effect(
         TimelineTime::new(1, 30).expect("one-frame history"),
     ));
     let clip_id = clip.id;
@@ -365,7 +383,80 @@ fn temporal_preview_schedules_the_complete_cross_zero_set_before_publishing() {
     let pixel = frame.working_frame().expect("working temporal output").frame.rgba_f32().data[0];
     assert!(
         (pixel[0] - 0.75).abs() < 1.0e-6,
-        "unexpected temporal mix: {pixel:?}"
+        "unexpected temporal blend: {pixel:?}"
+    );
+}
+
+#[test]
+fn temporal_preview_schedules_and_publishes_finite_lookahead() {
+    let mut sequence = Sequence::new("Preview future temporal media");
+    sequence.settings.frame_rate = Rational::new(30, 1);
+    sequence.settings.resolution = Resolution { width: 2, height: 1 };
+    let time_base = sequence.time_base();
+    let asset_id = AssetId::new();
+    let mut clip =
+        Clip::new(asset_id, TimelineTime::ZERO, tt(60, time_base)).expect("temporal media Clip");
+    clip.add_effect_node(temporal_sample_effect(
+        TimelineTime::new(1, 30).expect("one-frame lookahead"),
+    ));
+    sequence.video_tracks[0].add_clip(clip).expect("insert temporal media Clip");
+    let target = sequence.settings.resolution;
+    let mut scheduled = Vec::new();
+
+    let pending = resolve_preview_timeline(
+        &sequence,
+        &[],
+        0,
+        target,
+        PreviewResolutionScale::Full,
+        color_context(&sequence),
+        &mut |request: PreviewTimelineMediaRequest| {
+            scheduled.push(request);
+            PreviewTimelineMediaFrame::Pending
+        },
+        &mut |_| panic!("temporal media must not request titles"),
+    );
+    assert!(matches!(
+        pending,
+        PreviewTimelineResolution::Pending {
+            dependency: PreviewTimelinePendingDependency::Temporal { pending_sources: 2, .. }
+        }
+    ));
+    assert_eq!(
+        scheduled.iter().map(|request| request.source_time).collect::<Vec<_>>(),
+        vec![
+            TimelineTime::ZERO,
+            TimelineTime::new(1, 30).expect("future time")
+        ]
+    );
+
+    let ready = resolve_preview_timeline(
+        &sequence,
+        &[],
+        0,
+        target,
+        PreviewResolutionScale::Full,
+        color_context(&sequence),
+        &mut |request: PreviewTimelineMediaRequest| {
+            let red = if request.source_time.is_zero() {
+                0.0
+            } else {
+                1.0
+            };
+            ready_temporal_media_frame(&request, red, 2)
+        },
+        &mut |_| panic!("temporal media must not request titles"),
+    );
+    let PreviewTimelineResolution::Ready(ready) = ready else {
+        panic!("complete finite lookahead must publish");
+    };
+    let [ResolvedPreviewElement::Media { frame, .. }] = ready.plan.elements.as_slice() else {
+        panic!("future temporal media must use the ordinary compositor seam");
+    };
+    let pixel = frame.working_frame().expect("working temporal output").frame.rgba_f32().data[0];
+    assert!(
+        (pixel[0] - 0.25).abs() < 1.0e-6,
+        "unexpected lookahead blend: {pixel:?}"
     );
 }
 
@@ -555,7 +646,7 @@ fn temporal_transition_keeps_both_exact_endpoint_values() {
         tt(30, time_base),
     )
     .expect("left solid");
-    left.add_effect_node(temporal_mix_effect(
+    left.add_effect_node(temporal_blend_effect(
         TimelineTime::new(1, 30).expect("one-frame history"),
     ));
     let mut right = Clip::new_solid_color(
@@ -565,7 +656,7 @@ fn temporal_transition_keeps_both_exact_endpoint_values() {
         tt(30, time_base),
     )
     .expect("right solid");
-    right.add_effect_node(temporal_mix_effect(
+    right.add_effect_node(temporal_blend_effect(
         TimelineTime::new(1, 30).expect("one-frame history"),
     ));
     let (left_id, right_id) = (left.id, right.id);
@@ -626,7 +717,7 @@ fn temporal_nested_history_fails_closed_before_zero_and_recurses_when_valid() {
         Some("temporal child".to_owned()),
     )
     .expect("nested Clip");
-    nested.add_effect_node(temporal_mix_effect(
+    nested.add_effect_node(temporal_blend_effect(
         TimelineTime::new(1, 30).expect("one-frame history"),
     ));
     parent.video_tracks[0].add_clip(nested).expect("nested placement");
@@ -717,7 +808,7 @@ fn nested_temporal_preview_and_export_share_prepared_semantics_and_pixels() {
         Some("temporal parity child".to_owned()),
     )
     .expect("nested Clip");
-    nested.add_effect_node(temporal_mix_effect(one_frame));
+    nested.add_effect_node(temporal_blend_effect(one_frame));
     let nested_clip_id = nested.id;
     parent.video_tracks[0].add_clip(nested).expect("insert nested Clip");
 
@@ -860,7 +951,7 @@ fn nested_temporal_preview_and_export_share_prepared_semantics_and_pixels() {
             && pixel[1].abs() < 1.0e-6
             && (pixel[2] - 0.75).abs() < 1.0e-6
             && (pixel[3] - 1.0).abs() < 1.0e-6,
-        "past-only mix must combine child frame 1 blue with child frame 0 red: {pixel:?}"
+        "past temporal blend must combine child frame 1 blue with child frame 0 red: {pixel:?}"
     );
 }
 

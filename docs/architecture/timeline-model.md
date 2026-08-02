@@ -916,20 +916,22 @@ Transition endpoint fails closed. The provider never reads a legacy
 range/speed field, holds the current decoded frame as history, or scans
 `Track`/`Clip` author collections behind `RenderPlanSource`.
 
-The effects Module collects one exact finite-history demand batch from the same
+The effects Module collects one exact finite temporal demand batch from the same
 `CompiledEffectGraph` that is later executed. A `PreparedTemporalFrameSet`
 freezes a complete, generation-bound set of source coverage before scalar
 execution and reports its exact Float32 byte total before callers materialize
 it. Missing, duplicate, unexpected, stale-generation, wrongly sized, or
 ambiguous coverage fails before the graph can observe a partial provider. The
-admitted production graph shape is one Source-fed finite-past mixer followed by
-a current-time unary/fan-out/join DAG. Its Effect Session executes the request
+admitted production graph shape is a finite ordered set of Source-fed signed
+temporal taps followed by a current-time unary/fan-out/join DAG. Negative and
+positive offsets become exact history/lookahead demands; duplicate exact times
+are frozen once and retained to their last tap use. Its Effect Session executes the request
 directly when the proved live set fits, or deterministically tiles and stitches
 the complete output under the same source/output/tile grant. Current-time Clip
 Masks execute in that graph through one frame-extent-bound prepared raster;
 partial regions retain global Mask coordinates and direct/tiled results are
 bit-identical. Temporal input with an upstream Effect, generated or animated
-upstream content, Adjustment Clip, future/unbounded history, stateful continuity,
+upstream content, Adjustment Clip, unbounded temporal input, stateful continuity,
 or unsupported color/ROI semantics is rejected rather than rendered
 approximately.
 

@@ -82,7 +82,7 @@ pub enum EffectExecutionError {
     /// A custom processor returned an error or panicked without committing its staged pixels.
     #[error("custom effect processor `{key}` failed: {reason}")]
     CustomProcessorFailed { key: String, reason: String },
-    /// A finite-history operation entered an executor that owns only one
+    /// A finite temporal operation entered an executor that owns only one
     /// current frame.
     #[error("effect operation requires an exact temporal frame provider")]
     TemporalFrameProviderRequired,
@@ -1403,7 +1403,7 @@ fn admit_single_frame_execution(
 fn effect_render_op_supports_rgba_f32(op: &EffectRenderOp) -> bool {
     !matches!(
         op,
-        EffectRenderOp::Custom { .. } | EffectRenderOp::TemporalFrameMix { .. }
+        EffectRenderOp::Custom { .. } | EffectRenderOp::TemporalFrameBlend { .. }
     )
 }
 
@@ -1425,7 +1425,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Vignette { .. } => "vignette",
         EffectRenderOp::ChromaticAberration { .. } => "chromatic_aberration",
         EffectRenderOp::Grain { .. } => "grain",
-        EffectRenderOp::TemporalFrameMix { .. } => "temporal_frame_mix",
+        EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",
         EffectRenderOp::Lut3D { .. } => "lut3d",
         EffectRenderOp::Custom { .. } => "custom",
     }

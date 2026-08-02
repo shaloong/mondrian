@@ -1312,8 +1312,8 @@ mod tests {
                 topology: EffectGraphTopology::LinearChain,
             })
             .with_graph_builder(Arc::new(move |_, _, graph| {
-                graph.append_unary(EffectRenderOp::TemporalFrameMix {
-                    past_offset: offset,
+                graph.append_unary(EffectRenderOp::TemporalFrameBlend {
+                    sample_offset: TimelineTime::ZERO.checked_sub(offset).expect("past offset"),
                     mix: 0.25,
                 });
                 Ok(())

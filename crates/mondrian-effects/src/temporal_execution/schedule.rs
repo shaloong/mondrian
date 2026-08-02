@@ -5,7 +5,7 @@ use super::*;
 pub(super) fn temporal_scalar_required_bytes(
     compiled: &CompiledEffectGraph,
     request: &EffectTemporalExecutionRequest,
-    temporal_shape: Option<AdmittedTemporalShape>,
+    temporal_program: &AdmittedTemporalProgram,
     demand: &EffectExecutionDemand,
     mask_rasters: Option<&PreparedMaskRasterSet>,
 ) -> Result<usize, EffectTemporalExecutionError> {
@@ -24,6 +24,8 @@ pub(super) fn temporal_scalar_required_bytes(
     let mut working = ScalarWorkingSet::new(usize::MAX, frame_bytes);
     let mut live = HashSet::with_capacity(compiled.graph().nodes.len());
     let mut remaining_uses = compiled.node_use_counts().clone();
+    let mut live_temporal_samples = HashSet::with_capacity(temporal_program.len());
+    let mut remaining_sample_uses = temporal_program.sample_use_counts().clone();
 
     for node_id in &compiled.schedule().ordered_nodes {
         let node = compiled.graph().node(*node_id).ok_or(
@@ -37,21 +39,42 @@ pub(super) fn temporal_scalar_required_bytes(
             EffectGraphNodeKind::UnaryEffect { input, op }
             | EffectGraphNodeKind::DomainEffect { input, op, .. } => {
                 plan_take_graph_input(*input, &mut live, &mut remaining_uses, &mut working)?;
-                if let crate::EffectRenderOp::TemporalFrameMix { past_offset, .. } = op {
-                    let shape = temporal_shape.ok_or(
+                if let crate::EffectRenderOp::TemporalFrameBlend { sample_offset, .. } = op {
+                    let tap = temporal_program.tap(*node_id).ok_or(
                         EffectTemporalExecutionError::UnsupportedTemporalShape {
                             reason: "temporal operation has no admitted execution shape",
                         },
                     )?;
-                    if shape.node_id != *node_id || shape.source_id != *input {
+                    if tap.source_id != *input || tap.sample_offset != *sample_offset {
                         return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
                             reason: "planned temporal node differs from admitted shape",
                         });
                     }
-                    if temporal_past_time(request.output_time, *past_offset)? != request.output_time
+                    if temporal_sample_time(request.output_time, *sample_offset)?
+                        != request.output_time
                     {
-                        working.reserve_frame()?;
-                        working.release_frame()?;
+                        if live_temporal_samples.insert(*sample_offset) {
+                            working.reserve_frame()?;
+                        }
+                        let remaining = remaining_sample_uses.get_mut(sample_offset).ok_or(
+                            EffectTemporalExecutionError::InvalidGraphLiveness {
+                                reason: "temporal sample has no planned use-count evidence",
+                            },
+                        )?;
+                        if *remaining == 0 {
+                            return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
+                                reason: "temporal sample was planned more often than declared",
+                            });
+                        }
+                        *remaining -= 1;
+                        if *remaining == 0 {
+                            if !live_temporal_samples.remove(sample_offset) {
+                                return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
+                                    reason: "last temporal sample use was not resident",
+                                });
+                            }
+                            working.release_frame()?;
+                        }
                     }
                 } else {
                     let scratch_bytes =
@@ -110,9 +133,13 @@ pub(super) fn temporal_scalar_required_bytes(
     if !live.remove(&output_id) {
         return Err(EffectTemporalExecutionError::MissingGraphOutput);
     }
-    if !live.is_empty() || remaining_uses.values().any(|remaining| *remaining != 0) {
+    if !live.is_empty()
+        || remaining_uses.values().any(|remaining| *remaining != 0)
+        || !live_temporal_samples.is_empty()
+        || remaining_sample_uses.values().any(|remaining| *remaining != 0)
+    {
         return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
-            reason: "compiled schedule/use counts did not retire to one output",
+            reason: "compiled graph and temporal sample uses did not retire to one output",
         });
     }
     if working.resident_bytes != frame_bytes {
@@ -157,7 +184,7 @@ fn plan_take_graph_input(
 pub(super) fn plan_temporal_tiles(
     compiled: &CompiledEffectGraph,
     request: &EffectTemporalExecutionRequest,
-    temporal_shape: Option<AdmittedTemporalShape>,
+    temporal_program: &AdmittedTemporalProgram,
     output_roi: EffectPixelRoi,
     retained_output_bytes: usize,
     tile_budget: usize,
@@ -185,7 +212,7 @@ pub(super) fn plan_temporal_tiles(
         let required = temporal_scalar_required_bytes(
             compiled,
             &tile_request,
-            temporal_shape,
+            temporal_program,
             &demand,
             mask_rasters,
         )?;
