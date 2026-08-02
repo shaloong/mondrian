@@ -2542,14 +2542,15 @@ mod tests {
 
     #[test]
     fn new_sequence_revision_reprepares_external_resource_effects() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("mondrian-visual-program-{unique}.cube"));
-        std::fs::write(
-            &path,
-            "LUT_3D_SIZE 2
+        let reused_clips = with_stable_effect_registry(|| {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!("mondrian-visual-program-{unique}.cube"));
+            std::fs::write(
+                &path,
+                "LUT_3D_SIZE 2
 0 0 0
 1 0 0
 0 1 0
@@ -2559,40 +2560,62 @@ mod tests {
 0 1 1
 1 1 1
 ",
-        )
-        .expect("write LUT");
-
-        let mut effect = EffectNode::with_defaults(EffectType::Lut3D);
-        let path_id = EffectType::Lut3D.parameter_id("path").expect("path parameter ID");
-        let processing_space_id = EffectType::Lut3D
-            .parameter_id("processing_space")
-            .expect("processing-space parameter ID");
-        effect
-            .set_static_value_by_parameter(
-                &processing_space_id,
-                PropertyValue::Enum("scene_linear".to_owned()),
             )
-            .expect("set LUT processing space");
-        effect
-            .set_static_value_by_parameter(
-                &path_id,
-                PropertyValue::Resource(ParameterResourceReference::ExternalFile {
-                    path: path.clone(),
-                }),
-            )
-            .expect("set LUT path");
-        let mut sequence = single_solid_sequence(Some(effect));
-        let mut cache = PreparedVisualProgramCache::new(4);
-        let first = cache.prepare(&sequence).expect("initial resource program");
-        assert_eq!(first.diagnostics().blocked_clips, 0);
-        assert!(!first.dependency_refresh_required().expect("current dependency"));
+            .expect("write LUT");
 
-        sequence.video_tracks[0].clips[0].position = tt(1, sequence.time_base());
-        sequence.revision = sequence.revision.checked_next().expect("placement revision");
-        let replacement = cache.prepare(&sequence).expect("replacement resource program");
-        assert_eq!(replacement.diagnostics().reused_clips, 0);
+            let mut effect = EffectNode::with_defaults(EffectType::Lut3D);
+            let path_id = EffectType::Lut3D.parameter_id("path").expect("path parameter ID");
+            let processing_space_id = EffectType::Lut3D
+                .parameter_id("processing_space")
+                .expect("processing-space parameter ID");
+            effect
+                .set_static_value_by_parameter(
+                    &processing_space_id,
+                    PropertyValue::Enum("scene_linear".to_owned()),
+                )
+                .expect("set LUT processing space");
+            effect
+                .set_static_value_by_parameter(
+                    &path_id,
+                    PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+                        path: path.clone(),
+                    }),
+                )
+                .expect("set LUT path");
+            let mut sequence = single_solid_sequence(Some(effect));
+            let mut cache = PreparedVisualProgramCache::new(4);
+            let first = match cache.prepare(&sequence) {
+                Ok(program) => program,
+                Err(PreparedVisualProgramError::EffectRegistryChanged { .. }) => {
+                    std::fs::remove_file(path).expect("remove superseded LUT");
+                    return None;
+                }
+                Err(error) => panic!("initial resource program failed: {error}"),
+            };
+            assert_eq!(first.diagnostics().blocked_clips, 0);
+            let refresh_required = first.dependency_refresh_required().expect("current dependency");
+            if effect_registry_revision() != first.effect_registry_revision() {
+                std::fs::remove_file(path).expect("remove superseded LUT");
+                return None;
+            }
+            assert!(!refresh_required);
 
-        std::fs::remove_file(path).expect("remove LUT");
+            sequence.video_tracks[0].clips[0].position = tt(1, sequence.time_base());
+            sequence.revision = sequence.revision.checked_next().expect("placement revision");
+            let replacement = match cache.prepare(&sequence) {
+                Ok(program) => program,
+                Err(PreparedVisualProgramError::EffectRegistryChanged { .. }) => {
+                    std::fs::remove_file(path).expect("remove superseded LUT");
+                    return None;
+                }
+                Err(error) => panic!("replacement resource program failed: {error}"),
+            };
+            let reused_clips = replacement.diagnostics().reused_clips;
+
+            std::fs::remove_file(path).expect("remove LUT");
+            Some(reused_clips)
+        });
+        assert_eq!(reused_clips, 0);
     }
 
     #[test]

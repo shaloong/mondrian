@@ -2,6 +2,11 @@
 
 The intended render path is shared by preview and export:
 
+Tests that inspect prepared-program dependency currency must bind all assertions to
+a stable Effect Definition Registry revision. A concurrent definition registration
+is a legitimate program invalidation event, not evidence that an external resource
+fingerprint changed.
+
 ```text
 Raw/deserialized author snapshot or Program-cache miss
   + SequenceId + SequenceRevision + Effect Registry Revision
