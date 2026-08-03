@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use mondrian_core::types::{ClipId, FramePosition, TrackId};
 use mondrian_core::{Rational, TimelineTime};
 use mondrian_editor_state::Action;
-use mondrian_timeline::sequence::Sequence;
+use mondrian_timeline::{sequence::Sequence, AudioProcessorRackEditRequest};
 use serde::{Deserialize, Serialize};
 
 use super::AppState;
@@ -26,14 +26,29 @@ pub const TIMELINE_TRIM_CLIPS: &str = "trim_clips";
 /// External action name for seeking the active Timeline.
 pub const TIMELINE_SEEK: &str = "seek";
 
+/// External custom-action namespace for Audio Processor authoring operations.
+pub const AUDIO_PROCESSOR_NAMESPACE: &str = "ui.audio_processor";
+
+/// External action name for one atomic Audio Processor Rack edit.
+pub const AUDIO_PROCESSOR_EDIT_RACK: &str = "edit_rack";
+
 /// One closed product operation accepted by the App composition root.
 ///
 /// Additional product domains may extend this algebra without making their
 /// internal authoring or execution state part of the UI Interface.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ProductAction {
     /// An operation owned by the active Timeline Interface.
     Timeline(TimelineProductAction),
+    /// An operation owned by Sequence Audio Processor authoring.
+    AudioProcessor(AudioProcessorProductAction),
+}
+
+/// Closed Audio Processor authoring operations.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AudioProcessorProductAction {
+    /// Apply one stable-address Rack mutation in one author transaction.
+    EditRack(AudioProcessorRackEditRequest),
 }
 
 /// Closed high-frequency Timeline interaction operations.
@@ -66,7 +81,12 @@ pub struct ProductActionDecodeError {
 
 impl ProductActionDecodeError {
     pub(crate) fn dispatch_step_id(&self) -> String {
-        format!("timeline_ui_action.{}", self.name)
+        let domain = match self.namespace.as_str() {
+            TIMELINE_NAMESPACE => "timeline_ui_action",
+            AUDIO_PROCESSOR_NAMESPACE => "audio_processor_action",
+            _ => "product_action",
+        };
+        format!("{domain}.{}", self.name)
     }
 }
 
@@ -80,24 +100,35 @@ impl ProductAction {
         let Action::Custom { namespace, name, payload } = action else {
             return Ok(None);
         };
-        if namespace != TIMELINE_NAMESPACE {
-            return Ok(None);
+        match namespace.as_str() {
+            TIMELINE_NAMESPACE => {
+                let timeline_action = match name.as_str() {
+                    TIMELINE_SELECT_CLIP => {
+                        TimelineProductAction::SelectClip(decode_payload(namespace, name, payload)?)
+                    }
+                    TIMELINE_MOVE_CLIP => {
+                        TimelineProductAction::MoveClip(decode_payload(namespace, name, payload)?)
+                    }
+                    TIMELINE_TRIM_CLIPS => {
+                        TimelineProductAction::TrimClips(decode_payload(namespace, name, payload)?)
+                    }
+                    TIMELINE_SEEK => {
+                        TimelineProductAction::Seek(decode_payload(namespace, name, payload)?)
+                    }
+                    _ => return Ok(None),
+                };
+                Ok(Some(Self::Timeline(timeline_action)))
+            }
+            AUDIO_PROCESSOR_NAMESPACE => match name.as_str() {
+                AUDIO_PROCESSOR_EDIT_RACK => Ok(Some(Self::AudioProcessor(
+                    AudioProcessorProductAction::EditRack(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
+                _ => Ok(None),
+            },
+            _ => Ok(None),
         }
-
-        let timeline_action = match name.as_str() {
-            TIMELINE_SELECT_CLIP => {
-                TimelineProductAction::SelectClip(decode_payload(namespace, name, payload)?)
-            }
-            TIMELINE_MOVE_CLIP => {
-                TimelineProductAction::MoveClip(decode_payload(namespace, name, payload)?)
-            }
-            TIMELINE_TRIM_CLIPS => {
-                TimelineProductAction::TrimClips(decode_payload(namespace, name, payload)?)
-            }
-            TIMELINE_SEEK => TimelineProductAction::Seek(decode_payload(namespace, name, payload)?),
-            _ => return Ok(None),
-        };
-        Ok(Some(Self::Timeline(timeline_action)))
     }
 
     /// Encode a typed product Action for an external Widget or plugin envelope.
@@ -106,8 +137,9 @@ impl ProductAction {
     /// [`Self::decode_external`]; no other App Module may reinterpret these wire
     /// names or payloads.
     pub fn into_external_action(self) -> Action {
-        let (name, payload) = match self {
+        let (namespace, name, payload) = match self {
             Self::Timeline(TimelineProductAction::SelectClip(payload)) => (
+                TIMELINE_NAMESPACE,
                 TIMELINE_SELECT_CLIP,
                 serde_json::json!({
                     "clip_id": payload.clip_id,
@@ -115,6 +147,7 @@ impl ProductAction {
                 }),
             ),
             Self::Timeline(TimelineProductAction::MoveClip(payload)) => (
+                TIMELINE_NAMESPACE,
                 TIMELINE_MOVE_CLIP,
                 serde_json::json!({
                     "target_track_id": payload.target_track_id,
@@ -124,6 +157,7 @@ impl ProductAction {
                 }),
             ),
             Self::Timeline(TimelineProductAction::TrimClips(payload)) => (
+                TIMELINE_NAMESPACE,
                 TIMELINE_TRIM_CLIPS,
                 serde_json::json!({
                     "clip_ids": payload.clip_ids,
@@ -132,15 +166,21 @@ impl ProductAction {
                 }),
             ),
             Self::Timeline(TimelineProductAction::Seek(payload)) => (
+                TIMELINE_NAMESPACE,
                 TIMELINE_SEEK,
                 serde_json::json!({
                     "frame": payload.frame,
                     "source": payload.source,
                 }),
             ),
+            Self::AudioProcessor(AudioProcessorProductAction::EditRack(request)) => (
+                AUDIO_PROCESSOR_NAMESPACE,
+                AUDIO_PROCESSOR_EDIT_RACK,
+                serde_json::json!(request),
+            ),
         };
         Action::Custom {
-            namespace: TIMELINE_NAMESPACE.to_owned(),
+            namespace: namespace.to_owned(),
             name: name.to_owned(),
             payload,
         }
@@ -355,7 +395,12 @@ impl AppState {
 mod tests {
     use super::*;
     use mondrian_core::types::AssetId;
-    use mondrian_timeline::clip::Clip;
+    use mondrian_timeline::{
+        audio::{AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID},
+        clip::Clip,
+        AudioChannelStripOwner, AudioChannelStripRack, AudioProcessorRackAddress,
+        AudioProcessorRackEdit, AudioProcessorRackPlacement,
+    };
 
     fn tt(frame: i64, time_base: Rational) -> TimelineTime {
         let numerator = frame.checked_mul(time_base.num).expect("test time fits");
@@ -400,6 +445,29 @@ mod tests {
     }
 
     #[test]
+    fn external_codec_round_trips_audio_processor_rack_edits() {
+        let request = AudioProcessorRackEditRequest {
+            address: AudioProcessorRackAddress::ChannelStrip {
+                owner: AudioChannelStripOwner::Track { track_id: TrackId::new() },
+                rack: AudioChannelStripRack::PreFader,
+            },
+            edit: AudioProcessorRackEdit::Insert {
+                processor: AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1),
+                placement: AudioProcessorRackPlacement::End,
+            },
+        };
+        let expected =
+            ProductAction::AudioProcessor(AudioProcessorProductAction::EditRack(request));
+
+        let external = expected.clone().into_external_action();
+        let decoded = ProductAction::decode_external(&external)
+            .expect("valid external payload")
+            .expect("recognized product action");
+
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
     fn external_codec_distinguishes_unknown_and_malformed_known_actions() {
         let unknown = Action::Custom {
             namespace: TIMELINE_NAMESPACE.to_owned(),
@@ -416,6 +484,24 @@ mod tests {
             payload: serde_json::json!({"clip_id": ClipId::new()}),
         };
         assert!(ProductAction::decode_external(&malformed).is_err());
+
+        let unknown_audio = Action::Custom {
+            namespace: AUDIO_PROCESSOR_NAMESPACE.to_owned(),
+            name: "plugin_extension".to_owned(),
+            payload: serde_json::json!({"anything": true}),
+        };
+        assert!(ProductAction::decode_external(&unknown_audio)
+            .expect("unknown names are not decode failures")
+            .is_none());
+
+        let malformed_audio = Action::Custom {
+            namespace: AUDIO_PROCESSOR_NAMESPACE.to_owned(),
+            name: AUDIO_PROCESSOR_EDIT_RACK.to_owned(),
+            payload: serde_json::json!({"address": {"kind": "processing_scope"}}),
+        };
+        let error = ProductAction::decode_external(&malformed_audio)
+            .expect_err("recognized malformed payload fails closed");
+        assert_eq!(error.dispatch_step_id(), "audio_processor_action.edit_rack");
     }
 
     #[test]

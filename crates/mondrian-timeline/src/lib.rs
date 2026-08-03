@@ -10,6 +10,7 @@
 //! - 时间线查询（活跃 Clip、吸附点）
 
 pub mod audio;
+pub mod audio_processor_edit;
 pub mod clip;
 mod clip_fragment;
 pub mod clip_linking;
@@ -25,6 +26,12 @@ pub mod video_transition;
 pub mod visual_schedule;
 
 pub use audio::*;
+pub use audio_processor_edit::{
+    apply_audio_processor_rack_edit, audio_processor_rack, AudioChannelStripOwner,
+    AudioChannelStripRack, AudioProcessorParameterEdit, AudioProcessorRackAddress,
+    AudioProcessorRackEdit, AudioProcessorRackEditError, AudioProcessorRackEditOutcome,
+    AudioProcessorRackEditRequest, AudioProcessorRackPlacement,
+};
 pub use clip::{ActiveClip, Clip, ClipKind, ClipSourceTimeMap};
 pub use clip_linking::{
     apply_clip_link_edit, assess_clip_link_edit, clip_selection_unit, ClipLinkEditAssessment,

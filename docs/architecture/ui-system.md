@@ -369,14 +369,24 @@ Inside each migrated App slice, product meaning is carried by the closed
 `ProductAction` algebra. `Action::Custom` remains the external Widget,
 scripting, and plugin transport Seam; it must not become a second product-domain
 model. The current high-frequency Timeline slice covers Clip selection, Clip
-movement, bulk trim, and seek. Its production constructors lower typed
-operations into the external envelope, and one App-owned codec is the only
+movement, bulk trim, and seek. The Audio Processor slice carries the complete
+typed `AudioProcessorRackEditRequest` for Clip Processing Scope, Track, Bus, and
+Program Output Racks, including parameter automation edits. Its production
+constructor lowers the request into one external envelope; the App codec admits
+it into the closed `AudioProcessorProductAction`, and a dedicated App Module
+commits exactly one Sequence author transaction. Only a changed commit triggers
+post-commit audio execution reconciliation. Timeline remains the sole owner of
+Rack address, lock, identity, and schema validation; UI availability only
+projects whether an active Sequence exists and cannot duplicate those rules.
+
+The Timeline production constructors likewise lower typed operations into the
+external envelope, and one App-owned codec is the only
 Implementation allowed to inspect their namespace, name, or JSON payload. A
 recognized name with an invalid payload fails closed before legacy routing; an
 unknown name remains untouched for another owning Adapter. Dispatch for this
-slice then matches the typed algebra and no longer repeats string or payload
-interpretation. This is a bounded migration, not a claim that every App Action
-already belongs to `ProductAction`.
+these slices then matches the typed algebra and no longer repeats string or
+payload interpretation. This is a bounded migration, not a claim that every App
+Action already belongs to `ProductAction`.
 
 The same slice exposes one read-only `TimelineInteractionProjection`. Its Track
 lock, Clip membership, placement range, and Sequence time-base facts are

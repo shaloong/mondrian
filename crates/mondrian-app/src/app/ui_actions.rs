@@ -24,20 +24,21 @@ use mondrian_media::{
 use mondrian_timeline::{
     audio::AudioFade,
     sequence::{ColorWorkflow, DeliveryBitDepth, MissingColorMetadataPolicy, VideoRange},
-    AudioChannelLayout, AudioDisplayFormat, EditingMode, FieldOrder, PixelAspectRatio,
-    PreviewRenderFormat, SequenceSettings,
+    AudioChannelLayout, AudioDisplayFormat, AudioProcessorRackEditRequest, EditingMode, FieldOrder,
+    PixelAspectRatio, PreviewRenderFormat, SequenceSettings,
 };
 use mondrian_ui_theme::ThemePreference;
 use mondrian_ui_widgets::{ViewerCanvasBackground, WaveformDisplay};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use super::product_action::{ProductAction, TimelineProductAction};
+use super::product_action::{AudioProcessorProductAction, ProductAction, TimelineProductAction};
 pub use super::product_action::{
     TimelineClipSelectionModePayload, TimelineMoveClipPayload, TimelineSeekPayload,
     TimelineSeekSource, TimelineSelectClipPayload, TimelineTrimClipsPayload,
-    TimelineTrimPayloadEdge, TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK,
-    TIMELINE_SELECT_CLIP, TIMELINE_TRIM_CLIPS,
+    TimelineTrimPayloadEdge, AUDIO_PROCESSOR_EDIT_RACK, AUDIO_PROCESSOR_NAMESPACE,
+    TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
+    TIMELINE_TRIM_CLIPS,
 };
 use super::CrashRecoveryCandidate;
 
@@ -1242,6 +1243,12 @@ pub enum SequenceSettingsTabPayload {
 /// Build an action that selects a clip in the active timeline.
 pub fn timeline_select_clip_action(payload: TimelineSelectClipPayload) -> Action {
     ProductAction::Timeline(TimelineProductAction::SelectClip(payload)).into_external_action()
+}
+
+/// Build one atomic Sequence Audio Processor Rack authoring action.
+pub fn audio_processor_rack_edit_action(request: AudioProcessorRackEditRequest) -> Action {
+    ProductAction::AudioProcessor(AudioProcessorProductAction::EditRack(request))
+        .into_external_action()
 }
 
 /// Build an action that links the current Clip selection.

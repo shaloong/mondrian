@@ -511,6 +511,32 @@ Track creation/removal updates the keyed mixer state and default route in the
 same Sequence mutation. Validation rejects a snapshot when the two sets differ.
 See [Audio Pipeline](audio-pipeline.md) for the author/compiler boundary.
 
+All Processor authoring enters the atomic `AudioProcessorRackEditRequest`
+Interface. Its address is either one `AudioProcessingScopeId`, or the typed
+pair `(Track | Bus | ProgramOutput, PreFader | PostFader)`; invalid combinations
+such as a post-fader Processing Scope cannot be represented. Insert and reorder
+use `End` or `Before(AudioProcessorInstanceId)`, never a transient array index.
+Remove, bypass, and parameter edits address stable Processor, Parameter, and
+Keyframe IDs. A parameter gesture mutates one exact curve operation rather than
+replacing a UI-cached whole Rack or curve.
+
+The Implementation clones a structurally shared Sequence candidate, admits
+Track locks, resolves the address, performs the local mutation, and validates
+the complete Audio Program before replacing its input. A Track Rack edit is
+blocked by that Track's lock. A Processing Scope edit is blocked when any Clip
+binding to that shared Scope belongs to a locked Track, because the edit would
+change every binding's authored processing definition. Bus and Program Output
+Racks have no invented Track lock. Duplicate Sequence-wide Processor identity,
+stale placement anchors, missing parameters/keyframes, automation time
+collisions, and invalid definition schemas fail without partial mutation. A
+canonical no-op returns `changed = false`, so the Authoring Session does not
+advance revision, dirty state, or History.
+
+This Module is platform-independent author logic. Windows, macOS, Linux, and
+Headless products submit the same request and consume the same persisted Audio
+Program; native plugin or audio-device Adapters cannot reinterpret Rack order,
+identity, locks, or automation.
+
 ## Clip
 
 `Clip` is one Timeline placement, never an Asset or Sequence definition. It

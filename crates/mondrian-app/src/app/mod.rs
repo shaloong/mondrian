@@ -99,6 +99,7 @@ mod animation_state;
 mod audio_idle_warmup;
 #[cfg(test)]
 mod audio_playback_acceptance;
+mod audio_processor_authoring;
 mod audio_rendering;
 mod basic_titles;
 mod clip_clipboard;

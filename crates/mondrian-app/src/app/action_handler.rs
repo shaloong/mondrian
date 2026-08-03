@@ -1221,6 +1221,9 @@ impl AppState {
     fn dispatch_product_action(&mut self, action: ProductAction) -> Result<()> {
         match action {
             ProductAction::Timeline(action) => self.dispatch_timeline_product_action(action),
+            ProductAction::AudioProcessor(action) => {
+                self.dispatch_audio_processor_product_action(action)
+            }
         }
     }
 
