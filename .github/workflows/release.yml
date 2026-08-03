@@ -22,6 +22,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   BIN_NAME: mondrian
+  # Keep the produced Mach-O deployment contract independent of runner drift.
+  MACOSX_DEPLOYMENT_TARGET: "13.0"
   # 启用包级别 LTO，提升发布构建质量
   CARGO_PROFILE_RELEASE_LTO: "thin"
   CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
@@ -41,15 +43,20 @@ jobs:
           - label: linux-x86_64-gnu
             artifact_platform: linux
             artifact_arch: x64
-            os: ubuntu-latest
+            # Build on the oldest supported glibc baseline. A binary linked on
+            # ubuntu-latest can silently stop launching on Ubuntu 22.04 even
+            # when every non-system shared object is bundled correctly.
+            os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             ext: tar.gz
 
-          # macOS ARM64（原生，macos-latest = Apple Silicon）
+          # macOS ARM64（原生）
           - label: macos-aarch64-darwin
             artifact_platform: darwin
             artifact_arch: arm64
-            os: macos-latest
+            # Pin the oldest standard Apple-Silicon image used by the product
+            # baseline; do not let the SDK and Homebrew runtime drift via latest.
+            os: macos-14
             target: aarch64-apple-darwin
             ext: tar.gz
 
@@ -57,7 +64,9 @@ jobs:
           - label: windows-x86_64-msvc
             artifact_platform: win32
             artifact_arch: x64
-            os: windows-latest
+            # Keep the MSVC/UCRT build host stable instead of inheriting a new
+            # Windows SDK whenever GitHub advances windows-latest.
+            os: windows-2022
             target: x86_64-pc-windows-msvc
             ext: zip
 
@@ -260,9 +269,23 @@ jobs:
             Out-File -FilePath (Join-Path $stageDir 'MEDIA_RUNTIME_BUILD.txt') -Encoding utf8 -Append
           & (Join-Path $stageDir 'ffmpeg.exe') -hide_banner -L |
             Out-File -FilePath (Join-Path $stageDir 'FFMPEG_LICENSE.txt') -Encoding utf8
-          & (Join-Path $stageDir 'mondrian.exe') --verify-runtime
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "Packaged Windows runtime verification failed"
+          # Prove that the staged directory is self-contained. The build job
+          # added vcpkg to PATH, so an ordinary invocation could accidentally
+          # load a DLL omitted from the package and produce a false pass.
+          $savedPath = $env:PATH
+          try {
+            $env:PATH = "$stageDir;$env:SystemRoot\System32;$env:SystemRoot"
+            Push-Location $stageDir
+            try {
+              & '.\mondrian.exe' --verify-runtime
+              if ($LASTEXITCODE -ne 0) {
+                Write-Error "Packaged Windows runtime verification failed"
+              }
+            } finally {
+              Pop-Location
+            }
+          } finally {
+            $env:PATH = $savedPath
           }
           Compress-Archive -Path "$stageDir\*" -DestinationPath $env:PACKAGE_PATH
 

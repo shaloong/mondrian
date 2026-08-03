@@ -13,7 +13,8 @@ validation = []
 mondrian-storage = { workspace = true }
 mondrian-core = { workspace = true }
 
-# FFmpeg 绑定（需要系统安装 FFmpeg 8.x+）
+# FFmpeg bindings link dynamically for source builds. Product packages carry
+# their own verified private runtime closure; end users do not install FFmpeg.
 ffmpeg-next = "8"
 
 # 音频

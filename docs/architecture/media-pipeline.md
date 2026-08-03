@@ -577,6 +577,15 @@ gate rejects PATH-only tools, missing linked baseline decoders, missing
 production CLI encoders/filters/muxers, and an unredistributable `--enable-nonfree`
 build; product startup must not depend on Cargo's test-only search path,
 Homebrew, or a developer-specific `PATH`.
+On Windows the sanitized gate retains only the staged directory and Windows
+system directories in `PATH`; the vcpkg build tree cannot heal an omitted DLL.
+Linux release builds are pinned to the oldest supported Ubuntu/glibc baseline
+instead of `ubuntu-latest`, because a complete private dependency closure
+cannot make a binary compatible with an older glibc ABI. macOS declares its
+minimum deployment target explicitly and uses a pinned Apple-Silicon image
+rather than inheriting the runner SDK's default. Windows likewise pins its
+MSVC/UCRT image. These are release-admission constraints, not runtime fallback
+paths.
 Dynamic linkage is a delivery policy, not a license bypass. The current
 software Export baseline intentionally enables GPL-compatible x264/x265 in the
 runtime used by this AGPL project, never FFmpeg's nonfree profile. Each package

@@ -97,7 +97,8 @@ git push origin v0.1.1
 - Windows 构建使用 vcpkg 安装完整产品 profile：链接库、`ffmpeg`/`ffprobe`、PNG/EXR decoder，以及 Export 声明的软件编码器；不能用只有 `libavcodec.pc` 的旧缓存冒充。
 - Windows Release 包会同时包含 `mondrian.exe`、`ffmpeg.exe`、`ffprobe.exe` 与完整运行时 DLL closure。
 - Linux Release 包会把 Mondrian、`ffmpeg`、`ffprobe` 的递归非基础系统动态库收敛到同一个私有 `lib/` 并设置相对 RPATH；macOS Release 包会把三个可执行文件的非系统 dylib 收敛到 App Bundle 的 `Contents/Frameworks` 并重写加载路径。
-- 三个平台都必须在净化环境中执行 `mondrian --verify-runtime`；该命令拒绝 PATH-only 工具，并验证链接 decoder、CLI encoder/filter/muxer 和 `--enable-nonfree`。媒体或 OCIO 运行时不完整会直接阻止发布产物上传。
+- 三个平台都必须在净化环境中执行 `mondrian --verify-runtime`；该命令拒绝 PATH-only 工具，并验证链接 decoder、CLI encoder/filter/muxer 和 `--enable-nonfree`。Windows 验证时 `PATH` 只保留分发目录与系统目录，vcpkg 构建树不得补齐漏打包 DLL。媒体或 OCIO 运行时不完整会直接阻止发布产物上传。
+- Linux Release 必须在声明支持的最旧 glibc 基线上构建，不得使用会漂移的 `ubuntu-latest`；macOS 必须显式声明最低 deployment target，Windows/macOS 同样必须固定构建镜像。私有动态库齐全不能弥补基础 OS ABI 过新。
 - `workflow_dispatch` 可用于手动 dry-run 验证构建，不会自动创建 GitHub Release。
 
 ## 测试要求
