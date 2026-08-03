@@ -51,20 +51,20 @@ use mondrian_renderer::{
     GpuColorFrameWgpuResourcePool, GpuColorFrameWgpuResourcePoolOptions, GpuContext,
     HeterogeneousGpuCompletedEvidence, HeterogeneousGpuCompletedFrame,
     HeterogeneousGpuContinuationError, HeterogeneousGpuContinuationRequest,
-    HeterogeneousGpuContinuationRuntime, HeterogeneousGpuExecutionCapability, LinearFloatSource,
-    PreparedVisualChildCanvasPolicy, PreparedVisualFrameClosure, PreparedVisualFrameClosureRequest,
-    PreparedVisualFrameEvaluation, PreparedVisualFrameNode, PreparedVisualFrameNodeId,
-    PreparedVisualMaterializationContract, PreparedVisualNestedSample, PreparedVisualProgram,
-    RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
-    RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
-    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderGpuOutputBoundaryRuntimeRecordError,
-    RenderGpuOutputExecutionResourceGrant, RenderInputTransform, RenderOutputColorBoundary,
-    TimelineAdjustmentLayer, TimelineBasicTitlePlan, TimelineCompositeColorPathSummary,
-    TimelineCompositeDiagnostics, TimelineCompositeDomainBlockerBreakdown,
-    TimelineCompositeElement, TimelineCompositeLegacyBreakdown, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineCpuCompositePrecision, TimelineCrossDissolveLayer,
-    TimelineEffectColorRuntime, TimelineEvaluationRequest, TimelineFrameExecutionRequest,
-    TimelineMediaLayer, TimelineMediaPlan, TimelineRenderPlanElement, TimelineSolidColorLayer,
+    HeterogeneousGpuContinuationRuntime, LinearFloatSource, PreparedVisualChildCanvasPolicy,
+    PreparedVisualFrameClosure, PreparedVisualFrameClosureRequest, PreparedVisualFrameEvaluation,
+    PreparedVisualFrameNode, PreparedVisualFrameNodeId, PreparedVisualMaterializationContract,
+    PreparedVisualNestedSample, PreparedVisualProgram, RenderColorStageDiagnostics,
+    RenderColorStageGpuBlockerBreakdown, RenderColorTransformGpuOptions,
+    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
+    RenderGpuOutputBoundaryRuntimeRecordError, RenderGpuOutputExecutionResourceGrant,
+    RenderInputTransform, RenderOutputColorBoundary, TimelineAdjustmentLayer,
+    TimelineBasicTitlePlan, TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
+    TimelineCompositeDomainBlockerBreakdown, TimelineCompositeElement,
+    TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
+    TimelineCpuCompositePrecision, TimelineCrossDissolveLayer, TimelineEffectColorRuntime,
+    TimelineEvaluationRequest, TimelineFrameExecutionRequest, TimelineMediaLayer,
+    TimelineMediaPlan, TimelineRenderPlanElement, TimelineSolidColorLayer,
     TimelineTemporalDemandBatch, TimelineTemporalSource, TimelineTransitionInput,
     TimelineTransitionInputPlan,
 };
@@ -3054,7 +3054,6 @@ struct ExportVisualRenderSession {
     reference_programs_by_sequence: HashMap<SequenceId, Arc<PreparedVisualProgram>>,
     composite_scratch: TimelineCompositeScratch,
     gpu_output: ExportGpuExecutionRuntime,
-    heterogeneous_capability: Result<HeterogeneousGpuExecutionCapability, String>,
     heterogeneous_route_contracts: Vec<ExportHeterogeneousRouteContract>,
     visual_diagnostics: ExportJobVisualDiagnostics,
     resource_policy: service::ExportExecutionResourcePolicy,
@@ -3092,10 +3091,6 @@ impl ExportVisualRenderSession {
         let mut gpu_output = ExportGpuExecutionRuntime::default();
         gpu_output.configure(resource_policy);
         gpu_output.begin_attempt(effect_execution_generation);
-        let heterogeneous_capability = HeterogeneousGpuExecutionCapability::scene_linear_f32()
-            .map_err(|error| {
-                format!("renderer heterogeneous capability construction failed: {error}")
-            });
         let title_fonts = prepared_visual.title_fonts().ok_or_else(|| {
             "immutable export Basic Title font dependency closure is unavailable".to_owned()
         })?;
@@ -3121,7 +3116,6 @@ impl ExportVisualRenderSession {
             reference_programs_by_sequence: HashMap::new(),
             composite_scratch,
             gpu_output,
-            heterogeneous_capability,
             heterogeneous_route_contracts: Vec::new(),
             visual_diagnostics: ExportJobVisualDiagnostics::default(),
             resource_policy,
@@ -5507,13 +5501,20 @@ mod tests {
         graph: &Arc<CompiledEffectGraph>,
         placement: ExportHeterogeneousPlacement,
         extent: EffectFrameExtent,
-    ) {
-        let (prepared, budget) = session
-            .prepare_heterogeneous_work(graph, extent, placement)
+    ) -> mondrian_renderer::PreparedHeterogeneousEffectRoute {
+        let (route, budget) = session
+            .prepare_heterogeneous_route(graph, extent, placement)
             .expect("prepare heterogeneous Export test route");
         session
-            .register_or_validate_route_contract(graph, &prepared, placement, extent, budget)
+            .register_or_validate_route_contract(
+                graph,
+                route.prepared_work(),
+                placement,
+                extent,
+                budget,
+            )
             .expect("freeze heterogeneous Export test route");
+        route
     }
 
     #[test]
@@ -5527,12 +5528,13 @@ mod tests {
 
         assert!(compiled_effect_graph_supports_rgba_f32_with_domain_processor(&graph));
         session
-            .prepare_heterogeneous_work(&graph, extent, ExportHeterogeneousPlacement::Media)
+            .prepare_heterogeneous_route(&graph, extent, ExportHeterogeneousPlacement::Media)
             .expect("the same graph also has a heterogeneous route");
         assert!(
-            !session
+            session
                 .select_heterogeneous_route(&graph, ExportHeterogeneousPlacement::Media, extent,)
-                .expect("select complete CPU route"),
+                .expect("select complete CPU route")
+                .is_none(),
             "a complete exact CPU route must win before any heterogeneous work starts"
         );
         assert!(session.heterogeneous_route_contracts.is_empty());
@@ -5598,14 +5600,14 @@ mod tests {
             extent,
         );
         session.route_contracts_sealed = true;
-        let (drifted_work, budget) = session
-            .prepare_heterogeneous_work(&drifted, extent, ExportHeterogeneousPlacement::Media)
+        let (drifted_route, budget) = session
+            .prepare_heterogeneous_route(&drifted, extent, ExportHeterogeneousPlacement::Media)
             .expect("prepare shape-drift probe");
 
         let error = session
             .register_or_validate_route_contract(
                 &drifted,
-                &drifted_work,
+                drifted_route.prepared_work(),
                 ExportHeterogeneousPlacement::Media,
                 extent,
                 budget,
@@ -5628,7 +5630,7 @@ mod tests {
             generation,
             service::ExportExecutionResourcePolicy::default(),
         );
-        freeze_test_heterogeneous_route(
+        let prepared_route = freeze_test_heterogeneous_route(
             &mut session,
             &graph,
             ExportHeterogeneousPlacement::Media,
@@ -5644,7 +5646,7 @@ mod tests {
         let route = PreparedExportHeterogeneousElement {
             element_index: 0,
             placement: ExportHeterogeneousPlacement::Media,
-            graph,
+            route: prepared_route,
             frame_seed,
         };
         let _failure = GpuBoundaryFailureGuard::activate();
@@ -5677,7 +5679,7 @@ mod tests {
             generation,
             service::ExportExecutionResourcePolicy::default(),
         );
-        freeze_test_heterogeneous_route(
+        let prepared_route = freeze_test_heterogeneous_route(
             &mut session,
             &graph,
             ExportHeterogeneousPlacement::Media,
@@ -5693,7 +5695,7 @@ mod tests {
         let route = PreparedExportHeterogeneousElement {
             element_index: 0,
             placement: ExportHeterogeneousPlacement::Media,
-            graph,
+            route: prepared_route,
             frame_seed: 29,
         };
         let cancellation = ExecutionCancellationToken::new();
@@ -5730,7 +5732,7 @@ mod tests {
             eprintln!("skipping Export heterogeneous integration test: no GPU adapter available");
             return;
         }
-        freeze_test_heterogeneous_route(
+        let prepared_route = freeze_test_heterogeneous_route(
             &mut session,
             &graph,
             ExportHeterogeneousPlacement::Media,
@@ -5754,7 +5756,7 @@ mod tests {
         let route = PreparedExportHeterogeneousElement {
             element_index: 0,
             placement: ExportHeterogeneousPlacement::Media,
-            graph,
+            route: prepared_route,
             frame_seed,
         };
 

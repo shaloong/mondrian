@@ -737,7 +737,7 @@ fn execute_visual_frame(state: &AppState, frame: i64) -> anyhow::Result<VisualEx
             _ => None,
         })
         .context("resolved Preview contains no Cross Dissolve input")
-        .and_then(preview_transition_input_effect_signature)?;
+        .and_then(|input| preview_transition_input_effect_signature(input.as_ref()))?;
     ensure!(
         preview_left_effect_signature == export_left_effect_signature,
         "Preview and Export compiled different Clip effect graphs"

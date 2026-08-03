@@ -206,6 +206,7 @@ pub(crate) fn composite_resolved_preview_working(
                 transform,
                 effect_graph,
                 frame_seed,
+                ..
             } => {
                 let working = frame.working_frame_with_session(scratch.color_execution_mut())?;
                 if let Some(diagnostics) = working.color_diagnostics {
@@ -323,6 +324,7 @@ fn prepare_transition_input(
             transform,
             effect_graph,
             frame_seed,
+            ..
         } => {
             let working = frame.working_frame_with_session(color_session)?;
             if let Some(diagnostics) = working.color_diagnostics {

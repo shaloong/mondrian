@@ -1941,8 +1941,8 @@ mod tests {
         GpuColorFrameId, GpuContext, HeterogeneousCpuPrefixBatchExecutor,
         HeterogeneousCpuPrefixBatchGrant, HeterogeneousCpuPrefixBatchItem,
         HeterogeneousCpuPrefixBatchRequest, HeterogeneousGpuContinuationBinding,
-        HeterogeneousGpuContinuationRequest, HeterogeneousGpuResourceGrant, RenderInputTransform,
-        TimelineSolidColorLayer,
+        HeterogeneousGpuContinuationRequest, HeterogeneousGpuResourceGrant,
+        PreparedHeterogeneousEffectRoute, RenderInputTransform, TimelineSolidColorLayer,
     };
     use mondrian_core::automation::{PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::display_calibration::{
@@ -3188,13 +3188,19 @@ mod tests {
                 })
                 .collect(),
         });
+        let prepared_route = PreparedHeterogeneousEffectRoute::prepare(
+            Arc::clone(&graph),
+            EffectFrameExtent::new(WIDTH, HEIGHT),
+            graph_budget,
+        )
+        .expect("prepare tracer route");
         let cpu_output = HeterogeneousCpuPrefixBatchExecutor::default()
             .execute(
                 HeterogeneousCpuPrefixBatchRequest::new(
                     cpu_grant,
                     vec![HeterogeneousCpuPrefixBatchItem::new(
                         0,
-                        Arc::clone(&graph),
+                        prepared_route,
                         cpu_input,
                         WORKING_SPACE,
                         FRAME_SEED,

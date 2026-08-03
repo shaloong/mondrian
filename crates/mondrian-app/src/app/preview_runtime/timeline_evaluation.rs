@@ -50,6 +50,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             let execution = self.execution.borrow();
             (execution.generation(), execution.generation_cancellation())
         };
+        let heterogeneous_graph_budget =
+            self.heterogeneous_effect_decision.get().cpu_prefix_grant().graph_execution();
         let resolution = resolve_preview_timeline_with_programs_and_observer(
             PreviewTimelineFrameRequest::new(
                 sequence,
@@ -67,6 +69,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 cancellation,
                 author_snapshot,
                 &self.visual_dependencies,
+                heterogeneous_graph_budget,
             ),
         );
         match &resolution {

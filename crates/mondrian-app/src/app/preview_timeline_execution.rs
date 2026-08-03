@@ -20,23 +20,25 @@ use mondrian_core::{
     ExecutionCancellationToken, FramePosition, Resolution, TimelineTime, WorkingRgbaF32Frame,
 };
 use mondrian_effects::{
-    EffectFrameExtent, EffectFrameTileF32, EffectTemporalSourceIdentity, PreparedTemporalFrameSet,
+    CompiledEffectGraph, EffectFrameExtent, EffectFrameTileF32, EffectGraphExecutionBudget,
+    EffectTemporalSourceIdentity, PreparedTemporalFrameSet,
 };
 use mondrian_playback::{FramePresentationQuality, PreviewResolutionScale};
 use mondrian_renderer::{
-    admit_timeline_render_plan_for_cpu_compositor, basic_title_raster_request_identity,
-    execute_cpu_working_transform_with_session, prepare_bound_visual_frame_closure,
-    project_basic_title_transform, BasicTitleRasterFrame, BasicTitleRasterRequestIdentity,
-    ColorFrameAlpha, CpuColorFrame, PreparedVisualAuthorSnapshotIdentity,
-    PreparedVisualChildCanvasPolicy, PreparedVisualFrameClosure, PreparedVisualFrameClosureRequest,
-    PreparedVisualFrameEvaluation, PreparedVisualFrameNode, PreparedVisualFrameNodeId,
-    PreparedVisualMaterializationContract, PreparedVisualNestedSample,
-    PreparedVisualProgramBinding, PreparedVisualProgramCache, RenderColorStageDiagnostics,
-    RenderColorTransformDiagnostics, TimelineAdjustmentLayer, TimelineBasicTitlePlan,
-    TimelineCompositeDiagnostics, TimelineCompositeScratch, TimelineCpuCompositePrecision,
-    TimelineEvaluationRequest, TimelineFrameExecutionRequest, TimelineMediaPlan,
-    TimelineRenderPlanElement, TimelineSolidColorLayer, TimelineTemporalDemandBatch,
-    TimelineTemporalSource, TimelineTemporalSourceDemand, TimelineTransitionInputPlan,
+    basic_title_raster_request_identity, execute_cpu_working_transform_with_session,
+    prepare_bound_visual_frame_closure, project_basic_title_transform, BasicTitleRasterFrame,
+    BasicTitleRasterRequestIdentity, ColorFrameAlpha, CpuColorFrame,
+    PreparedHeterogeneousEffectRoute, PreparedTimelinePreviewEffectRoutes,
+    PreparedVisualAuthorSnapshotIdentity, PreparedVisualChildCanvasPolicy,
+    PreparedVisualFrameClosure, PreparedVisualFrameClosureRequest, PreparedVisualFrameEvaluation,
+    PreparedVisualFrameNode, PreparedVisualFrameNodeId, PreparedVisualMaterializationContract,
+    PreparedVisualNestedSample, PreparedVisualProgramBinding, PreparedVisualProgramCache,
+    RenderColorStageDiagnostics, RenderColorTransformDiagnostics, TimelineAdjustmentLayer,
+    TimelineBasicTitlePlan, TimelineCompositeDiagnostics, TimelineCompositeScratch,
+    TimelineCpuCompositePrecision, TimelineEvaluationRequest, TimelineFrameExecutionRequest,
+    TimelineMediaPlan, TimelinePreviewEffectRouteError, TimelineRenderPlanElement,
+    TimelineSolidColorLayer, TimelineTemporalDemandBatch, TimelineTemporalSource,
+    TimelineTemporalSourceDemand, TimelineTransitionInputPlan,
 };
 #[cfg(test)]
 use mondrian_renderer::{
@@ -214,6 +216,7 @@ pub(crate) struct PreviewTimelineExecutionBinding<'a> {
     author_snapshot: PreparedVisualAuthorSnapshotIdentity,
     dependency_observer:
         &'a crate::app::preview_visual_dependencies::PreviewVisualDependencyObserver,
+    heterogeneous_graph_budget: EffectGraphExecutionBudget,
 }
 
 impl<'a> PreviewTimelineExecutionBinding<'a> {
@@ -225,6 +228,7 @@ impl<'a> PreviewTimelineExecutionBinding<'a> {
         cancellation: ExecutionCancellationToken,
         author_snapshot: PreparedVisualAuthorSnapshotIdentity,
         dependency_observer: &'a crate::app::preview_visual_dependencies::PreviewVisualDependencyObserver,
+        heterogeneous_graph_budget: EffectGraphExecutionBudget,
     ) -> Self {
         Self {
             programs,
@@ -233,6 +237,7 @@ impl<'a> PreviewTimelineExecutionBinding<'a> {
             cancellation,
             author_snapshot,
             dependency_observer,
+            heterogeneous_graph_budget,
         }
     }
 }
@@ -261,6 +266,7 @@ pub(crate) fn collect_preview_timeline_media_demands(
         &programs,
         &scratch,
         None,
+        standalone_preview_heterogeneous_graph_budget(),
     )
 }
 
@@ -274,6 +280,7 @@ pub(crate) fn collect_preview_timeline_media_demands_with_programs(
     programs: &RefCell<PreparedVisualProgramCache>,
     scratch: &RefCell<TimelineCompositeScratch>,
     author_snapshot: Option<PreparedVisualAuthorSnapshotIdentity>,
+    heterogeneous_graph_budget: EffectGraphExecutionBudget,
 ) -> Result<Vec<PreviewTimelineMediaRequest>, PreviewUnavailability> {
     let cancellation = ExecutionCancellationToken::new();
     let graph = PreviewTimelineGraph {
@@ -283,6 +290,7 @@ pub(crate) fn collect_preview_timeline_media_demands_with_programs(
         generation: 0,
         cancellation: &cancellation,
         author_snapshot,
+        heterogeneous_graph_budget,
     };
     let closure = prepare_preview_frame_closure(
         graph,
@@ -293,7 +301,7 @@ pub(crate) fn collect_preview_timeline_media_demands_with_programs(
         color_context,
         runtime_scale,
     )?;
-    Ok(collect_prepared_visual_media_demands(&closure, scratch))
+    collect_prepared_visual_media_demands(&closure)
 }
 
 /// Materialize one prepared root closure for both Window and Headless.
@@ -345,6 +353,7 @@ pub(crate) fn resolve_preview_timeline_with_programs(
         generation: 0,
         cancellation: &cancellation,
         author_snapshot: None,
+        heterogeneous_graph_budget: standalone_preview_heterogeneous_graph_budget(),
     };
     resolve_preview_timeline_with_graph(
         PreviewTimelineFrameRequest::new(
@@ -377,6 +386,7 @@ where
         generation: binding.generation,
         cancellation: &cancellation,
         author_snapshot: Some(binding.author_snapshot),
+        heterogeneous_graph_budget: binding.heterogeneous_graph_budget,
     };
     resolve_preview_timeline_with_graph(request, adapters, graph)
 }
@@ -488,6 +498,7 @@ struct PreviewTimelineGraph<'a> {
     generation: u64,
     cancellation: &'a ExecutionCancellationToken,
     author_snapshot: Option<PreparedVisualAuthorSnapshotIdentity>,
+    heterogeneous_graph_budget: EffectGraphExecutionBudget,
 }
 
 impl<'a> PreviewTimelineGraph<'a> {
@@ -545,7 +556,10 @@ impl<'a> PreviewTimelineGraph<'a> {
         frame: i64,
         target_resolution: Resolution,
         normalized_preview_resolution_scale: f32,
-    ) -> Result<PreparedVisualFrameEvaluation<()>, PreviewUnavailability> {
+    ) -> Result<
+        PreparedVisualFrameEvaluation<PreparedTimelinePreviewEffectRoutes>,
+        PreviewUnavailability,
+    > {
         let extent = EffectFrameExtent::new(target_resolution.width, target_resolution.height);
         let prepared = self
             .scratch
@@ -590,26 +604,22 @@ impl<'a> PreviewTimelineGraph<'a> {
                 )
             })?;
         let (execution_plan, temporal_batches) = prepared.into_parts();
-        admit_timeline_render_plan_for_cpu_compositor(&execution_plan).map_err(|error| {
-            PreviewUnavailability::blocked(
-                PreviewOutputStage::TimelineEvaluation,
-                format!(
-                    "Sequence {} frame {} cannot enter the current Preview compositor: {error}",
-                    program.sequence_id(),
-                    frame.max(0)
-                ),
-            )
-        })?;
+        let routes = PreparedTimelinePreviewEffectRoutes::prepare(
+            &execution_plan,
+            extent,
+            self.heterogeneous_graph_budget,
+            &mut self.scratch.borrow_mut(),
+        );
         Ok(PreparedVisualFrameEvaluation::new(
             execution_plan,
             temporal_batches,
-            (),
+            routes,
         ))
     }
 }
 
 struct PreviewTimelineExecutionContext<'a, MediaFrame, TitleFrame> {
-    closure: &'a PreparedVisualFrameClosure<()>,
+    closure: &'a PreparedVisualFrameClosure<PreparedTimelinePreviewEffectRoutes>,
     media_frame: &'a mut MediaFrame,
     title_frame: &'a mut TitleFrame,
     scratch: &'a RefCell<TimelineCompositeScratch>,
@@ -1106,7 +1116,8 @@ fn prepare_preview_frame_closure(
     root_resolution: Resolution,
     root_color_context: ProgramColorContext,
     runtime_scale: PreviewResolutionScale,
-) -> Result<PreparedVisualFrameClosure<()>, PreviewUnavailability> {
+) -> Result<PreparedVisualFrameClosure<PreparedTimelinePreviewEffectRoutes>, PreviewUnavailability>
+{
     let child_canvas_policy =
         PreparedVisualChildCanvasPolicy::preview_scaled(runtime_scale.dimension_divisor())
             .map_err(|error| {
@@ -1115,7 +1126,7 @@ fn prepare_preview_frame_closure(
                     error.to_string(),
                 )
             })?;
-    prepare_bound_visual_frame_closure(
+    let closure = prepare_bound_visual_frame_closure(
         PreparedVisualFrameClosureRequest {
             root_sequence,
             sequences,
@@ -1138,13 +1149,31 @@ fn prepare_preview_frame_closure(
     )
     .map_err(|error| {
         PreviewUnavailability::blocked(PreviewOutputStage::TimelineEvaluation, error.to_string())
-    })
+    })?;
+    let root = closure.root();
+    for node in closure.nodes() {
+        let admission = if node.id() == root {
+            node.evaluation().payload().admit_root()
+        } else {
+            node.evaluation().payload().admit_nested_materialization()
+        };
+        admission.map_err(|error| {
+            PreviewUnavailability::blocked(
+                PreviewOutputStage::TimelineEvaluation,
+                format!(
+                    "Sequence {} frame {} Effect route admission failed: {error}",
+                    node.sequence_id(),
+                    node.frame()
+                ),
+            )
+        })?;
+    }
+    Ok(closure)
 }
 
 fn collect_prepared_visual_media_demands(
-    closure: &PreparedVisualFrameClosure<()>,
-    scratch: &RefCell<TimelineCompositeScratch>,
-) -> Vec<PreviewTimelineMediaRequest> {
+    closure: &PreparedVisualFrameClosure<PreparedTimelinePreviewEffectRoutes>,
+) -> Result<Vec<PreviewTimelineMediaRequest>, PreviewUnavailability> {
     let mut demands = Vec::new();
     for node in closure.nodes() {
         let color_context = node.color_context();
@@ -1181,12 +1210,15 @@ fn collect_prepared_visual_media_demands(
             match element {
                 TimelineRenderPlanElement::Media(media) => {
                     if !temporal_placements.contains(&media.placement) {
-                        demands.push(preview_timeline_media_request(
-                            media,
-                            target_resolution,
-                            color_context,
-                            scratch,
-                        ));
+                        demands.push(
+                            preview_timeline_media_request(
+                                media,
+                                target_resolution,
+                                color_context,
+                                node.evaluation().payload(),
+                            )
+                            .map_err(preview_route_unavailability)?,
+                        );
                     }
                 }
                 TimelineRenderPlanElement::NestedSequence(_) => {}
@@ -1198,23 +1230,33 @@ fn collect_prepared_visual_media_demands(
                         &transition.left,
                         target_resolution,
                         color_context,
-                        scratch,
+                        node.evaluation().payload(),
                         &temporal_placements,
                         &mut demands,
-                    );
+                    )?;
                     collect_prepared_transition_input_media_demand(
                         &transition.right,
                         target_resolution,
                         color_context,
-                        scratch,
+                        node.evaluation().payload(),
                         &temporal_placements,
                         &mut demands,
-                    );
+                    )?;
                 }
             }
         }
     }
-    demands
+    Ok(demands)
+}
+
+fn standalone_preview_heterogeneous_graph_budget() -> EffectGraphExecutionBudget {
+    EffectGraphExecutionBudget::new(
+        64 * 1024 * 1024,
+        64 * 1024 * 1024,
+        64 * 1024 * 1024,
+        64,
+        192,
+    )
 }
 
 fn resolve_prepared_visual_node<MediaFrame, TitleFrame>(
@@ -1225,7 +1267,7 @@ where
     MediaFrame: FnMut(PreviewTimelineMediaRequest) -> PreviewTimelineMediaFrame,
     TitleFrame: FnMut(PreviewTimelineTitleRequest) -> PreviewTimelineTitleFrame,
 {
-    let (materialization, target_resolution, color_context, elements, temporal_batches) = {
+    let (materialization, target_resolution, color_context, elements, temporal_batches, routes) = {
         let node = prepared_visual_node(execution.closure, node_id)?;
         (
             node.materialization_contract(),
@@ -1233,6 +1275,7 @@ where
             node.color_context().clone(),
             node.evaluation().plan().elements.clone(),
             node.evaluation().temporal_batches().to_vec(),
+            node.evaluation().payload().clone(),
         )
     };
     let author_resolution = materialization.author_resolution();
@@ -1266,6 +1309,11 @@ where
                         opacity: solid.opacity,
                         blend_mode: solid.blend_mode,
                         transform,
+                        prepared_heterogeneous_route: prepared_preview_heterogeneous_route(
+                            &routes,
+                            solid.placement,
+                            &solid.effect_graph,
+                        )?,
                         effect_graph: solid.effect_graph,
                         frame_seed: solid.frame_seed,
                     });
@@ -1291,8 +1339,9 @@ where
                         &media,
                         target_resolution,
                         &color_context,
-                        execution.scratch,
-                    );
+                        &routes,
+                    )
+                    .map_err(preview_route_abort)?;
                     match (execution.media_frame)(request) {
                         PreviewTimelineMediaFrame::Ready(frame) => frame,
                         PreviewTimelineMediaFrame::Pending => {
@@ -1324,6 +1373,11 @@ where
                     opacity: media.opacity,
                     blend_mode: media.blend_mode,
                     transform,
+                    prepared_heterogeneous_route: prepared_preview_heterogeneous_route(
+                        &routes,
+                        media.placement,
+                        &media.effect_graph,
+                    )?,
                     effect_graph: media.effect_graph,
                     frame_seed: media.frame_seed,
                 });
@@ -1341,6 +1395,11 @@ where
                     opacity: title.opacity,
                     blend_mode: title.blend_mode,
                     transform,
+                    prepared_heterogeneous_route: prepared_preview_heterogeneous_route(
+                        &routes,
+                        title.placement,
+                        &title.effect_graph,
+                    )?,
                     effect_graph: title.effect_graph,
                     frame_seed: title.frame_seed,
                 });
@@ -1407,6 +1466,11 @@ where
                     opacity: nested.opacity,
                     blend_mode: nested.blend_mode,
                     transform,
+                    prepared_heterogeneous_route: prepared_preview_heterogeneous_route(
+                        &routes,
+                        nested.placement,
+                        &nested.effect_graph,
+                    )?,
                     effect_graph: nested.effect_graph,
                     frame_seed: nested.frame_seed,
                 });
@@ -1431,8 +1495,8 @@ where
                     &temporal_layers,
                 )?;
                 resolved.push(ResolvedPreviewElement::CrossDissolve {
-                    left,
-                    right,
+                    left: Box::new(left),
+                    right: Box::new(right),
                     progress: transition.progress,
                 });
             }
@@ -1445,27 +1509,26 @@ fn collect_prepared_transition_input_media_demand(
     input: &TimelineTransitionInputPlan,
     target_resolution: Resolution,
     color_context: &ProgramColorContext,
-    scratch: &RefCell<TimelineCompositeScratch>,
+    routes: &PreparedTimelinePreviewEffectRoutes,
     temporal_placements: &HashSet<TimelineClipExecutionRef>,
     demands: &mut Vec<PreviewTimelineMediaRequest>,
-) {
+) -> Result<(), PreviewUnavailability> {
     if transition_input_placement(input)
         .is_some_and(|placement| temporal_placements.contains(&placement))
     {
-        return;
+        return Ok(());
     }
     match input {
         TimelineTransitionInputPlan::Transparent
         | TimelineTransitionInputPlan::SolidColor(_)
         | TimelineTransitionInputPlan::BasicTitle(_)
         | TimelineTransitionInputPlan::NestedSequence(_) => {}
-        TimelineTransitionInputPlan::Media(media) => demands.push(preview_timeline_media_request(
-            media,
-            target_resolution,
-            color_context,
-            scratch,
-        )),
+        TimelineTransitionInputPlan::Media(media) => demands.push(
+            preview_timeline_media_request(media, target_resolution, color_context, routes)
+                .map_err(preview_route_unavailability)?,
+        ),
     }
+    Ok(())
 }
 
 fn transition_input_placement(
@@ -1494,6 +1557,10 @@ where
     TitleFrame: FnMut(PreviewTimelineTitleRequest) -> PreviewTimelineTitleFrame,
 {
     let parent_author_resolution = parent_materialization.author_resolution();
+    let routes = prepared_visual_node(execution.closure, parent_node_id)?
+        .evaluation()
+        .payload()
+        .clone();
     if let Some(placement) = transition_input_placement(&input) {
         if let Some(temporal) = temporal_layers.get(&placement) {
             let (opacity, blend_mode, transform, effect_graph, frame_seed) = match &input {
@@ -1554,6 +1621,11 @@ where
                 opacity,
                 blend_mode,
                 transform,
+                prepared_heterogeneous_route: prepared_preview_heterogeneous_route(
+                    &routes,
+                    placement,
+                    &effect_graph,
+                )?,
                 effect_graph,
                 frame_seed,
             });
@@ -1573,12 +1645,9 @@ where
         }
         TimelineTransitionInputPlan::Media(media) => {
             let asset_id = media.asset_id;
-            let request = preview_timeline_media_request(
-                &media,
-                target_resolution,
-                &color_context,
-                execution.scratch,
-            );
+            let request =
+                preview_timeline_media_request(&media, target_resolution, &color_context, &routes)
+                    .map_err(preview_route_abort)?;
             let frame = match (execution.media_frame)(request) {
                 PreviewTimelineMediaFrame::Ready(frame) => frame,
                 PreviewTimelineMediaFrame::Pending => {
@@ -1609,6 +1678,11 @@ where
                 opacity: media.opacity,
                 blend_mode: media.blend_mode,
                 transform,
+                prepared_heterogeneous_route: prepared_preview_heterogeneous_route(
+                    &routes,
+                    media.placement,
+                    &media.effect_graph,
+                )?,
                 effect_graph: media.effect_graph,
                 frame_seed: media.frame_seed,
             }
@@ -1626,6 +1700,11 @@ where
                 opacity: title.opacity,
                 blend_mode: title.blend_mode,
                 transform,
+                prepared_heterogeneous_route: prepared_preview_heterogeneous_route(
+                    &routes,
+                    title.placement,
+                    &title.effect_graph,
+                )?,
                 effect_graph: title.effect_graph,
                 frame_seed: title.frame_seed,
             }
@@ -1677,6 +1756,11 @@ where
                 opacity: nested.opacity,
                 blend_mode: nested.blend_mode,
                 transform,
+                prepared_heterogeneous_route: prepared_preview_heterogeneous_route(
+                    &routes,
+                    nested.placement,
+                    &nested.effect_graph,
+                )?,
                 effect_graph: nested.effect_graph,
                 frame_seed: nested.frame_seed,
             }
@@ -1842,20 +1926,39 @@ fn preview_timeline_media_request(
     media: &TimelineMediaPlan,
     target_resolution: Resolution,
     color_context: &ProgramColorContext,
-    scratch: &RefCell<TimelineCompositeScratch>,
-) -> PreviewTimelineMediaRequest {
-    PreviewTimelineMediaRequest {
+    routes: &PreparedTimelinePreviewEffectRoutes,
+) -> Result<PreviewTimelineMediaRequest, TimelinePreviewEffectRouteError> {
+    let route = routes.route_for(media.placement, &media.effect_graph)?;
+    Ok(PreviewTimelineMediaRequest {
         asset_id: media.asset_id,
         color_space_override: media.color_space_override,
         alpha_interpretation: media.alpha_interpretation,
         source_time: media.source_time,
         target_resolution,
         input_color: color_context.media_input(media.auto_tone_map),
-        cpu_working_required: scratch
-            .borrow_mut()
-            .get_or_lower_effect_gpu_plan(&media.effect_graph)
-            .is_err(),
-    }
+        cpu_working_required: route.requires_cpu_working_frame(),
+    })
+}
+
+fn preview_route_unavailability(error: TimelinePreviewEffectRouteError) -> PreviewUnavailability {
+    PreviewUnavailability::blocked(PreviewOutputStage::TimelineEvaluation, error.to_string())
+}
+
+fn preview_route_abort(error: TimelinePreviewEffectRouteError) -> PreviewTimelineAbort {
+    PreviewTimelineAbort::Unavailable(preview_route_unavailability(error))
+}
+
+fn prepared_preview_heterogeneous_route(
+    routes: &PreparedTimelinePreviewEffectRoutes,
+    placement: TimelineClipExecutionRef,
+    graph: &CompiledEffectGraph,
+) -> Result<Option<Box<PreparedHeterogeneousEffectRoute>>, PreviewTimelineAbort> {
+    Ok(routes
+        .route_for(placement, graph)
+        .map_err(preview_route_abort)?
+        .heterogeneous()
+        .cloned()
+        .map(Box::new))
 }
 
 fn preview_temporal_media_request(

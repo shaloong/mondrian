@@ -214,14 +214,20 @@ expensive consumer. A blocker outside the reachable closure cannot reject the
 job; the same blocker fails closed when an exported frame can actually reach
 it.
 
-Preview performs that same dynamic evaluation and consumer admission before
-its canonical media-demand collector can publish a decode request and before a
-generated-source Adapter runs. Preview still requires a complete CPU
-single-frame compositor route at this early semantic-admission Seam, even when
-the resolved pixels will later use the Viewer GPU path. This conservative proof
-prevents GPU-only or transfer-dependent semantics from reaching decode on the
-strength of unexecuted placement evidence; it does not require the complete
-Effect graph to execute on CPU after the media frame is ready.
+Preview performs that same dynamic evaluation before its canonical
+media-demand collector can publish a decode request and before a
+generated-source Adapter runs. The renderer prepares an immutable
+`PreparedTimelinePreviewEffectRoutes` ledger for every Sequence node. The root
+must prove either one complete CPU compositor route or one complete Viewer
+Effect route in which every placement is full-GPU or carries an exact prepared
+CPU-F32→GPU-F32 route. A non-root node must still prove the complete CPU route
+because nested Preview currently materializes the child into a CPU working
+frame. Media demand derives `cpu_working_required` from that frozen placement
+entry, not from a second lowering attempt. Blend, projected geometry, layer
+count, and actual GPU resource admission remain later typed Viewer proofs;
+this ledger does not overclaim them. Unsupported Effect-route mixtures and
+non-CPU nested nodes fail before decode instead of claiming an Adapter that the
+materializer does not own.
 
 Preview prefetch/preroll walks the already-prepared closure's nodes, and
 Window/Headless materialization resolves only typed child bindings. The App
@@ -274,7 +280,7 @@ separate owner. Any additional layer or output-contract change returns to the
 ordinary conservative estimate.
 
 The effects Module now has a graph-value-aware heterogeneous planning seam
-without relaxing that early production admission rule. `CompiledEffectGraph` binds
+behind that production admission rule. `CompiledEffectGraph` binds
 each Definition stage to its exact incoming/output values and emitted nodes,
 then retains the real implementation/Definition mode intersection per node.
 `plan_effect_graph_value_execution(...)` assigns typed value residency,
@@ -288,8 +294,13 @@ admission consumes that count directly; it never divides device bytes by an
 assumed RGBA32F frame size to guess a texture count. The older linear-stage
 placement remains only a shallow feasibility diagnostic.
 
-`PreparedHeterogeneousEffectWork` proves one real execution tracer when the
-caller already owns a scene-linear CPU Float32 working frame: Gaussian Blur
+Renderer wraps `PreparedHeterogeneousEffectWork` in one cloneable
+`PreparedHeterogeneousEffectRoute` that also freezes the compiled graph,
+extent, graph-planning budget, and semantic fingerprint before source pixels
+are materialized. Batch binding rejects a different extent or resource grant;
+the worker executes this object and never replans it. The underlying work
+proves one real execution tracer when the caller already owns a scene-linear
+CPU Float32 working frame: Gaussian Blur
 executes through the scalar CPU kernel, one explicit upload remains pending,
 and the exact Basic Correction/Grain graph tail lowers to the fused GPU point
 plan. The returned evidence distinguishes completed CPU work from pending
@@ -299,9 +310,11 @@ Export submits that tracer through its job-local
 `ExportVisualRenderSession`. The same Session owns the retained Effect
 Execution Session, attempt generation, cancellation checkpoints, and one GPU
 runtime whose context/resource pool is shared with the final output boundary.
-The private `queue::visual_effect_execution` deep Module owns the route
-vocabulary, canonical fingerprinting, frozen-ledger preflight, typed route
-errors, and CPU-prefix/GPU-tail execution obligation behind that Session.
+The private `queue::visual_effect_execution` deep Module owns Export placement
+vocabulary, canonical fingerprinting, frozen-ledger validation, typed attempt
+errors, GPU completion/readback, and terminal policy behind that Session.
+Exact graph-value route preparation remains renderer-owned and is the same
+object consumed by Preview; Export no longer replans at pixel execution.
 `queue::mod` remains the composition Seam: it owns the Session lifetime,
 Prepared Visual Program cache, decoder/audio/encoder resources, and final
 publication flow rather than exposing a second general-purpose visual runtime.

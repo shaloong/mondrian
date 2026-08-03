@@ -28,6 +28,7 @@ pub mod prepared_visual_range_closure;
 pub mod profile;
 pub mod program_scopes_gpu;
 pub mod timeline_composite;
+mod timeline_effect_routes;
 pub mod timeline_render_plan;
 pub mod timeline_temporal;
 pub mod viewer_execution;
@@ -40,6 +41,7 @@ pub use heterogeneous_cpu::{
     HeterogeneousCpuPrefixBatchExecutor, HeterogeneousCpuPrefixBatchGrant,
     HeterogeneousCpuPrefixBatchItem, HeterogeneousCpuPrefixBatchOutput,
     HeterogeneousCpuPrefixBatchRequest, HeterogeneousCpuPrefixFrameContractViolation,
+    PreparedHeterogeneousEffectRoute,
 };
 pub mod viewer_spatial;
 
@@ -274,6 +276,10 @@ pub use timeline_composite::{
     TimelineCpuWorkingSetError, TimelineCpuWorkingSetEstimate, TimelineCpuWorkingSetGrant,
     TimelineCrossDissolveLayer, TimelineEffectColorRuntime, TimelineMediaLayer,
     TimelineSolidColorLayer, TimelineTransitionInput,
+};
+pub use timeline_effect_routes::{
+    PreparedTimelinePreviewEffectRoute, PreparedTimelinePreviewEffectRoutes,
+    TimelinePreviewEffectRouteError,
 };
 pub use timeline_render_plan::{
     evaluate_prepared_visual_program, evaluate_prepared_visual_program_with_session,

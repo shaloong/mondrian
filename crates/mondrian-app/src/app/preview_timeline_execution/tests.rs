@@ -190,18 +190,18 @@ fn preview_execution_admission_fails_before_media_demand_or_decode() {
     use std::sync::Arc;
 
     let effect_type = EffectType::Plugin(format!(
-        "test.preview.predecode.gpu_only.{}",
+        "test.preview.predecode.unavailable.{}",
         AssetId::new()
     ));
     register_effect_definition(
         EffectDefinition::new(
             effect_type.key(),
-            "GPU-only identity",
+            "Unavailable identity",
             Default::default(),
             EffectColorDomainContract::SCENE_LINEAR,
         )
         .with_execution_contract(EffectExecutionContract {
-            execution_modes: EffectExecutionModes::GPU_F32,
+            execution_modes: EffectExecutionModes::NONE,
             determinism: EffectDeterminism::Deterministic,
             state_model: EffectStateModel::Stateless,
             temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
@@ -317,6 +317,89 @@ fn media_demand_requests_cpu_working_pixels_only_when_exact_gpu_lowering_is_unav
         heterogeneous_demands[0].cpu_working_required,
         "renderer rejection of the exact full-GPU graph must request a CPU working payload"
     );
+}
+
+#[test]
+fn production_timeline_prepares_heterogeneous_route_before_media_materialization() {
+    use mondrian_core::WorkingColorSpace;
+    use mondrian_effects::{
+        register_effect_definition, EffectColorDomainContract, EffectDefinition, EffectDeterminism,
+        EffectExecutionContract, EffectExecutionModes, EffectGraphTopology, EffectNode,
+        EffectNodeExt, EffectRenderOp, EffectResourceLifetime, EffectRoiPropagation,
+        EffectStateModel, EffectTemporalInputExtent, EffectType,
+    };
+
+    let target = Resolution { width: 64, height: 36 };
+    let asset_id = AssetId::new();
+    let mut sequence = Sequence::new("prepared heterogeneous Preview route");
+    let time_base = sequence.time_base();
+    let mut clip = Clip::new(asset_id, TimelineTime::ZERO, tt(24, time_base)).expect("media Clip");
+    let blur = EffectNode::with_defaults(EffectType::GaussianBlur);
+    let gpu_only_type = EffectType::Plugin(format!("test.preview.gpu-only.{}", AssetId::new()));
+    register_effect_definition(
+        EffectDefinition::new(
+            gpu_only_type.key(),
+            "Preview GPU-only route test",
+            Default::default(),
+            EffectColorDomainContract::SCENE_LINEAR,
+        )
+        .with_execution_contract(EffectExecutionContract {
+            execution_modes: EffectExecutionModes::GPU_F32,
+            determinism: EffectDeterminism::Deterministic,
+            state_model: EffectStateModel::Stateless,
+            temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+            roi_propagation: EffectRoiPropagation::PixelLocal,
+            resource_lifetime: EffectResourceLifetime::Frame,
+            topology: EffectGraphTopology::LinearChain,
+        })
+        .with_graph_builder(Arc::new(|_, _, graph| {
+            graph.append_unary(EffectRenderOp::ColorAdjust {
+                exposure: 0.25,
+                contrast: 1.0,
+                saturation: 1.0,
+                working_color_space: WorkingColorSpace::LinearRec709,
+            });
+            Ok(())
+        })),
+    )
+    .expect("register GPU-only test Effect");
+    clip.add_effect_node(blur);
+    clip.add_effect_node(EffectNode::new(gpu_only_type));
+    sequence.video_tracks[0].add_clip(clip).expect("insert media Clip");
+
+    let mut media_called = false;
+    let resolution = resolve_preview_timeline(
+        &sequence,
+        &[],
+        0,
+        target,
+        PreviewResolutionScale::Full,
+        color_context(&sequence),
+        &mut |request: PreviewTimelineMediaRequest| {
+            media_called = true;
+            assert!(request.cpu_working_required);
+            ready_temporal_media_frame(&request, 0.25, 91)
+        },
+        &mut |_| panic!("media-only plan must not request title rasterization"),
+    );
+    let resolved = match resolution {
+        PreviewTimelineResolution::Ready(resolved) => resolved,
+        PreviewTimelineResolution::Unavailable { reason } => panic!(
+            "prepared heterogeneous Timeline must reach source materialization: {}",
+            reason.detail()
+        ),
+        PreviewTimelineResolution::Empty | PreviewTimelineResolution::Pending { .. } => {
+            panic!("prepared heterogeneous Timeline returned no ready plan")
+        }
+    };
+    assert!(
+        media_called,
+        "route admission must precede, not suppress, decode adaptation"
+    );
+    assert!(matches!(
+        resolved.plan.elements.as_slice(),
+        [ResolvedPreviewElement::Media { prepared_heterogeneous_route: Some(_), .. }]
+    ));
 }
 
 #[test]
@@ -478,6 +561,7 @@ fn temporal_preview_cache_identity_is_generation_and_source_complete() {
             generation,
             cancellation: &cancellation,
             author_snapshot: None,
+            heterogeneous_graph_budget: standalone_preview_heterogeneous_graph_budget(),
         };
         let mut media = |request: PreviewTimelineMediaRequest| {
             let red = if request.source_time < TimelineTime::ZERO {
@@ -535,6 +619,7 @@ fn temporal_preview_cache_identity_is_generation_and_source_complete() {
         generation: 73,
         cancellation: &canceled,
         author_snapshot: None,
+        heterogeneous_graph_budget: standalone_preview_heterogeneous_graph_budget(),
     };
     let mut media = |_: PreviewTimelineMediaRequest| {
         media_calls += 1;
@@ -688,14 +773,19 @@ fn temporal_transition_keeps_both_exact_endpoint_values() {
     ) else {
         panic!("temporal Transition should resolve");
     };
-    let [ResolvedPreviewElement::CrossDissolve {
-        left: ResolvedPreviewTransitionInput::Media { .. },
-        right: ResolvedPreviewTransitionInput::Media { .. },
-        progress,
-    }] = resolved.plan.elements.as_slice()
+    let [ResolvedPreviewElement::CrossDissolve { left, right, progress }] =
+        resolved.plan.elements.as_slice()
     else {
         panic!("both temporal endpoints must lower as their prepared pixel values");
     };
+    assert!(matches!(
+        left.as_ref(),
+        ResolvedPreviewTransitionInput::Media { .. }
+    ));
+    assert!(matches!(
+        right.as_ref(),
+        ResolvedPreviewTransitionInput::Media { .. }
+    ));
     assert_eq!(*progress, 0.5);
 }
 

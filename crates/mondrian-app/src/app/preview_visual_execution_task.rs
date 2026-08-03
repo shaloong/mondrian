@@ -1007,7 +1007,7 @@ mod tests {
         FramePosition, Rational, TimelineTime, WorkingColorSpace, WorkingRgbaF32Frame,
     };
     use mondrian_effects::{
-        EffectExecutionSessionConfig, EffectGraphExecutionBudget, EffectNodeExt,
+        EffectExecutionSessionConfig, EffectFrameExtent, EffectGraphExecutionBudget, EffectNodeExt,
         PreparedEffectProgram,
     };
     use mondrian_playback::PlaybackEngine;
@@ -1116,9 +1116,16 @@ mod tests {
     }
 
     fn item(address: u32) -> HeterogeneousCpuPrefixBatchItem {
+        let grant = grant();
+        let route = mondrian_renderer::PreparedHeterogeneousEffectRoute::prepare(
+            graph(),
+            EffectFrameExtent::new(2, 2),
+            grant.graph_execution(),
+        )
+        .expect("prepare heterogeneous route");
         HeterogeneousCpuPrefixBatchItem::new(
             address,
-            graph(),
+            route,
             CpuColorFrame::working(WorkingRgbaF32Frame {
                 width: 2,
                 height: 2,

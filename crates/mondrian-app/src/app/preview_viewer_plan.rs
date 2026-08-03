@@ -18,9 +18,10 @@ use mondrian_renderer::{
     GpuCompositingBlockerReason, HeterogeneousCpuPrefixBatchError,
     HeterogeneousCpuPrefixBatchGrant, HeterogeneousCpuPrefixBatchItem,
     HeterogeneousCpuPrefixBatchRequest, HeterogeneousGpuContinuationBinding,
-    HeterogeneousGpuContinuationRequest, HeterogeneousGpuResourceGrant, TimelineAdjustmentLayer,
-    TimelineCompositeScratch, TimelineSolidColorLayer, ViewerGpuCrossDissolveLayer,
-    ViewerGpuExecutionLayer, ViewerGpuSourceLayer, ViewerGpuTransitionInput,
+    HeterogeneousGpuContinuationRequest, HeterogeneousGpuResourceGrant,
+    PreparedHeterogeneousEffectRoute, TimelineAdjustmentLayer, TimelineCompositeScratch,
+    TimelineSolidColorLayer, ViewerGpuCrossDissolveLayer, ViewerGpuExecutionLayer,
+    ViewerGpuSourceLayer, ViewerGpuTransitionInput,
 };
 use mondrian_timeline::sequence::ProgramColorContext;
 
@@ -40,11 +41,12 @@ pub(crate) enum ResolvedPreviewElement {
         blend_mode: BlendMode,
         transform: [f32; 6],
         effect_graph: Arc<CompiledEffectGraph>,
+        prepared_heterogeneous_route: Option<Box<PreparedHeterogeneousEffectRoute>>,
         frame_seed: i64,
     },
     CrossDissolve {
-        left: ResolvedPreviewTransitionInput,
-        right: ResolvedPreviewTransitionInput,
+        left: Box<ResolvedPreviewTransitionInput>,
+        right: Box<ResolvedPreviewTransitionInput>,
         progress: f32,
     },
 }
@@ -58,6 +60,7 @@ pub(crate) enum ResolvedPreviewTransitionInput {
         blend_mode: BlendMode,
         transform: [f32; 6],
         effect_graph: Arc<CompiledEffectGraph>,
+        prepared_heterogeneous_route: Option<Box<PreparedHeterogeneousEffectRoute>>,
         frame_seed: i64,
     },
 }
@@ -159,6 +162,8 @@ pub(crate) enum PreviewViewerGpuLayerPreparationError {
     AddressSpaceExhausted,
     #[error("heterogeneous media input {address} has no CPU working payload")]
     MissingCpuWorkingPayload { address: u32 },
+    #[error("heterogeneous media input {address} has no pre-materialization route")]
+    MissingPreparedRoute { address: u32 },
     #[error("heterogeneous CPU-prefix batch is invalid: {0}")]
     InvalidCpuPrefixBatch(#[from] HeterogeneousCpuPrefixBatchError),
 }
@@ -204,6 +209,7 @@ pub(crate) fn viewer_preview_cache_key_for_resolved_plan(
                 transform,
                 effect_graph,
                 frame_seed,
+                ..
             } => {
                 2u8.hash(&mut builder);
                 frame.identity().hash(&mut builder);
@@ -243,6 +249,7 @@ fn hash_transition_input(input: &ResolvedPreviewTransitionInput, hasher: &mut im
             transform,
             effect_graph,
             frame_seed,
+            ..
         } => {
             2u8.hash(hasher);
             frame.identity().hash(hasher);
@@ -333,6 +340,7 @@ pub(crate) fn gpu_composite_layers_for_resolved_with_session(
                 transform,
                 effect_graph,
                 frame_seed,
+                ..
             } => {
                 layers.push(ViewerGpuExecutionLayer::Source(gpu_media_source(
                     frame,
@@ -397,9 +405,10 @@ pub(crate) fn gpu_composite_layers_for_resolved_with_session(
 ///
 /// Full-GPU lowering is attempted first and remains byte-for-byte the ordinary
 /// path. Only an `EffectRequiresCpu` result opens the explicit media-only
-/// heterogeneous seam. The returned CPU-prefix request is immutable and
-/// validated, but exact graph-value route selection remains in the renderer
-/// worker.
+/// heterogeneous seam. Exact graph-value routes were already prepared by the
+/// renderer-owned Timeline route ledger before source materialization. This
+/// function only binds working pixels, validates the immutable batch, and
+/// creates Viewer placeholders.
 pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
     resolved: &[ResolvedPreviewElement],
     working_color_space: WorkingColorSpace,
@@ -425,6 +434,7 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
                 blend_mode,
                 transform,
                 effect_graph,
+                prepared_heterogeneous_route,
                 frame_seed,
             } => {
                 if !opacity_has_contribution(*opacity) {
@@ -436,6 +446,7 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
                     *blend_mode,
                     *transform,
                     effect_graph,
+                    prepared_heterogeneous_route.as_deref(),
                     *frame_seed,
                 )?));
                 has_composited_layer = true;
@@ -542,6 +553,7 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
         blend_mode: BlendMode,
         transform: [f32; 6],
         effect_graph: &Arc<CompiledEffectGraph>,
+        prepared_heterogeneous_route: Option<&PreparedHeterogeneousEffectRoute>,
         frame_seed: i64,
     ) -> Result<ViewerGpuSourceLayer, PreviewViewerGpuLayerPreparationError> {
         if blend_mode != BlendMode::Normal {
@@ -580,11 +592,14 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
         let input = frame
             .working_payload()
             .ok_or(PreviewViewerGpuLayerPreparationError::MissingCpuWorkingPayload { address })?;
+        let route = prepared_heterogeneous_route
+            .cloned()
+            .ok_or(PreviewViewerGpuLayerPreparationError::MissingPreparedRoute { address })?;
         let descriptor = input.descriptor();
         let identity_effect_plan = self.identity_effect_plan()?;
         self.items.push(HeterogeneousCpuPrefixBatchItem::new(
             address,
-            Arc::clone(effect_graph),
+            route,
             input,
             self.working_color_space,
             frame_seed,
@@ -634,6 +649,7 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
                 blend_mode,
                 transform,
                 effect_graph,
+                prepared_heterogeneous_route,
                 frame_seed,
             } => {
                 if !opacity_has_contribution(*opacity) {
@@ -645,6 +661,7 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
                     *blend_mode,
                     *transform,
                     effect_graph,
+                    prepared_heterogeneous_route.as_deref(),
                     *frame_seed,
                 )?
             }
@@ -765,6 +782,7 @@ fn gpu_transition_input(
             transform,
             effect_graph,
             frame_seed,
+            ..
         } => gpu_media_source(
             frame,
             *opacity,
@@ -834,7 +852,7 @@ pub(crate) fn resolved_preview_decode_execution(
             }
             ResolvedPreviewElement::CrossDissolve { left, right, .. } => {
                 for input in [left, right] {
-                    if let ResolvedPreviewTransitionInput::Media { frame, .. } = input {
+                    if let ResolvedPreviewTransitionInput::Media { frame, .. } = input.as_ref() {
                         summary.accumulate(frame.decode_execution());
                     }
                 }
@@ -918,12 +936,20 @@ mod heterogeneous_tests {
     }
 
     fn media(graph: Arc<CompiledEffectGraph>, identity_salt: u64) -> ResolvedPreviewElement {
+        let prepared_heterogeneous_route = PreparedHeterogeneousEffectRoute::prepare(
+            Arc::clone(&graph),
+            EffectFrameExtent::new(WIDTH, HEIGHT),
+            cpu_grant().graph_execution(),
+        )
+        .ok()
+        .map(Box::new);
         ResolvedPreviewElement::Media {
             frame: working_frame(identity_salt),
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: graph,
+            prepared_heterogeneous_route,
             frame_seed: identity_salt as i64,
         }
     }
@@ -997,13 +1023,14 @@ mod heterogeneous_tests {
     fn cross_dissolve_zero_weight_endpoint_creates_no_cpu_prefix_item() {
         let graph = tracer_graph();
         let transition = ResolvedPreviewElement::CrossDissolve {
-            left: match media(Arc::clone(&graph), 11) {
+            left: Box::new(match media(Arc::clone(&graph), 11) {
                 ResolvedPreviewElement::Media {
                     frame,
                     opacity,
                     blend_mode,
                     transform,
                     effect_graph,
+                    prepared_heterogeneous_route,
                     frame_seed,
                 } => ResolvedPreviewTransitionInput::Media {
                     frame,
@@ -1011,17 +1038,19 @@ mod heterogeneous_tests {
                     blend_mode,
                     transform,
                     effect_graph,
+                    prepared_heterogeneous_route,
                     frame_seed,
                 },
                 _ => unreachable!("media helper"),
-            },
-            right: match media(graph, 12) {
+            }),
+            right: Box::new(match media(graph, 12) {
                 ResolvedPreviewElement::Media {
                     frame,
                     opacity,
                     blend_mode,
                     transform,
                     effect_graph,
+                    prepared_heterogeneous_route,
                     frame_seed,
                 } => ResolvedPreviewTransitionInput::Media {
                     frame,
@@ -1029,10 +1058,11 @@ mod heterogeneous_tests {
                     blend_mode,
                     transform,
                     effect_graph,
+                    prepared_heterogeneous_route,
                     frame_seed,
                 },
                 _ => unreachable!("media helper"),
-            },
+            }),
             progress: 0.0,
         };
         let prepared = prepare_gpu_composite_layers_with_heterogeneous_effects(

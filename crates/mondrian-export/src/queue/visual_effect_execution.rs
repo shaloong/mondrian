@@ -1,9 +1,10 @@
 //! Export-owned visual Effect route preparation and execution.
 //!
-//! This module keeps heterogeneous route vocabulary, conservative preflight
-//! evidence, and the CPU-prefix/GPU-tail execution obligation local. The
-//! enclosing queue module continues to own the export attempt, visual Session,
-//! decoder, audio renderer, encoder, and publication lifecycle.
+//! This module keeps Export placement vocabulary, conservative preflight
+//! evidence, and attempt-local CPU/GPU completion policy local. Exact
+//! graph-value route preparation is renderer-owned and shared with Preview.
+//! The enclosing queue module continues to own the export attempt, visual
+//! Session, decoder, audio renderer, encoder, and publication lifecycle.
 
 use super::service::EXPORT_HETEROGENEOUS_ROUTE_CONTRACT_LOGICAL_BYTES;
 use super::{
@@ -20,8 +21,9 @@ use mondrian_effects::{
 use mondrian_renderer::{
     admit_timeline_render_plan_for_cpu_compositor, ColorFrameAlpha, ColorFrameDomain,
     ColorFrameEncoding, ColorFrameResidency, CpuColorFrame, HeterogeneousGpuContinuationBinding,
-    HeterogeneousGpuContinuationRequest, HeterogeneousGpuResourceGrant, PreparedVisualProgram,
-    TimelineRenderPlan, TimelineRenderPlanElement, TimelineTransitionInputPlan,
+    HeterogeneousGpuContinuationRequest, HeterogeneousGpuResourceGrant,
+    PreparedHeterogeneousEffectRoute, PreparedVisualProgram, TimelineRenderPlan,
+    TimelineRenderPlanElement, TimelineTransitionInputPlan,
 };
 use sha2::Digest;
 use sha2::Sha256;
@@ -85,7 +87,7 @@ pub(super) struct ExportHeterogeneousRouteContract {
 pub(super) struct PreparedExportHeterogeneousElement {
     pub(super) element_index: usize,
     pub(super) placement: ExportHeterogeneousPlacement,
-    pub(super) graph: Arc<CompiledEffectGraph>,
+    pub(super) route: PreparedHeterogeneousEffectRoute,
     pub(super) frame_seed: i64,
 }
 
@@ -392,28 +394,21 @@ impl ExportVisualRenderSession {
         Ok(HeterogeneousGpuResourceGrant::new(bytes, bytes, bytes))
     }
 
-    pub(super) fn prepare_heterogeneous_work(
+    pub(super) fn prepare_heterogeneous_route(
         &self,
         graph: &Arc<CompiledEffectGraph>,
         extent: EffectFrameExtent,
         placement: ExportHeterogeneousPlacement,
     ) -> Result<
-        (PreparedHeterogeneousEffectWork, EffectGraphExecutionBudget),
+        (PreparedHeterogeneousEffectRoute, EffectGraphExecutionBudget),
         ExportHeterogeneousEffectError,
     > {
-        let capability = self.heterogeneous_capability.as_ref().map_err(|reason| {
-            ExportHeterogeneousEffectError::CapabilityUnavailable { reason: reason.clone() }
-        })?;
         let budget = self.heterogeneous_graph_budget()?;
-        let prepared = PreparedHeterogeneousEffectWork::prepare(
-            Arc::clone(graph),
-            capability.environment(),
-            capability.request(extent, budget),
-        )
-        .map_err(|source| ExportHeterogeneousEffectError::Preparation {
-            placement: placement.label(),
-            source,
-        })?;
+        let prepared = PreparedHeterogeneousEffectRoute::prepare(Arc::clone(graph), extent, budget)
+            .map_err(|source| ExportHeterogeneousEffectError::Preparation {
+                placement: placement.label(),
+                source,
+            })?;
         Ok((prepared, budget))
     }
 
@@ -517,12 +512,12 @@ impl ExportVisualRenderSession {
         graph: &Arc<CompiledEffectGraph>,
         placement: ExportHeterogeneousPlacement,
         maximum_extent: EffectFrameExtent,
-    ) -> Result<bool, ExportHeterogeneousEffectError> {
+    ) -> Result<Option<PreparedHeterogeneousEffectRoute>, ExportHeterogeneousEffectError> {
         let cpu_exact = compiled_effect_graph_supports_rgba_f32_with_domain_processor(graph);
         if cpu_exact {
             self.visual_diagnostics.cpu_routes_selected_before_start =
                 self.visual_diagnostics.cpu_routes_selected_before_start.saturating_add(1);
-            return Ok(false);
+            return Ok(None);
         }
         if !graph.execution_envelope().requires_execution_transitions() {
             // A homogeneous graph that cannot enter the Float32 CPU compositor
@@ -530,9 +525,9 @@ impl ExportVisualRenderSession {
             // single compositor admission below so ordered state, temporal
             // input, blocked color domains, GPU-only execution, and the
             // NormalizedU8 export boundary retain their canonical diagnostics.
-            return Ok(false);
+            return Ok(None);
         }
-        let prepared = self.prepare_heterogeneous_work(graph, maximum_extent, placement)?;
+        let (route, budget) = self.prepare_heterogeneous_route(graph, maximum_extent, placement)?;
         if !placement.supports_current_adapter() {
             return Err(ExportHeterogeneousEffectError::UnsupportedPlacement {
                 placement: placement.label(),
@@ -543,12 +538,12 @@ impl ExportVisualRenderSession {
         }
         self.register_or_validate_route_contract(
             graph,
-            &prepared.0,
+            route.prepared_work(),
             placement,
             maximum_extent,
-            prepared.1,
+            budget,
         )?;
-        Ok(true)
+        Ok(Some(route))
     }
 
     pub(super) fn execute_heterogeneous_element(
@@ -576,9 +571,21 @@ impl ExportVisualRenderSession {
             });
         }
         let extent = EffectFrameExtent::new(descriptor.width, descriptor.height);
-        let (prepared, _) =
-            self.prepare_heterogeneous_work(&route.graph, extent, route.placement)?;
-        self.validate_exact_route_contract(&route.graph, &prepared, route.placement, extent)?;
+        if route.route.frame_extent() != extent {
+            return Err(ExportHeterogeneousEffectError::FrameContractMismatch {
+                expected: format!(
+                    "prepared heterogeneous extent {:?}",
+                    route.route.frame_extent()
+                ),
+                actual: format!("materialized extent {extent:?}"),
+            });
+        }
+        self.validate_exact_route_contract(
+            route.route.graph(),
+            route.route.prepared_work(),
+            route.placement,
+            extent,
+        )?;
         let gpu_grant = self.heterogeneous_gpu_grant()?;
         if cancellation.is_canceled() {
             return Err(ExportHeterogeneousEffectError::Canceled {
@@ -591,7 +598,7 @@ impl ExportVisualRenderSession {
         let completion = self
             .composite_scratch
             .execute_prepared_heterogeneous_cpu_prefix_with_checkpoint(
-                &prepared,
+                route.route.prepared_work(),
                 generation,
                 &input.rgba_f32().data,
                 route.frame_seed,
@@ -625,7 +632,7 @@ impl ExportVisualRenderSession {
         }
         let request = HeterogeneousGpuContinuationRequest::new(
             HeterogeneousGpuContinuationBinding::new(
-                route.graph.semantic_fingerprint(),
+                route.route.graph_fingerprint(),
                 generation,
                 extent,
                 route.frame_seed,
@@ -698,7 +705,7 @@ pub(super) fn prepare_export_effect_frame_plan(
             TimelineRenderPlanElement::Media(media) => {
                 let graph = Arc::clone(&media.effect_graph);
                 let extent = EffectFrameExtent::new(resolution.width, resolution.height);
-                if visual_session
+                if let Some(route) = visual_session
                     .select_heterogeneous_route(&graph, ExportHeterogeneousPlacement::Media, extent)
                     .map_err(|error| error.to_string())?
                 {
@@ -706,7 +713,7 @@ pub(super) fn prepare_export_effect_frame_plan(
                     heterogeneous.push(PreparedExportHeterogeneousElement {
                         element_index,
                         placement: ExportHeterogeneousPlacement::Media,
-                        graph,
+                        route,
                         frame_seed: media.frame_seed,
                     });
                 }
@@ -714,7 +721,7 @@ pub(super) fn prepare_export_effect_frame_plan(
             TimelineRenderPlanElement::BasicTitle(title) => {
                 let graph = Arc::clone(&title.effect_graph);
                 let extent = EffectFrameExtent::new(resolution.width, resolution.height);
-                if visual_session
+                if let Some(route) = visual_session
                     .select_heterogeneous_route(
                         &graph,
                         ExportHeterogeneousPlacement::BasicTitle,
@@ -726,7 +733,7 @@ pub(super) fn prepare_export_effect_frame_plan(
                     heterogeneous.push(PreparedExportHeterogeneousElement {
                         element_index,
                         placement: ExportHeterogeneousPlacement::BasicTitle,
-                        graph,
+                        route,
                         frame_seed: title.frame_seed,
                     });
                 }
@@ -738,7 +745,7 @@ pub(super) fn prepare_export_effect_frame_plan(
                 let child_resolution = child.author_resolution();
                 let extent =
                     EffectFrameExtent::new(child_resolution.width, child_resolution.height);
-                if visual_session
+                if let Some(route) = visual_session
                     .select_heterogeneous_route(
                         &graph,
                         ExportHeterogeneousPlacement::NestedSequence,
@@ -750,7 +757,7 @@ pub(super) fn prepare_export_effect_frame_plan(
                     heterogeneous.push(PreparedExportHeterogeneousElement {
                         element_index,
                         placement: ExportHeterogeneousPlacement::NestedSequence,
-                        graph,
+                        route,
                         frame_seed: nested.frame_seed,
                     });
                 }

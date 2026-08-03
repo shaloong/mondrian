@@ -281,8 +281,14 @@ even a stateless, current-frame graph is rejected when its aggregate resource
 lifetime is `ContinuitySession`, because a frame attempt does not own the
 ordered Session required by that resource.
 
-`PreparedHeterogeneousEffectWork` is the first executable vertical slice over
-that plan. With a caller-supplied scene-linear CPU Float32 working frame it
+`PreparedHeterogeneousEffectRoute` is the renderer-owned immutable preparation
+boundary over the first executable vertical slice. It binds one compiled
+graph, extent, graph-planning budget, semantic fingerprint, graph-value plan,
+CPU prefix, and GPU suffix before source pixels exist. Preview and Export bind
+pixels to that same object; neither execution worker may choose lanes or
+replan. A changed extent or batch grant fails before CPU execution.
+`PreparedHeterogeneousEffectWork` then executes the prepared semantics. With a
+caller-supplied scene-linear CPU Float32 working frame it
 executes an exact unary CPU prefix through the scalar reference, requires one
 explicit CPU-F32→GPU-F32 transfer, and lowers the exact remaining graph-value
 tail through `lower_effect_graph_nodes_to_gpu_plan(...)`. The regression tracer

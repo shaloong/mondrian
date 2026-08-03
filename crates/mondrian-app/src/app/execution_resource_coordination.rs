@@ -319,6 +319,21 @@ impl PreviewHeterogeneousEffectExecutionDecision {
     pub(crate) const fn gpu_continuation_grant(self) -> HeterogeneousGpuResourceGrant {
         self.gpu_continuation
     }
+
+    /// Conservative authority available from Preview construction until the
+    /// composition root applies its first detected machine decision.
+    ///
+    /// Preview is a complete execution Module immediately after construction;
+    /// a missing product-policy tick must not make otherwise valid empty,
+    /// generated, or CPU-only Timelines unavailable. The first coordinated
+    /// resource decision replaces this grant before admitting machine-sized
+    /// heterogeneous work.
+    pub(crate) fn conservative_baseline() -> Self {
+        preview_heterogeneous_effect_execution_decision(
+            MachineResourceClass::UnknownConservative,
+            128 * MIB,
+        )
+    }
 }
 
 /// Product resource projection consumed only by a Viewer GPU execution owner.

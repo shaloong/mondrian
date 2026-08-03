@@ -1,10 +1,11 @@
 //! Renderer-owned atomic CPU-prefix preparation for heterogeneous Effects.
 //!
 //! Scheduling, freshness, deadlines, and presentation remain outside this
-//! Module. A caller supplies an immutable resource grant and a cooperative
-//! checkpoint; the executor validates typed working frames, prepares the exact
-//! CPU-F32 → GPU-F32 route, and returns an all-or-nothing batch of move-only
-//! completions for [`crate::record_heterogeneous_gpu_continuation`].
+//! Module. A caller first prepares the exact CPU-F32 → GPU-F32 graph route,
+//! then binds typed working frames under an immutable resource grant. The
+//! executor performs no route selection: it executes an all-or-nothing batch
+//! and returns move-only completions for
+//! [`crate::record_heterogeneous_gpu_continuation`].
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -22,11 +23,86 @@ use crate::{
     CpuColorFrame, HeterogeneousGpuExecutionCapability, TimelineCompositeScratch,
 };
 
+/// Exact immutable CPU-F32 → GPU-F32 route prepared before source pixels are
+/// materialized.
+///
+/// The route owns the graph-value plan and lowered GPU suffix. Binding pixels
+/// later cannot change the selected lanes, transfers, precision, or extent.
+#[derive(Debug, Clone)]
+pub struct PreparedHeterogeneousEffectRoute {
+    graph: Arc<CompiledEffectGraph>,
+    work: Arc<PreparedHeterogeneousEffectWork>,
+    graph_fingerprint: [u8; 32],
+    budget: EffectGraphExecutionBudget,
+}
+
+impl PreparedHeterogeneousEffectRoute {
+    /// Prepare the renderer's production heterogeneous route for one exact
+    /// graph, extent, and graph-planning budget.
+    pub fn prepare(
+        graph: Arc<CompiledEffectGraph>,
+        extent: EffectFrameExtent,
+        budget: EffectGraphExecutionBudget,
+    ) -> Result<Self, PreparedHeterogeneousEffectWorkError> {
+        let graph_fingerprint = graph.semantic_fingerprint();
+        let retained_graph = Arc::clone(&graph);
+        let capability = HeterogeneousGpuExecutionCapability::scene_linear_f32().map_err(|_| {
+            PreparedHeterogeneousEffectWorkError::UnsupportedTracerShape {
+                reason: "renderer_heterogeneous_capability_unavailable",
+            }
+        })?;
+        let work = PreparedHeterogeneousEffectWork::prepare(
+            graph,
+            capability.environment(),
+            capability.request(extent, budget),
+        )?;
+        Ok(Self {
+            graph: retained_graph,
+            work: Arc::new(work),
+            graph_fingerprint,
+            budget,
+        })
+    }
+
+    /// Complete semantic fingerprint of the compiled graph.
+    pub fn graph_fingerprint(&self) -> [u8; 32] {
+        self.graph_fingerprint
+    }
+
+    /// Exact frame extent used by graph-value planning.
+    pub fn frame_extent(&self) -> EffectFrameExtent {
+        self.work.plan().frame_extent()
+    }
+
+    /// Exact compiled graph whose route was prepared.
+    pub fn graph(&self) -> &Arc<CompiledEffectGraph> {
+        &self.graph
+    }
+
+    /// Effect-owned prepared graph-value work used by CPU and GPU executors.
+    pub fn prepared_work(&self) -> &PreparedHeterogeneousEffectWork {
+        &self.work
+    }
+
+    /// Exact graph-planning authority used during preparation.
+    pub const fn graph_budget(&self) -> EffectGraphExecutionBudget {
+        self.budget
+    }
+
+    fn work(&self) -> &PreparedHeterogeneousEffectWork {
+        self.prepared_work()
+    }
+
+    fn budget(&self) -> EffectGraphExecutionBudget {
+        self.graph_budget()
+    }
+}
+
 /// One addressable working-linear input to an atomic heterogeneous CPU batch.
 #[derive(Debug, Clone)]
 pub struct HeterogeneousCpuPrefixBatchItem {
     address: u32,
-    graph: Arc<CompiledEffectGraph>,
+    route: PreparedHeterogeneousEffectRoute,
     input: CpuColorFrame,
     working_color_space: WorkingColorSpace,
     frame_seed: i64,
@@ -37,14 +113,14 @@ impl HeterogeneousCpuPrefixBatchItem {
     /// frame seed.
     pub fn new(
         address: u32,
-        graph: Arc<CompiledEffectGraph>,
+        route: PreparedHeterogeneousEffectRoute,
         input: CpuColorFrame,
         working_color_space: WorkingColorSpace,
         frame_seed: i64,
     ) -> Self {
         Self {
             address,
-            graph,
+            route,
             input,
             working_color_space,
             frame_seed,
@@ -58,7 +134,7 @@ impl HeterogeneousCpuPrefixBatchItem {
 
     /// Complete compiled-graph semantic fingerprint.
     pub fn graph_fingerprint(&self) -> [u8; 32] {
-        self.graph.semantic_fingerprint()
+        self.route.graph_fingerprint()
     }
 
     /// Declared working-space identity.
@@ -291,6 +367,25 @@ pub enum HeterogeneousCpuPrefixBatchError {
         /// Rejected contract dimension.
         violation: HeterogeneousCpuPrefixFrameContractViolation,
     },
+    /// The materialized frame no longer matches the pre-decoding route extent.
+    #[error(
+        "heterogeneous CPU-prefix item {address} extent changed after route preparation: prepared={prepared:?}, actual={actual:?}"
+    )]
+    PreparedExtentMismatch {
+        /// Caller address.
+        address: u32,
+        /// Extent frozen by route preparation.
+        prepared: EffectFrameExtent,
+        /// Extent carried by the bound working frame.
+        actual: EffectFrameExtent,
+    },
+    /// A caller attempted to bind work prepared under different graph-planning
+    /// authority.
+    #[error("heterogeneous CPU-prefix item {address} route budget differs from the batch grant")]
+    PreparedBudgetMismatch {
+        /// Caller address.
+        address: u32,
+    },
     /// Aggregate retained-pixel accounting overflowed.
     #[error("heterogeneous CPU-prefix batch pixel-byte accounting overflowed")]
     BatchPixelBytesOverflow,
@@ -304,26 +399,11 @@ pub enum HeterogeneousCpuPrefixBatchError {
         /// Granted maximum.
         limit: u64,
     },
-    /// Renderer capability construction failed before graph preparation.
-    #[error("heterogeneous CPU-prefix capability is unavailable: {detail}")]
-    CapabilityUnavailable {
-        /// Stable backend diagnostic.
-        detail: String,
-    },
     /// Cooperative cancellation or deadline stopped the atomic batch.
     #[error("heterogeneous CPU-prefix batch stopped: {reason:?}")]
     Stopped {
         /// Caller-owned stop classification.
         reason: HeterogeneousCpuExecutionStopReason,
-    },
-    /// Exact heterogeneous graph preparation failed.
-    #[error("heterogeneous CPU-prefix item {address} preparation failed: {source}")]
-    Prepare {
-        /// Caller address.
-        address: u32,
-        /// Effect-owned reason.
-        #[source]
-        source: PreparedHeterogeneousEffectWorkError,
     },
     /// Scalar CPU-prefix execution failed.
     #[error("heterogeneous CPU-prefix item {address} execution failed: {source}")]
@@ -341,19 +421,9 @@ pub enum HeterogeneousCpuPrefixBatchError {
 /// One Preview worker or Export job owns one instance. A panic boundary must
 /// replace the complete executor before admitting later work so no mutable
 /// Effect Session survives an unwind.
+#[derive(Default)]
 pub struct HeterogeneousCpuPrefixBatchExecutor {
-    capability: Result<HeterogeneousGpuExecutionCapability, String>,
     scratch: TimelineCompositeScratch,
-}
-
-impl Default for HeterogeneousCpuPrefixBatchExecutor {
-    fn default() -> Self {
-        Self {
-            capability: HeterogeneousGpuExecutionCapability::scene_linear_f32()
-                .map_err(|error| error.to_string()),
-            scratch: TimelineCompositeScratch::default(),
-        }
-    }
 }
 
 impl HeterogeneousCpuPrefixBatchExecutor {
@@ -369,27 +439,13 @@ impl HeterogeneousCpuPrefixBatchExecutor {
         stop_if_requested(&mut checkpoint)?;
         self.scratch.reconfigure_effect_execution(request.grant.effect_session);
         self.scratch.bind_effect_execution_generation(generation);
-        let capability = self.capability.as_ref().map_err(|detail| {
-            HeterogeneousCpuPrefixBatchError::CapabilityUnavailable { detail: detail.clone() }
-        })?;
         let mut completions = Vec::with_capacity(request.items.len());
         for item in request.items {
             stop_if_requested(&mut checkpoint)?;
-            let descriptor = item.input.descriptor();
-            let extent = EffectFrameExtent::new(descriptor.width, descriptor.height);
-            let prepared = PreparedHeterogeneousEffectWork::prepare(
-                Arc::clone(&item.graph),
-                capability.environment(),
-                capability.request(extent, request.grant.graph_execution),
-            )
-            .map_err(|source| HeterogeneousCpuPrefixBatchError::Prepare {
-                address: item.address,
-                source,
-            })?;
             stop_if_requested(&mut checkpoint)?;
             let completion_result =
                 self.scratch.execute_prepared_heterogeneous_cpu_prefix_with_checkpoint(
-                    &prepared,
+                    item.route.work(),
                     generation,
                     item.input.rgba_f32().data.as_slice(),
                     item.frame_seed,
@@ -449,6 +505,19 @@ fn validate_batch_request(
             HeterogeneousCpuPrefixBatchError::FrameContract { address: item.address, violation }
         })?;
         let descriptor = item.input.descriptor();
+        let actual_extent = EffectFrameExtent::new(descriptor.width, descriptor.height);
+        if item.route.frame_extent() != actual_extent {
+            return Err(HeterogeneousCpuPrefixBatchError::PreparedExtentMismatch {
+                address: item.address,
+                prepared: item.route.frame_extent(),
+                actual: actual_extent,
+            });
+        }
+        if item.route.budget() != request.grant.graph_execution {
+            return Err(HeterogeneousCpuPrefixBatchError::PreparedBudgetMismatch {
+                address: item.address,
+            });
+        }
         let frame_bytes = u64::from(descriptor.width)
             .checked_mul(u64::from(descriptor.height))
             .and_then(|pixels| {
@@ -587,9 +656,13 @@ mod tests {
     }
 
     fn item(address: u32) -> HeterogeneousCpuPrefixBatchItem {
+        let grant = grant();
+        let route =
+            PreparedHeterogeneousEffectRoute::prepare(graph(), EXTENT, grant.graph_execution())
+                .expect("prepare heterogeneous route");
         HeterogeneousCpuPrefixBatchItem::new(
             address,
-            graph(),
+            route,
             CpuColorFrame::working(WorkingRgbaF32Frame {
                 width: EXTENT.width(),
                 height: EXTENT.height(),
@@ -645,5 +718,36 @@ mod tests {
         assert!(output.completions().iter().all(|completion| {
             completion.completion().evidence().working_color_space() == WORKING_SPACE
         }));
+    }
+
+    #[test]
+    fn validation_rejects_route_prepared_under_a_different_budget() {
+        let request_grant = grant();
+        let different_budget = EffectGraphExecutionBudget::new(
+            8 * 1024 * 1024,
+            8 * 1024 * 1024,
+            8 * 1024 * 1024,
+            32,
+            64,
+        );
+        let route = PreparedHeterogeneousEffectRoute::prepare(graph(), EXTENT, different_budget)
+            .expect("prepare route under different authority");
+        let item = HeterogeneousCpuPrefixBatchItem::new(
+            5,
+            route,
+            CpuColorFrame::working(WorkingRgbaF32Frame {
+                width: EXTENT.width(),
+                height: EXTENT.height(),
+                color_space: WORKING_SPACE,
+                data: vec![[0.2, 0.4, 0.6, 1.0]; 6],
+            }),
+            WORKING_SPACE,
+            19,
+        );
+        let request = HeterogeneousCpuPrefixBatchRequest::new(request_grant, vec![item]);
+        assert!(matches!(
+            request.validate(),
+            Err(HeterogeneousCpuPrefixBatchError::PreparedBudgetMismatch { address: 5 })
+        ));
     }
 }

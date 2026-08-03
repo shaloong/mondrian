@@ -100,7 +100,6 @@ use crate::app::preview_unavailability::{
 #[cfg(test)]
 use crate::app::preview_viewer_plan::gpu_composite_layers_for_resolved;
 use crate::app::preview_viewer_plan::{
-    gpu_composite_layers_for_resolved_with_session,
     prepare_gpu_composite_layers_with_heterogeneous_effects, resolved_preview_decode_execution,
     resolved_preview_media_protections, resolved_preview_presentation_quality,
     PreparedPreviewViewerGpuLayers, PreviewViewerGpuLayerPreparationError,
@@ -302,9 +301,7 @@ pub struct PreviewProductionRuntime<O: Clone> {
     playback_pressure: Cell<PlaybackPressureState>,
     applied_resource_trim: Cell<crate::app::execution_resource_coordination::ResourceTrimRequest>,
     heterogeneous_effect_decision: Cell<
-        Option<
-            crate::app::execution_resource_coordination::PreviewHeterogeneousEffectExecutionDecision,
-        >,
+        crate::app::execution_resource_coordination::PreviewHeterogeneousEffectExecutionDecision,
     >,
     scheduler: MediaPreviewScheduler,
     title_task: RefCell<PreviewTitleTask>,
@@ -313,9 +310,7 @@ pub struct PreviewProductionRuntime<O: Clone> {
     visual_execution_health_failed: Cell<bool>,
     visual_ready: RefCell<HashMap<VisualExecutionTaskKey, VisualExecutionPrefixReady>>,
     visual_failures: RefCell<HashMap<VisualExecutionTaskKey, String>>,
-    media_execution_failures: RefCell<
-        HashMap<MediaPreviewKey, (u64, MediaPreviewFailureReason)>,
-    >,
+    media_execution_failures: RefCell<HashMap<MediaPreviewKey, (u64, MediaPreviewFailureReason)>>,
     media_worker_health_failed: Cell<bool>,
     last_current_media_admission: Cell<Option<&'static str>>,
     last_gpu_loading_reason: Cell<Option<&'static str>>,
@@ -467,7 +462,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             applied_resource_trim: Cell::new(
                 crate::app::execution_resource_coordination::ResourceTrimRequest::None,
             ),
-            heterogeneous_effect_decision: Cell::new(None),
+            heterogeneous_effect_decision: Cell::new(
+                crate::app::execution_resource_coordination::PreviewHeterogeneousEffectExecutionDecision::conservative_baseline(),
+            ),
             scheduler,
             title_task: RefCell::new(PreviewTitleTask::with_notifier(work_notifier.clone())),
             visual_execution,
@@ -847,30 +844,19 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let heterogeneous_decision = self.heterogeneous_effect_decision.get();
         let prepared_gpu_layers = {
             let mut scratch = self.scratch.borrow_mut();
-            match heterogeneous_decision {
-                Some(decision) => prepare_gpu_composite_layers_with_heterogeneous_effects(
-                    &resolved.elements,
-                    resolved.color_context.working_color_space,
-                    &mut scratch,
-                    decision.cpu_prefix_grant(),
-                )
-                .map_err(|error| {
-                    let blocker = match &error {
-                        PreviewViewerGpuLayerPreparationError::Compositing { reason } => {
-                            Some(*reason)
-                        }
-                        _ => None,
-                    };
-                    (blocker, error.to_string())
-                }),
-                None => gpu_composite_layers_for_resolved_with_session(
-                    &resolved.elements,
-                    resolved.color_context.working_color_space,
-                    &mut scratch,
-                )
-                .map(|layers| PreparedPreviewViewerGpuLayers::Ordinary { layers })
-                .map_err(|reason| (Some(reason), format!("{reason:?}"))),
-            }
+            prepare_gpu_composite_layers_with_heterogeneous_effects(
+                &resolved.elements,
+                resolved.color_context.working_color_space,
+                &mut scratch,
+                heterogeneous_decision.cpu_prefix_grant(),
+            )
+            .map_err(|error| {
+                let blocker = match &error {
+                    PreviewViewerGpuLayerPreparationError::Compositing { reason } => Some(*reason),
+                    _ => None,
+                };
+                (blocker, error.to_string())
+            })
         };
         let prepared_gpu_layers = match prepared_gpu_layers {
             Ok(prepared) => prepared,
@@ -950,21 +936,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     ready.generation() == generation && ready.epoch() == transport.epoch()
                 });
                 let Some(ready) = ready else {
-                    let Some(decision) = heterogeneous_decision else {
-                        self.schedule_media_prefetches(
-                            snapshot,
-                            proxy_demands,
-                            sequence,
-                            frame,
-                            width,
-                            height,
-                        );
-                        self.scheduler.prune_obsolete();
-                        return self.unavailable_gpu_candidate(PreviewUnavailability::failed(
-                            PreviewOutputStage::GpuComposite,
-                            "heterogeneous Viewer plan has no frozen resource decision",
-                        ));
-                    };
+                    let decision = heterogeneous_decision;
                     let access_intent = media_preview_viewer_access_intent(
                         transport.is_playing(),
                         transport.seek_source(),
@@ -1901,7 +1873,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         decision: &crate::app::execution_resource_coordination::PreviewExecutionDecision,
     ) {
         bump(&self.metrics.resource_decision_applications);
-        self.heterogeneous_effect_decision.set(Some(decision.heterogeneous_effects));
+        self.heterogeneous_effect_decision.set(decision.heterogeneous_effects);
         self.frame_store.borrow_mut().reconfigure(decision.frame_store);
         self.title_task
             .borrow_mut()

@@ -375,6 +375,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let author_snapshot = snapshot
             .authoring()
             .map(PreviewAuthoringSnapshot::visual_author_snapshot_identity);
+        let heterogeneous_graph_budget =
+            self.heterogeneous_effect_decision.get().cpu_prefix_grant().graph_execution();
         let demands = match collect_preview_timeline_media_demands_with_programs(
             sequence,
             sequences,
@@ -385,6 +387,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             &self.visual_programs,
             &self.scratch,
             author_snapshot,
+            heterogeneous_graph_budget,
         ) {
             Ok(demands) => demands,
             Err(_) => {

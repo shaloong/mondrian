@@ -10,7 +10,8 @@ use crate::app::preview_raster_frame::{
 };
 use crate::app::preview_unavailability::PreviewUnavailabilityDisposition;
 use crate::app::preview_viewer_plan::{
-    viewer_preview_plan_allows_cross_call_reuse, ResolvedPreviewTransitionInput,
+    gpu_composite_layers_for_resolved_with_session, viewer_preview_plan_allows_cross_call_reuse,
+    ResolvedPreviewTransitionInput,
 };
 use crate::app::AppState;
 use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
@@ -1106,6 +1107,7 @@ fn gpu_composite_layers_accept_transformed_media_frame() {
         blend_mode: BlendMode::Normal,
         transform,
         effect_graph,
+        prepared_heterogeneous_route: None,
         frame_seed: 7,
     }];
 
@@ -1140,6 +1142,7 @@ fn gpu_viewer_lowering_reuses_the_preview_owned_effect_session() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
+        prepared_heterogeneous_route: None,
         frame_seed: 7,
     }];
     let mut scratch = TimelineCompositeScratch::default();
@@ -1180,22 +1183,25 @@ fn gpu_composite_layers_lower_cross_dissolve_as_typed_two_input_node() {
     )
     .expect("compile identity graph");
     let elements = vec![ResolvedPreviewElement::CrossDissolve {
-        left: ResolvedPreviewTransitionInput::Media {
+        left: Box::new(ResolvedPreviewTransitionInput::Media {
             frame: test_media_frame_with_size(180, 320, 180, 42),
             opacity: 0.8,
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: Arc::clone(&effect_graph),
+            prepared_heterogeneous_route: None,
             frame_seed: 7,
-        },
-        right: ResolvedPreviewTransitionInput::SolidColor(TimelineSolidColorLayer {
-            color: Color { r: 0.1, g: 0.2, b: 0.3, a: 0.6 },
-            opacity: 0.75,
-            blend_mode: BlendMode::Normal,
-            transform: [0.75, 0.0, 0.125, 0.0, 0.75, 0.125],
-            effect_graph,
-            frame_seed: 8,
         }),
+        right: Box::new(ResolvedPreviewTransitionInput::SolidColor(
+            TimelineSolidColorLayer {
+                color: Color { r: 0.1, g: 0.2, b: 0.3, a: 0.6 },
+                opacity: 0.75,
+                blend_mode: BlendMode::Normal,
+                transform: [0.75, 0.0, 0.125, 0.0, 0.75, 0.125],
+                effect_graph,
+                frame_seed: 8,
+            },
+        )),
         progress: 0.25,
     }];
 
@@ -1254,6 +1260,7 @@ fn gpu_composite_layers_lower_supported_working_effects() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
+        prepared_heterogeneous_route: None,
         frame_seed: 19,
     }];
 
@@ -1388,6 +1395,7 @@ fn gpu_composite_layers_accept_source_only_media_frame() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
+        prepared_heterogeneous_route: None,
         frame_seed: 7,
     }];
 
@@ -1429,6 +1437,7 @@ fn gpu_composite_layers_preserve_native_source_only_media_frame() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
+        prepared_heterogeneous_route: None,
         frame_seed: 7,
     }];
 
@@ -1518,6 +1527,7 @@ fn gpu_composite_layers_reject_singular_media_transform() {
         blend_mode: BlendMode::Normal,
         transform: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         effect_graph,
+        prepared_heterogeneous_route: None,
         frame_seed: 7,
     }];
 
@@ -7020,6 +7030,7 @@ fn resolved_media_preview_cache_key_includes_media_frame_identity() {
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: Arc::clone(&effect_graph),
+            prepared_heterogeneous_route: None,
             frame_seed: 12,
         }]
     };
@@ -7137,6 +7148,7 @@ fn stable_parameter_value_changes_compiled_graph_and_viewer_cache_identity() {
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph,
+            prepared_heterogeneous_route: None,
             frame_seed: 12,
         }]
     };
@@ -7169,6 +7181,7 @@ fn resolved_media_preview_cache_key_includes_color_context() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
+        prepared_heterogeneous_route: None,
         frame_seed: 12,
     }];
     let sequence_id = SequenceId::new();
@@ -7193,6 +7206,7 @@ fn resolved_media_preview_cache_key_includes_resolved_display_color_space() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
+        prepared_heterogeneous_route: None,
         frame_seed: 12,
     }];
     let sequence_id = SequenceId::new();
@@ -7215,6 +7229,7 @@ fn resolved_media_preview_cache_key_includes_versioned_output_transform_intent()
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
+        prepared_heterogeneous_route: None,
         frame_seed: 12,
     }];
     let sequence_id = SequenceId::new();
@@ -7245,6 +7260,7 @@ fn resolved_media_preview_cache_key_includes_output_transform_intent() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
+        prepared_heterogeneous_route: None,
         frame_seed: 12,
     }];
     let sequence_id = SequenceId::new();
@@ -7272,6 +7288,7 @@ fn resolved_media_preview_cache_key_includes_exact_standard_package() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph,
+        prepared_heterogeneous_route: None,
         frame_seed: 12,
     }];
     let sequence_id = SequenceId::new();
@@ -8165,6 +8182,7 @@ fn preview_single_media_color_output_matches_export_composite_contract() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph: Arc::clone(&effect_graph),
+        prepared_heterogeneous_route: None,
         frame_seed: 0,
     }];
     let mut preview_scratch = TimelineCompositeScratch::default();
@@ -8262,6 +8280,7 @@ fn preview_camera_log_input_matches_export_frame_hash() {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_graph: Arc::clone(&effect_graph),
+        prepared_heterogeneous_route: None,
         frame_seed: 3_003,
     }];
     let preview_service = WindowPreviewAdapter::new();
@@ -8376,6 +8395,7 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
             blend_mode: BlendMode::Multiply,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: Arc::clone(&effect_graph),
+            prepared_heterogeneous_route: None,
             frame_seed: 7,
         },
         ResolvedPreviewElement::SolidColor(solid.clone()),
