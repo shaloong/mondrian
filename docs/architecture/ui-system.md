@@ -416,10 +416,17 @@ counts. A Bus creation action allocates identity only during dispatch and may
 connect it to the first routed Program Output in the same author transaction.
 Track/Bus Route menus submit exact source tap and destination identities;
 existing edges expose enabled state, honest static-or-automated gain, and
-undoable removal. Bus names use transactional `TextInput` commit and therefore
-produce no mutation while typing and at most one typed `RenameBus` transaction
-per focus session. Bus deletion states how many connected Routes will be
-removed and uses Timeline's `Disconnect` policy rather than issuing N UI edits.
+undoable removal or stable-identity endpoint rewiring. The Mixer consumes one
+Timeline-owned Bus-reachability inspection built from all authored Routes,
+including disabled edges, and uses it for both create and rewire menus so
+self/cycle-producing candidates are not presented; Timeline's complete
+candidate validation remains final authority. Rewiring changes only
+source/destination and preserves Route gain,
+automation, enabled state, and identity. Bus names use transactional
+`TextInput` commit and therefore produce no mutation while typing and at most
+one typed `RenameBus` transaction per focus session. Bus deletion states how
+many connected Routes will be removed and uses Timeline's `Disconnect` policy
+rather than issuing N UI edits.
 Bus post-fader UI does not invent a mute stage: although the shared author port
 enum remains uniform, the product presents only real pre/post-fader choices.
 The current surface deliberately omits fake meter bars and transient solo until

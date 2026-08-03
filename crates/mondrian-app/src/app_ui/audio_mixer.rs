@@ -14,9 +14,11 @@ use mondrian_timeline::audio::{
     ProgramOutputMainSource, AUDIO_GAIN_DB_MAX, AUDIO_GAIN_DB_MIN,
 };
 use mondrian_timeline::{
-    inspect_audio_channel_strip, inspect_audio_route, AudioBusRemovalPolicy, AudioChannelStripEdit,
-    AudioChannelStripEditBlocker, AudioChannelStripEditRequest, AudioChannelStripRack,
-    AudioProcessorRackAddress, AudioRoutingEdit, AudioRoutingEditBlocker, AudioRoutingEditRequest,
+    inspect_audio_channel_strip, inspect_audio_route, inspect_audio_route_candidates,
+    AudioBusRemovalPolicy, AudioChannelStripEdit, AudioChannelStripEditBlocker,
+    AudioChannelStripEditRequest, AudioChannelStripRack, AudioProcessorRackAddress,
+    AudioRouteCandidateInspection, AudioRoutingEdit, AudioRoutingEditBlocker,
+    AudioRoutingEditRequest,
 };
 
 use crate::app::ui_actions::{
@@ -63,6 +65,8 @@ pub(crate) struct AudioMixerRouteCreateOption {
 #[derive(Debug, Clone)]
 pub(crate) struct AudioMixerRouteModel {
     pub(crate) route_id: AudioRouteId,
+    pub(crate) source: AudioRouteSource,
+    pub(crate) destination: AudioRouteDestination,
     pub(crate) source_port_label: &'static str,
     pub(crate) destination_label: String,
     pub(crate) enabled: bool,
@@ -208,7 +212,7 @@ fn project_channel(
     let incoming_route_count = routing.incoming_counts.get(&owner).copied().unwrap_or(0);
     let route_create_options = route_source_for_owner(owner)
         .map_or_else(Vec::new, |owner_source| {
-            route_create_options(sequence, owner_source, is_editable)
+            route_create_options(sequence, routing, owner_source, is_editable)
         });
     let bus_removal = match owner {
         AudioChannelStripOwner::Bus { bus_id } => routing.bus_removals.get(&bus_id).cloned(),
@@ -236,11 +240,15 @@ struct AudioMixerRoutingIndex {
     outbound: HashMap<AudioChannelStripOwner, Vec<AudioMixerRouteModel>>,
     incoming_counts: HashMap<AudioChannelStripOwner, usize>,
     bus_removals: HashMap<MixBusId, AudioMixerBusRemovalModel>,
+    route_candidates: Option<AudioRouteCandidateInspection>,
 }
 
 impl AudioMixerRoutingIndex {
     fn build(sequence: &mondrian_timeline::sequence::Sequence) -> Self {
-        let mut index = Self::default();
+        let mut index = Self {
+            route_candidates: inspect_audio_route_candidates(sequence).ok(),
+            ..Self::default()
+        };
         index.bus_removals.extend(sequence.audio_program.buses.iter().map(|bus| {
             (
                 bus.id,
@@ -288,6 +296,16 @@ impl AudioMixerRoutingIndex {
         }
         index
     }
+
+    fn allows_candidate(
+        &self,
+        source: AudioRouteSource,
+        destination: AudioRouteDestination,
+    ) -> bool {
+        self.route_candidates
+            .as_ref()
+            .is_some_and(|inspection| inspection.allows_addition(source, destination))
+    }
 }
 
 fn project_route(
@@ -306,6 +324,8 @@ fn project_route(
     };
     AudioMixerRouteModel {
         route_id: route.id,
+        source: route.source,
+        destination: route.destination,
         source_port_label: source_port_label(route.source),
         destination_label: destination_label(sequence, route.destination),
         enabled: route.enabled,
@@ -336,6 +356,7 @@ fn owner_for_destination(destination: AudioRouteDestination) -> AudioChannelStri
 
 fn route_create_options(
     sequence: &mondrian_timeline::sequence::Sequence,
+    routing: &AudioMixerRoutingIndex,
     owner_source: AudioRouteSource,
     is_editable: bool,
 ) -> Vec<AudioMixerRouteCreateOption> {
@@ -390,6 +411,7 @@ fn route_create_options(
                 }
             })
         })
+        .filter(|option| routing.allows_candidate(option.source, option.destination))
         .collect()
 }
 
@@ -527,6 +549,23 @@ pub(crate) fn create_route_action(option: &AudioMixerRouteCreateOption) -> Actio
             destination: option.destination,
         },
     })
+}
+
+pub(crate) fn rewire_route_action(
+    route: &AudioMixerRouteModel,
+    option: &AudioMixerRouteCreateOption,
+) -> Option<Action> {
+    (route.is_editable
+        && (route.source != option.source || route.destination != option.destination))
+        .then(|| {
+            audio_routing_edit_action(AudioRoutingEditRequest {
+                edit: AudioRoutingEdit::SetRouteEndpoints {
+                    route_id: route.route_id,
+                    source: option.source,
+                    destination: option.destination,
+                },
+            })
+        })
 }
 
 pub(crate) fn set_route_enabled_action(
@@ -755,6 +794,32 @@ mod tests {
         assert!(set_route_enabled_action(route, false).is_some());
         assert!(set_route_gain_action(route, -6.0).is_some());
         assert!(remove_route_action(route).is_some());
+        let current = track
+            .route_create_options
+            .iter()
+            .find(|option| option.source == route.source && option.destination == route.destination)
+            .expect("current Route endpoints remain a visible candidate");
+        assert!(rewire_route_action(route, current).is_none());
+        let replacement = track
+            .route_create_options
+            .iter()
+            .find(|option| option.source != route.source || option.destination != route.destination)
+            .expect("replacement Route endpoints");
+        let action = rewire_route_action(route, replacement).expect("rewire Route action");
+        assert!(matches!(
+            ProductAction::decode_external(&action).expect("decode"),
+            Some(ProductAction::Audio(AudioProductAction::EditRouting(
+                AudioRoutingEditRequest {
+                    edit: AudioRoutingEdit::SetRouteEndpoints {
+                        route_id,
+                        source,
+                        destination,
+                    }
+                }
+            ))) if route_id == route.route_id
+                && source == replacement.source
+                && destination == replacement.destination
+        ));
 
         let bus = model
             .channels
@@ -771,5 +836,82 @@ mod tests {
             ))) if projected == bus_id && name == "Dialogue"
         ));
         assert!(rename_bus_action(track, "invalid owner").is_none());
+    }
+
+    #[test]
+    fn route_candidates_hide_cycles_even_when_the_existing_edge_is_disabled() {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("Cycle-aware Mixer");
+        let first = MixBusId::new();
+        let second = MixBusId::new();
+        let third = MixBusId::new();
+        sequence.audio_program.buses.extend([
+            AudioMixBus {
+                id: first,
+                name: "First".to_owned(),
+                strip: AudioChannelStrip::default(),
+            },
+            AudioMixBus {
+                id: second,
+                name: "Second".to_owned(),
+                strip: AudioChannelStrip::default(),
+            },
+            AudioMixBus {
+                id: third,
+                name: "Third".to_owned(),
+                strip: AudioChannelStrip::default(),
+            },
+        ]);
+        let mut edge = AudioRoute::new(
+            AudioRouteSource::Bus {
+                bus_id: first,
+                port: AudioChannelStripOutputPort::PostMute,
+            },
+            AudioRouteDestination::Bus(second),
+        );
+        edge.enabled = false;
+        sequence.audio_program.routes.push(edge);
+        sequence.audio_program.routes.push(AudioRoute::new(
+            AudioRouteSource::Bus {
+                bus_id: second,
+                port: AudioChannelStripOutputPort::PostMute,
+            },
+            AudioRouteDestination::Bus(third),
+        ));
+        state.test_set_sequence(Some(sequence));
+
+        let model = AudioMixerPanelModel::from_app_state(&state);
+        let first_channel = model
+            .channels
+            .iter()
+            .find(|channel| channel.owner == AudioChannelStripOwner::Bus { bus_id: first })
+            .expect("first Bus");
+        let second_channel = model
+            .channels
+            .iter()
+            .find(|channel| channel.owner == AudioChannelStripOwner::Bus { bus_id: second })
+            .expect("second Bus");
+        let third_channel = model
+            .channels
+            .iter()
+            .find(|channel| channel.owner == AudioChannelStripOwner::Bus { bus_id: third })
+            .expect("third Bus");
+
+        assert!(first_channel
+            .route_create_options
+            .iter()
+            .any(|option| option.destination == AudioRouteDestination::Bus(second)));
+        assert!(second_channel
+            .route_create_options
+            .iter()
+            .all(|option| option.destination != AudioRouteDestination::Bus(first)));
+        assert!(third_channel.route_create_options.iter().all(|option| {
+            option.destination != AudioRouteDestination::Bus(first)
+                && option.destination != AudioRouteDestination::Bus(second)
+        }));
+        assert!(third_channel
+            .route_create_options
+            .iter()
+            .any(|option| matches!(option.destination, AudioRouteDestination::Output(_))));
     }
 }

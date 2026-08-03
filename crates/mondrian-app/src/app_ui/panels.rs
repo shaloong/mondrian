@@ -152,6 +152,7 @@ use crate::app_ui::audio_mixer::{
     remove_bus_action as audio_mixer_remove_bus_action,
     remove_route_action as audio_mixer_remove_route_action,
     rename_bus_action as audio_mixer_rename_bus_action,
+    rewire_route_action as audio_mixer_rewire_route_action,
     set_fader_action as audio_mixer_set_fader_action,
     set_input_trim_action as audio_mixer_set_input_trim_action,
     set_route_enabled_action as audio_mixer_set_route_enabled_action,
@@ -5447,6 +5448,23 @@ fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
                     remove_action,
                 ),
             ));
+            let rewire_items = channel
+                .route_create_options
+                .iter()
+                .filter_map(|option| {
+                    audio_mixer_rewire_route_action(route, option)
+                        .map(|action| MenuItem::new(option.label.clone(), action))
+                })
+                .collect::<Vec<_>>();
+            if !rewire_items.is_empty() {
+                route_section = route_section.with_row(PropertyRow::new(
+                    "重连",
+                    Box::new(
+                        Dropdown::new("选择新的 tap 与目标…", rewire_items)
+                            .with_max_visible_items(12),
+                    ),
+                ));
+            }
             if let Some(reason) = &route.edit_disabled_reason {
                 route_section = route_section.with_row(PropertyRow::new(
                     "只读",

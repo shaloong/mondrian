@@ -41,9 +41,10 @@ pub use audio_processor_edit::{
     AudioProcessorRackEditRequest, AudioProcessorRackInspection, AudioProcessorRackPlacement,
 };
 pub use audio_routing_edit::{
-    apply_audio_routing_edit, inspect_audio_mix_bus, inspect_audio_route, AudioBusRemovalPolicy,
-    AudioMixBusInspection, AudioRouteInspection, AudioRoutingAddressError, AudioRoutingEdit,
-    AudioRoutingEditBlocker, AudioRoutingEditError, AudioRoutingEditOutcome,
+    apply_audio_routing_edit, inspect_audio_mix_bus, inspect_audio_route,
+    inspect_audio_route_candidates, AudioBusRemovalPolicy, AudioMixBusInspection,
+    AudioRouteCandidateInspection, AudioRouteInspection, AudioRoutingAddressError,
+    AudioRoutingEdit, AudioRoutingEditBlocker, AudioRoutingEditError, AudioRoutingEditOutcome,
     AudioRoutingEditRequest,
 };
 pub use clip::{ActiveClip, Clip, ClipKind, ClipSourceTimeMap};

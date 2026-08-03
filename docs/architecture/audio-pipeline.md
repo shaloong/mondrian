@@ -265,6 +265,11 @@ while its curve is signal authority, and deleting the last key canonicalizes
 back to the retained static gain. Every changed candidate passes complete Audio
 Program validation, so an instantaneous Bus cycle or invalid endpoint never
 publishes partial state.
+`inspect_audio_route_candidates` is the matching bulk read Interface: it checks
+existing endpoint closure, captures Track-lock admission, and precomputes
+disabled-edge-inclusive Bus reachability once. Mixer/patchbay Adapters may use
+its constant-time addition query to omit impossible choices, but may not own a
+parallel cycle algorithm or treat the projection as transaction authority.
 
 This minimal edge contract already covers dry paths, pre/post-fader auxiliary
 sends, submixes, stems, and multiple parallel paths. Sidechain inputs are not

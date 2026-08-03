@@ -548,6 +548,12 @@ disconnecting delete removes the Bus and every incident Route in one candidate,
 while reject-if-connected preserves all state. Track locks protect every Route
 sourced from that Track, including a Route removed indirectly by Bus deletion.
 Full candidate validation remains the authority for cross-Bus cycle detection.
+For bulk product menus, `inspect_audio_route_candidates` validates existing
+addresses once and returns a snapshot-local reachability inspection. It applies
+Track locks and treats enabled and disabled Routes as structural edges, so
+callers can test many additions in constant time without copying the Sequence
+or recreating Routing rules. This projection is advisory for interaction;
+commit-time complete Audio Program validation remains authoritative.
 
 The Implementation clones a structurally shared Sequence candidate, admits
 Track locks, resolves the address, performs the local mutation, and validates
