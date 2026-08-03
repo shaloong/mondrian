@@ -389,6 +389,8 @@ pub enum ParameterUnit {
     Stops,
     Nits,
     Decibels,
+    /// Milliseconds in the owning execution domain.
+    Milliseconds,
     /// Exact integer audio sample frames on the active Evaluation Grid.
     Samples,
 }
@@ -2873,6 +2875,7 @@ impl crate::AuthoringFootprint for ParameterUnit {
             | Self::Stops
             | Self::Nits
             | Self::Decibels
+            | Self::Milliseconds
             | Self::Samples => Ok(()),
         }
     }

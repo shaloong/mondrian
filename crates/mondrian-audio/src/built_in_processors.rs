@@ -11,8 +11,9 @@ use crate::{
 use mondrian_core::{AudioChannelLayout, ParameterId};
 use mondrian_timeline::audio::{
     gain_parameter_schema, sample_delay_frames_parameter_schema, AudioProcessorDefinitionRef,
-    BUILTIN_GAIN_DEFINITION_ID, BUILTIN_SAMPLE_DELAY_DEFINITION_ID, GAIN_DB_PARAMETER_ID,
-    SAMPLE_DELAY_FRAMES_PARAMETER_ID, SAMPLE_DELAY_MAX_FRAMES,
+    BUILTIN_GAIN_DEFINITION_ID, BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID,
+    BUILTIN_SAMPLE_DELAY_DEFINITION_ID, GAIN_DB_PARAMETER_ID, SAMPLE_DELAY_FRAMES_PARAMETER_ID,
+    SAMPLE_DELAY_MAX_FRAMES,
 };
 use std::sync::Arc;
 
@@ -31,6 +32,12 @@ impl AudioProcessorResolver for BuiltInAudioProcessorResolver {
                 if definition_id == BUILTIN_SAMPLE_DELAY_DEFINITION_ID && *schema_version == 1 =>
             {
                 prepare_sample_delay(request)
+            }
+            AudioProcessorDefinitionRef::BuiltIn { definition_id, schema_version }
+                if definition_id == BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID
+                    && *schema_version == 1 =>
+            {
+                crate::lookahead_limiter::prepare_lookahead_limiter(request)
             }
             AudioProcessorDefinitionRef::BuiltIn { definition_id, schema_version } => {
                 Err(AudioProcessorHostError::Unavailable(format!(

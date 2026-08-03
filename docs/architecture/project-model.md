@@ -507,7 +507,7 @@ through a bounded reader directly into its typed Manifest or
 The value-based registry remains the explicit seam for future migrations
 without imposing its peak-memory cost on current Projects.
 
-Document schema v22 is the sole accepted Alpha author schema. It persists the
+Document schema v23 is the sole accepted Alpha author schema. It persists the
 Project-owned color environment and future-Sequence template, exact rational
 `TimelineTime`, canonical signal layouts and channel mappings, typed Routes and
 processor schemas, canonical proxy membership, closed `ClipContent`,

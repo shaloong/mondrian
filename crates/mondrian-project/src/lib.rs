@@ -34,7 +34,7 @@ use migration::JsonMigrationRegistry;
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 22;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 23;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 4;
 
@@ -1617,8 +1617,10 @@ mod tests {
         TimelineTime,
     };
     use mondrian_timeline::audio::{
-        AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID, BUILTIN_SAMPLE_DELAY_DEFINITION_ID,
-        GAIN_DB_PARAMETER_ID, SAMPLE_DELAY_FRAMES_PARAMETER_ID,
+        AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID,
+        BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID, BUILTIN_SAMPLE_DELAY_DEFINITION_ID,
+        GAIN_DB_PARAMETER_ID, LOOKAHEAD_LIMITER_LOOKAHEAD_MS_PARAMETER_ID,
+        SAMPLE_DELAY_FRAMES_PARAMETER_ID,
     };
     use mondrian_timeline::{Clip, Sequence};
 
@@ -2518,6 +2520,8 @@ mod tests {
                     .expect("exact delay value"),
             )
             .expect("schema-compatible sample delay");
+        let lookahead_limiter =
+            AudioProcessorInstance::built_in(BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID, 1);
         sequence
             .audio_program
             .track_channels
@@ -2536,6 +2540,15 @@ mod tests {
             .pre_fader
             .processors
             .push(sample_delay);
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track_id)
+            .expect("track channel")
+            .strip
+            .pre_fader
+            .processors
+            .push(lookahead_limiter);
 
         save_project_archive(&document, &db_path, &project_path).expect("save project");
         let reopened = read_project_document_from_archive(&project_path).expect("reopen project");
@@ -2554,6 +2567,12 @@ mod tests {
         assert!(!delay.schema.is_animatable);
         assert_eq!(delay.automation.default_value, 128.0);
         assert!(delay.automation.keyframes.is_empty());
+        let lookahead =
+            &sequence.audio_program.track_channels[&track_id].strip.pre_fader.processors[2]
+                .parameters[&ParameterId::new_static(LOOKAHEAD_LIMITER_LOOKAHEAD_MS_PARAMETER_ID)];
+        assert_eq!(lookahead.schema.unit, ParameterUnit::Milliseconds);
+        assert!(!lookahead.schema.is_animatable);
+        assert_eq!(lookahead.automation.default_value, 5.0);
     }
 
     #[test]

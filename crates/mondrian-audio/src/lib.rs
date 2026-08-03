@@ -12,6 +12,7 @@ mod delay;
 mod dependency;
 mod dsp;
 mod latency;
+mod lookahead_limiter;
 mod meter;
 mod plan;
 mod processor;

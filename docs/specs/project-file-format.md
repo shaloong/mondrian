@@ -44,8 +44,8 @@ could otherwise select one by name. Project JSON and Library entries are
 written with ZIP64 size fields from the start; readers must therefore support
 ZIP64 even when a particular Project remains below 4 GiB.
 
-The current independent versions are archive v1, document schema v22, and
-library schema v4. Document schema v22 is the sole accepted Alpha author
+The current independent versions are archive v1, document schema v23, and
+library schema v4. Document schema v23 is the sole accepted Alpha author
 contract. It requires closed Project/Sequence/Clip structures, including one
 mandatory tagged `source_time_map`; its constant variant contains
 `source_origin` and exact `scale`, and derives the terminal source boundary from

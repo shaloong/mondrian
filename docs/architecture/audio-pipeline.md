@@ -394,10 +394,30 @@ any Session is constructed. It also rejects public
 lookahead or aggregate interleaved compensation storage beyond the explicit
 Render Contract budgets. Generic compensation execution and root Session entry
 consume the remaining realized facts. Ordinary
-tests use a custom stateful non-zero-latency Host Adapter to prove PDC,
+tests use a custom stateful non-zero-latency Host Adapter to prove general PDC,
 whole/partitioned PCM, explicit entry, mode rejection, and failed-entry
 poisoning. The built-in Sample Delay separately proves a production stateful
-definition without mislabelling audible delay as compensable latency.
+definition without mislabelling audible delay as compensable latency. The
+built-in linked-channel sample-peak Lookahead Limiter is the first production
+Processor that declares nonzero algorithmic latency and exercises those same
+PDC and public-lookahead contracts.
+
+The Lookahead Limiter owns a deep private Module rather than adding special
+cases to graph traversal or the Host Interface. Preparation validates the exact
+versioned Ceiling/Lookahead/Release schemas, converts non-automatable Lookahead
+milliseconds upward to a fixed sample count, and admits every delay, parameter,
+gain, peak-value, and peak-index buffer as processor-private Session scratch.
+The callback uses a fixed-capacity monotonic queue, so the maximum linked
+absolute sample over `[signal time, signal time + lookahead]` is updated in
+amortized constant work instead of rescanning the window. Audio, Ceiling, and
+Release are delayed together; downstream PDC therefore cannot shift parameter
+time. Attack is immediate, release is a one-pole recovery, and all channels use
+one gain so the spatial image remains coherent. A final per-sample rounding
+guard enforces Ceiling. Non-finite PCM or contract drift poisons the owning
+continuity epoch before any output publication. This is deliberately a
+sample-peak limiter: no documentation, meter, or delivery evidence may call it
+true-peak until a separately qualified oversampled detector and reference
+corpus exist.
 
 ### Stage 3: exclusive mutable Session
 
@@ -971,6 +991,14 @@ The automated suite must prove:
 - built-in Sample Delay validates exact integer authoring, keeps audible delay
   outside PDC, resets on seek entry, remains partition invariant, and fails plan
   preparation when its exact Session storage exceeds the Render Contract;
+- built-in Lookahead Limiter persists and reopens its canonical millisecond and
+  decibel schemas, rounds Lookahead upward once, drives real parallel-route PDC,
+  keeps Ceiling automation on signal time, links channels, resets on seek,
+  rejects non-finite PCM, and fails before Session construction when exact
+  scratch is one byte over budget;
+- the optimized monotonic peak window matches an independent window-rescanning
+  scalar reference across irregular block partitions, runtime SIMD gain
+  application, and a non-zero fresh seek entry;
 - Program Output sample-peak/RMS observation preserves unclipped and non-finite
   evidence without claiming loudness/true-peak conformance;
 - timeline/audio crates compile and test independently;
@@ -984,6 +1012,10 @@ The automated suite must prove:
 - the ignored fixed-reference load matrix exercises 1/8/32/64 Tracks at
   64/256/1024-frame blocks, compares scalar and SIMD PCM, and fails when p99
   exceeds the block deadline;
+- a separate ignored linked-limiter matrix installs one real stateful limiter
+  on each of 1/8/32/64 Track Mixer Channels, enters an explicit continuity
+  epoch, compares scalar and SIMD PCM at 64/256/1024-frame blocks, and fails
+  when runtime-vectorized p99 exceeds the realtime block deadline;
 - decoded-media block reads native-layout PCM across aligned windows exactly,
   reuse hits, evict by global PCM bytes, and invalidate after file replacement;
 - standard mono-to-stereo, explicit stereo swap, and child-mono-to-parent-stereo

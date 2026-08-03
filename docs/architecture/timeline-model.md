@@ -1011,9 +1011,12 @@ automation share exact curve primitives, stable Parameter IDs, and the same
 Parameter Schema language. Audio Processor instances capture a schema snapshot
 beside the exact curve so missing plugins remain editable; a known built-in must
 still match its canonical definition schema exactly before compilation. Numeric
-audio schemas may use exact integer sample-frame units; values must remain
-exactly representable in the shared curve domain, and a parameter that changes
-storage or continuity topology is non-animatable and forces plan re-preparation
+audio schemas may use exact integer sample-frame units or sample-rate-independent
+milliseconds; values must remain exactly representable in the shared curve
+domain. The built-in Lookahead Limiter therefore persists Lookahead in
+milliseconds but marks it non-animatable and topology-affecting; audio plan
+preparation rounds it upward once to the concrete sample grid. A parameter that
+changes storage, latency, or continuity topology forces plan re-preparation
 rather than a live callback event.
 
 Automation authoring uses `AnimationParameterAddress { animation_track_id,

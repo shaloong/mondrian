@@ -1,15 +1,15 @@
 use mondrian_audio::{
-    compile_audio_program, AudioCompileRequest, AudioExecutionError, AudioKernelBackend,
-    AudioPcmSource, AudioProcessingMode, AudioRenderContract, AudioRenderRequest,
-    AudioRenderSession, PreparedAudioPlan,
+    compile_audio_program, AudioCompileRequest, AudioContinuityEpoch, AudioExecutionError,
+    AudioKernelBackend, AudioPcmSource, AudioProcessingMode, AudioRenderContract,
+    AudioRenderRequest, AudioRenderSession, AudioStateEntry, PreparedAudioPlan,
 };
 use mondrian_core::{
     AssetId, AudioChannelLayout, AudioComponentEditId, AudioSourceComponentId, MixBusId,
     TimelineTime,
 };
 use mondrian_timeline::audio::{
-    AudioChannelStrip, AudioChannelStripOutputPort, AudioMixBus, AudioRoute, AudioRouteDestination,
-    AudioRouteSource,
+    AudioChannelStrip, AudioChannelStripOutputPort, AudioMixBus, AudioProcessorInstance,
+    AudioRoute, AudioRouteDestination, AudioRouteSource, BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID,
 };
 use mondrian_timeline::{Clip, Sequence};
 use std::fs::{File, OpenOptions};
@@ -104,6 +104,51 @@ fn dense_schedule_multitrack_load_matrix() {
     }
     if let Some(file) = report_file {
         file.sync_all().expect("flush Audio load-matrix report");
+    }
+}
+
+#[test]
+#[ignore = "fixed-reference-machine linked limiter scalar/SIMD multitrack load matrix"]
+fn lookahead_limiter_multitrack_load_matrix() {
+    for track_count in [1_usize, 8, 32, 64] {
+        let mut sequence = multitrack_sequence(track_count, 0);
+        for channel in sequence.audio_program.track_channels.values_mut() {
+            channel.strip.pre_fader.processors.push(AudioProcessorInstance::built_in(
+                BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID,
+                1,
+            ));
+        }
+        for block_frames in [64_usize, 256, 1024] {
+            let scalar = prepared(&sequence, block_frames, AudioKernelBackend::ScalarReference);
+            let vectorized = prepared(
+                &sequence,
+                block_frames,
+                AudioKernelBackend::RuntimeVectorized,
+            );
+            assert_eq!(scalar.schedule_summary(), vectorized.schedule_summary());
+            assert_eq!(scalar.schedule_summary().track_count, track_count);
+            assert_eq!(
+                scalar.schedule_summary().processor_occurrence_count,
+                track_count
+            );
+
+            let (scalar_pcm, scalar_us) = run_case(scalar, block_frames);
+            let (vectorized_pcm, vectorized_us) = run_case(vectorized, block_frames);
+            assert_eq!(scalar_pcm, vectorized_pcm, "limiter backend PCM parity");
+
+            let deadline_us =
+                (block_frames as u64).saturating_mul(1_000_000).div_ceil(u64::from(SAMPLE_RATE));
+            let scalar_p99 = percentile(&scalar_us, 99);
+            let vectorized_p99 = percentile(&vectorized_us, 99);
+            println!(
+                "MONDRIAN_AUDIO_LIMITER_LOAD_MATRIX={{\"profile\":\"linked_sample_peak_limiter_v1\",\"tracks\":{track_count},\"processors\":{track_count},\"block_frames\":{block_frames},\"sample_rate\":{SAMPLE_RATE},\"channels\":{CHANNELS},\"iterations\":{ITERATIONS},\"deadline_us\":{deadline_us},\"scalar_p99_us\":{scalar_p99},\"vectorized_p99_us\":{vectorized_p99},\"vectorized_deadline_misses\":{}}}",
+                deadline_misses(&vectorized_us, deadline_us)
+            );
+            assert!(
+                vectorized_p99 <= deadline_us,
+                "linked limiter missed realtime deadline: tracks={track_count}, block={block_frames}, p99={vectorized_p99} us, deadline={deadline_us} us"
+            );
+        }
     }
 }
 
@@ -233,6 +278,12 @@ fn prepared(
 
 fn run_case(plan: Arc<PreparedAudioPlan>, block_frames: usize) -> (Vec<f32>, Vec<u64>) {
     let mut session = AudioRenderSession::new(plan).expect("Session");
+    session
+        .enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(1),
+            start_sample: 0,
+        })
+        .expect("load-matrix state entry");
     let mut source = DeterministicSource;
     let mut destination = vec![0.0; block_frames * CHANNELS];
     let request = AudioRenderRequest { start_sample: 0, frames: block_frames };

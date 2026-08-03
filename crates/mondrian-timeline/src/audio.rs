@@ -27,6 +27,25 @@ pub const BUILTIN_SAMPLE_DELAY_DEFINITION_ID: &str = "mondrian.audio.sample_dela
 pub const SAMPLE_DELAY_FRAMES_PARAMETER_ID: &str = "mondrian.audio.sample_delay.frames";
 /// Largest authorable delay retained by one built-in Sample Delay instance.
 pub const SAMPLE_DELAY_MAX_FRAMES: i64 = 192_000;
+/// Stable built-in definition identity for the linked-channel sample-peak limiter.
+pub const BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID: &str = "mondrian.audio.lookahead_limiter";
+/// Stable ceiling parameter identity for the built-in Lookahead Limiter.
+pub const LOOKAHEAD_LIMITER_CEILING_DB_PARAMETER_ID: &str =
+    "mondrian.audio.lookahead_limiter.ceiling_db";
+/// Stable lookahead parameter identity for the built-in Lookahead Limiter.
+pub const LOOKAHEAD_LIMITER_LOOKAHEAD_MS_PARAMETER_ID: &str =
+    "mondrian.audio.lookahead_limiter.lookahead_ms";
+/// Stable release parameter identity for the built-in Lookahead Limiter.
+pub const LOOKAHEAD_LIMITER_RELEASE_MS_PARAMETER_ID: &str =
+    "mondrian.audio.lookahead_limiter.release_ms";
+/// Default sample-peak ceiling in dBFS.
+pub const LOOKAHEAD_LIMITER_DEFAULT_CEILING_DB: f64 = -1.0;
+/// Default hidden lookahead in milliseconds.
+pub const LOOKAHEAD_LIMITER_DEFAULT_LOOKAHEAD_MS: f64 = 5.0;
+/// Default gain-release time in milliseconds.
+pub const LOOKAHEAD_LIMITER_DEFAULT_RELEASE_MS: f64 = 100.0;
+/// Maximum hidden lookahead admitted by the built-in processor.
+pub const LOOKAHEAD_LIMITER_MAX_LOOKAHEAD_MS: f64 = 20.0;
 /// Stable parameter identity for processing-scope input trim.
 pub const INPUT_GAIN_DB_PARAMETER_ID: &str = "mondrian.audio.input_gain.db";
 /// Stable parameter identity for placement-local volume.
@@ -85,6 +104,64 @@ pub fn sample_delay_frames_parameter_schema() -> ParameterSchema {
     )
     .with_animatable(false)
     .with_cache_impact(ParameterCacheImpact::Topology)
+}
+
+/// Definition contract for the Lookahead Limiter's linked-channel sample ceiling.
+pub fn lookahead_limiter_ceiling_parameter_schema() -> ParameterSchema {
+    ParameterSchema::v1(
+        ParameterId::new_static(LOOKAHEAD_LIMITER_CEILING_DB_PARAMETER_ID),
+        PropertyValue::Double(LOOKAHEAD_LIMITER_DEFAULT_CEILING_DB),
+    )
+    .with_numeric_contract(
+        ParameterUnit::Decibels,
+        ParameterNumericContract {
+            hard_range: ParameterNumericRange { min: -24.0, max: 0.0 },
+            soft_range: ParameterNumericRange { min: -12.0, max: 0.0 },
+            step: Some(0.1),
+            invalid_value_policy: ParameterInvalidValuePolicy::Reject,
+        },
+    )
+}
+
+/// Definition contract for the Lookahead Limiter's hidden analysis window.
+///
+/// The author value is sample-rate-independent. Preparation rounds upward to
+/// an exact number of frames so the realized window is never shorter than the
+/// requested duration. Live automation is forbidden because the value changes
+/// algorithmic latency, retained history, and PDC obligations.
+pub fn lookahead_limiter_lookahead_parameter_schema() -> ParameterSchema {
+    ParameterSchema::v1(
+        ParameterId::new_static(LOOKAHEAD_LIMITER_LOOKAHEAD_MS_PARAMETER_ID),
+        PropertyValue::Double(LOOKAHEAD_LIMITER_DEFAULT_LOOKAHEAD_MS),
+    )
+    .with_numeric_contract(
+        ParameterUnit::Milliseconds,
+        ParameterNumericContract {
+            hard_range: ParameterNumericRange { min: 0.0, max: LOOKAHEAD_LIMITER_MAX_LOOKAHEAD_MS },
+            soft_range: ParameterNumericRange { min: 0.0, max: 10.0 },
+            step: Some(0.1),
+            invalid_value_policy: ParameterInvalidValuePolicy::Reject,
+        },
+    )
+    .with_animatable(false)
+    .with_cache_impact(ParameterCacheImpact::Topology)
+}
+
+/// Definition contract for the Lookahead Limiter's gain-release time.
+pub fn lookahead_limiter_release_parameter_schema() -> ParameterSchema {
+    ParameterSchema::v1(
+        ParameterId::new_static(LOOKAHEAD_LIMITER_RELEASE_MS_PARAMETER_ID),
+        PropertyValue::Double(LOOKAHEAD_LIMITER_DEFAULT_RELEASE_MS),
+    )
+    .with_numeric_contract(
+        ParameterUnit::Milliseconds,
+        ParameterNumericContract {
+            hard_range: ParameterNumericRange { min: 5.0, max: 5_000.0 },
+            soft_range: ParameterNumericRange { min: 20.0, max: 1_000.0 },
+            step: Some(1.0),
+            invalid_value_policy: ParameterInvalidValuePolicy::Reject,
+        },
+    )
 }
 
 /// A persistent reference to one processor definition.
@@ -233,6 +310,29 @@ impl AudioProcessorInstance {
                 keyframes: AuthoringList::new(),
             };
             parameters.insert(parameter_id, AudioProcessorParameter { schema, automation });
+        } else if definition_id == BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID && schema_version == 1 {
+            for (schema, default_value) in [
+                (
+                    lookahead_limiter_ceiling_parameter_schema(),
+                    LOOKAHEAD_LIMITER_DEFAULT_CEILING_DB,
+                ),
+                (
+                    lookahead_limiter_lookahead_parameter_schema(),
+                    LOOKAHEAD_LIMITER_DEFAULT_LOOKAHEAD_MS,
+                ),
+                (
+                    lookahead_limiter_release_parameter_schema(),
+                    LOOKAHEAD_LIMITER_DEFAULT_RELEASE_MS,
+                ),
+            ] {
+                let parameter_id = schema.parameter_id.clone();
+                let automation = ExactAutomationCurve {
+                    parameter_id: parameter_id.clone(),
+                    default_value,
+                    keyframes: AuthoringList::new(),
+                };
+                parameters.insert(parameter_id, AudioProcessorParameter { schema, automation });
+            }
         }
         Self {
             id: AudioProcessorInstanceId::new(),
@@ -1744,6 +1844,55 @@ mod tests {
             *parameter
         );
         processor.validate().expect("valid built-in definition snapshot");
+    }
+
+    #[test]
+    fn built_in_lookahead_limiter_owns_versioned_latency_and_signal_parameters() {
+        let processor =
+            AudioProcessorInstance::built_in(BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID, 1);
+        let ceiling_id = ParameterId::new_static(LOOKAHEAD_LIMITER_CEILING_DB_PARAMETER_ID);
+        let lookahead_id = ParameterId::new_static(LOOKAHEAD_LIMITER_LOOKAHEAD_MS_PARAMETER_ID);
+        let release_id = ParameterId::new_static(LOOKAHEAD_LIMITER_RELEASE_MS_PARAMETER_ID);
+
+        assert_eq!(processor.parameters.len(), 3);
+        assert_eq!(
+            processor.parameters[&ceiling_id].schema,
+            lookahead_limiter_ceiling_parameter_schema()
+        );
+        assert_eq!(
+            processor.parameters[&lookahead_id].schema,
+            lookahead_limiter_lookahead_parameter_schema()
+        );
+        assert_eq!(
+            processor.parameters[&release_id].schema,
+            lookahead_limiter_release_parameter_schema()
+        );
+        assert_eq!(
+            processor.parameters[&ceiling_id].automation.default_value,
+            LOOKAHEAD_LIMITER_DEFAULT_CEILING_DB
+        );
+        assert_eq!(
+            processor.parameters[&lookahead_id].automation.default_value,
+            LOOKAHEAD_LIMITER_DEFAULT_LOOKAHEAD_MS
+        );
+        assert_eq!(
+            processor.parameters[&release_id].automation.default_value,
+            LOOKAHEAD_LIMITER_DEFAULT_RELEASE_MS
+        );
+        assert!(!processor.parameters[&lookahead_id].schema.is_animatable);
+        assert_eq!(
+            processor.parameters[&lookahead_id].schema.cache_impact,
+            ParameterCacheImpact::Topology
+        );
+        assert_eq!(
+            processor.parameters[&lookahead_id].schema.unit,
+            ParameterUnit::Milliseconds
+        );
+        processor.validate().expect("valid built-in limiter definition snapshot");
+        let encoded = serde_json::to_vec(&processor).expect("serialize limiter");
+        let restored: AudioProcessorInstance =
+            serde_json::from_slice(&encoded).expect("restore limiter");
+        assert_eq!(restored, processor);
     }
 
     #[test]

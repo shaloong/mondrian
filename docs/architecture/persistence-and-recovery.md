@@ -18,7 +18,7 @@ plans, plugin runtime state, UI navigation, and device handles never enter the
 archive.
 
 The archive format, Project document schema, and SQLite schema are independent
-version axes. The current values are archive v1, document v22, and library v4.
+version axes. The current values are archive v1, document v23, and library v4.
 An archive is accepted only when all three declarations match their registered
 contracts. During Alpha, old and future document schemas fail closed; absence
 of a migration is explicit and is never replaced by broad serde defaults.
@@ -625,7 +625,7 @@ runtime copy only; saving is the sole path back into `.mdp`.
 
 ## Document Schema Contract
 
-Document schema v22 is the current Alpha author contract. It persists the
+Document schema v23 is the current Alpha author contract. It persists the
 Project-owned color environment and future-Sequence template, exact rational
 author time, canonical audio layout/routing/processor schemas, canonical proxy
 membership, closed Clip content, multi-member link groups, strong visual

@@ -15,6 +15,9 @@ use mondrian_timeline::audio::{
 use mondrian_timeline::{Clip, Sequence};
 use std::sync::{Arc, Mutex};
 
+#[path = "tests/lookahead_limiter.rs"]
+mod lookahead_limiter_tests;
+
 #[derive(Default)]
 struct RampSource {
     block_reads: usize,
