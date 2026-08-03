@@ -969,6 +969,10 @@ fn raw_node_implementation_requirements(
         | EffectGraphNodeKind::DomainEffect { op, .. } => {
             Some(raw_render_op_execution_requirements(op))
         }
+        EffectGraphNodeKind::Blend {
+            blend_mode: mondrian_core::types::BlendMode::Normal,
+            ..
+        } => Some(gpu_normal_blend_node_requirements()),
         EffectGraphNodeKind::Blend { .. }
         | EffectGraphNodeKind::Mask { .. }
         | EffectGraphNodeKind::MaskSource { .. }
@@ -1430,6 +1434,15 @@ fn compositing_node_requirements() -> EffectImplementationRequirements {
         temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
         roi_from_effect_input: EffectRoiPropagation::PixelLocal,
         resource_lifetime: EffectResourceLifetime::Frame,
+    }
+}
+
+fn gpu_normal_blend_node_requirements() -> EffectImplementationRequirements {
+    EffectImplementationRequirements {
+        execution_modes: compositing_node_requirements()
+            .execution_modes
+            .union(EffectExecutionModes::GPU_F32),
+        ..compositing_node_requirements()
     }
 }
 

@@ -5605,7 +5605,7 @@ mod tests {
         );
 
         assert_eq!(route.prepared_work().cpu_nodes().len(), 3);
-        assert_eq!(route.prepared_work().gpu_plan().node_ids().len(), 1);
+        assert_eq!(route.prepared_work().gpu_suffix().node_ids().len(), 1);
         assert_eq!(session.heterogeneous_route_contracts.len(), 1);
     }
 

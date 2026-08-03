@@ -1047,7 +1047,12 @@ bounded remainder sets `ControlFlow::Poll` without itself requesting a
 whole-window redraw. A merely Pending asynchronous Title/Preview task never
 busy-polls because its eventual channel publication owns the next watch edge.
 Every Window Viewer GPU submission—ordinary native import as well as a
-heterogeneous CPU-prefix/GPU-tail batch—has one exact completion owner.
+heterogeneous CPU-prefix/GPU-suffix batch—has one exact completion owner.
+Before the CPU prefix enters the visual worker, Preview validates every
+prepared route against the same admission decision's upload and conservative
+one-command-buffer device-residency grant. A GPU DAG that fits the abstract
+value-plan live-set but not the wgpu Adapter's physical non-aliasing recording
+set therefore returns to route selection without executing partial pixels.
 The complete `PreviewGpuFrame` remains in that owner through actual queue
 completion, so Frame Store media-protection leases cannot retire merely because
 the renderer retained a physical decoder handle. The move-only renderer output

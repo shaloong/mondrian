@@ -5,16 +5,16 @@
 //! release directly from one immutable [`crate::CompiledEffectGraph`]. It does
 //! not introduce a second semantic graph. The current executable vertical
 //! slice accepts a caller-supplied scene-linear Float32 CPU frame, executes an
-//! exact plan-driven CPU DAG prefix, and prepares an exact fused GPU
-//! point-operation suffix. Preview/Export scheduling remains outside this
-//! Module.
+//! exact plan-driven CPU DAG prefix, and prepares an exact GPU DAG suffix from
+//! fused point chains plus admitted joins. Preview/Export scheduling remains
+//! outside this Module.
 
 use crate::{
     adjustment::{
         apply_render_op_f32_controlled, render_op_f32_scratch_frames, EffectRasterRegion,
     },
     execution::{apply_alpha_mask_f32_region_controlled, blend_rgba_f32_region_controlled},
-    lower_effect_graph_nodes_to_gpu_plan,
+    lower_effect_graph_node_to_gpu_point_plan, lower_effect_graph_nodes_to_gpu_plan,
     mask_raster::{ControlledMaskRasterError, PreparedMaskRasterSet},
     CompiledEffectGpuPlan, CompiledEffectGraph, EffectColorDomain, EffectExecutionEnvironment,
     EffectExecutionLane, EffectExecutionLaneId, EffectExecutionModes, EffectExecutionSession,
@@ -22,7 +22,7 @@ use crate::{
     EffectProcessingBackend, EffectResourceLifetime, EffectStateModel, EffectTemporalInputExtent,
     EffectWorkingPrecision,
 };
-use mondrian_core::WorkingColorSpace;
+use mondrian_core::{types::BlendMode, WorkingColorSpace};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -1654,6 +1654,137 @@ pub struct HeterogeneousCpuCompletionEvidence {
     pending_output_token: EffectCompletionToken,
 }
 
+/// One executable GPU DAG dispatch prepared from the unique graph-value plan.
+///
+/// Point chains are renderer-neutral shader programs. Normal blends retain
+/// their two exact materializations and authored opacity. Other graph-node
+/// semantics remain blocked until a production GPU Adapter exists.
+#[derive(Debug, Clone)]
+pub enum PreparedHeterogeneousGpuDispatch {
+    /// One fused unary point chain. A linear whole suffix keeps the existing
+    /// one-pass path; a DAG branch can use a one-node chain.
+    PointChain {
+        /// Exact semantic nodes represented by this dispatch.
+        nodes: Arc<[EffectGraphNodeId]>,
+        /// Existing GPU materialization consumed by the chain.
+        input: EffectMaterializationId,
+        /// New GPU materialization produced by the chain.
+        output: EffectMaterializationId,
+        /// Unique completion dependencies.
+        waits: Arc<[EffectCompletionToken]>,
+        /// Completion token proved by this dispatch.
+        signal: EffectCompletionToken,
+        /// Backend-neutral point program.
+        plan: Arc<CompiledEffectGpuPlan>,
+    },
+    /// Straight-alpha source-over join in scene-linear working space.
+    NormalBlend {
+        /// Exact semantic Blend node.
+        node: EffectGraphNodeId,
+        /// Base materialization.
+        base: EffectMaterializationId,
+        /// Overlay materialization.
+        overlay: EffectMaterializationId,
+        /// New joined materialization.
+        output: EffectMaterializationId,
+        /// Both producer-completion dependencies.
+        waits: Arc<[EffectCompletionToken]>,
+        /// Completion token proved by the join.
+        signal: EffectCompletionToken,
+        /// Authored straight-alpha opacity.
+        opacity: f32,
+    },
+}
+
+impl PreparedHeterogeneousGpuDispatch {
+    /// New output materialization.
+    pub const fn output(&self) -> EffectMaterializationId {
+        match self {
+            Self::PointChain { output, .. } | Self::NormalBlend { output, .. } => *output,
+        }
+    }
+
+    /// Completion dependencies.
+    pub fn waits(&self) -> &[EffectCompletionToken] {
+        match self {
+            Self::PointChain { waits, .. } | Self::NormalBlend { waits, .. } => waits,
+        }
+    }
+
+    /// Completion token produced by this dispatch.
+    pub const fn signal(&self) -> EffectCompletionToken {
+        match self {
+            Self::PointChain { signal, .. } | Self::NormalBlend { signal, .. } => *signal,
+        }
+    }
+
+    fn append_nodes(&self, output: &mut Vec<EffectGraphNodeId>) {
+        match self {
+            Self::PointChain { nodes, .. } => output.extend(nodes.iter().copied()),
+            Self::NormalBlend { node, .. } => output.push(*node),
+        }
+    }
+
+    fn try_for_each_input<E>(
+        &self,
+        mut visit: impl FnMut(EffectMaterializationId) -> Result<(), E>,
+    ) -> Result<(), E> {
+        match self {
+            Self::PointChain { input, .. } => visit(*input)?,
+            Self::NormalBlend { base, overlay, .. } => {
+                visit(*base)?;
+                visit(*overlay)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One GPU dispatch or exact materialization retirement.
+#[derive(Debug, Clone)]
+pub enum PreparedHeterogeneousGpuStep {
+    /// Record one prepared GPU dispatch.
+    Dispatch(PreparedHeterogeneousGpuDispatch),
+    /// Retire an actual GPU materialization after its final scheduled use.
+    Release {
+        /// Plan-local materialization identity.
+        materialization: EffectMaterializationId,
+        /// Completion token of the final consumer.
+        after: EffectCompletionToken,
+    },
+}
+
+/// Executable GPU suffix derived from one immutable graph-value plan.
+#[derive(Debug, Clone)]
+pub struct PreparedHeterogeneousGpuSuffix {
+    input_materialization: EffectMaterializationId,
+    output_materialization: EffectMaterializationId,
+    steps: Arc<[PreparedHeterogeneousGpuStep]>,
+    node_ids: Arc<[EffectGraphNodeId]>,
+}
+
+impl PreparedHeterogeneousGpuSuffix {
+    /// Uploaded materialization consumed by the suffix.
+    pub const fn input_materialization(&self) -> EffectMaterializationId {
+        self.input_materialization
+    }
+
+    /// Final GPU materialization returned by the suffix.
+    pub const fn output_materialization(&self) -> EffectMaterializationId {
+        self.output_materialization
+    }
+
+    /// Deterministic dispatch/release schedule.
+    pub fn steps(&self) -> &[PreparedHeterogeneousGpuStep] {
+        &self.steps
+    }
+
+    /// Exact semantic GPU nodes in compiled topology order.
+    pub fn node_ids(&self) -> &[EffectGraphNodeId] {
+        &self.node_ids
+    }
+}
+
 impl HeterogeneousCpuCompletionEvidence {
     /// Compiled graph whose CPU prefix completed.
     pub const fn graph_fingerprint(&self) -> [u8; 32] {
@@ -1715,7 +1846,7 @@ impl HeterogeneousCpuCompletionEvidence {
 pub struct PreparedHeterogeneousCpuCompletion {
     pixels: Vec<[f32; 4]>,
     execution_plan: Arc<CompiledEffectValueExecutionPlan>,
-    gpu_plan: Arc<CompiledEffectGpuPlan>,
+    gpu_suffix: Arc<PreparedHeterogeneousGpuSuffix>,
     evidence: HeterogeneousCpuCompletionEvidence,
 }
 
@@ -1748,9 +1879,9 @@ impl PreparedHeterogeneousCpuCompletion {
         &self.execution_plan
     }
 
-    /// Exact fused GPU suffix consuming the uploaded pixels.
-    pub fn gpu_plan(&self) -> &CompiledEffectGpuPlan {
-        &self.gpu_plan
+    /// Exact GPU DAG suffix consuming the uploaded pixels.
+    pub fn gpu_suffix(&self) -> &PreparedHeterogeneousGpuSuffix {
+        &self.gpu_suffix
     }
 
     /// Completed and still-pending token evidence.
@@ -1764,19 +1895,19 @@ impl PreparedHeterogeneousCpuCompletion {
     ) -> (
         Vec<[f32; 4]>,
         Arc<CompiledEffectValueExecutionPlan>,
-        Arc<CompiledEffectGpuPlan>,
+        Arc<PreparedHeterogeneousGpuSuffix>,
         HeterogeneousCpuCompletionEvidence,
     ) {
         (
             self.pixels,
             self.execution_plan,
-            self.gpu_plan,
+            self.gpu_suffix,
             self.evidence,
         )
     }
 }
 
-/// Why the executable CPU-DAG-prefix/GPU-tail route cannot be prepared or run.
+/// Why the executable CPU-DAG-prefix/GPU-DAG-suffix route cannot be prepared or run.
 #[derive(Debug, thiserror::Error)]
 pub enum PreparedHeterogeneousEffectWorkError {
     /// Graph-value planning failed before any pixel execution.
@@ -1784,13 +1915,13 @@ pub enum PreparedHeterogeneousEffectWorkError {
     Planning(#[from] EffectGraphExecutionPlanError),
     /// The selected graph route is valid but outside the executable vertical slice.
     #[error(
-        "effect heterogeneous route is not the supported CPU-F32 DAG to GPU-F32 fused-tail shape: {reason}"
+        "effect heterogeneous route is not the supported CPU-F32 DAG to GPU-F32 DAG-suffix shape: {reason}"
     )]
     UnsupportedRouteShape {
         /// Stable diagnostic label.
         reason: &'static str,
     },
-    /// The exact GPU tail cannot be lowered.
+    /// One exact GPU point dispatch cannot be lowered.
     #[error(transparent)]
     GpuPlan(#[from] EffectGpuPlanBlocker),
     /// Synthetic Mask geometry or raster preparation failed before CPU
@@ -1867,7 +1998,7 @@ struct PreparedCpuGraphDispatch {
     output: EffectMaterializationId,
 }
 
-/// Reusable exact CPU-DAG-prefix/GPU-tail work prepared from one compiled graph.
+/// Reusable exact CPU-DAG-prefix/GPU-DAG-suffix work prepared from one compiled graph.
 #[derive(Debug)]
 pub struct PreparedHeterogeneousEffectWork {
     compiled: Arc<CompiledEffectGraph>,
@@ -1877,7 +2008,7 @@ pub struct PreparedHeterogeneousEffectWork {
     cpu_use_counts: Arc<HashMap<EffectMaterializationId, usize>>,
     cpu_input_materialization: EffectMaterializationId,
     cpu_output_materialization: EffectMaterializationId,
-    gpu_plan: Arc<CompiledEffectGpuPlan>,
+    gpu_suffix: Arc<PreparedHeterogeneousGpuSuffix>,
     cpu_completion_token: EffectCompletionToken,
     transfer_wait: EffectCompletionToken,
     gpu_input_token: EffectCompletionToken,
@@ -1888,7 +2019,7 @@ pub struct PreparedHeterogeneousEffectWork {
 }
 
 impl PreparedHeterogeneousEffectWork {
-    /// Plan and prepare the currently executable CPU-F32→GPU-F32 unary route.
+    /// Plan and prepare the currently executable CPU-F32→GPU-F32 graph route.
     ///
     /// This operation executes no pixels and performs no implicit fallback.
     pub fn prepare(
@@ -2027,8 +2158,13 @@ impl PreparedHeterogeneousEffectWork {
             cpu_materialization,
             &gpu_nodes,
         )?;
-        let gpu_plan = Arc::new(lower_effect_graph_nodes_to_gpu_plan(&compiled, &gpu_nodes)?);
-        if gpu_plan.source_value() != cpu_completion.value {
+        let gpu_suffix = Arc::new(prepare_gpu_suffix(
+            &compiled,
+            &plan,
+            gpu_materialization,
+            &gpu_nodes,
+        )?);
+        if gpu_suffix.input_materialization() != gpu_materialization {
             return Err(
                 PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
                     reason: "gpu_tail_does_not_consume_transferred_cpu_value",
@@ -2070,7 +2206,7 @@ impl PreparedHeterogeneousEffectWork {
             cpu_use_counts: Arc::new(cpu_use_counts),
             cpu_input_materialization,
             cpu_output_materialization: cpu_materialization,
-            gpu_plan,
+            gpu_suffix,
             cpu_completion_token: cpu_completion.completion,
             transfer_wait,
             gpu_input_token,
@@ -2091,9 +2227,9 @@ impl PreparedHeterogeneousEffectWork {
         &self.cpu_nodes
     }
 
-    /// Exact fused GPU suffix.
-    pub fn gpu_plan(&self) -> &CompiledEffectGpuPlan {
-        &self.gpu_plan
+    /// Exact prepared GPU DAG suffix.
+    pub fn gpu_suffix(&self) -> &PreparedHeterogeneousGpuSuffix {
+        &self.gpu_suffix
     }
 
     /// Exact transient scalar bytes required by the prepared CPU prefix.
@@ -2220,7 +2356,7 @@ impl PreparedHeterogeneousEffectWork {
         Ok(PreparedHeterogeneousCpuCompletion {
             pixels,
             execution_plan: Arc::clone(&self.plan),
-            gpu_plan: Arc::clone(&self.gpu_plan),
+            gpu_suffix: Arc::clone(&self.gpu_suffix),
             evidence: HeterogeneousCpuCompletionEvidence {
                 graph_fingerprint: self.compiled.semantic_fingerprint(),
                 generation,
@@ -2571,6 +2707,270 @@ fn cpu_prefix_working_bytes(
     frame_bytes
         .checked_mul(peak_owned_frames)
         .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)
+}
+
+fn prepare_gpu_suffix(
+    compiled: &CompiledEffectGraph,
+    plan: &CompiledEffectValueExecutionPlan,
+    input_materialization: EffectMaterializationId,
+    gpu_nodes: &[EffectGraphNodeId],
+) -> Result<PreparedHeterogeneousGpuSuffix, PreparedHeterogeneousEffectWorkError> {
+    let gpu_dispatches = plan
+        .steps()
+        .iter()
+        .filter_map(|step| match step {
+            EffectGraphExecutionStep::Dispatch {
+                node,
+                backend: EffectProcessingBackend::Gpu,
+                precision: EffectWorkingPrecision::Float32,
+                inputs,
+                output,
+                waits,
+                signal,
+                ..
+            } => Some((
+                *node,
+                Arc::clone(inputs),
+                *output,
+                Arc::clone(waits),
+                *signal,
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if gpu_dispatches.len() != gpu_nodes.len()
+        || gpu_dispatches.iter().map(|dispatch| dispatch.0).ne(gpu_nodes.iter().copied())
+    {
+        return Err(
+            PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                reason: "gpu_dispatches_do_not_match_compiled_schedule",
+            },
+        );
+    }
+
+    let mut produced = HashSet::from([input_materialization]);
+    for (node_id, inputs, output, waits, signal) in &gpu_dispatches {
+        let node = compiled.graph().node(*node_id).ok_or(
+            PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                reason: "gpu_partition_node_missing",
+            },
+        )?;
+        if !compiled.node_execution_modes(*node_id).is_some_and(|modes| {
+            modes.contains(
+                EffectProcessingBackend::Gpu,
+                EffectWorkingPrecision::Float32,
+            )
+        }) {
+            return Err(
+                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                    reason: "gpu_partition_node_is_not_admitted_for_gpu_f32",
+                },
+            );
+        }
+        let semantic_inputs = node.input_ids();
+        if semantic_inputs.len() != inputs.len() || waits.len() != inputs.len() {
+            return Err(
+                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                    reason: "gpu_dispatch_input_arity_changed",
+                },
+            );
+        }
+        for ((semantic_input, materialization_id), wait) in
+            semantic_inputs.iter().zip(inputs.iter()).zip(waits.iter())
+        {
+            let materialization = plan.materialization(*materialization_id).ok_or(
+                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                    reason: "gpu_dispatch_input_materialization_missing",
+                },
+            )?;
+            if materialization.value() != *semantic_input
+                || materialization.completion() != *wait
+                || !produced.contains(materialization_id)
+            {
+                return Err(
+                    PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                        reason: "gpu_dispatch_input_does_not_match_the_compiled_graph",
+                    },
+                );
+            }
+        }
+        let output_materialization = plan.materialization(*output).ok_or(
+            PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                reason: "gpu_dispatch_output_materialization_missing",
+            },
+        )?;
+        if output_materialization.value() != *node_id
+            || output_materialization.completion() != *signal
+            || !produced.insert(*output)
+        {
+            return Err(
+                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                    reason: "gpu_dispatch_output_does_not_match_the_compiled_graph",
+                },
+            );
+        }
+    }
+    if !produced.contains(&plan.output_materialization()) {
+        return Err(
+            PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                reason: "gpu_suffix_does_not_produce_graph_output",
+            },
+        );
+    }
+
+    let dispatches = match lower_effect_graph_nodes_to_gpu_plan(compiled, gpu_nodes) {
+        Ok(fused) => {
+            let first = gpu_dispatches.first().ok_or(
+                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                    reason: "gpu_suffix_has_no_dispatch",
+                },
+            )?;
+            let last = gpu_dispatches.last().ok_or(
+                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                    reason: "gpu_suffix_has_no_dispatch",
+                },
+            )?;
+            if first.1.as_ref() != [input_materialization] {
+                return Err(
+                    PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                        reason: "fused_gpu_suffix_does_not_consume_transfer",
+                    },
+                );
+            }
+            vec![PreparedHeterogeneousGpuDispatch::PointChain {
+                nodes: Arc::from(gpu_nodes),
+                input: input_materialization,
+                output: last.2,
+                waits: Arc::clone(&first.3),
+                signal: last.4,
+                plan: Arc::new(fused),
+            }]
+        }
+        Err(
+            EffectGpuPlanBlocker::UnsupportedTopology { .. }
+            | EffectGpuPlanBlocker::DisconnectedChain { .. }
+            | EffectGpuPlanBlocker::TooManyOperations { .. },
+        ) => gpu_dispatches
+            .iter()
+            .map(|(node_id, inputs, output, waits, signal)| {
+                let node = compiled.graph().node(*node_id).ok_or(
+                    PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                        reason: "gpu_partition_node_missing",
+                    },
+                )?;
+                match &node.kind {
+                    EffectGraphNodeKind::UnaryEffect { .. }
+                    | EffectGraphNodeKind::DomainEffect { .. } => {
+                        if inputs.len() != 1 {
+                            return Err(
+                                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                                    reason: "gpu_point_dispatch_input_arity",
+                                },
+                            );
+                        }
+                        Ok(PreparedHeterogeneousGpuDispatch::PointChain {
+                            nodes: Arc::from([*node_id]),
+                            input: inputs[0],
+                            output: *output,
+                            waits: Arc::clone(waits),
+                            signal: *signal,
+                            plan: Arc::new(lower_effect_graph_node_to_gpu_point_plan(
+                                compiled, *node_id,
+                            )?),
+                        })
+                    }
+                    EffectGraphNodeKind::Blend {
+                        blend_mode: BlendMode::Normal, opacity, ..
+                    } => {
+                        if inputs.len() != 2 {
+                            return Err(
+                                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                                    reason: "gpu_blend_dispatch_input_arity",
+                                },
+                            );
+                        }
+                        Ok(PreparedHeterogeneousGpuDispatch::NormalBlend {
+                            node: *node_id,
+                            base: inputs[0],
+                            overlay: inputs[1],
+                            output: *output,
+                            waits: Arc::clone(waits),
+                            signal: *signal,
+                            opacity: *opacity,
+                        })
+                    }
+                    _ => Err(
+                        PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                            reason: "gpu_dag_contains_unimplemented_node",
+                        },
+                    ),
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        Err(error) => return Err(error.into()),
+    };
+
+    let mut use_counts = HashMap::<EffectMaterializationId, usize>::new();
+    for dispatch in &dispatches {
+        dispatch.try_for_each_input(|input| {
+            let count = use_counts.entry(input).or_default();
+            *count = count
+                .checked_add(1)
+                .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
+            Ok::<(), PreparedHeterogeneousEffectWorkError>(())
+        })?;
+    }
+    let mut steps = Vec::new();
+    for dispatch in dispatches {
+        let signal = dispatch.signal();
+        let mut releases = Vec::new();
+        dispatch.try_for_each_input(|input| {
+            let remaining = use_counts.get_mut(&input).ok_or(
+                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                    reason: "gpu_suffix_input_use_count_missing",
+                },
+            )?;
+            *remaining = remaining.checked_sub(1).ok_or(
+                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                    reason: "gpu_suffix_input_use_count_underflow",
+                },
+            )?;
+            if *remaining == 0 && input != plan.output_materialization() {
+                releases.push(input);
+            }
+            Ok::<(), PreparedHeterogeneousEffectWorkError>(())
+        })?;
+        steps.push(PreparedHeterogeneousGpuStep::Dispatch(dispatch));
+        steps.extend(releases.into_iter().map(|materialization| {
+            PreparedHeterogeneousGpuStep::Release { materialization, after: signal }
+        }));
+    }
+    if use_counts.values().any(|remaining| *remaining != 0) {
+        return Err(
+            PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                reason: "gpu_suffix_use_count_did_not_close",
+            },
+        );
+    }
+    let mut node_ids = Vec::new();
+    for step in &steps {
+        if let PreparedHeterogeneousGpuStep::Dispatch(dispatch) = step {
+            dispatch.append_nodes(&mut node_ids);
+        }
+    }
+    if node_ids != gpu_nodes {
+        return Err(
+            PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                reason: "prepared_gpu_suffix_changed_node_order",
+            },
+        );
+    }
+    Ok(PreparedHeterogeneousGpuSuffix {
+        input_materialization,
+        output_materialization: plan.output_materialization(),
+        steps: steps.into(),
+        node_ids: node_ids.into(),
+    })
 }
 
 fn validate_cpu_dag_gpu_tail_partition(
@@ -3113,11 +3513,22 @@ mod tests {
 
         assert_eq!(work.plan().frame_extent(), extent);
         assert_eq!(work.cpu_nodes().len(), 1);
-        assert_eq!(work.gpu_plan().node_ids().len(), 2);
-        assert_eq!(work.gpu_plan().source_value(), work.cpu_nodes()[0]);
+        assert_eq!(work.gpu_suffix().node_ids().len(), 2);
+        assert_eq!(
+            work.plan()
+                .materialization(work.gpu_suffix().input_materialization())
+                .expect("GPU input materialization")
+                .value(),
+            work.cpu_nodes()[0]
+        );
         assert_eq!(work.cpu_required_working_bytes(), 192);
         assert_eq!(
-            work.gpu_plan().operations().len(),
+            match &work.gpu_suffix().steps()[0] {
+                PreparedHeterogeneousGpuStep::Dispatch(
+                    PreparedHeterogeneousGpuDispatch::PointChain { plan, .. },
+                ) => plan.operations().len(),
+                _ => 0,
+            },
             2,
             "BasicCorrection and Grain form the exact GPU tail"
         );
@@ -3195,7 +3606,7 @@ mod tests {
             completion.evidence().pending_gpu_input_token()
         );
         assert_eq!(
-            completion.gpu_plan().graph_fingerprint(),
+            completion.evidence().graph_fingerprint(),
             compiled.semantic_fingerprint()
         );
         assert_eq!(
@@ -3635,7 +4046,7 @@ mod tests {
         )
         .expect("prepare CPU DAG route");
         assert_eq!(work.cpu_nodes().len(), 3);
-        assert_eq!(work.gpu_plan().node_ids().len(), 1);
+        assert_eq!(work.gpu_suffix().node_ids().len(), 1);
         assert!(matches!(
             compiled.graph().node(work.cpu_nodes()[2]).map(|node| &node.kind),
             Some(EffectGraphNodeKind::Blend { .. })
@@ -3704,7 +4115,11 @@ mod tests {
             work.cpu_nodes()
         );
         assert_eq!(
-            completion.gpu_plan().source_value(),
+            completion
+                .execution_plan()
+                .materialization(completion.gpu_suffix().input_materialization())
+                .expect("GPU input materialization")
+                .value(),
             work.cpu_nodes()[2],
             "the upload consumes the joined CPU graph value"
         );
@@ -3720,7 +4135,7 @@ mod tests {
         )
         .expect("prepare CPU Mask route");
         assert_eq!(work.cpu_nodes().len(), 2);
-        assert_eq!(work.gpu_plan().node_ids().len(), 1);
+        assert_eq!(work.gpu_suffix().node_ids().len(), 1);
         assert!(
             work.cpu_required_working_bytes() > 2 * 4 * 3 * std::mem::size_of::<[f32; 4]>(),
             "the working contract includes prepared Mask geometry and row scratch"
@@ -3795,7 +4210,7 @@ mod tests {
     }
 
     #[test]
-    fn route_rejects_a_gpu_dag_tail_without_executing_pixels() {
+    fn prepares_gpu_fanout_join_suffix_from_the_unique_value_plan() {
         let mut builder = EffectGraphBuilderState::new();
         let source = builder.source();
         let first = builder.add_unary_from(source, EffectRenderOp::GaussianBlur { radius: 1.0 });
@@ -3812,13 +4227,81 @@ mod tests {
         let output = builder.add_blend(left, right, BlendMode::Normal, 0.5);
         builder.set_current_output(output);
         let compiled = compile_reference_render_graph(builder.finish()).expect("DAG graph");
+        let work = PreparedHeterogeneousEffectWork::prepare(
+            Arc::clone(&compiled),
+            &test_environment(),
+            request(EffectFrameExtent::new(8, 8)),
+        )
+        .expect("GPU DAG suffix");
+        assert_eq!(work.cpu_nodes(), [first]);
+        assert_eq!(work.gpu_suffix().node_ids(), [left, right, output]);
+        let dispatches = work
+            .gpu_suffix()
+            .steps()
+            .iter()
+            .filter_map(|step| match step {
+                PreparedHeterogeneousGpuStep::Dispatch(dispatch) => Some(dispatch),
+                PreparedHeterogeneousGpuStep::Release { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(dispatches.len(), 3);
         assert!(matches!(
-            PreparedHeterogeneousEffectWork::prepare(
-                compiled,
-                &test_environment(),
-                request(EffectFrameExtent::new(8, 8)),
-            ),
-            Err(PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape { .. })
+            dispatches.as_slice(),
+            [
+                PreparedHeterogeneousGpuDispatch::PointChain { nodes: left_nodes, .. },
+                PreparedHeterogeneousGpuDispatch::PointChain { nodes: right_nodes, .. },
+                PreparedHeterogeneousGpuDispatch::NormalBlend { node: blend, .. },
+            ] if left_nodes.as_ref() == [left]
+                && right_nodes.as_ref() == [right]
+                && *blend == output
         ));
+        let releases = work
+            .gpu_suffix()
+            .steps()
+            .iter()
+            .filter(|step| matches!(step, PreparedHeterogeneousGpuStep::Release { .. }))
+            .count();
+        assert_eq!(
+            releases, 3,
+            "upload and both branch outputs retire exactly once"
+        );
+        assert_eq!(
+            work.gpu_suffix().output_materialization(),
+            work.plan().output_materialization()
+        );
+    }
+
+    #[test]
+    fn oversized_linear_gpu_tail_splits_into_admitted_point_dispatches() {
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::GaussianBlur { radius: 1.0 });
+        for index in 0..=crate::MAX_FUSED_GPU_EFFECT_OPS {
+            builder.append_unary(EffectRenderOp::ColorAdjust {
+                exposure: index as f32 * 0.01,
+                contrast: 1.0,
+                saturation: 1.0,
+                working_color_space: WorkingColorSpace::LinearRec2020,
+            });
+        }
+        let compiled = compile_reference_render_graph(builder.finish()).expect("long GPU tail");
+        let work = PreparedHeterogeneousEffectWork::prepare(
+            compiled,
+            &test_environment(),
+            request(EffectFrameExtent::new(8, 8)),
+        )
+        .expect("split long GPU tail");
+        assert_eq!(work.cpu_nodes().len(), 1);
+        assert_eq!(
+            work.gpu_suffix().node_ids().len(),
+            crate::MAX_FUSED_GPU_EFFECT_OPS + 1
+        );
+        assert_eq!(
+            work.gpu_suffix()
+                .steps()
+                .iter()
+                .filter(|step| matches!(step, PreparedHeterogeneousGpuStep::Dispatch(_)))
+                .count(),
+            crate::MAX_FUSED_GPU_EFFECT_OPS + 1
+        );
     }
 }

@@ -309,8 +309,21 @@ fan-out/Blend join followed by one GPU point operation proves that the prefix
 is no longer flattened into a unary chain. A generated MaskSource/Mask join is
 also executable in that prefix: its geometry preparation and raster loop use
 the attempt's checkpoint Seam, and its retained geometry plus maximum row
-scratch are charged beside the live pixel frames. GPU DAG tails and more than
-one backend transfer still fail before pixel execution. The returned evidence distinguishes completed CPU work from
+scratch are charged beside the live pixel frames. After the single upload, the
+prepared GPU suffix consumes the same value plan as explicit dispatch and
+release steps: a shared GPU value can feed two point-operation branches and a
+scene-linear Normal Blend join. Linear tails within the fused-operation capacity
+remain one pass; longer tails split into exact admitted point dispatches. The
+Preview and Export compare the prepared physical recording requirement with
+their frozen GPU grant before CPU prefix execution. The wgpu Adapter repeats
+materialization identity, wait, signal, release and terminal-live-set
+validation before recording, and its real-device test matches the
+complete scalar graph. One command buffer retains every referenced texture
+until exact submission completion, so admission separately charges the
+conservative non-aliasing recording bytes when that exceeds the abstract plan
+peak. More than one backend transfer, GPU Mask/MultiInput/non-Normal joins,
+color-domain conversion and temporal/stateful GPU dispatch still fail before
+pixel execution. The returned evidence distinguishes completed CPU work from
 pending upload and GPU output tokens.
 
 Export submits that route through its job-local

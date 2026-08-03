@@ -208,6 +208,73 @@ pub fn lower_effect_graph_nodes_to_gpu_plan(
     lower_effect_graph_nodes_to_gpu_plan_inner(compiled, node_ids, false)
 }
 
+/// Lower one exact compiled unary graph node into a backend-neutral GPU point
+/// plan.
+///
+/// This Interface is used by graph-value GPU DAG execution, where a node can
+/// sit on a branch and therefore is not necessarily part of the unique tail
+/// ending at the graph output. The returned plan preserves the semantic input
+/// and output value identities from the unique [`CompiledEffectGraph`]; it
+/// does not create another graph or infer connectivity.
+pub fn lower_effect_graph_node_to_gpu_point_plan(
+    compiled: &CompiledEffectGraph,
+    node_id: EffectGraphNodeId,
+) -> Result<CompiledEffectGpuPlan, EffectGpuPlanBlocker> {
+    if !compiled.domain_plan().blockers.is_empty() {
+        return Err(EffectGpuPlanBlocker::ColorDomainBlocked {
+            blockers: compiled.domain_plan().blockers.len(),
+        });
+    }
+    if !compiled.domain_plan().transitions.is_empty() {
+        return Err(EffectGpuPlanBlocker::UnsupportedColorDomainPlan {
+            transitions: compiled.domain_plan().transitions.len(),
+        });
+    }
+    let node = compiled
+        .graph()
+        .node(node_id)
+        .ok_or(EffectGpuPlanBlocker::DisconnectedChain { node_id })?;
+    let admitted = compiled.node_execution_modes(node_id).unwrap_or(EffectExecutionModes::NONE);
+    if !admitted.contains(
+        EffectProcessingBackend::Gpu,
+        EffectWorkingPrecision::Float32,
+    ) {
+        return Err(EffectGpuPlanBlocker::NodeExecutionModeNotAdmitted { node_id, admitted });
+    }
+    let (source_value, op, processing_domain) = match &node.kind {
+        EffectGraphNodeKind::UnaryEffect { input, op } => (
+            *input,
+            lower_point_op(node_id, op)?,
+            EffectColorDomain::SceneLinearRgb,
+        ),
+        EffectGraphNodeKind::DomainEffect { input, op, domain_contract } => {
+            if domain_contract.input != domain_contract.output {
+                return Err(EffectGpuPlanBlocker::NonPreservingColorDomain {
+                    node_id,
+                    input: domain_contract.input,
+                    output: domain_contract.output,
+                });
+            }
+            (*input, lower_point_op(node_id, op)?, domain_contract.input)
+        }
+        kind => {
+            return Err(EffectGpuPlanBlocker::UnsupportedTopology {
+                node_id,
+                kind: node_kind_name(kind),
+            });
+        }
+    };
+    Ok(CompiledEffectGpuPlan {
+        operations: vec![op],
+        node_ids: Arc::from([node_id]),
+        graph_signature: compiled.signature_hash(),
+        graph_fingerprint: compiled.semantic_fingerprint(),
+        source_value,
+        output_value: node_id,
+        processing_domain,
+    })
+}
+
 fn lower_effect_graph_nodes_to_gpu_plan_inner(
     compiled: &CompiledEffectGraph,
     node_ids: &[EffectGraphNodeId],

@@ -106,11 +106,10 @@ bench = false"#,
 }
 
 #[test]
-fn windows_ci_covers_the_complete_app_and_golden_entrypoint() {
+fn cross_platform_ci_covers_the_complete_app_and_windows_golden_entrypoint() {
     let workflow = include_str!("../../../.github/workflows/ci.yml");
     for required in [
-        r#"- name: 测试完整 App 产品路径 (Windows)
-        if: runner.os == 'Windows'
+        r#"- name: 测试完整 App 产品路径
         env:
           CARGO_INCREMENTAL: "0"
         run: cargo test -p mondrian-app --all-targets -j1"#,
@@ -122,7 +121,7 @@ fn windows_ci_covers_the_complete_app_and_golden_entrypoint() {
     ] {
         assert!(
             workflow.contains(required),
-            "Windows CI must retain required App contract: {required}"
+            "cross-platform CI must retain required App contract: {required}"
         );
     }
 }

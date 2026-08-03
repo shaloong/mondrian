@@ -64,9 +64,9 @@ pub use execution_session::{
     EffectExecutionSession, EffectExecutionSessionConfig, EffectExecutionSessionDiagnostics,
 };
 pub use gpu_plan::{
-    get_or_lower_effect_graph_to_gpu_plan, lower_effect_graph_nodes_to_gpu_plan,
-    lower_effect_graph_to_gpu_plan, CompiledEffectGpuPlan, EffectGpuPlanBlocker, EffectGpuPointOp,
-    MAX_FUSED_GPU_EFFECT_OPS,
+    get_or_lower_effect_graph_to_gpu_plan, lower_effect_graph_node_to_gpu_point_plan,
+    lower_effect_graph_nodes_to_gpu_plan, lower_effect_graph_to_gpu_plan, CompiledEffectGpuPlan,
+    EffectGpuPlanBlocker, EffectGpuPointOp, MAX_FUSED_GPU_EFFECT_OPS,
 };
 pub use graph::{
     compile_reference_effect_graph, compile_reference_effect_graph_in_domain,
@@ -83,7 +83,8 @@ pub use heterogeneous_execution::{
     EffectValueFormat, EffectValueMaterialization, EffectValueResidency,
     HeterogeneousCpuCompletionEvidence, HeterogeneousCpuExecutionStopReason,
     PreparedHeterogeneousCpuCompletion, PreparedHeterogeneousEffectWork,
-    PreparedHeterogeneousEffectWorkError,
+    PreparedHeterogeneousEffectWorkError, PreparedHeterogeneousGpuDispatch,
+    PreparedHeterogeneousGpuStep, PreparedHeterogeneousGpuSuffix,
 };
 pub use lut::{
     Lut3D, LutLibrary, LutLibraryEntry, LutPreparationCache, LutPreparationCacheConfig,

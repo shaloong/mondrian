@@ -20,7 +20,8 @@ use mondrian_effects::{
 
 use crate::{
     ColorFrameAlpha, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, ColorFrameSpace,
-    CpuColorFrame, HeterogeneousGpuExecutionCapability, TimelineCompositeScratch,
+    CpuColorFrame, HeterogeneousGpuContinuationError, HeterogeneousGpuExecutionCapability,
+    HeterogeneousGpuRecordingRequirements, HeterogeneousGpuResourceGrant, TimelineCompositeScratch,
 };
 
 /// Exact immutable CPU-F32 → GPU-F32 route prepared before source pixels are
@@ -34,6 +35,7 @@ pub struct PreparedHeterogeneousEffectRoute {
     work: Arc<PreparedHeterogeneousEffectWork>,
     graph_fingerprint: [u8; 32],
     budget: EffectGraphExecutionBudget,
+    gpu_recording_requirements: HeterogeneousGpuRecordingRequirements,
 }
 
 impl PreparedHeterogeneousEffectRoute {
@@ -56,11 +58,19 @@ impl PreparedHeterogeneousEffectRoute {
             capability.environment(),
             capability.request(extent, budget),
         )?;
+        let gpu_recording_requirements =
+            HeterogeneousGpuRecordingRequirements::from_prepared(work.plan(), work.gpu_suffix())
+                .map_err(
+                    |_| PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                        reason: "renderer_gpu_recording_requirements_invalid",
+                    },
+                )?;
         Ok(Self {
             graph: retained_graph,
             work: Arc::new(work),
             graph_fingerprint,
             budget,
+            gpu_recording_requirements,
         })
     }
 
@@ -87,6 +97,11 @@ impl PreparedHeterogeneousEffectRoute {
     /// Exact graph-planning authority used during preparation.
     pub const fn graph_budget(&self) -> EffectGraphExecutionBudget {
         self.budget
+    }
+
+    /// wgpu upload and physical recording residency known before CPU work.
+    pub const fn gpu_recording_requirements(&self) -> HeterogeneousGpuRecordingRequirements {
+        self.gpu_recording_requirements
     }
 
     fn work(&self) -> &PreparedHeterogeneousEffectWork {
@@ -232,6 +247,18 @@ impl HeterogeneousCpuPrefixBatchRequest {
     /// authority without preparing or executing an Effect graph.
     pub fn validate(&self) -> Result<(), HeterogeneousCpuPrefixBatchError> {
         validate_batch_request(self)
+    }
+
+    /// Validate every route against the GPU authority frozen by the same
+    /// admission decision before the atomic CPU batch begins.
+    pub fn validate_gpu_recording_grant(
+        &self,
+        grant: HeterogeneousGpuResourceGrant,
+    ) -> Result<(), HeterogeneousGpuContinuationError> {
+        for item in &self.items {
+            item.route.gpu_recording_requirements().validate(grant)?;
+        }
+        Ok(())
     }
 }
 
@@ -680,6 +707,21 @@ mod tests {
         assert!(matches!(
             request.validate(),
             Err(HeterogeneousCpuPrefixBatchError::DuplicateAddress { address: 7 })
+        ));
+    }
+
+    #[test]
+    fn gpu_recording_grant_is_validated_before_atomic_cpu_execution() {
+        let request = HeterogeneousCpuPrefixBatchRequest::new(grant(), vec![item(7)]);
+        let error = request
+            .validate_gpu_recording_grant(HeterogeneousGpuResourceGrant::new(1, 1, 0))
+            .expect_err("GPU authority must be checked before CPU work");
+        assert!(matches!(
+            error,
+            HeterogeneousGpuContinuationError::ResourceGrantExceeded {
+                kind: crate::HeterogeneousGpuResourceKind::UploadBytes,
+                ..
+            }
         ));
     }
 

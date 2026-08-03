@@ -230,8 +230,8 @@ fn export_heterogeneous_route_shape_fingerprint(
         hasher.update(node.0.to_le_bytes());
         hash_effect_operation_shape(&mut hasher, graph, *node)?;
     }
-    hasher.update((prepared.gpu_plan().node_ids().len() as u64).to_le_bytes());
-    for node in prepared.gpu_plan().node_ids() {
+    hasher.update((prepared.gpu_suffix().node_ids().len() as u64).to_le_bytes());
+    for node in prepared.gpu_suffix().node_ids() {
         hasher.update(node.0.to_le_bytes());
         hash_effect_operation_shape(&mut hasher, graph, *node)?;
     }
@@ -594,6 +594,12 @@ impl ExportVisualRenderSession {
             extent,
         )?;
         let gpu_grant = self.heterogeneous_gpu_grant()?;
+        route.route.gpu_recording_requirements().validate(gpu_grant).map_err(|source| {
+            ExportHeterogeneousEffectError::GpuContinuation {
+                placement: route.placement.label(),
+                source: Box::new(source.into()),
+            }
+        })?;
         if cancellation.is_canceled() {
             return Err(ExportHeterogeneousEffectError::Canceled {
                 checkpoint: "before_cpu_prefix",

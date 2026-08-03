@@ -163,7 +163,8 @@ pub use heterogeneous_gpu::{
     HeterogeneousGpuContinuationError, HeterogeneousGpuContinuationRequest,
     HeterogeneousGpuContinuationRuntime, HeterogeneousGpuExecutionCapability,
     HeterogeneousGpuRecordResources, HeterogeneousGpuRecordedContinuation,
-    HeterogeneousGpuRecordedEvidence, HeterogeneousGpuResourceGrant, HeterogeneousGpuResourceKind,
+    HeterogeneousGpuRecordedEvidence, HeterogeneousGpuRecordingRequirements,
+    HeterogeneousGpuResourceGrant, HeterogeneousGpuResourceKind,
     HeterogeneousGpuSubmissionAuthority, HeterogeneousGpuSubmittedContinuation,
     HeterogeneousGpuSubmittedEvidence,
 };

@@ -944,6 +944,30 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     let access_mode = media_preview_access_mode_for_intent(access_intent);
                     let work_class = media_preview_frame_work_class(access_mode);
                     let demand = transport.is_playing().then(|| transport.demand()).flatten();
+                    let gpu_grant = decision.gpu_continuation_grant();
+                    if let Err(error) = cpu_prefix.validate_gpu_recording_grant(gpu_grant) {
+                        if let Some(demand) = demand {
+                            self.queue_visual_terminal_candidate(
+                                mondrian_playback::FrameDeliveryCandidate::for_demand(
+                                    demand.identity(),
+                                    mondrian_playback::FrameDeliveryKind::Failed,
+                                ),
+                            );
+                        }
+                        self.schedule_media_prefetches(
+                            snapshot,
+                            proxy_demands,
+                            sequence,
+                            frame,
+                            width,
+                            height,
+                        );
+                        self.scheduler.prune_obsolete();
+                        return self.unavailable_gpu_candidate(PreviewUnavailability::failed(
+                            PreviewOutputStage::GpuComposite,
+                            format!("Preview heterogeneous GPU admission failed: {error}"),
+                        ));
+                    }
                     let Some(task) = self.visual_execution.as_ref() else {
                         let detail = self
                             .visual_execution_start_failure
@@ -985,7 +1009,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         VisualExecutionTaskPayload::heterogeneous_cpu_prefix_batch(
                             transport.epoch(),
                             cpu_prefix,
-                            decision.gpu_continuation_grant(),
+                            gpu_grant,
                             std::mem::take(&mut media_residency_protections),
                         ),
                     );
