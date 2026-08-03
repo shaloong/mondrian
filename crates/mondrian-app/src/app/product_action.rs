@@ -31,6 +31,8 @@ pub const AUDIO_PROCESSOR_NAMESPACE: &str = "ui.audio_processor";
 
 /// External action name for one atomic Audio Processor Rack edit.
 pub const AUDIO_PROCESSOR_EDIT_RACK: &str = "edit_rack";
+/// External action name for inserting one product-visible built-in Processor.
+pub const AUDIO_PROCESSOR_INSERT_BUILT_IN: &str = "insert_built_in";
 
 /// One closed product operation accepted by the App composition root.
 ///
@@ -49,6 +51,8 @@ pub enum ProductAction {
 pub enum AudioProcessorProductAction {
     /// Apply one stable-address Rack mutation in one author transaction.
     EditRack(AudioProcessorRackEditRequest),
+    /// Resolve and insert one canonical product-visible built-in Processor.
+    InsertBuiltIn(AudioProcessorInsertBuiltInPayload),
 }
 
 /// Closed high-frequency Timeline interaction operations.
@@ -125,6 +129,11 @@ impl ProductAction {
                         namespace, name, payload,
                     )?),
                 ))),
+                AUDIO_PROCESSOR_INSERT_BUILT_IN => Ok(Some(Self::AudioProcessor(
+                    AudioProcessorProductAction::InsertBuiltIn(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
                 _ => Ok(None),
             },
             _ => Ok(None),
@@ -178,6 +187,11 @@ impl ProductAction {
                 AUDIO_PROCESSOR_EDIT_RACK,
                 serde_json::json!(request),
             ),
+            Self::AudioProcessor(AudioProcessorProductAction::InsertBuiltIn(payload)) => (
+                AUDIO_PROCESSOR_NAMESPACE,
+                AUDIO_PROCESSOR_INSERT_BUILT_IN,
+                serde_json::json!(payload),
+            ),
         };
         Action::Custom {
             namespace: namespace.to_owned(),
@@ -185,6 +199,33 @@ impl ProductAction {
             payload,
         }
     }
+}
+
+/// Product-visible built-in Processor choice.
+///
+/// This closed presentation catalog is deliberately separate from persistent
+/// [`mondrian_timeline::audio::AudioProcessorDefinitionRef`]. Projects retain
+/// definition identity and schema snapshots; the menu only exposes built-ins
+/// whose production resolver and editor contract are currently complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioProcessorBuiltInPreset {
+    /// Stateless decibel gain.
+    Gain,
+    /// Linked-channel sample-peak limiter with compensated lookahead.
+    LookaheadLimiter,
+}
+
+/// Insert one canonical built-in at a stable Rack-relative placement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioProcessorInsertBuiltInPayload {
+    /// Rack receiving the new Processor.
+    pub address: mondrian_timeline::AudioProcessorRackAddress,
+    /// Product-visible canonical built-in.
+    pub preset: AudioProcessorBuiltInPreset,
+    /// Stable position inside the Rack.
+    pub placement: mondrian_timeline::AudioProcessorRackPlacement,
 }
 
 fn decode_payload<T: serde::de::DeserializeOwned>(
@@ -458,6 +499,26 @@ mod tests {
         };
         let expected =
             ProductAction::AudioProcessor(AudioProcessorProductAction::EditRack(request));
+
+        let external = expected.clone().into_external_action();
+        let decoded = ProductAction::decode_external(&external)
+            .expect("valid external payload")
+            .expect("recognized product action");
+
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn external_codec_round_trips_audio_processor_builtin_insertion_intent() {
+        let expected = ProductAction::AudioProcessor(AudioProcessorProductAction::InsertBuiltIn(
+            AudioProcessorInsertBuiltInPayload {
+                address: AudioProcessorRackAddress::ProcessingScope {
+                    scope_id: mondrian_core::AudioProcessingScopeId::new(),
+                },
+                preset: AudioProcessorBuiltInPreset::LookaheadLimiter,
+                placement: AudioProcessorRackPlacement::End,
+            },
+        ));
 
         let external = expected.clone().into_external_action();
         let decoded = ProductAction::decode_external(&external)

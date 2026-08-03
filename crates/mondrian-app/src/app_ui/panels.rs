@@ -23,8 +23,8 @@ use mondrian_core::types::{
     EffectId, JobId, KeyframeId, Rational, SequenceId, TrackId, VideoTransitionId,
 };
 use mondrian_core::{
-    Color, FrameRounding, TimeScale, TimelineDisplayContract, TimelineDisplayFormat, TimelineTime,
-    WorkingColorSpace,
+    Color, FrameRounding, ParameterUnit, TimeScale, TimelineDisplayContract, TimelineDisplayFormat,
+    TimelineTime, WorkingColorSpace,
 };
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
@@ -146,6 +146,15 @@ use crate::app::{
     AppState, SelectedClipRef, SelectedVideoTransitionRef, VideoTransitionHandleState,
 };
 use crate::app_ui::action_availability::app_state_action_enabled;
+use crate::app_ui::audio_processor_rack::{
+    bypass_action as audio_processor_bypass_action, clip_processing_scope_racks,
+    insert_action as audio_processor_insert_action,
+    move_before_action as audio_processor_move_before_action,
+    move_to_end_action as audio_processor_move_to_end_action,
+    remove_action as audio_processor_remove_action,
+    set_static_parameter_action as audio_processor_set_static_parameter_action,
+    AudioProcessorRackModel,
+};
 use crate::app_ui::icons::AppIcon;
 use crate::app_ui::inspector_source_timing::{
     inspector_forward_rate_action, inspector_freeze_action, inspector_source_timing_model,
@@ -1567,6 +1576,8 @@ pub struct InspectorPanelModel {
     pub opacity_curve: Option<InspectorCurveModel>,
     /// Placement-local audio Component Edits and their source choices.
     pub audio_components: Vec<InspectorAudioComponentModel>,
+    /// Unique Clip Processing Scope Racks projected through the shared Rack Module.
+    pub(crate) audio_processor_racks: Vec<AudioProcessorRackModel>,
     /// Definition-backed properties owned by the selected Clip content.
     pub clip_properties: Vec<InspectorEffectPropertyModel>,
     /// Effects currently attached to the selected clip.
@@ -1774,6 +1785,7 @@ impl InspectorPanelModel {
             tint_area_mode: ColorPickerAreaMode::Wheel,
             opacity_curve: opacity_curve_model_for_clip(clip, time),
             audio_components: inspector_audio_components(state, clip),
+            audio_processor_racks: clip_processing_scope_racks(sequence, clip),
             clip_properties,
             effects: clip
                 .effects
@@ -1816,6 +1828,7 @@ impl InspectorPanelModel {
             tint_area_mode: ColorPickerAreaMode::Wheel,
             opacity_curve: None,
             audio_components: Vec::new(),
+            audio_processor_racks: Vec::new(),
             clip_properties: Vec::new(),
             effects: Vec::new(),
         }
@@ -1844,6 +1857,7 @@ impl InspectorPanelModel {
             tint_area_mode: ColorPickerAreaMode::Wheel,
             opacity_curve: None,
             audio_components: Vec::new(),
+            audio_processor_racks: Vec::new(),
             clip_properties: Vec::new(),
             effects: Vec::new(),
         }
@@ -5472,6 +5486,162 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
         }
     }
 
+    for (rack_index, rack) in model.audio_processor_racks.iter().enumerate() {
+        let rack_can_edit = can_edit && rack.is_editable;
+        let title = if model.audio_processor_racks.len() == 1 {
+            rack.title.clone()
+        } else {
+            format!("{} {}", rack.title, rack_index + 1)
+        };
+        let insert_items = rack
+            .insert_options
+            .iter()
+            .map(|option| {
+                MenuItem::new(
+                    option.label,
+                    audio_processor_insert_action(rack, option.preset),
+                )
+            })
+            .collect();
+        let mut rack_section = PropertySection::new(title)
+            .with_row(PropertyRow::new(
+                "作用域",
+                Box::new(Label::new(rack.ownership_label.clone()).muted()),
+            ))
+            .with_row(PropertyRow::new(
+                "添加",
+                Box::new(
+                    Dropdown::new("添加处理器…", insert_items)
+                        .with_max_visible_items(8)
+                        .enabled(rack_can_edit),
+                ),
+            ));
+        if let Some(reason) = &rack.edit_disabled_reason {
+            rack_section = rack_section.with_row(PropertyRow::new(
+                "只读",
+                Box::new(Label::new(reason.clone()).muted()),
+            ));
+        }
+        panel = panel.with_section(rack_section);
+
+        for (processor_index, processor) in rack.processors.iter().enumerate() {
+            let rack_for_bypass = rack.clone();
+            let processor_for_bypass = processor.clone();
+            let can_move_up = rack_can_edit && processor_index > 0;
+            let can_move_down = rack_can_edit && processor_index + 1 < rack.processors.len();
+            let move_up = if processor_index > 0 {
+                audio_processor_move_before_action(
+                    rack,
+                    processor,
+                    rack.processors[processor_index - 1].processor_id,
+                )
+            } else {
+                audio_processor_move_before_action(rack, processor, processor.processor_id)
+            };
+            let move_down = if processor_index + 2 < rack.processors.len() {
+                audio_processor_move_before_action(
+                    rack,
+                    processor,
+                    rack.processors[processor_index + 2].processor_id,
+                )
+            } else {
+                audio_processor_move_to_end_action(rack, processor)
+            };
+            let mut section =
+                PropertySection::new(processor.label.clone()).with_row(PropertyRow::new(
+                    "控制",
+                    Box::new(
+                        FlexContainer::row(vec![
+                            FlexChild::flex(
+                                Box::new(
+                                    Checkbox::new("旁路", processor.bypassed)
+                                        .enabled(rack_can_edit)
+                                        .on_change(move |bypassed| {
+                                            audio_processor_bypass_action(
+                                                &rack_for_bypass,
+                                                &processor_for_bypass,
+                                                bypassed,
+                                            )
+                                        }),
+                                ),
+                                1.0,
+                            ),
+                            FlexChild::fixed(effect_icon_button(
+                                AppIcon::CaretUp,
+                                "Up",
+                                "Move processor up",
+                                can_move_up,
+                                Some(move_up),
+                            )),
+                            FlexChild::fixed(effect_icon_button(
+                                AppIcon::CaretDown,
+                                "Down",
+                                "Move processor down",
+                                can_move_down,
+                                Some(move_down),
+                            )),
+                            FlexChild::fixed(effect_icon_button(
+                                AppIcon::Trash,
+                                "Remove",
+                                "Remove processor",
+                                rack_can_edit,
+                                Some(audio_processor_remove_action(rack, processor)),
+                            )),
+                        ])
+                        .with_gap(8.0),
+                    ),
+                ));
+            for parameter in &processor.parameters {
+                let label = audio_processor_parameter_label(parameter);
+                if parameter.keyframe_count > 0 {
+                    section = section.with_row(PropertyRow::new(
+                        label,
+                        Box::new(
+                            Label::new(format!(
+                                "自动化 · {} 个关键帧（曲线编辑器待接入）",
+                                parameter.keyframe_count
+                            ))
+                            .muted(),
+                        ),
+                    ));
+                    continue;
+                }
+                let Some(numeric) = parameter.schema.numeric else {
+                    section = section.with_row(PropertyRow::new(
+                        label,
+                        Box::new(Label::new("此参数没有数值编辑契约").muted()),
+                    ));
+                    continue;
+                };
+                let rack_for_parameter = rack.clone();
+                let processor_for_parameter = processor.clone();
+                let parameter_for_action = parameter.clone();
+                section = section.with_row(PropertyRow::new(
+                    label,
+                    numeric_slider_input_control_with_hard_range(
+                        parameter.static_value as f32,
+                        numeric.soft_range.min as f32,
+                        numeric.soft_range.max as f32,
+                        numeric.hard_range.min as f32,
+                        numeric.hard_range.max as f32,
+                        numeric.step.map(|step| step as f32),
+                        audio_processor_parameter_decimals(numeric.step),
+                        rack_can_edit && parameter.is_static_editable(),
+                        move |value| {
+                            audio_processor_set_static_parameter_action(
+                                &rack_for_parameter,
+                                &processor_for_parameter,
+                                &parameter_for_action,
+                                value,
+                            )
+                        },
+                    ),
+                ));
+            }
+            panel = panel.with_section(section);
+        }
+    }
+
     panel = panel.with_section(
         PropertySection::new("变换")
             .with_row(PropertyRow::new(
@@ -5718,6 +5888,37 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
         PropertySection::new("动画")
             .with_row(PropertyRow::new("曲线", Box::new(curve)).with_height(118.0)),
     )
+}
+
+fn audio_processor_parameter_label(
+    parameter: &crate::app_ui::audio_processor_rack::AudioProcessorParameterModel,
+) -> String {
+    let unit = match parameter.schema.unit {
+        ParameterUnit::Decibels => "dB",
+        ParameterUnit::Milliseconds => "ms",
+        ParameterUnit::Samples => "samples",
+        ParameterUnit::Percent => "%",
+        ParameterUnit::Degrees => "°",
+        ParameterUnit::Pixels => "px",
+        ParameterUnit::Stops => "stops",
+        ParameterUnit::Nits => "nits",
+        ParameterUnit::Unitless | ParameterUnit::Normalized | ParameterUnit::TimelineTime => "",
+    };
+    if unit.is_empty() {
+        parameter.label.clone()
+    } else {
+        format!("{} ({unit})", parameter.label)
+    }
+}
+
+fn audio_processor_parameter_decimals(step: Option<f64>) -> usize {
+    match step {
+        Some(step) if step >= 1.0 => 0,
+        Some(step) if step >= 0.1 => 1,
+        Some(step) if step >= 0.01 => 2,
+        Some(_) => 3,
+        None => 2,
+    }
 }
 
 fn numeric_slider_input_control<R>(
@@ -6769,6 +6970,19 @@ mod tests {
         sequence
             .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
             .expect("add audio Clip");
+        let scope_id = sequence.audio_tracks[0].clips[0].audio_components[0].processing.scope_id;
+        sequence
+            .audio_program
+            .processing_scopes
+            .iter_mut()
+            .find(|scope| scope.id == scope_id)
+            .expect("Processing Scope")
+            .processors
+            .processors
+            .push(mondrian_timeline::audio::AudioProcessorInstance::built_in(
+                mondrian_timeline::audio::BUILTIN_GAIN_DEFINITION_ID,
+                1,
+            ));
         let authored_fade = AudioFade {
             duration: TimelineTime::new(1, 4).expect("fade duration"),
             curve: AudioFadeCurve::EqualPower,
@@ -6809,6 +7023,9 @@ mod tests {
             binding.options.iter().filter(|option| option.selected).count(),
             1
         );
+        assert_eq!(model.audio_processor_racks.len(), 1);
+        assert_eq!(model.audio_processor_racks[0].processors.len(), 1);
+        assert_eq!(model.audio_processor_racks[0].processors[0].label, "增益");
 
         drop(model);
         drop(state);
@@ -11874,6 +12091,7 @@ mod tests {
             tint_area_mode: ColorPickerAreaMode::Wheel,
             opacity_curve: None,
             audio_components: Vec::new(),
+            audio_processor_racks: Vec::new(),
             clip_properties: Vec::new(),
             effects: Vec::new(),
         };
@@ -11946,6 +12164,7 @@ mod tests {
             tint_area_mode: ColorPickerAreaMode::Wheel,
             opacity_curve: None,
             audio_components: Vec::new(),
+            audio_processor_racks: Vec::new(),
             clip_properties: Vec::new(),
             effects: vec![InspectorEffectModel {
                 effect_id,

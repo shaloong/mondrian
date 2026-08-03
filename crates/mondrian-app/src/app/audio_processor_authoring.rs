@@ -4,9 +4,14 @@
 //! mutation and validation; the App owns transaction and execution refresh.
 
 use mondrian_core::{MondrianError, Result};
-use mondrian_timeline::{apply_audio_processor_rack_edit, AudioProcessorRackEditRequest};
+use mondrian_timeline::audio::{
+    AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID, BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID,
+};
+use mondrian_timeline::{
+    apply_audio_processor_rack_edit, AudioProcessorRackEdit, AudioProcessorRackEditRequest,
+};
 
-use super::product_action::AudioProcessorProductAction;
+use super::product_action::{AudioProcessorBuiltInPreset, AudioProcessorProductAction};
 use super::AppState;
 
 impl AppState {
@@ -17,6 +22,21 @@ impl AppState {
         match action {
             AudioProcessorProductAction::EditRack(request) => {
                 self.edit_audio_processor_rack(request)
+            }
+            AudioProcessorProductAction::InsertBuiltIn(payload) => {
+                let definition_id = match payload.preset {
+                    AudioProcessorBuiltInPreset::Gain => BUILTIN_GAIN_DEFINITION_ID,
+                    AudioProcessorBuiltInPreset::LookaheadLimiter => {
+                        BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID
+                    }
+                };
+                self.edit_audio_processor_rack(AudioProcessorRackEditRequest {
+                    address: payload.address,
+                    edit: AudioProcessorRackEdit::Insert {
+                        processor: AudioProcessorInstance::built_in(definition_id, 1),
+                        placement: payload.placement,
+                    },
+                })
             }
         }
     }
@@ -46,7 +66,12 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::ui_actions::audio_processor_rack_edit_action;
+    use crate::app::product_action::{
+        AudioProcessorBuiltInPreset, AudioProcessorInsertBuiltInPayload,
+    };
+    use crate::app::ui_actions::{
+        audio_processor_insert_built_in_action, audio_processor_rack_edit_action,
+    };
     use mondrian_core::ParameterId;
     use mondrian_timeline::audio::{
         AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID, GAIN_DB_PARAMETER_ID,
@@ -141,6 +166,43 @@ mod tests {
                 .default_value,
             -6.0
         );
+    }
+
+    #[test]
+    fn product_builtin_insertion_resolves_canonical_instance_at_dispatch() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("Product Processor insertion");
+        let track_id = sequence.audio_tracks[0].id;
+        let address = AudioProcessorRackAddress::ChannelStrip {
+            owner: AudioChannelStripOwner::Track { track_id },
+            rack: AudioChannelStripRack::PreFader,
+        };
+        state.test_set_sequence(Some(sequence));
+        let generation = state.project_author_generation();
+
+        state
+            .dispatch_action(audio_processor_insert_built_in_action(
+                AudioProcessorInsertBuiltInPayload {
+                    address,
+                    preset: AudioProcessorBuiltInPreset::LookaheadLimiter,
+                    placement: AudioProcessorRackPlacement::End,
+                },
+            ))
+            .expect("insert canonical built-in");
+
+        let processor =
+            &audio_processor_rack(state.active_sequence().expect("active Sequence"), &address)
+                .expect("Rack")
+                .processors[0];
+        assert!(matches!(
+            &processor.definition,
+            mondrian_timeline::audio::AudioProcessorDefinitionRef::BuiltIn {
+                definition_id,
+                schema_version: 1,
+            } if definition_id == BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID
+        ));
+        assert_eq!(processor.parameters.len(), 3);
+        assert_eq!(state.project_author_generation(), generation + 1);
     }
 
     #[test]

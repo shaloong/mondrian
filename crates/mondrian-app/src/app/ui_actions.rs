@@ -1251,6 +1251,14 @@ pub fn audio_processor_rack_edit_action(request: AudioProcessorRackEditRequest) 
         .into_external_action()
 }
 
+/// Build an action that inserts one canonical product-visible built-in Processor.
+pub fn audio_processor_insert_built_in_action(
+    payload: super::product_action::AudioProcessorInsertBuiltInPayload,
+) -> Action {
+    ProductAction::AudioProcessor(AudioProcessorProductAction::InsertBuiltIn(payload))
+        .into_external_action()
+}
+
 /// Build an action that links the current Clip selection.
 pub fn timeline_link_selected_clips_action() -> Action {
     custom_timeline_action(TIMELINE_LINK_SELECTED_CLIPS, ())

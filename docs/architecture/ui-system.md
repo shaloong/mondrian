@@ -378,6 +378,24 @@ commits exactly one Sequence author transaction. Only a changed commit triggers
 post-commit audio execution reconciliation. Timeline remains the sole owner of
 Rack address, lock, identity, and schema validation; UI availability only
 projects whether an active Sequence exists and cannot duplicate those rules.
+Product insertion uses a separate typed `InsertBuiltIn` intent so repeatedly
+projecting a retained Widget does not allocate a new author identity. The App
+resolves that intent to one canonical versioned instance at dispatch and then
+enters the same Rack transaction. This menu catalog is only a presentation
+catalog; persistent built-in, VST3, and CLAP identity remains the definition
+reference plus captured schema.
+
+`app_ui::audio_processor_rack` is the shared read-only Rack projection Module.
+It deduplicates Clip bindings by Processing Scope, counts all Sequence bindings,
+projects the same shared-Scope lock blocker enforced by Timeline, preserves
+unknown plugin definitions and parameter schemas, and generates only typed Rack
+Actions. Inspector consumes it now; a later Mixer must reuse the same Interface
+for Track, Bus, and Program Output channel strips rather than traverse audio
+author state again. Numeric controls take hard/soft range, step, unit, value
+type, and animatability from `ParameterSchema`. An already-keyed curve is shown
+as automation and its fallback value is deliberately not exposed as though it
+were the playhead value; exact owner-time curve editing requires the dedicated
+automation interaction before that control becomes editable.
 
 The Timeline production constructors likewise lower typed operations into the
 external envelope, and one App-owned codec is the only
