@@ -6,8 +6,6 @@ use mondrian_core::{AudioChannelLayout, MondrianError, Result};
 use parking_lot::Mutex;
 #[cfg(test)]
 use std::path::Path;
-#[cfg(test)]
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1109,7 +1107,7 @@ pub(crate) fn decode_audio_file_with_ffmpeg_cli(
         asset_id: path.display().to_string(),
         reason: format!("audio output layout {channel_layout:?} has no explicit FFmpeg lowering"),
     })?;
-    let output = Command::new("ffmpeg")
+    let output = crate::ffmpeg_command()
         .arg("-v")
         .arg("error")
         .arg("-i")

@@ -15,7 +15,7 @@ cargo install cargo-audit      # 安全审计
 # 3. 安装 FFmpeg（Windows，推荐与 CI 对齐）
 git clone https://github.com/microsoft/vcpkg C:\vcpkg
 C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
-C:\vcpkg\vcpkg.exe install "ffmpeg[zlib]:x64-windows" --recurse
+C:\vcpkg\vcpkg.exe install "ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom]:x64-windows" --recurse
 # 设置环境变量（PowerShell）
 $env:VCPKG_ROOT="C:\vcpkg"
 $env:VCPKGRS_TRIPLET="x64-windows"
@@ -94,10 +94,10 @@ git push origin v0.1.1
 
 - Release 工作流会为 Linux/macOS/Windows 构建自包含运行时并上传产物。
 - Linux 构建依赖 `libasound2-dev`（用于 `alsa-sys`）。
-- Windows 构建使用 vcpkg 安装 `ffmpeg[zlib]`，确保应用内 FFmpeg 包含 PNG/EXR decoder，并导出 `VCPKG_ROOT`、`PKG_CONFIG_PATH` 等环境变量。
-- Windows Release 包会同时包含 `mondrian.exe` 与 FFmpeg 运行时 DLL（`avcodec-*`、`avformat-*`、`avutil-*` 等）。
-- Linux Release 包会递归收集非基础系统动态库到 `lib/`，并使用相对 RPATH；macOS Release 包会生成 `.app`，把非系统 dylib 放入 `Contents/Frameworks` 并重写加载路径。
-- 三个平台都必须在净化环境中执行 `mondrian --verify-runtime`，FFmpeg 或 OCIO 运行时缺失会直接阻止发布产物上传。
+- Windows 构建使用 vcpkg 安装完整产品 profile：链接库、`ffmpeg`/`ffprobe`、PNG/EXR decoder，以及 Export 声明的软件编码器；不能用只有 `libavcodec.pc` 的旧缓存冒充。
+- Windows Release 包会同时包含 `mondrian.exe`、`ffmpeg.exe`、`ffprobe.exe` 与完整运行时 DLL closure。
+- Linux Release 包会把 Mondrian、`ffmpeg`、`ffprobe` 的递归非基础系统动态库收敛到同一个私有 `lib/` 并设置相对 RPATH；macOS Release 包会把三个可执行文件的非系统 dylib 收敛到 App Bundle 的 `Contents/Frameworks` 并重写加载路径。
+- 三个平台都必须在净化环境中执行 `mondrian --verify-runtime`；该命令拒绝 PATH-only 工具，并验证链接 decoder、CLI encoder/filter/muxer 和 `--enable-nonfree`。媒体或 OCIO 运行时不完整会直接阻止发布产物上传。
 - `workflow_dispatch` 可用于手动 dry-run 验证构建，不会自动创建 GitHub Release。
 
 ## 测试要求

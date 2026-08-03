@@ -101,9 +101,9 @@ jobs:
             C:\vcpkg\installed
             C:\vcpkg\packages
             C:\vcpkg\triplets\community
-          key: ${{ runner.os }}-vcpkg-ffmpeg-zlib-v1-release-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-vcpkg-ffmpeg-runtime-v2-release-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-vcpkg-ffmpeg-zlib-v1-release-
+            ${{ runner.os }}-vcpkg-ffmpeg-runtime-v2-release-
             ${{ runner.os }}-vcpkg-ffmpeg-release-
             ${{ runner.os }}-vcpkg-ffmpeg-
 
@@ -123,9 +123,9 @@ jobs:
           $cacheHit = '${{ steps.vcpkg-cache.outputs.cache-hit }}' -eq 'true'
           Write-Host "Cache hit: $cacheHit"
 
-          # Always reconcile features: a cached libavcodec.pc can still belong to
-          # a build without the zlib-backed PNG/EXR decoders required by Mondrian.
-          & C:\vcpkg\vcpkg.exe install 'ffmpeg[zlib]:x64-windows' --recurse
+          # Always reconcile the complete product runtime. A cached libavcodec.pc
+          # does not prove CLI tools or Export's software encoders are present.
+          & C:\vcpkg\vcpkg.exe install 'ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom]:x64-windows' --recurse
 
           $pkgConf = 'C:\vcpkg\installed\x64-windows\tools\pkgconf\pkgconf.exe'
           "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -140,6 +140,7 @@ jobs:
           "PKG_CONFIG=$pkgConf" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Split-Path $pkgConf | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "C:\vcpkg\installed\x64-windows\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "C:\vcpkg\installed\x64-windows\tools\ffmpeg" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: 记录依赖版本 (Windows)
         if: runner.os == 'Windows'
@@ -238,12 +239,27 @@ jobs:
           # 将主程序与 FFmpeg 运行时 DLL 打包到同一目录，确保开箱即用。
           Copy-Item $env:BIN_PATH -Destination $stageDir -Force
           $dllSource = 'C:\vcpkg\installed\x64-windows\bin'
+          $toolSource = 'C:\vcpkg\installed\x64-windows\tools\ffmpeg'
           $dlls = Get-ChildItem -Path $dllSource -Filter '*.dll' -ErrorAction Stop
           if ($dlls.Count -eq 0) {
             Write-Error "No runtime DLLs found under $dllSource"
           }
 
           Copy-Item -Path "$dllSource\*.dll" -Destination $stageDir -Force
+          foreach ($tool in @('ffmpeg.exe', 'ffprobe.exe')) {
+            $source = Join-Path $toolSource $tool
+            if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+              Write-Error "Required packaged media tool is missing: $source"
+            }
+            Copy-Item -LiteralPath $source -Destination $stageDir -Force
+          }
+          Copy-Item -LiteralPath 'LICENSE' -Destination $stageDir -Force
+          & (Join-Path $stageDir 'ffmpeg.exe') -hide_banner -version |
+            Out-File -FilePath (Join-Path $stageDir 'MEDIA_RUNTIME_BUILD.txt') -Encoding utf8
+          & (Join-Path $stageDir 'ffmpeg.exe') -hide_banner -buildconf |
+            Out-File -FilePath (Join-Path $stageDir 'MEDIA_RUNTIME_BUILD.txt') -Encoding utf8 -Append
+          & (Join-Path $stageDir 'ffmpeg.exe') -hide_banner -L |
+            Out-File -FilePath (Join-Path $stageDir 'FFMPEG_LICENSE.txt') -Encoding utf8
           & (Join-Path $stageDir 'mondrian.exe') --verify-runtime
           if ($LASTEXITCODE -ne 0) {
             Write-Error "Packaged Windows runtime verification failed"
@@ -257,26 +273,37 @@ jobs:
           stage_dir="$PACKAGE_NAME"
           mkdir -p "$stage_dir/lib"
           cp "$BIN_PATH" "$stage_dir/mondrian"
+          cp -L "$(command -v ffmpeg)" "$stage_dir/ffmpeg"
+          cp -L "$(command -v ffprobe)" "$stage_dir/ffprobe"
+          cp LICENSE "$stage_dir/LICENSE"
 
-          while IFS= read -r dependency; do
-            [ -f "$dependency" ] || continue
-            name="$(basename "$dependency")"
-            case "$name" in
-              ld-linux*|libc.so*|libm.so*|libdl.so*|libpthread.so*|librt.so*|libgcc_s.so*|libstdc++.so*)
-                continue
-                ;;
-            esac
-            cp -L "$dependency" "$stage_dir/lib/$name"
-          done < <(lddtree -l "$stage_dir/mondrian" | sort -u)
+          for executable in "$stage_dir/mondrian" "$stage_dir/ffmpeg" "$stage_dir/ffprobe"; do
+            while IFS= read -r dependency; do
+              [ -f "$dependency" ] || continue
+              [ "$dependency" = "$executable" ] && continue
+              name="$(basename "$dependency")"
+              case "$name" in
+                ld-linux*|libc.so*|libm.so*|libdl.so*|libpthread.so*|librt.so*|libgcc_s.so*|libstdc++.so*)
+                  continue
+                  ;;
+              esac
+              cp -L "$dependency" "$stage_dir/lib/$name"
+            done < <(lddtree -l "$executable" | sort -u)
+            patchelf --set-rpath '$ORIGIN/lib' "$executable"
+          done
 
-          patchelf --set-rpath '$ORIGIN/lib' "$stage_dir/mondrian"
           for library in "$stage_dir"/lib/*.so*; do
             patchelf --set-rpath '$ORIGIN' "$library"
           done
-          if ldd "$stage_dir/mondrian" | grep -q 'not found'; then
-            ldd "$stage_dir/mondrian"
-            exit 1
-          fi
+          for executable in "$stage_dir/mondrian" "$stage_dir/ffmpeg" "$stage_dir/ffprobe"; do
+            if ldd "$executable" | grep -q 'not found'; then
+              ldd "$executable"
+              exit 1
+            fi
+          done
+          "$stage_dir/ffmpeg" -hide_banner -version > "$stage_dir/MEDIA_RUNTIME_BUILD.txt"
+          "$stage_dir/ffmpeg" -hide_banner -buildconf >> "$stage_dir/MEDIA_RUNTIME_BUILD.txt"
+          "$stage_dir/ffmpeg" -hide_banner -L > "$stage_dir/FFMPEG_LICENSE.txt"
           env -i PATH=/usr/bin:/bin HOME="$HOME" "$stage_dir/mondrian" --verify-runtime
           tar -czf "$PACKAGE_PATH" "$stage_dir"
 
@@ -290,15 +317,23 @@ jobs:
           frameworks_dir="$app_dir/Contents/Frameworks"
           mkdir -p "$executable_dir" "$frameworks_dir"
           cp "$BIN_PATH" "$executable_dir/mondrian"
-          dylibbundler \
-            -od -b \
-            -x "$executable_dir/mondrian" \
-            -d "$frameworks_dir" \
-            -p '@executable_path/../Frameworks/'
-          if otool -L "$executable_dir/mondrian" | grep -E '/(opt/homebrew|usr/local)/'; then
-            echo 'Packaged macOS executable still references Homebrew libraries'
-            exit 1
-          fi
+          cp -L "$(command -v ffmpeg)" "$executable_dir/ffmpeg"
+          cp -L "$(command -v ffprobe)" "$executable_dir/ffprobe"
+          cp LICENSE "$stage_dir/LICENSE"
+          for executable in "$executable_dir/mondrian" "$executable_dir/ffmpeg" "$executable_dir/ffprobe"; do
+            dylibbundler \
+              -od -b \
+              -x "$executable" \
+              -d "$frameworks_dir" \
+              -p '@executable_path/../Frameworks/'
+            if otool -L "$executable" | grep -E '/(opt/homebrew|usr/local)/'; then
+              echo "Packaged macOS executable still references Homebrew libraries: $executable"
+              exit 1
+            fi
+          done
+          "$executable_dir/ffmpeg" -hide_banner -version > "$stage_dir/MEDIA_RUNTIME_BUILD.txt"
+          "$executable_dir/ffmpeg" -hide_banner -buildconf >> "$stage_dir/MEDIA_RUNTIME_BUILD.txt"
+          "$executable_dir/ffmpeg" -hide_banner -L > "$stage_dir/FFMPEG_LICENSE.txt"
           env -i PATH=/usr/bin:/bin HOME="$HOME" "$executable_dir/mondrian" --verify-runtime
           tar -czf "$PACKAGE_PATH" "$stage_dir"
 

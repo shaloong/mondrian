@@ -13,6 +13,7 @@ mod audio_playback;
 pub mod audio_source;
 pub mod decoder;
 mod ffmpeg_runtime;
+mod ffmpeg_tools;
 pub mod info;
 pub mod multilevel_cache;
 pub mod preview;
@@ -44,6 +45,7 @@ pub use decoder::{
     HwAccelProbe, HwDeviceContextPool, HwDeviceContextPoolDiagnostics, HwDeviceContextPoolPolicy,
 };
 pub use ffmpeg_runtime::verify_ffmpeg_runtime;
+pub use ffmpeg_tools::{ffmpeg_command, ffprobe_command};
 pub use info::{
     interpret_video_color_metadata, is_picture_file_extension, parse_video_color_metadata_hint,
     probe_media_info, AudioStreamInfo, DetectedColorInterpretation, MediaInfo, MediaProbeSnapshot,

@@ -2094,7 +2094,7 @@ fn execute_timeline_export(
                 range.total_frames as f64 * range.fps_den as f64 / range.fps_num.max(1) as f64,
             ),
         };
-        let mut cmd = Command::new("ffmpeg");
+        let mut cmd = mondrian_media::ffmpeg_command();
         let frame_contract = export_frame_contract(delivery.bit_depth);
         let pix_fmt = frame_contract.ffmpeg_pix_fmt();
         cmd.arg("-y")

@@ -20,10 +20,12 @@ Mondrian depends on:
 - OCIO runtime support through `ocio-rs`
 
 On Windows, install a toolchain capable of building native Rust crates and use
-`vcpkg install "ffmpeg[zlib]:x64-windows" --recurse`. The `zlib` feature is
-required by FFmpeg's PNG and EXR decoders; a default `ffmpeg:x64-windows`
-install is not a supported Mondrian runtime. Ensure those development libraries
-are discoverable by the build.
+`vcpkg install "ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom]:x64-windows"
+--recurse`. This is the product profile: `zlib` closes PNG/OpenEXR decode,
+`ffmpeg`/`ffprobe` provide supervised CLI adapters, and the explicit encoder
+features match Export's current software backends. A default
+`ffmpeg:x64-windows` install is not a supported Mondrian runtime. Ensure those
+development libraries and tools are discoverable by the build.
 
 ## Optional Tools
 

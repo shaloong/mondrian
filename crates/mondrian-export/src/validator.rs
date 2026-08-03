@@ -501,7 +501,7 @@ fn ffprobe_report(
     path: &Path,
     cancellation: &ExecutionCancellationToken,
 ) -> Result<FfprobeReport, String> {
-    let mut command = Command::new("ffprobe");
+    let mut command = mondrian_media::ffprobe_command();
     command
         .arg("-v")
         .arg("error")
@@ -534,7 +534,7 @@ fn ffprobe_first_video_frame_side_data(
     path: &Path,
     cancellation: &ExecutionCancellationToken,
 ) -> Result<Vec<FfprobeFrameSideData>, String> {
-    let mut command = Command::new("ffprobe");
+    let mut command = mondrian_media::ffprobe_command();
     command
         .arg("-v")
         .arg("error")

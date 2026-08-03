@@ -564,12 +564,25 @@ driver-stall evidence, but it prevents the blocking-I/O seam from regressing
 into a merely declared callback.
 
 Packaged applications carry their complete non-system media/color runtime
-closure. Windows places vcpkg/`FFMPEG_DIR` DLLs beside the executable, Linux
-places collected shared objects under `lib/` with relative RPATH, and macOS
-places dylibs in the app bundle's `Contents/Frameworks` with rewritten install
-names. Every release stage runs `--verify-runtime` in a sanitized environment;
-product startup must not depend on Cargo's test-only search path, Homebrew, or a
-developer-specific `PATH`.
+closure. The private `ffmpeg` and `ffprobe` tools live beside Mondrian on all
+platforms. Windows also places the vcpkg/`FFMPEG_DIR` DLL closure there; Linux
+places the recursive closure of all three executables under `lib/` with
+relative RPATH; macOS places their non-system dylibs in
+`Contents/Frameworks` with rewritten install names. `mondrian-media` is the
+single tool-resolution Interface: packaged adjacent tools win, while a source
+development build may fall back to `PATH`. Media, Proxy, Preview, Audio, Export,
+and post-encode validation must not resolve their own command independently.
+Every release stage runs `--verify-runtime` in a sanitized environment. That
+gate rejects PATH-only tools, missing linked baseline decoders, missing
+production CLI encoders/filters/muxers, and an unredistributable `--enable-nonfree`
+build; product startup must not depend on Cargo's test-only search path,
+Homebrew, or a developer-specific `PATH`.
+Dynamic linkage is a delivery policy, not a license bypass. The current
+software Export baseline intentionally enables GPL-compatible x264/x265 in the
+runtime used by this AGPL project, never FFmpeg's nonfree profile. Each package
+therefore carries Mondrian's license plus the concrete FFmpeg `-L`, `-version`,
+and `-buildconf` output so the distributed runtime's license and build profile
+remain inspectable rather than inferred from CI configuration.
 `PreviewDecodeAccessMode` intentionally has no default value, and serialized
 decode diagnostics must include it. Missing access-mode evidence is a diagnostic
 coverage bug, not a reason to assume still-frame semantics.
@@ -2497,11 +2510,15 @@ during aggressive seek/scrub, must not leak directly to the user terminal as the
 primary diagnostic channel. Developers can opt into noisier FFmpeg output with
 `MONDRIAN_FFMPEG_LOG_LEVEL`; product health should use structured decode
 diagnostics and explicit frame failure/cancellation reasons instead.
-Packaged runtime verification also checks FFmpeg's public decoder registry for
-PNG and OpenEXR. Windows CI, release, and developer setup must install
-`ffmpeg[zlib]`; a `libavcodec.pc` file alone is not evidence that these decoders
-were compiled. The vcpkg step is idempotent and uses `--recurse` so an older
-cache with the default component set is upgraded instead of silently reused.
+Packaged runtime verification checks FFmpeg's public decoder registry for the
+declared baseline video, audio, image, and PCM families, including PNG and
+OpenEXR. It separately interrogates the adjacent CLI tools for every software
+encoder and filter consumed by current Proxy, Audio, Export, and validation
+Implementations. Windows CI, release, and developer setup therefore install the
+explicit `zlib,ffmpeg,ffprobe,gpl,x264,x265,aom` vcpkg profile; a
+`libavcodec.pc` file alone is not runtime evidence. The vcpkg step is
+idempotent and uses `--recurse`, and its cache identity includes the product
+runtime profile so an older partial component set cannot be silently reused.
 Preview path resolution already resolves the source/proxy file-revision evidence; app
 workers must forward that `MediaFileFingerprint` into the media decode
 boundary. The media worker deliberately performs one final revision-evidence check

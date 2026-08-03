@@ -398,7 +398,7 @@ impl DecodeSession {
         let (input_start_frame, exact_trim_frames) =
             exact_seek_partition(start_frame, key.sample_rate);
         let pan_filter = identity_pan_filter(key.channel_layout);
-        let mut command = Command::new("ffmpeg");
+        let mut command = crate::ffmpeg_command();
         command.arg("-v").arg("error").arg("-nostdin");
         if input_start_frame > 0 {
             command

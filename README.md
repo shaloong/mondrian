@@ -56,7 +56,7 @@
 ### 环境要求
 
 - Rust 1.92+
-- FFmpeg 8.x（动态链接）
+- FFmpeg 开发库与 `ffmpeg`/`ffprobe` CLI（仅源码构建需要；发行包自带私有动态运行时）
 - Vulkan / Metal / DirectX 12 驱动
 - Windows 11 / macOS 13+ / Ubuntu 22.04+
 
@@ -67,8 +67,10 @@
 git clone https://github.com/mondrian-studio/mondrian
 cd mondrian
 
-# 安装 FFmpeg（Windows）
-winget install ffmpeg
+# 安装与 CI 同构的 Windows 媒体运行时
+git clone https://github.com/microsoft/vcpkg C:\vcpkg
+C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+C:\vcpkg\vcpkg.exe install "ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom]:x64-windows" --recurse
 
 # Debug 构建
 cargo build
