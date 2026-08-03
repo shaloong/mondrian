@@ -520,6 +520,15 @@ Remove, bypass, and parameter edits address stable Processor, Parameter, and
 Keyframe IDs. A parameter gesture mutates one exact curve operation rather than
 replacing a UI-cached whole Rack or curve.
 
+Read-only product projection enters through the paired
+`inspect_audio_processor_rack` Interface. It resolves the typed address,
+returns the canonical Rack order, counts Processing Scope bindings, and reports
+the exact Track-lock blocker from one immutable Sequence snapshot. The mutation
+path consumes this same admission result before detaching the copy-on-write
+candidate. Inspector, Mixer, scripting, and Headless adapters therefore cannot
+grow separate interpretations of shared-Scope locks or Channel Strip ownership;
+an invalid address remains a typed error rather than disappearing from UI.
+
 The Implementation clones a structurally shared Sequence candidate, admits
 Track locks, resolves the address, performs the local mutation, and validates
 the complete Audio Program before replacing its input. A Track Rack edit is

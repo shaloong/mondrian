@@ -3,10 +3,8 @@
 //! Inspector and future Mixer surfaces consume this Module instead of
 //! traversing or interpreting the Sequence audio author model independently.
 
-use std::collections::BTreeSet;
-
 use mondrian_core::automation::{ParameterSchema, PropertyValueType};
-use mondrian_core::{AudioProcessingScopeId, AudioProcessorInstanceId, ParameterId};
+use mondrian_core::{AudioProcessorInstanceId, ParameterId};
 use mondrian_editor_state::Action;
 use mondrian_timeline::audio::{
     AudioProcessorDefinitionRef, AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID,
@@ -18,8 +16,10 @@ use mondrian_timeline::audio::{
 use mondrian_timeline::clip::Clip;
 use mondrian_timeline::sequence::Sequence;
 use mondrian_timeline::{
-    audio_processor_rack, AudioProcessorParameterEdit, AudioProcessorRackAddress,
-    AudioProcessorRackEdit, AudioProcessorRackEditRequest, AudioProcessorRackPlacement,
+    inspect_audio_processor_rack, AudioChannelStripOwner, AudioChannelStripRack,
+    AudioProcessorParameterEdit, AudioProcessorRackAddress, AudioProcessorRackEdit,
+    AudioProcessorRackEditError, AudioProcessorRackEditRequest, AudioProcessorRackInspection,
+    AudioProcessorRackPlacement,
 };
 
 use crate::app::product_action::{AudioProcessorBuiltInPreset, AudioProcessorInsertBuiltInPayload};
@@ -87,53 +87,51 @@ pub(crate) fn clip_processing_scope_racks(
     sequence: &Sequence,
     clip: &Clip,
 ) -> Vec<AudioProcessorRackModel> {
-    let mut seen = BTreeSet::new();
-    clip.audio_components
+    let mut scope_ids = clip
+        .audio_components
         .iter()
-        .filter_map(|edit| {
-            let scope_id = edit.processing.scope_id;
-            if seen.insert(scope_id) {
-                processing_scope_rack(sequence, scope_id)
-            } else {
-                None
-            }
+        .map(|edit| edit.processing.scope_id)
+        .collect::<Vec<_>>();
+    scope_ids.sort_unstable();
+    scope_ids.dedup();
+    scope_ids
+        .into_iter()
+        .map(|scope_id| {
+            project_audio_processor_rack(
+                sequence,
+                AudioProcessorRackAddress::ProcessingScope { scope_id },
+            )
         })
         .collect()
 }
 
-fn processing_scope_rack(
+/// Project one Rack through Timeline's authoritative address and edit-admission
+/// Interface. This is shared by the Clip Inspector and the Mixer surface.
+pub(crate) fn project_audio_processor_rack(
     sequence: &Sequence,
-    scope_id: AudioProcessingScopeId,
-) -> Option<AudioProcessorRackModel> {
-    let address = AudioProcessorRackAddress::ProcessingScope { scope_id };
-    let rack = audio_processor_rack(sequence, &address).ok()?;
-    let mut binding_count = 0usize;
-    let mut locked_track = None;
-    for track in &sequence.audio_tracks {
-        for clip in &track.clips {
-            for edit in &clip.audio_components {
-                if edit.processing.scope_id == scope_id {
-                    binding_count = binding_count.saturating_add(1);
-                    if track.is_locked {
-                        locked_track.get_or_insert(track.id);
-                    }
-                }
-            }
-        }
-    }
-    let ownership_label = match binding_count {
-        0 => "未绑定的 Processing Scope".to_owned(),
-        1 => "仅由当前 Component 使用".to_owned(),
-        count => format!("共享 Processing Scope · {count} 个 Component"),
+    address: AudioProcessorRackAddress,
+) -> AudioProcessorRackModel {
+    let inspection = inspect_audio_processor_rack(sequence, &address);
+    let ownership_label = rack_ownership_label(sequence, address, inspection.as_ref().ok());
+    let (is_editable, edit_disabled_reason, processors) = match inspection {
+        Ok(inspection) => (
+            inspection.is_editable(),
+            inspection.edit_blocker().map(edit_blocker_label),
+            inspection.rack().processors.iter().map(project_processor).collect(),
+        ),
+        Err(error) => (
+            false,
+            Some(format!("作者状态无法解析此 Rack：{error}")),
+            Vec::new(),
+        ),
     };
-    Some(AudioProcessorRackModel {
+    AudioProcessorRackModel {
         address,
-        title: "音频处理器 Rack".to_owned(),
+        title: rack_title(address).to_owned(),
         ownership_label,
-        is_editable: locked_track.is_none(),
-        edit_disabled_reason: locked_track
-            .map(|track_id| format!("共享 Scope 同时绑定到已锁定轨道 {track_id}，必须先解锁")),
-        processors: rack.processors.iter().map(project_processor).collect(),
+        is_editable,
+        edit_disabled_reason,
+        processors,
         insert_options: vec![
             AudioProcessorInsertOptionModel {
                 label: "增益",
@@ -144,7 +142,72 @@ fn processing_scope_rack(
                 preset: AudioProcessorBuiltInPreset::LookaheadLimiter,
             },
         ],
-    })
+    }
+}
+
+fn rack_title(address: AudioProcessorRackAddress) -> &'static str {
+    match address {
+        AudioProcessorRackAddress::ProcessingScope { .. } => "音频处理器 Rack",
+        AudioProcessorRackAddress::ChannelStrip {
+            rack: AudioChannelStripRack::PreFader, ..
+        } => "推子前处理器 Rack",
+        AudioProcessorRackAddress::ChannelStrip {
+            rack: AudioChannelStripRack::PostFader, ..
+        } => "推子后处理器 Rack",
+    }
+}
+
+fn rack_ownership_label(
+    sequence: &Sequence,
+    address: AudioProcessorRackAddress,
+    inspection: Option<&AudioProcessorRackInspection<'_>>,
+) -> String {
+    match address {
+        AudioProcessorRackAddress::ProcessingScope { scope_id } => {
+            match inspection.and_then(AudioProcessorRackInspection::processing_scope_binding_count)
+            {
+                Some(0) => "未绑定的 Processing Scope".to_owned(),
+                Some(1) => "仅由一个 Component 使用".to_owned(),
+                Some(count) => format!("共享 Processing Scope · {count} 个 Component"),
+                None => format!("Processing Scope · {scope_id}"),
+            }
+        }
+        AudioProcessorRackAddress::ChannelStrip { owner, .. } => match owner {
+            AudioChannelStripOwner::Track { track_id } => {
+                sequence.audio_tracks.iter().find(|track| track.id == track_id).map_or_else(
+                    || format!("音频轨道 · {track_id}"),
+                    |track| track.name.clone(),
+                )
+            }
+            AudioChannelStripOwner::Bus { bus_id } => {
+                sequence.audio_program.buses.iter().find(|bus| bus.id == bus_id).map_or_else(
+                    || format!("Bus · {bus_id}"),
+                    |bus| format!("Bus · {}", bus.name),
+                )
+            }
+            AudioChannelStripOwner::ProgramOutput { output_id } => sequence
+                .audio_program
+                .outputs
+                .iter()
+                .find(|output| output.id == output_id)
+                .map_or_else(
+                    || format!("Program Output · {output_id}"),
+                    |output| format!("Program Output · {}", output.name),
+                ),
+        },
+    }
+}
+
+fn edit_blocker_label(error: &AudioProcessorRackEditError) -> String {
+    match error {
+        AudioProcessorRackEditError::LockedTrack(track_id) => {
+            format!("轨道 {track_id} 已锁定，必须先解锁")
+        }
+        AudioProcessorRackEditError::LockedProcessingScopeBinding { track_id, .. } => {
+            format!("共享 Scope 同时绑定到已锁定轨道 {track_id}，必须先解锁")
+        }
+        error => error.to_string(),
+    }
 }
 
 fn project_processor(processor: &AudioProcessorInstance) -> AudioProcessorInstanceModel {
@@ -368,6 +431,47 @@ mod tests {
         let locked = clip_processing_scope_racks(&sequence, clip);
         assert!(!locked[0].is_editable);
         assert!(locked[0].edit_disabled_reason.is_some());
+    }
+
+    #[test]
+    fn one_projector_covers_track_bus_and_program_output_racks() {
+        let (mut sequence, _) = sequence_with_gain_scope();
+        let track_id = sequence.audio_tracks[0].id;
+        let bus_id = mondrian_core::MixBusId::new();
+        sequence.audio_program.buses.push(mondrian_timeline::audio::AudioMixBus {
+            id: bus_id,
+            name: "Dialog".to_owned(),
+            strip: mondrian_timeline::audio::AudioChannelStrip::default(),
+        });
+        let output_id = sequence.audio_program.outputs[0].id;
+        let addresses = [
+            AudioProcessorRackAddress::ChannelStrip {
+                owner: AudioChannelStripOwner::Track { track_id },
+                rack: AudioChannelStripRack::PreFader,
+            },
+            AudioProcessorRackAddress::ChannelStrip {
+                owner: AudioChannelStripOwner::Bus { bus_id },
+                rack: AudioChannelStripRack::PostFader,
+            },
+            AudioProcessorRackAddress::ChannelStrip {
+                owner: AudioChannelStripOwner::ProgramOutput { output_id },
+                rack: AudioChannelStripRack::PreFader,
+            },
+        ];
+
+        let projected = addresses.map(|address| project_audio_processor_rack(&sequence, address));
+        assert_eq!(projected[0].ownership_label, sequence.audio_tracks[0].name);
+        assert_eq!(projected[1].ownership_label, "Bus · Dialog");
+        assert!(projected[2].ownership_label.starts_with("Program Output · "));
+        assert!(projected.iter().all(|rack| rack.is_editable));
+
+        sequence.audio_tracks[0].is_locked = true;
+        let locked = project_audio_processor_rack(&sequence, addresses[0]);
+        assert!(!locked.is_editable);
+        assert!(locked
+            .edit_disabled_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("已锁定")));
     }
 
     #[test]

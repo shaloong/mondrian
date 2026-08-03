@@ -27,10 +27,11 @@ pub mod visual_schedule;
 
 pub use audio::*;
 pub use audio_processor_edit::{
-    apply_audio_processor_rack_edit, audio_processor_rack, AudioChannelStripOwner,
-    AudioChannelStripRack, AudioProcessorParameterEdit, AudioProcessorRackAddress,
-    AudioProcessorRackEdit, AudioProcessorRackEditError, AudioProcessorRackEditOutcome,
-    AudioProcessorRackEditRequest, AudioProcessorRackPlacement,
+    apply_audio_processor_rack_edit, audio_processor_rack, inspect_audio_processor_rack,
+    AudioChannelStripOwner, AudioChannelStripRack, AudioProcessorParameterEdit,
+    AudioProcessorRackAddress, AudioProcessorRackEdit, AudioProcessorRackEditError,
+    AudioProcessorRackEditOutcome, AudioProcessorRackEditRequest, AudioProcessorRackInspection,
+    AudioProcessorRackPlacement,
 };
 pub use clip::{ActiveClip, Clip, ClipKind, ClipSourceTimeMap};
 pub use clip_linking::{

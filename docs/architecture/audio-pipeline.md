@@ -173,17 +173,24 @@ path, evaluation mode, and continuity epoch; `scope_id`, plan equality, or a
 fingerprint alone is insufficient.
 
 The product Rack UI projects these definitions through one shared App UI
-Module. A selected Clip shows each distinct bound Scope exactly once, even when
-multiple Component Edits bind it, and lock admission scans every binding in the
-Sequence. The first product slice supports canonical Gain and linked-channel
-sample-peak Lookahead Limiter insertion, stable-ID reorder/remove/bypass, and
-schema-driven unkeyed numeric parameters. Sample Delay remains an execution
-contract fixture rather than a claimed product effect. Existing VST3/CLAP and
-unknown built-in snapshots remain visible by their persistent identity and
-captured schema; unavailable dependencies are never deleted or silently
-flattened. Keyed curves remain read-only in this slice because a fallback value
-is not the playhead evaluation. Automation editing must first bind an exact
-Scope-local coordinate and stable Keyframe identity.
+Module. That Module consumes Timeline's `inspect_audio_processor_rack`
+Interface for every Processing Scope, Track, Bus, and Program Output address;
+it does not scan Tracks or reproduce lock admission. The Interface returns Rack
+contents, complete-Sequence Scope binding count, and the authoritative edit
+blocker from one immutable author snapshot. A selected Clip shows each distinct
+bound Scope exactly once, even when multiple Component Edits bind it. An invalid
+address becomes an explicit disabled projection instead of silently hiding
+author state.
+
+The first product slice supports canonical Gain and linked-channel sample-peak
+Lookahead Limiter insertion, stable-ID reorder/remove/bypass, and schema-driven
+unkeyed numeric parameters. Sample Delay remains an execution contract fixture
+rather than a claimed product effect. Existing VST3/CLAP and unknown built-in
+snapshots remain visible by their persistent identity and captured schema;
+unavailable dependencies are never deleted or silently flattened. Keyed curves
+remain read-only in this slice because a fallback value is not the playhead
+evaluation. Automation editing must first bind an exact Scope-local coordinate
+and stable Keyframe identity.
 
 Razor splitting creates fresh Clip and Component Edit IDs for the right side,
 retains the Scope ID, and advances edit-local and Scope-local origins by the

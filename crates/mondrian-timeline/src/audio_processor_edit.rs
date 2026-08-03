@@ -228,8 +228,103 @@ pub enum AudioProcessorRackEditError {
     AuthorState(AudioAuthoringError),
 }
 
+/// Read-only author projection for one resolved Audio Processor Rack.
+///
+/// This is the sole query Interface for both Rack contents and edit admission.
+/// Product surfaces must not reproduce Track-lock or shared-Scope binding rules.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioProcessorRackInspection<'a> {
+    rack: &'a AudioProcessorRack,
+    processing_scope_binding_count: Option<usize>,
+    edit_blocker: Option<AudioProcessorRackEditError>,
+}
+
+impl<'a> AudioProcessorRackInspection<'a> {
+    /// Resolved Rack in canonical author order.
+    pub fn rack(&self) -> &'a AudioProcessorRack {
+        self.rack
+    }
+
+    /// Number of Component Edits bound to a Processing Scope.
+    ///
+    /// Channel-strip Racks return `None` because they are owned directly rather
+    /// than referenced through Component bindings.
+    pub fn processing_scope_binding_count(&self) -> Option<usize> {
+        self.processing_scope_binding_count
+    }
+
+    /// Authoritative reason this valid Rack cannot currently be edited.
+    pub fn edit_blocker(&self) -> Option<&AudioProcessorRackEditError> {
+        self.edit_blocker.as_ref()
+    }
+
+    /// Whether an edit request against this Rack may enter a transaction.
+    pub fn is_editable(&self) -> bool {
+        self.edit_blocker.is_none()
+    }
+}
+
+/// Resolve one Rack and inspect its authoritative edit admission state.
+///
+/// Address validity, shared Processing Scope binding counts, and Track locks
+/// are evaluated from the same immutable Sequence snapshot. The mutation path
+/// consumes this Interface before cloning or changing author state.
+pub fn inspect_audio_processor_rack<'a>(
+    sequence: &'a Sequence,
+    address: &AudioProcessorRackAddress,
+) -> Result<AudioProcessorRackInspection<'a>, AudioProcessorRackEditError> {
+    let rack = resolve_rack(sequence, address)?;
+    let (processing_scope_binding_count, edit_blocker) = match *address {
+        AudioProcessorRackAddress::ProcessingScope { scope_id } => {
+            let mut binding_count = 0usize;
+            let mut locked_track = None;
+            for track in &sequence.audio_tracks {
+                for clip in &track.clips {
+                    for edit in &clip.audio_components {
+                        if edit.processing.scope_id == scope_id {
+                            binding_count = binding_count.saturating_add(1);
+                            if track.is_locked {
+                                locked_track.get_or_insert(track.id);
+                            }
+                        }
+                    }
+                }
+            }
+            (
+                Some(binding_count),
+                locked_track.map(|track_id| {
+                    AudioProcessorRackEditError::LockedProcessingScopeBinding { scope_id, track_id }
+                }),
+            )
+        }
+        AudioProcessorRackAddress::ChannelStrip {
+            owner: AudioChannelStripOwner::Track { track_id },
+            ..
+        } => {
+            let track = sequence
+                .audio_tracks
+                .iter()
+                .find(|track| track.id == track_id)
+                .ok_or(AudioProcessorRackEditError::UnknownTrack(track_id))?;
+            (
+                None,
+                track.is_locked.then_some(AudioProcessorRackEditError::LockedTrack(track_id)),
+            )
+        }
+        AudioProcessorRackAddress::ChannelStrip { .. } => (None, None),
+    };
+    Ok(AudioProcessorRackInspection { rack, processing_scope_binding_count, edit_blocker })
+}
+
 /// Resolve one Rack for read-only projection by stable typed address.
 pub fn audio_processor_rack<'a>(
+    sequence: &'a Sequence,
+    address: &AudioProcessorRackAddress,
+) -> Result<&'a AudioProcessorRack, AudioProcessorRackEditError> {
+    resolve_rack(sequence, address)
+}
+
+fn resolve_rack<'a>(
     sequence: &'a Sequence,
     address: &AudioProcessorRackAddress,
 ) -> Result<&'a AudioProcessorRack, AudioProcessorRackEditError> {
@@ -292,17 +387,17 @@ pub fn apply_audio_processor_rack_edit(
     request: &AudioProcessorRackEditRequest,
 ) -> Result<AudioProcessorRackEditOutcome, AudioProcessorRackEditError> {
     let processor_id = request.edit.processor_id();
-    let mut candidate = sequence.clone();
-    ensure_editable(&candidate, &request.address)?;
+    ensure_editable(sequence, &request.address)?;
 
     if let AudioProcessorRackEdit::Insert { processor, .. } = &request.edit {
-        if processor_id_exists(&candidate.audio_program, processor.id) {
+        if processor_id_exists(&sequence.audio_program, processor.id) {
             return Err(AudioProcessorRackEditError::DuplicateProcessor(
                 processor.id,
             ));
         }
     }
 
+    let mut candidate = sequence.clone();
     let changed = apply_to_rack(
         resolve_rack_mut(&mut candidate, &request.address)?,
         &request.edit,
@@ -326,50 +421,11 @@ fn ensure_editable(
     sequence: &Sequence,
     address: &AudioProcessorRackAddress,
 ) -> Result<(), AudioProcessorRackEditError> {
-    match *address {
-        AudioProcessorRackAddress::ProcessingScope { scope_id } => {
-            if !sequence
-                .audio_program
-                .processing_scopes
-                .iter()
-                .any(|scope| scope.id == scope_id)
-            {
-                return Err(AudioProcessorRackEditError::UnknownProcessingScope(
-                    scope_id,
-                ));
-            }
-            for track in &sequence.audio_tracks {
-                if track.is_locked
-                    && track.clips.iter().any(|clip| {
-                        clip.audio_components
-                            .iter()
-                            .any(|edit| edit.processing.scope_id == scope_id)
-                    })
-                {
-                    return Err(AudioProcessorRackEditError::LockedProcessingScopeBinding {
-                        scope_id,
-                        track_id: track.id,
-                    });
-                }
-            }
-            Ok(())
-        }
-        AudioProcessorRackAddress::ChannelStrip {
-            owner: AudioChannelStripOwner::Track { track_id },
-            ..
-        } => {
-            let track = sequence
-                .audio_tracks
-                .iter()
-                .find(|track| track.id == track_id)
-                .ok_or(AudioProcessorRackEditError::UnknownTrack(track_id))?;
-            if track.is_locked {
-                Err(AudioProcessorRackEditError::LockedTrack(track_id))
-            } else {
-                Ok(())
-            }
-        }
-        AudioProcessorRackAddress::ChannelStrip { .. } => Ok(()),
+    let inspection = inspect_audio_processor_rack(sequence, address)?;
+    if let Some(blocker) = inspection.edit_blocker {
+        Err(blocker)
+    } else {
+        Ok(())
     }
 }
 
@@ -675,6 +731,40 @@ mod tests {
                 sequence.settings.audio_channel_layout,
             )
             .expect("complete valid Audio Program");
+    }
+
+    #[test]
+    fn inspection_is_the_single_address_lock_and_scope_binding_authority() {
+        let (mut sequence, track_id, scope_id) = sequence_with_audio_clip();
+        sequence.audio_tracks[0].clips[0].audio_components.push(
+            crate::audio::AudioComponentEdit::media(AudioSourceComponentId::new(), scope_id),
+        );
+        let scope_address = AudioProcessorRackAddress::ProcessingScope { scope_id };
+        let scope = inspect_audio_processor_rack(&sequence, &scope_address).expect("Scope");
+        assert_eq!(scope.processing_scope_binding_count(), Some(2));
+        assert!(scope.is_editable());
+        assert!(scope.edit_blocker().is_none());
+
+        let track_address = AudioProcessorRackAddress::ChannelStrip {
+            owner: AudioChannelStripOwner::Track { track_id },
+            rack: AudioChannelStripRack::PreFader,
+        };
+        let track = inspect_audio_processor_rack(&sequence, &track_address).expect("Track Rack");
+        assert_eq!(track.processing_scope_binding_count(), None);
+        assert!(track.is_editable());
+
+        sequence.audio_tracks[0].is_locked = true;
+        let scope = inspect_audio_processor_rack(&sequence, &scope_address).expect("locked Scope");
+        assert_eq!(
+            scope.edit_blocker(),
+            Some(&AudioProcessorRackEditError::LockedProcessingScopeBinding { scope_id, track_id })
+        );
+        let track =
+            inspect_audio_processor_rack(&sequence, &track_address).expect("locked Track Rack");
+        assert_eq!(
+            track.edit_blocker(),
+            Some(&AudioProcessorRackEditError::LockedTrack(track_id))
+        );
     }
 
     #[test]
