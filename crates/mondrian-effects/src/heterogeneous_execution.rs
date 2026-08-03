@@ -14,11 +14,13 @@ use crate::{
         apply_render_op_f32_controlled, render_op_f32_scratch_frames, EffectRasterRegion,
     },
     execution::{apply_alpha_mask_f32_region_controlled, blend_rgba_f32_region_controlled},
-    lower_effect_graph_nodes_to_gpu_plan, CompiledEffectGpuPlan, CompiledEffectGraph,
-    EffectColorDomain, EffectExecutionEnvironment, EffectExecutionLane, EffectExecutionLaneId,
-    EffectExecutionModes, EffectExecutionSession, EffectFrameExtent, EffectGpuPlanBlocker,
-    EffectGraphNodeId, EffectGraphNodeKind, EffectProcessingBackend, EffectResourceLifetime,
-    EffectStateModel, EffectTemporalInputExtent, EffectWorkingPrecision,
+    lower_effect_graph_nodes_to_gpu_plan,
+    mask_raster::{ControlledMaskRasterError, PreparedMaskRasterSet},
+    CompiledEffectGpuPlan, CompiledEffectGraph, EffectColorDomain, EffectExecutionEnvironment,
+    EffectExecutionLane, EffectExecutionLaneId, EffectExecutionModes, EffectExecutionSession,
+    EffectFrameExtent, EffectGpuPlanBlocker, EffectGraphNodeId, EffectGraphNodeKind,
+    EffectProcessingBackend, EffectResourceLifetime, EffectStateModel, EffectTemporalInputExtent,
+    EffectWorkingPrecision,
 };
 use mondrian_core::WorkingColorSpace;
 use std::{
@@ -1791,6 +1793,10 @@ pub enum PreparedHeterogeneousEffectWorkError {
     /// The exact GPU tail cannot be lowered.
     #[error(transparent)]
     GpuPlan(#[from] EffectGpuPlanBlocker),
+    /// Synthetic Mask geometry or raster preparation failed before CPU
+    /// completion could be proved.
+    #[error(transparent)]
+    MaskRaster(#[from] crate::MaskRasterError),
     /// The caller did not bind the expected execution generation.
     #[error(
         "effect execution Session generation mismatch: expected {expected}, observed {observed:?}"
@@ -1825,6 +1831,17 @@ pub enum PreparedHeterogeneousEffectWorkError {
         required: usize,
         /// Session limit.
         limit: usize,
+    },
+    /// Runtime Mask preparation exceeded the deterministic amount derived
+    /// from the same immutable graph during route preparation.
+    #[error(
+        "heterogeneous Mask resources changed after preparation: planned={planned}, actual={actual}"
+    )]
+    MaskResourceContractMismatch {
+        /// Conservative prepared geometry plus row scratch bytes.
+        planned: usize,
+        /// Runtime preparation result from the same graph.
+        actual: usize,
     },
     /// A prepared CPU node disappeared or no longer forms the exact chain.
     #[error("heterogeneous CPU prefix graph contract changed at node {node:?}")]
@@ -1867,6 +1884,7 @@ pub struct PreparedHeterogeneousEffectWork {
     output_token: EffectCompletionToken,
     frame_extent: EffectFrameExtent,
     cpu_required_working_bytes: usize,
+    mask_auxiliary_bytes: usize,
 }
 
 impl PreparedHeterogeneousEffectWork {
@@ -2020,6 +2038,12 @@ impl PreparedHeterogeneousEffectWork {
         let frame_extent = plan.frame_extent();
         let cpu_input_materialization = plan.input_materialization();
         let cpu_use_counts = cpu_materialization_use_counts(&cpu_dispatches)?;
+        let mask_auxiliary_bytes =
+            PreparedMaskRasterSet::required_retained_bytes(compiled.graph())?
+                .checked_add(PreparedMaskRasterSet::required_max_scratch_bytes(
+                    compiled.graph(),
+                )?)
+                .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
         let cpu_required_working_bytes = cpu_prefix_working_bytes(
             &compiled,
             &cpu_dispatches,
@@ -2027,7 +2051,9 @@ impl PreparedHeterogeneousEffectWork {
             cpu_input_materialization,
             cpu_materialization,
             frame_extent,
-        )?;
+        )?
+        .checked_add(mask_auxiliary_bytes)
+        .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
         let output_token = plan
             .materialization(plan.output_materialization())
             .ok_or(
@@ -2051,6 +2077,7 @@ impl PreparedHeterogeneousEffectWork {
             output_token,
             frame_extent,
             cpu_required_working_bytes,
+            mask_auxiliary_bytes,
         })
     }
 
@@ -2159,6 +2186,25 @@ impl PreparedHeterogeneousEffectWork {
             );
         }
         checkpoint_result()?;
+        let prepared_masks = PreparedMaskRasterSet::prepare_controlled(
+            self.compiled.graph(),
+            self.frame_extent,
+            &mut checkpoint_result,
+        )
+        .map_err(map_controlled_mask_error)?;
+        let actual_mask_auxiliary_bytes = prepared_masks
+            .retained_bytes()
+            .checked_add(prepared_masks.max_scratch_bytes())
+            .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
+        if actual_mask_auxiliary_bytes > self.mask_auxiliary_bytes {
+            return Err(
+                PreparedHeterogeneousEffectWorkError::MaskResourceContractMismatch {
+                    planned: self.mask_auxiliary_bytes,
+                    actual: actual_mask_auxiliary_bytes,
+                },
+            );
+        }
+        checkpoint_result()?;
         let pixels = execute_cpu_dag_prefix(
             &self.compiled,
             &self.cpu_dispatches,
@@ -2168,6 +2214,7 @@ impl PreparedHeterogeneousEffectWork {
             self.frame_extent,
             input,
             frame_seed,
+            &prepared_masks,
             &mut checkpoint_result,
         )?;
         Ok(PreparedHeterogeneousCpuCompletion {
@@ -2190,6 +2237,15 @@ impl PreparedHeterogeneousEffectWork {
     }
 }
 
+fn map_controlled_mask_error(
+    error: ControlledMaskRasterError<PreparedHeterogeneousEffectWorkError>,
+) -> PreparedHeterogeneousEffectWorkError {
+    match error {
+        ControlledMaskRasterError::Raster(error) => error.into(),
+        ControlledMaskRasterError::Checkpoint(error) => error,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_cpu_dag_prefix(
     compiled: &CompiledEffectGraph,
@@ -2200,6 +2256,7 @@ fn execute_cpu_dag_prefix(
     extent: EffectFrameExtent,
     input: &[[f32; 4]],
     frame_seed: i64,
+    prepared_masks: &PreparedMaskRasterSet,
     checkpoint: &mut impl FnMut() -> Result<(), PreparedHeterogeneousEffectWorkError>,
 ) -> Result<Vec<[f32; 4]>, PreparedHeterogeneousEffectWorkError> {
     let mut outputs = HashMap::with_capacity(dispatches.len().saturating_add(1));
@@ -2335,7 +2392,20 @@ fn execute_cpu_dag_prefix(
                 }
                 output
             }
-            EffectGraphNodeKind::Source | EffectGraphNodeKind::MaskSource { .. } => {
+            EffectGraphNodeKind::MaskSource { .. } => {
+                if !inputs.is_empty() {
+                    return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                        node: dispatch.node,
+                    });
+                }
+                let raster = prepared_masks.get(dispatch.node).ok_or(
+                    PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: dispatch.node },
+                )?;
+                raster
+                    .rasterize_rgba_f32_controlled(extent.full_frame_roi(), checkpoint)
+                    .map_err(map_controlled_mask_error)?
+            }
+            EffectGraphNodeKind::Source => {
                 return Err(
                     PreparedHeterogeneousEffectWorkError::UnsupportedCpuOperation {
                         node: dispatch.node,
@@ -2430,7 +2500,11 @@ fn cpu_prefix_working_bytes(
     let mut live_frames = 1_usize;
     let mut peak_owned_frames = live_frames;
     for dispatch in dispatches {
-        if dispatch.inputs.is_empty() {
+        let node = compiled.graph().node(dispatch.node).ok_or(
+            PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: dispatch.node },
+        )?;
+        let is_mask_source = matches!(node.kind, EffectGraphNodeKind::MaskSource { .. });
+        if dispatch.inputs.is_empty() && !is_mask_source {
             return Err(
                 PreparedHeterogeneousEffectWorkError::UnsupportedCpuOperation {
                     node: dispatch.node,
@@ -2462,18 +2536,22 @@ fn cpu_prefix_working_bytes(
             }
         }
 
-        let node = compiled.graph().node(dispatch.node).ok_or(
-            PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: dispatch.node },
-        )?;
         let scratch_frames = cpu_node_scratch_frames(node)?;
         peak_owned_frames = peak_owned_frames.max(
             live_frames
                 .checked_add(scratch_frames)
                 .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?,
         );
-        live_frames = live_frames.checked_sub(dispatch.inputs.len().saturating_sub(1)).ok_or(
-            PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: dispatch.node },
-        )?;
+        if is_mask_source {
+            live_frames = live_frames
+                .checked_add(1)
+                .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
+            peak_owned_frames = peak_owned_frames.max(live_frames);
+        } else {
+            live_frames = live_frames.checked_sub(dispatch.inputs.len().saturating_sub(1)).ok_or(
+                PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: dispatch.node },
+            )?;
+        }
         if !live_materializations.insert(dispatch.output) {
             return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
                 node: dispatch.node,
@@ -2653,11 +2731,11 @@ fn cpu_node_scratch_frames(
                 Err(PreparedHeterogeneousEffectWorkError::UnsupportedCpuOperation { node: node.id })
             }
         },
-        EffectGraphNodeKind::Blend { .. } | EffectGraphNodeKind::Mask { .. } => Ok(0),
+        EffectGraphNodeKind::Blend { .. }
+        | EffectGraphNodeKind::Mask { .. }
+        | EffectGraphNodeKind::MaskSource { .. } => Ok(0),
         EffectGraphNodeKind::MultiInput { inputs, .. } if !inputs.is_empty() => Ok(0),
-        EffectGraphNodeKind::Source
-        | EffectGraphNodeKind::MaskSource { .. }
-        | EffectGraphNodeKind::MultiInput { .. } => {
+        EffectGraphNodeKind::Source | EffectGraphNodeKind::MultiInput { .. } => {
             Err(PreparedHeterogeneousEffectWorkError::UnsupportedCpuOperation { node: node.id })
         }
     }
@@ -2667,7 +2745,9 @@ fn cpu_node_scratch_frames(
 mod tests {
     use super::*;
     use crate::{
-        adjustment::apply_render_op_f32, compile_reference_render_graph,
+        adjustment::apply_render_op_f32,
+        compile_reference_render_graph,
+        mask::{MaskOp, MaskShape},
         register_effect_definition, EffectColorDomainContract, EffectDefinition,
         EffectExecutionContract, EffectExecutionSessionConfig, EffectExecutionTransfer,
         EffectGraphBuilder, EffectGraphBuilderState, EffectGraphPreparer, EffectNodeExt,
@@ -2839,6 +2919,76 @@ mod tests {
         .expect("prepare CPU-DAG/GPU-tail program")
         .evaluate(TimelineTime::ZERO)
         .expect("compile CPU-DAG/GPU-tail graph")
+    }
+
+    fn mask_source_to_gpu_tail_graph() -> Arc<CompiledEffectGraph> {
+        static NEXT_DEFINITION_ID: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
+        let definition_id = NEXT_DEFINITION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mask_type = EffectType::Plugin(format!(
+            "test.heterogeneous.mask-source.{definition_id}.cpu"
+        ));
+        let gpu_type = EffectType::Plugin(format!(
+            "test.heterogeneous.mask-source.{definition_id}.gpu"
+        ));
+        register_effect_definition(
+            EffectDefinition::new(
+                mask_type.key(),
+                "CPU Mask stage",
+                Default::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32,
+                ..EffectExecutionContract::IDENTITY
+            })
+            .with_branching_graph_builder(Arc::new(|_, _, graph| {
+                let input = graph.current_output();
+                let mask = graph.add_mask_source(
+                    MaskShape::Rectangle {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 1.0,
+                        height: 1.0,
+                        corner_radius: 0.0,
+                    },
+                    0.0,
+                    0.0,
+                    0.5,
+                );
+                let output = graph.add_mask(input, mask, false, MaskOp::Add);
+                graph.set_current_output(output);
+                Ok(())
+            })),
+        )
+        .expect("register CPU Mask definition");
+        register_effect_definition(
+            EffectDefinition::new(
+                gpu_type.key(),
+                "GPU point tail",
+                Default::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                execution_modes: EffectExecutionModes::GPU_F32,
+                determinism: crate::EffectDeterminism::FrameSeeded,
+                ..EffectExecutionContract::IDENTITY
+            })
+            .with_graph_builder(Arc::new(|_, _, graph| {
+                graph.append_unary(EffectRenderOp::Grain { amount: 0.0 });
+                Ok(())
+            })),
+        )
+        .expect("register GPU-tail definition");
+
+        PreparedEffectProgram::prepare(
+            &[EffectNode::new(mask_type), EffectNode::new(gpu_type)],
+            &[],
+            WorkingColorSpace::LinearRec2020,
+        )
+        .expect("prepare CPU-Mask/GPU-tail program")
+        .evaluate(TimelineTime::ZERO)
+        .expect("compile CPU-Mask/GPU-tail graph")
     }
 
     fn lifetime_partition_graph(
@@ -3558,6 +3708,65 @@ mod tests {
             work.cpu_nodes()[2],
             "the upload consumes the joined CPU graph value"
         );
+    }
+
+    #[test]
+    fn executes_cancellable_mask_source_in_cpu_dag_before_gpu_tail() {
+        let extent = EffectFrameExtent::new(4, 3);
+        let work = PreparedHeterogeneousEffectWork::prepare(
+            mask_source_to_gpu_tail_graph(),
+            &test_environment(),
+            request(extent),
+        )
+        .expect("prepare CPU Mask route");
+        assert_eq!(work.cpu_nodes().len(), 2);
+        assert_eq!(work.gpu_plan().node_ids().len(), 1);
+        assert!(
+            work.cpu_required_working_bytes() > 2 * 4 * 3 * std::mem::size_of::<[f32; 4]>(),
+            "the working contract includes prepared Mask geometry and row scratch"
+        );
+
+        let input = vec![[0.2, 0.4, 0.6, 0.8]; 12];
+        let mut session =
+            EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(1024 * 1024));
+        session.bind_generation(71);
+        let completion = work
+            .execute_cpu_prefix_uncancelled(
+                &session,
+                71,
+                &input,
+                5,
+                WorkingColorSpace::LinearRec2020,
+            )
+            .expect("execute CPU Mask route");
+        for pixel in completion.pixels() {
+            assert_eq!(pixel[0..3], input[0][0..3]);
+            assert!((pixel[3] - 0.4).abs() <= f32::EPSILON);
+        }
+
+        let mut checkpoints = 0_u32;
+        let stopped = work
+            .execute_cpu_prefix_with_checkpoint(
+                &session,
+                71,
+                &input,
+                5,
+                WorkingColorSpace::LinearRec2020,
+                || {
+                    checkpoints = checkpoints.saturating_add(1);
+                    (checkpoints == 8)
+                        .then_some(HeterogeneousCpuExecutionStopReason::DeadlineExpired)
+                },
+            )
+            .expect_err("Mask preparation/raster cancellation cannot publish completion");
+        assert!(matches!(
+            stopped,
+            PreparedHeterogeneousEffectWorkError::ExecutionStopped {
+                generation: 71,
+                reason: HeterogeneousCpuExecutionStopReason::DeadlineExpired,
+            }
+        ));
+        assert_eq!(checkpoints, 8);
     }
 
     #[test]

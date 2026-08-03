@@ -48,6 +48,40 @@ pub enum MaskRasterError {
     RegionOutsideExtent,
 }
 
+/// Internal split between Mask geometry/raster failures and the exact stop
+/// selected by the execution attempt that owns a cooperative checkpoint.
+///
+/// Keeping the checkpoint error generic lets temporal token-backed execution
+/// and heterogeneous deadline-backed execution share one raster
+/// Implementation without flattening scheduler evidence into `Canceled`.
+#[derive(Debug)]
+pub(crate) enum ControlledMaskRasterError<E> {
+    Raster(MaskRasterError),
+    Checkpoint(E),
+}
+
+impl<E> From<MaskRasterError> for ControlledMaskRasterError<E> {
+    fn from(error: MaskRasterError) -> Self {
+        Self::Raster(error)
+    }
+}
+
+fn flatten_token_control_error(
+    error: ControlledMaskRasterError<MaskRasterError>,
+) -> MaskRasterError {
+    match error {
+        ControlledMaskRasterError::Raster(error) | ControlledMaskRasterError::Checkpoint(error) => {
+            error
+        }
+    }
+}
+
+fn controlled_checkpoint<E>(
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), ControlledMaskRasterError<E>> {
+    checkpoint().map_err(ControlledMaskRasterError::Checkpoint)
+}
+
 /// Immutable Mask geometry and pixel contract prepared for one full-frame
 /// extent.
 ///
@@ -115,11 +149,44 @@ impl PreparedMaskRasterSet {
         Ok(retained_bytes)
     }
 
+    pub(crate) fn required_max_scratch_bytes(
+        graph: &EffectRenderGraph,
+    ) -> Result<usize, MaskRasterError> {
+        let mut max_scratch_bytes = 0;
+        for node in &graph.nodes {
+            let EffectGraphNodeKind::MaskSource { shape, .. } = &node.kind else {
+                continue;
+            };
+            if let MaskShape::Path { points, closed } = shape {
+                if points.len() > MAX_MASK_PATH_POINTS {
+                    return Err(MaskRasterError::PathPointLimitExceeded {
+                        actual: points.len(),
+                        limit: MAX_MASK_PATH_POINTS,
+                    });
+                }
+                max_scratch_bytes = max_scratch_bytes.max(
+                    PreparedPath::required_max_row_scratch_bytes(points.len(), *closed)?,
+                );
+            }
+        }
+        Ok(max_scratch_bytes)
+    }
+
     pub(crate) fn prepare(
         graph: &EffectRenderGraph,
         extent: EffectFrameExtent,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<Self, MaskRasterError> {
+        let mut checkpoint = || mask_raster_checkpoint(cancellation);
+        Self::prepare_controlled(graph, extent, &mut checkpoint)
+            .map_err(flatten_token_control_error)
+    }
+
+    pub(crate) fn prepare_controlled<E>(
+        graph: &EffectRenderGraph,
+        extent: EffectFrameExtent,
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Self, ControlledMaskRasterError<E>> {
         let mask_count = graph
             .nodes
             .iter()
@@ -132,24 +199,24 @@ impl PreparedMaskRasterSet {
             mask_set_base_retained_bytes(mask_count)?
         };
         for node in &graph.nodes {
-            mask_raster_checkpoint(cancellation)?;
+            controlled_checkpoint(checkpoint)?;
             let EffectGraphNodeKind::MaskSource { shape, feather, expansion, opacity } = &node.kind
             else {
                 continue;
             };
-            let raster = Arc::new(PreparedMaskRaster::prepare(
-                shape,
-                extent,
-                *feather,
-                *expansion,
-                *opacity,
-                cancellation,
+            let raster = Arc::new(PreparedMaskRaster::prepare_controlled(
+                shape, extent, *feather, *expansion, *opacity, checkpoint,
             )?);
-            retained_bytes = retained_bytes.saturating_add(raster.retained_bytes());
+            retained_bytes = retained_bytes.checked_add(raster.retained_bytes()).ok_or(
+                MaskRasterError::GeometrySizeOverflow {
+                    reason: "Mask raster-set retained byte count overflowed",
+                },
+            )?;
             if rasters.insert(node.id, raster).is_some() {
                 return Err(MaskRasterError::InvalidGeometry {
                     reason: "Effect graph contains duplicate MaskSource identity",
-                });
+                }
+                .into());
             }
         }
         Ok(Self { extent, rasters, retained_bytes })
@@ -165,6 +232,14 @@ impl PreparedMaskRasterSet {
 
     pub(crate) const fn retained_bytes(&self) -> usize {
         self.retained_bytes
+    }
+
+    pub(crate) fn max_scratch_bytes(&self) -> usize {
+        self.rasters
+            .values()
+            .map(|raster| raster.max_scratch_bytes())
+            .max()
+            .unwrap_or(0)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -197,13 +272,27 @@ impl PreparedMaskRaster {
         opacity: f32,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<Self, MaskRasterError> {
-        mask_raster_checkpoint(cancellation)?;
+        let mut checkpoint = || mask_raster_checkpoint(cancellation);
+        Self::prepare_controlled(shape, extent, feather, expansion, opacity, &mut checkpoint)
+            .map_err(flatten_token_control_error)
+    }
+
+    pub(crate) fn prepare_controlled<E>(
+        shape: &MaskShape,
+        extent: EffectFrameExtent,
+        feather: f32,
+        expansion: f32,
+        opacity: f32,
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Self, ControlledMaskRasterError<E>> {
+        controlled_checkpoint(checkpoint)?;
         if !feather.is_finite() || !expansion.is_finite() || !opacity.is_finite() {
             return Err(MaskRasterError::InvalidGeometry {
                 reason: "feather, expansion, and opacity must be finite",
-            });
+            }
+            .into());
         }
-        let geometry = PreparedMaskGeometry::prepare(shape, cancellation)?;
+        let geometry = PreparedMaskGeometry::prepare_controlled(shape, checkpoint)?;
         let inverse_width = if extent.width() == 0 {
             0.0
         } else {
@@ -249,7 +338,9 @@ impl PreparedMaskRaster {
         region: EffectPixelRoi,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<Vec<f32>, MaskRasterError> {
-        self.rasterize_region(region, cancellation, |alpha| alpha)
+        let mut checkpoint = || mask_raster_checkpoint(cancellation);
+        self.rasterize_region_controlled(region, &mut checkpoint, |alpha| alpha)
+            .map_err(flatten_token_control_error)
     }
 
     /// Rasterize RGBA Float32 mask pixels over one exact contained region.
@@ -258,7 +349,17 @@ impl PreparedMaskRaster {
         region: EffectPixelRoi,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<Vec<[f32; 4]>, MaskRasterError> {
-        self.rasterize_region(region, cancellation, |alpha| [1.0, 1.0, 1.0, alpha])
+        let mut checkpoint = || mask_raster_checkpoint(cancellation);
+        self.rasterize_rgba_f32_controlled(region, &mut checkpoint)
+            .map_err(flatten_token_control_error)
+    }
+
+    pub(crate) fn rasterize_rgba_f32_controlled<E>(
+        &self,
+        region: EffectPixelRoi,
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Vec<[f32; 4]>, ControlledMaskRasterError<E>> {
+        self.rasterize_region_controlled(region, checkpoint, |alpha| [1.0, 1.0, 1.0, alpha])
     }
 
     /// Rasterize RGBA8 Mask pixels for the legacy encoded reference path.
@@ -278,8 +379,12 @@ impl PreparedMaskRaster {
             .ok_or(MaskRasterError::GeometrySizeOverflow {
                 reason: "encoded Mask raster byte count exceeds addressable memory",
             })?;
-        let alpha =
-            self.rasterize_region(region, cancellation, |alpha| (alpha * 255.0).round() as u8)?;
+        let mut checkpoint = || mask_raster_checkpoint(cancellation);
+        let alpha = self
+            .rasterize_region_controlled(region, &mut checkpoint, |alpha| {
+                (alpha * 255.0).round() as u8
+            })
+            .map_err(flatten_token_control_error)?;
         let mut rgba = Vec::with_capacity(pixel_count);
         for value in alpha {
             rgba.extend_from_slice(&[255, 255, 255, value]);
@@ -287,14 +392,14 @@ impl PreparedMaskRaster {
         Ok(rgba)
     }
 
-    fn rasterize_region<T>(
+    fn rasterize_region_controlled<T, E>(
         &self,
         region: EffectPixelRoi,
-        cancellation: &ExecutionCancellationToken,
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
         mut map: impl FnMut(f32) -> T,
-    ) -> Result<Vec<T>, MaskRasterError> {
+    ) -> Result<Vec<T>, ControlledMaskRasterError<E>> {
         validate_region(self.extent, region)?;
-        mask_raster_checkpoint(cancellation)?;
+        controlled_checkpoint(checkpoint)?;
         let pixel_count = usize::try_from(region.width())
             .ok()
             .and_then(|width| {
@@ -321,12 +426,12 @@ impl PreparedMaskRaster {
             MaskRasterError::GeometrySizeOverflow { reason: "Mask raster y range overflowed" },
         )?;
         for y in region.y()..y_end {
-            mask_raster_checkpoint(cancellation)?;
+            controlled_checkpoint(checkpoint)?;
             let py = (y as f32 + 0.5) * inverse_height;
             self.geometry.row_crossings(py, &mut row_crossings);
             for x in region.x()..x_end {
                 if since_checkpoint >= MASK_RASTER_CHECKPOINT_PIXELS {
-                    mask_raster_checkpoint(cancellation)?;
+                    controlled_checkpoint(checkpoint)?;
                     since_checkpoint = 0;
                 }
                 let px = (x as f32 + 0.5) * inverse_width;
@@ -345,11 +450,12 @@ impl PreparedMaskRaster {
                 since_checkpoint += 1;
             }
         }
-        mask_raster_checkpoint(cancellation)?;
+        controlled_checkpoint(checkpoint)?;
         if output.len() != pixel_count {
             return Err(MaskRasterError::GeometrySizeOverflow {
                 reason: "Mask raster output did not match its checked region",
-            });
+            }
+            .into());
         }
         Ok(output)
     }
@@ -371,10 +477,14 @@ pub fn rasterize_mask_shape(
 ) -> Result<Vec<u8>, MaskRasterError> {
     let cancellation = ExecutionCancellationToken::new();
     let extent = EffectFrameExtent::new(width, height);
-    PreparedMaskRaster::prepare(shape, extent, feather, expansion, opacity, &cancellation)?
-        .rasterize_region(extent.full_frame_roi(), &cancellation, |alpha| {
+    let raster =
+        PreparedMaskRaster::prepare(shape, extent, feather, expansion, opacity, &cancellation)?;
+    let mut checkpoint = || mask_raster_checkpoint(&cancellation);
+    raster
+        .rasterize_region_controlled(extent.full_frame_roi(), &mut checkpoint, |alpha| {
             (alpha * 255.0).round() as u8
         })
+        .map_err(flatten_token_control_error)
 }
 
 /// Rasterize one complete Mask into normalized Float32 alpha.
@@ -410,10 +520,10 @@ enum PreparedMaskGeometry {
 }
 
 impl PreparedMaskGeometry {
-    fn prepare(
+    fn prepare_controlled<E>(
         shape: &MaskShape,
-        cancellation: &ExecutionCancellationToken,
-    ) -> Result<Self, MaskRasterError> {
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Self, ControlledMaskRasterError<E>> {
         match shape {
             MaskShape::Rectangle { x, y, width, height, corner_radius } => {
                 if ![*x, *y, *width, *height, *corner_radius].into_iter().all(f32::is_finite)
@@ -423,7 +533,8 @@ impl PreparedMaskGeometry {
                 {
                     return Err(MaskRasterError::InvalidGeometry {
                         reason: "Rectangle values must be finite and sizes non-negative",
-                    });
+                    }
+                    .into());
                 }
                 Ok(Self::Rectangle {
                     x: *x,
@@ -437,7 +548,8 @@ impl PreparedMaskGeometry {
                 if !center.is_finite() || !radii.is_finite() || radii.x < 0.0 || radii.y < 0.0 {
                     return Err(MaskRasterError::InvalidGeometry {
                         reason: "Ellipse values must be finite and radii non-negative",
-                    });
+                    }
+                    .into());
                 }
                 Ok(Self::Ellipse { center: *center, radii: *radii })
             }
@@ -446,7 +558,8 @@ impl PreparedMaskGeometry {
                     return Err(MaskRasterError::PathPointLimitExceeded {
                         actual: points.len(),
                         limit: MAX_MASK_PATH_POINTS,
-                    });
+                    }
+                    .into());
                 }
                 if !points.iter().all(|point| {
                     point.position.is_finite()
@@ -455,12 +568,11 @@ impl PreparedMaskGeometry {
                 }) {
                     return Err(MaskRasterError::InvalidGeometry {
                         reason: "Path control points must be finite",
-                    });
+                    }
+                    .into());
                 }
-                Ok(Self::Path(PreparedPath::prepare(
-                    points,
-                    *closed,
-                    cancellation,
+                Ok(Self::Path(PreparedPath::prepare_controlled(
+                    points, *closed, checkpoint,
                 )?))
             }
         }

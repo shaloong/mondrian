@@ -136,7 +136,7 @@ jobs:
         run: cargo deny check bans licenses advisories
 
   # ───────────────────────────────────────────────────────────────────────────
-  # 测试（Linux + Windows；macOS 逻辑与 Linux 同构，仅在 Release 验证）
+  # 测试（Windows + Linux + macOS；实机硬件资格仍由专用 Windows 门禁负责）
   # ───────────────────────────────────────────────────────────────────────────
   test:
     name: Test (${{ matrix.os }})
@@ -144,7 +144,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
       - uses: actions/checkout@v4
@@ -167,6 +167,11 @@ jobs:
             ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
             libavdevice-dev libswscale-dev libswresample-dev \
             libasound2-dev pkg-config
+
+      # ── macOS ─────────────────────────────────────────────────────────────
+      - name: 安装 FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg pkg-config
 
       # ── Windows ───────────────────────────────────────────────────────────
       - name: 缓存 vcpkg (Windows)
@@ -241,8 +246,7 @@ jobs:
       - name: 测试
         run: cargo test --workspace --exclude mondrian-app
 
-      - name: 测试完整 App 产品路径 (Windows)
-        if: runner.os == 'Windows'
+      - name: 测试完整 App 产品路径
         env:
           CARGO_INCREMENTAL: "0"
         run: cargo test -p mondrian-app --all-targets -j1

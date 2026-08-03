@@ -2,7 +2,7 @@
 
 > 更新日期：2026-08-03
 >
-> 当前主目标：Windows 优先，在不牺牲项目、时间、帧、色彩、音频与任务契约的前提下，完成可验证的真实项目制作闭环。
+> 当前主目标：以同一套跨平台产品实现完成可信的真实项目制作闭环；M1/M2 暂以 Windows 实机作为发布资格证据平台，但不得把 Windows 专属实现写入共享语义。
 >
 > 推进方式：按退出门槛推进，不以日期、代码量、类型数量或“已有 UI”代替完成度。
 
@@ -40,13 +40,13 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 | 稳定性与诊断 | L1+ |
 | i18n 基础设施 | L1 |
 | 跟踪、外部插件、协作 | L0 或不发布 |
-| macOS/Linux | 保持可实现的适配器接缝，不要求首个 Beta 交付 |
+| macOS/Linux | 与 Windows 共用生产契约和产品入口；常规 CI 必须编译/测试，真实设备与发布资格证据可晚于 Windows |
 
 ### 1.2 不可妥协的规则
 
 1. **“有实现”不等于“产品可用”。** 只有同时接入主路径、持久化、Undo/Redo、预览/导出、诊断和回归测试的能力才可进入 L1。
 2. **基础契约先于功能扩张。** 项目迁移、时间映射、帧/色彩/Alpha、参数、音频时钟和任务取消不稳定时，不扩张依赖它们的长尾能力。
-3. **Windows 先完成，跨平台现在预留。** 平台差异必须位于 `mondrian-platform*`、媒体/渲染器原生后端或明确适配器内，不得渗入项目模型、时间线语义和 UI 业务状态。
+3. **跨平台实现现在完成，实机资格分阶段取得。** Windows、Linux、macOS 必须共用项目、时间线、播放、音频、效果、色彩、Viewer 与导出契约；平台差异只位于 `mondrian-platform*`、媒体/渲染器原生后端或明确 Adapter 内。M1/M2 允许只以 Windows 真实 GPU、硬解、音频设备和显示器证据阻止发布，但这不能授权共享 Module 依赖 Win32、D3D12 或 Windows 行为，也不能把 Linux/macOS 的缺失实现伪装成“已预留”。
 4. **预览与导出共享解释，不要求共享调度。** 输入解释、时间线求值、效果顺序、合成、Alpha 和最终输出变换必须一致；缓存寿命、优先级和是否读回 CPU 可以不同。
 5. **降级必须可见且语义正确。** CPU 解码、代理、降低预览分辨率、丢弃迟到视频帧、HDR 到 SDR view transform 均可接受；静默猜测、错误色彩、隐式 RGBA8 量化和把 CPU 路径冒充 GPU 路径不可接受。
 6. **保持模块深度。** 新模块必须用小而稳定的接口隐藏调度、缓存或求值复杂度；只有一个适配器且没有真实替换需求的透传模块不应被创建。
@@ -67,14 +67,14 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 | 播放与缓存 | UI 无关 `PlaybackEngine`、`FrameWorkBroker`、`PreviewFrameStore`、三种访问语义、FFmpeg Session/isolated helper、generation/cancellation/deadline 和 Window/Headless production runtime 已接入。解码选择以 `DecodedTemporalExtent` 的半开 `[start,end)` 为权威：正 duration 与首个 successor 共同收紧边界，跨 forward call 最多保留 selected + successor 两个候选。Playback/Still 只接受因果覆盖请求的帧，否则失败关闭；Scrub 才可把非覆盖近邻标为 Explicitly degraded。取消记录 request→checkpoint→return，旧 generation 不得发布。单一 `viewer_gpu_device_progress` 非 UI worker 驱动 exact submission/callback；替换 Window 时同一 device generation、retained owner 与 cleanup authority 一并 handoff，迟到 callback 只能 retire 旧提交 | 当前工作树仍须重跑 canonical 30 分钟 Video+CPAL/A/V、100 次 seek、5 ms checkpoint/50 ms Playback-Interactive/500 ms Still 取消、GPU exact-completion、Window replacement/handoff、完整产品进程树内存与 post-reap 门禁；还需多 GPU/驱动/音频设备、真实阻塞媒体、8 GiB 降级和声学 loopback。任何单元测试、旧运行或 probe 存在都不能替代这些门禁 | L1 代码契约闭合；当前工作树长时、硬件和 Window handoff 门禁未确认 |
 | 执行资源治理 | 版本化协调 Module 把物理内存档位、七个重任务域和进程/系统压力投影为不可变 admission decision；各域仍独立拥有队列、deadline、取消和失败分类。8/16/32 GiB 分别开放 1/2/4 个粗粒度域槽，realtime Preview/Audio 与 Critical 压力禁止新重任务，Elevated 压力停止自动 admission；撤销 owner 后必须 close+drain 才能 handoff。Preview/Export/Viewer 在执行前冻结 bytes+resource hard grant，压力只能修剪 idle residency，不能改变已准入精度或语义 | 必须在独立 8 GiB 环境以 Preview+音频+Import+Thumbnail+Waveform+Proxy+Export 为输入，证明实时音频/UI 不饥饿、no-overlap handoff、旧结果不发布、压力恢复可重复、内存/吞吐有实测证据；还需更多 GPU/驱动校准。逻辑 byte grant 不得冒充 VRAM/RSS | L1 调度与工作集策略闭合；跨负载实机门禁未完成 |
 | Windows 硬解/低拷贝 | FFmpeg hardware/codec probe、D3D11/D3D12 native-frame retention、D3D11→D3D12 import、NV12/P010 GPU sampling、准入 blocker 与结构化 fallback 已接入生产路径；执行报告能区分 native GPU、upload、readback、degraded 与 blocked | 当前工作树须在 canonical 4K HEVC Main10 长素材上重跑连续播放、100 seek、取消、exact GPU completion、零错误 readback/fallback、helper post-reap 和内存收敛；随后扩展 GPU/驱动、HDR 显示链与 8 GiB 降级矩阵 | L1 实现存在；当前工作树硬件基线与发布矩阵未确认 |
-| 渲染与色彩 | Preview/Export 共用按 Sequence/Registry revision 与作者 fingerprint 绑定的不可变 `PreparedVisualProgram`；逐帧 `PreparedVisualFrameClosure` 固定 nested time、canvas/color、Transition/temporal binding 与 instance path，区间 `PreparedVisualRangeClosure` 固定 selected-range 的媒体、Transition 和字体依赖。`CompiledEffectGraph` 是唯一生产 IR，动态 topology/cache 只驻留于调用方 `EffectExecutionSession`。生产帧入口由 `TimelineCompositeScratch` 一次绑定 Generation，并用同一 Session 完成普通 Render Plan 求值、全部 temporal root/sample 精确时刻重求值及后续像素执行；Preview/Export 不再拼接无 Session 的第二套 temporal 准备。有限时域 CPU-F32 执行把根图、精确请求、按 `(Clip time, graph value)` 寻址的 time-expanded program 与原始 Source demand 冻结为一个对象；temporal tap 可采样稳定 Definition-stage input，并在各采样时刻从同一 Prepared Effect Program 重求值全部上游效果、动画参数、动态 topology、frame seed 与 Mask。expanded schedule/use-count 驱动精确去重和 live-set；完整请求超出 grant 时会在最多 4,096 个非重叠 tile 内自动执行。`PreparedMaskRaster` 按每个可达时间上下文准备 Path/BVH，以全局坐标、受限 row scratch 和合作取消服务 direct/tiled 路径；Blur/Vignette/Grain、Mask、含 Dissolve 的 temporal DAG、signed multi-tap、sampled upstream 参数差异、同代 topology 复用及换代清空均有 evidence。异构 CPU prefix 已按唯一 value plan 执行 source-closed DAG 与 fan-out/join live-set，提交开始后的取消、GPU 或证据失败是本次 attempt 终态，不隐式整图 CPU 重跑 | Temporal 与异构仍是 bounded execution：internal same-stage temporal address、unbounded/stateful、GPU DAG/multi-transfer、temporal×heterogeneous 和 GPU parity 未闭合。后续必须以生产有限时域/扩大 ROI Processor、嵌套和更多 placement 为输入，证明 exact window、halo/full-frame/unknown、continuity、resource lifetime、seek/cancel 与 CPU/GPU reference parity；缺少 exact mode、live-set 或 Adapter 时在像素执行前阻止。Log/HDR 仍需独立 reference | L1+ 唯一 IR、Prepared closure、精确 ROI、effected temporal upstream、owner-scoped temporal topology、受限自动切片与 bounded temporal DAG scalar 边界闭合；通用 Temporal/ROI/异构执行未完成 |
+| 渲染与色彩 | Preview/Export 共用按 Sequence/Registry revision 与作者 fingerprint 绑定的不可变 `PreparedVisualProgram`；逐帧 `PreparedVisualFrameClosure` 固定 nested time、canvas/color、Transition/temporal binding 与 instance path，区间 `PreparedVisualRangeClosure` 固定 selected-range 的媒体、Transition 和字体依赖。`CompiledEffectGraph` 是唯一生产 IR，动态 topology/cache 只驻留于调用方 `EffectExecutionSession`。生产帧入口由 `TimelineCompositeScratch` 一次绑定 Generation，并用同一 Session 完成普通 Render Plan 求值、全部 temporal root/sample 精确时刻重求值及后续像素执行；Preview/Export 不再拼接无 Session 的第二套 temporal 准备。有限时域 CPU-F32 执行把根图、精确请求、按 `(Clip time, graph value)` 寻址的 time-expanded program 与原始 Source demand 冻结为一个对象；temporal tap 可采样稳定 Definition-stage input，并在各采样时刻从同一 Prepared Effect Program 重求值全部上游效果、动画参数、动态 topology、frame seed 与 Mask。expanded schedule/use-count 驱动精确去重和 live-set；完整请求超出 grant 时会在最多 4,096 个非重叠 tile 内自动执行。`PreparedMaskRaster` 按每个可达时间上下文准备 Path/BVH，以全局坐标、受限 row scratch 和合作取消服务 direct/tiled 路径；Blur/Vignette/Grain、Mask、含 Dissolve 的 temporal DAG、signed multi-tap、sampled upstream 参数差异、同代 topology 复用及换代清空均有 evidence。异构 CPU prefix 已按唯一 value plan 执行 source-closed DAG、synthetic MaskSource 与 fan-out/join live-set；Mask preparation/raster 保留 attempt 的取消/deadline 原因，提交开始后的取消、GPU 或证据失败是本次 attempt 终态，不隐式整图 CPU 重跑 | Temporal 与异构仍是 bounded execution：internal same-stage temporal address、unbounded/stateful、GPU DAG/multi-transfer、temporal×heterogeneous 和 GPU parity 未闭合。后续必须以生产有限时域/扩大 ROI Processor、嵌套和更多 placement 为输入，证明 exact window、halo/full-frame/unknown、continuity、resource lifetime、seek/cancel 与 CPU/GPU reference parity；缺少 exact mode、live-set 或 Adapter 时在像素执行前阻止。Log/HDR 仍需独立 reference | L1+ 唯一 IR、Prepared closure、精确 ROI、effected temporal upstream、owner-scoped temporal topology、受限自动切片与 bounded temporal DAG scalar 边界闭合；通用 Temporal/ROI/异构执行未完成 |
 | 效果与动画 | 稳定 Effect/Parameter/Keyframe 身份、版本化 Parameter Schema、Property/Animation、DAG、Mask 和 plugin definition/DSL 已接入。一次关键帧手势产生一次事务并保留 Bezier handle/flags；非法参数和未知定义失败关闭。Basic Title 与 Cross Dissolve 已贯通作者、Undo、保存重开和共享 Preview/Export 路径；效果库只展示可构图定义 | 仍须以 Ease/handle、copy/paste/reset、长文本/缺字、真实媒体/嵌套 Transition 及首批算子为输入，逐项证明产品可选、图可执行、CPU/GPU backend、缓存失效、Preview/Export parity 和独立视觉 reference；没有 render op 或 backend 的 definition 必须保持 blocked | L1 地基；首批算子与产品广度未完成 |
 | 音频 | 当前 document v22 承载规范 signal layout、Component matrix、typed Route/send、Rack、Automation 与 Transition；Track→Clip 是 placement SSOT。播放、导出、Audition、Analysis 和嵌套共用 `compile → prepare → Session → Runtime`；dense schedule、PDC、tail、lookahead 和 Processor Host 均有显式预算，callback 不扫描作者图、不分配、不做 I/O 或隐式 clipping。Clip gain/pan/fade 已有类型化作者事务、Undo 与保存重开 | 仍须以多布局设备、首个生产级非零算法延迟 Processor、stateful reverse、sidechain、limiter/true-peak/响度和完整 Rack/Automation UI 为输入，证明 layout negotiation、PDC/entry/tail、实时 deadline、嵌套与播放/导出 PCM 一致；不支持布局或预算必须带原因拒绝。当前工作树真实 CPAL/A/V 长时、多设备及声学 loopback 门禁待重跑 | L1+ 执行地基；产品编辑与发布设备证据未完成 |
 | 导出 | 产品/Headless 共用内建 preset 目录和单一 delivery resolver；App 预检、队列、执行与完成 probe 共用容器、codec/profile、位深、range、chroma、Alpha、fps、画幅、色彩目标及音频合同。`Completed` 只有在 Required/Forbidden stream、mux、CICP/range、时长、stream-local PTS/time-base 和音频格式均有精确证据后发布；不可变快照冻结媒体画幅、Program Output/Color Engine 与执行 closure，目标尺寸进入 decode cache identity | 仍须以长 Work Area、变帧率/重采样、多布局、覆盖目标、失败重试、磁盘失败和取消为输入，证明 H.264/AAC 与 HEVC Main10 的像素/音频 roundtrip、A/V 边界、色彩/Alpha/位深、失败清理和 durable publication；GOP/二遍、硬编、图像序列和专业中间格式只有具备 capability probe、独立 reference 与重导入证据才可开放 | L1+ 交付合同闭合；长项目与发布机证据未完成 |
 | 自研 UI | winit/wgpu 产品入口、retained widget、主题 token、事件/焦点/IME、Dock、面板和大量组件测试已建立 | 交互一致性和无障碍仍需真实工作流验证；产品字符串大量硬编码，中英文混用，尚无 message ID/pseudo-locale 基础 | L1-；i18n 为 L0 |
 | 插件 | 内部效果 definition、graph DSL、能力/缓存/失败隔离契约已有；plugin contract 已成为不可变 `EffectDefinition` 的一部分，不再由平行全局合同注册表提供，运行期 quarantine 只按精确 Definition Registry generation 记录，不能污染同 key 的替换定义 | 尚无稳定外部 ABI、包加载/权限/进程隔离/兼容矩阵；generation-scoped quarantine 也不是外部插件 host，当前只能称内部扩展接缝 | L0 |
 | AI | Provider trait、workflow schema 与 fail-closed orchestrator 存在；没有生产 Adapter 时，未知/未绑定 Provider 与 `place_on_timeline` 都返回结构化失败，且不会发布虚假的 step/workflow completion | 尚无生产 Provider 或 UI-independent typed editor Action Adapter，不进入核心发布承诺 | L0 |
-| 跨平台 | 平台 trait、Noop adapter、Windows 实现、非 Windows 的明确 unsupported 结果已存在；Linux 独立 App UI Gate 运行 `mondrian-app --all-targets`，Windows 矩阵以非增量、单 Cargo 作业运行同一完整 App 测试并编译 feature-gated `mondrian-golden` 产品验证入口，避免 default/validation 混合 feature 的 MSVC 增量链接产物充当门禁证据并约束 16 GiB 证据机峰值内存 | 原生硬解/显示管理主要为 Windows；macOS/Linux 产品入口、安装和真实 GPU/音频门禁未完成 | 接缝存在，实现后置 |
+| 跨平台 | 平台 Interface、Noop/headless Adapter、winit/wgpu 产品入口和 Windows/macOS/Linux 显示探测已有真实代码；常规 CI 已配置三平台 workspace 与完整 App 产品路径，Linux 另有 App UI Gate，Release 也构建三平台 | 新增 macOS Gate 尚待远端实际通过；原生硬解、低拷贝、音频/显示设备与安装发布能力仍明显偏 Windows，Linux/macOS 的部分路径只会结构化 unsupported，尚不满足“生产实现已闭合”。应在 M1/M2 内逐项补齐 Vulkan/Metal、VideoToolbox/VA-API、音频与显示 Adapter；真实硬件资格可暂不阻止 Windows Alpha/Beta | 共享契约与三平台静态门禁成立；多平台实现未闭合，不再后置到 M4 |
 
 本轮音频执行需求已收敛为编译后 Signal Closure 产生的
 [`AudioProgramExecutionDemand`](../crates/mondrian-audio/src/plan.rs)
@@ -155,9 +155,9 @@ Parameter Schema
         └── Future plugin adapter
 
 Platform Capability Contract
-        ├── Windows adapters（当前）
-        ├── macOS adapters（后续）
-        └── Linux adapters（后续）
+        ├── Windows adapters（D3D12/Vulkan、原生媒体与设备）
+        ├── macOS adapters（Metal、VideoToolbox 与平台设备）
+        └── Linux adapters（Vulkan、VA-API 与平台设备）
 ```
 
 ### 3.1 项目文档与迁移
@@ -228,9 +228,10 @@ Platform Capability Contract
 ### 3.7 平台与原生后端
 
 - `cfg(target_os)` 和 OS handle 只存在于平台、媒体/渲染原生后端或应用启动适配器；核心模型和 Widget 不含平台分支。
-- Windows、Noop/headless 是当前真实适配器；macOS/Linux 后续实现同一 capability contract，不复制业务逻辑。
-- Unsupported、degraded、ready 都是结构化能力状态。非 Windows 先返回明确 unsupported，也不能假装成功或静默使用错误格式。
+- Windows、macOS、Linux 与 Noop/headless 都必须实现同一小型 Platform Capability Interface，不复制业务逻辑。D3D12、Vulkan、Metal、VideoToolbox、VA-API 等具体类型和同步原语只能留在对应 Adapter；共享 Renderer/Media Interface 只携带类型化能力、资源身份、同步义务和执行证据。
+- Unsupported、degraded、ready 都是结构化能力状态。某个平台尚无正确的原生低拷贝或 HDR 路径时可以回到语义正确的 CPU/upload/SDR 路径或明确阻止，但不能假装成功、静默使用错误格式，或把缺失 Adapter 当作长期平台策略。
 - 项目文件、时间线语义、效果参数和 golden frame 期望不因平台分叉；允许后端性能不同，不允许结果语义未经说明地不同。
+- M1/M2 的跨平台工程门禁至少包括三平台产品入口编译、共享 CPU reference、平台能力合同、无平台类型泄漏和 Adapter failure/degrade 测试；Windows 另承担当前真实 GPU、硬解、音频、显示和长时运行资格。缺少 Linux/macOS 实机证据必须明确记录为资格缺口，不能反向降低其生产实现要求。
 
 ---
 
@@ -440,9 +441,9 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 - 音频时钟、video target selection 和 fallback 决策可由结构化报告关联到同一次播放。
 - corpus、Golden/Stress 项目和参考机都有可复现说明，不是空 README。
 
-## M1 — Windows Alpha：完成 5 分钟真实项目
+## M1 — Alpha（Windows 实机资格）：完成 5 分钟真实项目
 
-**目标：** 一个不理解内部架构的用户能独立完成包含常见 SDR/HDR、音频、标题、转场、基础效果和关键帧的 5 分钟项目，并得到可重复导出。
+**目标：** 一个不理解内部架构的用户能独立完成包含常见 SDR/HDR、音频、标题、转场、基础效果和关键帧的 5 分钟项目，并得到可重复导出。产品实现和 Interface 同时面向 Windows、Linux、macOS；本阶段只要求 Windows 完成真实设备与长时运行资格。
 
 ### 项目与素材
 
@@ -494,12 +495,13 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 
 ### 退出门槛
 
+- Windows、Linux、macOS 的产品入口与共享 CPU reference 在常规 CI 中编译/测试；各平台图形、媒体、音频和显示 Adapter 的 capability/fallback/blocked 结果均为类型化且不改变项目、时间、色彩或 Alpha 语义。Linux/macOS 缺少真实设备报告不阻止 Windows Alpha，缺少生产 Adapter 或平台专属类型泄漏则阻止。
 - [ ] 最终候选的 `windows-alpha-golden-v11`/schema v4 完整工作流按第 5.2 节连续 3 次通过；每轮使用独立 run/Project identity，七个 stage 绑定同一 Hero，最终仅保留 Hero 与一个强引用 child，并观察全部切片、constant-retime 反事实、Preview/Export/Headless/重导入证据。当前工作树未重跑，不继承旧运行状态。
 - 达到第 5.4 节 4K 播放、seek、UI 响应、30 分钟同步和导出门槛。
 - 所有运行路径被分类为 Verified、Explicitly degraded 或 Blocked/Unresolved。
 - 已知 P0 数据损坏、错误色彩、A/V 失步和不可取消卡死为零。
 
-## M2 — Windows Beta：生产可靠性与完整编辑体验
+## M2 — Beta（Windows 实机资格）：生产可靠性与完整编辑体验
 
 **目标：** 用户可以把 Mondrian 用于较长真实项目，升级、恢复和交付风险可控，常用编辑不再表现为“播放器加轨道”。
 
@@ -525,7 +527,7 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 
 ## M3 — 专业能力深化与互操作
 
-**目标：** 在 Windows Beta 闭环稳定后，按真实工作流把少数模块做深；扩展建立在 M0 接缝上，不重写核心项目/时间/帧/参数模型。
+**目标：** 在 Beta 闭环稳定后，按真实工作流把少数模块做深；扩展建立在 M0 接缝上，不重写核心项目/时间/帧/参数模型。
 
 ### 优先方向
 
@@ -542,18 +544,18 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 - 外部交换/插件不能使未知参数或不支持效果静默丢失；必须保留 metadata 或生成 loss report。
 - 新后端不得复制 preview/export 解释逻辑，不得绕过参数和帧契约。
 
-## M4 — 跨平台实现与长期扩展
+## M4 — 多平台实机资格、发布工程与长期扩展
 
-**目标：** 在 Windows 产品和平台接缝被真实验证后，为 macOS/Linux 增加适配器，并持续改善效果、性能和交互，而不是分叉产品模型。
+**目标：** 在 M1/M2 已共用的 Windows、macOS、Linux 生产实现上补齐非 Windows 真实设备、性能、安装和发布资格，并持续改善效果、性能和交互；M4 不承担“首次让核心架构跨平台”的补课工作。
 
-### macOS/Linux 交付顺序
+### macOS/Linux 资格闭合顺序
 
-1. 构建、启动、项目/时间线/CPU reference 路径。
-2. 文件/剪贴板/通知/显示 profile/日志/安装适配器。
-3. 音频设备和 audio-master playback。
-4. 原生硬解与 GPU residency：VideoToolbox/CVPixelBuffer、VA-API/DMABUF 等。
-5. SDR display/output parity。
-6. 平台 HDR/EDR，只在完整显示 payload 与真实设备门禁成立后发布。
+1. 在真实发行版/硬件上复核既有构建、启动、项目/时间线、CPU reference 与故障诊断。
+2. 取得文件/剪贴板/通知/显示 profile/日志/安装 Adapter 的真实桌面环境证据。
+3. 取得音频设备、Audio Device Clock 与 Synthetic Clock Master handoff 的长时证据。
+4. 取得原生硬解与 GPU residency 证据：VideoToolbox/CVPixelBuffer、VA-API/DMABUF 等。
+5. 取得 Vulkan/Metal SDR display/output、device-loss 和 Preview/Export parity 证据。
+6. 平台 HDR/EDR 只在完整显示 payload 与真实设备门禁成立后发布。
 
 ### 跨平台门槛
 
@@ -566,9 +568,9 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 
 ## 7. 接下来 90 天
 
-这 90 天只有一个主里程碑：通过 M1 Windows Alpha 的完整退出门槛。
+这 90 天只有一个主里程碑：通过 M1 Alpha 的完整退出门槛，其中真实设备资格以 Windows 为准，生产实现与常规 CI 仍覆盖 Windows、Linux、macOS。
 验证/性能作为并行证据线，小型基础设施只服务于可复现报告；不同时开启
-外部插件、RAW、动态 HDR 或 macOS/Linux 产品化。
+外部插件、RAW、动态 HDR 或 macOS/Linux 实机发布资格。
 
 ### 第 1–3 周：封存本轮架构基线
 
@@ -584,7 +586,7 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 
 - 让 temporal frame provider 从 `EffectExecutionDemand` 扩展根与嵌套 Sequence 的精确输入窗口，并定义 seek、重入、source/Clip handle 边界解析、缓存身份和取消语义；通用 planner 保留 signed owner-domain 时间，不得把素材边界策略泛化为时间零点 clamp。
 - 已让 CPU-F32 scalar executor 消费同一 demand：精确输入 tile 保留完整画布坐标，有限核消费实现推导 halo，full-frame/unknown 证据不降级。根图、请求、按 `(Clip time, graph value)` 寻址的 time-expanded program 与 Source demand 现被冻结为单一 `PreparedEffectTemporalExecution`；temporal tap 按稳定 Definition-stage input 寻址，跨时间边严格前移 stage，并从同一 Prepared Effect Program 在采样时刻重求值上游动画参数、动态 topology、frame seed 与 Mask。stage contract 漂移、超出声明 temporal/spatial coverage、internal same-stage address、超过 512 contexts/65,536 values 均在像素前失败。expanded schedule/use-count 的纯 dry-run 与执行共同驱动 last-use move、fan-out clone 和 Blend/MultiInput/Mask join；精确重复 graph/source value 只保留到最后 edge。需求批次在物化前给出精确 Float32 source coverage，Preview/Export 先做 CPU grant 准入；Effect Session 再把 retained coverage、每个可达时间上下文的 Prepared Mask geometry/row scratch、resident value、kernel scratch、唯一 final output 和单 tile live-set 纳入同一硬上限。完整请求不能直接容纳时，Session 自动生成确定性、非重叠、最多 4,096 块的二维计划；取消或任何计划/账本失败都不发布半帧或局部缓存，最终 `Vec` 进入 `Arc<Vec<_>>` 不复制整帧像素。Blur/Vignette/Grain/Mask、signed temporal fan-out/join DAG、重复 future sample、坐标种子 Dissolve 和采样时刻参数差异已有 production/reference evidence；Timeline 门禁证明 future offset 经过 Clip retime 只映射一次且 upstream stage 可进入同一生产批次。allocation-free UHD 门禁证明两帧 pixel-local 请求在标准 384 MiB grant 下形成 64 个 `480x270` tile，逻辑峰值 402,278,400 bytes。下一步是不改变该语义参考地补真实 4K 进程内存/吞吐 evidence、unbounded/stateful continuity、internal same-stage temporal semantics、temporal×heterogeneous 与 CPU/GPU parity；不得用错误裁剪像素或隐式整图 fallback 换取性能。
-- 以已经接入 Preview/Export UI 无关生产调度的 bounded CPU-F32-DAG→GPU-F32-tail route 为执行基线：`PreparedHeterogeneousEffectRoute` 已在媒体物化前冻结图、extent、budget、source-closed CPU dispatch DAG、单次 upload 与 fused unary GPU tail，Preview/Export worker 只绑定像素和执行。CPU Implementation 直接消费唯一 graph-value plan 的 materialization input/output，按精确 use-count 对 fan-out clone、last-use move 与 Blend/MultiInput/Mask join 做 live-set 管理，copy/kernel 共享合作取消 checkpoint，并把优化后的峰值帧数与 kernel scratch 纳入 Effect Session；Gaussian→Basic Correction/Grain 与 CPU fan-out/Blend→GPU point tail 均有 scalar-reference evidence。Preview 根节点持有逐 placement 路线账本，当前嵌套 child 物化继续要求完整 CPU 路线。下一步沿唯一 `CompiledEffectGraph` 深化 GPU DAG tail/多次 transfer、可取消的 synthetic Mask raster、嵌套 Viewer 物化、更多 placement、颜色域转换、外部 lane executor，以及 temporal×heterogeneous 组合。现有 Preview worker/completion lease 与 Export attempt-local upload/dispatch/wait/readback 不能被第二套 runtime 取代。Linear Stage Placement 不参与执行；缺少 exact mode、已声明 transfer、具体 Adapter 或可证明 live-set 时必须在像素执行前类型化拒绝，异构提交开始后不做隐式整图 CPU fallback。
+- 以已经接入 Preview/Export UI 无关生产调度的 bounded CPU-F32-DAG→GPU-F32-tail route 为执行基线：`PreparedHeterogeneousEffectRoute` 已在媒体物化前冻结图、extent、budget、source-closed CPU dispatch DAG、单次 upload 与 fused unary GPU tail，Preview/Export worker 只绑定像素和执行。CPU Implementation 直接消费唯一 graph-value plan 的 materialization input/output，按精确 use-count 对 fan-out clone、last-use move、synthetic MaskSource 与 Blend/MultiInput/Mask join 做 live-set 管理；copy/kernel/Path-BVH/Mask raster 共享 attempt checkpoint，并把优化后的峰值帧数、Mask retained geometry/row scratch 与 kernel scratch 纳入 Effect Session。Gaussian→Basic Correction/Grain、CPU fan-out/Blend→GPU point tail 与 generated Mask/Mask→GPU point tail 均有 scalar-reference/stop evidence。Preview 根节点持有逐 placement 路线账本，当前嵌套 child 物化继续要求完整 CPU 路线。下一步沿唯一 `CompiledEffectGraph` 深化 GPU DAG tail/多次 transfer、嵌套 Viewer 物化、更多 placement、颜色域转换、外部 lane executor，以及 temporal×heterogeneous 组合。现有 Preview worker/completion lease 与 Export attempt-local upload/dispatch/wait/readback 不能被第二套 runtime 取代。Linear Stage Placement 不参与执行；缺少 exact mode、已声明 transfer、具体 Adapter 或可证明 live-set 时必须在像素执行前类型化拒绝，异构提交开始后不做隐式整图 CPU fallback。
 - 以至少一个需要有限历史的 Processor 和一个扩大 ROI 的 Processor 证明 Preview/Export 共用相同 IR、嵌套闭包和结果；stateful Processor 必须有连续性 Session 或保持阻塞。
 
 **阶段门槛：** Temporal/ROI/异构能力不再只有 Demand 与 placement evidence；所选证明算子在 Preview、Export、seek、取消、嵌套和 reference parity 中全部闭合，其他未实现合同继续失败关闭。
@@ -606,7 +608,7 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 - 完成 H.264/AAC 与 HEVC Main10 的长项目 roundtrip、A/V 边界、色彩/Alpha/位深、取消、失败清理和发布后校验。
 - 在最终候选构建上让完整 Golden Project 监督器连续三轮通过；隔离 slice、旧构建或测试专用解释均不能拼成完成证据。
 
-**90 天退出目标：** M1 Windows Alpha 全部门槛有版本化证据；若任一 P0/P1 未闭合，继续修复同一里程碑，不以新增效果、格式、平台或类型数量宣布下一阶段。
+**90 天退出目标：** M1 Alpha 全部门槛有版本化证据，Windows 实机矩阵完成且三平台工程门禁通过；若任一 P0/P1 未闭合，继续修复同一里程碑，不以新增效果、格式、平台或类型数量宣布下一阶段。
 
 ---
 
@@ -616,7 +618,7 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 
 - 完整相机 RAW 与所有厂商色彩生态。
 - 动态 HDR10+、Dolby Vision、专业 SDI 和广泛显示校准产品化。
-- macOS EDR、Linux HDR，以及 Windows Beta 前的多平台同时发布。
+- macOS EDR、Linux HDR，以及 Beta 前的多平台同时发布。
 - OpenFX、VST3、CLAP 等外部插件 host 和稳定二进制 ABI。
 - 复杂 3D tracking、实时高阶 tracking、表达式和程序化 rig。
 - 多人实时协作、云媒体/分布式缓存、审片平台深度集成。

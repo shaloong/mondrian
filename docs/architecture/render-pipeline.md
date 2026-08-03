@@ -306,9 +306,11 @@ primitives, admits the exact live-frame/kernel-scratch peak, and leaves one
 explicit upload pending. Gaussian Blur followed by the exact Basic
 Correction/Grain fused GPU point tail remains the spatial gate; a CPU
 fan-out/Blend join followed by one GPU point operation proves that the prefix
-is no longer flattened into a unary chain. Synthetic Mask raster sources, GPU
-DAG tails, and more than one backend transfer still fail before pixel
-execution. The returned evidence distinguishes completed CPU work from
+is no longer flattened into a unary chain. A generated MaskSource/Mask join is
+also executable in that prefix: its geometry preparation and raster loop use
+the attempt's checkpoint Seam, and its retained geometry plus maximum row
+scratch are charged beside the live pixel frames. GPU DAG tails and more than
+one backend transfer still fail before pixel execution. The returned evidence distinguishes completed CPU work from
 pending upload and GPU output tokens.
 
 Export submits that route through its job-local

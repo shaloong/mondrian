@@ -1276,6 +1276,27 @@ impl EffectGraphBuilderState {
         id
     }
 
+    /// Add one synthetic Mask raster value with no graph-value inputs.
+    ///
+    /// The returned alpha-domain value must be consumed by an explicit Mask
+    /// or other compatible compositing node. Preparation and execution remain
+    /// subject to the owning Effect stage's declared modes and resource
+    /// contract.
+    pub fn add_mask_source(
+        &mut self,
+        shape: crate::mask::MaskShape,
+        feather: f32,
+        expansion: f32,
+        opacity: f32,
+    ) -> EffectGraphNodeId {
+        let id = self.alloc_id();
+        self.graph.nodes.push(EffectGraphNode {
+            id,
+            kind: EffectGraphNodeKind::MaskSource { shape, feather, expansion, opacity },
+        });
+        id
+    }
+
     pub fn set_current_output(&mut self, node_id: EffectGraphNodeId) {
         self.current_output = node_id;
     }

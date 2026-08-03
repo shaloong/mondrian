@@ -1,9 +1,8 @@
 //! Immutable flattened Path geometry and exact nearest-segment acceleration.
 
-use super::{mask_raster_checkpoint, MaskRasterError};
+use super::{controlled_checkpoint, ControlledMaskRasterError, MaskRasterError};
 use crate::mask::BezierPoint;
 use glam::Vec2;
-use mondrian_core::ExecutionCancellationToken;
 
 const BEZIER_SUBDIVISIONS: usize = 8;
 const BVH_LEAF_SEGMENTS: usize = 8;
@@ -18,6 +17,23 @@ pub(super) struct PreparedPath {
 }
 
 impl PreparedPath {
+    pub(super) fn required_max_row_scratch_bytes(
+        point_count: usize,
+        closed: bool,
+    ) -> Result<usize, MaskRasterError> {
+        let pair_count = match point_count {
+            0 | 1 => 0,
+            count if closed => count,
+            count => count - 1,
+        };
+        pair_count
+            .checked_mul(BEZIER_SUBDIVISIONS)
+            .and_then(|segments| segments.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or(MaskRasterError::GeometrySizeOverflow {
+                reason: "Path row scratch byte count overflowed",
+            })
+    }
+
     pub(super) fn required_retained_bytes(
         point_count: usize,
         closed: bool,
@@ -52,12 +68,12 @@ impl PreparedPath {
             })
     }
 
-    pub(super) fn prepare(
+    pub(super) fn prepare_controlled<E>(
         points: &[BezierPoint],
         closed: bool,
-        cancellation: &ExecutionCancellationToken,
-    ) -> Result<Self, MaskRasterError> {
-        mask_raster_checkpoint(cancellation)?;
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Self, ControlledMaskRasterError<E>> {
+        controlled_checkpoint(checkpoint)?;
         if points.is_empty() {
             return Ok(Self {
                 point: None,
@@ -87,7 +103,7 @@ impl PreparedPath {
         )?;
         let mut segments = Vec::with_capacity(segment_count);
         for index in 0..pair_count {
-            mask_raster_checkpoint(cancellation)?;
+            controlled_checkpoint(checkpoint)?;
             let next = if index + 1 < points.len() {
                 index + 1
             } else {
@@ -101,7 +117,7 @@ impl PreparedPath {
             })?;
         let mut nodes = Vec::with_capacity(node_capacity);
         let segment_len = segments.len();
-        let root = build_bvh(&mut segments, &mut nodes, 0, segment_len, cancellation)?;
+        let root = build_bvh_controlled(&mut segments, &mut nodes, 0, segment_len, checkpoint)?;
         Ok(Self {
             point: None,
             segments,
@@ -267,14 +283,14 @@ impl Bounds {
     }
 }
 
-fn build_bvh(
+fn build_bvh_controlled<E>(
     segments: &mut [PathSegment],
     nodes: &mut Vec<BvhNode>,
     start: usize,
     end: usize,
-    cancellation: &ExecutionCancellationToken,
-) -> Result<usize, MaskRasterError> {
-    mask_raster_checkpoint(cancellation)?;
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<usize, ControlledMaskRasterError<E>> {
+    controlled_checkpoint(checkpoint)?;
     let bounds = segments[start..end]
         .iter()
         .map(|segment| segment.bounds)
@@ -300,8 +316,8 @@ fn build_bvh(
             .sort_unstable_by(|left, right| left.centroid.y.total_cmp(&right.centroid.y));
     }
     let middle = start + (end - start) / 2;
-    let left = build_bvh(segments, nodes, start, middle, cancellation)?;
-    let right = build_bvh(segments, nodes, middle, end, cancellation)?;
+    let left = build_bvh_controlled(segments, nodes, start, middle, checkpoint)?;
+    let right = build_bvh_controlled(segments, nodes, middle, end, checkpoint)?;
     nodes[node_id].kind = BvhNodeKind::Branch { left, right };
     Ok(node_id)
 }

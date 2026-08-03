@@ -298,8 +298,13 @@ fused GPU point plan; a second gate proves source fan-out, independent unary
 branches, a Blend join, exact last-use release, and the joined value entering
 the same GPU tail. Unary, Blend, nonempty MultiInput, and Mask nodes with an
 already materialized matte use the same Float32 pixel primitives as the scalar
-reference. A synthetic `MaskSource` remains blocked because its raster
-Implementation cannot yet observe the caller's checkpoint during all work.
+reference. Synthetic `MaskSource` nodes are zero-input CPU DAG values: Path/BVH
+preparation and full-frame Float32 rasterization consume a generic checkpoint
+Seam, so token-backed temporal execution and deadline-backed heterogeneous
+execution share one Implementation without flattening the latter's exact stop
+reason. Prepared geometry, maximum row scratch, raster output live-set, and
+kernel scratch are all included in the same checked Session demand; a stop
+returns neither partial pixels nor a completion token.
 Its result carries the CPU pixels, Session generation,
 the immutable graph-value plan, completed CPU token, required upload wait, and
 still-pending GPU-input/output tokens. An Adapter therefore receives the exact
@@ -309,7 +314,7 @@ Preparation compiles exact CPU materialization use counts, rejects any input
 that is not produced by the source-closed prefix, and proves that the only
 remaining live CPU value is the transfer source. Runtime moves last-use values,
 clones only fan-out values with future consumers, releases join inputs, and
-checks the resulting peak plus Gaussian/Sharpen scratch against the bound
+checks the resulting peak plus Mask geometry/row scratch and Gaussian/Sharpen scratch against the bound
 Effect Execution Session before allocation. Input and fan-out copies observe
 the same fixed-size cooperative checkpoints as long-running kernels. GPU DAG
 tails, multiple transfers, color-domain conversion, temporal/stateful work,

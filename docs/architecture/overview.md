@@ -142,7 +142,7 @@ Lower layers cannot depend on higher layers:
   closed. UI admission reads an App-owned interaction projection rather than
   traversing authoring or execution internals. A custom slice may be replaced
   only atomically with equivalent typed behavior.
-- Platform services are injected into event/app layers; widgets never call OS APIs directly.
+- Platform services are injected into event/app layers; widgets never call OS APIs directly. Windows, macOS, Linux, and Headless implement one Platform Execution Contract throughout M1/M2. D3D12, Vulkan, Metal, native media surfaces, window-system objects, audio devices, and display payloads remain concrete Adapter details; shared Project, Timeline, Playback, Audio, Effects, Color, Viewer, and Export Interfaces carry only typed capability, ownership, synchronization, fallback, and terminal evidence. Windows is the current real-device qualification platform, not the semantic owner of the production Implementation.
 - `mondrian-core::ExecutionCancellationToken` is the payload-agnostic monotonic cancellation primitive. Domain schedulers own when to cancel; lower execution and media Adapters only observe it. Reusing or resetting a canceled token is forbidden.
 - Native process-memory observation is a separate read-only `ProcessMemoryProbe`
   Seam with non-interchangeable `CurrentProcess` and `ProductProcessTree`
