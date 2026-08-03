@@ -511,14 +511,15 @@ Track creation/removal updates the keyed mixer state and default route in the
 same Sequence mutation. Validation rejects a snapshot when the two sets differ.
 See [Audio Pipeline](audio-pipeline.md) for the author/compiler boundary.
 
-All Processor authoring enters the atomic `AudioProcessorRackEditRequest`
+Processor topology, bypass, and unkeyed parameter authoring enter the atomic `AudioProcessorRackEditRequest`
 Interface. Its address is either one `AudioProcessingScopeId`, or the typed
 pair `(Track | Bus | ProgramOutput, PreFader | PostFader)`; invalid combinations
 such as a post-fader Processing Scope cannot be represented. Insert and reorder
 use `End` or `Before(AudioProcessorInstanceId)`, never a transient array index.
-Remove, bypass, and parameter edits address stable Processor, Parameter, and
-Keyframe IDs. A parameter gesture mutates one exact curve operation rather than
-replacing a UI-cached whole Rack or curve.
+Remove, bypass, and unkeyed parameter edits address stable Processor and
+Parameter IDs. Keyed parameter edits enter the unified
+`AudioAutomationEditRequest` Interface rather than widening the Rack algebra or
+replacing a UI-cached whole curve.
 
 Read-only product projection enters through the paired
 `inspect_audio_processor_rack` Interface. It resolves the typed address,
@@ -531,7 +532,7 @@ an invalid address remains a typed error rather than disappearing from UI.
 
 Input trim and fader are normative Channel Strip stages, not generated Gain
 Processors. Their separate `AudioChannelStripEditRequest` Interface addresses a
-typed Track, Bus, or Program Output owner and performs exact static/fader-curve
+typed Track, Bus, or Program Output owner and performs exact static-stage
 operations. Read-only inspection distinguishes invalid owner identity from a
 valid but locked Track. Static fader editing fails while its exact Sequence-time
 automation is authoritative, and removing the final key canonicalizes the curve
@@ -541,7 +542,7 @@ creating parallel signal-state authorities.
 
 Bus and Route collections are likewise not public mutation surfaces.
 `AudioRoutingEditRequest` is the sole authoring Interface for Bus lifecycle,
-typed Route endpoints, enabled state, static/automated send level, and stable
+typed Route endpoints, enabled state, static send level, and stable
 Route identity. Principal paths and parallel sends are the same `AudioRoute`
 type. Bus deletion names its strong-reference disposition explicitly; a
 disconnecting delete removes the Bus and every incident Route in one candidate,
@@ -554,6 +555,18 @@ Track locks and treats enabled and disabled Routes as structural edges, so
 callers can test many additions in constant time without copying the Sequence
 or recreating Routing rules. This projection is advisory for interaction;
 commit-time complete Audio Program validation remains authoritative.
+
+All audio keyframes use one additional Timeline Interface:
+`AudioAutomationTarget` closes over Component volume/pan, Processing Scope input
+gain, Channel Strip fader, Route gain, and Processor parameter addresses.
+`inspect_audio_automation` returns the exact `AuthoringTimeDomain`, schema range,
+curve/default authority, and lock blocker. `AudioAutomationEditRequest` then
+upserts or removes one stable `KeyframeId`, or clears explicitly, in one
+validated candidate. Component keys are Component-edit-local, shared processing
+keys are Scope-local, and mixer/Route keys are Sequence-local; a UI-normalized x
+coordinate is never persisted. Removing the last key from an optional semantic
+curve canonicalizes to its retained static value. This is the only keyed audio
+write path; Rack, Channel Strip, and Routing Interfaces do not duplicate it.
 
 The Implementation clones a structurally shared Sequence candidate, admits
 Track locks, resolves the address, performs the local mutation, and validates

@@ -379,8 +379,9 @@ Inside each migrated App slice, product meaning is carried by the closed
 scripting, and plugin transport Seam; it must not become a second product-domain
 model. The current high-frequency Timeline slice covers Clip selection, Clip
 movement, bulk trim, and seek. The closed `AudioProductAction` slice carries
-complete `AudioProcessorRackEditRequest` and `AudioChannelStripEditRequest`
-values for Clip Processing Scope, Track, Bus, and Program Output authoring. Its
+complete `AudioProcessorRackEditRequest`, `AudioChannelStripEditRequest`, and
+`AudioAutomationEditRequest` values for Clip Processing Scope, Track, Bus, and
+Program Output authoring. Its
 production constructors lower each request into one `ui.audio` external
 envelope; the App codec admits a recognized payload into the closed algebra and
 a dedicated App Module commits exactly one Sequence author transaction. Only a
@@ -403,8 +404,21 @@ same Rack sections and action factories; neither traverses audio author state to
 reconstruct admission. Numeric controls take hard/soft range, step, unit, value
 type, and animatability from `ParameterSchema`. An already-keyed curve is shown
 as automation and its fallback value is deliberately not exposed as though it
-were the playhead value; exact owner-time curve editing requires the dedicated
-automation interaction before that control becomes editable.
+were the playhead value.
+
+`app_ui::audio_automation` is the dedicated curve Adapter shared by Inspector,
+Mixer, and Rack sections. Timeline supplies the stable target, exact
+`AuthoringTimeDomain`, schema, and lock admission. The Adapter requires an
+explicit exact viewport: Sequence curves cover Sequence author time, Component
+curves cover the visible Component-local Clip span, and shared Processing Scope
+curves cover the union of current bindings. Only this viewport is normalized
+for `CurveEditor`; normalized coordinates never become author state. Virtual
+boundary anchors are read-only, real points retain `KeyframeId`, and one
+Insert/Move/Delete gesture emits at most one typed product Action on gesture
+completion. Moving a point reconstructs the exact key with its existing
+interpolation and handles before changing time/value. Static controls are
+disabled while keys are authoritative, but the exact evaluated curve remains
+visible and editable.
 
 `app_ui::audio_mixer` projects audio Tracks in Timeline order, followed by
 authored Buses and Program Outputs, each with input trim, an honest static-or-

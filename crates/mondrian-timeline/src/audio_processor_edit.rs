@@ -10,8 +10,8 @@ use crate::audio_channel_strip_edit::{
 };
 use crate::sequence::Sequence;
 use mondrian_core::{
-    AudioProcessingScopeId, AudioProcessorInstanceId, ExactAutomationKeyframe, KeyframeId,
-    MixBusId, ParameterId, ProgramOutputId, TrackId,
+    AudioProcessingScopeId, AudioProcessorInstanceId, MixBusId, ParameterId, ProgramOutputId,
+    TrackId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -62,32 +62,6 @@ pub enum AudioProcessorRackPlacement {
     },
 }
 
-/// Fine-grained mutation of one exact numeric Processor parameter curve.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
-pub enum AudioProcessorParameterEdit {
-    /// Replace only the unkeyed value, preserving every keyframe.
-    SetStaticValue {
-        /// Definition-domain numeric value.
-        value: f64,
-    },
-    /// Insert a keyframe or replace/move the keyframe with the same stable ID.
-    UpsertKeyframe {
-        /// Complete exact-time keyframe state.
-        keyframe: ExactAutomationKeyframe,
-    },
-    /// Remove exactly one keyframe by stable identity.
-    RemoveKeyframe {
-        /// Keyframe to remove.
-        keyframe_id: KeyframeId,
-    },
-    /// Remove every keyframe and install one explicit unkeyed value.
-    ClearKeyframes {
-        /// Definition-domain value retained after clearing automation.
-        default_value: f64,
-    },
-}
-
 /// One atomic edit against an addressed Audio Processor Rack.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
@@ -118,14 +92,14 @@ pub enum AudioProcessorRackEdit {
         /// New authored bypass state.
         bypassed: bool,
     },
-    /// Edit one parameter by stable definition identity.
-    EditParameter {
+    /// Replace one parameter's unkeyed value by stable definition identity.
+    SetParameterStaticValue {
         /// Processor identity to edit.
         processor_id: AudioProcessorInstanceId,
         /// Stable parameter identity captured in the instance schema.
         parameter_id: ParameterId,
-        /// Fine-grained curve mutation.
-        edit: AudioProcessorParameterEdit,
+        /// Definition-domain numeric value.
+        value: f64,
     },
 }
 
@@ -136,7 +110,7 @@ impl AudioProcessorRackEdit {
             Self::Remove { processor_id }
             | Self::Move { processor_id, .. }
             | Self::SetBypassed { processor_id, .. }
-            | Self::EditParameter { processor_id, .. } => *processor_id,
+            | Self::SetParameterStaticValue { processor_id, .. } => *processor_id,
         }
     }
 }
@@ -203,12 +177,6 @@ pub enum AudioProcessorRackEditError {
         /// Missing stable parameter identity.
         parameter_id: ParameterId,
     },
-    /// Keyframe identity is absent from the addressed parameter curve.
-    #[error("Audio Processor parameter has no keyframe {0}")]
-    UnknownKeyframe(KeyframeId),
-    /// A distinct keyframe already owns the requested exact time.
-    #[error("Audio Processor parameter already has another keyframe at the requested time")]
-    KeyframeTimeCollision,
     /// Complete resulting audio author state is invalid.
     #[error("Audio Processor Rack edit produced invalid author state: {0}")]
     AuthorState(AudioAuthoringError),
@@ -499,17 +467,17 @@ fn apply_to_rack(
             rack.processors[index].bypassed = *bypassed;
             Ok(true)
         }
-        AudioProcessorRackEdit::EditParameter { processor_id, parameter_id, edit } => {
+        AudioProcessorRackEdit::SetParameterStaticValue { processor_id, parameter_id, value } => {
             let index = processor_index(rack, *processor_id)?;
-            edit_parameter(&mut rack.processors[index], parameter_id, edit)
+            set_parameter_static_value(&mut rack.processors[index], parameter_id, *value)
         }
     }
 }
 
-fn edit_parameter(
+fn set_parameter_static_value(
     processor: &mut AudioProcessorInstance,
     parameter_id: &ParameterId,
-    edit: &AudioProcessorParameterEdit,
+    value: f64,
 ) -> Result<bool, AudioProcessorRackEditError> {
     let parameter = processor.parameters.get(parameter_id).ok_or_else(|| {
         AudioProcessorRackEditError::UnknownParameter {
@@ -518,37 +486,7 @@ fn edit_parameter(
         }
     })?;
     let mut curve = parameter.automation.clone();
-    match edit {
-        AudioProcessorParameterEdit::SetStaticValue { value } => {
-            curve.default_value = *value;
-        }
-        AudioProcessorParameterEdit::UpsertKeyframe { keyframe } => {
-            if curve
-                .keyframes
-                .iter()
-                .any(|candidate| candidate.id != keyframe.id && candidate.time == keyframe.time)
-            {
-                return Err(AudioProcessorRackEditError::KeyframeTimeCollision);
-            }
-            curve.keyframes.retain(|candidate| candidate.id != keyframe.id);
-            curve.set_keyframe(keyframe.clone()).map_err(|error| {
-                AudioProcessorRackEditError::AuthorState(AudioAuthoringError::InvalidAutomation {
-                    reason: error.to_string(),
-                })
-            })?;
-        }
-        AudioProcessorParameterEdit::RemoveKeyframe { keyframe_id } => {
-            let before = curve.keyframes.len();
-            curve.keyframes.retain(|candidate| candidate.id != *keyframe_id);
-            if curve.keyframes.len() == before {
-                return Err(AudioProcessorRackEditError::UnknownKeyframe(*keyframe_id));
-            }
-        }
-        AudioProcessorParameterEdit::ClearKeyframes { default_value } => {
-            curve.default_value = *default_value;
-            curve.keyframes.clear();
-        }
-    }
+    curve.default_value = value;
     if curve == parameter.automation {
         return Ok(false);
     }
@@ -748,7 +686,7 @@ mod tests {
     }
 
     #[test]
-    fn stable_processor_and_keyframe_identities_drive_reorder_bypass_and_parameter_edits() {
+    fn stable_processor_identities_drive_reorder_bypass_and_static_parameter_edits() {
         let (mut sequence, track_id, _) = sequence_with_audio_clip();
         let address = AudioProcessorRackAddress::ChannelStrip {
             owner: AudioChannelStripOwner::Track { track_id },
@@ -814,28 +752,14 @@ mod tests {
             &mut sequence,
             &request(
                 address,
-                AudioProcessorRackEdit::EditParameter {
+                AudioProcessorRackEdit::SetParameterStaticValue {
                     processor_id: first,
                     parameter_id: parameter_id.clone(),
-                    edit: AudioProcessorParameterEdit::SetStaticValue { value: -6.0 },
+                    value: -6.0,
                 },
             ),
         )
         .expect("static parameter");
-        let keyframe = ExactAutomationKeyframe::linear(TimelineTime::ZERO, -3.0);
-        let keyframe_id = keyframe.id;
-        apply_audio_processor_rack_edit(
-            &mut sequence,
-            &request(
-                address,
-                AudioProcessorRackEdit::EditParameter {
-                    processor_id: first,
-                    parameter_id: parameter_id.clone(),
-                    edit: AudioProcessorParameterEdit::UpsertKeyframe { keyframe },
-                },
-            ),
-        )
-        .expect("keyframe");
         let gain = audio_processor_rack(&sequence, &address)
             .expect("Rack")
             .processors
@@ -846,30 +770,7 @@ mod tests {
             gain.parameters[&parameter_id].automation.default_value,
             -6.0
         );
-        assert_eq!(
-            gain.parameters[&parameter_id].automation.keyframes[0].id,
-            keyframe_id
-        );
-
-        apply_audio_processor_rack_edit(
-            &mut sequence,
-            &request(
-                address,
-                AudioProcessorRackEdit::EditParameter {
-                    processor_id: first,
-                    parameter_id,
-                    edit: AudioProcessorParameterEdit::RemoveKeyframe { keyframe_id },
-                },
-            ),
-        )
-        .expect("remove keyframe");
-        assert!(
-            audio_processor_rack(&sequence, &address).expect("Rack").processors[1].parameters
-                [&ParameterId::new_static(GAIN_DB_PARAMETER_ID)]
-                .automation
-                .keyframes
-                .is_empty()
-        );
+        assert!(gain.parameters[&parameter_id].automation.keyframes.is_empty());
     }
 
     #[test]

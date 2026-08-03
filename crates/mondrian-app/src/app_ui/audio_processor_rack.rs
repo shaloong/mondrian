@@ -17,11 +17,14 @@ use mondrian_timeline::clip::Clip;
 use mondrian_timeline::sequence::Sequence;
 use mondrian_timeline::{
     inspect_audio_processor_rack, AudioChannelStripOwner, AudioChannelStripRack,
-    AudioProcessorParameterEdit, AudioProcessorRackAddress, AudioProcessorRackEdit,
-    AudioProcessorRackEditError, AudioProcessorRackEditRequest, AudioProcessorRackInspection,
-    AudioProcessorRackPlacement,
+    AudioProcessorRackAddress, AudioProcessorRackEdit, AudioProcessorRackEditError,
+    AudioProcessorRackEditRequest, AudioProcessorRackInspection, AudioProcessorRackPlacement,
 };
 
+use super::audio_automation::{
+    processing_scope_automation_viewport, project_audio_automation, sequence_automation_viewport,
+    AudioAutomationCurveModel, AudioAutomationViewport,
+};
 use crate::app::product_action::{AudioProcessorBuiltInPreset, AudioProcessorInsertBuiltInPayload};
 use crate::app::ui_actions::{
     audio_processor_insert_built_in_action, audio_processor_rack_edit_action,
@@ -40,6 +43,7 @@ pub(crate) struct AudioProcessorParameterModel {
     pub(crate) schema: ParameterSchema,
     pub(crate) static_value: f64,
     pub(crate) keyframe_count: usize,
+    pub(crate) automation: Option<AudioAutomationCurveModel>,
 }
 
 impl AudioProcessorParameterModel {
@@ -76,6 +80,7 @@ pub(crate) struct AudioProcessorRackModel {
     pub(crate) is_editable: bool,
     pub(crate) edit_disabled_reason: Option<String>,
     pub(crate) processors: Vec<AudioProcessorInstanceModel>,
+    pub(crate) scope_input_gain_automation: Option<AudioAutomationCurveModel>,
     pub(crate) insert_options: Vec<AudioProcessorInsertOptionModel>,
 }
 
@@ -111,13 +116,21 @@ pub(crate) fn project_audio_processor_rack(
     sequence: &Sequence,
     address: AudioProcessorRackAddress,
 ) -> AudioProcessorRackModel {
+    let automation_viewport = rack_automation_viewport(sequence, address);
     let inspection = inspect_audio_processor_rack(sequence, &address);
     let ownership_label = rack_ownership_label(sequence, address, inspection.as_ref().ok());
     let (is_editable, edit_disabled_reason, processors) = match inspection {
         Ok(inspection) => (
             inspection.is_editable(),
             inspection.edit_blocker().map(edit_blocker_label),
-            inspection.rack().processors.iter().map(project_processor).collect(),
+            inspection
+                .rack()
+                .processors
+                .iter()
+                .map(|processor| {
+                    project_processor(sequence, address, automation_viewport, processor)
+                })
+                .collect(),
         ),
         Err(error) => (
             false,
@@ -132,6 +145,19 @@ pub(crate) fn project_audio_processor_rack(
         is_editable,
         edit_disabled_reason,
         processors,
+        scope_input_gain_automation: match address {
+            AudioProcessorRackAddress::ProcessingScope { scope_id } => automation_viewport
+                .and_then(|viewport| {
+                    project_audio_automation(
+                        sequence,
+                        mondrian_timeline::AudioAutomationTarget::ProcessingScopeInputGain {
+                            scope_id,
+                        },
+                        viewport,
+                    )
+                }),
+            AudioProcessorRackAddress::ChannelStrip { .. } => None,
+        },
         insert_options: vec![
             AudioProcessorInsertOptionModel {
                 label: "增益",
@@ -210,7 +236,24 @@ fn edit_blocker_label(error: &AudioProcessorRackEditError) -> String {
     }
 }
 
-fn project_processor(processor: &AudioProcessorInstance) -> AudioProcessorInstanceModel {
+fn rack_automation_viewport(
+    sequence: &Sequence,
+    address: AudioProcessorRackAddress,
+) -> Option<AudioAutomationViewport> {
+    match address {
+        AudioProcessorRackAddress::ProcessingScope { scope_id } => {
+            processing_scope_automation_viewport(sequence, scope_id)
+        }
+        AudioProcessorRackAddress::ChannelStrip { .. } => sequence_automation_viewport(sequence),
+    }
+}
+
+fn project_processor(
+    sequence: &Sequence,
+    address: AudioProcessorRackAddress,
+    viewport: Option<AudioAutomationViewport>,
+    processor: &AudioProcessorInstance,
+) -> AudioProcessorInstanceModel {
     let definition_id = match &processor.definition {
         AudioProcessorDefinitionRef::BuiltIn { definition_id, .. } => Some(definition_id.as_str()),
         AudioProcessorDefinitionRef::Vst3 { .. } | AudioProcessorDefinitionRef::Clap { .. } => None,
@@ -222,12 +265,27 @@ fn project_processor(processor: &AudioProcessorInstance) -> AudioProcessorInstan
         parameters: processor
             .parameters
             .values()
-            .map(|parameter| AudioProcessorParameterModel {
-                parameter_id: parameter.schema.parameter_id.clone(),
-                label: parameter_label(definition_id, &parameter.schema.parameter_id),
-                schema: parameter.schema.clone(),
-                static_value: parameter.automation.default_value,
-                keyframe_count: parameter.automation.keyframes.len(),
+            .map(|parameter| {
+                let parameter_id = parameter.schema.parameter_id.clone();
+                let automation = viewport.and_then(|viewport| {
+                    project_audio_automation(
+                        sequence,
+                        mondrian_timeline::AudioAutomationTarget::ProcessorParameter {
+                            rack: address,
+                            processor_id: processor.id,
+                            parameter_id: parameter_id.clone(),
+                        },
+                        viewport,
+                    )
+                });
+                AudioProcessorParameterModel {
+                    parameter_id: parameter_id.clone(),
+                    label: parameter_label(definition_id, &parameter_id),
+                    schema: parameter.schema.clone(),
+                    static_value: parameter.automation.default_value,
+                    keyframe_count: parameter.automation.keyframes.len(),
+                    automation,
+                }
             })
             .collect(),
     }
@@ -354,10 +412,10 @@ pub(crate) fn set_static_parameter_action(
     let value = parameter.normalized_static_value(value)?;
     Some(rack_edit_action(
         rack.address,
-        AudioProcessorRackEdit::EditParameter {
+        AudioProcessorRackEdit::SetParameterStaticValue {
             processor_id: processor.processor_id,
             parameter_id: parameter.parameter_id.clone(),
-            edit: AudioProcessorParameterEdit::SetStaticValue { value },
+            value,
         },
     ))
 }
@@ -490,7 +548,7 @@ mod tests {
             Some(ProductAction::Audio(AudioProductAction::EditProcessorRack(
                 AudioProcessorRackEditRequest {
                     address: AudioProcessorRackAddress::ProcessingScope { .. },
-                    edit: AudioProcessorRackEdit::EditParameter { .. },
+                    edit: AudioProcessorRackEdit::SetParameterStaticValue { .. },
                 }
             )))
         ));

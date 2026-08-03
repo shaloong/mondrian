@@ -10,6 +10,7 @@
 //! - 时间线查询（活跃 Clip、吸附点）
 
 pub mod audio;
+pub mod audio_automation_edit;
 pub mod audio_channel_strip_edit;
 pub mod audio_processor_edit;
 pub mod audio_routing_edit;
@@ -28,6 +29,12 @@ pub mod video_transition;
 pub mod visual_schedule;
 
 pub use audio::*;
+pub use audio_automation_edit::{
+    apply_audio_automation_edit, inspect_audio_automation, AudioAutomationAddressError,
+    AudioAutomationEdit, AudioAutomationEditBlocker, AudioAutomationEditError,
+    AudioAutomationEditOutcome, AudioAutomationEditRequest, AudioAutomationInspection,
+    AudioAutomationTarget, AudioAutomationValueContract,
+};
 pub use audio_channel_strip_edit::{
     apply_audio_channel_strip_edit, audio_channel_strip, inspect_audio_channel_strip,
     AudioChannelStripAddressError, AudioChannelStripEdit, AudioChannelStripEditBlocker,
@@ -36,9 +43,9 @@ pub use audio_channel_strip_edit::{
 };
 pub use audio_processor_edit::{
     apply_audio_processor_rack_edit, audio_processor_rack, inspect_audio_processor_rack,
-    AudioChannelStripRack, AudioProcessorParameterEdit, AudioProcessorRackAddress,
-    AudioProcessorRackEdit, AudioProcessorRackEditError, AudioProcessorRackEditOutcome,
-    AudioProcessorRackEditRequest, AudioProcessorRackInspection, AudioProcessorRackPlacement,
+    AudioChannelStripRack, AudioProcessorRackAddress, AudioProcessorRackEdit,
+    AudioProcessorRackEditError, AudioProcessorRackEditOutcome, AudioProcessorRackEditRequest,
+    AudioProcessorRackInspection, AudioProcessorRackPlacement,
 };
 pub use audio_routing_edit::{
     apply_audio_routing_edit, inspect_audio_mix_bus, inspect_audio_route,

@@ -9,13 +9,10 @@ use std::collections::{HashMap, HashSet};
 
 use crate::audio::{
     AudioAuthoringError, AudioChannelStrip, AudioMixBus, AudioRoute, AudioRouteDestination,
-    AudioRouteSource, ROUTE_GAIN_DB_PARAMETER_ID,
+    AudioRouteSource,
 };
 use crate::sequence::Sequence;
-use mondrian_core::{
-    AudioRouteId, ExactAutomationCurve, ExactAutomationKeyframe, KeyframeId, MixBusId, ParameterId,
-    ProgramOutputId, TrackId,
-};
+use mondrian_core::{AudioRouteId, MixBusId, ProgramOutputId, TrackId};
 use serde::{Deserialize, Serialize};
 
 /// Explicit dependency policy for deleting one Mix Bus.
@@ -87,27 +84,6 @@ pub enum AudioRoutingEdit {
         route_id: AudioRouteId,
         /// Decibel value validated by the complete Audio Program contract.
         value: f64,
-    },
-    /// Insert, replace, or move one exact Sequence-time Route-gain keyframe.
-    UpsertRouteGainKeyframe {
-        /// Stable Route identity.
-        route_id: AudioRouteId,
-        /// Complete exact keyframe state with stable identity.
-        keyframe: ExactAutomationKeyframe,
-    },
-    /// Remove one Route-gain keyframe by stable identity.
-    RemoveRouteGainKeyframe {
-        /// Stable Route identity.
-        route_id: AudioRouteId,
-        /// Stable keyframe identity.
-        keyframe_id: KeyframeId,
-    },
-    /// Remove Route-gain automation and install an explicit static level.
-    ClearRouteGainAutomation {
-        /// Stable Route identity.
-        route_id: AudioRouteId,
-        /// Static decibel value retained after removing the curve.
-        gain_db: f64,
     },
 }
 
@@ -196,18 +172,6 @@ pub enum AudioRoutingEditError {
     /// A static Route-gain edit would change a value that is not signal authority.
     #[error("Audio Route gain automation is active; edit the curve or clear it explicitly")]
     RouteGainAutomationActive,
-    /// Keyframe identity is absent from the Route-gain automation curve.
-    #[error("Audio Route gain has no keyframe {0}")]
-    UnknownKeyframe(KeyframeId),
-    /// A distinct keyframe already owns the requested exact Sequence time.
-    #[error("Audio Route gain already has another keyframe at the requested time")]
-    KeyframeTimeCollision,
-    /// Exact automation construction or interpolation failed.
-    #[error("Audio Route gain automation is invalid: {reason}")]
-    InvalidAutomation {
-        /// Stable diagnostic detail from the exact automation contract.
-        reason: String,
-    },
     /// Complete resulting Audio Program is invalid.
     #[error("Audio Routing edit produced invalid author state: {0}")]
     AuthorState(AudioAuthoringError),
@@ -493,10 +457,7 @@ fn admit_edit(sequence: &Sequence, edit: &AudioRoutingEdit) -> Result<(), AudioR
         }
         AudioRoutingEdit::RemoveRoute { route_id }
         | AudioRoutingEdit::SetRouteEnabled { route_id, .. }
-        | AudioRoutingEdit::SetRouteGainDb { route_id, .. }
-        | AudioRoutingEdit::UpsertRouteGainKeyframe { route_id, .. }
-        | AudioRoutingEdit::RemoveRouteGainKeyframe { route_id, .. }
-        | AudioRoutingEdit::ClearRouteGainAutomation { route_id, .. } => {
+        | AudioRoutingEdit::SetRouteGainDb { route_id, .. } => {
             admit_route(sequence, *route_id)?;
             if matches!(edit, AudioRoutingEdit::SetRouteGainDb { .. })
                 && resolve_route(sequence, *route_id)?.gain_automation.is_some()
@@ -598,63 +559,6 @@ fn apply_to_candidate(
                 return Ok(AudioRoutingEditOutcome::unchanged());
             }
             route.gain_db = *value;
-            Ok(AudioRoutingEditOutcome::changed())
-        }
-        AudioRoutingEdit::UpsertRouteGainKeyframe { route_id, keyframe } => {
-            let route = resolve_route_mut(sequence, *route_id)?;
-            let mut curve = match &route.gain_automation {
-                Some(curve) => curve.clone(),
-                None => ExactAutomationCurve::new(
-                    ParameterId::new_static(ROUTE_GAIN_DB_PARAMETER_ID),
-                    route.gain_db,
-                )
-                .map_err(|error| AudioRoutingEditError::InvalidAutomation {
-                    reason: error.to_string(),
-                })?,
-            };
-            if curve
-                .keyframes
-                .iter()
-                .any(|candidate| candidate.id != keyframe.id && candidate.time == keyframe.time)
-            {
-                return Err(AudioRoutingEditError::KeyframeTimeCollision);
-            }
-            curve.keyframes.retain(|candidate| candidate.id != keyframe.id);
-            curve.set_keyframe(keyframe.clone()).map_err(|error| {
-                AudioRoutingEditError::InvalidAutomation { reason: error.to_string() }
-            })?;
-            if route.gain_automation.as_ref() == Some(&curve) {
-                return Ok(AudioRoutingEditOutcome::unchanged());
-            }
-            route.gain_automation = Some(curve);
-            Ok(AudioRoutingEditOutcome::changed())
-        }
-        AudioRoutingEdit::RemoveRouteGainKeyframe { route_id, keyframe_id } => {
-            let route = resolve_route_mut(sequence, *route_id)?;
-            let mut curve = route
-                .gain_automation
-                .clone()
-                .ok_or(AudioRoutingEditError::UnknownKeyframe(*keyframe_id))?;
-            let before = curve.keyframes.len();
-            curve.keyframes.retain(|candidate| candidate.id != *keyframe_id);
-            if curve.keyframes.len() == before {
-                return Err(AudioRoutingEditError::UnknownKeyframe(*keyframe_id));
-            }
-            if curve.keyframes.is_empty() {
-                route.gain_db = curve.default_value;
-                route.gain_automation = None;
-            } else {
-                route.gain_automation = Some(curve);
-            }
-            Ok(AudioRoutingEditOutcome::changed())
-        }
-        AudioRoutingEdit::ClearRouteGainAutomation { route_id, gain_db } => {
-            let route = resolve_route_mut(sequence, *route_id)?;
-            if route.gain_automation.is_none() && route.gain_db == *gain_db {
-                return Ok(AudioRoutingEditOutcome::unchanged());
-            }
-            route.gain_db = *gain_db;
-            route.gain_automation = None;
             Ok(AudioRoutingEditOutcome::changed())
         }
     }
@@ -785,7 +689,11 @@ fn route_names_bus(route: &AudioRoute, bus_id: MixBusId) -> bool {
 mod tests {
     use super::*;
     use crate::audio::AudioChannelStripOutputPort;
-    use mondrian_core::TimelineTime;
+    use crate::{
+        apply_audio_automation_edit, AudioAutomationEdit, AudioAutomationEditRequest,
+        AudioAutomationTarget,
+    };
+    use mondrian_core::{ExactAutomationKeyframe, TimelineTime};
 
     fn request(edit: AudioRoutingEdit) -> AudioRoutingEditRequest {
         AudioRoutingEditRequest { edit }
@@ -901,9 +809,12 @@ mod tests {
         .expect("set static gain");
         let keyframe = ExactAutomationKeyframe::linear(TimelineTime::ONE, -12.0);
         let keyframe_id = keyframe.id;
-        apply_audio_routing_edit(
+        apply_audio_automation_edit(
             &mut sequence,
-            &request(AudioRoutingEdit::UpsertRouteGainKeyframe { route_id, keyframe }),
+            &AudioAutomationEditRequest {
+                target: AudioAutomationTarget::RouteGain { route_id },
+                edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+            },
         )
         .expect("add exact key");
         apply_audio_routing_edit(
@@ -939,9 +850,12 @@ mod tests {
         );
         assert_eq!(sequence, before);
 
-        apply_audio_routing_edit(
+        apply_audio_automation_edit(
             &mut sequence,
-            &request(AudioRoutingEdit::RemoveRouteGainKeyframe { route_id, keyframe_id }),
+            &AudioAutomationEditRequest {
+                target: AudioAutomationTarget::RouteGain { route_id },
+                edit: AudioAutomationEdit::RemoveKeyframe { keyframe_id },
+            },
         )
         .expect("remove final key");
         let route = resolve_route(&sequence, route_id).expect("Route");

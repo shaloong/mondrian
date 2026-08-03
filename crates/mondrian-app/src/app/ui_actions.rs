@@ -1250,6 +1250,13 @@ pub fn audio_processor_rack_edit_action(request: AudioProcessorRackEditRequest) 
     ProductAction::Audio(AudioProductAction::EditProcessorRack(request)).into_external_action()
 }
 
+/// Encode one stable-address exact audio automation edit for Widget dispatch.
+pub fn audio_automation_edit_action(
+    request: mondrian_timeline::AudioAutomationEditRequest,
+) -> Action {
+    ProductAction::Audio(AudioProductAction::EditAutomation(request)).into_external_action()
+}
+
 /// Build an action that inserts one canonical product-visible built-in Processor.
 pub fn audio_processor_insert_built_in_action(
     payload: super::product_action::AudioProcessorInsertBuiltInPayload,

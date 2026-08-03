@@ -15,10 +15,10 @@ use mondrian_timeline::audio::{
 };
 use mondrian_timeline::{
     inspect_audio_channel_strip, inspect_audio_route, inspect_audio_route_candidates,
-    AudioBusRemovalPolicy, AudioChannelStripEdit, AudioChannelStripEditBlocker,
-    AudioChannelStripEditRequest, AudioChannelStripRack, AudioProcessorRackAddress,
-    AudioRouteCandidateInspection, AudioRoutingEdit, AudioRoutingEditBlocker,
-    AudioRoutingEditRequest,
+    AudioAutomationTarget, AudioBusRemovalPolicy, AudioChannelStripEdit,
+    AudioChannelStripEditBlocker, AudioChannelStripEditRequest, AudioChannelStripRack,
+    AudioProcessorRackAddress, AudioRouteCandidateInspection, AudioRoutingEdit,
+    AudioRoutingEditBlocker, AudioRoutingEditRequest,
 };
 
 use crate::app::ui_actions::{
@@ -27,6 +27,9 @@ use crate::app::ui_actions::{
 };
 use crate::app::AppState;
 
+use super::audio_automation::{
+    project_audio_automation, sequence_automation_viewport, AudioAutomationCurveModel,
+};
 use super::audio_processor_rack::{project_audio_processor_rack, AudioProcessorRackModel};
 
 /// Complete immutable Mixer panel projection.
@@ -71,6 +74,7 @@ pub(crate) struct AudioMixerRouteModel {
     pub(crate) destination_label: String,
     pub(crate) enabled: bool,
     pub(crate) gain: AudioMixerGainModel,
+    pub(crate) gain_automation: Option<AudioAutomationCurveModel>,
     pub(crate) is_editable: bool,
     pub(crate) edit_disabled_reason: Option<String>,
 }
@@ -94,6 +98,7 @@ pub(crate) struct AudioMixerChannelModel {
     pub(crate) edit_disabled_reason: Option<String>,
     pub(crate) input_trim_db: f64,
     pub(crate) fader: AudioMixerGainModel,
+    pub(crate) fader_automation: Option<AudioAutomationCurveModel>,
     pub(crate) track_muted: Option<bool>,
     pub(crate) incoming_route_count: usize,
     pub(crate) outbound_routes: Vec<AudioMixerRouteModel>,
@@ -174,6 +179,7 @@ fn project_channel(
     name: String,
     track_muted: Option<bool>,
 ) -> AudioMixerChannelModel {
+    let automation_viewport = sequence_automation_viewport(sequence);
     let inspection = inspect_audio_channel_strip(sequence, owner);
     let (is_editable, edit_disabled_reason, input_trim_db, fader) = match inspection {
         Ok(inspection) => {
@@ -226,6 +232,13 @@ fn project_channel(
         edit_disabled_reason,
         input_trim_db,
         fader,
+        fader_automation: automation_viewport.and_then(|viewport| {
+            project_audio_automation(
+                sequence,
+                AudioAutomationTarget::ChannelFader { owner },
+                viewport,
+            )
+        }),
         track_muted,
         incoming_route_count,
         outbound_routes,
@@ -333,6 +346,13 @@ fn project_route(
             AudioMixerGainModel::Static { value_db: route.gain_db },
             |curve| AudioMixerGainModel::Automated { keyframe_count: curve.keyframes.len() },
         ),
+        gain_automation: sequence_automation_viewport(sequence).and_then(|viewport| {
+            project_audio_automation(
+                sequence,
+                AudioAutomationTarget::RouteGain { route_id: route.id },
+                viewport,
+            )
+        }),
         is_editable,
         edit_disabled_reason,
     }

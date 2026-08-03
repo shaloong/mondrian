@@ -219,8 +219,8 @@ the post-fader rack.
 
 Normative strip controls enter through `AudioChannelStripEditRequest`, addressed
 by the same closed `Track | Bus | ProgramOutput` owner type as Rack addresses.
-The edit algebra keeps static input trim, static fader, exact Sequence-time
-fader keyframes, key removal, and explicit automation clearing distinct. A
+The edit algebra owns static input trim and static fader only; all keyed changes
+enter the unified `AudioAutomationEditRequest` Interface described below. A
 static fader edit is rejected while automation is authoritative; UI therefore
 cannot modify or display the curve's fallback value as though it were the
 playhead value. Removing the final key canonicalizes back to one static fader
@@ -253,9 +253,9 @@ latency.
 
 All Bus and Route lifecycle mutations enter through the single
 `AudioRoutingEditRequest` Interface. It creates, renames, or removes Buses;
-creates, removes, or rewires Routes; changes enabled/static gain; and edits
-exact Sequence-time Route-gain keys without exposing the underlying authoring
-collections. `CreateBus` may create one onward Route in the same transaction,
+creates, removes, or rewires Routes; and changes enabled/static gain without
+exposing the underlying authoring collections. Route keys enter the unified
+automation Interface. `CreateBus` may create one onward Route in the same transaction,
 and its receipt returns both allocated stable identities. Bus removal requires
 an explicit `RejectIfConnected` or `Disconnect` policy. Disconnect atomically
 removes every incoming and outgoing strong Route reference, and refuses when
@@ -281,6 +281,28 @@ Disabled Clip or disabled Component Edit is absent from compilation. Persistent
 Track mute gates `PostMute` while preserving pre-mute taps. Solo is not stored
 on Track: an `AudioAuditionOverlay` selects a temporary closure without
 rewriting or exporting the canonical Program.
+
+### Unified audio automation authoring
+
+`AudioAutomationTarget` is the sole keyed-curve address across Component
+volume/pan, Processing Scope input gain, Channel Strip fader, Route gain, and
+Processor parameters. Every variant carries stable typed owner identity; array
+indexes, display names, plugin paths, and UI property strings cannot address a
+curve. `inspect_audio_automation` resolves the canonical curve, numeric hard and
+soft ranges, allowed interpolation modes, edit admission, and its explicit
+`AuthoringTimeDomain` (`Sequence`, `AudioComponentEdit`, or
+`AudioProcessingScope`) from one immutable Sequence snapshot.
+
+`AudioAutomationEditRequest` performs stable-ID key upsert, key removal, or
+explicit clear-to-default. It admits Track and shared-Scope locks before
+copy-on-write detachment, mutates a complete candidate, validates the complete
+Audio Program, and publishes atomically. Moving a key preserves its ID,
+interpolation, and Bezier handles; collisions at the same exact owner time fail
+closed. Optional semantic curves canonicalize to their static value after the
+last key is removed, while Processor parameters retain their intrinsic empty
+curve because that curve also owns the unkeyed definition value. Channel Strip,
+Routing, and Rack Modules retain only their static/topology operations, so no
+second keyed write path can drift from this contract.
 
 ### Processors and plugins
 

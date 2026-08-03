@@ -10,8 +10,8 @@ use mondrian_core::types::{ClipId, FramePosition, TrackId};
 use mondrian_core::{Rational, TimelineTime};
 use mondrian_editor_state::Action;
 use mondrian_timeline::{
-    sequence::Sequence, AudioChannelStripEditRequest, AudioProcessorRackEditRequest,
-    AudioRoutingEditRequest,
+    sequence::Sequence, AudioAutomationEditRequest, AudioChannelStripEditRequest,
+    AudioProcessorRackEditRequest, AudioRoutingEditRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -40,6 +40,8 @@ pub const AUDIO_INSERT_BUILT_IN_PROCESSOR: &str = "insert_built_in_processor";
 pub const AUDIO_EDIT_CHANNEL_STRIP: &str = "edit_channel_strip";
 /// External action name for one atomic Bus/Route graph edit.
 pub const AUDIO_EDIT_ROUTING: &str = "edit_routing";
+/// External action name for one stable-address audio automation edit.
+pub const AUDIO_EDIT_AUTOMATION: &str = "edit_automation";
 
 /// One closed product operation accepted by the App composition root.
 ///
@@ -56,6 +58,8 @@ pub enum ProductAction {
 /// Closed Sequence audio authoring operations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioProductAction {
+    /// Apply one exact owner-time curve mutation.
+    EditAutomation(AudioAutomationEditRequest),
     /// Apply one stable-address Rack mutation in one author transaction.
     EditProcessorRack(AudioProcessorRackEditRequest),
     /// Resolve and insert one canonical product-visible built-in Processor.
@@ -135,6 +139,9 @@ impl ProductAction {
                 Ok(Some(Self::Timeline(timeline_action)))
             }
             AUDIO_NAMESPACE => match name.as_str() {
+                AUDIO_EDIT_AUTOMATION => Ok(Some(Self::Audio(AudioProductAction::EditAutomation(
+                    decode_payload(namespace, name, payload)?,
+                )))),
                 AUDIO_EDIT_PROCESSOR_RACK => {
                     Ok(Some(Self::Audio(AudioProductAction::EditProcessorRack(
                         decode_payload(namespace, name, payload)?,
@@ -164,6 +171,11 @@ impl ProductAction {
     /// names or payloads.
     pub fn into_external_action(self) -> Action {
         let (namespace, name, payload) = match self {
+            Self::Audio(AudioProductAction::EditAutomation(request)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_EDIT_AUTOMATION,
+                serde_json::json!(request),
+            ),
             Self::Timeline(TimelineProductAction::SelectClip(payload)) => (
                 TIMELINE_NAMESPACE,
                 TIMELINE_SELECT_CLIP,
@@ -466,6 +478,7 @@ mod tests {
     use mondrian_timeline::{
         audio::{AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID},
         clip::Clip,
+        AudioAutomationEdit, AudioAutomationEditRequest, AudioAutomationTarget,
         AudioChannelStripOwner, AudioChannelStripRack, AudioProcessorRackAddress,
         AudioProcessorRackEdit, AudioProcessorRackPlacement, AudioRouteDestination,
         AudioRoutingEdit, AudioRoutingEditRequest,
@@ -526,6 +539,30 @@ mod tests {
             },
         };
         let expected = ProductAction::Audio(AudioProductAction::EditProcessorRack(request));
+
+        let external = expected.clone().into_external_action();
+        let decoded = ProductAction::decode_external(&external)
+            .expect("valid external payload")
+            .expect("recognized product action");
+
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn external_codec_round_trips_stable_audio_automation_edits() {
+        let expected = ProductAction::Audio(AudioProductAction::EditAutomation(
+            AudioAutomationEditRequest {
+                target: AudioAutomationTarget::ChannelFader {
+                    owner: AudioChannelStripOwner::Track { track_id: TrackId::new() },
+                },
+                edit: AudioAutomationEdit::UpsertKeyframe {
+                    keyframe: mondrian_core::ExactAutomationKeyframe::linear(
+                        TimelineTime::new(1, 48_000).expect("sample time"),
+                        -6.0,
+                    ),
+                },
+            },
+        ));
 
         let external = expected.clone().into_external_action();
         let decoded = ProductAction::decode_external(&external)

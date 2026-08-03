@@ -146,6 +146,10 @@ use crate::app::{
     AppState, SelectedClipRef, SelectedVideoTransitionRef, VideoTransitionHandleState,
 };
 use crate::app_ui::action_availability::app_state_action_enabled;
+use crate::app_ui::audio_automation::{
+    audio_automation_curve_edit_action, component_automation_viewport, project_audio_automation,
+    AudioAutomationCurveModel,
+};
 use crate::app_ui::audio_mixer::{
     create_bus_action as audio_mixer_create_bus_action,
     create_route_action as audio_mixer_create_route_action,
@@ -1616,8 +1620,12 @@ pub struct InspectorAudioComponentModel {
     pub enabled: bool,
     /// Static post-processing placement volume in dB.
     pub volume_db: f64,
+    /// Exact Component-local volume curve projected into the visible Clip span.
+    pub(crate) volume_automation: Option<AudioAutomationCurveModel>,
     /// Static stereo pan/balance in normalized `[-1, 1]` units.
     pub pan: f64,
+    /// Exact Component-local pan curve projected into the visible Clip span.
+    pub(crate) pan_automation: Option<AudioAutomationCurveModel>,
     /// Optional exact unary fade beginning at the Clip in edge.
     pub fade_in: Option<AudioFade>,
     /// Optional exact unary fade ending at the Clip out edge.
@@ -1801,7 +1809,7 @@ impl InspectorPanelModel {
             ),
             tint_area_mode: ColorPickerAreaMode::Wheel,
             opacity_curve: opacity_curve_model_for_clip(clip, time),
-            audio_components: inspector_audio_components(state, clip),
+            audio_components: inspector_audio_components(state, sequence, resolved_selection, clip),
             audio_processor_racks: clip_processing_scope_racks(sequence, clip),
             clip_properties,
             effects: clip
@@ -3246,7 +3254,12 @@ fn clip_for_selection<'a>(
     None
 }
 
-fn inspector_audio_components(state: &AppState, clip: &Clip) -> Vec<InspectorAudioComponentModel> {
+fn inspector_audio_components(
+    state: &AppState,
+    sequence: &Sequence,
+    selection: SelectedClipRef,
+    clip: &Clip,
+) -> Vec<InspectorAudioComponentModel> {
     let asset = (!clip.is_nested_sequence())
         .then(|| {
             state.asset_library().and_then(|library| {
@@ -3270,6 +3283,9 @@ fn inspector_audio_components(state: &AppState, clip: &Clip) -> Vec<InspectorAud
                         Vec::new(),
                         None,
                         clip.duration,
+                        sequence,
+                        selection.track_id,
+                        clip.id,
                     );
                 };
                 let source_options = asset
@@ -3332,6 +3348,9 @@ fn inspector_audio_components(state: &AppState, clip: &Clip) -> Vec<InspectorAud
                     source_options,
                     binding,
                     clip.duration,
+                    sequence,
+                    selection.track_id,
+                    clip.id,
                 )
             }
             AudioComponentSource::NestedOutput { output_id } => {
@@ -3363,6 +3382,9 @@ fn inspector_audio_components(state: &AppState, clip: &Clip) -> Vec<InspectorAud
                     source_options,
                     None,
                     clip.duration,
+                    sequence,
+                    selection.track_id,
+                    clip.id,
                 )
             }
         })
@@ -3375,7 +3397,11 @@ fn inspector_audio_component_model(
     source_options: Vec<InspectorAudioSourceOptionModel>,
     binding: Option<InspectorAudioBindingModel>,
     clip_duration: TimelineTime,
+    sequence: &Sequence,
+    track_id: TrackId,
+    clip_id: ClipId,
 ) -> InspectorAudioComponentModel {
+    let viewport = component_automation_viewport(edit.id, edit.local_time_in, clip_duration);
     InspectorAudioComponentModel {
         edit_id: edit.id,
         source_label,
@@ -3383,7 +3409,29 @@ fn inspector_audio_component_model(
         binding,
         enabled: edit.enabled,
         volume_db: edit.volume_db,
+        volume_automation: viewport.and_then(|viewport| {
+            project_audio_automation(
+                sequence,
+                mondrian_timeline::AudioAutomationTarget::ComponentVolume {
+                    track_id,
+                    clip_id,
+                    edit_id: edit.id,
+                },
+                viewport,
+            )
+        }),
         pan: edit.pan,
+        pan_automation: viewport.and_then(|viewport| {
+            project_audio_automation(
+                sequence,
+                mondrian_timeline::AudioAutomationTarget::ComponentPan {
+                    track_id,
+                    clip_id,
+                    edit_id: edit.id,
+                },
+                viewport,
+            )
+        }),
         fade_in: edit.fades.fade_in,
         fade_out: edit.fades.fade_out,
         clip_duration,
@@ -5314,14 +5362,15 @@ fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
             AudioMixerGainModel::Automated { keyframe_count } => {
                 section = section.with_row(PropertyRow::new(
                     "推子",
-                    Box::new(
-                        Label::new(format!(
-                            "自动化 · {keyframe_count} 个关键帧（曲线编辑器待接入）"
-                        ))
-                        .muted(),
-                    ),
+                    Box::new(Label::new(format!("自动化 · {keyframe_count} 个关键帧")).muted()),
                 ));
             }
+        }
+        if let Some(automation) = &channel.fader_automation {
+            section = section.with_row(
+                PropertyRow::new("推子曲线", audio_automation_curve_control(automation))
+                    .with_height(118.0),
+            );
         }
         if let Some(reason) = &channel.edit_disabled_reason {
             section = section.with_row(PropertyRow::new(
@@ -5429,14 +5478,15 @@ fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
                 AudioMixerGainModel::Automated { keyframe_count } => {
                     route_section = route_section.with_row(PropertyRow::new(
                         "电平",
-                        Box::new(
-                            Label::new(format!(
-                                "自动化 · {keyframe_count} 个关键帧（曲线编辑器待接入）"
-                            ))
-                            .muted(),
-                        ),
+                        Box::new(Label::new(format!("自动化 · {keyframe_count} 个关键帧")).muted()),
                     ));
                 }
+            }
+            if let Some(automation) = &route.gain_automation {
+                route_section = route_section.with_row(
+                    PropertyRow::new("电平曲线", audio_automation_curve_control(automation))
+                        .with_height(118.0),
+                );
             }
             route_section = route_section.with_row(PropertyRow::new(
                 "控制",
@@ -5583,6 +5633,10 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
     if !model.audio_components.is_empty() {
         for (index, component) in model.audio_components.iter().enumerate() {
             let edit_id = component.edit_id;
+            let volume_static_editable = can_edit
+                && component.volume_automation.as_ref().is_none_or(|curve| !curve.is_automated());
+            let pan_static_editable = can_edit
+                && component.pan_automation.as_ref().is_none_or(|curve| !curve.is_automated());
             let section_title = if model.audio_components.len() == 1 {
                 "音频 Component".to_owned()
             } else {
@@ -5613,7 +5667,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                         AUDIO_GAIN_DB_MAX as f32,
                         Some(0.1),
                         1,
-                        can_edit,
+                        volume_static_editable,
                         move |value| {
                             inspector_audio_edit_field_action(
                                 selected_clip,
@@ -5631,7 +5685,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                         100.0,
                         Some(1.0),
                         0,
-                        can_edit,
+                        pan_static_editable,
                         move |value| {
                             inspector_audio_edit_field_action(
                                 selected_clip,
@@ -5641,6 +5695,18 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                         },
                     ),
                 ));
+            if let Some(automation) = &component.volume_automation {
+                section = section.with_row(
+                    PropertyRow::new("音量曲线", audio_automation_curve_control(automation))
+                        .with_height(118.0),
+                );
+            }
+            if let Some(automation) = &component.pan_automation {
+                section = section.with_row(
+                    PropertyRow::new("声像曲线", audio_automation_curve_control(automation))
+                        .with_height(118.0),
+                );
+            }
             let source_items = component
                 .source_options
                 .iter()
@@ -6067,6 +6133,12 @@ fn with_audio_processor_rack_sections(
                 Box::new(Label::new(reason.clone()).muted()),
             ));
         }
+        if let Some(automation) = &rack.scope_input_gain_automation {
+            rack_section = rack_section.with_row(
+                PropertyRow::new("Scope 输入曲线", audio_automation_curve_control(automation))
+                    .with_height(118.0),
+            );
+        }
         panel = panel.with_section(rack_section);
 
         for (processor_index, processor) in rack.processors.iter().enumerate() {
@@ -6140,48 +6212,52 @@ fn with_audio_processor_rack_sections(
                 let label = audio_processor_parameter_label(parameter);
                 if parameter.keyframe_count > 0 {
                     section = section.with_row(PropertyRow::new(
-                        label,
+                        label.clone(),
                         Box::new(
-                            Label::new(format!(
-                                "自动化 · {} 个关键帧（曲线编辑器待接入）",
-                                parameter.keyframe_count
-                            ))
-                            .muted(),
+                            Label::new(format!("自动化 · {} 个关键帧", parameter.keyframe_count))
+                                .muted(),
                         ),
                     ));
-                    continue;
-                }
-                let Some(numeric) = parameter.schema.numeric else {
+                } else if let Some(numeric) = parameter.schema.numeric {
+                    let rack_for_parameter = rack.clone();
+                    let processor_for_parameter = processor.clone();
+                    let parameter_for_action = parameter.clone();
                     section = section.with_row(PropertyRow::new(
-                        label,
+                        label.clone(),
+                        numeric_slider_input_control_with_hard_range(
+                            parameter.static_value as f32,
+                            numeric.soft_range.min as f32,
+                            numeric.soft_range.max as f32,
+                            numeric.hard_range.min as f32,
+                            numeric.hard_range.max as f32,
+                            numeric.step.map(|step| step as f32),
+                            audio_processor_parameter_decimals(numeric.step),
+                            rack_can_edit && parameter.is_static_editable(),
+                            move |value| {
+                                audio_processor_set_static_parameter_action(
+                                    &rack_for_parameter,
+                                    &processor_for_parameter,
+                                    &parameter_for_action,
+                                    value,
+                                )
+                            },
+                        ),
+                    ));
+                } else {
+                    section = section.with_row(PropertyRow::new(
+                        label.clone(),
                         Box::new(Label::new("此参数没有数值编辑契约").muted()),
                     ));
-                    continue;
-                };
-                let rack_for_parameter = rack.clone();
-                let processor_for_parameter = processor.clone();
-                let parameter_for_action = parameter.clone();
-                section = section.with_row(PropertyRow::new(
-                    label,
-                    numeric_slider_input_control_with_hard_range(
-                        parameter.static_value as f32,
-                        numeric.soft_range.min as f32,
-                        numeric.soft_range.max as f32,
-                        numeric.hard_range.min as f32,
-                        numeric.hard_range.max as f32,
-                        numeric.step.map(|step| step as f32),
-                        audio_processor_parameter_decimals(numeric.step),
-                        rack_can_edit && parameter.is_static_editable(),
-                        move |value| {
-                            audio_processor_set_static_parameter_action(
-                                &rack_for_parameter,
-                                &processor_for_parameter,
-                                &parameter_for_action,
-                                value,
-                            )
-                        },
-                    ),
-                ));
+                }
+                if let Some(automation) = &parameter.automation {
+                    section = section.with_row(
+                        PropertyRow::new(
+                            format!("{label} 曲线"),
+                            audio_automation_curve_control(automation),
+                        )
+                        .with_height(118.0),
+                    );
+                }
             }
             panel = panel.with_section(section);
         }
@@ -6218,6 +6294,17 @@ fn audio_processor_parameter_decimals(step: Option<f64>) -> usize {
         Some(_) => 3,
         None => 2,
     }
+}
+
+fn audio_automation_curve_control(model: &AudioAutomationCurveModel) -> Box<dyn Widget> {
+    let action_model = model.clone();
+    Box::new(
+        CurveEditor::with_points(model.points())
+            .with_point_policies(model.point_policies())
+            .with_display_points(model.display_points.clone())
+            .enabled(model.is_editable)
+            .on_edit(move |edit| audio_automation_curve_edit_action(&action_model, edit)),
+    )
 }
 
 fn numeric_slider_input_control<R>(

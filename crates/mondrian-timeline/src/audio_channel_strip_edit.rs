@@ -4,14 +4,9 @@
 //! processors. This Module gives them one typed address, inspection, lock
 //! admission, and transaction Implementation across Track, Bus, and Output.
 
-use crate::audio::{
-    AudioAuthoringError, AudioChannelStrip, AudioChannelStripOwner, FADER_DB_PARAMETER_ID,
-};
+use crate::audio::{AudioAuthoringError, AudioChannelStrip, AudioChannelStripOwner};
 use crate::sequence::Sequence;
-use mondrian_core::{
-    ExactAutomationCurve, ExactAutomationKeyframe, KeyframeId, MixBusId, ParameterId,
-    ProgramOutputId, TrackId,
-};
+use mondrian_core::{MixBusId, ProgramOutputId, TrackId};
 use serde::{Deserialize, Serialize};
 
 /// Fine-grained mutation of one normative Audio Channel Strip.
@@ -27,21 +22,6 @@ pub enum AudioChannelStripEdit {
     SetFaderDb {
         /// Decibel value validated by the complete Audio Program contract.
         value: f64,
-    },
-    /// Insert, replace, or move one exact Sequence-time fader keyframe.
-    UpsertFaderKeyframe {
-        /// Complete keyframe state with stable identity.
-        keyframe: ExactAutomationKeyframe,
-    },
-    /// Remove one fader keyframe by stable identity.
-    RemoveFaderKeyframe {
-        /// Keyframe to remove.
-        keyframe_id: KeyframeId,
-    },
-    /// Remove fader automation and install one explicit static value.
-    ClearFaderAutomation {
-        /// Static decibel value retained after the curve is removed.
-        fader_db: f64,
     },
 }
 
@@ -98,18 +78,6 @@ pub enum AudioChannelStripEditError {
         "Audio Channel Strip fader automation is active; edit the curve or clear it explicitly"
     )]
     FaderAutomationActive,
-    /// Keyframe identity is absent from the fader automation curve.
-    #[error("Audio Channel Strip fader has no keyframe {0}")]
-    UnknownKeyframe(KeyframeId),
-    /// A distinct keyframe already owns the requested exact time.
-    #[error("Audio Channel Strip fader already has another keyframe at the requested time")]
-    KeyframeTimeCollision,
-    /// Exact automation construction or interpolation failed.
-    #[error("Audio Channel Strip fader automation is invalid: {reason}")]
-    InvalidAutomation {
-        /// Stable diagnostic detail from the exact automation contract.
-        reason: String,
-    },
     /// Complete resulting audio author state is invalid.
     #[error("Audio Channel Strip edit produced invalid author state: {0}")]
     AuthorState(AudioAuthoringError),
@@ -293,60 +261,6 @@ fn apply_to_strip(
             strip.fader_db = *value;
             Ok(true)
         }
-        AudioChannelStripEdit::UpsertFaderKeyframe { keyframe } => {
-            let mut curve = match &strip.fader_automation {
-                Some(curve) => curve.clone(),
-                None => ExactAutomationCurve::new(
-                    ParameterId::new_static(FADER_DB_PARAMETER_ID),
-                    strip.fader_db,
-                )
-                .map_err(|error| {
-                    AudioChannelStripEditError::InvalidAutomation { reason: error.to_string() }
-                })?,
-            };
-            if curve
-                .keyframes
-                .iter()
-                .any(|candidate| candidate.id != keyframe.id && candidate.time == keyframe.time)
-            {
-                return Err(AudioChannelStripEditError::KeyframeTimeCollision);
-            }
-            curve.keyframes.retain(|candidate| candidate.id != keyframe.id);
-            curve.set_keyframe(keyframe.clone()).map_err(|error| {
-                AudioChannelStripEditError::InvalidAutomation { reason: error.to_string() }
-            })?;
-            if strip.fader_automation.as_ref() == Some(&curve) {
-                return Ok(false);
-            }
-            strip.fader_automation = Some(curve);
-            Ok(true)
-        }
-        AudioChannelStripEdit::RemoveFaderKeyframe { keyframe_id } => {
-            let mut curve = strip
-                .fader_automation
-                .clone()
-                .ok_or(AudioChannelStripEditError::UnknownKeyframe(*keyframe_id))?;
-            let before = curve.keyframes.len();
-            curve.keyframes.retain(|candidate| candidate.id != *keyframe_id);
-            if curve.keyframes.len() == before {
-                return Err(AudioChannelStripEditError::UnknownKeyframe(*keyframe_id));
-            }
-            if curve.keyframes.is_empty() {
-                strip.fader_db = curve.default_value;
-                strip.fader_automation = None;
-            } else {
-                strip.fader_automation = Some(curve);
-            }
-            Ok(true)
-        }
-        AudioChannelStripEdit::ClearFaderAutomation { fader_db } => {
-            if strip.fader_automation.is_none() && strip.fader_db == *fader_db {
-                return Ok(false);
-            }
-            strip.fader_db = *fader_db;
-            strip.fader_automation = None;
-            Ok(true)
-        }
     }
 }
 
@@ -354,7 +268,11 @@ fn apply_to_strip(
 mod tests {
     use super::*;
     use crate::audio::{AudioChannelStrip, AudioMixBus};
-    use mondrian_core::TimelineTime;
+    use crate::{
+        apply_audio_automation_edit, AudioAutomationEdit, AudioAutomationEditRequest,
+        AudioAutomationTarget,
+    };
+    use mondrian_core::{ExactAutomationKeyframe, TimelineTime};
 
     fn request(
         owner: AudioChannelStripOwner,
@@ -418,12 +336,12 @@ mod tests {
             -9.0,
         );
         let keyframe_id = keyframe.id;
-        apply_audio_channel_strip_edit(
+        apply_audio_automation_edit(
             &mut sequence,
-            &request(
-                owner,
-                AudioChannelStripEdit::UpsertFaderKeyframe { keyframe },
-            ),
+            &AudioAutomationEditRequest {
+                target: AudioAutomationTarget::ChannelFader { owner },
+                edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+            },
         )
         .expect("keyframe");
         let strip = audio_channel_strip(&sequence, owner).expect("Track");
@@ -442,12 +360,12 @@ mod tests {
         );
         assert_eq!(sequence, before);
 
-        apply_audio_channel_strip_edit(
+        apply_audio_automation_edit(
             &mut sequence,
-            &request(
-                owner,
-                AudioChannelStripEdit::RemoveFaderKeyframe { keyframe_id },
-            ),
+            &AudioAutomationEditRequest {
+                target: AudioAutomationTarget::ChannelFader { owner },
+                edit: AudioAutomationEdit::RemoveKeyframe { keyframe_id },
+            },
         )
         .expect("remove last key");
         let strip = audio_channel_strip(&sequence, owner).expect("Track");
@@ -484,39 +402,39 @@ mod tests {
         let time = TimelineTime::ONE;
         let first = ExactAutomationKeyframe::linear(time, -3.0);
         let second = ExactAutomationKeyframe::linear(time, -6.0);
-        apply_audio_channel_strip_edit(
+        apply_audio_automation_edit(
             &mut sequence,
-            &request(
-                owner,
-                AudioChannelStripEdit::UpsertFaderKeyframe { keyframe: first },
-            ),
+            &AudioAutomationEditRequest {
+                target: AudioAutomationTarget::ChannelFader { owner },
+                edit: AudioAutomationEdit::UpsertKeyframe { keyframe: first },
+            },
         )
         .expect("first key");
         let before_collision = sequence.clone();
         assert_eq!(
-            apply_audio_channel_strip_edit(
+            apply_audio_automation_edit(
                 &mut sequence,
-                &request(
-                    owner,
-                    AudioChannelStripEdit::UpsertFaderKeyframe { keyframe: second }
-                ),
+                &AudioAutomationEditRequest {
+                    target: AudioAutomationTarget::ChannelFader { owner },
+                    edit: AudioAutomationEdit::UpsertKeyframe { keyframe: second },
+                },
             ),
-            Err(AudioChannelStripEditError::KeyframeTimeCollision)
+            Err(crate::AudioAutomationEditError::KeyframeTimeCollision)
         );
         assert_eq!(sequence, before_collision);
 
         sequence.audio_tracks[0].is_locked = true;
         let before_locked = sequence.clone();
         assert_eq!(
-            apply_audio_channel_strip_edit(
+            apply_audio_automation_edit(
                 &mut sequence,
-                &request(
-                    owner,
-                    AudioChannelStripEdit::ClearFaderAutomation { fader_db: -2.0 }
-                ),
+                &AudioAutomationEditRequest {
+                    target: AudioAutomationTarget::ChannelFader { owner },
+                    edit: AudioAutomationEdit::Clear { default_value: -2.0 },
+                },
             ),
-            Err(AudioChannelStripEditError::Blocked(
-                AudioChannelStripEditBlocker::LockedTrack(track_id)
+            Err(crate::AudioAutomationEditError::Blocked(
+                crate::AudioAutomationEditBlocker::LockedTrack(track_id)
             ))
         );
         assert_eq!(sequence, before_locked);
