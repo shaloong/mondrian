@@ -45,28 +45,28 @@ use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
     execute_cpu_output_boundary_float_with_session, execute_cpu_output_boundary_rgba8_with_session,
     execute_cpu_source_input_stage_with_session, execute_cpu_working_transform_with_session,
-    prepare_timeline_temporal_execution, prepare_visual_frame_closure,
-    project_affine_to_sampled_extents, project_basic_title_transform, BasicTitleRasterizer,
-    ColorFrameResidency, CpuColorFrame, CpuEncodedColorFrame, CpuSourceColorFrame,
-    GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat, GpuColorFrameWgpuResourcePool,
-    GpuColorFrameWgpuResourcePoolOptions, GpuContext, HeterogeneousGpuCompletedEvidence,
-    HeterogeneousGpuCompletedFrame, HeterogeneousGpuContinuationError,
-    HeterogeneousGpuContinuationRequest, HeterogeneousGpuContinuationRuntime,
-    HeterogeneousGpuExecutionCapability, LinearFloatSource, PreparedVisualChildCanvasPolicy,
-    PreparedVisualFrameClosure, PreparedVisualFrameClosureRequest, PreparedVisualFrameEvaluation,
-    PreparedVisualFrameNode, PreparedVisualFrameNodeId, PreparedVisualMaterializationContract,
-    PreparedVisualNestedSample, PreparedVisualProgram, RenderColorStageDiagnostics,
-    RenderColorStageGpuBlockerBreakdown, RenderColorTransformGpuOptions,
-    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
-    RenderGpuOutputBoundaryRuntimeRecordError, RenderGpuOutputExecutionResourceGrant,
-    RenderInputTransform, RenderOutputColorBoundary, TimelineAdjustmentLayer,
-    TimelineBasicTitlePlan, TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
-    TimelineCompositeDomainBlockerBreakdown, TimelineCompositeElement,
-    TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineCpuCompositePrecision, TimelineCrossDissolveLayer, TimelineEffectColorRuntime,
-    TimelineEvaluationRequest, TimelineMediaLayer, TimelineMediaPlan, TimelineRenderPlan,
-    TimelineRenderPlanElement, TimelineSolidColorLayer, TimelineTemporalDemandBatch,
-    TimelineTemporalSource, TimelineTransitionInput, TimelineTransitionInputPlan,
+    prepare_visual_frame_closure, project_affine_to_sampled_extents, project_basic_title_transform,
+    BasicTitleRasterizer, ColorFrameResidency, CpuColorFrame, CpuEncodedColorFrame,
+    CpuSourceColorFrame, GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat,
+    GpuColorFrameWgpuResourcePool, GpuColorFrameWgpuResourcePoolOptions, GpuContext,
+    HeterogeneousGpuCompletedEvidence, HeterogeneousGpuCompletedFrame,
+    HeterogeneousGpuContinuationError, HeterogeneousGpuContinuationRequest,
+    HeterogeneousGpuContinuationRuntime, HeterogeneousGpuExecutionCapability, LinearFloatSource,
+    PreparedVisualChildCanvasPolicy, PreparedVisualFrameClosure, PreparedVisualFrameClosureRequest,
+    PreparedVisualFrameEvaluation, PreparedVisualFrameNode, PreparedVisualFrameNodeId,
+    PreparedVisualMaterializationContract, PreparedVisualNestedSample, PreparedVisualProgram,
+    RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
+    RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
+    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderGpuOutputBoundaryRuntimeRecordError,
+    RenderGpuOutputExecutionResourceGrant, RenderInputTransform, RenderOutputColorBoundary,
+    TimelineAdjustmentLayer, TimelineBasicTitlePlan, TimelineCompositeColorPathSummary,
+    TimelineCompositeDiagnostics, TimelineCompositeDomainBlockerBreakdown,
+    TimelineCompositeElement, TimelineCompositeLegacyBreakdown, TimelineCompositeOptions,
+    TimelineCompositeScratch, TimelineCpuCompositePrecision, TimelineCrossDissolveLayer,
+    TimelineEffectColorRuntime, TimelineEvaluationRequest, TimelineFrameExecutionRequest,
+    TimelineMediaLayer, TimelineMediaPlan, TimelineRenderPlanElement, TimelineSolidColorLayer,
+    TimelineTemporalDemandBatch, TimelineTemporalSource, TimelineTransitionInput,
+    TimelineTransitionInputPlan,
 };
 #[cfg(test)]
 use mondrian_renderer::{PreparedVisualProgramCache, PreparedVisualProgramCacheConfig};
@@ -2734,29 +2734,6 @@ fn preflight_timeline_visual_range_once(
     Ok(())
 }
 
-fn prepare_export_temporal_plan(
-    program: &PreparedVisualProgram,
-    render_plan: &TimelineRenderPlan,
-    resolution: Resolution,
-    generation: u64,
-    cancellation: &ExecutionCancellationToken,
-) -> Result<(TimelineRenderPlan, Vec<TimelineTemporalDemandBatch>, u64), String> {
-    let extent = EffectFrameExtent::new(resolution.width, resolution.height);
-    let prepared = prepare_timeline_temporal_execution(
-        program,
-        render_plan,
-        generation,
-        EffectExecutionContinuity::Discontinuous,
-        extent,
-        extent.full_frame_roi(),
-        cancellation.clone(),
-    )
-    .map_err(|error| format!("export temporal preparation failed closed: {error}"))?;
-    let source_coverage_bytes = prepared.source_coverage_bytes();
-    let (plan, batches) = prepared.into_parts();
-    Ok((plan, batches, source_coverage_bytes))
-}
-
 fn process_supervision_failure(
     operation: &str,
     error: SupervisedProcessError,
@@ -3633,34 +3610,34 @@ fn prepare_export_visual_frame_closure(
             }
             let mut visual_session = visual_session.borrow_mut();
             let effect_execution_generation = visual_session.effect_execution_generation;
-            visual_session
+            let extent = EffectFrameExtent::new(resolution.width, resolution.height);
+            let prepared_frame = visual_session
                 .composite_scratch
-                .bind_effect_execution_generation(effect_execution_generation);
-            let authored_render_plan = visual_session
-                .composite_scratch
-                .evaluate_prepared_visual_program(
+                .prepare_timeline_frame_execution(
                     program.as_ref(),
-                    TimelineEvaluationRequest::export(FramePosition::new(
-                        frame,
-                        program.evaluation_time_base(),
-                    )),
+                    TimelineFrameExecutionRequest::new(
+                        TimelineEvaluationRequest::export(FramePosition::new(
+                            frame,
+                            program.evaluation_time_base(),
+                        )),
+                        effect_execution_generation,
+                        EffectExecutionContinuity::Discontinuous,
+                        extent,
+                        extent.full_frame_roi(),
+                        cancellation.clone(),
+                    ),
                 )
                 .map_err(|error| error.to_string())?;
-            if authored_render_plan.is_empty() {
+            if prepared_frame.execution_plan().is_empty() {
+                let (render_plan, temporal_batches) = prepared_frame.into_parts();
                 return Ok(PreparedVisualFrameEvaluation::new(
-                    authored_render_plan,
-                    Vec::new(),
+                    render_plan,
+                    temporal_batches,
                     Vec::new(),
                 ));
             }
-            let (temporal_render_plan, temporal_batches, temporal_source_coverage_bytes) =
-                prepare_export_temporal_plan(
-                    program.as_ref(),
-                    &authored_render_plan,
-                    resolution,
-                    visual_session.effect_execution_generation,
-                    cancellation,
-                )?;
+            let temporal_source_coverage_bytes = prepared_frame.source_coverage_bytes();
+            let (temporal_render_plan, temporal_batches) = prepared_frame.into_parts();
             visual_session
                 .composite_scratch
                 .admit_cpu_active_working_set(

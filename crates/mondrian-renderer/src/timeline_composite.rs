@@ -215,6 +215,40 @@ impl TimelineCompositeScratch {
         )
     }
 
+    /// Evaluate and freeze one complete Timeline frame under this exact
+    /// Preview/Export owner's Effect execution Session.
+    ///
+    /// This is the production Interface for ordinary Render Plan evaluation
+    /// plus finite-temporal preparation. It binds the generation before either
+    /// phase and retains every root or sampled dynamic topology in the same
+    /// bounded Session that later executes the pixels.
+    pub fn prepare_timeline_frame_execution(
+        &mut self,
+        program: &crate::PreparedVisualProgram,
+        request: crate::TimelineFrameExecutionRequest,
+    ) -> Result<crate::PreparedTimelineFrameExecution, crate::TimelineFramePreparationError> {
+        let (request, generation, continuity, frame_extent, output_roi, cancellation) =
+            request.into_parts();
+        self.effect_execution.bind_generation(generation);
+        let plan = crate::evaluate_prepared_visual_program_with_session(
+            program,
+            request,
+            &mut self.effect_execution,
+        )
+        .map_err(crate::TimelineFramePreparationError::Evaluation)?;
+        crate::timeline_temporal::prepare_timeline_temporal_execution_with_session(
+            program,
+            &plan,
+            generation,
+            continuity,
+            frame_extent,
+            output_roi,
+            cancellation,
+            &mut self.effect_execution,
+        )
+        .map_err(crate::TimelineFramePreparationError::Temporal)
+    }
+
     /// Apply one product resource decision to this Preview/Export-owned Effect
     /// execution Session. Trimming is synchronous and cannot affect another
     /// consumer's residency.
@@ -286,7 +320,11 @@ impl TimelineCompositeScratch {
         mondrian_effects::EffectTemporalExecutionOutput,
         mondrian_effects::EffectTemporalExecutionError,
     > {
-        crate::execute_prepared_timeline_temporal_batch(&mut self.effect_execution, batch, prepared)
+        crate::timeline_temporal::execute_prepared_timeline_temporal_batch(
+            &mut self.effect_execution,
+            batch,
+            prepared,
+        )
     }
 
     /// Execute only one prepared heterogeneous CPU prefix through this

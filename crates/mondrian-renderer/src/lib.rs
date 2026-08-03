@@ -285,8 +285,7 @@ pub use timeline_render_plan::{
     TimelineSolidColorPlan, TimelineTransitionInputPlan,
 };
 pub use timeline_temporal::{
-    collect_timeline_temporal_demands, execute_prepared_timeline_temporal_batch,
-    prepare_timeline_temporal_execution, PreparedTimelineTemporalExecution,
+    PreparedTimelineFrameExecution, TimelineFrameExecutionRequest, TimelineFramePreparationError,
     TimelineTemporalDemandBatch, TimelineTemporalPreparationError, TimelineTemporalSource,
     TimelineTemporalSourceDemand,
 };

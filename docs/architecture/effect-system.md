@@ -335,6 +335,14 @@ sample instant. Stage contracts and ordering must remain stable, and a temporal
 op may not address an internal same-stage value whose cross-time identity is
 undefined. Both conditions fail closed.
 
+The production overload is owned by `EffectExecutionSession`. It binds the
+request generation and evaluates both the root and every sampled graph through
+`PreparedEffectProgram::evaluate_with_session`; ordinary frame evaluation and
+later pixel execution use that same owner. Dynamic topology reached only by a
+temporal sample is therefore charged, reused, trimmed, and retired by the same
+bounded Session as current-time topology. The session-free overload remains
+the uncached scalar/reference path and is not a production cache owner.
+
 The projection references the unique compiled Effect IR rather than copying
 operations into another Render Graph. Ordinary edges stay within one exact-time
 context; temporal edges move to an earlier Definition stage at another exact
@@ -468,6 +476,13 @@ current/displayed frame can stand in for an absent sample. Masks are prepared
 once per reachable exact-time graph context and run in this same production
 contract. Unbounded input, stateful continuity, internal same-stage temporal
 branches, and heterogeneous temporal execution remain outside it.
+
+Preview and Export enter this contract through the renderer-owned
+`TimelineCompositeScratch::prepare_timeline_frame_execution`. That deep
+Interface binds the consumer generation, evaluates the ordinary Render Plan,
+and freezes all finite-temporal batches with the scratch's one retained Effect
+Session. Application and queue code do not invoke a second temporal planner or
+choose a different topology owner.
 
 Prepared dependency identity combines the definition-registry revision with
 semantic fingerprints of immutable resources. `.cube` files are parsed,

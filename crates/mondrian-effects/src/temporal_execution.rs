@@ -792,14 +792,23 @@ pub fn prepare_temporal_frame_execution(
     request: &EffectTemporalExecutionRequest,
     mut sample_frame_seed: impl FnMut(TimelineTime) -> Result<i64, String>,
 ) -> Result<PreparedEffectTemporalExecution, EffectTemporalExecutionError> {
-    let compiled = program.evaluate(request.output_time).map_err(|error| {
-        EffectTemporalExecutionError::SampleGraphEvaluation {
-            time: request.output_time,
-            reason: error.to_string(),
-        }
+    prepare_temporal_frame_execution_with_evaluator(
+        request,
+        |time| program.evaluate(time).map_err(|error| error.to_string()),
+        &mut sample_frame_seed,
+    )
+}
+
+fn prepare_temporal_frame_execution_with_evaluator(
+    request: &EffectTemporalExecutionRequest,
+    mut evaluate_graph: impl FnMut(TimelineTime) -> Result<Arc<CompiledEffectGraph>, String>,
+    sample_frame_seed: &mut impl FnMut(TimelineTime) -> Result<i64, String>,
+) -> Result<PreparedEffectTemporalExecution, EffectTemporalExecutionError> {
+    let compiled = evaluate_graph(request.output_time).map_err(|reason| {
+        EffectTemporalExecutionError::SampleGraphEvaluation { time: request.output_time, reason }
     })?;
     let mut evaluate_sample = |time| {
-        let graph = program.evaluate(time).map_err(|error| error.to_string())?;
+        let graph = evaluate_graph(time)?;
         let frame_seed = sample_frame_seed(time)?;
         Ok((graph, frame_seed))
     };
@@ -991,6 +1000,27 @@ impl PreparedScalarTemporalRequest {
 }
 
 impl EffectExecutionSession {
+    /// Prepare one exact finite temporal execution while retaining every
+    /// dynamic topology in this owner-scoped Session.
+    ///
+    /// The Session never becomes graph authority: root and sampled graphs are
+    /// still evaluated from the same immutable [`PreparedEffectProgram`]. It
+    /// only supplies bounded topology residency shared with ordinary
+    /// single-frame evaluation and later pixel execution.
+    pub fn prepare_temporal_frame_execution(
+        &mut self,
+        program: &PreparedEffectProgram,
+        request: &EffectTemporalExecutionRequest,
+        mut sample_frame_seed: impl FnMut(TimelineTime) -> Result<i64, String>,
+    ) -> Result<PreparedEffectTemporalExecution, EffectTemporalExecutionError> {
+        self.bind_generation(request.generation());
+        prepare_temporal_frame_execution_with_evaluator(
+            request,
+            |time| program.evaluate_with_session(time, self).map_err(|error| error.to_string()),
+            &mut sample_frame_seed,
+        )
+    }
+
     /// Execute a finite temporal, stateless CPU Float32 graph under this
     /// Session's hard working-set grant.
     ///

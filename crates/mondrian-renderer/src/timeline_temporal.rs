@@ -14,7 +14,8 @@ use mondrian_core::timeline_data::{
     AlphaInterpretation, NestedColorProcessing, TimelineClipExecutionRef,
 };
 use mondrian_core::{
-    AssetId, Color, ColorSpace, ExecutionCancellationToken, FrameRounding, SequenceId, TimelineTime,
+    AssetId, Color, ColorSpace, ExecutionCancellationToken, FrameRounding, MondrianError,
+    SequenceId, TimelineTime,
 };
 use mondrian_effects::{
     identity_compiled_effect_graph, CompiledEffectGraph, EffectExecutionContinuity,
@@ -86,13 +87,100 @@ pub struct TimelineTemporalDemandBatch {
 /// graph exactly once. A consumer must resolve and execute every batch before
 /// lowering the corresponding placement from this plan.
 #[derive(Debug, Clone)]
-pub struct PreparedTimelineTemporalExecution {
+pub struct PreparedTimelineFrameExecution {
     execution_plan: TimelineRenderPlan,
     batches: Vec<TimelineTemporalDemandBatch>,
     source_coverage_bytes: u64,
 }
 
-impl PreparedTimelineTemporalExecution {
+/// Cohesive scheduler and raster contract for one prepared Timeline frame.
+///
+/// Keeping generation, continuity, cancellation, evaluation coordinates, and
+/// raster demand together prevents Preview and Export from pairing execution
+/// authority from different attempts.
+#[derive(Debug, Clone)]
+pub struct TimelineFrameExecutionRequest {
+    evaluation: crate::TimelineEvaluationRequest,
+    generation: u64,
+    continuity: EffectExecutionContinuity,
+    frame_extent: EffectFrameExtent,
+    output_roi: EffectPixelRoi,
+    cancellation: ExecutionCancellationToken,
+}
+
+impl TimelineFrameExecutionRequest {
+    /// Bind one exact Timeline evaluation to its execution generation and
+    /// raster demand.
+    pub fn new(
+        evaluation: crate::TimelineEvaluationRequest,
+        generation: u64,
+        continuity: EffectExecutionContinuity,
+        frame_extent: EffectFrameExtent,
+        output_roi: EffectPixelRoi,
+        cancellation: ExecutionCancellationToken,
+    ) -> Self {
+        Self {
+            evaluation,
+            generation,
+            continuity,
+            frame_extent,
+            output_roi,
+            cancellation,
+        }
+    }
+
+    /// Exact prepared-Sequence evaluation request.
+    pub const fn evaluation(&self) -> &crate::TimelineEvaluationRequest {
+        &self.evaluation
+    }
+
+    /// Scheduler generation owning all prepared and executed work.
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Continuity evidence supplied by the scheduler.
+    pub const fn continuity(&self) -> EffectExecutionContinuity {
+        self.continuity
+    }
+
+    /// Complete output frame coordinates.
+    pub const fn frame_extent(&self) -> EffectFrameExtent {
+        self.frame_extent
+    }
+
+    /// Requested half-open output region.
+    pub const fn output_roi(&self) -> EffectPixelRoi {
+        self.output_roi
+    }
+
+    /// Monotonic cancellation authority for this generation.
+    pub const fn cancellation(&self) -> &ExecutionCancellationToken {
+        &self.cancellation
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        crate::TimelineEvaluationRequest,
+        u64,
+        EffectExecutionContinuity,
+        EffectFrameExtent,
+        EffectPixelRoi,
+        ExecutionCancellationToken,
+    ) {
+        (
+            self.evaluation,
+            self.generation,
+            self.continuity,
+            self.frame_extent,
+            self.output_roi,
+            self.cancellation,
+        )
+    }
+}
+
+impl PreparedTimelineFrameExecution {
     /// Render plan admitted only after all returned temporal batches execute.
     pub const fn execution_plan(&self) -> &TimelineRenderPlan {
         &self.execution_plan
@@ -197,10 +285,23 @@ pub enum TimelineTemporalPreparationError {
     SourceCoverageSizeOverflow,
 }
 
+/// Failure while one owner Session evaluates and prepares a complete Timeline
+/// frame for ordinary and finite-temporal execution.
+#[derive(Debug, thiserror::Error)]
+pub enum TimelineFramePreparationError {
+    /// Prepared visual evaluation failed before temporal dependency planning.
+    #[error("timeline visual evaluation failed: {0}")]
+    Evaluation(#[source] MondrianError),
+    /// Finite temporal preparation failed after ordinary plan evaluation.
+    #[error(transparent)]
+    Temporal(#[from] TimelineTemporalPreparationError),
+}
+
 /// Collect finite temporal demands and remove their already-accounted graphs
 /// from one cloned ordinary compositing plan.
 #[allow(clippy::too_many_arguments)]
-pub fn prepare_timeline_temporal_execution(
+#[cfg(test)]
+pub(crate) fn prepare_timeline_temporal_execution(
     program: &PreparedVisualProgram,
     plan: &TimelineRenderPlan,
     generation: u64,
@@ -208,8 +309,8 @@ pub fn prepare_timeline_temporal_execution(
     frame_extent: EffectFrameExtent,
     output_roi: EffectPixelRoi,
     cancellation: ExecutionCancellationToken,
-) -> Result<PreparedTimelineTemporalExecution, TimelineTemporalPreparationError> {
-    let batches = collect_timeline_temporal_demands(
+) -> Result<PreparedTimelineFrameExecution, TimelineTemporalPreparationError> {
+    prepare_timeline_temporal_execution_inner(
         program,
         plan,
         generation,
@@ -217,6 +318,53 @@ pub fn prepare_timeline_temporal_execution(
         frame_extent,
         output_roi,
         cancellation,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_timeline_temporal_execution_with_session(
+    program: &PreparedVisualProgram,
+    plan: &TimelineRenderPlan,
+    generation: u64,
+    continuity: EffectExecutionContinuity,
+    frame_extent: EffectFrameExtent,
+    output_roi: EffectPixelRoi,
+    cancellation: ExecutionCancellationToken,
+    session: &mut EffectExecutionSession,
+) -> Result<PreparedTimelineFrameExecution, TimelineTemporalPreparationError> {
+    prepare_timeline_temporal_execution_inner(
+        program,
+        plan,
+        generation,
+        continuity,
+        frame_extent,
+        output_roi,
+        cancellation,
+        Some(session),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_timeline_temporal_execution_inner(
+    program: &PreparedVisualProgram,
+    plan: &TimelineRenderPlan,
+    generation: u64,
+    continuity: EffectExecutionContinuity,
+    frame_extent: EffectFrameExtent,
+    output_roi: EffectPixelRoi,
+    cancellation: ExecutionCancellationToken,
+    session: Option<&mut EffectExecutionSession>,
+) -> Result<PreparedTimelineFrameExecution, TimelineTemporalPreparationError> {
+    let batches = collect_timeline_temporal_demands_inner(
+        program,
+        plan,
+        generation,
+        continuity,
+        frame_extent,
+        output_roi,
+        cancellation,
+        session,
     )?;
     let source_coverage_bytes = batches.iter().try_fold(0_u64, |total, batch| {
         u64::try_from(batch.effect_demands().coverage_bytes())
@@ -236,12 +384,13 @@ pub fn prepare_timeline_temporal_execution(
             )?;
         }
     }
-    Ok(PreparedTimelineTemporalExecution { execution_plan, batches, source_coverage_bytes })
+    Ok(PreparedTimelineFrameExecution { execution_plan, batches, source_coverage_bytes })
 }
 
 /// Collect all admitted finite temporal source batches in deterministic render
 /// order without resolving media.
-pub fn collect_timeline_temporal_demands(
+#[cfg(test)]
+pub(crate) fn collect_timeline_temporal_demands(
     program: &PreparedVisualProgram,
     plan: &TimelineRenderPlan,
     generation: u64,
@@ -249,6 +398,29 @@ pub fn collect_timeline_temporal_demands(
     frame_extent: EffectFrameExtent,
     output_roi: EffectPixelRoi,
     cancellation: ExecutionCancellationToken,
+) -> Result<Vec<TimelineTemporalDemandBatch>, TimelineTemporalPreparationError> {
+    collect_timeline_temporal_demands_inner(
+        program,
+        plan,
+        generation,
+        continuity,
+        frame_extent,
+        output_roi,
+        cancellation,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_timeline_temporal_demands_inner(
+    program: &PreparedVisualProgram,
+    plan: &TimelineRenderPlan,
+    generation: u64,
+    continuity: EffectExecutionContinuity,
+    frame_extent: EffectFrameExtent,
+    output_roi: EffectPixelRoi,
+    cancellation: ExecutionCancellationToken,
+    mut session: Option<&mut EffectExecutionSession>,
 ) -> Result<Vec<TimelineTemporalDemandBatch>, TimelineTemporalPreparationError> {
     let mut batches = Vec::new();
     for element in &plan.elements {
@@ -262,6 +434,7 @@ pub fn collect_timeline_temporal_demands(
                 frame_extent,
                 output_roi,
                 cancellation.clone(),
+                session.as_deref_mut(),
             )?,
             TimelineRenderPlanElement::NestedSequence(nested) => collect_nested_batch(
                 &mut batches,
@@ -272,6 +445,7 @@ pub fn collect_timeline_temporal_demands(
                 frame_extent,
                 output_roi,
                 cancellation.clone(),
+                session.as_deref_mut(),
             )?,
             TimelineRenderPlanElement::SolidColor(solid) => collect_solid_batch(
                 &mut batches,
@@ -282,6 +456,7 @@ pub fn collect_timeline_temporal_demands(
                 frame_extent,
                 output_roi,
                 cancellation.clone(),
+                session.as_deref_mut(),
             )?,
             TimelineRenderPlanElement::BasicTitle(title) => {
                 reject_temporal_title(title)?;
@@ -306,6 +481,7 @@ pub fn collect_timeline_temporal_demands(
                             frame_extent,
                             output_roi,
                             cancellation.clone(),
+                            session.as_deref_mut(),
                         )?,
                         TimelineTransitionInputPlan::NestedSequence(nested) => {
                             collect_nested_batch(
@@ -317,6 +493,7 @@ pub fn collect_timeline_temporal_demands(
                                 frame_extent,
                                 output_roi,
                                 cancellation.clone(),
+                                session.as_deref_mut(),
                             )?
                         }
                         TimelineTransitionInputPlan::SolidColor(solid) => collect_solid_batch(
@@ -328,6 +505,7 @@ pub fn collect_timeline_temporal_demands(
                             frame_extent,
                             output_roi,
                             cancellation.clone(),
+                            session.as_deref_mut(),
                         )?,
                         TimelineTransitionInputPlan::BasicTitle(title) => {
                             reject_temporal_title(title)?;
@@ -344,7 +522,7 @@ pub fn collect_timeline_temporal_demands(
 ///
 /// This function cannot resolve a missing frame: the only provider it accepts
 /// is the immutable prepared set.
-pub fn execute_prepared_timeline_temporal_batch(
+pub(crate) fn execute_prepared_timeline_temporal_batch(
     session: &mut EffectExecutionSession,
     batch: &TimelineTemporalDemandBatch,
     prepared: &mut PreparedTemporalFrameSet,
@@ -362,6 +540,7 @@ fn collect_media_batch(
     frame_extent: EffectFrameExtent,
     output_roi: EffectPixelRoi,
     cancellation: ExecutionCancellationToken,
+    session: Option<&mut EffectExecutionSession>,
 ) -> Result<(), TimelineTemporalPreparationError> {
     if !graph_requires_temporal(&media.effect_graph) {
         return Ok(());
@@ -376,6 +555,7 @@ fn collect_media_batch(
         output_roi,
         media.frame_seed,
         cancellation,
+        session,
         |request| {
             let source_time =
                 program.sample_clip_source(media.placement, request.time()).map_err(|error| {
@@ -422,6 +602,7 @@ fn collect_nested_batch(
     frame_extent: EffectFrameExtent,
     output_roi: EffectPixelRoi,
     cancellation: ExecutionCancellationToken,
+    session: Option<&mut EffectExecutionSession>,
 ) -> Result<(), TimelineTemporalPreparationError> {
     if !graph_requires_temporal(&nested.effect_graph) {
         return Ok(());
@@ -436,6 +617,7 @@ fn collect_nested_batch(
         output_roi,
         nested.frame_seed,
         cancellation,
+        session,
         |request| {
             let source_time = program
                 .sample_clip_source(nested.placement, request.time())
@@ -462,6 +644,7 @@ fn collect_solid_batch(
     frame_extent: EffectFrameExtent,
     output_roi: EffectPixelRoi,
     cancellation: ExecutionCancellationToken,
+    session: Option<&mut EffectExecutionSession>,
 ) -> Result<(), TimelineTemporalPreparationError> {
     if !graph_requires_temporal(&solid.effect_graph) {
         return Ok(());
@@ -476,6 +659,7 @@ fn collect_solid_batch(
         output_roi,
         solid.frame_seed,
         cancellation,
+        session,
         |_request| Ok(TimelineTemporalSource::SolidColor { color: solid.color }),
     )
 }
@@ -491,6 +675,7 @@ fn collect_batch(
     output_roi: EffectPixelRoi,
     output_frame_seed: i64,
     cancellation: ExecutionCancellationToken,
+    session: Option<&mut EffectExecutionSession>,
     mut resolve_source: impl FnMut(
         EffectTemporalFrameRequest,
     )
@@ -505,13 +690,16 @@ fn collect_batch(
         cancellation,
     )
     .with_output_frame_seed(output_frame_seed);
-    let prepared =
-        program
-            .prepare_clip_temporal_execution(placement, &execution)
-            .map_err(|error| TimelineTemporalPreparationError::EffectDemand {
-                clip_id: placement.clip_id,
-                reason: error.to_string(),
-            })?;
+    let prepared = match session {
+        Some(session) => {
+            program.prepare_clip_temporal_execution_with_session(placement, &execution, session)
+        }
+        None => program.prepare_clip_temporal_execution(placement, &execution),
+    }
+    .map_err(|error| TimelineTemporalPreparationError::EffectDemand {
+        clip_id: placement.clip_id,
+        reason: error.to_string(),
+    })?;
     let source_demands = prepared
         .demands()
         .requests()
@@ -750,6 +938,45 @@ mod tests {
         EffectNode::new(effect_type)
     }
 
+    fn sampled_dynamic_topology_effect() -> EffectNode {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let effect_type = EffectType::Plugin(format!("test.timeline.dynamic-topology.{id}"));
+        register_effect_definition(
+            EffectDefinition::new(
+                effect_type.key(),
+                "Timeline dynamic topology test",
+                Default::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32,
+                determinism: EffectDeterminism::Deterministic,
+                state_model: EffectStateModel::Stateless,
+                temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+                roi_propagation: EffectRoiPropagation::PixelLocal,
+                resource_lifetime: EffectResourceLifetime::Frame,
+                topology: EffectGraphTopology::LinearChain,
+            })
+            .with_graph_builder(Arc::new(|_, context, graph| {
+                if context.time >= TimelineTime::new(1, 2).expect("sample threshold") {
+                    graph.append_unary(EffectRenderOp::ColorAdjust {
+                        exposure: 0.25,
+                        contrast: 1.0,
+                        saturation: 1.0,
+                        working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
+                    });
+                }
+                if context.time >= TimelineTime::ONE {
+                    graph.append_unary(EffectRenderOp::Vignette { intensity: 0.4, feather: 0.6 });
+                }
+                Ok(())
+            })),
+        )
+        .expect("register dynamic topology test definition");
+        EffectNode::new(effect_type)
+    }
+
     #[test]
     fn media_demands_preserve_retime_color_alpha_and_generation() {
         let rate = Rational::new(30, 1);
@@ -921,22 +1148,25 @@ mod tests {
         sequence.video_tracks.push(track);
 
         let program = PreparedVisualProgram::prepare(&sequence).expect("program");
-        let plan = evaluate_prepared_visual_program(
-            &program,
-            crate::TimelineEvaluationRequest::export(FramePosition::new(24, sequence.time_base())),
-        )
-        .expect("plan");
         let extent = EffectFrameExtent::new(8, 4);
-        let prepared = prepare_timeline_temporal_execution(
-            &program,
-            &plan,
-            73,
-            EffectExecutionContinuity::Continuous,
-            extent,
-            extent.full_frame_roi(),
-            ExecutionCancellationToken::new(),
-        )
-        .expect("prepared temporal DAG");
+        let mut scratch = crate::TimelineCompositeScratch::default();
+        let prepared = scratch
+            .prepare_timeline_frame_execution(
+                &program,
+                TimelineFrameExecutionRequest::new(
+                    crate::TimelineEvaluationRequest::export(FramePosition::new(
+                        24,
+                        sequence.time_base(),
+                    )),
+                    73,
+                    EffectExecutionContinuity::Continuous,
+                    extent,
+                    extent.full_frame_roi(),
+                    ExecutionCancellationToken::new(),
+                ),
+            )
+            .expect("prepared temporal DAG");
+        assert_eq!(scratch.effect_execution_diagnostics().generation, Some(73));
 
         assert_eq!(prepared.batches().len(), 1);
         let batch = &prepared.batches()[0];
@@ -1022,6 +1252,57 @@ mod tests {
         assert!(tiled.execution_tiles() > 1);
         assert!(tiled.peak_working_bytes() <= tiled_budget);
         assert_eq!(tiled.tile().pixels(), direct.tile().pixels());
+    }
+
+    #[test]
+    fn frame_preparation_shares_topology_owner_across_current_and_sampled_graphs() {
+        let rate = Rational::new(24, 1);
+        let offset = TimelineTime::new(1, 2).expect("offset");
+        let mut sequence = Sequence::new("owner-scoped temporal topology");
+        sequence.settings.frame_rate = rate;
+        sequence.video_tracks.clear();
+        let mut track = Track::new_video("V1");
+        let mut clip = Clip::new(
+            AssetId::new(),
+            TimelineTime::ZERO,
+            TimelineTime::new(5, 1).expect("duration"),
+        )
+        .expect("Clip");
+        clip.add_effect_node(sampled_dynamic_topology_effect());
+        clip.add_effect_node(temporal_effect(offset));
+        track.add_clip(clip).expect("add Clip");
+        sequence.video_tracks.push(track);
+
+        let program = PreparedVisualProgram::prepare(&sequence).expect("program");
+        let extent = EffectFrameExtent::new(8, 4);
+        let request = TimelineFrameExecutionRequest::new(
+            crate::TimelineEvaluationRequest::export(FramePosition::new(24, sequence.time_base())),
+            91,
+            EffectExecutionContinuity::Continuous,
+            extent,
+            extent.full_frame_roi(),
+            ExecutionCancellationToken::new(),
+        );
+        let mut scratch = crate::TimelineCompositeScratch::default();
+
+        let prepared = scratch
+            .prepare_timeline_frame_execution(&program, request.clone())
+            .expect("prepare temporal topology frame");
+        assert_eq!(prepared.batches().len(), 1);
+        assert_eq!(
+            scratch.effect_execution_diagnostics().topology_entries,
+            2,
+            "ordinary root and sampled topology variants must reside in one owner Session"
+        );
+
+        scratch
+            .prepare_timeline_frame_execution(&program, request)
+            .expect("reuse temporal topology frame");
+        assert_eq!(
+            scratch.effect_execution_diagnostics().topology_entries,
+            2,
+            "repeated same-generation preparation must reuse both variants"
+        );
     }
 
     #[test]

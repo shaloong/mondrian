@@ -26,15 +26,15 @@ use mondrian_playback::{FramePresentationQuality, PreviewResolutionScale};
 use mondrian_renderer::{
     admit_timeline_render_plan_for_cpu_compositor, basic_title_raster_request_identity,
     execute_cpu_working_transform_with_session, prepare_bound_visual_frame_closure,
-    prepare_timeline_temporal_execution, project_basic_title_transform, BasicTitleRasterFrame,
-    BasicTitleRasterRequestIdentity, ColorFrameAlpha, CpuColorFrame,
-    PreparedVisualAuthorSnapshotIdentity, PreparedVisualChildCanvasPolicy,
-    PreparedVisualFrameClosure, PreparedVisualFrameClosureRequest, PreparedVisualFrameEvaluation,
-    PreparedVisualFrameNode, PreparedVisualFrameNodeId, PreparedVisualMaterializationContract,
-    PreparedVisualNestedSample, PreparedVisualProgramBinding, PreparedVisualProgramCache,
-    RenderColorStageDiagnostics, RenderColorTransformDiagnostics, TimelineAdjustmentLayer,
-    TimelineBasicTitlePlan, TimelineCompositeDiagnostics, TimelineCompositeScratch,
-    TimelineCpuCompositePrecision, TimelineEvaluationRequest, TimelineMediaPlan,
+    project_basic_title_transform, BasicTitleRasterFrame, BasicTitleRasterRequestIdentity,
+    ColorFrameAlpha, CpuColorFrame, PreparedVisualAuthorSnapshotIdentity,
+    PreparedVisualChildCanvasPolicy, PreparedVisualFrameClosure, PreparedVisualFrameClosureRequest,
+    PreparedVisualFrameEvaluation, PreparedVisualFrameNode, PreparedVisualFrameNodeId,
+    PreparedVisualMaterializationContract, PreparedVisualNestedSample,
+    PreparedVisualProgramBinding, PreparedVisualProgramCache, RenderColorStageDiagnostics,
+    RenderColorTransformDiagnostics, TimelineAdjustmentLayer, TimelineBasicTitlePlan,
+    TimelineCompositeDiagnostics, TimelineCompositeScratch, TimelineCpuCompositePrecision,
+    TimelineEvaluationRequest, TimelineFrameExecutionRequest, TimelineMediaPlan,
     TimelineRenderPlanElement, TimelineSolidColorLayer, TimelineTemporalDemandBatch,
     TimelineTemporalSource, TimelineTemporalSourceDemand, TimelineTransitionInputPlan,
 };
@@ -546,45 +546,34 @@ impl<'a> PreviewTimelineGraph<'a> {
         target_resolution: Resolution,
         normalized_preview_resolution_scale: f32,
     ) -> Result<PreparedVisualFrameEvaluation<()>, PreviewUnavailability> {
-        let plan = self
+        let extent = EffectFrameExtent::new(target_resolution.width, target_resolution.height);
+        let prepared = self
             .scratch
             .borrow_mut()
-            .evaluate_prepared_visual_program(
+            .prepare_timeline_frame_execution(
                 program.as_ref(),
-                TimelineEvaluationRequest::preview(
-                    FramePosition::new(frame, program.evaluation_time_base()),
-                    normalized_preview_resolution_scale,
+                TimelineFrameExecutionRequest::new(
+                    TimelineEvaluationRequest::preview(
+                        FramePosition::new(frame, program.evaluation_time_base()),
+                        normalized_preview_resolution_scale,
+                    ),
+                    self.generation,
+                    mondrian_effects::EffectExecutionContinuity::Discontinuous,
+                    extent,
+                    extent.full_frame_roi(),
+                    self.cancellation.clone(),
                 ),
             )
             .map_err(|error| {
                 PreviewUnavailability::blocked(
                     PreviewOutputStage::TimelineEvaluation,
                     format!(
-                        "Sequence {} render-plan evaluation failed: {error}",
-                        program.sequence_id()
+                        "Sequence {} frame {} execution preparation failed closed: {error}",
+                        program.sequence_id(),
+                        frame.max(0)
                     ),
                 )
             })?;
-        let extent = EffectFrameExtent::new(target_resolution.width, target_resolution.height);
-        let prepared = prepare_timeline_temporal_execution(
-            program.as_ref(),
-            &plan,
-            self.generation,
-            mondrian_effects::EffectExecutionContinuity::Discontinuous,
-            extent,
-            extent.full_frame_roi(),
-            self.cancellation.clone(),
-        )
-        .map_err(|error| {
-            PreviewUnavailability::blocked(
-                PreviewOutputStage::TimelineEvaluation,
-                format!(
-                    "Sequence {} frame {} temporal preparation failed closed: {error}",
-                    program.sequence_id(),
-                    frame.max(0)
-                ),
-            )
-        })?;
         self.scratch
             .borrow()
             .admit_cpu_active_working_set(

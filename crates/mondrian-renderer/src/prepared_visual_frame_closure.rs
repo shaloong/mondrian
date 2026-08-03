@@ -1179,9 +1179,8 @@ impl std::error::Error for PreparedVisualFrameClosureError {}
 mod tests {
     use super::*;
     use crate::{
-        evaluate_prepared_visual_program, prepare_timeline_temporal_execution,
-        PreparedVisualProgram, TimelineCompositeScratch, TimelineCpuCompositePrecision,
-        TimelineCpuWorkingSetError, TimelineCpuWorkingSetGrant,
+        evaluate_prepared_visual_program, PreparedVisualProgram, TimelineCompositeScratch,
+        TimelineCpuCompositePrecision, TimelineCpuWorkingSetError, TimelineCpuWorkingSetGrant,
     };
     use mondrian_core::timeline_data::TimelineClipEndpointContext;
     use mondrian_core::{
@@ -1354,7 +1353,7 @@ mod tests {
                 )
                 .map_err(|error| error.to_string())?;
                 let extent = EffectFrameExtent::new(resolution.width, resolution.height);
-                let prepared = prepare_timeline_temporal_execution(
+                let prepared = crate::timeline_temporal::prepare_timeline_temporal_execution(
                     program,
                     &plan,
                     7,

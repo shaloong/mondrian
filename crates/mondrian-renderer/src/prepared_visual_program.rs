@@ -587,6 +587,34 @@ impl PreparedVisualProgram {
         placement: TimelineClipExecutionRef,
         request: &EffectTemporalExecutionRequest,
     ) -> Result<PreparedEffectTemporalExecution> {
+        let effect_program = self.temporal_effect_program(placement, request)?;
+        prepare_temporal_frame_execution(effect_program, request, |clip_time| {
+            self.temporal_frame_seed(placement, clip_time)
+        })
+        .map_err(|error| self.temporal_preparation_error(placement.clip_id, error))
+    }
+
+    /// Freeze one Clip's time-expanded execution while sharing bounded dynamic
+    /// topology residency with this consumer's ordinary frame evaluation.
+    pub(crate) fn prepare_clip_temporal_execution_with_session(
+        &self,
+        placement: TimelineClipExecutionRef,
+        request: &EffectTemporalExecutionRequest,
+        session: &mut EffectExecutionSession,
+    ) -> Result<PreparedEffectTemporalExecution> {
+        let effect_program = self.temporal_effect_program(placement, request)?;
+        session
+            .prepare_temporal_frame_execution(effect_program, request, |clip_time| {
+                self.temporal_frame_seed(placement, clip_time)
+            })
+            .map_err(|error| self.temporal_preparation_error(placement.clip_id, error))
+    }
+
+    fn temporal_effect_program(
+        &self,
+        placement: TimelineClipExecutionRef,
+        request: &EffectTemporalExecutionRequest,
+    ) -> Result<&PreparedEffectProgram> {
         if request.output_time() != placement.clip_time {
             return Err(MondrianError::EffectGraphEvaluationFailed {
                 reason: format!(
@@ -616,22 +644,35 @@ impl PreparedVisualProgram {
                 });
             }
         };
-        prepare_temporal_frame_execution(effect_program, request, |clip_time| {
-            let sequence_time = self
-                .schedule
-                .clip_to_sequence_time(placement, clip_time)
-                .map_err(|error| error.to_string())?;
-            Ok(visual_frame_seed(
-                sequence_time,
-                self.evaluation_time_base(),
-            ))
-        })
-        .map_err(|error| MondrianError::EffectGraphEvaluationFailed {
+        Ok(effect_program)
+    }
+
+    fn temporal_frame_seed(
+        &self,
+        placement: TimelineClipExecutionRef,
+        clip_time: TimelineTime,
+    ) -> std::result::Result<i64, String> {
+        let sequence_time = self
+            .schedule
+            .clip_to_sequence_time(placement, clip_time)
+            .map_err(|error| error.to_string())?;
+        Ok(visual_frame_seed(
+            sequence_time,
+            self.evaluation_time_base(),
+        ))
+    }
+
+    fn temporal_preparation_error(
+        &self,
+        clip_id: ClipId,
+        error: mondrian_effects::EffectTemporalExecutionError,
+    ) -> MondrianError {
+        MondrianError::EffectGraphEvaluationFailed {
             reason: format!(
                 "Clip {} temporal Effect preparation failed: {error}",
-                placement.clip_id
+                clip_id
             ),
-        })
+        }
     }
 
     /// Exact Effect-definition registry revision.

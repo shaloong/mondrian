@@ -24,7 +24,9 @@ Prepared Visual Program set + inclusive root range
        -> exact range-selected Programs / media / Transitions / title fonts
 TimelineEvaluationRequest
   -> Prepared Visual Program query
-  -> Timeline Evaluation
+  -> owner-scoped Timeline Frame Preparation
+       -> ordinary Timeline Evaluation
+       -> finite-temporal exact-time evaluation
   -> FlatVisualItem (Clip or two-input Transition)
   -> per-Sequence TimelineRenderPlan
   -> Dynamic Effect Evaluation + Consumer Execution Admission
@@ -65,9 +67,10 @@ the exact Sequence author revision and Effect-definition registry revision. Its
 `PreparedVisualSchedule` first selects active visible Tracks through one merged
 global activity index, restores authored Track order, then queries only those
 Tracks' Clip and Transition indexes. Its per-Clip `PreparedEffectProgram`
-bindings retain definition, resource,
-execution-envelope, immutable zero-time compiled graph, and reusable
-graph-topology state. The canonical source-only identity graph is the sole
+bindings retain definition, resource, execution-envelope, immutable zero-time
+compiled graph, and immutable zero-time topology. Dynamic topology residency
+belongs only to the consumer's bounded Effect Execution Session. The canonical
+source-only identity graph is the sole
 process-wide compiled graph; every non-identity compiled graph belongs to its
 Prepared Program, one frame-local uncached reference evaluation, or the
 consumer's bounded Effect Execution Session. Effect preparation
@@ -562,6 +565,17 @@ per-Sequence-frame scratch can outlive its consumer. Preview Viewer lowering
 borrows that retained Preview
 scratch, while Export diagnostics borrow the job-local scratch. Preview
 resource policy may resize only its own Session and cannot evict an Export job.
+
+`TimelineCompositeScratch::prepare_timeline_frame_execution` is the deep
+production entry for one Sequence frame. It binds the generation before work,
+evaluates the ordinary Render Plan with the retained Session, and prepares
+every root/sample temporal graph through that same Session. Preview and Export
+receive one `PreparedTimelineFrameExecution` containing the rewritten ordinary
+plan, exact temporal batches, and aggregate source-coverage bytes; neither
+Adapter stitches a session-free temporal pass onto a separately evaluated
+plan. The session-free Timeline temporal wrappers exist only in test builds for
+scalar parity evidence and are absent from production artifacts.
+
 The compositor scratch also owns one non-`Send`
 `RenderCpuColorExecutionSession`. Source/import transforms, effect-domain
 edges, nested working-to-working conversion, Program Output, and monitor
@@ -610,8 +624,9 @@ same composition, not apply its auto-fit scale a second time.
 
 `mondrian-renderer::timeline_render_plan` lowers one Sequence frame through one
 internal Implementation. Production calls
-`evaluate_prepared_visual_program_with_session(program, request, session)`
-through its consumer-owned `TimelineCompositeScratch`; the session-free
+`TimelineCompositeScratch::prepare_timeline_frame_execution(...)`, which uses
+`evaluate_prepared_visual_program_with_session(program, request, session)` and
+the Session-owned finite-temporal preparation under one generation. The session-free
 `evaluate_prepared_visual_program(program, request)` and direct
 `evaluate_timeline_render_plan(source, request)` remain scalar reference
 Adapters for tests and diagnostics. All three enter the same Clip/Transition

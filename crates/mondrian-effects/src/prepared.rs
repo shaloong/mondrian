@@ -992,6 +992,60 @@ mod tests {
         .expect("prepare dynamic topology program")
     }
 
+    fn dynamic_temporal_topology_program(key: &str) -> PreparedEffectProgram {
+        let dynamic_effect_type = EffectType::Plugin(key.to_owned());
+        let temporal_effect_type = EffectType::Plugin(format!("{key}.temporal"));
+        let offset = TimelineTime::new(1, 2).expect("temporal offset");
+        register_effect_definition(
+            EffectDefinition::new(
+                dynamic_effect_type.key(),
+                "Dynamic Temporal Topology",
+                Default::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(cpu_linear_contract())
+            .with_graph_builder(Arc::new(|_, context, graph| {
+                if context.time != TimelineTime::ZERO {
+                    graph.append_unary(EffectRenderOp::Vignette { intensity: 0.25, feather: 0.75 });
+                }
+                Ok(())
+            })),
+        )
+        .expect("register dynamic topology definition");
+        register_effect_definition(
+            EffectDefinition::new(
+                temporal_effect_type.key(),
+                "Temporal Topology Consumer",
+                Default::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                temporal_input: EffectTemporalInputExtent {
+                    past: crate::EffectTemporalSpan::Finite(offset),
+                    future: crate::EffectTemporalSpan::None,
+                },
+                ..cpu_linear_contract()
+            })
+            .with_graph_builder(Arc::new(move |_, _, graph| {
+                graph.append_unary(EffectRenderOp::TemporalFrameBlend {
+                    sample_offset: TimelineTime::ZERO.checked_sub(offset).expect("past offset"),
+                    mix: 0.25,
+                });
+                Ok(())
+            })),
+        )
+        .expect("register temporal topology definition");
+        PreparedEffectProgram::prepare(
+            &[
+                EffectNode::new(dynamic_effect_type),
+                EffectNode::new(temporal_effect_type),
+            ],
+            &[],
+            WorkingColorSpace::LinearRec709,
+        )
+        .expect("prepare dynamic temporal topology program")
+    }
+
     fn topology_session_config(
         max_cache_entries: usize,
         max_cache_bytes: usize,
@@ -1299,6 +1353,59 @@ mod tests {
         assert_eq!(export.diagnostics().topology_entries, 0);
         assert_eq!(export.diagnostics().topology_bytes, 0);
         assert_eq!(program.retained_bytes_estimate(), retained_before);
+    }
+
+    #[test]
+    fn temporal_preparation_reuses_owner_topology_and_rotates_with_generation() {
+        let program = dynamic_temporal_topology_program("plugin.prepared.temporal_topology_owner");
+        let extent = crate::EffectFrameExtent::new(8, 4);
+        let request = crate::EffectTemporalExecutionRequest::new(
+            11,
+            crate::EffectExecutionContinuity::Continuous,
+            TimelineTime::ONE,
+            extent,
+            extent.full_frame_roi(),
+            mondrian_core::ExecutionCancellationToken::new(),
+        );
+        let mut session = EffectExecutionSession::new(topology_session_config(10, 2 * 1024 * 1024));
+
+        let first = session
+            .prepare_temporal_frame_execution(&program, &request, |_| Ok(1))
+            .expect("prepare first temporal frame");
+        assert_eq!(first.demands().requests().len(), 2);
+        assert_eq!(session.diagnostics().generation, Some(11));
+        assert_eq!(
+            session.diagnostics().topology_entries,
+            1,
+            "root and sampled evaluations must share one retained dynamic topology"
+        );
+
+        session
+            .prepare_temporal_frame_execution(&program, &request, |_| Ok(1))
+            .expect("reuse temporal topology");
+        assert_eq!(
+            session.diagnostics().topology_entries,
+            1,
+            "repeated preparation in one generation must not duplicate topology residency"
+        );
+
+        let next_request = crate::EffectTemporalExecutionRequest::new(
+            12,
+            crate::EffectExecutionContinuity::Discontinuous,
+            TimelineTime::ONE,
+            extent,
+            extent.full_frame_roi(),
+            mondrian_core::ExecutionCancellationToken::new(),
+        );
+        session
+            .prepare_temporal_frame_execution(&program, &next_request, |_| Ok(1))
+            .expect("prepare next generation");
+        assert_eq!(session.diagnostics().generation, Some(12));
+        assert_eq!(
+            session.diagnostics().topology_entries,
+            1,
+            "generation rotation must clear and rebuild, not accumulate, residency"
+        );
     }
 
     #[test]
