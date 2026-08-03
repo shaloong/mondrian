@@ -425,16 +425,19 @@ terminal delivery. No CPU rerun is allowed after the prefix starts.
 
 `EffectExecutionDemand` derives a checked signed finite/unbounded temporal
 window and exact-or-conservative input ROI from the same prepared execution
-envelope. `collect_temporal_frame_demands` accepts one closed production
-shape: finite Source-fed `TemporalFrameBlend` taps with signed offsets followed
-by a current-time DAG. Negative history and positive lookahead coexist; exact
-duplicate sample times are requested and frozen once, then retained through
-their last compiled tap use. Unary branches may fan out and rejoin through
-Blend/MultiInput, and current-time Mask/MaskSource nodes are valid PixelLocal
-stages. Their immutable prepared
-geometry uses global frame coordinates for every region and is shared by direct
-or tiled execution; retained geometry and bounded row scratch are admitted as
-part of the Effect working set.
+envelope. `prepare_temporal_frame_execution` compiles a time-expanded value
+projection over the sole `CompiledEffectGraph` IR. Negative history and
+positive lookahead coexist; exact duplicate source times and graph values are
+requested once, then retained through their final expanded edge use. A
+temporal stage samples its stable Definition-stage input. Earlier Effect stages
+are reevaluated from the same `PreparedEffectProgram` at the exact sampled Clip
+time, so animated parameters, dynamic topology, frame seeds, and Masks cannot
+borrow output-time state. Each cross-time edge strictly lowers the stage index;
+unstable contracts, internal same-stage addresses, unbounded expansion, or a
+sampled spatial demand outside root coverage fail closed. Immutable Mask
+geometry uses global frame coordinates per exact-time graph context and is
+shared by direct or tiled execution; retained geometry and bounded row scratch
+are admitted as part of the Effect working set.
 `PreparedTemporalFrameSet` is the decode-free provider used by the bounded
 CPU-Float32 scalar reference. Its demand batch carries the checked exact
 Float32 source-coverage byte total. Preview and Export admit that total against
@@ -448,7 +451,7 @@ That scalar reference keeps the exact input ROI rather than expanding it into
 a zero-filled complete frame. Its raster-region contract preserves global
 frame coordinates for coordinate-dependent kernels, finite-support kernels
 consume only their implementation-derived halo, and complete-frame-only
-kernels fail closed on a partial region. The compiled schedule/use counts are
+kernels fail closed on a partial region. The expanded schedule/use counts are
 the liveness authority: last-use values move, fan-out clones only remain while
 needed, and joins release inputs immediately. A pure dry-run proves the exact
 scalar live set before pixel work. Resident graph values, concrete kernel
@@ -467,9 +470,10 @@ attempt-local and never enter the Effect output cache; only the complete frame
 may publish there. Direct and tiled production
 paths have exact pixel-parity and peak-budget tests, including a Path Mask after
 a finite temporal fan-out/join DAG and a signed past/future multi-tap DAG with
-duplicate samples. This evidence applies only to the bounded
-CPU-Float32 temporal scalar contract; it is not evidence of GPU temporal tiling,
-arbitrary temporal graphs, or stateful continuity execution.
+duplicate samples, plus an effected upstream stage whose parameters differ at
+the sampled instant. This evidence applies only to the bounded CPU-Float32
+temporal scalar contract; it is not evidence of GPU temporal tiling, internal
+same-stage temporal addressing, or stateful continuity execution.
 
 Export connects this tracer to its job-local decoder and closure-backed nested
 materializer. It resolves every typed demand address first, adapts the result to
@@ -478,8 +482,8 @@ under the export generation/cancellation Session before replacing that graph
 with identity for ordinary compositing. Media and Solid Color are admitted; a
 nested source is admitted only when its closure-bound exact raster already
 matches the Effect extent. Basic Title temporal input, Adjustment-stack temporal
-input, unbounded input, stateful continuity, and any Effect upstream of a
-temporal tap fail closed. Preview emits the same exact batch into its existing
+input, unbounded input, stateful continuity, and internal same-stage temporal
+input fail closed. Preview emits the same exact batch into its existing
 asynchronous media Scheduler. Temporal media keys require CPU-working output
 and therefore cannot coalesce with an opaque native-surface request. A missing
 Frame Store value returns typed Temporal Pending after all demands have been

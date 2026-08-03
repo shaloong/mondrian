@@ -916,24 +916,37 @@ Transition endpoint fails closed. The provider never reads a legacy
 range/speed field, holds the current decoded frame as history, or scans
 `Track`/`Clip` author collections behind `RenderPlanSource`.
 
-The effects Module collects one exact finite temporal demand batch from the same
-`CompiledEffectGraph` that is later executed. A `PreparedTemporalFrameSet`
+The effects Module prepares one exact finite time-expanded execution from the
+same `PreparedEffectProgram` and `CompiledEffectGraph` that are later executed.
+The schedule maps every requested Clip time back to its owning Sequence time
+for exact parameter/frame-seed evaluation, separately from the canonical
+Clip-to-source mapping used by media and nested Adapters. An on-grid sample
+uses the ordinary Sequence frame number; an off-grid sample uses a versioned
+hash of exact Sequence time and Evaluation Grid. Source retime therefore never
+changes stochastic Effect identity.
+
+`PreparedEffectTemporalExecution` freezes root graph, exact sampled graphs,
+cross-time value addresses, and raw source demands as one authority. A
+`PreparedTemporalFrameSet`
 freezes a complete, generation-bound set of source coverage before scalar
 execution and reports its exact Float32 byte total before callers materialize
 it. Missing, duplicate, unexpected, stale-generation, wrongly sized, or
 ambiguous coverage fails before the graph can observe a partial provider. The
-admitted production graph shape is a finite ordered set of Source-fed signed
-temporal taps followed by a current-time unary/fan-out/join DAG. Negative and
-positive offsets become exact history/lookahead demands; duplicate exact times
-are frozen once and retained to their last tap use. Its Effect Session executes the request
+admitted production graph shape is a finite Definition-stage-addressed value
+projection. Negative and positive offsets become exact history/lookahead
+demands; an effected upstream value reevaluates all earlier Definition stages
+at that exact Clip time, including animated parameters, dynamic topology,
+frame seeds, and Masks. Duplicate exact source times and graph values are
+frozen once and retained to their last edge use. Stage contracts must remain
+stable, cross-time edges must move to an earlier stage, and every discovered
+source time/ROI must fit the declared aggregate contract. Its Effect Session executes the request
 directly when the proved live set fits, or deterministically tiles and stitches
 the complete output under the same source/output/tile grant. Current-time Clip
 Masks execute in that graph through one frame-extent-bound prepared raster;
 partial regions retain global Mask coordinates and direct/tiled results are
-bit-identical. Temporal input with an upstream Effect, generated or animated
-upstream content, Adjustment Clip, unbounded temporal input, stateful continuity,
-or unsupported color/ROI semantics is rejected rather than rendered
-approximately.
+bit-identical. Adjustment-stack temporal input, internal same-stage temporal
+branches, unbounded temporal input, stateful continuity, or unsupported
+color/ROI semantics are rejected rather than rendered approximately.
 
 Export connects this first tracer to job-local synchronous media and nested
 resolution, reusing the ordinary input color/alpha preparation and nested

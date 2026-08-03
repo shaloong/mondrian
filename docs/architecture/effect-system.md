@@ -320,17 +320,41 @@ recursively evaluate, or allocate at this seam. Cancellation is checked during
 bounded copies, between planned tiles, inside kernels and stitching, and before
 cache publication.
 
-`collect_temporal_frame_demands` walks that same compiled graph without
-fetching pixels. The bounded production tracer admits any finite number of
-`Source -> TemporalFrameBlend` taps with exact signed `sample_offset` values,
-followed by a current-time DAG. Negative offsets request history, positive
-offsets request lookahead, and zero reuses the current source value. Unary
-branches may fan out and rejoin through Blend or MultiInput, and a current
-Source branch may bypass all taps. Exact duplicate sample times are requested
-and frozen once, retained until their last compiled tap use, and charged by the
-same dry-run and runtime liveness ledger. A tap with upstream Effect values is
-rejected because those upstream parameters are bound at the output Clip time.
-`PreparedTemporalFrameSet` freezes one complete, de-duplicated batch and proves
+`prepare_temporal_frame_execution` expands cross-time dependencies without
+fetching pixels. Its `PreparedEffectTemporalExecution` owns the root
+`CompiledEffectGraph`, scheduler request, exact-time value projection, and raw
+source demand batch as one immutable object; collection and execution therefore
+cannot use different graph evaluations. `TemporalFrameBlend` addresses its
+Definition stage input, not merely a source time. When that input has earlier
+Effect stages, the Effects Module reevaluates the same bound
+`PreparedEffectProgram` at `output_time + sample_offset`; the projection
+targets the same stage index's input in that sampled graph. Animated
+parameters, dynamic topology, frame-seeded operations, and Mask geometry
+consequently use their own exact
+sample instant. Stage contracts and ordering must remain stable, and a temporal
+op may not address an internal same-stage value whose cross-time identity is
+undefined. Both conditions fail closed.
+
+The projection references the unique compiled Effect IR rather than copying
+operations into another Render Graph. Ordinary edges stay within one exact-time
+context; temporal edges move to an earlier Definition stage at another exact
+time. This strictly decreasing stage address makes recursive finite taps
+acyclic by construction. Exact `(time, graph value)` addresses, source times,
+edge use counts, and context fingerprints are de-duplicated deterministically.
+Hard limits of 512 graph contexts and 65,536 expanded values bound hostile or
+accidentally combinatorial graphs before pixels or Masks are allocated. The
+root aggregate temporal extent must cover every discovered raw source time,
+every sampled context must admit stateless CPU Float32 execution, and its
+conservative spatial demand must fit inside the root request's already admitted
+coverage. A violated Definition contract is an error, never a cropped result.
+
+The legacy `collect_temporal_frame_demands` / `execute_temporal_f32` convenience
+Interface remains valid for source-fed finite taps followed by current-time
+graph work. It
+intentionally lacks an exact-time prepared-program evaluator and therefore
+rejects effected temporal inputs instead of reusing output-time parameters.
+Timeline production uses the prepared Interface. `PreparedTemporalFrameSet`
+freezes one complete, de-duplicated batch and proves
 generation, request, ROI, extent, and tile equality before it can implement the
 provider. The demand batch computes checked exact Float32 coverage bytes before
 callers materialize any dependency. Preview and Export admit that aggregate
@@ -362,9 +386,10 @@ not a second working-precision contract. `UnknownRequiresFullFrame` remains a
 conservative full-frame request with no exact-halo evidence, so an optimized
 tile backend cannot present fallback as proved tiling.
 
-The scalar executor consumes the compiled topological schedule and use counts
-as its sole liveness authority. A pure private scheduling Module dry-runs that
-same liveness program before pixel work. A last-use value moves into its consumer, a
+The scalar executor consumes the prepared time-expanded topological schedule
+and its exact use counts as its sole liveness authority. A pure private
+scheduling Module dry-runs that same liveness program before pixel work. A
+last-use value moves into its consumer, a
 fan-out value is cloned only while another edge remains, and Blend/MultiInput
 releases each joined overlay immediately. It fails if an edge is over- or
 under-consumed, a non-output value survives, or the owned-byte ledger does not
@@ -403,8 +428,11 @@ corresponding full-frame/current-frame reference crop in direct and tiled
 production execution. Signed past/future and duplicate-sample multi-tap gates
 also prove deterministic request order, exact de-duplication, scalar reference
 output, and direct/tiled parity. This does not claim GPU temporal tiling,
-temporal input with upstream Effects, unbounded input, or stateful continuity
-execution.
+unbounded input, stateful continuity, or cross-time identity for internal
+same-stage temporal branches. A separate effected-input gate proves that an
+upstream exposure evaluated as `+1` at the output and `-1` at the sampled
+instant produces the exact two-context reference instead of reusing current
+parameters.
 
 `TemporalFrameBlend` is the finite signed-tap proof Processor. It
 coverage-correctly interpolates the current Source frame with the exact sample
@@ -436,10 +464,10 @@ Frame Store value is missing. Nested demands are materialized from the same
 closure node/binding identities; Preview has no second recursive Timeline
 resolver. Only a complete set is frozen and passed to the retained Preview
 Effect Session under that generation's monotonic cancellation token; no
-current/displayed frame can stand in for an absent sample. Current-time Masks are
-prepared once and run in this same production contract. Unbounded input,
-stateful continuity, animated/effected upstream temporal input, and heterogeneous
-temporal execution remain outside it.
+current/displayed frame can stand in for an absent sample. Masks are prepared
+once per reachable exact-time graph context and run in this same production
+contract. Unbounded input, stateful continuity, internal same-stage temporal
+branches, and heterogeneous temporal execution remain outside it.
 
 Prepared dependency identity combines the definition-registry revision with
 semantic fingerprints of immutable resources. `.cube` files are parsed,

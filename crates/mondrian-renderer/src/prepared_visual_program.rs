@@ -12,12 +12,14 @@ use mondrian_core::timeline_data::{
     TimelineClipExecutionRef,
 };
 use mondrian_core::{
-    AssetId, ClipId, FramePosition, MondrianError, Rational, Resolution, Result, SequenceId,
-    SequenceRevision, TimelineTime, VideoTransitionId,
+    AssetId, ClipId, FramePosition, FrameRounding, MondrianError, Rational, Resolution, Result,
+    SequenceId, SequenceRevision, TimelineTime, VideoTransitionId,
 };
 use mondrian_effects::{
-    effect_registry_revision, CompiledEffectGraph, EffectExecutionEnvelope, EffectExecutionSession,
+    effect_registry_revision, prepare_temporal_frame_execution, CompiledEffectGraph,
+    EffectExecutionEnvelope, EffectExecutionSession, EffectTemporalExecutionRequest,
     EffectTemporalSpan, LutPreparationCache, LutPreparationCacheConfig, PreparedEffectProgram,
+    PreparedEffectTemporalExecution,
 };
 use mondrian_timeline::{PreparedVisualSchedule, Sequence, VideoTransitionType};
 use sha2::{Digest, Sha256};
@@ -30,6 +32,24 @@ pub const DEFAULT_PREPARED_VISUAL_PROGRAM_CACHE_CAPACITY: usize = 64;
 /// Default conservative logical bytes retained by one visual-program cache.
 pub const DEFAULT_PREPARED_VISUAL_PROGRAM_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_VISUAL_DEFINITION_BIND_RETRIES: usize = 32;
+
+fn visual_frame_seed(sequence_time: TimelineTime, rate: Rational) -> i64 {
+    if let Ok(position) = sequence_time.to_frame_position(rate, FrameRounding::Nearest) {
+        if TimelineTime::from_frame_position(position).ok() == Some(sequence_time) {
+            return position.frame;
+        }
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"mondrian.visual-off-grid-frame-seed.v1");
+    hasher.update(sequence_time.numerator().to_le_bytes());
+    hasher.update(sequence_time.denominator().to_le_bytes());
+    hasher.update(rate.num.to_le_bytes());
+    hasher.update(rate.den.to_le_bytes());
+    let digest = hasher.finalize();
+    i64::from_le_bytes([
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
+    ])
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct PreparedVisualProgramKey {
@@ -558,6 +578,60 @@ impl PreparedVisualProgram {
         requested_clip_time: TimelineTime,
     ) -> Result<TimelineTime> {
         self.schedule.sample_clip_source(placement, requested_clip_time)
+    }
+
+    /// Freeze one Clip's exact time-expanded Effect execution through the
+    /// immutable program and placement snapshot owned here.
+    pub(crate) fn prepare_clip_temporal_execution(
+        &self,
+        placement: TimelineClipExecutionRef,
+        request: &EffectTemporalExecutionRequest,
+    ) -> Result<PreparedEffectTemporalExecution> {
+        if request.output_time() != placement.clip_time {
+            return Err(MondrianError::EffectGraphEvaluationFailed {
+                reason: format!(
+                    "Clip {} temporal request time {:?} does not match prepared placement time {:?}",
+                    placement.clip_id,
+                    request.output_time(),
+                    placement.clip_time
+                ),
+            });
+        }
+        let effect_program = match self.clip_effects.get(&placement.clip_id) {
+            Some(PreparedClipEffects::Ready { program, .. }) => program,
+            Some(PreparedClipEffects::Blocked { reason, .. }) => {
+                return Err(MondrianError::EffectGraphEvaluationFailed {
+                    reason: format!(
+                        "Clip {} Effect preparation failed: {reason}",
+                        placement.clip_id
+                    ),
+                });
+            }
+            None => {
+                return Err(MondrianError::EffectGraphEvaluationFailed {
+                    reason: format!(
+                        "Clip {} is absent from prepared Sequence {} revision {:?}",
+                        placement.clip_id, self.key.sequence_id, self.key.sequence_revision
+                    ),
+                });
+            }
+        };
+        prepare_temporal_frame_execution(effect_program, request, |clip_time| {
+            let sequence_time = self
+                .schedule
+                .clip_to_sequence_time(placement, clip_time)
+                .map_err(|error| error.to_string())?;
+            Ok(visual_frame_seed(
+                sequence_time,
+                self.evaluation_time_base(),
+            ))
+        })
+        .map_err(|error| MondrianError::EffectGraphEvaluationFailed {
+            reason: format!(
+                "Clip {} temporal Effect preparation failed: {error}",
+                placement.clip_id
+            ),
+        })
     }
 
     /// Exact Effect-definition registry revision.

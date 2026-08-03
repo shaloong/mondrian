@@ -17,10 +17,10 @@ use mondrian_core::{
     AssetId, Color, ColorSpace, ExecutionCancellationToken, FrameRounding, SequenceId, TimelineTime,
 };
 use mondrian_effects::{
-    collect_temporal_frame_demands, identity_compiled_effect_graph, CompiledEffectGraph,
-    EffectExecutionContinuity, EffectExecutionSession, EffectFrameExtent, EffectPixelRoi,
-    EffectTemporalExecutionError, EffectTemporalExecutionOutput, EffectTemporalExecutionRequest,
-    EffectTemporalFrameDemandBatch, EffectTemporalFrameRequest, EffectTemporalSpan,
+    identity_compiled_effect_graph, CompiledEffectGraph, EffectExecutionContinuity,
+    EffectExecutionSession, EffectFrameExtent, EffectPixelRoi, EffectTemporalExecutionError,
+    EffectTemporalExecutionOutput, EffectTemporalExecutionRequest, EffectTemporalFrameDemandBatch,
+    EffectTemporalFrameRequest, EffectTemporalSpan, PreparedEffectTemporalExecution,
     PreparedTemporalFrameSet,
 };
 use std::sync::Arc;
@@ -75,9 +75,7 @@ pub enum TimelineTemporalSource {
 #[derive(Debug, Clone)]
 pub struct TimelineTemporalDemandBatch {
     placement: TimelineClipExecutionRef,
-    graph: Arc<CompiledEffectGraph>,
-    execution: EffectTemporalExecutionRequest,
-    effect_demands: EffectTemporalFrameDemandBatch,
+    execution: PreparedEffectTemporalExecution,
     source_demands: Arc<[TimelineTemporalSourceDemand]>,
 }
 
@@ -125,17 +123,17 @@ impl TimelineTemporalDemandBatch {
 
     /// Unique compiled semantic IR that emitted these demands.
     pub fn graph(&self) -> &Arc<CompiledEffectGraph> {
-        &self.graph
+        self.execution.graph()
     }
 
     /// Exact Effect execution request.
     pub const fn execution_request(&self) -> &EffectTemporalExecutionRequest {
-        &self.execution
+        self.execution.request()
     }
 
     /// Exact Effect-owned demand batch used when freezing resolved tiles.
     pub const fn effect_demands(&self) -> &EffectTemporalFrameDemandBatch {
-        &self.effect_demands
+        self.execution.demands()
     }
 
     /// Concrete source work that Preview or Export must resolve.
@@ -277,6 +275,7 @@ pub fn collect_timeline_temporal_demands(
             )?,
             TimelineRenderPlanElement::SolidColor(solid) => collect_solid_batch(
                 &mut batches,
+                program,
                 solid,
                 generation,
                 continuity,
@@ -322,6 +321,7 @@ pub fn collect_timeline_temporal_demands(
                         }
                         TimelineTransitionInputPlan::SolidColor(solid) => collect_solid_batch(
                             &mut batches,
+                            program,
                             solid,
                             generation,
                             continuity,
@@ -349,7 +349,7 @@ pub fn execute_prepared_timeline_temporal_batch(
     batch: &TimelineTemporalDemandBatch,
     prepared: &mut PreparedTemporalFrameSet,
 ) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
-    session.execute_temporal_f32(&batch.graph, &batch.execution, prepared)
+    session.execute_prepared_temporal_f32(&batch.execution, prepared)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -368,8 +368,8 @@ fn collect_media_batch(
     }
     collect_batch(
         batches,
+        program,
         media.placement,
-        Arc::clone(&media.effect_graph),
         generation,
         continuity,
         frame_extent,
@@ -428,8 +428,8 @@ fn collect_nested_batch(
     }
     collect_batch(
         batches,
+        program,
         nested.placement,
-        Arc::clone(&nested.effect_graph),
         generation,
         continuity,
         frame_extent,
@@ -455,6 +455,7 @@ fn collect_nested_batch(
 #[allow(clippy::too_many_arguments)]
 fn collect_solid_batch(
     batches: &mut Vec<TimelineTemporalDemandBatch>,
+    program: &PreparedVisualProgram,
     solid: &TimelineSolidColorPlan,
     generation: u64,
     continuity: EffectExecutionContinuity,
@@ -467,8 +468,8 @@ fn collect_solid_batch(
     }
     collect_batch(
         batches,
+        program,
         solid.placement,
-        Arc::clone(&solid.effect_graph),
         generation,
         continuity,
         frame_extent,
@@ -482,8 +483,8 @@ fn collect_solid_batch(
 #[allow(clippy::too_many_arguments)]
 fn collect_batch(
     batches: &mut Vec<TimelineTemporalDemandBatch>,
+    program: &PreparedVisualProgram,
     placement: TimelineClipExecutionRef,
-    graph: Arc<CompiledEffectGraph>,
     generation: u64,
     continuity: EffectExecutionContinuity,
     frame_extent: EffectFrameExtent,
@@ -504,13 +505,15 @@ fn collect_batch(
         cancellation,
     )
     .with_output_frame_seed(output_frame_seed);
-    let effect_demands = collect_temporal_frame_demands(&graph, &execution).map_err(|error| {
-        TimelineTemporalPreparationError::EffectDemand {
-            clip_id: placement.clip_id,
-            reason: error.to_string(),
-        }
-    })?;
-    let source_demands = effect_demands
+    let prepared =
+        program
+            .prepare_clip_temporal_execution(placement, &execution)
+            .map_err(|error| TimelineTemporalPreparationError::EffectDemand {
+                clip_id: placement.clip_id,
+                reason: error.to_string(),
+            })?;
+    let source_demands = prepared
+        .demands()
         .requests()
         .iter()
         .copied()
@@ -524,9 +527,7 @@ fn collect_batch(
         .collect::<Result<Vec<_>, TimelineTemporalPreparationError>>()?;
     batches.push(TimelineTemporalDemandBatch {
         placement,
-        graph,
-        execution,
-        effect_demands,
+        execution: prepared,
         source_demands: source_demands.into(),
     });
     Ok(())
@@ -642,7 +643,7 @@ mod tests {
     use mondrian_effects::{
         register_effect_definition, EffectColorDomainContract, EffectDefinition, EffectDeterminism,
         EffectExecutionContract, EffectExecutionModes, EffectExecutionSessionConfig,
-        EffectFrameTileF32, EffectGraphTopology, EffectNode, EffectRenderOp,
+        EffectFrameTileF32, EffectGraphTopology, EffectNode, EffectNodeExt, EffectRenderOp,
         EffectResourceLifetime, EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
         EffectTemporalSourceIdentity, EffectType,
     };
@@ -777,6 +778,7 @@ mod tests {
                 ..MediaInterpretation::default()
             },
         };
+        clip.add_effect_node(EffectNode::with_defaults(EffectType::BasicCorrection));
         clip.add_effect_node(temporal_effect(offset));
         track.add_clip(clip).expect("add Clip");
         sequence.video_tracks.push(track);
@@ -799,6 +801,7 @@ mod tests {
         .expect("demands");
         assert_eq!(batches.len(), 1);
         let batch = &batches[0];
+        assert_eq!(batch.graph().stage_bindings().len(), 2);
         assert_eq!(batch.effect_demands().generation(), 42);
         assert_eq!(batch.execution_request().output_frame_seed(), 30);
         assert_eq!(batch.source_demands().len(), 2);

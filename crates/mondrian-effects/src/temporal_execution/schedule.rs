@@ -3,11 +3,9 @@
 use super::*;
 
 pub(super) fn temporal_scalar_required_bytes(
-    compiled: &CompiledEffectGraph,
-    request: &EffectTemporalExecutionRequest,
-    temporal_program: &AdmittedTemporalProgram,
+    temporal_program: &PreparedTemporalValueProgram,
     demand: &EffectExecutionDemand,
-    mask_rasters: Option<&PreparedMaskRasterSet>,
+    mask_rasters: &HashMap<usize, Arc<PreparedMaskRasterSet>>,
 ) -> Result<usize, EffectTemporalExecutionError> {
     let frame_bytes = checked_pixel_count(demand.input_roi().region())
         .and_then(|pixels| pixels.checked_mul(std::mem::size_of::<[f32; 4]>()))
@@ -22,124 +20,100 @@ pub(super) fn temporal_scalar_required_bytes(
             budget_bytes: usize::MAX,
         })?;
     let mut working = ScalarWorkingSet::new(usize::MAX, frame_bytes);
-    let mut live = HashSet::with_capacity(compiled.graph().nodes.len());
-    let mut remaining_uses = compiled.node_use_counts().clone();
-    let mut live_temporal_samples = HashSet::with_capacity(temporal_program.len());
-    let mut remaining_sample_uses = temporal_program.sample_use_counts().clone();
+    let mut live = HashSet::with_capacity(temporal_program.ordered_values().len());
+    let mut remaining_uses = temporal_program.use_counts().clone();
 
-    for node_id in &compiled.schedule().ordered_nodes {
-        let node = compiled.graph().node(*node_id).ok_or(
-            EffectTemporalExecutionError::UnsupportedGraphNode {
-                node_id: *node_id,
-                kind: "missing",
-            },
-        )?;
-        match &node.kind {
-            EffectGraphNodeKind::Source => working.reserve_frame()?,
-            EffectGraphNodeKind::UnaryEffect { input, op }
-            | EffectGraphNodeKind::DomainEffect { input, op, .. } => {
-                plan_take_graph_input(*input, &mut live, &mut remaining_uses, &mut working)?;
-                if let crate::EffectRenderOp::TemporalFrameBlend { sample_offset, .. } = op {
-                    let tap = temporal_program.tap(*node_id).ok_or(
-                        EffectTemporalExecutionError::UnsupportedTemporalShape {
-                            reason: "temporal operation has no admitted execution shape",
-                        },
-                    )?;
-                    if tap.source_id != *input || tap.sample_offset != *sample_offset {
+    for address in temporal_program.ordered_values() {
+        match *address {
+            TemporalValueAddress::Source(_) => working.reserve_frame()?,
+            TemporalValueAddress::Graph { context, node_id } => {
+                let context_ref = temporal_program.context(context)?;
+                let node = context_ref.graph.graph().node(node_id).ok_or(
+                    EffectTemporalExecutionError::UnsupportedGraphNode { node_id, kind: "missing" },
+                )?;
+                match &node.kind {
+                    EffectGraphNodeKind::Source => {
                         return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
-                            reason: "planned temporal node differs from admitted shape",
+                            reason: "source node was not normalized in the time-expanded plan",
                         });
                     }
-                    if temporal_sample_time(request.output_time, *sample_offset)?
-                        != request.output_time
-                    {
-                        if live_temporal_samples.insert(*sample_offset) {
-                            working.reserve_frame()?;
+                    EffectGraphNodeKind::UnaryEffect { input, op }
+                    | EffectGraphNodeKind::DomainEffect { input, op, .. } => {
+                        let input = temporal_program.address_for_input(context, *input)?;
+                        plan_take_value(input, &mut live, &mut remaining_uses, &mut working)?;
+                        if matches!(op, crate::EffectRenderOp::TemporalFrameBlend { .. }) {
+                            let sample = temporal_program.temporal_sample(*address).ok_or(
+                                EffectTemporalExecutionError::InvalidGraphLiveness {
+                                    reason: "temporal value has no planned sample edge",
+                                },
+                            )?;
+                            plan_take_value(sample, &mut live, &mut remaining_uses, &mut working)?;
+                            working.release_frame()?;
+                        } else {
+                            let scratch_bytes = render_op_f32_scratch_frames(op)
+                                .checked_mul(frame_bytes)
+                                .ok_or(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                                    required_bytes: usize::MAX,
+                                    budget_bytes: usize::MAX,
+                                })?;
+                            working.ensure_transient(scratch_bytes)?;
                         }
-                        let remaining = remaining_sample_uses.get_mut(sample_offset).ok_or(
-                            EffectTemporalExecutionError::InvalidGraphLiveness {
-                                reason: "temporal sample has no planned use-count evidence",
-                            },
-                        )?;
-                        if *remaining == 0 {
+                    }
+                    EffectGraphNodeKind::Blend { base, overlay, .. } => {
+                        let base = temporal_program.address_for_input(context, *base)?;
+                        let overlay = temporal_program.address_for_input(context, *overlay)?;
+                        plan_take_value(base, &mut live, &mut remaining_uses, &mut working)?;
+                        plan_take_value(overlay, &mut live, &mut remaining_uses, &mut working)?;
+                        working.release_frame()?;
+                    }
+                    EffectGraphNodeKind::MultiInput { inputs, .. } => {
+                        let Some(first) = inputs.first() else {
                             return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
-                                reason: "temporal sample was planned more often than declared",
+                                reason: "multi-input node has no inputs",
                             });
-                        }
-                        *remaining -= 1;
-                        if *remaining == 0 {
-                            if !live_temporal_samples.remove(sample_offset) {
-                                return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
-                                    reason: "last temporal sample use was not resident",
-                                });
-                            }
+                        };
+                        let first = temporal_program.address_for_input(context, *first)?;
+                        plan_take_value(first, &mut live, &mut remaining_uses, &mut working)?;
+                        for input in &inputs[1..] {
+                            let input = temporal_program.address_for_input(context, *input)?;
+                            plan_take_value(input, &mut live, &mut remaining_uses, &mut working)?;
                             working.release_frame()?;
                         }
                     }
-                } else {
-                    let scratch_bytes =
-                        render_op_f32_scratch_frames(op).checked_mul(frame_bytes).ok_or(
-                            EffectTemporalExecutionError::WorkingSetBudgetExceeded {
-                                required_bytes: usize::MAX,
-                                budget_bytes: usize::MAX,
-                            },
-                        )?;
-                    working.ensure_transient(scratch_bytes)?;
+                    EffectGraphNodeKind::Mask { input, mask, .. } => {
+                        let input = temporal_program.address_for_input(context, *input)?;
+                        let mask = temporal_program.address_for_input(context, *mask)?;
+                        plan_take_value(input, &mut live, &mut remaining_uses, &mut working)?;
+                        plan_take_value(mask, &mut live, &mut remaining_uses, &mut working)?;
+                        working.release_frame()?;
+                    }
+                    EffectGraphNodeKind::MaskSource { .. } => {
+                        working.reserve_frame()?;
+                        let raster = mask_rasters
+                            .get(&context)
+                            .and_then(|rasters| rasters.get(node_id))
+                            .ok_or(EffectTemporalExecutionError::InvalidGraphLiveness {
+                                reason: "prepared Mask raster is missing for a MaskSource node",
+                            })?;
+                        working.ensure_transient(raster.max_scratch_bytes())?;
+                    }
                 }
-            }
-            EffectGraphNodeKind::Blend { base, overlay, .. } => {
-                plan_take_graph_input(*base, &mut live, &mut remaining_uses, &mut working)?;
-                plan_take_graph_input(*overlay, &mut live, &mut remaining_uses, &mut working)?;
-                working.release_frame()?;
-            }
-            EffectGraphNodeKind::MultiInput { inputs, .. } => {
-                let Some(first) = inputs.first() else {
-                    return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
-                        reason: "multi-input node has no inputs",
-                    });
-                };
-                plan_take_graph_input(*first, &mut live, &mut remaining_uses, &mut working)?;
-                for input in &inputs[1..] {
-                    plan_take_graph_input(*input, &mut live, &mut remaining_uses, &mut working)?;
-                    working.release_frame()?;
-                }
-            }
-            EffectGraphNodeKind::Mask { input, mask, .. } => {
-                plan_take_graph_input(*input, &mut live, &mut remaining_uses, &mut working)?;
-                plan_take_graph_input(*mask, &mut live, &mut remaining_uses, &mut working)?;
-                working.release_frame()?;
-            }
-            EffectGraphNodeKind::MaskSource { .. } => {
-                working.reserve_frame()?;
-                let raster = mask_rasters.and_then(|rasters| rasters.get(*node_id)).ok_or(
-                    EffectTemporalExecutionError::InvalidGraphLiveness {
-                        reason: "prepared Mask raster is missing for a MaskSource node",
-                    },
-                )?;
-                working.ensure_transient(raster.max_scratch_bytes())?;
             }
         }
-        if !live.insert(*node_id) {
+        if !live.insert(*address) {
             return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
-                reason: "compiled schedule planned one graph value more than once",
+                reason: "time-expanded schedule planned one value more than once",
             });
         }
     }
 
-    let output_id = compiled
-        .graph()
-        .output
-        .ok_or(EffectTemporalExecutionError::MissingGraphOutput)?;
+    let output_id = temporal_program.root();
     if !live.remove(&output_id) {
         return Err(EffectTemporalExecutionError::MissingGraphOutput);
     }
-    if !live.is_empty()
-        || remaining_uses.values().any(|remaining| *remaining != 0)
-        || !live_temporal_samples.is_empty()
-        || remaining_sample_uses.values().any(|remaining| *remaining != 0)
-    {
+    if !live.is_empty() || remaining_uses.values().any(|remaining| *remaining != 0) {
         return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
-            reason: "compiled graph and temporal sample uses did not retire to one output",
+            reason: "time-expanded uses did not retire to one output",
         });
     }
     if working.resident_bytes != frame_bytes {
@@ -152,16 +126,16 @@ pub(super) fn temporal_scalar_required_bytes(
     Ok(working.peak)
 }
 
-fn plan_take_graph_input(
-    node_id: EffectGraphNodeId,
-    live: &mut HashSet<EffectGraphNodeId>,
-    remaining_uses: &mut HashMap<EffectGraphNodeId, usize>,
+fn plan_take_value(
+    address: TemporalValueAddress,
+    live: &mut HashSet<TemporalValueAddress>,
+    remaining_uses: &mut HashMap<TemporalValueAddress, usize>,
     working: &mut ScalarWorkingSet,
 ) -> Result<(), EffectTemporalExecutionError> {
-    if !live.contains(&node_id) {
-        return Err(EffectTemporalExecutionError::MissingGraphValue { node_id });
+    if !live.contains(&address) {
+        return Err(missing_temporal_value(address));
     }
-    let remaining = remaining_uses.get_mut(&node_id).ok_or(
+    let remaining = remaining_uses.get_mut(&address).ok_or(
         EffectTemporalExecutionError::InvalidGraphLiveness {
             reason: "compiled graph value has no use-count evidence",
         },
@@ -173,7 +147,7 @@ fn plan_take_graph_input(
     }
     *remaining -= 1;
     if *remaining == 0 {
-        live.remove(&node_id);
+        live.remove(&address);
     } else {
         working.reserve_frame()?;
     }
@@ -184,12 +158,12 @@ fn plan_take_graph_input(
 pub(super) fn plan_temporal_tiles(
     compiled: &CompiledEffectGraph,
     request: &EffectTemporalExecutionRequest,
-    temporal_program: &AdmittedTemporalProgram,
+    temporal_program: &PreparedTemporalValueProgram,
     output_roi: EffectPixelRoi,
     retained_output_bytes: usize,
     tile_budget: usize,
     total_budget: usize,
-    mask_rasters: Option<&PreparedMaskRasterSet>,
+    mask_rasters: &HashMap<usize, Arc<PreparedMaskRasterSet>>,
 ) -> Result<Vec<EffectPixelRoi>, EffectTemporalExecutionError> {
     let mut pending = vec![output_roi];
     let mut tiles = Vec::new();
@@ -209,13 +183,7 @@ pub(super) fn plan_temporal_tiles(
             tile_request.frame_extent,
             tile_request.output_roi,
         )?;
-        let required = temporal_scalar_required_bytes(
-            compiled,
-            &tile_request,
-            temporal_program,
-            &demand,
-            mask_rasters,
-        )?;
+        let required = temporal_scalar_required_bytes(temporal_program, &demand, mask_rasters)?;
         if required <= tile_budget {
             tiles.push(candidate);
             if tiles.len() > MAX_TEMPORAL_SCALAR_TILES {

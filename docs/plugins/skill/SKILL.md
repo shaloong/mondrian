@@ -326,6 +326,10 @@ EffectRenderOp::TemporalFrameBlend { sample_offset: TimelineTime, mix: f32 }
 EffectRenderOp::Lut3D { lut: Arc<PreparedLut3D>, intensity: f32 }
 ```
 
+`TemporalFrameBlend` must consume the Definition stage input directly. Earlier
+stages are reevaluated at the exact sample time; a same-stage internal DAG value
+has no stable cross-time identity and is rejected.
+
 Write `ColorAdjust` as
 `EffectRenderOp::ColorAdjust { exposure, contrast, saturation,
 working_color_space: context.working_color_space }`. White Balance is currently

@@ -79,6 +79,10 @@ TemporalFrameBlend { sample_offset: TimelineTime, mix: f32 }
 Lut3D { lut: Arc<PreparedLut3D>, intensity: f32 }
 ```
 
+`TemporalFrameBlend` must read the Definition stage input directly; sampled
+earlier stages are reevaluated at exact time, while same-stage internal values
+are not cross-time-addressable.
+
 White Balance remains modeled-only / execution-unavailable; no executable
 WhiteBalance op exists. Custom work is bound only through
 `EffectPluginDefinitionBuilder::with_custom_render_backend(...)`; never

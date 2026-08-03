@@ -223,6 +223,26 @@ impl PreparedVisualSchedule {
         placement: TimelineClipExecutionRef,
         requested_clip_time: TimelineTime,
     ) -> Result<TimelineTime> {
+        let sequence_time = self.clip_to_sequence_time(placement, requested_clip_time)?;
+        let (track_index, clip_index) = self.clip_location(placement)?;
+        self.tracks[track_index].track.clips[clip_index].timeline_to_source_time(sequence_time)
+    }
+
+    /// Map one exact Clip-local Effect instant back into the owning Sequence
+    /// author-time domain without applying source retime.
+    ///
+    /// Temporal Effect parameter evaluation and frame-seed derivation use
+    /// this mapping; media sampling continues through [`Self::sample_clip_source`].
+    pub fn clip_to_sequence_time(
+        &self,
+        placement: TimelineClipExecutionRef,
+        requested_clip_time: TimelineTime,
+    ) -> Result<TimelineTime> {
+        let (track_index, clip_index) = self.clip_location(placement)?;
+        self.tracks[track_index].track.clips[clip_index].clip_to_timeline_time(requested_clip_time)
+    }
+
+    fn clip_location(&self, placement: TimelineClipExecutionRef) -> Result<(usize, usize)> {
         if placement.sequence_id != self.key.sequence_id
             || placement.sequence_revision != self.key.revision
         {
@@ -254,9 +274,7 @@ impl PreparedVisualSchedule {
             clip_index,
             placement.endpoint,
         )?;
-        let clip = &prepared.track.clips[clip_index];
-        let sequence_time = clip.clip_to_timeline_time(requested_clip_time)?;
-        clip.timeline_to_source_time(sequence_time)
+        Ok((track_index, clip_index))
     }
 
     /// Evaluate the ordered visual program and report interval-query work.

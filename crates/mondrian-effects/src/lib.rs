@@ -104,10 +104,10 @@ pub use prepared::{
     PreparedEffectStack,
 };
 pub use temporal_execution::{
-    collect_temporal_frame_demands, EffectExecutionContinuity, EffectFrameTileF32,
-    EffectTemporalExecutionError, EffectTemporalExecutionOutput, EffectTemporalExecutionRequest,
-    EffectTemporalFrameDemandBatch, EffectTemporalFrameProvider, EffectTemporalFrameProviderError,
-    EffectTemporalFrameRequest, EffectTemporalSourceIdentity, PreparedTemporalFrameSet,
-    PreparedTemporalFrameSetError,
+    collect_temporal_frame_demands, prepare_temporal_frame_execution, EffectExecutionContinuity,
+    EffectFrameTileF32, EffectTemporalExecutionError, EffectTemporalExecutionOutput,
+    EffectTemporalExecutionRequest, EffectTemporalFrameDemandBatch, EffectTemporalFrameProvider,
+    EffectTemporalFrameProviderError, EffectTemporalFrameRequest, EffectTemporalSourceIdentity,
+    PreparedEffectTemporalExecution, PreparedTemporalFrameSet, PreparedTemporalFrameSetError,
 };
 pub use transition::Transition;

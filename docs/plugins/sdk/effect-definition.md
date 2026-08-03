@@ -341,7 +341,11 @@ Definition revision 与 processor identity。
 
 `TemporalFrameBlend` 需要精确声明有限 past/future 窗口，并由 temporal executor
 提供当前帧和 `time + sample_offset`；负值表示历史，正值表示 lookahead，零值复用
-当前帧。单帧执行器不会静默降级。`Lut3D` 只接受 preparation 阶段产生的
+当前帧。它必须直接读取所属 Definition stage 的输入；这样生产执行器才能在采样
+时刻从同一 Prepared Effect Program 重求值更早的 stage，而不会把输出时刻的动画
+参数错误套到历史/未来帧。插件 Definition 内部临时 DAG value 没有稳定跨时间身份，
+因此从同一 stage 内部派生 value 采样会失败关闭。单帧执行器不会静默降级。
+`Lut3D` 只接受 preparation 阶段产生的
 不可变 `PreparedLut3D`，不能在逐帧构图时读取文件。
 ### 方法
 
