@@ -147,10 +147,16 @@ use crate::app::{
 };
 use crate::app_ui::action_availability::app_state_action_enabled;
 use crate::app_ui::audio_mixer::{
+    create_bus_action as audio_mixer_create_bus_action,
+    create_route_action as audio_mixer_create_route_action,
+    remove_bus_action as audio_mixer_remove_bus_action,
+    remove_route_action as audio_mixer_remove_route_action,
     set_fader_action as audio_mixer_set_fader_action,
     set_input_trim_action as audio_mixer_set_input_trim_action,
+    set_route_enabled_action as audio_mixer_set_route_enabled_action,
+    set_route_gain_action as audio_mixer_set_route_gain_action,
     set_track_mute_action as audio_mixer_set_track_mute_action, AudioMixerChannelKind,
-    AudioMixerFaderModel, AudioMixerPanelModel,
+    AudioMixerGainModel, AudioMixerPanelModel,
 };
 use crate::app_ui::audio_processor_rack::{
     bypass_action as audio_processor_bypass_action, clip_processing_scope_racks,
@@ -5242,6 +5248,16 @@ fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
     )
     .with_embedded_panel_chrome();
 
+    let create_bus = audio_mixer_create_bus_action(model);
+    let create_bus_label = model
+        .next_bus_name
+        .as_deref()
+        .map_or("新建 Bus".to_owned(), |name| format!("新建 {name}"));
+    panel = panel.with_section(PropertySection::new("路由图").with_row(PropertyRow::new(
+        "Bus",
+        Box::new(Button::new(create_bus_label).enabled(create_bus.is_some()).on_click(create_bus)),
+    )));
+
     for channel in &model.channels {
         let kind = match channel.kind {
             AudioMixerChannelKind::Track => "轨道",
@@ -5276,7 +5292,7 @@ fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
             ),
         ));
         match channel.fader {
-            AudioMixerFaderModel::Static { value_db } => {
+            AudioMixerGainModel::Static { value_db } => {
                 let fader_channel = channel.clone();
                 section = section.with_row(PropertyRow::new(
                     "推子",
@@ -5293,7 +5309,7 @@ fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
                     ),
                 ));
             }
-            AudioMixerFaderModel::Automated { keyframe_count } => {
+            AudioMixerGainModel::Automated { keyframe_count } => {
                 section = section.with_row(PropertyRow::new(
                     "推子",
                     Box::new(
@@ -5311,7 +5327,119 @@ fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
                 Box::new(Label::new(reason.clone()).muted()),
             ));
         }
+        if channel.incoming_route_count > 0
+            || matches!(
+                channel.kind,
+                AudioMixerChannelKind::Bus | AudioMixerChannelKind::ProgramOutput
+            )
+        {
+            section = section.with_row(PropertyRow::new(
+                "输入路由",
+                Box::new(Label::new(format!("{} 条", channel.incoming_route_count)).muted()),
+            ));
+        }
+        if !channel.route_create_options.is_empty() {
+            let items = channel
+                .route_create_options
+                .iter()
+                .map(|option| {
+                    MenuItem::new(
+                        option.label.clone(),
+                        audio_mixer_create_route_action(option),
+                    )
+                })
+                .collect();
+            section = section.with_row(PropertyRow::new(
+                "添加路由",
+                Box::new(Dropdown::new("选择 tap 与目标…", items).with_max_visible_items(12)),
+            ));
+        }
+        if let Some(removal) = &channel.bus_removal {
+            let action = audio_mixer_remove_bus_action(removal);
+            let label = if removal.connected_route_count == 0 {
+                "删除 Bus".to_owned()
+            } else {
+                format!("删除 Bus 与 {} 条路由", removal.connected_route_count)
+            };
+            section = section.with_row(PropertyRow::new(
+                "Bus",
+                Box::new(Button::new(label).enabled(action.is_some()).on_click(action)),
+            ));
+            if let Some(reason) = &removal.edit_disabled_reason {
+                section = section.with_row(PropertyRow::new(
+                    "删除受阻",
+                    Box::new(Label::new(reason.clone()).muted()),
+                ));
+            }
+        }
         panel = panel.with_section(section);
+        for route in &channel.outbound_routes {
+            let enabled_route = route.clone();
+            let remove_action = audio_mixer_remove_route_action(route);
+            let mut route_section =
+                PropertySection::new(format!("Route · {}", route.destination_label))
+                    .with_row(PropertyRow::new(
+                        "Tap",
+                        Box::new(Label::new(route.source_port_label).muted()),
+                    ))
+                    .with_row(PropertyRow::new(
+                        "启用",
+                        Box::new(
+                            Checkbox::new("传递信号", route.enabled)
+                                .enabled(route.is_editable)
+                                .on_change(move |enabled| {
+                                    audio_mixer_set_route_enabled_action(&enabled_route, enabled)
+                                }),
+                        ),
+                    ));
+            match route.gain {
+                AudioMixerGainModel::Static { value_db } => {
+                    let gain_route = route.clone();
+                    route_section = route_section.with_row(PropertyRow::new(
+                        "电平",
+                        numeric_slider_input_control_with_hard_range(
+                            value_db as f32,
+                            -60.0,
+                            12.0,
+                            AUDIO_GAIN_DB_MIN as f32,
+                            AUDIO_GAIN_DB_MAX as f32,
+                            Some(0.1),
+                            1,
+                            route.is_editable,
+                            move |value| audio_mixer_set_route_gain_action(&gain_route, value),
+                        ),
+                    ));
+                }
+                AudioMixerGainModel::Automated { keyframe_count } => {
+                    route_section = route_section.with_row(PropertyRow::new(
+                        "电平",
+                        Box::new(
+                            Label::new(format!(
+                                "自动化 · {keyframe_count} 个关键帧（曲线编辑器待接入）"
+                            ))
+                            .muted(),
+                        ),
+                    ));
+                }
+            }
+            route_section = route_section.with_row(PropertyRow::new(
+                "控制",
+                effect_icon_button(
+                    AppIcon::Trash,
+                    "删除 Route",
+                    "删除这条 Route 或 Send",
+                    remove_action.is_some(),
+                    remove_action,
+                ),
+            ));
+            if let Some(reason) = &route.edit_disabled_reason {
+                route_section = route_section.with_row(PropertyRow::new(
+                    "只读",
+                    Box::new(Label::new(reason.clone()).muted()),
+                ));
+            }
+            panel = panel.with_section(route_section);
+        }
         panel = with_audio_processor_rack_sections(
             panel,
             &channel.processor_racks,

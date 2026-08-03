@@ -12,6 +12,7 @@
 pub mod audio;
 pub mod audio_channel_strip_edit;
 pub mod audio_processor_edit;
+pub mod audio_routing_edit;
 pub mod clip;
 mod clip_fragment;
 pub mod clip_linking;
@@ -38,6 +39,12 @@ pub use audio_processor_edit::{
     AudioChannelStripRack, AudioProcessorParameterEdit, AudioProcessorRackAddress,
     AudioProcessorRackEdit, AudioProcessorRackEditError, AudioProcessorRackEditOutcome,
     AudioProcessorRackEditRequest, AudioProcessorRackInspection, AudioProcessorRackPlacement,
+};
+pub use audio_routing_edit::{
+    apply_audio_routing_edit, inspect_audio_mix_bus, inspect_audio_route, AudioBusRemovalPolicy,
+    AudioMixBusInspection, AudioRouteInspection, AudioRoutingAddressError, AudioRoutingEdit,
+    AudioRoutingEditBlocker, AudioRoutingEditError, AudioRoutingEditOutcome,
+    AudioRoutingEditRequest,
 };
 pub use clip::{ActiveClip, Clip, ClipKind, ClipSourceTimeMap};
 pub use clip_linking::{

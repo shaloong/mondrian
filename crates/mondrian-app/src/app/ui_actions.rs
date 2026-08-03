@@ -25,8 +25,8 @@ use mondrian_timeline::{
     audio::AudioFade,
     sequence::{ColorWorkflow, DeliveryBitDepth, MissingColorMetadataPolicy, VideoRange},
     AudioChannelLayout, AudioChannelStripEditRequest, AudioDisplayFormat,
-    AudioProcessorRackEditRequest, EditingMode, FieldOrder, PixelAspectRatio, PreviewRenderFormat,
-    SequenceSettings,
+    AudioProcessorRackEditRequest, AudioRoutingEditRequest, EditingMode, FieldOrder,
+    PixelAspectRatio, PreviewRenderFormat, SequenceSettings,
 };
 use mondrian_ui_theme::ThemePreference;
 use mondrian_ui_widgets::{ViewerCanvasBackground, WaveformDisplay};
@@ -1260,6 +1260,11 @@ pub fn audio_processor_insert_built_in_action(
 /// Build one atomic normative Audio Channel Strip authoring action.
 pub fn audio_channel_strip_edit_action(request: AudioChannelStripEditRequest) -> Action {
     ProductAction::Audio(AudioProductAction::EditChannelStrip(request)).into_external_action()
+}
+
+/// Build one atomic Sequence Audio Routing graph authoring action.
+pub fn audio_routing_edit_action(request: AudioRoutingEditRequest) -> Action {
+    ProductAction::Audio(AudioProductAction::EditRouting(request)).into_external_action()
 }
 
 /// Build an action that links the current Clip selection.

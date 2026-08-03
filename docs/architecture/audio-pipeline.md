@@ -251,6 +251,21 @@ across the complete author graph, including disabled edges. Feedback will
 require an explicit delay/state operator with defined initialization and
 latency.
 
+All Bus and Route lifecycle mutations enter through the single
+`AudioRoutingEditRequest` Interface. It creates, renames, or removes Buses;
+creates, removes, or rewires Routes; changes enabled/static gain; and edits
+exact Sequence-time Route-gain keys without exposing the underlying authoring
+collections. `CreateBus` may create one onward Route in the same transaction,
+and its receipt returns both allocated stable identities. Bus removal requires
+an explicit `RejectIfConnected` or `Disconnect` policy. Disconnect atomically
+removes every incoming and outgoing strong Route reference, and refuses when
+that would edit a Route sourced from a locked Track. Every other mutation of a
+Track-sourced Route obeys the same Track lock. Static Route gain is rejected
+while its curve is signal authority, and deleting the last key canonicalizes
+back to the retained static gain. Every changed candidate passes complete Audio
+Program validation, so an instantaneous Bus cycle or invalid endpoint never
+publishes partial state.
+
 This minimal edge contract already covers dry paths, pre/post-fader auxiliary
 sends, submixes, stems, and multiple parallel paths. Sidechain inputs are not
 ordinary summing destinations: they require a typed processor-input endpoint

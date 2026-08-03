@@ -1,19 +1,26 @@
 //! Audio Mixer projection and typed action factories.
 //!
-//! This App UI Adapter presents Sequence-owned Track, Bus, and Program Output
-//! Channel Strips. Timeline remains authority for strip/Rack addresses, locks,
-//! exact automation, and mutations; no mixer widget owns shadow author state.
+//! This App UI Adapter presents Sequence-owned Track, Bus, Program Output,
+//! Channel Strip, and Route state. Timeline remains authority for addresses,
+//! locks, automation, graph validity, and mutation; no Widget owns a shadow
+//! mixer or a second Send graph.
 
-use mondrian_core::TrackId;
+use std::collections::HashMap;
+
+use mondrian_core::{AudioRouteId, MixBusId, TrackId};
 use mondrian_editor_state::Action;
-use mondrian_timeline::audio::{AudioChannelStripOwner, AUDIO_GAIN_DB_MAX, AUDIO_GAIN_DB_MIN};
+use mondrian_timeline::audio::{
+    AudioChannelStripOutputPort, AudioChannelStripOwner, AudioRouteDestination, AudioRouteSource,
+    ProgramOutputMainSource, AUDIO_GAIN_DB_MAX, AUDIO_GAIN_DB_MIN,
+};
 use mondrian_timeline::{
-    inspect_audio_channel_strip, AudioChannelStripEdit, AudioChannelStripEditBlocker,
-    AudioChannelStripEditRequest, AudioChannelStripRack, AudioProcessorRackAddress,
+    inspect_audio_channel_strip, inspect_audio_route, AudioBusRemovalPolicy, AudioChannelStripEdit,
+    AudioChannelStripEditBlocker, AudioChannelStripEditRequest, AudioChannelStripRack,
+    AudioProcessorRackAddress, AudioRoutingEdit, AudioRoutingEditBlocker, AudioRoutingEditRequest,
 };
 
 use crate::app::ui_actions::{
-    audio_channel_strip_edit_action, timeline_set_track_control_action,
+    audio_channel_strip_edit_action, audio_routing_edit_action, timeline_set_track_control_action,
     TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind,
 };
 use crate::app::AppState;
@@ -24,6 +31,8 @@ use super::audio_processor_rack::{project_audio_processor_rack, AudioProcessorRa
 #[derive(Debug, Clone)]
 pub(crate) struct AudioMixerPanelModel {
     pub(crate) channels: Vec<AudioMixerChannelModel>,
+    pub(crate) next_bus_name: Option<String>,
+    pub(crate) new_bus_destination: Option<AudioRouteDestination>,
     pub(crate) empty_message: Option<String>,
 }
 
@@ -35,11 +44,40 @@ pub(crate) enum AudioMixerChannelKind {
     ProgramOutput,
 }
 
-/// Honest fader projection: static and automated values are disjoint.
+/// Honest decibel control projection: static and automated authority are disjoint.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum AudioMixerFaderModel {
+pub(crate) enum AudioMixerGainModel {
     Static { value_db: f64 },
     Automated { keyframe_count: usize },
+}
+
+/// One available typed Route creation choice for a source Channel Strip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AudioMixerRouteCreateOption {
+    pub(crate) label: String,
+    pub(crate) source: AudioRouteSource,
+    pub(crate) destination: AudioRouteDestination,
+}
+
+/// One existing principal Route or parallel send shown by the Mixer.
+#[derive(Debug, Clone)]
+pub(crate) struct AudioMixerRouteModel {
+    pub(crate) route_id: AudioRouteId,
+    pub(crate) source_port_label: &'static str,
+    pub(crate) destination_label: String,
+    pub(crate) enabled: bool,
+    pub(crate) gain: AudioMixerGainModel,
+    pub(crate) is_editable: bool,
+    pub(crate) edit_disabled_reason: Option<String>,
+}
+
+/// Bus deletion projection with explicit strong-Route consequences.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AudioMixerBusRemovalModel {
+    pub(crate) bus_id: MixBusId,
+    pub(crate) connected_route_count: usize,
+    pub(crate) is_editable: bool,
+    pub(crate) edit_disabled_reason: Option<String>,
 }
 
 /// One Track, Bus, or Program Output Channel Strip shown by the Mixer.
@@ -51,8 +89,12 @@ pub(crate) struct AudioMixerChannelModel {
     pub(crate) is_editable: bool,
     pub(crate) edit_disabled_reason: Option<String>,
     pub(crate) input_trim_db: f64,
-    pub(crate) fader: AudioMixerFaderModel,
+    pub(crate) fader: AudioMixerGainModel,
     pub(crate) track_muted: Option<bool>,
+    pub(crate) incoming_route_count: usize,
+    pub(crate) outbound_routes: Vec<AudioMixerRouteModel>,
+    pub(crate) route_create_options: Vec<AudioMixerRouteCreateOption>,
+    pub(crate) bus_removal: Option<AudioMixerBusRemovalModel>,
     pub(crate) processor_racks: Vec<AudioProcessorRackModel>,
 }
 
@@ -61,6 +103,8 @@ impl AudioMixerPanelModel {
         let Some(sequence) = state.active_sequence() else {
             return Self {
                 channels: Vec::new(),
+                next_bus_name: None,
+                new_bus_destination: None,
                 empty_message: Some(
                     "没有活动序列\n打开或创建序列后，可在这里混合轨道、Bus 与节目输出。".to_owned(),
                 ),
@@ -73,9 +117,11 @@ impl AudioMixerPanelModel {
                 .saturating_add(sequence.audio_program.buses.len())
                 .saturating_add(sequence.audio_program.outputs.len()),
         );
+        let routing = AudioMixerRoutingIndex::build(sequence);
         channels.extend(sequence.audio_tracks.iter().map(|track| {
             project_channel(
                 sequence,
+                &routing,
                 AudioChannelStripOwner::Track { track_id: track.id },
                 AudioMixerChannelKind::Track,
                 track.name.clone(),
@@ -85,6 +131,7 @@ impl AudioMixerPanelModel {
         channels.extend(sequence.audio_program.buses.iter().map(|bus| {
             project_channel(
                 sequence,
+                &routing,
                 AudioChannelStripOwner::Bus { bus_id: bus.id },
                 AudioMixerChannelKind::Bus,
                 bus.name.clone(),
@@ -94,18 +141,30 @@ impl AudioMixerPanelModel {
         channels.extend(sequence.audio_program.outputs.iter().map(|output| {
             project_channel(
                 sequence,
+                &routing,
                 AudioChannelStripOwner::ProgramOutput { output_id: output.id },
                 AudioMixerChannelKind::ProgramOutput,
                 output.name.clone(),
                 None,
             )
         }));
-        Self { channels, empty_message: None }
+        Self {
+            channels,
+            next_bus_name: Some(next_bus_name(sequence)),
+            new_bus_destination: sequence
+                .audio_program
+                .outputs
+                .iter()
+                .find(|output| matches!(output.main_source, ProgramOutputMainSource::RoutedInputs))
+                .map(|output| AudioRouteDestination::Output(output.id)),
+            empty_message: None,
+        }
     }
 }
 
 fn project_channel(
     sequence: &mondrian_timeline::sequence::Sequence,
+    routing: &AudioMixerRoutingIndex,
     owner: AudioChannelStripOwner,
     kind: AudioMixerChannelKind,
     name: String,
@@ -116,12 +175,12 @@ fn project_channel(
         Ok(inspection) => {
             let strip = inspection.strip();
             let fader = strip.fader_automation.as_ref().map_or(
-                AudioMixerFaderModel::Static { value_db: strip.fader_db },
-                |curve| AudioMixerFaderModel::Automated { keyframe_count: curve.keyframes.len() },
+                AudioMixerGainModel::Static { value_db: strip.fader_db },
+                |curve| AudioMixerGainModel::Automated { keyframe_count: curve.keyframes.len() },
             );
             (
                 inspection.is_editable(),
-                inspection.edit_blocker().map(edit_blocker_label),
+                inspection.edit_blocker().map(channel_strip_blocker_label),
                 strip.input_trim_db,
                 fader,
             )
@@ -130,7 +189,7 @@ fn project_channel(
             false,
             Some(format!("作者状态无法解析此 Channel Strip：{error}")),
             0.0,
-            AudioMixerFaderModel::Static { value_db: 0.0 },
+            AudioMixerGainModel::Static { value_db: 0.0 },
         ),
     };
     let processor_racks = [
@@ -145,6 +204,16 @@ fn project_channel(
         )
     })
     .collect();
+    let outbound_routes = routing.outbound.get(&owner).cloned().unwrap_or_default();
+    let incoming_route_count = routing.incoming_counts.get(&owner).copied().unwrap_or(0);
+    let route_create_options = route_source_for_owner(owner)
+        .map_or_else(Vec::new, |owner_source| {
+            route_create_options(sequence, owner_source, is_editable)
+        });
+    let bus_removal = match owner {
+        AudioChannelStripOwner::Bus { bus_id } => routing.bus_removals.get(&bus_id).cloned(),
+        AudioChannelStripOwner::Track { .. } | AudioChannelStripOwner::ProgramOutput { .. } => None,
+    };
     AudioMixerChannelModel {
         owner,
         kind,
@@ -154,16 +223,327 @@ fn project_channel(
         input_trim_db,
         fader,
         track_muted,
+        incoming_route_count,
+        outbound_routes,
+        route_create_options,
+        bus_removal,
         processor_racks,
     }
 }
 
-fn edit_blocker_label(blocker: &AudioChannelStripEditBlocker) -> String {
+#[derive(Debug, Default)]
+struct AudioMixerRoutingIndex {
+    outbound: HashMap<AudioChannelStripOwner, Vec<AudioMixerRouteModel>>,
+    incoming_counts: HashMap<AudioChannelStripOwner, usize>,
+    bus_removals: HashMap<MixBusId, AudioMixerBusRemovalModel>,
+}
+
+impl AudioMixerRoutingIndex {
+    fn build(sequence: &mondrian_timeline::sequence::Sequence) -> Self {
+        let mut index = Self::default();
+        index.bus_removals.extend(sequence.audio_program.buses.iter().map(|bus| {
+            (
+                bus.id,
+                AudioMixerBusRemovalModel {
+                    bus_id: bus.id,
+                    connected_route_count: 0,
+                    is_editable: true,
+                    edit_disabled_reason: None,
+                },
+            )
+        }));
+        for route in &sequence.audio_program.routes {
+            let projected = project_route(sequence, route);
+            let connected_bus_disabled_reason = (!projected.is_editable)
+                .then(|| projected.edit_disabled_reason.clone())
+                .flatten();
+            index
+                .outbound
+                .entry(owner_for_source(route.source))
+                .or_default()
+                .push(projected);
+            *index
+                .incoming_counts
+                .entry(owner_for_destination(route.destination))
+                .or_default() += 1;
+
+            let mut connected_buses = Vec::with_capacity(2);
+            if let AudioRouteSource::Bus { bus_id, .. } = route.source {
+                connected_buses.push(bus_id);
+            }
+            if let AudioRouteDestination::Bus(bus_id) = route.destination {
+                if !connected_buses.contains(&bus_id) {
+                    connected_buses.push(bus_id);
+                }
+            }
+            for bus_id in connected_buses {
+                if let Some(removal) = index.bus_removals.get_mut(&bus_id) {
+                    removal.connected_route_count += 1;
+                    if let Some(reason) = connected_bus_disabled_reason.as_ref() {
+                        removal.is_editable = false;
+                        removal.edit_disabled_reason = Some(reason.clone());
+                    }
+                }
+            }
+        }
+        index
+    }
+}
+
+fn project_route(
+    sequence: &mondrian_timeline::sequence::Sequence,
+    route: &mondrian_timeline::audio::AudioRoute,
+) -> AudioMixerRouteModel {
+    let (is_editable, edit_disabled_reason) = match inspect_audio_route(sequence, route.id) {
+        Ok(inspection) => {
+            let blocker = inspection.edit_blocker().cloned();
+            (
+                inspection.is_editable(),
+                blocker.as_ref().map(routing_blocker_label),
+            )
+        }
+        Err(error) => (false, Some(format!("作者状态无法解析此 Route：{error}"))),
+    };
+    AudioMixerRouteModel {
+        route_id: route.id,
+        source_port_label: source_port_label(route.source),
+        destination_label: destination_label(sequence, route.destination),
+        enabled: route.enabled,
+        gain: route.gain_automation.as_ref().map_or(
+            AudioMixerGainModel::Static { value_db: route.gain_db },
+            |curve| AudioMixerGainModel::Automated { keyframe_count: curve.keyframes.len() },
+        ),
+        is_editable,
+        edit_disabled_reason,
+    }
+}
+
+fn owner_for_source(source: AudioRouteSource) -> AudioChannelStripOwner {
+    match source {
+        AudioRouteSource::Track { track_id, .. } => AudioChannelStripOwner::Track { track_id },
+        AudioRouteSource::Bus { bus_id, .. } => AudioChannelStripOwner::Bus { bus_id },
+    }
+}
+
+fn owner_for_destination(destination: AudioRouteDestination) -> AudioChannelStripOwner {
+    match destination {
+        AudioRouteDestination::Bus(bus_id) => AudioChannelStripOwner::Bus { bus_id },
+        AudioRouteDestination::Output(output_id) => {
+            AudioChannelStripOwner::ProgramOutput { output_id }
+        }
+    }
+}
+
+fn route_create_options(
+    sequence: &mondrian_timeline::sequence::Sequence,
+    owner_source: AudioRouteSource,
+    is_editable: bool,
+) -> Vec<AudioMixerRouteCreateOption> {
+    if !is_editable {
+        return Vec::new();
+    }
+    let mut destinations = sequence
+        .audio_program
+        .buses
+        .iter()
+        .filter_map(|bus| {
+            (!matches!(owner_source, AudioRouteSource::Bus { bus_id, .. } if bus_id == bus.id))
+                .then_some((
+                    AudioRouteDestination::Bus(bus.id),
+                    format!("Bus · {}", bus.name),
+                ))
+        })
+        .collect::<Vec<_>>();
+    destinations.extend(sequence.audio_program.outputs.iter().filter_map(|output| {
+        matches!(output.main_source, ProgramOutputMainSource::RoutedInputs).then_some((
+            AudioRouteDestination::Output(output.id),
+            format!("节目输出 · {}", output.name),
+        ))
+    }));
+    let source_identity = match owner_source {
+        AudioRouteSource::Track { track_id, .. } => RouteSourceIdentity::Track(track_id),
+        AudioRouteSource::Bus { bus_id, .. } => RouteSourceIdentity::Bus(bus_id),
+    };
+    let ports: &[AudioChannelStripOutputPort] = match source_identity {
+        RouteSourceIdentity::Track(_) => &[
+            AudioChannelStripOutputPort::PreFader,
+            AudioChannelStripOutputPort::PostFaderPreMute,
+            AudioChannelStripOutputPort::PostMute,
+        ],
+        RouteSourceIdentity::Bus(_) => &[
+            AudioChannelStripOutputPort::PreFader,
+            AudioChannelStripOutputPort::PostMute,
+        ],
+    };
+    destinations
+        .into_iter()
+        .flat_map(|(destination, destination_label)| {
+            ports.iter().copied().map({
+                let destination_label = destination_label.clone();
+                move |port| {
+                    let source = source_identity.with_port(port);
+                    AudioMixerRouteCreateOption {
+                        label: format!("{} → {destination_label}", source_port_label(source)),
+                        source,
+                        destination,
+                    }
+                }
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RouteSourceIdentity {
+    Track(TrackId),
+    Bus(MixBusId),
+}
+
+impl RouteSourceIdentity {
+    fn with_port(self, port: AudioChannelStripOutputPort) -> AudioRouteSource {
+        match self {
+            Self::Track(track_id) => AudioRouteSource::Track { track_id, port },
+            Self::Bus(bus_id) => AudioRouteSource::Bus { bus_id, port },
+        }
+    }
+}
+
+fn route_source_for_owner(owner: AudioChannelStripOwner) -> Option<AudioRouteSource> {
+    match owner {
+        AudioChannelStripOwner::Track { track_id } => Some(AudioRouteSource::Track {
+            track_id,
+            port: AudioChannelStripOutputPort::PostMute,
+        }),
+        AudioChannelStripOwner::Bus { bus_id } => Some(AudioRouteSource::Bus {
+            bus_id,
+            port: AudioChannelStripOutputPort::PostMute,
+        }),
+        AudioChannelStripOwner::ProgramOutput { .. } => None,
+    }
+}
+
+fn source_port_label(source: AudioRouteSource) -> &'static str {
+    match source {
+        AudioRouteSource::Track { port: AudioChannelStripOutputPort::PreFader, .. }
+        | AudioRouteSource::Bus { port: AudioChannelStripOutputPort::PreFader, .. } => "推子前",
+        AudioRouteSource::Track {
+            port: AudioChannelStripOutputPort::PostFaderPreMute,
+            ..
+        } => "推子后 / 静音前",
+        AudioRouteSource::Track { port: AudioChannelStripOutputPort::PostMute, .. } => "静音后",
+        AudioRouteSource::Bus {
+            port:
+                AudioChannelStripOutputPort::PostFaderPreMute | AudioChannelStripOutputPort::PostMute,
+            ..
+        } => "推子后",
+    }
+}
+
+fn destination_label(
+    sequence: &mondrian_timeline::sequence::Sequence,
+    destination: AudioRouteDestination,
+) -> String {
+    match destination {
+        AudioRouteDestination::Bus(bus_id) => {
+            sequence.audio_program.buses.iter().find(|bus| bus.id == bus_id).map_or_else(
+                || format!("缺失 Bus · {bus_id}"),
+                |bus| format!("Bus · {}", bus.name),
+            )
+        }
+        AudioRouteDestination::Output(output_id) => sequence
+            .audio_program
+            .outputs
+            .iter()
+            .find(|output| output.id == output_id)
+            .map_or_else(
+                || format!("缺失节目输出 · {output_id}"),
+                |output| format!("节目输出 · {}", output.name),
+            ),
+    }
+}
+
+fn next_bus_name(sequence: &mondrian_timeline::sequence::Sequence) -> String {
+    let names = sequence
+        .audio_program
+        .buses
+        .iter()
+        .map(|bus| bus.name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    (1_u32..)
+        .map(|index| format!("Bus {index}"))
+        .find(|candidate| !names.contains(candidate.as_str()))
+        .unwrap_or_else(|| "Bus".to_owned())
+}
+
+fn channel_strip_blocker_label(blocker: &AudioChannelStripEditBlocker) -> String {
     match blocker {
         AudioChannelStripEditBlocker::LockedTrack(track_id) => {
             format!("轨道 {track_id} 已锁定；处理器、输入增益和推子为只读")
         }
     }
+}
+
+fn routing_blocker_label(blocker: &AudioRoutingEditBlocker) -> String {
+    match blocker {
+        AudioRoutingEditBlocker::LockedTrack(track_id) => {
+            format!("轨道 {track_id} 已锁定；其 Route 为只读")
+        }
+    }
+}
+
+pub(crate) fn create_bus_action(model: &AudioMixerPanelModel) -> Option<Action> {
+    let name = model.next_bus_name.clone()?;
+    Some(audio_routing_edit_action(AudioRoutingEditRequest {
+        edit: AudioRoutingEdit::CreateBus { name, route_to: model.new_bus_destination },
+    }))
+}
+
+pub(crate) fn remove_bus_action(model: &AudioMixerBusRemovalModel) -> Option<Action> {
+    model.is_editable.then(|| {
+        audio_routing_edit_action(AudioRoutingEditRequest {
+            edit: AudioRoutingEdit::RemoveBus {
+                bus_id: model.bus_id,
+                policy: AudioBusRemovalPolicy::Disconnect,
+            },
+        })
+    })
+}
+
+pub(crate) fn create_route_action(option: &AudioMixerRouteCreateOption) -> Action {
+    audio_routing_edit_action(AudioRoutingEditRequest {
+        edit: AudioRoutingEdit::CreateRoute {
+            source: option.source,
+            destination: option.destination,
+        },
+    })
+}
+
+pub(crate) fn set_route_enabled_action(
+    route: &AudioMixerRouteModel,
+    enabled: bool,
+) -> Option<Action> {
+    route.is_editable.then(|| {
+        audio_routing_edit_action(AudioRoutingEditRequest {
+            edit: AudioRoutingEdit::SetRouteEnabled { route_id: route.route_id, enabled },
+        })
+    })
+}
+
+pub(crate) fn set_route_gain_action(route: &AudioMixerRouteModel, value_db: f32) -> Option<Action> {
+    let value = normalized_gain(value_db)?;
+    (route.is_editable && matches!(route.gain, AudioMixerGainModel::Static { .. })).then(|| {
+        audio_routing_edit_action(AudioRoutingEditRequest {
+            edit: AudioRoutingEdit::SetRouteGainDb { route_id: route.route_id, value },
+        })
+    })
+}
+
+pub(crate) fn remove_route_action(route: &AudioMixerRouteModel) -> Option<Action> {
+    route.is_editable.then(|| {
+        audio_routing_edit_action(AudioRoutingEditRequest {
+            edit: AudioRoutingEdit::RemoveRoute { route_id: route.route_id },
+        })
+    })
 }
 
 pub(crate) fn set_input_trim_action(
@@ -181,7 +561,7 @@ pub(crate) fn set_input_trim_action(
 
 pub(crate) fn set_fader_action(channel: &AudioMixerChannelModel, value_db: f32) -> Option<Action> {
     let value = normalized_gain(value_db)?;
-    (channel.is_editable && matches!(channel.fader, AudioMixerFaderModel::Static { .. })).then(
+    (channel.is_editable && matches!(channel.fader, AudioMixerGainModel::Static { .. })).then(
         || {
             audio_channel_strip_edit_action(AudioChannelStripEditRequest {
                 owner: channel.owner,
@@ -210,11 +590,13 @@ mod tests {
     use super::*;
     use crate::app::product_action::{AudioProductAction, ProductAction};
     use mondrian_core::{ExactAutomationCurve, ExactAutomationKeyframe, ParameterId, TimelineTime};
-    use mondrian_timeline::audio::{AudioChannelStrip, AudioMixBus, FADER_DB_PARAMETER_ID};
+    use mondrian_timeline::audio::{
+        AudioChannelStrip, AudioMixBus, AudioRoute, FADER_DB_PARAMETER_ID,
+    };
     use mondrian_timeline::sequence::Sequence;
 
     #[test]
-    fn projection_orders_tracks_buses_outputs_and_reuses_both_rack_addresses() {
+    fn projection_orders_tracks_buses_outputs_and_reuses_racks_and_routes() {
         let mut state = AppState::new();
         let mut sequence = Sequence::new("Mixer");
         let bus_id = mondrian_core::MixBusId::new();
@@ -244,6 +626,12 @@ mod tests {
                 rack: AudioChannelStripRack::PreFader,
             } if projected == bus_id
         ));
+        assert!(!model.channels[0].outbound_routes.is_empty());
+        assert!(!model.channels[0].route_create_options.is_empty());
+        assert_eq!(
+            model.channels[track_count + bus_count].incoming_route_count,
+            track_count
+        );
     }
 
     #[test]
@@ -264,20 +652,38 @@ mod tests {
             .expect("channel")
             .strip
             .fader_automation = Some(automation);
+        let bus_id = MixBusId::new();
+        sequence.audio_program.buses.push(AudioMixBus {
+            id: bus_id,
+            name: "Locked Bus".to_owned(),
+            strip: AudioChannelStrip::default(),
+        });
+        sequence.audio_program.routes.push(AudioRoute::new(
+            AudioRouteSource::Track {
+                track_id,
+                port: AudioChannelStripOutputPort::PostMute,
+            },
+            AudioRouteDestination::Bus(bus_id),
+        ));
         sequence.audio_tracks[0].is_locked = true;
         state.test_set_sequence(Some(sequence));
-        let channel = &AudioMixerPanelModel::from_app_state(&state).channels[0];
+        let model = AudioMixerPanelModel::from_app_state(&state);
+        let channel = &model.channels[0];
 
         assert!(matches!(
             channel.fader,
-            AudioMixerFaderModel::Automated { .. }
+            AudioMixerGainModel::Automated { .. }
         ));
         assert!(set_fader_action(channel, -6.0).is_none());
         assert!(set_input_trim_action(channel, -6.0).is_none());
-        assert!(matches!(
-            channel.owner,
-            AudioChannelStripOwner::Track { .. }
-        ));
+        assert!(channel.route_create_options.is_empty());
+        assert!(channel.outbound_routes.iter().all(|route| !route.is_editable));
+        let bus = model
+            .channels
+            .iter()
+            .find(|channel| channel.owner == AudioChannelStripOwner::Bus { bus_id })
+            .expect("Bus channel");
+        assert!(!bus.bus_removal.as_ref().expect("Bus removal").is_editable);
         let _mute = set_track_mute_action(track_id, true);
 
         let mut sequence = state.active_sequence().expect("Sequence").clone();
@@ -301,5 +707,35 @@ mod tests {
                 }
             ))) if projected == track_id
         ));
+    }
+
+    #[test]
+    fn bus_and_route_factories_emit_only_typed_routing_intents() {
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(Sequence::new("Mixer routing")));
+        let model = AudioMixerPanelModel::from_app_state(&state);
+        let action = create_bus_action(&model).expect("create Bus action");
+        assert!(matches!(
+            ProductAction::decode_external(&action).expect("decode"),
+            Some(ProductAction::Audio(AudioProductAction::EditRouting(
+                AudioRoutingEditRequest {
+                    edit: AudioRoutingEdit::CreateBus { route_to: Some(_), .. }
+                }
+            )))
+        ));
+
+        let track = &model.channels[0];
+        let option = &track.route_create_options[0];
+        let action = create_route_action(option);
+        assert!(matches!(
+            ProductAction::decode_external(&action).expect("decode"),
+            Some(ProductAction::Audio(AudioProductAction::EditRouting(
+                AudioRoutingEditRequest { edit: AudioRoutingEdit::CreateRoute { .. } }
+            )))
+        ));
+        let route = &track.outbound_routes[0];
+        assert!(set_route_enabled_action(route, false).is_some());
+        assert!(set_route_gain_action(route, -6.0).is_some());
+        assert!(remove_route_action(route).is_some());
     }
 }

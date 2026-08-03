@@ -8,8 +8,9 @@ use mondrian_timeline::audio::{
     AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID, BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID,
 };
 use mondrian_timeline::{
-    apply_audio_channel_strip_edit, apply_audio_processor_rack_edit, AudioChannelStripEditRequest,
-    AudioProcessorRackEdit, AudioProcessorRackEditRequest,
+    apply_audio_channel_strip_edit, apply_audio_processor_rack_edit, apply_audio_routing_edit,
+    AudioChannelStripEditRequest, AudioProcessorRackEdit, AudioProcessorRackEditRequest,
+    AudioRoutingEditRequest,
 };
 
 use super::product_action::{AudioProcessorBuiltInPreset, AudioProductAction};
@@ -40,7 +41,28 @@ impl AppState {
                 })
             }
             AudioProductAction::EditChannelStrip(request) => self.edit_audio_channel_strip(request),
+            AudioProductAction::EditRouting(request) => self.edit_audio_routing(request),
         }
+    }
+
+    fn edit_audio_routing(&mut self, request: AudioRoutingEditRequest) -> Result<()> {
+        let sequence_id =
+            self.active_sequence_id().ok_or_else(|| MondrianError::WorkflowStepFailed {
+                step_id: "audio_edit_routing".to_owned(),
+                reason: "当前没有活动序列".to_owned(),
+            })?;
+        let outcome = self.commit_sequence_edit(sequence_id, "编辑音频路由", |sequence| {
+            apply_audio_routing_edit(sequence, &request).map_err(|error| {
+                MondrianError::WorkflowStepFailed {
+                    step_id: "audio_edit_routing".to_owned(),
+                    reason: error.to_string(),
+                }
+            })
+        })?;
+        if outcome.changed {
+            self.reconcile_audio_after_committed_authoring_change("audio_edit_routing");
+        }
+        Ok(())
     }
 
     fn edit_audio_channel_strip(&mut self, request: AudioChannelStripEditRequest) -> Result<()> {
@@ -94,7 +116,7 @@ mod tests {
     };
     use crate::app::ui_actions::{
         audio_channel_strip_edit_action, audio_processor_insert_built_in_action,
-        audio_processor_rack_edit_action,
+        audio_processor_rack_edit_action, audio_routing_edit_action,
     };
     use mondrian_core::ParameterId;
     use mondrian_timeline::audio::{
@@ -104,7 +126,8 @@ mod tests {
         audio_channel_strip, audio_processor_rack, sequence::Sequence, AudioChannelStripEdit,
         AudioChannelStripEditRequest, AudioChannelStripOwner, AudioChannelStripRack,
         AudioProcessorParameterEdit, AudioProcessorRackAddress, AudioProcessorRackEdit,
-        AudioProcessorRackPlacement,
+        AudioProcessorRackPlacement, AudioRouteDestination, AudioRoutingEdit,
+        AudioRoutingEditRequest,
     };
 
     fn request(
@@ -230,6 +253,41 @@ mod tests {
                 .expect("Track strip")
                 .fader_db,
             -6.0
+        );
+    }
+
+    #[test]
+    fn typed_routing_action_commits_bus_and_route_once_and_round_trips_undo_redo() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("Routing authoring");
+        let output_id = sequence.audio_program.outputs[0].id;
+        state.test_set_sequence(Some(sequence));
+        let initial_generation = state.project_author_generation();
+
+        state
+            .dispatch_action(audio_routing_edit_action(AudioRoutingEditRequest {
+                edit: AudioRoutingEdit::CreateBus {
+                    name: "Dialogue".to_owned(),
+                    route_to: Some(AudioRouteDestination::Output(output_id)),
+                },
+            }))
+            .expect("create Bus through typed product action");
+        assert_eq!(state.project_author_generation(), initial_generation + 1);
+        let sequence = state.active_sequence().expect("Sequence");
+        assert_eq!(sequence.audio_program.buses.len(), 1);
+        assert_eq!(sequence.audio_program.buses[0].name, "Dialogue");
+        assert!(sequence.audio_program.routes.iter().any(|route| {
+            matches!(route.source, mondrian_timeline::AudioRouteSource::Bus { bus_id, .. }
+                if bus_id == sequence.audio_program.buses[0].id)
+                && route.destination == AudioRouteDestination::Output(output_id)
+        }));
+
+        assert!(state.undo_timeline().expect("undo Bus creation"));
+        assert!(state.active_sequence().expect("Sequence").audio_program.buses.is_empty());
+        assert!(state.redo_timeline().expect("redo Bus creation"));
+        assert_eq!(
+            state.active_sequence().expect("Sequence").audio_program.buses.len(),
+            1
         );
     }
 

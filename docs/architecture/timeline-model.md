@@ -539,6 +539,16 @@ back to the strip's static fader. Track mute remains on the Timeline Track and
 solo remains a transient audition overlay, preventing one Mixer surface from
 creating parallel signal-state authorities.
 
+Bus and Route collections are likewise not public mutation surfaces.
+`AudioRoutingEditRequest` is the sole authoring Interface for Bus lifecycle,
+typed Route endpoints, enabled state, static/automated send level, and stable
+Route identity. Principal paths and parallel sends are the same `AudioRoute`
+type. Bus deletion names its strong-reference disposition explicitly; a
+disconnecting delete removes the Bus and every incident Route in one candidate,
+while reject-if-connected preserves all state. Track locks protect every Route
+sourced from that Track, including a Route removed indirectly by Bus deletion.
+Full candidate validation remains the authority for cross-Bus cycle detection.
+
 The Implementation clones a structurally shared Sequence candidate, admits
 Track locks, resolves the address, performs the local mutation, and validates
 the complete Audio Program before replacing its input. A Track Rack edit is

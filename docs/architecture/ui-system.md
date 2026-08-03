@@ -402,10 +402,18 @@ authored Buses and Program Outputs, each with input trim, an honest static-or-
 automated fader state, Track mute where applicable, and both pre/post-fader Rack
 addresses. The Audio workspace owns a real `Mixer` panel whose Inspector is a
 secondary tab; panel focus and persisted layout use the stable `PanelKind`
-identity. The current surface deliberately omits fake meter bars, route/send
-controls, and transient solo until their execution evidence or session overlay
-is connected. Adding those features must extend this projection rather than
-create another mixer graph.
+identity. The Mixer also projects existing outgoing Routes and incoming Route
+counts. A Bus creation action allocates identity only during dispatch and may
+connect it to the first routed Program Output in the same author transaction.
+Track/Bus Route menus submit exact source tap and destination identities;
+existing edges expose enabled state, honest static-or-automated gain, and
+undoable removal. Bus deletion states how many connected Routes will be removed
+and uses Timeline's `Disconnect` policy rather than issuing N UI edits. Bus
+post-fader UI does not invent a mute stage: although the shared author port enum
+remains uniform, the product presents only real pre/post-fader choices. The
+current surface deliberately omits fake meter bars and transient solo until
+their execution evidence or session overlay is connected. Adding those
+features must extend this projection rather than create another mixer graph.
 
 The Timeline production constructors likewise lower typed operations into the
 external envelope, and one App-owned codec is the only

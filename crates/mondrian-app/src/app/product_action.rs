@@ -11,6 +11,7 @@ use mondrian_core::{Rational, TimelineTime};
 use mondrian_editor_state::Action;
 use mondrian_timeline::{
     sequence::Sequence, AudioChannelStripEditRequest, AudioProcessorRackEditRequest,
+    AudioRoutingEditRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +38,8 @@ pub const AUDIO_EDIT_PROCESSOR_RACK: &str = "edit_processor_rack";
 pub const AUDIO_INSERT_BUILT_IN_PROCESSOR: &str = "insert_built_in_processor";
 /// External action name for one normative Channel Strip edit.
 pub const AUDIO_EDIT_CHANNEL_STRIP: &str = "edit_channel_strip";
+/// External action name for one atomic Bus/Route graph edit.
+pub const AUDIO_EDIT_ROUTING: &str = "edit_routing";
 
 /// One closed product operation accepted by the App composition root.
 ///
@@ -59,6 +62,8 @@ pub enum AudioProductAction {
     InsertBuiltInProcessor(AudioProcessorInsertBuiltInPayload),
     /// Apply one Track, Bus, or Program Output Channel Strip mutation.
     EditChannelStrip(AudioChannelStripEditRequest),
+    /// Apply one Bus/Route graph mutation.
+    EditRouting(AudioRoutingEditRequest),
 }
 
 /// Closed high-frequency Timeline interaction operations.
@@ -143,6 +148,9 @@ impl ProductAction {
                 AUDIO_EDIT_CHANNEL_STRIP => Ok(Some(Self::Audio(
                     AudioProductAction::EditChannelStrip(decode_payload(namespace, name, payload)?),
                 ))),
+                AUDIO_EDIT_ROUTING => Ok(Some(Self::Audio(AudioProductAction::EditRouting(
+                    decode_payload(namespace, name, payload)?,
+                )))),
                 _ => Ok(None),
             },
             _ => Ok(None),
@@ -204,6 +212,11 @@ impl ProductAction {
             Self::Audio(AudioProductAction::EditChannelStrip(request)) => (
                 AUDIO_NAMESPACE,
                 AUDIO_EDIT_CHANNEL_STRIP,
+                serde_json::json!(request),
+            ),
+            Self::Audio(AudioProductAction::EditRouting(request)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_EDIT_ROUTING,
                 serde_json::json!(request),
             ),
         };
@@ -454,7 +467,8 @@ mod tests {
         audio::{AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID},
         clip::Clip,
         AudioChannelStripOwner, AudioChannelStripRack, AudioProcessorRackAddress,
-        AudioProcessorRackEdit, AudioProcessorRackPlacement,
+        AudioProcessorRackEdit, AudioProcessorRackPlacement, AudioRouteDestination,
+        AudioRoutingEdit, AudioRoutingEditRequest,
     };
 
     fn tt(frame: i64, time_base: Rational) -> TimelineTime {
@@ -549,6 +563,26 @@ mod tests {
                 edit: mondrian_timeline::AudioChannelStripEdit::SetFaderDb { value: -3.0 },
             },
         ));
+
+        let external = expected.clone().into_external_action();
+        let decoded = ProductAction::decode_external(&external)
+            .expect("valid external payload")
+            .expect("recognized product action");
+
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn external_codec_round_trips_audio_routing_edits() {
+        let expected =
+            ProductAction::Audio(AudioProductAction::EditRouting(AudioRoutingEditRequest {
+                edit: AudioRoutingEdit::CreateBus {
+                    name: "Dialogue".to_owned(),
+                    route_to: Some(AudioRouteDestination::Output(
+                        mondrian_core::ProgramOutputId::new(),
+                    )),
+                },
+            }));
 
         let external = expected.clone().into_external_action();
         let decoded = ProductAction::decode_external(&external)
