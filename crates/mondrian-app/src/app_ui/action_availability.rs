@@ -51,10 +51,10 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         Ok(Some(ProductAction::Timeline(action))) => {
             return state.timeline_interaction_projection().allows(&action);
         }
-        Ok(Some(ProductAction::AudioProcessor(_))) => {
-            // The Timeline Rack Module performs authoritative address, lock,
-            // identity, and schema validation at dispatch. UI availability
-            // only projects whether there is an authoring target at all.
+        Ok(Some(ProductAction::Audio(_))) => {
+            // Timeline audio Modules perform authoritative address, lock,
+            // identity, curve, and schema validation at dispatch. UI
+            // availability only projects whether an authoring target exists.
             return state.active_sequence().is_some();
         }
         Err(_) => return false,

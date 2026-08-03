@@ -369,7 +369,7 @@ fn rack_edit_action(address: AudioProcessorRackAddress, edit: AudioProcessorRack
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::product_action::{AudioProcessorProductAction, ProductAction};
+    use crate::app::product_action::{AudioProductAction, ProductAction};
     use mondrian_core::{AudioSourceComponentId, ExactAutomationKeyframe, TimelineTime};
 
     fn sequence_with_gain_scope() -> (Sequence, mondrian_core::ClipId) {
@@ -487,12 +487,12 @@ mod tests {
             .expect("valid static edit");
         assert!(matches!(
             ProductAction::decode_external(&action).expect("decode"),
-            Some(ProductAction::AudioProcessor(
-                AudioProcessorProductAction::EditRack(AudioProcessorRackEditRequest {
+            Some(ProductAction::Audio(AudioProductAction::EditProcessorRack(
+                AudioProcessorRackEditRequest {
                     address: AudioProcessorRackAddress::ProcessingScope { .. },
                     edit: AudioProcessorRackEdit::EditParameter { .. },
-                })
-            ))
+                }
+            )))
         ));
         assert!(set_static_parameter_action(rack, processor, parameter, -121.0).is_none());
 
@@ -530,8 +530,8 @@ mod tests {
 
         assert!(matches!(
             ProductAction::decode_external(&action).expect("decode"),
-            Some(ProductAction::AudioProcessor(
-                AudioProcessorProductAction::InsertBuiltIn(AudioProcessorInsertBuiltInPayload {
+            Some(ProductAction::Audio(
+                AudioProductAction::InsertBuiltInProcessor(AudioProcessorInsertBuiltInPayload {
                     preset: AudioProcessorBuiltInPreset::LookaheadLimiter,
                     ..
                 })

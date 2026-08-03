@@ -146,6 +146,12 @@ use crate::app::{
     AppState, SelectedClipRef, SelectedVideoTransitionRef, VideoTransitionHandleState,
 };
 use crate::app_ui::action_availability::app_state_action_enabled;
+use crate::app_ui::audio_mixer::{
+    set_fader_action as audio_mixer_set_fader_action,
+    set_input_trim_action as audio_mixer_set_input_trim_action,
+    set_track_mute_action as audio_mixer_set_track_mute_action, AudioMixerChannelKind,
+    AudioMixerFaderModel, AudioMixerPanelModel,
+};
 use crate::app_ui::audio_processor_rack::{
     bypass_action as audio_processor_bypass_action, clip_processing_scope_racks,
     insert_action as audio_processor_insert_action,
@@ -269,6 +275,7 @@ pub struct AppUiPanelModels {
     pub scopes: ScopesPanelModel,
     pub timeline: TimelinePanelModel,
     pub inspector: InspectorPanelModel,
+    pub(crate) mixer: AudioMixerPanelModel,
     pub export: ExportPanelModel,
     pub node_graph: NodeGraphPanelModel,
 }
@@ -327,6 +334,7 @@ impl AppUiPanelModels {
             scopes,
             timeline: TimelinePanelModel::from_app_state(state),
             inspector: InspectorPanelModel::from_app_state(state),
+            mixer: AudioMixerPanelModel::from_app_state(state),
             export: ExportPanelModel::from_app_state(state),
             node_graph: NodeGraphPanelModel::from_app_state(state),
         }
@@ -356,6 +364,7 @@ impl AppUiPanelModels {
                 })
                 .unwrap_or_else(demo_timeline_model),
             inspector: InspectorPanelModel::from_app_state(state),
+            mixer: AudioMixerPanelModel::from_app_state(state),
             export: ExportPanelModel::from_app_state(state),
             node_graph: NodeGraphPanelModel::from_app_state(state),
         }
@@ -2284,7 +2293,7 @@ fn audio_workspace(models: AppUiPanelModels) -> DockSplitter {
         SplitDirection::Horizontal,
         0.74,
         slot(PanelKind::Timeline, models.clone()),
-        slot(PanelKind::Inspector, models.clone()),
+        slot(PanelKind::Mixer, models.clone()),
     );
     DockSplitter::new(
         SplitDirection::Vertical,
@@ -2396,6 +2405,7 @@ fn default_tabs_for_slot(kind: PanelKind) -> &'static [PanelKind] {
         PanelKind::Scopes => &[PanelKind::Scopes],
         PanelKind::Timeline => &[PanelKind::Timeline],
         PanelKind::Inspector => &[PanelKind::Inspector],
+        PanelKind::Mixer => &[PanelKind::Mixer, PanelKind::Inspector],
         PanelKind::Effects => &[PanelKind::Effects],
         PanelKind::NodeGraph => &[PanelKind::NodeGraph],
         PanelKind::Export => &[PanelKind::Export],
@@ -2414,6 +2424,9 @@ fn panel_content_for_slot(kind: PanelKind, models: &AppUiPanelModels) -> Box<dyn
         ))))),
         PanelKind::Inspector => Box::new(ScrollView::new(Some(Box::new(inspector_panel(
             &models.inspector,
+        ))))),
+        PanelKind::Mixer => Box::new(ScrollView::new(Some(Box::new(audio_mixer_panel(
+            &models.mixer,
         ))))),
         PanelKind::NodeGraph => Box::new(node_graph_panel(&models.node_graph)),
     }
@@ -5194,6 +5207,120 @@ fn demo_panel_action(name: &str) -> Action {
     }
 }
 
+fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
+    if let Some(message) = model.empty_message.as_deref().filter(|message| !message.is_empty()) {
+        let (title, description) = message
+            .split_once('\n')
+            .map_or((message, ""), |(title, description)| (title, description));
+        let mut panel = PropertyPanel::with_options(
+            "音频混音器",
+            PropertyPanelOptions {
+                label_width: 0.0,
+                control_gap: 0.0,
+                row_height: 28.0,
+                section_gap: 0.0,
+                ..PropertyPanelOptions::default()
+            },
+        )
+        .with_embedded_panel_chrome()
+        .with_empty_state(title, description);
+        if let Ok(icon) = AppIcon::Music.vector_icon() {
+            panel = panel.with_empty_state_icon(icon);
+        }
+        return panel;
+    }
+
+    let mut panel = PropertyPanel::with_options(
+        "音频混音器",
+        PropertyPanelOptions {
+            label_width: 104.0,
+            control_gap: 8.0,
+            row_height: 30.0,
+            section_gap: 8.0,
+            ..PropertyPanelOptions::default()
+        },
+    )
+    .with_embedded_panel_chrome();
+
+    for channel in &model.channels {
+        let kind = match channel.kind {
+            AudioMixerChannelKind::Track => "轨道",
+            AudioMixerChannelKind::Bus => "Bus",
+            AudioMixerChannelKind::ProgramOutput => "节目输出",
+        };
+        let mut section = PropertySection::new(format!("{kind} · {}", channel.name));
+        if let (Some(muted), mondrian_timeline::AudioChannelStripOwner::Track { track_id }) =
+            (channel.track_muted, channel.owner)
+        {
+            section = section.with_row(PropertyRow::new(
+                "静音",
+                Box::new(
+                    Checkbox::new("M", muted)
+                        .on_change(move |value| audio_mixer_set_track_mute_action(track_id, value)),
+                ),
+            ));
+        }
+        let trim_channel = channel.clone();
+        section = section.with_row(PropertyRow::new(
+            "输入增益",
+            numeric_slider_input_control_with_hard_range(
+                channel.input_trim_db as f32,
+                -60.0,
+                12.0,
+                AUDIO_GAIN_DB_MIN as f32,
+                AUDIO_GAIN_DB_MAX as f32,
+                Some(0.1),
+                1,
+                channel.is_editable,
+                move |value| audio_mixer_set_input_trim_action(&trim_channel, value),
+            ),
+        ));
+        match channel.fader {
+            AudioMixerFaderModel::Static { value_db } => {
+                let fader_channel = channel.clone();
+                section = section.with_row(PropertyRow::new(
+                    "推子",
+                    numeric_slider_input_control_with_hard_range(
+                        value_db as f32,
+                        -60.0,
+                        12.0,
+                        AUDIO_GAIN_DB_MIN as f32,
+                        AUDIO_GAIN_DB_MAX as f32,
+                        Some(0.1),
+                        1,
+                        channel.is_editable,
+                        move |value| audio_mixer_set_fader_action(&fader_channel, value),
+                    ),
+                ));
+            }
+            AudioMixerFaderModel::Automated { keyframe_count } => {
+                section = section.with_row(PropertyRow::new(
+                    "推子",
+                    Box::new(
+                        Label::new(format!(
+                            "自动化 · {keyframe_count} 个关键帧（曲线编辑器待接入）"
+                        ))
+                        .muted(),
+                    ),
+                ));
+            }
+        }
+        if let Some(reason) = &channel.edit_disabled_reason {
+            section = section.with_row(PropertyRow::new(
+                "只读",
+                Box::new(Label::new(reason.clone()).muted()),
+            ));
+        }
+        panel = panel.with_section(section);
+        panel = with_audio_processor_rack_sections(
+            panel,
+            &channel.processor_racks,
+            channel.is_editable,
+        );
+    }
+    panel
+}
+
 fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
     let selected_clip = model.selected_clip;
     let has_target = selected_clip.is_some();
@@ -5486,161 +5613,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
         }
     }
 
-    for (rack_index, rack) in model.audio_processor_racks.iter().enumerate() {
-        let rack_can_edit = can_edit && rack.is_editable;
-        let title = if model.audio_processor_racks.len() == 1 {
-            rack.title.clone()
-        } else {
-            format!("{} {}", rack.title, rack_index + 1)
-        };
-        let insert_items = rack
-            .insert_options
-            .iter()
-            .map(|option| {
-                MenuItem::new(
-                    option.label,
-                    audio_processor_insert_action(rack, option.preset),
-                )
-            })
-            .collect();
-        let mut rack_section = PropertySection::new(title)
-            .with_row(PropertyRow::new(
-                "作用域",
-                Box::new(Label::new(rack.ownership_label.clone()).muted()),
-            ))
-            .with_row(PropertyRow::new(
-                "添加",
-                Box::new(
-                    Dropdown::new("添加处理器…", insert_items)
-                        .with_max_visible_items(8)
-                        .enabled(rack_can_edit),
-                ),
-            ));
-        if let Some(reason) = &rack.edit_disabled_reason {
-            rack_section = rack_section.with_row(PropertyRow::new(
-                "只读",
-                Box::new(Label::new(reason.clone()).muted()),
-            ));
-        }
-        panel = panel.with_section(rack_section);
-
-        for (processor_index, processor) in rack.processors.iter().enumerate() {
-            let rack_for_bypass = rack.clone();
-            let processor_for_bypass = processor.clone();
-            let can_move_up = rack_can_edit && processor_index > 0;
-            let can_move_down = rack_can_edit && processor_index + 1 < rack.processors.len();
-            let move_up = if processor_index > 0 {
-                audio_processor_move_before_action(
-                    rack,
-                    processor,
-                    rack.processors[processor_index - 1].processor_id,
-                )
-            } else {
-                audio_processor_move_before_action(rack, processor, processor.processor_id)
-            };
-            let move_down = if processor_index + 2 < rack.processors.len() {
-                audio_processor_move_before_action(
-                    rack,
-                    processor,
-                    rack.processors[processor_index + 2].processor_id,
-                )
-            } else {
-                audio_processor_move_to_end_action(rack, processor)
-            };
-            let mut section =
-                PropertySection::new(processor.label.clone()).with_row(PropertyRow::new(
-                    "控制",
-                    Box::new(
-                        FlexContainer::row(vec![
-                            FlexChild::flex(
-                                Box::new(
-                                    Checkbox::new("旁路", processor.bypassed)
-                                        .enabled(rack_can_edit)
-                                        .on_change(move |bypassed| {
-                                            audio_processor_bypass_action(
-                                                &rack_for_bypass,
-                                                &processor_for_bypass,
-                                                bypassed,
-                                            )
-                                        }),
-                                ),
-                                1.0,
-                            ),
-                            FlexChild::fixed(effect_icon_button(
-                                AppIcon::CaretUp,
-                                "Up",
-                                "Move processor up",
-                                can_move_up,
-                                Some(move_up),
-                            )),
-                            FlexChild::fixed(effect_icon_button(
-                                AppIcon::CaretDown,
-                                "Down",
-                                "Move processor down",
-                                can_move_down,
-                                Some(move_down),
-                            )),
-                            FlexChild::fixed(effect_icon_button(
-                                AppIcon::Trash,
-                                "Remove",
-                                "Remove processor",
-                                rack_can_edit,
-                                Some(audio_processor_remove_action(rack, processor)),
-                            )),
-                        ])
-                        .with_gap(8.0),
-                    ),
-                ));
-            for parameter in &processor.parameters {
-                let label = audio_processor_parameter_label(parameter);
-                if parameter.keyframe_count > 0 {
-                    section = section.with_row(PropertyRow::new(
-                        label,
-                        Box::new(
-                            Label::new(format!(
-                                "自动化 · {} 个关键帧（曲线编辑器待接入）",
-                                parameter.keyframe_count
-                            ))
-                            .muted(),
-                        ),
-                    ));
-                    continue;
-                }
-                let Some(numeric) = parameter.schema.numeric else {
-                    section = section.with_row(PropertyRow::new(
-                        label,
-                        Box::new(Label::new("此参数没有数值编辑契约").muted()),
-                    ));
-                    continue;
-                };
-                let rack_for_parameter = rack.clone();
-                let processor_for_parameter = processor.clone();
-                let parameter_for_action = parameter.clone();
-                section = section.with_row(PropertyRow::new(
-                    label,
-                    numeric_slider_input_control_with_hard_range(
-                        parameter.static_value as f32,
-                        numeric.soft_range.min as f32,
-                        numeric.soft_range.max as f32,
-                        numeric.hard_range.min as f32,
-                        numeric.hard_range.max as f32,
-                        numeric.step.map(|step| step as f32),
-                        audio_processor_parameter_decimals(numeric.step),
-                        rack_can_edit && parameter.is_static_editable(),
-                        move |value| {
-                            audio_processor_set_static_parameter_action(
-                                &rack_for_parameter,
-                                &processor_for_parameter,
-                                &parameter_for_action,
-                                value,
-                            )
-                        },
-                    ),
-                ));
-            }
-            panel = panel.with_section(section);
-        }
-    }
+    panel = with_audio_processor_rack_sections(panel, &model.audio_processor_racks, can_edit);
 
     panel = panel.with_section(
         PropertySection::new("变换")
@@ -5888,6 +5861,171 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
         PropertySection::new("动画")
             .with_row(PropertyRow::new("曲线", Box::new(curve)).with_height(118.0)),
     )
+}
+
+fn with_audio_processor_rack_sections(
+    mut panel: PropertyPanel,
+    racks: &[AudioProcessorRackModel],
+    surface_editable: bool,
+) -> PropertyPanel {
+    for (rack_index, rack) in racks.iter().enumerate() {
+        let rack_can_edit = surface_editable && rack.is_editable;
+        let duplicate_title_count =
+            racks.iter().filter(|candidate| candidate.title == rack.title).count();
+        let title = if duplicate_title_count == 1 {
+            rack.title.clone()
+        } else {
+            format!("{} {}", rack.title, rack_index + 1)
+        };
+        let insert_items = rack
+            .insert_options
+            .iter()
+            .map(|option| {
+                MenuItem::new(
+                    option.label,
+                    audio_processor_insert_action(rack, option.preset),
+                )
+            })
+            .collect();
+        let mut rack_section = PropertySection::new(title)
+            .with_row(PropertyRow::new(
+                "作用域",
+                Box::new(Label::new(rack.ownership_label.clone()).muted()),
+            ))
+            .with_row(PropertyRow::new(
+                "添加",
+                Box::new(
+                    Dropdown::new("添加处理器…", insert_items)
+                        .with_max_visible_items(8)
+                        .enabled(rack_can_edit),
+                ),
+            ));
+        if let Some(reason) = &rack.edit_disabled_reason {
+            rack_section = rack_section.with_row(PropertyRow::new(
+                "只读",
+                Box::new(Label::new(reason.clone()).muted()),
+            ));
+        }
+        panel = panel.with_section(rack_section);
+
+        for (processor_index, processor) in rack.processors.iter().enumerate() {
+            let rack_for_bypass = rack.clone();
+            let processor_for_bypass = processor.clone();
+            let can_move_up = rack_can_edit && processor_index > 0;
+            let can_move_down = rack_can_edit && processor_index + 1 < rack.processors.len();
+            let move_up = if processor_index > 0 {
+                audio_processor_move_before_action(
+                    rack,
+                    processor,
+                    rack.processors[processor_index - 1].processor_id,
+                )
+            } else {
+                audio_processor_move_before_action(rack, processor, processor.processor_id)
+            };
+            let move_down = if processor_index + 2 < rack.processors.len() {
+                audio_processor_move_before_action(
+                    rack,
+                    processor,
+                    rack.processors[processor_index + 2].processor_id,
+                )
+            } else {
+                audio_processor_move_to_end_action(rack, processor)
+            };
+            let mut section =
+                PropertySection::new(processor.label.clone()).with_row(PropertyRow::new(
+                    "控制",
+                    Box::new(
+                        FlexContainer::row(vec![
+                            FlexChild::flex(
+                                Box::new(
+                                    Checkbox::new("旁路", processor.bypassed)
+                                        .enabled(rack_can_edit)
+                                        .on_change(move |bypassed| {
+                                            audio_processor_bypass_action(
+                                                &rack_for_bypass,
+                                                &processor_for_bypass,
+                                                bypassed,
+                                            )
+                                        }),
+                                ),
+                                1.0,
+                            ),
+                            FlexChild::fixed(effect_icon_button(
+                                AppIcon::CaretUp,
+                                "Up",
+                                "Move processor up",
+                                can_move_up,
+                                Some(move_up),
+                            )),
+                            FlexChild::fixed(effect_icon_button(
+                                AppIcon::CaretDown,
+                                "Down",
+                                "Move processor down",
+                                can_move_down,
+                                Some(move_down),
+                            )),
+                            FlexChild::fixed(effect_icon_button(
+                                AppIcon::Trash,
+                                "Remove",
+                                "Remove processor",
+                                rack_can_edit,
+                                Some(audio_processor_remove_action(rack, processor)),
+                            )),
+                        ])
+                        .with_gap(8.0),
+                    ),
+                ));
+            for parameter in &processor.parameters {
+                let label = audio_processor_parameter_label(parameter);
+                if parameter.keyframe_count > 0 {
+                    section = section.with_row(PropertyRow::new(
+                        label,
+                        Box::new(
+                            Label::new(format!(
+                                "自动化 · {} 个关键帧（曲线编辑器待接入）",
+                                parameter.keyframe_count
+                            ))
+                            .muted(),
+                        ),
+                    ));
+                    continue;
+                }
+                let Some(numeric) = parameter.schema.numeric else {
+                    section = section.with_row(PropertyRow::new(
+                        label,
+                        Box::new(Label::new("此参数没有数值编辑契约").muted()),
+                    ));
+                    continue;
+                };
+                let rack_for_parameter = rack.clone();
+                let processor_for_parameter = processor.clone();
+                let parameter_for_action = parameter.clone();
+                section = section.with_row(PropertyRow::new(
+                    label,
+                    numeric_slider_input_control_with_hard_range(
+                        parameter.static_value as f32,
+                        numeric.soft_range.min as f32,
+                        numeric.soft_range.max as f32,
+                        numeric.hard_range.min as f32,
+                        numeric.hard_range.max as f32,
+                        numeric.step.map(|step| step as f32),
+                        audio_processor_parameter_decimals(numeric.step),
+                        rack_can_edit && parameter.is_static_editable(),
+                        move |value| {
+                            audio_processor_set_static_parameter_action(
+                                &rack_for_parameter,
+                                &processor_for_parameter,
+                                &parameter_for_action,
+                                value,
+                            )
+                        },
+                    ),
+                ));
+            }
+            panel = panel.with_section(section);
+        }
+    }
+    panel
 }
 
 fn audio_processor_parameter_label(
@@ -7335,7 +7473,7 @@ mod tests {
             (
                 WorkspacePreset::Audio,
                 Point::new(900.0, 520.0),
-                PanelKind::Inspector,
+                PanelKind::Mixer,
             ),
             (
                 WorkspacePreset::Compositing,

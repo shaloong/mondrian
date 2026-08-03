@@ -217,6 +217,25 @@ one universal node identity. A strip has input trim, ordered pre-fader rack,
 fader/automation, and ordered post-fader rack. Track mute is applied only after
 the post-fader rack.
 
+Normative strip controls enter through `AudioChannelStripEditRequest`, addressed
+by the same closed `Track | Bus | ProgramOutput` owner type as Rack addresses.
+The edit algebra keeps static input trim, static fader, exact Sequence-time
+fader keyframes, key removal, and explicit automation clearing distinct. A
+static fader edit is rejected while automation is authoritative; UI therefore
+cannot modify or display the curve's fallback value as though it were the
+playhead value. Removing the final key canonicalizes back to one static fader
+instead of retaining an empty competing curve. Address errors, temporary Track
+lock blockers, and invalid mutations are separate typed results.
+
+`inspect_audio_channel_strip` is the common read-only Interface used by Mixer
+and Channel Strip Rack inspection. Track, Bus, and Program Output resolution and
+Track-lock admission therefore have one Timeline Implementation. Admission
+happens before copy-on-write detachment; a changed candidate still validates the
+complete Audio Program before publication, while a no-op advances no author
+revision. Track mute remains a Track field and the Mixer submits the existing
+Track transaction; it is not duplicated into `AudioChannelStrip`. Transient
+solo remains outside author state.
+
 Routes use stable typed endpoints. Source ports are `PreFader`,
 `PostFaderPreMute`, or `PostMute`; destinations are Bus or Program Output.
 Routes never name array indexes, display names, generated Clip stages, or child

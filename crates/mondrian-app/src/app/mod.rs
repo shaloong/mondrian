@@ -96,10 +96,10 @@ pub(crate) fn tt(frame: i64, time_base: Rational) -> TimelineTime {
 mod action_handler;
 mod animation_authoring;
 mod animation_state;
+mod audio_authoring;
 mod audio_idle_warmup;
 #[cfg(test)]
 mod audio_playback_acceptance;
-mod audio_processor_authoring;
 mod audio_rendering;
 mod basic_titles;
 mod clip_clipboard;

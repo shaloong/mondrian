@@ -10,6 +10,7 @@
 //! - 时间线查询（活跃 Clip、吸附点）
 
 pub mod audio;
+pub mod audio_channel_strip_edit;
 pub mod audio_processor_edit;
 pub mod clip;
 mod clip_fragment;
@@ -26,12 +27,17 @@ pub mod video_transition;
 pub mod visual_schedule;
 
 pub use audio::*;
+pub use audio_channel_strip_edit::{
+    apply_audio_channel_strip_edit, audio_channel_strip, inspect_audio_channel_strip,
+    AudioChannelStripAddressError, AudioChannelStripEdit, AudioChannelStripEditBlocker,
+    AudioChannelStripEditError, AudioChannelStripEditOutcome, AudioChannelStripEditRequest,
+    AudioChannelStripInspection,
+};
 pub use audio_processor_edit::{
     apply_audio_processor_rack_edit, audio_processor_rack, inspect_audio_processor_rack,
-    AudioChannelStripOwner, AudioChannelStripRack, AudioProcessorParameterEdit,
-    AudioProcessorRackAddress, AudioProcessorRackEdit, AudioProcessorRackEditError,
-    AudioProcessorRackEditOutcome, AudioProcessorRackEditRequest, AudioProcessorRackInspection,
-    AudioProcessorRackPlacement,
+    AudioChannelStripRack, AudioProcessorParameterEdit, AudioProcessorRackAddress,
+    AudioProcessorRackEdit, AudioProcessorRackEditError, AudioProcessorRackEditOutcome,
+    AudioProcessorRackEditRequest, AudioProcessorRackInspection, AudioProcessorRackPlacement,
 };
 pub use clip::{ActiveClip, Clip, ClipKind, ClipSourceTimeMap};
 pub use clip_linking::{

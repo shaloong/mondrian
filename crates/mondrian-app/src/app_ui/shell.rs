@@ -1561,10 +1561,11 @@ fn dock_panel_locations(panel: PanelKind) -> Vec<(PanelKind, usize)> {
     match panel {
         PanelKind::Assets => vec![(PanelKind::Assets, 0)],
         PanelKind::Effects => vec![(PanelKind::Assets, 1), (PanelKind::Effects, 0)],
+        PanelKind::Inspector => vec![(PanelKind::Inspector, 0), (PanelKind::Mixer, 1)],
         PanelKind::Viewer
         | PanelKind::Scopes
         | PanelKind::Timeline
-        | PanelKind::Inspector
+        | PanelKind::Mixer
         | PanelKind::NodeGraph
         | PanelKind::Export => vec![(panel, 0)],
     }
@@ -1575,6 +1576,7 @@ fn preferred_workspace_for_panel(panel: PanelKind) -> WorkspacePreset {
         PanelKind::Export => WorkspacePreset::Export,
         PanelKind::NodeGraph => WorkspacePreset::Compositing,
         PanelKind::Scopes => WorkspacePreset::Color,
+        PanelKind::Mixer => WorkspacePreset::Audio,
         PanelKind::Viewer
         | PanelKind::Timeline
         | PanelKind::Assets

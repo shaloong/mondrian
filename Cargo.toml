@@ -158,6 +158,12 @@ zip              = "0.6"
 [profile.dev]
 opt-level = 1          # 适度优化，加快媒体解码调试体验
 
+# The App lib-test links the complete product and validation harness. Avoiding a
+# full App PDB keeps that monolithic MSVC link practical on 16 GiB machines;
+# domain crates retain normal test debuginfo and App incremental builds stay on.
+[profile.test.package.mondrian-app]
+debug = 0
+
 [profile.release]
 opt-level     = 3
 lto           = "thin"

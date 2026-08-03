@@ -14,6 +14,7 @@ pub enum PanelKind {
     Timeline,
     Assets,
     Inspector,
+    Mixer,
     Effects,
     NodeGraph,
     Export,
@@ -27,6 +28,7 @@ impl PanelKind {
             Self::Timeline => "时间线",
             Self::Assets => "素材",
             Self::Inspector => "检查器",
+            Self::Mixer => "音频混音器",
             Self::Effects => "效果",
             Self::NodeGraph => "节点图",
             Self::Export => "导出",
@@ -40,18 +42,20 @@ impl PanelKind {
             Self::Timeline => "timeline",
             Self::Assets => "assets",
             Self::Inspector => "inspector",
+            Self::Mixer => "mixer",
             Self::Effects => "effects",
             Self::NodeGraph => "node_graph",
             Self::Export => "export",
         }
     }
 
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Viewer,
         Self::Scopes,
         Self::Timeline,
         Self::Assets,
         Self::Inspector,
+        Self::Mixer,
         Self::Effects,
         Self::NodeGraph,
         Self::Export,

@@ -9,7 +9,9 @@ use std::collections::HashMap;
 use mondrian_core::types::{ClipId, FramePosition, TrackId};
 use mondrian_core::{Rational, TimelineTime};
 use mondrian_editor_state::Action;
-use mondrian_timeline::{sequence::Sequence, AudioProcessorRackEditRequest};
+use mondrian_timeline::{
+    sequence::Sequence, AudioChannelStripEditRequest, AudioProcessorRackEditRequest,
+};
 use serde::{Deserialize, Serialize};
 
 use super::AppState;
@@ -26,13 +28,15 @@ pub const TIMELINE_TRIM_CLIPS: &str = "trim_clips";
 /// External action name for seeking the active Timeline.
 pub const TIMELINE_SEEK: &str = "seek";
 
-/// External custom-action namespace for Audio Processor authoring operations.
-pub const AUDIO_PROCESSOR_NAMESPACE: &str = "ui.audio_processor";
+/// External custom-action namespace for Sequence audio authoring operations.
+pub const AUDIO_NAMESPACE: &str = "ui.audio";
 
 /// External action name for one atomic Audio Processor Rack edit.
-pub const AUDIO_PROCESSOR_EDIT_RACK: &str = "edit_rack";
+pub const AUDIO_EDIT_PROCESSOR_RACK: &str = "edit_processor_rack";
 /// External action name for inserting one product-visible built-in Processor.
-pub const AUDIO_PROCESSOR_INSERT_BUILT_IN: &str = "insert_built_in";
+pub const AUDIO_INSERT_BUILT_IN_PROCESSOR: &str = "insert_built_in_processor";
+/// External action name for one normative Channel Strip edit.
+pub const AUDIO_EDIT_CHANNEL_STRIP: &str = "edit_channel_strip";
 
 /// One closed product operation accepted by the App composition root.
 ///
@@ -42,17 +46,19 @@ pub const AUDIO_PROCESSOR_INSERT_BUILT_IN: &str = "insert_built_in";
 pub enum ProductAction {
     /// An operation owned by the active Timeline Interface.
     Timeline(TimelineProductAction),
-    /// An operation owned by Sequence Audio Processor authoring.
-    AudioProcessor(AudioProcessorProductAction),
+    /// An operation owned by Sequence audio authoring.
+    Audio(AudioProductAction),
 }
 
-/// Closed Audio Processor authoring operations.
+/// Closed Sequence audio authoring operations.
 #[derive(Debug, Clone, PartialEq)]
-pub enum AudioProcessorProductAction {
+pub enum AudioProductAction {
     /// Apply one stable-address Rack mutation in one author transaction.
-    EditRack(AudioProcessorRackEditRequest),
+    EditProcessorRack(AudioProcessorRackEditRequest),
     /// Resolve and insert one canonical product-visible built-in Processor.
-    InsertBuiltIn(AudioProcessorInsertBuiltInPayload),
+    InsertBuiltInProcessor(AudioProcessorInsertBuiltInPayload),
+    /// Apply one Track, Bus, or Program Output Channel Strip mutation.
+    EditChannelStrip(AudioChannelStripEditRequest),
 }
 
 /// Closed high-frequency Timeline interaction operations.
@@ -87,7 +93,7 @@ impl ProductActionDecodeError {
     pub(crate) fn dispatch_step_id(&self) -> String {
         let domain = match self.namespace.as_str() {
             TIMELINE_NAMESPACE => "timeline_ui_action",
-            AUDIO_PROCESSOR_NAMESPACE => "audio_processor_action",
+            AUDIO_NAMESPACE => "audio_action",
             _ => "product_action",
         };
         format!("{domain}.{}", self.name)
@@ -123,16 +129,19 @@ impl ProductAction {
                 };
                 Ok(Some(Self::Timeline(timeline_action)))
             }
-            AUDIO_PROCESSOR_NAMESPACE => match name.as_str() {
-                AUDIO_PROCESSOR_EDIT_RACK => Ok(Some(Self::AudioProcessor(
-                    AudioProcessorProductAction::EditRack(decode_payload(
+            AUDIO_NAMESPACE => match name.as_str() {
+                AUDIO_EDIT_PROCESSOR_RACK => {
+                    Ok(Some(Self::Audio(AudioProductAction::EditProcessorRack(
+                        decode_payload(namespace, name, payload)?,
+                    ))))
+                }
+                AUDIO_INSERT_BUILT_IN_PROCESSOR => Ok(Some(Self::Audio(
+                    AudioProductAction::InsertBuiltInProcessor(decode_payload(
                         namespace, name, payload,
                     )?),
                 ))),
-                AUDIO_PROCESSOR_INSERT_BUILT_IN => Ok(Some(Self::AudioProcessor(
-                    AudioProcessorProductAction::InsertBuiltIn(decode_payload(
-                        namespace, name, payload,
-                    )?),
+                AUDIO_EDIT_CHANNEL_STRIP => Ok(Some(Self::Audio(
+                    AudioProductAction::EditChannelStrip(decode_payload(namespace, name, payload)?),
                 ))),
                 _ => Ok(None),
             },
@@ -182,15 +191,20 @@ impl ProductAction {
                     "source": payload.source,
                 }),
             ),
-            Self::AudioProcessor(AudioProcessorProductAction::EditRack(request)) => (
-                AUDIO_PROCESSOR_NAMESPACE,
-                AUDIO_PROCESSOR_EDIT_RACK,
+            Self::Audio(AudioProductAction::EditProcessorRack(request)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_EDIT_PROCESSOR_RACK,
                 serde_json::json!(request),
             ),
-            Self::AudioProcessor(AudioProcessorProductAction::InsertBuiltIn(payload)) => (
-                AUDIO_PROCESSOR_NAMESPACE,
-                AUDIO_PROCESSOR_INSERT_BUILT_IN,
+            Self::Audio(AudioProductAction::InsertBuiltInProcessor(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_INSERT_BUILT_IN_PROCESSOR,
                 serde_json::json!(payload),
+            ),
+            Self::Audio(AudioProductAction::EditChannelStrip(request)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_EDIT_CHANNEL_STRIP,
+                serde_json::json!(request),
             ),
         };
         Action::Custom {
@@ -497,8 +511,7 @@ mod tests {
                 placement: AudioProcessorRackPlacement::End,
             },
         };
-        let expected =
-            ProductAction::AudioProcessor(AudioProcessorProductAction::EditRack(request));
+        let expected = ProductAction::Audio(AudioProductAction::EditProcessorRack(request));
 
         let external = expected.clone().into_external_action();
         let decoded = ProductAction::decode_external(&external)
@@ -510,13 +523,30 @@ mod tests {
 
     #[test]
     fn external_codec_round_trips_audio_processor_builtin_insertion_intent() {
-        let expected = ProductAction::AudioProcessor(AudioProcessorProductAction::InsertBuiltIn(
+        let expected = ProductAction::Audio(AudioProductAction::InsertBuiltInProcessor(
             AudioProcessorInsertBuiltInPayload {
                 address: AudioProcessorRackAddress::ProcessingScope {
                     scope_id: mondrian_core::AudioProcessingScopeId::new(),
                 },
                 preset: AudioProcessorBuiltInPreset::LookaheadLimiter,
                 placement: AudioProcessorRackPlacement::End,
+            },
+        ));
+
+        let external = expected.clone().into_external_action();
+        let decoded = ProductAction::decode_external(&external)
+            .expect("valid external payload")
+            .expect("recognized product action");
+
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn external_codec_round_trips_channel_strip_edits() {
+        let expected = ProductAction::Audio(AudioProductAction::EditChannelStrip(
+            AudioChannelStripEditRequest {
+                owner: AudioChannelStripOwner::Bus { bus_id: mondrian_core::MixBusId::new() },
+                edit: mondrian_timeline::AudioChannelStripEdit::SetFaderDb { value: -3.0 },
             },
         ));
 
@@ -547,7 +577,7 @@ mod tests {
         assert!(ProductAction::decode_external(&malformed).is_err());
 
         let unknown_audio = Action::Custom {
-            namespace: AUDIO_PROCESSOR_NAMESPACE.to_owned(),
+            namespace: AUDIO_NAMESPACE.to_owned(),
             name: "plugin_extension".to_owned(),
             payload: serde_json::json!({"anything": true}),
         };
@@ -556,13 +586,13 @@ mod tests {
             .is_none());
 
         let malformed_audio = Action::Custom {
-            namespace: AUDIO_PROCESSOR_NAMESPACE.to_owned(),
-            name: AUDIO_PROCESSOR_EDIT_RACK.to_owned(),
+            namespace: AUDIO_NAMESPACE.to_owned(),
+            name: AUDIO_EDIT_PROCESSOR_RACK.to_owned(),
             payload: serde_json::json!({"address": {"kind": "processing_scope"}}),
         };
         let error = ProductAction::decode_external(&malformed_audio)
             .expect_err("recognized malformed payload fails closed");
-        assert_eq!(error.dispatch_step_id(), "audio_processor_action.edit_rack");
+        assert_eq!(error.dispatch_step_id(), "audio_action.edit_processor_rack");
     }
 
     #[test]

@@ -8,6 +8,7 @@ pub mod about_dialog;
 pub mod action_availability;
 pub mod action_queue;
 pub mod asset_thumbnails;
+mod audio_mixer;
 mod audio_processor_rack;
 mod color_management_controls;
 pub mod commands;

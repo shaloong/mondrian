@@ -538,6 +538,7 @@ fn panel_tabs(kind: PanelKind) -> &'static [PanelKind] {
         PanelKind::Scopes => &[PanelKind::Scopes],
         PanelKind::Timeline => &[PanelKind::Timeline],
         PanelKind::Inspector => &[PanelKind::Inspector],
+        PanelKind::Mixer => &[PanelKind::Mixer, PanelKind::Inspector],
         PanelKind::Effects => &[PanelKind::Effects],
         PanelKind::NodeGraph => &[PanelKind::NodeGraph],
         PanelKind::Export => &[PanelKind::Export],

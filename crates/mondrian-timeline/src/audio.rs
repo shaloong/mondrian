@@ -390,6 +390,27 @@ impl AudioProcessorRack {
     }
 }
 
+/// Sequence-owned entity whose Channel Strip carries mixer processing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AudioChannelStripOwner {
+    /// Mixer channel paired exactly with one Timeline audio Track.
+    Track {
+        /// Stable Timeline Track identity.
+        track_id: TrackId,
+    },
+    /// User-authored intermediate Mix Bus.
+    Bus {
+        /// Stable Mix Bus identity.
+        bus_id: MixBusId,
+    },
+    /// Stable public Program Output.
+    ProgramOutput {
+        /// Stable Program Output identity.
+        output_id: ProgramOutputId,
+    },
+}
+
 /// Shared mixer processing owned by a Track, Bus, or Program Output.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioChannelStrip {

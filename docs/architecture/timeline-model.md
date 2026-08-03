@@ -529,6 +529,16 @@ candidate. Inspector, Mixer, scripting, and Headless adapters therefore cannot
 grow separate interpretations of shared-Scope locks or Channel Strip ownership;
 an invalid address remains a typed error rather than disappearing from UI.
 
+Input trim and fader are normative Channel Strip stages, not generated Gain
+Processors. Their separate `AudioChannelStripEditRequest` Interface addresses a
+typed Track, Bus, or Program Output owner and performs exact static/fader-curve
+operations. Read-only inspection distinguishes invalid owner identity from a
+valid but locked Track. Static fader editing fails while its exact Sequence-time
+automation is authoritative, and removing the final key canonicalizes the curve
+back to the strip's static fader. Track mute remains on the Timeline Track and
+solo remains a transient audition overlay, preventing one Mixer surface from
+creating parallel signal-state authorities.
+
 The Implementation clones a structurally shared Sequence candidate, admits
 Track locks, resolves the address, performs the local mutation, and validates
 the complete Audio Program before replacing its input. A Track Rack edit is

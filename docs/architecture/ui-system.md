@@ -369,33 +369,43 @@ Inside each migrated App slice, product meaning is carried by the closed
 `ProductAction` algebra. `Action::Custom` remains the external Widget,
 scripting, and plugin transport Seam; it must not become a second product-domain
 model. The current high-frequency Timeline slice covers Clip selection, Clip
-movement, bulk trim, and seek. The Audio Processor slice carries the complete
-typed `AudioProcessorRackEditRequest` for Clip Processing Scope, Track, Bus, and
-Program Output Racks, including parameter automation edits. Its production
-constructor lowers the request into one external envelope; the App codec admits
-it into the closed `AudioProcessorProductAction`, and a dedicated App Module
-commits exactly one Sequence author transaction. Only a changed commit triggers
-post-commit audio execution reconciliation. Timeline remains the sole owner of
-Rack address, lock, identity, and schema validation; UI availability only
-projects whether an active Sequence exists and cannot duplicate those rules.
-Product insertion uses a separate typed `InsertBuiltIn` intent so repeatedly
-projecting a retained Widget does not allocate a new author identity. The App
-resolves that intent to one canonical versioned instance at dispatch and then
-enters the same Rack transaction. This menu catalog is only a presentation
-catalog; persistent built-in, VST3, and CLAP identity remains the definition
-reference plus captured schema.
+movement, bulk trim, and seek. The closed `AudioProductAction` slice carries
+complete `AudioProcessorRackEditRequest` and `AudioChannelStripEditRequest`
+values for Clip Processing Scope, Track, Bus, and Program Output authoring. Its
+production constructors lower each request into one `ui.audio` external
+envelope; the App codec admits a recognized payload into the closed algebra and
+a dedicated App Module commits exactly one Sequence author transaction. Only a
+changed commit triggers post-commit audio execution reconciliation. Timeline
+remains the sole owner of address, lock, identity, curve, and schema validation;
+UI availability only projects whether an active Sequence exists and cannot
+duplicate those rules. Product insertion uses a separate typed
+`InsertBuiltInProcessor` intent so repeatedly projecting a retained Widget does
+not allocate a new author identity. The App resolves that intent to one
+canonical versioned instance at dispatch and then enters the same Rack
+transaction. This menu catalog is only a presentation catalog; persistent
+built-in, VST3, and CLAP identity remains the definition reference plus captured
+schema.
 
 `app_ui::audio_processor_rack` is the shared read-only Rack projection Module.
-It deduplicates Clip bindings by Processing Scope, counts all Sequence bindings,
-projects the same shared-Scope lock blocker enforced by Timeline, preserves
-unknown plugin definitions and parameter schemas, and generates only typed Rack
-Actions. Inspector consumes it now; a later Mixer must reuse the same Interface
-for Track, Bus, and Program Output channel strips rather than traverse audio
-author state again. Numeric controls take hard/soft range, step, unit, value
+It deduplicates Clip bindings by Processing Scope, consumes Timeline's binding
+count and lock blocker, preserves unknown plugin definitions and parameter
+schemas, and generates only typed Rack Actions. Inspector and Mixer render the
+same Rack sections and action factories; neither traverses audio author state to
+reconstruct admission. Numeric controls take hard/soft range, step, unit, value
 type, and animatability from `ParameterSchema`. An already-keyed curve is shown
 as automation and its fallback value is deliberately not exposed as though it
 were the playhead value; exact owner-time curve editing requires the dedicated
 automation interaction before that control becomes editable.
+
+`app_ui::audio_mixer` projects audio Tracks in Timeline order, followed by
+authored Buses and Program Outputs, each with input trim, an honest static-or-
+automated fader state, Track mute where applicable, and both pre/post-fader Rack
+addresses. The Audio workspace owns a real `Mixer` panel whose Inspector is a
+secondary tab; panel focus and persisted layout use the stable `PanelKind`
+identity. The current surface deliberately omits fake meter bars, route/send
+controls, and transient solo until their execution evidence or session overlay
+is connected. Adding those features must extend this projection rather than
+create another mixer graph.
 
 The Timeline production constructors likewise lower typed operations into the
 external envelope, and one App-owned codec is the only

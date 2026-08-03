@@ -103,6 +103,10 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                     Action::TogglePanel(PanelKind::Inspector),
                 )),
                 menu_item_with_shortcut(MenuItem::new(
+                    PanelKind::Mixer.display_name(),
+                    Action::TogglePanel(PanelKind::Mixer),
+                )),
+                menu_item_with_shortcut(MenuItem::new(
                     PanelKind::Effects.display_name(),
                     Action::TogglePanel(PanelKind::Effects),
                 )),

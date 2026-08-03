@@ -24,21 +24,21 @@ use mondrian_media::{
 use mondrian_timeline::{
     audio::AudioFade,
     sequence::{ColorWorkflow, DeliveryBitDepth, MissingColorMetadataPolicy, VideoRange},
-    AudioChannelLayout, AudioDisplayFormat, AudioProcessorRackEditRequest, EditingMode, FieldOrder,
-    PixelAspectRatio, PreviewRenderFormat, SequenceSettings,
+    AudioChannelLayout, AudioChannelStripEditRequest, AudioDisplayFormat,
+    AudioProcessorRackEditRequest, EditingMode, FieldOrder, PixelAspectRatio, PreviewRenderFormat,
+    SequenceSettings,
 };
 use mondrian_ui_theme::ThemePreference;
 use mondrian_ui_widgets::{ViewerCanvasBackground, WaveformDisplay};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use super::product_action::{AudioProcessorProductAction, ProductAction, TimelineProductAction};
+use super::product_action::{AudioProductAction, ProductAction, TimelineProductAction};
 pub use super::product_action::{
     TimelineClipSelectionModePayload, TimelineMoveClipPayload, TimelineSeekPayload,
     TimelineSeekSource, TimelineSelectClipPayload, TimelineTrimClipsPayload,
-    TimelineTrimPayloadEdge, AUDIO_PROCESSOR_EDIT_RACK, AUDIO_PROCESSOR_NAMESPACE,
-    TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
-    TIMELINE_TRIM_CLIPS,
+    TimelineTrimPayloadEdge, AUDIO_EDIT_PROCESSOR_RACK, AUDIO_NAMESPACE, TIMELINE_MOVE_CLIP,
+    TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP, TIMELINE_TRIM_CLIPS,
 };
 use super::CrashRecoveryCandidate;
 
@@ -1247,16 +1247,19 @@ pub fn timeline_select_clip_action(payload: TimelineSelectClipPayload) -> Action
 
 /// Build one atomic Sequence Audio Processor Rack authoring action.
 pub fn audio_processor_rack_edit_action(request: AudioProcessorRackEditRequest) -> Action {
-    ProductAction::AudioProcessor(AudioProcessorProductAction::EditRack(request))
-        .into_external_action()
+    ProductAction::Audio(AudioProductAction::EditProcessorRack(request)).into_external_action()
 }
 
 /// Build an action that inserts one canonical product-visible built-in Processor.
 pub fn audio_processor_insert_built_in_action(
     payload: super::product_action::AudioProcessorInsertBuiltInPayload,
 ) -> Action {
-    ProductAction::AudioProcessor(AudioProcessorProductAction::InsertBuiltIn(payload))
-        .into_external_action()
+    ProductAction::Audio(AudioProductAction::InsertBuiltInProcessor(payload)).into_external_action()
+}
+
+/// Build one atomic normative Audio Channel Strip authoring action.
+pub fn audio_channel_strip_edit_action(request: AudioChannelStripEditRequest) -> Action {
+    ProductAction::Audio(AudioProductAction::EditChannelStrip(request)).into_external_action()
 }
 
 /// Build an action that links the current Clip selection.

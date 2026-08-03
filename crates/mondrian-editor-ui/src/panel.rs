@@ -143,8 +143,8 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════════════
 
     #[test]
-    fn panel_kind_all_has_8_variants() {
-        assert_eq!(PanelKind::ALL.len(), 8);
+    fn panel_kind_all_has_9_variants() {
+        assert_eq!(PanelKind::ALL.len(), 9);
     }
 
     #[test]

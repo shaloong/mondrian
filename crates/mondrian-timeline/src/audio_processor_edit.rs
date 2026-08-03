@@ -1,33 +1,19 @@
 //! Atomic authoring operations for every Sequence-owned Audio Processor Rack.
 
-use crate::audio::{AudioAuthoringError, AudioProcessorInstance, AudioProcessorRack, AudioProgram};
+use crate::audio::{
+    AudioAuthoringError, AudioChannelStrip, AudioChannelStripOwner, AudioProcessorInstance,
+    AudioProcessorRack, AudioProgram,
+};
+use crate::audio_channel_strip_edit::{
+    audio_channel_strip, inspect_audio_channel_strip, AudioChannelStripAddressError,
+    AudioChannelStripEditBlocker,
+};
 use crate::sequence::Sequence;
 use mondrian_core::{
     AudioProcessingScopeId, AudioProcessorInstanceId, ExactAutomationKeyframe, KeyframeId,
     MixBusId, ParameterId, ProgramOutputId, TrackId,
 };
 use serde::{Deserialize, Serialize};
-
-/// Sequence-owned entity whose channel strip contains an Audio Processor Rack.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum AudioChannelStripOwner {
-    /// Mixer channel paired exactly with one Timeline audio Track.
-    Track {
-        /// Stable Timeline Track identity.
-        track_id: TrackId,
-    },
-    /// User-authored intermediate Mix Bus.
-    Bus {
-        /// Stable Mix Bus identity.
-        bus_id: MixBusId,
-    },
-    /// Stable public Program Output.
-    ProgramOutput {
-        /// Stable Program Output identity.
-        output_id: ProgramOutputId,
-    },
-}
 
 /// Ordered insertion stage within an Audio Channel Strip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -273,9 +259,9 @@ pub fn inspect_audio_processor_rack<'a>(
     sequence: &'a Sequence,
     address: &AudioProcessorRackAddress,
 ) -> Result<AudioProcessorRackInspection<'a>, AudioProcessorRackEditError> {
-    let rack = resolve_rack(sequence, address)?;
-    let (processing_scope_binding_count, edit_blocker) = match *address {
+    let (rack, processing_scope_binding_count, edit_blocker) = match *address {
         AudioProcessorRackAddress::ProcessingScope { scope_id } => {
+            let rack = resolve_rack(sequence, address)?;
             let mut binding_count = 0usize;
             let mut locked_track = None;
             for track in &sequence.audio_tracks {
@@ -291,27 +277,22 @@ pub fn inspect_audio_processor_rack<'a>(
                 }
             }
             (
+                rack,
                 Some(binding_count),
                 locked_track.map(|track_id| {
                     AudioProcessorRackEditError::LockedProcessingScopeBinding { scope_id, track_id }
                 }),
             )
         }
-        AudioProcessorRackAddress::ChannelStrip {
-            owner: AudioChannelStripOwner::Track { track_id },
-            ..
-        } => {
-            let track = sequence
-                .audio_tracks
-                .iter()
-                .find(|track| track.id == track_id)
-                .ok_or(AudioProcessorRackEditError::UnknownTrack(track_id))?;
+        AudioProcessorRackAddress::ChannelStrip { owner, rack } => {
+            let inspection = inspect_audio_channel_strip(sequence, owner)
+                .map_err(map_channel_strip_address_error)?;
             (
+                rack_in_strip(inspection.strip(), rack),
                 None,
-                track.is_locked.then_some(AudioProcessorRackEditError::LockedTrack(track_id)),
+                inspection.edit_blocker().cloned().map(map_channel_strip_blocker),
             )
         }
-        AudioProcessorRackAddress::ChannelStrip { .. } => (None, None),
     };
     Ok(AudioProcessorRackInspection { rack, processing_scope_binding_count, edit_blocker })
 }
@@ -339,41 +320,40 @@ fn resolve_rack<'a>(
                 scope_id,
             )),
         AudioProcessorRackAddress::ChannelStrip { owner, rack } => {
-            let strip = match owner {
-                AudioChannelStripOwner::Track { track_id } => {
-                    if !sequence.audio_tracks.iter().any(|track| track.id == track_id) {
-                        return Err(AudioProcessorRackEditError::UnknownTrack(track_id));
-                    }
-                    &sequence
-                        .audio_program
-                        .track_channels
-                        .get(&track_id)
-                        .ok_or(AudioProcessorRackEditError::UnknownTrack(track_id))?
-                        .strip
-                }
-                AudioChannelStripOwner::Bus { bus_id } => {
-                    &sequence
-                        .audio_program
-                        .buses
-                        .iter()
-                        .find(|bus| bus.id == bus_id)
-                        .ok_or(AudioProcessorRackEditError::UnknownBus(bus_id))?
-                        .strip
-                }
-                AudioChannelStripOwner::ProgramOutput { output_id } => {
-                    &sequence
-                        .audio_program
-                        .outputs
-                        .iter()
-                        .find(|output| output.id == output_id)
-                        .ok_or(AudioProcessorRackEditError::UnknownProgramOutput(output_id))?
-                        .strip
-                }
-            };
-            Ok(match rack {
-                AudioChannelStripRack::PreFader => &strip.pre_fader,
-                AudioChannelStripRack::PostFader => &strip.post_fader,
-            })
+            let strip =
+                audio_channel_strip(sequence, owner).map_err(map_channel_strip_address_error)?;
+            Ok(rack_in_strip(strip, rack))
+        }
+    }
+}
+
+fn rack_in_strip(strip: &AudioChannelStrip, rack: AudioChannelStripRack) -> &AudioProcessorRack {
+    match rack {
+        AudioChannelStripRack::PreFader => &strip.pre_fader,
+        AudioChannelStripRack::PostFader => &strip.post_fader,
+    }
+}
+
+fn map_channel_strip_address_error(
+    error: AudioChannelStripAddressError,
+) -> AudioProcessorRackEditError {
+    match error {
+        AudioChannelStripAddressError::UnknownTrack(track_id) => {
+            AudioProcessorRackEditError::UnknownTrack(track_id)
+        }
+        AudioChannelStripAddressError::UnknownBus(bus_id) => {
+            AudioProcessorRackEditError::UnknownBus(bus_id)
+        }
+        AudioChannelStripAddressError::UnknownProgramOutput(output_id) => {
+            AudioProcessorRackEditError::UnknownProgramOutput(output_id)
+        }
+    }
+}
+
+fn map_channel_strip_blocker(blocker: AudioChannelStripEditBlocker) -> AudioProcessorRackEditError {
+    match blocker {
+        AudioChannelStripEditBlocker::LockedTrack(track_id) => {
+            AudioProcessorRackEditError::LockedTrack(track_id)
         }
     }
 }
