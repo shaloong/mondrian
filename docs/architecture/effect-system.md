@@ -282,26 +282,39 @@ lifetime is `ContinuitySession`, because a frame attempt does not own the
 ordered Session required by that resource.
 
 `PreparedHeterogeneousEffectRoute` is the renderer-owned immutable preparation
-boundary over the first executable vertical slice. It binds one compiled
+Seam over the bounded production shape. It binds one compiled
 graph, extent, graph-planning budget, semantic fingerprint, graph-value plan,
 CPU prefix, and GPU suffix before source pixels exist. Preview and Export bind
 pixels to that same object; neither execution worker may choose lanes or
 replan. A changed extent or batch grant fails before CPU execution.
 `PreparedHeterogeneousEffectWork` then executes the prepared semantics. With a
 caller-supplied scene-linear CPU Float32 working frame it
-executes an exact unary CPU prefix through the scalar reference, requires one
+executes an exact source-closed CPU DAG prefix directly from the planned
+materialization inputs/outputs, requires one
 explicit CPU-F32→GPU-F32 transfer, and lowers the exact remaining graph-value
 tail through `lower_effect_graph_nodes_to_gpu_plan(...)`. The regression tracer
 is real Gaussian Blur on CPU followed by Basic Correction and Grain in the
-fused GPU point plan. Its result carries the CPU pixels, Session generation,
+fused GPU point plan; a second gate proves source fan-out, independent unary
+branches, a Blend join, exact last-use release, and the joined value entering
+the same GPU tail. Unary, Blend, nonempty MultiInput, and Mask nodes with an
+already materialized matte use the same Float32 pixel primitives as the scalar
+reference. A synthetic `MaskSource` remains blocked because its raster
+Implementation cannot yet observe the caller's checkpoint during all work.
+Its result carries the CPU pixels, Session generation,
 the immutable graph-value plan, completed CPU token, required upload wait, and
 still-pending GPU-input/output tokens. An Adapter therefore receives the exact
 transfer residency and lifetime steps without replanning. The result
 deliberately contains no whole-graph CPU fallback Interface.
-Preparation also derives the current scalar kernel's peak owned working-frame
-count (including Gaussian/Sharpen premultiplication and separable scratch), and
-execution checks that byte requirement against the bound Effect Execution
-Session before allocating the prefix.
+Preparation compiles exact CPU materialization use counts, rejects any input
+that is not produced by the source-closed prefix, and proves that the only
+remaining live CPU value is the transfer source. Runtime moves last-use values,
+clones only fan-out values with future consumers, releases join inputs, and
+checks the resulting peak plus Gaussian/Sharpen scratch against the bound
+Effect Execution Session before allocation. Input and fan-out copies observe
+the same fixed-size cooperative checkpoints as long-running kernels. GPU DAG
+tails, multiple transfers, color-domain conversion, temporal/stateful work,
+and external lanes remain typed blockers rather than being flattened or
+silently rerun.
 
 Current CPU RGBA8, CPU Float32, and fused GPU single-frame admission do not
 execute the shallow linear-stage placement. Each scans every retained stage

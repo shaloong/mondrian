@@ -320,17 +320,24 @@ fn hash_effect_operation_shape(
             actual: format!("missing node {node_id:?}"),
         }
     })?;
-    let (kind_tag, operation) = match &node.kind {
-        EffectGraphNodeKind::UnaryEffect { op, .. } => (1, op),
-        EffectGraphNodeKind::DomainEffect { op, .. } => (2, op),
-        kind => {
+    match &node.kind {
+        EffectGraphNodeKind::UnaryEffect { op, .. } => {
+            hasher.update([1, effect_operation_shape_tag(op)]);
+        }
+        EffectGraphNodeKind::DomainEffect { op, .. } => {
+            hasher.update([2, effect_operation_shape_tag(op)]);
+        }
+        EffectGraphNodeKind::Blend { .. } => hasher.update([3]),
+        EffectGraphNodeKind::Mask { .. } => hasher.update([4]),
+        EffectGraphNodeKind::MaskSource { .. } => hasher.update([5]),
+        EffectGraphNodeKind::MultiInput { .. } => hasher.update([6]),
+        EffectGraphNodeKind::Source => {
             return Err(ExportHeterogeneousEffectError::FrameContractMismatch {
-                expected: "unary heterogeneous effect node".to_owned(),
-                actual: format!("{kind:?}"),
+                expected: "executable heterogeneous effect node".to_owned(),
+                actual: "Source".to_owned(),
             });
         }
-    };
-    hasher.update([kind_tag, effect_operation_shape_tag(operation)]);
+    }
     Ok(())
 }
 

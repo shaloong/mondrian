@@ -5,11 +5,15 @@
 //! release directly from one immutable [`crate::CompiledEffectGraph`]. It does
 //! not introduce a second semantic graph. The current executable vertical
 //! slice accepts a caller-supplied scene-linear Float32 CPU frame, executes an
-//! exact unary CPU prefix, and prepares an exact fused GPU point-operation
-//! suffix. Preview/Export scheduling remains outside this Module.
+//! exact plan-driven CPU DAG prefix, and prepares an exact fused GPU
+//! point-operation suffix. Preview/Export scheduling remains outside this
+//! Module.
 
 use crate::{
-    adjustment::{apply_render_op_f32_controlled, render_op_f32_scratch_frames},
+    adjustment::{
+        apply_render_op_f32_controlled, render_op_f32_scratch_frames, EffectRasterRegion,
+    },
+    execution::{apply_alpha_mask_f32_region_controlled, blend_rgba_f32_region_controlled},
     lower_effect_graph_nodes_to_gpu_plan, CompiledEffectGpuPlan, CompiledEffectGraph,
     EffectColorDomain, EffectExecutionEnvironment, EffectExecutionLane, EffectExecutionLaneId,
     EffectExecutionModes, EffectExecutionSession, EffectFrameExtent, EffectGpuPlanBlocker,
@@ -1770,7 +1774,7 @@ impl PreparedHeterogeneousCpuCompletion {
     }
 }
 
-/// Why the executable CPU-prefix/GPU-tail tracer cannot be prepared or run.
+/// Why the executable CPU-DAG-prefix/GPU-tail route cannot be prepared or run.
 #[derive(Debug, thiserror::Error)]
 pub enum PreparedHeterogeneousEffectWorkError {
     /// Graph-value planning failed before any pixel execution.
@@ -1778,9 +1782,9 @@ pub enum PreparedHeterogeneousEffectWorkError {
     Planning(#[from] EffectGraphExecutionPlanError),
     /// The selected graph route is valid but outside the executable vertical slice.
     #[error(
-        "effect heterogeneous route is not the supported CPU-F32 to GPU-F32 unary tracer: {reason}"
+        "effect heterogeneous route is not the supported CPU-F32 DAG to GPU-F32 fused-tail shape: {reason}"
     )]
-    UnsupportedTracerShape {
+    UnsupportedRouteShape {
         /// Stable diagnostic label.
         reason: &'static str,
     },
@@ -1839,12 +1843,23 @@ pub enum PreparedHeterogeneousEffectWorkError {
     InputSizeOverflow,
 }
 
-/// Reusable exact CPU-prefix/GPU-tail work prepared from one compiled graph.
+#[derive(Debug, Clone)]
+struct PreparedCpuGraphDispatch {
+    node: EffectGraphNodeId,
+    inputs: Arc<[EffectMaterializationId]>,
+    output: EffectMaterializationId,
+}
+
+/// Reusable exact CPU-DAG-prefix/GPU-tail work prepared from one compiled graph.
 #[derive(Debug)]
 pub struct PreparedHeterogeneousEffectWork {
     compiled: Arc<CompiledEffectGraph>,
     plan: Arc<CompiledEffectValueExecutionPlan>,
     cpu_nodes: Arc<[EffectGraphNodeId]>,
+    cpu_dispatches: Arc<[PreparedCpuGraphDispatch]>,
+    cpu_use_counts: Arc<HashMap<EffectMaterializationId, usize>>,
+    cpu_input_materialization: EffectMaterializationId,
+    cpu_output_materialization: EffectMaterializationId,
     gpu_plan: Arc<CompiledEffectGpuPlan>,
     cpu_completion_token: EffectCompletionToken,
     transfer_wait: EffectCompletionToken,
@@ -1869,12 +1884,12 @@ impl PreparedHeterogeneousEffectWork {
             request,
         )?);
         let input_lane = lane_by_id(environment, request.input_residency.lane).ok_or(
-            PreparedHeterogeneousEffectWorkError::UnsupportedTracerShape {
+            PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
                 reason: "input_lane_missing_after_planning",
             },
         )?;
         let output_lane = lane_by_id(environment, request.output_residency.lane).ok_or(
-            PreparedHeterogeneousEffectWorkError::UnsupportedTracerShape {
+            PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
                 reason: "output_lane_missing_after_planning",
             },
         )?;
@@ -1884,13 +1899,14 @@ impl PreparedHeterogeneousEffectWork {
             || request.output_residency.format.precision != EffectWorkingPrecision::Float32
         {
             return Err(
-                PreparedHeterogeneousEffectWorkError::UnsupportedTracerShape {
+                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
                     reason: "endpoints_are_not_cpu_f32_to_gpu_f32",
                 },
             );
         }
 
         let mut cpu_nodes = Vec::new();
+        let mut cpu_dispatches = Vec::new();
         let mut gpu_nodes = Vec::new();
         let mut transfer = None;
         let mut entered_gpu = false;
@@ -1901,8 +1917,17 @@ impl PreparedHeterogeneousEffectWork {
                     node,
                     backend: EffectProcessingBackend::Cpu,
                     precision: EffectWorkingPrecision::Float32,
+                    inputs,
+                    output,
                     ..
-                } if !entered_gpu && transfer.is_none() => cpu_nodes.push(*node),
+                } if !entered_gpu && transfer.is_none() => {
+                    cpu_nodes.push(*node);
+                    cpu_dispatches.push(PreparedCpuGraphDispatch {
+                        node: *node,
+                        inputs: Arc::clone(inputs),
+                        output: *output,
+                    });
+                }
                 EffectGraphExecutionStep::Transfer {
                     input,
                     output,
@@ -1931,7 +1956,7 @@ impl PreparedHeterogeneousEffectWork {
                 } if entered_gpu => gpu_nodes.push(*node),
                 _ => {
                     return Err(
-                        PreparedHeterogeneousEffectWorkError::UnsupportedTracerShape {
+                        PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
                             reason: "route_contains_an_unexecutable_dispatch_or_transfer",
                         },
                     );
@@ -1940,24 +1965,24 @@ impl PreparedHeterogeneousEffectWork {
         }
         if cpu_nodes.is_empty() || gpu_nodes.is_empty() {
             return Err(
-                PreparedHeterogeneousEffectWorkError::UnsupportedTracerShape {
+                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
                     reason: "route_requires_nonempty_cpu_prefix_and_gpu_tail",
                 },
             );
         }
         let (cpu_materialization, gpu_materialization, transfer_wait, gpu_input_token) = transfer
             .ok_or(
-            PreparedHeterogeneousEffectWorkError::UnsupportedTracerShape {
+            PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
                 reason: "route_requires_exactly_one_cpu_to_gpu_transfer",
             },
         )?;
         let cpu_completion = plan.materialization(cpu_materialization).ok_or(
-            PreparedHeterogeneousEffectWorkError::UnsupportedTracerShape {
+            PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
                 reason: "cpu_materialization_missing",
             },
         )?;
         let gpu_input = plan.materialization(gpu_materialization).ok_or(
-            PreparedHeterogeneousEffectWorkError::UnsupportedTracerShape {
+            PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
                 reason: "gpu_input_materialization_missing",
             },
         )?;
@@ -1965,34 +1990,48 @@ impl PreparedHeterogeneousEffectWork {
             || gpu_input.completion != gpu_input_token
             || cpu_completion.value
                 != *cpu_nodes.last().ok_or(
-                    PreparedHeterogeneousEffectWorkError::UnsupportedTracerShape {
+                    PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
                         reason: "cpu_prefix_missing",
                     },
                 )?
             || gpu_input.value != cpu_completion.value
         {
             return Err(
-                PreparedHeterogeneousEffectWorkError::UnsupportedTracerShape {
+                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
                     reason: "cpu_to_gpu_completion_tokens_do_not_match",
                 },
             );
         }
-        validate_unary_partition(&compiled, &cpu_nodes, &gpu_nodes)?;
+        validate_cpu_dag_gpu_tail_partition(
+            &compiled,
+            &plan,
+            &cpu_dispatches,
+            cpu_materialization,
+            &gpu_nodes,
+        )?;
         let gpu_plan = Arc::new(lower_effect_graph_nodes_to_gpu_plan(&compiled, &gpu_nodes)?);
         if gpu_plan.source_value() != cpu_completion.value {
             return Err(
-                PreparedHeterogeneousEffectWorkError::UnsupportedTracerShape {
+                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
                     reason: "gpu_tail_does_not_consume_transferred_cpu_value",
                 },
             );
         }
         let frame_extent = plan.frame_extent();
-        let cpu_required_working_bytes =
-            cpu_prefix_working_bytes(&compiled, &cpu_nodes, frame_extent)?;
+        let cpu_input_materialization = plan.input_materialization();
+        let cpu_use_counts = cpu_materialization_use_counts(&cpu_dispatches)?;
+        let cpu_required_working_bytes = cpu_prefix_working_bytes(
+            &compiled,
+            &cpu_dispatches,
+            &cpu_use_counts,
+            cpu_input_materialization,
+            cpu_materialization,
+            frame_extent,
+        )?;
         let output_token = plan
             .materialization(plan.output_materialization())
             .ok_or(
-                PreparedHeterogeneousEffectWorkError::UnsupportedTracerShape {
+                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
                     reason: "output_materialization_missing",
                 },
             )?
@@ -2001,6 +2040,10 @@ impl PreparedHeterogeneousEffectWork {
             compiled,
             plan,
             cpu_nodes: cpu_nodes.into(),
+            cpu_dispatches: cpu_dispatches.into(),
+            cpu_use_counts: Arc::new(cpu_use_counts),
+            cpu_input_materialization,
+            cpu_output_materialization: cpu_materialization,
             gpu_plan,
             cpu_completion_token: cpu_completion.completion,
             transfer_wait,
@@ -2116,54 +2159,17 @@ impl PreparedHeterogeneousEffectWork {
             );
         }
         checkpoint_result()?;
-        let mut pixels = input.to_vec();
-        checkpoint_result()?;
-        let mut previous = self.plan.input_value();
-        for node_id in self.cpu_nodes.iter().copied() {
-            checkpoint_result()?;
-            let node =
-                self.compiled.graph().node(node_id).ok_or(
-                    PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: node_id },
-                )?;
-            let (input_value, operation) = match &node.kind {
-                EffectGraphNodeKind::UnaryEffect { input, op }
-                | EffectGraphNodeKind::DomainEffect { input, op, .. } => (*input, op),
-                _ => {
-                    return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
-                        node: node_id,
-                    });
-                }
-            };
-            if input_value != previous
-                || !self.compiled.node_execution_modes(node_id).is_some_and(|modes| {
-                    modes.contains(
-                        EffectProcessingBackend::Cpu,
-                        EffectWorkingPrecision::Float32,
-                    )
-                })
-            {
-                return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
-                    node: node_id,
-                });
-            }
-            if !apply_render_op_f32_controlled(
-                &mut pixels,
-                self.frame_extent.width(),
-                self.frame_extent.height(),
-                operation,
-                frame_seed,
-                &mut checkpoint_result,
-            )? {
-                return Err(
-                    PreparedHeterogeneousEffectWorkError::UnsupportedCpuOperation { node: node_id },
-                );
-            }
-            previous = node_id;
-        }
-        checkpoint_result()?;
-        if previous != self.gpu_plan.source_value() {
-            return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: previous });
-        }
+        let pixels = execute_cpu_dag_prefix(
+            &self.compiled,
+            &self.cpu_dispatches,
+            &self.cpu_use_counts,
+            self.cpu_input_materialization,
+            self.cpu_output_materialization,
+            self.frame_extent,
+            input,
+            frame_seed,
+            &mut checkpoint_result,
+        )?;
         Ok(PreparedHeterogeneousCpuCompletion {
             pixels,
             execution_plan: Arc::clone(&self.plan),
@@ -2184,58 +2190,319 @@ impl PreparedHeterogeneousEffectWork {
     }
 }
 
-fn cpu_prefix_working_bytes(
+#[allow(clippy::too_many_arguments)]
+fn execute_cpu_dag_prefix(
     compiled: &CompiledEffectGraph,
-    cpu_nodes: &[EffectGraphNodeId],
+    dispatches: &[PreparedCpuGraphDispatch],
+    use_counts: &HashMap<EffectMaterializationId, usize>,
+    input_materialization: EffectMaterializationId,
+    output_materialization: EffectMaterializationId,
     extent: EffectFrameExtent,
-) -> Result<usize, PreparedHeterogeneousEffectWorkError> {
-    let frame_bytes = usize::try_from(frame_bytes(extent, EffectWorkingPrecision::Float32)?)
-        .map_err(|_| PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
-    let mut peak_owned_frames = 1_usize;
-    for node_id in cpu_nodes {
-        let node = compiled
-            .graph()
-            .node(*node_id)
-            .ok_or(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: *node_id })?;
-        let operation = match &node.kind {
+    input: &[[f32; 4]],
+    frame_seed: i64,
+    checkpoint: &mut impl FnMut() -> Result<(), PreparedHeterogeneousEffectWorkError>,
+) -> Result<Vec<[f32; 4]>, PreparedHeterogeneousEffectWorkError> {
+    let mut outputs = HashMap::with_capacity(dispatches.len().saturating_add(1));
+    outputs.insert(
+        input_materialization,
+        copy_cpu_pixels_controlled(input, checkpoint)?,
+    );
+    let mut remaining = use_counts.clone();
+    let raster_region = EffectRasterRegion::full_frame(extent.width(), extent.height());
+    checkpoint()?;
+
+    for dispatch in dispatches {
+        checkpoint()?;
+        let node = compiled.graph().node(dispatch.node).cloned().ok_or(
+            PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: dispatch.node },
+        )?;
+        let mut inputs = dispatch
+            .inputs
+            .iter()
+            .copied()
+            .map(|materialization| {
+                take_cpu_materialization(
+                    &mut outputs,
+                    &mut remaining,
+                    materialization,
+                    dispatch.node,
+                    checkpoint,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let output = match node.kind {
             EffectGraphNodeKind::UnaryEffect { op, .. }
-            | EffectGraphNodeKind::DomainEffect { op, .. } => op,
-            _ => {
-                return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
-                    node: *node_id,
-                });
+            | EffectGraphNodeKind::DomainEffect { op, .. } => {
+                let mut output = take_single_cpu_input(&mut inputs, dispatch.node)?;
+                if !apply_render_op_f32_controlled(
+                    &mut output,
+                    extent.width(),
+                    extent.height(),
+                    &op,
+                    frame_seed,
+                    checkpoint,
+                )? {
+                    return Err(
+                        PreparedHeterogeneousEffectWorkError::UnsupportedCpuOperation {
+                            node: dispatch.node,
+                        },
+                    );
+                }
+                output
             }
-        };
-        let owned_frames = match operation {
-            crate::EffectRenderOp::GaussianBlur { .. }
-            | crate::EffectRenderOp::Sharpen { .. }
-            | crate::EffectRenderOp::ChromaticAberration { .. }
-            | crate::EffectRenderOp::ColorAdjust { .. }
-            | crate::EffectRenderOp::Vignette { .. }
-            | crate::EffectRenderOp::Grain { .. }
-            | crate::EffectRenderOp::Lut3D { .. } => 1 + render_op_f32_scratch_frames(operation),
-            crate::EffectRenderOp::TemporalFrameBlend { .. }
-            | crate::EffectRenderOp::Custom { .. } => {
+            EffectGraphNodeKind::Blend { blend_mode, opacity, .. } => {
+                if inputs.len() != 2 {
+                    return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                        node: dispatch.node,
+                    });
+                }
+                let overlay =
+                    inputs.pop().ok_or(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                        node: dispatch.node,
+                    })?;
+                let mut base =
+                    inputs.pop().ok_or(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                        node: dispatch.node,
+                    })?;
+                if !blend_rgba_f32_region_controlled(
+                    &mut base,
+                    &overlay,
+                    raster_region,
+                    opacity,
+                    blend_mode,
+                    frame_seed,
+                    checkpoint,
+                )? {
+                    return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                        node: dispatch.node,
+                    });
+                }
+                base
+            }
+            EffectGraphNodeKind::Mask { invert, mask_op, .. } => {
+                if inputs.len() != 2 {
+                    return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                        node: dispatch.node,
+                    });
+                }
+                let mask =
+                    inputs.pop().ok_or(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                        node: dispatch.node,
+                    })?;
+                let mut output =
+                    inputs.pop().ok_or(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                        node: dispatch.node,
+                    })?;
+                if output.len() != mask.len() {
+                    return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                        node: dispatch.node,
+                    });
+                }
+                apply_alpha_mask_f32_region_controlled(
+                    &mut output,
+                    &mask,
+                    invert,
+                    mask_op,
+                    checkpoint,
+                )?;
+                output
+            }
+            EffectGraphNodeKind::MultiInput { blend_mode, opacity, .. } => {
+                if inputs.is_empty() {
+                    return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                        node: dispatch.node,
+                    });
+                }
+                let mut inputs = inputs.into_iter();
+                let mut output = inputs.next().ok_or(
+                    PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: dispatch.node },
+                )?;
+                for overlay in inputs {
+                    if !blend_rgba_f32_region_controlled(
+                        &mut output,
+                        &overlay,
+                        raster_region,
+                        opacity,
+                        blend_mode,
+                        frame_seed,
+                        checkpoint,
+                    )? {
+                        return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                            node: dispatch.node,
+                        });
+                    }
+                }
+                output
+            }
+            EffectGraphNodeKind::Source | EffectGraphNodeKind::MaskSource { .. } => {
                 return Err(
                     PreparedHeterogeneousEffectWorkError::UnsupportedCpuOperation {
-                        node: *node_id,
+                        node: dispatch.node,
                     },
                 );
             }
         };
-        peak_owned_frames = peak_owned_frames.max(owned_frames);
+        if outputs.insert(dispatch.output, output).is_some() {
+            return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                node: dispatch.node,
+            });
+        }
+    }
+    checkpoint()?;
+    let output_node = dispatches.last().map(|dispatch| dispatch.node).ok_or(
+        PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+            reason: "cpu_dag_has_no_dispatch",
+        },
+    )?;
+    let pixels = outputs
+        .remove(&output_materialization)
+        .ok_or(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: output_node })?;
+    if !outputs.is_empty() || remaining.values().any(|remaining| *remaining != 0) {
+        return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: output_node });
+    }
+    Ok(pixels)
+}
+
+fn take_single_cpu_input(
+    inputs: &mut Vec<Vec<[f32; 4]>>,
+    node: EffectGraphNodeId,
+) -> Result<Vec<[f32; 4]>, PreparedHeterogeneousEffectWorkError> {
+    if inputs.len() != 1 {
+        return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node });
+    }
+    inputs
+        .pop()
+        .ok_or(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node })
+}
+
+fn take_cpu_materialization(
+    outputs: &mut HashMap<EffectMaterializationId, Vec<[f32; 4]>>,
+    remaining: &mut HashMap<EffectMaterializationId, usize>,
+    materialization: EffectMaterializationId,
+    node: EffectGraphNodeId,
+    checkpoint: &mut impl FnMut() -> Result<(), PreparedHeterogeneousEffectWorkError>,
+) -> Result<Vec<[f32; 4]>, PreparedHeterogeneousEffectWorkError> {
+    let remaining_uses = remaining
+        .get_mut(&materialization)
+        .ok_or(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node })?;
+    if *remaining_uses == 0 {
+        return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node });
+    }
+    *remaining_uses -= 1;
+    if *remaining_uses == 0 {
+        outputs
+            .remove(&materialization)
+            .ok_or(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node })
+    } else {
+        let pixels = outputs
+            .get(&materialization)
+            .ok_or(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node })?;
+        copy_cpu_pixels_controlled(pixels, checkpoint)
+    }
+}
+
+fn copy_cpu_pixels_controlled(
+    source: &[[f32; 4]],
+    checkpoint: &mut impl FnMut() -> Result<(), PreparedHeterogeneousEffectWorkError>,
+) -> Result<Vec<[f32; 4]>, PreparedHeterogeneousEffectWorkError> {
+    let mut copy = Vec::with_capacity(source.len());
+    for chunk in source.chunks(4_096) {
+        checkpoint()?;
+        copy.extend_from_slice(chunk);
+    }
+    checkpoint()?;
+    Ok(copy)
+}
+
+fn cpu_prefix_working_bytes(
+    compiled: &CompiledEffectGraph,
+    dispatches: &[PreparedCpuGraphDispatch],
+    use_counts: &HashMap<EffectMaterializationId, usize>,
+    input_materialization: EffectMaterializationId,
+    output_materialization: EffectMaterializationId,
+    extent: EffectFrameExtent,
+) -> Result<usize, PreparedHeterogeneousEffectWorkError> {
+    let frame_bytes = usize::try_from(frame_bytes(extent, EffectWorkingPrecision::Float32)?)
+        .map_err(|_| PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
+    let mut remaining = use_counts.clone();
+    let mut live_materializations = HashSet::from([input_materialization]);
+    let mut live_frames = 1_usize;
+    let mut peak_owned_frames = live_frames;
+    for dispatch in dispatches {
+        if dispatch.inputs.is_empty() {
+            return Err(
+                PreparedHeterogeneousEffectWorkError::UnsupportedCpuOperation {
+                    node: dispatch.node,
+                },
+            );
+        }
+        for input in dispatch.inputs.iter() {
+            if !live_materializations.contains(input) {
+                return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                    node: dispatch.node,
+                });
+            }
+            let remaining_uses = remaining.get_mut(input).ok_or(
+                PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: dispatch.node },
+            )?;
+            if *remaining_uses == 0 {
+                return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                    node: dispatch.node,
+                });
+            }
+            *remaining_uses -= 1;
+            if *remaining_uses == 0 {
+                live_materializations.remove(input);
+            } else {
+                live_frames = live_frames
+                    .checked_add(1)
+                    .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
+                peak_owned_frames = peak_owned_frames.max(live_frames);
+            }
+        }
+
+        let node = compiled.graph().node(dispatch.node).ok_or(
+            PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: dispatch.node },
+        )?;
+        let scratch_frames = cpu_node_scratch_frames(node)?;
+        peak_owned_frames = peak_owned_frames.max(
+            live_frames
+                .checked_add(scratch_frames)
+                .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?,
+        );
+        live_frames = live_frames.checked_sub(dispatch.inputs.len().saturating_sub(1)).ok_or(
+            PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: dispatch.node },
+        )?;
+        if !live_materializations.insert(dispatch.output) {
+            return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                node: dispatch.node,
+            });
+        }
+    }
+    if live_frames != 1
+        || live_materializations != HashSet::from([output_materialization])
+        || remaining.values().any(|remaining| *remaining != 0)
+    {
+        return Err(
+            PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                reason: "cpu_dag_liveness_does_not_end_at_transfer_value",
+            },
+        );
     }
     frame_bytes
         .checked_mul(peak_owned_frames)
         .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)
 }
 
-fn validate_unary_partition(
+fn validate_cpu_dag_gpu_tail_partition(
     compiled: &CompiledEffectGraph,
-    cpu_nodes: &[EffectGraphNodeId],
+    plan: &CompiledEffectValueExecutionPlan,
+    cpu_dispatches: &[PreparedCpuGraphDispatch],
+    cpu_output_materialization: EffectMaterializationId,
     gpu_nodes: &[EffectGraphNodeId],
 ) -> Result<(), PreparedHeterogeneousEffectWorkError> {
-    let mut previous = compiled
+    let source = compiled
         .schedule()
         .ordered_nodes
         .iter()
@@ -2247,44 +2514,153 @@ fn validate_unary_partition(
             )
         })
         .ok_or(
-            PreparedHeterogeneousEffectWorkError::UnsupportedTracerShape {
+            PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
                 reason: "compiled_source_missing",
             },
         )?;
-    for node_id in cpu_nodes.iter().chain(gpu_nodes).copied() {
-        let node = compiled.graph().node(node_id).ok_or(
-            PreparedHeterogeneousEffectWorkError::UnsupportedTracerShape {
-                reason: "partition_node_missing",
+    if plan.input_value() != source {
+        return Err(
+            PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                reason: "cpu_input_materialization_is_not_the_compiled_source",
+            },
+        );
+    }
+    let scheduled = compiled
+        .schedule()
+        .ordered_nodes
+        .iter()
+        .copied()
+        .filter(|node_id| *node_id != source)
+        .collect::<Vec<_>>();
+    let partition = cpu_dispatches
+        .iter()
+        .map(|dispatch| dispatch.node)
+        .chain(gpu_nodes.iter().copied())
+        .collect::<Vec<_>>();
+    if partition != scheduled {
+        return Err(
+            PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                reason: "cpu_gpu_partition_does_not_cover_the_compiled_schedule",
+            },
+        );
+    }
+
+    let mut produced = HashSet::from([plan.input_materialization()]);
+    for dispatch in cpu_dispatches {
+        let node = compiled.graph().node(dispatch.node).ok_or(
+            PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                reason: "cpu_partition_node_missing",
             },
         )?;
-        let input = match &node.kind {
-            EffectGraphNodeKind::UnaryEffect { input, .. }
-            | EffectGraphNodeKind::DomainEffect { input, .. } => *input,
-            _ => {
-                return Err(
-                    PreparedHeterogeneousEffectWorkError::UnsupportedTracerShape {
-                        reason: "partition_is_not_a_unary_chain",
-                    },
-                );
-            }
-        };
-        if input != previous {
+        if !compiled.node_execution_modes(dispatch.node).is_some_and(|modes| {
+            modes.contains(
+                EffectProcessingBackend::Cpu,
+                EffectWorkingPrecision::Float32,
+            )
+        }) {
             return Err(
-                PreparedHeterogeneousEffectWorkError::UnsupportedTracerShape {
-                    reason: "partition_is_disconnected",
+                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                    reason: "cpu_partition_node_is_not_admitted_for_cpu_f32",
                 },
             );
         }
-        previous = node_id;
+        cpu_node_scratch_frames(node)?;
+        let semantic_inputs = node.input_ids();
+        if semantic_inputs.len() != dispatch.inputs.len() {
+            return Err(
+                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                    reason: "cpu_dispatch_input_arity_changed",
+                },
+            );
+        }
+        for (semantic_input, materialization_id) in
+            semantic_inputs.iter().zip(dispatch.inputs.iter())
+        {
+            let materialization = plan.materialization(*materialization_id).ok_or(
+                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                    reason: "cpu_dispatch_input_materialization_missing",
+                },
+            )?;
+            if materialization.value() != *semantic_input || !produced.contains(materialization_id)
+            {
+                return Err(
+                    PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                        reason: "cpu_dispatch_input_does_not_match_the_compiled_graph",
+                    },
+                );
+            }
+        }
+        let output = plan.materialization(dispatch.output).ok_or(
+            PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                reason: "cpu_dispatch_output_materialization_missing",
+            },
+        )?;
+        if output.value() != dispatch.node || !produced.insert(dispatch.output) {
+            return Err(
+                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                    reason: "cpu_dispatch_output_does_not_match_the_compiled_graph",
+                },
+            );
+        }
     }
-    if compiled.graph().output != Some(previous) {
+    let output = plan.materialization(cpu_output_materialization).ok_or(
+        PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+            reason: "cpu_transfer_materialization_missing",
+        },
+    )?;
+    if !produced.contains(&cpu_output_materialization)
+        || cpu_dispatches.last().map(|dispatch| dispatch.node) != Some(output.value())
+    {
         return Err(
-            PreparedHeterogeneousEffectWorkError::UnsupportedTracerShape {
-                reason: "partition_does_not_end_at_graph_output",
+            PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                reason: "cpu_dag_does_not_end_at_the_transfer_value",
             },
         );
     }
     Ok(())
+}
+
+fn cpu_materialization_use_counts(
+    dispatches: &[PreparedCpuGraphDispatch],
+) -> Result<HashMap<EffectMaterializationId, usize>, PreparedHeterogeneousEffectWorkError> {
+    let mut use_counts = HashMap::new();
+    for dispatch in dispatches {
+        for input in dispatch.inputs.iter().copied() {
+            let count = use_counts.entry(input).or_insert(0_usize);
+            *count = count
+                .checked_add(1)
+                .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
+        }
+    }
+    Ok(use_counts)
+}
+
+fn cpu_node_scratch_frames(
+    node: &crate::EffectGraphNode,
+) -> Result<usize, PreparedHeterogeneousEffectWorkError> {
+    match &node.kind {
+        EffectGraphNodeKind::UnaryEffect { op, .. }
+        | EffectGraphNodeKind::DomainEffect { op, .. } => match op {
+            crate::EffectRenderOp::GaussianBlur { .. }
+            | crate::EffectRenderOp::Sharpen { .. }
+            | crate::EffectRenderOp::ChromaticAberration { .. }
+            | crate::EffectRenderOp::ColorAdjust { .. }
+            | crate::EffectRenderOp::Vignette { .. }
+            | crate::EffectRenderOp::Grain { .. }
+            | crate::EffectRenderOp::Lut3D { .. } => Ok(render_op_f32_scratch_frames(op)),
+            crate::EffectRenderOp::TemporalFrameBlend { .. }
+            | crate::EffectRenderOp::Custom { .. } => {
+                Err(PreparedHeterogeneousEffectWorkError::UnsupportedCpuOperation { node: node.id })
+            }
+        },
+        EffectGraphNodeKind::Blend { .. } | EffectGraphNodeKind::Mask { .. } => Ok(0),
+        EffectGraphNodeKind::MultiInput { inputs, .. } if !inputs.is_empty() => Ok(0),
+        EffectGraphNodeKind::Source
+        | EffectGraphNodeKind::MaskSource { .. }
+        | EffectGraphNodeKind::MultiInput { .. } => {
+            Err(PreparedHeterogeneousEffectWorkError::UnsupportedCpuOperation { node: node.id })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2394,6 +2770,75 @@ mod tests {
             .expect("prepared tracer effects")
             .evaluate(TimelineTime::ZERO)
             .expect("compiled tracer graph")
+    }
+
+    fn cpu_dag_to_gpu_tail_graph() -> Arc<CompiledEffectGraph> {
+        static NEXT_DEFINITION_ID: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
+        let definition_id = NEXT_DEFINITION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let cpu_type =
+            EffectType::Plugin(format!("test.heterogeneous.cpu-dag.{definition_id}.cpu"));
+        let gpu_type =
+            EffectType::Plugin(format!("test.heterogeneous.cpu-dag.{definition_id}.gpu"));
+        register_effect_definition(
+            EffectDefinition::new(
+                cpu_type.key(),
+                "CPU DAG stage",
+                Default::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32,
+                ..EffectExecutionContract::IDENTITY
+            })
+            .with_branching_graph_builder(Arc::new(|_, _, graph| {
+                let source = graph.current_output();
+                let left = graph.add_unary_from(
+                    source,
+                    EffectRenderOp::ColorAdjust {
+                        exposure: 0.5,
+                        contrast: 1.0,
+                        saturation: 1.0,
+                        working_color_space: WorkingColorSpace::LinearRec2020,
+                    },
+                );
+                let right = graph.add_unary_from(
+                    source,
+                    EffectRenderOp::Vignette { intensity: 0.2, feather: 0.75 },
+                );
+                let output = graph.add_blend(left, right, BlendMode::Screen, 0.35);
+                graph.set_current_output(output);
+                Ok(())
+            })),
+        )
+        .expect("register CPU DAG definition");
+        register_effect_definition(
+            EffectDefinition::new(
+                gpu_type.key(),
+                "GPU point tail",
+                Default::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                execution_modes: EffectExecutionModes::GPU_F32,
+                determinism: crate::EffectDeterminism::FrameSeeded,
+                ..EffectExecutionContract::IDENTITY
+            })
+            .with_graph_builder(Arc::new(|_, _, graph| {
+                graph.append_unary(EffectRenderOp::Grain { amount: 0.1 });
+                Ok(())
+            })),
+        )
+        .expect("register GPU-tail definition");
+
+        PreparedEffectProgram::prepare(
+            &[EffectNode::new(cpu_type), EffectNode::new(gpu_type)],
+            &[],
+            WorkingColorSpace::LinearRec2020,
+        )
+        .expect("prepare CPU-DAG/GPU-tail program")
+        .evaluate(TimelineTime::ZERO)
+        .expect("compile CPU-DAG/GPU-tail graph")
     }
 
     fn lifetime_partition_graph(
@@ -3030,7 +3475,118 @@ mod tests {
     }
 
     #[test]
-    fn tracer_rejects_general_dag_without_executing_pixels() {
+    fn executes_cpu_f32_fanout_join_before_fused_gpu_tail() {
+        let compiled = cpu_dag_to_gpu_tail_graph();
+        let extent = EffectFrameExtent::new(2, 2);
+        let work = PreparedHeterogeneousEffectWork::prepare(
+            Arc::clone(&compiled),
+            &test_environment(),
+            request(extent),
+        )
+        .expect("prepare CPU DAG route");
+        assert_eq!(work.cpu_nodes().len(), 3);
+        assert_eq!(work.gpu_plan().node_ids().len(), 1);
+        assert!(matches!(
+            compiled.graph().node(work.cpu_nodes()[2]).map(|node| &node.kind),
+            Some(EffectGraphNodeKind::Blend { .. })
+        ));
+        assert_eq!(
+            work.cpu_required_working_bytes(),
+            2 * 2 * 2 * std::mem::size_of::<[f32; 4]>(),
+            "the shared source is cloned once for fan-out and joins back to one transfer value"
+        );
+
+        let input = vec![
+            [0.05, 0.15, 0.25, 1.0],
+            [0.25, 0.35, 0.45, 1.0],
+            [0.45, 0.55, 0.65, 1.0],
+            [0.65, 0.75, 0.85, 1.0],
+        ];
+        let mut left = input.clone();
+        let mut right = input.clone();
+        let left_op = match &compiled.graph().node(work.cpu_nodes()[0]).expect("left CPU node").kind
+        {
+            EffectGraphNodeKind::UnaryEffect { op, .. } => op,
+            _ => panic!("expected left unary node"),
+        };
+        let right_op =
+            match &compiled.graph().node(work.cpu_nodes()[1]).expect("right CPU node").kind {
+                EffectGraphNodeKind::UnaryEffect { op, .. } => op,
+                _ => panic!("expected right unary node"),
+            };
+        assert!(apply_render_op_f32(
+            &mut left,
+            extent.width(),
+            extent.height(),
+            left_op,
+            23,
+        ));
+        assert!(apply_render_op_f32(
+            &mut right,
+            extent.width(),
+            extent.height(),
+            right_op,
+            23,
+        ));
+        let expected = left
+            .iter()
+            .zip(&right)
+            .map(|(base, overlay)| {
+                crate::adjustment::blend_rgba_f32_pixel(*base, *overlay, 0.35, BlendMode::Screen)
+            })
+            .collect::<Vec<_>>();
+
+        let mut session =
+            EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(1024 * 1024));
+        session.bind_generation(11);
+        let completion = work
+            .execute_cpu_prefix_uncancelled(
+                &session,
+                11,
+                &input,
+                23,
+                WorkingColorSpace::LinearRec2020,
+            )
+            .expect("execute CPU DAG prefix");
+        assert_eq!(completion.pixels(), expected);
+        assert_eq!(
+            completion.evidence().completed_cpu_nodes(),
+            work.cpu_nodes()
+        );
+        assert_eq!(
+            completion.gpu_plan().source_value(),
+            work.cpu_nodes()[2],
+            "the upload consumes the joined CPU graph value"
+        );
+    }
+
+    #[test]
+    fn cpu_dag_fanout_copy_observes_bounded_stop_checkpoints() {
+        let source = vec![[0.25, 0.5, 0.75, 1.0]; 8_193];
+        let mut checkpoints = 0_u32;
+        let result = copy_cpu_pixels_controlled(&source, &mut || {
+            checkpoints = checkpoints.saturating_add(1);
+            if checkpoints == 2 {
+                Err(PreparedHeterogeneousEffectWorkError::ExecutionStopped {
+                    generation: 31,
+                    reason: HeterogeneousCpuExecutionStopReason::DeadlineExpired,
+                })
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(
+            result,
+            Err(PreparedHeterogeneousEffectWorkError::ExecutionStopped {
+                generation: 31,
+                reason: HeterogeneousCpuExecutionStopReason::DeadlineExpired,
+            })
+        ));
+        assert_eq!(checkpoints, 2);
+    }
+
+    #[test]
+    fn route_rejects_a_gpu_dag_tail_without_executing_pixels() {
         let mut builder = EffectGraphBuilderState::new();
         let source = builder.source();
         let first = builder.add_unary_from(source, EffectRenderOp::GaussianBlur { radius: 1.0 });
@@ -3053,7 +3609,7 @@ mod tests {
                 &test_environment(),
                 request(EffectFrameExtent::new(8, 8)),
             ),
-            Err(PreparedHeterogeneousEffectWorkError::UnsupportedTracerShape { .. })
+            Err(PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape { .. })
         ));
     }
 }

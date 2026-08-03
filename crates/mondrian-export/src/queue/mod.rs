@@ -5496,6 +5496,78 @@ mod tests {
             .expect("compile heterogeneous Export test graph")
     }
 
+    fn heterogeneous_cpu_dag_graph() -> Arc<CompiledEffectGraph> {
+        static NEXT_DEFINITION_ID: AtomicUsize = AtomicUsize::new(1);
+        let definition_id = NEXT_DEFINITION_ID.fetch_add(1, Ordering::Relaxed);
+        let cpu_type = mondrian_effects::EffectType::Plugin(format!(
+            "test.export.heterogeneous.cpu-dag.{definition_id}.cpu"
+        ));
+        let gpu_type = mondrian_effects::EffectType::Plugin(format!(
+            "test.export.heterogeneous.cpu-dag.{definition_id}.gpu"
+        ));
+        mondrian_effects::register_effect_definition(
+            mondrian_effects::EffectDefinition::new(
+                cpu_type.key(),
+                "Export CPU DAG",
+                Default::default(),
+                mondrian_effects::EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(mondrian_effects::EffectExecutionContract {
+                execution_modes: mondrian_effects::EffectExecutionModes::CPU_F32,
+                ..mondrian_effects::EffectExecutionContract::IDENTITY
+            })
+            .with_branching_graph_builder(Arc::new(|_, _, graph| {
+                let source = graph.current_output();
+                let left = graph.add_unary_from(
+                    source,
+                    mondrian_effects::EffectRenderOp::ColorAdjust {
+                        exposure: 0.25,
+                        contrast: 1.0,
+                        saturation: 1.0,
+                        working_color_space: WorkingColorSpace::LinearRec709,
+                    },
+                );
+                let right = graph.add_unary_from(
+                    source,
+                    mondrian_effects::EffectRenderOp::Vignette { intensity: 0.2, feather: 0.75 },
+                );
+                let output = graph.add_blend(left, right, BlendMode::Screen, 0.35);
+                graph.set_current_output(output);
+                Ok(())
+            })),
+        )
+        .expect("register Export CPU-DAG definition");
+        mondrian_effects::register_effect_definition(
+            mondrian_effects::EffectDefinition::new(
+                gpu_type.key(),
+                "Export GPU tail",
+                Default::default(),
+                mondrian_effects::EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(mondrian_effects::EffectExecutionContract {
+                execution_modes: mondrian_effects::EffectExecutionModes::GPU_F32,
+                determinism: mondrian_effects::EffectDeterminism::FrameSeeded,
+                ..mondrian_effects::EffectExecutionContract::IDENTITY
+            })
+            .with_graph_builder(Arc::new(|_, _, graph| {
+                graph.append_unary(mondrian_effects::EffectRenderOp::Grain { amount: 0.1 });
+                Ok(())
+            })),
+        )
+        .expect("register Export GPU-tail definition");
+        PreparedEffectProgram::prepare(
+            &[
+                mondrian_effects::EffectNode::new(cpu_type),
+                mondrian_effects::EffectNode::new(gpu_type),
+            ],
+            &[],
+            WorkingColorSpace::LinearRec709,
+        )
+        .expect("prepare heterogeneous Export CPU-DAG program")
+        .evaluate(TimelineTime::ZERO)
+        .expect("compile heterogeneous Export CPU-DAG graph")
+    }
+
     fn freeze_test_heterogeneous_route(
         session: &mut ExportVisualRenderSession,
         graph: &Arc<CompiledEffectGraph>,
@@ -5515,6 +5587,26 @@ mod tests {
             )
             .expect("freeze heterogeneous Export test route");
         route
+    }
+
+    #[test]
+    fn export_route_contract_accepts_the_prepared_cpu_dag_shape() {
+        let graph = heterogeneous_cpu_dag_graph();
+        let extent = EffectFrameExtent::new(4, 3);
+        let mut session = ExportVisualRenderSession::for_reference_generation(
+            70,
+            service::ExportExecutionResourcePolicy::default(),
+        );
+        let route = freeze_test_heterogeneous_route(
+            &mut session,
+            &graph,
+            ExportHeterogeneousPlacement::Media,
+            extent,
+        );
+
+        assert_eq!(route.prepared_work().cpu_nodes().len(), 3);
+        assert_eq!(route.prepared_work().gpu_plan().node_ids().len(), 1);
+        assert_eq!(session.heterogeneous_route_contracts.len(), 1);
     }
 
     #[test]

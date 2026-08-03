@@ -47,7 +47,7 @@ impl PreparedHeterogeneousEffectRoute {
         let graph_fingerprint = graph.semantic_fingerprint();
         let retained_graph = Arc::clone(&graph);
         let capability = HeterogeneousGpuExecutionCapability::scene_linear_f32().map_err(|_| {
-            PreparedHeterogeneousEffectWorkError::UnsupportedTracerShape {
+            PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
                 reason: "renderer_heterogeneous_capability_unavailable",
             }
         })?;

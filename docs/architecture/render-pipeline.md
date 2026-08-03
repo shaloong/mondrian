@@ -299,14 +299,19 @@ Renderer wraps `PreparedHeterogeneousEffectWork` in one cloneable
 extent, graph-planning budget, and semantic fingerprint before source pixels
 are materialized. Batch binding rejects a different extent or resource grant;
 the worker executes this object and never replans it. The underlying work
-proves one real execution tracer when the caller already owns a scene-linear
-CPU Float32 working frame: Gaussian Blur
-executes through the scalar CPU kernel, one explicit upload remains pending,
-and the exact Basic Correction/Grain graph tail lowers to the fused GPU point
-plan. The returned evidence distinguishes completed CPU work from pending
-upload and GPU output tokens.
+consumes the planned CPU materialization DAG when the caller already owns a
+scene-linear CPU Float32 working frame. It moves last-use values, clones only
+live fan-out inputs, executes unary and join nodes through the shared Float32
+primitives, admits the exact live-frame/kernel-scratch peak, and leaves one
+explicit upload pending. Gaussian Blur followed by the exact Basic
+Correction/Grain fused GPU point tail remains the spatial gate; a CPU
+fan-out/Blend join followed by one GPU point operation proves that the prefix
+is no longer flattened into a unary chain. Synthetic Mask raster sources, GPU
+DAG tails, and more than one backend transfer still fail before pixel
+execution. The returned evidence distinguishes completed CPU work from
+pending upload and GPU output tokens.
 
-Export submits that tracer through its job-local
+Export submits that route through its job-local
 `ExportVisualRenderSession`. The same Session owns the retained Effect
 Execution Session, attempt generation, cancellation checkpoints, and one GPU
 runtime whose context/resource pool is shared with the final output boundary.
@@ -333,7 +338,7 @@ completion are dropped and poison the job-local heterogeneous runtime rather
 than entering the shared texture pool.
 
 Route selection is a pre-start decision: a complete exact CPU route is retained
-even if the heterogeneous tracer is also preparable. After a heterogeneous CPU
+even if the heterogeneous route is also preparable. After a heterogeneous CPU
 prefix starts, cancellation, upload, recording, submission, wait, readback, or
 evidence failure is terminal for that attempt. No path may reinterpret the
 whole graph on CPU after partial work. Viewer/UI lowering does not synchronously
