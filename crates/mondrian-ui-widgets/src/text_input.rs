@@ -151,6 +151,9 @@ fn normalize_single_line_input(input: &str) -> Cow<'_, str> {
 /// Adapter that maps the current input value to an editor [`Action`].
 pub type TextInputChangeAction = dyn Fn(&str) -> Option<Action>;
 
+/// Adapter that maps one committed text-edit interaction to an editor [`Action`].
+pub type TextInputCommitAction = dyn Fn(&str) -> Option<Action>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EmptyTextCommitPolicy {
     PreserveSelection,
@@ -174,6 +177,8 @@ pub struct TextInput {
     scroll_x: Cell<f32>,
     composition: TextCompositionState,
     on_change: Option<Box<TextInputChangeAction>>,
+    on_commit: Option<Box<TextInputCommitAction>>,
+    edit_session_origin: Option<String>,
 }
 
 impl TextInput {
@@ -191,6 +196,8 @@ impl TextInput {
             scroll_x: Cell::new(0.0),
             composition: TextCompositionState::default(),
             on_change: None,
+            on_commit: None,
+            edit_session_origin: None,
         }
     }
 
@@ -209,6 +216,7 @@ impl TextInput {
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
         if !enabled {
+            self.cancel_edit_session();
             self.focused = false;
             self.mouse_down = false;
             self.edit.clear_selection();
@@ -236,8 +244,14 @@ impl TextInput {
         self.edit.text()
     }
 
+    /// Replace text from an external authoritative model.
+    ///
+    /// In transactional mode this also resets the focused session origin, so
+    /// a later focus loss cannot publish the programmatic synchronization as a
+    /// user edit.
     pub fn set_text(&mut self, text: String) {
         self.edit.set_text(text);
+        self.sync_edit_session_origin_to_programmatic_text();
         self.update_scroll(TextInputMetrics::current());
     }
 
@@ -248,17 +262,41 @@ impl TextInput {
     }
 
     /// Dispatch an action whenever user input changes the committed text.
+    ///
+    /// This live-change mode is mutually exclusive with [`Self::on_commit`];
+    /// whichever builder is called last defines the dispatch policy.
     pub fn on_change<F, R>(mut self, action: F) -> Self
     where
         F: Fn(&str) -> R + 'static,
         R: Into<Option<Action>>,
     {
         self.on_change = Some(Box::new(move |text| action(text).into()));
+        self.on_commit = None;
+        self.edit_session_origin = None;
+        self
+    }
+
+    /// Dispatch one action when an editing session commits.
+    ///
+    /// Text and IME input remain local while focused. Enter or focus loss emits
+    /// at most one action and only when text differs from the focus-session
+    /// origin. Escape restores that origin without dispatching. This
+    /// transactional mode is mutually exclusive with [`Self::on_change`];
+    /// whichever builder is called last defines the dispatch policy.
+    pub fn on_commit<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(&str) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_commit = Some(Box::new(move |text| action(text).into()));
+        self.on_change = None;
+        self.edit_session_origin = None;
         self
     }
 
     pub fn clear(&mut self) {
         self.edit.clear();
+        self.sync_edit_session_origin_to_programmatic_text();
         self.update_scroll(TextInputMetrics::current());
     }
 
@@ -418,6 +456,55 @@ impl TextInput {
         }
     }
 
+    fn begin_edit_session(&mut self) {
+        if self.on_commit.is_some() && self.edit_session_origin.is_none() {
+            self.edit_session_origin = Some(self.edit.text.clone());
+        }
+    }
+
+    fn sync_edit_session_origin_to_programmatic_text(&mut self) {
+        if self.on_commit.is_some() && self.focused {
+            self.edit_session_origin = Some(self.edit.text.clone());
+        } else {
+            self.edit_session_origin = None;
+        }
+    }
+
+    fn commit_edit_session(&mut self, ctx: &mut EventContext) {
+        let changed =
+            self.edit_session_origin.take().is_some_and(|origin| origin != self.edit.text);
+        if changed {
+            if let Some(factory) = &self.on_commit {
+                if let Some(action) = factory(self.edit.text()) {
+                    (ctx.dispatch)(action);
+                }
+            }
+        }
+    }
+
+    fn cancel_edit_session(&mut self) -> bool {
+        let Some(origin) = self.edit_session_origin.take() else {
+            return false;
+        };
+        if self.edit.text == origin {
+            return false;
+        }
+        self.edit.set_text(origin);
+        self.update_scroll(TextInputMetrics::current());
+        true
+    }
+
+    fn finish_focus(&mut self, ctx: &mut EventContext) {
+        self.focused = false;
+        self.mouse_down = false;
+        self.clear_selection();
+        self.composition.clear();
+        ctx.release_pointer_capture(self.id);
+        ctx.focus.release_focus(self.id);
+        request_disabled_ime(ctx.requests);
+        ctx.request_repaint();
+    }
+
     // ── Word navigation ───────────────────────────────────────────────────
 
     fn next_word_boundary(&self, from: usize) -> usize {
@@ -544,6 +631,7 @@ impl Widget for TextInput {
             UiEvent::MouseDown { position, button: MouseButton::Left, modifiers } => {
                 let clicked = self.bounds.contains(*position);
                 if clicked {
+                    self.begin_edit_session();
                     let text_x = self.text_x_from_pointer(*position);
                     if modifiers.shift {
                         // Shift+Click: extend selection from anchor (or current cursor)
@@ -560,6 +648,7 @@ impl Widget for TextInput {
                     ctx.request_pointer_capture(self.id);
                     ctx.request_repaint();
                 } else {
+                    self.commit_edit_session(ctx);
                     let changed = self.focused
                         || self.mouse_down
                         || self.has_selection()
@@ -609,6 +698,7 @@ impl Widget for TextInput {
             }
             // ── Focus ──────────────────────────────────────────────────
             UiEvent::FocusGained { .. } => {
+                self.begin_edit_session();
                 self.focused = true;
                 self.cursor_visible.set(true);
                 self.last_blink.set(Instant::now());
@@ -618,6 +708,7 @@ impl Widget for TextInput {
                 EventResult::Handled
             }
             UiEvent::FocusLost => {
+                self.commit_edit_session(ctx);
                 let changed = self.focused
                     || self.mouse_down
                     || self.has_selection()
@@ -648,6 +739,23 @@ impl Widget for TextInput {
                         return EventResult::Handled;
                     }
                     ImeKeyDisposition::RouteNormally => {}
+                }
+
+                if *modifiers == Modifiers::none() && *key == KeyCode::Enter {
+                    if self.on_commit.is_none() {
+                        return EventResult::Ignored;
+                    }
+                    self.commit_edit_session(ctx);
+                    self.finish_focus(ctx);
+                    return EventResult::Handled;
+                }
+                if *modifiers == Modifiers::none()
+                    && *key == KeyCode::Escape
+                    && self.on_commit.is_some()
+                {
+                    self.cancel_edit_session();
+                    self.finish_focus(ctx);
+                    return EventResult::Handled;
                 }
 
                 let before_text = self.edit.text.clone();
@@ -1106,6 +1214,108 @@ mod tests {
 
         assert_eq!(input.text(), "你");
         assert_eq!(actions.borrow().as_slice(), &[change_action("你")]);
+    }
+
+    #[test]
+    fn on_commit_keeps_typing_local_and_dispatches_once_on_enter() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let mut input = TextInput::new("ph").with_text("Bus 1").on_commit(change_action);
+        layout(&mut input);
+
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        input.select_all();
+        tp(&mut input, "Dialogue", &mut ctx);
+        assert_eq!(input.text(), "Dialogue");
+        assert!(actions.borrow().is_empty());
+
+        assert_eq!(
+            input.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(actions.borrow().as_slice(), &[change_action("Dialogue")]);
+        assert!(!input.is_focused());
+
+        input.event(&UiEvent::FocusLost, &mut ctx);
+        assert_eq!(actions.borrow().as_slice(), &[change_action("Dialogue")]);
+    }
+
+    #[test]
+    fn on_commit_dispatches_composed_text_once_on_focus_loss() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let mut input = TextInput::new("ph").on_commit(change_action);
+        layout(&mut input);
+
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        input.event(&UiEvent::ImePreedit("dui hua".into()), &mut ctx);
+        input.event(&UiEvent::ImeCommit("对话".into()), &mut ctx);
+        assert!(actions.borrow().is_empty());
+
+        input.event(&UiEvent::FocusLost, &mut ctx);
+        assert_eq!(actions.borrow().as_slice(), &[change_action("对话")]);
+    }
+
+    #[test]
+    fn on_commit_escape_restores_origin_without_dispatching() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let mut input = TextInput::new("ph").with_text("Original").on_commit(change_action);
+        layout(&mut input);
+
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        input.select_all();
+        tp(&mut input, "Draft", &mut ctx);
+        kd(&mut input, KeyCode::Escape, &mut ctx);
+
+        assert_eq!(input.text(), "Original");
+        assert!(!input.is_focused());
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn on_commit_ignores_unchanged_sessions_and_disabling_cancels_draft() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let mut input = TextInput::new("ph").with_text("Original").on_commit(change_action);
+        layout(&mut input);
+
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        kd(&mut input, KeyCode::Enter, &mut ctx);
+        assert!(actions.borrow().is_empty());
+
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        input.set_text("External".to_owned());
+        input.event(&UiEvent::FocusLost, &mut ctx);
+        assert_eq!(input.text(), "External");
+        assert!(actions.borrow().is_empty());
+
+        input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        input.select_all();
+        tp(&mut input, "Draft", &mut ctx);
+        input.set_enabled(false);
+
+        assert_eq!(input.text(), "External");
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]

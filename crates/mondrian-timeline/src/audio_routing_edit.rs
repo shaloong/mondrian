@@ -681,6 +681,29 @@ mod tests {
             resolve_route(&sequence, route_id).expect("Route").destination,
             AudioRouteDestination::Output(output_id)
         );
+        assert_eq!(
+            apply_audio_routing_edit(
+                &mut sequence,
+                &request(AudioRoutingEdit::RenameBus {
+                    bus_id,
+                    name: "  Dialogue Stem  ".to_owned(),
+                }),
+            )
+            .expect("rename Bus"),
+            AudioRoutingEditOutcome::changed()
+        );
+        assert_eq!(
+            resolve_bus(&sequence, bus_id).expect("Bus").name,
+            "Dialogue Stem"
+        );
+        assert_eq!(
+            apply_audio_routing_edit(
+                &mut sequence,
+                &request(AudioRoutingEdit::RenameBus { bus_id, name: "Dialogue Stem".to_owned() }),
+            )
+            .expect("canonical no-op rename"),
+            AudioRoutingEditOutcome::unchanged()
+        );
 
         assert_eq!(
             apply_audio_routing_edit(

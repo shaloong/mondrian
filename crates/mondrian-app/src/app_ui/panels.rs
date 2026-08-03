@@ -151,6 +151,7 @@ use crate::app_ui::audio_mixer::{
     create_route_action as audio_mixer_create_route_action,
     remove_bus_action as audio_mixer_remove_bus_action,
     remove_route_action as audio_mixer_remove_route_action,
+    rename_bus_action as audio_mixer_rename_bus_action,
     set_fader_action as audio_mixer_set_fader_action,
     set_input_trim_action as audio_mixer_set_input_trim_action,
     set_route_enabled_action as audio_mixer_set_route_enabled_action,
@@ -5336,6 +5337,20 @@ fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
             section = section.with_row(PropertyRow::new(
                 "输入路由",
                 Box::new(Label::new(format!("{} 条", channel.incoming_route_count)).muted()),
+            ));
+        }
+        if matches!(channel.kind, AudioMixerChannelKind::Bus) {
+            let rename_channel = channel.clone();
+            section = section.with_row(PropertyRow::new(
+                "名称",
+                Box::new(
+                    TextInput::new("Bus 名称")
+                        .with_text(&channel.name)
+                        .enabled(channel.is_editable)
+                        .on_commit(move |name| {
+                            audio_mixer_rename_bus_action(&rename_channel, name)
+                        }),
+                ),
             ));
         }
         if !channel.route_create_options.is_empty() {

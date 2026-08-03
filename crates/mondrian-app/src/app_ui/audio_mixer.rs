@@ -509,6 +509,17 @@ pub(crate) fn remove_bus_action(model: &AudioMixerBusRemovalModel) -> Option<Act
     })
 }
 
+pub(crate) fn rename_bus_action(channel: &AudioMixerChannelModel, name: &str) -> Option<Action> {
+    let AudioChannelStripOwner::Bus { bus_id } = channel.owner else {
+        return None;
+    };
+    channel.is_editable.then(|| {
+        audio_routing_edit_action(AudioRoutingEditRequest {
+            edit: AudioRoutingEdit::RenameBus { bus_id, name: name.to_owned() },
+        })
+    })
+}
+
 pub(crate) fn create_route_action(option: &AudioMixerRouteCreateOption) -> Action {
     audio_routing_edit_action(AudioRoutingEditRequest {
         edit: AudioRoutingEdit::CreateRoute {
@@ -712,7 +723,14 @@ mod tests {
     #[test]
     fn bus_and_route_factories_emit_only_typed_routing_intents() {
         let mut state = AppState::new();
-        state.test_set_sequence(Some(Sequence::new("Mixer routing")));
+        let mut sequence = Sequence::new("Mixer routing");
+        let bus_id = MixBusId::new();
+        sequence.audio_program.buses.push(AudioMixBus {
+            id: bus_id,
+            name: "Bus 1".to_owned(),
+            strip: AudioChannelStrip::default(),
+        });
+        state.test_set_sequence(Some(sequence));
         let model = AudioMixerPanelModel::from_app_state(&state);
         let action = create_bus_action(&model).expect("create Bus action");
         assert!(matches!(
@@ -737,5 +755,21 @@ mod tests {
         assert!(set_route_enabled_action(route, false).is_some());
         assert!(set_route_gain_action(route, -6.0).is_some());
         assert!(remove_route_action(route).is_some());
+
+        let bus = model
+            .channels
+            .iter()
+            .find(|channel| channel.owner == AudioChannelStripOwner::Bus { bus_id })
+            .expect("Bus channel");
+        let action = rename_bus_action(bus, "Dialogue").expect("rename Bus action");
+        assert!(matches!(
+            ProductAction::decode_external(&action).expect("decode"),
+            Some(ProductAction::Audio(AudioProductAction::EditRouting(
+                AudioRoutingEditRequest {
+                    edit: AudioRoutingEdit::RenameBus { bus_id: projected, name }
+                }
+            ))) if projected == bus_id && name == "Dialogue"
+        ));
+        assert!(rename_bus_action(track, "invalid owner").is_none());
     }
 }

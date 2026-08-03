@@ -65,6 +65,15 @@ non-deletable, while real author keys remain movable and deletable even when
 their time lies exactly on a boundary. Escape cancels widget-local preview
 state and publishes no author mutation.
 
+Single-line `TextInput` has two mutually exclusive dispatch policies. Live
+change mode emits after each committed text/IME edit and is reserved for draft
+or filter state. Transactional commit mode retains edits inside the Widget,
+captures one focus-session origin, emits at most one Action on Enter or focus
+loss only when the text changed, and restores the origin on Escape or
+programmatic disable. App panel Adapters select the policy; they must not
+simulate author-transaction coalescing outside the Widget or turn each typed
+character into Undo/Author Generation history.
+
 Timeline Track Targeting and Sync-Lock are editor interaction policy, not
 renderable Sequence fields. `TimelineTargetingState` is keyed by stable
 Sequence/Track identity in the open editor Session and stores only exceptions
@@ -407,11 +416,13 @@ counts. A Bus creation action allocates identity only during dispatch and may
 connect it to the first routed Program Output in the same author transaction.
 Track/Bus Route menus submit exact source tap and destination identities;
 existing edges expose enabled state, honest static-or-automated gain, and
-undoable removal. Bus deletion states how many connected Routes will be removed
-and uses Timeline's `Disconnect` policy rather than issuing N UI edits. Bus
-post-fader UI does not invent a mute stage: although the shared author port enum
-remains uniform, the product presents only real pre/post-fader choices. The
-current surface deliberately omits fake meter bars and transient solo until
+undoable removal. Bus names use transactional `TextInput` commit and therefore
+produce no mutation while typing and at most one typed `RenameBus` transaction
+per focus session. Bus deletion states how many connected Routes will be
+removed and uses Timeline's `Disconnect` policy rather than issuing N UI edits.
+Bus post-fader UI does not invent a mute stage: although the shared author port
+enum remains uniform, the product presents only real pre/post-fader choices.
+The current surface deliberately omits fake meter bars and transient solo until
 their execution evidence or session overlay is connected. Adding those
 features must extend this projection rather than create another mixer graph.
 
