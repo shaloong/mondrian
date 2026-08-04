@@ -513,7 +513,11 @@ mod tests {
         state.test_set_sequence(Some(sequence));
         state.test_set_asset_library(Some(asset_library));
         state
-            .create_default_cross_dissolve(left_id, right_id)
+            .create_default_cross_dissolve(
+                left_id,
+                right_id,
+                crate::app::product_action::VideoTransitionHandlePolicy::Reject,
+            )
             .expect("admit initial Transition");
         let history_before = state.authoring_history().expect("history").diagnostics().undo_entries;
 

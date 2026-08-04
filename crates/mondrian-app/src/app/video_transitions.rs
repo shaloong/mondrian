@@ -6,35 +6,28 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    sync::Arc,
     time::Duration,
 };
 
 use mondrian_core::{
-    ClipId, FramePosition, MondrianError, Rational, TimelineTime, TimelineTimeRange,
-    VideoTransitionId,
+    ClipId, FramePosition, MondrianError, Rational, SequenceId, SequenceRevision, TimelineTime,
+    TimelineTimeRange, VideoTransitionId,
 };
+use mondrian_editor_state::AuthoringSessionId;
 use mondrian_timeline::{clip::Clip, VideoTransition};
+use parking_lot::Mutex;
 
+use super::product_action::VideoTransitionHandlePolicy;
 use super::AppState;
-
-/// Explicit policy for a requested Transition whose source handles are short.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VideoTransitionHandlePolicy {
-    /// Preserve the requested author range or reject the edit.
-    Reject,
-    /// Intersect with real source extents while retaining the editorial cut.
-    ShortenToAvailable,
-}
 
 /// Result of one committed visual-Transition edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VideoTransitionEditOutcome {
+pub(super) struct VideoTransitionEditOutcome {
     /// Stable Transition identity.
-    pub transition_id: VideoTransitionId,
-    /// Exact range committed to the author document.
-    pub applied_range: TimelineTimeRange,
-    /// Whether explicit handle policy shortened the requested range.
-    pub was_shortened: bool,
+    pub(super) transition_id: VideoTransitionId,
+    /// Whether canonical author state changed.
+    pub(super) changed: bool,
 }
 
 /// Current external source-handle state for one authored visual Transition.
@@ -46,6 +39,63 @@ pub enum VideoTransitionHandleState {
     Insufficient,
     /// A recoverable external dependency could not be resolved exactly.
     Unresolved { reason: String },
+    /// The in-memory author graph violates a structural Transition invariant.
+    ///
+    /// Validated production transactions cannot create this state. It remains
+    /// explicit so recovery, diagnostics, and forged test fixtures never
+    /// misreport corrupt author structure as an offline media dependency.
+    InvalidAuthorState { reason: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VideoTransitionHandleDiagnosticsKey {
+    authoring_session_id: AuthoringSessionId,
+    author_generation: u64,
+    sequence_id: SequenceId,
+    sequence_revision: SequenceRevision,
+    asset_library_instance: usize,
+    asset_library_revision: u64,
+}
+
+#[derive(Debug)]
+struct CachedVideoTransitionHandleDiagnostics {
+    key: VideoTransitionHandleDiagnosticsKey,
+    states: Arc<HashMap<VideoTransitionId, VideoTransitionHandleState>>,
+}
+
+/// Process-local memoization for immutable Transition-handle observations.
+///
+/// This cache is an Implementation detail of the visual-Transition Module. It
+/// never becomes author state and publishes a result only when both author and
+/// Asset Library revisions remain stable across preparation.
+#[derive(Debug, Default)]
+pub(super) struct VideoTransitionHandleDiagnosticsCache {
+    entry: Mutex<Option<CachedVideoTransitionHandleDiagnostics>>,
+}
+
+impl VideoTransitionHandleDiagnosticsCache {
+    fn get(
+        &self,
+        key: VideoTransitionHandleDiagnosticsKey,
+    ) -> Option<Arc<HashMap<VideoTransitionId, VideoTransitionHandleState>>> {
+        self.entry
+            .lock()
+            .as_ref()
+            .and_then(|entry| (entry.key == key).then(|| Arc::clone(&entry.states)))
+    }
+
+    fn publish(
+        &self,
+        key: VideoTransitionHandleDiagnosticsKey,
+        states: Arc<HashMap<VideoTransitionId, VideoTransitionHandleState>>,
+    ) {
+        *self.entry.lock() = Some(CachedVideoTransitionHandleDiagnostics { key, states });
+    }
+
+    #[cfg(test)]
+    pub(super) fn clear(&self) {
+        *self.entry.lock() = None;
+    }
 }
 
 impl AppState {
@@ -111,6 +161,90 @@ pub(super) fn validate_retimed_transition_handles_with_extents(
 }
 
 impl AppState {
+    /// Lightweight selection admission for UI projections.
+    ///
+    /// Author mutations still revalidate the complete Transition contract at
+    /// dispatch; this path performs no media or filesystem work.
+    pub(super) fn video_transition_selection_available(
+        &self,
+        transition_id: VideoTransitionId,
+    ) -> bool {
+        self.active_sequence().is_some_and(|sequence| {
+            sequence
+                .video_transitions
+                .iter()
+                .any(|transition| transition.id == transition_id)
+        })
+    }
+
+    /// Lightweight adjacent-edit admission for product surfaces.
+    pub(super) fn video_transition_creation_available(
+        &self,
+        left_id: ClipId,
+        right_id: ClipId,
+    ) -> bool {
+        let Some(sequence) = self.active_sequence() else {
+            return false;
+        };
+        let Ok((_, locked, left, right)) = transition_endpoints(sequence, left_id, right_id) else {
+            return false;
+        };
+        !locked
+            && !sequence
+                .video_transitions
+                .iter()
+                .any(|transition| transition.left == left_id && transition.right == right_id)
+            && default_cross_dissolve_range(left, right, sequence.settings.frame_rate).is_ok()
+    }
+
+    /// Lightweight exact-range admission for product surfaces.
+    pub(super) fn video_transition_range_edit_available(
+        &self,
+        transition_id: VideoTransitionId,
+        requested_range: TimelineTimeRange,
+    ) -> bool {
+        let Some(sequence) = self.active_sequence() else {
+            return false;
+        };
+        let Some(transition) = sequence
+            .video_transitions
+            .iter()
+            .find(|transition| transition.id == transition_id)
+        else {
+            return false;
+        };
+        let Ok((_, locked, _, _)) =
+            transition_endpoints(sequence, transition.left, transition.right)
+        else {
+            return false;
+        };
+        if locked || transition.sequence_range == requested_range {
+            return false;
+        }
+        let mut candidate = transition.clone();
+        candidate.sequence_range = requested_range;
+        candidate.validate_definition_state().is_ok()
+    }
+
+    /// Lightweight removal admission for product surfaces.
+    pub(super) fn video_transition_removal_available(
+        &self,
+        transition_id: VideoTransitionId,
+    ) -> bool {
+        let Some(sequence) = self.active_sequence() else {
+            return false;
+        };
+        let Some(transition) = sequence
+            .video_transitions
+            .iter()
+            .find(|transition| transition.id == transition_id)
+        else {
+            return false;
+        };
+        transition_endpoints(sequence, transition.left, transition.right)
+            .is_ok_and(|(_, locked, _, _)| !locked)
+    }
+
     /// Resolve current source-handle evidence for one authored Transition.
     ///
     /// This observation never repairs author state or changes the Transition
@@ -121,13 +255,106 @@ impl AppState {
         transition_id: VideoTransitionId,
     ) -> mondrian_core::Result<VideoTransitionHandleState> {
         let sequence = self.active_sequence().ok_or_else(no_active_sequence)?;
-        let transition = sequence
+        sequence
             .video_transitions
             .iter()
             .find(|transition| transition.id == transition_id)
             .ok_or_else(|| transition_not_found(transition_id))?;
+        self.video_transition_handle_states()
+            .get(&transition_id)
+            .cloned()
+            .ok_or_else(|| transition_not_found(transition_id))
+    }
+
+    /// Prepare one immutable handle-diagnostics snapshot for the active
+    /// Sequence rather than resolving every Transition independently from UI.
+    ///
+    /// The cache identity includes the open author lifetime, Project author
+    /// generation, active Sequence revision, and exact Asset Library instance
+    /// and revision. Nested-Sequence edits therefore invalidate the snapshot
+    /// even when the active Sequence itself did not change.
+    pub(crate) fn video_transition_handle_states(
+        &self,
+    ) -> Arc<HashMap<VideoTransitionId, VideoTransitionHandleState>> {
+        // A library mutation can occur through another retained Arc. Retry a
+        // bounded number of times and publish only a revision-stable result.
+        for _ in 0..2 {
+            let key_before = self.video_transition_handle_diagnostics_key();
+            if let Some(key) = key_before {
+                if let Some(states) = self.video_transition_handle_diagnostics.get(key) {
+                    return states;
+                }
+            }
+
+            let states = Arc::new(self.prepare_video_transition_handle_states());
+            let key_after = self.video_transition_handle_diagnostics_key();
+            if let (Some(before), Some(after)) = (key_before, key_after) {
+                if before == after {
+                    self.video_transition_handle_diagnostics.publish(after, Arc::clone(&states));
+                    return states;
+                }
+            } else if key_before.is_none() && key_after.is_none() {
+                return states;
+            }
+        }
+
+        // Diagnostics are advisory. Under continuous external library churn,
+        // return a fresh uncached observation rather than blocking the UI.
+        Arc::new(self.prepare_video_transition_handle_states())
+    }
+
+    fn video_transition_handle_diagnostics_key(
+        &self,
+    ) -> Option<VideoTransitionHandleDiagnosticsKey> {
+        let sequence = self.active_sequence()?;
+        let authoring_session_id = self.authoring_session_id()?;
+        let library = self.asset_library_handle()?;
+        let asset_library_revision = library.database_revision().ok()?;
+        Some(VideoTransitionHandleDiagnosticsKey {
+            authoring_session_id,
+            author_generation: self.project_author_generation(),
+            sequence_id: sequence.id,
+            sequence_revision: sequence.revision,
+            asset_library_instance: Arc::as_ptr(&library) as usize,
+            asset_library_revision,
+        })
+    }
+
+    fn prepare_video_transition_handle_states(
+        &self,
+    ) -> HashMap<VideoTransitionId, VideoTransitionHandleState> {
+        let Some(sequence) = self.active_sequence() else {
+            return HashMap::new();
+        };
+        sequence
+            .video_transitions
+            .iter()
+            .map(|transition| {
+                let state = self.evaluate_video_transition_handle_state(sequence, transition);
+                (transition.id, state)
+            })
+            .collect()
+    }
+
+    fn evaluate_video_transition_handle_state(
+        &self,
+        sequence: &mondrian_timeline::sequence::Sequence,
+        transition: &VideoTransition,
+    ) -> VideoTransitionHandleState {
         let (_, _, left, right) =
-            transition_endpoints(sequence, transition.left, transition.right)?;
+            match transition_endpoints(sequence, transition.left, transition.right) {
+                Ok(endpoints) => endpoints,
+                Err(error) => {
+                    return VideoTransitionHandleState::InvalidAuthorState {
+                        reason: error.to_string(),
+                    };
+                }
+            };
+        if left.is_adjustment_layer() || right.is_adjustment_layer() {
+            return VideoTransitionHandleState::InvalidAuthorState {
+                reason: "Adjustment Layer cannot be a Transition endpoint".to_owned(),
+            };
+        }
         let extents = self.transition_source_extent(left).and_then(|left_extent| {
             self.transition_source_extent(right)
                 .map(|right_extent| (left_extent, right_extent))
@@ -135,13 +362,15 @@ impl AppState {
         let (left_extent, right_extent) = match extents {
             Ok(extents) => extents,
             Err(error) => {
-                return Ok(VideoTransitionHandleState::Unresolved { reason: error.to_string() });
+                return VideoTransitionHandleState::Unresolved { reason: error.to_string() };
             }
         };
-        if handles_satisfy(transition, left, right, left_extent, right_extent)? {
-            Ok(VideoTransitionHandleState::Available)
-        } else {
-            Ok(VideoTransitionHandleState::Insufficient)
+        match handles_satisfy(transition, left, right, left_extent, right_extent) {
+            Ok(true) => VideoTransitionHandleState::Available,
+            Ok(false) => VideoTransitionHandleState::Insufficient,
+            Err(error) => {
+                VideoTransitionHandleState::InvalidAuthorState { reason: error.to_string() }
+            }
         }
     }
 
@@ -151,50 +380,49 @@ impl AppState {
     /// The default is clamped only by endpoint placement geometry. Real source
     /// handles remain authoritative and are admitted with the fail-closed
     /// `Reject` policy; the UI must request shortening explicitly.
-    pub fn create_default_cross_dissolve(
+    pub(super) fn create_default_cross_dissolve(
         &mut self,
         left_id: ClipId,
         right_id: ClipId,
+        handle_policy: VideoTransitionHandlePolicy,
     ) -> mondrian_core::Result<VideoTransitionEditOutcome> {
-        let sequence = self.active_sequence().cloned().ok_or_else(no_active_sequence)?;
-        let (_, _, left, right) = transition_endpoints(&sequence, left_id, right_id)?;
-        let requested_range =
-            default_cross_dissolve_range(left, right, sequence.settings.frame_rate)?;
-        self.create_cross_dissolve(
-            left_id,
-            right_id,
-            requested_range,
-            VideoTransitionHandlePolicy::Reject,
-        )
+        let requested_range = {
+            let sequence = self.active_sequence().ok_or_else(no_active_sequence)?;
+            let (_, _, left, right) = transition_endpoints(sequence, left_id, right_id)?;
+            default_cross_dissolve_range(left, right, sequence.settings.frame_rate)?
+        };
+        self.create_cross_dissolve(left_id, right_id, requested_range, handle_policy)
     }
 
     /// Create one Cross Dissolve between an ordered adjacent Clip pair.
     ///
     /// The entire operation, including an explicitly requested shortening, is
     /// one validated author transaction and therefore one Undo step.
-    pub fn create_cross_dissolve(
+    fn create_cross_dissolve(
         &mut self,
         left_id: ClipId,
         right_id: ClipId,
         requested_range: TimelineTimeRange,
         handle_policy: VideoTransitionHandlePolicy,
     ) -> mondrian_core::Result<VideoTransitionEditOutcome> {
-        let sequence = self.active_sequence().cloned().ok_or_else(no_active_sequence)?;
-        let (track_id, track_locked, left, right) =
-            transition_endpoints(&sequence, left_id, right_id)?;
-        if track_locked {
-            return Err(MondrianError::TrackLocked { track_id: track_id.to_string() });
-        }
-        let left_extent = self.transition_source_extent(left)?;
-        let right_extent = self.transition_source_extent(right)?;
-        let (applied_range, was_shortened) = admit_transition_range(
-            left,
-            right,
-            requested_range,
-            left_extent,
-            right_extent,
-            handle_policy,
-        )?;
+        let (applied_range, was_shortened) = {
+            let sequence = self.active_sequence().ok_or_else(no_active_sequence)?;
+            let (track_id, track_locked, left, right) =
+                transition_endpoints(sequence, left_id, right_id)?;
+            if track_locked {
+                return Err(MondrianError::TrackLocked { track_id: track_id.to_string() });
+            }
+            let left_extent = self.transition_source_extent(left)?;
+            let right_extent = self.transition_source_extent(right)?;
+            admit_transition_range(
+                left,
+                right,
+                requested_range,
+                left_extent,
+                right_extent,
+                handle_policy,
+            )?
+        };
         let transition = VideoTransition::cross_dissolve(left_id, right_id, applied_range);
         let transition_id = transition.id;
         let _sequence_id = self.commit_active_sequence_edit("创建交叉溶解", |sequence| {
@@ -205,40 +433,46 @@ impl AppState {
         if was_shortened {
             self.set_status_hint("交叉溶解已按可用源素材手柄缩短", false);
         }
-        Ok(VideoTransitionEditOutcome { transition_id, applied_range, was_shortened })
+        Ok(VideoTransitionEditOutcome { transition_id, changed: true })
     }
 
     /// Change one Transition range after re-running exact source-handle admission.
-    pub fn set_video_transition_range(
+    pub(super) fn set_video_transition_range(
         &mut self,
         transition_id: VideoTransitionId,
         requested_range: TimelineTimeRange,
         handle_policy: VideoTransitionHandlePolicy,
     ) -> mondrian_core::Result<VideoTransitionEditOutcome> {
-        let sequence = self.active_sequence().cloned().ok_or_else(no_active_sequence)?;
-        let transition = sequence
-            .video_transitions
-            .iter()
-            .find(|transition| transition.id == transition_id)
-            .ok_or_else(|| transition_not_found(transition_id))?;
-        let (_, track_locked, left, right) =
-            transition_endpoints(&sequence, transition.left, transition.right)?;
-        if track_locked {
-            return Err(MondrianError::WorkflowStepFailed {
-                step_id: "set_video_transition_range".to_owned(),
-                reason: "Transition endpoint Track is locked".to_owned(),
-            });
+        let (applied_range, was_shortened, current_range) = {
+            let sequence = self.active_sequence().ok_or_else(no_active_sequence)?;
+            let transition = sequence
+                .video_transitions
+                .iter()
+                .find(|transition| transition.id == transition_id)
+                .ok_or_else(|| transition_not_found(transition_id))?;
+            let (_, track_locked, left, right) =
+                transition_endpoints(sequence, transition.left, transition.right)?;
+            if track_locked {
+                return Err(MondrianError::WorkflowStepFailed {
+                    step_id: "set_video_transition_range".to_owned(),
+                    reason: "Transition endpoint Track is locked".to_owned(),
+                });
+            }
+            let left_extent = self.transition_source_extent(left)?;
+            let right_extent = self.transition_source_extent(right)?;
+            let (applied_range, was_shortened) = admit_transition_range(
+                left,
+                right,
+                requested_range,
+                left_extent,
+                right_extent,
+                handle_policy,
+            )?;
+            (applied_range, was_shortened, transition.sequence_range)
+        };
+        if applied_range == current_range {
+            return Ok(VideoTransitionEditOutcome { transition_id, changed: false });
         }
-        let left_extent = self.transition_source_extent(left)?;
-        let right_extent = self.transition_source_extent(right)?;
-        let (applied_range, was_shortened) = admit_transition_range(
-            left,
-            right,
-            requested_range,
-            left_extent,
-            right_extent,
-            handle_policy,
-        )?;
         let _sequence_id = self.commit_active_sequence_edit("调整视频转场", |sequence| {
             let transition = sequence
                 .video_transitions
@@ -252,27 +486,29 @@ impl AppState {
         if was_shortened {
             self.set_status_hint("视频转场已按可用源素材手柄缩短", false);
         }
-        Ok(VideoTransitionEditOutcome { transition_id, applied_range, was_shortened })
+        Ok(VideoTransitionEditOutcome { transition_id, changed: true })
     }
 
     /// Delete one visual Transition as a single author transaction.
-    pub fn remove_video_transition(
+    pub(super) fn remove_video_transition(
         &mut self,
         transition_id: VideoTransitionId,
     ) -> mondrian_core::Result<()> {
-        let sequence = self.active_sequence().cloned().ok_or_else(no_active_sequence)?;
-        let transition = sequence
-            .video_transitions
-            .iter()
-            .find(|transition| transition.id == transition_id)
-            .ok_or_else(|| transition_not_found(transition_id))?;
-        let (_, track_locked, _, _) =
-            transition_endpoints(&sequence, transition.left, transition.right)?;
-        if track_locked {
-            return Err(MondrianError::WorkflowStepFailed {
-                step_id: "remove_video_transition".to_owned(),
-                reason: "Transition endpoint Track is locked".to_owned(),
-            });
+        {
+            let sequence = self.active_sequence().ok_or_else(no_active_sequence)?;
+            let transition = sequence
+                .video_transitions
+                .iter()
+                .find(|transition| transition.id == transition_id)
+                .ok_or_else(|| transition_not_found(transition_id))?;
+            let (_, track_locked, _, _) =
+                transition_endpoints(sequence, transition.left, transition.right)?;
+            if track_locked {
+                return Err(MondrianError::WorkflowStepFailed {
+                    step_id: "remove_video_transition".to_owned(),
+                    reason: "Transition endpoint Track is locked".to_owned(),
+                });
+            }
         }
         let _sequence_id = self.commit_active_sequence_edit("删除视频转场", |sequence| {
             let index = sequence
@@ -691,6 +927,12 @@ mod tests {
                 .expect("handle state"),
             VideoTransitionHandleState::Available
         );
+        let first_handle_snapshot = state.video_transition_handle_states();
+        let repeated_handle_snapshot = state.video_transition_handle_states();
+        assert!(Arc::ptr_eq(
+            &first_handle_snapshot,
+            &repeated_handle_snapshot
+        ));
         assert!(state.selection.selected_clips.is_empty());
         assert!(state.selection.selected_track_ids.is_empty());
         assert_eq!(
@@ -698,6 +940,12 @@ mod tests {
             1
         );
         assert!(state.undo_timeline().expect("undo create"));
+        let after_undo_handle_snapshot = state.video_transition_handle_states();
+        assert!(!Arc::ptr_eq(
+            &first_handle_snapshot,
+            &after_undo_handle_snapshot
+        ));
+        assert!(after_undo_handle_snapshot.is_empty());
         assert!(state
             .sequence_by_id(sequence_id)
             .expect("sequence")
@@ -722,5 +970,154 @@ mod tests {
             state.sequence_by_id(sequence_id).expect("sequence").video_transitions.len(),
             1
         );
+    }
+
+    #[test]
+    fn handle_snapshot_reports_invalid_author_structure_separately_from_offline_media() {
+        let mut state = AppState::default();
+        state.test_ensure_authoring();
+        let transition_id = {
+            let sequence = state.active_sequence_mut_uncommitted().expect("test Sequence");
+            let left = Clip::new_solid_color(
+                AssetId::new(),
+                mondrian_core::Color::from_rgba8(255, 0, 0, 255),
+                tt(0),
+                tt(10),
+            )
+            .expect("left");
+            let middle = Clip::new_solid_color(
+                AssetId::new(),
+                mondrian_core::Color::from_rgba8(0, 255, 0, 255),
+                tt(10),
+                tt(10),
+            )
+            .expect("middle");
+            let right = Clip::new_solid_color(
+                AssetId::new(),
+                mondrian_core::Color::from_rgba8(0, 0, 255, 255),
+                tt(20),
+                tt(10),
+            )
+            .expect("right");
+            let transition = VideoTransition::cross_dissolve(
+                left.id,
+                right.id,
+                TimelineTimeRange::new(tt(8), tt(4)).expect("range"),
+            );
+            let transition_id = transition.id;
+            sequence.video_tracks[0].add_clip(left).expect("left placement");
+            sequence.video_tracks[0].add_clip(middle).expect("middle placement");
+            sequence.video_tracks[0].add_clip(right).expect("right placement");
+            sequence.video_transitions.push(transition);
+            transition_id
+        };
+
+        let states = state.video_transition_handle_states();
+        assert!(matches!(
+            states.get(&transition_id),
+            Some(VideoTransitionHandleState::InvalidAuthorState { reason })
+                if reason.contains("ordered adjacent pair")
+        ));
+    }
+
+    #[test]
+    fn product_actions_preserve_exact_ranges_and_elide_noop_transactions() {
+        use crate::app::product_action::{
+            ProductAction, VideoTransitionCreateCrossDissolvePayload, VideoTransitionProductAction,
+            VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
+        };
+
+        let mut state = AppState::default();
+        state.test_ensure_authoring();
+        let (left_id, right_id) = {
+            let sequence = state.active_sequence_mut_uncommitted().expect("test Sequence");
+            let left = Clip::new_solid_color(
+                AssetId::new(),
+                mondrian_core::Color::from_rgba8(255, 0, 0, 255),
+                tt(0),
+                tt(10),
+            )
+            .expect("left");
+            let right = Clip::new_solid_color(
+                AssetId::new(),
+                mondrian_core::Color::from_rgba8(0, 0, 255, 255),
+                tt(10),
+                tt(10),
+            )
+            .expect("right");
+            let ids = (left.id, right.id);
+            sequence.video_tracks[0].add_clip(left).expect("left placement");
+            sequence.video_tracks[0].add_clip(right).expect("right placement");
+            ids
+        };
+
+        let create =
+            ProductAction::VideoTransition(VideoTransitionProductAction::CreateCrossDissolve(
+                VideoTransitionCreateCrossDissolvePayload {
+                    left_clip_id: left_id,
+                    right_clip_id: right_id,
+                    handle_policy: VideoTransitionHandlePolicy::Reject,
+                },
+            ));
+        assert!(state.product_action_availability().allows(&create));
+        state
+            .dispatch_action(create.into_external_action())
+            .expect("create through product seam");
+        let transition_id = state
+            .selected_video_transition()
+            .expect("created Transition is selected")
+            .transition_id;
+
+        let exact_range = TimelineTimeRange::new(
+            TimelineTime::new(7, 20).expect("subframe start"),
+            TimelineTime::new(1, 10).expect("subframe duration"),
+        )
+        .expect("exact range");
+        let set_range = ProductAction::VideoTransition(VideoTransitionProductAction::SetRange(
+            VideoTransitionSetRangePayload {
+                transition_id,
+                requested_range: exact_range,
+                handle_policy: VideoTransitionHandlePolicy::Reject,
+            },
+        ));
+        assert!(state.product_action_availability().allows(&set_range));
+        let history_before = state.authoring_history().expect("history").diagnostics().undo_entries;
+        state
+            .dispatch_action(set_range.clone().into_external_action())
+            .expect("write exact range through product seam");
+        let transition = state
+            .active_sequence()
+            .expect("Sequence")
+            .video_transitions
+            .iter()
+            .find(|transition| transition.id == transition_id)
+            .expect("Transition");
+        assert_eq!(transition.sequence_range, exact_range);
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics().undo_entries,
+            history_before + 1
+        );
+
+        assert!(!state.product_action_availability().allows(&set_range));
+        let history_before_noop =
+            state.authoring_history().expect("history").diagnostics().undo_entries;
+        assert!(matches!(
+            state.dispatch_action(set_range.into_external_action()),
+            Err(MondrianError::ActionNotExecuted { .. })
+        ));
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics().undo_entries,
+            history_before_noop
+        );
+
+        let remove = ProductAction::VideoTransition(VideoTransitionProductAction::Remove(
+            VideoTransitionTargetPayload { transition_id },
+        ));
+        assert!(state.product_action_availability().allows(&remove));
+        state
+            .dispatch_action(remove.into_external_action())
+            .expect("remove through product seam");
+        assert!(state.active_sequence().expect("Sequence").video_transitions.is_empty());
+        assert!(state.selected_video_transition().is_none());
     }
 }

@@ -9,9 +9,11 @@ use std::path::PathBuf;
 use mondrian_core::automation::{AnimationParameterAddress, PropertyValue};
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::types::{
-    ClipId, EffectId, FramePosition, JobId, KeyframeId, SequenceId, TrackId,
+    ClipId, EffectId, FramePosition, JobId, KeyframeId, SequenceId, TrackId, VideoTransitionId,
 };
-use mondrian_core::{Color, ProjectColorEnvironment, ProjectSettings, TimelineTime};
+use mondrian_core::{
+    Color, ProjectColorEnvironment, ProjectSettings, TimelineTime, TimelineTimeRange,
+};
 use mondrian_editor_state::Action;
 use mondrian_export::preset::{BuiltinExportPreset, ExportPreset, TimelineExportRange};
 use mondrian_timeline::{
@@ -36,6 +38,18 @@ pub const TIMELINE_MOVE_CLIP: &str = "move_clip";
 pub const TIMELINE_TRIM_CLIPS: &str = "trim_clips";
 /// External action name for seeking the active Timeline.
 pub const TIMELINE_SEEK: &str = "seek";
+
+/// External custom-action namespace for Sequence-owned visual Transitions.
+pub const VIDEO_TRANSITION_NAMESPACE: &str = "ui.video_transition";
+
+/// External action name for selecting one visual Transition.
+pub const VIDEO_TRANSITION_SELECT: &str = "select";
+/// External action name for creating a product-default Cross Dissolve.
+pub const VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE: &str = "create_cross_dissolve";
+/// External action name for changing one visual Transition's exact author range.
+pub const VIDEO_TRANSITION_SET_RANGE: &str = "set_range";
+/// External action name for removing one visual Transition.
+pub const VIDEO_TRANSITION_REMOVE: &str = "remove";
 
 /// External custom-action namespace for Viewer product operations.
 pub const VIEWER_NAMESPACE: &str = "ui.viewer";
@@ -138,6 +152,8 @@ pub const AUDIO_SET_TRACK_SOLO: &str = "set_track_solo";
 pub enum ProductAction {
     /// An operation owned by the active Timeline Interface.
     Timeline(TimelineProductAction),
+    /// An operation owned by a Sequence-local visual Transition.
+    VideoTransition(VideoTransitionProductAction),
     /// An operation owned by Sequence audio authoring.
     Audio(AudioProductAction),
     /// An operation owned by the Viewer product Interface.
@@ -268,6 +284,19 @@ pub enum TimelineProductAction {
     Seek(TimelineSeekPayload),
 }
 
+/// Closed operations owned by Sequence-local visual Transitions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VideoTransitionProductAction {
+    /// Select one existing Transition in the App selection scope.
+    Select(VideoTransitionTargetPayload),
+    /// Create the product-default Cross Dissolve on an adjacent Clip pair.
+    CreateCrossDissolve(VideoTransitionCreateCrossDissolvePayload),
+    /// Change one Transition's exact Sequence-local author range.
+    SetRange(VideoTransitionSetRangePayload),
+    /// Remove one Transition through a single author transaction.
+    Remove(VideoTransitionTargetPayload),
+}
+
 /// Failure to decode a recognized external custom Action.
 ///
 /// Unknown namespaces and names are not errors: they return `None` from
@@ -287,6 +316,7 @@ impl ProductActionDecodeError {
     pub(crate) fn dispatch_step_id(&self) -> String {
         let domain = match self.namespace.as_str() {
             TIMELINE_NAMESPACE => "timeline_ui_action",
+            VIDEO_TRANSITION_NAMESPACE => "video_transition_action",
             AUDIO_NAMESPACE => "audio_action",
             VIEWER_NAMESPACE => "viewer_action",
             CLIP_NAMESPACE => "clip_action",
@@ -329,6 +359,25 @@ impl ProductAction {
                 };
                 Ok(Some(Self::Timeline(timeline_action)))
             }
+            VIDEO_TRANSITION_NAMESPACE => match name.as_str() {
+                VIDEO_TRANSITION_SELECT => Ok(Some(Self::VideoTransition(
+                    VideoTransitionProductAction::Select(decode_payload(namespace, name, payload)?),
+                ))),
+                VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE => Ok(Some(Self::VideoTransition(
+                    VideoTransitionProductAction::CreateCrossDissolve(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
+                VIDEO_TRANSITION_SET_RANGE => Ok(Some(Self::VideoTransition(
+                    VideoTransitionProductAction::SetRange(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
+                VIDEO_TRANSITION_REMOVE => Ok(Some(Self::VideoTransition(
+                    VideoTransitionProductAction::Remove(decode_payload(namespace, name, payload)?),
+                ))),
+                _ => Ok(None),
+            },
             AUDIO_NAMESPACE => match name.as_str() {
                 AUDIO_EDIT_AUTOMATION => Ok(Some(Self::Audio(AudioProductAction::EditAutomation(
                     decode_payload(namespace, name, payload)?,
@@ -544,6 +593,26 @@ impl ProductAction {
                     "frame": payload.frame,
                     "source": payload.source,
                 }),
+            ),
+            Self::VideoTransition(VideoTransitionProductAction::Select(payload)) => (
+                VIDEO_TRANSITION_NAMESPACE,
+                VIDEO_TRANSITION_SELECT,
+                serde_json::json!(payload),
+            ),
+            Self::VideoTransition(VideoTransitionProductAction::CreateCrossDissolve(payload)) => (
+                VIDEO_TRANSITION_NAMESPACE,
+                VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE,
+                serde_json::json!(payload),
+            ),
+            Self::VideoTransition(VideoTransitionProductAction::SetRange(payload)) => (
+                VIDEO_TRANSITION_NAMESPACE,
+                VIDEO_TRANSITION_SET_RANGE,
+                serde_json::json!(payload),
+            ),
+            Self::VideoTransition(VideoTransitionProductAction::Remove(payload)) => (
+                VIDEO_TRANSITION_NAMESPACE,
+                VIDEO_TRANSITION_REMOVE,
+                serde_json::json!(payload),
             ),
             Self::Audio(AudioProductAction::EditProcessorRack(request)) => (
                 AUDIO_NAMESPACE,
@@ -956,6 +1025,50 @@ pub struct VisualEffectSetParameterValuePayload {
     pub value: PropertyValue,
 }
 
+/// Explicit author policy when real endpoint handles cannot satisfy a visual
+/// Transition range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoTransitionHandlePolicy {
+    /// Preserve the requested range or reject the complete operation.
+    Reject,
+    /// Intersect with proven endpoint extents while retaining the edit cut.
+    ShortenToAvailable,
+}
+
+/// Address one Sequence-local visual Transition by stable identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VideoTransitionTargetPayload {
+    /// Stable Transition identity; Track membership is derived at dispatch.
+    pub transition_id: VideoTransitionId,
+}
+
+/// Create the product-default Cross Dissolve between an ordered adjacent edit
+/// pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VideoTransitionCreateCrossDissolvePayload {
+    /// Clip ending at the shared edit.
+    pub left_clip_id: ClipId,
+    /// Clip beginning at the shared edit.
+    pub right_clip_id: ClipId,
+    /// Explicit behavior when current media/nested handles are insufficient.
+    pub handle_policy: VideoTransitionHandlePolicy,
+}
+
+/// Change one visual Transition through exact Sequence-local author time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VideoTransitionSetRangePayload {
+    /// Stable Transition identity; endpoint Track membership is derived.
+    pub transition_id: VideoTransitionId,
+    /// Exact requested half-open Sequence-local range.
+    pub requested_range: TimelineTimeRange,
+    /// Explicit behavior when current media/nested handles are insufficient.
+    pub handle_policy: VideoTransitionHandlePolicy,
+}
+
 /// Change one Clip's enabled state through its canonical identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1073,6 +1186,7 @@ impl<'a> ProductActionAvailability<'a> {
     pub fn allows(&self, action: &ProductAction) -> bool {
         match action {
             ProductAction::Timeline(action) => self.allows_timeline(action),
+            ProductAction::VideoTransition(action) => self.allows_video_transition(action),
             ProductAction::Audio(_) => self.state.active_sequence().is_some(),
             ProductAction::Viewer(action) => self.allows_viewer(action),
             ProductAction::Clip(action) => self.allows_clip(action),
@@ -1098,6 +1212,26 @@ impl<'a> ProductActionAvailability<'a> {
             }
             TimelineProductAction::TrimClips(payload) => allows_trim(sequence, payload),
             TimelineProductAction::Seek(payload) => payload.frame >= 0,
+        }
+    }
+
+    fn allows_video_transition(&self, action: &VideoTransitionProductAction) -> bool {
+        match action {
+            VideoTransitionProductAction::Select(payload) => {
+                self.state.video_transition_selection_available(payload.transition_id)
+            }
+            VideoTransitionProductAction::CreateCrossDissolve(payload) => self
+                .state
+                .video_transition_creation_available(payload.left_clip_id, payload.right_clip_id),
+            VideoTransitionProductAction::SetRange(payload) => {
+                self.state.video_transition_range_edit_available(
+                    payload.transition_id,
+                    payload.requested_range,
+                )
+            }
+            VideoTransitionProductAction::Remove(payload) => {
+                self.state.video_transition_removal_available(payload.transition_id)
+            }
         }
     }
 
@@ -1461,6 +1595,48 @@ mod tests {
             let decoded = ProductAction::decode_external(&external)
                 .expect("valid external payload")
                 .expect("recognized product action");
+            assert_eq!(decoded, expected);
+        }
+    }
+
+    #[test]
+    fn external_codec_round_trips_every_video_transition_product_action() {
+        let transition_id = VideoTransitionId::new();
+        let left_clip_id = ClipId::new();
+        let right_clip_id = ClipId::new();
+        let range = TimelineTimeRange::new(
+            TimelineTime::new(7, 20).expect("range start"),
+            TimelineTime::new(1, 10).expect("range duration"),
+        )
+        .expect("exact range");
+        let actions = [
+            ProductAction::VideoTransition(VideoTransitionProductAction::Select(
+                VideoTransitionTargetPayload { transition_id },
+            )),
+            ProductAction::VideoTransition(VideoTransitionProductAction::CreateCrossDissolve(
+                VideoTransitionCreateCrossDissolvePayload {
+                    left_clip_id,
+                    right_clip_id,
+                    handle_policy: VideoTransitionHandlePolicy::Reject,
+                },
+            )),
+            ProductAction::VideoTransition(VideoTransitionProductAction::SetRange(
+                VideoTransitionSetRangePayload {
+                    transition_id,
+                    requested_range: range,
+                    handle_policy: VideoTransitionHandlePolicy::ShortenToAvailable,
+                },
+            )),
+            ProductAction::VideoTransition(VideoTransitionProductAction::Remove(
+                VideoTransitionTargetPayload { transition_id },
+            )),
+        ];
+
+        for expected in actions {
+            let external = expected.clone().into_external_action();
+            let decoded = ProductAction::decode_external(&external)
+                .expect("valid external payload")
+                .expect("recognized visual Transition product action");
             assert_eq!(decoded, expected);
         }
     }
@@ -1874,6 +2050,18 @@ mod tests {
         assert_eq!(
             error.dispatch_step_id(),
             "clip_action.write_parameter_values"
+        );
+
+        let malformed_transition = Action::Custom {
+            namespace: VIDEO_TRANSITION_NAMESPACE.to_owned(),
+            name: VIDEO_TRANSITION_SET_RANGE.to_owned(),
+            payload: serde_json::json!({"transition_id": VideoTransitionId::new()}),
+        };
+        let error = ProductAction::decode_external(&malformed_transition)
+            .expect_err("recognized malformed visual Transition payload fails closed");
+        assert_eq!(
+            error.dispatch_step_id(),
+            "video_transition_action.set_range"
         );
 
         for (namespace, name, step_id) in [

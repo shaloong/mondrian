@@ -196,9 +196,7 @@ pub use selection::{
     SelectedVideoTransitionRef,
 };
 use timeline_editing::*;
-pub use video_transitions::{
-    VideoTransitionEditOutcome, VideoTransitionHandlePolicy, VideoTransitionHandleState,
-};
+pub use video_transitions::VideoTransitionHandleState;
 
 #[derive(Debug, Clone)]
 pub struct DraggingAsset {
@@ -387,6 +385,8 @@ pub struct AppState {
     pub selection: SelectionState,
     /// UI-independent per-Sequence Track Targeting and Sync-Lock policy.
     timeline_targeting: timeline_targeting::TimelineTargetingState,
+    /// Immutable, revision-bound visual-Transition handle observations.
+    video_transition_handle_diagnostics: video_transitions::VideoTransitionHandleDiagnosticsCache,
 
     // 渲染导出队列
     pub(crate) render_queue: Arc<RenderQueue>,
@@ -461,6 +461,8 @@ impl AppState {
             dragging_asset: None,
             selection: SelectionState::default(),
             timeline_targeting: timeline_targeting::TimelineTargetingState::default(),
+            video_transition_handle_diagnostics:
+                video_transitions::VideoTransitionHandleDiagnosticsCache::default(),
             render_queue: RenderQueue::new(),
             execution_resources: ExecutionResourceCoordinator::new(Default::default()),
             export_jobs_observed_revision: 0,
@@ -528,6 +530,7 @@ impl AppState {
     /// transaction and can never borrow the canonical document mutably.
     #[cfg(test)]
     pub(crate) fn active_sequence_mut_uncommitted(&mut self) -> Option<&mut Sequence> {
+        self.video_transition_handle_diagnostics.clear();
         self.authoring
             .as_mut()
             .and_then(|session| session.document_mut_for_test_fixture().sequences.active_mut())

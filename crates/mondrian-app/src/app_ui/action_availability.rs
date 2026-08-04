@@ -10,20 +10,17 @@ use mondrian_editor_state::Action;
 use crate::app::product_action::ProductAction;
 use crate::app::ui_actions::{
     AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveSelectionPayload,
-    TimelineCreateCrossDissolvePayload, TimelineInsertAssetPayload, TimelineMoveTrackPayload,
-    TimelineSelectVideoTransitionPayload, TimelineSetInOutPointPayload,
+    TimelineInsertAssetPayload, TimelineMoveTrackPayload, TimelineSetInOutPointPayload,
     TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
-    TimelineSetTrackTargetingPayload, TimelineSetVideoTransitionRangePayload,
-    TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
-    APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_PROJECT_SETTINGS, APP_SHELL_QUIT,
-    APP_SHELL_SAVE_PROJECT_AS_DIALOG, APP_SHELL_SEQUENCE_SETTINGS, ASSETS_DELETE_SELECTION,
-    ASSETS_IMPORT_FILES, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE, TIMELINE_ADD_TRACK,
-    TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_CREATE_BASIC_TITLE, TIMELINE_CREATE_CROSS_DISSOLVE,
-    TIMELINE_EXTRACT_RANGE, TIMELINE_INSERT_ASSET, TIMELINE_LIFT_RANGE,
-    TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
-    TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SELECT_VIDEO_TRANSITION,
-    TIMELINE_SET_IN_OUT_POINT, TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
-    TIMELINE_SET_TRACK_TARGETING, TIMELINE_SET_VIDEO_TRANSITION_RANGE,
+    TimelineSetTrackTargetingPayload, TimelineTrimPayloadEdge,
+    TimelineTrimSelectedClipsToPlayheadPayload, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
+    APP_SHELL_PROJECT_SETTINGS, APP_SHELL_QUIT, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+    APP_SHELL_SEQUENCE_SETTINGS, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
+    ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
+    TIMELINE_CREATE_BASIC_TITLE, TIMELINE_EXTRACT_RANGE, TIMELINE_INSERT_ASSET,
+    TIMELINE_LIFT_RANGE, TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
+    TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SET_IN_OUT_POINT,
+    TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL, TIMELINE_SET_TRACK_TARGETING,
     TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, TIMELINE_UNLINK_SELECTED_CLIPS,
 };
 use crate::app::AppState;
@@ -161,35 +158,10 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         {
             clip_link_edit_available(state, ClipLinkEditKind::Unlink)
         }
-        Action::Custom { namespace, name, payload }
-            if namespace == TIMELINE_NAMESPACE && name == TIMELINE_SELECT_VIDEO_TRANSITION =>
-        {
-            parse_payload::<TimelineSelectVideoTransitionPayload>(payload).is_some_and(|payload| {
-                transition_track_lock(state, payload.transition_id).is_some()
-            })
-        }
-        Action::Custom { namespace, name, payload }
-            if namespace == TIMELINE_NAMESPACE && name == TIMELINE_CREATE_CROSS_DISSOLVE =>
-        {
-            parse_payload::<TimelineCreateCrossDissolvePayload>(payload).is_some_and(|payload| {
-                adjacent_unlocked_video_edit(state, payload.left_clip_id, payload.right_clip_id)
-            })
-        }
         Action::Custom { namespace, name, .. }
             if namespace == TIMELINE_NAMESPACE && name == TIMELINE_CREATE_BASIC_TITLE =>
         {
             state.active_sequence().is_some()
-        }
-        Action::Custom { namespace, name, payload }
-            if namespace == TIMELINE_NAMESPACE && name == TIMELINE_SET_VIDEO_TRANSITION_RANGE =>
-        {
-            parse_payload::<TimelineSetVideoTransitionRangePayload>(payload).is_some_and(
-                |payload| {
-                    payload.start_frame >= 0
-                        && payload.end_frame > payload.start_frame
-                        && transition_track_lock(state, payload.transition_id) == Some(false)
-                },
-            )
         }
         Action::Custom { namespace, name, payload }
             if namespace == TIMELINE_NAMESPACE
@@ -357,26 +329,6 @@ fn transition_track_lock(
         let has_left = track.clips.iter().any(|clip| clip.id == transition.left);
         let has_right = track.clips.iter().any(|clip| clip.id == transition.right);
         (has_left && has_right).then_some(track.is_locked)
-    })
-}
-
-fn adjacent_unlocked_video_edit(state: &AppState, left_id: ClipId, right_id: ClipId) -> bool {
-    let Some(sequence) = state.active_sequence() else {
-        return false;
-    };
-    sequence.video_tracks.iter().any(|track| {
-        if track.is_locked {
-            return false;
-        }
-        track.clips.windows(2).any(|pair| {
-            pair[0].id == left_id
-                && pair[1].id == right_id
-                && pair[0].end_position().ok() == Some(pair[1].position)
-                && !sequence
-                    .video_transitions
-                    .iter()
-                    .any(|transition| transition.left == left_id && transition.right == right_id)
-        })
     })
 }
 

@@ -270,11 +270,22 @@ Visual Transition UI intent follows the same domain-light Widget seam as Clip
 editing. `mondrian-ui-widgets` may emit track/Clip/Transition view indices and
 frame-grid gesture proposals, while the App panel Adapter resolves stable
 identities. Selection stores only `VideoTransitionId`; it never mirrors a Track
-identity that author validation derives from strong Clip endpoints. Default
-duration, exact Timeline Time conversion, source-handle admission, Track locks,
-and the one-Undo author transaction remain App-owned. Ordinary Delete targets a
-selected Transition; Ripple Delete is unavailable because deleting a
-Transition cannot move Timeline placements.
+identity that author validation derives from strong Clip endpoints. The panel
+Adapter lowers a resize proposal exactly once through the resolved Sequence
+display grid into an exact `TimelineTimeRange`; the external action therefore
+contains no bare frame authority or implicit time base. Default duration,
+source-handle admission, Track locks, and the one-Undo author transaction remain
+inside the App's Video Transition authoring Module. Ordinary Delete lowers to
+the same typed Remove operation; Ripple Delete is unavailable because deleting
+a Transition cannot move Timeline placements.
+
+Handle diagnostics are projected as one immutable, revision-bound map prepared
+by that same deep Module. The Timeline Adapter consumes the map once for all
+Tracks; it never re-enters the Asset Library for each Transition or UI row. Its
+cache identity binds the open Authoring Session, Project Author Generation,
+active Sequence revision, and Asset Library instance/revision. A library change
+during preparation prevents cache publication, while invalid author structure
+and recoverable unresolved media remain distinct user-visible states.
 
 The Timeline Adapter produces every Clip/Transition stable identity and its
 domain-light view model in one projection pass. It must not build a second ID
@@ -391,7 +402,17 @@ Inside each migrated App slice, product meaning is carried by the closed
 `ProductAction` algebra. `Action::Custom` remains the external Widget,
 scripting, and plugin transport Seam; it must not become a second product-domain
 model. The current high-frequency Timeline slice covers Clip selection, Clip
-movement, bulk trim, and seek. The closed `AudioProductAction` slice carries
+movement, bulk trim, and seek. Sequence-owned visual Transition operations use
+a separate closed `VideoTransitionProductAction`: Select, product-default Cross
+Dissolve creation, exact-range edit, and Remove. The
+`ui.video_transition` envelope is decoded only at the Product Action Seam.
+Payloads carry stable endpoint/Transition identities, exact Sequence-local
+author time, and an explicit `Reject | ShortenToAvailable` handle policy.
+Dispatch re-derives current endpoint Track membership, lock state, source
+extents, and no-op status; a range already installed returns
+`ActionNotExecuted` and creates no History. The old `ui.timeline` Transition
+name/payload interpretation does not coexist with this Interface. The closed
+`AudioProductAction` slice carries
 complete `AudioComponentEditRequest`, `AudioProcessorRackEditRequest`,
 `AudioChannelStripEditRequest`, and `AudioAutomationEditRequest` values for Clip
 placement, Clip Processing Scope, Track, Bus, and Program Output authoring. Its
@@ -543,8 +564,9 @@ The migrated slices expose one borrowed, read-only
 `ProductActionAvailability`. Project/Sequence membership and navigation, Track
 lock, Clip membership/media kind, placement range, Sequence time-base, Export
 draft difference, and Queue target facts remain private; the stable UI
-Interface is only `allows(&ProductAction)`. Timeline, Clip, Audio, Viewer, Project,
-Sequence, and Export controls therefore use the same admission Seam. The
+Interface is only `allows(&ProductAction)`. Timeline, Video Transition, Clip,
+Audio, Viewer, Project, Sequence, and Export controls therefore use the same
+admission Seam. The
 projection does not clone or index the author graph or clone the Export Job
 list for each query. Window and panel Adapters cannot reconstruct admission by traversing
 `AuthoringSession`, `Sequence`, `Track`, or `Clip`, and cannot observe playback

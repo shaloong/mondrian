@@ -1092,9 +1092,21 @@ admission remains fail-closed and never silently selects the explicit
 shortening policy. A selected Transition stores only its stable identity;
 Track membership continues to derive from the strong Clip endpoints. Timeline
 overlays now create Cross Dissolve at an exact adjacent unlocked video cut,
-select/delete by stable identity, and resize either exact range edge through one
-typed App action. The view Adapter reports current insufficient or unresolved
-source handles without modifying author state. Cross Dissolve now also lowers
+select/delete by stable identity, and resize either exact range edge through the
+closed `VideoTransitionProductAction` Interface. The panel Adapter lowers its
+frame-grid proposal once to an exact Sequence-local `TimelineTimeRange`; Product
+dispatch carries no implicit grid, re-derives endpoint Track/lock facts, and
+queries current source extents before a single Author Transaction. Create and
+range admission inspect the live immutable Sequence without cloning its full
+body; only the transaction constructs a candidate. Rewriting the installed
+range is a typed no-op and cannot consume History. The view Adapter reports
+current insufficient or unresolved source handles without modifying author
+state. It obtains those observations from one immutable App-owned diagnostics
+snapshot per exact author/library revision, rather than issuing one Asset
+Library query per Transition on every Timeline projection. Invalid in-memory
+endpoint structure remains distinct from recoverable external dependency
+failure, and a snapshot spanning a library revision change is never cached.
+Cross Dissolve now also lowers
 to a typed working-linear GPU pass whose real readback is checked against the
 shared straight-alpha scalar reference. CPU remains the scalar reference and a
 valid fallback; backend choice cannot change Transition semantics. This closes

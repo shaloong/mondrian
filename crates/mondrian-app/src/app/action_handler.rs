@@ -9,7 +9,8 @@ use crate::app::product_action::{
     ClipCurveEditPayload, ClipProductAction, ExportDraftEdit, ExportProductAction, ProductAction,
     ProjectCreateWithSettingsPayload, ProjectProductAction, ProjectRecoverFromAutosavePayload,
     SequenceProductAction, SequenceUpdateSettingsPayload, TimelineClipSelectionModePayload,
-    TimelineProductAction, TimelineTrimPayloadEdge, ViewerProductAction, VisualEffectProductAction,
+    TimelineProductAction, TimelineTrimPayloadEdge, VideoTransitionProductAction,
+    VideoTransitionTargetPayload, ViewerProductAction, VisualEffectProductAction,
     VisualEffectSetParameterValuePayload,
 };
 #[cfg(test)]
@@ -29,27 +30,24 @@ use crate::app::ui_actions::{
     AssetsRefreshAudioComponentsPayload, AssetsRelinkAssetPayload, AssetsRenameAssetPayload,
     AssetsRenameFolderPayload, AssetsSetInterpretationPayload, AssetsSetProxyModePayload,
     InspectorAudioComponentSourcePayload, InspectorSetAudioComponentSourcePayload,
-    TimelineAddTrackKind, TimelineAddTrackPayload, TimelineCreateCrossDissolvePayload,
-    TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineInsertAssetPayload,
-    TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
-    TimelinePrecomposeSelectionPayload, TimelineSelectVideoTransitionPayload,
+    TimelineAddTrackKind, TimelineAddTrackPayload, TimelineDropAssetPayload,
+    TimelineInOutPointPayloadKind, TimelineInsertAssetPayload, TimelineMoveTrackPayload,
+    TimelineOpenNestedSequencePayload, TimelinePrecomposeSelectionPayload,
     TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
     TimelineSetTrackControlPayload, TimelineSetTrackTargetingPayload,
-    TimelineSetVideoTransitionRangePayload, TimelineTrackControlPayloadKind,
-    TimelineTrackTargetingControl, TimelineTrimSelectedClipsToPlayheadPayload,
-    ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
-    ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
-    ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
-    ASSETS_PREPARE_DRAG, ASSETS_REBIND_AUDIO_COMPONENT, ASSETS_REFRESH_AUDIO_COMPONENTS,
-    ASSETS_RELINK_ASSET, ASSETS_RENAME_ASSET, ASSETS_RENAME_FOLDER, ASSETS_SET_INTERPRETATION,
-    ASSETS_SET_PROXY_MODE, INSPECTOR_NAMESPACE, INSPECTOR_SET_AUDIO_COMPONENT_SOURCE,
-    TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_CREATE_BASIC_TITLE,
-    TIMELINE_CREATE_CROSS_DISSOLVE, TIMELINE_DROP_ASSET, TIMELINE_EXTRACT_RANGE,
+    TimelineTrackControlPayloadKind, TimelineTrackTargetingControl,
+    TimelineTrimSelectedClipsToPlayheadPayload, ASSETS_CREATE_ADJUSTMENT_LAYER,
+    ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR, ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER,
+    ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES, ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER,
+    ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, ASSETS_REBIND_AUDIO_COMPONENT,
+    ASSETS_REFRESH_AUDIO_COMPONENTS, ASSETS_RELINK_ASSET, ASSETS_RENAME_ASSET,
+    ASSETS_RENAME_FOLDER, ASSETS_SET_INTERPRETATION, ASSETS_SET_PROXY_MODE, INSPECTOR_NAMESPACE,
+    INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
+    TIMELINE_CREATE_BASIC_TITLE, TIMELINE_DROP_ASSET, TIMELINE_EXTRACT_RANGE,
     TIMELINE_INSERT_ASSET, TIMELINE_LIFT_RANGE, TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_MOVE_TRACK,
     TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_PRECOMPOSE_SELECTION,
-    TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SELECT_VIDEO_TRANSITION,
-    TIMELINE_SET_IN_OUT_POINT, TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
-    TIMELINE_SET_TRACK_TARGETING, TIMELINE_SET_VIDEO_TRANSITION_RANGE,
+    TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SET_IN_OUT_POINT,
+    TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL, TIMELINE_SET_TRACK_TARGETING,
     TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, TIMELINE_UNLINK_SELECTED_CLIPS,
 };
 #[cfg(test)]
@@ -61,7 +59,7 @@ use mondrian_core::automation::PropertyHost;
 #[cfg(test)]
 use mondrian_core::automation::{PropertyMutation, PropertyValue};
 use mondrian_core::events::AppEvent;
-use mondrian_core::types::{AudioComponentEditId, ClipId, EffectId, FramePosition, Rational};
+use mondrian_core::types::{AudioComponentEditId, ClipId, EffectId, FramePosition};
 use mondrian_core::{FrameRounding, MondrianError, Result, TimelineTime};
 use mondrian_export::queue::ExportCancelOutcome;
 use mondrian_timeline::audio::AudioComponentSource;
@@ -1089,9 +1087,11 @@ impl AppState {
                     reason: "Ripple Delete does not apply to a visual Transition".to_owned(),
                 });
             }
-            self.remove_video_transition(selection.transition_id)?;
-            self.clear_selection();
-            return Ok(());
+            return self.dispatch_video_transition_product_action(
+                VideoTransitionProductAction::Remove(VideoTransitionTargetPayload {
+                    transition_id: selection.transition_id,
+                }),
+            );
         }
 
         let selections = self
@@ -1152,6 +1152,9 @@ impl AppState {
     fn dispatch_product_action(&mut self, action: ProductAction) -> Result<()> {
         match action {
             ProductAction::Timeline(action) => self.dispatch_timeline_product_action(action),
+            ProductAction::VideoTransition(action) => {
+                self.dispatch_video_transition_product_action(action)
+            }
             ProductAction::Audio(action) => self.dispatch_audio_product_action(action),
             ProductAction::Viewer(action) => self.dispatch_viewer_product_action(action),
             ProductAction::Clip(action) => self.dispatch_clip_product_action(action),
@@ -1160,6 +1163,67 @@ impl AppState {
             ProductAction::Export(action) => self.dispatch_export_product_action(action),
             ProductAction::VisualEffect(action) => {
                 self.dispatch_visual_effect_product_action(action)
+            }
+        }
+    }
+
+    fn dispatch_video_transition_product_action(
+        &mut self,
+        action: VideoTransitionProductAction,
+    ) -> Result<()> {
+        match action {
+            VideoTransitionProductAction::Select(payload) => self
+                .select_video_transition_by_id(payload.transition_id)
+                .map(|_| ())
+                .ok_or_else(|| MondrianError::WorkflowStepFailed {
+                    step_id: "video_transition_select".to_owned(),
+                    reason: format!(
+                        "visual Transition does not exist: {}",
+                        payload.transition_id
+                    ),
+                }),
+            VideoTransitionProductAction::CreateCrossDissolve(payload) => {
+                match self.create_default_cross_dissolve(
+                    payload.left_clip_id,
+                    payload.right_clip_id,
+                    payload.handle_policy,
+                ) {
+                    Ok(outcome) => {
+                        self.select_video_transition_by_id(outcome.transition_id);
+                        self.set_status_hint("已创建交叉溶解", false);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        self.set_status_hint(format!("无法创建交叉溶解：{error}"), true);
+                        Err(error)
+                    }
+                }
+            }
+            VideoTransitionProductAction::SetRange(payload) => {
+                match self.set_video_transition_range(
+                    payload.transition_id,
+                    payload.requested_range,
+                    payload.handle_policy,
+                ) {
+                    Ok(outcome) => {
+                        require_action_executed(
+                            outcome.changed,
+                            "video_transition_set_range",
+                            "visual Transition already has the requested range",
+                        )?;
+                        self.select_video_transition_by_id(payload.transition_id);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        self.set_status_hint(format!("无法调整视频转场：{error}"), true);
+                        Err(error)
+                    }
+                }
+            }
+            VideoTransitionProductAction::Remove(payload) => {
+                self.remove_video_transition(payload.transition_id)?;
+                self.clear_selection();
+                Ok(())
             }
         }
     }
@@ -1264,79 +1328,7 @@ impl AppState {
             TIMELINE_UNLINK_SELECTED_CLIPS => {
                 self.edit_selected_clip_links_from_ui(ClipLinkEditKind::Unlink)
             }
-            TIMELINE_SELECT_VIDEO_TRANSITION => {
-                let payload = parse_ui_payload::<TimelineSelectVideoTransitionPayload>(
-                    "timeline_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.select_video_transition_by_id(payload.transition_id)
-                    .map(|_| ())
-                    .ok_or_else(|| MondrianError::WorkflowStepFailed {
-                        step_id: "timeline_select_video_transition".to_owned(),
-                        reason: format!(
-                            "video Transition does not exist: {}",
-                            payload.transition_id
-                        ),
-                    })
-            }
-            TIMELINE_CREATE_CROSS_DISSOLVE => {
-                let payload = parse_ui_payload::<TimelineCreateCrossDissolvePayload>(
-                    "timeline_ui_action",
-                    name,
-                    payload,
-                )?;
-                match self
-                    .create_default_cross_dissolve(payload.left_clip_id, payload.right_clip_id)
-                {
-                    Ok(outcome) => {
-                        self.select_video_transition_by_id(outcome.transition_id);
-                        self.set_status_hint("已创建交叉溶解", false);
-                        Ok(())
-                    }
-                    Err(error) => {
-                        self.set_status_hint(format!("无法创建交叉溶解：{error}"), true);
-                        Err(error)
-                    }
-                }
-            }
             TIMELINE_CREATE_BASIC_TITLE => self.create_basic_title_at_playhead().map(|_| ()),
-            TIMELINE_SET_VIDEO_TRANSITION_RANGE => {
-                let payload = parse_ui_payload::<TimelineSetVideoTransitionRangePayload>(
-                    "timeline_ui_action",
-                    name,
-                    payload,
-                )?;
-                let sequence = self
-                    .active_sequence()
-                    .ok_or_else(|| missing_sequence_error("timeline_set_video_transition_range"))?;
-                let frame_rate = sequence.settings.frame_rate;
-                let time_base = Rational::new(frame_rate.den, frame_rate.num);
-                let start = TimelineTime::from_frame_position(FramePosition::new(
-                    payload.start_frame,
-                    time_base,
-                ))?;
-                let end = TimelineTime::from_frame_position(FramePosition::new(
-                    payload.end_frame,
-                    time_base,
-                ))?;
-                let duration = end.checked_sub(start)?;
-                let range = mondrian_core::TimelineTimeRange::new(start, duration)?;
-                match self.set_video_transition_range(
-                    payload.transition_id,
-                    range,
-                    crate::app::video_transitions::VideoTransitionHandlePolicy::Reject,
-                ) {
-                    Ok(_) => {
-                        self.select_video_transition_by_id(payload.transition_id);
-                        Ok(())
-                    }
-                    Err(error) => {
-                        self.set_status_hint(format!("无法调整视频转场：{error}"), true);
-                        Err(error)
-                    }
-                }
-            }
             TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD => {
                 let payload = parse_ui_payload::<TimelineTrimSelectedClipsToPlayheadPayload>(
                     "timeline_ui_action",

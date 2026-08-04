@@ -6,7 +6,7 @@
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{
     AssetId, AudioComponentEditId, AudioSourceComponentId, ClipId, JobId, ProgramOutputId,
-    SequenceId, TrackId, VideoTransitionId,
+    SequenceId, TrackId,
 };
 use mondrian_core::{
     ColorEngine, ColorSpace, DisplayToneMapPolicy, Rational, Resolution, TimelineDisplayFormat,
@@ -32,8 +32,8 @@ use std::path::PathBuf;
 pub use super::exporting::TimelineExportRequest;
 use super::product_action::{
     AudioProductAction, ClipProductAction, ExportProductAction, ProductAction,
-    ProjectProductAction, SequenceProductAction, TimelineProductAction, ViewerProductAction,
-    VisualEffectProductAction,
+    ProjectProductAction, SequenceProductAction, TimelineProductAction,
+    VideoTransitionProductAction, ViewerProductAction, VisualEffectProductAction,
 };
 pub use super::product_action::{
     ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
@@ -43,7 +43,9 @@ pub use super::product_action::{
     ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
     TimelineClipSelectionModePayload, TimelineMoveClipPayload, TimelineSeekPayload,
     TimelineSeekSource, TimelineSelectClipPayload, TimelineTrimClipsPayload,
-    TimelineTrimPayloadEdge, ViewerSetPreviewResolutionScalePayload, VisualEffectAddToClipPayload,
+    TimelineTrimPayloadEdge, VideoTransitionCreateCrossDissolvePayload,
+    VideoTransitionHandlePolicy, VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
+    ViewerSetPreviewResolutionScalePayload, VisualEffectAddToClipPayload,
     VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
     VisualEffectSetParameterValuePayload, VisualEffectTargetPayload, AUDIO_EDIT_COMPONENT,
     AUDIO_EDIT_PROCESSOR_RACK, AUDIO_NAMESPACE, CLIP_EDIT_NUMERIC_CURVE, CLIP_NAMESPACE,
@@ -54,8 +56,10 @@ pub use super::product_action::{
     SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE, SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT,
     SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE, SEQUENCE_UPDATE_SETTINGS,
     TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
-    TIMELINE_TRIM_CLIPS, VIEWER_NAMESPACE, VISUAL_EFFECT_ADD_TO_CLIP, VISUAL_EFFECT_NAMESPACE,
-    VISUAL_EFFECT_REMOVE, VISUAL_EFFECT_REORDER, VISUAL_EFFECT_SELECT, VISUAL_EFFECT_SET_ENABLED,
+    TIMELINE_TRIM_CLIPS, VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE, VIDEO_TRANSITION_NAMESPACE,
+    VIDEO_TRANSITION_REMOVE, VIDEO_TRANSITION_SELECT, VIDEO_TRANSITION_SET_RANGE, VIEWER_NAMESPACE,
+    VISUAL_EFFECT_ADD_TO_CLIP, VISUAL_EFFECT_NAMESPACE, VISUAL_EFFECT_REMOVE,
+    VISUAL_EFFECT_REORDER, VISUAL_EFFECT_SELECT, VISUAL_EFFECT_SET_ENABLED,
     VISUAL_EFFECT_SET_PARAMETER_VALUE,
 };
 
@@ -63,14 +67,8 @@ pub use super::product_action::{
 pub const TIMELINE_LINK_SELECTED_CLIPS: &str = "link_selected_clips";
 /// Action name for unlinking the current Clip selection.
 pub const TIMELINE_UNLINK_SELECTED_CLIPS: &str = "unlink_selected_clips";
-/// Action name for selecting a visual Transition.
-pub const TIMELINE_SELECT_VIDEO_TRANSITION: &str = "select_video_transition";
-/// Action name for creating the product-default Cross Dissolve at an edit.
-pub const TIMELINE_CREATE_CROSS_DISSOLVE: &str = "create_cross_dissolve";
 /// Action name for creating a generated Basic Title at the current edit range.
 pub const TIMELINE_CREATE_BASIC_TITLE: &str = "create_basic_title";
-/// Action name for changing one visual Transition range on the frame grid.
-pub const TIMELINE_SET_VIDEO_TRANSITION_RANGE: &str = "set_video_transition_range";
 /// Action name for trimming the current clip selection to the playhead.
 pub const TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD: &str = "trim_selected_clips_to_playhead";
 /// Action name for rolling the selected timeline cut to the playhead.
@@ -348,33 +346,6 @@ pub struct AppShellRelocatePanelPayload {
     /// `None` keeps the target-panel default, usually after the active tab.
     #[serde(default)]
     pub tab_index: Option<usize>,
-}
-
-/// Select one visual Transition in the active Sequence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimelineSelectVideoTransitionPayload {
-    /// Stable Transition identity.
-    pub transition_id: VideoTransitionId,
-}
-
-/// Create the product-default Cross Dissolve between an adjacent edit pair.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimelineCreateCrossDissolvePayload {
-    /// Clip ending at the edit.
-    pub left_clip_id: ClipId,
-    /// Clip beginning at the edit.
-    pub right_clip_id: ClipId,
-}
-
-/// Change one visual Transition range on the Sequence video grid.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimelineSetVideoTransitionRangePayload {
-    /// Stable Transition identity.
-    pub transition_id: VideoTransitionId,
-    /// Inclusive range start in Sequence evaluation frames.
-    pub start_frame: i64,
-    /// Exclusive range end in Sequence evaluation frames.
-    pub end_frame: i64,
 }
 
 /// Trim the current timeline clip selection to the playhead.
@@ -927,17 +898,17 @@ pub fn timeline_unlink_selected_clips_action() -> Action {
 }
 
 /// Build an action that selects a visual Transition.
-pub fn timeline_select_video_transition_action(
-    payload: TimelineSelectVideoTransitionPayload,
-) -> Action {
-    custom_timeline_action(TIMELINE_SELECT_VIDEO_TRANSITION, payload)
+pub fn video_transition_select_action(payload: VideoTransitionTargetPayload) -> Action {
+    ProductAction::VideoTransition(VideoTransitionProductAction::Select(payload))
+        .into_external_action()
 }
 
 /// Build an action that creates the product-default Cross Dissolve at an edit.
-pub fn timeline_create_cross_dissolve_action(
-    payload: TimelineCreateCrossDissolvePayload,
+pub fn video_transition_create_cross_dissolve_action(
+    payload: VideoTransitionCreateCrossDissolvePayload,
 ) -> Action {
-    custom_timeline_action(TIMELINE_CREATE_CROSS_DISSOLVE, payload)
+    ProductAction::VideoTransition(VideoTransitionProductAction::CreateCrossDissolve(payload))
+        .into_external_action()
 }
 
 /// Build an action that creates a generated Basic Title.
@@ -946,10 +917,15 @@ pub fn timeline_create_basic_title_action() -> Action {
 }
 
 /// Build an action that changes one visual Transition range.
-pub fn timeline_set_video_transition_range_action(
-    payload: TimelineSetVideoTransitionRangePayload,
-) -> Action {
-    custom_timeline_action(TIMELINE_SET_VIDEO_TRANSITION_RANGE, payload)
+pub fn video_transition_set_range_action(payload: VideoTransitionSetRangePayload) -> Action {
+    ProductAction::VideoTransition(VideoTransitionProductAction::SetRange(payload))
+        .into_external_action()
+}
+
+/// Build an action that removes one visual Transition.
+pub fn video_transition_remove_action(payload: VideoTransitionTargetPayload) -> Action {
+    ProductAction::VideoTransition(VideoTransitionProductAction::Remove(payload))
+        .into_external_action()
 }
 
 /// Build an action that moves a clip in the active timeline.

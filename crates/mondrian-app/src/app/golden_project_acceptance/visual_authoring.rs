@@ -21,13 +21,14 @@ use crate::app::selection::SelectedClipRef;
 use crate::app::ui_actions::{
     assets_create_solid_color_action, clip_edit_numeric_curve_action, clip_set_solid_color_action,
     clip_write_parameter_values_action, timeline_create_basic_title_action,
-    timeline_create_cross_dissolve_action, timeline_drop_asset_action, timeline_seek_action,
-    timeline_trim_clips_action, visual_effect_add_to_clip_action,
+    timeline_drop_asset_action, timeline_seek_action, timeline_trim_clips_action,
+    video_transition_create_cross_dissolve_action, visual_effect_add_to_clip_action,
     visual_effect_set_parameter_value_action, AssetsCreateAssetPayload, ClipCurveEditPayload,
     ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload, ClipParameterValueWrite,
-    ClipSetSolidColorPayload, ClipWriteParameterValuesPayload, TimelineCreateCrossDissolvePayload,
-    TimelineDropAssetPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
-    VisualEffectAddToClipPayload, VisualEffectSetParameterValuePayload,
+    ClipSetSolidColorPayload, ClipWriteParameterValuesPayload, TimelineDropAssetPayload,
+    TimelineTrimClipsPayload, TimelineTrimPayloadEdge, VideoTransitionCreateCrossDissolvePayload,
+    VideoTransitionHandlePolicy, VisualEffectAddToClipPayload,
+    VisualEffectSetParameterValuePayload,
 };
 use crate::app::AppState;
 use anyhow::{bail, ensure, Context};
@@ -986,9 +987,10 @@ pub(super) fn execute_visual_stage(
     let transition_step = dispatch_author_transition(
         state,
         "create-cross-dissolve",
-        timeline_create_cross_dissolve_action(TimelineCreateCrossDissolvePayload {
+        video_transition_create_cross_dissolve_action(VideoTransitionCreateCrossDissolvePayload {
             left_clip_id,
             right_clip_id,
+            handle_policy: VideoTransitionHandlePolicy::Reject,
         }),
     )?;
     let sequence = state.active_sequence().context("active Sequence is absent")?;
