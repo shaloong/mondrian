@@ -1,13 +1,11 @@
 use super::*;
 use mondrian_audio::{
     AudioAuditionOverlay, AudioCompileRequest, AudioContinuityEpoch, AudioDecodedSource,
-    AudioKernelBackend, AudioMediaResolver, AudioMeterObserver, AudioProcessingMode,
-    AudioProgramExecutionDemand, AudioProgramRuntime, AudioRenderContract, AudioRenderRequest,
-    AudioRuntimeResourceGrant, AudioStateEntry, PreparedAudioChannelMixer, ResolvedAudioSource,
+    AudioDeliveryEvidence, AudioMediaResolver, AudioMeterObserver, AudioProcessingMode,
+    AudioProgramDeliveryRuntime, AudioProgramExecutionDemand, AudioProgramRuntime,
+    AudioRenderContract, AudioRenderRequest, AudioRuntimeResourceGrant, ResolvedAudioSource,
 };
-use mondrian_core::{
-    AudioChannelLayout, AudioChannelMixMatrix, AudioSourceComponentId, ExecutionCancellationToken,
-};
+use mondrian_core::{AudioChannelLayout, AudioSourceComponentId, ExecutionCancellationToken};
 use mondrian_media::{AudioSourceReader, AudioSourceSelection};
 use parking_lot::Mutex;
 
@@ -18,15 +16,12 @@ pub(super) struct TimelineAudioPcmRenderer {
     continuity_model: AudioPcmContinuityModel,
     sample_rate: u32,
     channel_layout: AudioChannelLayout,
-    program_channel_layout: AudioChannelLayout,
-    delivery_mixer: PreparedAudioChannelMixer,
 }
 
 struct TimelineAudioRenderState {
-    runtime: AudioProgramRuntime,
+    delivery: AudioProgramDeliveryRuntime,
     generation: Option<AudioPcmRenderGeneration>,
     next_sample: Option<i64>,
-    program_pcm: Vec<f32>,
 }
 
 impl TimelineAudioPcmRenderer {
@@ -72,42 +67,35 @@ impl TimelineAudioPcmRenderer {
         } else {
             AudioPcmContinuityModel::IndependentWindows
         };
-        let delivery_mixer = PreparedAudioChannelMixer::new(
-            AudioChannelMixMatrix::standard(program_channel_layout, channel_layout).map_err(
-                |error| audio_render_error("playback_audio_delivery_mapping", error.to_string()),
-            )?,
-        );
-        let program_samples = MAX_AUDIO_RENDER_BLOCK_FRAMES
-            .checked_mul(program_channel_layout.channel_count())
-            .ok_or_else(|| {
-                audio_render_error(
-                    "playback_audio_delivery_mapping",
-                    "program audio scratch extent is too large",
-                )
+        let delivery = AudioProgramDeliveryRuntime::prepare_standard(runtime, channel_layout)
+            .map_err(|error| {
+                audio_render_error("playback_audio_delivery_mapping", error.to_string())
             })?;
         Ok(Self {
             state: Mutex::new(TimelineAudioRenderState {
-                runtime,
+                delivery,
                 generation: None,
                 next_sample: None,
-                program_pcm: vec![0.0; program_samples],
             }),
             continuity_model,
             sample_rate,
             channel_layout,
-            program_channel_layout,
-            delivery_mixer,
         })
     }
 
     /// Compiler-owned evidence for replacing this Program Output with silence.
     pub(super) fn execution_demand(&self) -> AudioProgramExecutionDemand {
-        self.state.lock().runtime.execution_demand()
+        self.state.lock().delivery.execution_demand()
     }
 
     /// Lock-free meter observation bound to this exact prepared Runtime.
     pub(super) fn meter_observer(&self) -> AudioMeterObserver {
-        self.state.lock().runtime.meter_observer()
+        self.state.lock().delivery.meter_observer()
+    }
+
+    /// Exact Sequence Program Output to monitoring-target delivery evidence.
+    pub(super) fn delivery_evidence(&self) -> AudioDeliveryEvidence {
+        self.state.lock().delivery.evidence()
     }
 }
 
@@ -172,11 +160,11 @@ impl AudioPcmRenderer for TimelineAudioPcmRenderer {
                     ));
                 }
                 state
-                    .runtime
-                    .enter_state(AudioStateEntry {
-                        epoch: AudioContinuityEpoch::new(generation.get()),
-                        start_sample: request.start_sample,
-                    })
+                    .delivery
+                    .enter_state(
+                        AudioContinuityEpoch::new(generation.get()),
+                        request.start_sample,
+                    )
                     .map_err(|error| {
                         audio_render_error("timeline_audio_state_entry", error.to_string())
                     })?;
@@ -205,33 +193,17 @@ impl AudioPcmRenderer for TimelineAudioPcmRenderer {
                 ),
             ));
         }
-        let program_samples = request
-            .frame_count
-            .checked_mul(self.program_channel_layout.channel_count())
-            .ok_or_else(|| {
-                audio_render_error("timeline_audio_sample_range", "audio window is too large")
-            })?;
-        let TimelineAudioRenderState { runtime, program_pcm, .. } = &mut *state;
-        runtime
+        state
+            .delivery
             .render_into_cancellable(
                 AudioRenderRequest {
                     start_sample: request.start_sample,
                     frames: request.frame_count,
                 },
-                &mut program_pcm[..program_samples],
+                &mut output,
                 cancellation,
             )
             .map_err(|error| audio_render_error("timeline_audio_execute", error.to_string()))?;
-        self.delivery_mixer
-            .mix_into(
-                AudioKernelBackend::RuntimeVectorized,
-                request.frame_count,
-                &program_pcm[..program_samples],
-                &mut output,
-            )
-            .map_err(|error| {
-                audio_render_error("playback_audio_delivery_mapping", error.to_string())
-            })?;
         state.next_sample = Some(next_sample);
         Ok(AudioBuffer {
             samples: output,
@@ -420,6 +392,15 @@ mod tests {
             AudioChannelLayout::Stereo,
         )
         .expect("mono program with stereo delivery");
+
+        let evidence = renderer.delivery_evidence();
+        assert_eq!(evidence.program_layout, AudioChannelLayout::Mono);
+        assert_eq!(evidence.target_layout, AudioChannelLayout::Stereo);
+        assert_eq!(
+            evidence.mapping_kind,
+            mondrian_audio::AudioDeliveryMappingKind::ProvenSilence
+        );
+        assert_eq!(evidence.coefficient_count, 0);
 
         let output = renderer
             .render(

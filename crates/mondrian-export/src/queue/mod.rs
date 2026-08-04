@@ -1,6 +1,6 @@
 //! 后台渲染队列
 
-use crate::delivery::ResolvedExportDeliveryContract;
+use crate::delivery::{ffmpeg_audio_channel_layout, ResolvedExportDeliveryContract};
 #[cfg(test)]
 use crate::preset::TimelineExportRange;
 use crate::preset::{
@@ -14,18 +14,18 @@ use crate::validator::{
 };
 use crate::{PreparedTimelineAudioSnapshot, PreparedTimelineVisualSnapshot};
 use mondrian_audio::{
-    AudioContinuityEpoch, AudioDecodedSource, AudioKernelBackend, AudioMediaResolver,
-    AudioProcessingMode, AudioProgramRuntime, AudioRenderContract, AudioRenderRequest,
-    AudioStateEntry, PreparedAudioChannelMixer, ResolvedAudioSource,
+    AudioContinuityEpoch, AudioDecodedSource, AudioMediaResolver, AudioProcessingMode,
+    AudioProgramDeliveryRuntime, AudioProgramRuntime, AudioRenderContract, AudioRenderRequest,
+    ResolvedAudioSource,
 };
 use mondrian_core::timeline_data::{AlphaInterpretation, TimelineClipExecutionRef};
 #[cfg(test)]
 use mondrian_core::types::ColorEngine;
 use mondrian_core::types::{AssetId, ColorSpace, FramePosition, Rational};
 use mondrian_core::{
-    AudioChannelLayout, AudioChannelMixMatrix, AudioSamplePosition, AudioSampleRate,
-    AudioSampleRounding, AudioSourceComponentId, ExecutionCancellationToken, Resolution,
-    SequenceId, TimelineTime, TimelineTimeRange, WorkingColorSpace, WorkingRgbaF32Frame,
+    AudioChannelLayout, AudioSamplePosition, AudioSampleRate, AudioSampleRounding,
+    AudioSourceComponentId, ExecutionCancellationToken, Resolution, SequenceId, TimelineTime,
+    TimelineTimeRange, WorkingColorSpace, WorkingRgbaF32Frame,
 };
 use mondrian_effects::{
     identity_compiled_effect_graph, EffectExecutionContinuity, EffectExecutionSessionConfig,
@@ -2114,7 +2114,7 @@ fn execute_timeline_export(
 
         match &audio_input {
             TimelineAudioInput::PcmFile { path, sample_rate, channel_layout } => {
-                let Some(ffmpeg_layout) = ffmpeg_channel_layout(*channel_layout) else {
+                let Some(ffmpeg_layout) = ffmpeg_audio_channel_layout(*channel_layout) else {
                     return JobExecutionResult::Failed(format!(
                         "audio output layout {channel_layout:?} has no explicit FFmpeg lowering"
                     ));
@@ -2136,7 +2136,7 @@ fn execute_timeline_export(
                     .arg("-shortest");
             }
             TimelineAudioInput::Silent { sample_rate, channel_layout } => {
-                let Some(channel_layout) = ffmpeg_channel_layout(*channel_layout) else {
+                let Some(channel_layout) = ffmpeg_audio_channel_layout(*channel_layout) else {
                     return JobExecutionResult::Failed(format!(
                         "audio output layout {channel_layout:?} has no explicit FFmpeg lowering"
                     ));
@@ -2432,7 +2432,7 @@ fn render_timeline_audio_to_pcm_f32(
         Ok(range) => range,
         Err(error) => return JobExecutionResult::Failed(error),
     };
-    let mut runtime =
+    let runtime =
         match AudioProgramRuntime::build_from_precompiled_closure_for_range_with_resource_grant(
             &timeline.sequence,
             &timeline.sequences,
@@ -2456,13 +2456,13 @@ fn render_timeline_audio_to_pcm_f32(
                 .to_owned(),
         );
     }
-    let delivery_mixer =
-        match AudioChannelMixMatrix::standard(program_channel_layout, channel_layout) {
-            Ok(matrix) => PreparedAudioChannelMixer::new(matrix),
-            Err(error) => {
-                return JobExecutionResult::Failed(format!("导出音频输出布局映射不可用: {error}"));
-            }
-        };
+    let mut delivery = match AudioProgramDeliveryRuntime::prepare_standard(runtime, channel_layout)
+    {
+        Ok(delivery) => delivery,
+        Err(error) => {
+            return JobExecutionResult::Failed(format!("导出音频输出布局映射不可用: {error}"));
+        }
+    };
 
     let (start_sample, total_samples) = match timeline_audio_sample_range(range, sample_rate) {
         Ok(sample_range) => sample_range,
@@ -2471,10 +2471,8 @@ fn render_timeline_audio_to_pcm_f32(
     if total_samples == 0 {
         return JobExecutionResult::ReversibleWorkCompleted;
     }
-    if runtime.requires_state_entry() {
-        if let Err(error) = runtime
-            .enter_state(AudioStateEntry { epoch: AudioContinuityEpoch::new(1), start_sample })
-        {
+    if delivery.requires_state_entry() {
+        if let Err(error) = delivery.enter_state(AudioContinuityEpoch::new(1), start_sample) {
             return JobExecutionResult::Failed(format!("进入导出音频连续性状态失败: {error}"));
         }
     }
@@ -2485,8 +2483,6 @@ fn render_timeline_audio_to_pcm_f32(
     let channels = channel_layout.channel_count();
     let mut sample_bytes = Vec::<u8>::with_capacity(chunk_frames_target * channels * 4);
     let mut pcm = vec![0.0_f32; chunk_frames_target * channels];
-    let program_channels = program_channel_layout.channel_count();
-    let mut program_pcm = vec![0.0_f32; chunk_frames_target * program_channels];
 
     while rendered_samples < total_samples {
         if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
@@ -2508,10 +2504,9 @@ fn render_timeline_audio_to_pcm_f32(
             }
         };
         let chunk_samples = chunk_frames * channels;
-        let program_samples = chunk_frames * program_channels;
-        if let Err(error) = runtime.render_into_cancellable(
+        if let Err(error) = delivery.render_into_cancellable(
             AudioRenderRequest { start_sample: chunk_start, frames: chunk_frames },
-            &mut program_pcm[..program_samples],
+            &mut pcm[..chunk_samples],
             cancel,
         ) {
             if cancel.is_canceled() {
@@ -2519,15 +2514,6 @@ fn render_timeline_audio_to_pcm_f32(
             }
             return JobExecutionResult::Failed(format!("执行导出音频 Program 失败: {error}"));
         }
-        if let Err(error) = delivery_mixer.mix_into(
-            AudioKernelBackend::RuntimeVectorized,
-            chunk_frames,
-            &program_pcm[..program_samples],
-            &mut pcm[..chunk_samples],
-        ) {
-            return JobExecutionResult::Failed(format!("执行导出音频输出布局映射失败: {error}"));
-        }
-
         sample_bytes.clear();
         sample_bytes.reserve(chunk_samples * 4);
         for sample in &pcm[..chunk_samples] {
@@ -5193,15 +5179,6 @@ fn compute_timeline_render_range(
         fps_num: resolved.fps_num,
         fps_den: resolved.fps_den,
     })
-}
-
-fn ffmpeg_channel_layout(layout: AudioChannelLayout) -> Option<&'static str> {
-    match layout {
-        AudioChannelLayout::Mono => Some("mono"),
-        AudioChannelLayout::Stereo => Some("stereo"),
-        AudioChannelLayout::Surround51Side => Some("5.1(side)"),
-        AudioChannelLayout::Speakers(_) | AudioChannelLayout::Discrete(_) => None,
-    }
 }
 
 mod helpers;
@@ -9523,23 +9500,27 @@ mod tests {
     #[test]
     fn ffmpeg_audio_output_lowering_rejects_unnegotiated_layouts() {
         assert_eq!(
-            ffmpeg_channel_layout(AudioChannelLayout::Mono),
+            ffmpeg_audio_channel_layout(AudioChannelLayout::Mono),
             Some("mono")
         );
         assert_eq!(
-            ffmpeg_channel_layout(AudioChannelLayout::Stereo),
+            ffmpeg_audio_channel_layout(AudioChannelLayout::Stereo),
             Some("stereo")
         );
         assert_eq!(
-            ffmpeg_channel_layout(AudioChannelLayout::Surround51Side),
+            ffmpeg_audio_channel_layout(AudioChannelLayout::Surround51Side),
             Some("5.1(side)")
         );
         assert_eq!(
-            ffmpeg_channel_layout(AudioChannelLayout::Surround51Back),
-            None
+            ffmpeg_audio_channel_layout(AudioChannelLayout::Surround51Back),
+            Some("5.1")
         );
         assert_eq!(
-            ffmpeg_channel_layout(AudioChannelLayout::discrete(8).expect("discrete layout")),
+            ffmpeg_audio_channel_layout(AudioChannelLayout::Surround71),
+            Some("7.1")
+        );
+        assert_eq!(
+            ffmpeg_audio_channel_layout(AudioChannelLayout::discrete(8).expect("discrete layout")),
             None
         );
     }

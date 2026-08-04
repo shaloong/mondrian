@@ -7,7 +7,9 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use mondrian_audio::{AudioAuditionOverlay, AudioMeterFrame, AudioMeterObserver};
+use mondrian_audio::{
+    AudioAuditionOverlay, AudioDeliveryEvidence, AudioMeterFrame, AudioMeterObserver,
+};
 use mondrian_core::{SequenceId, TrackId};
 use mondrian_editor_state::AuthoringSessionId;
 use mondrian_timeline::Sequence;
@@ -23,6 +25,7 @@ struct BoundAudioMeter {
     session_id: AuthoringSessionId,
     sequence_id: SequenceId,
     observer: AudioMeterObserver,
+    delivery_evidence: AudioDeliveryEvidence,
 }
 
 impl AudioMonitoringState {
@@ -97,9 +100,15 @@ impl AudioMonitoringState {
         session_id: AuthoringSessionId,
         sequence_id: SequenceId,
         observer: AudioMeterObserver,
+        delivery_evidence: AudioDeliveryEvidence,
     ) {
         self.ensure_session(session_id);
-        self.meter = Some(BoundAudioMeter { session_id, sequence_id, observer });
+        self.meter = Some(BoundAudioMeter {
+            session_id,
+            sequence_id,
+            observer,
+            delivery_evidence,
+        });
     }
 
     pub(super) fn clear_meter(&mut self) {
@@ -117,6 +126,17 @@ impl AudioMonitoringState {
             .filter(|meter| meter.session_id == session_id && meter.sequence_id == sequence_id)?;
         let frame = meter.observer.latest();
         (frame.block_serial != 0).then_some(frame)
+    }
+
+    pub(super) fn delivery_evidence(
+        &self,
+        session_id: AuthoringSessionId,
+        sequence_id: SequenceId,
+    ) -> Option<AudioDeliveryEvidence> {
+        self.meter
+            .as_ref()
+            .filter(|meter| meter.session_id == session_id && meter.sequence_id == sequence_id)
+            .map(|meter| meter.delivery_evidence)
     }
 }
 
@@ -182,6 +202,13 @@ impl super::AppState {
         let (session_id, sequence_id) =
             self.authoring_session_id().zip(self.active_sequence_id())?;
         self.audio_monitoring.latest_meter(session_id, sequence_id)
+    }
+
+    /// Exact active Program Output to monitoring-device layout mapping.
+    pub fn active_audio_delivery_evidence(&self) -> Option<AudioDeliveryEvidence> {
+        let (session_id, sequence_id) =
+            self.authoring_session_id().zip(self.active_sequence_id())?;
+        self.audio_monitoring.delivery_evidence(session_id, sequence_id)
     }
 }
 

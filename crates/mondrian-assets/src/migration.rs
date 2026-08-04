@@ -3,10 +3,10 @@ use crate::{
     schema::{CREATE_FOLDERS_SQL, INIT_SQL},
 };
 use anyhow::Context;
-use mondrian_core::{MediaFileFingerprint, MediaInfo};
+use mondrian_core::{AudioChannelLayout, MediaFileFingerprint, MediaInfo};
 use rusqlite::{Connection, Transaction};
 /// Current asset-library SQLite schema version stored in `PRAGMA user_version`.
-pub const ASSET_LIBRARY_SCHEMA_VERSION: u32 = 4;
+pub const ASSET_LIBRARY_SCHEMA_VERSION: u32 = 5;
 
 type SqliteMigrationFn = fn(&Transaction<'_>) -> anyhow::Result<()>;
 
@@ -21,6 +21,7 @@ const MIGRATIONS: &[SqliteMigrationStep] = &[
     SqliteMigrationStep { from: 1, to: 2, migrate: migrate_one_to_two },
     SqliteMigrationStep { from: 2, to: 3, migrate: migrate_two_to_three },
     SqliteMigrationStep { from: 3, to: 4, migrate: migrate_three_to_four },
+    SqliteMigrationStep { from: 4, to: 5, migrate: migrate_four_to_five },
 ];
 
 pub(crate) fn migrate_asset_library(connection: &mut Connection) -> anyhow::Result<()> {
@@ -133,6 +134,83 @@ fn migrate_three_to_four(transaction: &Transaction<'_>) -> anyhow::Result<()> {
     // record from ordinary Library membership; it never deletes the record or
     // its recoverable source/provider binding.
     add_column_if_missing(transaction, "assets", "retired_at", "TEXT")?;
+    Ok(())
+}
+
+fn migrate_four_to_five(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    // v5 removes the parallel standard-layout enum representation. Rewrite
+    // only typed layout fields; arbitrary asset metadata strings are never
+    // interpreted as schema values.
+    let rows = {
+        let mut statement =
+            transaction.prepare("SELECT id, metadata, audio_components FROM assets")?;
+        let mapped = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (asset_id, metadata, audio_components) in rows {
+        let metadata = rewrite_legacy_channel_layout_json(&metadata)
+            .with_context(|| format!("asset {asset_id} has invalid media metadata"))?;
+        let audio_components = rewrite_legacy_channel_layout_json(&audio_components)
+            .with_context(|| format!("asset {asset_id} has invalid audio Component catalog"))?;
+        transaction.execute(
+            "UPDATE assets SET metadata = ?1, audio_components = ?2 WHERE id = ?3",
+            rusqlite::params![metadata, audio_components, asset_id],
+        )?;
+    }
+    Ok(())
+}
+
+fn rewrite_legacy_channel_layout_json(encoded: &str) -> anyhow::Result<String> {
+    let mut value = serde_json::from_str::<serde_json::Value>(encoded)?;
+    rewrite_legacy_channel_layout_fields(&mut value)?;
+    Ok(serde_json::to_string(&value)?)
+}
+
+fn rewrite_legacy_channel_layout_fields(value: &mut serde_json::Value) -> anyhow::Result<()> {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (name, field) in fields {
+                if matches!(name.as_str(), "channel_layout" | "source_layout") {
+                    rewrite_one_legacy_channel_layout(field)?;
+                } else {
+                    rewrite_legacy_channel_layout_fields(field)?;
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                rewrite_legacy_channel_layout_fields(value)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn rewrite_one_legacy_channel_layout(value: &mut serde_json::Value) -> anyhow::Result<()> {
+    let exact = match value.as_str() {
+        Some("Mono") => Some(AudioChannelLayout::Mono),
+        Some("Stereo") => Some(AudioChannelLayout::Stereo),
+        Some("Surround51Side") => Some(AudioChannelLayout::Surround51Side),
+        Some("Surround51Back") => Some(AudioChannelLayout::Surround51Back),
+        Some("Surround71") => Some(AudioChannelLayout::Surround71),
+        _ => None,
+    };
+    if let Some(layout) = exact {
+        *value = serde_json::json!({"Exact": serde_json::to_value(layout)?});
+        return Ok(());
+    }
+    if let Some(fields) = value.as_object_mut() {
+        if let Some(channels) = fields.remove("Other") {
+            fields.insert("Unsupported".to_owned(), channels);
+        }
+    }
     Ok(())
 }
 
@@ -357,5 +435,47 @@ mod tests {
             )
             .expect("migrated row");
         assert!(retired_at.is_none());
+    }
+
+    #[test]
+    fn v4_layout_evidence_is_rewritten_transactionally_without_touching_labels() {
+        let mut connection = Connection::open_in_memory().expect("open");
+        connection.execute_batch(INIT_SQL).expect("current tables");
+        connection
+            .execute(
+                "INSERT INTO assets \
+                 (id, name, asset_type, path, metadata, audio_components, created_at, updated_at) \
+                 VALUES ('asset-1', 'Stereo', 'audio', 'legacy.wav', \
+                 '{\"audio_streams\":[{\"channel_layout\":\"Stereo\",\"title\":\"Stereo\"}]}', \
+                 '{\"components\":[{\"source_layout\":{\"Other\":6}}]}', 'now', 'now')",
+                [],
+            )
+            .expect("legacy row");
+        connection.pragma_update(None, "user_version", 4).expect("v4");
+
+        migrate_asset_library(&mut connection).expect("migrate");
+
+        let (metadata, components): (String, String) = connection
+            .query_row(
+                "SELECT metadata, audio_components FROM assets WHERE id = 'asset-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("migrated row");
+        let metadata: serde_json::Value = serde_json::from_str(&metadata).expect("metadata");
+        let components: serde_json::Value = serde_json::from_str(&components).expect("components");
+        assert_eq!(metadata["audio_streams"][0]["title"], "Stereo");
+        assert_eq!(
+            metadata["audio_streams"][0]["channel_layout"],
+            serde_json::json!({"Exact": {"Speakers": ["FrontLeft", "FrontRight"]}})
+        );
+        assert_eq!(
+            components["components"][0]["source_layout"],
+            serde_json::json!({"Unsupported": 6})
+        );
+        assert_eq!(
+            sqlite_user_version(&connection).expect("version"),
+            ASSET_LIBRARY_SCHEMA_VERSION
+        );
     }
 }

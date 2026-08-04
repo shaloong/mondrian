@@ -1525,9 +1525,13 @@ PCM; the shared prepared Contribution applies the same canonical Component
 matrix used by Playback before any Sequence processing.
 The frozen Sequence `AudioChannelLayout` is authoritative for Program
 execution. Export's requested packaging layout is a distinct delivery contract
-applied after the selected Program Output. The current Adapter admits only
-versioned standard delivery pairs; unsupported named/custom or Discrete pairs
-fail before encoding instead of being reduced to a matching `-ac` count.
+applied after the selected Program Output through the same
+`AudioProgramDeliveryRuntime` used by Playback. Export admission owns the exact
+FFmpeg layout-name capability table shared by command construction and output
+validation: AAC/PCM admit the explicit Mono, Stereo, 5.1(side), 5.1(back), and
+7.1 lowerings; MP3 admits only Mono/Stereo. Unsupported named/custom or
+Discrete pairs fail during preset resolution with codec plus Program/target
+layout evidence instead of being reduced to a matching `-ac` count.
 
 Preview media decoding must convert source media into the sequence working
 color space before compositing. The source color space resolves from clip

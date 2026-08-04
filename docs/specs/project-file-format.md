@@ -19,7 +19,7 @@ library/index.db
   "document_layout": "single-project-json",
   "project_entry": "project.json",
   "library_entry": "library/index.db",
-  "library_schema_version": 4
+  "library_schema_version": 5
 }
 ```
 

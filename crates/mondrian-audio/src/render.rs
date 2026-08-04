@@ -6,6 +6,7 @@ use crate::schedule::{
     PreparedAudioPlan, PreparedAudioSchedule, PreparedAutomationCurve, PreparedContribution,
     PreparedNode, PreparedNodeOrigin, PreparedTransitionBinding, PreparedTransitionDirection,
 };
+use crate::AudioRenderContract;
 use mondrian_core::{
     AudioChannelLayout, AudioChannelPosition, AudioComponentEditId, AudioSampleRate, TimelineTime,
     TimelineTimeError,
@@ -295,6 +296,11 @@ impl AudioRenderSession {
     /// Internal lookahead needed to return Timeline-aligned public PCM.
     pub fn public_output_lookahead_frames(&self) -> usize {
         self.plan.public_output_lookahead_frames()
+    }
+
+    /// Exact immutable Render Contract that admitted this Session.
+    pub fn contract(&self) -> AudioRenderContract {
+        self.plan.contract()
     }
 
     /// Whether this Plan owns history and therefore rejects unentered or

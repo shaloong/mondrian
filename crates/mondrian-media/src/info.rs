@@ -20,9 +20,9 @@ pub use mondrian_core::{
     VideoColorTag, VideoHdrMetadataSummary, VideoHdrSideDataKind, VideoStreamInfo,
 };
 use mondrian_core::{
-    VideoContentLightMetadata, VideoHdrChromaticity, VideoHdrMetadataPayload, VideoHdrRational,
-    VideoIccProfileMetadata, VideoMasteringDisplayLuminance, VideoMasteringDisplayMetadata,
-    VideoMasteringDisplayPrimaries,
+    AudioChannelLayout, AudioChannelPosition, VideoContentLightMetadata, VideoHdrChromaticity,
+    VideoHdrMetadataPayload, VideoHdrRational, VideoIccProfileMetadata,
+    VideoMasteringDisplayLuminance, VideoMasteringDisplayMetadata, VideoMasteringDisplayPrimaries,
 };
 use serde::{Deserialize, Serialize};
 use std::os::raw::c_int;
@@ -1858,19 +1858,66 @@ fn map_video_codec_profile(profile: ffmpeg::codec::Profile) -> VideoCodecProfile
 fn map_channel_layout(layout: ffmpeg::ChannelLayout, reported_channels: u8) -> ChannelLayout {
     if layout.is_empty() {
         ChannelLayout::Unspecified(reported_channels)
-    } else if layout == ffmpeg::ChannelLayout::MONO {
-        ChannelLayout::Mono
-    } else if layout == ffmpeg::ChannelLayout::STEREO {
-        ChannelLayout::Stereo
-    } else if layout == ffmpeg::ChannelLayout::_5POINT1 {
-        ChannelLayout::Surround51Side
-    } else if layout == ffmpeg::ChannelLayout::_5POINT1_BACK {
-        ChannelLayout::Surround51Back
-    } else if layout == ffmpeg::ChannelLayout::_7POINT1 {
-        ChannelLayout::Surround71
+    } else if layout.0.order != ffmpeg::ffi::AVChannelOrder::AV_CHANNEL_ORDER_NATIVE {
+        ChannelLayout::Unsupported(reported_channels)
     } else {
-        ChannelLayout::Other(reported_channels)
+        exact_signal_layout_from_ffmpeg_mask(layout.bits(), reported_channels).map_or(
+            ChannelLayout::Unsupported(reported_channels),
+            ChannelLayout::Exact,
+        )
     }
+}
+
+fn exact_signal_layout_from_ffmpeg_mask(
+    mask: u64,
+    reported_channels: u8,
+) -> Option<AudioChannelLayout> {
+    // AVChannel native-mask positions are ABI-stable bit indexes. Keep this
+    // translation explicit: core signal-layout bits are deliberately private
+    // and must never be treated as FFmpeg masks.
+    const POSITIONS: &[(u32, AudioChannelPosition)] = &[
+        (0, AudioChannelPosition::FrontLeft),
+        (1, AudioChannelPosition::FrontRight),
+        (2, AudioChannelPosition::FrontCenter),
+        (3, AudioChannelPosition::LowFrequencyEffects),
+        (4, AudioChannelPosition::BackLeft),
+        (5, AudioChannelPosition::BackRight),
+        (6, AudioChannelPosition::FrontLeftOfCenter),
+        (7, AudioChannelPosition::FrontRightOfCenter),
+        (8, AudioChannelPosition::BackCenter),
+        (9, AudioChannelPosition::SideLeft),
+        (10, AudioChannelPosition::SideRight),
+        (11, AudioChannelPosition::TopCenter),
+        (12, AudioChannelPosition::TopFrontLeft),
+        (13, AudioChannelPosition::TopFrontCenter),
+        (14, AudioChannelPosition::TopFrontRight),
+        (15, AudioChannelPosition::TopBackLeft),
+        (16, AudioChannelPosition::TopBackCenter),
+        (17, AudioChannelPosition::TopBackRight),
+        (31, AudioChannelPosition::WideLeft),
+        (32, AudioChannelPosition::WideRight),
+        (35, AudioChannelPosition::LowFrequencyEffects2),
+        (36, AudioChannelPosition::TopSideLeft),
+        (37, AudioChannelPosition::TopSideRight),
+    ];
+    if reported_channels == 0 || u32::from(reported_channels) != mask.count_ones() {
+        return None;
+    }
+    // A single FC channel is FFmpeg's native representation of Mono. It is
+    // intentionally not a one-speaker set in Mondrian's signal contract.
+    if mask == (1_u64 << 2) {
+        return Some(AudioChannelLayout::Mono);
+    }
+    let supported_mask = POSITIONS.iter().fold(0_u64, |bits, (index, _)| bits | (1_u64 << index));
+    if mask == 0 || mask & !supported_mask != 0 {
+        return None;
+    }
+    AudioChannelLayout::speakers(
+        POSITIONS
+            .iter()
+            .filter_map(|(index, position)| (mask & (1_u64 << index) != 0).then_some(*position)),
+    )
+    .ok()
 }
 
 fn normalized_stream_metadata(value: Option<&str>) -> Option<String> {
@@ -3763,36 +3810,53 @@ mod tests {
     }
 
     #[test]
-    fn audio_layout_probe_preserves_side_back_and_nonstandard_six_channel_semantics() {
+    fn audio_layout_probe_preserves_standard_and_custom_speaker_semantics() {
         assert_eq!(
             map_channel_layout(ffmpeg::ChannelLayout::_5POINT1, 6),
-            ChannelLayout::Surround51Side
+            ChannelLayout::Exact(AudioChannelLayout::Surround51Side)
         );
         assert_eq!(
             map_channel_layout(ffmpeg::ChannelLayout::_5POINT1_BACK, 6),
-            ChannelLayout::Surround51Back
+            ChannelLayout::Exact(AudioChannelLayout::Surround51Back)
         );
+        let six_point_zero = AudioChannelLayout::speakers([
+            AudioChannelPosition::FrontLeft,
+            AudioChannelPosition::FrontRight,
+            AudioChannelPosition::FrontCenter,
+            AudioChannelPosition::BackCenter,
+            AudioChannelPosition::SideLeft,
+            AudioChannelPosition::SideRight,
+        ])
+        .expect("6.0 speaker layout");
         assert_eq!(
             map_channel_layout(ffmpeg::ChannelLayout::_6POINT0, 6),
-            ChannelLayout::Other(6)
+            ChannelLayout::Exact(six_point_zero)
         );
         assert_eq!(
-            ChannelLayout::Surround51Side.exact_signal_layout(),
-            Some(mondrian_core::AudioChannelLayout::Surround51Side)
+            ChannelLayout::Exact(AudioChannelLayout::Surround51Side).exact_signal_layout(),
+            Some(AudioChannelLayout::Surround51Side)
         );
         assert_eq!(
-            ChannelLayout::Surround51Back.exact_signal_layout(),
-            Some(mondrian_core::AudioChannelLayout::Surround51Back)
+            ChannelLayout::Exact(AudioChannelLayout::Surround51Back).exact_signal_layout(),
+            Some(AudioChannelLayout::Surround51Back)
         );
         assert_eq!(
-            ChannelLayout::Surround71.exact_signal_layout(),
-            Some(mondrian_core::AudioChannelLayout::Surround71)
+            ChannelLayout::Exact(AudioChannelLayout::Surround71).exact_signal_layout(),
+            Some(AudioChannelLayout::Surround71)
         );
         assert_eq!(
             ChannelLayout::Unspecified(12).exact_signal_layout(),
             Some(mondrian_core::AudioChannelLayout::discrete(12).expect("discrete layout"))
         );
-        assert_eq!(ChannelLayout::Other(6).exact_signal_layout(), None);
+        assert_eq!(ChannelLayout::Unsupported(6).exact_signal_layout(), None);
+        assert_eq!(
+            exact_signal_layout_from_ffmpeg_mask((1_u64 << 0) | (1_u64 << 63), 2),
+            None
+        );
+        assert_eq!(
+            exact_signal_layout_from_ffmpeg_mask(1_u64 << 2, 1),
+            Some(AudioChannelLayout::Mono)
+        );
     }
 
     #[test]

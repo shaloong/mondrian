@@ -174,9 +174,16 @@ Scope processing, volume/pan, fades, Transitions, and Track summing. Nested
 Sequences render their public output in the child Sequence layout and cross the
 same matrix boundary at the parent Component. A child can no longer be silently
 re-rendered in the parent's layout. The selected root Program likewise renders
-in its authored Sequence layout; Playback and Export apply a separate standard
-delivery matrix only after the public output. Unsupported device/export pairs
-fail instead of changing Program semantics.
+in its authored Sequence layout. `AudioProgramDeliveryRuntime` is the sole
+post-output execution Module for Playback and Export: it owns the Program
+Runtime, maximum-block Program scratch, prepared standard matrix, and immutable
+`AudioDeliveryEvidence` containing Program layout, target layout, mapping kind,
+and coefficient count. Playback retains generation/watermark/device scheduling;
+Export retains offline scheduling and file I/O. Neither may render Program PCM
+and apply its own matrix. A compiler-proven silent Program uses an explicit
+zero-coefficient `ProvenSilence` delivery rather than requiring a meaningless
+custom-layout conversion. For audible Programs, unsupported device/export
+pairs fail with both layouts instead of changing Program semantics.
 
 ### Processing scopes
 

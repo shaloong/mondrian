@@ -9,6 +9,7 @@ mod built_in_processors;
 mod channel_mix;
 mod compiler;
 mod delay;
+mod delivery;
 mod dependency;
 mod dsp;
 mod latency;
@@ -23,6 +24,10 @@ mod runtime;
 mod schedule;
 
 pub use compiler::{compile_audio_program, AudioCompileError};
+pub use delivery::{
+    AudioDeliveryError, AudioDeliveryEvidence, AudioDeliveryMappingKind,
+    AudioProgramDeliveryRuntime,
+};
 pub use dependency::{
     compile_audio_dependency_closure, AudioDependencyClosure, AudioDependencyError,
 };

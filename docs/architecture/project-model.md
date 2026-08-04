@@ -441,8 +441,10 @@ operation re-probes and conservatively reconciles current candidates without
 retargeting; this is required before selecting a newly discovered stream whose
 index was absent from stored metadata.
 
-Library schema v4 uses nullable `retired_at` as the sole persisted membership
-state. Existing records without a retirement timestamp remain visible.
+Library schema v5 retains nullable `retired_at` as the sole persisted membership
+state and canonicalizes native audio layouts onto `AudioChannelLayout` without
+a parallel standard-layout enum. Existing records without a retirement
+timestamp remain visible.
 Retirement never clears a path, probe, source fingerprint, Component catalog,
 or interpretation, and ordinary list filtering never weakens identity lookup.
 
@@ -498,7 +500,7 @@ library/index.db
 Archive `format_version`, document `schema_version`, and embedded library
 `PRAGMA user_version` are independent contracts. `manifest.json` records the
 expected library schema version in addition to archive layout. The current
-archive-v1 manifest explicitly writes `library_schema_version: 4`.
+archive-v1 manifest explicitly writes `library_schema_version: 5`.
 
 Archive and document JSON pass through separate version registries before typed
 deserialization. The ordinary current-schema path streams each JSON ZIP entry

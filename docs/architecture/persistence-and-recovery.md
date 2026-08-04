@@ -18,8 +18,11 @@ plans, plugin runtime state, UI navigation, and device handles never enter the
 archive.
 
 The archive format, Project document schema, and SQLite schema are independent
-version axes. The current values are archive v1, document v23, and library v4.
-An archive is accepted only when all three declarations match their registered
+version axes. The current values are archive v1, document v23, and library v5.
+Library v5 canonicalizes persisted native audio layout evidence as exact,
+unspecified, or unsupported; its v4 migration is a field-scoped transactional
+JSON rewrite and never interprets asset names or stream labels. An archive is
+accepted only when all three declarations match their registered
 contracts. During Alpha, old and future document schemas fail closed; absence
 of a migration is explicit and is never replaced by broad serde defaults.
 

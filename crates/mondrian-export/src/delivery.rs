@@ -10,7 +10,9 @@ use crate::preset::{
     ExportColorTarget, ExportPreset, HevcProfile, ProResProfile, Resolution, VideoCodecConfig,
     VideoRateControl,
 };
-use mondrian_core::{ColorEngine, ColorSpace, OutputTransformIntent, ProjectColorEnvironment};
+use mondrian_core::{
+    AudioChannelLayout, ColorEngine, ColorSpace, OutputTransformIntent, ProjectColorEnvironment,
+};
 use mondrian_timeline::sequence::{
     DeliveryBitDepth, SequenceSettings, StaticHdrMetadataPolicy, VideoRange,
 };
@@ -38,6 +40,8 @@ pub enum ExportDeliveryIssueCode {
     InvalidCodecParameter,
     /// One audio-specific authoring value is invalid.
     InvalidAudioParameter,
+    /// The exact Sequence layout cannot be lowered by the selected encoder.
+    UnsupportedAudioLayout,
 }
 
 /// Structured delivery-admission failure shared by product UI and execution.
@@ -107,6 +111,7 @@ pub fn resolve_export_delivery(
     })?;
     validate_rate_control(&preset.video)?;
     validate_audio_parameters(&preset.audio)?;
+    validate_audio_layout(&preset.audio, settings.audio_channel_layout)?;
     validate_container(&preset.container, &preset.video, &preset.audio)?;
 
     let bit_depth = preset.video_signal.bit_depth.resolve(settings.delivery.bit_depth);
@@ -267,6 +272,52 @@ fn validate_audio_parameters(audio: &AudioCodecConfig) -> Result<(), ExportDeliv
         Err(ExportDeliveryError::new(
             ExportDeliveryIssueCode::InvalidAudioParameter,
             "音频编码参数不在已验证范围内",
+        ))
+    }
+}
+
+/// Canonical FFmpeg name for one explicitly supported encoded audio layout.
+///
+/// Custom speaker sets and Discrete buses remain representable inside the DSP
+/// core, but export must not guess an encoded channel order from their extent.
+pub(crate) const fn ffmpeg_audio_channel_layout(
+    layout: AudioChannelLayout,
+) -> Option<&'static str> {
+    match layout {
+        AudioChannelLayout::Mono => Some("mono"),
+        AudioChannelLayout::Stereo => Some("stereo"),
+        AudioChannelLayout::Surround51Side => Some("5.1(side)"),
+        AudioChannelLayout::Surround51Back => Some("5.1"),
+        AudioChannelLayout::Surround71 => Some("7.1"),
+        AudioChannelLayout::Speakers(_) | AudioChannelLayout::Discrete(_) => None,
+    }
+}
+
+fn validate_audio_layout(
+    audio: &AudioCodecConfig,
+    layout: AudioChannelLayout,
+) -> Result<(), ExportDeliveryError> {
+    let supported = match audio {
+        AudioCodecConfig::Disabled => true,
+        AudioCodecConfig::Mp3 { .. } => {
+            matches!(
+                layout,
+                AudioChannelLayout::Mono | AudioChannelLayout::Stereo
+            )
+        }
+        AudioCodecConfig::Aac { .. } | AudioCodecConfig::Pcm { .. } => {
+            ffmpeg_audio_channel_layout(layout).is_some()
+        }
+    };
+    if supported {
+        Ok(())
+    } else {
+        Err(ExportDeliveryError::new(
+            ExportDeliveryIssueCode::UnsupportedAudioLayout,
+            format!(
+                "音频编码 {:?} 无法显式承载 Sequence 布局 {layout}；请选择可证明的布局或编码",
+                audio
+            ),
         ))
     }
 }
@@ -639,6 +690,35 @@ mod tests {
                 .expect("sequence defaults should resolve to a concrete contract");
         assert_eq!(contract.bit_depth, DeliveryBitDepth::Eight);
         assert_eq!(contract.video_range, VideoRange::Full);
+    }
+
+    #[test]
+    fn audio_layout_admission_is_codec_specific_and_fail_closed() {
+        let environment = ProjectColorEnvironment::default();
+        let mut settings = SequenceSettings {
+            audio_channel_layout: AudioChannelLayout::Surround71,
+            ..SequenceSettings::default()
+        };
+        let mut preset = ExportPreset::h264_aac_sdr_1080p();
+        resolve_export_delivery(&preset, &settings, &environment)
+            .expect("AAC admits an explicit 7.1 lowering");
+
+        preset.audio = AudioCodecConfig::Mp3 { bitrate_kbps: 192 };
+        let error = resolve_export_delivery(&preset, &settings, &environment)
+            .expect_err("MP3 must not accept 7.1 by channel count");
+        assert_eq!(error.code, ExportDeliveryIssueCode::UnsupportedAudioLayout);
+
+        settings.audio_channel_layout = AudioChannelLayout::speakers([
+            mondrian_core::AudioChannelPosition::FrontLeft,
+            mondrian_core::AudioChannelPosition::FrontRight,
+            mondrian_core::AudioChannelPosition::TopCenter,
+        ])
+        .expect("custom speaker layout");
+        preset.audio = AudioCodecConfig::Aac { bitrate_kbps: 192 };
+        let error = resolve_export_delivery(&preset, &settings, &environment)
+            .expect_err("custom order needs an explicit encoding Adapter");
+        assert_eq!(error.code, ExportDeliveryIssueCode::UnsupportedAudioLayout);
+        assert!(error.detail.contains(&settings.audio_channel_layout.to_string()));
     }
 
     #[test]

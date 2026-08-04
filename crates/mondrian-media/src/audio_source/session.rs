@@ -765,7 +765,7 @@ mod tests {
                 modified_nanos: Some(1),
                 selection: super::super::AudioSourceSelection::new(
                     index,
-                    ChannelLayout::Stereo,
+                    ChannelLayout::Exact(AudioChannelLayout::Stereo),
                     MediaFileFingerprint::default(),
                 ),
                 channel_layout: AudioChannelLayout::Stereo,

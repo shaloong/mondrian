@@ -6,6 +6,7 @@ const AUDIO_CALLBACK_STALE_AFTER: Duration = Duration::from_millis(100);
 struct PreparedTimelineAudioSource {
     renderer: Arc<dyn AudioPcmRenderer>,
     meter_observer: mondrian_audio::AudioMeterObserver,
+    delivery_evidence: mondrian_audio::AudioDeliveryEvidence,
     authoring_session_id: AuthoringSessionId,
     sequence_id: SequenceId,
 }
@@ -866,9 +867,11 @@ impl AppState {
         .map_err(|error| transport_action_error(action, error))?;
         let requires_execution = renderer.execution_demand().requires_execution();
         let meter_observer = renderer.meter_observer();
+        let delivery_evidence = renderer.delivery_evidence();
         Ok(requires_execution.then(|| PreparedTimelineAudioSource {
             renderer: Arc::new(renderer),
             meter_observer,
+            delivery_evidence,
             authoring_session_id,
             sequence_id: sequence.id,
         }))
@@ -888,6 +891,7 @@ impl AppState {
                 source.authoring_session_id,
                 source.sequence_id,
                 source.meter_observer,
+                source.delivery_evidence,
             );
         } else {
             self.audio_playback

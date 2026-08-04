@@ -3537,13 +3537,9 @@ fn audio_stream_label(stream: &AudioStreamInfo) -> String {
 
 fn native_audio_layout_label(layout: &ChannelLayout) -> String {
     match layout {
+        ChannelLayout::Exact(layout) => layout.to_string(),
         ChannelLayout::Unspecified(channels) => format!("未指定 {channels}ch"),
-        ChannelLayout::Mono => "Mono".to_owned(),
-        ChannelLayout::Stereo => "Stereo".to_owned(),
-        ChannelLayout::Surround51Side => "5.1(side)".to_owned(),
-        ChannelLayout::Surround51Back => "5.1(back)".to_owned(),
-        ChannelLayout::Surround71 => "7.1".to_owned(),
-        ChannelLayout::Other(channels) => format!("其他 {channels}ch"),
+        ChannelLayout::Unsupported(channels) => format!("不支持的命名布局 {channels}ch"),
     }
 }
 

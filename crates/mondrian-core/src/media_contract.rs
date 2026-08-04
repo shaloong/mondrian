@@ -1224,46 +1224,47 @@ impl VideoHdrMetadataSummary {
 /// Native decoder-probed audio channel layout.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ChannelLayout {
+    /// Decoder proved one complete semantic signal layout and canonical order.
+    Exact(AudioChannelLayout),
     /// Decoder supplied a count without speaker semantics.
     Unspecified(u8),
-    /// One mono program channel.
-    Mono,
-    /// Front left and front right.
-    Stereo,
-    /// FL, FR, FC, LFE, SL, SR.
-    Surround51Side,
-    /// FL, FR, FC, LFE, BL, BR.
-    Surround51Back,
-    /// FL, FR, FC, LFE, BL, BR, SL, SR.
-    Surround71,
-    /// Known decoder layout not represented by this contract.
-    Other(u8),
+    /// Decoder supplied a named or ordered layout that this contract cannot represent.
+    Unsupported(u8),
 }
 
 impl ChannelLayout {
+    /// Exact layout-independent mono probe fact.
+    #[allow(non_upper_case_globals)]
+    pub const Mono: Self = Self::Exact(AudioChannelLayout::Mono);
+    /// Exact front-left/front-right probe fact.
+    #[allow(non_upper_case_globals)]
+    pub const Stereo: Self = Self::Exact(AudioChannelLayout::Stereo);
+    /// Exact 5.1(side) probe fact.
+    #[allow(non_upper_case_globals)]
+    pub const Surround51Side: Self = Self::Exact(AudioChannelLayout::Surround51Side);
+    /// Exact 5.1(back) probe fact.
+    #[allow(non_upper_case_globals)]
+    pub const Surround51Back: Self = Self::Exact(AudioChannelLayout::Surround51Back);
+    /// Exact 7.1 probe fact.
+    #[allow(non_upper_case_globals)]
+    pub const Surround71: Self = Self::Exact(AudioChannelLayout::Surround71);
+
     /// Channel extent reported for this native layout.
     pub const fn channel_count(&self) -> u8 {
         match self {
-            Self::Unspecified(channels) | Self::Other(channels) => *channels,
-            Self::Mono => 1,
-            Self::Stereo => 2,
-            Self::Surround51Side | Self::Surround51Back => 6,
-            Self::Surround71 => 8,
+            Self::Exact(layout) => layout.channel_count_u8(),
+            Self::Unspecified(channels) | Self::Unsupported(channels) => *channels,
         }
     }
 
     /// Preserve probe semantics in the shared signal-layout value.
     pub fn exact_signal_layout(&self) -> Option<AudioChannelLayout> {
         match self {
-            Self::Mono => Some(AudioChannelLayout::Mono),
-            Self::Stereo => Some(AudioChannelLayout::Stereo),
-            Self::Surround51Side => Some(AudioChannelLayout::Surround51Side),
-            Self::Surround51Back => Some(AudioChannelLayout::Surround51Back),
-            Self::Surround71 => Some(AudioChannelLayout::Surround71),
+            Self::Exact(layout) => Some(*layout),
             Self::Unspecified(channels) if *channels > 0 && *channels <= MAX_AUDIO_CHANNELS => {
                 AudioChannelLayout::discrete(*channels).ok()
             }
-            Self::Unspecified(_) | Self::Other(_) => None,
+            Self::Unspecified(_) | Self::Unsupported(_) => None,
         }
     }
 }

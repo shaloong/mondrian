@@ -1,3 +1,4 @@
+use crate::delivery::ffmpeg_audio_channel_layout;
 use crate::preset::{
     AudioCodecConfig, Av1Profile, Container, H264Profile, HevcProfile, ProResProfile,
     VideoCodecConfig,
@@ -835,7 +836,7 @@ fn validate_audio_stream(
                 .unwrap_or_else(|| "<missing>".to_string())
         ));
     }
-    let expected_layout = expected_ffprobe_channel_layout(expected.channel_layout)
+    let expected_layout = ffmpeg_audio_channel_layout(expected.channel_layout)
         .ok_or_else(|| format!("导出校验尚未定义音频布局 {}", expected.channel_layout))?;
     validate_exact_codec_field(
         "音频声道布局",
@@ -864,15 +865,6 @@ fn normalized_identity(value: &str) -> String {
         .filter(|character| character.is_ascii_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect()
-}
-
-const fn expected_ffprobe_channel_layout(layout: AudioChannelLayout) -> Option<&'static str> {
-    match layout {
-        AudioChannelLayout::Mono => Some("mono"),
-        AudioChannelLayout::Stereo => Some("stereo"),
-        AudioChannelLayout::Surround51Side => Some("5.1(side)"),
-        AudioChannelLayout::Speakers(_) | AudioChannelLayout::Discrete(_) => None,
-    }
 }
 
 fn pixel_format_bit_depth(pixel_format: &str) -> Option<u8> {

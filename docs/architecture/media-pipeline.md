@@ -115,10 +115,15 @@ identity. Neither a stream index without its file revision nor a file revision
 without its Asset binding is a valid product selection.
 
 Audio probing reads FFmpeg's declared channel layout rather than deriving it
-from channel count. `5.1(side)`, `5.1(back)`, and 7.1 project to distinct shared
-signal layouts; bounded unspecified layouts project to Discrete values without
-inventing speakers, while unsupported named layouts remain explicit probe
-facts. The standard execution mapping policy admits declared mono/stereo/5.1(side)
+from channel count. The persisted probe value has only three states:
+`Exact(AudioChannelLayout)`, `Unspecified(count)`, and `Unsupported(count)`;
+standard layouts are no longer duplicated in a second enum. Native FFmpeg
+speaker masks whose every position is modeled project to one canonical named
+speaker set, including custom combinations such as 6.0. `5.1(side)`,
+`5.1(back)`, and 7.1 therefore remain distinct; bounded unspecified layouts
+project to Discrete values without inventing speakers, while custom-order or
+unmodeled positions remain explicit unsupported probe facts. The standard
+execution mapping policy admits declared mono/stereo/5.1(side)
 and explicit discrete defaults for otherwise-unlabelled one- or two-channel
 sources; it never promotes an ambiguous 3+ channel count. Each probed audio
 stream also retains its absolute stream index, optional container stream ID,
@@ -126,7 +131,10 @@ language/title metadata, and default disposition. These are selection evidence
 for the Asset Component Catalog, not permission to auto-retarget an authored
 Component when a relinked file differs.
 
-`mondrian-assets` owns the persistent Component Catalog. Import assigns stable
+`mondrian-assets` owns the persistent Component Catalog. Library schema v5
+transactionally rewrites v4 standard layout variants into the sole exact
+signal representation and `Other` into `Unsupported`, touching only typed
+layout fields. Import assigns stable
 IDs, persists conservative stream signatures plus the probe source fingerprint,
 and SQLite schema v3 migrates existing records transactionally while revoking
 unproven legacy fingerprints.

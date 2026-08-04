@@ -775,7 +775,7 @@ mod tests {
     fn stereo_selection(path: &Path, stream_index: u32) -> AudioSourceSelection {
         AudioSourceSelection::new(
             stream_index,
-            ChannelLayout::Stereo,
+            ChannelLayout::Exact(AudioChannelLayout::Stereo),
             MediaFileFingerprint::capture(path),
         )
     }
@@ -1214,7 +1214,7 @@ mod tests {
         file.flush().expect("flush source");
         let partial = AudioSourceSelection::new(
             0,
-            ChannelLayout::Stereo,
+            ChannelLayout::Exact(AudioChannelLayout::Stereo),
             MediaFileFingerprint {
                 len: Some(6),
                 modified_secs: Some(1),

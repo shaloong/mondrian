@@ -790,6 +790,11 @@ impl AudioProgramRuntime {
         self.render_into_cancellable(request, destination, &ExecutionCancellationToken::new())
     }
 
+    /// Exact immutable Render Contract shared by the root and delivery Seam.
+    pub fn render_contract(&self) -> AudioRenderContract {
+        self.session.contract()
+    }
+
     /// Internal lookahead needed to return Timeline-aligned public PCM.
     pub fn public_output_lookahead_frames(&self) -> usize {
         self.session.public_output_lookahead_frames()
