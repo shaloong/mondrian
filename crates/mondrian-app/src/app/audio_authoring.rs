@@ -8,9 +8,10 @@ use mondrian_timeline::audio::{
     AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID, BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID,
 };
 use mondrian_timeline::{
-    apply_audio_automation_edit, apply_audio_channel_strip_edit, apply_audio_processor_rack_edit,
-    apply_audio_routing_edit, AudioAutomationEditRequest, AudioChannelStripEditRequest,
-    AudioProcessorRackEdit, AudioProcessorRackEditRequest, AudioRoutingEditRequest,
+    apply_audio_automation_edit, apply_audio_channel_strip_edit, apply_audio_component_edit,
+    apply_audio_processor_rack_edit, apply_audio_routing_edit, AudioAutomationEditRequest,
+    AudioChannelStripEditRequest, AudioComponentEditRequest, AudioProcessorRackEdit,
+    AudioProcessorRackEditRequest, AudioRoutingEditRequest,
 };
 
 use super::product_action::{AudioProcessorBuiltInPreset, AudioProductAction};
@@ -24,6 +25,7 @@ impl AppState {
         match action {
             AudioProductAction::SetTrackSolo(payload) => self.set_audio_track_solo(payload),
             AudioProductAction::EditAutomation(request) => self.edit_audio_automation(request),
+            AudioProductAction::EditComponent(request) => self.edit_audio_component(request),
             AudioProductAction::EditProcessorRack(request) => {
                 self.edit_audio_processor_rack(request)
             }
@@ -64,6 +66,27 @@ impl AppState {
             })?;
         if outcome.changed {
             self.reconcile_audio_after_committed_authoring_change("audio_edit_automation");
+        }
+        Ok(())
+    }
+
+    fn edit_audio_component(&mut self, request: AudioComponentEditRequest) -> Result<()> {
+        let sequence_id =
+            self.active_sequence_id().ok_or_else(|| MondrianError::WorkflowStepFailed {
+                step_id: "audio_edit_component".to_owned(),
+                reason: "当前没有活动序列".to_owned(),
+            })?;
+        let outcome =
+            self.commit_sequence_edit(sequence_id, "调整片段音频 Component", |sequence| {
+                apply_audio_component_edit(sequence, &request).map_err(|error| {
+                    MondrianError::WorkflowStepFailed {
+                        step_id: "audio_edit_component".to_owned(),
+                        reason: error.to_string(),
+                    }
+                })
+            })?;
+        if outcome.changed {
+            self.reconcile_audio_after_committed_authoring_change("audio_edit_component");
         }
         Ok(())
     }

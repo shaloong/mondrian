@@ -12,6 +12,7 @@
 pub mod audio;
 pub mod audio_automation_edit;
 pub mod audio_channel_strip_edit;
+pub mod audio_component_edit;
 pub mod audio_processor_edit;
 pub mod audio_routing_edit;
 pub mod clip;
@@ -40,6 +41,12 @@ pub use audio_channel_strip_edit::{
     AudioChannelStripAddressError, AudioChannelStripEdit, AudioChannelStripEditBlocker,
     AudioChannelStripEditError, AudioChannelStripEditOutcome, AudioChannelStripEditRequest,
     AudioChannelStripInspection,
+};
+pub use audio_component_edit::{
+    apply_audio_component_edit, inspect_audio_component, AudioComponentAddress,
+    AudioComponentAddressError, AudioComponentEditBlocker, AudioComponentEditError,
+    AudioComponentEditOutcome, AudioComponentEditRequest, AudioComponentInspection,
+    AudioComponentMutation,
 };
 pub use audio_processor_edit::{
     apply_audio_processor_rack_edit, audio_processor_rack, inspect_audio_processor_rack,

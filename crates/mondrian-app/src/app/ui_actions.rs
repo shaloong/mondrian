@@ -22,7 +22,6 @@ use mondrian_media::{
     VideoColorMetadataHint,
 };
 use mondrian_timeline::{
-    audio::AudioFade,
     sequence::{ColorWorkflow, DeliveryBitDepth, MissingColorMetadataPolicy, VideoRange},
     AudioChannelLayout, AudioChannelStripEditRequest, AudioDisplayFormat,
     AudioProcessorRackEditRequest, AudioRoutingEditRequest, EditingMode, FieldOrder,
@@ -37,8 +36,9 @@ use super::product_action::{AudioProductAction, ProductAction, TimelineProductAc
 pub use super::product_action::{
     TimelineClipSelectionModePayload, TimelineMoveClipPayload, TimelineSeekPayload,
     TimelineSeekSource, TimelineSelectClipPayload, TimelineTrimClipsPayload,
-    TimelineTrimPayloadEdge, AUDIO_EDIT_PROCESSOR_RACK, AUDIO_NAMESPACE, TIMELINE_MOVE_CLIP,
-    TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP, TIMELINE_TRIM_CLIPS,
+    TimelineTrimPayloadEdge, AUDIO_EDIT_COMPONENT, AUDIO_EDIT_PROCESSOR_RACK, AUDIO_NAMESPACE,
+    TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
+    TIMELINE_TRIM_CLIPS,
 };
 use super::CrashRecoveryCandidate;
 
@@ -102,8 +102,6 @@ pub const INSPECTOR_EDIT_CLIP_CURVE: &str = "edit_clip_curve";
 pub const INSPECTOR_SET_CLIP_PROPERTY: &str = "set_clip_property";
 /// Action name for selecting the logical source of one Clip audio Component Edit.
 pub const INSPECTOR_SET_AUDIO_COMPONENT_SOURCE: &str = "set_audio_component_source";
-/// Action name for changing one field of one Clip audio Component Edit.
-pub const INSPECTOR_SET_AUDIO_COMPONENT_EDIT_FIELD: &str = "set_audio_component_edit_field";
 /// Action name for selecting one effect inside the selected clip.
 pub const INSPECTOR_SELECT_EFFECT: &str = "select_effect";
 /// Action name for toggling one effect on a selected clip.
@@ -789,32 +787,6 @@ pub struct InspectorSetAudioComponentSourcePayload {
     pub source: InspectorAudioComponentSourcePayload,
 }
 
-/// One independently mutable placement-local audio Component Edit field.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub enum InspectorAudioComponentEditField {
-    /// Whether this Component contributes signal.
-    Enabled(bool),
-    /// Static post-processing placement volume in dB.
-    VolumeDb(f64),
-    /// Static stereo pan/balance in normalized `[-1, 1]` units.
-    Pan(f64),
-    /// Optional exact unary fade beginning at the Clip in edge.
-    FadeIn(Option<AudioFade>),
-    /// Optional exact unary fade ending at the Clip out edge.
-    FadeOut(Option<AudioFade>),
-}
-
-/// Change exactly one field of one placement-local audio Component Edit.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct InspectorSetAudioComponentEditFieldPayload {
-    /// Clip that owns the edit.
-    pub clip: InspectorClipRefPayload,
-    /// Stable edit being changed.
-    pub edit_id: AudioComponentEditId,
-    /// Single typed field mutation; unrelated author state is preserved.
-    pub field: InspectorAudioComponentEditField,
-}
-
 /// Select one effect instance inside a clip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InspectorSelectEffectPayload {
@@ -1257,6 +1229,13 @@ pub fn audio_automation_edit_action(
     ProductAction::Audio(AudioProductAction::EditAutomation(request)).into_external_action()
 }
 
+/// Build one atomic placement-local Audio Component authoring action.
+pub fn audio_component_edit_action(
+    request: mondrian_timeline::AudioComponentEditRequest,
+) -> Action {
+    ProductAction::Audio(AudioProductAction::EditComponent(request)).into_external_action()
+}
+
 /// Build an action that inserts one canonical product-visible built-in Processor.
 pub fn audio_processor_insert_built_in_action(
     payload: super::product_action::AudioProcessorInsertBuiltInPayload,
@@ -1455,13 +1434,6 @@ pub fn inspector_set_audio_component_source_action(
     payload: InspectorSetAudioComponentSourcePayload,
 ) -> Action {
     custom_inspector_action(INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, payload)
-}
-
-/// Build an action that changes one Clip audio Component Edit field.
-pub fn inspector_set_audio_component_edit_field_action(
-    payload: InspectorSetAudioComponentEditFieldPayload,
-) -> Action {
-    custom_inspector_action(INSPECTOR_SET_AUDIO_COMPONENT_EDIT_FIELD, payload)
 }
 
 /// Build an action that selects an effect in the inspector scope.

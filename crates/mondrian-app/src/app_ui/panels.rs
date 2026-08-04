@@ -23,8 +23,8 @@ use mondrian_core::types::{
     EffectId, JobId, KeyframeId, Rational, SequenceId, TrackId, VideoTransitionId,
 };
 use mondrian_core::{
-    Color, FrameRounding, ParameterUnit, TimeScale, TimelineDisplayContract, TimelineDisplayFormat,
-    TimelineTime, WorkingColorSpace,
+    AudioChannelLayout, Color, FrameRounding, ParameterUnit, TimeScale, TimelineDisplayContract,
+    TimelineDisplayFormat, TimelineTime, WorkingColorSpace,
 };
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
@@ -53,6 +53,7 @@ use mondrian_timeline::sequence::{
     DeliveryBitDepth, InputColorResolutionSource, MissingColorMetadataPolicy, Sequence, VideoRange,
 };
 use mondrian_timeline::track::Track;
+use mondrian_timeline::AudioComponentMutation;
 use mondrian_timeline::VideoTransitionType;
 use mondrian_ui_core::types::SplitDirection;
 use mondrian_ui_core::DragPayload;
@@ -96,39 +97,37 @@ use crate::app::ui_actions::{
     assets_rename_folder_action, assets_set_proxy_mode_action, effects_add_to_clip_action,
     export_cancel_job_action, export_clear_completed_action, export_enqueue_action,
     export_set_draft_action, inspector_edit_clip_curve_action, inspector_remove_effect_action,
-    inspector_select_effect_action, inspector_set_audio_component_edit_field_action,
-    inspector_set_audio_component_source_action, inspector_set_clip_enabled_action,
-    inspector_set_clip_opacity_action, inspector_set_clip_property_action,
-    inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
-    inspector_set_effect_enabled_action, inspector_set_effect_property_action,
-    timeline_add_track_action, timeline_clear_in_out_points_action,
-    timeline_create_cross_dissolve_action, timeline_drop_asset_action,
-    timeline_extract_range_action, timeline_lift_range_action, timeline_link_selected_clips_action,
-    timeline_move_clip_action, timeline_move_track_action, timeline_open_nested_sequence_action,
-    timeline_roll_selected_cut_to_playhead_action, timeline_seek_with_source_action,
-    timeline_select_clip_action, timeline_select_video_transition_action,
-    timeline_set_in_out_point_action, timeline_set_selected_clips_enabled_action,
-    timeline_set_track_control_action, timeline_set_track_targeting_action,
-    timeline_set_video_transition_range_action, timeline_trim_clips_action,
-    timeline_trim_selected_clips_to_playhead_action, timeline_unlink_selected_clips_action,
-    viewer_set_preview_resolution_scale_action, viewer_set_zoom_scale_action,
-    AppShellInputColorPipelineDiagnostics, AppShellInterpretAssetDialogPayload,
-    AppShellRelinkAssetDialogPayload, AppShellRelocatePanelPayload,
-    AppShellRevealInFileManagerPayload, AppShellVideoSignalDiagnostics, AssetsCreateAssetPayload,
-    AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
-    AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
-    AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsOpenFolderPayload,
-    AssetsPrepareDragPayload, AssetsRebindAudioComponentPayload,
-    AssetsRefreshAudioComponentsPayload, AssetsRenameAssetPayload, AssetsRenameFolderPayload,
-    AssetsSetProxyModePayload, DockDropAreaPayload, EffectsAddToClipPayload,
-    ExportDraftUpdatePayload, ExportEnqueuePayload, ExportJobTargetPayload,
-    ExportOutputDialogPayload, ImportMediaDialogPayload, InspectorAudioComponentEditField,
+    inspector_select_effect_action, inspector_set_audio_component_source_action,
+    inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
+    inspector_set_clip_property_action, inspector_set_clip_tint_action,
+    inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
+    inspector_set_effect_property_action, timeline_add_track_action,
+    timeline_clear_in_out_points_action, timeline_create_cross_dissolve_action,
+    timeline_drop_asset_action, timeline_extract_range_action, timeline_lift_range_action,
+    timeline_link_selected_clips_action, timeline_move_clip_action, timeline_move_track_action,
+    timeline_open_nested_sequence_action, timeline_roll_selected_cut_to_playhead_action,
+    timeline_seek_with_source_action, timeline_select_clip_action,
+    timeline_select_video_transition_action, timeline_set_in_out_point_action,
+    timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
+    timeline_set_track_targeting_action, timeline_set_video_transition_range_action,
+    timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
+    timeline_unlink_selected_clips_action, viewer_set_preview_resolution_scale_action,
+    viewer_set_zoom_scale_action, AppShellInputColorPipelineDiagnostics,
+    AppShellInterpretAssetDialogPayload, AppShellRelinkAssetDialogPayload,
+    AppShellRelocatePanelPayload, AppShellRevealInFileManagerPayload,
+    AppShellVideoSignalDiagnostics, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
+    AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
+    AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
+    AssetsMoveSelectionPayload, AssetsOpenFolderPayload, AssetsPrepareDragPayload,
+    AssetsRebindAudioComponentPayload, AssetsRefreshAudioComponentsPayload,
+    AssetsRenameAssetPayload, AssetsRenameFolderPayload, AssetsSetProxyModePayload,
+    DockDropAreaPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
+    ExportJobTargetPayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
     InspectorAudioComponentSourcePayload, InspectorClipRefPayload, InspectorClipTransformField,
     InspectorCurveEditPayload, InspectorCurvePointPayload, InspectorEditClipCurvePayload,
     InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
-    InspectorSetAudioComponentEditFieldPayload, InspectorSetAudioComponentSourcePayload,
-    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-    InspectorSetClipPropertyPayload, InspectorSetClipTintPayload,
+    InspectorSetAudioComponentSourcePayload, InspectorSetClipEnabledPayload,
+    InspectorSetClipOpacityPayload, InspectorSetClipPropertyPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
     TimelineClipSelectionModePayload, TimelineCreateCrossDissolvePayload, TimelineDropAssetPayload,
@@ -149,6 +148,10 @@ use crate::app_ui::action_availability::app_state_action_enabled;
 use crate::app_ui::audio_automation::{
     audio_automation_curve_edit_action, component_automation_viewport, project_audio_automation,
     AudioAutomationCurveModel,
+};
+use crate::app_ui::audio_component_mapping::{
+    audio_component_mutation_action, project_audio_channel_mapping,
+    with_audio_channel_mapping_rows, AudioChannelMappingModel,
 };
 use crate::app_ui::audio_mixer::{
     create_bus_action as audio_mixer_create_bus_action,
@@ -1617,6 +1620,8 @@ pub struct InspectorAudioComponentModel {
     pub source_options: Vec<InspectorAudioSourceOptionModel>,
     /// Asset-global physical binding editor for media Components only.
     pub binding: Option<InspectorAudioBindingModel>,
+    /// Exact channel-mapping policy, observed source evidence, and review matrix.
+    pub(crate) channel_mapping: AudioChannelMappingModel,
     /// Whether this Component contributes signal.
     pub enabled: bool,
     /// Static post-processing placement volume in dB.
@@ -3283,6 +3288,7 @@ fn inspector_audio_components(
                         format!("Component {component_id}（素材不可用）"),
                         Vec::new(),
                         None,
+                        None,
                         clip.duration,
                         sequence,
                         selection.track_id,
@@ -3343,11 +3349,15 @@ fn inspector_audio_components(
                             })
                             .unwrap_or_default(),
                     });
+                let source_layout = asset
+                    .admitted_audio_source_selection(component_id)
+                    .and_then(|selection| selection.source_layout().exact_signal_layout());
                 inspector_audio_component_model(
                     edit,
                     source_label,
                     source_options,
                     binding,
+                    source_layout,
                     clip.duration,
                     sequence,
                     selection.track_id,
@@ -3382,6 +3392,14 @@ fn inspector_audio_components(
                     source_label,
                     source_options,
                     None,
+                    child.and_then(|child| {
+                        child
+                            .audio_program
+                            .outputs
+                            .iter()
+                            .any(|output| output.id == output_id)
+                            .then_some(child.settings.audio_channel_layout)
+                    }),
                     clip.duration,
                     sequence,
                     selection.track_id,
@@ -3397,6 +3415,7 @@ fn inspector_audio_component_model(
     source_label: String,
     source_options: Vec<InspectorAudioSourceOptionModel>,
     binding: Option<InspectorAudioBindingModel>,
+    observed_source_layout: Option<AudioChannelLayout>,
     clip_duration: TimelineTime,
     sequence: &Sequence,
     track_id: TrackId,
@@ -3408,6 +3427,11 @@ fn inspector_audio_component_model(
         source_label,
         source_options,
         binding,
+        channel_mapping: project_audio_channel_mapping(
+            &edit.channel_mapping,
+            observed_source_layout,
+            sequence.settings.audio_channel_layout,
+        ),
         enabled: edit.enabled,
         volume_db: edit.volume_db,
         volume_automation: viewport.and_then(|viewport| {
@@ -5701,10 +5725,10 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                     Box::new(
                         Checkbox::new("参与混音", component.enabled).enabled(can_edit).on_change(
                             move |value| {
-                                inspector_audio_edit_field_action(
+                                audio_component_mutation_action(
                                     selected_clip,
                                     edit_id,
-                                    InspectorAudioComponentEditField::Enabled(value),
+                                    AudioComponentMutation::SetEnabled { value },
                                 )
                             },
                         ),
@@ -5722,10 +5746,10 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                         1,
                         volume_static_editable,
                         move |value| {
-                            inspector_audio_edit_field_action(
+                            audio_component_mutation_action(
                                 selected_clip,
                                 edit_id,
-                                InspectorAudioComponentEditField::VolumeDb(f64::from(value)),
+                                AudioComponentMutation::SetVolumeDb { value: f64::from(value) },
                             )
                         },
                     ),
@@ -5740,10 +5764,10 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                         0,
                         pan_static_editable,
                         move |value| {
-                            inspector_audio_edit_field_action(
+                            audio_component_mutation_action(
                                 selected_clip,
                                 edit_id,
-                                InspectorAudioComponentEditField::Pan(f64::from(value) / 100.0),
+                                AudioComponentMutation::SetPan { value: f64::from(value) / 100.0 },
                             )
                         },
                     ),
@@ -5814,6 +5838,13 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                     ),
                 ));
             }
+            section = with_audio_channel_mapping_rows(
+                section,
+                selected_clip,
+                edit_id,
+                &component.channel_mapping,
+                can_edit,
+            );
             let max_fade_seconds = component.clip_duration.to_f64().max(0.0) as f32;
             let fade_in_curve =
                 component.fade_in.map(|fade| fade.curve).unwrap_or(AudioFadeCurve::EqualPower);
@@ -6464,22 +6495,6 @@ fn inspector_audio_source_action(
     })
 }
 
-fn inspector_audio_edit_field_action(
-    selection: Option<SelectedClipRef>,
-    edit_id: AudioComponentEditId,
-    field: InspectorAudioComponentEditField,
-) -> Option<Action> {
-    selection.map(|selection| {
-        inspector_set_audio_component_edit_field_action(
-            InspectorSetAudioComponentEditFieldPayload {
-                clip: inspector_clip_payload(selection),
-                edit_id,
-                field,
-            },
-        )
-    })
-}
-
 const INSPECTOR_AUDIO_FADE_TIMESCALE: u32 = 1_000;
 
 fn inspector_audio_fade_duration_action(
@@ -6502,12 +6517,12 @@ fn inspector_audio_fade_duration_action(
         };
         (duration > TimelineTime::ZERO).then_some(AudioFade { duration, curve })
     };
-    let field = if fade_in {
-        InspectorAudioComponentEditField::FadeIn(fade)
+    let mutation = if fade_in {
+        AudioComponentMutation::SetFadeIn { value: fade }
     } else {
-        InspectorAudioComponentEditField::FadeOut(fade)
+        AudioComponentMutation::SetFadeOut { value: fade }
     };
-    inspector_audio_edit_field_action(selection, edit_id, field)
+    audio_component_mutation_action(selection, edit_id, mutation)
 }
 
 fn audio_fade_curve_items(
@@ -6523,14 +6538,14 @@ fn audio_fade_curve_items(
         .into_iter()
         .map(|curve| {
             let updated = Some(AudioFade { duration: fade.duration, curve });
-            let field = if fade_in {
-                InspectorAudioComponentEditField::FadeIn(updated)
+            let mutation = if fade_in {
+                AudioComponentMutation::SetFadeIn { value: updated }
             } else {
-                InspectorAudioComponentEditField::FadeOut(updated)
+                AudioComponentMutation::SetFadeOut { value: updated }
             };
             MenuItem::new(
                 audio_fade_curve_label(curve),
-                inspector_audio_edit_field_action(selection, edit_id, field),
+                audio_component_mutation_action(selection, edit_id, mutation),
             )
             .checked(curve == fade.curve)
         })
@@ -7230,8 +7245,8 @@ mod tests {
         ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
         ASSETS_OPEN_FOLDER, ASSETS_PREPARE_DRAG, ASSETS_REBIND_AUDIO_COMPONENT,
         ASSETS_REFRESH_AUDIO_COMPONENTS, ASSETS_RENAME_ASSET, ASSETS_SET_PROXY_MODE,
-        EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_EDIT_CLIP_CURVE, INSPECTOR_NAMESPACE,
-        INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_AUDIO_COMPONENT_EDIT_FIELD,
+        AUDIO_EDIT_COMPONENT, AUDIO_NAMESPACE, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE,
+        INSPECTOR_EDIT_CLIP_CURVE, INSPECTOR_NAMESPACE, INSPECTOR_SELECT_EFFECT,
         INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
         INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
         TIMELINE_CREATE_CROSS_DISSOLVE, TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK,
@@ -7462,6 +7477,21 @@ mod tests {
             binding.options.iter().filter(|option| option.selected).count(),
             1
         );
+        assert_eq!(
+            component.channel_mapping.observed_source_layout,
+            Some(AudioChannelLayout::Stereo)
+        );
+        assert_eq!(
+            component.channel_mapping.destination_layout,
+            AudioChannelLayout::Stereo
+        );
+        assert!(component
+            .channel_mapping
+            .review_matrix
+            .as_ref()
+            .is_some_and(mondrian_core::AudioChannelMixMatrix::is_identity));
+        assert!(!component.channel_mapping.matrix_is_explicit);
+        assert!(component.channel_mapping.diagnostic.is_none());
         assert_eq!(model.audio_processor_racks.len(), 1);
         assert_eq!(model.audio_processor_racks[0].processors.len(), 1);
         assert_eq!(model.audio_processor_racks[0].processors[0].label, "增益");
@@ -7469,6 +7499,45 @@ mod tests {
         drop(model);
         drop(state);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn inspector_model_uses_child_sequence_layout_for_nested_output_mapping() {
+        let mut child = Sequence::new("Nested source");
+        child.settings.audio_channel_layout = AudioChannelLayout::Surround51Side;
+        let output_id = child.audio_program.outputs[0].id;
+
+        let mut parent = Sequence::new("Nested parent");
+        let track_id = parent.audio_tracks[0].id;
+        let clip = Clip::new_nested_sequence(
+            child.id,
+            TimelineTime::ZERO,
+            tt(25, parent.time_base()),
+            None,
+        )
+        .expect("nested Clip");
+        let clip_id = clip.id;
+        parent
+            .add_nested_audio_clip(track_id, clip, output_id)
+            .expect("nested audio Clip");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(parent));
+        state.test_set_sequences(vec![child]);
+        state.selection.selected_clips =
+            vec![SelectedClipRef { track_id, is_video_track: false, clip_id }];
+
+        let model = InspectorPanelModel::from_app_state(&state);
+        let mapping = &model.audio_components[0].channel_mapping;
+        assert_eq!(
+            mapping.observed_source_layout,
+            Some(AudioChannelLayout::Surround51Side)
+        );
+        assert_eq!(mapping.destination_layout, AudioChannelLayout::Stereo);
+        assert_eq!(
+            mapping.review_matrix.as_ref().map(|matrix| matrix.entries().len()),
+            Some(6)
+        );
+        assert!(mapping.diagnostic.is_none());
     }
 
     #[test]
@@ -12372,23 +12441,23 @@ mod tests {
             InspectorAudioComponentSourcePayload::Media { component_id }
         );
 
-        let field_action = inspector_audio_edit_field_action(
+        let field_action = audio_component_mutation_action(
             Some(selection),
             edit_id,
-            InspectorAudioComponentEditField::VolumeDb(-3.5),
+            AudioComponentMutation::SetVolumeDb { value: -3.5 },
         );
         let Some(Action::Custom { namespace, name, payload }) = field_action else {
             panic!("expected typed Inspector audio field action");
         };
-        assert_eq!(namespace, INSPECTOR_NAMESPACE);
-        assert_eq!(name, INSPECTOR_SET_AUDIO_COMPONENT_EDIT_FIELD);
-        let payload: InspectorSetAudioComponentEditFieldPayload =
+        assert_eq!(namespace, AUDIO_NAMESPACE);
+        assert_eq!(name, AUDIO_EDIT_COMPONENT);
+        let payload: mondrian_timeline::AudioComponentEditRequest =
             serde_json::from_value(payload).expect("audio field payload");
-        assert_eq!(payload.clip.clip_id, selection.clip_id);
-        assert_eq!(payload.edit_id, edit_id);
+        assert_eq!(payload.address.clip_id, selection.clip_id);
+        assert_eq!(payload.address.edit_id, edit_id);
         assert_eq!(
-            payload.field,
-            InspectorAudioComponentEditField::VolumeDb(-3.5)
+            payload.mutation,
+            AudioComponentMutation::SetVolumeDb { value: -3.5 }
         );
 
         let zero_fade_action = inspector_audio_fade_duration_action(
@@ -12401,11 +12470,11 @@ mod tests {
         let Some(Action::Custom { payload, .. }) = zero_fade_action else {
             panic!("expected typed zero-fade action");
         };
-        let payload: InspectorSetAudioComponentEditFieldPayload =
+        let payload: mondrian_timeline::AudioComponentEditRequest =
             serde_json::from_value(payload).expect("zero-fade payload");
         assert_eq!(
-            payload.field,
-            InspectorAudioComponentEditField::FadeIn(None)
+            payload.mutation,
+            AudioComponentMutation::SetFadeIn { value: None }
         );
 
         let asset_id = AssetId::new();
@@ -12447,10 +12516,10 @@ mod tests {
             None
         );
         assert_eq!(
-            inspector_audio_edit_field_action(
+            audio_component_mutation_action(
                 None,
                 AudioComponentEditId::new(),
-                InspectorAudioComponentEditField::Enabled(false),
+                AudioComponentMutation::SetEnabled { value: false },
             ),
             None
         );

@@ -17,9 +17,7 @@ use super::workflow::{
 use super::{load_golden_contract, repository_root};
 use super::{load_json, parse_rational, sequence_settings_from_contract, GoldenProjectContract};
 use crate::app::ui_actions::{
-    inspector_set_audio_component_edit_field_action, timeline_drop_asset_action,
-    InspectorAudioComponentEditField, InspectorClipRefPayload,
-    InspectorSetAudioComponentEditFieldPayload, TimelineDropAssetPayload,
+    audio_component_edit_action, timeline_drop_asset_action, TimelineDropAssetPayload,
 };
 use crate::app::AppState;
 use anyhow::{bail, ensure, Context};
@@ -32,6 +30,7 @@ use mondrian_media::info::ChannelLayout;
 use mondrian_timeline::audio::{AudioComponentEdit, AudioFade, AudioFadeCurve};
 use mondrian_timeline::clip::Clip;
 use mondrian_timeline::sequence::SequenceSettings;
+use mondrian_timeline::{AudioComponentAddress, AudioComponentEditRequest, AudioComponentMutation};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -383,41 +382,41 @@ pub(super) fn execute_foundation_stage(
         "foundation Clip does not exactly cover the Golden timeline"
     );
     let edit_id = clip.audio_components.first().context("audio Clip has no Component Edit")?.id;
-    let clip_ref = InspectorClipRefPayload {
-        track_id: actual_audio_track_id,
-        is_video_track: false,
-        clip_id,
-    };
     let fade = AudioFade {
         duration: TimelineTime::new(1, 1)?,
         curve: AudioFadeCurve::EqualPower,
     };
 
     let mut content_steps = Vec::new();
-    for (intent, field) in [
+    for (intent, mutation) in [
         (
             "set-clip-audio-volume",
-            InspectorAudioComponentEditField::VolumeDb(-6.0),
+            AudioComponentMutation::SetVolumeDb { value: -6.0 },
         ),
         (
             "set-clip-audio-pan",
-            InspectorAudioComponentEditField::Pan(0.25),
+            AudioComponentMutation::SetPan { value: 0.25 },
         ),
         (
             "set-clip-audio-fade-in",
-            InspectorAudioComponentEditField::FadeIn(Some(fade)),
+            AudioComponentMutation::SetFadeIn { value: Some(fade) },
         ),
         (
             "set-clip-audio-fade-out",
-            InspectorAudioComponentEditField::FadeOut(Some(fade)),
+            AudioComponentMutation::SetFadeOut { value: Some(fade) },
         ),
     ] {
         content_steps.push(dispatch_author_transition(
             state,
             intent,
-            inspector_set_audio_component_edit_field_action(
-                InspectorSetAudioComponentEditFieldPayload { clip: clip_ref, edit_id, field },
-            ),
+            audio_component_edit_action(AudioComponentEditRequest {
+                address: AudioComponentAddress {
+                    track_id: actual_audio_track_id,
+                    clip_id,
+                    edit_id,
+                },
+                mutation,
+            }),
         )?);
     }
     let authored_edit = find_audio_edit(state, clip_id, edit_id)?;

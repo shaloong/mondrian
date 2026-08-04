@@ -11,7 +11,7 @@ use mondrian_core::{Rational, TimelineTime};
 use mondrian_editor_state::Action;
 use mondrian_timeline::{
     sequence::Sequence, AudioAutomationEditRequest, AudioChannelStripEditRequest,
-    AudioProcessorRackEditRequest, AudioRoutingEditRequest,
+    AudioComponentEditRequest, AudioProcessorRackEditRequest, AudioRoutingEditRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +42,8 @@ pub const AUDIO_EDIT_CHANNEL_STRIP: &str = "edit_channel_strip";
 pub const AUDIO_EDIT_ROUTING: &str = "edit_routing";
 /// External action name for one stable-address audio automation edit.
 pub const AUDIO_EDIT_AUTOMATION: &str = "edit_automation";
+/// External action name for one placement-local Audio Component edit.
+pub const AUDIO_EDIT_COMPONENT: &str = "edit_component";
 /// External action name for one open-Session Track solo change.
 pub const AUDIO_SET_TRACK_SOLO: &str = "set_track_solo";
 
@@ -64,6 +66,8 @@ pub enum AudioProductAction {
     SetTrackSolo(AudioTrackSoloPayload),
     /// Apply one exact owner-time curve mutation.
     EditAutomation(AudioAutomationEditRequest),
+    /// Apply one stable-address placement-local Component mutation.
+    EditComponent(AudioComponentEditRequest),
     /// Apply one stable-address Rack mutation in one author transaction.
     EditProcessorRack(AudioProcessorRackEditRequest),
     /// Resolve and insert one canonical product-visible built-in Processor.
@@ -146,6 +150,9 @@ impl ProductAction {
                 AUDIO_EDIT_AUTOMATION => Ok(Some(Self::Audio(AudioProductAction::EditAutomation(
                     decode_payload(namespace, name, payload)?,
                 )))),
+                AUDIO_EDIT_COMPONENT => Ok(Some(Self::Audio(AudioProductAction::EditComponent(
+                    decode_payload(namespace, name, payload)?,
+                )))),
                 AUDIO_SET_TRACK_SOLO => Ok(Some(Self::Audio(AudioProductAction::SetTrackSolo(
                     decode_payload(namespace, name, payload)?,
                 )))),
@@ -186,6 +193,11 @@ impl ProductAction {
             Self::Audio(AudioProductAction::EditAutomation(request)) => (
                 AUDIO_NAMESPACE,
                 AUDIO_EDIT_AUTOMATION,
+                serde_json::json!(request),
+            ),
+            Self::Audio(AudioProductAction::EditComponent(request)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_EDIT_COMPONENT,
                 serde_json::json!(request),
             ),
             Self::Timeline(TimelineProductAction::SelectClip(payload)) => (
@@ -597,6 +609,35 @@ mod tests {
                     keyframe: mondrian_core::ExactAutomationKeyframe::linear(
                         TimelineTime::new(1, 48_000).expect("sample time"),
                         -6.0,
+                    ),
+                },
+            },
+        ));
+
+        let external = expected.clone().into_external_action();
+        let decoded = ProductAction::decode_external(&external)
+            .expect("valid external payload")
+            .expect("recognized product action");
+
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn external_codec_round_trips_audio_component_edits() {
+        let expected = ProductAction::Audio(AudioProductAction::EditComponent(
+            AudioComponentEditRequest {
+                address: mondrian_timeline::AudioComponentAddress {
+                    track_id: TrackId::new(),
+                    clip_id: ClipId::new(),
+                    edit_id: mondrian_core::AudioComponentEditId::new(),
+                },
+                mutation: mondrian_timeline::AudioComponentMutation::SetChannelMapping {
+                    value: mondrian_timeline::audio::AudioComponentChannelMapping::Explicit(
+                        mondrian_core::AudioChannelMixMatrix::standard(
+                            mondrian_core::AudioChannelLayout::Mono,
+                            mondrian_core::AudioChannelLayout::Stereo,
+                        )
+                        .expect("standard matrix"),
                     ),
                 },
             },

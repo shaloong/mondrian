@@ -511,6 +511,19 @@ Track creation/removal updates the keyed mixer state and default route in the
 same Sequence mutation. Validation rejects a snapshot when the two sets differ.
 See [Audio Pipeline](audio-pipeline.md) for the author/compiler boundary.
 
+Placement-local controls enter through one `AudioComponentEditRequest`
+Interface addressed by `(TrackId, ClipId, AudioComponentEditId)`. Its closed
+mutation algebra covers enabled state, unautomated volume/pan, both unary fades,
+and complete `Standard | Explicit(AudioChannelMixMatrix)` mapping replacement.
+One coefficient operation carries expected source/destination layouts and fails
+if the explicit matrix changed since inspection; the candidate then rebuilds
+the complete canonical sparse matrix exactly once.
+Inspection returns the canonical Component, Sequence-owned destination layout,
+and Track-lock blocker. Static volume/pan cannot overwrite active automation,
+and an explicit matrix whose destination differs from the Sequence layout is
+rejected by complete Audio Program validation. The Implementation commits only
+the validated candidate and reports canonical no-op without a revision.
+
 Processor topology, bypass, and unkeyed parameter authoring enter the atomic `AudioProcessorRackEditRequest`
 Interface. Its address is either one `AudioProcessingScopeId`, or the typed
 pair `(Track | Bus | ProgramOutput, PreFader | PostFader)`; invalid combinations

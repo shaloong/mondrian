@@ -102,14 +102,17 @@ authoring intent.
 The Inspector selects the logical source of each `AudioComponentEdit` by its
 stable edit ID. Media Clips offer Asset Component IDs; nested Clips offer only
 the child Sequence's stable public outputs. Independent typed field actions
-address enabled state, static volume, static pan/balance, fade-in, or fade-out;
-they never round-trip or replace the complete edit, so an interaction cannot
-overwrite unrelated automation, channel mapping, Role, or processing state.
-The application derives actual Track ownership, enforces Track lock, resolves
-the stable edit ID, validates the complete audio author aggregate, and commits
-one Sequence snapshot only when the field changed. A rejected or no-op action
-does not advance revision/history. Successful source or field changes are
-undoable and invalidate the prepared Runtime at the current transport anchor;
+address enabled state, static volume, static pan/balance, fade-in, fade-out, or
+the complete channel-mapping policy. They never round-trip or replace the
+complete edit, so an interaction cannot overwrite unrelated automation, Role,
+or processing state. `AudioComponentEditRequest` is the sole stable-address
+Timeline Interface for these mutations: it resolves Track/Clip/Edit ownership,
+admits the Track lock, rejects static volume or pan while its curve is signal
+authority, validates the complete Audio Program candidate, and replaces the
+Sequence only after success. Matrix replacement is atomic; a partially edited
+or non-canonical matrix never enters an immutable snapshot. A rejected or no-op
+action does not advance revision/history. Successful source or field changes
+are undoable and invalidate the prepared Runtime at the current transport anchor;
 running playback re-prepares, while paused/stopped playback releases the stale
 source.
 
@@ -147,6 +150,22 @@ the exact source layout is bound. Equal layouts use ordinal identity; approved
 mono/stereo/5.1(side) conversions retain the documented averaging/-3 dB laws
 and omit LFE from fold-down. Explicit one/two-channel Discrete compatibility is
 versioned; ambiguous or unsupported pairs fail closed.
+
+`app_ui::audio_component_mapping` is a shallow product Adapter over that deep
+Interface. It resolves current source-layout evidence only from an exact Asset
+Component binding/probe match or the selected child public output; channel
+count alone is never speaker semantics. The Inspector shows source and
+Sequence destination layouts plus every non-zero coefficient. `Standard`
+remains a versioned execution policy and is reviewable as its currently
+resolved matrix without being silently persisted. A deliberate custom choice
+materializes either that reviewed standard matrix or an exact empty matrix;
+coefficient edits carry only the inspected source/destination layouts, channel
+pair, and gain. Timeline rejects stale layout guards, rebuilds the entire
+canonical sparse matrix inside the candidate, and commits once. This keeps a
+64-channel editor from cloning one full matrix into every menu action.
+If current evidence is unavailable or differs from an existing explicit source
+layout, the author matrix is preserved and the product reports that execution
+will fail closed instead of retargeting the user's intent.
 
 The prepared Contribution, not FFmpeg or UI, owns the resolved matrix and native
 source layout. It reads native interleaved PCM into one Session-preallocated

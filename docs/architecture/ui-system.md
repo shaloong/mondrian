@@ -122,8 +122,8 @@ authoring payloads.
 
 The same Component section projects enabled state, static dB volume,
 normalized pan/balance, and independent exact edge fades. Every interaction
-emits one typed field mutation instead of serializing the whole
-`AudioComponentEdit`; the application re-resolves Clip/Track/edit ownership and
+emits one typed `AudioComponentEditRequest` mutation instead of serializing the
+whole `AudioComponentEdit`; Timeline re-resolves Clip/Track/edit ownership and
 validates the full candidate before commit. Volume exposes a normal working
 range of `-60..+12 dB` while preserving the author hard range
 `-120..+24 dB`; pan displays `-100..+100` and crosses the domain boundary only
@@ -131,6 +131,17 @@ as normalized `-1..1`. Fade seconds are quantized once to exact
 `TimelineTime`, bounded by Clip duration, and zero means absent. Curve selection
 preserves the exact duration and is disabled when that fade is absent. The
 panel owns no parallel audio draft and no execution interpretation.
+
+`app_ui::audio_component_mapping` owns the Inspector projection for Component
+channel matrices. The Adapter combines persistent mapping intent with exact
+current Asset-binding or child-output layout evidence, renders `Standard` as a
+read-only review matrix, and exposes explicit sparse coefficients by semantic
+channel label or discrete ordinal. Choosing a custom preset materializes one
+exact matrix; adding, removing, or changing an edge reconstructs and submits
+the complete canonical matrix in one Product Action. Missing, unsupported, or
+mismatched layout evidence remains visible and fail-closed. The Adapter never
+infers speaker positions from channel count and never rewrites an existing
+explicit matrix after source rebinding.
 
 ## Product SVG Capability
 
@@ -379,9 +390,9 @@ Inside each migrated App slice, product meaning is carried by the closed
 scripting, and plugin transport Seam; it must not become a second product-domain
 model. The current high-frequency Timeline slice covers Clip selection, Clip
 movement, bulk trim, and seek. The closed `AudioProductAction` slice carries
-complete `AudioProcessorRackEditRequest`, `AudioChannelStripEditRequest`, and
-`AudioAutomationEditRequest` values for Clip Processing Scope, Track, Bus, and
-Program Output authoring. Its
+complete `AudioComponentEditRequest`, `AudioProcessorRackEditRequest`,
+`AudioChannelStripEditRequest`, and `AudioAutomationEditRequest` values for Clip
+placement, Clip Processing Scope, Track, Bus, and Program Output authoring. Its
 production constructors lower each request into one `ui.audio` external
 envelope; the App codec admits a recognized payload into the closed algebra and
 a dedicated App Module commits exactly one Sequence author transaction. Only a
