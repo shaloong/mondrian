@@ -340,10 +340,13 @@ All current-selection editorial commands share the closed
 `TimelineSelectionEdit` Interface: Link, Unlink, Trim-to-playhead,
 Roll-to-playhead, and Set Enabled. The Widget never transports its selected ID
 list or a Track-lock snapshot. The deep App Module resolves current Session
-selection/playhead state, expands structural Link Groups where synchronized
-placement changes require it, and uses the same pure Trim/Roll preparation as
-execution. Product availability is therefore a projection of the owning Module
-rather than a second collection of UI geometry rules. The sole strict
+selection/playhead state, keeps the primary Clip first for anchor-sensitive
+edits, expands structural Link Groups where synchronized placement changes
+require it, and uses the same pure Trim/Roll preparation as execution. A linked
+Trim clamps one exact group delta against all members and retains existing J/L
+or sample offsets; the Widget does not align edges or choose a second policy.
+Product availability is therefore a projection of the owning Module rather than
+a second collection of UI geometry rules. The sole strict
 `ui.timeline.edit_selection` codec uses one
 variant-specific payload shape; unknown variants and fields fail closed.
 

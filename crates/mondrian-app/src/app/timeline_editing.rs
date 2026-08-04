@@ -533,64 +533,60 @@ pub(super) fn slide_clip_in_track(
     Ok(true)
 }
 
-pub(super) fn can_trim_clip_edge(
-    seq: &Sequence,
-    clip_id: ClipId,
-    edge: TrimEdge,
-    target_frame: i64,
-) -> mondrian_core::Result<bool> {
-    let time_base = seq.time_base();
-    for track in seq.video_tracks.iter().chain(&seq.audio_tracks) {
-        if let Some(clip) = track.clips.iter().find(|clip| clip.id == clip_id) {
-            if track.is_locked {
-                return Ok(false);
-            }
-            return prepare_trimmed_clip(clip, edge, target_frame, time_base)
-                .map(|prepared| prepared.is_some());
-        }
-    }
-    Ok(false)
-}
-
-pub(super) fn prepare_trimmed_clip(
+pub(super) fn prepare_trimmed_clip_at_time(
     original: &Clip,
     edge: TrimEdge,
-    target_frame: i64,
-    time_base: Rational,
+    target: TimelineTime,
+    minimum_duration: TimelineTime,
 ) -> mondrian_core::Result<Option<Clip>> {
-    let start = author_frame_from_time(original.position, time_base)?;
-    let end = author_frame_from_time(original.end_position()?, time_base)?;
+    if minimum_duration <= TimelineTime::ZERO {
+        return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+            step_id: "trim_clip".to_string(),
+            reason: "修剪最小时长必须为正".to_string(),
+        });
+    }
+    let start = original.position;
+    let end = original.end_position()?;
     if end <= start {
         return Ok(None);
     }
+    // A frame-grid gesture must not make an ordinary Clip shorter than one
+    // Sequence frame. Existing exact sub-frame placements remain valid and
+    // are never lengthened merely to satisfy that gesture policy.
+    let retained_duration = original.duration.min(minimum_duration);
 
     let mut updated = original.clone();
     match edge {
         TrimEdge::In => {
-            let new_start = target_frame.max(start).min(end - 1);
+            let latest_start = end.checked_sub(retained_duration)?;
+            if latest_start <= start {
+                return Ok(None);
+            }
+            let new_start = target.max(start).min(latest_start);
             if new_start == start {
                 return Ok(None);
             }
-            let new_in =
-                original.timeline_to_source_time(author_time_from_frame(new_start, time_base)?)?;
-            let new_position = author_time_from_frame(new_start, time_base)?;
-            let new_clip_time_in = original.timeline_to_clip_time(new_position)?;
-            updated.shift_audio_component_in(new_position.checked_sub(updated.position)?)?;
-            updated.position = new_position;
-            updated.duration = author_time_from_frame(end - new_start, time_base)?;
+            let new_in = original.timeline_to_source_time(new_start)?;
+            let new_clip_time_in = original.timeline_to_clip_time(new_start)?;
+            updated.shift_audio_component_in(new_start.checked_sub(updated.position)?)?;
+            updated.position = new_start;
+            updated.duration = end.checked_sub(new_start)?;
             updated.clip_time_in = new_clip_time_in;
             updated.set_source_origin(new_in)?;
         }
         TrimEdge::Out => {
+            let minimum_end = start.checked_add(retained_duration)?;
             let new_end = if original.source_time_scale().numerator() == 0 {
-                target_frame.max(start + 1)
+                target.max(minimum_end)
+            } else if minimum_end > end {
+                return Ok(None);
             } else {
-                target_frame.max(start + 1).min(end)
+                target.max(minimum_end).min(end)
             };
             if new_end == end {
                 return Ok(None);
             }
-            updated.duration = author_time_from_frame(new_end - start, time_base)?;
+            updated.duration = new_end.checked_sub(start)?;
         }
     }
 

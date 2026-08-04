@@ -10,14 +10,14 @@ use super::product_action::{
 };
 use super::timeline_editing::{
     apply_sequence_track_conflicts_for_focus_group, clip_link_group_member_ids,
-    compact_sequence_references, expand_clip_link_groups, find_clip, find_clip_track_index,
-    find_clip_track_lock, move_existing_clip_to_track_index_at_time, prepare_trimmed_clip,
+    compact_sequence_references, find_clip, find_clip_track_index, find_clip_track_lock,
+    move_existing_clip_to_track_index_at_time, prepare_trimmed_clip_at_time,
 };
 use super::timeline_position::lower_nearest_sequence_frame;
 use super::{AppState, ClipOverlapMode};
 use mondrian_core::{ClipId, FramePosition, MondrianError, TimelineTime, TrackId};
 use mondrian_timeline::{clip::TrimEdge, Clip, Sequence};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 const MOVE_STEP: &str = "move_clip";
 const TRIM_STEP: &str = "timeline_trim_clips";
@@ -109,6 +109,25 @@ impl AppState {
             return Ok(0);
         }
         self.commit_prepared_bulk_trim(plan, trim_edge_action_label(edge))
+    }
+
+    /// Assess one internal frame-grid Trim through the same preparation used
+    /// by execution without mutating author state.
+    pub(super) fn assess_trim_clips_to_frame(
+        &self,
+        clip_ids: &[ClipId],
+        edge: TrimEdge,
+        target_frame: i64,
+    ) -> mondrian_core::Result<usize> {
+        if clip_ids.is_empty() {
+            return Err(action_not_executed(TRIM_STEP, "Clip 集合不能为空"));
+        }
+        let sequence = self.active_sequence().ok_or_else(|| missing_sequence(TRIM_STEP))?;
+        let plan = prepare_bulk_trim_to_frame(sequence, clip_ids, edge, target_frame)?;
+        if plan.updates.is_empty() {
+            return Err(action_not_executed(TRIM_STEP, "请求不会改变任何 Clip 边界"));
+        }
+        Ok(plan.updates.len())
     }
 
     fn prepare_product_clip_move(
@@ -309,42 +328,103 @@ fn prepare_bulk_trim_to_frame(
             "Timeline position must be non-negative",
         ));
     }
-    let mut targets = clip_ids.iter().copied().collect::<HashSet<_>>();
-    for clip_id in &targets {
+    let time_base = sequence.time_base();
+    let target = TimelineTime::from_frame_position(FramePosition::new(target_frame, time_base))?;
+    let minimum_duration = TimelineTime::from_frame_position(FramePosition::new(1, time_base))?;
+
+    let mut roots = Vec::with_capacity(clip_ids.len());
+    let mut seen_roots = HashSet::with_capacity(clip_ids.len());
+    for clip_id in clip_ids {
         if find_clip(sequence, *clip_id).is_none() {
             return Err(MondrianError::ClipNotFound { clip_id: clip_id.to_string() });
         }
-    }
-    for clip_id in &targets {
-        let anchor = find_clip(sequence, *clip_id)
-            .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
-        let anchor_edge = clip_edge_time(anchor, edge)?;
-        for member_id in clip_link_group_member_ids(sequence, *clip_id) {
-            let member = find_clip(sequence, member_id)
-                .ok_or_else(|| MondrianError::ClipNotFound { clip_id: member_id.to_string() })?;
-            if clip_edge_time(member, edge)? != anchor_edge {
-                return Err(workflow_error(
-                    TRIM_STEP,
-                    "offset Link Group edges require an explicit J/L trim policy",
-                ));
-            }
+        if seen_roots.insert(*clip_id) {
+            roots.push(*clip_id);
         }
     }
-    expand_clip_link_groups(sequence, &mut targets);
+
+    let mut claimed_members = HashSet::new();
+    let mut targets = HashMap::new();
+    for root_id in roots {
+        if claimed_members.contains(&root_id) {
+            continue;
+        }
+        let root = find_clip(sequence, root_id)
+            .ok_or_else(|| MondrianError::ClipNotFound { clip_id: root_id.to_string() })?;
+        let requested_delta = target.checked_sub(clip_edge_time(root, edge)?)?;
+        let member_ids = clip_link_group_member_ids(sequence, root_id);
+        let mut minimum_delta: Option<TimelineTime> = None;
+        let mut maximum_delta: Option<TimelineTime> = None;
+        for member_id in &member_ids {
+            let member = find_clip(sequence, *member_id)
+                .ok_or_else(|| MondrianError::ClipNotFound { clip_id: member_id.to_string() })?;
+            let (member_minimum, member_maximum) =
+                trim_delta_bounds(member, edge, minimum_duration)?;
+            minimum_delta =
+                Some(minimum_delta.map_or(member_minimum, |current| current.max(member_minimum)));
+            maximum_delta = intersect_optional_upper_bound(maximum_delta, member_maximum);
+        }
+        let minimum_delta = minimum_delta.unwrap_or(TimelineTime::ZERO);
+        let mut delta = requested_delta.max(minimum_delta);
+        if let Some(maximum_delta) = maximum_delta {
+            delta = delta.min(maximum_delta);
+        }
+        for member_id in member_ids {
+            let member = find_clip(sequence, member_id)
+                .ok_or_else(|| MondrianError::ClipNotFound { clip_id: member_id.to_string() })?;
+            let member_target = clip_edge_time(member, edge)?.checked_add(delta)?;
+            claimed_members.insert(member_id);
+            targets.insert(member_id, member_target);
+        }
+    }
 
     let mut updates = Vec::new();
-    let time_base = sequence.time_base();
     for track in sequence.video_tracks.iter().chain(&sequence.audio_tracks) {
-        for clip in track.clips.iter().filter(|clip| targets.contains(&clip.id)) {
+        for clip in &track.clips {
+            let Some(target) = targets.get(&clip.id).copied() else {
+                continue;
+            };
             if track.is_locked {
                 return Err(MondrianError::TrackLocked { track_id: track.id.to_string() });
             }
-            if let Some(updated) = prepare_trimmed_clip(clip, edge, target_frame, time_base)? {
+            if let Some(updated) =
+                prepare_trimmed_clip_at_time(clip, edge, target, minimum_duration)?
+            {
                 updates.push(updated);
             }
         }
     }
     Ok(PreparedBulkTrim { updates })
+}
+
+fn trim_delta_bounds(
+    clip: &Clip,
+    edge: TrimEdge,
+    minimum_duration: TimelineTime,
+) -> mondrian_core::Result<(TimelineTime, Option<TimelineTime>)> {
+    let retained_duration = clip.duration.min(minimum_duration);
+    match edge {
+        TrimEdge::In => Ok((
+            TimelineTime::ZERO,
+            Some(clip.duration.checked_sub(retained_duration)?),
+        )),
+        TrimEdge::Out => Ok((
+            retained_duration.checked_sub(clip.duration)?,
+            (clip.source_time_scale().numerator() != 0).then_some(TimelineTime::ZERO),
+        )),
+    }
+}
+
+fn intersect_optional_upper_bound(
+    current: Option<TimelineTime>,
+    next: Option<TimelineTime>,
+) -> Option<TimelineTime> {
+    match (current, next) {
+        (Some(current), Some(next)) => Some(current.min(next)),
+        (Some(current), None) => Some(current),
+        (None, Some(next)) => Some(next),
+        (None, None) => None,
+    }
 }
 
 fn clip_edge_time(clip: &Clip, edge: TrimEdge) -> mondrian_core::Result<TimelineTime> {

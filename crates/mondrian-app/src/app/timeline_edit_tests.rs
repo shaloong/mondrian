@@ -2039,7 +2039,7 @@ fn linked_move_preserves_exact_subframe_offsets() {
 }
 
 #[test]
-fn bulk_trim_rejects_offset_link_edges_without_collapsing_them() {
+fn bulk_trim_preserves_exact_offset_link_edges() {
     let mut state = create_state_with_sequence();
     let tb = state.active_sequence().expect("sequence").time_base();
     let sample_offset = TimelineTime::new(1, 48_000).expect("one sample");
@@ -2061,20 +2061,81 @@ fn bulk_trim_rejects_offset_link_edges_without_collapsing_them() {
             .expect("add audio Clip");
     }
 
-    state
+    let changed = state
         .trim_clips_bulk_to_frame(&[video_id], TrimEdge::Out, 5)
-        .expect_err("offset linked edges need an explicit J/L policy");
+        .expect("trim offset Link Group from the video anchor");
+    assert_eq!(changed, 2);
 
     let sequence = state.active_sequence().expect("sequence");
     assert_eq!(
         find_clip(sequence, video_id).expect("video Clip").duration,
-        tt(10, tb)
+        tt(5, tb)
     );
     assert_eq!(
         find_clip(sequence, audio_id).expect("audio Clip").duration,
+        tt(5, tb)
+    );
+    assert_eq!(
+        find_clip(sequence, audio_id)
+            .expect("audio Clip")
+            .end_position()
+            .expect("audio end"),
+        tt(5, tb).checked_add(sample_offset).expect("offset audio end")
+    );
+    assert!(state.can_undo_action());
+
+    assert!(state.undo_timeline().expect("undo linked Trim"));
+    let sequence = state.active_sequence().expect("sequence after Undo");
+    assert_eq!(
+        find_clip(sequence, video_id).expect("restored video Clip").duration,
         tt(10, tb)
     );
-    assert!(!state.can_undo_action());
+    let restored_audio = find_clip(sequence, audio_id).expect("restored audio Clip");
+    assert_eq!(restored_audio.position, sample_offset);
+    assert_eq!(restored_audio.duration, tt(10, tb));
+}
+
+#[test]
+fn bulk_trim_uses_the_complete_link_groups_common_delta_limit() {
+    let mut state = create_state_with_sequence();
+    let tb = state.active_sequence().expect("sequence").time_base();
+    let sample_offset = TimelineTime::new(1, 48_000).expect("one sample");
+    let initial_edge_offset = sample_offset.checked_sub(tt(7, tb)).expect("initial edge offset");
+    let asset_id = AssetId::new();
+    let mut video = Clip::new(asset_id, tt(0, tb), tt(10, tb)).expect("video Clip");
+    let mut audio = Clip::new(asset_id, sample_offset, tt(3, tb)).expect("audio Clip");
+    let video_id = video.id;
+    let audio_id = audio.id;
+    let link_group = ClipLinkGroupId::new();
+    video.link_group = Some(link_group);
+    audio.link_group = Some(link_group);
+    {
+        let sequence = state.active_sequence_mut_uncommitted().expect("sequence");
+        sequence.video_tracks[0].add_clip(video).expect("video Clip");
+        let audio_track_id = sequence.audio_tracks[0].id;
+        sequence
+            .add_media_audio_clip(audio_track_id, audio, AudioSourceComponentId::primary())
+            .expect("audio Clip");
+    }
+
+    let changed = state
+        .trim_clips_bulk_to_frame(&[video_id], TrimEdge::Out, 1)
+        .expect("shortest member constrains linked Trim");
+    assert_eq!(changed, 2);
+
+    let sequence = state.active_sequence().expect("sequence");
+    let video = find_clip(sequence, video_id).expect("video Clip");
+    let audio = find_clip(sequence, audio_id).expect("audio Clip");
+    assert_eq!(video.duration, tt(8, tb));
+    assert_eq!(audio.duration, tt(1, tb));
+    assert_eq!(
+        audio
+            .end_position()
+            .expect("audio end")
+            .checked_sub(video.end_position().expect("video end"))
+            .expect("edge offset"),
+        initial_edge_offset
+    );
 }
 
 #[test]

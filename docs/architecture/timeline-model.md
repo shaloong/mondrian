@@ -803,13 +803,16 @@ Product operations over the current selection enter the deep
 `timeline_selection_edit` Module through one closed `TimelineSelectionEdit`
 Interface. Link/Unlink, Trim-to-playhead, Roll-to-playhead, and batch Enabled
 changes carry no copied selection or Track projection. The Module resolves the
-latest stable Clip IDs and playhead, expands complete Link Groups where the
-structural edit requires synchronized placement changes,
+latest stable Clip IDs and playhead, retains primary-first selection order for
+anchor-sensitive edits, expands complete Link Groups where the structural edit
+requires synchronized placement changes,
 prepares the complete lock/geometry/no-op result, and only then invokes one
 Author Transaction. Trim and Roll admission reuse the same pure preparation
 Implementation that execution consumes; the UI does not maintain approximate
-edge or handle rules. A locked unselected Link Group member therefore blocks
-the complete Trim, while a repeated Enabled value returns
+edge or handle rules. Selection Trim uses the primary member as the linked
+group anchor and preserves every member's exact pre-existing edge offset. A
+locked unselected Link Group member therefore blocks the complete Trim, while a
+repeated Enabled value returns
 `ActionNotExecuted` without advancing Author Generation or History.
 
 ### Insert Edit
@@ -903,15 +906,27 @@ its Track set. It never clamps one member onto a different Track. Conflict
 resolution runs on the transaction candidate with the complete moved focus set
 before author validation and publication.
 
-Bulk Trim rejects every stale requested identity before expanding complete Link
-Groups. Offset Link Group edges are currently rejected until the gesture carries
-an explicit J/L trim policy; the Implementation never silently aligns them.
-Co-timed edges prepare all changed Clip values without mutating live author state;
-one locked member or invalid boundary rejects the complete gesture. Product
-no-ops return `ActionNotExecuted`, so Author Generation, Sequence Revision and
-History advance exactly once only for a real accepted gesture. Internal callers
-that already own a Sequence-grid frame reuse the same preparation and commit
-Implementation rather than reconstructing the edit in UI or command routing.
+Bulk Trim rejects every stale requested identity before resolving groups. The
+first explicitly addressed member of each Link Group is its anchor; later
+requested members already claimed by that group do not replace it. Independent
+unlinked or grouped roots each derive one requested exact edge delta from their
+anchor. The Module intersects every member's legal delta range, including the
+one-Sequence-frame retention policy plus non-extending ordinary media versus
+extensible holds, clamps once against that common interval, and applies the
+resulting `TimelineTime` delta to all corresponding edges. Different member
+durations therefore stop at the most restrictive legal boundary without
+collapsing sample-accurate or existing J/L offsets. Creating or independently
+changing a J/L offset remains a separate
+Product policy, not an implicit side effect of synchronized Trim.
+
+All changed Clip values, source origins, Clip-local times, and native-audio
+placements are prepared without mutating live author state. One locked member,
+invalid boundary, or failed candidate validation rejects the complete gesture.
+Product no-ops return `ActionNotExecuted`, so Author Generation, Sequence
+Revision and History advance exactly once only for a real accepted gesture.
+Internal callers that already own a Sequence-grid frame reuse the same
+preparation and commit Implementation rather than reconstructing the edit in UI
+or command routing.
 
 ### Lift and Extract Range Edit
 

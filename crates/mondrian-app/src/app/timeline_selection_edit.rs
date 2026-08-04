@@ -8,8 +8,7 @@
 use super::product_action::{TimelineSelectionEdit, TimelineTrimPayloadEdge};
 use super::selection::resolve_clip_selection;
 use super::timeline_editing::{
-    can_roll_cut_for_clip, can_trim_clip_edge, expand_clip_link_groups, find_clip,
-    find_clip_track_lock, set_clip_disabled,
+    can_roll_cut_for_clip, find_clip, find_clip_track_lock, set_clip_disabled,
 };
 use super::AppState;
 use mondrian_core::{ClipId, MondrianError};
@@ -17,7 +16,6 @@ use mondrian_timeline::{
     apply_clip_link_edit, assess_clip_link_edit, clip::TrimEdge, ClipLinkEditKind,
     ClipLinkEditRequest,
 };
-use std::collections::HashSet;
 
 impl AppState {
     /// Whether one selection-scoped editorial intent can change current state.
@@ -69,16 +67,6 @@ impl AppState {
             }
         }
         clip_ids
-    }
-
-    fn expanded_selected_clip_ids(&self) -> mondrian_core::Result<Vec<ClipId>> {
-        let sequence = self.active_sequence().ok_or_else(|| selection_edit_error("当前无序列"))?;
-        let mut clip_ids = self.selected_clip_ids_for_edit().into_iter().collect::<HashSet<_>>();
-        if clip_ids.is_empty() {
-            return Err(selection_not_executed("当前没有片段选择"));
-        }
-        expand_clip_link_groups(sequence, &mut clip_ids);
-        Ok(clip_ids.into_iter().collect())
     }
 
     fn can_edit_selected_clip_links(&self, kind: ClipLinkEditKind) -> bool {
@@ -143,7 +131,10 @@ impl AppState {
         &self,
         edge: TimelineTrimPayloadEdge,
     ) -> mondrian_core::Result<(Vec<ClipId>, TrimEdge, i64)> {
-        let clip_ids = self.expanded_selected_clip_ids()?;
+        let clip_ids = self.selected_clip_ids_for_edit();
+        if clip_ids.is_empty() {
+            return Err(selection_not_executed("当前没有片段选择"));
+        }
         let target_frame = match edge {
             TimelineTrimPayloadEdge::In => self.current_frame(),
             TimelineTrimPayloadEdge::Out => self.current_frame().saturating_add(1),
@@ -152,14 +143,8 @@ impl AppState {
             TimelineTrimPayloadEdge::In => TrimEdge::In,
             TimelineTrimPayloadEdge::Out => TrimEdge::Out,
         };
-        let sequence = self.active_sequence().ok_or_else(|| selection_edit_error("当前无序列"))?;
-        for clip_id in &clip_ids {
-            if !can_trim_clip_edge(sequence, *clip_id, trim_edge, target_frame)? {
-                return Err(selection_not_executed(
-                    "所选 Clip 或其链接成员无法全部修剪到当前播放头",
-                ));
-            }
-        }
+        self.assess_trim_clips_to_frame(&clip_ids, trim_edge, target_frame)
+            .map_err(|error| selection_not_executed(error.to_string()))?;
         Ok((clip_ids, trim_edge, target_frame))
     }
 
@@ -266,7 +251,9 @@ mod tests {
         timeline_trim_selected_clips_to_playhead_action,
     };
     use crate::app::SelectedClipRef;
-    use mondrian_core::{AssetId, ClipLinkGroupId, FramePosition, Rational, TimelineTime};
+    use mondrian_core::{
+        AssetId, AudioSourceComponentId, ClipLinkGroupId, FramePosition, Rational, TimelineTime,
+    };
     use mondrian_timeline::{Clip, Sequence};
 
     fn tt(frame: i64, time_base: Rational) -> TimelineTime {
@@ -350,6 +337,83 @@ mod tests {
             state.active_sequence().expect("sequence").video_tracks[0].clips[0].position,
             TimelineTime::ZERO
         );
+    }
+
+    #[test]
+    fn linked_selection_trim_uses_primary_clip_as_exact_group_anchor() {
+        let mut sequence = Sequence::new("offset linked trim");
+        let time_base = sequence.time_base();
+        let video_track_id = sequence.video_tracks[0].id;
+        let audio_track_id = sequence.audio_tracks[0].id;
+        let sample_offset = TimelineTime::new(1, 48_000).expect("sample offset");
+        let group = ClipLinkGroupId::new();
+        let asset_id = AssetId::new();
+        let mut video = Clip::new(asset_id, TimelineTime::ZERO, tt(20, time_base)).expect("video");
+        let video_id = video.id;
+        video.link_group = Some(group);
+        let mut audio = Clip::new(asset_id, sample_offset, tt(20, time_base)).expect("audio");
+        let audio_id = audio.id;
+        audio.link_group = Some(group);
+        sequence.video_tracks[0].add_clip(video).expect("video");
+        sequence
+            .add_media_audio_clip(audio_track_id, audio, AudioSourceComponentId::primary())
+            .expect("audio");
+
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.selection.selected_clips = vec![
+            SelectedClipRef {
+                track_id: video_track_id,
+                is_video_track: true,
+                clip_id: video_id,
+            },
+            SelectedClipRef {
+                track_id: audio_track_id,
+                is_video_track: false,
+                clip_id: audio_id,
+            },
+        ];
+        state.seek(5).expect("seek");
+
+        let edit = TimelineSelectionEdit::TrimClipsToPlayhead { edge: TimelineTrimPayloadEdge::In };
+        assert!(state.can_apply_timeline_selection_edit(edit));
+        state
+            .dispatch_action(timeline_trim_selected_clips_to_playhead_action(
+                TimelineTrimPayloadEdge::In,
+            ))
+            .expect("trim linked selection");
+
+        let sequence = state.active_sequence().expect("sequence");
+        let video = find_clip(sequence, video_id).expect("video");
+        let audio = find_clip(sequence, audio_id).expect("audio");
+        assert_eq!(video.position, tt(5, time_base));
+        assert_eq!(
+            audio.position,
+            tt(5, time_base).checked_add(sample_offset).expect("audio in")
+        );
+        assert_eq!(video.duration, tt(15, time_base));
+        assert_eq!(audio.duration, tt(15, time_base));
+        assert_eq!(video.clip_time_in, tt(5, time_base));
+        assert_eq!(audio.clip_time_in, tt(5, time_base));
+        assert_eq!(video.source_origin(), tt(5, time_base));
+        assert_eq!(audio.source_origin(), tt(5, time_base));
+        assert_eq!(audio.audio_components[0].local_time_in, tt(5, time_base));
+        assert_eq!(
+            audio.audio_components[0].processing.scope_in,
+            tt(5, time_base)
+        );
+
+        assert!(state.undo_timeline().expect("undo linked selection Trim"));
+        let sequence = state.active_sequence().expect("sequence after Undo");
+        assert_eq!(
+            find_clip(sequence, video_id).expect("video").position,
+            TimelineTime::ZERO
+        );
+        assert_eq!(
+            find_clip(sequence, audio_id).expect("audio").position,
+            sample_offset
+        );
+        assert!(!state.can_undo_action());
     }
 
     #[test]
