@@ -25,13 +25,14 @@ pub use adjustment::{
 };
 pub use effect::{
     build_effect_render_graph, compile_clip_effect_graph, effect_category_tree, effect_definition,
-    effect_display_name, effect_library_types, effect_registry_revision,
+    effect_display_name, effect_library_types, effect_registry_revision, instantiate_effect_node,
     register_effect_definition, CustomEffectProcessorBinding, EffectCacheKeyBuilder,
     EffectCachePolicy, EffectCategoryNode, EffectColorDomain, EffectColorDomainContract,
     EffectDefinition, EffectEvalContext, EffectGraphBuildError, EffectGraphBuilder,
-    EffectGraphPreparer, EffectNode, EffectNodeExt, EffectPreparationContext, EffectRenderOp,
-    EffectRenderParamsBuilder, EffectRenderPlan, EffectResourceDependency, EffectResourceRecovery,
-    EffectType, PreparedEffectEvaluator, PreparedLut3D,
+    EffectGraphPreparer, EffectInstantiationError, EffectNode, EffectNodeExt,
+    EffectPreparationContext, EffectRenderOp, EffectRenderParamsBuilder, EffectRenderPlan,
+    EffectResourceDependency, EffectResourceRecovery, EffectType, PreparedEffectEvaluator,
+    PreparedLut3D,
 };
 pub use execution::{
     apply_compiled_effect_graph, apply_compiled_effect_graph_pass,

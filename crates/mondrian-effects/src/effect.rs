@@ -920,6 +920,17 @@ pub enum EffectDefinitionError {
     RegistryRevisionExhausted,
 }
 
+/// Failure to instantiate one author-visible Effect from the live registry.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum EffectInstantiationError {
+    /// The persistent definition identity is not currently registered.
+    #[error("effect definition is not registered: {effect_key}")]
+    DefinitionUnavailable { effect_key: String },
+    /// The definition exists but cannot currently provide visual execution.
+    #[error("effect definition is not currently authorable: {effect_key}")]
+    DefinitionNotAuthorable { effect_key: String },
+}
+
 impl EffectDefinition {
     /// Create an effect definition with an explicit processing-domain contract.
     ///
@@ -1267,6 +1278,34 @@ pub fn effect_definition(effect_type: &EffectType) -> Option<Arc<EffectDefinitio
         .cloned()
 }
 
+/// Instantiate one Effect author node from the current registered definition.
+///
+/// Production authoring must use this fallible constructor. It captures the
+/// definition's validated Parameter Schema defaults and fails closed when a
+/// stale browser action names a missing or currently unavailable definition;
+/// it never authors an empty-property placeholder that could later render with
+/// different semantics.
+pub fn instantiate_effect_node(
+    effect_type: EffectType,
+) -> Result<EffectNode, EffectInstantiationError> {
+    let effect_key = effect_type.key();
+    let definition = effect_definition(&effect_type).ok_or_else(|| {
+        EffectInstantiationError::DefinitionUnavailable { effect_key: effect_key.clone() }
+    })?;
+    if !definition.supports_visual_evaluation() {
+        return Err(EffectInstantiationError::DefinitionNotAuthorable { effect_key });
+    }
+    let mut properties = definition.default_properties().clone();
+    properties.fork_author_identities();
+    Ok(EffectNode {
+        id: EffectId::new(),
+        effect_type,
+        properties,
+        params: serde_json::json!({}),
+        is_enabled: true,
+    })
+}
+
 pub fn effect_library_types() -> Vec<EffectType> {
     let registry = effect_registry().read().unwrap_or_else(|e| e.into_inner());
     let mut effects = registry
@@ -1390,9 +1429,10 @@ pub trait EffectNodeExt {
 
 impl EffectNodeExt for EffectNode {
     fn with_defaults(effect_type: EffectType) -> Self {
-        let default_properties = effect_definition(&effect_type)
+        let mut default_properties = effect_definition(&effect_type)
             .map(|definition| definition.default_properties.clone())
             .unwrap_or_default();
+        default_properties.fork_author_identities();
         Self {
             id: EffectId::new(),
             properties: default_properties,
@@ -2187,6 +2227,30 @@ mod tests {
             execution_modes: crate::EffectExecutionModes::CPU_U8,
             ..test_plugin_execution_contract()
         }
+    }
+
+    #[test]
+    fn production_instantiation_requires_a_registered_definition_and_forks_owner_identity() {
+        let first =
+            instantiate_effect_node(EffectType::GaussianBlur).expect("registered built-in Effect");
+        let second = instantiate_effect_node(EffectType::GaussianBlur)
+            .expect("second registered built-in Effect");
+        let first_property = first.properties.iter().next().expect("built-in property").1;
+        let second_property = second.properties.iter().next().expect("built-in property").1;
+
+        assert_ne!(first.id, second.id);
+        assert_ne!(first_property.track_id, second_property.track_id);
+        assert_eq!(first_property.descriptor, second_property.descriptor);
+        assert_eq!(
+            first_property.static_value(),
+            second_property.static_value()
+        );
+
+        let missing = EffectType::Plugin("plugin.test.not_registered".to_owned());
+        assert!(matches!(
+            instantiate_effect_node(missing),
+            Err(EffectInstantiationError::DefinitionUnavailable { .. })
+        ));
     }
 
     fn emitted_op_contract_violation(

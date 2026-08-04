@@ -153,8 +153,10 @@ pub struct EffectNode {
 impl EffectNode {
     /// Create a new effect node with an empty property bag.
     ///
-    /// To populate defaults from the effect registry, use
-    /// `EffectNodeExt::with_defaults()` from `mondrian-effects`.
+    /// Product authoring must use the fallible `instantiate_effect_node()`
+    /// boundary from `mondrian-effects`; this empty constructor is for
+    /// definition/runtime assembly where registry availability is handled by
+    /// the caller.
     pub fn new(effect_type: EffectType) -> Self {
         Self {
             id: EffectId::new(),

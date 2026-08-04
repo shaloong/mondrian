@@ -25,6 +25,19 @@ pub enum TrimEdge {
     Out,
 }
 
+/// Stable relative placement for one visual Effect inside a Clip chain.
+///
+/// Effect indexes are snapshot-local presentation data. Authoring therefore
+/// addresses both the moving instance and its anchor by stable `EffectId`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectRelativePlacement {
+    /// Place the moving Effect immediately before the anchor.
+    Before(EffectId),
+    /// Place the moving Effect immediately after the anchor.
+    After(EffectId),
+}
+
 /// 2D 变换（位置 / 缩放 / 旋转 / 锚点 / 不透明度），所有属性可关键帧动画
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Transform2D {
@@ -821,7 +834,7 @@ impl Clip {
     /// Add a definition-bound effect node.
     ///
     /// Product authoring must construct the node from its registered definition
-    /// (see `EffectNodeExt::with_defaults()` in `mondrian-effects`) before
+    /// (see `instantiate_effect_node()` in `mondrian-effects`) before
     /// crossing this Timeline-owned insertion boundary. Timeline deliberately
     /// cannot synthesize effect parameters because it does not own or depend on
     /// the executable effect registry.
@@ -888,8 +901,74 @@ impl Clip {
         Ok(())
     }
 
+    /// Return whether one stable-identity relative move would change the chain.
+    pub fn effect_relative_placement_would_change(
+        &self,
+        effect_id: EffectId,
+        placement: EffectRelativePlacement,
+    ) -> Result<bool> {
+        let source = self.effect_index(effect_id)?;
+        let anchor_id = match placement {
+            EffectRelativePlacement::Before(anchor_id)
+            | EffectRelativePlacement::After(anchor_id) => anchor_id,
+        };
+        if anchor_id == effect_id {
+            return Err(effect_order_error(
+                "an Effect cannot be ordered relative to itself",
+            ));
+        }
+        let anchor = self.effect_index(anchor_id)?;
+        Ok(match placement {
+            EffectRelativePlacement::Before(_) => source.checked_add(1) != Some(anchor),
+            EffectRelativePlacement::After(_) => anchor.checked_add(1) != Some(source),
+        })
+    }
+
+    /// Move one Effect immediately before or after another stable instance.
+    ///
+    /// Returns `false` without mutation when the requested relation already
+    /// holds. Missing or self-referential identities fail closed.
+    pub fn reorder_effect_relative(
+        &mut self,
+        effect_id: EffectId,
+        placement: EffectRelativePlacement,
+    ) -> Result<bool> {
+        if !self.effect_relative_placement_would_change(effect_id, placement)? {
+            return Ok(false);
+        }
+        let source = self.effect_index(effect_id)?;
+        let anchor_id = match placement {
+            EffectRelativePlacement::Before(anchor_id)
+            | EffectRelativePlacement::After(anchor_id) => anchor_id,
+        };
+        let effect = self.effects.remove(source);
+        let anchor = self.effect_index(anchor_id)?;
+        let target = match placement {
+            EffectRelativePlacement::Before(_) => anchor,
+            EffectRelativePlacement::After(_) => anchor.checked_add(1).ok_or_else(|| {
+                effect_order_error("Effect insertion index overflowed the author chain")
+            })?,
+        };
+        self.effects.insert(target, effect);
+        Ok(true)
+    }
+
+    fn effect_index(&self, effect_id: EffectId) -> Result<usize> {
+        self.effects
+            .iter()
+            .position(|effect| effect.id == effect_id)
+            .ok_or_else(|| effect_order_error(format!("Effect does not exist: {effect_id}")))
+    }
+
     fn next_effect_group_label(&self, effect_type: &EffectType) -> String {
         effect_type.display_name().to_string()
+    }
+}
+
+fn effect_order_error(reason: impl Into<String>) -> MondrianError {
+    MondrianError::WorkflowStepFailed {
+        step_id: "clip_effect_order".to_owned(),
+        reason: reason.into(),
     }
 }
 
@@ -1289,6 +1368,51 @@ mod tests {
         assert_eq!(clip.position, tt(12));
         assert_eq!(clip.duration, tt(30));
         assert!(clip.effects.is_empty());
+    }
+
+    #[test]
+    fn effect_relative_placement_uses_stable_identities_and_exact_adjacency() {
+        let mut clip = Clip::new(AssetId::new(), tt(0), tt(30)).expect("valid Clip");
+        let first = clip.add_effect_node(mondrian_effects::EffectNodeExt::with_defaults(
+            EffectType::GaussianBlur,
+        ));
+        let second = clip.add_effect_node(mondrian_effects::EffectNodeExt::with_defaults(
+            EffectType::Sharpen,
+        ));
+        let third = clip.add_effect_node(mondrian_effects::EffectNodeExt::with_defaults(
+            EffectType::BasicCorrection,
+        ));
+
+        assert!(!clip
+            .effect_relative_placement_would_change(first, EffectRelativePlacement::Before(second),)
+            .expect("valid adjacency"));
+        assert!(clip
+            .reorder_effect_relative(first, EffectRelativePlacement::After(third))
+            .expect("stable relative move"));
+        assert_eq!(
+            clip.effects.iter().map(|effect| effect.id).collect::<Vec<_>>(),
+            vec![second, third, first]
+        );
+        assert!(!clip
+            .reorder_effect_relative(first, EffectRelativePlacement::After(third))
+            .expect("already adjacent"));
+    }
+
+    #[test]
+    fn effect_relative_placement_rejects_stale_and_self_references_without_mutation() {
+        let mut clip = Clip::new(AssetId::new(), tt(0), tt(30)).expect("valid Clip");
+        let effect_id = clip.add_effect_node(mondrian_effects::EffectNodeExt::with_defaults(
+            EffectType::GaussianBlur,
+        ));
+        let before = clip.effects.clone();
+
+        assert!(clip
+            .reorder_effect_relative(effect_id, EffectRelativePlacement::Before(EffectId::new()),)
+            .is_err());
+        assert!(clip
+            .reorder_effect_relative(effect_id, EffectRelativePlacement::After(effect_id),)
+            .is_err());
+        assert_eq!(clip.effects, before);
     }
 
     #[test]

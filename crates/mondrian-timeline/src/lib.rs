@@ -61,7 +61,7 @@ pub use audio_routing_edit::{
     AudioRoutingEdit, AudioRoutingEditBlocker, AudioRoutingEditError, AudioRoutingEditOutcome,
     AudioRoutingEditRequest,
 };
-pub use clip::{ActiveClip, Clip, ClipKind, ClipSourceTimeMap};
+pub use clip::{ActiveClip, Clip, ClipKind, ClipSourceTimeMap, EffectRelativePlacement};
 pub use clip_linking::{
     apply_clip_link_edit, assess_clip_link_edit, clip_selection_unit, ClipLinkEditAssessment,
     ClipLinkEditError, ClipLinkEditKind, ClipLinkEditOutcome, ClipLinkEditRequest,

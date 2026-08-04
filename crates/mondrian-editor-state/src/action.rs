@@ -13,7 +13,7 @@
 
 use std::path::PathBuf;
 
-use mondrian_core::{ClipId, EffectId, FramePosition, TimeScale, TrackId};
+use mondrian_core::{ClipId, FramePosition, TimeScale, TrackId};
 use serde::{Deserialize, Serialize};
 
 use crate::state::{PanelKind, WorkspacePreset};
@@ -25,14 +25,6 @@ pub enum SelectionTarget {
     Track(TrackId),
     AllClips,
     AllTracks,
-}
-
-/// 效果应用目标
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EffectTarget {
-    Clip(ClipId),
-    Track(TrackId),
-    SelectedClips,
 }
 
 /// 全局 Action —— 所有状态变更的统一入口
@@ -121,23 +113,6 @@ pub enum Action {
     DeselectAll,
 
     // ═══════════════════════════════════════════════════════════════════
-    // 效果
-    // ═══════════════════════════════════════════════════════════════════
-    ApplyEffect {
-        target: EffectTarget,
-        effect_id: EffectId,
-    },
-    RemoveEffect {
-        clip_id: ClipId,
-        effect_id: EffectId,
-    },
-    ReorderEffects {
-        clip_id: ClipId,
-        from: usize,
-        to: usize,
-    },
-
-    // ═══════════════════════════════════════════════════════════════════
     // 撤销/重做
     // ═══════════════════════════════════════════════════════════════════
     Undo,
@@ -174,7 +149,7 @@ pub enum Action {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_core::{ClipId, EffectId, FramePosition, Rational, TrackId};
+    use mondrian_core::{ClipId, FramePosition, Rational, TrackId};
     use serde_json;
     use uuid::Uuid;
 
@@ -192,10 +167,6 @@ mod tests {
 
     fn test_track_id() -> TrackId {
         TrackId(Uuid::new_v4())
-    }
-
-    fn test_effect_id() -> EffectId {
-        EffectId(Uuid::new_v4())
     }
 
     fn test_timecode() -> FramePosition {
@@ -404,30 +375,6 @@ mod tests {
     #[test]
     fn round_trip_deselect_all() {
         assert_eq!(round_trip(&Action::DeselectAll), Action::DeselectAll);
-    }
-
-    #[test]
-    fn round_trip_apply_effect() {
-        let a = Action::ApplyEffect {
-            target: EffectTarget::Clip(test_clip_id()),
-            effect_id: test_effect_id(),
-        };
-        assert_eq!(round_trip(&a), a);
-    }
-
-    #[test]
-    fn round_trip_remove_effect() {
-        let a = Action::RemoveEffect {
-            clip_id: test_clip_id(),
-            effect_id: test_effect_id(),
-        };
-        assert_eq!(round_trip(&a), a);
-    }
-
-    #[test]
-    fn round_trip_reorder_effects() {
-        let a = Action::ReorderEffects { clip_id: test_clip_id(), from: 2, to: 5 };
-        assert_eq!(round_trip(&a), a);
     }
 
     #[test]

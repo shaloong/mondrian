@@ -442,6 +442,21 @@ while dispatch consumes the Queue's exact `ExportCancelOutcome`; only
 `Requested` is success. Terminal cleanup uses the Queue-locked removal count
 and treats Completed, Failed, and Cancelled entries consistently.
 
+`VisualEffectProductAction` closes Clip-local visual Effect insertion,
+selection, enabled state, removal, relative reorder, and parameter-value edits.
+Every payload carries canonical `ClipId`/`EffectId`; Track identity and media
+kind are resolved by the author Interface. Reorder uses stable
+`EffectRelativePlacement`, never a projected vector index. Parameter edits use
+`AnimationParameterAddress`, never a mutable property path. Add resolves the
+current registered Definition through the Effects Module and fails before the
+transaction when it is missing or not visually executable. The borrowed
+availability projection and authoritative dispatch both reject stale targets,
+locked mutations, type mismatches, already-selected instances, unchanged
+enabled/value state, and already-satisfied ordering. Only a real author change
+allocates a Sequence transaction; selection remains transient and creates no
+Undo entry. The old `ui.effects`, Inspector Effect JSON payloads, and generic
+editor-state Effect variants do not coexist as alternate interpretations.
+
 `app_ui::audio_processor_rack` is the shared read-only Rack projection Module.
 It deduplicates Clip bindings by Processing Scope, consumes Timeline's binding
 count and lock blocker, preserves unknown plugin definitions and parameter

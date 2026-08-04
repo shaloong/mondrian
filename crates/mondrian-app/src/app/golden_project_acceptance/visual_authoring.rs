@@ -19,22 +19,23 @@ use crate::app::preview_unavailability::{PreviewOutputStage, PreviewUnavailabili
 use crate::app::preview_viewer_plan::{ResolvedPreviewElement, ResolvedPreviewTransitionInput};
 use crate::app::selection::SelectedClipRef;
 use crate::app::ui_actions::{
-    assets_create_solid_color_action, effects_add_to_clip_action, inspector_edit_clip_curve_action,
+    assets_create_solid_color_action, inspector_edit_clip_curve_action,
     inspector_set_clip_property_action, inspector_set_clip_tint_action,
-    inspector_set_effect_property_action, timeline_create_basic_title_action,
-    timeline_create_cross_dissolve_action, timeline_drop_asset_action, timeline_seek_action,
-    timeline_trim_clips_action, AssetsCreateAssetPayload, EffectsAddToClipPayload,
-    InspectorClipRefPayload, InspectorCurveEditPayload, InspectorCurvePointPayload,
-    InspectorEditClipCurvePayload, InspectorSetClipPropertyPayload, InspectorSetClipTintPayload,
-    InspectorSetEffectPropertyPayload, TimelineCreateCrossDissolvePayload,
-    TimelineDropAssetPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+    timeline_create_basic_title_action, timeline_create_cross_dissolve_action,
+    timeline_drop_asset_action, timeline_seek_action, timeline_trim_clips_action,
+    visual_effect_add_to_clip_action, visual_effect_set_parameter_value_action,
+    AssetsCreateAssetPayload, InspectorClipRefPayload, InspectorCurveEditPayload,
+    InspectorCurvePointPayload, InspectorEditClipCurvePayload, InspectorSetClipPropertyPayload,
+    InspectorSetClipTintPayload, TimelineCreateCrossDissolvePayload, TimelineDropAssetPayload,
+    TimelineTrimClipsPayload, TimelineTrimPayloadEdge, VisualEffectAddToClipPayload,
+    VisualEffectSetParameterValuePayload,
 };
 use crate::app::AppState;
 use anyhow::{bail, ensure, Context};
 use mondrian_assets::AssetKind;
 use mondrian_core::automation::{
-    InterpolationType, Keyframe, KeyframeInterpolation, ParameterResourceReference,
-    PropertyMutation, PropertyValue,
+    AnimationParameterAddress, InterpolationType, Keyframe, KeyframeInterpolation,
+    ParameterResourceReference, PropertyMutation, PropertyValue,
 };
 use mondrian_core::{
     AssetId, BasicTitle, ClipId, Color, EffectId, EvaluatedBasicTitle, FramePosition,
@@ -378,8 +379,8 @@ fn add_effect(
     let step = dispatch_author_transition(
         state,
         intent,
-        effects_add_to_clip_action(EffectsAddToClipPayload {
-            clip,
+        visual_effect_add_to_clip_action(VisualEffectAddToClipPayload {
+            clip_id: clip.clip_id,
             effect_type: effect_type.clone(),
         }),
     )?;
@@ -418,19 +419,23 @@ fn set_effect_parameter(
         .effect_type
         .parameter_id(parameter)
         .with_context(|| format!("invalid parameter name: {parameter}"))?;
-    let path = effect
+    let property = effect
         .properties
         .iter()
         .find(|(_, property)| property.descriptor.parameter_id() == &parameter_id)
-        .map(|(path, _)| path.to_owned())
+        .map(|(_, property)| property)
         .with_context(|| format!("Effect {effect_id} has no parameter {parameter_id}"))?;
+    let parameter = AnimationParameterAddress {
+        animation_track_id: property.track_id,
+        parameter_id,
+    };
     dispatch_author_transition(
         state,
         intent,
-        inspector_set_effect_property_action(InspectorSetEffectPropertyPayload {
-            clip,
+        visual_effect_set_parameter_value_action(VisualEffectSetParameterValuePayload {
+            clip_id: clip.clip_id,
             effect_id,
-            path,
+            parameter,
             value,
         }),
     )

@@ -19,9 +19,7 @@ use mondrian_core::{
     DisplayManagementPolicy, FrameRounding, ProjectId, ProjectSettings, TimelineTime,
 };
 use mondrian_editor_state::{AuthoringSession, AuthoringSessionId, SequenceNavigationIntent};
-use mondrian_effects::{
-    EffectNode, EffectNodeExt, EffectType, MaskComponent, MaskId, MaskKeyframe, MaskShape,
-};
+use mondrian_effects::{EffectType, MaskComponent, MaskId, MaskKeyframe, MaskShape};
 use mondrian_export::queue::RenderQueue;
 use mondrian_media::audio::{AudioBuffer, RealtimeAudioOutputSnapshot};
 use mondrian_media::{

@@ -4,10 +4,9 @@
 //! to `Action::Custom` payloads before actions reach the app state layer.
 
 use mondrian_core::automation::AnimationParameterAddress;
-use mondrian_core::effect_data::EffectType;
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{
-    AssetId, AudioComponentEditId, AudioSourceComponentId, ClipId, EffectId, JobId, KeyframeId,
+    AssetId, AudioComponentEditId, AudioSourceComponentId, ClipId, JobId, KeyframeId,
     ProgramOutputId, SequenceId, TrackId, VideoTransitionId,
 };
 use mondrian_core::{
@@ -34,7 +33,7 @@ use std::path::PathBuf;
 pub use super::exporting::TimelineExportRequest;
 use super::product_action::{
     AudioProductAction, ExportProductAction, ProductAction, ProjectProductAction,
-    SequenceProductAction, TimelineProductAction, ViewerProductAction,
+    SequenceProductAction, TimelineProductAction, ViewerProductAction, VisualEffectProductAction,
 };
 pub use super::product_action::{
     ExportDraftEdit, ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
@@ -42,14 +41,18 @@ pub use super::product_action::{
     SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineClipSelectionModePayload,
     TimelineMoveClipPayload, TimelineSeekPayload, TimelineSeekSource, TimelineSelectClipPayload,
     TimelineTrimClipsPayload, TimelineTrimPayloadEdge, ViewerSetClipTransformPayload,
-    ViewerSetPreviewResolutionScalePayload, ViewerTransformPositionPayload, AUDIO_EDIT_COMPONENT,
+    ViewerSetPreviewResolutionScalePayload, ViewerTransformPositionPayload,
+    VisualEffectAddToClipPayload, VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
+    VisualEffectSetParameterValuePayload, VisualEffectTargetPayload, AUDIO_EDIT_COMPONENT,
     AUDIO_EDIT_PROCESSOR_RACK, AUDIO_NAMESPACE, EXPORT_CANCEL, EXPORT_CLEAR_TERMINAL_HISTORY,
     EXPORT_EDIT_DRAFT, EXPORT_ENQUEUE, EXPORT_NAMESPACE, PROJECT_CREATE_WITH_SETTINGS,
     PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_UPDATE_COLOR_ENVIRONMENT,
     PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS, SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE,
     SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE,
     SEQUENCE_UPDATE_SETTINGS, TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK,
-    TIMELINE_SELECT_CLIP, TIMELINE_TRIM_CLIPS, VIEWER_NAMESPACE,
+    TIMELINE_SELECT_CLIP, TIMELINE_TRIM_CLIPS, VIEWER_NAMESPACE, VISUAL_EFFECT_ADD_TO_CLIP,
+    VISUAL_EFFECT_NAMESPACE, VISUAL_EFFECT_REMOVE, VISUAL_EFFECT_REORDER, VISUAL_EFFECT_SELECT,
+    VISUAL_EFFECT_SET_ENABLED, VISUAL_EFFECT_SET_PARAMETER_VALUE,
 };
 
 /// Action name for linking the current Clip selection.
@@ -112,21 +115,6 @@ pub const INSPECTOR_EDIT_CLIP_CURVE: &str = "edit_clip_curve";
 pub const INSPECTOR_SET_CLIP_PROPERTY: &str = "set_clip_property";
 /// Action name for selecting the logical source of one Clip audio Component Edit.
 pub const INSPECTOR_SET_AUDIO_COMPONENT_SOURCE: &str = "set_audio_component_source";
-/// Action name for selecting one effect inside the selected clip.
-pub const INSPECTOR_SELECT_EFFECT: &str = "select_effect";
-/// Action name for toggling one effect on a selected clip.
-pub const INSPECTOR_SET_EFFECT_ENABLED: &str = "set_effect_enabled";
-/// Action name for removing one effect from a selected clip.
-pub const INSPECTOR_REMOVE_EFFECT: &str = "remove_effect";
-/// Action name for changing one effect property value.
-pub const INSPECTOR_SET_EFFECT_PROPERTY: &str = "set_effect_property";
-
-/// Custom action namespace for effect browser operations.
-pub const EFFECTS_NAMESPACE: &str = "ui.effects";
-
-/// Action name for adding an effect to a selected clip.
-pub const EFFECTS_ADD_TO_CLIP: &str = "add_to_clip";
-
 /// Custom action namespace for asset-browser operations.
 pub const ASSETS_NAMESPACE: &str = "ui.assets";
 
@@ -694,57 +682,6 @@ pub struct InspectorSetAudioComponentSourcePayload {
     pub source: InspectorAudioComponentSourcePayload,
 }
 
-/// Select one effect instance inside a clip.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InspectorSelectEffectPayload {
-    /// Clip that owns the effect.
-    pub clip: InspectorClipRefPayload,
-    /// Effect instance to make active in the inspector scope.
-    pub effect_id: EffectId,
-}
-
-/// Toggle a clip effect enabled state from an inspector panel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InspectorSetEffectEnabledPayload {
-    /// Clip targeted by the inspector mutation.
-    pub clip: InspectorClipRefPayload,
-    /// Effect instance being toggled.
-    pub effect_id: EffectId,
-    /// Whether the effect should participate in rendering.
-    pub enabled: bool,
-}
-
-/// Remove an effect instance from a selected clip.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InspectorRemoveEffectPayload {
-    /// Clip targeted by the inspector mutation.
-    pub clip: InspectorClipRefPayload,
-    /// Effect instance to remove.
-    pub effect_id: EffectId,
-}
-
-/// Change one effect property value from an inspector panel.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct InspectorSetEffectPropertyPayload {
-    /// Clip targeted by the inspector mutation.
-    pub clip: InspectorClipRefPayload,
-    /// Effect instance being edited.
-    pub effect_id: EffectId,
-    /// Namespaced property path on the effect.
-    pub path: String,
-    /// New property value to set.
-    pub value: mondrian_core::automation::PropertyValue,
-}
-
-/// Add an effect from the effect browser to a clip.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EffectsAddToClipPayload {
-    /// Clip targeted by the effect insertion.
-    pub clip: InspectorClipRefPayload,
-    /// Effect type to instantiate with defaults.
-    pub effect_type: EffectType,
-}
-
 /// Prepare one asset for the existing timeline drag/drop path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetsPrepareDragPayload {
@@ -1276,29 +1213,41 @@ pub fn inspector_set_audio_component_source_action(
     custom_inspector_action(INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, payload)
 }
 
-/// Build an action that selects an effect in the inspector scope.
-pub fn inspector_select_effect_action(payload: InspectorSelectEffectPayload) -> Action {
-    custom_inspector_action(INSPECTOR_SELECT_EFFECT, payload)
+/// Build an action that inserts one registered visual Effect on a Clip.
+pub fn visual_effect_add_to_clip_action(payload: VisualEffectAddToClipPayload) -> Action {
+    ProductAction::VisualEffect(VisualEffectProductAction::AddToClip(payload))
+        .into_external_action()
 }
 
-/// Build an action that toggles an effect on a selected clip.
-pub fn inspector_set_effect_enabled_action(payload: InspectorSetEffectEnabledPayload) -> Action {
-    custom_inspector_action(INSPECTOR_SET_EFFECT_ENABLED, payload)
+/// Build an action that selects one visual Effect instance.
+pub fn visual_effect_select_action(payload: VisualEffectTargetPayload) -> Action {
+    ProductAction::VisualEffect(VisualEffectProductAction::Select(payload)).into_external_action()
 }
 
-/// Build an action that removes an effect from a selected clip.
-pub fn inspector_remove_effect_action(payload: InspectorRemoveEffectPayload) -> Action {
-    custom_inspector_action(INSPECTOR_REMOVE_EFFECT, payload)
+/// Build an action that changes one visual Effect enabled state.
+pub fn visual_effect_set_enabled_action(payload: VisualEffectSetEnabledPayload) -> Action {
+    ProductAction::VisualEffect(VisualEffectProductAction::SetEnabled(payload))
+        .into_external_action()
 }
 
-/// Build an action that changes one effect property value.
-pub fn inspector_set_effect_property_action(payload: InspectorSetEffectPropertyPayload) -> Action {
-    custom_inspector_action(INSPECTOR_SET_EFFECT_PROPERTY, payload)
+/// Build an action that removes one visual Effect instance.
+pub fn visual_effect_remove_action(payload: VisualEffectTargetPayload) -> Action {
+    ProductAction::VisualEffect(VisualEffectProductAction::Remove(payload)).into_external_action()
 }
 
-/// Build an action that adds an effect to a selected clip.
-pub fn effects_add_to_clip_action(payload: EffectsAddToClipPayload) -> Action {
-    custom_effects_action(EFFECTS_ADD_TO_CLIP, payload)
+/// Build an action that moves one visual Effect relative to another instance.
+pub fn visual_effect_reorder_action(payload: VisualEffectReorderPayload) -> Action {
+    ProductAction::VisualEffect(VisualEffectProductAction::Reorder(payload)).into_external_action()
+}
+
+/// Build an action that writes one stable-address visual Effect parameter.
+pub fn visual_effect_set_parameter_value_action(
+    payload: VisualEffectSetParameterValuePayload,
+) -> Action {
+    ProductAction::VisualEffect(VisualEffectProductAction::SetParameterValue(Box::new(
+        payload,
+    )))
+    .into_external_action()
 }
 
 /// Build an action that prepares an asset for timeline drag/drop.
@@ -1764,14 +1713,6 @@ fn custom_timeline_action<T: Serialize>(name: &'static str, payload: T) -> Actio
 fn custom_inspector_action<T: Serialize>(name: &'static str, payload: T) -> Action {
     Action::Custom {
         namespace: INSPECTOR_NAMESPACE.into(),
-        name: name.into(),
-        payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
-    }
-}
-
-fn custom_effects_action<T: Serialize>(name: &'static str, payload: T) -> Action {
-    Action::Custom {
-        namespace: EFFECTS_NAMESPACE.into(),
         name: name.into(),
         payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
     }

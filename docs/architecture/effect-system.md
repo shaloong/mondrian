@@ -28,8 +28,13 @@ not share `EffectNode`, RGBA capabilities, JSON parameters, or runtime graphs.
 
 Adding an executable effect is a definition-bound authoring operation. Product
 commands construct the complete instance through
-`EffectNodeExt::with_defaults()` and only then pass it to
-`Clip::add_effect_node` or `Clip::insert_effect_node_at`. Timeline does not offer
+the fallible `instantiate_effect_node()` boundary and only then pass it to
+`Clip::add_effect_node`. The constructor resolves the current registered,
+visually executable Definition, clones its validated defaults, and forks every
+owner-local `AnimationTrackId`; two instances share Schema and default values,
+never author identity. A stale or unavailable Definition fails before the
+author transaction and cannot create an empty-property placeholder.
+Timeline does not offer
 an `EffectType`-only convenience constructor: it cannot manufacture the
 definition-owned parameter schema without reversing the authoring-to-execution
 dependency direction. `EffectNode::new` remains the low-level empty data
@@ -55,9 +60,12 @@ When placed on a clip, property paths are prefixed as `effect.<effect_id>.<rest>
 
 Every product property carries a versioned `ParameterSchema`. Its
 `ParameterId` is definition-stable and is the only identity accepted by effect
-execution. The string property path is an instance address for author commands
-and Inspector routing; renaming or re-namespacing that address must not rename
-the parameter. The schema owns value type, definition default, automation
+execution. Product authoring addresses one concrete parameter with
+`AnimationParameterAddress { AnimationTrackId, ParameterId }`. The string
+property path is presentation/resource metadata and the final owner-local
+mutation key after that stable address is resolved; it is never external Action
+identity. Renaming or re-namespacing a path must not rename the parameter or
+invalidate an already projected stable address. The schema owns value type, definition default, automation
 capability, unit/range, admitted Hold/Linear/Bezier mathematics, stable enum or
 resource intent, localization identity, and cache impact. Auto Bezier,
 Continuous Bezier, and Ease are editor presets that produce Bezier handles;
@@ -602,7 +610,12 @@ time-domain transform, not visual parameter automation.
 
 ## Ordering
 
-Effect stack order affects graph output. UI reorder operations must mutate the clip effect vector, then selection/navigation state may follow without an extra undo entry.
+Effect stack order affects graph output. Reorder intent carries the moving
+`EffectId` and a `Before(EffectId)` or `After(EffectId)` anchor. Snapshot indexes
+never cross the Action Seam: stale, missing, and self-referential identities
+fail closed, while an already-adjacent relation is an explicit no-op. A changed
+move mutates the Clip effect vector in one author transaction; selection may be
+reconciled afterward without a second Undo entry.
 
 ## Optimization
 

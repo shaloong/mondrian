@@ -611,9 +611,17 @@ Visual-effect insertion accepts a complete `EffectNode`, not only an
 parameter defaults, while Timeline owns placement, ordered instance storage,
 instance namespacing, and identity. Product commands therefore construct an
 instance with the currently bound definition before calling
-`Clip::add_effect_node`/`insert_effect_node_at`. Timeline neither depends on the
+`Clip::add_effect_node`. Timeline neither depends on the
 execution registry nor creates an empty parameter bag that compilation would
 later guess how to repair.
+
+The Clip owns Effect-chain ordering as stable relative identity, not snapshot
+indexes. `EffectRelativePlacement::Before/After` names both the moving
+`EffectId` and its anchor; missing or self-referential identities are invalid,
+and an already-adjacent relation returns no change before an author transaction
+is allocated. Parameter writes similarly arrive as a stable
+`AnimationParameterAddress`; Timeline resolves the current path only inside the
+owning Effect instance.
 
 - `Media { asset_id, interpretation }`
 - `AdjustmentLayer { asset_id }`

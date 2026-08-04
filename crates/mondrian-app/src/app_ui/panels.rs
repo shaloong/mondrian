@@ -53,8 +53,8 @@ use mondrian_timeline::sequence::{
     DeliveryBitDepth, InputColorResolutionSource, MissingColorMetadataPolicy, Sequence, VideoRange,
 };
 use mondrian_timeline::track::Track;
-use mondrian_timeline::AudioComponentMutation;
 use mondrian_timeline::VideoTransitionType;
+use mondrian_timeline::{AudioComponentMutation, EffectRelativePlacement};
 use mondrian_ui_core::types::SplitDirection;
 use mondrian_ui_core::DragPayload;
 use mondrian_ui_core::Widget;
@@ -94,14 +94,12 @@ use crate::app::ui_actions::{
     assets_move_folder_action, assets_move_selection_action, assets_open_folder_action,
     assets_prepare_drag_action, assets_rebind_audio_component_action,
     assets_refresh_audio_components_action, assets_rename_asset_action,
-    assets_rename_folder_action, assets_set_proxy_mode_action, effects_add_to_clip_action,
-    export_cancel_action, export_clear_terminal_history_action, export_edit_draft_action,
-    export_enqueue_action, inspector_edit_clip_curve_action, inspector_remove_effect_action,
-    inspector_select_effect_action, inspector_set_audio_component_source_action,
+    assets_rename_folder_action, assets_set_proxy_mode_action, export_cancel_action,
+    export_clear_terminal_history_action, export_edit_draft_action, export_enqueue_action,
+    inspector_edit_clip_curve_action, inspector_set_audio_component_source_action,
     inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
     inspector_set_clip_property_action, inspector_set_clip_tint_action,
-    inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
-    inspector_set_effect_property_action, timeline_add_track_action,
+    inspector_set_clip_transform_field_action, timeline_add_track_action,
     timeline_clear_in_out_points_action, timeline_create_cross_dissolve_action,
     timeline_drop_asset_action, timeline_extract_range_action, timeline_lift_range_action,
     timeline_link_selected_clips_action, timeline_move_clip_action, timeline_move_track_action,
@@ -112,7 +110,9 @@ use crate::app::ui_actions::{
     timeline_set_track_targeting_action, timeline_set_video_transition_range_action,
     timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
     timeline_unlink_selected_clips_action, viewer_set_preview_resolution_scale_action,
-    viewer_set_zoom_scale_action, AppShellInputColorPipelineDiagnostics,
+    viewer_set_zoom_scale_action, visual_effect_add_to_clip_action, visual_effect_remove_action,
+    visual_effect_reorder_action, visual_effect_select_action, visual_effect_set_enabled_action,
+    visual_effect_set_parameter_value_action, AppShellInputColorPipelineDiagnostics,
     AppShellInterpretAssetDialogPayload, AppShellRelinkAssetDialogPayload,
     AppShellRelocatePanelPayload, AppShellRevealInFileManagerPayload,
     AppShellVideoSignalDiagnostics, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
@@ -121,14 +121,12 @@ use crate::app::ui_actions::{
     AssetsMoveSelectionPayload, AssetsOpenFolderPayload, AssetsPrepareDragPayload,
     AssetsRebindAudioComponentPayload, AssetsRefreshAudioComponentsPayload,
     AssetsRenameAssetPayload, AssetsRenameFolderPayload, AssetsSetProxyModePayload,
-    DockDropAreaPayload, EffectsAddToClipPayload, ExportDraftEdit, ExportOutputDialogPayload,
-    ImportMediaDialogPayload, InspectorAudioComponentSourcePayload, InspectorClipRefPayload,
-    InspectorClipTransformField, InspectorCurveEditPayload, InspectorCurvePointPayload,
-    InspectorEditClipCurvePayload, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
+    DockDropAreaPayload, ExportDraftEdit, ExportOutputDialogPayload, ImportMediaDialogPayload,
+    InspectorAudioComponentSourcePayload, InspectorClipRefPayload, InspectorClipTransformField,
+    InspectorCurveEditPayload, InspectorCurvePointPayload, InspectorEditClipCurvePayload,
     InspectorSetAudioComponentSourcePayload, InspectorSetClipEnabledPayload,
     InspectorSetClipOpacityPayload, InspectorSetClipPropertyPayload, InspectorSetClipTintPayload,
-    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-    InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
+    InspectorSetClipTransformFieldPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
     TimelineClipSelectionModePayload, TimelineCreateCrossDissolvePayload, TimelineDropAssetPayload,
     TimelineExportRequest, TimelineInOutPointPayloadKind, TimelineMoveClipPayload,
     TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
@@ -139,6 +137,8 @@ use crate::app::ui_actions::{
     TimelineTrackControlPayloadKind, TimelineTrackTargetingControl, TimelineTrimClipsPayload,
     TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
     ViewerSetPreviewResolutionScalePayload, ViewerSetZoomScalePayload,
+    VisualEffectAddToClipPayload, VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
+    VisualEffectSetParameterValuePayload, VisualEffectTargetPayload,
 };
 use crate::app::waveform_service::AudioWaveformSource;
 use crate::app::{
@@ -668,11 +668,8 @@ impl PanelListModel {
                 let depth = categories.len();
                 let mut item = PanelListItem::new(name).with_tree_depth(depth as u8);
                 if let Some(selection) = effect_target {
-                    item = item.with_activate_action(effects_add_to_clip_action(
-                        EffectsAddToClipPayload {
-                            clip: inspector_clip_payload(selection),
-                            effect_type,
-                        },
+                    item = item.with_activate_action(visual_effect_add_to_clip_action(
+                        VisualEffectAddToClipPayload { clip_id: selection.clip_id, effect_type },
                     ));
                 }
                 items.push(item);
@@ -1695,7 +1692,11 @@ pub struct InspectorEffectModel {
 pub struct InspectorEffectPropertyModel {
     /// Stable parameter schema consumed independently from the instance address.
     pub schema: ParameterSchema,
+    /// Stable owner-local parameter instance used by authoring Actions.
+    pub address: AnimationParameterAddress,
     /// Namespaced property path, e.g. `effect.<id>.exposure`.
+    ///
+    /// This is presentation and resource-editing metadata, never Action identity.
     pub path: String,
     /// Human-readable property name from the descriptor.
     pub label: String,
@@ -1720,6 +1721,10 @@ fn inspector_property_model(
     let numeric = property.descriptor.schema.numeric;
     InspectorEffectPropertyModel {
         schema: property.descriptor.schema.clone(),
+        address: AnimationParameterAddress {
+            animation_track_id: property.track_id,
+            parameter_id: property.descriptor.parameter_id().clone(),
+        },
         path: path.to_owned(),
         label: property.descriptor.display_name.clone(),
         value: property.evaluate(author_time),
@@ -6122,22 +6127,34 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                                 "Up",
                                 "Move effect up",
                                 can_move_up,
-                                inspector_reorder_effect_action(
-                                    selected_clip,
-                                    index,
-                                    index.saturating_sub(1),
-                                ),
+                                can_move_up
+                                    .then(|| {
+                                        inspector_reorder_effect_action(
+                                            selected_clip,
+                                            effect_id,
+                                            EffectRelativePlacement::Before(
+                                                model.effects[index - 1].effect_id,
+                                            ),
+                                        )
+                                    })
+                                    .flatten(),
                             )),
                             FlexChild::fixed(effect_icon_button(
                                 AppIcon::CaretDown,
                                 "Down",
                                 "Move effect down",
                                 can_move_down,
-                                inspector_reorder_effect_action(
-                                    selected_clip,
-                                    index,
-                                    (index + 1).min(model.effects.len().saturating_sub(1)),
-                                ),
+                                can_move_down
+                                    .then(|| {
+                                        inspector_reorder_effect_action(
+                                            selected_clip,
+                                            effect_id,
+                                            EffectRelativePlacement::After(
+                                                model.effects[index + 1].effect_id,
+                                            ),
+                                        )
+                                    })
+                                    .flatten(),
                             )),
                             FlexChild::fixed(effect_icon_button(
                                 AppIcon::Trash,
@@ -6620,51 +6637,51 @@ fn inspector_effect_enabled_action(
     effect_id: EffectId,
     enabled: bool,
 ) -> Option<Action> {
-    if let Some(selection) = selection {
-        return Some(inspector_set_effect_enabled_action(
-            InspectorSetEffectEnabledPayload {
-                clip: inspector_clip_payload(selection),
-                effect_id,
-                enabled,
-            },
-        ));
-    }
-    None
+    selection.map(|selection| {
+        visual_effect_set_enabled_action(VisualEffectSetEnabledPayload {
+            clip_id: selection.clip_id,
+            effect_id,
+            enabled,
+        })
+    })
 }
 
 fn inspector_effect_select_action(
     selection: Option<SelectedClipRef>,
     effect_id: EffectId,
 ) -> Option<Action> {
-    if let Some(selection) = selection {
-        return Some(inspector_select_effect_action(
-            InspectorSelectEffectPayload { clip: inspector_clip_payload(selection), effect_id },
-        ));
-    }
-    None
+    selection.map(|selection| {
+        visual_effect_select_action(VisualEffectTargetPayload {
+            clip_id: selection.clip_id,
+            effect_id,
+        })
+    })
 }
 
 fn inspector_remove_effect_row_action(
     selection: Option<SelectedClipRef>,
     effect_id: EffectId,
 ) -> Option<Action> {
-    if let Some(selection) = selection {
-        return Some(inspector_remove_effect_action(
-            InspectorRemoveEffectPayload { clip: inspector_clip_payload(selection), effect_id },
-        ));
-    }
-    None
+    selection.map(|selection| {
+        visual_effect_remove_action(VisualEffectTargetPayload {
+            clip_id: selection.clip_id,
+            effect_id,
+        })
+    })
 }
 
 fn inspector_reorder_effect_action(
     selection: Option<SelectedClipRef>,
-    from: usize,
-    to: usize,
+    effect_id: EffectId,
+    placement: EffectRelativePlacement,
 ) -> Option<Action> {
-    if from == to {
-        return None;
-    }
-    selection.map(|selection| Action::ReorderEffects { clip_id: selection.clip_id, from, to })
+    selection.map(|selection| {
+        visual_effect_reorder_action(VisualEffectReorderPayload {
+            clip_id: selection.clip_id,
+            effect_id,
+            placement,
+        })
+    })
 }
 
 fn inspector_curve_edit_action(
@@ -6716,9 +6733,12 @@ fn node_graph_node_action(
         .iter()
         .find_map(|entry| (entry.node_id == node_id).then_some(entry.target))
     {
-        Some(NodeGraphTarget::Effect(effect_id)) => Some(inspector_select_effect_action(
-            InspectorSelectEffectPayload { clip: inspector_clip_payload(selection), effect_id },
-        )),
+        Some(NodeGraphTarget::Effect(effect_id)) => {
+            Some(visual_effect_select_action(VisualEffectTargetPayload {
+                clip_id: selection.clip_id,
+                effect_id,
+            }))
+        }
         Some(NodeGraphTarget::Clip | NodeGraphTarget::Output) => {
             node_graph_clip_action(Some(selection))
         }
@@ -6753,7 +6773,7 @@ fn effect_property_row(
         property,
         can_edit,
         selection,
-        InspectorPropertyTarget::Effect(effect_id),
+        InspectorPropertyTarget::Effect { effect_id, parameter: property.address.clone() },
     )
 }
 
@@ -6777,7 +6797,7 @@ fn inspector_property_row(
             property,
             can_edit,
             selection,
-            target,
+            target.clone(),
             property.path.clone(),
         ),
     );
@@ -6808,8 +6828,8 @@ fn effect_property_row_height(value: &PropertyValue) -> Option<f32> {
 /// Build a typed value widget for one effect property row.
 ///
 /// Widget construction depends on the `PropertyValue` variant present in the
-/// snapshot. The returned widget dispatches `INSPECTOR_SET_EFFECT_PROPERTY`
-/// through the existing inspector custom-action path.
+/// snapshot. The returned widget dispatches a stable-address visual Effect
+/// Product Action through the unique external codec.
 #[cfg(test)]
 fn effect_property_value_widget(
     property: &InspectorEffectPropertyModel,
@@ -6822,15 +6842,18 @@ fn effect_property_value_widget(
         property,
         can_edit,
         selection,
-        InspectorPropertyTarget::Effect(effect_id),
+        InspectorPropertyTarget::Effect { effect_id, parameter: property.address.clone() },
         path,
     )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum InspectorPropertyTarget {
     Clip,
-    Effect(EffectId),
+    Effect {
+        effect_id: EffectId,
+        parameter: AnimationParameterAddress,
+    },
 }
 
 fn inspector_property_value_widget(
@@ -6845,7 +6868,12 @@ fn inspector_property_value_widget(
             let selected_clip = selection;
             Box::new(
                 Checkbox::new(&property.label, *value).enabled(can_edit).on_change(move |v| {
-                    inspector_property_action(selected_clip, target, &path, PropertyValue::Bool(v))
+                    inspector_property_action(
+                        selected_clip,
+                        target.clone(),
+                        &path,
+                        PropertyValue::Bool(v),
+                    )
                 }),
             )
         }
@@ -6865,7 +6893,7 @@ fn inspector_property_value_widget(
                 move |v| {
                     inspector_property_action(
                         selected_clip,
-                        target,
+                        target.clone(),
                         &path,
                         PropertyValue::Float(v.clamp(hard_min, hard_max)),
                     )
@@ -6888,7 +6916,7 @@ fn inspector_property_value_widget(
                 move |v: f32| {
                     inspector_property_action(
                         selected_clip,
-                        target,
+                        target.clone(),
                         &path,
                         PropertyValue::Double((v as f64).clamp(hard_min as f64, hard_max as f64)),
                     )
@@ -6911,7 +6939,7 @@ fn inspector_property_value_widget(
                 move |v: f32| {
                     inspector_property_action(
                         selected_clip,
-                        target,
+                        target.clone(),
                         &path,
                         PropertyValue::Int(
                             (v.round() as i64).clamp(hard_min as i64, hard_max as i64),
@@ -6925,7 +6953,12 @@ fn inspector_property_value_widget(
             let path = path.clone();
             let trigger = color_picker_trigger(*value).enabled(can_edit);
             Box::new(trigger.on_change(move |color| {
-                inspector_property_action(selected_clip, target, &path, PropertyValue::Color(color))
+                inspector_property_action(
+                    selected_clip,
+                    target.clone(),
+                    &path,
+                    PropertyValue::Color(color),
+                )
             }))
         }
         PropertyValue::Text(value) => {
@@ -6942,7 +6975,7 @@ fn inspector_property_value_widget(
                         .on_change(move |text| {
                             inspector_property_action(
                                 selected_clip,
-                                target,
+                                target.clone(),
                                 &path,
                                 PropertyValue::Text(text.to_owned()),
                             )
@@ -6959,7 +6992,7 @@ fn inspector_property_value_widget(
                     TextInput::new(text).enabled(can_edit).on_change(move |text| {
                         inspector_property_action(
                             selected_clip,
-                            target,
+                            target.clone(),
                             &path,
                             PropertyValue::Text(text.to_string()),
                         )
@@ -6977,7 +7010,7 @@ fn inspector_property_value_widget(
                         option.key.clone(),
                         inspector_property_action(
                             selection,
-                            target,
+                            target.clone(),
                             &path,
                             PropertyValue::Enum(option.key.clone()),
                         ),
@@ -7004,7 +7037,7 @@ fn inspector_property_value_widget(
                     };
                     inspector_property_action(
                         selected_clip,
-                        target,
+                        target.clone(),
                         &path,
                         PropertyValue::Resource(value),
                     )
@@ -7066,6 +7099,7 @@ fn vector_property_widget(
         .map(|(component_index, (label, value))| {
             let base_values = values.to_vec();
             let selected_clip = selection;
+            let target = target.clone();
             let path = path.clone();
             let control = numeric_slider_input_control_with_hard_range(
                 *value,
@@ -7081,7 +7115,7 @@ fn vector_property_widget(
                     next_values[component_index] = v.clamp(hard_min, hard_max);
                     inspector_property_action(
                         selected_clip,
-                        target,
+                        target.clone(),
                         &path,
                         build_value(&next_values),
                     )
@@ -7180,13 +7214,13 @@ fn decimal_places_for_step(step: f64) -> usize {
 fn inspector_effect_property_action(
     selection: Option<SelectedClipRef>,
     effect_id: EffectId,
-    path: &str,
+    parameter: AnimationParameterAddress,
     value: PropertyValue,
 ) -> Option<Action> {
     inspector_property_action(
         selection,
-        InspectorPropertyTarget::Effect(effect_id),
-        path,
+        InspectorPropertyTarget::Effect { effect_id, parameter },
+        "",
         value,
     )
 }
@@ -7206,11 +7240,11 @@ fn inspector_property_action(
                 value,
             })
         }
-        InspectorPropertyTarget::Effect(effect_id) => {
-            inspector_set_effect_property_action(InspectorSetEffectPropertyPayload {
-                clip: inspector_clip_payload(selection),
+        InspectorPropertyTarget::Effect { effect_id, parameter } => {
+            visual_effect_set_parameter_value_action(VisualEffectSetParameterValuePayload {
+                clip_id: selection.clip_id,
                 effect_id,
-                path: path.to_owned(),
+                parameter,
                 value,
             })
         }
@@ -7227,6 +7261,13 @@ mod tests {
         let numerator = frame.checked_mul(time_base.num).expect("test time fits i64");
         mondrian_core::TimelineTime::new(numerator, time_base.den).expect("valid test time")
     }
+
+    fn test_parameter_address(parameter_id: &'static str) -> AnimationParameterAddress {
+        AnimationParameterAddress {
+            animation_track_id: mondrian_core::types::AnimationTrackId::new(),
+            parameter_id: mondrian_core::ParameterId::new_static(parameter_id),
+        }
+    }
     use crate::app::ui_actions::{
         AppShellInterpretAssetDialogPayload, AppShellRelinkAssetDialogPayload,
         AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
@@ -7239,15 +7280,15 @@ mod tests {
         ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
         ASSETS_OPEN_FOLDER, ASSETS_PREPARE_DRAG, ASSETS_REBIND_AUDIO_COMPONENT,
         ASSETS_REFRESH_AUDIO_COMPONENTS, ASSETS_RENAME_ASSET, ASSETS_SET_PROXY_MODE,
-        AUDIO_EDIT_COMPONENT, AUDIO_NAMESPACE, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE,
-        INSPECTOR_EDIT_CLIP_CURVE, INSPECTOR_NAMESPACE, INSPECTOR_SELECT_EFFECT,
+        AUDIO_EDIT_COMPONENT, AUDIO_NAMESPACE, INSPECTOR_EDIT_CLIP_CURVE, INSPECTOR_NAMESPACE,
         INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
-        INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
-        TIMELINE_CREATE_CROSS_DISSOLVE, TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK,
-        TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_SELECT_CLIP,
-        TIMELINE_SELECT_VIDEO_TRANSITION, TIMELINE_SET_IN_OUT_POINT,
-        TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_VIDEO_TRANSITION_RANGE,
-        TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
+        TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_CREATE_CROSS_DISSOLVE,
+        TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
+        TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_SELECT_CLIP, TIMELINE_SELECT_VIDEO_TRANSITION,
+        TIMELINE_SET_IN_OUT_POINT, TIMELINE_SET_SELECTED_CLIPS_ENABLED,
+        TIMELINE_SET_VIDEO_TRANSITION_RANGE, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
+        VISUAL_EFFECT_ADD_TO_CLIP, VISUAL_EFFECT_NAMESPACE, VISUAL_EFFECT_SELECT,
+        VISUAL_EFFECT_SET_PARAMETER_VALUE,
     };
     use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
@@ -11301,13 +11342,11 @@ mod tests {
         let Action::Custom { namespace, name, payload } = action else {
             panic!("expected effect custom action, got {action:?}");
         };
-        assert_eq!(namespace, EFFECTS_NAMESPACE);
-        assert_eq!(name, EFFECTS_ADD_TO_CLIP);
-        let payload: EffectsAddToClipPayload =
+        assert_eq!(namespace, VISUAL_EFFECT_NAMESPACE);
+        assert_eq!(name, VISUAL_EFFECT_ADD_TO_CLIP);
+        let payload: VisualEffectAddToClipPayload =
             serde_json::from_value(payload.clone()).expect("effect add payload");
-        assert_eq!(payload.clip.clip_id, clip_id);
-        assert_eq!(payload.clip.track_id, track_id);
-        assert!(payload.clip.is_video_track);
+        assert_eq!(payload.clip_id, clip_id);
     }
 
     #[test]
@@ -11365,14 +11404,9 @@ mod tests {
         });
 
         state
-            .dispatch_action(effects_add_to_clip_action(EffectsAddToClipPayload {
-                clip: inspector_clip_payload(SelectedClipRef {
-                    track_id,
-                    is_video_track: true,
-                    clip_id,
-                }),
-                effect_type: EffectType::GaussianBlur,
-            }))
+            .dispatch_action(visual_effect_add_to_clip_action(
+                VisualEffectAddToClipPayload { clip_id, effect_type: EffectType::GaussianBlur },
+            ))
             .expect("dispatch add effect");
 
         let selected = state.primary_selected_effect().expect("new effect selected");
@@ -11416,12 +11450,10 @@ mod tests {
             .clip;
 
         state
-            .dispatch_action(inspector_remove_effect_action(
-                InspectorRemoveEffectPayload {
-                    clip: inspector_clip_payload(selection),
-                    effect_id: remove_id,
-                },
-            ))
+            .dispatch_action(visual_effect_remove_action(VisualEffectTargetPayload {
+                clip_id: selection.clip_id,
+                effect_id: remove_id,
+            }))
             .expect("dispatch remove selected effect");
 
         assert!(state.primary_selected_effect().is_none());
@@ -11468,7 +11500,11 @@ mod tests {
         state.select_effect_by_id(clip_id, second_id).expect("seed selected effect");
 
         state
-            .dispatch_action(Action::ReorderEffects { clip_id, from: 1, to: 0 })
+            .dispatch_action(visual_effect_reorder_action(VisualEffectReorderPayload {
+                clip_id,
+                effect_id: second_id,
+                placement: EffectRelativePlacement::Before(first_id),
+            }))
             .expect("dispatch reorder selected effect");
 
         let models = AppUiPanelModels::from_app_state(&state);
@@ -11531,6 +11567,7 @@ mod tests {
                 mondrian_core::ParameterId::new_static("mondrian.test.lighting_direction"),
                 PropertyValue::Vec3(glam::Vec3::new(0.1, 0.2, 0.3)),
             ),
+            address: test_parameter_address("mondrian.test.lighting_direction"),
             path: "lighting.direction".to_string(),
             label: "Direction".to_string(),
             value: PropertyValue::Vec3(glam::Vec3::new(0.1, 0.2, 0.3)),
@@ -11579,13 +11616,13 @@ mod tests {
         let Action::Custom { namespace, name, payload } = &recorded[0] else {
             panic!("expected inspector custom action, got {:?}", recorded[0]);
         };
-        assert_eq!(namespace, INSPECTOR_NAMESPACE);
-        assert_eq!(name, INSPECTOR_SET_EFFECT_PROPERTY);
-        let payload: InspectorSetEffectPropertyPayload =
+        assert_eq!(namespace, VISUAL_EFFECT_NAMESPACE);
+        assert_eq!(name, VISUAL_EFFECT_SET_PARAMETER_VALUE);
+        let payload: VisualEffectSetParameterValuePayload =
             serde_json::from_value(payload.clone()).expect("set effect property payload");
-        assert_eq!(payload.clip.clip_id, selection.clip_id);
+        assert_eq!(payload.clip_id, selection.clip_id);
         assert_eq!(payload.effect_id, effect_id);
-        assert_eq!(payload.path, "lighting.direction");
+        assert_eq!(payload.parameter, property.address);
         let PropertyValue::Vec3(value) = payload.value else {
             panic!("expected Vec3 payload");
         };
@@ -11610,6 +11647,7 @@ mod tests {
                 mondrian_core::ParameterId::new_static("mondrian.test.color_exposure"),
                 PropertyValue::Float(0.2),
             ),
+            address: test_parameter_address("mondrian.test.color_exposure"),
             path: "color.exposure".to_string(),
             label: "Exposure".to_string(),
             value: PropertyValue::Float(0.2),
@@ -11669,9 +11707,9 @@ mod tests {
         let Action::Custom { payload, .. } = &recorded[0] else {
             panic!("expected inspector custom action, got {:?}", recorded[0]);
         };
-        let payload: InspectorSetEffectPropertyPayload =
+        let payload: VisualEffectSetParameterValuePayload =
             serde_json::from_value(payload.clone()).expect("set effect property payload");
-        assert_eq!(payload.path, "color.exposure");
+        assert_eq!(payload.parameter, property.address);
         let PropertyValue::Float(value) = payload.value else {
             panic!("expected Float payload");
         };
@@ -11694,6 +11732,7 @@ mod tests {
                 mondrian_core::ParameterId::new_static("mondrian.test.blur_radius"),
                 PropertyValue::Float(0.2),
             ),
+            address: test_parameter_address("mondrian.test.blur_radius"),
             path: "blur.radius".to_string(),
             label: "Radius".to_string(),
             value: PropertyValue::Float(0.2),
@@ -11754,13 +11793,13 @@ mod tests {
         let Action::Custom { namespace, name, payload } = &recorded[0] else {
             panic!("expected inspector custom action, got {:?}", recorded[0]);
         };
-        assert_eq!(namespace, INSPECTOR_NAMESPACE);
-        assert_eq!(name, INSPECTOR_SET_EFFECT_PROPERTY);
-        let payload: InspectorSetEffectPropertyPayload =
+        assert_eq!(namespace, VISUAL_EFFECT_NAMESPACE);
+        assert_eq!(name, VISUAL_EFFECT_SET_PARAMETER_VALUE);
+        let payload: VisualEffectSetParameterValuePayload =
             serde_json::from_value(payload.clone()).expect("set effect property payload");
-        assert_eq!(payload.clip.clip_id, selection.clip_id);
+        assert_eq!(payload.clip_id, selection.clip_id);
         assert_eq!(payload.effect_id, effect_id);
-        assert_eq!(payload.path, "blur.radius");
+        assert_eq!(payload.parameter, property.address);
         let PropertyValue::Float(value) = payload.value else {
             panic!("expected Float payload");
         };
@@ -11783,6 +11822,7 @@ mod tests {
                 mondrian_core::ParameterId::new_static("mondrian.test.color_exposure"),
                 PropertyValue::Float(0.2),
             ),
+            address: test_parameter_address("mondrian.test.color_exposure"),
             path: "color.exposure".to_string(),
             label: "Exposure".to_string(),
             value: PropertyValue::Float(0.2),
@@ -11839,9 +11879,9 @@ mod tests {
         let Action::Custom { payload, .. } = &recorded[0] else {
             panic!("expected inspector custom action, got {:?}", recorded[0]);
         };
-        let payload: InspectorSetEffectPropertyPayload =
+        let payload: VisualEffectSetParameterValuePayload =
             serde_json::from_value(payload.clone()).expect("set effect property payload");
-        assert_eq!(payload.path, "color.exposure");
+        assert_eq!(payload.parameter, property.address);
         let PropertyValue::Float(value) = payload.value else {
             panic!("expected Float payload");
         };
@@ -11864,6 +11904,7 @@ mod tests {
                 mondrian_core::ParameterId::new_static("mondrian.test.level_iterations"),
                 PropertyValue::Int(10),
             ),
+            address: test_parameter_address("mondrian.test.level_iterations"),
             path: "levels.iterations".to_string(),
             label: "Iterations".to_string(),
             value: PropertyValue::Int(10),
@@ -11923,9 +11964,9 @@ mod tests {
         let Action::Custom { payload, .. } = &recorded[0] else {
             panic!("expected inspector custom action, got {:?}", recorded[0]);
         };
-        let payload: InspectorSetEffectPropertyPayload =
+        let payload: VisualEffectSetParameterValuePayload =
             serde_json::from_value(payload.clone()).expect("set effect property payload");
-        assert_eq!(payload.path, "levels.iterations");
+        assert_eq!(payload.parameter, property.address);
         assert_eq!(payload.value, PropertyValue::Int(12));
     }
 
@@ -11942,21 +11983,23 @@ mod tests {
         let action = inspector_effect_property_action(
             Some(selection),
             effect_id,
-            "key.color",
+            test_parameter_address("mondrian.test.key_color"),
             PropertyValue::Color(color),
         );
 
         let Some(Action::Custom { namespace, name, payload }) = action else {
             panic!("expected inspector set effect property action");
         };
-        assert_eq!(namespace, INSPECTOR_NAMESPACE);
-        assert_eq!(name, INSPECTOR_SET_EFFECT_PROPERTY);
-        let payload: InspectorSetEffectPropertyPayload =
+        assert_eq!(namespace, VISUAL_EFFECT_NAMESPACE);
+        assert_eq!(name, VISUAL_EFFECT_SET_PARAMETER_VALUE);
+        let payload: VisualEffectSetParameterValuePayload =
             serde_json::from_value(payload).expect("set effect property payload");
-        assert_eq!(payload.clip.track_id, selection.track_id);
-        assert_eq!(payload.clip.clip_id, selection.clip_id);
+        assert_eq!(payload.clip_id, selection.clip_id);
         assert_eq!(payload.effect_id, effect_id);
-        assert_eq!(payload.path, "key.color");
+        assert_eq!(
+            payload.parameter.parameter_id,
+            mondrian_core::ParameterId::new_static("mondrian.test.key_color")
+        );
         assert_eq!(payload.value, PropertyValue::Color(color));
     }
 
@@ -12537,12 +12580,19 @@ mod tests {
             inspector_remove_effect_row_action(None, EffectId::new()),
             None
         );
-        assert_eq!(inspector_reorder_effect_action(None, 1, 0), None);
+        assert_eq!(
+            inspector_reorder_effect_action(
+                None,
+                EffectId::new(),
+                EffectRelativePlacement::Before(EffectId::new()),
+            ),
+            None
+        );
         assert_eq!(
             inspector_effect_property_action(
                 None,
                 EffectId::new(),
-                "color.tint",
+                test_parameter_address("mondrian.test.color_tint"),
                 PropertyValue::Color(Color::from_rgba8(1, 2, 3, 4)),
             ),
             None
@@ -12711,12 +12761,11 @@ mod tests {
                 recorded[0]
             );
         };
-        assert_eq!(namespace, INSPECTOR_NAMESPACE);
-        assert_eq!(name, INSPECTOR_SELECT_EFFECT);
-        let payload: InspectorSelectEffectPayload =
+        assert_eq!(namespace, VISUAL_EFFECT_NAMESPACE);
+        assert_eq!(name, VISUAL_EFFECT_SELECT);
+        let payload: VisualEffectTargetPayload =
             serde_json::from_value(payload.clone()).expect("inspector select effect payload");
-        assert_eq!(payload.clip.clip_id, selection.clip_id);
-        assert_eq!(payload.clip.track_id, selection.track_id);
+        assert_eq!(payload.clip_id, selection.clip_id);
         assert_eq!(payload.effect_id, effect_id);
     }
 
@@ -12727,12 +12776,21 @@ mod tests {
             is_video_track: true,
             clip_id: ClipId::new(),
         };
+        let effect_id = EffectId::new();
+        let anchor_id = EffectId::new();
 
         assert_eq!(
-            inspector_reorder_effect_action(Some(selection), 2, 0),
-            Some(Action::ReorderEffects { clip_id: selection.clip_id, from: 2, to: 0 })
+            inspector_reorder_effect_action(
+                Some(selection),
+                effect_id,
+                EffectRelativePlacement::Before(anchor_id),
+            ),
+            Some(visual_effect_reorder_action(VisualEffectReorderPayload {
+                clip_id: selection.clip_id,
+                effect_id,
+                placement: EffectRelativePlacement::Before(anchor_id),
+            }))
         );
-        assert_eq!(inspector_reorder_effect_action(Some(selection), 1, 1), None);
     }
 
     #[test]
@@ -12779,11 +12837,11 @@ mod tests {
 
         match node_graph_node_action(Some(selection), &targets, "effect-node") {
             Some(Action::Custom { namespace, name, payload }) => {
-                assert_eq!(namespace, INSPECTOR_NAMESPACE);
-                assert_eq!(name, INSPECTOR_SELECT_EFFECT);
-                let payload: InspectorSelectEffectPayload =
+                assert_eq!(namespace, VISUAL_EFFECT_NAMESPACE);
+                assert_eq!(name, VISUAL_EFFECT_SELECT);
+                let payload: VisualEffectTargetPayload =
                     serde_json::from_value(payload).expect("inspector select effect payload");
-                assert_eq!(payload.clip.clip_id, selection.clip_id);
+                assert_eq!(payload.clip_id, selection.clip_id);
                 assert_eq!(payload.effect_id, effect_id);
             }
             other => panic!("expected inspector select effect action, got {other:?}"),
@@ -12945,11 +13003,11 @@ mod tests {
                 recorded[1]
             );
         };
-        assert_eq!(namespace, INSPECTOR_NAMESPACE);
-        assert_eq!(name, INSPECTOR_SELECT_EFFECT);
-        let payload: InspectorSelectEffectPayload =
+        assert_eq!(namespace, VISUAL_EFFECT_NAMESPACE);
+        assert_eq!(name, VISUAL_EFFECT_SELECT);
+        let payload: VisualEffectTargetPayload =
             serde_json::from_value(payload.clone()).expect("inspector select effect payload");
-        assert_eq!(payload.clip.clip_id, selection.clip_id);
+        assert_eq!(payload.clip_id, selection.clip_id);
         assert_eq!(payload.effect_id, effect_id);
     }
 
@@ -13120,9 +13178,9 @@ mod tests {
                 recorded[1]
             );
         };
-        assert_eq!(namespace, INSPECTOR_NAMESPACE);
-        assert_eq!(name, INSPECTOR_SELECT_EFFECT);
-        let effect_payload: InspectorSelectEffectPayload =
+        assert_eq!(namespace, VISUAL_EFFECT_NAMESPACE);
+        assert_eq!(name, VISUAL_EFFECT_SELECT);
+        let effect_payload: VisualEffectTargetPayload =
             serde_json::from_value(payload.clone()).expect("inspector select effect payload");
         assert_eq!(effect_payload.effect_id, effect_id);
     }

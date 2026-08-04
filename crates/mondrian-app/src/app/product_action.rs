@@ -1,19 +1,22 @@
 //! Closed product Actions and the external custom-action Adapter.
 //!
 //! Product code dispatches and admits the typed algebra in this Module.
-//! `Action::Custom` remains a compatibility transport for reusable Widgets,
+//! `Action::Custom` remains an external transport for reusable Widgets,
 //! scripting, and future plugin Adapters; it is decoded only at this seam.
 
 use std::path::PathBuf;
 
-use mondrian_core::types::{ClipId, FramePosition, JobId, SequenceId, TrackId};
+use mondrian_core::automation::{AnimationParameterAddress, PropertyValue};
+use mondrian_core::effect_data::EffectType;
+use mondrian_core::types::{ClipId, EffectId, FramePosition, JobId, SequenceId, TrackId};
 use mondrian_core::{ProjectColorEnvironment, ProjectSettings, TimelineTime};
 use mondrian_editor_state::Action;
 use mondrian_export::preset::{BuiltinExportPreset, ExportPreset, TimelineExportRange};
 use mondrian_timeline::{
+    clip::Clip,
     sequence::{Sequence, SequenceSettings},
     AudioAutomationEditRequest, AudioChannelStripEditRequest, AudioComponentEditRequest,
-    AudioProcessorRackEditRequest, AudioRoutingEditRequest,
+    AudioProcessorRackEditRequest, AudioRoutingEditRequest, EffectRelativePlacement,
 };
 use serde::{Deserialize, Serialize};
 
@@ -82,6 +85,22 @@ pub const EXPORT_CANCEL: &str = "cancel";
 /// External action name for clearing bounded terminal Export evidence.
 pub const EXPORT_CLEAR_TERMINAL_HISTORY: &str = "clear_terminal_history";
 
+/// External custom-action namespace for visual Effect authoring operations.
+pub const VISUAL_EFFECT_NAMESPACE: &str = "ui.visual_effect";
+
+/// External action name for inserting one registered visual Effect on a Clip.
+pub const VISUAL_EFFECT_ADD_TO_CLIP: &str = "add_to_clip";
+/// External action name for selecting one visual Effect instance.
+pub const VISUAL_EFFECT_SELECT: &str = "select";
+/// External action name for changing one visual Effect enabled state.
+pub const VISUAL_EFFECT_SET_ENABLED: &str = "set_enabled";
+/// External action name for removing one visual Effect instance.
+pub const VISUAL_EFFECT_REMOVE: &str = "remove";
+/// External action name for moving one visual Effect relative to another instance.
+pub const VISUAL_EFFECT_REORDER: &str = "reorder";
+/// External action name for writing one stable-address visual Effect parameter.
+pub const VISUAL_EFFECT_SET_PARAMETER_VALUE: &str = "set_parameter_value";
+
 /// External custom-action namespace for Sequence audio authoring operations.
 pub const AUDIO_NAMESPACE: &str = "ui.audio";
 
@@ -118,6 +137,8 @@ pub enum ProductAction {
     Sequence(SequenceProductAction),
     /// An operation owned by Export draft or execution orchestration.
     Export(ExportProductAction),
+    /// An operation owned by Clip-local visual Effect authoring or selection.
+    VisualEffect(VisualEffectProductAction),
 }
 
 /// Closed Project lifecycle and authoring operations.
@@ -163,6 +184,23 @@ pub enum ExportProductAction {
     Cancel(JobId),
     /// Remove all retained terminal Export evidence.
     ClearTerminalHistory,
+}
+
+/// Closed Clip-local visual Effect operations.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VisualEffectProductAction {
+    /// Instantiate one currently registered definition and append it to a Clip.
+    AddToClip(VisualEffectAddToClipPayload),
+    /// Select one existing Effect instance in the App selection scope.
+    Select(VisualEffectTargetPayload),
+    /// Change whether one Effect instance participates in rendering.
+    SetEnabled(VisualEffectSetEnabledPayload),
+    /// Remove one Effect instance from its Clip.
+    Remove(VisualEffectTargetPayload),
+    /// Move one Effect relative to another stable instance identity.
+    Reorder(VisualEffectReorderPayload),
+    /// Write one parameter value through its stable author instance address.
+    SetParameterValue(Box<VisualEffectSetParameterValuePayload>),
 }
 
 /// Closed Viewer operations that mutate product state.
@@ -230,6 +268,7 @@ impl ProductActionDecodeError {
             PROJECT_NAMESPACE => "project_action",
             SEQUENCE_NAMESPACE => "sequence_action",
             EXPORT_NAMESPACE => "export_action",
+            VISUAL_EFFECT_NAMESPACE => "visual_effect_action",
             _ => "product_action",
         };
         format!("{domain}.{}", self.name)
@@ -379,6 +418,31 @@ impl ProductAction {
                         ExportProductAction::ClearTerminalHistory,
                     )))
                 }
+                _ => Ok(None),
+            },
+            VISUAL_EFFECT_NAMESPACE => match name.as_str() {
+                VISUAL_EFFECT_ADD_TO_CLIP => Ok(Some(Self::VisualEffect(
+                    VisualEffectProductAction::AddToClip(decode_payload(namespace, name, payload)?),
+                ))),
+                VISUAL_EFFECT_SELECT => Ok(Some(Self::VisualEffect(
+                    VisualEffectProductAction::Select(decode_payload(namespace, name, payload)?),
+                ))),
+                VISUAL_EFFECT_SET_ENABLED => Ok(Some(Self::VisualEffect(
+                    VisualEffectProductAction::SetEnabled(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
+                VISUAL_EFFECT_REMOVE => Ok(Some(Self::VisualEffect(
+                    VisualEffectProductAction::Remove(decode_payload(namespace, name, payload)?),
+                ))),
+                VISUAL_EFFECT_REORDER => Ok(Some(Self::VisualEffect(
+                    VisualEffectProductAction::Reorder(decode_payload(namespace, name, payload)?),
+                ))),
+                VISUAL_EFFECT_SET_PARAMETER_VALUE => Ok(Some(Self::VisualEffect(
+                    VisualEffectProductAction::SetParameterValue(Box::new(decode_payload(
+                        namespace, name, payload,
+                    )?)),
+                ))),
                 _ => Ok(None),
             },
             _ => Ok(None),
@@ -540,6 +604,36 @@ impl ProductAction {
                 EXPORT_NAMESPACE,
                 EXPORT_CLEAR_TERMINAL_HISTORY,
                 serde_json::Value::Null,
+            ),
+            Self::VisualEffect(VisualEffectProductAction::AddToClip(payload)) => (
+                VISUAL_EFFECT_NAMESPACE,
+                VISUAL_EFFECT_ADD_TO_CLIP,
+                serde_json::json!(payload),
+            ),
+            Self::VisualEffect(VisualEffectProductAction::Select(payload)) => (
+                VISUAL_EFFECT_NAMESPACE,
+                VISUAL_EFFECT_SELECT,
+                serde_json::json!(payload),
+            ),
+            Self::VisualEffect(VisualEffectProductAction::SetEnabled(payload)) => (
+                VISUAL_EFFECT_NAMESPACE,
+                VISUAL_EFFECT_SET_ENABLED,
+                serde_json::json!(payload),
+            ),
+            Self::VisualEffect(VisualEffectProductAction::Remove(payload)) => (
+                VISUAL_EFFECT_NAMESPACE,
+                VISUAL_EFFECT_REMOVE,
+                serde_json::json!(payload),
+            ),
+            Self::VisualEffect(VisualEffectProductAction::Reorder(payload)) => (
+                VISUAL_EFFECT_NAMESPACE,
+                VISUAL_EFFECT_REORDER,
+                serde_json::json!(payload),
+            ),
+            Self::VisualEffect(VisualEffectProductAction::SetParameterValue(payload)) => (
+                VISUAL_EFFECT_NAMESPACE,
+                VISUAL_EFFECT_SET_PARAMETER_VALUE,
+                serde_json::json!(payload),
             ),
         };
         Action::Custom {
@@ -752,6 +846,64 @@ struct ExportCancelWirePayload {
     job_id: JobId,
 }
 
+/// Clip and registered definition selected for one visual Effect insertion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VisualEffectAddToClipPayload {
+    /// Canonical Clip identity; current Track placement is derived at dispatch.
+    pub clip_id: ClipId,
+    /// Definition identity to instantiate from the current Effect registry.
+    pub effect_type: EffectType,
+}
+
+/// Stable identity of one visual Effect instance on one Clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VisualEffectTargetPayload {
+    /// Canonical Clip identity; current Track placement is derived at dispatch.
+    pub clip_id: ClipId,
+    /// Stable Effect instance identity owned by the Clip.
+    pub effect_id: EffectId,
+}
+
+/// Change one visual Effect's enabled state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VisualEffectSetEnabledPayload {
+    /// Canonical Clip identity; current Track placement is derived at dispatch.
+    pub clip_id: ClipId,
+    /// Stable Effect instance identity owned by the Clip.
+    pub effect_id: EffectId,
+    /// Whether the Effect participates in prepared visual execution.
+    pub enabled: bool,
+}
+
+/// Move one visual Effect relative to another stable instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VisualEffectReorderPayload {
+    /// Canonical Clip identity; current Track placement is derived at dispatch.
+    pub clip_id: ClipId,
+    /// Stable Effect instance being moved.
+    pub effect_id: EffectId,
+    /// Stable relative placement requested inside the same Effect chain.
+    pub placement: EffectRelativePlacement,
+}
+
+/// Write one visual Effect parameter through stable author identity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VisualEffectSetParameterValuePayload {
+    /// Canonical Clip identity; current Track placement is derived at dispatch.
+    pub clip_id: ClipId,
+    /// Stable Effect instance that owns the parameter.
+    pub effect_id: EffectId,
+    /// Stable parameter instance plus definition identity; never a property-path alias.
+    pub parameter: AnimationParameterAddress,
+    /// Value to write statically or as a key at the current Clip-local author time.
+    pub value: PropertyValue,
+}
+
 /// Change the active Viewer preview resolution scale.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -831,6 +983,7 @@ impl<'a> ProductActionAvailability<'a> {
             ProductAction::Project(action) => self.allows_project(action),
             ProductAction::Sequence(action) => self.allows_sequence(action),
             ProductAction::Export(action) => self.allows_export(action),
+            ProductAction::VisualEffect(action) => self.allows_visual_effect(action),
         }
     }
 
@@ -952,6 +1105,132 @@ impl<'a> ProductActionAvailability<'a> {
             }
         }
     }
+
+    fn allows_visual_effect(&self, action: &VisualEffectProductAction) -> bool {
+        let Some(sequence) = self.state.active_sequence() else {
+            return false;
+        };
+        match action {
+            VisualEffectProductAction::AddToClip(payload) => {
+                visual_effect_clip(sequence, payload.clip_id).is_some_and(|target| {
+                    target.track_unlocked
+                        && target.is_video_track
+                        && mondrian_effects::effect_definition(&payload.effect_type)
+                            .is_some_and(|definition| definition.supports_visual_evaluation())
+                })
+            }
+            VisualEffectProductAction::Select(payload) => {
+                visual_effect_target(sequence, payload.clip_id, payload.effect_id).is_some()
+                    && self.state.primary_selected_effect().is_none_or(|selected| {
+                        selected.clip.clip_id != payload.clip_id
+                            || selected.effect_id != payload.effect_id
+                    })
+            }
+            VisualEffectProductAction::SetEnabled(payload) => {
+                visual_effect_target(sequence, payload.clip_id, payload.effect_id).is_some_and(
+                    |target| target.track_unlocked && target.effect.is_enabled != payload.enabled,
+                )
+            }
+            VisualEffectProductAction::Remove(payload) => {
+                visual_effect_target(sequence, payload.clip_id, payload.effect_id)
+                    .is_some_and(|target| target.track_unlocked)
+            }
+            VisualEffectProductAction::Reorder(payload) => {
+                visual_effect_target(sequence, payload.clip_id, payload.effect_id).is_some_and(
+                    |target| {
+                        target.track_unlocked
+                            && target
+                                .clip
+                                .effect_relative_placement_would_change(
+                                    payload.effect_id,
+                                    payload.placement,
+                                )
+                                .unwrap_or(false)
+                    },
+                )
+            }
+            VisualEffectProductAction::SetParameterValue(payload) => {
+                visual_effect_target(sequence, payload.clip_id, payload.effect_id).is_some_and(
+                    |target| {
+                        if !target.track_unlocked {
+                            return false;
+                        }
+                        let Some((_, property)) =
+                            target.effect.properties.property_by_address(&payload.parameter)
+                        else {
+                            return false;
+                        };
+                        if property.value_type() != payload.value.value_type() {
+                            return false;
+                        }
+                        let current = if property.is_animated() {
+                            visual_effect_author_time(self.state, sequence, target.clip)
+                                .map(|time| property.evaluate(time))
+                        } else {
+                            Some(property.static_value().clone())
+                        };
+                        current.is_some_and(|current| current != payload.value)
+                    },
+                )
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct VisualEffectClip<'a> {
+    clip: &'a Clip,
+    track_unlocked: bool,
+    is_video_track: bool,
+}
+
+#[derive(Clone, Copy)]
+struct VisualEffectTarget<'a> {
+    clip: &'a Clip,
+    effect: &'a mondrian_core::effect_data::EffectNode,
+    track_unlocked: bool,
+}
+
+fn visual_effect_clip(sequence: &Sequence, clip_id: ClipId) -> Option<VisualEffectClip<'_>> {
+    sequence
+        .video_tracks
+        .iter()
+        .map(|track| (track, true))
+        .chain(sequence.audio_tracks.iter().map(|track| (track, false)))
+        .find_map(|(track, is_video_track)| {
+            track.clips.iter().find(|clip| clip.id == clip_id).map(|clip| VisualEffectClip {
+                clip,
+                track_unlocked: !track.is_locked,
+                is_video_track,
+            })
+        })
+}
+
+fn visual_effect_target(
+    sequence: &Sequence,
+    clip_id: ClipId,
+    effect_id: EffectId,
+) -> Option<VisualEffectTarget<'_>> {
+    let target = visual_effect_clip(sequence, clip_id)?;
+    if !target.is_video_track {
+        return None;
+    }
+    let effect = target.clip.effects.iter().find(|effect| effect.id == effect_id)?;
+    Some(VisualEffectTarget {
+        clip: target.clip,
+        effect,
+        track_unlocked: target.track_unlocked,
+    })
+}
+
+fn visual_effect_author_time(
+    state: &AppState,
+    sequence: &Sequence,
+    clip: &Clip,
+) -> Option<TimelineTime> {
+    let sequence_time = state.current_timeline_time().ok().flatten().unwrap_or(sequence.playhead);
+    let end = clip.end_position().ok()?;
+    clip.timeline_to_clip_time(sequence_time.clamp(clip.position, end)).ok()
 }
 
 fn clip_admission_facts(sequence: &Sequence, clip_id: ClipId) -> Option<ClipAdmissionFacts> {
@@ -1218,6 +1497,53 @@ mod tests {
             let decoded = ProductAction::decode_external(&expected.clone().into_external_action())
                 .expect("valid external payload")
                 .expect("recognized Export product action");
+            assert_eq!(decoded, expected);
+        }
+    }
+
+    #[test]
+    fn external_codec_round_trips_every_visual_effect_product_action() {
+        let clip_id = ClipId::new();
+        let effect_id = EffectId::new();
+        let anchor_id = EffectId::new();
+        let parameter = AnimationParameterAddress {
+            animation_track_id: mondrian_core::AnimationTrackId::new(),
+            parameter_id: mondrian_core::ParameterId::new_static("mondrian.effect.test.amount"),
+        };
+        let actions = [
+            ProductAction::VisualEffect(VisualEffectProductAction::AddToClip(
+                VisualEffectAddToClipPayload { clip_id, effect_type: EffectType::GaussianBlur },
+            )),
+            ProductAction::VisualEffect(VisualEffectProductAction::Select(
+                VisualEffectTargetPayload { clip_id, effect_id },
+            )),
+            ProductAction::VisualEffect(VisualEffectProductAction::SetEnabled(
+                VisualEffectSetEnabledPayload { clip_id, effect_id, enabled: false },
+            )),
+            ProductAction::VisualEffect(VisualEffectProductAction::Remove(
+                VisualEffectTargetPayload { clip_id, effect_id },
+            )),
+            ProductAction::VisualEffect(VisualEffectProductAction::Reorder(
+                VisualEffectReorderPayload {
+                    clip_id,
+                    effect_id,
+                    placement: EffectRelativePlacement::After(anchor_id),
+                },
+            )),
+            ProductAction::VisualEffect(VisualEffectProductAction::SetParameterValue(Box::new(
+                VisualEffectSetParameterValuePayload {
+                    clip_id,
+                    effect_id,
+                    parameter,
+                    value: PropertyValue::Float(0.75),
+                },
+            ))),
+        ];
+
+        for expected in actions {
+            let decoded = ProductAction::decode_external(&expected.clone().into_external_action())
+                .expect("valid external payload")
+                .expect("recognized visual Effect product action");
             assert_eq!(decoded, expected);
         }
     }
@@ -1605,6 +1931,100 @@ mod tests {
                 )
             ))
         );
+    }
+
+    #[test]
+    fn visual_effect_availability_uses_authoritative_targets_and_exact_noop_semantics() {
+        let mut sequence = Sequence::new("Visual Effects");
+        let time_base = sequence.time_base();
+        let mut clip =
+            Clip::new(AssetId::new(), tt(0, time_base), tt(30, time_base)).expect("valid Clip");
+        let first = mondrian_effects::instantiate_effect_node(EffectType::GaussianBlur)
+            .expect("registered Effect");
+        let first_id = first.id;
+        let (_, first_property) = first.properties.iter().next().expect("Effect property");
+        let parameter = AnimationParameterAddress {
+            animation_track_id: first_property.track_id,
+            parameter_id: first_property.descriptor.parameter_id().clone(),
+        };
+        let initial_value = first_property.static_value().clone();
+        let second = mondrian_effects::instantiate_effect_node(EffectType::Sharpen)
+            .expect("registered anchor Effect");
+        let second_id = second.id;
+        clip.add_effect_node(first);
+        clip.add_effect_node(second);
+        let clip_id = clip.id;
+        sequence.video_tracks[0].add_clip(clip).expect("add Clip");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+
+        let add = ProductAction::VisualEffect(VisualEffectProductAction::AddToClip(
+            VisualEffectAddToClipPayload { clip_id, effect_type: EffectType::BasicCorrection },
+        ));
+        let missing_add = ProductAction::VisualEffect(VisualEffectProductAction::AddToClip(
+            VisualEffectAddToClipPayload {
+                clip_id,
+                effect_type: EffectType::Plugin("plugin.test.missing".to_owned()),
+            },
+        ));
+        let select = ProductAction::VisualEffect(VisualEffectProductAction::Select(
+            VisualEffectTargetPayload { clip_id, effect_id: first_id },
+        ));
+        let set_same = ProductAction::VisualEffect(VisualEffectProductAction::SetEnabled(
+            VisualEffectSetEnabledPayload { clip_id, effect_id: first_id, enabled: true },
+        ));
+        let set_changed = ProductAction::VisualEffect(VisualEffectProductAction::SetEnabled(
+            VisualEffectSetEnabledPayload { clip_id, effect_id: first_id, enabled: false },
+        ));
+        let already_before = ProductAction::VisualEffect(VisualEffectProductAction::Reorder(
+            VisualEffectReorderPayload {
+                clip_id,
+                effect_id: first_id,
+                placement: EffectRelativePlacement::Before(second_id),
+            },
+        ));
+        let move_after = ProductAction::VisualEffect(VisualEffectProductAction::Reorder(
+            VisualEffectReorderPayload {
+                clip_id,
+                effect_id: first_id,
+                placement: EffectRelativePlacement::After(second_id),
+            },
+        ));
+        let same_parameter =
+            ProductAction::VisualEffect(VisualEffectProductAction::SetParameterValue(Box::new(
+                VisualEffectSetParameterValuePayload {
+                    clip_id,
+                    effect_id: first_id,
+                    parameter: parameter.clone(),
+                    value: initial_value,
+                },
+            )));
+        let changed_parameter =
+            ProductAction::VisualEffect(VisualEffectProductAction::SetParameterValue(Box::new(
+                VisualEffectSetParameterValuePayload {
+                    clip_id,
+                    effect_id: first_id,
+                    parameter,
+                    value: PropertyValue::Float(3.0),
+                },
+            )));
+
+        let availability = state.product_action_availability();
+        assert!(availability.allows(&add));
+        assert!(!availability.allows(&missing_add));
+        assert!(availability.allows(&select));
+        assert!(!availability.allows(&set_same));
+        assert!(availability.allows(&set_changed));
+        assert!(!availability.allows(&already_before));
+        assert!(availability.allows(&move_after));
+        assert!(!availability.allows(&same_parameter));
+        assert!(availability.allows(&changed_parameter));
+
+        state.active_sequence_mut_uncommitted().expect("Sequence").video_tracks[0].is_locked = true;
+        assert!(!state.product_action_availability().allows(&add));
+        assert!(!state.product_action_availability().allows(&set_changed));
+        assert!(!state.product_action_availability().allows(&move_after));
+        assert!(state.product_action_availability().allows(&select));
     }
 
     #[test]

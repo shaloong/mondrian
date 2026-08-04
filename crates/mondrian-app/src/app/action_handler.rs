@@ -11,6 +11,7 @@ use crate::app::product_action::{
     ProjectProductAction, ProjectRecoverFromAutosavePayload, SequenceProductAction,
     SequenceUpdateSettingsPayload, TimelineClipSelectionModePayload, TimelineProductAction,
     TimelineTrimPayloadEdge, ViewerProductAction, ViewerSetClipTransformPayload,
+    VisualEffectProductAction, VisualEffectSetParameterValuePayload,
 };
 #[cfg(test)]
 use crate::app::product_action::{TimelineMoveClipPayload, TimelineSelectClipPayload};
@@ -28,13 +29,11 @@ use crate::app::ui_actions::{
     AssetsPrepareDragPayload, AssetsRebindAudioComponentPayload,
     AssetsRefreshAudioComponentsPayload, AssetsRelinkAssetPayload, AssetsRenameAssetPayload,
     AssetsRenameFolderPayload, AssetsSetInterpretationPayload, AssetsSetProxyModePayload,
-    EffectsAddToClipPayload, InspectorAudioComponentSourcePayload, InspectorClipTransformField,
-    InspectorCurveEditPayload, InspectorEditClipCurvePayload, InspectorRemoveEffectPayload,
-    InspectorSelectEffectPayload, InspectorSetAudioComponentSourcePayload,
+    InspectorAudioComponentSourcePayload, InspectorClipTransformField, InspectorCurveEditPayload,
+    InspectorEditClipCurvePayload, InspectorSetAudioComponentSourcePayload,
     InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
     InspectorSetClipPropertyPayload, InspectorSetClipTintPayload,
-    InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-    InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
+    InspectorSetClipTransformFieldPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
     TimelineCreateCrossDissolvePayload, TimelineDropAssetPayload, TimelineInOutPointPayloadKind,
     TimelineInsertAssetPayload, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
     TimelinePrecomposeSelectionPayload, TimelineSelectVideoTransitionPayload,
@@ -47,15 +46,13 @@ use crate::app::ui_actions::{
     ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
     ASSETS_PREPARE_DRAG, ASSETS_REBIND_AUDIO_COMPONENT, ASSETS_REFRESH_AUDIO_COMPONENTS,
     ASSETS_RELINK_ASSET, ASSETS_RENAME_ASSET, ASSETS_RENAME_FOLDER, ASSETS_SET_INTERPRETATION,
-    ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_EDIT_CLIP_CURVE,
-    INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT,
+    ASSETS_SET_PROXY_MODE, INSPECTOR_EDIT_CLIP_CURVE, INSPECTOR_NAMESPACE,
     INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
     INSPECTOR_SET_CLIP_PROPERTY, INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
-    INSPECTOR_SET_EFFECT_ENABLED, INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK,
-    TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_CREATE_BASIC_TITLE, TIMELINE_CREATE_CROSS_DISSOLVE,
-    TIMELINE_DROP_ASSET, TIMELINE_EXTRACT_RANGE, TIMELINE_INSERT_ASSET, TIMELINE_LIFT_RANGE,
-    TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
-    TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_PRECOMPOSE_SELECTION,
+    TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_CREATE_BASIC_TITLE,
+    TIMELINE_CREATE_CROSS_DISSOLVE, TIMELINE_DROP_ASSET, TIMELINE_EXTRACT_RANGE,
+    TIMELINE_INSERT_ASSET, TIMELINE_LIFT_RANGE, TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_MOVE_TRACK,
+    TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_PRECOMPOSE_SELECTION,
     TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SELECT_VIDEO_TRANSITION,
     TIMELINE_SET_IN_OUT_POINT, TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
     TIMELINE_SET_TRACK_TARGETING, TIMELINE_SET_VIDEO_TRANSITION_RANGE,
@@ -221,14 +218,6 @@ impl AppState {
                 self.freeze_video_clip_from_action(clip_id, sequence_time)
             }
 
-            // ── 效果（复用 clip-level undoable 命令）──────────────────────
-            Action::RemoveEffect { clip_id, effect_id } => {
-                self.remove_effect_from_action(clip_id, effect_id)
-            }
-            Action::ReorderEffects { clip_id, from, to } => {
-                self.reorder_effects_from_action(clip_id, from, to)
-            }
-
             // ── 项目操作 ──────────────────────────────────────────────────
             Action::OpenProject(path) => self.open_project_from_action(path),
             Action::SaveProject => {
@@ -248,9 +237,6 @@ impl AppState {
             }
             Action::Custom { namespace, name, payload } if namespace == INSPECTOR_NAMESPACE => {
                 self.dispatch_inspector_ui_action(&name, payload)
-            }
-            Action::Custom { namespace, name, payload } if namespace == EFFECTS_NAMESPACE => {
-                self.dispatch_effects_ui_action(&name, payload)
             }
             Action::Custom { namespace, name, payload } if namespace == ASSETS_NAMESPACE => {
                 self.dispatch_assets_ui_action(&name, payload)
@@ -1052,35 +1038,6 @@ impl AppState {
         Ok(())
     }
 
-    fn remove_effect_from_action(
-        &mut self,
-        clip_id: ClipId,
-        effect_id: mondrian_core::types::EffectId,
-    ) -> Result<()> {
-        let (track_id, is_video_track, _) = self.clip_action_location("remove_effect", clip_id)?;
-        self.remove_effect_from_clip(
-            SelectedClipRef { track_id, is_video_track, clip_id },
-            effect_id,
-        )
-        .map(|_| ())
-    }
-
-    fn reorder_effects_from_action(
-        &mut self,
-        clip_id: ClipId,
-        from: usize,
-        to: usize,
-    ) -> Result<()> {
-        let (track_id, is_video_track, _) =
-            self.clip_action_location("reorder_effects", clip_id)?;
-        self.reorder_effects_for_clip(
-            SelectedClipRef { track_id, is_video_track, clip_id },
-            from,
-            to,
-        )
-        .map(|_| ())
-    }
-
     fn select_from_action(
         &mut self,
         target: mondrian_editor_state::action::SelectionTarget,
@@ -1203,6 +1160,9 @@ impl AppState {
             ProductAction::Project(action) => self.dispatch_project_product_action(action),
             ProductAction::Sequence(action) => self.dispatch_sequence_product_action(action),
             ProductAction::Export(action) => self.dispatch_export_product_action(action),
+            ProductAction::VisualEffect(action) => {
+                self.dispatch_visual_effect_product_action(action)
+            }
         }
     }
 
@@ -1235,6 +1195,62 @@ impl AppState {
             TimelineProductAction::Seek(payload) => {
                 self.seek_with_source(payload.frame, payload.source)
             }
+        }
+    }
+
+    fn dispatch_visual_effect_product_action(
+        &mut self,
+        action: VisualEffectProductAction,
+    ) -> Result<()> {
+        match action {
+            VisualEffectProductAction::AddToClip(payload) => {
+                let effect_id = self.add_effect_to_clip(payload.clip_id, payload.effect_type)?;
+                self.select_effect_for_action(
+                    "visual_effect_add_to_clip",
+                    payload.clip_id,
+                    effect_id,
+                )
+            }
+            VisualEffectProductAction::Select(payload) => {
+                if self.primary_selected_effect().is_some_and(|selected| {
+                    selected.clip.clip_id == payload.clip_id
+                        && selected.effect_id == payload.effect_id
+                }) {
+                    return Err(action_not_executed(
+                        "visual_effect_select",
+                        "Effect is already the active Inspector selection",
+                    ));
+                }
+                self.select_effect_for_action(
+                    "visual_effect_select",
+                    payload.clip_id,
+                    payload.effect_id,
+                )
+            }
+            VisualEffectProductAction::SetEnabled(payload) => require_action_executed(
+                self.set_clip_effect_enabled(payload.clip_id, payload.effect_id, payload.enabled)?,
+                "visual_effect_set_enabled",
+                "Effect already has the requested enabled state",
+            ),
+            VisualEffectProductAction::Remove(payload) => require_action_executed(
+                self.remove_effect_from_clip(payload.clip_id, payload.effect_id)?,
+                "visual_effect_remove",
+                "Effect was not removed",
+            ),
+            VisualEffectProductAction::Reorder(payload) => require_action_executed(
+                self.reorder_effect_for_clip(
+                    payload.clip_id,
+                    payload.effect_id,
+                    payload.placement,
+                )?,
+                "visual_effect_reorder",
+                "Effect chain already has the requested relative order",
+            ),
+            VisualEffectProductAction::SetParameterValue(payload) => require_action_executed(
+                self.set_effect_parameter_value(*payload)?,
+                "visual_effect_set_parameter_value",
+                "Effect parameter already has the requested value at the current author time",
+            ),
         }
     }
 
@@ -1535,91 +1551,7 @@ impl AppState {
                 )?;
                 self.set_audio_component_source_from_ui(payload)
             }
-            INSPECTOR_SELECT_EFFECT => {
-                let payload = parse_ui_payload::<InspectorSelectEffectPayload>(
-                    "inspector_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.select_effect_for_action(
-                    "inspector_select_effect",
-                    payload.clip.clip_id,
-                    payload.effect_id,
-                )
-            }
-            INSPECTOR_SET_EFFECT_ENABLED => {
-                let payload = parse_ui_payload::<InspectorSetEffectEnabledPayload>(
-                    "inspector_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.set_clip_effect_enabled(
-                    SelectedClipRef {
-                        track_id: payload.clip.track_id,
-                        is_video_track: payload.clip.is_video_track,
-                        clip_id: payload.clip.clip_id,
-                    },
-                    payload.effect_id,
-                    payload.enabled,
-                )
-                .map(|_| ())
-            }
-            INSPECTOR_REMOVE_EFFECT => {
-                let payload = parse_ui_payload::<InspectorRemoveEffectPayload>(
-                    "inspector_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.remove_effect_from_clip(
-                    SelectedClipRef {
-                        track_id: payload.clip.track_id,
-                        is_video_track: payload.clip.is_video_track,
-                        clip_id: payload.clip.clip_id,
-                    },
-                    payload.effect_id,
-                )
-                .map(|_| ())
-            }
-            INSPECTOR_SET_EFFECT_PROPERTY => {
-                let payload = parse_ui_payload::<InspectorSetEffectPropertyPayload>(
-                    "inspector_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.set_effect_property_from_ui(
-                    SelectedClipRef {
-                        track_id: payload.clip.track_id,
-                        is_video_track: payload.clip.is_video_track,
-                        clip_id: payload.clip.clip_id,
-                    },
-                    payload.effect_id,
-                    &payload.path,
-                    payload.value,
-                )
-            }
             _ => Err(unknown_ui_action_error("inspector_ui_action", name)),
-        }
-    }
-
-    fn dispatch_effects_ui_action(&mut self, name: &str, payload: serde_json::Value) -> Result<()> {
-        match name {
-            EFFECTS_ADD_TO_CLIP => {
-                let payload = parse_ui_payload::<EffectsAddToClipPayload>(
-                    "effects_ui_action",
-                    name,
-                    payload,
-                )?;
-                let selection = SelectedClipRef {
-                    track_id: payload.clip.track_id,
-                    is_video_track: payload.clip.is_video_track,
-                    clip_id: payload.clip.clip_id,
-                };
-                let effect_id = self.add_effect_to_clip(selection, payload.effect_type)?;
-                self.select_effect_by_id(selection.clip_id, effect_id).map(|_| ()).ok_or_else(
-                    || missing_effect_error("effects_add_to_clip", selection.clip_id, effect_id),
-                )
-            }
-            _ => Err(unknown_ui_action_error("effects_ui_action", name)),
         }
     }
 
@@ -2034,42 +1966,107 @@ impl AppState {
         }
     }
 
-    fn set_effect_property_from_ui(
+    fn set_effect_parameter_value(
         &mut self,
-        selection: SelectedClipRef,
-        effect_id: EffectId,
-        path: &str,
-        value: PropertyValue,
-    ) -> Result<()> {
-        self.ensure_clip_track_unlocked("set_effect_property", selection.clip_id)?;
+        payload: VisualEffectSetParameterValuePayload,
+    ) -> Result<bool> {
+        let VisualEffectSetParameterValuePayload { clip_id, effect_id, parameter, value } = payload;
+        self.ensure_clip_track_unlocked("visual_effect_set_parameter_value", clip_id)?;
+        let (_, is_video_track, _) =
+            self.clip_action_location("visual_effect_set_parameter_value", clip_id)?;
+        if !is_video_track {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "visual_effect_set_parameter_value".to_owned(),
+                reason: "visual Effects require a video Clip".to_owned(),
+            });
+        }
+        let current_time = self.current_timeline_time()?.unwrap_or(TimelineTime::ZERO);
         let Some(sequence_id) = self.active_sequence_id() else {
-            return Err(missing_sequence_error("set_effect_property"));
+            return Err(missing_sequence_error("visual_effect_set_parameter_value"));
         };
-        self.commit_sequence_edit(sequence_id, "调整特效属性", move |sequence| {
-            let clip = find_clip_mut(sequence, selection.clip_id)
-                .ok_or_else(|| missing_clip_error("set_effect_property", selection.clip_id))?;
-            let effect = clip.effects.iter_mut().find(|e| e.id == effect_id).ok_or_else(|| {
-                MondrianError::WorkflowStepFailed {
-                    step_id: "set_effect_property".to_string(),
-                    reason: format!("effect {effect_id} not found on clip"),
-                }
-            })?;
-            let property = effect.properties.property(path).ok_or_else(|| {
-                MondrianError::WorkflowStepFailed {
-                    step_id: "set_effect_property".to_string(),
-                    reason: format!("effect property not found: {path}"),
-                }
-            })?;
-            if property.static_value() == &value {
-                return Ok(());
-            } else {
-                effect.apply_property_mutation(PropertyMutation::SetStaticValue {
-                    path: path.to_string(),
-                    value,
+        let mutation = {
+            let sequence = self
+                .active_sequence()
+                .ok_or_else(|| missing_sequence_error("visual_effect_set_parameter_value"))?;
+            let clip = find_clip(sequence, clip_id)
+                .ok_or_else(|| missing_clip_error("visual_effect_set_parameter_value", clip_id))?;
+            let end = clip.end_position()?;
+            let author_time = clip.timeline_to_clip_time(current_time.clamp(clip.position, end))?;
+            let effect =
+                clip.effects.iter().find(|effect| effect.id == effect_id).ok_or_else(|| {
+                    MondrianError::WorkflowStepFailed {
+                        step_id: "visual_effect_set_parameter_value".to_owned(),
+                        reason: format!("Effect {effect_id} does not belong to Clip {clip_id}"),
+                    }
                 })?;
+            let (path, property) =
+                effect.properties.property_by_address(&parameter).ok_or_else(|| {
+                    MondrianError::WorkflowStepFailed {
+                        step_id: "visual_effect_set_parameter_value".to_owned(),
+                        reason: format!(
+                            "Effect {effect_id} does not own parameter instance {} / {}",
+                            parameter.animation_track_id, parameter.parameter_id
+                        ),
+                    }
+                })?;
+            if property.value_type() != value.value_type() {
+                return Err(MondrianError::WorkflowStepFailed {
+                    step_id: "visual_effect_set_parameter_value".to_owned(),
+                    reason: format!(
+                        "parameter {} expects {:?}, received {:?}",
+                        parameter.parameter_id,
+                        property.value_type(),
+                        value.value_type()
+                    ),
+                });
             }
-            Ok(())
-        })
+            if property.is_animated() {
+                if property.evaluate(author_time) == value {
+                    None
+                } else {
+                    let interpolation = match &value {
+                        PropertyValue::Float(_)
+                        | PropertyValue::Double(_)
+                        | PropertyValue::Color(_)
+                        | PropertyValue::Vec2(_)
+                        | PropertyValue::Vec3(_)
+                        | PropertyValue::Vec4(_) => InterpolationType::Linear,
+                        PropertyValue::Bool(_)
+                        | PropertyValue::Int(_)
+                        | PropertyValue::Enum(_)
+                        | PropertyValue::Resource(_)
+                        | PropertyValue::Text(_) => InterpolationType::Hold,
+                    };
+                    Some(PropertyMutation::SetKeyframe {
+                        path: path.to_owned(),
+                        keyframe: Keyframe::from_preset(author_time, value, interpolation),
+                    })
+                }
+            } else if property.static_value() == &value {
+                None
+            } else {
+                Some(PropertyMutation::SetStaticValue { path: path.to_owned(), value })
+            }
+        };
+        let Some(mutation) = mutation else {
+            return Ok(false);
+        };
+        let _sequence_id =
+            self.commit_sequence_edit(sequence_id, "调整特效属性", |sequence| {
+                let clip = find_clip_mut(sequence, clip_id).ok_or_else(|| {
+                    missing_clip_error("visual_effect_set_parameter_value", clip_id)
+                })?;
+                let effect =
+                    clip.effects.iter_mut().find(|effect| effect.id == effect_id).ok_or_else(
+                        || MondrianError::WorkflowStepFailed {
+                            step_id: "visual_effect_set_parameter_value".to_owned(),
+                            reason: format!("Effect {effect_id} does not belong to Clip {clip_id}"),
+                        },
+                    )?;
+                effect.apply_property_mutation(mutation)?;
+                Ok(sequence.id)
+            })?;
+        Ok(true)
     }
 
     fn set_clip_property_from_ui(
@@ -3094,19 +3091,16 @@ mod tests {
         assets_rebind_audio_component_action, assets_refresh_audio_components_action,
         assets_relink_asset_action, assets_rename_asset_action, assets_rename_folder_action,
         assets_set_interpretation_action, assets_set_proxy_mode_action,
-        audio_component_edit_action, effects_add_to_clip_action, export_cancel_action,
-        export_clear_terminal_history_action, export_edit_draft_action, export_enqueue_action,
-        inspector_edit_clip_curve_action, inspector_remove_effect_action,
-        inspector_select_effect_action, inspector_set_audio_component_source_action,
-        inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
-        inspector_set_clip_property_action, inspector_set_clip_tint_action,
-        inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
-        inspector_set_effect_property_action, project_create_with_settings_action,
-        project_recover_from_autosave_action, project_update_color_environment_action,
-        project_update_new_sequence_defaults_action, sequence_delete_action,
-        sequence_duplicate_action, sequence_new_action, sequence_return_to_parent_action,
-        sequence_set_active_default_action, sequence_switch_active_action,
-        sequence_update_settings_action, timeline_add_track_action,
+        audio_component_edit_action, export_cancel_action, export_clear_terminal_history_action,
+        export_edit_draft_action, export_enqueue_action, inspector_edit_clip_curve_action,
+        inspector_set_audio_component_source_action, inspector_set_clip_enabled_action,
+        inspector_set_clip_opacity_action, inspector_set_clip_property_action,
+        inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
+        project_create_with_settings_action, project_recover_from_autosave_action,
+        project_update_color_environment_action, project_update_new_sequence_defaults_action,
+        sequence_delete_action, sequence_duplicate_action, sequence_new_action,
+        sequence_return_to_parent_action, sequence_set_active_default_action,
+        sequence_switch_active_action, sequence_update_settings_action, timeline_add_track_action,
         timeline_clear_in_out_points_action, timeline_create_basic_title_action,
         timeline_drop_asset_action, timeline_insert_asset_action,
         timeline_link_selected_clips_action, timeline_move_clip_action, timeline_move_track_action,
@@ -3116,20 +3110,21 @@ mod tests {
         timeline_set_track_control_action, timeline_trim_clips_action,
         timeline_trim_selected_clips_to_playhead_action, timeline_unlink_selected_clips_action,
         viewer_set_clip_transform_action, viewer_set_preview_resolution_scale_action,
+        visual_effect_add_to_clip_action, visual_effect_remove_action,
+        visual_effect_reorder_action, visual_effect_select_action,
+        visual_effect_set_enabled_action, visual_effect_set_parameter_value_action,
         AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
         AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload, AssetsImportFilesPayload,
         AssetsMoveAssetPayload, AssetsMoveFolderPayload, AssetsMoveSelectionPayload,
         AssetsPrepareDragPayload, AssetsRebindAudioComponentPayload,
         AssetsRefreshAudioComponentsPayload, AssetsRelinkAssetPayload, AssetsRenameAssetPayload,
         AssetsRenameFolderPayload, AssetsSetInterpretationPayload, AssetsSetProxyModePayload,
-        EffectsAddToClipPayload, ExportDraftEdit, InspectorAudioComponentSourcePayload,
-        InspectorClipRefPayload, InspectorClipTransformField, InspectorCurveEditPayload,
-        InspectorCurvePointPayload, InspectorEditClipCurvePayload, InspectorRemoveEffectPayload,
-        InspectorSelectEffectPayload, InspectorSetAudioComponentSourcePayload,
+        ExportDraftEdit, InspectorAudioComponentSourcePayload, InspectorClipRefPayload,
+        InspectorClipTransformField, InspectorCurveEditPayload, InspectorCurvePointPayload,
+        InspectorEditClipCurvePayload, InspectorSetAudioComponentSourcePayload,
         InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
         InspectorSetClipPropertyPayload, InspectorSetClipTintPayload,
-        InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-        InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
+        InspectorSetClipTransformFieldPayload, ProjectCreateWithSettingsPayload,
         ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
         ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload,
         SequenceUpdateSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
@@ -3139,7 +3134,9 @@ mod tests {
         TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
         TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
         ViewerSetClipTransformPayload, ViewerSetPreviewResolutionScalePayload,
-        ViewerTransformPositionPayload,
+        ViewerTransformPositionPayload, VisualEffectAddToClipPayload, VisualEffectReorderPayload,
+        VisualEffectSetEnabledPayload, VisualEffectSetParameterValuePayload,
+        VisualEffectTargetPayload,
     };
     use mondrian_assets::AssetLibrary;
     use mondrian_core::automation::AnimationParameterAddress;
@@ -3159,7 +3156,8 @@ mod tests {
     };
     use mondrian_timeline::{
         AudioComponentAddress, AudioComponentEditRequest, AudioComponentMutation,
-        InsertAutomationPolicy, InsertTimelineStatePolicy, InsertTransitionPolicy,
+        EffectRelativePlacement, InsertAutomationPolicy, InsertTimelineStatePolicy,
+        InsertTransitionPolicy,
     };
 
     fn audio_component_action(
@@ -3358,7 +3356,7 @@ mod tests {
     fn add_default_effect_with_first_property(
         state: &mut AppState,
         effect_type: EffectType,
-    ) -> (EffectId, String, PropertyValue) {
+    ) -> (EffectId, String, AnimationParameterAddress, PropertyValue) {
         let effect: mondrian_effects::EffectNode =
             mondrian_effects::EffectNodeExt::with_defaults(effect_type);
         let effect_id = effect.id;
@@ -3375,7 +3373,16 @@ mod tests {
             .iter()
             .next()
             .expect("effect should expose at least one property");
-        (effect_id, path.to_string(), property.static_value().clone())
+        let address = AnimationParameterAddress {
+            animation_track_id: property.track_id,
+            parameter_id: property.descriptor.parameter_id().clone(),
+        };
+        (
+            effect_id,
+            path.to_string(),
+            address,
+            property.static_value().clone(),
+        )
     }
 
     fn different_property_value(value: &PropertyValue) -> PropertyValue {
@@ -3433,7 +3440,6 @@ mod tests {
         for (namespace, expected_step) in [
             (TIMELINE_NAMESPACE, "timeline_ui_action.unknown"),
             (INSPECTOR_NAMESPACE, "inspector_ui_action.unknown"),
-            (EFFECTS_NAMESPACE, "effects_ui_action.unknown"),
             (ASSETS_NAMESPACE, "assets_ui_action.unknown"),
         ] {
             let mut state = AppState::new();
@@ -7664,14 +7670,13 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_effects_ui_adds_effect_to_selected_clip() {
-        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+    fn dispatch_visual_effect_adds_registered_effect_to_clip() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
 
         state
-            .dispatch_action(effects_add_to_clip_action(EffectsAddToClipPayload {
-                clip: inspector_clip_payload(track_id, clip_id),
-                effect_type: EffectType::GaussianBlur,
-            }))
+            .dispatch_action(visual_effect_add_to_clip_action(
+                VisualEffectAddToClipPayload { clip_id, effect_type: EffectType::GaussianBlur },
+            ))
             .expect("dispatch add effect");
 
         let clip = &state.active_sequence().expect("sequence").video_tracks[0].clips[0];
@@ -7694,8 +7699,8 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_inspector_ui_selects_effect_without_undo_history() {
-        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+    fn dispatch_visual_effect_selects_by_stable_identity_without_undo_history() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
         let effect: mondrian_effects::EffectNode =
             mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
         let effect_id = effect.id;
@@ -7703,12 +7708,10 @@ mod tests {
             .add_effect_node(effect);
 
         state
-            .dispatch_action(inspector_select_effect_action(
-                InspectorSelectEffectPayload {
-                    clip: inspector_clip_payload(track_id, clip_id),
-                    effect_id,
-                },
-            ))
+            .dispatch_action(visual_effect_select_action(VisualEffectTargetPayload {
+                clip_id,
+                effect_id,
+            }))
             .expect("dispatch select effect");
 
         let selected = state.primary_selected_effect().expect("selected effect");
@@ -7718,16 +7721,14 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_inspector_ui_select_effect_rejects_missing_effect_without_undo() {
-        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+    fn dispatch_visual_effect_select_rejects_missing_effect_without_undo() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
 
         let err = state
-            .dispatch_action(inspector_select_effect_action(
-                InspectorSelectEffectPayload {
-                    clip: inspector_clip_payload(track_id, clip_id),
-                    effect_id: EffectId::new(),
-                },
-            ))
+            .dispatch_action(visual_effect_select_action(VisualEffectTargetPayload {
+                clip_id,
+                effect_id: EffectId::new(),
+            }))
             .expect_err("missing effect should reject selection");
 
         assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
@@ -7736,8 +7737,8 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_inspector_ui_sets_effect_enabled_state() {
-        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+    fn dispatch_visual_effect_sets_enabled_state() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
         let effect: mondrian_effects::EffectNode =
             mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
         let effect_id = effect.id;
@@ -7745,12 +7746,8 @@ mod tests {
             .add_effect_node(effect);
 
         state
-            .dispatch_action(inspector_set_effect_enabled_action(
-                InspectorSetEffectEnabledPayload {
-                    clip: inspector_clip_payload(track_id, clip_id),
-                    effect_id,
-                    enabled: false,
-                },
+            .dispatch_action(visual_effect_set_enabled_action(
+                VisualEffectSetEnabledPayload { clip_id, effect_id, enabled: false },
             ))
             .expect("dispatch effect enabled");
 
@@ -7762,35 +7759,32 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_inspector_ui_effect_enabled_noop_does_not_enter_undo_history() {
-        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+    fn dispatch_visual_effect_enabled_noop_is_rejected_without_undo_history() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
         let effect: mondrian_effects::EffectNode =
             mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
         let effect_id = effect.id;
         state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].clips[0]
             .add_effect_node(effect);
 
-        state
-            .dispatch_action(inspector_set_effect_enabled_action(
-                InspectorSetEffectEnabledPayload {
-                    clip: inspector_clip_payload(track_id, clip_id),
-                    effect_id,
-                    enabled: true,
-                },
+        let error = state
+            .dispatch_action(visual_effect_set_enabled_action(
+                VisualEffectSetEnabledPayload { clip_id, effect_id, enabled: true },
             ))
-            .expect("dispatch no-op effect enabled");
+            .expect_err("no-op effect enabled must not report success");
 
+        assert_action_not_executed(error, "visual_effect_set_enabled");
         assert!(!state.can_undo_action());
     }
 
     #[test]
-    fn dispatch_inspector_ui_effect_enabled_rejects_missing_effect_without_undo() {
-        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+    fn dispatch_visual_effect_enabled_rejects_missing_effect_without_undo() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
 
         let err = state
-            .dispatch_action(inspector_set_effect_enabled_action(
-                InspectorSetEffectEnabledPayload {
-                    clip: inspector_clip_payload(track_id, clip_id),
+            .dispatch_action(visual_effect_set_enabled_action(
+                VisualEffectSetEnabledPayload {
+                    clip_id,
                     effect_id: EffectId::new(),
                     enabled: false,
                 },
@@ -7802,18 +7796,18 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_inspector_ui_sets_effect_property_with_undo_snapshot() {
-        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
-        let (effect_id, path, initial_value) =
+    fn dispatch_visual_effect_sets_parameter_by_stable_address_with_undo_snapshot() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let (effect_id, path, parameter, initial_value) =
             add_default_effect_with_first_property(&mut state, EffectType::GaussianBlur);
         let next_value = different_property_value(&initial_value);
 
         state
-            .dispatch_action(inspector_set_effect_property_action(
-                InspectorSetEffectPropertyPayload {
-                    clip: inspector_clip_payload(track_id, clip_id),
+            .dispatch_action(visual_effect_set_parameter_value_action(
+                VisualEffectSetParameterValuePayload {
+                    clip_id,
                     effect_id,
-                    path: path.clone(),
+                    parameter,
                     value: next_value.clone(),
                 },
             ))
@@ -7900,37 +7894,39 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_inspector_ui_effect_property_noop_does_not_enter_undo_history() {
-        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
-        let (effect_id, path, initial_value) =
+    fn dispatch_visual_effect_parameter_noop_is_rejected_without_undo_history() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let (effect_id, _, parameter, initial_value) =
             add_default_effect_with_first_property(&mut state, EffectType::GaussianBlur);
 
-        state
-            .dispatch_action(inspector_set_effect_property_action(
-                InspectorSetEffectPropertyPayload {
-                    clip: inspector_clip_payload(track_id, clip_id),
+        let error = state
+            .dispatch_action(visual_effect_set_parameter_value_action(
+                VisualEffectSetParameterValuePayload {
+                    clip_id,
                     effect_id,
-                    path,
+                    parameter,
                     value: initial_value,
                 },
             ))
-            .expect("dispatch no-op effect property");
+            .expect_err("no-op parameter edit must not report success");
 
+        assert_action_not_executed(error, "visual_effect_set_parameter_value");
         assert!(!state.can_undo_action());
     }
 
     #[test]
-    fn dispatch_inspector_ui_effect_property_rejects_missing_path_without_undo() {
-        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
-        let (effect_id, _, initial_value) =
+    fn dispatch_visual_effect_parameter_rejects_stale_address_without_undo() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let (effect_id, _, mut parameter, initial_value) =
             add_default_effect_with_first_property(&mut state, EffectType::GaussianBlur);
+        parameter.parameter_id = mondrian_core::ParameterId::new_static("mondrian.test.missing");
 
         let err = state
-            .dispatch_action(inspector_set_effect_property_action(
-                InspectorSetEffectPropertyPayload {
-                    clip: inspector_clip_payload(track_id, clip_id),
+            .dispatch_action(visual_effect_set_parameter_value_action(
+                VisualEffectSetParameterValuePayload {
+                    clip_id,
                     effect_id,
-                    path: format!("effect.{effect_id}.missing"),
+                    parameter,
                     value: initial_value,
                 },
             ))
@@ -7941,8 +7937,8 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_inspector_ui_removes_effect_instance() {
-        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+    fn dispatch_visual_effect_removes_effect_instance() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
         let remove_effect: mondrian_effects::EffectNode =
             mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
         let keep_effect: mondrian_effects::EffectNode =
@@ -7955,12 +7951,10 @@ mod tests {
         clip.add_effect_node(keep_effect);
 
         state
-            .dispatch_action(inspector_remove_effect_action(
-                InspectorRemoveEffectPayload {
-                    clip: inspector_clip_payload(track_id, clip_id),
-                    effect_id: remove_id,
-                },
-            ))
+            .dispatch_action(visual_effect_remove_action(VisualEffectTargetPayload {
+                clip_id,
+                effect_id: remove_id,
+            }))
             .expect("dispatch remove effect");
 
         let effects = &state.active_sequence().expect("sequence").video_tracks[0].clips[0].effects;
@@ -7970,34 +7964,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_remove_effect_action_removes_effect_instance() {
-        let (mut state, _, clip_id) = state_with_two_video_tracks();
-        let remove_effect: mondrian_effects::EffectNode =
-            mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
-        let keep_effect: mondrian_effects::EffectNode =
-            mondrian_effects::EffectNodeExt::with_defaults(EffectType::Sharpen);
-        let remove_id = remove_effect.id;
-        let keep_id = keep_effect.id;
-        let clip = &mut state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0]
-            .clips[0];
-        clip.add_effect_node(remove_effect);
-        clip.add_effect_node(keep_effect);
-
-        state
-            .dispatch_action(mondrian_editor_state::Action::RemoveEffect {
-                clip_id,
-                effect_id: remove_id,
-            })
-            .expect("dispatch remove effect action");
-
-        let effects = &state.active_sequence().expect("sequence").video_tracks[0].clips[0].effects;
-        assert_eq!(effects.len(), 1);
-        assert_eq!(effects[0].id, keep_id);
-        assert!(state.can_undo_action());
-    }
-
-    #[test]
-    fn dispatch_remove_effect_action_preserves_locked_track() {
+    fn dispatch_visual_effect_remove_preserves_locked_track() {
         let (mut state, _, clip_id) = state_with_two_video_tracks();
         let effect: mondrian_effects::EffectNode =
             mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
@@ -8007,7 +7974,10 @@ mod tests {
         sequence.video_tracks[0].is_locked = true;
 
         let err = state
-            .dispatch_action(mondrian_editor_state::Action::RemoveEffect { clip_id, effect_id })
+            .dispatch_action(visual_effect_remove_action(VisualEffectTargetPayload {
+                clip_id,
+                effect_id,
+            }))
             .expect_err("locked track should reject effect removal");
 
         assert!(matches!(err, MondrianError::TrackLocked { .. }));
@@ -8018,7 +7988,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_reorder_effects_action_reorders_with_undo_snapshot() {
+    fn dispatch_visual_effect_reorders_by_stable_anchor_with_undo_snapshot() {
         let (mut state, _, clip_id) = state_with_two_video_tracks();
         let first: mondrian_effects::EffectNode =
             mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
@@ -8036,11 +8006,11 @@ mod tests {
         clip.add_effect_node(third);
 
         state
-            .dispatch_action(mondrian_editor_state::Action::ReorderEffects {
+            .dispatch_action(visual_effect_reorder_action(VisualEffectReorderPayload {
                 clip_id,
-                from: 0,
-                to: usize::MAX,
-            })
+                effect_id: first_id,
+                placement: EffectRelativePlacement::After(third_id),
+            }))
             .expect("dispatch reorder effects");
 
         let effects = &state.active_sequence().expect("sequence").video_tracks[0].clips[0].effects;
@@ -8059,46 +8029,29 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_reorder_effects_action_noop_does_not_enter_undo_history() {
+    fn dispatch_visual_effect_reorder_rejects_stale_anchor_without_undo() {
         let (mut state, _, clip_id) = state_with_two_video_tracks();
         let effect: mondrian_effects::EffectNode =
             mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
         state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].clips[0]
             .add_effect_node(effect);
 
-        state
-            .dispatch_action(mondrian_editor_state::Action::ReorderEffects {
-                clip_id,
-                from: 0,
-                to: 0,
-            })
-            .expect("dispatch reorder noop");
-
-        assert!(!state.can_undo_action());
-    }
-
-    #[test]
-    fn dispatch_reorder_effects_action_rejects_out_of_range_source_index() {
-        let (mut state, _, clip_id) = state_with_two_video_tracks();
-        let effect: mondrian_effects::EffectNode =
-            mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
-        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].clips[0]
-            .add_effect_node(effect);
-
+        let effect_id =
+            state.active_sequence().expect("sequence").video_tracks[0].clips[0].effects[0].id;
         let err = state
-            .dispatch_action(mondrian_editor_state::Action::ReorderEffects {
+            .dispatch_action(visual_effect_reorder_action(VisualEffectReorderPayload {
                 clip_id,
-                from: 1,
-                to: 0,
-            })
-            .expect_err("out-of-range source index should reject reorder");
+                effect_id,
+                placement: EffectRelativePlacement::After(EffectId::new()),
+            }))
+            .expect_err("stale Effect anchor should reject reorder");
 
         assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
         assert!(!state.can_undo_action());
     }
 
     #[test]
-    fn dispatch_reorder_effects_action_preserves_locked_track() {
+    fn dispatch_visual_effect_reorder_preserves_locked_track() {
         let (mut state, _, clip_id) = state_with_two_video_tracks();
         let first: mondrian_effects::EffectNode =
             mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
@@ -8112,11 +8065,11 @@ mod tests {
         sequence.video_tracks[0].is_locked = true;
 
         let err = state
-            .dispatch_action(mondrian_editor_state::Action::ReorderEffects {
+            .dispatch_action(visual_effect_reorder_action(VisualEffectReorderPayload {
                 clip_id,
-                from: 0,
-                to: 1,
-            })
+                effect_id: first_id,
+                placement: EffectRelativePlacement::After(second_id),
+            }))
             .expect_err("locked track should reject effect reorder");
 
         assert!(matches!(err, MondrianError::TrackLocked { .. }));
