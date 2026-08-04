@@ -584,7 +584,8 @@ mod tests {
     }
     use crate::app::ui_actions::{
         app_shell_project_settings_action, assets_delete_selection_action,
-        assets_import_files_action, assets_move_selection_action, export_cancel_action,
+        assets_import_files_action, assets_move_selection_action,
+        clip_write_parameter_values_action, export_cancel_action,
         export_clear_terminal_history_action, export_edit_draft_action, export_enqueue_action,
         project_create_with_settings_action, sequence_new_action, sequence_switch_active_action,
         sequence_update_settings_action, timeline_add_track_action,
@@ -594,22 +595,22 @@ mod tests {
         timeline_select_clip_action, timeline_set_in_out_point_action,
         timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
         timeline_set_track_targeting_action, timeline_trim_clips_action,
-        timeline_trim_selected_clips_to_playhead_action, viewer_set_clip_transform_action,
+        timeline_trim_selected_clips_to_playhead_action,
         viewer_set_preview_resolution_scale_action, AssetsDeleteSelectionPayload,
-        AssetsImportFilesPayload, AssetsMoveSelectionPayload, ExportDraftEdit,
-        ProjectCreateWithSettingsPayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
-        TimelineAddTrackKind, TimelineAddTrackPayload, TimelineExportRequest,
-        TimelineInOutPointPayloadKind, TimelineMoveClipPayload, TimelineMoveTrackPayload,
-        TimelineSelectClipPayload, TimelineSetInOutPointPayload,
-        TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
-        TimelineSetTrackTargetingPayload, TimelineTrackControlPayloadKind,
-        TimelineTrackTargetingControl, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
-        ViewerSetClipTransformPayload, ViewerSetPreviewResolutionScalePayload,
-        ViewerTransformPositionPayload,
+        AssetsImportFilesPayload, AssetsMoveSelectionPayload, ClipParameterValueWrite,
+        ClipWriteParameterValuesPayload, ExportDraftEdit, ProjectCreateWithSettingsPayload,
+        SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineAddTrackKind,
+        TimelineAddTrackPayload, TimelineExportRequest, TimelineInOutPointPayloadKind,
+        TimelineMoveClipPayload, TimelineMoveTrackPayload, TimelineSelectClipPayload,
+        TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
+        TimelineSetTrackControlPayload, TimelineSetTrackTargetingPayload,
+        TimelineTrackControlPayloadKind, TimelineTrackTargetingControl, TimelineTrimClipsPayload,
+        TimelineTrimPayloadEdge, ViewerSetPreviewResolutionScalePayload,
     };
     use crate::app::SelectedClipRef;
+    use mondrian_core::automation::PropertyValue;
     use mondrian_core::types::{AssetId, ClipId, TrackId};
-    use mondrian_timeline::clip::Clip;
+    use mondrian_timeline::clip::{Clip, Transform2D};
     use mondrian_timeline::sequence::Sequence;
 
     fn state_with_selected_clip() -> AppState {
@@ -885,24 +886,28 @@ mod tests {
     }
 
     #[test]
-    fn app_state_action_gate_uses_viewer_product_availability() {
+    fn app_state_action_gate_uses_viewer_and_clip_product_availability() {
         let mut state = state_with_selected_clip();
         let clip_id = state.selection.selected_clips[0].clip_id;
+        let position_parameter = state.active_sequence().expect("sequence").video_tracks[0].clips
+            [0]
+        .intrinsic_parameter_bag()
+        .address_for_path(Transform2D::POSITION_PATH)
+        .expect("position parameter");
         let preview_scale =
             viewer_set_preview_resolution_scale_action(ViewerSetPreviewResolutionScalePayload {
                 scale: 0.25,
             });
-        let transform = viewer_set_clip_transform_action(ViewerSetClipTransformPayload {
+        let transform = clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
             clip_id,
-            position: Some(ViewerTransformPositionPayload { x: 10.0, y: 20.0 }),
-            scale_percent: None,
-            rotation_degrees: None,
+            writes: vec![ClipParameterValueWrite {
+                parameter: position_parameter.clone(),
+                value: PropertyValue::Vec2(glam::Vec2::new(10.0, 20.0)),
+            }],
         });
-        let empty_transform = viewer_set_clip_transform_action(ViewerSetClipTransformPayload {
+        let empty_transform = clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
             clip_id,
-            position: None,
-            scale_percent: None,
-            rotation_degrees: None,
+            writes: Vec::new(),
         });
 
         assert!(app_state_action_enabled(&preview_scale, &state));
@@ -912,11 +917,12 @@ mod tests {
         state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked = true;
         assert!(!app_state_action_enabled(&transform, &state));
 
-        let stale = viewer_set_clip_transform_action(ViewerSetClipTransformPayload {
+        let stale = clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
             clip_id: ClipId::new(),
-            position: Some(ViewerTransformPositionPayload { x: 10.0, y: 20.0 }),
-            scale_percent: None,
-            rotation_degrees: None,
+            writes: vec![ClipParameterValueWrite {
+                parameter: position_parameter,
+                value: PropertyValue::Vec2(glam::Vec2::new(10.0, 20.0)),
+            }],
         });
         assert!(!app_state_action_enabled(&stale, &state));
     }

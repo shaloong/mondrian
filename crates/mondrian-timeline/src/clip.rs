@@ -598,6 +598,24 @@ impl Clip {
         matches!(self.content, ClipContent::SolidColor { .. })
     }
 
+    /// Replace the typed generator color of this Solid Color Clip.
+    ///
+    /// Returns whether author state changed. Other Clip content kinds fail
+    /// closed instead of accepting a synthetic parameter-path mutation.
+    pub fn set_solid_color(&mut self, color: Color) -> Result<bool> {
+        let ClipContent::SolidColor { color: current, .. } = &mut self.content else {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "clip_set_solid_color".to_owned(),
+                reason: "target is not a Solid Color Clip".to_owned(),
+            });
+        };
+        if *current == color {
+            return Ok(false);
+        }
+        *current = color;
+        Ok(true)
+    }
+
     pub fn is_nested_sequence(&self) -> bool {
         matches!(self.content, ClipContent::NestedSequence { .. })
     }
@@ -736,6 +754,17 @@ impl Clip {
     pub fn timeline_to_clip_time(&self, timeline_time: TimelineTime) -> Result<TimelineTime> {
         let placement_offset = timeline_time.checked_sub(self.position)?;
         Ok(self.clip_time_in.checked_add(placement_offset)?)
+    }
+
+    /// Resolve Sequence time to the nearest valid Clip-local visual author time.
+    ///
+    /// Inspector and monitor gestures may arrive exactly outside the placement
+    /// after a concurrent seek or edit. Clamping to the closed placement extent
+    /// gives every visual authoring Adapter one canonical boundary policy while
+    /// leaving half-open render membership to [`Self::contains`].
+    pub fn clamped_visual_author_time(&self, timeline_time: TimelineTime) -> Result<TimelineTime> {
+        let placement_end = self.end_position()?;
+        self.timeline_to_clip_time(timeline_time.clamp(self.position, placement_end))
     }
 
     /// Map stable Clip-local visual time back into Sequence placement time.
@@ -974,17 +1003,7 @@ fn effect_order_error(reason: impl Into<String>) -> MondrianError {
 
 impl PropertyHost for Clip {
     fn property_bag(&self) -> Result<PropertyBag> {
-        let mut properties = if self.is_adjustment_layer() || self.is_nested_sequence() {
-            let mut bag = PropertyBag::default();
-            if let Some(opacity) =
-                self.transform.to_property_bag().property(Transform2D::OPACITY_PATH).cloned()
-            {
-                bag.upsert(opacity);
-            }
-            bag
-        } else {
-            self.transform.to_property_bag()
-        };
+        let mut properties = self.intrinsic_parameter_bag();
         for effect in &self.effects {
             for (_, property) in effect.property_bag()?.iter() {
                 properties.upsert(property.clone());
@@ -1023,11 +1042,6 @@ impl PropertyHost for Clip {
                 AnimatedProperty::from_descriptor(solid_color_descriptor);
             solid_color_property.set_static_value(PropertyValue::Color(solid_color))?;
             properties.upsert(solid_color_property);
-        }
-        if let Some(title) = self.content.basic_title() {
-            for (_, property) in title.property_bag().iter() {
-                properties.upsert(property.clone());
-            }
         }
         Ok(properties)
     }
@@ -1160,6 +1174,34 @@ impl PropertyHost for Clip {
                 reason: format!("当前 Clip 不支持属性路径: {path}"),
             })
         }
+    }
+}
+
+impl Clip {
+    /// Return only persistent Parameter instances owned directly by this Clip.
+    ///
+    /// Effect and Mask instances have their own author Interfaces. Synthetic
+    /// projections such as Blend Mode and Solid Color are also excluded because
+    /// they are typed Clip fields rather than persisted `AnimatedProperty`
+    /// owners. Every address returned here remains stable across projections.
+    pub fn intrinsic_parameter_bag(&self) -> PropertyBag {
+        let mut properties = if self.is_adjustment_layer() || self.is_nested_sequence() {
+            let mut bag = PropertyBag::default();
+            if let Some(opacity) =
+                self.transform.to_property_bag().property(Transform2D::OPACITY_PATH).cloned()
+            {
+                bag.upsert(opacity);
+            }
+            bag
+        } else {
+            self.transform.to_property_bag()
+        };
+        if let Some(title) = self.content.basic_title() {
+            for (_, property) in title.property_bag().iter() {
+                properties.upsert(property.clone());
+            }
+        }
+        properties
     }
 }
 
@@ -1471,6 +1513,57 @@ mod tests {
             clip.timeline_to_source_time(tt(52)).expect("slipped source time"),
             tt(204)
         );
+    }
+
+    #[test]
+    fn clamped_visual_author_time_uses_one_closed_gesture_boundary_policy() {
+        let mut clip = Clip::new(AssetId::new(), tt(10), tt(20)).expect("valid clip");
+        clip.clip_time_in = tt(3);
+
+        assert_eq!(
+            clip.clamped_visual_author_time(tt(5)).expect("before Clip"),
+            tt(3)
+        );
+        assert_eq!(
+            clip.clamped_visual_author_time(tt(18)).expect("inside Clip"),
+            tt(11)
+        );
+        assert_eq!(
+            clip.clamped_visual_author_time(tt(40)).expect("after Clip"),
+            tt(23)
+        );
+    }
+
+    #[test]
+    fn intrinsic_parameter_projection_is_stable_and_excludes_synthetic_or_child_owners() {
+        let mut clip =
+            Clip::new_solid_color(AssetId::new(), Color::from_hex(0x224466), tt(0), tt(30))
+                .expect("solid Clip");
+        let effect_id = clip.add_effect_node(mondrian_effects::EffectNodeExt::with_defaults(
+            EffectType::GaussianBlur,
+        ));
+
+        let first = clip.intrinsic_parameter_bag();
+        let second = clip.intrinsic_parameter_bag();
+        assert_eq!(first.iter().count(), 5);
+        for path in [
+            Transform2D::POSITION_PATH,
+            Transform2D::SCALE_PATH,
+            Transform2D::ROTATION_PATH,
+            Transform2D::ANCHOR_POINT_PATH,
+            Transform2D::OPACITY_PATH,
+        ] {
+            assert_eq!(first.address_for_path(path), second.address_for_path(path));
+        }
+        assert!(first.property(Clip::SOLID_COLOR_PATH).is_none());
+        assert!(first.property(Clip::BLEND_MODE_PATH).is_none());
+        assert!(!first.iter().any(|(path, _)| path.starts_with(&format!("effect.{effect_id}."))));
+
+        let nested =
+            Clip::new_nested_sequence(SequenceId::new(), tt(0), tt(30), None).expect("nested Clip");
+        let nested_parameters = nested.intrinsic_parameter_bag();
+        assert_eq!(nested_parameters.iter().count(), 1);
+        assert!(nested_parameters.property(Transform2D::OPACITY_PATH).is_some());
     }
 
     #[test]

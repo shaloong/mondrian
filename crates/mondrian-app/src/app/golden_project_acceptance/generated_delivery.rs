@@ -21,15 +21,14 @@ use crate::app::preview_timeline_execution::{
 use crate::app::preview_unavailability::{PreviewOutputStage, PreviewUnavailability};
 use crate::app::preview_viewer_plan::ResolvedPreviewElement;
 use crate::app::ui_actions::{
-    assets_prepare_drag_action, inspector_set_clip_opacity_action,
-    inspector_set_clip_transform_field_action, timeline_trim_clips_action,
-    AssetsPrepareDragPayload, InspectorClipRefPayload, InspectorClipTransformField,
-    InspectorSetClipOpacityPayload, InspectorSetClipTransformFieldPayload,
+    assets_prepare_drag_action, clip_write_parameter_values_action, timeline_trim_clips_action,
+    AssetsPrepareDragPayload, ClipParameterValueWrite, ClipWriteParameterValuesPayload,
     TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
 };
 use crate::app::{AppState, ClipOverlapMode};
 use anyhow::{bail, ensure, Context};
 use mondrian_assets::AssetKind;
+use mondrian_core::automation::PropertyValue;
 use mondrian_core::{
     timeline_data::AlphaInterpretation, AssetId, AudioChannelLayout, AudioSamplePosition,
     AudioSampleRate, AudioSampleRounding, BlendMode, ClipId, ExecutionCancellationToken,
@@ -49,6 +48,7 @@ use mondrian_renderer::{
     execute_cpu_output_boundary, CpuColorFrame, RenderOutputColorBoundary,
     RenderOutputColorBoundaryTarget, TimelineCompositeScratch,
 };
+use mondrian_timeline::clip::Transform2D;
 use mondrian_timeline::sequence::InputColorResolutionSource;
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -1308,45 +1308,42 @@ pub(super) fn execute_delivery_stage(
         "trim did not produce the exact Golden window"
     );
 
-    let solid_clip_ref = InspectorClipRefPayload {
-        track_id: video_track_id,
-        is_video_track: true,
-        clip_id: solid_clip_id,
-    };
-    let mut transform_steps = Vec::new();
-    for (intent, field, value) in [
-        (
-            "set-delivery-position-x",
-            InspectorClipTransformField::PositionX,
-            96.0,
-        ),
-        (
-            "set-delivery-position-y",
-            InspectorClipTransformField::PositionY,
-            54.0,
-        ),
-        (
-            "set-delivery-scale",
-            InspectorClipTransformField::ScalePercent,
-            90.0,
-        ),
-    ] {
-        transform_steps.push(dispatch_author_transition(
-            state,
-            intent,
-            inspector_set_clip_transform_field_action(InspectorSetClipTransformFieldPayload {
-                clip: solid_clip_ref,
-                field,
-                value,
-            }),
-        )?);
-    }
+    let parameters = solid_clip.intrinsic_parameter_bag();
+    let position_parameter = parameters
+        .address_for_path(Transform2D::POSITION_PATH)
+        .context("solid Clip position parameter is absent")?;
+    let scale_parameter = parameters
+        .address_for_path(Transform2D::SCALE_PATH)
+        .context("solid Clip scale parameter is absent")?;
+    let opacity_parameter = parameters
+        .address_for_path(Transform2D::OPACITY_PATH)
+        .context("solid Clip opacity parameter is absent")?;
+    let transform_steps = vec![dispatch_author_transition(
+        state,
+        "set-delivery-transform",
+        clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
+            clip_id: solid_clip_id,
+            writes: vec![
+                ClipParameterValueWrite {
+                    parameter: position_parameter,
+                    value: PropertyValue::Vec2(glam::Vec2::new(96.0, 54.0)),
+                },
+                ClipParameterValueWrite {
+                    parameter: scale_parameter,
+                    value: PropertyValue::Vec2(glam::Vec2::splat(0.9)),
+                },
+            ],
+        }),
+    )?];
     let opacity_step = dispatch_author_transition(
         state,
         "set-delivery-opacity",
-        inspector_set_clip_opacity_action(InspectorSetClipOpacityPayload {
-            clip: solid_clip_ref,
-            opacity_percent: 80.0,
+        clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
+            clip_id: solid_clip_id,
+            writes: vec![ClipParameterValueWrite {
+                parameter: opacity_parameter,
+                value: PropertyValue::Float(0.8),
+            }],
         }),
     )?;
     let sequence = state.active_sequence().context("active Sequence is absent")?;

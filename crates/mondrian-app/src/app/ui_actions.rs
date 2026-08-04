@@ -3,11 +3,10 @@
 //! Reusable widget crates remain domain-light. UI adapters attach stable app ids
 //! to `Action::Custom` payloads before actions reach the app state layer.
 
-use mondrian_core::automation::AnimationParameterAddress;
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{
-    AssetId, AudioComponentEditId, AudioSourceComponentId, ClipId, JobId, KeyframeId,
-    ProgramOutputId, SequenceId, TrackId, VideoTransitionId,
+    AssetId, AudioComponentEditId, AudioSourceComponentId, ClipId, JobId, ProgramOutputId,
+    SequenceId, TrackId, VideoTransitionId,
 };
 use mondrian_core::{
     ColorEngine, ColorSpace, DisplayToneMapPolicy, Rational, Resolution, TimelineDisplayFormat,
@@ -32,27 +31,32 @@ use std::path::PathBuf;
 
 pub use super::exporting::TimelineExportRequest;
 use super::product_action::{
-    AudioProductAction, ExportProductAction, ProductAction, ProjectProductAction,
-    SequenceProductAction, TimelineProductAction, ViewerProductAction, VisualEffectProductAction,
+    AudioProductAction, ClipProductAction, ExportProductAction, ProductAction,
+    ProjectProductAction, SequenceProductAction, TimelineProductAction, ViewerProductAction,
+    VisualEffectProductAction,
 };
 pub use super::product_action::{
-    ExportDraftEdit, ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
-    ProjectUpdateColorEnvironmentPayload, ProjectUpdateNewSequenceDefaultsPayload,
-    SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineClipSelectionModePayload,
-    TimelineMoveClipPayload, TimelineSeekPayload, TimelineSeekSource, TimelineSelectClipPayload,
-    TimelineTrimClipsPayload, TimelineTrimPayloadEdge, ViewerSetClipTransformPayload,
-    ViewerSetPreviewResolutionScalePayload, ViewerTransformPositionPayload,
-    VisualEffectAddToClipPayload, VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
+    ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
+    ClipParameterValueWrite, ClipSetEnabledPayload, ClipSetSolidColorPayload,
+    ClipWriteParameterValuesPayload, ExportDraftEdit, ProjectCreateWithSettingsPayload,
+    ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
+    ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
+    TimelineClipSelectionModePayload, TimelineMoveClipPayload, TimelineSeekPayload,
+    TimelineSeekSource, TimelineSelectClipPayload, TimelineTrimClipsPayload,
+    TimelineTrimPayloadEdge, ViewerSetPreviewResolutionScalePayload, VisualEffectAddToClipPayload,
+    VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
     VisualEffectSetParameterValuePayload, VisualEffectTargetPayload, AUDIO_EDIT_COMPONENT,
-    AUDIO_EDIT_PROCESSOR_RACK, AUDIO_NAMESPACE, EXPORT_CANCEL, EXPORT_CLEAR_TERMINAL_HISTORY,
-    EXPORT_EDIT_DRAFT, EXPORT_ENQUEUE, EXPORT_NAMESPACE, PROJECT_CREATE_WITH_SETTINGS,
-    PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_UPDATE_COLOR_ENVIRONMENT,
-    PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS, SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE,
-    SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE,
-    SEQUENCE_UPDATE_SETTINGS, TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK,
-    TIMELINE_SELECT_CLIP, TIMELINE_TRIM_CLIPS, VIEWER_NAMESPACE, VISUAL_EFFECT_ADD_TO_CLIP,
-    VISUAL_EFFECT_NAMESPACE, VISUAL_EFFECT_REMOVE, VISUAL_EFFECT_REORDER, VISUAL_EFFECT_SELECT,
-    VISUAL_EFFECT_SET_ENABLED, VISUAL_EFFECT_SET_PARAMETER_VALUE,
+    AUDIO_EDIT_PROCESSOR_RACK, AUDIO_NAMESPACE, CLIP_EDIT_NUMERIC_CURVE, CLIP_NAMESPACE,
+    CLIP_SET_ENABLED, CLIP_SET_SOLID_COLOR, CLIP_WRITE_PARAMETER_VALUES, EXPORT_CANCEL,
+    EXPORT_CLEAR_TERMINAL_HISTORY, EXPORT_EDIT_DRAFT, EXPORT_ENQUEUE, EXPORT_NAMESPACE,
+    PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE,
+    PROJECT_UPDATE_COLOR_ENVIRONMENT, PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS, SEQUENCE_DELETE,
+    SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE, SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT,
+    SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE, SEQUENCE_UPDATE_SETTINGS,
+    TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
+    TIMELINE_TRIM_CLIPS, VIEWER_NAMESPACE, VISUAL_EFFECT_ADD_TO_CLIP, VISUAL_EFFECT_NAMESPACE,
+    VISUAL_EFFECT_REMOVE, VISUAL_EFFECT_REORDER, VISUAL_EFFECT_SELECT, VISUAL_EFFECT_SET_ENABLED,
+    VISUAL_EFFECT_SET_PARAMETER_VALUE,
 };
 
 /// Action name for linking the current Clip selection.
@@ -101,18 +105,6 @@ pub const TIMELINE_OPEN_NESTED_SEQUENCE: &str = "open_nested_sequence";
 /// Custom action namespace for inspector UI operations.
 pub const INSPECTOR_NAMESPACE: &str = "ui.inspector";
 
-/// Action name for toggling a selected clip's enabled state.
-pub const INSPECTOR_SET_CLIP_ENABLED: &str = "set_clip_enabled";
-/// Action name for changing a selected clip's opacity percentage.
-pub const INSPECTOR_SET_CLIP_OPACITY: &str = "set_clip_opacity";
-/// Action name for changing a selected clip's solid/tint color.
-pub const INSPECTOR_SET_CLIP_TINT: &str = "set_clip_tint";
-/// Action name for changing one selected clip transform field.
-pub const INSPECTOR_SET_CLIP_TRANSFORM_FIELD: &str = "set_clip_transform_field";
-/// Action name for committing one stable-identity Clip curve edit.
-pub const INSPECTOR_EDIT_CLIP_CURVE: &str = "edit_clip_curve";
-/// Action name for changing one definition-backed Clip content property.
-pub const INSPECTOR_SET_CLIP_PROPERTY: &str = "set_clip_property";
 /// Action name for selecting the logical source of one Clip audio Component Edit.
 pub const INSPECTOR_SET_AUDIO_COMPONENT_SOURCE: &str = "set_audio_component_source";
 /// Custom action namespace for asset-browser operations.
@@ -545,117 +537,6 @@ pub struct TimelineInsertAssetPayload {
     pub timeline_state_policy: mondrian_timeline::InsertTimelineStatePolicy,
 }
 
-/// Application-level identity for an inspector-selected clip.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InspectorClipRefPayload {
-    /// Track that owned the selected clip when the panel snapshot was built.
-    pub track_id: TrackId,
-    /// Whether `track_id` was a video track rather than an audio track.
-    pub is_video_track: bool,
-    /// Clip targeted by the inspector mutation.
-    pub clip_id: ClipId,
-}
-
-/// Toggle the enabled state for a clip.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InspectorSetClipEnabledPayload {
-    /// Clip targeted by the inspector mutation.
-    pub clip: InspectorClipRefPayload,
-    /// `true` when the clip should participate in rendering/playback.
-    pub enabled: bool,
-}
-
-/// Change a clip opacity value in UI percentage units.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct InspectorSetClipOpacityPayload {
-    /// Clip targeted by the inspector mutation.
-    pub clip: InspectorClipRefPayload,
-    /// Opacity in the same `0.0..=100.0` percentage range used by the slider.
-    pub opacity_percent: f32,
-}
-
-/// Change a clip solid/tint color.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct InspectorSetClipTintPayload {
-    /// Clip targeted by the inspector mutation.
-    pub clip: InspectorClipRefPayload,
-    /// New color value.
-    pub color: mondrian_core::Color,
-}
-
-/// Transform field exposed by the app UI inspector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum InspectorClipTransformField {
-    /// Horizontal position in sequence pixels.
-    PositionX,
-    /// Vertical position in sequence pixels.
-    PositionY,
-    /// Uniform scale displayed in percent units.
-    ScalePercent,
-    /// Rotation in degrees.
-    RotationDegrees,
-}
-
-/// Change a single transform field on a selected clip.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct InspectorSetClipTransformFieldPayload {
-    /// Clip targeted by the inspector mutation.
-    pub clip: InspectorClipRefPayload,
-    /// Transform field being changed.
-    pub field: InspectorClipTransformField,
-    /// New UI-space value for the field.
-    pub value: f32,
-}
-
-/// One normalized point from the app UI curve editor.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct InspectorCurvePointPayload {
-    /// Normalized x coordinate in the curve editor.
-    pub x: f32,
-    /// Normalized y coordinate in the curve editor.
-    pub y: f32,
-}
-
-/// One incremental stable-key curve edit.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum InspectorCurveEditPayload {
-    /// Insert a key, or move/update the addressed key.
-    Upsert {
-        /// Existing stable key identity. `None` inserts or updates by time.
-        keyframe_id: Option<KeyframeId>,
-        /// New normalized time and value.
-        point: InspectorCurvePointPayload,
-    },
-    /// Remove one existing key by stable identity.
-    Remove {
-        /// Stable key identity captured by the panel snapshot.
-        keyframe_id: KeyframeId,
-    },
-}
-
-/// Commit one selected Clip curve edit.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct InspectorEditClipCurvePayload {
-    /// Clip targeted by the inspector mutation.
-    pub clip: InspectorClipRefPayload,
-    /// Stable property-instance and Parameter Schema identity.
-    pub property: AnimationParameterAddress,
-    /// One incremental point intent.
-    pub edit: InspectorCurveEditPayload,
-}
-
-/// Change one definition-backed Clip property.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct InspectorSetClipPropertyPayload {
-    /// Clip targeted by the inspector mutation.
-    pub clip: InspectorClipRefPayload,
-    /// Current authoring address of the definition-backed parameter.
-    pub path: String,
-    /// New typed value.
-    pub value: mondrian_core::automation::PropertyValue,
-}
-
 /// Logical source selected for one placement-local audio Component Edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InspectorAudioComponentSourcePayload {
@@ -674,8 +555,8 @@ pub enum InspectorAudioComponentSourcePayload {
 /// Change the logical source of one placement-local audio Component Edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InspectorSetAudioComponentSourcePayload {
-    /// Clip that owns the edit.
-    pub clip: InspectorClipRefPayload,
+    /// Canonical Clip identity; current Track placement is derived at dispatch.
+    pub clip_id: ClipId,
     /// Stable edit being changed; source identity is not edit identity.
     pub edit_id: AudioComponentEditId,
     /// New logical source in the owning Clip's source domain.
@@ -1174,36 +1055,26 @@ pub fn timeline_open_nested_sequence_action(payload: TimelineOpenNestedSequenceP
     custom_timeline_action(TIMELINE_OPEN_NESTED_SEQUENCE, payload)
 }
 
-/// Build an action that toggles a clip enabled state from an inspector panel.
-pub fn inspector_set_clip_enabled_action(payload: InspectorSetClipEnabledPayload) -> Action {
-    custom_inspector_action(INSPECTOR_SET_CLIP_ENABLED, payload)
+/// Build an action that changes one Clip enabled state.
+pub fn clip_set_enabled_action(payload: ClipSetEnabledPayload) -> Action {
+    ProductAction::Clip(ClipProductAction::SetEnabled(payload)).into_external_action()
 }
 
-/// Build an action that changes clip opacity from an inspector panel.
-pub fn inspector_set_clip_opacity_action(payload: InspectorSetClipOpacityPayload) -> Action {
-    custom_inspector_action(INSPECTOR_SET_CLIP_OPACITY, payload)
+/// Build an action that changes one Solid Color Clip source color.
+pub fn clip_set_solid_color_action(payload: ClipSetSolidColorPayload) -> Action {
+    ProductAction::Clip(ClipProductAction::SetSolidColor(payload)).into_external_action()
 }
 
-/// Build an action that changes clip solid/tint color from an inspector panel.
-pub fn inspector_set_clip_tint_action(payload: InspectorSetClipTintPayload) -> Action {
-    custom_inspector_action(INSPECTOR_SET_CLIP_TINT, payload)
+/// Build an action that atomically writes persistent Clip-owned parameters.
+pub fn clip_write_parameter_values_action(payload: ClipWriteParameterValuesPayload) -> Action {
+    ProductAction::Clip(ClipProductAction::WriteParameterValues(Box::new(payload)))
+        .into_external_action()
 }
 
-/// Build an action that changes a clip transform field from an inspector panel.
-pub fn inspector_set_clip_transform_field_action(
-    payload: InspectorSetClipTransformFieldPayload,
-) -> Action {
-    custom_inspector_action(INSPECTOR_SET_CLIP_TRANSFORM_FIELD, payload)
-}
-
-/// Build an action that commits one Clip curve edit from an inspector panel.
-pub fn inspector_edit_clip_curve_action(payload: InspectorEditClipCurvePayload) -> Action {
-    custom_inspector_action(INSPECTOR_EDIT_CLIP_CURVE, payload)
-}
-
-/// Build an action that changes one definition-backed Clip property.
-pub fn inspector_set_clip_property_action(payload: InspectorSetClipPropertyPayload) -> Action {
-    custom_inspector_action(INSPECTOR_SET_CLIP_PROPERTY, payload)
+/// Build an action that edits one numeric Clip curve by stable identity.
+pub fn clip_edit_numeric_curve_action(payload: ClipEditNumericCurvePayload) -> Action {
+    ProductAction::Clip(ClipProductAction::EditNumericCurve(Box::new(payload)))
+        .into_external_action()
 }
 
 /// Build an action that changes one Clip audio Component Edit's logical source.
@@ -1371,11 +1242,6 @@ pub fn viewer_set_preview_resolution_scale_action(
 ) -> Action {
     ProductAction::Viewer(ViewerProductAction::SetPreviewResolutionScale(payload))
         .into_external_action()
-}
-
-/// Build a viewer request for changing one selected clip transform.
-pub fn viewer_set_clip_transform_action(payload: ViewerSetClipTransformPayload) -> Action {
-    ProductAction::Viewer(ViewerProductAction::SetClipTransform(payload)).into_external_action()
 }
 
 /// Build a shell-local viewer request for cycling canvas zoom.

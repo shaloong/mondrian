@@ -42,7 +42,7 @@ accept enum keys absent from the schema, or flatten a resource reference into a
 generic text parameter.
 
 Basic Title Inspector rows use the same definition-backed property projection
-and mutation action as other Clip content; the panel does not own a parallel
+and `ClipProductAction` parameter-write Interface as Transform/Opacity; the panel does not own a parallel
 title draft or reconstruct property ranges/options. Text is multiline, the
 concrete font family remains editable regardless of display length, and
 font-size/fill/tracking/line-height animation is evaluated at exact Clip
@@ -109,7 +109,9 @@ drag collision choice is labeled `PushForward`; UI code must not expose it as
 professional Insert.
 
 Inspector audio source controls project existing author state rather than own
-it. Each row addresses one stable `AudioComponentEditId`; media choices carry
+it. Each command carries only canonical `ClipId` plus one stable
+`AudioComponentEditId`; current Track placement and media kind are never copied
+into the payload. Media choices carry
 only Asset `AudioSourceComponentId` values and nested choices carry only child
 `ProgramOutputId` values. The application validates source domain, Asset/child
 membership, track lock, and the complete audio author aggregate before it
@@ -412,14 +414,27 @@ It never advances author generation, dirty state, or Undo/Redo. Runtime
 replacement is part of action success; failure rolls the monitoring intent
 back so the retained control cannot disagree with audible execution.
 
-The migrated Viewer slice carries authored preview-resolution changes and
-monitor-driven Clip transforms through `ViewerProductAction`. Transform intent
-addresses its canonical Clip by `ClipId`; it does not repeat Track identity or
-media-kind facts that the authoring Interface must resolve and validate. Empty
-or non-finite transform gestures and audio-Track Clip targets fail before an
-author transaction, while an accepted multi-field gesture commits atomically
-with one Undo step. Canvas zoom is presentation state owned by the Window/Shell
-Adapter and deliberately remains outside the product algebra.
+The migrated Viewer slice carries only authored preview-resolution changes
+through `ViewerProductAction`. Canvas zoom is presentation state owned by the
+Window/Shell Adapter and deliberately remains outside the product algebra.
+Viewer gestures that manipulate picture geometry do not create a second Viewer
+transform model: they emit the same `ClipProductAction` used by Inspector,
+Headless, scripting, and future plugin Adapters.
+
+`ClipProductAction` closes enabled state, typed Solid Color source edits,
+atomic direct-parameter writes, and stable-key numeric curve edits. A direct
+parameter write carries canonical `ClipId` plus one or more
+`AnimationParameterAddress + PropertyValue` entries; it never carries Track
+identity, media-kind snapshots, path aliases, percent-specific fields, or a
+Viewer/Inspector interpretation. The deep `app::clip_authoring` Module derives
+current placement and Clip-local author time, resolves only the Timeline
+Module's persistent intrinsic parameter projection, prepares every normalized
+mutation, and commits one Author Transaction. Existing keys retain identity,
+Bezier handles, interpolation, and temporal flags. Empty or duplicate batches,
+stale addresses, invalid values, audio-Track visual targets, lock blockers, and
+no-ops fail before candidate allocation; one invalid member cannot partially
+apply a multi-field gesture. Solid Color remains a typed Clip content edit and
+is deliberately not exposed as a synthetic parameter address.
 
 `ProjectProductAction` carries Project creation, durable recovery selection,
 future-Sequence defaults, and Project Color Environment replacement;
@@ -442,7 +457,7 @@ while dispatch consumes the Queue's exact `ExportCancelOutcome`; only
 `Requested` is success. Terminal cleanup uses the Queue-locked removal count
 and treats Completed, Failed, and Cancelled entries consistently.
 
-`VisualEffectProductAction` closes Clip-local visual Effect insertion,
+`VisualEffectProductAction` separately closes Clip-local visual Effect insertion,
 selection, enabled state, removal, relative reorder, and parameter-value edits.
 Every payload carries canonical `ClipId`/`EffectId`; Track identity and media
 kind are resolved by the author Interface. Reorder uses stable
@@ -528,7 +543,7 @@ The migrated slices expose one borrowed, read-only
 `ProductActionAvailability`. Project/Sequence membership and navigation, Track
 lock, Clip membership/media kind, placement range, Sequence time-base, Export
 draft difference, and Queue target facts remain private; the stable UI
-Interface is only `allows(&ProductAction)`. Timeline, Audio, Viewer, Project,
+Interface is only `allows(&ProductAction)`. Timeline, Clip, Audio, Viewer, Project,
 Sequence, and Export controls therefore use the same admission Seam. The
 projection does not clone or index the author graph or clone the Export Job
 list for each query. Window and panel Adapters cannot reconstruct admission by traversing

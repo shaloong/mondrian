@@ -8,8 +8,10 @@ use std::path::PathBuf;
 
 use mondrian_core::automation::{AnimationParameterAddress, PropertyValue};
 use mondrian_core::effect_data::EffectType;
-use mondrian_core::types::{ClipId, EffectId, FramePosition, JobId, SequenceId, TrackId};
-use mondrian_core::{ProjectColorEnvironment, ProjectSettings, TimelineTime};
+use mondrian_core::types::{
+    ClipId, EffectId, FramePosition, JobId, KeyframeId, SequenceId, TrackId,
+};
+use mondrian_core::{Color, ProjectColorEnvironment, ProjectSettings, TimelineTime};
 use mondrian_editor_state::Action;
 use mondrian_export::preset::{BuiltinExportPreset, ExportPreset, TimelineExportRange};
 use mondrian_timeline::{
@@ -40,8 +42,17 @@ pub const VIEWER_NAMESPACE: &str = "ui.viewer";
 
 /// External action name for changing the active Sequence preview scale.
 pub const VIEWER_SET_PREVIEW_RESOLUTION_SCALE: &str = "set_preview_resolution_scale";
-/// External action name for changing one Clip transform from monitor editing.
-pub const VIEWER_SET_CLIP_TRANSFORM: &str = "set_clip_transform";
+/// External custom-action namespace for Clip authoring operations.
+pub const CLIP_NAMESPACE: &str = "ui.clip";
+
+/// External action name for changing one Clip enabled state.
+pub const CLIP_SET_ENABLED: &str = "set_enabled";
+/// External action name for changing one Solid Color Clip's source color.
+pub const CLIP_SET_SOLID_COLOR: &str = "set_solid_color";
+/// External action name for atomically writing stable-address Clip parameters.
+pub const CLIP_WRITE_PARAMETER_VALUES: &str = "write_parameter_values";
+/// External action name for editing one numeric Clip curve by stable identity.
+pub const CLIP_EDIT_NUMERIC_CURVE: &str = "edit_numeric_curve";
 
 /// External custom-action namespace for Project product operations.
 pub const PROJECT_NAMESPACE: &str = "ui.project";
@@ -131,6 +142,8 @@ pub enum ProductAction {
     Audio(AudioProductAction),
     /// An operation owned by the Viewer product Interface.
     Viewer(ViewerProductAction),
+    /// An operation owned by one Timeline Clip's authoring Interface.
+    Clip(ClipProductAction),
     /// An operation owned by the Project lifecycle or authoring Interface.
     Project(ProjectProductAction),
     /// An operation owned by the Sequence management Interface.
@@ -203,13 +216,24 @@ pub enum VisualEffectProductAction {
     SetParameterValue(Box<VisualEffectSetParameterValuePayload>),
 }
 
+/// Closed authoring operations owned by one Timeline Clip.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClipProductAction {
+    /// Change whether one Clip participates in picture or sound execution.
+    SetEnabled(ClipSetEnabledPayload),
+    /// Change the generated source color of one Solid Color Clip.
+    SetSolidColor(ClipSetSolidColorPayload),
+    /// Atomically write one or more persistent Clip-owned parameters.
+    WriteParameterValues(Box<ClipWriteParameterValuesPayload>),
+    /// Insert, edit, or remove one complete numeric key by stable identity.
+    EditNumericCurve(Box<ClipEditNumericCurvePayload>),
+}
+
 /// Closed Viewer operations that mutate product state.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViewerProductAction {
     /// Change the active Sequence's authored preview resolution scale.
     SetPreviewResolutionScale(ViewerSetPreviewResolutionScalePayload),
-    /// Change one Clip transform at the active Sequence playhead.
-    SetClipTransform(ViewerSetClipTransformPayload),
 }
 
 /// Closed Sequence audio authoring operations.
@@ -265,6 +289,7 @@ impl ProductActionDecodeError {
             TIMELINE_NAMESPACE => "timeline_ui_action",
             AUDIO_NAMESPACE => "audio_action",
             VIEWER_NAMESPACE => "viewer_action",
+            CLIP_NAMESPACE => "clip_action",
             PROJECT_NAMESPACE => "project_action",
             SEQUENCE_NAMESPACE => "sequence_action",
             EXPORT_NAMESPACE => "export_action",
@@ -338,9 +363,23 @@ impl ProductAction {
                         namespace, name, payload,
                     )?),
                 ))),
-                VIEWER_SET_CLIP_TRANSFORM => {
-                    Ok(Some(Self::Viewer(ViewerProductAction::SetClipTransform(
-                        decode_payload(namespace, name, payload)?,
+                _ => Ok(None),
+            },
+            CLIP_NAMESPACE => match name.as_str() {
+                CLIP_SET_ENABLED => Ok(Some(Self::Clip(ClipProductAction::SetEnabled(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                CLIP_SET_SOLID_COLOR => Ok(Some(Self::Clip(ClipProductAction::SetSolidColor(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                CLIP_WRITE_PARAMETER_VALUES => {
+                    Ok(Some(Self::Clip(ClipProductAction::WriteParameterValues(
+                        Box::new(decode_payload(namespace, name, payload)?),
+                    ))))
+                }
+                CLIP_EDIT_NUMERIC_CURVE => {
+                    Ok(Some(Self::Clip(ClipProductAction::EditNumericCurve(
+                        Box::new(decode_payload(namespace, name, payload)?),
                     ))))
                 }
                 _ => Ok(None),
@@ -531,9 +570,22 @@ impl ProductAction {
                 VIEWER_SET_PREVIEW_RESOLUTION_SCALE,
                 serde_json::json!(payload),
             ),
-            Self::Viewer(ViewerProductAction::SetClipTransform(payload)) => (
-                VIEWER_NAMESPACE,
-                VIEWER_SET_CLIP_TRANSFORM,
+            Self::Clip(ClipProductAction::SetEnabled(payload)) => {
+                (CLIP_NAMESPACE, CLIP_SET_ENABLED, serde_json::json!(payload))
+            }
+            Self::Clip(ClipProductAction::SetSolidColor(payload)) => (
+                CLIP_NAMESPACE,
+                CLIP_SET_SOLID_COLOR,
+                serde_json::json!(payload),
+            ),
+            Self::Clip(ClipProductAction::WriteParameterValues(payload)) => (
+                CLIP_NAMESPACE,
+                CLIP_WRITE_PARAMETER_VALUES,
+                serde_json::json!(payload),
+            ),
+            Self::Clip(ClipProductAction::EditNumericCurve(payload)) => (
+                CLIP_NAMESPACE,
+                CLIP_EDIT_NUMERIC_CURVE,
                 serde_json::json!(payload),
             ),
             Self::Project(ProjectProductAction::CreateWithSettings(payload)) => (
@@ -904,49 +956,92 @@ pub struct VisualEffectSetParameterValuePayload {
     pub value: PropertyValue,
 }
 
+/// Change one Clip's enabled state through its canonical identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipSetEnabledPayload {
+    /// Canonical Clip identity; current Track placement is derived at dispatch.
+    pub clip_id: ClipId,
+    /// Whether the Clip participates in picture or sound execution.
+    pub enabled: bool,
+}
+
+/// Change the generated source color of one Solid Color Clip.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipSetSolidColorPayload {
+    /// Canonical Clip identity; current Track placement is derived at dispatch.
+    pub clip_id: ClipId,
+    /// Straight-alpha source color authored by the generated Clip.
+    pub color: Color,
+}
+
+/// One stable-address parameter value in an atomic Clip write.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipParameterValueWrite {
+    /// Stable owner-local parameter instance and Definition identity.
+    pub parameter: AnimationParameterAddress,
+    /// Typed value to write statically or at the current Clip-local author time.
+    pub value: PropertyValue,
+}
+
+/// Atomically write one or more persistent parameters owned directly by a Clip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipWriteParameterValuesPayload {
+    /// Canonical Clip identity; current Track placement is derived at dispatch.
+    pub clip_id: ClipId,
+    /// Non-empty, duplicate-free parameter writes committed as one gesture.
+    pub writes: Vec<ClipParameterValueWrite>,
+}
+
+/// One finite normalized point in a Clip curve editor viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipNormalizedCurvePointPayload {
+    /// Ratio across the visible Clip-local author span, in `0..=1`.
+    pub time_ratio: f64,
+    /// Ratio across the Parameter Schema soft range, in `0..=1`.
+    pub value_ratio: f64,
+}
+
+/// One stable-key numeric curve edit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ClipCurveEditPayload {
+    /// Insert a key, or edit one existing complete key.
+    Upsert {
+        /// Existing stable identity; `None` inserts or resolves by exact time.
+        keyframe_id: Option<KeyframeId>,
+        /// New normalized editor point.
+        point: ClipNormalizedCurvePointPayload,
+    },
+    /// Remove one complete key by stable identity.
+    Remove {
+        /// Stable key identity captured by the current projection.
+        keyframe_id: KeyframeId,
+    },
+}
+
+/// Edit one Clip-owned numeric curve through stable author identity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipEditNumericCurvePayload {
+    /// Canonical Clip identity; current Track placement is derived at dispatch.
+    pub clip_id: ClipId,
+    /// Stable owner-local parameter instance and Definition identity.
+    pub parameter: AnimationParameterAddress,
+    /// Incremental key edit; never a replacement curve or point index.
+    pub edit: ClipCurveEditPayload,
+}
+
 /// Change the active Viewer preview resolution scale.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerSetPreviewResolutionScalePayload {
     /// Preview resolution scale requested by the UI.
     pub scale: f32,
-}
-
-/// Sequence-space position emitted by monitor direct manipulation.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ViewerTransformPositionPayload {
-    /// Horizontal position in Sequence pixels.
-    pub x: f32,
-    /// Vertical position in Sequence pixels.
-    pub y: f32,
-}
-
-/// Change one Clip transform from the Viewer/monitor surface.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ViewerSetClipTransformPayload {
-    /// Stable Clip identity targeted by the monitor interaction.
-    pub clip_id: ClipId,
-    /// Optional absolute Sequence-space position.
-    pub position: Option<ViewerTransformPositionPayload>,
-    /// Optional uniform scale in UI percent units.
-    pub scale_percent: Option<f32>,
-    /// Optional rotation in degrees.
-    pub rotation_degrees: Option<f32>,
-}
-
-impl ViewerSetClipTransformPayload {
-    pub(crate) const fn has_mutation(self) -> bool {
-        self.position.is_some() || self.scale_percent.is_some() || self.rotation_degrees.is_some()
-    }
-
-    pub(crate) fn values_are_finite(self) -> bool {
-        self.position
-            .is_none_or(|position| position.x.is_finite() && position.y.is_finite())
-            && self.scale_percent.is_none_or(f32::is_finite)
-            && self.rotation_degrees.is_none_or(f32::is_finite)
-    }
 }
 
 /// Stable read-only admission projection for migrated product Actions.
@@ -980,6 +1075,7 @@ impl<'a> ProductActionAvailability<'a> {
             ProductAction::Timeline(action) => self.allows_timeline(action),
             ProductAction::Audio(_) => self.state.active_sequence().is_some(),
             ProductAction::Viewer(action) => self.allows_viewer(action),
+            ProductAction::Clip(action) => self.allows_clip(action),
             ProductAction::Project(action) => self.allows_project(action),
             ProductAction::Sequence(action) => self.allows_sequence(action),
             ProductAction::Export(action) => self.allows_export(action),
@@ -1006,16 +1102,32 @@ impl<'a> ProductActionAvailability<'a> {
     }
 
     fn allows_viewer(&self, action: &ViewerProductAction) -> bool {
-        let Some(sequence) = self.state.active_sequence() else {
+        let Some(_sequence) = self.state.active_sequence() else {
             return false;
         };
         match action {
             ViewerProductAction::SetPreviewResolutionScale(_) => true,
-            ViewerProductAction::SetClipTransform(payload) => {
-                payload.has_mutation()
-                    && payload.values_are_finite()
-                    && clip_admission_facts(sequence, payload.clip_id)
-                        .is_some_and(|clip| clip.source_track_unlocked && clip.is_video_track)
+        }
+    }
+
+    fn allows_clip(&self, action: &ClipProductAction) -> bool {
+        let Some(_sequence) = self.state.active_sequence() else {
+            return false;
+        };
+        match action {
+            ClipProductAction::SetEnabled(payload) => self
+                .state
+                .clip_enabled_write_would_change(payload.clip_id, payload.enabled)
+                .unwrap_or(false),
+            ClipProductAction::SetSolidColor(payload) => self
+                .state
+                .clip_solid_color_write_would_change(payload.clip_id, payload.color)
+                .unwrap_or(false),
+            ClipProductAction::WriteParameterValues(payload) => {
+                self.state.clip_parameter_writes_would_change(payload).unwrap_or(false)
+            }
+            ClipProductAction::EditNumericCurve(payload) => {
+                self.state.clip_numeric_curve_payload_would_change(payload).unwrap_or(false)
             }
         }
     }
@@ -1155,21 +1267,20 @@ impl<'a> ProductActionAvailability<'a> {
                         if !target.track_unlocked {
                             return false;
                         }
-                        let Some((_, property)) =
-                            target.effect.properties.property_by_address(&payload.parameter)
-                        else {
-                            return false;
-                        };
-                        if property.value_type() != payload.value.value_type() {
-                            return false;
-                        }
-                        let current = if property.is_animated() {
-                            visual_effect_author_time(self.state, sequence, target.clip)
-                                .map(|time| property.evaluate(time))
-                        } else {
-                            Some(property.static_value().clone())
-                        };
-                        current.is_some_and(|current| current != payload.value)
+                        visual_effect_author_time(self.state, sequence, target.clip)
+                            .and_then(|time| {
+                                target
+                                    .effect
+                                    .properties
+                                    .prepare_value_write_by_address(
+                                        &payload.parameter,
+                                        time,
+                                        payload.value.clone(),
+                                    )
+                                    .ok()
+                                    .flatten()
+                            })
+                            .is_some()
                     },
                 )
             }
@@ -1305,7 +1416,7 @@ mod tests {
     use mondrian_core::Rational;
     use mondrian_timeline::{
         audio::{AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID},
-        clip::Clip,
+        clip::{Clip, Transform2D},
         AudioAutomationEdit, AudioAutomationEditRequest, AudioAutomationTarget,
         AudioChannelStripOwner, AudioChannelStripRack, AudioProcessorRackAddress,
         AudioProcessorRackEdit, AudioProcessorRackPlacement, AudioRouteDestination,
@@ -1356,20 +1467,11 @@ mod tests {
 
     #[test]
     fn external_codec_round_trips_every_viewer_product_action() {
-        let clip_id = ClipId::new();
-        let actions = [
-            ProductAction::Viewer(ViewerProductAction::SetPreviewResolutionScale(
+        let actions = [ProductAction::Viewer(
+            ViewerProductAction::SetPreviewResolutionScale(
                 ViewerSetPreviewResolutionScalePayload { scale: 0.25 },
-            )),
-            ProductAction::Viewer(ViewerProductAction::SetClipTransform(
-                ViewerSetClipTransformPayload {
-                    clip_id,
-                    position: Some(ViewerTransformPositionPayload { x: 320.0, y: 180.0 }),
-                    scale_percent: Some(125.0),
-                    rotation_degrees: Some(8.5),
-                },
-            )),
-        ];
+            ),
+        )];
 
         for expected in actions {
             let external = expected.clone().into_external_action();
@@ -1378,6 +1480,27 @@ mod tests {
                 .expect("recognized Viewer product action");
             assert_eq!(decoded, expected);
         }
+    }
+
+    #[test]
+    fn external_codec_round_trips_atomic_clip_parameter_writes() {
+        let expected = ProductAction::Clip(ClipProductAction::WriteParameterValues(Box::new(
+            ClipWriteParameterValuesPayload {
+                clip_id: ClipId::new(),
+                writes: vec![ClipParameterValueWrite {
+                    parameter: AnimationParameterAddress {
+                        animation_track_id: mondrian_core::AnimationTrackId::new(),
+                        parameter_id: mondrian_core::ParameterId::new_static("transform.position"),
+                    },
+                    value: PropertyValue::Vec2(glam::Vec2::new(320.0, 180.0)),
+                }],
+            },
+        )));
+
+        let decoded = ProductAction::decode_external(&expected.clone().into_external_action())
+            .expect("valid external payload")
+            .expect("recognized Clip product action");
+        assert_eq!(decoded, expected);
     }
 
     #[test]
@@ -1741,14 +1864,17 @@ mod tests {
             .expect("shell-local Viewer names are not decode failures")
             .is_none());
 
-        let malformed_viewer = Action::Custom {
-            namespace: VIEWER_NAMESPACE.to_owned(),
-            name: VIEWER_SET_CLIP_TRANSFORM.to_owned(),
-            payload: serde_json::json!({"clip_id": ClipId::new(), "position": {"x": 1.0}}),
+        let malformed_clip = Action::Custom {
+            namespace: CLIP_NAMESPACE.to_owned(),
+            name: CLIP_WRITE_PARAMETER_VALUES.to_owned(),
+            payload: serde_json::json!({"clip_id": ClipId::new()}),
         };
-        let error = ProductAction::decode_external(&malformed_viewer)
-            .expect_err("recognized malformed Viewer payload fails closed");
-        assert_eq!(error.dispatch_step_id(), "viewer_action.set_clip_transform");
+        let error = ProductAction::decode_external(&malformed_clip)
+            .expect_err("recognized malformed Clip payload fails closed");
+        assert_eq!(
+            error.dispatch_step_id(),
+            "clip_action.write_parameter_values"
+        );
 
         for (namespace, name, step_id) in [
             (
@@ -1792,6 +1918,10 @@ mod tests {
         let clip =
             Clip::new(AssetId::new(), tt(10, time_base), tt(20, time_base)).expect("valid clip");
         let clip_id = clip.id;
+        let position_parameter = clip
+            .intrinsic_parameter_bag()
+            .address_for_path(Transform2D::POSITION_PATH)
+            .expect("position parameter");
         let track_id = sequence.video_tracks[0].id;
         let audio_track_id = sequence.audio_tracks[0].id;
         sequence.video_tracks[0].add_clip(clip).expect("add clip");
@@ -1850,29 +1980,29 @@ mod tests {
                 ViewerSetPreviewResolutionScalePayload { scale: 0.25 }
             )
         )));
-        assert!(projection.allows(&ProductAction::Viewer(
-            ViewerProductAction::SetClipTransform(ViewerSetClipTransformPayload {
+        assert!(projection.allows(&ProductAction::Clip(
+            ClipProductAction::WriteParameterValues(Box::new(ClipWriteParameterValuesPayload {
                 clip_id,
-                position: Some(ViewerTransformPositionPayload { x: 10.0, y: 20.0 }),
-                scale_percent: None,
-                rotation_degrees: None,
-            })
+                writes: vec![ClipParameterValueWrite {
+                    parameter: position_parameter.clone(),
+                    value: PropertyValue::Vec2(glam::Vec2::new(10.0, 20.0)),
+                }],
+            }))
         )));
-        assert!(!projection.allows(&ProductAction::Viewer(
-            ViewerProductAction::SetClipTransform(ViewerSetClipTransformPayload {
+        assert!(!projection.allows(&ProductAction::Clip(
+            ClipProductAction::WriteParameterValues(Box::new(ClipWriteParameterValuesPayload {
                 clip_id,
-                position: None,
-                scale_percent: None,
-                rotation_degrees: None,
-            })
+                writes: Vec::new(),
+            }))
         )));
-        assert!(!projection.allows(&ProductAction::Viewer(
-            ViewerProductAction::SetClipTransform(ViewerSetClipTransformPayload {
+        assert!(!projection.allows(&ProductAction::Clip(
+            ClipProductAction::WriteParameterValues(Box::new(ClipWriteParameterValuesPayload {
                 clip_id: ClipId::new(),
-                position: Some(ViewerTransformPositionPayload { x: 10.0, y: 20.0 }),
-                scale_percent: None,
-                rotation_degrees: None,
-            })
+                writes: vec![ClipParameterValueWrite {
+                    parameter: position_parameter.clone(),
+                    value: PropertyValue::Vec2(glam::Vec2::new(10.0, 20.0)),
+                }],
+            }))
         )));
 
         state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked = true;
@@ -1896,13 +2026,14 @@ mod tests {
                 },
             )))
         );
-        assert!(!locked.allows(&ProductAction::Viewer(
-            ViewerProductAction::SetClipTransform(ViewerSetClipTransformPayload {
+        assert!(!locked.allows(&ProductAction::Clip(
+            ClipProductAction::WriteParameterValues(Box::new(ClipWriteParameterValuesPayload {
                 clip_id,
-                position: Some(ViewerTransformPositionPayload { x: 10.0, y: 20.0 }),
-                scale_percent: None,
-                rotation_degrees: None,
-            })
+                writes: vec![ClipParameterValueWrite {
+                    parameter: position_parameter,
+                    value: PropertyValue::Vec2(glam::Vec2::new(10.0, 20.0)),
+                }],
+            }))
         )));
         assert!(
             locked.allows(&ProductAction::Timeline(TimelineProductAction::Seek(

@@ -373,6 +373,10 @@ formed from its stable owner/animation-track identity and definition-stable
 without changing this address.
 _Avoid_: Property path as identity, ParameterId derived from display name, suffix matching during execution
 
+**Clip Parameter Write**:
+One non-empty, duplicate-free atomic gesture over persistent parameter instances owned directly by one Clip, addressed by canonical Clip ID plus Parameter Instance Address and evaluated at the current clamped Clip Visual Author Time. Track placement and lock are resolved at admission and again by the author transaction; Effect, Mask, synthetic Blend/Solid Color fields, and child-owned properties are outside this Interface. If animation is enabled, the write edits or creates the authoritative complete key and preserves existing key identity, handles, interpolation, and temporal flags. Any stale address, invalid value, duplicate target, or failed member rejects the complete gesture before an author candidate exists.
+_Avoid_: Viewer- or Inspector-specific transform semantics, Track/range snapshot in the payload, property path as command identity, hidden static write beneath an active curve, partial multi-field commit
+
 **Parameter Resource Reference**:
 A recoverable typed parameter value representing unbound intent, a Project Asset, an external file, or a URI, with resource-level invalidation semantics.
 _Avoid_: Free-form path text treated as a loaded resource, persisted resolved/available flag

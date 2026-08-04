@@ -666,6 +666,26 @@ interval, and the derived terminal boundary may be earlier. This prevents
 placement, source selection, and visual processing from becoming accidental
 competing authorities.
 
+`Clip::intrinsic_parameter_bag()` is the sole read-only projection of
+persistent parameter instances owned directly by the Clip. It includes the
+Clip Transform and definition-backed generated content such as Basic Title,
+but excludes Effect and Mask child owners plus synthetic Blend Mode and Solid
+Color projections. Every returned `AnimationParameterAddress` is stable across
+projections. App authoring resolves a value gesture against this bag before a
+candidate exists; a mutable property path is selected only after stable owner
+and `ParameterId` identity resolve. A non-empty multi-parameter gesture is one
+transaction, and any stale/duplicate/type-invalid member rejects the complete
+gesture.
+
+Interactive authoring uses `Clip::clamped_visual_author_time()` as its one
+boundary policy: Sequence time is clamped to the closed placement extent and
+then mapped into Clip-local visual author time. This protects a gesture that
+arrives beside a concurrent seek or placement edit without changing the
+half-open membership semantics used by render evaluation. If the target
+property has animation enabled, a value write edits the complete existing key
+by `KeyframeId` or creates one at that exact author time; it never writes an
+invisible static fallback under an authoritative curve.
+
 Future variable time remapping must add a validated closed
 `ClipSourceTimeMap` variant with exact segment ordering, continuity,
 source-boundary, and inverse/ambiguity semantics. Ordinary parameter automation

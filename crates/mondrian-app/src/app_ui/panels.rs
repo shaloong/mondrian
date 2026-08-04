@@ -94,12 +94,10 @@ use crate::app::ui_actions::{
     assets_move_folder_action, assets_move_selection_action, assets_open_folder_action,
     assets_prepare_drag_action, assets_rebind_audio_component_action,
     assets_refresh_audio_components_action, assets_rename_asset_action,
-    assets_rename_folder_action, assets_set_proxy_mode_action, export_cancel_action,
-    export_clear_terminal_history_action, export_edit_draft_action, export_enqueue_action,
-    inspector_edit_clip_curve_action, inspector_set_audio_component_source_action,
-    inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
-    inspector_set_clip_property_action, inspector_set_clip_tint_action,
-    inspector_set_clip_transform_field_action, timeline_add_track_action,
+    assets_rename_folder_action, assets_set_proxy_mode_action, clip_edit_numeric_curve_action,
+    clip_set_enabled_action, clip_set_solid_color_action, clip_write_parameter_values_action,
+    export_cancel_action, export_clear_terminal_history_action, export_edit_draft_action,
+    export_enqueue_action, inspector_set_audio_component_source_action, timeline_add_track_action,
     timeline_clear_in_out_points_action, timeline_create_cross_dissolve_action,
     timeline_drop_asset_action, timeline_extract_range_action, timeline_lift_range_action,
     timeline_link_selected_clips_action, timeline_move_clip_action, timeline_move_track_action,
@@ -121,12 +119,11 @@ use crate::app::ui_actions::{
     AssetsMoveSelectionPayload, AssetsOpenFolderPayload, AssetsPrepareDragPayload,
     AssetsRebindAudioComponentPayload, AssetsRefreshAudioComponentsPayload,
     AssetsRenameAssetPayload, AssetsRenameFolderPayload, AssetsSetProxyModePayload,
-    DockDropAreaPayload, ExportDraftEdit, ExportOutputDialogPayload, ImportMediaDialogPayload,
-    InspectorAudioComponentSourcePayload, InspectorClipRefPayload, InspectorClipTransformField,
-    InspectorCurveEditPayload, InspectorCurvePointPayload, InspectorEditClipCurvePayload,
-    InspectorSetAudioComponentSourcePayload, InspectorSetClipEnabledPayload,
-    InspectorSetClipOpacityPayload, InspectorSetClipPropertyPayload, InspectorSetClipTintPayload,
-    InspectorSetClipTransformFieldPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
+    ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
+    ClipParameterValueWrite, ClipSetEnabledPayload, ClipSetSolidColorPayload,
+    ClipWriteParameterValuesPayload, DockDropAreaPayload, ExportDraftEdit,
+    ExportOutputDialogPayload, ImportMediaDialogPayload, InspectorAudioComponentSourcePayload,
+    InspectorSetAudioComponentSourcePayload, TimelineAddTrackKind, TimelineAddTrackPayload,
     TimelineClipSelectionModePayload, TimelineCreateCrossDissolvePayload, TimelineDropAssetPayload,
     TimelineExportRequest, TimelineInOutPointPayloadKind, TimelineMoveClipPayload,
     TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
@@ -1555,6 +1552,19 @@ pub struct InspectorCurveModel {
     pub display_points: Vec<CurvePoint>,
 }
 
+/// Stable Clip-owned parameter targets projected for direct Inspector gestures.
+#[derive(Debug, Clone)]
+pub struct InspectorVisualParameterTargets {
+    /// Transform opacity parameter, present for every visual Clip.
+    pub opacity: Option<AnimationParameterAddress>,
+    /// Transform position parameter, absent for Clip kinds that expose opacity only.
+    pub position: Option<AnimationParameterAddress>,
+    /// Transform scale parameter, absent for Clip kinds that expose opacity only.
+    pub scale: Option<AnimationParameterAddress>,
+    /// Transform rotation parameter, absent for Clip kinds that expose opacity only.
+    pub rotation: Option<AnimationParameterAddress>,
+}
+
 /// Inspector fixture data independent from a concrete property widget tree.
 #[derive(Debug, Clone)]
 pub struct InspectorPanelModel {
@@ -1584,6 +1594,8 @@ pub struct InspectorPanelModel {
     pub scale_percent: f32,
     /// Transform rotation shown in degrees.
     pub rotation_degrees: f32,
+    /// Stable author targets for direct visual parameter gestures.
+    pub visual_parameters: Option<InspectorVisualParameterTargets>,
     /// Clip in point shown as an absolute timeline frame.
     pub in_frame: f32,
     /// Clip out point shown as an absolute timeline frame.
@@ -1750,10 +1762,17 @@ impl InspectorPanelModel {
         };
 
         let time = state.current_timeline_time().ok().flatten().unwrap_or(sequence.playhead);
-        let clip_author_time = clip_visual_author_time_at(clip, time).unwrap_or(clip.clip_time_in);
+        let clip_author_time = clip.clamped_visual_author_time(time).unwrap_or(clip.clip_time_in);
         let opacity = (clip.transform.evaluate_opacity(clip_author_time) * 100.0).clamp(0.0, 100.0);
         let position = clip.transform.get_position(clip_author_time);
         let scale = clip.transform.get_scale(clip_author_time);
+        let intrinsic_parameters = clip.intrinsic_parameter_bag();
+        let visual_parameters = InspectorVisualParameterTargets {
+            opacity: intrinsic_parameters.address_for_path(Transform2D::OPACITY_PATH),
+            position: intrinsic_parameters.address_for_path(Transform2D::POSITION_PATH),
+            scale: intrinsic_parameters.address_for_path(Transform2D::SCALE_PATH),
+            rotation: intrinsic_parameters.address_for_path(Transform2D::ROTATION_PATH),
+        };
         let is_editable = !selected_clip_track_is_locked(state, resolved_selection);
         let clip_properties = clip
             .content
@@ -1790,6 +1809,7 @@ impl InspectorPanelModel {
             position_y: position.y,
             scale_percent: scale.x * 100.0,
             rotation_degrees: clip_rotation_degrees(clip, time),
+            visual_parameters: Some(visual_parameters),
             in_frame: clip
                 .position
                 .to_frame_position(sequence.settings.frame_rate, FrameRounding::Nearest)
@@ -1857,6 +1877,7 @@ impl InspectorPanelModel {
             position_y: 0.0,
             scale_percent: 100.0,
             rotation_degrees: 0.0,
+            visual_parameters: None,
             in_frame: 0.0,
             out_frame: 1.0,
             max_frame: 1.0,
@@ -1886,6 +1907,7 @@ impl InspectorPanelModel {
             position_y: -8.0,
             scale_percent: 100.0,
             rotation_degrees: 0.0,
+            visual_parameters: None,
             in_frame: 0.0,
             out_frame: 96.0,
             max_frame: 240.0,
@@ -2817,16 +2839,8 @@ fn timeline_clip_color(clip: &Clip, is_video_track: bool) -> Option<Color> {
     }
 }
 
-fn clip_visual_author_time_at(
-    clip: &Clip,
-    timeline_time: TimelineTime,
-) -> mondrian_core::Result<TimelineTime> {
-    let placement_end = clip.end_position()?;
-    clip.timeline_to_clip_time(timeline_time.clamp(clip.position, placement_end))
-}
-
 fn clip_rotation_degrees(clip: &Clip, time: TimelineTime) -> f32 {
-    let author_time = clip_visual_author_time_at(clip, time).unwrap_or(clip.clip_time_in);
+    let author_time = clip.clamped_visual_author_time(time).unwrap_or(clip.clip_time_in);
     clip.transform
         .to_property_bag()
         .evaluate(Transform2D::ROTATION_PATH, author_time)
@@ -5610,6 +5624,17 @@ fn audio_meter_dbfs_label(linear: f64) -> String {
 
 fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
     let selected_clip = model.selected_clip;
+    let opacity_parameter =
+        model.visual_parameters.as_ref().and_then(|targets| targets.opacity.clone());
+    let position_x_parameter =
+        model.visual_parameters.as_ref().and_then(|targets| targets.position.clone());
+    let position_y_parameter = position_x_parameter.clone();
+    let scale_parameter =
+        model.visual_parameters.as_ref().and_then(|targets| targets.scale.clone());
+    let rotation_parameter =
+        model.visual_parameters.as_ref().and_then(|targets| targets.rotation.clone());
+    let position_x = model.position_x;
+    let position_y = model.position_y;
     let has_target = selected_clip.is_some();
     let can_edit = has_target && model.is_editable;
     let subtitle = model.edit_disabled_reason.as_deref().unwrap_or(if has_target {
@@ -5682,7 +5707,13 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                 Some(1.0),
                 0,
                 can_edit,
-                move |value| inspector_value_action(selected_clip, "opacity", value),
+                move |value| {
+                    inspector_parameter_action(
+                        selected_clip,
+                        opacity_parameter.clone(),
+                        PropertyValue::Float(value / 100.0),
+                    )
+                },
             ),
         ));
     if model.shows_tint {
@@ -5937,10 +5968,10 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                     0,
                     can_edit,
                     move |value| {
-                        inspector_transform_action(
+                        inspector_parameter_action(
                             selected_clip,
-                            InspectorClipTransformField::PositionX,
-                            value,
+                            position_x_parameter.clone(),
+                            PropertyValue::Vec2(glam::Vec2::new(value, position_y)),
                         )
                     },
                 ),
@@ -5955,10 +5986,10 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                     0,
                     can_edit,
                     move |value| {
-                        inspector_transform_action(
+                        inspector_parameter_action(
                             selected_clip,
-                            InspectorClipTransformField::PositionY,
-                            value,
+                            position_y_parameter.clone(),
+                            PropertyValue::Vec2(glam::Vec2::new(position_x, value)),
                         )
                     },
                 ),
@@ -5973,10 +6004,10 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                     0,
                     can_edit,
                     move |value| {
-                        inspector_transform_action(
+                        inspector_parameter_action(
                             selected_clip,
-                            InspectorClipTransformField::ScalePercent,
-                            value,
+                            scale_parameter.clone(),
+                            PropertyValue::Vec2(glam::Vec2::splat(value.max(0.0) / 100.0)),
                         )
                     },
                 ),
@@ -5991,10 +6022,10 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                     1,
                     can_edit,
                     move |value| {
-                        inspector_transform_action(
+                        inspector_parameter_action(
                             selected_clip,
-                            InspectorClipTransformField::RotationDegrees,
-                            value,
+                            rotation_parameter.clone(),
+                            PropertyValue::Float(value),
                         )
                     },
                 ),
@@ -6462,34 +6493,13 @@ where
     )
 }
 
-fn inspector_value_action(
-    selection: Option<SelectedClipRef>,
-    name: &'static str,
-    value: f32,
-) -> Option<Action> {
-    if name == "opacity" {
-        if let Some(selection) = selection {
-            return Some(inspector_set_clip_opacity_action(
-                InspectorSetClipOpacityPayload {
-                    clip: inspector_clip_payload(selection),
-                    opacity_percent: value,
-                },
-            ));
-        }
-    }
-    None
-}
-
 fn inspector_bool_action(selection: Option<SelectedClipRef>, value: bool) -> Option<Action> {
-    if let Some(selection) = selection {
-        return Some(inspector_set_clip_enabled_action(
-            InspectorSetClipEnabledPayload {
-                clip: inspector_clip_payload(selection),
-                enabled: value,
-            },
-        ));
-    }
-    None
+    selection.map(|selection| {
+        clip_set_enabled_action(ClipSetEnabledPayload {
+            clip_id: selection.clip_id,
+            enabled: value,
+        })
+    })
 }
 
 fn inspector_audio_source_action(
@@ -6499,7 +6509,7 @@ fn inspector_audio_source_action(
 ) -> Option<Action> {
     selection.map(|selection| {
         inspector_set_audio_component_source_action(InspectorSetAudioComponentSourcePayload {
-            clip: inspector_clip_payload(selection),
+            clip_id: selection.clip_id,
             edit_id,
             source,
         })
@@ -6587,29 +6597,24 @@ fn inspector_audio_refresh_action(asset_id: AssetId) -> Action {
 }
 
 fn inspector_color_action(selection: Option<SelectedClipRef>, color: Color) -> Option<Action> {
-    if let Some(selection) = selection {
-        return Some(inspector_set_clip_tint_action(
-            InspectorSetClipTintPayload { clip: inspector_clip_payload(selection), color },
-        ));
-    }
-    None
+    selection.map(|selection| {
+        clip_set_solid_color_action(ClipSetSolidColorPayload { clip_id: selection.clip_id, color })
+    })
 }
 
-fn inspector_transform_action(
+fn inspector_parameter_action(
     selection: Option<SelectedClipRef>,
-    field: InspectorClipTransformField,
-    value: f32,
+    parameter: Option<AnimationParameterAddress>,
+    value: PropertyValue,
 ) -> Option<Action> {
-    if let Some(selection) = selection {
-        return Some(inspector_set_clip_transform_field_action(
-            InspectorSetClipTransformFieldPayload {
-                clip: inspector_clip_payload(selection),
-                field,
-                value,
-            },
-        ));
-    }
-    None
+    let selection = selection?;
+    let parameter = parameter?;
+    Some(clip_write_parameter_values_action(
+        ClipWriteParameterValuesPayload {
+            clip_id: selection.clip_id,
+            writes: vec![ClipParameterValueWrite { parameter, value }],
+        },
+    ))
 }
 
 fn inspector_timing_action(
@@ -6691,35 +6696,35 @@ fn inspector_curve_edit_action(
 ) -> Option<Action> {
     let selection = selection?;
     let edit = match edit {
-        CurveEdit::Insert { point, .. } => InspectorCurveEditPayload::Upsert {
+        CurveEdit::Insert { point, .. } => ClipCurveEditPayload::Upsert {
             keyframe_id: None,
             point: inspector_curve_point_payload(point),
         },
         CurveEdit::Move { index, point } => {
             let key = model.keys.get(index)?;
-            InspectorCurveEditPayload::Upsert {
+            ClipCurveEditPayload::Upsert {
                 keyframe_id: key.keyframe_id,
                 point: inspector_curve_point_payload(point),
             }
         }
         CurveEdit::Delete { index } => {
             let keyframe_id = model.keys.get(index).and_then(|key| key.keyframe_id)?;
-            InspectorCurveEditPayload::Remove { keyframe_id }
+            ClipCurveEditPayload::Remove { keyframe_id }
         }
     };
-    Some(inspector_edit_clip_curve_action(
-        InspectorEditClipCurvePayload {
-            clip: inspector_clip_payload(selection),
-            property: model.property.clone(),
+    Some(clip_edit_numeric_curve_action(
+        ClipEditNumericCurvePayload {
+            clip_id: selection.clip_id,
+            parameter: model.property.clone(),
             edit,
         },
     ))
 }
 
-fn inspector_curve_point_payload(point: CurvePoint) -> InspectorCurvePointPayload {
-    InspectorCurvePointPayload {
-        x: point.x.clamp(0.0, 1.0),
-        y: point.y.clamp(0.0, 1.0),
+fn inspector_curve_point_payload(point: CurvePoint) -> ClipNormalizedCurvePointPayload {
+    ClipNormalizedCurvePointPayload {
+        time_ratio: f64::from(point.x.clamp(0.0, 1.0)),
+        value_ratio: f64::from(point.y.clamp(0.0, 1.0)),
     }
 }
 
@@ -6755,14 +6760,6 @@ fn node_graph_clip_action(selection: Option<SelectedClipRef>) -> Option<Action> 
     })
 }
 
-fn inspector_clip_payload(selection: SelectedClipRef) -> InspectorClipRefPayload {
-    InspectorClipRefPayload {
-        track_id: selection.track_id,
-        is_video_track: selection.is_video_track,
-        clip_id: selection.clip_id,
-    }
-}
-
 fn effect_property_row(
     property: &InspectorEffectPropertyModel,
     can_edit: bool,
@@ -6782,7 +6779,12 @@ fn clip_property_row(
     can_edit: bool,
     selection: Option<SelectedClipRef>,
 ) -> PropertyRow {
-    inspector_property_row(property, can_edit, selection, InspectorPropertyTarget::Clip)
+    inspector_property_row(
+        property,
+        can_edit,
+        selection,
+        InspectorPropertyTarget::Clip { parameter: property.address.clone() },
+    )
 }
 
 fn inspector_property_row(
@@ -6801,7 +6803,7 @@ fn inspector_property_row(
             property.path.clone(),
         ),
     );
-    let height = if target == InspectorPropertyTarget::Clip
+    let height = if matches!(&target, InspectorPropertyTarget::Clip { .. })
         && property.path == mondrian_core::BasicTitle::TEXT_PATH
     {
         Some(92.0)
@@ -6849,7 +6851,9 @@ fn effect_property_value_widget(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum InspectorPropertyTarget {
-    Clip,
+    Clip {
+        parameter: AnimationParameterAddress,
+    },
     Effect {
         effect_id: EffectId,
         parameter: AnimationParameterAddress,
@@ -6963,7 +6967,7 @@ fn inspector_property_value_widget(
         }
         PropertyValue::Text(value) => {
             let text = value.clone();
-            if target == InspectorPropertyTarget::Clip
+            if matches!(&target, InspectorPropertyTarget::Clip { .. })
                 && path == mondrian_core::BasicTitle::TEXT_PATH
             {
                 let selected_clip = selection;
@@ -6983,7 +6987,7 @@ fn inspector_property_value_widget(
                 );
             }
             let max_width = 180.0;
-            if target != InspectorPropertyTarget::Clip && text.len() > 60 {
+            if !matches!(&target, InspectorPropertyTarget::Clip { .. }) && text.len() > 60 {
                 Box::new(Label::new(text).with_max_width(max_width))
             } else {
                 let selected_clip = selection;
@@ -7228,16 +7232,15 @@ fn inspector_effect_property_action(
 fn inspector_property_action(
     selection: Option<SelectedClipRef>,
     target: InspectorPropertyTarget,
-    path: &str,
+    _path: &str,
     value: PropertyValue,
 ) -> Option<Action> {
     let selection = selection?;
     Some(match target {
-        InspectorPropertyTarget::Clip => {
-            inspector_set_clip_property_action(InspectorSetClipPropertyPayload {
-                clip: inspector_clip_payload(selection),
-                path: path.to_owned(),
-                value,
+        InspectorPropertyTarget::Clip { parameter } => {
+            clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
+                clip_id: selection.clip_id,
+                writes: vec![ClipParameterValueWrite { parameter, value }],
             })
         }
         InspectorPropertyTarget::Effect { effect_id, parameter } => {
@@ -7280,8 +7283,8 @@ mod tests {
         ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
         ASSETS_OPEN_FOLDER, ASSETS_PREPARE_DRAG, ASSETS_REBIND_AUDIO_COMPONENT,
         ASSETS_REFRESH_AUDIO_COMPONENTS, ASSETS_RENAME_ASSET, ASSETS_SET_PROXY_MODE,
-        AUDIO_EDIT_COMPONENT, AUDIO_NAMESPACE, INSPECTOR_EDIT_CLIP_CURVE, INSPECTOR_NAMESPACE,
-        INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
+        AUDIO_EDIT_COMPONENT, AUDIO_NAMESPACE, CLIP_EDIT_NUMERIC_CURVE, CLIP_NAMESPACE,
+        CLIP_WRITE_PARAMETER_VALUES, INSPECTOR_NAMESPACE, INSPECTOR_SET_AUDIO_COMPONENT_SOURCE,
         TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_CREATE_CROSS_DISSOLVE,
         TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
         TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_SELECT_CLIP, TIMELINE_SELECT_VIDEO_TRANSITION,
@@ -12010,12 +12013,14 @@ mod tests {
             is_video_track: true,
             clip_id: ClipId::new(),
         };
+        let parameter = test_parameter_address("mondrian.transform.rotation");
+        let expected_parameter = parameter.clone();
         let mut widget =
             numeric_slider_input_control(12.0, -180.0, 180.0, Some(0.1), 1, true, move |value| {
-                inspector_transform_action(
+                inspector_parameter_action(
                     Some(selection),
-                    InspectorClipTransformField::RotationDegrees,
-                    value,
+                    Some(parameter.clone()),
+                    PropertyValue::Float(value),
                 )
             });
         widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
@@ -12062,13 +12067,17 @@ mod tests {
         let Action::Custom { namespace, name, payload } = &recorded[0] else {
             panic!("expected inspector custom action, got {:?}", recorded[0]);
         };
-        assert_eq!(namespace, INSPECTOR_NAMESPACE);
-        assert_eq!(name, INSPECTOR_SET_CLIP_TRANSFORM_FIELD);
-        let payload: InspectorSetClipTransformFieldPayload =
+        assert_eq!(namespace, CLIP_NAMESPACE);
+        assert_eq!(name, CLIP_WRITE_PARAMETER_VALUES);
+        let payload: ClipWriteParameterValuesPayload =
             serde_json::from_value(payload.clone()).expect("transform payload");
-        assert_eq!(payload.clip.clip_id, selection.clip_id);
-        assert_eq!(payload.field, InspectorClipTransformField::RotationDegrees);
-        assert!((payload.value - 45.6).abs() < 0.0001);
+        assert_eq!(payload.clip_id, selection.clip_id);
+        assert_eq!(payload.writes.len(), 1);
+        assert_eq!(payload.writes[0].parameter, expected_parameter);
+        let PropertyValue::Float(value) = payload.writes[0].value else {
+            panic!("rotation payload must remain Float");
+        };
+        assert!((value - 45.6).abs() < 0.0001);
     }
 
     #[test]
@@ -12078,9 +12087,14 @@ mod tests {
             is_video_track: true,
             clip_id: ClipId::new(),
         };
+        let parameter = test_parameter_address("mondrian.transform.opacity");
         let mut widget =
             numeric_slider_input_control(50.0, 0.0, 100.0, Some(1.0), 0, false, move |value| {
-                inspector_value_action(Some(selection), "opacity", value)
+                inspector_parameter_action(
+                    Some(selection),
+                    Some(parameter.clone()),
+                    PropertyValue::Float(value / 100.0),
+                )
             });
         widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
 
@@ -12402,17 +12416,20 @@ mod tests {
 
         match action {
             Some(Action::Custom { namespace, name, payload }) => {
-                assert_eq!(namespace, INSPECTOR_NAMESPACE);
-                assert_eq!(name, INSPECTOR_EDIT_CLIP_CURVE);
-                let payload: InspectorEditClipCurvePayload =
+                assert_eq!(namespace, CLIP_NAMESPACE);
+                assert_eq!(name, CLIP_EDIT_NUMERIC_CURVE);
+                let payload: ClipEditNumericCurvePayload =
                     serde_json::from_value(payload).expect("curve payload");
-                assert_eq!(payload.clip.clip_id, selection.clip_id);
-                assert_eq!(payload.property, property);
+                assert_eq!(payload.clip_id, selection.clip_id);
+                assert_eq!(payload.parameter, property);
                 assert_eq!(
                     payload.edit,
-                    InspectorCurveEditPayload::Upsert {
+                    ClipCurveEditPayload::Upsert {
                         keyframe_id: Some(keyframe_id),
-                        point: InspectorCurvePointPayload { x: 0.6, y: 0.7 },
+                        point: ClipNormalizedCurvePointPayload {
+                            time_ratio: f64::from(0.6_f32),
+                            value_ratio: f64::from(0.7_f32),
+                        },
                     }
                 );
             }
@@ -12442,11 +12459,11 @@ mod tests {
         let Some(Action::Custom { payload, .. }) = boundary_delete else {
             panic!("expected boundary keyframe removal action");
         };
-        let payload: InspectorEditClipCurvePayload =
+        let payload: ClipEditNumericCurvePayload =
             serde_json::from_value(payload).expect("boundary curve payload");
         assert_eq!(
             payload.edit,
-            InspectorCurveEditPayload::Remove { keyframe_id: boundary_keyframe_id }
+            ClipCurveEditPayload::Remove { keyframe_id: boundary_keyframe_id }
         );
     }
 
@@ -12471,7 +12488,7 @@ mod tests {
         assert_eq!(name, INSPECTOR_SET_AUDIO_COMPONENT_SOURCE);
         let payload: InspectorSetAudioComponentSourcePayload =
             serde_json::from_value(payload).expect("audio source payload");
-        assert_eq!(payload.clip.clip_id, selection.clip_id);
+        assert_eq!(payload.clip_id, selection.clip_id);
         assert_eq!(payload.edit_id, edit_id);
         assert_eq!(
             payload.source,
@@ -12540,7 +12557,14 @@ mod tests {
 
     #[test]
     fn inspector_actions_without_selection_produce_no_command() {
-        assert_eq!(inspector_value_action(None, "opacity", 42.0), None);
+        assert_eq!(
+            inspector_parameter_action(
+                None,
+                Some(test_parameter_address("mondrian.transform.opacity")),
+                PropertyValue::Float(0.42),
+            ),
+            None
+        );
         assert_eq!(inspector_bool_action(None, true), None);
         assert_eq!(
             inspector_audio_source_action(
@@ -12565,7 +12589,11 @@ mod tests {
             None
         );
         assert_eq!(
-            inspector_transform_action(None, InspectorClipTransformField::PositionX, 12.0),
+            inspector_parameter_action(
+                None,
+                Some(test_parameter_address("mondrian.transform.position")),
+                PropertyValue::Vec2(glam::Vec2::new(12.0, 0.0)),
+            ),
             None
         );
         assert_eq!(
@@ -12636,6 +12664,7 @@ mod tests {
             position_y: 0.0,
             scale_percent: 100.0,
             rotation_degrees: 0.0,
+            visual_parameters: None,
             in_frame: 0.0,
             out_frame: 30.0,
             max_frame: 60.0,
@@ -12709,6 +12738,7 @@ mod tests {
             position_y: 0.0,
             scale_percent: 100.0,
             rotation_degrees: 0.0,
+            visual_parameters: None,
             in_frame: 0.0,
             out_frame: 30.0,
             max_frame: 60.0,

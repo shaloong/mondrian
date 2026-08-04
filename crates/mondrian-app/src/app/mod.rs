@@ -97,6 +97,7 @@ mod animation_state;
 mod audio_authoring;
 mod audio_idle_warmup;
 mod audio_monitoring;
+mod clip_authoring;
 pub use audio_monitoring::ActiveAudioMonitoringPathEvidence;
 #[cfg(test)]
 mod audio_playback_acceptance;

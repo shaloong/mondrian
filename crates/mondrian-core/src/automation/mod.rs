@@ -2168,6 +2168,56 @@ impl PropertyBag {
         })
     }
 
+    /// Prepare one value write resolved through stable author identity.
+    ///
+    /// The returned mutation contains the current path alias only after the
+    /// stable instance and Parameter Schema identities have resolved. Values
+    /// are normalized against the current schema before no-op comparison.
+    /// Static properties receive a static write; an enabled animated property
+    /// receives either a new key or an edit that preserves the identity,
+    /// interpolation handles, and temporal flags of an existing complete key.
+    pub fn prepare_value_write_by_address(
+        &self,
+        address: &AnimationParameterAddress,
+        time: TimelineTime,
+        value: PropertyValue,
+    ) -> Result<Option<PropertyMutation>> {
+        let (path, property) =
+            self.property_by_address(address)
+                .ok_or_else(|| MondrianError::WorkflowStepFailed {
+                    step_id: "property_address_resolution".to_owned(),
+                    reason: format!(
+                        "parameter instance {} / {} is not owned by this Property Bag",
+                        address.animation_track_id, address.parameter_id
+                    ),
+                })?;
+        let value = property.normalize_value(value)?;
+        if property.evaluate(time) == value {
+            return Ok(None);
+        }
+
+        if property.is_enabled() {
+            if let Some(existing) = property.keyframe_at(time) {
+                return Ok(Some(PropertyMutation::EditKeyframe {
+                    path: path.to_owned(),
+                    keyframe_id: existing.id,
+                    time,
+                    value,
+                }));
+            }
+            let interpolation = default_value_write_interpolation(property)?;
+            return Ok(Some(PropertyMutation::SetKeyframe {
+                path: path.to_owned(),
+                keyframe: Keyframe::from_preset(time, value, interpolation),
+            }));
+        }
+
+        Ok(Some(PropertyMutation::SetStaticValue {
+            path: path.to_owned(),
+            value,
+        }))
+    }
+
     /// Resolve the stable instance address currently routed by one path alias.
     pub fn address_for_path(&self, path: &str) -> Option<AnimationParameterAddress> {
         self.property(path).map(AnimatedProperty::address)
@@ -2462,6 +2512,36 @@ impl PropertyBag {
             reason: format!("属性不存在: {path}"),
         })
     }
+}
+
+fn default_value_write_interpolation(property: &AnimatedProperty) -> Result<InterpolationType> {
+    let preferred = property.value_type().normalized_interpolation(InterpolationType::Linear);
+    if property
+        .descriptor
+        .schema
+        .allowed_interpolations
+        .contains(&preferred.parameter_interpolation())
+    {
+        return Ok(preferred);
+    }
+    property
+        .descriptor
+        .schema
+        .allowed_interpolations
+        .first()
+        .copied()
+        .map(|interpolation| match interpolation {
+            ParameterInterpolation::Hold => InterpolationType::Hold,
+            ParameterInterpolation::Linear => InterpolationType::Linear,
+            ParameterInterpolation::Bezier => InterpolationType::Bezier,
+        })
+        .ok_or_else(|| MondrianError::WorkflowStepFailed {
+            step_id: "parameter_interpolation_contract".to_owned(),
+            reason: format!(
+                "parameter {} has no admitted interpolation",
+                property.descriptor.parameter_id()
+            ),
+        })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3330,6 +3410,114 @@ mod tests {
         assert_eq!(edited.interp_in, middle.interp_in);
         assert_eq!(edited.interp_out, middle.interp_out);
         assert_eq!(edited.temporal_flags, middle.temporal_flags);
+    }
+
+    #[test]
+    fn stable_address_value_write_preserves_existing_bezier_key_metadata() {
+        let mut bag = PropertyBag::default();
+        bag.define(PropertyDescriptor::new(
+            "effect.amount",
+            "Amount",
+            PropertyValue::Float(0.0),
+        ));
+        let key = Keyframe {
+            id: KeyframeId::new(),
+            time: tt(10),
+            value: PropertyValue::Float(0.5),
+            interp_in: KeyframeInterpolation::Bezier(BezierHandle {
+                time_offset: ht(-0.2),
+                value_offset: -0.1,
+            }),
+            interp_out: KeyframeInterpolation::Bezier(BezierHandle {
+                time_offset: ht(0.3),
+                value_offset: 0.2,
+            }),
+            temporal_flags: KeyframeTemporalFlags {
+                auto_bezier: false,
+                continuous: false,
+                broken_handles: true,
+            },
+        };
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "effect.amount".to_owned(),
+            keyframe: key.clone(),
+        })
+        .expect("seed Bezier key");
+        let address = bag.address_for_path("effect.amount").expect("stable address");
+
+        let mutation = bag
+            .prepare_value_write_by_address(&address, tt(10), PropertyValue::Float(0.75))
+            .expect("prepare value write")
+            .expect("changed value");
+        assert!(matches!(
+            &mutation,
+            PropertyMutation::EditKeyframe { keyframe_id, time, .. }
+                if *keyframe_id == key.id && *time == key.time
+        ));
+        bag.apply_mutation(mutation).expect("apply value write");
+
+        let edited = bag
+            .property("effect.amount")
+            .and_then(|property| property.keyframe_by_id(key.id))
+            .expect("same key remains");
+        assert_eq!(edited.value, PropertyValue::Float(0.75));
+        assert_eq!(edited.interp_in, key.interp_in);
+        assert_eq!(edited.interp_out, key.interp_out);
+        assert_eq!(edited.temporal_flags, key.temporal_flags);
+    }
+
+    #[test]
+    fn enabled_empty_curve_value_write_creates_key_instead_of_hidden_static_value() {
+        let mut bag = PropertyBag::default();
+        bag.define(PropertyDescriptor::new(
+            "effect.amount",
+            "Amount",
+            PropertyValue::Float(0.0),
+        ));
+        bag.apply_mutation(PropertyMutation::SetKeyframe {
+            path: "effect.amount".to_owned(),
+            keyframe: Keyframe::linear(tt(0), PropertyValue::Float(0.25)),
+        })
+        .expect("enable curve");
+        bag.apply_mutation(PropertyMutation::RemoveKeyframe {
+            path: "effect.amount".to_owned(),
+            time: tt(0),
+        })
+        .expect("remove last key");
+        let address = bag.address_for_path("effect.amount").expect("stable address");
+
+        let mutation = bag
+            .prepare_value_write_by_address(&address, tt(12), PropertyValue::Float(0.75))
+            .expect("prepare value write")
+            .expect("changed value");
+        assert!(matches!(
+            mutation,
+            PropertyMutation::SetKeyframe { ref keyframe, .. }
+                if keyframe.time == tt(12) && keyframe.value == PropertyValue::Float(0.75)
+        ));
+    }
+
+    #[test]
+    fn stable_address_value_write_rejects_stale_identity_and_elides_noop() {
+        let mut bag = PropertyBag::default();
+        bag.define(PropertyDescriptor::new(
+            "effect.amount",
+            "Amount",
+            PropertyValue::Float(0.5),
+        ));
+        let address = bag.address_for_path("effect.amount").expect("stable address");
+        assert!(bag
+            .prepare_value_write_by_address(&address, tt(0), PropertyValue::Float(0.5))
+            .expect("prepare no-op")
+            .is_none());
+
+        let stale = AnimationParameterAddress {
+            animation_track_id: AnimationTrackId::new(),
+            parameter_id: address.parameter_id,
+        };
+        assert!(bag
+            .prepare_value_write_by_address(&stale, tt(0), PropertyValue::Float(0.75))
+            .is_err());
     }
 
     #[test]

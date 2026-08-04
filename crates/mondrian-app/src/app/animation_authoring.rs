@@ -6,10 +6,10 @@
 //! Transaction. Widgets never replace an entire curve or infer author identity
 //! from point order.
 
-use super::{AppState, SelectedClipRef};
+use super::{find_clip, find_clip_track_lock, AppState, SelectedClipRef};
 use mondrian_core::automation::{
-    AnimationParameterAddress, InterpolationType, Keyframe, PropertyHost, PropertyMutation,
-    PropertyValue, PropertyValueType,
+    AnimationParameterAddress, InterpolationType, Keyframe, PropertyMutation, PropertyValue,
+    PropertyValueType,
 };
 use mondrian_core::{KeyframeId, MondrianError, Result, TimeScale, TimelineTime};
 
@@ -79,14 +79,12 @@ impl AppState {
     /// Keyframe ID survive time/value edits.
     pub fn edit_clip_numeric_curve(
         &mut self,
-        selection: SelectedClipRef,
+        clip_id: mondrian_core::ClipId,
         address: AnimationParameterAddress,
         edit: ClipNumericCurveEdit,
     ) -> Result<ClipNumericCurveEditOutcome> {
-        let clip = self.clip_snapshot(selection).ok_or_else(|| MondrianError::ClipNotFound {
-            clip_id: selection.clip_id.to_string(),
-        })?;
-        let prepared = prepare_curve_edit(&clip, &address, edit)?;
+        let (selection, clip) = numeric_curve_target(self, clip_id)?;
+        let prepared = prepare_curve_edit(clip, &address, edit)?;
         if prepared.mutations.is_empty() {
             return Ok(ClipNumericCurveEditOutcome {
                 changed: false,
@@ -97,6 +95,37 @@ impl AppState {
         self.mutate_clip_properties(selection, prepared.mutations, "调整关键帧")?;
         Ok(ClipNumericCurveEditOutcome { changed: true, keyframe_id: prepared.keyframe_id })
     }
+
+    /// Return whether one stable-identity numeric curve edit would commit.
+    pub fn clip_numeric_curve_edit_would_change(
+        &self,
+        clip_id: mondrian_core::ClipId,
+        address: &AnimationParameterAddress,
+        edit: ClipNumericCurveEdit,
+    ) -> Result<bool> {
+        let (_, clip) = numeric_curve_target(self, clip_id)?;
+        Ok(!prepare_curve_edit(clip, address, edit)?.mutations.is_empty())
+    }
+}
+
+fn numeric_curve_target(
+    state: &AppState,
+    clip_id: mondrian_core::ClipId,
+) -> Result<(SelectedClipRef, &mondrian_timeline::Clip)> {
+    let sequence = state.active_sequence().ok_or_else(|| curve_error("no active Sequence"))?;
+    let Some((track_id, is_video_track, is_locked)) = find_clip_track_lock(sequence, clip_id)
+    else {
+        return Err(MondrianError::ClipNotFound { clip_id: clip_id.to_string() });
+    };
+    if !is_video_track {
+        return Err(curve_error("visual Clip automation requires a video Clip"));
+    }
+    if is_locked {
+        return Err(MondrianError::TrackLocked { track_id: track_id.to_string() });
+    }
+    let clip = find_clip(sequence, clip_id)
+        .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
+    Ok((SelectedClipRef { track_id, is_video_track, clip_id }, clip))
 }
 
 fn prepare_curve_edit(
@@ -104,7 +133,7 @@ fn prepare_curve_edit(
     address: &AnimationParameterAddress,
     edit: ClipNumericCurveEdit,
 ) -> Result<PreparedCurveEdit> {
-    let properties = clip.property_bag()?;
+    let properties = clip.intrinsic_parameter_bag();
     let (path, property) = properties.property_by_address(address).ok_or_else(|| {
         curve_error(format!(
             "animation parameter {} / {} is not owned by Clip {}",
@@ -245,7 +274,9 @@ fn curve_error(reason: impl Into<String>) -> MondrianError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_core::automation::{BezierHandle, KeyframeInterpolation, KeyframeTemporalFlags};
+    use mondrian_core::automation::{
+        BezierHandle, KeyframeInterpolation, KeyframeTemporalFlags, PropertyHost,
+    };
     use mondrian_core::{AssetId, Rational};
     use mondrian_timeline::clip::Transform2D;
     use mondrian_timeline::{Clip, Sequence};
@@ -339,7 +370,7 @@ mod tests {
 
         let outcome = state
             .edit_clip_numeric_curve(
-                selection,
+                selection.clip_id,
                 address,
                 ClipNumericCurveEdit::Upsert {
                     keyframe_id: Some(middle_id),
@@ -399,7 +430,7 @@ mod tests {
 
         state
             .edit_clip_numeric_curve(
-                selection,
+                selection.clip_id,
                 address.clone(),
                 ClipNumericCurveEdit::Upsert {
                     keyframe_id: Some(first_id),
@@ -409,7 +440,7 @@ mod tests {
             .expect_err("occupied time rejects");
         state
             .edit_clip_numeric_curve(
-                selection,
+                selection.clip_id,
                 address,
                 ClipNumericCurveEdit::Remove { keyframe_id: KeyframeId::new() },
             )
@@ -437,7 +468,7 @@ mod tests {
 
         let inserted = state
             .edit_clip_numeric_curve(
-                selection,
+                selection.clip_id,
                 address.clone(),
                 ClipNumericCurveEdit::Upsert {
                     keyframe_id: None,
@@ -451,7 +482,7 @@ mod tests {
 
         let removed = state
             .edit_clip_numeric_curve(
-                selection,
+                selection.clip_id,
                 address,
                 ClipNumericCurveEdit::Remove { keyframe_id: inserted.keyframe_id },
             )

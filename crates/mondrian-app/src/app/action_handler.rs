@@ -3,15 +3,14 @@
 //! UI intent is routed to the owning domain Interface. Project mutations go
 //! through `AuthoringSession`; transport intent goes through `PlaybackEngine`.
 
-use crate::app::animation_authoring::{ClipNumericCurveEdit, NormalizedCurvePoint};
 use crate::app::media_asset_mutation::MediaAssetMutationKind;
 use crate::app::preview_quality::normalize_preview_resolution_scale;
 use crate::app::product_action::{
-    ExportDraftEdit, ExportProductAction, ProductAction, ProjectCreateWithSettingsPayload,
-    ProjectProductAction, ProjectRecoverFromAutosavePayload, SequenceProductAction,
-    SequenceUpdateSettingsPayload, TimelineClipSelectionModePayload, TimelineProductAction,
-    TimelineTrimPayloadEdge, ViewerProductAction, ViewerSetClipTransformPayload,
-    VisualEffectProductAction, VisualEffectSetParameterValuePayload,
+    ClipCurveEditPayload, ClipProductAction, ExportDraftEdit, ExportProductAction, ProductAction,
+    ProjectCreateWithSettingsPayload, ProjectProductAction, ProjectRecoverFromAutosavePayload,
+    SequenceProductAction, SequenceUpdateSettingsPayload, TimelineClipSelectionModePayload,
+    TimelineProductAction, TimelineTrimPayloadEdge, ViewerProductAction, VisualEffectProductAction,
+    VisualEffectSetParameterValuePayload,
 };
 #[cfg(test)]
 use crate::app::product_action::{TimelineMoveClipPayload, TimelineSelectClipPayload};
@@ -29,13 +28,10 @@ use crate::app::ui_actions::{
     AssetsPrepareDragPayload, AssetsRebindAudioComponentPayload,
     AssetsRefreshAudioComponentsPayload, AssetsRelinkAssetPayload, AssetsRenameAssetPayload,
     AssetsRenameFolderPayload, AssetsSetInterpretationPayload, AssetsSetProxyModePayload,
-    InspectorAudioComponentSourcePayload, InspectorClipTransformField, InspectorCurveEditPayload,
-    InspectorEditClipCurvePayload, InspectorSetAudioComponentSourcePayload,
-    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-    InspectorSetClipPropertyPayload, InspectorSetClipTintPayload,
-    InspectorSetClipTransformFieldPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-    TimelineCreateCrossDissolvePayload, TimelineDropAssetPayload, TimelineInOutPointPayloadKind,
-    TimelineInsertAssetPayload, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
+    InspectorAudioComponentSourcePayload, InspectorSetAudioComponentSourcePayload,
+    TimelineAddTrackKind, TimelineAddTrackPayload, TimelineCreateCrossDissolvePayload,
+    TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineInsertAssetPayload,
+    TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
     TimelinePrecomposeSelectionPayload, TimelineSelectVideoTransitionPayload,
     TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
     TimelineSetTrackControlPayload, TimelineSetTrackTargetingPayload,
@@ -46,9 +42,7 @@ use crate::app::ui_actions::{
     ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
     ASSETS_PREPARE_DRAG, ASSETS_REBIND_AUDIO_COMPONENT, ASSETS_REFRESH_AUDIO_COMPONENTS,
     ASSETS_RELINK_ASSET, ASSETS_RENAME_ASSET, ASSETS_RENAME_FOLDER, ASSETS_SET_INTERPRETATION,
-    ASSETS_SET_PROXY_MODE, INSPECTOR_EDIT_CLIP_CURVE, INSPECTOR_NAMESPACE,
-    INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
-    INSPECTOR_SET_CLIP_PROPERTY, INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
+    ASSETS_SET_PROXY_MODE, INSPECTOR_NAMESPACE, INSPECTOR_SET_AUDIO_COMPONENT_SOURCE,
     TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_CREATE_BASIC_TITLE,
     TIMELINE_CREATE_CROSS_DISSOLVE, TIMELINE_DROP_ASSET, TIMELINE_EXTRACT_RANGE,
     TIMELINE_INSERT_ASSET, TIMELINE_LIFT_RANGE, TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_MOVE_TRACK,
@@ -58,19 +52,22 @@ use crate::app::ui_actions::{
     TIMELINE_SET_TRACK_TARGETING, TIMELINE_SET_VIDEO_TRANSITION_RANGE,
     TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, TIMELINE_UNLINK_SELECTED_CLIPS,
 };
-use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, ClipSelectionMode, SelectedClipRef};
-use glam::Vec2;
+#[cfg(test)]
+use crate::app::SelectedClipRef;
+use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, ClipSelectionMode};
 use mondrian_assets::library::FolderRecord;
 use mondrian_assets::{AssetKind, AssetLibrary};
-use mondrian_core::automation::{
-    InterpolationType, Keyframe, PropertyHost, PropertyMutation, PropertyValue,
-};
+use mondrian_core::automation::PropertyHost;
+#[cfg(test)]
+use mondrian_core::automation::{PropertyMutation, PropertyValue};
 use mondrian_core::events::AppEvent;
 use mondrian_core::types::{AudioComponentEditId, ClipId, EffectId, FramePosition, Rational};
 use mondrian_core::{FrameRounding, MondrianError, Result, TimelineTime};
 use mondrian_export::queue::ExportCancelOutcome;
 use mondrian_timeline::audio::AudioComponentSource;
-use mondrian_timeline::clip::{Clip, Transform2D, TrimEdge};
+#[cfg(test)]
+use mondrian_timeline::clip::Transform2D;
+use mondrian_timeline::clip::{Clip, TrimEdge};
 use mondrian_timeline::{
     apply_clip_link_edit, assess_clip_link_edit, ClipLinkEditKind, ClipLinkEditRequest,
 };
@@ -914,7 +911,7 @@ impl AppState {
         let destination_time = self
             .active_sequence()
             .and_then(|sequence| find_clip(sequence, selection.clip_id))
-            .map(|clip| clip_visual_author_time_at(clip, timeline_time))
+            .map(|clip| clip.clamped_visual_author_time(timeline_time))
             .transpose()?
             .ok_or_else(|| missing_clip_error("paste_animation_keyframes", selection.clip_id))?;
         let pasted = self.paste_animation_keyframes(selection, destination_time)?;
@@ -1157,6 +1154,7 @@ impl AppState {
             ProductAction::Timeline(action) => self.dispatch_timeline_product_action(action),
             ProductAction::Audio(action) => self.dispatch_audio_product_action(action),
             ProductAction::Viewer(action) => self.dispatch_viewer_product_action(action),
+            ProductAction::Clip(action) => self.dispatch_clip_product_action(action),
             ProductAction::Project(action) => self.dispatch_project_product_action(action),
             ProductAction::Sequence(action) => self.dispatch_sequence_product_action(action),
             ProductAction::Export(action) => self.dispatch_export_product_action(action),
@@ -1483,66 +1481,6 @@ impl AppState {
         payload: serde_json::Value,
     ) -> Result<()> {
         match name {
-            INSPECTOR_SET_CLIP_ENABLED => {
-                let payload = parse_ui_payload::<InspectorSetClipEnabledPayload>(
-                    "inspector_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.set_clip_enabled_from_ui(payload.clip.clip_id, payload.enabled)
-            }
-            INSPECTOR_SET_CLIP_OPACITY => {
-                let payload = parse_ui_payload::<InspectorSetClipOpacityPayload>(
-                    "inspector_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.set_clip_opacity_from_ui(payload.clip.clip_id, payload.opacity_percent)
-            }
-            INSPECTOR_SET_CLIP_TINT => {
-                let payload = parse_ui_payload::<InspectorSetClipTintPayload>(
-                    "inspector_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.set_clip_tint_from_ui(payload.clip.clip_id, payload.color)
-            }
-            INSPECTOR_SET_CLIP_TRANSFORM_FIELD => {
-                let payload = parse_ui_payload::<InspectorSetClipTransformFieldPayload>(
-                    "inspector_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.set_clip_transform_field_from_ui(
-                    payload.clip.clip_id,
-                    payload.field,
-                    payload.value,
-                )
-            }
-            INSPECTOR_EDIT_CLIP_CURVE => {
-                let payload = parse_ui_payload::<InspectorEditClipCurvePayload>(
-                    "inspector_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.edit_clip_curve_from_ui(payload)
-            }
-            INSPECTOR_SET_CLIP_PROPERTY => {
-                let payload = parse_ui_payload::<InspectorSetClipPropertyPayload>(
-                    "inspector_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.set_clip_property_from_ui(
-                    SelectedClipRef {
-                        track_id: payload.clip.track_id,
-                        is_video_track: payload.clip.is_video_track,
-                        clip_id: payload.clip.clip_id,
-                    },
-                    &payload.path,
-                    payload.value,
-                )
-            }
             INSPECTOR_SET_AUDIO_COMPONENT_SOURCE => {
                 let payload = parse_ui_payload::<InspectorSetAudioComponentSourcePayload>(
                     "inspector_ui_action",
@@ -1770,8 +1708,50 @@ impl AppState {
             ViewerProductAction::SetPreviewResolutionScale(payload) => {
                 self.set_preview_resolution_scale_from_ui(payload.scale)
             }
-            ViewerProductAction::SetClipTransform(payload) => {
-                self.set_clip_transform_from_viewer(payload)
+        }
+    }
+
+    fn dispatch_clip_product_action(&mut self, action: ClipProductAction) -> Result<()> {
+        match action {
+            ClipProductAction::SetEnabled(payload) => require_action_executed(
+                self.set_clip_enabled_by_id(payload.clip_id, payload.enabled)?,
+                "clip_set_enabled",
+                "Clip already has the requested enabled state",
+            ),
+            ClipProductAction::SetSolidColor(payload) => require_action_executed(
+                self.set_clip_solid_color_by_id(payload.clip_id, payload.color)?,
+                "clip_set_solid_color",
+                "Solid Color Clip already has the requested source color",
+            ),
+            ClipProductAction::WriteParameterValues(payload) => require_action_executed(
+                self.write_clip_parameter_values(*payload)?,
+                "clip_write_parameter_values",
+                "Clip parameters already have the requested values at the current author time",
+            ),
+            ClipProductAction::EditNumericCurve(payload) => {
+                let clip_id = payload.clip_id;
+                let property = payload.parameter.clone();
+                let removing = matches!(&payload.edit, ClipCurveEditPayload::Remove { .. });
+                let outcome = self.edit_clip_numeric_curve_payload(*payload)?;
+                require_action_executed(
+                    outcome.changed,
+                    "clip_edit_numeric_curve",
+                    "Numeric curve already contains the requested key state",
+                )?;
+                let key_selection = crate::app::AnimationKeyframeSelection {
+                    property: crate::app::AnimationPropertySelection {
+                        clip_id,
+                        property: property.clone(),
+                    },
+                    keyframe_id: outcome.keyframe_id,
+                };
+                if removing {
+                    self.animation_selection.selected_keyframes.remove(&key_selection);
+                    self.set_active_animation_property(clip_id, property);
+                } else {
+                    self.select_animation_keyframe_only(key_selection);
+                }
+                Ok(())
             }
         }
     }
@@ -1999,54 +1979,9 @@ impl AppState {
                         reason: format!("Effect {effect_id} does not belong to Clip {clip_id}"),
                     }
                 })?;
-            let (path, property) =
-                effect.properties.property_by_address(&parameter).ok_or_else(|| {
-                    MondrianError::WorkflowStepFailed {
-                        step_id: "visual_effect_set_parameter_value".to_owned(),
-                        reason: format!(
-                            "Effect {effect_id} does not own parameter instance {} / {}",
-                            parameter.animation_track_id, parameter.parameter_id
-                        ),
-                    }
-                })?;
-            if property.value_type() != value.value_type() {
-                return Err(MondrianError::WorkflowStepFailed {
-                    step_id: "visual_effect_set_parameter_value".to_owned(),
-                    reason: format!(
-                        "parameter {} expects {:?}, received {:?}",
-                        parameter.parameter_id,
-                        property.value_type(),
-                        value.value_type()
-                    ),
-                });
-            }
-            if property.is_animated() {
-                if property.evaluate(author_time) == value {
-                    None
-                } else {
-                    let interpolation = match &value {
-                        PropertyValue::Float(_)
-                        | PropertyValue::Double(_)
-                        | PropertyValue::Color(_)
-                        | PropertyValue::Vec2(_)
-                        | PropertyValue::Vec3(_)
-                        | PropertyValue::Vec4(_) => InterpolationType::Linear,
-                        PropertyValue::Bool(_)
-                        | PropertyValue::Int(_)
-                        | PropertyValue::Enum(_)
-                        | PropertyValue::Resource(_)
-                        | PropertyValue::Text(_) => InterpolationType::Hold,
-                    };
-                    Some(PropertyMutation::SetKeyframe {
-                        path: path.to_owned(),
-                        keyframe: Keyframe::from_preset(author_time, value, interpolation),
-                    })
-                }
-            } else if property.static_value() == &value {
-                None
-            } else {
-                Some(PropertyMutation::SetStaticValue { path: path.to_owned(), value })
-            }
+            effect
+                .properties
+                .prepare_value_write_by_address(&parameter, author_time, value)?
         };
         let Some(mutation) = mutation else {
             return Ok(false);
@@ -2067,63 +2002,6 @@ impl AppState {
                 Ok(sequence.id)
             })?;
         Ok(true)
-    }
-
-    fn set_clip_property_from_ui(
-        &mut self,
-        selection: SelectedClipRef,
-        path: &str,
-        value: PropertyValue,
-    ) -> Result<()> {
-        self.ensure_clip_track_unlocked("set_clip_property", selection.clip_id)?;
-        let current_time = self.current_timeline_time()?.unwrap_or(TimelineTime::ZERO);
-        let Some(sequence_id) = self.active_sequence_id() else {
-            return Err(missing_sequence_error("set_clip_property"));
-        };
-        self.commit_sequence_edit(sequence_id, "调整剪辑属性", move |sequence| {
-            let clip = find_clip_mut(sequence, selection.clip_id)
-                .ok_or_else(|| missing_clip_error("set_clip_property", selection.clip_id))?;
-            let properties = clip.property_bag()?;
-            let property =
-                properties.property(path).ok_or_else(|| MondrianError::WorkflowStepFailed {
-                    step_id: "set_clip_property".to_owned(),
-                    reason: format!("Clip property not found: {path}"),
-                })?;
-            let mutation = if property.is_animated() {
-                let end = clip.end_position()?;
-                let sequence_time = current_time.clamp(clip.position, end);
-                let author_time = clip.timeline_to_clip_time(sequence_time)?;
-                if property.evaluate(author_time) == value {
-                    None
-                } else {
-                    let interpolation = match value {
-                        PropertyValue::Float(_)
-                        | PropertyValue::Double(_)
-                        | PropertyValue::Color(_)
-                        | PropertyValue::Vec2(_)
-                        | PropertyValue::Vec3(_)
-                        | PropertyValue::Vec4(_) => InterpolationType::Linear,
-                        PropertyValue::Bool(_)
-                        | PropertyValue::Int(_)
-                        | PropertyValue::Enum(_)
-                        | PropertyValue::Resource(_)
-                        | PropertyValue::Text(_) => InterpolationType::Hold,
-                    };
-                    Some(PropertyMutation::SetKeyframe {
-                        path: path.to_owned(),
-                        keyframe: Keyframe::from_preset(author_time, value, interpolation),
-                    })
-                }
-            } else if property.static_value() == &value {
-                None
-            } else {
-                Some(PropertyMutation::SetStaticValue { path: path.to_owned(), value })
-            };
-            if let Some(mutation) = mutation {
-                clip.apply_property_mutation(mutation)?;
-            }
-            Ok(())
-        })
     }
 
     fn set_selected_clips_enabled_from_ui(&mut self, enabled: bool) -> Result<()> {
@@ -2295,10 +2173,6 @@ impl AppState {
         Ok(())
     }
 
-    fn set_clip_enabled_from_ui(&mut self, clip_id: ClipId, enabled: bool) -> Result<()> {
-        self.set_clips_enabled_from_ui("inspector_set_clip_enabled", &[clip_id], enabled)
-    }
-
     fn set_clips_enabled_from_ui(
         &mut self,
         step_id: &'static str,
@@ -2327,255 +2201,17 @@ impl AppState {
         })
     }
 
-    fn set_clip_opacity_from_ui(&mut self, clip_id: ClipId, opacity_percent: f32) -> Result<()> {
-        self.ensure_clip_track_unlocked("inspector_set_clip_opacity", clip_id)?;
-        let Some(sequence_id) = self.active_sequence_id() else {
-            return Err(missing_sequence_error("inspector_set_clip_opacity"));
-        };
-        let opacity = (opacity_percent / 100.0).clamp(0.0, 1.0);
-        self.commit_sequence_edit(sequence_id, "调整片段不透明度", |sequence| {
-            let playhead = sequence.playhead;
-            let clip = find_clip_mut(sequence, clip_id)
-                .ok_or_else(|| missing_clip_error("inspector_set_clip_opacity", clip_id))?;
-            let author_time = clip_visual_author_time_at(clip, playhead)?;
-            if (clip.transform.evaluate_opacity(author_time) - opacity).abs() < f32::EPSILON {
-                return Ok(());
-            } else {
-                clip.apply_property_mutation(PropertyMutation::SetStaticValue {
-                    path: Transform2D::OPACITY_PATH.to_string(),
-                    value: PropertyValue::Float(opacity),
-                })?;
-            }
-            Ok(())
-        })
-    }
-
-    fn set_clip_tint_from_ui(
-        &mut self,
-        clip_id: ClipId,
-        color: mondrian_core::Color,
-    ) -> Result<()> {
-        self.ensure_clip_track_unlocked("inspector_set_clip_tint", clip_id)?;
-        let Some(sequence_id) = self.active_sequence_id() else {
-            return Err(missing_sequence_error("inspector_set_clip_tint"));
-        };
-        self.commit_sequence_edit(sequence_id, "调整片段颜色", |sequence| {
-            let clip = find_clip_mut(sequence, clip_id)
-                .ok_or_else(|| missing_clip_error("inspector_set_clip_tint", clip_id))?;
-            if clip.content.solid_color() == Some(color) {
-                return Ok(());
-            } else {
-                clip.apply_property_mutation(PropertyMutation::SetStaticValue {
-                    path: Clip::SOLID_COLOR_PATH.to_string(),
-                    value: PropertyValue::Color(color),
-                })?;
-            }
-            Ok(())
-        })
-    }
-
-    fn set_clip_transform_field_from_ui(
-        &mut self,
-        clip_id: ClipId,
-        field: InspectorClipTransformField,
-        value: f32,
-    ) -> Result<()> {
-        if !value.is_finite() {
-            return Err(MondrianError::WorkflowStepFailed {
-                step_id: "inspector_set_clip_transform_field".to_string(),
-                reason: "transform value must be finite".to_string(),
-            });
-        }
-
-        self.ensure_clip_track_unlocked("inspector_set_clip_transform_field", clip_id)?;
-        let Some(sequence_id) = self.active_sequence_id() else {
-            return Err(missing_sequence_error("inspector_set_clip_transform_field"));
-        };
-        self.commit_sequence_edit(sequence_id, "调整片段变换", |sequence| {
-            let playhead = sequence.playhead;
-            let clip = find_clip_mut(sequence, clip_id)
-                .ok_or_else(|| missing_clip_error("inspector_set_clip_transform_field", clip_id))?;
-            let author_time = clip_visual_author_time_at(clip, playhead)?;
-            let _changed = match field {
-                InspectorClipTransformField::PositionX => {
-                    let mut position = clip.transform.get_position(author_time);
-                    if (position.x - value).abs() < f32::EPSILON {
-                        false
-                    } else {
-                        position.x = value;
-                        clip.apply_property_mutation(PropertyMutation::SetStaticValue {
-                            path: Transform2D::POSITION_PATH.to_string(),
-                            value: PropertyValue::Vec2(position),
-                        })?;
-                        true
-                    }
-                }
-                InspectorClipTransformField::PositionY => {
-                    let mut position = clip.transform.get_position(author_time);
-                    if (position.y - value).abs() < f32::EPSILON {
-                        false
-                    } else {
-                        position.y = value;
-                        clip.apply_property_mutation(PropertyMutation::SetStaticValue {
-                            path: Transform2D::POSITION_PATH.to_string(),
-                            value: PropertyValue::Vec2(position),
-                        })?;
-                        true
-                    }
-                }
-                InspectorClipTransformField::ScalePercent => {
-                    let scale = (value.max(0.0)) / 100.0;
-                    let scale = Vec2::splat(scale);
-                    if (clip.transform.get_scale(author_time) - scale).length_squared()
-                        < f32::EPSILON
-                    {
-                        false
-                    } else {
-                        clip.apply_property_mutation(PropertyMutation::SetStaticValue {
-                            path: Transform2D::SCALE_PATH.to_string(),
-                            value: PropertyValue::Vec2(scale),
-                        })?;
-                        true
-                    }
-                }
-                InspectorClipTransformField::RotationDegrees => {
-                    let current = clip
-                        .transform
-                        .to_property_bag()
-                        .evaluate(Transform2D::ROTATION_PATH, author_time)
-                        .and_then(|value| value.as_f32())
-                        .unwrap_or(0.0);
-                    if (current - value).abs() < f32::EPSILON {
-                        false
-                    } else {
-                        clip.apply_property_mutation(PropertyMutation::SetStaticValue {
-                            path: Transform2D::ROTATION_PATH.to_string(),
-                            value: PropertyValue::Float(value),
-                        })?;
-                        true
-                    }
-                }
-            };
-            Ok(())
-        })
-    }
-
-    fn set_clip_transform_from_viewer(
-        &mut self,
-        payload: ViewerSetClipTransformPayload,
-    ) -> Result<()> {
-        const STEP_ID: &str = "viewer_set_clip_transform";
-        if !payload.has_mutation() {
-            return Err(MondrianError::ActionNotExecuted {
-                action: STEP_ID.to_owned(),
-                reason: "viewer transform contains no changed field".to_owned(),
-            });
-        }
-        if !payload.values_are_finite() {
-            return Err(MondrianError::WorkflowStepFailed {
-                step_id: STEP_ID.to_string(),
-                reason: "transform values must be finite".to_string(),
-            });
-        }
-
-        self.ensure_video_clip_track_unlocked(STEP_ID, payload.clip_id)?;
-        let Some(sequence_id) = self.active_sequence_id() else {
-            return Err(missing_sequence_error(STEP_ID));
-        };
-        self.commit_sequence_edit(sequence_id, "调整监视器片段变换", |sequence| {
-            let playhead = sequence.playhead;
-            let clip = find_clip_mut(sequence, payload.clip_id)
-                .ok_or_else(|| missing_clip_error(STEP_ID, payload.clip_id))?;
-            let author_time = clip_visual_author_time_at(clip, playhead)?;
-
-            if let Some(position) = payload.position {
-                let position = Vec2::new(position.x, position.y);
-                if (clip.transform.get_position(author_time) - position).length_squared()
-                    >= f32::EPSILON
-                {
-                    clip.apply_property_mutation(PropertyMutation::SetStaticValue {
-                        path: Transform2D::POSITION_PATH.to_string(),
-                        value: PropertyValue::Vec2(position),
-                    })?;
-                }
-            }
-
-            if let Some(scale_percent) = payload.scale_percent {
-                let scale = Vec2::splat(scale_percent.max(0.0) / 100.0);
-                if (clip.transform.get_scale(author_time) - scale).length_squared() >= f32::EPSILON
-                {
-                    clip.apply_property_mutation(PropertyMutation::SetStaticValue {
-                        path: Transform2D::SCALE_PATH.to_string(),
-                        value: PropertyValue::Vec2(scale),
-                    })?;
-                }
-            }
-
-            if let Some(rotation) = payload.rotation_degrees {
-                let current = clip
-                    .transform
-                    .to_property_bag()
-                    .evaluate(Transform2D::ROTATION_PATH, author_time)
-                    .and_then(|value| value.as_f32())
-                    .unwrap_or(0.0);
-                if (current - rotation).abs() >= f32::EPSILON {
-                    clip.apply_property_mutation(PropertyMutation::SetStaticValue {
-                        path: Transform2D::ROTATION_PATH.to_string(),
-                        value: PropertyValue::Float(rotation),
-                    })?;
-                }
-            }
-            Ok(())
-        })
-    }
-
-    fn edit_clip_curve_from_ui(&mut self, payload: InspectorEditClipCurvePayload) -> Result<()> {
-        let selection = SelectedClipRef {
-            track_id: payload.clip.track_id,
-            is_video_track: payload.clip.is_video_track,
-            clip_id: payload.clip.clip_id,
-        };
-        let edit = match payload.edit {
-            InspectorCurveEditPayload::Upsert { keyframe_id, point } => {
-                ClipNumericCurveEdit::Upsert {
-                    keyframe_id,
-                    point: NormalizedCurvePoint::new(f64::from(point.x), f64::from(point.y))?,
-                }
-            }
-            InspectorCurveEditPayload::Remove { keyframe_id } => {
-                ClipNumericCurveEdit::Remove { keyframe_id }
-            }
-        };
-        let removing = matches!(edit, ClipNumericCurveEdit::Remove { .. });
-        let property = payload.property;
-        let outcome = self.edit_clip_numeric_curve(selection, property.clone(), edit)?;
-        let key_selection = crate::app::AnimationKeyframeSelection {
-            property: crate::app::AnimationPropertySelection {
-                clip_id: selection.clip_id,
-                property: property.clone(),
-            },
-            keyframe_id: outcome.keyframe_id,
-        };
-        if removing {
-            self.animation_selection.selected_keyframes.remove(&key_selection);
-            self.set_active_animation_property(selection.clip_id, property);
-        } else {
-            self.select_animation_keyframe_only(key_selection);
-        }
-        Ok(())
-    }
-
     fn set_audio_component_source_from_ui(
         &mut self,
         payload: InspectorSetAudioComponentSourcePayload,
     ) -> Result<()> {
         const STEP_ID: &str = "inspector_set_audio_component_source";
-        self.ensure_audio_component_edit_target(STEP_ID, payload.clip.clip_id, payload.edit_id)?;
+        self.ensure_audio_component_edit_target(STEP_ID, payload.clip_id, payload.edit_id)?;
 
         let target_source = {
             let sequence = self.active_sequence().ok_or_else(|| missing_sequence_error(STEP_ID))?;
-            let clip = find_clip(sequence, payload.clip.clip_id)
-                .ok_or_else(|| missing_clip_error(STEP_ID, payload.clip.clip_id))?;
+            let clip = find_clip(sequence, payload.clip_id)
+                .ok_or_else(|| missing_clip_error(STEP_ID, payload.clip_id))?;
             let current_source = clip
                 .audio_components
                 .iter()
@@ -2585,7 +2221,7 @@ impl AppState {
                     step_id: STEP_ID.to_string(),
                     reason: format!(
                         "audio Component Edit {} is absent from Clip {}",
-                        payload.edit_id, payload.clip.clip_id
+                        payload.edit_id, payload.clip_id
                     ),
                 })?;
             let requested_source = match payload.source {
@@ -2678,8 +2314,8 @@ impl AppState {
             sequence_id,
             "切换片段音频 Component",
             move |sequence| {
-                let clip = find_clip_mut(sequence, payload.clip.clip_id)
-                    .ok_or_else(|| missing_clip_error(STEP_ID, payload.clip.clip_id))?;
+                let clip = find_clip_mut(sequence, payload.clip_id)
+                    .ok_or_else(|| missing_clip_error(STEP_ID, payload.clip_id))?;
                 let edit = clip
                     .audio_components
                     .iter_mut()
@@ -2739,27 +2375,6 @@ impl AppState {
         let Some((track_id, _, is_locked)) = find_clip_track_lock(seq, clip_id) else {
             return Err(missing_clip_error(step_id, clip_id));
         };
-        if is_locked {
-            return Err(MondrianError::TrackLocked { track_id: track_id.to_string() });
-        }
-        Ok(())
-    }
-
-    fn ensure_video_clip_track_unlocked(
-        &self,
-        step_id: &'static str,
-        clip_id: ClipId,
-    ) -> Result<()> {
-        let Some(sequence) = self.active_sequence() else {
-            return Err(missing_sequence_error(step_id));
-        };
-        let Some((track_id, is_video_track, is_locked)) = find_clip_track_lock(sequence, clip_id)
-        else {
-            return Err(missing_clip_error(step_id, clip_id));
-        };
-        if !is_video_track {
-            return Err(clip_media_type_mismatch_error(step_id, clip_id));
-        }
         if is_locked {
             return Err(MondrianError::TrackLocked { track_id: track_id.to_string() });
         }
@@ -3013,11 +2628,6 @@ fn missing_sequence_error(step_id: &'static str) -> MondrianError {
     }
 }
 
-fn clip_visual_author_time_at(clip: &Clip, timeline_time: TimelineTime) -> Result<TimelineTime> {
-    let placement_end = clip.end_position()?;
-    clip.timeline_to_clip_time(timeline_time.clamp(clip.position, placement_end))
-}
-
 fn missing_clip_error(step_id: &'static str, clip_id: ClipId) -> MondrianError {
     MondrianError::WorkflowStepFailed {
         step_id: step_id.to_string(),
@@ -3091,16 +2701,15 @@ mod tests {
         assets_rebind_audio_component_action, assets_refresh_audio_components_action,
         assets_relink_asset_action, assets_rename_asset_action, assets_rename_folder_action,
         assets_set_interpretation_action, assets_set_proxy_mode_action,
-        audio_component_edit_action, export_cancel_action, export_clear_terminal_history_action,
-        export_edit_draft_action, export_enqueue_action, inspector_edit_clip_curve_action,
-        inspector_set_audio_component_source_action, inspector_set_clip_enabled_action,
-        inspector_set_clip_opacity_action, inspector_set_clip_property_action,
-        inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
-        project_create_with_settings_action, project_recover_from_autosave_action,
-        project_update_color_environment_action, project_update_new_sequence_defaults_action,
-        sequence_delete_action, sequence_duplicate_action, sequence_new_action,
-        sequence_return_to_parent_action, sequence_set_active_default_action,
-        sequence_switch_active_action, sequence_update_settings_action, timeline_add_track_action,
+        audio_component_edit_action, clip_edit_numeric_curve_action, clip_set_enabled_action,
+        clip_set_solid_color_action, clip_write_parameter_values_action, export_cancel_action,
+        export_clear_terminal_history_action, export_edit_draft_action, export_enqueue_action,
+        inspector_set_audio_component_source_action, project_create_with_settings_action,
+        project_recover_from_autosave_action, project_update_color_environment_action,
+        project_update_new_sequence_defaults_action, sequence_delete_action,
+        sequence_duplicate_action, sequence_new_action, sequence_return_to_parent_action,
+        sequence_set_active_default_action, sequence_switch_active_action,
+        sequence_update_settings_action, timeline_add_track_action,
         timeline_clear_in_out_points_action, timeline_create_basic_title_action,
         timeline_drop_asset_action, timeline_insert_asset_action,
         timeline_link_selected_clips_action, timeline_move_clip_action, timeline_move_track_action,
@@ -3109,9 +2718,8 @@ mod tests {
         timeline_set_in_out_point_action, timeline_set_selected_clips_enabled_action,
         timeline_set_track_control_action, timeline_trim_clips_action,
         timeline_trim_selected_clips_to_playhead_action, timeline_unlink_selected_clips_action,
-        viewer_set_clip_transform_action, viewer_set_preview_resolution_scale_action,
-        visual_effect_add_to_clip_action, visual_effect_remove_action,
-        visual_effect_reorder_action, visual_effect_select_action,
+        viewer_set_preview_resolution_scale_action, visual_effect_add_to_clip_action,
+        visual_effect_remove_action, visual_effect_reorder_action, visual_effect_select_action,
         visual_effect_set_enabled_action, visual_effect_set_parameter_value_action,
         AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
         AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload, AssetsImportFilesPayload,
@@ -3119,12 +2727,10 @@ mod tests {
         AssetsPrepareDragPayload, AssetsRebindAudioComponentPayload,
         AssetsRefreshAudioComponentsPayload, AssetsRelinkAssetPayload, AssetsRenameAssetPayload,
         AssetsRenameFolderPayload, AssetsSetInterpretationPayload, AssetsSetProxyModePayload,
-        ExportDraftEdit, InspectorAudioComponentSourcePayload, InspectorClipRefPayload,
-        InspectorClipTransformField, InspectorCurveEditPayload, InspectorCurvePointPayload,
-        InspectorEditClipCurvePayload, InspectorSetAudioComponentSourcePayload,
-        InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
-        InspectorSetClipPropertyPayload, InspectorSetClipTintPayload,
-        InspectorSetClipTransformFieldPayload, ProjectCreateWithSettingsPayload,
+        ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
+        ClipParameterValueWrite, ClipSetEnabledPayload, ClipSetSolidColorPayload,
+        ClipWriteParameterValuesPayload, ExportDraftEdit, InspectorAudioComponentSourcePayload,
+        InspectorSetAudioComponentSourcePayload, ProjectCreateWithSettingsPayload,
         ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
         ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload,
         SequenceUpdateSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
@@ -3133,10 +2739,9 @@ mod tests {
         TimelineSeekSource, TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
         TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
         TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
-        ViewerSetClipTransformPayload, ViewerSetPreviewResolutionScalePayload,
-        ViewerTransformPositionPayload, VisualEffectAddToClipPayload, VisualEffectReorderPayload,
-        VisualEffectSetEnabledPayload, VisualEffectSetParameterValuePayload,
-        VisualEffectTargetPayload,
+        ViewerSetPreviewResolutionScalePayload, VisualEffectAddToClipPayload,
+        VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
+        VisualEffectSetParameterValuePayload, VisualEffectTargetPayload,
     };
     use mondrian_assets::AssetLibrary;
     use mondrian_core::automation::AnimationParameterAddress;
@@ -3306,22 +2911,33 @@ mod tests {
         (root, state, track_id, clip_id, edit_id, alternate_component)
     }
 
-    fn inspector_clip_payload(
-        track_id: mondrian_core::types::TrackId,
-        clip_id: mondrian_core::types::ClipId,
-    ) -> InspectorClipRefPayload {
-        InspectorClipRefPayload { track_id, is_video_track: true, clip_id }
+    fn opacity_parameter_address(state: &AppState, clip_id: ClipId) -> AnimationParameterAddress {
+        clip_parameter_address(state, clip_id, Transform2D::OPACITY_PATH)
     }
 
-    fn opacity_parameter_address(state: &AppState, clip_id: ClipId) -> AnimationParameterAddress {
+    fn clip_parameter_address(
+        state: &AppState,
+        clip_id: ClipId,
+        path: &str,
+    ) -> AnimationParameterAddress {
         let clip = state
             .active_sequence()
             .and_then(|sequence| find_clip(sequence, clip_id))
             .expect("clip");
-        clip.transform
-            .to_property_bag()
-            .address_for_path(Transform2D::OPACITY_PATH)
-            .expect("opacity address")
+        clip.intrinsic_parameter_bag()
+            .address_for_path(path)
+            .expect("Clip parameter address")
+    }
+
+    fn clip_parameter_action(
+        clip_id: ClipId,
+        parameter: AnimationParameterAddress,
+        value: PropertyValue,
+    ) -> mondrian_editor_state::Action {
+        clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
+            clip_id,
+            writes: vec![ClipParameterValueWrite { parameter, value }],
+        })
     }
 
     fn opacity_property_selection(
@@ -7032,15 +6648,13 @@ mod tests {
 
     #[test]
     fn dispatch_inspector_ui_sets_clip_enabled_state() {
-        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
 
         state
-            .dispatch_action(inspector_set_clip_enabled_action(
-                InspectorSetClipEnabledPayload {
-                    clip: inspector_clip_payload(track_id, clip_id),
-                    enabled: false,
-                },
-            ))
+            .dispatch_action(clip_set_enabled_action(ClipSetEnabledPayload {
+                clip_id,
+                enabled: false,
+            }))
             .expect("dispatch enabled");
 
         let clip = &state.active_sequence().expect("sequence").video_tracks[0].clips[0];
@@ -7050,14 +6664,14 @@ mod tests {
 
     #[test]
     fn dispatch_inspector_ui_sets_clip_opacity() {
-        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let opacity = opacity_parameter_address(&state, clip_id);
 
         state
-            .dispatch_action(inspector_set_clip_opacity_action(
-                InspectorSetClipOpacityPayload {
-                    clip: inspector_clip_payload(track_id, clip_id),
-                    opacity_percent: 42.0,
-                },
+            .dispatch_action(clip_parameter_action(
+                clip_id,
+                opacity,
+                PropertyValue::Float(0.42),
             ))
             .expect("dispatch opacity");
 
@@ -7069,15 +6683,80 @@ mod tests {
     }
 
     #[test]
+    fn clip_value_write_updates_authoritative_key_without_hidden_static_write() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let playhead = state.active_sequence().expect("sequence").playhead;
+        let keyframe =
+            mondrian_core::automation::Keyframe::linear(playhead, PropertyValue::Float(0.25));
+        let keyframe_id = keyframe.id;
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].clips[0]
+            .apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: Transform2D::OPACITY_PATH.to_owned(),
+                keyframe,
+            })
+            .expect("seed opacity key");
+        let opacity = opacity_parameter_address(&state, clip_id);
+
+        state
+            .dispatch_action(clip_parameter_action(
+                clip_id,
+                opacity,
+                PropertyValue::Float(0.42),
+            ))
+            .expect("write animated opacity");
+
+        let property = state.active_sequence().expect("sequence").video_tracks[0].clips[0]
+            .transform
+            .to_property_bag()
+            .property(Transform2D::OPACITY_PATH)
+            .cloned()
+            .expect("opacity property");
+        let edited = property.keyframe_by_id(keyframe_id).expect("same key identity");
+        assert_eq!(edited.value, PropertyValue::Float(0.42));
+        assert_eq!(property.static_value(), &PropertyValue::Float(1.0));
+    }
+
+    #[test]
+    fn clip_parameter_batch_rejects_stale_member_without_partial_commit() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let position = clip_parameter_address(&state, clip_id, Transform2D::POSITION_PATH);
+        let stale = AnimationParameterAddress {
+            animation_track_id: mondrian_core::AnimationTrackId::new(),
+            parameter_id: mondrian_core::ParameterId::new_static("transform.opacity"),
+        };
+        let before = state.active_sequence().expect("sequence").clone();
+
+        let error = state
+            .dispatch_action(clip_write_parameter_values_action(
+                ClipWriteParameterValuesPayload {
+                    clip_id,
+                    writes: vec![
+                        ClipParameterValueWrite {
+                            parameter: position,
+                            value: PropertyValue::Vec2(glam::Vec2::new(20.0, 10.0)),
+                        },
+                        ClipParameterValueWrite {
+                            parameter: stale,
+                            value: PropertyValue::Float(0.5),
+                        },
+                    ],
+                },
+            ))
+            .expect_err("stale batch member must fail closed");
+
+        assert!(matches!(error, MondrianError::WorkflowStepFailed { .. }));
+        assert_eq!(state.active_sequence().expect("sequence"), &before);
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
     fn dispatch_inspector_audio_source_selection_is_validated_and_undoable() {
-        let (root, mut state, track_id, clip_id, edit_id, alternate_component) =
-            state_with_audio_asset();
-        let clip = InspectorClipRefPayload { track_id, is_video_track: false, clip_id };
+        let (root, mut state, _, clip_id, edit_id, alternate_component) = state_with_audio_asset();
 
         state
             .dispatch_action(inspector_set_audio_component_source_action(
                 InspectorSetAudioComponentSourcePayload {
-                    clip,
+                    clip_id,
                     edit_id,
                     source: InspectorAudioComponentSourcePayload::Media {
                         component_id: alternate_component,
@@ -7104,14 +6783,14 @@ mod tests {
 
     #[test]
     fn dispatch_inspector_audio_source_rejects_unknown_component_without_mutation() {
-        let (root, mut state, track_id, clip_id, edit_id, _) = state_with_audio_asset();
+        let (root, mut state, _, clip_id, edit_id, _) = state_with_audio_asset();
         let before = serde_json::to_vec(state.active_sequence().expect("sequence"))
             .expect("serialize before Sequence");
 
         let error = state
             .dispatch_action(inspector_set_audio_component_source_action(
                 InspectorSetAudioComponentSourcePayload {
-                    clip: InspectorClipRefPayload { track_id, is_video_track: false, clip_id },
+                    clip_id,
                     edit_id,
                     source: InspectorAudioComponentSourcePayload::Media {
                         component_id: AudioSourceComponentId::new(),
@@ -7376,7 +7055,7 @@ mod tests {
         state
             .dispatch_action(inspector_set_audio_component_source_action(
                 InspectorSetAudioComponentSourcePayload {
-                    clip: InspectorClipRefPayload { track_id, is_video_track: false, clip_id },
+                    clip_id,
                     edit_id,
                     source: InspectorAudioComponentSourcePayload::NestedOutput {
                         output_id: alternate_output,
@@ -7402,7 +7081,6 @@ mod tests {
     fn dispatch_inspector_ui_sets_clip_tint_color() {
         let mut state = AppState::new();
         let mut sequence = Sequence::new("solid color inspector");
-        let track_id = sequence.video_tracks[0].id;
         let tb = sequence.time_base();
         let clip = Clip::new_solid_color(AssetId::new(), Color::BLACK, tt(10, tb), tt(20, tb))
             .expect("solid color Clip");
@@ -7412,12 +7090,10 @@ mod tests {
         let color = Color::from_rgba8(8, 144, 220, 192);
 
         state
-            .dispatch_action(inspector_set_clip_tint_action(
-                InspectorSetClipTintPayload {
-                    clip: inspector_clip_payload(track_id, clip_id),
-                    color,
-                },
-            ))
+            .dispatch_action(clip_set_solid_color_action(ClipSetSolidColorPayload {
+                clip_id,
+                color,
+            }))
             .expect("dispatch tint");
 
         let clip = &state.active_sequence().expect("sequence").video_tracks[0].clips[0];
@@ -7426,22 +7102,33 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_inspector_ui_sets_clip_transform_fields() {
-        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
-        let clip_ref = inspector_clip_payload(track_id, clip_id);
+    fn dispatch_clip_parameter_action_sets_transform_atomically() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let position = clip_parameter_address(&state, clip_id, Transform2D::POSITION_PATH);
+        let scale = clip_parameter_address(&state, clip_id, Transform2D::SCALE_PATH);
+        let rotation = clip_parameter_address(&state, clip_id, Transform2D::ROTATION_PATH);
 
-        for (field, value) in [
-            (InspectorClipTransformField::PositionX, 128.0),
-            (InspectorClipTransformField::PositionY, 72.0),
-            (InspectorClipTransformField::ScalePercent, 150.0),
-            (InspectorClipTransformField::RotationDegrees, -12.5),
-        ] {
-            state
-                .dispatch_action(inspector_set_clip_transform_field_action(
-                    InspectorSetClipTransformFieldPayload { clip: clip_ref, field, value },
-                ))
-                .expect("dispatch transform");
-        }
+        state
+            .dispatch_action(clip_write_parameter_values_action(
+                ClipWriteParameterValuesPayload {
+                    clip_id,
+                    writes: vec![
+                        ClipParameterValueWrite {
+                            parameter: position,
+                            value: PropertyValue::Vec2(glam::Vec2::new(128.0, 72.0)),
+                        },
+                        ClipParameterValueWrite {
+                            parameter: scale,
+                            value: PropertyValue::Vec2(glam::Vec2::splat(1.5)),
+                        },
+                        ClipParameterValueWrite {
+                            parameter: rotation,
+                            value: PropertyValue::Float(-12.5),
+                        },
+                    ],
+                },
+            ))
+            .expect("dispatch atomic transform");
 
         let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
@@ -7462,44 +7149,8 @@ mod tests {
             .expect("rotation value");
         assert!((rotation + 12.5).abs() < f32::EPSILON);
         assert!(state.can_undo_action());
-    }
 
-    #[test]
-    fn dispatch_viewer_product_action_sets_clip_transform_atomically() {
-        let (mut state, _, clip_id) = state_with_two_video_tracks();
-
-        state
-            .dispatch_action(viewer_set_clip_transform_action(
-                ViewerSetClipTransformPayload {
-                    clip_id,
-                    position: Some(ViewerTransformPositionPayload { x: 320.0, y: 180.0 }),
-                    scale_percent: Some(125.0),
-                    rotation_degrees: Some(8.5),
-                },
-            ))
-            .expect("dispatch viewer transform");
-
-        let sequence = state.active_sequence().expect("sequence");
-        let _tb = sequence.time_base();
-        let clip = &sequence.video_tracks[0].clips[0];
-        assert_eq!(
-            clip.transform.get_position(sequence.playhead),
-            glam::Vec2::new(320.0, 180.0)
-        );
-        assert_eq!(
-            clip.transform.get_scale(sequence.playhead),
-            glam::Vec2::splat(1.25)
-        );
-        let rotation = clip
-            .transform
-            .to_property_bag()
-            .evaluate(Transform2D::ROTATION_PATH, sequence.playhead)
-            .and_then(|value| value.as_f32())
-            .expect("rotation value");
-        assert!((rotation - 8.5).abs() < f32::EPSILON);
-        assert!(state.can_undo_action());
-
-        assert!(state.undo_timeline().expect("undo viewer transform"));
+        assert!(state.undo_timeline().expect("undo atomic transform"));
         let sequence = state.active_sequence().expect("sequence after undo");
         let clip = &sequence.video_tracks[0].clips[0];
         assert_eq!(
@@ -7510,41 +7161,17 @@ mod tests {
     }
 
     #[test]
-    fn viewer_transform_without_a_mutation_fails_before_author_state_changes() {
+    fn empty_clip_parameter_write_fails_before_author_state_changes() {
         let (mut state, _, clip_id) = state_with_two_video_tracks();
         let before = state.active_sequence().expect("sequence").clone();
 
         let error = state
-            .dispatch_product_action(ProductAction::Viewer(
-                ViewerProductAction::SetClipTransform(ViewerSetClipTransformPayload {
-                    clip_id,
-                    position: None,
-                    scale_percent: None,
-                    rotation_degrees: None,
-                }),
+            .dispatch_product_action(ProductAction::Clip(
+                ClipProductAction::WriteParameterValues(Box::new(
+                    ClipWriteParameterValuesPayload { clip_id, writes: Vec::new() },
+                )),
             ))
-            .expect_err("empty monitor gesture is not a product mutation");
-
-        assert!(matches!(error, MondrianError::ActionNotExecuted { .. }));
-        assert_eq!(state.active_sequence().expect("sequence"), &before);
-        assert!(!state.can_undo_action());
-    }
-
-    #[test]
-    fn viewer_transform_with_non_finite_values_fails_before_author_state_changes() {
-        let (mut state, _, clip_id) = state_with_two_video_tracks();
-        let before = state.active_sequence().expect("sequence").clone();
-
-        let error = state
-            .dispatch_product_action(ProductAction::Viewer(
-                ViewerProductAction::SetClipTransform(ViewerSetClipTransformPayload {
-                    clip_id,
-                    position: Some(ViewerTransformPositionPayload { x: f32::NAN, y: 0.0 }),
-                    scale_percent: None,
-                    rotation_degrees: None,
-                }),
-            ))
-            .expect_err("non-finite monitor gesture is not an author mutation");
+            .expect_err("empty Clip parameter gesture is not a product mutation");
 
         assert!(matches!(error, MondrianError::WorkflowStepFailed { .. }));
         assert_eq!(state.active_sequence().expect("sequence"), &before);
@@ -7552,27 +7179,59 @@ mod tests {
     }
 
     #[test]
-    fn viewer_transform_rejects_audio_track_clip_before_author_state_changes() {
+    fn clip_parameter_write_with_non_finite_value_fails_before_author_state_changes() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let position = clip_parameter_address(&state, clip_id, Transform2D::POSITION_PATH);
+        let before = state.active_sequence().expect("sequence").clone();
+
+        let error = state
+            .dispatch_product_action(ProductAction::Clip(
+                ClipProductAction::WriteParameterValues(Box::new(
+                    ClipWriteParameterValuesPayload {
+                        clip_id,
+                        writes: vec![ClipParameterValueWrite {
+                            parameter: position,
+                            value: PropertyValue::Vec2(glam::Vec2::new(f32::NAN, 0.0)),
+                        }],
+                    },
+                )),
+            ))
+            .expect_err("non-finite Clip gesture is not an author mutation");
+
+        assert!(matches!(error, MondrianError::WorkflowStepFailed { .. }));
+        assert_eq!(state.active_sequence().expect("sequence"), &before);
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn clip_visual_parameter_write_rejects_audio_track_clip_before_author_state_changes() {
         let (mut state, _, _) = state_with_two_video_tracks();
         let time_base = state.active_sequence().expect("sequence").time_base();
         let audio_clip =
             Clip::new(AssetId::new(), TimelineTime::ZERO, tt(10, time_base)).expect("audio clip");
         let audio_clip_id = audio_clip.id;
+        let position = audio_clip
+            .intrinsic_parameter_bag()
+            .address_for_path(Transform2D::POSITION_PATH)
+            .expect("position parameter");
         state.active_sequence_mut_uncommitted().expect("sequence").audio_tracks[0]
             .add_clip(audio_clip)
             .expect("add audio clip");
         let before = state.active_sequence().expect("sequence").clone();
 
         let error = state
-            .dispatch_product_action(ProductAction::Viewer(
-                ViewerProductAction::SetClipTransform(ViewerSetClipTransformPayload {
-                    clip_id: audio_clip_id,
-                    position: Some(ViewerTransformPositionPayload { x: 10.0, y: 20.0 }),
-                    scale_percent: None,
-                    rotation_degrees: None,
-                }),
+            .dispatch_product_action(ProductAction::Clip(
+                ClipProductAction::WriteParameterValues(Box::new(
+                    ClipWriteParameterValuesPayload {
+                        clip_id: audio_clip_id,
+                        writes: vec![ClipParameterValueWrite {
+                            parameter: position,
+                            value: PropertyValue::Vec2(glam::Vec2::new(10.0, 20.0)),
+                        }],
+                    },
+                )),
             ))
-            .expect_err("Viewer transform is defined only for video Track Clips");
+            .expect_err("visual Clip parameters require a video Track Clip");
 
         assert!(matches!(error, MondrianError::WorkflowStepFailed { .. }));
         assert_eq!(state.active_sequence().expect("sequence"), &before);
@@ -7581,20 +7240,20 @@ mod tests {
 
     #[test]
     fn dispatch_inspector_ui_maps_incremental_curve_edits_to_opacity_keyframes() {
-        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
         let property = opacity_parameter_address(&state, clip_id);
 
         for point in [
-            InspectorCurvePointPayload { x: 0.0, y: 0.0 },
-            InspectorCurvePointPayload { x: 0.5, y: 0.72 },
-            InspectorCurvePointPayload { x: 1.0, y: 1.0 },
+            ClipNormalizedCurvePointPayload { time_ratio: 0.0, value_ratio: 0.0 },
+            ClipNormalizedCurvePointPayload { time_ratio: 0.5, value_ratio: 0.72 },
+            ClipNormalizedCurvePointPayload { time_ratio: 1.0, value_ratio: 1.0 },
         ] {
             state
-                .dispatch_action(inspector_edit_clip_curve_action(
-                    InspectorEditClipCurvePayload {
-                        clip: inspector_clip_payload(track_id, clip_id),
-                        property: property.clone(),
-                        edit: InspectorCurveEditPayload::Upsert { keyframe_id: None, point },
+                .dispatch_action(clip_edit_numeric_curve_action(
+                    ClipEditNumericCurvePayload {
+                        clip_id,
+                        parameter: property.clone(),
+                        edit: ClipCurveEditPayload::Upsert { keyframe_id: None, point },
                     },
                 ))
                 .expect("dispatch curve point");
@@ -7612,41 +7271,33 @@ mod tests {
 
     #[test]
     fn dispatch_inspector_clip_mutations_preserve_locked_track() {
-        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
         let opacity_property = opacity_parameter_address(&state, clip_id);
+        let position_property = clip_parameter_address(&state, clip_id, Transform2D::POSITION_PATH);
         state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked = true;
-        let clip_ref = inspector_clip_payload(track_id, clip_id);
 
         for action in [
-            inspector_set_clip_enabled_action(InspectorSetClipEnabledPayload {
-                clip: clip_ref,
-                enabled: false,
-            }),
-            inspector_set_clip_opacity_action(InspectorSetClipOpacityPayload {
-                clip: clip_ref,
-                opacity_percent: 42.0,
-            }),
-            inspector_set_clip_tint_action(InspectorSetClipTintPayload {
-                clip: clip_ref,
+            clip_set_enabled_action(ClipSetEnabledPayload { clip_id, enabled: false }),
+            clip_parameter_action(
+                clip_id,
+                opacity_property.clone(),
+                PropertyValue::Float(0.42),
+            ),
+            clip_set_solid_color_action(ClipSetSolidColorPayload {
+                clip_id,
                 color: Color::from_hex(0x2255AA),
             }),
-            inspector_set_clip_transform_field_action(InspectorSetClipTransformFieldPayload {
-                clip: clip_ref,
-                field: InspectorClipTransformField::PositionX,
-                value: 128.0,
-            }),
-            viewer_set_clip_transform_action(ViewerSetClipTransformPayload {
+            clip_parameter_action(
                 clip_id,
-                position: Some(ViewerTransformPositionPayload { x: 320.0, y: 180.0 }),
-                scale_percent: Some(125.0),
-                rotation_degrees: Some(8.5),
-            }),
-            inspector_edit_clip_curve_action(InspectorEditClipCurvePayload {
-                clip: clip_ref,
-                property: opacity_property,
-                edit: InspectorCurveEditPayload::Upsert {
+                position_property,
+                PropertyValue::Vec2(glam::Vec2::new(128.0, 72.0)),
+            ),
+            clip_edit_numeric_curve_action(ClipEditNumericCurvePayload {
+                clip_id,
+                parameter: opacity_property,
+                edit: ClipCurveEditPayload::Upsert {
                     keyframe_id: None,
-                    point: InspectorCurvePointPayload { x: 0.0, y: 0.5 },
+                    point: ClipNormalizedCurvePointPayload { time_ratio: 0.0, value_ratio: 0.5 },
                 },
             }),
         ] {
@@ -7851,14 +7502,19 @@ mod tests {
             .expect("evaluate initial title")
             .text;
         assert_eq!(initial_text, "标题");
+        let text_parameter = state
+            .active_sequence()
+            .and_then(|sequence| find_clip(sequence, selection.clip_id))
+            .expect("Basic Title Clip")
+            .intrinsic_parameter_bag()
+            .address_for_path(mondrian_core::BasicTitle::TEXT_PATH)
+            .expect("Basic Title text parameter");
 
         state
-            .dispatch_action(inspector_set_clip_property_action(
-                InspectorSetClipPropertyPayload {
-                    clip: inspector_clip_payload(selection.track_id, selection.clip_id),
-                    path: mondrian_core::BasicTitle::TEXT_PATH.to_owned(),
-                    value: PropertyValue::Text("Mondrian".to_owned()),
-                },
+            .dispatch_action(clip_parameter_action(
+                selection.clip_id,
+                text_parameter,
+                PropertyValue::Text("Mondrian".to_owned()),
             ))
             .expect("dispatch Basic Title property edit");
 

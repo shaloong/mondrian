@@ -19,16 +19,15 @@ use crate::app::preview_unavailability::{PreviewOutputStage, PreviewUnavailabili
 use crate::app::preview_viewer_plan::{ResolvedPreviewElement, ResolvedPreviewTransitionInput};
 use crate::app::selection::SelectedClipRef;
 use crate::app::ui_actions::{
-    assets_create_solid_color_action, inspector_edit_clip_curve_action,
-    inspector_set_clip_property_action, inspector_set_clip_tint_action,
-    timeline_create_basic_title_action, timeline_create_cross_dissolve_action,
-    timeline_drop_asset_action, timeline_seek_action, timeline_trim_clips_action,
-    visual_effect_add_to_clip_action, visual_effect_set_parameter_value_action,
-    AssetsCreateAssetPayload, InspectorClipRefPayload, InspectorCurveEditPayload,
-    InspectorCurvePointPayload, InspectorEditClipCurvePayload, InspectorSetClipPropertyPayload,
-    InspectorSetClipTintPayload, TimelineCreateCrossDissolvePayload, TimelineDropAssetPayload,
-    TimelineTrimClipsPayload, TimelineTrimPayloadEdge, VisualEffectAddToClipPayload,
-    VisualEffectSetParameterValuePayload,
+    assets_create_solid_color_action, clip_edit_numeric_curve_action, clip_set_solid_color_action,
+    clip_write_parameter_values_action, timeline_create_basic_title_action,
+    timeline_create_cross_dissolve_action, timeline_drop_asset_action, timeline_seek_action,
+    timeline_trim_clips_action, visual_effect_add_to_clip_action,
+    visual_effect_set_parameter_value_action, AssetsCreateAssetPayload, ClipCurveEditPayload,
+    ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload, ClipParameterValueWrite,
+    ClipSetSolidColorPayload, ClipWriteParameterValuesPayload, TimelineCreateCrossDissolvePayload,
+    TimelineDropAssetPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+    VisualEffectAddToClipPayload, VisualEffectSetParameterValuePayload,
 };
 use crate::app::AppState;
 use anyhow::{bail, ensure, Context};
@@ -363,13 +362,13 @@ fn find_clip_effect(
 
 fn add_effect(
     state: &mut AppState,
-    clip: InspectorClipRefPayload,
+    clip_id: ClipId,
     effect_type: EffectType,
     intent: &'static str,
 ) -> anyhow::Result<(EffectId, AuthorTransitionEvidence)> {
     let before = find_video_clip(
         state.active_sequence().context("active Sequence is absent")?,
-        clip.clip_id,
+        clip_id,
     )?
     .0
     .effects
@@ -380,13 +379,13 @@ fn add_effect(
         state,
         intent,
         visual_effect_add_to_clip_action(VisualEffectAddToClipPayload {
-            clip_id: clip.clip_id,
+            clip_id,
             effect_type: effect_type.clone(),
         }),
     )?;
     let created = find_video_clip(
         state.active_sequence().context("active Sequence is absent")?,
-        clip.clip_id,
+        clip_id,
     )?
     .0
     .effects
@@ -404,7 +403,7 @@ fn add_effect(
 
 fn set_effect_parameter(
     state: &mut AppState,
-    clip: InspectorClipRefPayload,
+    clip_id: ClipId,
     effect_id: EffectId,
     parameter: &'static str,
     value: PropertyValue,
@@ -412,7 +411,7 @@ fn set_effect_parameter(
 ) -> anyhow::Result<AuthorTransitionEvidence> {
     let effect = find_clip_effect(
         state.active_sequence().context("active Sequence is absent")?,
-        clip.clip_id,
+        clip_id,
         effect_id,
     )?;
     let parameter_id = effect
@@ -433,7 +432,7 @@ fn set_effect_parameter(
         state,
         intent,
         visual_effect_set_parameter_value_action(VisualEffectSetParameterValuePayload {
-            clip_id: clip.clip_id,
+            clip_id,
             effect_id,
             parameter,
             value,
@@ -872,14 +871,7 @@ pub(super) fn execute_visual_stage(
         dispatch_author_transition(
             state,
             intent,
-            inspector_set_clip_tint_action(InspectorSetClipTintPayload {
-                clip: InspectorClipRefPayload {
-                    track_id: video_track_id,
-                    is_video_track: true,
-                    clip_id,
-                },
-                color,
-            }),
+            clip_set_solid_color_action(ClipSetSolidColorPayload { clip_id, color }),
         )?;
     }
 
@@ -893,11 +885,7 @@ pub(super) fn execute_visual_stage(
             == mondrian_core::WorkingColorSpace::LinearRec2020,
         "visual Golden Primary Color requires the contract's Linear Rec.2020 working space"
     );
-    let left_clip = InspectorClipRefPayload {
-        track_id: video_track_id,
-        is_video_track: true,
-        clip_id: left_clip_id,
-    };
+    let left_clip = left_clip_id;
     let (primary_effect_id, primary_add_step) = add_effect(
         state,
         left_clip,
@@ -1037,17 +1025,23 @@ pub(super) fn execute_visual_stage(
         .filter(|selection| selection.is_video_track)
         .context("Basic Title action did not select its created Clip")?;
     let title_clip_id = title_selection.clip_id;
+    let title_text_parameter = find_video_clip(
+        state.active_sequence().context("active Sequence is absent")?,
+        title_clip_id,
+    )?
+    .0
+    .intrinsic_parameter_bag()
+    .address_for_path(BasicTitle::TEXT_PATH)
+    .context("Basic Title text parameter is absent")?;
     let title_text_step = dispatch_author_transition(
         state,
         "set-basic-title-text",
-        inspector_set_clip_property_action(InspectorSetClipPropertyPayload {
-            clip: InspectorClipRefPayload {
-                track_id: title_selection.track_id,
-                is_video_track: true,
-                clip_id: title_clip_id,
-            },
-            path: BasicTitle::TEXT_PATH.to_owned(),
-            value: PropertyValue::Text(TITLE_TEXT.to_owned()),
+        clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
+            clip_id: title_clip_id,
+            writes: vec![ClipParameterValueWrite {
+                parameter: title_text_parameter,
+                value: PropertyValue::Text(TITLE_TEXT.to_owned()),
+            }],
         }),
     )?;
     let title = find_video_clip(
@@ -1191,16 +1185,15 @@ pub(super) fn execute_visual_stage(
     let curve_edit_step = dispatch_author_transition(
         state,
         "curve-editor-move-bezier-font-size-end",
-        inspector_edit_clip_curve_action(InspectorEditClipCurvePayload {
-            clip: InspectorClipRefPayload {
-                track_id: title_selection.track_id,
-                is_video_track: true,
-                clip_id: title_clip_id,
-            },
-            property: bezier_address,
-            edit: InspectorCurveEditPayload::Upsert {
+        clip_edit_numeric_curve_action(ClipEditNumericCurvePayload {
+            clip_id: title_clip_id,
+            parameter: bezier_address,
+            edit: ClipCurveEditPayload::Upsert {
                 keyframe_id: Some(bezier_end_id),
-                point: InspectorCurvePointPayload { x: 0.875, y: bezier_end_value_ratio },
+                point: ClipNormalizedCurvePointPayload {
+                    time_ratio: 0.875,
+                    value_ratio: f64::from(bezier_end_value_ratio),
+                },
             },
         }),
     )?;
