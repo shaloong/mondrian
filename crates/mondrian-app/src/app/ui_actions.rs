@@ -30,12 +30,11 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub use super::exporting::TimelineExportRequest;
-use super::product_action::{
-    AudioProductAction, ClipProductAction, ExportProductAction, ProductAction,
-    ProjectProductAction, SequenceProductAction, TimelineProductAction,
-    VideoTransitionProductAction, ViewerProductAction, VisualEffectProductAction,
-};
 pub use super::product_action::{
+    AssetAudioComponentRebindPayload, AssetCreateFolderPayload, AssetCreateGeneratedPayload,
+    AssetImportFilesPayload, AssetLibraryMovePayload, AssetLibrarySelectionPayload,
+    AssetRelinkPayload, AssetRenameFolderPayload, AssetRenamePayload,
+    AssetSetInterpretationPayload, AssetSetProxyModePayload, AssetTargetPayload,
     ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
     ClipParameterValueWrite, ClipSetEnabledPayload, ClipSetSolidColorPayload,
     ClipWriteParameterValuesPayload, ExportDraftEdit, ProjectCreateWithSettingsPayload,
@@ -47,20 +46,28 @@ pub use super::product_action::{
     VideoTransitionHandlePolicy, VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
     ViewerSetPreviewResolutionScalePayload, VisualEffectAddToClipPayload,
     VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
-    VisualEffectSetParameterValuePayload, VisualEffectTargetPayload, AUDIO_EDIT_COMPONENT,
-    AUDIO_EDIT_PROCESSOR_RACK, AUDIO_NAMESPACE, CLIP_EDIT_NUMERIC_CURVE, CLIP_NAMESPACE,
-    CLIP_SET_ENABLED, CLIP_SET_SOLID_COLOR, CLIP_WRITE_PARAMETER_VALUES, EXPORT_CANCEL,
-    EXPORT_CLEAR_TERMINAL_HISTORY, EXPORT_EDIT_DRAFT, EXPORT_ENQUEUE, EXPORT_NAMESPACE,
-    PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE,
-    PROJECT_UPDATE_COLOR_ENVIRONMENT, PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS, SEQUENCE_DELETE,
-    SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE, SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT,
-    SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE, SEQUENCE_UPDATE_SETTINGS,
-    TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
-    TIMELINE_TRIM_CLIPS, VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE, VIDEO_TRANSITION_NAMESPACE,
-    VIDEO_TRANSITION_REMOVE, VIDEO_TRANSITION_SELECT, VIDEO_TRANSITION_SET_RANGE, VIEWER_NAMESPACE,
-    VISUAL_EFFECT_ADD_TO_CLIP, VISUAL_EFFECT_NAMESPACE, VISUAL_EFFECT_REMOVE,
-    VISUAL_EFFECT_REORDER, VISUAL_EFFECT_SELECT, VISUAL_EFFECT_SET_ENABLED,
-    VISUAL_EFFECT_SET_PARAMETER_VALUE,
+    VisualEffectSetParameterValuePayload, VisualEffectTargetPayload, ASSET_CREATE_FOLDER,
+    ASSET_CREATE_GENERATED, ASSET_IMPORT_FILES, ASSET_MOVE_ENTRIES, ASSET_NAMESPACE,
+    ASSET_PREPARE_DRAG, ASSET_REBIND_AUDIO_COMPONENT, ASSET_REFRESH_AUDIO_COMPONENTS, ASSET_RELINK,
+    ASSET_REMOVE_ENTRIES, ASSET_RENAME, ASSET_RENAME_FOLDER, ASSET_SET_INTERPRETATION,
+    ASSET_SET_PROXY_MODE, AUDIO_EDIT_COMPONENT, AUDIO_EDIT_PROCESSOR_RACK, AUDIO_NAMESPACE,
+    CLIP_EDIT_NUMERIC_CURVE, CLIP_NAMESPACE, CLIP_SET_ENABLED, CLIP_SET_SOLID_COLOR,
+    CLIP_WRITE_PARAMETER_VALUES, EXPORT_CANCEL, EXPORT_CLEAR_TERMINAL_HISTORY, EXPORT_EDIT_DRAFT,
+    EXPORT_ENQUEUE, EXPORT_NAMESPACE, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
+    PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_UPDATE_COLOR_ENVIRONMENT,
+    PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS, SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE,
+    SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE,
+    SEQUENCE_UPDATE_SETTINGS, TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK,
+    TIMELINE_SELECT_CLIP, TIMELINE_TRIM_CLIPS, VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE,
+    VIDEO_TRANSITION_NAMESPACE, VIDEO_TRANSITION_REMOVE, VIDEO_TRANSITION_SELECT,
+    VIDEO_TRANSITION_SET_RANGE, VIEWER_NAMESPACE, VISUAL_EFFECT_ADD_TO_CLIP,
+    VISUAL_EFFECT_NAMESPACE, VISUAL_EFFECT_REMOVE, VISUAL_EFFECT_REORDER, VISUAL_EFFECT_SELECT,
+    VISUAL_EFFECT_SET_ENABLED, VISUAL_EFFECT_SET_PARAMETER_VALUE,
+};
+use super::product_action::{
+    AssetProductAction, AudioProductAction, ClipProductAction, ExportProductAction, ProductAction,
+    ProjectProductAction, SequenceProductAction, TimelineProductAction,
+    VideoTransitionProductAction, ViewerProductAction, VisualEffectProductAction,
 };
 
 /// Action name for linking the current Clip selection.
@@ -105,48 +112,6 @@ pub const INSPECTOR_NAMESPACE: &str = "ui.inspector";
 
 /// Action name for selecting the logical source of one Clip audio Component Edit.
 pub const INSPECTOR_SET_AUDIO_COMPONENT_SOURCE: &str = "set_audio_component_source";
-/// Custom action namespace for asset-browser operations.
-pub const ASSETS_NAMESPACE: &str = "ui.assets";
-
-/// Action name for preparing an asset for timeline drag/drop.
-pub const ASSETS_PREPARE_DRAG: &str = "prepare_drag";
-/// Action name for re-probing one Asset's audio Component candidates.
-pub const ASSETS_REFRESH_AUDIO_COMPONENTS: &str = "refresh_audio_components";
-/// Action name for explicitly rebinding one stable Asset audio Component.
-pub const ASSETS_REBIND_AUDIO_COMPONENT: &str = "rebind_audio_component";
-/// Action name for creating an adjustment-layer asset in the library.
-pub const ASSETS_CREATE_ADJUSTMENT_LAYER: &str = "create_adjustment_layer";
-/// Action name for creating a solid-color asset in the library.
-pub const ASSETS_CREATE_SOLID_COLOR: &str = "create_solid_color";
-/// Action name for creating a folder in the library.
-pub const ASSETS_CREATE_FOLDER: &str = "create_folder";
-/// Action name for opening an asset-browser folder in the app UI shell.
-pub const ASSETS_OPEN_FOLDER: &str = "open_folder";
-/// Action name for importing files into an asset-browser folder.
-pub const ASSETS_IMPORT_FILES: &str = "import_files";
-/// Action name for relinking one asset-library record to a new media path.
-pub const ASSETS_RELINK_ASSET: &str = "relink_asset";
-/// Action name for setting one asset-library record's media interpretation.
-pub const ASSETS_SET_INTERPRETATION: &str = "set_interpretation";
-/// Action name for renaming one asset-library record.
-pub const ASSETS_RENAME_ASSET: &str = "rename_asset";
-/// Action name for renaming one asset-library folder/bin.
-pub const ASSETS_RENAME_FOLDER: &str = "rename_folder";
-/// Action name for toggling proxy playback for one video asset.
-pub const ASSETS_SET_PROXY_MODE: &str = "set_proxy_mode";
-/// Action name for deleting one asset from the library.
-pub const ASSETS_DELETE_ASSET: &str = "delete_asset";
-/// Action name for deleting one folder/bin from the library.
-pub const ASSETS_DELETE_FOLDER: &str = "delete_folder";
-/// Action name for deleting multiple asset-browser items together.
-pub const ASSETS_DELETE_SELECTION: &str = "delete_selection";
-/// Action name for moving one asset between folders.
-pub const ASSETS_MOVE_ASSET: &str = "move_asset";
-/// Action name for moving one folder/bin between parents.
-pub const ASSETS_MOVE_FOLDER: &str = "move_folder";
-/// Action name for moving multiple asset-browser items together.
-pub const ASSETS_MOVE_SELECTION: &str = "move_selection";
-
 /// Shell-local action name for cycling viewer canvas zoom.
 pub const VIEWER_CYCLE_ZOOM: &str = "cycle_zoom";
 /// Shell-local action name for setting viewer canvas zoom.
@@ -179,6 +144,9 @@ pub const APP_SHELL_OPEN_RECENT_PROJECT: &str = "open_recent_project";
 pub const APP_SHELL_RECOVER_PROJECT: &str = "recover_project";
 /// App-shell request to open a platform media import dialog.
 pub const APP_SHELL_IMPORT_MEDIA_DIALOG: &str = "import_media_dialog";
+/// App-shell request to navigate the Asset browser to one folder.
+pub const APP_SHELL_ASSET_BROWSER_OPEN_FOLDER: &str = "asset_browser_open_folder";
+
 /// App-shell request to reveal one real file in the platform file manager.
 pub const APP_SHELL_REVEAL_IN_FILE_MANAGER: &str = "reveal_in_file_manager";
 /// App-shell request to choose a replacement media file for one asset.
@@ -534,157 +502,73 @@ pub struct InspectorSetAudioComponentSourcePayload {
     pub source: InspectorAudioComponentSourcePayload,
 }
 
-/// Prepare one asset for the existing timeline drag/drop path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AssetsPrepareDragPayload {
-    /// Asset selected from the app UI asset browser.
-    pub asset_id: AssetId,
-}
-
-/// Re-probe one Asset without retargeting any existing logical Component.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AssetsRefreshAudioComponentsPayload {
-    /// Asset whose current file supplies fresh stream evidence.
-    pub asset_id: AssetId,
-}
-
-/// Explicitly repair one Asset audio Component's physical stream binding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AssetsRebindAudioComponentPayload {
-    /// Asset that owns the stable logical Component.
-    pub asset_id: AssetId,
-    /// Logical Component identity preserved by the operation.
-    pub component_id: AudioSourceComponentId,
-    /// Absolute stream index selected from current probe evidence.
-    pub stream_index: u32,
-}
-
-/// Delete one asset-library record and any timeline clips that reference it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AssetsDeleteAssetPayload {
-    /// Asset to remove from the project library.
-    pub asset_id: AssetId,
-}
-
-/// Delete one asset-library folder/bin.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AssetsDeleteFolderPayload {
-    /// Folder id to remove.
-    pub folder_id: String,
-}
-
-/// Delete multiple asset-library items.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AssetsDeleteSelectionPayload {
-    /// Asset ids to delete.
-    pub asset_ids: Vec<AssetId>,
-    /// Folder ids to delete.
-    pub folder_ids: Vec<String>,
-}
-
-/// Move one asset-library item into a folder, or to the root view.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AssetsMoveAssetPayload {
-    /// Asset id to move.
-    pub asset_id: AssetId,
-    /// Destination folder. `None` moves to the root/unfiled view.
-    pub folder_id: Option<String>,
-}
-
-/// Move one asset-library folder/bin under another folder, or to the root.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AssetsMoveFolderPayload {
-    /// Folder id to move.
-    pub folder_id: String,
-    /// Destination parent folder. `None` moves to the root level.
-    pub parent_folder_id: Option<String>,
-}
-
-/// Move multiple asset-library items into a folder, or to the root view.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AssetsMoveSelectionPayload {
-    /// Asset ids to move.
-    pub asset_ids: Vec<AssetId>,
-    /// Folder ids to reparent.
-    pub folder_ids: Vec<String>,
-    /// Destination folder/parent. `None` moves to the root level.
-    pub target_folder_id: Option<String>,
-}
-
-/// Create a synthetic reusable asset in the selected folder, or at root.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AssetsCreateAssetPayload {
-    /// Target folder for the new asset. `None` creates it in the root/unfiled view.
-    pub folder_id: Option<String>,
-}
-
 /// Open one folder in the app UI asset browser, or the root view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AssetsOpenFolderPayload {
+pub struct AssetBrowserOpenFolderPayload {
     /// Folder to show. `None` returns to the root/unfiled asset view.
     pub folder_id: Option<String>,
 }
 
-/// Create an asset-library folder in the selected parent, or at root.
+/// UI Adapter target for one Asset operation.
+pub type AssetsPrepareDragPayload = AssetTargetPayload;
+/// UI Adapter target for refreshing one Asset's audio evidence.
+pub type AssetsRefreshAudioComponentsPayload = AssetTargetPayload;
+/// UI Adapter input for repairing one audio Component binding.
+pub type AssetsRebindAudioComponentPayload = AssetAudioComponentRebindPayload;
+/// UI Adapter input for creating generated content in one folder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AssetsCreateFolderPayload {
-    /// Parent folder for the new folder. `None` creates a root-level folder.
-    pub parent_folder_id: Option<String>,
-}
-
-/// Import media files into an asset-library folder, or into the root view.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AssetsImportFilesPayload {
-    /// Media file paths selected by the user or dropped onto the asset browser.
-    pub paths: Vec<PathBuf>,
-    /// Target folder for imported assets. `None` imports into the root/unfiled view.
+pub struct AssetsCreateAssetPayload {
+    /// Target folder, or `None` for root.
     pub folder_id: Option<String>,
 }
-
-/// Relink one asset-library record to a replacement file selected by the shell.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AssetsRelinkAssetPayload {
-    /// Asset to relink.
-    pub asset_id: AssetId,
-    /// Replacement media path.
-    pub path: PathBuf,
-}
-
-/// Persist one asset-library record's media interpretation.
+/// UI Adapter input for retiring one Asset membership.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AssetsSetInterpretationPayload {
-    /// Asset to update.
+pub struct AssetsDeleteAssetPayload {
+    /// Asset membership to retire.
     pub asset_id: AssetId,
-    /// Persistent user intent to store on the asset.
-    pub interpretation: AssetMediaInterpretation,
 }
-
-/// Rename one asset-library record.
+/// UI Adapter input for deleting one Library folder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AssetsRenameAssetPayload {
-    /// Asset to rename.
-    pub asset_id: AssetId,
-    /// New user-facing asset name.
-    pub name: String,
-}
-
-/// Rename one asset-library folder/bin.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AssetsRenameFolderPayload {
-    /// Folder to rename.
+pub struct AssetsDeleteFolderPayload {
+    /// Folder to delete.
     pub folder_id: String,
-    /// New user-facing folder name.
-    pub name: String,
 }
-
-/// Enable or disable proxy playback for one video asset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AssetsSetProxyModePayload {
-    /// Video asset to update.
+/// UI Adapter input for removing a multi-selection atomically.
+pub type AssetsDeleteSelectionPayload = AssetLibrarySelectionPayload;
+/// UI Adapter input for moving one Asset membership.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetsMoveAssetPayload {
+    /// Asset to move.
     pub asset_id: AssetId,
-    /// Whether timeline playback should prefer a generated proxy.
-    pub enabled: bool,
+    /// Destination folder, or `None` for root.
+    pub folder_id: Option<String>,
 }
+/// UI Adapter input for reparenting one Library folder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetsMoveFolderPayload {
+    /// Folder to move.
+    pub folder_id: String,
+    /// Destination parent, or `None` for root.
+    pub parent_folder_id: Option<String>,
+}
+/// UI Adapter input for moving a multi-selection atomically.
+pub type AssetsMoveSelectionPayload = AssetLibraryMovePayload;
+/// UI Adapter input for creating one Library folder.
+pub type AssetsCreateFolderPayload = AssetCreateFolderPayload;
+/// UI Adapter input for importing files.
+pub type AssetsImportFilesPayload = AssetImportFilesPayload;
+/// UI Adapter input for relinking one Asset.
+pub type AssetsRelinkAssetPayload = AssetRelinkPayload;
+/// UI Adapter input for changing media interpretation.
+pub type AssetsSetInterpretationPayload = AssetSetInterpretationPayload;
+/// UI Adapter input for renaming one Asset.
+pub type AssetsRenameAssetPayload = AssetRenamePayload;
+/// UI Adapter input for renaming one Library folder.
+pub type AssetsRenameFolderPayload = AssetRenameFolderPayload;
+/// UI Adapter input for changing proxy preference.
+pub type AssetsSetProxyModePayload = AssetSetProxyModePayload;
+/// Shell Adapter input for navigating the Asset browser.
+pub type AssetsOpenFolderPayload = AssetBrowserOpenFolderPayload;
 
 /// Platform file-dialog target for importing media.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1097,99 +981,203 @@ pub fn visual_effect_set_parameter_value_action(
     .into_external_action()
 }
 
-/// Build an action that prepares an asset for timeline drag/drop.
-pub fn assets_prepare_drag_action(payload: AssetsPrepareDragPayload) -> Action {
-    custom_assets_action(ASSETS_PREPARE_DRAG, payload)
+/// Build an action that prepares one Asset for Timeline drag/drop.
+pub fn asset_prepare_drag_action(payload: AssetTargetPayload) -> Action {
+    ProductAction::Asset(AssetProductAction::PrepareDrag(payload)).into_external_action()
 }
 
 /// Build an action that refreshes one Asset's audio stream candidates.
-pub fn assets_refresh_audio_components_action(
-    payload: AssetsRefreshAudioComponentsPayload,
-) -> Action {
-    custom_assets_action(ASSETS_REFRESH_AUDIO_COMPONENTS, payload)
+pub fn asset_refresh_audio_components_action(payload: AssetTargetPayload) -> Action {
+    ProductAction::Asset(AssetProductAction::RefreshAudioComponents(payload)).into_external_action()
 }
 
 /// Build an action that explicitly repairs an Asset audio Component binding.
+pub fn asset_rebind_audio_component_action(payload: AssetAudioComponentRebindPayload) -> Action {
+    ProductAction::Asset(AssetProductAction::RebindAudioComponent(payload)).into_external_action()
+}
+
+/// Build one atomic Asset Library removal action.
+pub fn asset_remove_entries_action(payload: AssetLibrarySelectionPayload) -> Action {
+    ProductAction::Asset(AssetProductAction::RemoveEntries(Box::new(payload)))
+        .into_external_action()
+}
+
+/// Build one atomic Asset Library move action.
+pub fn asset_move_entries_action(payload: AssetLibraryMovePayload) -> Action {
+    ProductAction::Asset(AssetProductAction::MoveEntries(Box::new(payload))).into_external_action()
+}
+
+/// Build an action that creates an adjustment-layer Asset in the Library.
+pub fn asset_create_adjustment_layer_action(folder_id: Option<String>) -> Action {
+    ProductAction::Asset(AssetProductAction::CreateGenerated(
+        AssetCreateGeneratedPayload {
+            kind: mondrian_core::types::GeneratedAssetKind::AdjustmentLayer,
+            folder_id,
+        },
+    ))
+    .into_external_action()
+}
+
+/// Build an action that creates a solid-color Asset in the Library.
+pub fn asset_create_solid_color_action(folder_id: Option<String>) -> Action {
+    ProductAction::Asset(AssetProductAction::CreateGenerated(
+        AssetCreateGeneratedPayload {
+            kind: mondrian_core::types::GeneratedAssetKind::SolidColor,
+            folder_id,
+        },
+    ))
+    .into_external_action()
+}
+
+/// Build an action that creates a Library folder.
+pub fn asset_create_folder_action(payload: AssetCreateFolderPayload) -> Action {
+    ProductAction::Asset(AssetProductAction::CreateFolder(payload)).into_external_action()
+}
+
+/// Build an action that imports media files into an Asset Library folder.
+pub fn asset_import_files_action(payload: AssetImportFilesPayload) -> Action {
+    ProductAction::Asset(AssetProductAction::ImportFiles(Box::new(payload))).into_external_action()
+}
+
+/// Build an action that relinks one Asset to a replacement file.
+pub fn asset_relink_action(payload: AssetRelinkPayload) -> Action {
+    ProductAction::Asset(AssetProductAction::Relink(payload)).into_external_action()
+}
+
+/// Build an action that persists one Asset's media interpretation.
+pub fn asset_set_interpretation_action(payload: AssetSetInterpretationPayload) -> Action {
+    ProductAction::Asset(AssetProductAction::SetInterpretation(payload)).into_external_action()
+}
+
+/// Build an action that renames one Asset.
+pub fn asset_rename_action(payload: AssetRenamePayload) -> Action {
+    ProductAction::Asset(AssetProductAction::Rename(payload)).into_external_action()
+}
+
+/// Build an action that renames one Library folder.
+pub fn asset_rename_folder_action(payload: AssetRenameFolderPayload) -> Action {
+    ProductAction::Asset(AssetProductAction::RenameFolder(payload)).into_external_action()
+}
+
+/// Build an action that toggles proxy playback for one video Asset.
+pub fn asset_set_proxy_mode_action(payload: AssetSetProxyModePayload) -> Action {
+    ProductAction::Asset(AssetProductAction::SetProxyMode(payload)).into_external_action()
+}
+
+/// Build a shell-local action that opens an Asset-browser folder.
+pub fn asset_browser_open_folder_action(payload: AssetBrowserOpenFolderPayload) -> Action {
+    custom_app_shell_action_with_payload(APP_SHELL_ASSET_BROWSER_OPEN_FOLDER, payload)
+}
+
+/// Build the Asset-panel drag Adapter action.
+pub fn assets_prepare_drag_action(payload: AssetsPrepareDragPayload) -> Action {
+    asset_prepare_drag_action(payload)
+}
+
+/// Build the Asset-panel audio-evidence refresh Adapter action.
+pub fn assets_refresh_audio_components_action(
+    payload: AssetsRefreshAudioComponentsPayload,
+) -> Action {
+    asset_refresh_audio_components_action(payload)
+}
+
+/// Build the Asset-panel audio Component rebind Adapter action.
 pub fn assets_rebind_audio_component_action(payload: AssetsRebindAudioComponentPayload) -> Action {
-    custom_assets_action(ASSETS_REBIND_AUDIO_COMPONENT, payload)
+    asset_rebind_audio_component_action(payload)
 }
 
-/// Build an action that deletes one asset from the library.
+/// Build the Asset-panel single-membership retirement Adapter action.
 pub fn assets_delete_asset_action(payload: AssetsDeleteAssetPayload) -> Action {
-    custom_assets_action(ASSETS_DELETE_ASSET, payload)
+    asset_remove_entries_action(AssetLibrarySelectionPayload {
+        asset_ids: vec![payload.asset_id],
+        folder_ids: Vec::new(),
+    })
 }
 
-/// Build an action that deletes one folder from the library.
+/// Build the Asset-panel single-folder removal Adapter action.
 pub fn assets_delete_folder_action(payload: AssetsDeleteFolderPayload) -> Action {
-    custom_assets_action(ASSETS_DELETE_FOLDER, payload)
+    asset_remove_entries_action(AssetLibrarySelectionPayload {
+        asset_ids: Vec::new(),
+        folder_ids: vec![payload.folder_id],
+    })
 }
 
+/// Build the Asset-panel multi-selection removal Adapter action.
 pub fn assets_delete_selection_action(payload: AssetsDeleteSelectionPayload) -> Action {
-    custom_assets_action(ASSETS_DELETE_SELECTION, payload)
+    asset_remove_entries_action(payload)
 }
 
-/// Build an action that moves one asset to another folder.
+/// Build the Asset-panel single-membership move Adapter action.
 pub fn assets_move_asset_action(payload: AssetsMoveAssetPayload) -> Action {
-    custom_assets_action(ASSETS_MOVE_ASSET, payload)
+    asset_move_entries_action(AssetLibraryMovePayload {
+        asset_ids: vec![payload.asset_id],
+        folder_ids: Vec::new(),
+        target_folder_id: payload.folder_id,
+    })
 }
 
-/// Build an action that moves one folder to another parent.
+/// Build the Asset-panel single-folder move Adapter action.
 pub fn assets_move_folder_action(payload: AssetsMoveFolderPayload) -> Action {
-    custom_assets_action(ASSETS_MOVE_FOLDER, payload)
+    asset_move_entries_action(AssetLibraryMovePayload {
+        asset_ids: Vec::new(),
+        folder_ids: vec![payload.folder_id],
+        target_folder_id: payload.parent_folder_id,
+    })
 }
 
+/// Build the Asset-panel multi-selection move Adapter action.
 pub fn assets_move_selection_action(payload: AssetsMoveSelectionPayload) -> Action {
-    custom_assets_action(ASSETS_MOVE_SELECTION, payload)
+    asset_move_entries_action(payload)
 }
 
-/// Build an action that creates an adjustment-layer asset in the library.
+/// Build the Asset-panel generated adjustment-layer Adapter action.
 pub fn assets_create_adjustment_layer_action(payload: AssetsCreateAssetPayload) -> Action {
-    custom_assets_action(ASSETS_CREATE_ADJUSTMENT_LAYER, payload)
+    asset_create_adjustment_layer_action(payload.folder_id)
 }
 
-/// Build an action that creates a solid-color asset in the library.
+/// Build the Asset-panel generated solid-color Adapter action.
 pub fn assets_create_solid_color_action(payload: AssetsCreateAssetPayload) -> Action {
-    custom_assets_action(ASSETS_CREATE_SOLID_COLOR, payload)
+    asset_create_solid_color_action(payload.folder_id)
 }
 
-/// Build an action that creates a folder in the library.
+/// Build the Asset-panel folder-creation Adapter action.
 pub fn assets_create_folder_action(payload: AssetsCreateFolderPayload) -> Action {
-    custom_assets_action(ASSETS_CREATE_FOLDER, payload)
+    asset_create_folder_action(payload)
 }
 
-/// Build an action that imports media files into an asset-library folder.
+/// Build the Asset-panel file-import Adapter action.
 pub fn assets_import_files_action(payload: AssetsImportFilesPayload) -> Action {
-    custom_assets_action(ASSETS_IMPORT_FILES, payload)
+    asset_import_files_action(payload)
 }
 
-/// Build an action that relinks one asset to a replacement file.
+/// Build the native-shell relink Adapter action.
 pub fn assets_relink_asset_action(payload: AssetsRelinkAssetPayload) -> Action {
-    custom_assets_action(ASSETS_RELINK_ASSET, payload)
+    asset_relink_action(payload)
 }
 
-/// Build an action that persists one asset's media interpretation.
+/// Build the Interpret Footage Adapter action.
 pub fn assets_set_interpretation_action(payload: AssetsSetInterpretationPayload) -> Action {
-    custom_assets_action(ASSETS_SET_INTERPRETATION, payload)
+    asset_set_interpretation_action(payload)
 }
 
-/// Build an action that renames one asset.
+/// Build the Asset-panel rename Adapter action.
 pub fn assets_rename_asset_action(payload: AssetsRenameAssetPayload) -> Action {
-    custom_assets_action(ASSETS_RENAME_ASSET, payload)
+    asset_rename_action(payload)
 }
 
-/// Build an action that renames one folder.
+/// Build the Asset-panel folder rename Adapter action.
 pub fn assets_rename_folder_action(payload: AssetsRenameFolderPayload) -> Action {
-    custom_assets_action(ASSETS_RENAME_FOLDER, payload)
+    asset_rename_folder_action(payload)
 }
 
-/// Build an action that toggles proxy playback for one video asset.
+/// Build the Asset-panel proxy-preference Adapter action.
 pub fn assets_set_proxy_mode_action(payload: AssetsSetProxyModePayload) -> Action {
-    custom_assets_action(ASSETS_SET_PROXY_MODE, payload)
+    asset_set_proxy_mode_action(payload)
 }
 
-/// Build a shell-local action that opens an asset-browser folder.
+/// Build the shell-local Asset-browser navigation Adapter action.
 pub fn assets_open_folder_action(payload: AssetsOpenFolderPayload) -> Action {
-    custom_assets_action(ASSETS_OPEN_FOLDER, payload)
+    asset_browser_open_folder_action(payload)
 }
 
 /// Build an action that enqueues a timeline export.
@@ -1555,14 +1543,6 @@ fn custom_timeline_action<T: Serialize>(name: &'static str, payload: T) -> Actio
 fn custom_inspector_action<T: Serialize>(name: &'static str, payload: T) -> Action {
     Action::Custom {
         namespace: INSPECTOR_NAMESPACE.into(),
-        name: name.into(),
-        payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
-    }
-}
-
-fn custom_assets_action<T: Serialize>(name: &'static str, payload: T) -> Action {
-    Action::Custom {
-        namespace: ASSETS_NAMESPACE.into(),
         name: name.into(),
         payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
     }

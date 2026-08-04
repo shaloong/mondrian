@@ -435,6 +435,20 @@ It never advances author generation, dirty state, or Undo/Redo. Runtime
 replacement is part of action success; failure rolls the monitoring intent
 back so the retained control cannot disagree with audible execution.
 
+`AssetProductAction` closes the Project Asset Library namespace: preparation,
+audio-evidence refresh/rebind, generated creation, folder creation, import,
+Relink, interpretation, rename, proxy preference, removal, and organization.
+Its external `ui.asset` codec is the sole namespace/name/payload
+interpretation. Single-card menus and drag/drop remain small UI Adapters, but
+they lower into the same `RemoveEntries` or `MoveEntries` selection payload as
+multi-selection operations. App dispatch never loops SQLite mutations: the
+Asset Library deduplicates, validates, and publishes the complete removal or
+move in one transaction. Product removal retires visible Asset membership and
+must not delete stable Asset records, Sequence references, proxy intent,
+history, or recovery evidence. Asset-browser folder navigation is Window state
+under `app.shell`; it is not an Asset Library mutation and is deliberately
+absent from `AssetProductAction`.
+
 The migrated Viewer slice carries only authored preview-resolution changes
 through `ViewerProductAction`. Canvas zoom is presentation state owned by the
 Window/Shell Adapter and deliberately remains outside the product algebra.
@@ -565,7 +579,8 @@ The migrated slices expose one borrowed, read-only
 lock, Clip membership/media kind, placement range, Sequence time-base, Export
 draft difference, and Queue target facts remain private; the stable UI
 Interface is only `allows(&ProductAction)`. Timeline, Video Transition, Clip,
-Audio, Viewer, Project, Sequence, and Export controls therefore use the same
+Audio, Asset, Viewer, Project, Sequence, Export, and Visual Effect controls
+therefore use the same
 admission Seam. The
 projection does not clone or index the author graph or clone the Export Job
 list for each query. Window and panel Adapters cannot reconstruct admission by traversing

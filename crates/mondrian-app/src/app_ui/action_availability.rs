@@ -9,14 +9,12 @@ use mondrian_editor_state::Action;
 
 use crate::app::product_action::ProductAction;
 use crate::app::ui_actions::{
-    AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveSelectionPayload,
     TimelineInsertAssetPayload, TimelineMoveTrackPayload, TimelineSetInOutPointPayload,
     TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
     TimelineSetTrackTargetingPayload, TimelineTrimPayloadEdge,
     TimelineTrimSelectedClipsToPlayheadPayload, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
     APP_SHELL_PROJECT_SETTINGS, APP_SHELL_QUIT, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
-    APP_SHELL_SEQUENCE_SETTINGS, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
-    ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
+    APP_SHELL_SEQUENCE_SETTINGS, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
     TIMELINE_CREATE_BASIC_TITLE, TIMELINE_EXTRACT_RANGE, TIMELINE_INSERT_ASSET,
     TIMELINE_LIFT_RANGE, TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
     TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SET_IN_OUT_POINT,
@@ -107,31 +105,6 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_SAVE_PROJECT_AS_DIALOG =>
         {
             state.active_sequence().is_some()
-        }
-        Action::Custom { namespace, name, payload }
-            if namespace == ASSETS_NAMESPACE && name == ASSETS_IMPORT_FILES =>
-        {
-            state.asset_library().is_some()
-                && parse_payload::<AssetsImportFilesPayload>(payload).is_some_and(|payload| {
-                    !payload.paths.is_empty()
-                        && payload.paths.iter().all(|path| !path.as_os_str().is_empty())
-                })
-        }
-        Action::Custom { namespace, name, payload }
-            if namespace == ASSETS_NAMESPACE && name == ASSETS_DELETE_SELECTION =>
-        {
-            state.asset_library().is_some()
-                && parse_payload::<AssetsDeleteSelectionPayload>(payload).is_some_and(|payload| {
-                    !payload.asset_ids.is_empty() || !payload.folder_ids.is_empty()
-                })
-        }
-        Action::Custom { namespace, name, payload }
-            if namespace == ASSETS_NAMESPACE && name == ASSETS_MOVE_SELECTION =>
-        {
-            state.asset_library().is_some()
-                && parse_payload::<AssetsMoveSelectionPayload>(payload).is_some_and(|payload| {
-                    !payload.asset_ids.is_empty() || !payload.folder_ids.is_empty()
-                })
         }
         Action::Custom { namespace, name, .. }
             if namespace == TIMELINE_NAMESPACE && name == TIMELINE_CLEAR_IN_OUT_POINTS =>

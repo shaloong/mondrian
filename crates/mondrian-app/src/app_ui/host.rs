@@ -38,16 +38,16 @@ use crate::app::preview_work_notification::PreviewWorkWatch;
 use crate::app::ui_actions::{
     AssetsOpenFolderPayload, PreferencesShortcutPayload, PreferencesShortcutReboundPayload,
     PreferencesThemePayload, PreferencesViewerBackgroundPayload, PreferencesWaveformDisplayPayload,
-    APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
-    APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
-    APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
-    APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PENDING_CLOSE_CANCEL, APP_SHELL_PENDING_CLOSE_DISCARD,
-    APP_SHELL_PENDING_CLOSE_SAVE_CONTINUE, APP_SHELL_PREFERENCES_SHORTCUT_DISABLED,
-    APP_SHELL_PREFERENCES_SHORTCUT_REBOUND, APP_SHELL_PREFERENCES_SHORTCUT_RESET,
-    APP_SHELL_PREFERENCES_THEME_CHANGED, APP_SHELL_PREFERENCES_VIEWER_BACKGROUND_CHANGED,
+    APP_SHELL_ASSET_BROWSER_OPEN_FOLDER, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG,
+    APP_SHELL_CLOSE_MODAL, APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_NAMESPACE,
+    APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
+    APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PENDING_CLOSE_CANCEL,
+    APP_SHELL_PENDING_CLOSE_DISCARD, APP_SHELL_PENDING_CLOSE_SAVE_CONTINUE,
+    APP_SHELL_PREFERENCES_SHORTCUT_DISABLED, APP_SHELL_PREFERENCES_SHORTCUT_REBOUND,
+    APP_SHELL_PREFERENCES_SHORTCUT_RESET, APP_SHELL_PREFERENCES_THEME_CHANGED,
+    APP_SHELL_PREFERENCES_VIEWER_BACKGROUND_CHANGED,
     APP_SHELL_PREFERENCES_WAVEFORM_DISPLAY_CHANGED, APP_SHELL_QUIT, APP_SHELL_RECOVER_PROJECT,
     APP_SHELL_WINDOW_DRAG, APP_SHELL_WINDOW_MINIMIZE, APP_SHELL_WINDOW_TOGGLE_MAXIMIZE,
-    ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER,
 };
 use crate::app::waveform_service::AudioWaveformService;
 use crate::app::{
@@ -2053,7 +2053,7 @@ fn parse_asset_browser_navigation(
 ) -> Option<Result<AssetsOpenFolderPayload, serde_json::Error>> {
     match action {
         Action::Custom { namespace, name, payload }
-            if namespace == ASSETS_NAMESPACE && name == ASSETS_OPEN_FOLDER =>
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_ASSET_BROWSER_OPEN_FOLDER =>
         {
             Some(serde_json::from_value(payload.clone()))
         }
@@ -4626,7 +4626,7 @@ mod tests {
     }
 
     #[test]
-    fn host_refreshes_root_after_failed_editor_action() {
+    fn host_ignores_disabled_editor_action_without_false_failure() {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let mut host = AppUiHost::new(AppState::new());
         let pending = PendingUiActions::default();
@@ -4640,13 +4640,7 @@ mod tests {
             &NoopPlatformService,
         );
         assert_eq!(commands, AppUiShellCommands::default());
-        assert!(
-            host.app_state().status_hint.as_ref().is_some_and(|(message, is_error)| {
-                *is_error && message.contains("素材准备失败")
-            }),
-            "status hint: {:?}",
-            host.app_state().status_hint
-        );
+        assert!(host.app_state().status_hint.is_none());
 
         assert!(
             !host.ui_dirty.get(),

@@ -8,8 +8,10 @@ use std::path::PathBuf;
 
 use mondrian_core::automation::{AnimationParameterAddress, PropertyValue};
 use mondrian_core::effect_data::EffectType;
+use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{
-    ClipId, EffectId, FramePosition, JobId, KeyframeId, SequenceId, TrackId, VideoTransitionId,
+    AssetId, AudioSourceComponentId, ClipId, EffectId, FramePosition, GeneratedAssetKind, JobId,
+    KeyframeId, SequenceId, TrackId, VideoTransitionId,
 };
 use mondrian_core::{
     Color, ProjectColorEnvironment, ProjectSettings, TimelineTime, TimelineTimeRange,
@@ -144,6 +146,36 @@ pub const AUDIO_EDIT_COMPONENT: &str = "edit_component";
 /// External action name for one open-Session Track solo change.
 pub const AUDIO_SET_TRACK_SOLO: &str = "set_track_solo";
 
+/// External custom-action namespace for Project Asset Library operations.
+pub const ASSET_NAMESPACE: &str = "ui.asset";
+
+/// External action name for preparing one Asset for Timeline drag/drop.
+pub const ASSET_PREPARE_DRAG: &str = "prepare_drag";
+/// External action name for re-probing one Asset's audio Component evidence.
+pub const ASSET_REFRESH_AUDIO_COMPONENTS: &str = "refresh_audio_components";
+/// External action name for repairing one stable audio Component binding.
+pub const ASSET_REBIND_AUDIO_COMPONENT: &str = "rebind_audio_component";
+/// External action name for creating one generated Asset.
+pub const ASSET_CREATE_GENERATED: &str = "create_generated";
+/// External action name for creating one Asset Library folder.
+pub const ASSET_CREATE_FOLDER: &str = "create_folder";
+/// External action name for importing files into the Asset Library.
+pub const ASSET_IMPORT_FILES: &str = "import_files";
+/// External action name for relinking one Asset to a replacement file.
+pub const ASSET_RELINK: &str = "relink";
+/// External action name for changing persistent media interpretation.
+pub const ASSET_SET_INTERPRETATION: &str = "set_interpretation";
+/// External action name for renaming one Asset.
+pub const ASSET_RENAME: &str = "rename";
+/// External action name for renaming one Asset Library folder.
+pub const ASSET_RENAME_FOLDER: &str = "rename_folder";
+/// External action name for changing one Asset's proxy preference.
+pub const ASSET_SET_PROXY_MODE: &str = "set_proxy_mode";
+/// External action name for retiring Assets and deleting Library folders atomically.
+pub const ASSET_REMOVE_ENTRIES: &str = "remove_entries";
+/// External action name for moving Assets and folders atomically.
+pub const ASSET_MOVE_ENTRIES: &str = "move_entries";
+
 /// One closed product operation accepted by the App composition root.
 ///
 /// Additional product domains may extend this algebra without making their
@@ -156,6 +188,8 @@ pub enum ProductAction {
     VideoTransition(VideoTransitionProductAction),
     /// An operation owned by Sequence audio authoring.
     Audio(AudioProductAction),
+    /// An operation owned by the Project Asset Library Interface.
+    Asset(AssetProductAction),
     /// An operation owned by the Viewer product Interface.
     Viewer(ViewerProductAction),
     /// An operation owned by one Timeline Clip's authoring Interface.
@@ -168,6 +202,37 @@ pub enum ProductAction {
     Export(ExportProductAction),
     /// An operation owned by Clip-local visual Effect authoring or selection.
     VisualEffect(VisualEffectProductAction),
+}
+
+/// Closed Project Asset Library operations.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AssetProductAction {
+    /// Prepare one validated Asset for a Timeline placement gesture.
+    PrepareDrag(AssetTargetPayload),
+    /// Re-probe physical audio stream evidence without changing logical identity.
+    RefreshAudioComponents(AssetTargetPayload),
+    /// Repair one stable logical audio Component's physical binding.
+    RebindAudioComponent(AssetAudioComponentRebindPayload),
+    /// Create one generated Asset in a Library folder or at root.
+    CreateGenerated(AssetCreateGeneratedPayload),
+    /// Create one Library folder under an optional parent.
+    CreateFolder(AssetCreateFolderPayload),
+    /// Import one or more files into a Library folder or at root.
+    ImportFiles(Box<AssetImportFilesPayload>),
+    /// Relink one stable Asset identity to a replacement file.
+    Relink(AssetRelinkPayload),
+    /// Replace one Asset's persistent media interpretation.
+    SetInterpretation(AssetSetInterpretationPayload),
+    /// Rename one Asset.
+    Rename(AssetRenamePayload),
+    /// Rename one Library folder.
+    RenameFolder(AssetRenameFolderPayload),
+    /// Change one video Asset's proxy preference.
+    SetProxyMode(AssetSetProxyModePayload),
+    /// Atomically retire visible Asset memberships and delete Library folders.
+    RemoveEntries(Box<AssetLibrarySelectionPayload>),
+    /// Atomically move Asset memberships and folders to one destination.
+    MoveEntries(Box<AssetLibraryMovePayload>),
 }
 
 /// Closed Project lifecycle and authoring operations.
@@ -318,6 +383,7 @@ impl ProductActionDecodeError {
             TIMELINE_NAMESPACE => "timeline_ui_action",
             VIDEO_TRANSITION_NAMESPACE => "video_transition_action",
             AUDIO_NAMESPACE => "audio_action",
+            ASSET_NAMESPACE => "asset_action",
             VIEWER_NAMESPACE => "viewer_action",
             CLIP_NAMESPACE => "clip_action",
             PROJECT_NAMESPACE => "project_action",
@@ -403,6 +469,54 @@ impl ProductAction {
                 ))),
                 AUDIO_EDIT_ROUTING => Ok(Some(Self::Audio(AudioProductAction::EditRouting(
                     decode_payload(namespace, name, payload)?,
+                )))),
+                _ => Ok(None),
+            },
+            ASSET_NAMESPACE => match name.as_str() {
+                ASSET_PREPARE_DRAG => Ok(Some(Self::Asset(AssetProductAction::PrepareDrag(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                ASSET_REFRESH_AUDIO_COMPONENTS => Ok(Some(Self::Asset(
+                    AssetProductAction::RefreshAudioComponents(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
+                ASSET_REBIND_AUDIO_COMPONENT => {
+                    Ok(Some(Self::Asset(AssetProductAction::RebindAudioComponent(
+                        decode_payload(namespace, name, payload)?,
+                    ))))
+                }
+                ASSET_CREATE_GENERATED => Ok(Some(Self::Asset(
+                    AssetProductAction::CreateGenerated(decode_payload(namespace, name, payload)?),
+                ))),
+                ASSET_CREATE_FOLDER => Ok(Some(Self::Asset(AssetProductAction::CreateFolder(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                ASSET_IMPORT_FILES => Ok(Some(Self::Asset(AssetProductAction::ImportFiles(
+                    Box::new(decode_payload(namespace, name, payload)?),
+                )))),
+                ASSET_RELINK => Ok(Some(Self::Asset(AssetProductAction::Relink(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                ASSET_SET_INTERPRETATION => {
+                    Ok(Some(Self::Asset(AssetProductAction::SetInterpretation(
+                        decode_payload(namespace, name, payload)?,
+                    ))))
+                }
+                ASSET_RENAME => Ok(Some(Self::Asset(AssetProductAction::Rename(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                ASSET_RENAME_FOLDER => Ok(Some(Self::Asset(AssetProductAction::RenameFolder(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                ASSET_SET_PROXY_MODE => Ok(Some(Self::Asset(AssetProductAction::SetProxyMode(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                ASSET_REMOVE_ENTRIES => Ok(Some(Self::Asset(AssetProductAction::RemoveEntries(
+                    Box::new(decode_payload(namespace, name, payload)?),
+                )))),
+                ASSET_MOVE_ENTRIES => Ok(Some(Self::Asset(AssetProductAction::MoveEntries(
+                    Box::new(decode_payload(namespace, name, payload)?),
                 )))),
                 _ => Ok(None),
             },
@@ -558,6 +672,67 @@ impl ProductAction {
                 AUDIO_NAMESPACE,
                 AUDIO_EDIT_COMPONENT,
                 serde_json::json!(request),
+            ),
+            Self::Asset(AssetProductAction::PrepareDrag(payload)) => (
+                ASSET_NAMESPACE,
+                ASSET_PREPARE_DRAG,
+                serde_json::json!(payload),
+            ),
+            Self::Asset(AssetProductAction::RefreshAudioComponents(payload)) => (
+                ASSET_NAMESPACE,
+                ASSET_REFRESH_AUDIO_COMPONENTS,
+                serde_json::json!(payload),
+            ),
+            Self::Asset(AssetProductAction::RebindAudioComponent(payload)) => (
+                ASSET_NAMESPACE,
+                ASSET_REBIND_AUDIO_COMPONENT,
+                serde_json::json!(payload),
+            ),
+            Self::Asset(AssetProductAction::CreateGenerated(payload)) => (
+                ASSET_NAMESPACE,
+                ASSET_CREATE_GENERATED,
+                serde_json::json!(payload),
+            ),
+            Self::Asset(AssetProductAction::CreateFolder(payload)) => (
+                ASSET_NAMESPACE,
+                ASSET_CREATE_FOLDER,
+                serde_json::json!(payload),
+            ),
+            Self::Asset(AssetProductAction::ImportFiles(payload)) => (
+                ASSET_NAMESPACE,
+                ASSET_IMPORT_FILES,
+                serde_json::json!(payload),
+            ),
+            Self::Asset(AssetProductAction::Relink(payload)) => {
+                (ASSET_NAMESPACE, ASSET_RELINK, serde_json::json!(payload))
+            }
+            Self::Asset(AssetProductAction::SetInterpretation(payload)) => (
+                ASSET_NAMESPACE,
+                ASSET_SET_INTERPRETATION,
+                serde_json::json!(payload),
+            ),
+            Self::Asset(AssetProductAction::Rename(payload)) => {
+                (ASSET_NAMESPACE, ASSET_RENAME, serde_json::json!(payload))
+            }
+            Self::Asset(AssetProductAction::RenameFolder(payload)) => (
+                ASSET_NAMESPACE,
+                ASSET_RENAME_FOLDER,
+                serde_json::json!(payload),
+            ),
+            Self::Asset(AssetProductAction::SetProxyMode(payload)) => (
+                ASSET_NAMESPACE,
+                ASSET_SET_PROXY_MODE,
+                serde_json::json!(payload),
+            ),
+            Self::Asset(AssetProductAction::RemoveEntries(payload)) => (
+                ASSET_NAMESPACE,
+                ASSET_REMOVE_ENTRIES,
+                serde_json::json!(payload),
+            ),
+            Self::Asset(AssetProductAction::MoveEntries(payload)) => (
+                ASSET_NAMESPACE,
+                ASSET_MOVE_ENTRIES,
+                serde_json::json!(payload),
             ),
             Self::Timeline(TimelineProductAction::SelectClip(payload)) => (
                 TIMELINE_NAMESPACE,
@@ -763,6 +938,129 @@ impl ProductAction {
             payload,
         }
     }
+}
+
+/// Stable target of a single-Asset product operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetTargetPayload {
+    /// Canonical Asset identity.
+    pub asset_id: AssetId,
+}
+
+/// Repair one logical audio Component's physical stream binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetAudioComponentRebindPayload {
+    /// Asset that owns the stable logical Component.
+    pub asset_id: AssetId,
+    /// Logical Component identity preserved by the operation.
+    pub component_id: AudioSourceComponentId,
+    /// Absolute stream index selected from current probe evidence.
+    pub stream_index: u32,
+}
+
+/// Create one generated Asset in an optional Library folder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetCreateGeneratedPayload {
+    /// Exact generated-content kind.
+    pub kind: GeneratedAssetKind,
+    /// Target folder, or `None` for the root/unfiled view.
+    pub folder_id: Option<String>,
+}
+
+/// Create one Asset Library folder under an optional parent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetCreateFolderPayload {
+    /// Parent folder, or `None` for a root-level folder.
+    pub parent_folder_id: Option<String>,
+}
+
+/// Import files into one Asset Library location.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetImportFilesPayload {
+    /// Media file paths selected by the user or dropped onto the Asset browser.
+    pub paths: Vec<PathBuf>,
+    /// Target folder, or `None` for the root/unfiled view.
+    pub folder_id: Option<String>,
+}
+
+/// Relink one stable Asset identity to a replacement media file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetRelinkPayload {
+    /// Asset to relink.
+    pub asset_id: AssetId,
+    /// Replacement media path.
+    pub path: PathBuf,
+}
+
+/// Replace one Asset's persistent media interpretation intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetSetInterpretationPayload {
+    /// Asset to update.
+    pub asset_id: AssetId,
+    /// Persistent user intent stored independently of transient probe evidence.
+    pub interpretation: AssetMediaInterpretation,
+}
+
+/// Rename one Asset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetRenamePayload {
+    /// Asset to rename.
+    pub asset_id: AssetId,
+    /// New user-facing name; dispatch trims surrounding whitespace.
+    pub name: String,
+}
+
+/// Rename one Asset Library folder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetRenameFolderPayload {
+    /// Folder to rename.
+    pub folder_id: String,
+    /// New user-facing name; dispatch trims surrounding whitespace.
+    pub name: String,
+}
+
+/// Change one video Asset's proxy preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetSetProxyModePayload {
+    /// Video Asset to update.
+    pub asset_id: AssetId,
+    /// Whether playback should prefer a qualified proxy.
+    pub enabled: bool,
+}
+
+/// One atomic Asset Library removal selection.
+///
+/// Asset identities are retired from visible Library membership; strong
+/// Sequence, history, proxy, and recovery references remain addressable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetLibrarySelectionPayload {
+    /// Asset memberships to retire.
+    pub asset_ids: Vec<AssetId>,
+    /// Library folders to delete.
+    pub folder_ids: Vec<String>,
+}
+
+/// One atomic Asset Library organization edit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetLibraryMovePayload {
+    /// Asset memberships to move.
+    pub asset_ids: Vec<AssetId>,
+    /// Library folders to reparent.
+    pub folder_ids: Vec<String>,
+    /// Destination folder/parent, or `None` for the root level.
+    pub target_folder_id: Option<String>,
 }
 
 /// Product-visible built-in Processor choice.
@@ -1188,12 +1486,74 @@ impl<'a> ProductActionAvailability<'a> {
             ProductAction::Timeline(action) => self.allows_timeline(action),
             ProductAction::VideoTransition(action) => self.allows_video_transition(action),
             ProductAction::Audio(_) => self.state.active_sequence().is_some(),
+            ProductAction::Asset(action) => self.allows_asset(action),
             ProductAction::Viewer(action) => self.allows_viewer(action),
             ProductAction::Clip(action) => self.allows_clip(action),
             ProductAction::Project(action) => self.allows_project(action),
             ProductAction::Sequence(action) => self.allows_sequence(action),
             ProductAction::Export(action) => self.allows_export(action),
             ProductAction::VisualEffect(action) => self.allows_visual_effect(action),
+        }
+    }
+
+    fn allows_asset(&self, action: &AssetProductAction) -> bool {
+        let Some(library) = self.state.asset_library_handle() else {
+            return false;
+        };
+        let asset_record = |asset_id| {
+            library
+                .get_asset(asset_id)
+                .ok()
+                .flatten()
+                .filter(|asset| !asset.membership.is_retired())
+        };
+        let asset_exists = |asset_id| asset_record(asset_id).is_some();
+        let folder_id_valid = |folder_id: &Option<String>| {
+            folder_id.as_ref().is_none_or(|folder_id| !folder_id.trim().is_empty())
+        };
+        match action {
+            AssetProductAction::PrepareDrag(payload)
+            | AssetProductAction::RefreshAudioComponents(payload) => asset_exists(payload.asset_id),
+            AssetProductAction::RebindAudioComponent(payload) => asset_exists(payload.asset_id),
+            AssetProductAction::CreateGenerated(payload) => folder_id_valid(&payload.folder_id),
+            AssetProductAction::CreateFolder(payload) => folder_id_valid(&payload.parent_folder_id),
+            AssetProductAction::ImportFiles(payload) => {
+                !payload.paths.is_empty()
+                    && payload.paths.iter().all(|path| !path.as_os_str().is_empty())
+                    && folder_id_valid(&payload.folder_id)
+            }
+            AssetProductAction::Relink(payload) => {
+                asset_exists(payload.asset_id) && !payload.path.as_os_str().is_empty()
+            }
+            AssetProductAction::SetInterpretation(payload) => asset_record(payload.asset_id)
+                .is_some_and(|asset| asset.interpretation != payload.interpretation),
+            AssetProductAction::Rename(payload) => {
+                asset_record(payload.asset_id).is_some_and(|asset| {
+                    !payload.name.trim().is_empty() && asset.name != payload.name.trim()
+                })
+            }
+            AssetProductAction::RenameFolder(payload) => {
+                !payload.folder_id.trim().is_empty()
+                    && !payload.name.trim().is_empty()
+                    && library.list_folders().ok().is_some_and(|folders| {
+                        folders.iter().any(|folder| {
+                            folder.id == payload.folder_id && folder.name != payload.name.trim()
+                        })
+                    })
+            }
+            AssetProductAction::SetProxyMode(payload) => asset_record(payload.asset_id)
+                .is_some_and(|asset| {
+                    matches!(asset.kind, mondrian_assets::AssetKind::Video)
+                        && self.state.proxy_mode_assets().contains(&payload.asset_id)
+                            != payload.enabled
+                }),
+            AssetProductAction::RemoveEntries(payload) => {
+                !payload.asset_ids.is_empty() || !payload.folder_ids.is_empty()
+            }
+            AssetProductAction::MoveEntries(payload) => {
+                (!payload.asset_ids.is_empty() || !payload.folder_ids.is_empty())
+                    && folder_id_valid(&payload.target_folder_id)
+            }
         }
     }
 
@@ -1597,6 +1957,101 @@ mod tests {
                 .expect("recognized product action");
             assert_eq!(decoded, expected);
         }
+    }
+
+    #[test]
+    fn external_codec_round_trips_every_asset_product_action() {
+        let asset_id = AssetId::new();
+        let folder_id = "folder-a".to_owned();
+        let actions = vec![
+            ProductAction::Asset(AssetProductAction::PrepareDrag(AssetTargetPayload {
+                asset_id,
+            })),
+            ProductAction::Asset(AssetProductAction::RefreshAudioComponents(
+                AssetTargetPayload { asset_id },
+            )),
+            ProductAction::Asset(AssetProductAction::RebindAudioComponent(
+                AssetAudioComponentRebindPayload {
+                    asset_id,
+                    component_id: AudioSourceComponentId::new(),
+                    stream_index: 3,
+                },
+            )),
+            ProductAction::Asset(AssetProductAction::CreateGenerated(
+                AssetCreateGeneratedPayload {
+                    kind: GeneratedAssetKind::SolidColor,
+                    folder_id: Some(folder_id.clone()),
+                },
+            )),
+            ProductAction::Asset(AssetProductAction::CreateFolder(AssetCreateFolderPayload {
+                parent_folder_id: Some(folder_id.clone()),
+            })),
+            ProductAction::Asset(AssetProductAction::ImportFiles(Box::new(
+                AssetImportFilesPayload {
+                    paths: vec![PathBuf::from("media.mov")],
+                    folder_id: Some(folder_id.clone()),
+                },
+            ))),
+            ProductAction::Asset(AssetProductAction::Relink(AssetRelinkPayload {
+                asset_id,
+                path: PathBuf::from("replacement.mov"),
+            })),
+            ProductAction::Asset(AssetProductAction::SetInterpretation(
+                AssetSetInterpretationPayload {
+                    asset_id,
+                    interpretation: AssetMediaInterpretation::default(),
+                },
+            )),
+            ProductAction::Asset(AssetProductAction::Rename(AssetRenamePayload {
+                asset_id,
+                name: "Interview A".to_owned(),
+            })),
+            ProductAction::Asset(AssetProductAction::RenameFolder(AssetRenameFolderPayload {
+                folder_id: folder_id.clone(),
+                name: "Interviews".to_owned(),
+            })),
+            ProductAction::Asset(AssetProductAction::SetProxyMode(AssetSetProxyModePayload {
+                asset_id,
+                enabled: true,
+            })),
+            ProductAction::Asset(AssetProductAction::RemoveEntries(Box::new(
+                AssetLibrarySelectionPayload {
+                    asset_ids: vec![asset_id],
+                    folder_ids: vec![folder_id.clone()],
+                },
+            ))),
+            ProductAction::Asset(AssetProductAction::MoveEntries(Box::new(
+                AssetLibraryMovePayload {
+                    asset_ids: vec![asset_id],
+                    folder_ids: vec![folder_id],
+                    target_folder_id: Some("folder-b".to_owned()),
+                },
+            ))),
+        ];
+
+        for expected in actions {
+            let external = expected.clone().into_external_action();
+            let decoded = ProductAction::decode_external(&external)
+                .expect("valid external payload")
+                .expect("recognized Asset product action");
+            assert_eq!(decoded, expected);
+        }
+    }
+
+    #[test]
+    fn external_codec_rejects_unknown_asset_payload_fields() {
+        let action = Action::Custom {
+            namespace: ASSET_NAMESPACE.to_owned(),
+            name: ASSET_PREPARE_DRAG.to_owned(),
+            payload: serde_json::json!({
+                "asset_id": AssetId::new(),
+                "legacy_folder_hint": "bin-a",
+            }),
+        };
+
+        let error = ProductAction::decode_external(&action)
+            .expect_err("recognized Asset payload must fail closed");
+        assert_eq!(error.dispatch_step_id(), "asset_action.prepare_drag");
     }
 
     #[test]

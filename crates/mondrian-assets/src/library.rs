@@ -122,6 +122,15 @@ pub struct AssetLibraryRemovalOutcome {
     pub deleted_folders: usize,
 }
 
+/// Result of one atomic Asset Library organization transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AssetLibraryMoveOutcome {
+    /// Distinct visible Asset records whose folder membership changed.
+    pub moved_assets: usize,
+    /// Distinct folder records whose parent changed.
+    pub moved_folders: usize,
+}
+
 impl AssetRecord {
     /// Canonical path for a file-backed Asset.
     pub fn file_path(&self) -> Option<&Path> {
@@ -322,6 +331,44 @@ fn connection_revision(connection: &Connection) -> Result<u64> {
     u64::try_from(revision).map_err(|_| MondrianError::AssetDbError {
         reason: format!("SQLite returned a negative total_changes value: {revision}"),
     })
+}
+
+fn validate_folder_reparent(
+    folders: &[(String, Option<String>)],
+    folder_id: &str,
+    parent_folder_id: Option<&str>,
+) -> Result<()> {
+    if !folders.iter().any(|(id, _)| id == folder_id) {
+        return Err(MondrianError::AssetDbError {
+            reason: format!("文件夹不存在：{folder_id}")
+        });
+    }
+    let Some(parent_id) = parent_folder_id else {
+        return Ok(());
+    };
+    if parent_id == folder_id {
+        return Err(MondrianError::AssetDbError {
+            reason: "不能将文件夹移动到自身".to_owned()
+        });
+    }
+
+    let mut descendants = vec![folder_id.to_owned()];
+    let mut index = 0usize;
+    while index < descendants.len() {
+        let current = descendants[index].clone();
+        for (id, parent) in folders {
+            if parent.as_deref() == Some(current.as_str()) && !descendants.contains(id) {
+                descendants.push(id.clone());
+            }
+        }
+        index += 1;
+    }
+    if descendants.iter().any(|id| id == parent_id) {
+        return Err(MondrianError::AssetDbError {
+            reason: "不能将文件夹移动到自身的子文件夹".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 impl AssetLibrary {
@@ -1225,94 +1272,132 @@ impl AssetLibrary {
     }
 
     pub fn move_asset_to_folder(&self, asset_id: AssetId, folder_id: Option<&str>) -> Result<()> {
-        let db = self.db.lock();
-        if let Some(folder_id) = folder_id {
-            let exists = db
-                .query_row(
-                    "SELECT 1 FROM folders WHERE id = ?1 LIMIT 1",
-                    rusqlite::params![folder_id],
-                    |_| Ok(()),
-                )
-                .optional()
-                .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?
-                .is_some();
-            if !exists {
-                return Err(MondrianError::AssetDbError {
-                    reason: format!("目标文件夹不存在：{folder_id}"),
-                });
-            }
-        }
-        let changed = db
-            .execute(
-                "UPDATE assets SET folder_id = ?1 WHERE id = ?2",
-                rusqlite::params![folder_id, asset_id.0.to_string()],
-            )
-            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
-        if changed == 0 {
-            return Err(MondrianError::AssetNotFound { asset_id: asset_id.to_string() });
-        }
+        self.move_assets_and_folders(&[asset_id], &[], folder_id)?;
         Ok(())
     }
 
     pub fn move_folder(&self, folder_id: &str, parent_folder_id: Option<&str>) -> Result<()> {
-        let db = self.db.lock();
-        let mut stmt = db
-            .prepare("SELECT id, parent_id FROM folders")
-            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
-        let folders: Vec<(String, Option<String>)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?
-            .collect::<std::result::Result<_, _>>()
-            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
-        drop(stmt);
-
-        if !folders.iter().any(|(id, _)| id == folder_id) {
-            return Err(MondrianError::AssetDbError {
-                reason: format!("文件夹不存在：{folder_id}"),
-            });
-        }
-        if let Some(parent_id) = parent_folder_id {
-            if parent_id == folder_id {
-                return Err(MondrianError::AssetDbError {
-                    reason: "不能将文件夹移动到自身".to_string(),
-                });
-            }
-            if !folders.iter().any(|(id, _)| id == parent_id) {
-                return Err(MondrianError::AssetDbError {
-                    reason: format!("目标文件夹不存在：{parent_id}"),
-                });
-            }
-
-            let mut descendants = vec![folder_id.to_string()];
-            let mut index = 0usize;
-            while index < descendants.len() {
-                let current = descendants[index].clone();
-                for (id, parent) in &folders {
-                    if parent.as_deref() == Some(current.as_str()) && !descendants.contains(id) {
-                        descendants.push(id.clone());
-                    }
-                }
-                index += 1;
-            }
-            if descendants.iter().any(|id| id == parent_id) {
-                return Err(MondrianError::AssetDbError {
-                    reason: "不能将文件夹移动到自身的子文件夹".to_string(),
-                });
-            }
-        }
-
-        let changed = db
-            .execute(
-                "UPDATE folders SET parent_id = ?1, updated_at = ?2 WHERE id = ?3",
-                rusqlite::params![parent_folder_id, chrono::Utc::now().to_rfc3339(), folder_id],
-            )
-            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
-        if changed == 0 {
-            return Err(MondrianError::AssetDbError {
-                reason: format!("文件夹不存在：{folder_id}"),
-            });
-        }
+        self.move_assets_and_folders(&[], &[folder_id.to_owned()], parent_folder_id)?;
         Ok(())
+    }
+
+    /// Atomically move visible Asset records and folders to one Library bin.
+    ///
+    /// The complete request is deduplicated and validated against one SQLite
+    /// transaction before any row changes. Missing/retired Assets, missing
+    /// folders, self-parenting, descendant cycles, or a storage failure roll
+    /// back the entire request. A record already at the destination is a
+    /// successful no-op and is excluded from the returned counts.
+    pub fn move_assets_and_folders(
+        &self,
+        asset_ids: &[AssetId],
+        folder_ids: &[String],
+        target_folder_id: Option<&str>,
+    ) -> Result<AssetLibraryMoveOutcome> {
+        let asset_ids = asset_ids.iter().copied().collect::<BTreeSet<_>>();
+        let folder_ids = folder_ids.iter().cloned().collect::<BTreeSet<_>>();
+        if asset_ids.is_empty() && folder_ids.is_empty() {
+            return Ok(AssetLibraryMoveOutcome { moved_assets: 0, moved_folders: 0 });
+        }
+
+        let mut db = self.db.lock();
+        let transaction = db
+            .transaction()
+            .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+        let folders = {
+            let mut statement = transaction
+                .prepare("SELECT id, parent_id FROM folders")
+                .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })
+                .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?
+        };
+        if let Some(target_folder_id) = target_folder_id {
+            if !folders.iter().any(|(id, _)| id == target_folder_id) {
+                return Err(MondrianError::AssetDbError {
+                    reason: format!("目标文件夹不存在：{target_folder_id}"),
+                });
+            }
+        }
+
+        let mut assets_to_move = Vec::with_capacity(asset_ids.len());
+        for asset_id in asset_ids {
+            let record = transaction
+                .query_row(
+                    "SELECT folder_id, retired_at FROM assets WHERE id = ?1 LIMIT 1",
+                    rusqlite::params![asset_id.0.to_string()],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+            let Some((current_folder_id, retired_at)) = record else {
+                return Err(MondrianError::AssetNotFound { asset_id: asset_id.to_string() });
+            };
+            if retired_at.is_some() {
+                return Err(MondrianError::AssetNotFound { asset_id: asset_id.to_string() });
+            }
+            if current_folder_id.as_deref() != target_folder_id {
+                assets_to_move.push(asset_id);
+            }
+        }
+
+        let mut folders_to_move = Vec::with_capacity(folder_ids.len());
+        for folder_id in folder_ids {
+            validate_folder_reparent(&folders, &folder_id, target_folder_id)?;
+            let current_parent = folders
+                .iter()
+                .find(|(id, _)| id == &folder_id)
+                .and_then(|(_, parent)| parent.as_deref());
+            if current_parent != target_folder_id {
+                folders_to_move.push(folder_id);
+            }
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        for asset_id in &assets_to_move {
+            let changed = transaction
+                .execute(
+                    "UPDATE assets SET folder_id = ?1, updated_at = ?2 \
+                     WHERE id = ?3 AND retired_at IS NULL",
+                    rusqlite::params![target_folder_id, now, asset_id.0.to_string()],
+                )
+                .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+            if changed != 1 {
+                return Err(MondrianError::AssetDbError {
+                    reason: "Asset folder membership changed after batch preflight".to_owned(),
+                });
+            }
+        }
+        for folder_id in &folders_to_move {
+            let changed = transaction
+                .execute(
+                    "UPDATE folders SET parent_id = ?1, updated_at = ?2 WHERE id = ?3",
+                    rusqlite::params![target_folder_id, now, folder_id],
+                )
+                .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+            if changed != 1 {
+                return Err(MondrianError::AssetDbError {
+                    reason: "Asset folder parent changed after batch preflight".to_owned(),
+                });
+            }
+        }
+
+        transaction
+            .commit()
+            .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+        Ok(AssetLibraryMoveOutcome {
+            moved_assets: assets_to_move.len(),
+            moved_folders: folders_to_move.len(),
+        })
     }
 
     /// Find which timeline clips reference this asset (position reverse lookup).
@@ -2393,6 +2478,107 @@ mod tests {
             lib.move_asset_to_folder(id, Some("missing-folder")).unwrap_err(),
             MondrianError::AssetDbError { .. }
         ));
+    }
+
+    #[test]
+    fn batch_move_deduplicates_and_commits_assets_and_folders_together() {
+        let lib = open_test_library();
+        let target = lib.create_folder("Target", None).expect("target");
+        let first_folder = lib.create_folder("First", None).expect("first folder");
+        let second_folder = lib.create_folder("Second", None).expect("second folder");
+        let first_asset = lib.create_solid_color_asset(Some("First")).expect("first asset");
+        let second_asset = lib.create_solid_color_asset(Some("Second")).expect("second asset");
+
+        let outcome = lib
+            .move_assets_and_folders(
+                &[first_asset, second_asset, first_asset],
+                &[
+                    first_folder.clone(),
+                    second_folder.clone(),
+                    first_folder.clone(),
+                ],
+                Some(&target),
+            )
+            .expect("atomic batch move");
+
+        assert_eq!(
+            outcome,
+            AssetLibraryMoveOutcome { moved_assets: 2, moved_folders: 2 }
+        );
+        assert_eq!(
+            lib.get_asset(first_asset).expect("first").expect("record").folder_id.as_deref(),
+            Some(target.as_str())
+        );
+        assert_eq!(
+            lib.get_asset(second_asset)
+                .expect("second")
+                .expect("record")
+                .folder_id
+                .as_deref(),
+            Some(target.as_str())
+        );
+        let folders = lib.list_folders().expect("folders");
+        for folder_id in [first_folder, second_folder] {
+            assert_eq!(
+                folders
+                    .iter()
+                    .find(|folder| folder.id == folder_id)
+                    .expect("moved folder")
+                    .parent_id
+                    .as_deref(),
+                Some(target.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn batch_move_rolls_back_every_row_when_sqlite_aborts_mid_transaction() {
+        let lib = open_test_library();
+        let target = lib.create_folder("Target", None).expect("target");
+        let first = lib.create_solid_color_asset(Some("First")).expect("first");
+        let second = lib.create_solid_color_asset(Some("Second")).expect("second");
+        lib.db
+            .lock()
+            .execute_batch(&format!(
+                "CREATE TRIGGER force_batch_move_abort \
+                 BEFORE UPDATE OF folder_id ON assets \
+                 WHEN OLD.id = '{}' \
+                 BEGIN SELECT RAISE(ABORT, 'forced batch move failure'); END;",
+                second.0
+            ))
+            .expect("install failure trigger");
+
+        let error = lib
+            .move_assets_and_folders(&[first, second], &[], Some(&target))
+            .expect_err("trigger must abort the transaction");
+
+        assert!(matches!(error, MondrianError::AssetDbError { .. }));
+        assert_eq!(
+            lib.get_asset(first).expect("first").expect("record").folder_id,
+            None
+        );
+        assert_eq!(
+            lib.get_asset(second).expect("second").expect("record").folder_id,
+            None
+        );
+    }
+
+    #[test]
+    fn batch_move_rejects_cycles_before_changing_asset_membership() {
+        let lib = open_test_library();
+        let parent = lib.create_folder("Parent", None).expect("parent");
+        let child = lib.create_folder("Child", Some(&parent)).expect("child");
+        let asset = lib.create_solid_color_asset(Some("Plate")).expect("asset");
+
+        let error = lib
+            .move_assets_and_folders(&[asset], &[parent], Some(&child))
+            .expect_err("folder cycle must fail the complete request");
+
+        assert!(matches!(error, MondrianError::AssetDbError { .. }));
+        assert_eq!(
+            lib.get_asset(asset).expect("asset").expect("record").folder_id,
+            None
+        );
     }
 
     #[test]

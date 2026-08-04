@@ -2037,8 +2037,8 @@ mod tests {
         ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
         ProjectSettingsDraftUpdatePayload, ProjectUpdateColorEnvironmentPayload,
         SequenceSettingsDraftUpdatePayload, SequenceSettingsTabPayload,
-        SequenceUpdateSettingsPayload, ViewerSetZoomScalePayload, ASSETS_IMPORT_FILES,
-        ASSETS_NAMESPACE, ASSETS_RELINK_ASSET, ASSETS_SET_INTERPRETATION, EXPORT_EDIT_DRAFT,
+        SequenceUpdateSettingsPayload, ViewerSetZoomScalePayload, ASSET_IMPORT_FILES,
+        ASSET_NAMESPACE, ASSET_RELINK, ASSET_SET_INTERPRETATION, EXPORT_EDIT_DRAFT,
         EXPORT_NAMESPACE, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
         PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_UPDATE_COLOR_ENVIRONMENT, SEQUENCE_NAMESPACE,
         SEQUENCE_UPDATE_SETTINGS,
@@ -3968,8 +3968,8 @@ mod tests {
         let Some(Action::Custom { namespace, name, payload }) = action else {
             panic!("expected asset interpretation action");
         };
-        assert_eq!(namespace, ASSETS_NAMESPACE);
-        assert_eq!(name, ASSETS_SET_INTERPRETATION);
+        assert_eq!(namespace, ASSET_NAMESPACE);
+        assert_eq!(name, ASSET_SET_INTERPRETATION);
         let payload: AssetsSetInterpretationPayload =
             serde_json::from_value(payload).expect("interpretation payload");
         assert_eq!(payload.asset_id, asset_id);
@@ -4046,8 +4046,8 @@ mod tests {
         let Some(Action::Custom { namespace, name, payload }) = action else {
             panic!("expected assets import action");
         };
-        assert_eq!(namespace, ASSETS_NAMESPACE);
-        assert_eq!(name, ASSETS_IMPORT_FILES);
+        assert_eq!(namespace, ASSET_NAMESPACE);
+        assert_eq!(name, ASSET_IMPORT_FILES);
         let payload: AssetsImportFilesPayload =
             serde_json::from_value(payload).expect("assets import payload");
         assert_eq!(payload.paths, paths);
@@ -4072,8 +4072,8 @@ mod tests {
         let Some(Action::Custom { namespace, name, payload }) = action else {
             panic!("expected assets relink action");
         };
-        assert_eq!(namespace, ASSETS_NAMESPACE);
-        assert_eq!(name, ASSETS_RELINK_ASSET);
+        assert_eq!(namespace, ASSET_NAMESPACE);
+        assert_eq!(name, ASSET_RELINK);
         let payload: AssetsRelinkAssetPayload =
             serde_json::from_value(payload).expect("assets relink payload");
         assert_eq!(payload.asset_id, asset_id);

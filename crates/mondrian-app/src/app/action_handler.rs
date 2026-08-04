@@ -6,6 +6,9 @@
 use crate::app::media_asset_mutation::MediaAssetMutationKind;
 use crate::app::preview_quality::normalize_preview_resolution_scale;
 use crate::app::product_action::{
+    AssetAudioComponentRebindPayload, AssetLibraryMovePayload, AssetLibrarySelectionPayload,
+    AssetProductAction, AssetRelinkPayload, AssetRenameFolderPayload, AssetRenamePayload,
+    AssetSetInterpretationPayload, AssetSetProxyModePayload, AssetTargetPayload,
     ClipCurveEditPayload, ClipProductAction, ExportDraftEdit, ExportProductAction, ProductAction,
     ProjectCreateWithSettingsPayload, ProjectProductAction, ProjectRecoverFromAutosavePayload,
     SequenceProductAction, SequenceUpdateSettingsPayload, TimelineClipSelectionModePayload,
@@ -23,12 +26,6 @@ use crate::app::timeline_editing::{
     clip_link_group_member_ids, find_clip, find_clip_mut, find_clip_track_lock, set_clip_disabled,
 };
 use crate::app::ui_actions::{
-    AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
-    AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload, AssetsImportFilesPayload,
-    AssetsMoveAssetPayload, AssetsMoveFolderPayload, AssetsMoveSelectionPayload,
-    AssetsPrepareDragPayload, AssetsRebindAudioComponentPayload,
-    AssetsRefreshAudioComponentsPayload, AssetsRelinkAssetPayload, AssetsRenameAssetPayload,
-    AssetsRenameFolderPayload, AssetsSetInterpretationPayload, AssetsSetProxyModePayload,
     InspectorAudioComponentSourcePayload, InspectorSetAudioComponentSourcePayload,
     TimelineAddTrackKind, TimelineAddTrackPayload, TimelineDropAssetPayload,
     TimelineInOutPointPayloadKind, TimelineInsertAssetPayload, TimelineMoveTrackPayload,
@@ -36,12 +33,7 @@ use crate::app::ui_actions::{
     TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
     TimelineSetTrackControlPayload, TimelineSetTrackTargetingPayload,
     TimelineTrackControlPayloadKind, TimelineTrackTargetingControl,
-    TimelineTrimSelectedClipsToPlayheadPayload, ASSETS_CREATE_ADJUSTMENT_LAYER,
-    ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR, ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER,
-    ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES, ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER,
-    ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, ASSETS_REBIND_AUDIO_COMPONENT,
-    ASSETS_REFRESH_AUDIO_COMPONENTS, ASSETS_RELINK_ASSET, ASSETS_RENAME_ASSET,
-    ASSETS_RENAME_FOLDER, ASSETS_SET_INTERPRETATION, ASSETS_SET_PROXY_MODE, INSPECTOR_NAMESPACE,
+    TimelineTrimSelectedClipsToPlayheadPayload, INSPECTOR_NAMESPACE,
     INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
     TIMELINE_CREATE_BASIC_TITLE, TIMELINE_DROP_ASSET, TIMELINE_EXTRACT_RANGE,
     TIMELINE_INSERT_ASSET, TIMELINE_LIFT_RANGE, TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_MOVE_TRACK,
@@ -53,8 +45,7 @@ use crate::app::ui_actions::{
 #[cfg(test)]
 use crate::app::SelectedClipRef;
 use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, ClipSelectionMode};
-use mondrian_assets::library::FolderRecord;
-use mondrian_assets::{AssetKind, AssetLibrary};
+use mondrian_assets::AssetKind;
 use mondrian_core::automation::PropertyHost;
 #[cfg(test)]
 use mondrian_core::automation::{PropertyMutation, PropertyValue};
@@ -71,6 +62,11 @@ use mondrian_timeline::{
 };
 use std::path::PathBuf;
 use std::time::Duration;
+
+enum AssetLibrarySubject {
+    Asset(String),
+    Folder(String),
+}
 
 impl AppState {
     /// Dispatch one semantic Action into its owning product Interface.
@@ -232,9 +228,6 @@ impl AppState {
             }
             Action::Custom { namespace, name, payload } if namespace == INSPECTOR_NAMESPACE => {
                 self.dispatch_inspector_ui_action(&name, payload)
-            }
-            Action::Custom { namespace, name, payload } if namespace == ASSETS_NAMESPACE => {
-                self.dispatch_assets_ui_action(&name, payload)
             }
             unsupported => Err(MondrianError::WorkflowStepFailed {
                 step_id: "dispatch_action".to_owned(),
@@ -398,27 +391,7 @@ impl AppState {
         self.start_media_import_batch(paths, folder_id.map(str::to_owned))
     }
 
-    fn delete_asset_from_ui(&mut self, payload: AssetsDeleteAssetPayload) -> Result<()> {
-        let library = self.asset_library_handle().ok_or_else(|| {
-            let reason = "素材库未连接".to_string();
-            self.set_status_hint(format!("删除素材失败：{reason}"), true);
-            MondrianError::WorkflowStepFailed { step_id: "delete_asset".to_string(), reason }
-        })?;
-        let asset_name = library
-            .get_asset(payload.asset_id)?
-            .map(|asset| asset.name)
-            .unwrap_or_else(|| payload.asset_id.to_string());
-
-        self.retire_asset_from_library(payload.asset_id).map_err(|err| {
-            let reason = err.to_string();
-            self.set_status_hint(format!("删除素材失败：{reason}"), true);
-            MondrianError::WorkflowStepFailed { step_id: "delete_asset".to_string(), reason }
-        })?;
-        self.set_status_hint(format!("已从素材面板移除：{asset_name}"), false);
-        Ok(())
-    }
-
-    fn relink_asset_from_ui(&mut self, payload: AssetsRelinkAssetPayload) -> Result<()> {
+    fn relink_asset_from_ui(&mut self, payload: AssetRelinkPayload) -> Result<()> {
         self.request_media_asset_mutation(
             payload.asset_id,
             Some(payload.path),
@@ -433,10 +406,7 @@ impl AppState {
         Ok(())
     }
 
-    fn refresh_audio_components_from_ui(
-        &mut self,
-        payload: AssetsRefreshAudioComponentsPayload,
-    ) -> Result<()> {
+    fn refresh_audio_components_from_ui(&mut self, payload: AssetTargetPayload) -> Result<()> {
         self.request_media_asset_mutation(
             payload.asset_id,
             None,
@@ -456,7 +426,7 @@ impl AppState {
 
     fn rebind_audio_component_from_ui(
         &mut self,
-        payload: AssetsRebindAudioComponentPayload,
+        payload: AssetAudioComponentRebindPayload,
     ) -> Result<()> {
         self.request_media_asset_mutation(
             payload.asset_id,
@@ -478,12 +448,25 @@ impl AppState {
         Ok(())
     }
 
-    fn rename_asset_from_ui(&mut self, payload: AssetsRenameAssetPayload) -> Result<()> {
+    fn rename_asset_from_ui(&mut self, payload: AssetRenamePayload) -> Result<()> {
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("重命名素材失败：{reason}"), true);
             MondrianError::WorkflowStepFailed { step_id: "rename_asset".to_string(), reason }
         })?;
+        let requested_name = payload.name.trim();
+        let asset =
+            library
+                .get_asset(payload.asset_id)?
+                .ok_or_else(|| MondrianError::AssetNotFound {
+                    asset_id: payload.asset_id.to_string(),
+                })?;
+        if asset.name == requested_name {
+            return Err(action_not_executed(
+                "rename_asset",
+                "素材已经使用请求的名称",
+            ));
+        }
         library.rename_asset(payload.asset_id, &payload.name).map_err(|err| {
             let reason = err.to_string();
             self.set_status_hint(format!("重命名素材失败：{reason}"), true);
@@ -496,7 +479,7 @@ impl AppState {
 
     fn set_asset_interpretation_from_ui(
         &mut self,
-        payload: AssetsSetInterpretationPayload,
+        payload: AssetSetInterpretationPayload,
     ) -> Result<()> {
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
@@ -506,10 +489,19 @@ impl AppState {
                 reason,
             }
         })?;
-        let asset_name = library
-            .get_asset(payload.asset_id)?
-            .map(|asset| asset.name)
-            .unwrap_or_else(|| payload.asset_id.to_string());
+        let asset_name =
+            library
+                .get_asset(payload.asset_id)?
+                .ok_or_else(|| MondrianError::AssetNotFound {
+                    asset_id: payload.asset_id.to_string(),
+                })?;
+        if asset_name.interpretation == payload.interpretation {
+            return Err(action_not_executed(
+                "set_asset_interpretation",
+                "素材已经使用请求的解释设置",
+            ));
+        }
+        let asset_name = asset_name.name;
         library
             .set_asset_interpretation(payload.asset_id, payload.interpretation)
             .map_err(|err| {
@@ -525,12 +517,26 @@ impl AppState {
         Ok(())
     }
 
-    fn rename_folder_from_ui(&mut self, payload: AssetsRenameFolderPayload) -> Result<()> {
+    fn rename_folder_from_ui(&mut self, payload: AssetRenameFolderPayload) -> Result<()> {
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("重命名文件夹失败：{reason}"), true);
             MondrianError::WorkflowStepFailed { step_id: "rename_folder".to_string(), reason }
         })?;
+        let requested_name = payload.name.trim();
+        let folder = library
+            .list_folders()?
+            .into_iter()
+            .find(|folder| folder.id == payload.folder_id)
+            .ok_or_else(|| MondrianError::AssetDbError {
+                reason: format!("文件夹不存在：{}", payload.folder_id),
+            })?;
+        if folder.name == requested_name {
+            return Err(action_not_executed(
+                "rename_folder",
+                "文件夹已经使用请求的名称",
+            ));
+        }
         library.rename_folder(&payload.folder_id, &payload.name).map_err(|err| {
             let reason = err.to_string();
             self.set_status_hint(format!("重命名文件夹失败：{reason}"), true);
@@ -541,7 +547,7 @@ impl AppState {
         Ok(())
     }
 
-    fn set_asset_proxy_mode_from_ui(&mut self, payload: AssetsSetProxyModePayload) -> Result<()> {
+    fn set_asset_proxy_mode_from_ui(&mut self, payload: AssetSetProxyModePayload) -> Result<()> {
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("设置代理模式失败：{reason}"), true);
@@ -565,6 +571,12 @@ impl AppState {
                 step_id: "set_asset_proxy_mode".to_string(),
                 reason,
             });
+        }
+        if self.proxy_mode_assets().contains(&payload.asset_id) == payload.enabled {
+            return Err(action_not_executed(
+                "set_asset_proxy_mode",
+                "素材代理偏好已经处于请求状态",
+            ));
         }
         let source_path = asset.file_path().map(PathBuf::from);
         if payload.enabled && source_path.as_ref().is_none_or(|source_path| !source_path.exists()) {
@@ -643,35 +655,13 @@ impl AppState {
         Ok(())
     }
 
-    fn delete_folder_from_ui(&mut self, payload: AssetsDeleteFolderPayload) -> Result<()> {
-        let library = self.asset_library_handle().ok_or_else(|| {
-            let reason = "素材库未连接".to_string();
-            self.set_status_hint(format!("删除文件夹失败：{reason}"), true);
-            MondrianError::WorkflowStepFailed { step_id: "delete_folder".to_string(), reason }
-        })?;
-        let folder_name = library
-            .list_folders()?
-            .into_iter()
-            .find(|folder| folder.id == payload.folder_id)
-            .map(|folder| folder.name)
-            .unwrap_or_else(|| payload.folder_id.clone());
-
-        self.delete_folder_from_library(&payload.folder_id).map_err(|err| {
-            let reason = err.to_string();
-            self.set_status_hint(format!("删除文件夹失败：{reason}"), true);
-            MondrianError::WorkflowStepFailed { step_id: "delete_folder".to_string(), reason }
-        })?;
-        self.set_status_hint(format!("已删除文件夹：{folder_name}"), false);
-        Ok(())
-    }
-
-    fn delete_asset_selection_from_ui(
+    fn remove_asset_library_entries(
         &mut self,
-        payload: AssetsDeleteSelectionPayload,
+        payload: AssetLibrarySelectionPayload,
     ) -> Result<()> {
         if payload.asset_ids.is_empty() && payload.folder_ids.is_empty() {
             return Err(action_not_executed(
-                "delete_asset_selection",
+                "remove_asset_library_entries",
                 "当前没有可删除的素材或文件夹选择",
             ));
         }
@@ -679,23 +669,37 @@ impl AppState {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("删除素材选择失败：{reason}"), true);
             MondrianError::WorkflowStepFailed {
-                step_id: "delete_asset_selection".to_string(),
+                step_id: "remove_asset_library_entries".to_string(),
                 reason,
             }
         })?;
+        let single_subject = match (payload.asset_ids.as_slice(), payload.folder_ids.as_slice()) {
+            ([asset_id], []) => library
+                .get_asset(*asset_id)?
+                .map(|asset| AssetLibrarySubject::Asset(asset.name)),
+            ([], [folder_id]) => library
+                .list_folders()?
+                .into_iter()
+                .find(|folder| folder.id == *folder_id)
+                .map(|folder| AssetLibrarySubject::Folder(folder.name)),
+            _ => None,
+        };
         let outcome = library
             .retire_assets_and_delete_folders(&payload.asset_ids, &payload.folder_ids)
             .map_err(|err| {
                 let reason = err.to_string();
                 self.set_status_hint(format!("删除素材选择失败：{reason}"), true);
                 MondrianError::WorkflowStepFailed {
-                    step_id: "delete_asset_selection".to_string(),
+                    step_id: "remove_asset_library_entries".to_string(),
                     reason,
                 }
             })?;
 
         if outcome.retired_assets + outcome.deleted_folders == 0 {
-            return Ok(());
+            return Err(action_not_executed(
+                "remove_asset_library_entries",
+                "素材库已经处于请求的状态",
+            ));
         }
         let mut retired_ids = Vec::new();
         for asset_id in payload.asset_ids {
@@ -706,92 +710,45 @@ impl AppState {
             }
         }
         self.event_bus.publish(mondrian_core::events::AppEvent::AssetLibraryReloaded);
-        self.set_status_hint(
-            format!(
-                "已从素材面板移除 {} 个素材、删除 {} 个文件夹",
-                outcome.retired_assets, outcome.deleted_folders
-            ),
-            false,
-        );
+        if let Some(subject) = single_subject {
+            let message = match subject {
+                AssetLibrarySubject::Asset(name) => format!("已从素材面板移除：{name}"),
+                AssetLibrarySubject::Folder(name) => format!("已删除文件夹：{name}"),
+            };
+            self.set_status_hint(message, false);
+        } else {
+            self.set_status_hint(
+                format!(
+                    "已从素材面板移除 {} 个素材、删除 {} 个文件夹",
+                    outcome.retired_assets, outcome.deleted_folders
+                ),
+                false,
+            );
+        }
         Ok(())
     }
 
-    fn move_asset_from_ui(&mut self, payload: AssetsMoveAssetPayload) -> Result<()> {
-        let library = self.asset_library_handle().ok_or_else(|| {
-            let reason = "素材库未连接".to_string();
-            self.set_status_hint(format!("移动素材失败：{reason}"), true);
-            MondrianError::WorkflowStepFailed { step_id: "move_asset".to_string(), reason }
-        })?;
-        let asset_name = library
-            .get_asset(payload.asset_id)?
-            .map(|asset| asset.name)
-            .unwrap_or_else(|| payload.asset_id.to_string());
-        let target_name = match payload.folder_id.as_deref() {
-            Some(folder_id) => library
-                .list_folders()?
-                .into_iter()
-                .find(|folder| folder.id == folder_id)
-                .map(|folder| folder.name)
-                .unwrap_or_else(|| folder_id.to_string()),
-            None => "All assets".to_string(),
-        };
-
-        self.move_asset_in_library(payload.asset_id, payload.folder_id.as_deref())
-            .map_err(|err| {
-                let reason = err.to_string();
-                self.set_status_hint(format!("移动素材失败：{reason}"), true);
-                MondrianError::WorkflowStepFailed { step_id: "move_asset".to_string(), reason }
-            })?;
-        self.set_status_hint(format!("已移动素材：{asset_name} → {target_name}"), false);
-        Ok(())
-    }
-
-    fn move_folder_from_ui(&mut self, payload: AssetsMoveFolderPayload) -> Result<()> {
-        let library = self.asset_library_handle().ok_or_else(|| {
-            let reason = "素材库未连接".to_string();
-            self.set_status_hint(format!("移动文件夹失败：{reason}"), true);
-            MondrianError::WorkflowStepFailed { step_id: "move_folder".to_string(), reason }
-        })?;
-        let folders = library.list_folders()?;
-        let folder_name = folders
-            .iter()
-            .find(|folder| folder.id == payload.folder_id)
-            .map(|folder| folder.name.clone())
-            .unwrap_or_else(|| payload.folder_id.clone());
-        let target_name = match payload.parent_folder_id.as_deref() {
-            Some(parent_id) => folders
-                .iter()
-                .find(|folder| folder.id == parent_id)
-                .map(|folder| folder.name.clone())
-                .unwrap_or_else(|| parent_id.to_string()),
-            None => "All assets".to_string(),
-        };
-
-        self.move_folder_in_library(&payload.folder_id, payload.parent_folder_id.as_deref())
-            .map_err(|err| {
-                let reason = err.to_string();
-                self.set_status_hint(format!("移动文件夹失败：{reason}"), true);
-                MondrianError::WorkflowStepFailed { step_id: "move_folder".to_string(), reason }
-            })?;
-        self.set_status_hint(
-            format!("已移动文件夹：{folder_name} → {target_name}"),
-            false,
-        );
-        Ok(())
-    }
-
-    fn move_selection_from_ui(&mut self, payload: AssetsMoveSelectionPayload) -> Result<()> {
+    fn move_asset_library_entries(&mut self, mut payload: AssetLibraryMovePayload) -> Result<()> {
         if payload.asset_ids.is_empty() && payload.folder_ids.is_empty() {
             return Err(action_not_executed(
-                "move_asset_selection",
+                "move_asset_library_entries",
                 "当前没有可移动的素材或文件夹选择",
+            ));
+        }
+        if let Some(target_folder_id) = payload.target_folder_id.as_deref() {
+            payload.folder_ids.retain(|folder_id| folder_id != target_folder_id);
+        }
+        if payload.asset_ids.is_empty() && payload.folder_ids.is_empty() {
+            return Err(action_not_executed(
+                "move_asset_library_entries",
+                "目标文件夹不能同时作为唯一移动对象",
             ));
         }
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("移动素材选择失败：{reason}"), true);
             MondrianError::WorkflowStepFailed {
-                step_id: "move_asset_selection".to_string(),
+                step_id: "move_asset_library_entries".to_string(),
                 reason,
             }
         })?;
@@ -799,18 +756,20 @@ impl AppState {
             let reason = err.to_string();
             self.set_status_hint(format!("移动素材选择失败：{reason}"), true);
             MondrianError::WorkflowStepFailed {
-                step_id: "move_asset_selection".to_string(),
+                step_id: "move_asset_library_entries".to_string(),
                 reason,
             }
         })?;
-        if let Err(err) = validate_asset_selection_move(&library, &payload, &folders) {
-            let reason = err.to_string();
-            self.set_status_hint(format!("移动素材选择失败：{reason}"), true);
-            return Err(MondrianError::WorkflowStepFailed {
-                step_id: "move_asset_selection".to_string(),
-                reason,
-            });
-        }
+        let single_subject = match (payload.asset_ids.as_slice(), payload.folder_ids.as_slice()) {
+            ([asset_id], []) => library
+                .get_asset(*asset_id)?
+                .map(|asset| AssetLibrarySubject::Asset(asset.name)),
+            ([], [folder_id]) => folders
+                .iter()
+                .find(|folder| folder.id == *folder_id)
+                .map(|folder| AssetLibrarySubject::Folder(folder.name.clone())),
+            _ => None,
+        };
         let target_name = match payload.target_folder_id.as_deref() {
             Some(folder_id) => folders
                 .iter()
@@ -819,47 +778,47 @@ impl AppState {
                 .unwrap_or_else(|| folder_id.to_string()),
             None => "All assets".to_string(),
         };
-        let mut moved_assets = 0usize;
-        let mut moved_folders = 0usize;
+        let outcome = library
+            .move_assets_and_folders(
+                &payload.asset_ids,
+                &payload.folder_ids,
+                payload.target_folder_id.as_deref(),
+            )
+            .map_err(|err| {
+                let reason = err.to_string();
+                self.set_status_hint(format!("移动素材选择失败：{reason}"), true);
+                MondrianError::WorkflowStepFailed {
+                    step_id: "move_asset_library_entries".to_string(),
+                    reason,
+                }
+            })?;
 
-        for asset_id in &payload.asset_ids {
-            library
-                .move_asset_to_folder(*asset_id, payload.target_folder_id.as_deref())
-                .map_err(|err| {
-                    let reason = err.to_string();
-                    self.set_status_hint(format!("移动素材选择失败：{reason}"), true);
-                    MondrianError::WorkflowStepFailed {
-                        step_id: "move_asset_selection".to_string(),
-                        reason,
-                    }
-                })?;
-            moved_assets += 1;
-        }
-        for folder_id in &payload.folder_ids {
-            if Some(folder_id.as_str()) == payload.target_folder_id.as_deref() {
-                continue;
-            }
-            library
-                .move_folder(folder_id, payload.target_folder_id.as_deref())
-                .map_err(|err| {
-                    let reason = err.to_string();
-                    self.set_status_hint(format!("移动素材选择失败：{reason}"), true);
-                    MondrianError::WorkflowStepFailed {
-                        step_id: "move_asset_selection".to_string(),
-                        reason,
-                    }
-                })?;
-            moved_folders += 1;
-        }
-
-        if moved_assets + moved_folders == 0 {
-            return Ok(());
+        if outcome.moved_assets + outcome.moved_folders == 0 {
+            return Err(action_not_executed(
+                "move_asset_library_entries",
+                "素材库已经处于请求的组织状态",
+            ));
         }
         self.event_bus.publish(mondrian_core::events::AppEvent::AssetLibraryReloaded);
-        self.set_status_hint(
-            format!("已移动 {moved_assets} 个素材、{moved_folders} 个文件夹 → {target_name}"),
-            false,
-        );
+        if let Some(subject) = single_subject {
+            let message = match subject {
+                AssetLibrarySubject::Asset(name) => {
+                    format!("已移动素材：{name} → {target_name}")
+                }
+                AssetLibrarySubject::Folder(name) => {
+                    format!("已移动文件夹：{name} → {target_name}")
+                }
+            };
+            self.set_status_hint(message, false);
+        } else {
+            self.set_status_hint(
+                format!(
+                    "已移动 {} 个素材、{} 个文件夹 → {target_name}",
+                    outcome.moved_assets, outcome.moved_folders
+                ),
+                false,
+            );
+        }
         Ok(())
     }
 
@@ -1156,6 +1115,7 @@ impl AppState {
                 self.dispatch_video_transition_product_action(action)
             }
             ProductAction::Audio(action) => self.dispatch_audio_product_action(action),
+            ProductAction::Asset(action) => self.dispatch_asset_product_action(action),
             ProductAction::Viewer(action) => self.dispatch_viewer_product_action(action),
             ProductAction::Clip(action) => self.dispatch_clip_product_action(action),
             ProductAction::Project(action) => self.dispatch_project_product_action(action),
@@ -1164,6 +1124,42 @@ impl AppState {
             ProductAction::VisualEffect(action) => {
                 self.dispatch_visual_effect_product_action(action)
             }
+        }
+    }
+
+    fn dispatch_asset_product_action(&mut self, action: AssetProductAction) -> Result<()> {
+        match action {
+            AssetProductAction::PrepareDrag(payload) => self.prepare_asset_drag(payload),
+            AssetProductAction::RefreshAudioComponents(payload) => {
+                self.refresh_audio_components_from_ui(payload)
+            }
+            AssetProductAction::RebindAudioComponent(payload) => {
+                self.rebind_audio_component_from_ui(payload)
+            }
+            AssetProductAction::CreateGenerated(payload) => match payload.kind {
+                mondrian_core::types::GeneratedAssetKind::AdjustmentLayer => self
+                    .create_adjustment_layer_asset_in_folder(None, payload.folder_id.as_deref())
+                    .map(|_| ()),
+                mondrian_core::types::GeneratedAssetKind::SolidColor => self
+                    .create_solid_color_asset_in_folder(None, payload.folder_id.as_deref())
+                    .map(|_| ()),
+            },
+            AssetProductAction::CreateFolder(payload) => self
+                .create_default_folder_in_library(payload.parent_folder_id.as_deref())
+                .map(|_| ()),
+            AssetProductAction::ImportFiles(payload) => self
+                .import_media_into_folder_from_action(payload.paths, payload.folder_id.as_deref()),
+            AssetProductAction::Relink(payload) => self.relink_asset_from_ui(payload),
+            AssetProductAction::SetInterpretation(payload) => {
+                self.set_asset_interpretation_from_ui(payload)
+            }
+            AssetProductAction::Rename(payload) => self.rename_asset_from_ui(payload),
+            AssetProductAction::RenameFolder(payload) => self.rename_folder_from_ui(payload),
+            AssetProductAction::SetProxyMode(payload) => self.set_asset_proxy_mode_from_ui(payload),
+            AssetProductAction::RemoveEntries(payload) => {
+                self.remove_asset_library_entries(*payload)
+            }
+            AssetProductAction::MoveEntries(payload) => self.move_asset_library_entries(*payload),
         }
     }
 
@@ -1485,156 +1481,6 @@ impl AppState {
         }
     }
 
-    fn dispatch_assets_ui_action(&mut self, name: &str, payload: serde_json::Value) -> Result<()> {
-        match name {
-            ASSETS_PREPARE_DRAG => {
-                let payload = parse_ui_payload::<AssetsPrepareDragPayload>(
-                    "assets_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.prepare_asset_drag_from_ui(payload)
-            }
-            ASSETS_CREATE_ADJUSTMENT_LAYER => {
-                let payload = parse_ui_payload::<AssetsCreateAssetPayload>(
-                    "assets_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.create_adjustment_layer_asset_in_folder(None, payload.folder_id.as_deref())
-                    .map(|_| ())
-            }
-            ASSETS_CREATE_SOLID_COLOR => {
-                let payload = parse_ui_payload::<AssetsCreateAssetPayload>(
-                    "assets_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.create_solid_color_asset_in_folder(None, payload.folder_id.as_deref())
-                    .map(|_| ())
-            }
-            ASSETS_CREATE_FOLDER => {
-                let payload = parse_ui_payload::<AssetsCreateFolderPayload>(
-                    "assets_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.create_default_folder_in_library(payload.parent_folder_id.as_deref())
-                    .map(|_| ())
-            }
-            ASSETS_IMPORT_FILES => {
-                let payload = parse_ui_payload::<AssetsImportFilesPayload>(
-                    "assets_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.import_media_into_folder_from_action(
-                    payload.paths,
-                    payload.folder_id.as_deref(),
-                )
-            }
-            ASSETS_RELINK_ASSET => {
-                let payload = parse_ui_payload::<AssetsRelinkAssetPayload>(
-                    "assets_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.relink_asset_from_ui(payload)
-            }
-            ASSETS_REBIND_AUDIO_COMPONENT => {
-                let payload = parse_ui_payload::<AssetsRebindAudioComponentPayload>(
-                    "assets_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.rebind_audio_component_from_ui(payload)
-            }
-            ASSETS_REFRESH_AUDIO_COMPONENTS => {
-                let payload = parse_ui_payload::<AssetsRefreshAudioComponentsPayload>(
-                    "assets_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.refresh_audio_components_from_ui(payload)
-            }
-            ASSETS_RENAME_ASSET => {
-                let payload = parse_ui_payload::<AssetsRenameAssetPayload>(
-                    "assets_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.rename_asset_from_ui(payload)
-            }
-            ASSETS_SET_INTERPRETATION => {
-                let payload = parse_ui_payload::<AssetsSetInterpretationPayload>(
-                    "assets_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.set_asset_interpretation_from_ui(payload)
-            }
-            ASSETS_RENAME_FOLDER => {
-                let payload = parse_ui_payload::<AssetsRenameFolderPayload>(
-                    "assets_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.rename_folder_from_ui(payload)
-            }
-            ASSETS_SET_PROXY_MODE => {
-                let payload = parse_ui_payload::<AssetsSetProxyModePayload>(
-                    "assets_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.set_asset_proxy_mode_from_ui(payload)
-            }
-            ASSETS_DELETE_ASSET => {
-                let payload = parse_ui_payload::<AssetsDeleteAssetPayload>(
-                    "assets_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.delete_asset_from_ui(payload)
-            }
-            ASSETS_DELETE_FOLDER => {
-                let payload = parse_ui_payload::<AssetsDeleteFolderPayload>(
-                    "assets_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.delete_folder_from_ui(payload)
-            }
-            ASSETS_DELETE_SELECTION => {
-                let payload = parse_ui_payload::<AssetsDeleteSelectionPayload>(
-                    "assets_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.delete_asset_selection_from_ui(payload)
-            }
-            ASSETS_MOVE_ASSET => {
-                let payload =
-                    parse_ui_payload::<AssetsMoveAssetPayload>("assets_ui_action", name, payload)?;
-                self.move_asset_from_ui(payload)
-            }
-            ASSETS_MOVE_FOLDER => {
-                let payload =
-                    parse_ui_payload::<AssetsMoveFolderPayload>("assets_ui_action", name, payload)?;
-                self.move_folder_from_ui(payload)
-            }
-            ASSETS_MOVE_SELECTION => {
-                let payload = parse_ui_payload::<AssetsMoveSelectionPayload>(
-                    "assets_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.move_selection_from_ui(payload)
-            }
-            _ => Err(unknown_ui_action_error("assets_ui_action", name)),
-        }
-    }
-
     fn dispatch_export_product_action(&mut self, action: ExportProductAction) -> Result<()> {
         match action {
             ExportProductAction::EditDraft(edit) => {
@@ -1843,7 +1689,7 @@ impl AppState {
         Ok(())
     }
 
-    fn prepare_asset_drag_from_ui(&mut self, payload: AssetsPrepareDragPayload) -> Result<()> {
+    fn prepare_asset_drag(&mut self, payload: AssetTargetPayload) -> Result<()> {
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("素材准备失败：{reason}"), true);
@@ -1915,9 +1761,7 @@ impl AppState {
             .dragging_asset()
             .is_none_or(|dragging| dragging.asset_id != payload.asset_id);
         if needs_prepare {
-            self.prepare_asset_drag_from_ui(AssetsPrepareDragPayload {
-                asset_id: payload.asset_id,
-            })?;
+            self.prepare_asset_drag(AssetTargetPayload { asset_id: payload.asset_id })?;
         }
 
         let result = if payload.is_video_track {
@@ -2372,79 +2216,6 @@ impl AppState {
         }
         Ok(())
     }
-}
-
-fn validate_asset_selection_move(
-    library: &AssetLibrary,
-    payload: &AssetsMoveSelectionPayload,
-    folders: &[FolderRecord],
-) -> Result<()> {
-    if let Some(target_folder_id) = payload.target_folder_id.as_deref() {
-        if !folders.iter().any(|folder| folder.id == target_folder_id) {
-            return Err(MondrianError::AssetDbError {
-                reason: format!("目标文件夹不存在：{target_folder_id}"),
-            });
-        }
-    }
-
-    for asset_id in &payload.asset_ids {
-        if library.get_asset(*asset_id)?.is_none() {
-            return Err(MondrianError::AssetNotFound { asset_id: asset_id.to_string() });
-        }
-    }
-
-    for folder_id in &payload.folder_ids {
-        if Some(folder_id.as_str()) == payload.target_folder_id.as_deref() {
-            continue;
-        }
-        validate_folder_reparent(folders, folder_id, payload.target_folder_id.as_deref())?;
-    }
-
-    Ok(())
-}
-
-fn validate_folder_reparent(
-    folders: &[FolderRecord],
-    folder_id: &str,
-    parent_folder_id: Option<&str>,
-) -> Result<()> {
-    if !folders.iter().any(|folder| folder.id == folder_id) {
-        return Err(MondrianError::AssetDbError {
-            reason: format!("文件夹不存在：{folder_id}")
-        });
-    }
-    let Some(parent_id) = parent_folder_id else {
-        return Ok(());
-    };
-    if parent_id == folder_id {
-        return Err(MondrianError::AssetDbError {
-            reason: "不能将文件夹移动到自身".to_string()
-        });
-    }
-    if !folders.iter().any(|folder| folder.id == parent_id) {
-        return Err(MondrianError::AssetDbError {
-            reason: format!("目标文件夹不存在：{parent_id}"),
-        });
-    }
-    let mut descendants = vec![folder_id.to_string()];
-    let mut index = 0usize;
-    while index < descendants.len() {
-        let current = descendants[index].clone();
-        for folder in folders {
-            if folder.parent_id.as_deref() == Some(current.as_str())
-                && !descendants.iter().any(|id| id == &folder.id)
-            {
-                descendants.push(folder.id.clone());
-            }
-        }
-        index += 1;
-    }
-    if descendants.iter().any(|id| id == parent_id) {
-        return Err(MondrianError::AssetDbError {
-            reason: "不能将文件夹移动到其子文件夹中".to_string(),
-        });
-    }
-    Ok(())
 }
 
 /// Map a source-local trim coordinate into exact Sequence-local author time.
@@ -3048,7 +2819,6 @@ mod tests {
         for (namespace, expected_step) in [
             (TIMELINE_NAMESPACE, "timeline_ui_action.unknown"),
             (INSPECTOR_NAMESPACE, "inspector_ui_action.unknown"),
-            (ASSETS_NAMESPACE, "assets_ui_action.unknown"),
         ] {
             let mut state = AppState::new();
             let err = state
@@ -4514,7 +4284,7 @@ mod tests {
                     asset_ids: Vec::new(),
                     folder_ids: Vec::new(),
                 }),
-                "delete_asset_selection",
+                "remove_asset_library_entries",
             ),
             (
                 assets_move_selection_action(AssetsMoveSelectionPayload {
@@ -4522,7 +4292,7 @@ mod tests {
                     folder_ids: Vec::new(),
                     target_folder_id: None,
                 }),
-                "move_asset_selection",
+                "move_asset_library_entries",
             ),
         ];
 

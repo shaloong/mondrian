@@ -11,8 +11,8 @@ pub use audio_catalog::{
     AudioComponentCatalogError,
 };
 pub use library::{
-    AssetKind, AssetLibrary, AssetLibraryMembership, AssetLibraryRemovalOutcome,
-    AssetLibrarySnapshot, AssetMediaProbeCandidate, AssetRecord,
+    AssetKind, AssetLibrary, AssetLibraryMembership, AssetLibraryMoveOutcome,
+    AssetLibraryRemovalOutcome, AssetLibrarySnapshot, AssetMediaProbeCandidate, AssetRecord,
 };
 mod migration;
 mod native_path;

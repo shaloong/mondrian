@@ -144,6 +144,15 @@ the live catalog, waveform explicitly requests `primary`, and Export snapshots
 freeze only the reachable bindings; media receives only a validated
 `AudioSourceSelection` and never owns author identity.
 
+Asset Library organization is also a deep SQLite mutation Interface. Moving
+any mixture of visible Asset records and folders to one bin deduplicates the
+complete request, validates every strong identity and the complete folder graph,
+and applies only real membership/parent changes inside one transaction. Single
+item movement reuses the same Implementation. Missing or retired Assets,
+missing folders, self/descendant cycles, a changed preflight row, or a storage
+failure roll back the entire request; UI-side loops are not publication
+authority.
+
 Stdout has two bounded 64 KiB look-ahead chunks and stderr retains only its
 latest 64 KiB while always draining the pipe. Generation cancellation is
 polled every 5 ms while waiting for output, then kills, waits, and joins the

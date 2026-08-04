@@ -7286,25 +7286,22 @@ mod tests {
     }
     use crate::app::ui_actions::{
         AppShellInterpretAssetDialogPayload, AppShellRelinkAssetDialogPayload,
-        AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
-        AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
-        AssetsMoveSelectionPayload, AssetsOpenFolderPayload, AssetsRenameAssetPayload,
-        AssetsSetProxyModePayload, ImportMediaDialogPayload, APP_SHELL_IMPORT_MEDIA_DIALOG,
-        APP_SHELL_INTERPRET_ASSET_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_RELINK_ASSET_DIALOG,
-        ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
-        ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
-        ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
-        ASSETS_OPEN_FOLDER, ASSETS_PREPARE_DRAG, ASSETS_REBIND_AUDIO_COMPONENT,
-        ASSETS_REFRESH_AUDIO_COMPONENTS, ASSETS_RENAME_ASSET, ASSETS_SET_PROXY_MODE,
-        AUDIO_EDIT_COMPONENT, AUDIO_NAMESPACE, CLIP_EDIT_NUMERIC_CURVE, CLIP_NAMESPACE,
-        CLIP_WRITE_PARAMETER_VALUES, INSPECTOR_NAMESPACE, INSPECTOR_SET_AUDIO_COMPONENT_SOURCE,
-        TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK,
-        TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_SELECT_CLIP,
-        TIMELINE_SET_IN_OUT_POINT, TIMELINE_SET_SELECTED_CLIPS_ENABLED,
-        TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE,
-        VIDEO_TRANSITION_NAMESPACE, VIDEO_TRANSITION_SELECT, VIDEO_TRANSITION_SET_RANGE,
-        VISUAL_EFFECT_ADD_TO_CLIP, VISUAL_EFFECT_NAMESPACE, VISUAL_EFFECT_SELECT,
-        VISUAL_EFFECT_SET_PARAMETER_VALUE,
+        AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveSelectionPayload,
+        AssetsOpenFolderPayload, AssetsRenameAssetPayload, AssetsSetProxyModePayload,
+        ImportMediaDialogPayload, APP_SHELL_ASSET_BROWSER_OPEN_FOLDER,
+        APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_INTERPRET_ASSET_DIALOG, APP_SHELL_NAMESPACE,
+        APP_SHELL_RELINK_ASSET_DIALOG, ASSET_CREATE_FOLDER, ASSET_CREATE_GENERATED,
+        ASSET_IMPORT_FILES, ASSET_MOVE_ENTRIES, ASSET_NAMESPACE, ASSET_PREPARE_DRAG,
+        ASSET_REBIND_AUDIO_COMPONENT, ASSET_REFRESH_AUDIO_COMPONENTS, ASSET_REMOVE_ENTRIES,
+        ASSET_RENAME, ASSET_SET_PROXY_MODE, AUDIO_EDIT_COMPONENT, AUDIO_NAMESPACE,
+        CLIP_EDIT_NUMERIC_CURVE, CLIP_NAMESPACE, CLIP_WRITE_PARAMETER_VALUES, INSPECTOR_NAMESPACE,
+        INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
+        TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
+        TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT,
+        TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
+        VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE, VIDEO_TRANSITION_NAMESPACE,
+        VIDEO_TRANSITION_SELECT, VIDEO_TRANSITION_SET_RANGE, VISUAL_EFFECT_ADD_TO_CLIP,
+        VISUAL_EFFECT_NAMESPACE, VISUAL_EFFECT_SELECT, VISUAL_EFFECT_SET_PARAMETER_VALUE,
     };
     use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
@@ -8496,8 +8493,8 @@ mod tests {
         let Action::Custom { namespace, name, payload } = &actions[0] else {
             panic!("expected import-files custom action");
         };
-        assert_eq!(namespace, ASSETS_NAMESPACE);
-        assert_eq!(name, ASSETS_IMPORT_FILES);
+        assert_eq!(namespace, ASSET_NAMESPACE);
+        assert_eq!(name, ASSET_IMPORT_FILES);
         let payload: AssetsImportFilesPayload =
             serde_json::from_value(payload.clone()).expect("import files payload");
         assert_eq!(payload.paths, vec![path]);
@@ -8547,12 +8544,13 @@ mod tests {
         let Action::Custom { namespace, name, payload } = &actions[0] else {
             panic!("expected move asset custom action");
         };
-        assert_eq!(namespace, ASSETS_NAMESPACE);
-        assert_eq!(name, ASSETS_MOVE_ASSET);
-        let payload: AssetsMoveAssetPayload =
+        assert_eq!(namespace, ASSET_NAMESPACE);
+        assert_eq!(name, ASSET_MOVE_ENTRIES);
+        let payload: AssetsMoveSelectionPayload =
             serde_json::from_value(payload.clone()).expect("move asset payload");
-        assert_eq!(payload.asset_id, asset_id);
-        assert_eq!(payload.folder_id.as_deref(), Some("rushes"));
+        assert_eq!(payload.asset_ids, vec![asset_id]);
+        assert!(payload.folder_ids.is_empty());
+        assert_eq!(payload.target_folder_id.as_deref(), Some("rushes"));
     }
 
     #[test]
@@ -8590,12 +8588,13 @@ mod tests {
         let Action::Custom { namespace, name, payload } = &actions[0] else {
             panic!("expected move folder custom action");
         };
-        assert_eq!(namespace, ASSETS_NAMESPACE);
-        assert_eq!(name, ASSETS_MOVE_FOLDER);
-        let payload: AssetsMoveFolderPayload =
+        assert_eq!(namespace, ASSET_NAMESPACE);
+        assert_eq!(name, ASSET_MOVE_ENTRIES);
+        let payload: AssetsMoveSelectionPayload =
             serde_json::from_value(payload.clone()).expect("move folder payload");
-        assert_eq!(payload.folder_id, "child");
-        assert_eq!(payload.parent_folder_id.as_deref(), Some("parent"));
+        assert!(payload.asset_ids.is_empty());
+        assert_eq!(payload.folder_ids, vec!["child"]);
+        assert_eq!(payload.target_folder_id.as_deref(), Some("parent"));
     }
 
     #[test]
@@ -8645,8 +8644,8 @@ mod tests {
         let Action::Custom { namespace, name, payload } = &actions[0] else {
             panic!("expected move selection custom action");
         };
-        assert_eq!(namespace, ASSETS_NAMESPACE);
-        assert_eq!(name, ASSETS_MOVE_SELECTION);
+        assert_eq!(namespace, ASSET_NAMESPACE);
+        assert_eq!(name, ASSET_MOVE_ENTRIES);
         let payload: AssetsMoveSelectionPayload =
             serde_json::from_value(payload.clone()).expect("move selection payload");
         assert_eq!(payload.asset_ids, vec![first_asset, second_asset]);
@@ -8666,9 +8665,9 @@ mod tests {
         match &items[2].kind {
             MenuItemKind::Submenu { children } => {
                 assert_eq!(children.len(), 3);
-                assert_assets_action(children[0].action(), ASSETS_CREATE_ADJUSTMENT_LAYER);
-                assert_assets_action(children[1].action(), ASSETS_CREATE_SOLID_COLOR);
-                assert_assets_action(children[2].action(), ASSETS_CREATE_FOLDER);
+                assert_assets_action(children[0].action(), ASSET_CREATE_GENERATED);
+                assert_assets_action(children[1].action(), ASSET_CREATE_GENERATED);
+                assert_assets_action(children[2].action(), ASSET_CREATE_FOLDER);
             }
             _ => panic!("expected 新建 submenu"),
         }
@@ -8694,9 +8693,9 @@ mod tests {
             MenuItemKind::Submenu { children } => children,
             _ => panic!("expected 新建 submenu"),
         };
-        assert_assets_action(children[0].action(), ASSETS_CREATE_ADJUSTMENT_LAYER);
-        assert_assets_action(children[1].action(), ASSETS_CREATE_SOLID_COLOR);
-        assert_assets_action(children[2].action(), ASSETS_CREATE_FOLDER);
+        assert_assets_action(children[0].action(), ASSET_CREATE_GENERATED);
+        assert_assets_action(children[1].action(), ASSET_CREATE_GENERATED);
+        assert_assets_action(children[2].action(), ASSET_CREATE_FOLDER);
     }
 
     #[test]
@@ -8812,11 +8811,12 @@ mod tests {
         let Action::Custom { namespace, name, payload } = &actions[0] else {
             panic!("expected asset delete action");
         };
-        assert_eq!(namespace, ASSETS_NAMESPACE);
-        assert_eq!(name, ASSETS_DELETE_ASSET);
-        let payload: AssetsDeleteAssetPayload =
+        assert_eq!(namespace, ASSET_NAMESPACE);
+        assert_eq!(name, ASSET_REMOVE_ENTRIES);
+        let payload: AssetsDeleteSelectionPayload =
             serde_json::from_value(payload.clone()).expect("delete payload");
-        assert_eq!(payload.asset_id, asset_id);
+        assert_eq!(payload.asset_ids, vec![asset_id]);
+        assert!(payload.folder_ids.is_empty());
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -8938,8 +8938,8 @@ mod tests {
         let Action::Custom { namespace, name, payload } = &actions[0] else {
             panic!("expected asset rename action");
         };
-        assert_eq!(namespace, ASSETS_NAMESPACE);
-        assert_eq!(name, ASSETS_RENAME_ASSET);
+        assert_eq!(namespace, ASSET_NAMESPACE);
+        assert_eq!(name, ASSET_RENAME);
         let payload: AssetsRenameAssetPayload =
             serde_json::from_value(payload.clone()).expect("rename payload");
         assert_eq!(payload.asset_id, asset_id);
@@ -9027,8 +9027,8 @@ mod tests {
         else {
             panic!("expected proxy mode custom action");
         };
-        assert_eq!(namespace, ASSETS_NAMESPACE);
-        assert_eq!(name, ASSETS_SET_PROXY_MODE);
+        assert_eq!(namespace, ASSET_NAMESPACE);
+        assert_eq!(name, ASSET_SET_PROXY_MODE);
         let payload: AssetsSetProxyModePayload =
             serde_json::from_value(payload.clone()).expect("proxy payload");
         assert_eq!(payload.asset_id, asset_id);
@@ -9113,11 +9113,12 @@ mod tests {
         let Action::Custom { namespace, name, payload } = &actions[0] else {
             panic!("expected folder delete action");
         };
-        assert_eq!(namespace, ASSETS_NAMESPACE);
-        assert_eq!(name, ASSETS_DELETE_FOLDER);
-        let payload: AssetsDeleteFolderPayload =
+        assert_eq!(namespace, ASSET_NAMESPACE);
+        assert_eq!(name, ASSET_REMOVE_ENTRIES);
+        let payload: AssetsDeleteSelectionPayload =
             serde_json::from_value(payload.clone()).expect("delete folder payload");
-        assert_eq!(payload.folder_id, folder_id);
+        assert!(payload.asset_ids.is_empty());
+        assert_eq!(payload.folder_ids, vec![folder_id]);
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -9189,8 +9190,8 @@ mod tests {
         let Action::Custom { namespace, name, payload } = &actions[0] else {
             panic!("expected delete selection action");
         };
-        assert_eq!(namespace, ASSETS_NAMESPACE);
-        assert_eq!(name, ASSETS_DELETE_SELECTION);
+        assert_eq!(namespace, ASSET_NAMESPACE);
+        assert_eq!(name, ASSET_REMOVE_ENTRIES);
         let payload: AssetsDeleteSelectionPayload =
             serde_json::from_value(payload.clone()).expect("delete selection payload");
         assert_eq!(payload.folder_ids, vec![folder_id]);
@@ -9245,8 +9246,8 @@ mod tests {
         let Action::Custom { namespace, name, payload } = &actions[0] else {
             panic!("expected delete selection action");
         };
-        assert_eq!(namespace, ASSETS_NAMESPACE);
-        assert_eq!(name, ASSETS_DELETE_SELECTION);
+        assert_eq!(namespace, ASSET_NAMESPACE);
+        assert_eq!(name, ASSET_REMOVE_ENTRIES);
         let payload: AssetsDeleteSelectionPayload =
             serde_json::from_value(payload.clone()).expect("delete selection payload");
         assert_eq!(payload.folder_ids, vec![folder_id]);
@@ -11036,8 +11037,8 @@ mod tests {
         let Action::Custom { namespace, name, payload } = action else {
             panic!("expected asset custom action, got {action:?}");
         };
-        assert_eq!(namespace, ASSETS_NAMESPACE);
-        assert_eq!(name, ASSETS_PREPARE_DRAG);
+        assert_eq!(namespace, ASSET_NAMESPACE);
+        assert_eq!(name, ASSET_PREPARE_DRAG);
         let payload: AssetsPrepareDragPayload =
             serde_json::from_value(payload.clone()).expect("asset drag payload");
         assert_eq!(payload.asset_id, asset_id);
@@ -11049,11 +11050,12 @@ mod tests {
         else {
             panic!("expected asset delete custom action");
         };
-        assert_eq!(namespace, ASSETS_NAMESPACE);
-        assert_eq!(name, ASSETS_DELETE_ASSET);
-        let payload: AssetsDeleteAssetPayload =
+        assert_eq!(namespace, ASSET_NAMESPACE);
+        assert_eq!(name, ASSET_REMOVE_ENTRIES);
+        let payload: AssetsDeleteSelectionPayload =
             serde_json::from_value(payload.clone()).expect("asset delete payload");
-        assert_eq!(payload.asset_id, asset_id);
+        assert_eq!(payload.asset_ids, vec![asset_id]);
+        assert!(payload.folder_ids.is_empty());
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -11184,17 +11186,18 @@ mod tests {
         else {
             panic!("expected asset folder delete custom action");
         };
-        assert_eq!(namespace, ASSETS_NAMESPACE);
-        assert_eq!(name, ASSETS_DELETE_FOLDER);
-        let payload: AssetsDeleteFolderPayload =
+        assert_eq!(namespace, ASSET_NAMESPACE);
+        assert_eq!(name, ASSET_REMOVE_ENTRIES);
+        let payload: AssetsDeleteSelectionPayload =
             serde_json::from_value(payload.clone()).expect("folder delete payload");
-        assert_eq!(payload.folder_id, folder_id);
+        assert!(payload.asset_ids.is_empty());
+        assert_eq!(payload.folder_ids, vec![folder_id.clone()]);
         let action = folder.activate_action.as_ref().expect("folder activate action");
         let Action::Custom { namespace, name, payload } = action else {
             panic!("expected asset folder custom action, got {action:?}");
         };
-        assert_eq!(namespace, ASSETS_NAMESPACE);
-        assert_eq!(name, ASSETS_OPEN_FOLDER);
+        assert_eq!(namespace, APP_SHELL_NAMESPACE);
+        assert_eq!(name, APP_SHELL_ASSET_BROWSER_OPEN_FOLDER);
         let payload: AssetsOpenFolderPayload =
             serde_json::from_value(payload.clone()).expect("folder open payload");
         assert_eq!(payload.folder_id.as_deref(), Some(folder_id.as_str()));
@@ -11260,8 +11263,8 @@ mod tests {
         else {
             panic!("expected parent navigation action");
         };
-        assert_eq!(namespace, ASSETS_NAMESPACE);
-        assert_eq!(name, ASSETS_OPEN_FOLDER);
+        assert_eq!(namespace, APP_SHELL_NAMESPACE);
+        assert_eq!(name, APP_SHELL_ASSET_BROWSER_OPEN_FOLDER);
         let payload: AssetsOpenFolderPayload =
             serde_json::from_value(payload.clone()).expect("parent open payload");
         assert_eq!(payload.folder_id, None);
@@ -11282,11 +11285,12 @@ mod tests {
         else {
             panic!("expected nested folder delete custom action");
         };
-        assert_eq!(namespace, ASSETS_NAMESPACE);
-        assert_eq!(name, ASSETS_DELETE_FOLDER);
-        let payload: AssetsDeleteFolderPayload =
+        assert_eq!(namespace, ASSET_NAMESPACE);
+        assert_eq!(name, ASSET_REMOVE_ENTRIES);
+        let payload: AssetsDeleteSelectionPayload =
             serde_json::from_value(payload.clone()).expect("nested folder delete payload");
-        assert_eq!(payload.folder_id, nested_id);
+        assert!(payload.asset_ids.is_empty());
+        assert_eq!(payload.folder_ids, vec![nested_id]);
 
         let asset = &models.assets.items[2];
         assert_eq!(asset.title, "Filed Solid");
@@ -12554,8 +12558,8 @@ mod tests {
         let Action::Custom { namespace, name, payload } = rebind_action else {
             panic!("expected typed Asset audio rebind action");
         };
-        assert_eq!(namespace, ASSETS_NAMESPACE);
-        assert_eq!(name, ASSETS_REBIND_AUDIO_COMPONENT);
+        assert_eq!(namespace, ASSET_NAMESPACE);
+        assert_eq!(name, ASSET_REBIND_AUDIO_COMPONENT);
         let payload: AssetsRebindAudioComponentPayload =
             serde_json::from_value(payload).expect("audio rebind payload");
         assert_eq!(payload.asset_id, asset_id);
@@ -12566,8 +12570,8 @@ mod tests {
         let Action::Custom { namespace, name, payload } = refresh_action else {
             panic!("expected typed Asset audio refresh action");
         };
-        assert_eq!(namespace, ASSETS_NAMESPACE);
-        assert_eq!(name, ASSETS_REFRESH_AUDIO_COMPONENTS);
+        assert_eq!(namespace, ASSET_NAMESPACE);
+        assert_eq!(name, ASSET_REFRESH_AUDIO_COMPONENTS);
         let payload: AssetsRefreshAudioComponentsPayload =
             serde_json::from_value(payload).expect("audio refresh payload");
         assert_eq!(payload.asset_id, asset_id);
@@ -13334,7 +13338,7 @@ mod tests {
     fn assert_assets_action(action: Option<&Action>, name: &str) {
         match action {
             Some(Action::Custom { namespace, name: action_name, .. }) => {
-                assert_eq!(namespace, ASSETS_NAMESPACE);
+                assert_eq!(namespace, ASSET_NAMESPACE);
                 assert_eq!(action_name, name);
             }
             other => panic!("expected assets action, got {other:?}"),
