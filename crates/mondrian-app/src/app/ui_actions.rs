@@ -40,12 +40,13 @@ pub use super::product_action::{
     ClipWriteParameterValuesPayload, ExportDraftEdit, ProjectCreateWithSettingsPayload,
     ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
     ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
-    TimelineClipSelectionModePayload, TimelineMoveClipPayload, TimelineSeekPayload,
-    TimelineSeekSource, TimelineSelectClipPayload, TimelineTrimClipsPayload,
-    TimelineTrimPayloadEdge, TrackAddKind, TrackAddPayload, TrackAuthorControl,
-    TrackEditPolicyControl, TrackMovePayload, TrackSetAuthorControlPayload,
-    TrackSetEditPolicyPayload, VideoTransitionCreateCrossDissolvePayload,
-    VideoTransitionHandlePolicy, VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
+    TimelineClipSelectionModePayload, TimelineInOutPointKind, TimelineMoveClipPayload,
+    TimelineSeekPayload, TimelineSeekSource, TimelineSelectClipPayload, TimelineSelectionEdit,
+    TimelineSetInOutPointPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TrackAddKind,
+    TrackAddPayload, TrackAuthorControl, TrackEditPolicyControl, TrackMovePayload,
+    TrackSetAuthorControlPayload, TrackSetEditPolicyPayload,
+    VideoTransitionCreateCrossDissolvePayload, VideoTransitionHandlePolicy,
+    VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
     ViewerSetPreviewResolutionScalePayload, VisualEffectAddToClipPayload,
     VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
     VisualEffectSetParameterValuePayload, VisualEffectTargetPayload, ASSET_CREATE_FOLDER,
@@ -59,13 +60,15 @@ pub use super::product_action::{
     PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_UPDATE_COLOR_ENVIRONMENT,
     PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS, SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE,
     SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE,
-    SEQUENCE_UPDATE_SETTINGS, TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK,
-    TIMELINE_SELECT_CLIP, TIMELINE_TRIM_CLIPS, TRACK_ADD, TRACK_MOVE, TRACK_NAMESPACE,
-    TRACK_SET_AUTHOR_CONTROL, TRACK_SET_EDIT_POLICY, VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE,
-    VIDEO_TRANSITION_NAMESPACE, VIDEO_TRANSITION_REMOVE, VIDEO_TRANSITION_SELECT,
-    VIDEO_TRANSITION_SET_RANGE, VIEWER_NAMESPACE, VISUAL_EFFECT_ADD_TO_CLIP,
-    VISUAL_EFFECT_NAMESPACE, VISUAL_EFFECT_REMOVE, VISUAL_EFFECT_REORDER, VISUAL_EFFECT_SELECT,
-    VISUAL_EFFECT_SET_ENABLED, VISUAL_EFFECT_SET_PARAMETER_VALUE,
+    SEQUENCE_UPDATE_SETTINGS, TIMELINE_APPLY_RANGE_EDIT, TIMELINE_CLEAR_IN_OUT_POINTS,
+    TIMELINE_EDIT_SELECTION, TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK,
+    TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT, TIMELINE_TRIM_CLIPS, TRACK_ADD, TRACK_MOVE,
+    TRACK_NAMESPACE, TRACK_SET_AUTHOR_CONTROL, TRACK_SET_EDIT_POLICY,
+    VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE, VIDEO_TRANSITION_NAMESPACE, VIDEO_TRANSITION_REMOVE,
+    VIDEO_TRANSITION_SELECT, VIDEO_TRANSITION_SET_RANGE, VIEWER_NAMESPACE,
+    VISUAL_EFFECT_ADD_TO_CLIP, VISUAL_EFFECT_NAMESPACE, VISUAL_EFFECT_REMOVE,
+    VISUAL_EFFECT_REORDER, VISUAL_EFFECT_SELECT, VISUAL_EFFECT_SET_ENABLED,
+    VISUAL_EFFECT_SET_PARAMETER_VALUE,
 };
 use super::product_action::{
     AssetProductAction, AudioProductAction, ClipProductAction, ExportProductAction, ProductAction,
@@ -73,26 +76,8 @@ use super::product_action::{
     VideoTransitionProductAction, ViewerProductAction, VisualEffectProductAction,
 };
 
-/// Action name for linking the current Clip selection.
-pub const TIMELINE_LINK_SELECTED_CLIPS: &str = "link_selected_clips";
-/// Action name for unlinking the current Clip selection.
-pub const TIMELINE_UNLINK_SELECTED_CLIPS: &str = "unlink_selected_clips";
 /// Action name for creating a generated Basic Title at the current edit range.
 pub const TIMELINE_CREATE_BASIC_TITLE: &str = "create_basic_title";
-/// Action name for trimming the current clip selection to the playhead.
-pub const TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD: &str = "trim_selected_clips_to_playhead";
-/// Action name for rolling the selected timeline cut to the playhead.
-pub const TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD: &str = "roll_selected_cut_to_playhead";
-/// Action name for setting one timeline in/out point to an explicit frame.
-pub const TIMELINE_SET_IN_OUT_POINT: &str = "set_in_out_point";
-/// Action name for clearing active-sequence in/out points.
-pub const TIMELINE_CLEAR_IN_OUT_POINTS: &str = "clear_in_out_points";
-/// Action name for lifting the active In/Out range from targeted Tracks.
-pub const TIMELINE_LIFT_RANGE: &str = "lift_range";
-/// Action name for extracting the active In/Out range from targeted Tracks.
-pub const TIMELINE_EXTRACT_RANGE: &str = "extract_range";
-/// Action name for toggling the current timeline clip selection.
-pub const TIMELINE_SET_SELECTED_CLIPS_ENABLED: &str = "set_selected_clips_enabled";
 /// Action name for dropping one prepared asset onto a timeline track.
 pub const TIMELINE_DROP_ASSET: &str = "drop_asset";
 /// Action name for inserting one Asset through explicit target/ripple scope.
@@ -309,36 +294,6 @@ pub struct AppShellRelocatePanelPayload {
     /// `None` keeps the target-panel default, usually after the active tab.
     #[serde(default)]
     pub tab_index: Option<usize>,
-}
-
-/// Trim the current timeline clip selection to the playhead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimelineTrimSelectedClipsToPlayheadPayload {
-    /// Edge that should be trimmed.
-    pub edge: TimelineTrimPayloadEdge,
-}
-
-/// Timeline range point edited by a UI surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TimelineInOutPointPayloadKind {
-    In,
-    Out,
-}
-
-/// Set one active-sequence in/out point to a target timeline frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimelineSetInOutPointPayload {
-    /// In or out point being changed.
-    pub point: TimelineInOutPointPayloadKind,
-    /// Target timeline frame.
-    pub frame: i64,
-}
-
-/// Toggle the enabled state for the current timeline clip selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimelineSetSelectedClipsEnabledPayload {
-    /// `true` when selected clips should participate in rendering/playback.
-    pub enabled: bool,
 }
 
 /// Replace the current clip selection with one nested Sequence placement.
@@ -697,12 +652,18 @@ pub fn audio_track_solo_action(payload: super::product_action::AudioTrackSoloPay
 
 /// Build an action that links the current Clip selection.
 pub fn timeline_link_selected_clips_action() -> Action {
-    custom_timeline_action(TIMELINE_LINK_SELECTED_CLIPS, ())
+    ProductAction::Timeline(TimelineProductAction::EditSelection(
+        TimelineSelectionEdit::LinkClips,
+    ))
+    .into_external_action()
 }
 
 /// Build an action that unlinks the current Clip selection.
 pub fn timeline_unlink_selected_clips_action() -> Action {
-    custom_timeline_action(TIMELINE_UNLINK_SELECTED_CLIPS, ())
+    ProductAction::Timeline(TimelineProductAction::EditSelection(
+        TimelineSelectionEdit::UnlinkClips,
+    ))
+    .into_external_action()
 }
 
 /// Build an action that selects a visual Transition.
@@ -747,42 +708,53 @@ pub fn timeline_trim_clips_action(payload: TimelineTrimClipsPayload) -> Action {
 }
 
 /// Build an action that trims the current clip selection to the playhead.
-pub fn timeline_trim_selected_clips_to_playhead_action(
-    payload: TimelineTrimSelectedClipsToPlayheadPayload,
-) -> Action {
-    custom_timeline_action(TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, payload)
+pub fn timeline_trim_selected_clips_to_playhead_action(edge: TimelineTrimPayloadEdge) -> Action {
+    ProductAction::Timeline(TimelineProductAction::EditSelection(
+        TimelineSelectionEdit::TrimClipsToPlayhead { edge },
+    ))
+    .into_external_action()
 }
 
 /// Build an action that rolls the selected cut to the playhead.
 pub fn timeline_roll_selected_cut_to_playhead_action() -> Action {
-    custom_timeline_action(TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, ())
+    ProductAction::Timeline(TimelineProductAction::EditSelection(
+        TimelineSelectionEdit::RollCutToPlayhead,
+    ))
+    .into_external_action()
 }
 
 /// Build an action that sets one active-sequence in/out point.
 pub fn timeline_set_in_out_point_action(payload: TimelineSetInOutPointPayload) -> Action {
-    custom_timeline_action(TIMELINE_SET_IN_OUT_POINT, payload)
+    ProductAction::Timeline(TimelineProductAction::SetInOutPoint(payload)).into_external_action()
 }
 
 /// Build an action that clears the active sequence in/out points.
 pub fn timeline_clear_in_out_points_action() -> Action {
-    custom_timeline_action(TIMELINE_CLEAR_IN_OUT_POINTS, ())
+    ProductAction::Timeline(TimelineProductAction::ClearInOutPoints).into_external_action()
 }
 
 /// Build an action that lifts the active In/Out range.
 pub fn timeline_lift_range_action() -> Action {
-    custom_timeline_action(TIMELINE_LIFT_RANGE, ())
+    ProductAction::Timeline(TimelineProductAction::ApplyRangeEdit(
+        mondrian_timeline::RangeEditKind::Lift,
+    ))
+    .into_external_action()
 }
 
 /// Build an action that extracts the active In/Out range.
 pub fn timeline_extract_range_action() -> Action {
-    custom_timeline_action(TIMELINE_EXTRACT_RANGE, ())
+    ProductAction::Timeline(TimelineProductAction::ApplyRangeEdit(
+        mondrian_timeline::RangeEditKind::Extract,
+    ))
+    .into_external_action()
 }
 
 /// Build an action that toggles the current timeline clip selection.
-pub fn timeline_set_selected_clips_enabled_action(
-    payload: TimelineSetSelectedClipsEnabledPayload,
-) -> Action {
-    custom_timeline_action(TIMELINE_SET_SELECTED_CLIPS_ENABLED, payload)
+pub fn timeline_set_selected_clips_enabled_action(enabled: bool) -> Action {
+    ProductAction::Timeline(TimelineProductAction::EditSelection(
+        TimelineSelectionEdit::SetClipsEnabled { enabled },
+    ))
+    .into_external_action()
 }
 
 /// Build an action that seeks the active timeline.

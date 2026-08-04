@@ -22,23 +22,16 @@ use crate::app::product_action::{TimelineMoveClipPayload, TimelineSelectClipPayl
 use crate::app::proxy_generation::{
     resolve_app_state_proxy_color_contract, ProxyGenerationOrigin, ProxyGenerationRequestOutcome,
 };
-use crate::app::selection::{resolve_clip_selection, resolve_track_selection};
+use crate::app::selection::resolve_track_selection;
 use crate::app::timeline_editing::{
-    clip_link_group_member_ids, find_clip, find_clip_mut, find_clip_track_lock, set_clip_disabled,
+    clip_link_group_member_ids, find_clip, find_clip_mut, find_clip_track_lock,
 };
 use crate::app::ui_actions::{
     InspectorAudioComponentSourcePayload, InspectorSetAudioComponentSourcePayload,
-    TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineInsertAssetPayload,
-    TimelineOpenNestedSequencePayload, TimelinePrecomposeSelectionPayload,
-    TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
-    TimelineTrimSelectedClipsToPlayheadPayload, INSPECTOR_NAMESPACE,
-    INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, TIMELINE_CLEAR_IN_OUT_POINTS,
-    TIMELINE_CREATE_BASIC_TITLE, TIMELINE_DROP_ASSET, TIMELINE_EXTRACT_RANGE,
-    TIMELINE_INSERT_ASSET, TIMELINE_LIFT_RANGE, TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_NAMESPACE,
+    TimelineDropAssetPayload, TimelineInsertAssetPayload, TimelineOpenNestedSequencePayload,
+    TimelinePrecomposeSelectionPayload, INSPECTOR_NAMESPACE, INSPECTOR_SET_AUDIO_COMPONENT_SOURCE,
+    TIMELINE_CREATE_BASIC_TITLE, TIMELINE_DROP_ASSET, TIMELINE_INSERT_ASSET, TIMELINE_NAMESPACE,
     TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_PRECOMPOSE_SELECTION,
-    TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SET_IN_OUT_POINT,
-    TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
-    TIMELINE_UNLINK_SELECTED_CLIPS,
 };
 #[cfg(test)]
 use crate::app::SelectedClipRef;
@@ -55,9 +48,6 @@ use mondrian_timeline::audio::AudioComponentSource;
 #[cfg(test)]
 use mondrian_timeline::clip::Transform2D;
 use mondrian_timeline::clip::{Clip, TrimEdge};
-use mondrian_timeline::{
-    apply_clip_link_edit, assess_clip_link_edit, ClipLinkEditKind, ClipLinkEditRequest,
-};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -1252,6 +1242,14 @@ impl AppState {
             TimelineProductAction::Seek(payload) => {
                 self.seek_with_source(payload.frame, payload.source)
             }
+            TimelineProductAction::SetInOutPoint(payload) => {
+                self.set_timeline_in_out_point(payload)
+            }
+            TimelineProductAction::ClearInOutPoints => self.clear_timeline_in_out_points(),
+            TimelineProductAction::ApplyRangeEdit(kind) => {
+                self.apply_timeline_range_edit(kind).map(|_| ())
+            }
+            TimelineProductAction::EditSelection(edit) => self.apply_timeline_selection_edit(edit),
         }
     }
 
@@ -1380,49 +1378,7 @@ impl AppState {
         payload: serde_json::Value,
     ) -> Result<()> {
         match name {
-            TIMELINE_LINK_SELECTED_CLIPS => {
-                self.edit_selected_clip_links_from_ui(ClipLinkEditKind::Link)
-            }
-            TIMELINE_UNLINK_SELECTED_CLIPS => {
-                self.edit_selected_clip_links_from_ui(ClipLinkEditKind::Unlink)
-            }
             TIMELINE_CREATE_BASIC_TITLE => self.create_basic_title_at_playhead().map(|_| ()),
-            TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD => {
-                let payload = parse_ui_payload::<TimelineTrimSelectedClipsToPlayheadPayload>(
-                    "timeline_ui_action",
-                    name,
-                    payload,
-                )?;
-                let edge = match payload.edge {
-                    TimelineTrimPayloadEdge::In => TrimEdge::In,
-                    TimelineTrimPayloadEdge::Out => TrimEdge::Out,
-                };
-                self.trim_selected_clips_to_playhead_from_ui(edge)
-            }
-            TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD => self.roll_selected_cut_to_playhead_from_ui(),
-            TIMELINE_SET_IN_OUT_POINT => {
-                let payload = parse_ui_payload::<TimelineSetInOutPointPayload>(
-                    "timeline_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.set_in_out_point_from_ui(payload)
-            }
-            TIMELINE_CLEAR_IN_OUT_POINTS => self.clear_in_out_points_from_ui(),
-            TIMELINE_LIFT_RANGE => self
-                .apply_timeline_range_edit(mondrian_timeline::RangeEditKind::Lift)
-                .map(|_| ()),
-            TIMELINE_EXTRACT_RANGE => self
-                .apply_timeline_range_edit(mondrian_timeline::RangeEditKind::Extract)
-                .map(|_| ()),
-            TIMELINE_SET_SELECTED_CLIPS_ENABLED => {
-                let payload = parse_ui_payload::<TimelineSetSelectedClipsEnabledPayload>(
-                    "timeline_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.set_selected_clips_enabled_from_ui(payload.enabled)
-            }
             TIMELINE_DROP_ASSET => {
                 let payload = parse_ui_payload::<TimelineDropAssetPayload>(
                     "timeline_ui_action",
@@ -1836,147 +1792,6 @@ impl AppState {
         Ok(true)
     }
 
-    fn set_selected_clips_enabled_from_ui(&mut self, enabled: bool) -> Result<()> {
-        let clip_ids = self.selected_clip_ids_for_timeline_action();
-        self.set_clips_enabled_from_ui("timeline_set_selected_clips_enabled", &clip_ids, enabled)
-    }
-
-    fn trim_selected_clips_to_playhead_from_ui(&mut self, edge: TrimEdge) -> Result<()> {
-        let clip_ids = self.selected_clip_ids_for_timeline_action();
-        if clip_ids.is_empty() {
-            return Err(action_not_executed(
-                "trim_selected_clips_to_playhead",
-                "当前没有可修剪的片段选择",
-            ));
-        }
-        let target_frame = match edge {
-            TrimEdge::In => self.current_frame(),
-            TrimEdge::Out => self.current_frame().saturating_add(1),
-        };
-        self.trim_clips_bulk_to_frame(&clip_ids, edge, target_frame).map(|_| ())
-    }
-
-    fn roll_selected_cut_to_playhead_from_ui(&mut self) -> Result<()> {
-        let clip_ids = self.selected_clip_ids_for_timeline_action();
-        let [clip_id] = clip_ids.as_slice() else {
-            return Err(action_not_executed(
-                "roll_selected_cut_to_playhead",
-                "滚动编辑要求且仅允许选择一个片段",
-            ));
-        };
-        match self.roll_cut_to_frame(*clip_id, self.current_frame())? {
-            true => Ok(()),
-            false => {
-                let reason = "未找到可滚动切点，或播放头不在可滚动范围";
-                self.set_status_hint(reason, true);
-                Err(action_not_executed("roll_selected_cut_to_playhead", reason))
-            }
-        }
-    }
-
-    fn set_in_out_point_from_ui(&mut self, payload: TimelineSetInOutPointPayload) -> Result<()> {
-        let sequence_id = self
-            .active_sequence_id()
-            .ok_or_else(|| missing_sequence_error("timeline_set_in_out_point"))?;
-        self.commit_sequence_edit(sequence_id, "设置时间线入出点", |sequence| {
-            let time = TimelineTime::from_frame_position(FramePosition::new(
-                payload.frame,
-                sequence.time_base(),
-            ))?;
-            match payload.point {
-                TimelineInOutPointPayloadKind::In => sequence.mark_in(time),
-                TimelineInOutPointPayloadKind::Out => sequence.mark_out(time),
-            }
-            Ok(())
-        })
-    }
-
-    fn clear_in_out_points_from_ui(&mut self) -> Result<()> {
-        let sequence_id = self
-            .active_sequence_id()
-            .ok_or_else(|| missing_sequence_error("timeline_clear_in_out_points"))?;
-        self.commit_sequence_edit(sequence_id, "清除时间线入出点", |sequence| {
-            sequence.clear_in_out();
-            Ok(())
-        })
-    }
-
-    fn selected_clip_ids_for_timeline_action(&self) -> Vec<ClipId> {
-        let mut clip_ids = Vec::new();
-        for selection in &self.selection.selected_clips {
-            if !clip_ids.contains(&selection.clip_id) {
-                clip_ids.push(selection.clip_id);
-            }
-        }
-        clip_ids
-    }
-
-    fn edit_selected_clip_links_from_ui(&mut self, kind: ClipLinkEditKind) -> Result<()> {
-        let clip_ids = self.selected_clip_ids_for_timeline_action();
-        let primary_clip_id = self.selected_clips().first().map(|selection| selection.clip_id);
-        let request = ClipLinkEditRequest::new(kind, clip_ids);
-        let assessment = self
-            .active_sequence()
-            .ok_or_else(|| missing_sequence_error("timeline_edit_clip_links"))
-            .and_then(|sequence| {
-                assess_clip_link_edit(sequence, &request).map_err(|error| {
-                    MondrianError::WorkflowStepFailed {
-                        step_id: "timeline_edit_clip_links".to_owned(),
-                        reason: error.to_string(),
-                    }
-                })
-            })?;
-        if !assessment.would_change {
-            return Err(MondrianError::ActionNotExecuted {
-                action: match kind {
-                    ClipLinkEditKind::Link => "link_selected_clips",
-                    ClipLinkEditKind::Unlink => "unlink_selected_clips",
-                }
-                .to_owned(),
-                reason: "当前选择不会改变 Clip Link Group".to_owned(),
-            });
-        }
-
-        let description = match kind {
-            ClipLinkEditKind::Link => "链接剪辑",
-            ClipLinkEditKind::Unlink => "取消链接剪辑",
-        };
-        let outcome = self.commit_active_sequence_edit(description, |sequence| {
-            apply_clip_link_edit(sequence, &request).map_err(|error| {
-                MondrianError::WorkflowStepFailed {
-                    step_id: "timeline_edit_clip_links".to_owned(),
-                    reason: error.to_string(),
-                }
-            })
-        })?;
-        let mut selections = self
-            .active_sequence()
-            .map(|sequence| {
-                outcome
-                    .affected_clip_ids
-                    .iter()
-                    .filter_map(|clip_id| resolve_clip_selection(sequence, *clip_id))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        if let Some(primary_clip_id) = primary_clip_id {
-            if let Some(index) =
-                selections.iter().position(|selection| selection.clip_id == primary_clip_id)
-            {
-                selections.swap(0, index);
-            }
-        }
-        self.replace_clip_selection(selections);
-        self.set_status_hint(
-            match kind {
-                ClipLinkEditKind::Link => "已链接所选剪辑",
-                ClipLinkEditKind::Unlink => "已取消所选剪辑链接",
-            },
-            false,
-        );
-        Ok(())
-    }
-
     fn precompose_selection_from_ui(
         &mut self,
         payload: TimelinePrecomposeSelectionPayload,
@@ -2003,34 +1818,6 @@ impl AppState {
         self.select_clip_for_action("timeline_precompose_selection", nested_clip_id)?;
         self.set_status_hint(format!("已创建嵌套序列“{name}”"), false);
         Ok(())
-    }
-
-    fn set_clips_enabled_from_ui(
-        &mut self,
-        step_id: &'static str,
-        clip_ids: &[ClipId],
-        enabled: bool,
-    ) -> Result<()> {
-        if clip_ids.is_empty() {
-            return Err(action_not_executed(step_id, "当前没有可修改的片段选择"));
-        }
-        for clip_id in clip_ids {
-            self.ensure_clip_track_unlocked(step_id, *clip_id)?;
-        }
-        let Some(sequence_id) = self.active_sequence_id() else {
-            return Err(missing_sequence_error(step_id));
-        };
-        self.commit_sequence_edit(sequence_id, "切换片段启用状态", |sequence| {
-            if let Some(missing) =
-                clip_ids.iter().copied().find(|clip_id| !clip_exists(sequence, *clip_id))
-            {
-                return Err(missing_clip_error(step_id, missing));
-            }
-            for clip_id in clip_ids {
-                let _ = set_clip_disabled(sequence, *clip_id, !enabled);
-            }
-            Ok(())
-        })
     }
 
     fn set_audio_component_source_from_ui(
@@ -2423,16 +2210,6 @@ fn missing_effect_error(
     }
 }
 
-fn clip_exists(seq: &mondrian_timeline::sequence::Sequence, clip_id: ClipId) -> bool {
-    seq.video_tracks
-        .iter()
-        .any(|track| track.clips.iter().any(|clip| clip.id == clip_id))
-        || seq
-            .audio_tracks
-            .iter()
-            .any(|track| track.clips.iter().any(|clip| clip.id == clip_id))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2494,11 +2271,10 @@ mod tests {
         ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
         ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload,
         SequenceUpdateSettingsPayload, TimelineDropAssetPayload, TimelineExportRequest,
-        TimelineInOutPointPayloadKind, TimelineInsertAssetPayload,
-        TimelineOpenNestedSequencePayload, TimelineSeekSource, TimelineSetInOutPointPayload,
-        TimelineSetSelectedClipsEnabledPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
-        TimelineTrimSelectedClipsToPlayheadPayload, TrackAddKind, TrackAddPayload,
-        TrackAuthorControl, TrackEditPolicyControl, TrackMovePayload, TrackSetAuthorControlPayload,
+        TimelineInOutPointKind, TimelineInsertAssetPayload, TimelineOpenNestedSequencePayload,
+        TimelineSeekSource, TimelineSetInOutPointPayload, TimelineTrimClipsPayload,
+        TimelineTrimPayloadEdge, TrackAddKind, TrackAddPayload, TrackAuthorControl,
+        TrackEditPolicyControl, TrackMovePayload, TrackSetAuthorControlPayload,
         TrackSetEditPolicyPayload, ViewerSetPreviewResolutionScalePayload,
         VisualEffectAddToClipPayload, VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
         VisualEffectSetParameterValuePayload, VisualEffectTargetPayload,
@@ -4083,7 +3859,7 @@ mod tests {
 
         state
             .dispatch_action(timeline_trim_selected_clips_to_playhead_action(
-                TimelineTrimSelectedClipsToPlayheadPayload { edge: TimelineTrimPayloadEdge::In },
+                TimelineTrimPayloadEdge::In,
             ))
             .expect("dispatch selected trim");
 
@@ -4156,9 +3932,7 @@ mod tests {
         ];
 
         state
-            .dispatch_action(timeline_set_selected_clips_enabled_action(
-                TimelineSetSelectedClipsEnabledPayload { enabled: false },
-            ))
+            .dispatch_action(timeline_set_selected_clips_enabled_action(false))
             .expect("disable selection");
 
         let sequence = state.active_sequence().expect("sequence");
@@ -4167,9 +3941,7 @@ mod tests {
         assert!(sequence.video_tracks[1].clips[0].is_disabled);
 
         state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[1].is_locked = true;
-        let result = state.dispatch_action(timeline_set_selected_clips_enabled_action(
-            TimelineSetSelectedClipsEnabledPayload { enabled: true },
-        ));
+        let result = state.dispatch_action(timeline_set_selected_clips_enabled_action(true));
 
         assert!(result.is_err());
         let sequence = state.active_sequence().expect("sequence");
@@ -6042,19 +5814,20 @@ mod tests {
     #[test]
     fn dispatch_timeline_ui_sets_explicit_in_out_points() {
         let (mut state, _, _) = state_with_two_video_tracks();
+        let time_base = state.active_sequence().expect("sequence").time_base();
         state
             .dispatch_action(timeline_set_in_out_point_action(
                 TimelineSetInOutPointPayload {
-                    point: TimelineInOutPointPayloadKind::In,
-                    frame: 32,
+                    point: TimelineInOutPointKind::In,
+                    position: FramePosition::new(32, time_base),
                 },
             ))
             .expect("set in point");
         state
             .dispatch_action(timeline_set_in_out_point_action(
                 TimelineSetInOutPointPayload {
-                    point: TimelineInOutPointPayloadKind::Out,
-                    frame: 16,
+                    point: TimelineInOutPointKind::Out,
+                    position: FramePosition::new(16, time_base),
                 },
             ))
             .expect("set out point");
@@ -6249,22 +6022,16 @@ mod tests {
                 "delete_selection",
             ),
             (
-                timeline_trim_selected_clips_to_playhead_action(
-                    TimelineTrimSelectedClipsToPlayheadPayload {
-                        edge: TimelineTrimPayloadEdge::In,
-                    },
-                ),
-                "trim_selected_clips_to_playhead",
+                timeline_trim_selected_clips_to_playhead_action(TimelineTrimPayloadEdge::In),
+                "timeline_edit_selection",
             ),
             (
                 timeline_roll_selected_cut_to_playhead_action(),
-                "roll_selected_cut_to_playhead",
+                "timeline_edit_selection",
             ),
             (
-                timeline_set_selected_clips_enabled_action(
-                    TimelineSetSelectedClipsEnabledPayload { enabled: false },
-                ),
-                "timeline_set_selected_clips_enabled",
+                timeline_set_selected_clips_enabled_action(false),
+                "timeline_edit_selection",
             ),
         ];
 

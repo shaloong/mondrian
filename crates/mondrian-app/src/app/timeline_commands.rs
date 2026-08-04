@@ -1565,32 +1565,30 @@ impl AppState {
 
     pub fn mark_in_at_current_frame(&mut self) -> mondrian_core::Result<()> {
         let current = self.current_frame().max(0);
-        let sequence_id = self.active_sequence_id().ok_or_else(|| {
+        let time_base = self.active_sequence().map(Sequence::time_base).ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "mark_in_at_current_frame".to_owned(),
                 reason: "当前无序列".to_owned(),
             }
         })?;
-        self.commit_sequence_edit(sequence_id, "标记入点", |sequence| {
-            sequence.mark_in(sequence_time_from_frame(current, sequence.time_base())?);
-            Ok(())
-        })?;
-        Ok(())
+        self.set_timeline_in_out_point(crate::app::product_action::TimelineSetInOutPointPayload {
+            point: crate::app::product_action::TimelineInOutPointKind::In,
+            position: FramePosition::new(current, time_base),
+        })
     }
 
     pub fn mark_out_at_current_frame(&mut self) -> mondrian_core::Result<()> {
         let current = self.current_frame().max(0);
-        let sequence_id = self.active_sequence_id().ok_or_else(|| {
+        let time_base = self.active_sequence().map(Sequence::time_base).ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "mark_out_at_current_frame".to_owned(),
                 reason: "当前无序列".to_owned(),
             }
         })?;
-        self.commit_sequence_edit(sequence_id, "标记出点", |sequence| {
-            sequence.mark_out(sequence_time_from_frame(current, sequence.time_base())?);
-            Ok(())
-        })?;
-        Ok(())
+        self.set_timeline_in_out_point(crate::app::product_action::TimelineSetInOutPointPayload {
+            point: crate::app::product_action::TimelineInOutPointKind::Out,
+            position: FramePosition::new(current, time_base),
+        })
     }
 
     pub fn trim_clips_bulk_to_frame(

@@ -22,7 +22,7 @@ use mondrian_timeline::{
     clip::Clip,
     sequence::{Sequence, SequenceSettings},
     AudioAutomationEditRequest, AudioChannelStripEditRequest, AudioComponentEditRequest,
-    AudioProcessorRackEditRequest, AudioRoutingEditRequest, EffectRelativePlacement,
+    AudioProcessorRackEditRequest, AudioRoutingEditRequest, EffectRelativePlacement, RangeEditKind,
     TrackRelativePlacement,
 };
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,14 @@ pub const TIMELINE_MOVE_CLIP: &str = "move_clip";
 pub const TIMELINE_TRIM_CLIPS: &str = "trim_clips";
 /// External action name for seeking the active Timeline.
 pub const TIMELINE_SEEK: &str = "seek";
+/// External action name for setting one exact active-Sequence In/Out point.
+pub const TIMELINE_SET_IN_OUT_POINT: &str = "set_in_out_point";
+/// External action name for clearing the active Sequence In/Out range.
+pub const TIMELINE_CLEAR_IN_OUT_POINTS: &str = "clear_in_out_points";
+/// External action name for applying Lift or Extract to the active In/Out range.
+pub const TIMELINE_APPLY_RANGE_EDIT: &str = "apply_range_edit";
+/// External action name for editing the current Timeline Clip selection.
+pub const TIMELINE_EDIT_SELECTION: &str = "edit_selection";
 
 /// External custom-action namespace for Timeline Track operations.
 pub const TRACK_NAMESPACE: &str = "ui.track";
@@ -362,6 +370,38 @@ pub enum TimelineProductAction {
     TrimClips(TimelineTrimClipsPayload),
     /// Seek the active Timeline through the transport Interface.
     Seek(TimelineSeekPayload),
+    /// Set one exact In/Out point in the active Sequence author domain.
+    SetInOutPoint(TimelineSetInOutPointPayload),
+    /// Clear the active Sequence's authored In/Out range.
+    ClearInOutPoints,
+    /// Resolve current edit policy and apply one atomic Lift or Extract.
+    ApplyRangeEdit(RangeEditKind),
+    /// Apply one selection-scoped editorial intent against current Session state.
+    EditSelection(TimelineSelectionEdit),
+}
+
+/// Closed editorial operations whose operands are the current Clip selection.
+///
+/// Selection identity and playhead position are resolved at dispatch so a
+/// retained Widget action cannot carry stale Track or Clip projections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineSelectionEdit {
+    /// Form one synchronization Link Group from the current selection.
+    LinkClips,
+    /// Remove current selection members from their Link Groups.
+    UnlinkClips,
+    /// Trim every selected Clip edge to the current playhead.
+    TrimClipsToPlayhead {
+        /// Selected edge; Out is interpreted as the playhead's exclusive frame.
+        edge: TimelineTrimPayloadEdge,
+    },
+    /// Roll the cut adjacent to the sole selected Clip to the playhead.
+    RollCutToPlayhead,
+    /// Change whether every selected Clip participates in execution.
+    SetClipsEnabled {
+        /// Requested enabled state for the complete selection.
+        enabled: bool,
+    },
 }
 
 /// Closed operations addressed to Timeline Tracks by stable identity.
@@ -449,6 +489,23 @@ impl ProductAction {
                     }
                     TIMELINE_SEEK => {
                         TimelineProductAction::Seek(decode_payload(namespace, name, payload)?)
+                    }
+                    TIMELINE_SET_IN_OUT_POINT => TimelineProductAction::SetInOutPoint(
+                        decode_payload(namespace, name, payload)?,
+                    ),
+                    TIMELINE_CLEAR_IN_OUT_POINTS => {
+                        decode_payload::<()>(namespace, name, payload)?;
+                        TimelineProductAction::ClearInOutPoints
+                    }
+                    TIMELINE_APPLY_RANGE_EDIT => {
+                        let payload: TimelineRangeEditWirePayload =
+                            decode_payload(namespace, name, payload)?;
+                        TimelineProductAction::ApplyRangeEdit(payload.kind)
+                    }
+                    TIMELINE_EDIT_SELECTION => {
+                        let payload: TimelineSelectionEditWirePayload =
+                            decode_payload(namespace, name, payload)?;
+                        TimelineProductAction::EditSelection(payload.into())
                     }
                     _ => return Ok(None),
                 };
@@ -812,6 +869,26 @@ impl ProductAction {
                     "frame": payload.frame,
                     "source": payload.source,
                 }),
+            ),
+            Self::Timeline(TimelineProductAction::SetInOutPoint(payload)) => (
+                TIMELINE_NAMESPACE,
+                TIMELINE_SET_IN_OUT_POINT,
+                serde_json::json!(payload),
+            ),
+            Self::Timeline(TimelineProductAction::ClearInOutPoints) => (
+                TIMELINE_NAMESPACE,
+                TIMELINE_CLEAR_IN_OUT_POINTS,
+                serde_json::Value::Null,
+            ),
+            Self::Timeline(TimelineProductAction::ApplyRangeEdit(kind)) => (
+                TIMELINE_NAMESPACE,
+                TIMELINE_APPLY_RANGE_EDIT,
+                serde_json::json!(TimelineRangeEditWirePayload { kind }),
+            ),
+            Self::Timeline(TimelineProductAction::EditSelection(edit)) => (
+                TIMELINE_NAMESPACE,
+                TIMELINE_EDIT_SELECTION,
+                serde_json::json!(TimelineSelectionEditWirePayload::from(edit)),
             ),
             Self::Track(TrackProductAction::Add(payload)) => {
                 (TRACK_NAMESPACE, TRACK_ADD, serde_json::json!(payload))
@@ -1241,6 +1318,96 @@ pub struct TimelineSeekPayload {
     pub frame: i64,
     /// User interaction source for this seek.
     pub source: TimelineSeekSource,
+}
+
+/// Authored Timeline work-range endpoint selected by an input Adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineInOutPointKind {
+    /// Inclusive work-range start.
+    In,
+    /// Exclusive work-range end.
+    Out,
+}
+
+/// Set one active-Sequence In/Out point from an explicit evaluation grid.
+///
+/// The App Adapter converts this position exactly to canonical
+/// [`TimelineTime`] before entering the Author Transaction. Carrying the grid
+/// prevents a bare frame integer from being interpreted at the wrong rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TimelineSetInOutPointPayload {
+    /// In or Out endpoint being changed.
+    pub point: TimelineInOutPointKind,
+    /// Exact frame coordinate and its declared evaluation time base.
+    pub position: FramePosition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TimelineRangeEditWirePayload {
+    kind: RangeEditKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TimelineSelectionEditWirePayload {
+    LinkClips(EmptyProductActionPayload),
+    UnlinkClips(EmptyProductActionPayload),
+    TrimClipsToPlayhead(TimelineSelectionTrimWirePayload),
+    RollCutToPlayhead(EmptyProductActionPayload),
+    SetClipsEnabled(TimelineSelectionEnabledWirePayload),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyProductActionPayload {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TimelineSelectionTrimWirePayload {
+    edge: TimelineTrimPayloadEdge,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TimelineSelectionEnabledWirePayload {
+    enabled: bool,
+}
+
+impl From<TimelineSelectionEditWirePayload> for TimelineSelectionEdit {
+    fn from(payload: TimelineSelectionEditWirePayload) -> Self {
+        match payload {
+            TimelineSelectionEditWirePayload::LinkClips(_) => Self::LinkClips,
+            TimelineSelectionEditWirePayload::UnlinkClips(_) => Self::UnlinkClips,
+            TimelineSelectionEditWirePayload::TrimClipsToPlayhead(payload) => {
+                Self::TrimClipsToPlayhead { edge: payload.edge }
+            }
+            TimelineSelectionEditWirePayload::RollCutToPlayhead(_) => Self::RollCutToPlayhead,
+            TimelineSelectionEditWirePayload::SetClipsEnabled(payload) => {
+                Self::SetClipsEnabled { enabled: payload.enabled }
+            }
+        }
+    }
+}
+
+impl From<TimelineSelectionEdit> for TimelineSelectionEditWirePayload {
+    fn from(edit: TimelineSelectionEdit) -> Self {
+        match edit {
+            TimelineSelectionEdit::LinkClips => Self::LinkClips(EmptyProductActionPayload {}),
+            TimelineSelectionEdit::UnlinkClips => Self::UnlinkClips(EmptyProductActionPayload {}),
+            TimelineSelectionEdit::TrimClipsToPlayhead { edge } => {
+                Self::TrimClipsToPlayhead(TimelineSelectionTrimWirePayload { edge })
+            }
+            TimelineSelectionEdit::RollCutToPlayhead => {
+                Self::RollCutToPlayhead(EmptyProductActionPayload {})
+            }
+            TimelineSelectionEdit::SetClipsEnabled { enabled } => {
+                Self::SetClipsEnabled(TimelineSelectionEnabledWirePayload { enabled })
+            }
+        }
+    }
 }
 
 /// Media kind supported by the product Add Track operation.
@@ -1707,6 +1874,18 @@ impl<'a> ProductActionAvailability<'a> {
             }
             TimelineProductAction::TrimClips(payload) => allows_trim(sequence, payload),
             TimelineProductAction::Seek(payload) => payload.frame >= 0,
+            TimelineProductAction::SetInOutPoint(payload) => {
+                self.state.can_set_timeline_in_out_point(*payload)
+            }
+            TimelineProductAction::ClearInOutPoints => {
+                sequence.in_point.is_some() || sequence.out_point.is_some()
+            }
+            TimelineProductAction::ApplyRangeEdit(kind) => {
+                self.state.can_apply_timeline_range_edit(*kind)
+            }
+            TimelineProductAction::EditSelection(edit) => {
+                self.state.can_apply_timeline_selection_edit(*edit)
+            }
         }
     }
 
@@ -2134,6 +2313,32 @@ mod tests {
                 frame: 21,
                 source: TimelineSeekSource::PointerDrag,
             })),
+            ProductAction::Timeline(TimelineProductAction::SetInOutPoint(
+                TimelineSetInOutPointPayload {
+                    point: TimelineInOutPointKind::In,
+                    position: FramePosition::new(11, Rational::new(1, 24)),
+                },
+            )),
+            ProductAction::Timeline(TimelineProductAction::ClearInOutPoints),
+            ProductAction::Timeline(TimelineProductAction::ApplyRangeEdit(RangeEditKind::Lift)),
+            ProductAction::Timeline(TimelineProductAction::ApplyRangeEdit(
+                RangeEditKind::Extract,
+            )),
+            ProductAction::Timeline(TimelineProductAction::EditSelection(
+                TimelineSelectionEdit::LinkClips,
+            )),
+            ProductAction::Timeline(TimelineProductAction::EditSelection(
+                TimelineSelectionEdit::UnlinkClips,
+            )),
+            ProductAction::Timeline(TimelineProductAction::EditSelection(
+                TimelineSelectionEdit::TrimClipsToPlayhead { edge: TimelineTrimPayloadEdge::Out },
+            )),
+            ProductAction::Timeline(TimelineProductAction::EditSelection(
+                TimelineSelectionEdit::RollCutToPlayhead,
+            )),
+            ProductAction::Timeline(TimelineProductAction::EditSelection(
+                TimelineSelectionEdit::SetClipsEnabled { enabled: false },
+            )),
         ];
 
         for expected in actions {
@@ -2143,6 +2348,59 @@ mod tests {
                 .expect("recognized product action");
             assert_eq!(decoded, expected);
         }
+    }
+
+    #[test]
+    fn external_timeline_work_range_codec_rejects_implicit_frame_and_unknown_kind() {
+        let implicit_frame = Action::Custom {
+            namespace: TIMELINE_NAMESPACE.to_owned(),
+            name: TIMELINE_SET_IN_OUT_POINT.to_owned(),
+            payload: serde_json::json!({ "point": "in", "frame": 10 }),
+        };
+        let error = ProductAction::decode_external(&implicit_frame)
+            .expect_err("bare frame must not cross the exact-time boundary");
+        assert_eq!(
+            error.dispatch_step_id(),
+            "timeline_ui_action.set_in_out_point"
+        );
+
+        let unknown_kind = Action::Custom {
+            namespace: TIMELINE_NAMESPACE.to_owned(),
+            name: TIMELINE_APPLY_RANGE_EDIT.to_owned(),
+            payload: serde_json::json!({ "kind": "roll" }),
+        };
+        let error = ProductAction::decode_external(&unknown_kind)
+            .expect_err("unknown Range Edit kind must fail closed");
+        assert_eq!(
+            error.dispatch_step_id(),
+            "timeline_ui_action.apply_range_edit"
+        );
+
+        let selection_extra_field = Action::Custom {
+            namespace: TIMELINE_NAMESPACE.to_owned(),
+            name: TIMELINE_EDIT_SELECTION.to_owned(),
+            payload: serde_json::json!({
+                "link_clips": { "enabled": true },
+            }),
+        };
+        let error = ProductAction::decode_external(&selection_extra_field)
+            .expect_err("selection edit variants must reject unrelated fields");
+        assert_eq!(
+            error.dispatch_step_id(),
+            "timeline_ui_action.edit_selection"
+        );
+
+        let unknown_selection_edit = Action::Custom {
+            namespace: TIMELINE_NAMESPACE.to_owned(),
+            name: TIMELINE_EDIT_SELECTION.to_owned(),
+            payload: serde_json::json!({ "quantize_clips": {} }),
+        };
+        let error = ProductAction::decode_external(&unknown_selection_edit)
+            .expect_err("unknown selection edit must fail closed");
+        assert_eq!(
+            error.dispatch_step_id(),
+            "timeline_ui_action.edit_selection"
+        );
     }
 
     #[test]

@@ -626,6 +626,10 @@ _Avoid_: Font display name as output fingerprint, platform default fallback, sil
 A Sequence-local set identity shared by two or more Clip placements whose ordinary editorial selection and structural edits are synchronized.
 _Avoid_: Pair pointer, linked-list chain, singleton group, media ownership relation
 
+**Timeline Selection Edit**:
+A closed Product intent whose operands are the current open-Session Clip selection and, when required, the current playhead. Link, Unlink, Trim-to-playhead, Roll-to-playhead, and batch Enabled changes resolve stable Clip identities at dispatch, expand complete Link Groups where structural synchronization applies, and share read-only admission with execution before one Author Transaction.
+_Avoid_: Widget-carried selection snapshots, UI-only lock/trim guesses, partial linked edits, repeated values committed as success, one external action name per enum branch
+
 **Timeline Edit Targeting**:
 Per-open-editor-Session policy keyed by stable Sequence and Track identity. Target decides whether a structural edit cuts Track content; Sync-Lock independently decides whether downstream placements follow a program-time ripple. Both default on, are compiled into explicit command scopes, and are not renderable Sequence author state.
 _Avoid_: Persisted Track flags, selected Track as implicit target, hidden expansion of a command scope, Sync-Lock treated as content selection
@@ -636,7 +640,8 @@ _Avoid_: Display/list index as author address, redundant video/audio boolean bes
 
 **Range Edit**:
 One atomic Lift or Extract over an exact half-open Sequence-time range and explicit content/ripple Track sets. Lift removes intersecting targeted content without changing program time; Extract removes it and closes the interval on its admitted ripple closure.
-_Avoid_: Repeated per-Track deletes, Widget-owned ripple rules, silent cutting of untargeted Sync-Locked content, local PushForward collision mode
+The Product Action carries only the closed edit kind and resolves the latest authored In/Out plus open-Session Target/Sync-Lock policy into this complete request at dispatch. Ruler-authored In/Out input carries an explicit frame grid and lowers once to canonical author time.
+_Avoid_: Repeated per-Track deletes, Widget-owned ripple rules, copied stale range/Track snapshots, bare frame integers, silent cutting of untargeted Sync-Locked content, local PushForward collision mode
 
 **Precompose Action**:
 One Project-scoped Author Transaction that resolves the current stable-ID Clip selection, expands complete link groups, projects selected author content into a new Nested Composition Sequence, and replaces only the represented video/audio placement kinds in the parent.

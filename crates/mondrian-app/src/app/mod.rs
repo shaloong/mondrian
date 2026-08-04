@@ -164,6 +164,7 @@ mod timeline_commands;
 mod timeline_editing;
 mod timeline_insert;
 mod timeline_range_edit;
+mod timeline_selection_edit;
 mod timeline_targeting;
 pub mod ui_actions;
 mod video_transitions;

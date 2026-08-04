@@ -125,11 +125,10 @@ use crate::app::ui_actions::{
     ClipWriteParameterValuesPayload, DockDropAreaPayload, ExportDraftEdit,
     ExportOutputDialogPayload, ImportMediaDialogPayload, InspectorAudioComponentSourcePayload,
     InspectorSetAudioComponentSourcePayload, TimelineClipSelectionModePayload,
-    TimelineDropAssetPayload, TimelineExportRequest, TimelineInOutPointPayloadKind,
+    TimelineDropAssetPayload, TimelineExportRequest, TimelineInOutPointKind,
     TimelineMoveClipPayload, TimelineOpenNestedSequencePayload,
     TimelineSeekSource as AppTimelineSeekSource, TimelineSelectClipPayload,
-    TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload, TimelineTrimClipsPayload,
-    TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload, TrackAddKind,
+    TimelineSetInOutPointPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TrackAddKind,
     TrackAddPayload, TrackAuthorControl, TrackEditPolicyControl, TrackMovePayload,
     TrackSetAuthorControlPayload, TrackSetEditPolicyPayload,
     VideoTransitionCreateCrossDissolvePayload, VideoTransitionHandlePolicy,
@@ -1084,19 +1083,11 @@ impl TimelineEditAvailability {
             ripple_delete: app_state_action_enabled(&Action::RippleDeleteSelection, state),
             split: app_state_action_enabled(&Action::SplitClipAtPlayhead, state),
             trim_in_to_playhead: app_state_action_enabled(
-                &timeline_trim_selected_clips_to_playhead_action(
-                    TimelineTrimSelectedClipsToPlayheadPayload {
-                        edge: TimelineTrimPayloadEdge::In,
-                    },
-                ),
+                &timeline_trim_selected_clips_to_playhead_action(TimelineTrimPayloadEdge::In),
                 state,
             ),
             trim_out_to_playhead: app_state_action_enabled(
-                &timeline_trim_selected_clips_to_playhead_action(
-                    TimelineTrimSelectedClipsToPlayheadPayload {
-                        edge: TimelineTrimPayloadEdge::Out,
-                    },
-                ),
+                &timeline_trim_selected_clips_to_playhead_action(TimelineTrimPayloadEdge::Out),
                 state,
             ),
             roll_cut_to_playhead: app_state_action_enabled(
@@ -3987,6 +3978,8 @@ fn demo_selection(sequence: &Sequence) -> Option<SelectedClipRef> {
 
 fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
     let action_model = model.clone();
+    let frame_rate = model.timeline_display.frame_rate();
+    let in_out_time_base = Rational::new(frame_rate.den, frame_rate.num);
     let timeline = TimelineView::new(model.tracks.clone())
         .enabled(model.enabled)
         .with_header_width(144.0)
@@ -4086,10 +4079,10 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
             let action_model = action_model.clone();
             move |trim, _clip| action_model.trim_payload(trim).map(timeline_trim_clips_action)
         })
-        .on_in_out_point(|point, frame| {
+        .on_in_out_point(move |point, frame| {
             timeline_set_in_out_point_action(TimelineSetInOutPointPayload {
                 point: timeline_in_out_point_payload_kind(point),
-                frame: frame.max(0),
+                position: FramePosition::new(frame.max(0), in_out_time_base),
             })
         })
         .on_seek(timeline_seek_action_from_widget)
@@ -4122,10 +4115,10 @@ fn timeline_seek_source_from_widget(source: WidgetTimelineSeekSource) -> AppTime
     }
 }
 
-fn timeline_in_out_point_payload_kind(point: TimelineInOutPoint) -> TimelineInOutPointPayloadKind {
+fn timeline_in_out_point_payload_kind(point: TimelineInOutPoint) -> TimelineInOutPointKind {
     match point {
-        TimelineInOutPoint::In => TimelineInOutPointPayloadKind::In,
-        TimelineInOutPoint::Out => TimelineInOutPointPayloadKind::Out,
+        TimelineInOutPoint::In => TimelineInOutPointKind::In,
+        TimelineInOutPoint::Out => TimelineInOutPointKind::Out,
     }
 }
 
@@ -4141,25 +4134,21 @@ fn timeline_edit_command_action(
         TimelineEditCommand::DeleteSelection => Some(Action::DeleteSelection),
         TimelineEditCommand::RippleDeleteSelection => Some(Action::RippleDeleteSelection),
         TimelineEditCommand::SplitAtPlayhead => Some(Action::SplitClipAtPlayhead),
-        TimelineEditCommand::TrimSelectionInToPlayhead => {
-            Some(timeline_trim_selected_clips_to_playhead_action(
-                TimelineTrimSelectedClipsToPlayheadPayload { edge: TimelineTrimPayloadEdge::In },
-            ))
-        }
-        TimelineEditCommand::TrimSelectionOutToPlayhead => {
-            Some(timeline_trim_selected_clips_to_playhead_action(
-                TimelineTrimSelectedClipsToPlayheadPayload { edge: TimelineTrimPayloadEdge::Out },
-            ))
-        }
+        TimelineEditCommand::TrimSelectionInToPlayhead => Some(
+            timeline_trim_selected_clips_to_playhead_action(TimelineTrimPayloadEdge::In),
+        ),
+        TimelineEditCommand::TrimSelectionOutToPlayhead => Some(
+            timeline_trim_selected_clips_to_playhead_action(TimelineTrimPayloadEdge::Out),
+        ),
         TimelineEditCommand::RollSelectedCutToPlayhead => {
             Some(timeline_roll_selected_cut_to_playhead_action())
         }
-        TimelineEditCommand::EnableSelection => Some(timeline_set_selected_clips_enabled_action(
-            TimelineSetSelectedClipsEnabledPayload { enabled: true },
-        )),
-        TimelineEditCommand::DisableSelection => Some(timeline_set_selected_clips_enabled_action(
-            TimelineSetSelectedClipsEnabledPayload { enabled: false },
-        )),
+        TimelineEditCommand::EnableSelection => {
+            Some(timeline_set_selected_clips_enabled_action(true))
+        }
+        TimelineEditCommand::DisableSelection => {
+            Some(timeline_set_selected_clips_enabled_action(false))
+        }
         TimelineEditCommand::LinkSelection => Some(timeline_link_selected_clips_action()),
         TimelineEditCommand::UnlinkSelection => Some(timeline_unlink_selected_clips_action()),
         TimelineEditCommand::LiftInOutRange => Some(timeline_lift_range_action()),
@@ -4191,28 +4180,16 @@ fn timeline_edit_command_shortcut_label(command: TimelineEditCommand) -> Option<
         TimelineEditCommand::RippleDeleteSelection => Action::RippleDeleteSelection,
         TimelineEditCommand::SplitAtPlayhead => Action::SplitClipAtPlayhead,
         TimelineEditCommand::TrimSelectionInToPlayhead => {
-            timeline_trim_selected_clips_to_playhead_action(
-                TimelineTrimSelectedClipsToPlayheadPayload { edge: TimelineTrimPayloadEdge::In },
-            )
+            timeline_trim_selected_clips_to_playhead_action(TimelineTrimPayloadEdge::In)
         }
         TimelineEditCommand::TrimSelectionOutToPlayhead => {
-            timeline_trim_selected_clips_to_playhead_action(
-                TimelineTrimSelectedClipsToPlayheadPayload { edge: TimelineTrimPayloadEdge::Out },
-            )
+            timeline_trim_selected_clips_to_playhead_action(TimelineTrimPayloadEdge::Out)
         }
         TimelineEditCommand::RollSelectedCutToPlayhead => {
             timeline_roll_selected_cut_to_playhead_action()
         }
-        TimelineEditCommand::EnableSelection => {
-            timeline_set_selected_clips_enabled_action(TimelineSetSelectedClipsEnabledPayload {
-                enabled: true,
-            })
-        }
-        TimelineEditCommand::DisableSelection => {
-            timeline_set_selected_clips_enabled_action(TimelineSetSelectedClipsEnabledPayload {
-                enabled: false,
-            })
-        }
+        TimelineEditCommand::EnableSelection => timeline_set_selected_clips_enabled_action(true),
+        TimelineEditCommand::DisableSelection => timeline_set_selected_clips_enabled_action(false),
         TimelineEditCommand::MarkInAtPlayhead => Action::MarkInAtPlayhead,
         TimelineEditCommand::MarkOutAtPlayhead => Action::MarkOutAtPlayhead,
     };
@@ -7249,6 +7226,7 @@ fn inspector_property_action(
 mod tests {
     use super::*;
     use crate::app::preview_unavailability::PreviewOutputStage;
+    use crate::app::product_action::TimelineSelectionEdit;
     use mondrian_export::queue::{ExportFailure, ExportFailureReason};
 
     fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::TimelineTime {
@@ -7262,6 +7240,7 @@ mod tests {
             parameter_id: mondrian_core::ParameterId::new_static(parameter_id),
         }
     }
+    use crate::app::product_action::{ProductAction, TimelineProductAction};
     use crate::app::ui_actions::{
         AppShellInterpretAssetDialogPayload, AppShellRelinkAssetDialogPayload,
         AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveSelectionPayload,
@@ -7275,8 +7254,7 @@ mod tests {
         CLIP_EDIT_NUMERIC_CURVE, CLIP_NAMESPACE, CLIP_WRITE_PARAMETER_VALUES, INSPECTOR_NAMESPACE,
         INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_DROP_ASSET,
         TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_SELECT_CLIP,
-        TIMELINE_SET_IN_OUT_POINT, TIMELINE_SET_SELECTED_CLIPS_ENABLED,
-        TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, TRACK_ADD, TRACK_MOVE, TRACK_NAMESPACE,
+        TIMELINE_SET_IN_OUT_POINT, TRACK_ADD, TRACK_MOVE, TRACK_NAMESPACE,
         VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE, VIDEO_TRANSITION_NAMESPACE,
         VIDEO_TRANSITION_SELECT, VIDEO_TRANSITION_SET_RANGE, VISUAL_EFFECT_ADD_TO_CLIP,
         VISUAL_EFFECT_NAMESPACE, VISUAL_EFFECT_SELECT, VISUAL_EFFECT_SET_PARAMETER_VALUE,
@@ -10188,8 +10166,9 @@ mod tests {
         assert_eq!(name, TIMELINE_SET_IN_OUT_POINT);
         let payload: TimelineSetInOutPointPayload =
             serde_json::from_value(payload.clone()).expect("timeline in/out payload");
-        assert_eq!(payload.point, TimelineInOutPointPayloadKind::In);
-        assert_eq!(payload.frame, 20);
+        assert_eq!(payload.point, TimelineInOutPointKind::In);
+        assert_eq!(payload.position.frame, 20);
+        assert_eq!(payload.position.time_base, Rational::new(1, 25));
     }
 
     #[test]
@@ -10234,38 +10213,40 @@ mod tests {
         );
 
         let trim_action =
-            timeline_edit_command_action(&model, TimelineEditCommand::TrimSelectionInToPlayhead);
-        let Some(Action::Custom { namespace, name, payload }) = trim_action else {
-            panic!("expected selected trim action");
-        };
-        assert_eq!(namespace, TIMELINE_NAMESPACE);
-        assert_eq!(name, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD);
-        let payload: TimelineTrimSelectedClipsToPlayheadPayload =
-            serde_json::from_value(payload).expect("trim payload");
-        assert_eq!(payload.edge, TimelineTrimPayloadEdge::In);
+            timeline_edit_command_action(&model, TimelineEditCommand::TrimSelectionInToPlayhead)
+                .expect("selected trim action");
+        assert_eq!(
+            ProductAction::decode_external(&trim_action)
+                .expect("valid product payload")
+                .expect("recognized product action"),
+            ProductAction::Timeline(TimelineProductAction::EditSelection(
+                TimelineSelectionEdit::TrimClipsToPlayhead { edge: TimelineTrimPayloadEdge::In }
+            ))
+        );
 
         let roll_action =
-            timeline_edit_command_action(&model, TimelineEditCommand::RollSelectedCutToPlayhead);
-        let Some(Action::Custom { namespace, name, payload }) = roll_action else {
-            panic!("expected roll cut action");
-        };
-        assert_eq!(namespace, TIMELINE_NAMESPACE);
+            timeline_edit_command_action(&model, TimelineEditCommand::RollSelectedCutToPlayhead)
+                .expect("roll cut action");
         assert_eq!(
-            name,
-            crate::app::ui_actions::TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD
+            ProductAction::decode_external(&roll_action)
+                .expect("valid product payload")
+                .expect("recognized product action"),
+            ProductAction::Timeline(TimelineProductAction::EditSelection(
+                TimelineSelectionEdit::RollCutToPlayhead
+            ))
         );
-        assert!(payload.is_null());
 
         let disable_action =
-            timeline_edit_command_action(&model, TimelineEditCommand::DisableSelection);
-        let Some(Action::Custom { namespace, name, payload }) = disable_action else {
-            panic!("expected selected enable action");
-        };
-        assert_eq!(namespace, TIMELINE_NAMESPACE);
-        assert_eq!(name, TIMELINE_SET_SELECTED_CLIPS_ENABLED);
-        let payload: TimelineSetSelectedClipsEnabledPayload =
-            serde_json::from_value(payload).expect("enabled payload");
-        assert!(!payload.enabled);
+            timeline_edit_command_action(&model, TimelineEditCommand::DisableSelection)
+                .expect("selected enabled action");
+        assert_eq!(
+            ProductAction::decode_external(&disable_action)
+                .expect("valid product payload")
+                .expect("recognized product action"),
+            ProductAction::Timeline(TimelineProductAction::EditSelection(
+                TimelineSelectionEdit::SetClipsEnabled { enabled: false }
+            ))
+        );
 
         let clear_action =
             timeline_edit_command_action(&model, TimelineEditCommand::ClearInOutPoints);

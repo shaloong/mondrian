@@ -794,6 +794,19 @@ stale Clip ID, insufficient new membership, or final author-validation failure
 rejects the entire operation. A request that would not change membership is
 reported as a no-op and the App must not create an Author Transaction for it.
 
+Product operations over the current selection enter the deep
+`timeline_selection_edit` Module through one closed `TimelineSelectionEdit`
+Interface. Link/Unlink, Trim-to-playhead, Roll-to-playhead, and batch Enabled
+changes carry no copied selection or Track projection. The Module resolves the
+latest stable Clip IDs and playhead, expands complete Link Groups where the
+structural edit requires synchronized placement changes,
+prepares the complete lock/geometry/no-op result, and only then invokes one
+Author Transaction. Trim and Roll admission reuse the same pure preparation
+Implementation that execution consumes; the UI does not maintain approximate
+edge or handle rules. A locked unselected Link Group member therefore blocks
+the complete Trim, while a repeated Enabled value returns
+`ActionNotExecuted` without advancing Author Generation or History.
+
 ### Insert Edit
 
 Professional Insert is a single `InsertEditRequest`, not a collision mode.
@@ -859,6 +872,19 @@ panel, or workspace state. Lift removes only content intersecting the range
 and requires an empty ripple set. Extract removes the same content and closes
 the exact duration on every ripple Track; every content Track must therefore
 also be in the ripple set.
+
+The authored work range and the structural request remain distinct. Sequence
+In/Out points are canonical `TimelineTime` author state. A ruler gesture enters
+the closed `TimelineProductAction` Interface as a `FramePosition` containing
+both frame index and evaluation time base; the App lowers it exactly once and
+never interprets a bare integer on the active Sequence grid. Set and Clear
+revalidate current author state before mutable access, so repeated values are
+`ActionNotExecuted` and create no Author Generation or History entry.
+`ApplyRangeEdit(Lift | Extract)` carries product intent rather than a copied
+work-range/Track snapshot: at dispatch, the App reads the latest In/Out and
+open-Session Target/Sync-Lock policy and builds the complete deterministic
+`RangeEditRequest`. Headless callers that already own an explicit request use
+the domain Interface directly; Widgets never construct content/ripple scope.
 
 Track Targeting and Sync-Lock remain editor-session policy. The App Adapter
 resolves Target-enabled Tracks into `content_tracks`, and resolves the union of

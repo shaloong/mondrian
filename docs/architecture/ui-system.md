@@ -126,6 +126,14 @@ exclusive Out point, and commit through one Author Transaction. The existing
 drag collision choice is labeled `PushForward`; UI code must not expose it as
 professional Insert.
 
+In/Out and Range Edit product intent use the same closed Timeline Action slice,
+but are not one domain request. Ruler input carries `FramePosition` with its
+explicit grid and is lowered once to exact Sequence author time. Clear and
+repeated point writes are rejected as no-ops before mutable access. Lift and
+Extract carry only the closed kind; the App resolves the latest In/Out plus
+Target/Sync-Lock state into the complete `RangeEditRequest` at dispatch. This
+avoids both bare-frame ambiguity and stale duplicated range/Track snapshots.
+
 Inspector audio source controls project existing author state rather than own
 it. Each command carries only canonical `ClipId` plus one stable
 `AudioComponentEditId`; current Track placement and media kind are never copied
@@ -328,6 +336,17 @@ reinterpreting author membership. The semantic Action is selection-scoped; the
 App resolves current stable IDs again, applies one domain edit, and commits one
 Undo step only when membership actually changes.
 
+All current-selection editorial commands share the closed
+`TimelineSelectionEdit` Interface: Link, Unlink, Trim-to-playhead,
+Roll-to-playhead, and Set Enabled. The Widget never transports its selected ID
+list or a Track-lock snapshot. The deep App Module resolves current Session
+selection/playhead state, expands structural Link Groups where synchronized
+placement changes require it, and uses the same pure Trim/Roll preparation as
+execution. Product availability is therefore a projection of the owning Module
+rather than a second collection of UI geometry rules. The sole strict
+`ui.timeline.edit_selection` codec uses one
+variant-specific payload shape; unknown variants and fields fail closed.
+
 Targeted Split and global Razor are separate product intents. A targeted Split
 names one stable `ClipId` and returns one typed `SplitClipOutcome`: the requested
 left/right identity mapping plus every synchronized link-group member mapping.
@@ -419,8 +438,14 @@ local input-routing state, not a second product Action hierarchy.
 Inside each migrated App slice, product meaning is carried by the closed
 `ProductAction` algebra. `Action::Custom` remains the external Widget,
 scripting, and plugin transport Seam; it must not become a second product-domain
-model. The current high-frequency Timeline slice covers Clip selection, Clip
-movement, bulk trim, and seek; Track operations use the closed Interface above.
+model. The current Timeline slice covers Clip selection, Clip movement, bulk
+trim, seek, exact In/Out mutation, atomic Lift/Extract intent, and the complete
+current-selection edit algebra. Track operations use the closed Interface
+above. The sole `ui.timeline` codecs for Range and Selection Edit reject legacy
+bare-frame payloads, unknown variants, and unknown fields; dispatch and
+availability consume the decoded algebra rather than repeating namespace/name
+interpretation. The five replaced per-command selection action names do not
+coexist with this Interface.
 Sequence-owned visual Transition operations use
 a separate closed `VideoTransitionProductAction`: Select, product-default Cross
 Dissolve creation, exact-range edit, and Remove. The

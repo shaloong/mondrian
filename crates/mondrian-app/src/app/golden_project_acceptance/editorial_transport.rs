@@ -17,7 +17,7 @@ use crate::app::playback::PlaybackAdvanceStatus;
 use crate::app::ui_actions::{
     assets_prepare_drag_action, timeline_extract_range_action, timeline_lift_range_action,
     timeline_seek_with_source_action, timeline_set_in_out_point_action, timeline_trim_clips_action,
-    track_set_edit_policy_action, AssetsPrepareDragPayload, TimelineInOutPointPayloadKind,
+    track_set_edit_policy_action, AssetsPrepareDragPayload, TimelineInOutPointKind,
     TimelineInsertAssetPayload, TimelineSeekSource, TimelineSetInOutPointPayload,
     TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TrackEditPolicyControl,
     TrackSetEditPolicyPayload,
@@ -25,7 +25,7 @@ use crate::app::ui_actions::{
 use crate::app::AppState;
 use anyhow::{ensure, Context};
 use mondrian_assets::AssetKind;
-use mondrian_core::{AssetId, ClipId, FrameRounding, SequenceId, TrackId};
+use mondrian_core::{AssetId, ClipId, FramePosition, FrameRounding, SequenceId, TrackId};
 use mondrian_editor_state::action::SelectionTarget;
 use mondrian_editor_state::Action;
 use mondrian_media::info::{AudioCodec, ChannelLayout};
@@ -331,21 +331,22 @@ fn set_in_out_range(
         sequence_in_out_range(state)?.is_none(),
         "previous Golden range edit did not consume its In/Out range"
     );
+    let time_base = state.active_sequence().context("active Sequence is absent")?.time_base();
     let steps = vec![
         dispatch_author_transition(
             state,
             in_intent,
             timeline_set_in_out_point_action(TimelineSetInOutPointPayload {
-                point: TimelineInOutPointPayloadKind::In,
-                frame: range.start_frame,
+                point: TimelineInOutPointKind::In,
+                position: FramePosition::new(range.start_frame, time_base),
             }),
         )?,
         dispatch_author_transition(
             state,
             out_intent,
             timeline_set_in_out_point_action(TimelineSetInOutPointPayload {
-                point: TimelineInOutPointPayloadKind::Out,
-                frame: range.end_frame_exclusive,
+                point: TimelineInOutPointKind::Out,
+                position: FramePosition::new(range.end_frame_exclusive, time_base),
             }),
         )?,
     ];
