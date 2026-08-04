@@ -674,8 +674,10 @@ slipping the source, or changing the source time map preserves
 overwrite fragment advances it by the removed placement duration. Source time
 is separately derived through `ClipSourceTimeMap` and controls only
 media/nested sampling. The current closed `Constant` variant stores exactly a
-`source_origin` and an exact `TimeScale`: positive, negative, and zero scales
-mean forward sampling, reverse sampling, and a hold. The source coordinate at
+`source_origin`, an exact `TimeScale`, and its `SourceSamplingBoundary`:
+positive and negative scales require `Covering` and `StrictPredecessor`
+respectively; a zero-rate hold retains whichever boundary selected its captured
+picture. The source coordinate at
 the exclusive placement end is always derived as `map(duration)`; no mutable
 `source_out` or parallel speed field is persisted. For reverse sampling,
 `source_origin` is the first sampled coordinate rather than the minimum of an
@@ -711,24 +713,19 @@ added beside it. Author transaction validation checks placement, Clip-local,
 and complete source-map arithmetic before a snapshot may commit.
 
 The constant-retime operation accepts an explicit complete Clip target set and
-changes only the canonical source-time map. A positive forward-rate intent
-preserves source origin, placement, Timeline duration, `clip_time_in`, and
-audio edit origins. A picture-hold intent first resolves the source coordinate
-visible at one in-range Sequence time, then installs a zero-rate map. All
-targets and Track locks are validated before any Clip changes. The App product
-adapter may expand the complete link group for forward rate; freeze frame is
-deliberately video-only because repeating one audio sample is not a valid audio
-freeze. New retime intent additionally fails closed unless the referenced media
-stream or nested Sequence has a finite, currently resolvable source extent.
-Existing unresolved author intent may survive reopen, but a new source-dependent
-edit cannot be admitted on guessed duration.
-
-Signed reverse is not implemented by merely negating the scale. A reversed
-half-open source interval begins at the old exclusive terminal boundary and
-must request the strict predecessor sample at the media/audio lowering seam.
-Until that direction-aware boundary contract is carried through Preview,
-Audio, and Export, public forward-rate Actions reject zero/negative ratios and
-the reverse product feature remains incomplete.
+changes only the canonical source-time map. A signed nonzero rate preserves
+placement, Timeline duration, `clip_time_in`, and audio edit origins. When its
+sign changes, the new origin is the old exclusive terminal boundary, so the
+same half-open source span reverses instead of jumping to another span. Reverse
+evaluation emits a `StrictPredecessor` target; forward evaluation emits
+`Covering`. A picture-hold first resolves the complete target visible at one
+in-range Sequence time and installs a zero-rate map retaining both its exact
+time and boundary. All targets, finite source extents, and Track locks are
+validated before any Clip changes. The App product adapter may atomically
+expand the complete link group for signed rate; hold is deliberately video-only
+because repeating one audio sample is not a valid audio freeze. A no-op, zero
+rate, stale identity, partial/locked link group, out-of-range reverse origin,
+or unresolved source extent creates neither mutation nor History entry.
 
 A file-backed still is not another `ClipContent` variant. The Asset Library
 classifies the physical source as `StillImage`, while `Clip::new_still_image`

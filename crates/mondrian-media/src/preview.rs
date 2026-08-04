@@ -11,8 +11,10 @@ use crate::decoder::{
 };
 use ffmpeg_next as ffmpeg;
 use mondrian_core::types::ColorSpace;
+use mondrian_core::{
+    FrameRounding, MondrianError, Rational, Result, SourceSampleTarget, TimelineTime,
+};
 pub use mondrian_core::{MediaFileChangeStamp, MediaFileFingerprint, MediaFileObjectIdentity};
-use mondrian_core::{MondrianError, Result, TimelineTime};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -427,7 +429,7 @@ pub struct PreviewDecodeRequest<'a> {
     /// Optional exact physical video stream selected by the caller's probe.
     pub video_stream_index: Option<u32>,
     /// Exact media-source-local target; FFmpeg PTS lowering occurs inside the Adapter.
-    pub source_time: TimelineTime,
+    pub source_sample: SourceSampleTarget,
     /// Optional maximum output width.
     pub max_width: Option<u32>,
     /// Optional maximum output height.
@@ -497,7 +499,7 @@ impl<'a> PreviewDecodeRequest<'a> {
         Self {
             path: key.source().path(),
             video_stream_index: Some(key.source().video_stream_index()),
-            source_time: key.source_time(),
+            source_sample: key.source_sample(),
             max_width,
             max_height,
             access_mode,
@@ -512,14 +514,14 @@ impl<'a> PreviewDecodeRequest<'a> {
     /// Create a request for one scaled preview decode outcome.
     pub fn new(
         path: &'a Path,
-        source_time: TimelineTime,
+        source_sample: SourceSampleTarget,
         access_mode: PreviewDecodeAccessMode,
         source_color: PreviewSourceColorContract,
     ) -> Self {
         Self {
             path,
             video_stream_index: None,
-            source_time,
+            source_sample,
             max_width: None,
             max_height: None,
             access_mode,
@@ -1561,64 +1563,88 @@ use external_decode::{
     run_external_decode_command_cancellable,
 };
 
-pub(super) fn source_time_to_stream_pts(
-    source_time: TimelineTime,
+pub(super) fn source_sample_to_stream_pts(
+    source_sample: SourceSampleTarget,
     stream_tb: ffmpeg::Rational,
     stream_start_pts: i64,
 ) -> std::result::Result<i64, String> {
-    let relative = source_time_to_time_base_ticks(
-        source_time,
+    let relative = source_sample_to_time_base_ticks(
+        source_sample,
         i64::from(stream_tb.numerator()),
         i64::from(stream_tb.denominator()),
     )?;
     stream_start_pts.checked_add(relative).ok_or_else(|| {
         format!(
-            "source target PTS overflow: time={source_time} stream_time_base={}/{} start_pts={stream_start_pts}",
+            "source target PTS overflow: target={source_sample:?} stream_time_base={}/{} start_pts={stream_start_pts}",
             stream_tb.numerator(),
             stream_tb.denominator()
         )
     })
 }
 
-fn source_time_to_time_base_ticks(
-    source_time: TimelineTime,
+fn source_sample_to_time_base_ticks(
+    source_sample: SourceSampleTarget,
     time_base_num: i64,
     time_base_den: i64,
 ) -> std::result::Result<i64, String> {
-    if source_time.is_negative() {
+    if source_sample.time().is_negative() {
         return Err(format!(
-            "negative media source target is invalid: {source_time}"
+            "negative media source target is invalid: {source_sample:?}"
         ));
     }
     if time_base_num <= 0 || time_base_den <= 0 {
         return Err(format!(
-            "invalid FFmpeg time base {time_base_num}/{time_base_den} for source target {source_time}"
+            "invalid FFmpeg time base {time_base_num}/{time_base_den} for source target {source_sample:?}"
         ));
     }
-    let scaled_numerator = i128::from(source_time.numerator())
-        .checked_mul(i128::from(time_base_den))
-        .ok_or_else(|| format!("source target numerator overflow: {source_time}"))?;
-    let scaled_denominator = i128::from(source_time.denominator())
-        .checked_mul(i128::from(time_base_num))
-        .ok_or_else(|| format!("source target denominator overflow: {source_time}"))?;
-    let quotient = scaled_numerator / scaled_denominator;
-    let remainder = scaled_numerator % scaled_denominator;
-    let doubled_remainder = remainder
-        .checked_mul(2)
-        .ok_or_else(|| format!("source target rounding overflow: {source_time}"))?;
-    let rounded = if doubled_remainder >= scaled_denominator {
-        quotient
-            .checked_add(1)
-            .ok_or_else(|| format!("source target rounding overflow: {source_time}"))?
-    } else {
-        quotient
-    };
-    i64::try_from(rounded).map_err(|_| format!("source target exceeds FFmpeg PTS: {source_time}"))
+    let rate = Rational::new(time_base_den, time_base_num);
+    let frame = source_sample
+        .to_frame_position(rate)
+        .map_err(|error| format!("source target cannot project to FFmpeg PTS: {error}"))?
+        .frame;
+    if frame < 0 {
+        return Err(format!(
+            "media source target precedes origin: {source_sample:?}"
+        ));
+    }
+    Ok(frame)
 }
 
-fn ffmpeg_source_time_arg(source_time: TimelineTime) -> std::result::Result<String, String> {
-    let micros =
-        source_time_to_time_base_ticks(source_time, 1, i64::from(ffmpeg::ffi::AV_TIME_BASE))?;
+fn duration_to_time_base_ticks(
+    duration: TimelineTime,
+    time_base_num: i64,
+    time_base_den: i64,
+) -> std::result::Result<i64, String> {
+    if duration.is_negative() || time_base_num <= 0 || time_base_den <= 0 {
+        return Err(format!(
+            "invalid duration {duration} or FFmpeg time base {time_base_num}/{time_base_den}"
+        ));
+    }
+    let rate = Rational::new(time_base_den, time_base_num);
+    duration
+        .to_frame_position(rate, FrameRounding::Ceil)
+        .map(|position| position.frame)
+        .map_err(|error| format!("duration cannot project to FFmpeg ticks: {error}"))
+}
+
+fn ffmpeg_source_time_arg(
+    source_sample: SourceSampleTarget,
+    stream_tb: ffmpeg::Rational,
+) -> std::result::Result<String, String> {
+    let relative_pts = source_sample_to_time_base_ticks(
+        source_sample,
+        i64::from(stream_tb.numerator()),
+        i64::from(stream_tb.denominator()),
+    )?;
+    let numerator = relative_pts
+        .checked_mul(i64::from(stream_tb.numerator()))
+        .ok_or_else(|| format!("source seek time overflow: {source_sample:?}"))?;
+    let exact = TimelineTime::new(numerator, i64::from(stream_tb.denominator()))
+        .map_err(|error| format!("invalid source seek time: {error}"))?;
+    let micros = SourceSampleTarget::covering(exact)
+        .to_frame_position(Rational::new(i64::from(ffmpeg::ffi::AV_TIME_BASE), 1))
+        .map_err(|error| format!("source seek time cannot project to microseconds: {error}"))?
+        .frame;
     let seconds = micros / i64::from(ffmpeg::ffi::AV_TIME_BASE);
     let fractional = micros % i64::from(ffmpeg::ffi::AV_TIME_BASE);
     Ok(format!("{seconds}.{fractional:06}"))

@@ -19,7 +19,6 @@ use mondrian_core::{
     ClipId, ColorSpace, FramePosition, ProjectColorEnvironment, ProjectSettings, Rational,
     TimeScale, TimelineTime,
 };
-use mondrian_editor_state::Action;
 use mondrian_media::info::{AudioCodec, ChannelLayout, PixelFormat, VideoCodec};
 use mondrian_media::{
     AudioStreamInfo, DecodedVideoRange, DetectedColorInterpretation, MediaInfo, VideoCodecProfile,
@@ -166,11 +165,13 @@ fn golden_hero_retime_is_one_exact_contract_across_author_preview_audio_export_a
     dispatch_author_transition(
         workflow.app_mut(),
         "set-linked-forward-rate",
-        Action::SetClipForwardRate {
-            clip_id: video_clip_id,
-            rate: TimeScale::new(3, 2)?,
-            include_linked: true,
-        },
+        crate::app::ui_actions::clip_set_rate_action(
+            crate::app::product_action::ClipSetRatePayload {
+                clip_id: video_clip_id,
+                rate: TimeScale::new(3, 2)?,
+                include_linked: true,
+            },
+        ),
     )?;
     assert_clip_scale(
         workflow.app().active_sequence().context("Hero is absent")?,
@@ -200,10 +201,12 @@ fn golden_hero_retime_is_one_exact_contract_across_author_preview_audio_export_a
     dispatch_author_transition(
         workflow.app_mut(),
         "freeze-linked-picture-only",
-        Action::FreezeVideoClipAt {
-            clip_id: video_clip_id,
-            sequence_time: FramePosition::new(sample_frame, time_base),
-        },
+        crate::app::ui_actions::clip_hold_frame_action(
+            crate::app::product_action::ClipHoldFramePayload {
+                clip_id: video_clip_id,
+                sequence_time: FramePosition::new(sample_frame, time_base),
+            },
+        ),
     )?;
     let held_sequence = workflow.app().active_sequence().context("Hero is absent")?;
     assert_clip_scale(held_sequence, video_clip_id, TimeScale::new(0, 1)?)?;
@@ -329,7 +332,7 @@ fn assert_visual_source_time(
             })
             .collect::<Vec<_>>();
         ensure!(
-            media.len() == 1 && media[0].source_time == expected,
+            media.len() == 1 && media[0].source_sample.time() == expected,
             "Preview/Export render plan did not preserve the exact source-time map"
         );
     }

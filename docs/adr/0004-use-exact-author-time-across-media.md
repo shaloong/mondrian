@@ -41,6 +41,18 @@ the persisted time representation. SMPTE timecode is a separate display
 contract containing nominal rate, drop/non-drop rules, and start offset; it is
 not the arithmetic timeline value.
 
+Half-open reverse sampling cannot be represented by a naked exact time alone.
+The canonical `SourceSampleTarget` therefore pairs source-local time with either
+`Covering` or `StrictPredecessor`. Positive maps use the covering cell; negative
+maps begin at an exclusive terminal boundary and use its strict predecessor.
+Lowering to an integer grid is exact: covering uses `floor(t * rate)`, while
+strict predecessor uses `ceil(t * rate) - 1`. No epsilon, nominal-frame
+subtraction, or nearest rounding is permitted. The declared media, audio, or
+nested-Sequence grid consumes this boundary once; downstream execution carries
+the resolved grid coordinate as a covering target. A zero-rate hold preserves
+the captured target's boundary so VFR media and exact CFR boundaries do not
+shift to an adjacent sample.
+
 Realtime audio prepare, reprime, and device recovery follow the same rule. The
 Playback Engine lowers its authoritative phase at one explicit Playback Epoch
 and monotonic timestamp directly to an `AudioSamplePosition` on the requested

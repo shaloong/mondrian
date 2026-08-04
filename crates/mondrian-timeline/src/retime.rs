@@ -8,12 +8,12 @@ use std::collections::{HashMap, HashSet};
 /// One constant-retime intent applied without changing Timeline placement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipConstantRetime {
-    /// Replace the source-time rate while preserving each Clip source origin.
+    /// Replace the nonzero source-time rate while preserving the visible source span direction.
     ///
-    /// The rate must be strictly positive. Reverse requires direction-aware
-    /// half-open source-boundary sampling and is deliberately a separate
-    /// product contract.
-    ForwardRate { rate: TimeScale },
+    /// The rate must be nonzero. A direction change anchors the replacement at
+    /// the old exclusive terminal boundary so the same source span reverses
+    /// instead of jumping to unrelated media.
+    SetRate { rate: TimeScale },
     /// Hold the exact source sample visible at one Sequence-local time.
     HoldAtSequenceTime { sequence_time: TimelineTime },
 }
@@ -55,10 +55,10 @@ pub fn apply_clip_constant_retime(
     }
     if matches!(
         request.retime,
-        ClipConstantRetime::ForwardRate { rate } if rate.numerator() <= 0
+        ClipConstantRetime::SetRate { rate } if rate.numerator() == 0
     ) {
         return Err(retime_error(
-            "forward retime requires a strictly positive exact rate",
+            "constant retime requires a nonzero exact rate; use a hold intent for zero",
         ));
     }
 
@@ -114,8 +114,16 @@ fn replacement_map(
     retime: ClipConstantRetime,
 ) -> mondrian_core::Result<ClipSourceTimeMap> {
     Ok(match retime {
-        ClipConstantRetime::ForwardRate { rate } => {
-            ClipSourceTimeMap::constant(clip.source_origin(), rate)
+        ClipConstantRetime::SetRate { rate } => {
+            let current = clip.source_time_scale().numerator();
+            let replacement = rate.numerator();
+            let direction_changed = current != 0 && current.signum() != replacement.signum();
+            let source_origin = if direction_changed {
+                clip.source_terminal_boundary()?
+            } else {
+                clip.source_origin()
+            };
+            ClipSourceTimeMap::constant(source_origin, rate)
         }
         ClipConstantRetime::HoldAtSequenceTime { sequence_time } => {
             if !clip.contains(sequence_time)? {
@@ -124,8 +132,8 @@ fn replacement_map(
                     clip.id
                 )));
             }
-            let source_time = clip.timeline_to_source_time(sequence_time)?;
-            ClipSourceTimeMap::constant(source_time, TimeScale::new(0, 1)?)
+            let source_sample = clip.timeline_to_source_sample(sequence_time)?;
+            ClipSourceTimeMap::hold(source_sample)
         }
     })
 }
@@ -164,7 +172,7 @@ mod tests {
             &mut sequence,
             &ClipConstantRetimeRequest {
                 clip_ids: vec![video_id, audio_id],
-                retime: ClipConstantRetime::ForwardRate { rate: TimeScale::new(2, 1).expect("2x") },
+                retime: ClipConstantRetime::SetRate { rate: TimeScale::new(2, 1).expect("2x") },
             },
         )
         .expect("retime");
@@ -214,10 +222,102 @@ mod tests {
             &mut sequence,
             &ClipConstantRetimeRequest {
                 clip_ids: vec![clip_id, ClipId::new()],
-                retime: ClipConstantRetime::ForwardRate { rate: TimeScale::ONE },
+                retime: ClipConstantRetime::SetRate { rate: TimeScale::ONE },
             },
         )
         .is_err());
         assert_eq!(sequence.video_tracks[0].clips[0].source_time_map(), &before);
+    }
+
+    #[test]
+    fn direction_changes_reverse_the_existing_source_span_at_its_exclusive_boundary() {
+        let mut sequence = Sequence::new("direction change");
+        let mut clip = Clip::new(AssetId::new(), tt(10), tt(20)).expect("Clip");
+        clip.set_source_origin(tt(100)).expect("source origin");
+        let clip_id = clip.id;
+        sequence.video_tracks[0].add_clip(clip).expect("add Clip");
+
+        apply_clip_constant_retime(
+            &mut sequence,
+            &ClipConstantRetimeRequest {
+                clip_ids: vec![clip_id],
+                retime: ClipConstantRetime::SetRate { rate: TimeScale::NEGATIVE_ONE },
+            },
+        )
+        .expect("reverse");
+        let reversed = &sequence.video_tracks[0].clips[0];
+        assert_eq!(reversed.source_origin(), tt(120));
+        assert_eq!(
+            reversed.source_terminal_boundary().expect("terminal"),
+            tt(100)
+        );
+        assert_eq!(
+            reversed.timeline_to_source_sample(reversed.position).expect("first sample"),
+            mondrian_core::SourceSampleTarget::strict_predecessor(tt(120))
+        );
+
+        apply_clip_constant_retime(
+            &mut sequence,
+            &ClipConstantRetimeRequest {
+                clip_ids: vec![clip_id],
+                retime: ClipConstantRetime::SetRate { rate: TimeScale::ONE },
+            },
+        )
+        .expect("restore forward");
+        let restored = &sequence.video_tracks[0].clips[0];
+        assert_eq!(restored.source_origin(), tt(100));
+        assert_eq!(
+            restored.source_terminal_boundary().expect("terminal"),
+            tt(120)
+        );
+    }
+
+    #[test]
+    fn hold_of_reverse_content_preserves_strict_predecessor_sampling() {
+        let mut sequence = Sequence::new("reverse hold");
+        let mut clip = Clip::new(AssetId::new(), tt(10), tt(20)).expect("Clip");
+        clip.set_constant_source_time_map(tt(120), TimeScale::NEGATIVE_ONE)
+            .expect("reverse map");
+        let clip_id = clip.id;
+        sequence.video_tracks[0].add_clip(clip).expect("add Clip");
+
+        apply_clip_constant_retime(
+            &mut sequence,
+            &ClipConstantRetimeRequest {
+                clip_ids: vec![clip_id],
+                retime: ClipConstantRetime::HoldAtSequenceTime { sequence_time: tt(15) },
+            },
+        )
+        .expect("hold reverse content");
+
+        let held = &sequence.video_tracks[0].clips[0];
+        assert_eq!(held.source_origin(), tt(115));
+        assert_eq!(held.source_time_scale(), TimeScale::ZERO);
+        assert_eq!(
+            held.timeline_to_source_sample(held.position).expect("held sample"),
+            mondrian_core::SourceSampleTarget::strict_predecessor(tt(115))
+        );
+    }
+
+    #[test]
+    fn set_rate_rejects_zero_without_mutating_author_state() {
+        let mut sequence = Sequence::new("zero rate");
+        let clip = Clip::new(AssetId::new(), tt(0), tt(20)).expect("Clip");
+        let clip_id = clip.id;
+        let original = clip.source_time_map().clone();
+        sequence.video_tracks[0].add_clip(clip).expect("add Clip");
+
+        assert!(apply_clip_constant_retime(
+            &mut sequence,
+            &ClipConstantRetimeRequest {
+                clip_ids: vec![clip_id],
+                retime: ClipConstantRetime::SetRate { rate: TimeScale::new(0, 1).expect("zero") },
+            },
+        )
+        .is_err());
+        assert_eq!(
+            sequence.video_tracks[0].clips[0].source_time_map(),
+            &original
+        );
     }
 }

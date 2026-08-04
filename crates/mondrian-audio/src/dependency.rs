@@ -506,6 +506,7 @@ mod tests {
             sequence_start: tt(0),
             source_origin: tt(7),
             scale: TimeScale::new(0, 1).expect("freeze scale"),
+            sampling_boundary: mondrian_core::SourceSamplingBoundary::Covering,
         };
         let mapped = window.map(map).expect("mapped");
         assert_eq!(mapped.lower, tt(7));

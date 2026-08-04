@@ -903,7 +903,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         }
         let hints = self.scrub_adaptation.borrow_mut().observe_request(
             key.asset_id,
-            key.source_time(),
+            key.source_sample().time(),
             Instant::now(),
         );
         match hints.scrub_class {
@@ -1015,7 +1015,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             self.record_playback_current_sustained_pressure_skip();
             tracing::trace!(
                 asset_id = %key.asset_id,
-                source_time = %key.source_time(),
+                source_sample = ?key.source_sample(),
                 "viewer preview skipped current playback decode while sustained pressure recovery has realtime work pending"
             );
             return MediaPreviewRequestAdmission::DeferredExecutionPressure;
@@ -1142,7 +1142,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             MediaPreviewRequestStatus::DroppedObsoleteGeneration => {
                 tracing::debug!(
                     asset_id = %key.asset_id,
-                    source_time = %key.source_time(),
+                    source_sample = ?key.source_sample(),
                     generation,
                     "viewer preview request generation was already obsolete"
                 );
@@ -1152,7 +1152,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 bump(&self.metrics.queue_full_drops);
                 tracing::trace!(
                     asset_id = %key.asset_id,
-                    source_time = %key.source_time(),
+                    source_sample = ?key.source_sample(),
                     "viewer preview request dropped by backpressure"
                 );
                 if self.scheduler.diagnostics().pending_requests > 0 {
@@ -1160,7 +1160,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 } else {
                     tracing::error!(
                         asset_id = %key.asset_id,
-                        source_time = %key.source_time(),
+                        source_sample = ?key.source_sample(),
                         "Broker reported capacity pressure without a pending retry owner"
                     );
                     MediaPreviewRequestAdmission::InvalidScheduling
@@ -1170,7 +1170,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 bump(&self.metrics.queue_invalid_access_mode_drops);
                 tracing::warn!(
                     asset_id = %key.asset_id,
-                    source_time = %key.source_time(),
+                    source_sample = ?key.source_sample(),
                     priority = ?priority,
                     access_mode = access_mode.as_str(),
                     "viewer preview request dropped because priority/access-mode pair is invalid"
@@ -1217,7 +1217,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         bump(&self.metrics.queue_canceled_jobs);
                         tracing::trace!(
                             asset_id = %preempted.asset_id,
-                            source_time = %preempted.source_time(),
+                            source_sample = ?preempted.source_sample(),
                             "current Preview work reclaimed one queued Prefetch residency reservation"
                         );
                         continue;
@@ -1227,7 +1227,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     if preemption_requested {
                         tracing::trace!(
                             asset_id = %key.asset_id,
-                            source_time = %key.source_time(),
+                            source_sample = ?key.source_sample(),
                             "current Preview work requested one in-flight Prefetch cooperative preemption"
                         );
                     }

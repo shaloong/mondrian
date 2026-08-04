@@ -19,7 +19,7 @@ use crate::types::{
     AssetId, BlendMode, ClipId, Color, ColorSpace, Rational, SequenceId, VideoTransitionId,
     WorkingColorSpace,
 };
-use crate::{BasicTitle, Result, SequenceRevision, TimelineTime};
+use crate::{BasicTitle, Result, SequenceRevision, SourceSampleTarget, TimelineTime};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -424,7 +424,8 @@ pub struct FlatActiveClip {
     pub masks: Arc<[MaskComponent]>,
     /// Stable Clip-local visual author time for all Clip-owned processing.
     pub clip_time: TimelineTime,
-    pub source_time: TimelineTime,
+    /// Exact source coordinate and half-open boundary ownership.
+    pub source_sample: SourceSampleTarget,
     /// Affine transform matrix as 6-element array [a, c, tx, b, d, ty].
     pub transform_matrix: [f32; 6],
     pub opacity: f32,

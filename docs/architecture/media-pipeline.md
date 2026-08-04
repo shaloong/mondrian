@@ -2651,6 +2651,15 @@ fingerprint never authorizes reuse. This is important for nested Sequences:
 the same physical sample evaluated under a different child working context
 cannot receive pixels prepared for its parent.
 
+The decode identity's source coordinate is the complete `SourceSampleTarget`.
+`Covering` and `StrictPredecessor` at the same rational time are different cache
+keys. The decoder lowers the target to its selected stream time base exactly
+once: covering is `floor(t * rate)`, strict predecessor is
+`ceil(t * rate) - 1`; a strict predecessor at source origin is invalid. This
+single rule is shared by in-process FFmpeg and external fallback seeking. VFR
+frame selection still uses the decoded half-open presentation extent and never
+replaces this target with nearest-PTS or a nominal-frame epsilon.
+
 Every Export job owns one explicit `PreviewDecodeSessionContext` inside its
 `ExportVisualRenderSession`. The same context is passed through root frames,
 closure-addressed nested-Sequence materialization, and Transition endpoints;

@@ -204,7 +204,7 @@ pub struct PreparedVisualNestedDemand {
     /// Child Sequence selected by the nested Clip.
     pub sequence_id: SequenceId,
     /// Exact child-local time emitted by the canonical Clip source-time map.
-    pub source_time: TimelineTime,
+    pub source_sample: mondrian_core::SourceSampleTarget,
 }
 
 /// Status-only reachability result for one prepared visual frame.
@@ -576,7 +576,7 @@ impl PreparedVisualProgram {
         &self,
         placement: TimelineClipExecutionRef,
         requested_clip_time: TimelineTime,
-    ) -> Result<TimelineTime> {
+    ) -> Result<mondrian_core::SourceSampleTarget> {
         self.schedule.sample_clip_source(placement, requested_clip_time)
     }
 
@@ -865,8 +865,8 @@ impl PreparedVisualProgram {
             reachability.nested_demands.push(PreparedVisualNestedRangeDemand {
                 sequence_id,
                 range: PreparedVisualNestedRange::Bounded {
-                    first: first_source.min(last_source),
-                    last: first_source.max(last_source),
+                    first: first_source.time().min(last_source.time()),
+                    last: first_source.time().max(last_source.time()),
                 },
             });
         }
@@ -970,7 +970,7 @@ impl PreparedVisualProgram {
         if let ClipContent::NestedSequence { sequence_id, .. } = &clip.content {
             reachability.nested_demands.push(PreparedVisualNestedDemand {
                 sequence_id: *sequence_id,
-                source_time: clip.source_time,
+                source_sample: clip.source_sample,
             });
         }
         Ok(())

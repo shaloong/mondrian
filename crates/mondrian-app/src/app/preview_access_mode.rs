@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use crate::app::ui_actions::TimelineSeekSource;
 use mondrian_core::timeline_data::AlphaInterpretation;
 use mondrian_core::types::{AssetId, ColorEngine};
-use mondrian_core::{Resolution, TimelineTime, WorkingColorSpace};
+use mondrian_core::{Resolution, SourceSampleTarget, WorkingColorSpace};
 use mondrian_media::{
     preview_decode_cpu_budget, HwAccelDeviceSelector, PreviewDecodeAccessMode,
     PreviewDecodeAdaptiveHints, PreviewDecodeAlphaPresence, PreviewDecodeGeometry,
@@ -44,8 +44,8 @@ pub(crate) struct MediaPreviewKey {
 
 impl MediaPreviewKey {
     /// Exact media-source-local decode target.
-    pub(crate) const fn source_time(&self) -> TimelineTime {
-        self.decode.source_time()
+    pub(crate) const fn source_sample(&self) -> SourceSampleTarget {
+        self.decode.source_sample()
     }
 
     /// Physical native-surface family proved by the selected source contract.
@@ -74,7 +74,7 @@ impl MediaPreviewKey {
     pub(crate) fn test_cpu(
         mut path: std::path::PathBuf,
         fingerprint: mondrian_media::MediaFileFingerprint,
-        source_time: TimelineTime,
+        source_time: mondrian_core::TimelineTime,
         resolution: Resolution,
         source_color: mondrian_media::PreviewSourceColorContract,
     ) -> Self {
@@ -86,7 +86,7 @@ impl MediaPreviewKey {
                 .expect("complete synthetic Preview source");
         let decode = PreviewDecodeKey::new(
             source,
-            source_time,
+            SourceSampleTarget::covering(source_time),
             PreviewDecodeGeometry::FitWithin(resolution),
             source_color,
         )

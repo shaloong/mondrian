@@ -8,8 +8,8 @@ use crate::schedule::{
 };
 use crate::AudioRenderContract;
 use mondrian_core::{
-    AudioChannelLayout, AudioChannelPosition, AudioComponentEditId, AudioSampleRate, TimelineTime,
-    TimelineTimeError,
+    AudioChannelLayout, AudioChannelPosition, AudioComponentEditId, AudioSampleRate,
+    SourceSamplingBoundary, TimelineTime, TimelineTimeError,
 };
 use mondrian_timeline::audio::{AudioChannelStripOutputPort, AudioTransitionCurve};
 use std::sync::Arc;
@@ -875,6 +875,7 @@ fn prepare_source_frames(
     let sequence_time = TimelineTime::new(active_start, i64::from(sample_rate.hz()))?;
     let source_time = contribution.semantic.source_time_map.map(sequence_time)?;
     let scale = contribution.semantic.source_time_map.scale;
+    let boundary = contribution.semantic.source_time_map.sampling_boundary;
     let denominator = i128::from(source_time.denominator())
         .checked_mul(i128::from(scale.denominator()))
         .ok_or(AudioExecutionError::BufferTooLarge)?;
@@ -886,7 +887,13 @@ fn prepare_source_frames(
         .checked_mul(i128::from(source_time.denominator()))
         .ok_or(AudioExecutionError::BufferTooLarge)?;
     for frame in active_range.clone() {
-        destination[frame] = i64::try_from(numerator.div_euclid(denominator))
+        let indexed_numerator = match boundary {
+            SourceSamplingBoundary::Covering => numerator,
+            SourceSamplingBoundary::StrictPredecessor => {
+                numerator.checked_sub(1).ok_or(AudioExecutionError::BufferTooLarge)?
+            }
+        };
+        destination[frame] = i64::try_from(indexed_numerator.div_euclid(denominator))
             .map_err(|_| AudioExecutionError::BufferTooLarge)?;
         numerator = numerator.checked_add(step).ok_or(AudioExecutionError::BufferTooLarge)?;
     }

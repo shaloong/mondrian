@@ -48,7 +48,8 @@ pub(super) fn ensure_ffmpeg_initialized(path: &Path) -> Result<()> {
 pub(super) fn try_decode_with_external_ffmpeg_cpu_rgba(
     path: &Path,
     video_stream_index: Option<u32>,
-    source_time: TimelineTime,
+    source_sample: SourceSampleTarget,
+    stream_tb: ffmpeg::Rational,
     width: u32,
     height: u32,
     source_color: PreviewSourceColorContract,
@@ -98,7 +99,7 @@ pub(super) fn try_decode_with_external_ffmpeg_cpu_rgba(
         "scale={width}:{height}:flags=fast_bilinear:in_color_matrix={matrix_name}:out_color_matrix={matrix_name}:in_range={range_name}:out_range=pc"
     );
 
-    let source_time_arg = match ffmpeg_source_time_arg(source_time) {
+    let source_time_arg = match ffmpeg_source_time_arg(source_sample, stream_tb) {
         Ok(value) => value,
         Err(reason) => {
             return Some(Err(MondrianError::DecodeFailed {

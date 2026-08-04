@@ -283,7 +283,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         {
                             tracing::warn!(
                                 asset_id = %result.key.asset_id,
-                                source_time = %result.key.source_time(),
+                                source_sample = ?result.key.source_sample(),
                                 admission = ?residency_admission,
                                 "decoded Preview result could not transfer its physical residency lease"
                             );

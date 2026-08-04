@@ -40,7 +40,7 @@ use crate::decoder::{
 };
 use ffmpeg_next as ffmpeg;
 use mondrian_core::types::ColorSpace;
-use mondrian_core::{MondrianError, TimelineTime};
+use mondrian_core::{MondrianError, SourceSampleTarget, TimelineTime};
 use serde::Serialize;
 use std::any::Any;
 use std::ffi::c_void;
@@ -271,6 +271,20 @@ fn test_source_color() -> PreviewSourceColorContract {
     PreviewSourceColorContract::automatic(ColorSpace::Rec709, DecodedVideoRange::Limited)
 }
 
+fn covering_decode_request<'a>(
+    path: &'a Path,
+    source_time: TimelineTime,
+    access_mode: PreviewDecodeAccessMode,
+    source_color: PreviewSourceColorContract,
+) -> PreviewDecodeRequest<'a> {
+    PreviewDecodeRequest::new(
+        path,
+        SourceSampleTarget::covering(source_time),
+        access_mode,
+        source_color,
+    )
+}
+
 fn test_linear_source_color() -> PreviewSourceColorContract {
     PreviewSourceColorContract::automatic(ColorSpace::Aces2065_1, DecodedVideoRange::Full)
 }
@@ -446,7 +460,7 @@ fn external_ffmpeg_cpu_rgba_policy_is_still_frame_only() {
 fn preview_decode_request_defaults_to_auto_hardware_decode() {
     let request = PreviewDecodeRequest::new(
         Path::new("clip.mov"),
-        TimelineTime::ZERO,
+        SourceSampleTarget::covering(TimelineTime::ZERO),
         PreviewDecodeAccessMode::PlaybackCursor,
         test_source_color(),
     );
@@ -470,10 +484,10 @@ fn preview_decode_request_defaults_to_auto_hardware_decode() {
 }
 
 #[test]
-fn exact_source_time_lowers_to_stream_pts_with_start_offset() {
+fn exact_source_sample_lowers_to_stream_pts_with_start_offset() {
     assert_eq!(
-        super::source_time_to_stream_pts(
-            TimelineTime::new(1, 3).expect("exact source time"),
+        super::source_sample_to_stream_pts(
+            SourceSampleTarget::covering(TimelineTime::new(1, 3).expect("exact source time")),
             ffmpeg::Rational(1, 90_000),
             9_000,
         )
@@ -483,23 +497,36 @@ fn exact_source_time_lowers_to_stream_pts_with_start_offset() {
 }
 
 #[test]
-fn exact_source_time_rounds_half_ticks_away_from_zero() {
+fn source_sample_boundary_controls_half_open_grid_lowering() {
     assert_eq!(
-        super::source_time_to_stream_pts(
-            TimelineTime::new(1, 2).expect("exact source time"),
+        super::source_sample_to_stream_pts(
+            SourceSampleTarget::covering(TimelineTime::new(1, 2).expect("exact source time")),
             ffmpeg::Rational(1, 1),
             0,
         )
         .expect("valid stream target"),
-        1
+        0
+    );
+    assert_eq!(
+        super::source_sample_to_stream_pts(
+            SourceSampleTarget::strict_predecessor(
+                TimelineTime::new(1, 1).expect("exact source boundary"),
+            ),
+            ffmpeg::Rational(1, 1),
+            0,
+        )
+        .expect("valid strict-predecessor target"),
+        0
     );
 }
 
 #[test]
 fn exact_source_time_preserves_long_duration_without_float_drift() {
     assert_eq!(
-        super::source_time_to_stream_pts(
-            TimelineTime::new(360_000, 1).expect("exact source time"),
+        super::source_sample_to_stream_pts(
+            SourceSampleTarget::covering(
+                TimelineTime::new(360_000, 1).expect("exact source time"),
+            ),
             ffmpeg::Rational(1, 90_000),
             0,
         )
@@ -510,22 +537,28 @@ fn exact_source_time_preserves_long_duration_without_float_drift() {
 
 #[test]
 fn exact_source_time_rejects_negative_targets_and_invalid_time_bases() {
-    assert!(super::source_time_to_stream_pts(
-        TimelineTime::new(-1, 1).expect("exact source time"),
+    assert!(super::source_sample_to_stream_pts(
+        SourceSampleTarget::covering(TimelineTime::new(-1, 1).expect("exact source time")),
         ffmpeg::Rational(1, 90_000),
         0,
     )
     .is_err());
-    assert!(
-        super::source_time_to_stream_pts(TimelineTime::ZERO, ffmpeg::Rational(0, 1), 0,).is_err()
-    );
+    assert!(super::source_sample_to_stream_pts(
+        SourceSampleTarget::covering(TimelineTime::ZERO),
+        ffmpeg::Rational(0, 1),
+        0,
+    )
+    .is_err());
 }
 
 #[test]
 fn external_ffmpeg_argument_is_lowered_only_at_the_cli_adapter() {
     assert_eq!(
-        super::ffmpeg_source_time_arg(TimelineTime::new(5, 4).expect("exact source time"))
-            .expect("valid CLI target"),
+        super::ffmpeg_source_time_arg(
+            SourceSampleTarget::covering(TimelineTime::new(5, 4).expect("exact source time")),
+            ffmpeg::Rational(1, 100),
+        )
+        .expect("valid CLI target"),
         "1.250000"
     );
 }
@@ -822,7 +855,7 @@ fn preview_decode_access_mode_names_and_defaults_are_stable() {
 fn preview_decode_rgba_request_preserves_explicit_contract_fields() {
     let path = PathBuf::from("E:/media/source.mov");
     let fingerprint = synthetic_file_fingerprint(10, 20, 30);
-    let request = PreviewDecodeRequest::new(
+    let request = covering_decode_request(
         path.as_path(),
         TimelineTime::new(5, 4).expect("exact source time"),
         PreviewDecodeAccessMode::ScrubCursor,
@@ -836,7 +869,7 @@ fn preview_decode_rgba_request_preserves_explicit_contract_fields() {
 
     assert_eq!(request.path, path.as_path());
     assert_eq!(
-        request.source_time,
+        request.source_sample.time(),
         TimelineTime::new(5, 4).expect("exact source time")
     );
     assert_eq!(request.max_width, Some(640));
@@ -2353,7 +2386,7 @@ fn p010_native_sampling() -> DecodedVideoSampling {
 #[test]
 fn cancellable_preview_decode_returns_canceled_before_opening_missing_file() {
     let path = PathBuf::from("E:/definitely-missing/canceled-preview.mov");
-    let request = PreviewDecodeRequest::new(
+    let request = covering_decode_request(
         path.as_path(),
         TimelineTime::ZERO,
         PreviewDecodeAccessMode::RandomAccessStillFrame,
@@ -2415,7 +2448,7 @@ fn playback_session_drains_reordered_frames_between_sequential_requests() {
 
     let mut decoded_pixels = Vec::new();
     for index in 5..20 {
-        let request = PreviewDecodeRequest::new(
+        let request = covering_decode_request(
             path.as_path(),
             TimelineTime::new(i64::from(index), 25).expect("exact source time"),
             PreviewDecodeAccessMode::PlaybackCursor,
@@ -2454,7 +2487,7 @@ fn exact_random_access_decodes_stream_start_with_negative_dts_preroll() {
     let mut context = PreviewDecodeSessionContext::new();
     let fingerprint = MediaFileFingerprint::capture(&path);
     for frame_index in [0, 1] {
-        let request = PreviewDecodeRequest::new(
+        let request = covering_decode_request(
             path.as_path(),
             TimelineTime::new(frame_index, 25).expect("exact source time"),
             PreviewDecodeAccessMode::RandomAccessStillFrame,
@@ -2497,7 +2530,7 @@ fn isolated_demux_worker_reuses_each_access_mode_session_across_requests() {
     let (bootstrap, observer) =
         PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(worker);
     let mut context = bootstrap.build();
-    let request = PreviewDecodeRequest::new(
+    let request = covering_decode_request(
         path.as_path(),
         TimelineTime::new(8, 25).expect("exact source time"),
         PreviewDecodeAccessMode::RandomAccessStillFrame,
@@ -2512,7 +2545,7 @@ fn isolated_demux_worker_reuses_each_access_mode_session_across_requests() {
     assert_eq!((frame.width, frame.height), (64, 64));
     assert!(frame.diagnostics.seek_performed);
 
-    let second_request = PreviewDecodeRequest::new(
+    let second_request = covering_decode_request(
         path.as_path(),
         TimelineTime::new(2, 25).expect("second exact source time"),
         PreviewDecodeAccessMode::RandomAccessStillFrame,
@@ -2538,7 +2571,7 @@ fn isolated_demux_worker_reuses_each_access_mode_session_across_requests() {
         (PreviewDecodeAccessMode::PlaybackCursor, 5, 6),
     ] {
         for (request_index, frame_index) in [first_frame, second_frame].into_iter().enumerate() {
-            let request = PreviewDecodeRequest::new(
+            let request = covering_decode_request(
                 path.as_path(),
                 TimelineTime::new(frame_index, 25).expect("source time"),
                 access_mode,
@@ -2593,7 +2626,7 @@ fn isolated_demux_worker_cancellation_terminates_the_packet_source() {
     let (bootstrap, observer) =
         PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(worker);
     let mut context = bootstrap.build();
-    let request = PreviewDecodeRequest::new(
+    let request = covering_decode_request(
         path.as_path(),
         TimelineTime::new(8, 25).expect("exact source time"),
         PreviewDecodeAccessMode::RandomAccessStillFrame,
@@ -2653,7 +2686,7 @@ fn isolated_demux_worker_attributes_stream_info_seek_and_packet_read_cancellatio
         let (bootstrap, observer) =
             PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(worker.clone());
         let mut context = bootstrap.build();
-        let request = PreviewDecodeRequest::new(
+        let request = covering_decode_request(
             path.as_path(),
             TimelineTime::new(8, 25).expect("exact source time"),
             PreviewDecodeAccessMode::RandomAccessStillFrame,
@@ -2696,7 +2729,7 @@ fn isolated_demux_worker_rejects_stale_source_revision_before_publication() {
     let (bootstrap, observer) =
         PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(worker);
     let mut context = bootstrap.build();
-    let request = PreviewDecodeRequest::new(
+    let request = covering_decode_request(
         path.as_path(),
         TimelineTime::new(8, 25).expect("exact source time"),
         PreviewDecodeAccessMode::RandomAccessStillFrame,
@@ -2729,7 +2762,7 @@ fn preview_decode_rejects_replaced_source_against_caller_revision() {
     std::fs::write(&replacement, FIXTURE).expect("write same-length replacement");
     std::fs::remove_file(&path).expect("unlink admitted source");
     std::fs::rename(&replacement, &path).expect("install same-length replacement");
-    let request = PreviewDecodeRequest::new(
+    let request = covering_decode_request(
         path.as_path(),
         TimelineTime::ZERO,
         PreviewDecodeAccessMode::RandomAccessStillFrame,
@@ -2858,7 +2891,7 @@ fn canceled_codec_work_forces_seek_before_session_reuse() {
     let fingerprint = MediaFileFingerprint::capture(&path);
     let mut context = PreviewDecodeSessionContext::new();
     let request = |frame| {
-        PreviewDecodeRequest::new(
+        covering_decode_request(
             path.as_path(),
             TimelineTime::new(frame, 25).expect("exact source time"),
             PreviewDecodeAccessMode::PlaybackCursor,
@@ -2975,7 +3008,7 @@ fn preview_decode_fixture_perf_smoke() {
         .and_then(|value| value.parse::<u32>().ok());
 
     let started = Instant::now();
-    let request = PreviewDecodeRequest::new(
+    let request = covering_decode_request(
         path.as_path(),
         TimelineTime::from_f64_quantized(timestamp_secs, 1_000_000)
             .expect("quantized diagnostic source time"),
@@ -3070,7 +3103,7 @@ fn preview_decode_fixture_sequence_perf_smoke() {
     for index in 0..frame_count {
         let timestamp_secs = start_secs + index as f64 / frame_rate;
         let frame_started = Instant::now();
-        let request = PreviewDecodeRequest::new(
+        let request = covering_decode_request(
             path.as_path(),
             TimelineTime::from_f64_quantized(timestamp_secs, 1_000_000)
                 .expect("quantized diagnostic source time"),

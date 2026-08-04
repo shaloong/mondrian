@@ -3114,7 +3114,7 @@ fn playback_video_preroll_requires_next_media_payload_and_observes_cache_residen
             &media.asset_id,
             media.color_space_override,
             media.alpha_interpretation,
-            media.source_time,
+            media.source_sample.time(),
             width,
             height,
             &input_color,
@@ -3178,7 +3178,7 @@ fn media_preview_key_for_simple_sequence_frame<O: Clone>(
             &media.asset_id,
             media.color_space_override,
             media.alpha_interpretation,
-            media.source_time,
+            media.source_sample.time(),
             width,
             height,
             &input_color,
@@ -10285,7 +10285,9 @@ fn current_media_grant_rejection_is_blocked_without_phantom_pending_work() {
         asset_id,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Straight,
-        source_time: mondrian_core::TimelineTime::ZERO,
+        source_sample: mondrian_core::SourceSampleTarget::covering(
+            mondrian_core::TimelineTime::ZERO,
+        ),
         target_resolution,
         input_color: sequence
             .settings
@@ -10761,7 +10763,7 @@ fn test_media_key_with_source_time(
 ) -> MediaPreviewKey {
     key.decode = mondrian_media::PreviewDecodeKey::new(
         key.decode.source().clone(),
-        source_time,
+        mondrian_core::SourceSampleTarget::covering(source_time),
         key.decode.geometry(),
         key.decode.source_color(),
     )
@@ -10786,7 +10788,7 @@ fn test_media_key_with_physical_source(
     .expect("complete replacement physical source");
     key.decode = mondrian_media::PreviewDecodeKey::new(
         source,
-        key.source_time(),
+        key.source_sample(),
         key.decode.geometry(),
         key.decode.source_color(),
     )
@@ -11237,12 +11239,13 @@ fn scrub_adaptation_switches_for_hot_region_and_slow_latency() {
 
     assert_eq!(
         adaptation
-            .observe_request(key.asset_id, key.source_time(), observed_at)
+            .observe_request(key.asset_id, key.source_sample().time(), observed_at)
             .scrub_class,
         PreviewScrubAdaptiveClass::Normal
     );
     let next_source_time = key
-        .source_time()
+        .source_sample()
+        .time()
         .checked_add(mondrian_core::TimelineTime::new(1, 10).expect("exact source delta"))
         .expect("source time remains valid");
     key = test_media_key_with_source_time(key, next_source_time);
@@ -11250,14 +11253,15 @@ fn scrub_adaptation_switches_for_hot_region_and_slow_latency() {
         adaptation
             .observe_request(
                 key.asset_id,
-                key.source_time(),
+                key.source_sample().time(),
                 observed_at + Duration::from_millis(1),
             )
             .scrub_class,
         PreviewScrubAdaptiveClass::Normal
     );
     let next_source_time = key
-        .source_time()
+        .source_sample()
+        .time()
         .checked_add(mondrian_core::TimelineTime::new(1, 10).expect("exact source delta"))
         .expect("source time remains valid");
     key = test_media_key_with_source_time(key, next_source_time);
@@ -11265,7 +11269,7 @@ fn scrub_adaptation_switches_for_hot_region_and_slow_latency() {
         adaptation
             .observe_request(
                 key.asset_id,
-                key.source_time(),
+                key.source_sample().time(),
                 observed_at + Duration::from_millis(2),
             )
             .scrub_class,
@@ -11329,7 +11333,8 @@ fn scrub_adaptation_switches_for_hot_region_and_slow_latency() {
     adaptation.observe_decode(slow_decode);
     adaptation.observe_decode(slow_decode);
     let next_source_time = key
-        .source_time()
+        .source_sample()
+        .time()
         .checked_add(mondrian_core::TimelineTime::new(1, 10).expect("exact source delta"))
         .expect("source time remains valid");
     key = test_media_key_with_source_time(key, next_source_time);
@@ -11337,7 +11342,7 @@ fn scrub_adaptation_switches_for_hot_region_and_slow_latency() {
         adaptation
             .observe_request(
                 key.asset_id,
-                key.source_time(),
+                key.source_sample().time(),
                 observed_at + Duration::from_millis(3),
             )
             .scrub_class,
@@ -11353,7 +11358,7 @@ fn scrub_adaptation_switches_for_hot_region_and_slow_latency() {
         failed_adaptation
             .observe_request(
                 key.asset_id,
-                key.source_time(),
+                key.source_sample().time(),
                 observed_at + Duration::from_millis(4),
             )
             .scrub_class,

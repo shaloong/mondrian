@@ -175,7 +175,7 @@ pub(super) fn decode_thumbnail(
     );
     let request = PreviewDecodeRequest::new(
         job.key.path.as_path(),
-        mondrian_core::TimelineTime::ZERO,
+        mondrian_core::SourceSampleTarget::covering(mondrian_core::TimelineTime::ZERO),
         PreviewDecodeAccessMode::RandomAccessStillFrame,
         PreviewSourceColorContract::new(
             job.key.color.source_color_space,

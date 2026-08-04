@@ -759,7 +759,7 @@ fn prepared_source_schedule_preserves_fractional_reverse_retime() {
     .expect("fractional reverse render");
 
     assert_eq!(source.block_reads, 1);
-    assert_eq!(pcm, vec![7.0, 6.0, 6.0, 5.0]);
+    assert_eq!(pcm, vec![6.0, 6.0, 5.0, 5.0]);
 }
 
 #[test]
@@ -2625,7 +2625,10 @@ fn stateless_nested_runtime_preserves_fractional_reverse_mapping() {
     runtime
         .render_into(AudioRenderRequest { start_sample: 0, frames: 4 }, &mut pcm)
         .expect("stateless nested reverse render");
-    assert_eq!(pcm, vec![7.0, 6.0, 6.0, 5.0]);
+    // Source targets are 3, 2.75, 2.5, and 2.25 seconds. On the 2 Hz
+    // child grid strict-predecessor lowering selects frames 5, 5, 4, 4;
+    // RampSource exposes each zero-based frame as frame + 1.
+    assert_eq!(pcm, vec![6.0, 6.0, 5.0, 5.0]);
 }
 
 #[test]

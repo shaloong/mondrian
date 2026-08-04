@@ -28,7 +28,7 @@ fn test_media_key_at(label: &str, source_time: TimelineTime) -> MediaPreviewKey 
 fn with_source_time(mut key: MediaPreviewKey, source_time: TimelineTime) -> MediaPreviewKey {
     key.decode = PreviewDecodeKey::new(
         key.decode.source().clone(),
-        source_time,
+        mondrian_core::SourceSampleTarget::covering(source_time),
         key.decode.geometry(),
         key.decode.source_color(),
     )

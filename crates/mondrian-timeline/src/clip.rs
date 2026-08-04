@@ -325,18 +325,38 @@ pub enum ClipSourceTimeMap {
         source_origin: TimelineTime,
         /// Exact source-time delta per Clip-local time delta.
         scale: TimeScale,
+        /// Half-open ownership used when this mapping reaches a concrete source grid.
+        sampling_boundary: mondrian_core::SourceSamplingBoundary,
     },
 }
 
 impl ClipSourceTimeMap {
     /// Construct an identity mapping from the requested source origin.
     pub const fn identity(source_origin: TimelineTime) -> Self {
-        Self::Constant { source_origin, scale: TimeScale::ONE }
+        Self::Constant {
+            source_origin,
+            scale: TimeScale::ONE,
+            sampling_boundary: mondrian_core::SourceSamplingBoundary::Covering,
+        }
     }
 
     /// Construct one exact constant source-time mapping.
     pub const fn constant(source_origin: TimelineTime, scale: TimeScale) -> Self {
-        Self::Constant { source_origin, scale }
+        Self::Constant {
+            source_origin,
+            scale,
+            sampling_boundary: mondrian_core::SourceSampleTarget::for_scale(source_origin, scale)
+                .boundary(),
+        }
+    }
+
+    /// Construct a zero-rate hold that retains the captured sample boundary.
+    pub const fn hold(source_sample: mondrian_core::SourceSampleTarget) -> Self {
+        Self::Constant {
+            source_origin: source_sample.time(),
+            scale: TimeScale::ZERO,
+            sampling_boundary: source_sample.boundary(),
+        }
     }
 
     /// Source coordinate sampled at Clip-local time zero.
@@ -353,10 +373,21 @@ impl ClipSourceTimeMap {
         }
     }
 
+    /// Half-open sample ownership carried by this mapping.
+    pub const fn sampling_boundary(&self) -> mondrian_core::SourceSamplingBoundary {
+        match self {
+            Self::Constant { sampling_boundary, .. } => *sampling_boundary,
+        }
+    }
+
     /// Return the same mapping with a different source origin.
     pub fn with_source_origin(&self, source_origin: TimelineTime) -> Self {
         match self {
-            Self::Constant { scale, .. } => Self::Constant { source_origin, scale: *scale },
+            Self::Constant { scale, sampling_boundary, .. } => Self::Constant {
+                source_origin,
+                scale: *scale,
+                sampling_boundary: *sampling_boundary,
+            },
         }
     }
 
@@ -364,6 +395,36 @@ impl ClipSourceTimeMap {
     pub fn map(&self, clip_local_time: TimelineTime) -> Result<TimelineTime> {
         let source_delta = clip_local_time.checked_scale(self.scale())?;
         Ok(self.source_origin().checked_add(source_delta)?)
+    }
+
+    /// Map one Clip-local time into the complete source sample contract.
+    pub fn sample(
+        &self,
+        clip_local_time: TimelineTime,
+    ) -> Result<mondrian_core::SourceSampleTarget> {
+        let time = self.map(clip_local_time)?;
+        Ok(match self.sampling_boundary() {
+            mondrian_core::SourceSamplingBoundary::Covering => {
+                mondrian_core::SourceSampleTarget::covering(time)
+            }
+            mondrian_core::SourceSamplingBoundary::StrictPredecessor => {
+                mondrian_core::SourceSampleTarget::strict_predecessor(time)
+            }
+        })
+    }
+
+    fn validate_boundary(&self) -> Result<()> {
+        if self.scale().numerator() != 0
+            && self.sampling_boundary()
+                != mondrian_core::SourceSampleTarget::for_scale(self.source_origin(), self.scale())
+                    .boundary()
+        {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "clip_source_time_map".to_owned(),
+                reason: "nonzero source-time map has inconsistent sampling boundary".to_owned(),
+            });
+        }
+        Ok(())
     }
 
     /// Invert one exact source coordinate into Clip-local time.
@@ -387,7 +448,7 @@ impl AuthoringFootprint for ClipSourceTimeMap {
         _collector: &mut AuthoringFootprintCollector,
     ) -> std::result::Result<(), AuthoringFootprintError> {
         match self {
-            Self::Constant { source_origin: _, scale: _ } => Ok(()),
+            Self::Constant { .. } => Ok(()),
         }
     }
 }
@@ -686,6 +747,11 @@ impl Clip {
         self.source_time_map.scale()
     }
 
+    /// Half-open source sampling boundary owned by the canonical mapping.
+    pub const fn source_sampling_boundary(&self) -> mondrian_core::SourceSamplingBoundary {
+        self.source_time_map.sampling_boundary()
+    }
+
     /// Exact source coordinate at the exclusive Clip placement end.
     ///
     /// This derived boundary may be before `source_origin` for reverse
@@ -732,6 +798,7 @@ impl Clip {
 
     /// Validate Clip time ranges and the complete source mapping.
     pub fn validate_time_state(&self) -> Result<()> {
+        self.source_time_map.validate_boundary()?;
         if self.duration.is_negative() {
             return Err(mondrian_core::TimelineTimeError::NegativeDuration.into());
         }
@@ -777,6 +844,18 @@ impl Clip {
     pub fn timeline_to_source_time(&self, timeline_time: TimelineTime) -> Result<TimelineTime> {
         let local = timeline_time.checked_sub(self.position)?;
         self.source_time_map.map(local)
+    }
+
+    /// Map Sequence time to the complete source-sampling contract.
+    ///
+    /// Reverse maps retain their exact exclusive source coordinate and carry
+    /// strict-predecessor ownership instead of manufacturing an epsilon.
+    pub fn timeline_to_source_sample(
+        &self,
+        timeline_time: TimelineTime,
+    ) -> Result<mondrian_core::SourceSampleTarget> {
+        let local = timeline_time.checked_sub(self.position)?;
+        self.source_time_map.sample(local)
     }
 
     /// Map one source-domain time back into this Clip's Sequence placement.
@@ -1212,8 +1291,8 @@ pub struct ActiveClip {
     pub track_index: usize,
     /// Stable Clip-local visual author time used by every Clip processor.
     pub clip_time: TimelineTime,
-    /// 此时刻对应的素材源时间（用于解码）
-    pub source_time: TimelineTime,
+    /// 此时刻对应的完整素材采样目标（用于解码）
+    pub source_sample: mondrian_core::SourceSampleTarget,
     /// Transform 矩阵（已在此时刻求值）
     pub transform_matrix: glam::Mat3,
     /// 不透明度（已在此时刻求值）

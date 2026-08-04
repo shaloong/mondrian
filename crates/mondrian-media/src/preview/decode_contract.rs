@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use mondrian_core::{Resolution, TimelineTime};
+use mondrian_core::{Resolution, SourceSampleTarget, SourceSamplingBoundary, TimelineTime};
 
 use super::{MediaFileFingerprint, PreviewHardwareDecodeRequest, PreviewSourceColorContract};
 use crate::info::{PixelFormat, VideoStreamInfo};
@@ -338,7 +338,7 @@ fn fit_within_extent(source: Resolution, target: Resolution) -> Resolution {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PreviewDecodeKey {
     source: PreviewDecodeSource,
-    source_time: TimelineTime,
+    source_sample: SourceSampleTarget,
     geometry: PreviewDecodeGeometry,
     source_color: PreviewSourceColorContract,
 }
@@ -347,15 +347,25 @@ impl PreviewDecodeKey {
     /// Build a validated exact physical Preview decode key.
     pub fn new(
         source: PreviewDecodeSource,
-        source_time: TimelineTime,
+        source_sample: SourceSampleTarget,
         geometry: PreviewDecodeGeometry,
         source_color: PreviewSourceColorContract,
     ) -> Result<Self, PreviewDecodeContractError> {
-        if source_time.is_negative() {
-            return Err(PreviewDecodeContractError::NegativeSourceTime { source_time });
+        if source_sample.time().is_negative() {
+            return Err(PreviewDecodeContractError::NegativeSourceTime {
+                source_time: source_sample.time(),
+            });
+        }
+        if source_sample.time().is_zero()
+            && source_sample.boundary() == SourceSamplingBoundary::StrictPredecessor
+        {
+            return Err(PreviewDecodeContractError::SourceSampleBeforeOrigin {
+                source_time: source_sample.time(),
+                boundary: source_sample.boundary(),
+            });
         }
         geometry.validate_for(&source)?;
-        Ok(Self { source, source_time, geometry, source_color })
+        Ok(Self { source, source_sample, geometry, source_color })
     }
 
     /// Selected physical file and stream revision.
@@ -364,8 +374,8 @@ impl PreviewDecodeKey {
     }
 
     /// Exact media-source-local target.
-    pub const fn source_time(&self) -> TimelineTime {
-        self.source_time
+    pub const fn source_sample(&self) -> SourceSampleTarget {
+        self.source_sample
     }
 
     /// Canonical CPU/native decode geometry.
@@ -456,6 +466,14 @@ pub enum PreviewDecodeContractError {
     NegativeSourceTime {
         /// Invalid source-local target.
         source_time: TimelineTime,
+    },
+    /// A strict-predecessor request at source origin has no physical sample.
+    #[error("Preview source sample precedes origin: time={source_time}, boundary={boundary:?}")]
+    SourceSampleBeforeOrigin {
+        /// Exact source-local boundary.
+        source_time: TimelineTime,
+        /// Sampling boundary that selected the missing predecessor.
+        boundary: SourceSamplingBoundary,
     },
 }
 
@@ -748,7 +766,9 @@ mod tests {
         assert!(matches!(
             PreviewDecodeKey::new(
                 source.clone(),
-                TimelineTime::new(-1, 1).expect("valid negative rational"),
+                SourceSampleTarget::covering(
+                    TimelineTime::new(-1, 1).expect("valid negative rational"),
+                ),
                 geometry,
                 source_color(),
             ),
@@ -757,7 +777,7 @@ mod tests {
 
         let key = PreviewDecodeKey::new(
             source,
-            TimelineTime::new(1, 2).expect("valid source time"),
+            SourceSampleTarget::covering(TimelineTime::new(1, 2).expect("valid source time")),
             geometry,
             source_color(),
         )
@@ -773,9 +793,46 @@ mod tests {
             Some(key.source().video_stream_index())
         );
         assert_eq!(request.fingerprint, Some(key.source().fingerprint()));
-        assert_eq!(request.source_time, key.source_time());
+        assert_eq!(request.source_sample, key.source_sample());
         assert_eq!(request.max_width, Some(1280));
         assert_eq!(request.max_height, Some(720));
         assert_eq!(request.source_color, key.source_color());
+    }
+
+    #[test]
+    fn key_identity_distinguishes_covering_and_strict_predecessor_targets() {
+        let source = PreviewDecodeSource::from_probed_stream(
+            absolute_test_path("media/source.mov"),
+            exact_fingerprint(41),
+            &video_stream(5, PixelFormat::Yuv420p, true),
+        )
+        .expect("valid source");
+        let geometry = PreviewDecodeGeometry::FitWithin(Resolution { width: 1280, height: 720 });
+        let source_time = TimelineTime::new(1, 1).expect("valid source time");
+        let covering = PreviewDecodeKey::new(
+            source.clone(),
+            SourceSampleTarget::covering(source_time),
+            geometry,
+            source_color(),
+        )
+        .expect("covering key");
+        let strict = PreviewDecodeKey::new(
+            source.clone(),
+            SourceSampleTarget::strict_predecessor(source_time),
+            geometry,
+            source_color(),
+        )
+        .expect("strict predecessor key");
+
+        assert_ne!(covering, strict);
+        assert!(matches!(
+            PreviewDecodeKey::new(
+                source,
+                SourceSampleTarget::strict_predecessor(TimelineTime::ZERO),
+                geometry,
+                source_color(),
+            ),
+            Err(PreviewDecodeContractError::SourceSampleBeforeOrigin { .. })
+        ));
     }
 }

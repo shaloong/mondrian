@@ -5,8 +5,7 @@ use mondrian_core::{
         RenderPlanSource, TimelineClipEndpointContext, TimelineClipExecutionRef,
     },
     types::{AssetId, BlendMode, Color, ColorSpace, FramePosition, Rational, SequenceId},
-    ColorEncodingSpec, EvaluatedBasicTitle, FrameRounding, MondrianError, Result, TimelineTime,
-    WorkingColorSpace,
+    ColorEncodingSpec, EvaluatedBasicTitle, MondrianError, Result, TimelineTime, WorkingColorSpace,
 };
 use mondrian_effects::{CompiledEffectGraph, EffectExecutionSession};
 use std::sync::Arc;
@@ -190,7 +189,7 @@ pub struct TimelineMediaPlan {
     /// historical decode target.
     pub frame_rate_override: Option<Rational>,
     /// Exact source-domain decode target after any explicit interpretation grid.
-    pub source_time: TimelineTime,
+    pub source_sample: mondrian_core::SourceSampleTarget,
     pub opacity: f32,
     pub blend_mode: BlendMode,
     pub transform: [f32; 6],
@@ -248,7 +247,7 @@ pub struct TimelineNestedSequencePlan {
     pub placement: TimelineClipExecutionRef,
     pub sequence_id: SequenceId,
     /// Exact child-Sequence-local source time; consumers resolve the child grid.
-    pub source_time: TimelineTime,
+    pub source_sample: mondrian_core::SourceSampleTarget,
     pub color_processing: NestedColorProcessing,
     pub opacity: f32,
     pub blend_mode: BlendMode,
@@ -408,7 +407,7 @@ fn timeline_media_color_diagnostic(
         pixel_aspect_ratio_override: media.pixel_aspect_ratio_override,
         field_order_override: media.field_order_override,
         alpha_interpretation: media.alpha_interpretation,
-        source_time: media.source_time,
+        source_time: media.source_sample.time(),
     }
 }
 
@@ -738,7 +737,7 @@ fn compile_flat_clip(
             TimelineRenderPlanElement::NestedSequence(TimelineNestedSequencePlan {
                 placement,
                 sequence_id,
-                source_time: ac.source_time,
+                source_sample: ac.source_sample,
                 color_processing,
                 opacity,
                 blend_mode: ac.blend_mode,
@@ -780,12 +779,12 @@ fn compile_flat_clip(
             })
         }
         ClipContent::Media { asset_id, interpretation } => {
-            let source_time = if let Some(frame_rate) = interpretation.frame_rate_override {
-                TimelineTime::from_frame_position(
-                    ac.source_time.to_frame_position(frame_rate, FrameRounding::Floor)?,
-                )?
+            let source_sample = if let Some(frame_rate) = interpretation.frame_rate_override {
+                mondrian_core::SourceSampleTarget::covering(TimelineTime::from_frame_position(
+                    ac.source_sample.to_frame_position(frame_rate)?,
+                )?)
             } else {
-                ac.source_time
+                ac.source_sample
             };
             let transform = apply_pixel_aspect_to_affine(
                 ac.transform_matrix,
@@ -799,7 +798,7 @@ fn compile_flat_clip(
                 field_order_override: interpretation.field_order_override,
                 alpha_interpretation: interpretation.alpha,
                 frame_rate_override: interpretation.frame_rate_override,
-                source_time,
+                source_sample,
                 opacity,
                 blend_mode: ac.blend_mode,
                 transform,
@@ -883,6 +882,7 @@ mod tests {
     use super::*;
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::types::{AssetId, Resolution};
+    use mondrian_core::TimeScale;
     use mondrian_timeline::clip::{Clip, Transform2D};
     use mondrian_timeline::sequence::Sequence;
     use mondrian_timeline::track::Track;
@@ -1138,8 +1138,10 @@ mod tests {
             panic!("expected media plan");
         };
         assert_eq!(
-            media.source_time,
-            TimelineTime::new(3, 5).expect("exact source time")
+            media.source_sample,
+            mondrian_core::SourceSampleTarget::covering(
+                TimelineTime::new(3, 5).expect("exact source time"),
+            )
         );
     }
 
@@ -1157,8 +1159,35 @@ mod tests {
             panic!("expected media plan");
         };
         assert_eq!(
-            media.source_time,
-            TimelineTime::new(26, 35).expect("exact source time")
+            media.source_sample,
+            mondrian_core::SourceSampleTarget::covering(
+                TimelineTime::new(26, 35).expect("exact source time"),
+            )
+        );
+    }
+
+    #[test]
+    fn reverse_render_plan_preserves_strict_predecessor_until_decode_grid() {
+        let mut sequence = Sequence::new("reverse render plan");
+        let time_base = sequence.time_base();
+        let mut clip =
+            Clip::new(AssetId::new(), tt(0, time_base), tt(20, time_base)).expect("valid Clip");
+        clip.set_constant_source_time_map(
+            TimelineTime::new(1, 1).expect("exclusive reverse origin"),
+            TimeScale::NEGATIVE_ONE,
+        )
+        .expect("reverse map");
+        sequence.video_tracks[0].add_clip(clip).expect("add Clip");
+
+        let plan = analysis_elements(&sequence, 0);
+        let TimelineRenderPlanElement::Media(media) = &plan[0] else {
+            panic!("expected media plan");
+        };
+        assert_eq!(
+            media.source_sample,
+            mondrian_core::SourceSampleTarget::strict_predecessor(
+                TimelineTime::new(1, 1).expect("exclusive reverse origin"),
+            )
         );
     }
 
@@ -1414,8 +1443,8 @@ mod tests {
         let TimelineTransitionInputPlan::Media(right) = &transition.right else {
             panic!("right input must be media");
         };
-        assert_eq!(left.source_time, tt(15, time_base));
-        assert_eq!(right.source_time, tt(20, time_base));
+        assert_eq!(left.source_sample.time(), tt(15, time_base));
+        assert_eq!(right.source_sample.time(), tt(20, time_base));
 
         let start = evaluate_timeline_render_plan(
             &sequence,
@@ -1429,7 +1458,7 @@ mod tests {
         let TimelineTransitionInputPlan::Media(right) = &start.right else {
             panic!("right input must be media");
         };
-        assert_eq!(right.source_time, tt(18, time_base));
+        assert_eq!(right.source_sample.time(), tt(18, time_base));
     }
 
     #[test]
@@ -1539,7 +1568,7 @@ mod tests {
                     pixel_aspect_ratio_override: media.pixel_aspect_ratio_override,
                     field_order_override: media.field_order_override,
                     alpha_interpretation: media.alpha_interpretation,
-                    source_time: media.source_time,
+                    source_time: media.source_sample.time(),
                     opacity: media.opacity,
                     blend_mode: media.blend_mode,
                     transform: media.transform,
@@ -1574,7 +1603,7 @@ mod tests {
                 TimelineRenderPlanElement::NestedSequence(nested) => {
                     RenderPlanSemanticElement::NestedSequence {
                         sequence_id: nested.sequence_id,
-                        source_time: nested.source_time,
+                        source_time: nested.source_sample.time(),
                         color_processing: nested.color_processing,
                         opacity: nested.opacity,
                         blend_mode: nested.blend_mode,
@@ -1602,7 +1631,7 @@ mod tests {
             }
             TimelineTransitionInputPlan::Media(media) => RenderPlanSemanticTransitionInput::Media {
                 asset_id: media.asset_id,
-                source_time: media.source_time,
+                source_time: media.source_sample.time(),
             },
             TimelineTransitionInputPlan::SolidColor(solid) => {
                 RenderPlanSemanticTransitionInput::SolidColor { color: solid.color }
@@ -1613,7 +1642,7 @@ mod tests {
             TimelineTransitionInputPlan::NestedSequence(nested) => {
                 RenderPlanSemanticTransitionInput::NestedSequence {
                     sequence_id: nested.sequence_id,
-                    source_time: nested.source_time,
+                    source_time: nested.source_sample.time(),
                 }
             }
         }

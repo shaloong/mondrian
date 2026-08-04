@@ -160,6 +160,7 @@ pub fn compile_audio_program(
                         sequence_start: clip.position,
                         source_origin: clip.source_origin(),
                         scale: clip.source_time_scale(),
+                        sampling_boundary: clip.source_sampling_boundary(),
                     },
                     source,
                     channel_mapping: edit.channel_mapping.clone(),

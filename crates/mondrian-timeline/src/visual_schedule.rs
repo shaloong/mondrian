@@ -222,10 +222,10 @@ impl PreparedVisualSchedule {
         &self,
         placement: TimelineClipExecutionRef,
         requested_clip_time: TimelineTime,
-    ) -> Result<TimelineTime> {
+    ) -> Result<mondrian_core::SourceSampleTarget> {
         let sequence_time = self.clip_to_sequence_time(placement, requested_clip_time)?;
         let (track_index, clip_index) = self.clip_location(placement)?;
-        self.tracks[track_index].track.clips[clip_index].timeline_to_source_time(sequence_time)
+        self.tracks[track_index].track.clips[clip_index].timeline_to_source_sample(sequence_time)
     }
 
     /// Map one exact Clip-local Effect instant back into the owning Sequence
@@ -855,7 +855,7 @@ mod tests {
         Clip {
             clip_id: mondrian_core::ClipId,
             clip_time: TimelineTime,
-            source_time: TimelineTime,
+            source_sample: mondrian_core::SourceSampleTarget,
             opacity: u32,
             track_index: usize,
         },
@@ -875,7 +875,7 @@ mod tests {
                 FlatVisualItem::Clip(clip) => VisualSignature::Clip {
                     clip_id: clip.clip_id,
                     clip_time: clip.clip_time,
-                    source_time: clip.source_time,
+                    source_sample: clip.source_sample,
                     opacity: clip.opacity.to_bits(),
                     track_index: clip.track_index,
                 },
@@ -901,7 +901,7 @@ mod tests {
             "effects": clip.effects.as_ref(),
             "masks": clip.masks.as_ref(),
             "clip_time": clip.clip_time,
-            "source_time": clip.source_time,
+            "source_sample": clip.source_sample,
             "transform_matrix_bits": clip.transform_matrix.map(f32::to_bits),
             "opacity_bits": clip.opacity.to_bits(),
             "blend_mode": clip.blend_mode,
@@ -1327,9 +1327,18 @@ mod tests {
     #[test]
     fn canonical_temporal_sampling_covers_forward_reverse_and_hold_maps() {
         for (scale, expected) in [
-            (TimeScale::new(2, 1).expect("forward"), tt(104)),
-            (TimeScale::new(-1, 1).expect("reverse"), tt(98)),
-            (TimeScale::new(0, 1).expect("hold"), tt(100)),
+            (
+                TimeScale::new(2, 1).expect("forward"),
+                mondrian_core::SourceSampleTarget::covering(tt(104)),
+            ),
+            (
+                TimeScale::new(-1, 1).expect("reverse"),
+                mondrian_core::SourceSampleTarget::strict_predecessor(tt(98)),
+            ),
+            (
+                TimeScale::new(0, 1).expect("hold"),
+                mondrian_core::SourceSampleTarget::covering(tt(100)),
+            ),
         ] {
             let mut sequence = Sequence::new("temporal retime sample");
             sequence.video_tracks.clear();
@@ -1402,7 +1411,7 @@ mod tests {
         };
         assert_eq!(
             schedule.sample_clip_source(placement, tt(-5)).expect("hidden signed sample"),
-            tt(98)
+            mondrian_core::SourceSampleTarget::covering(tt(98))
         );
     }
 

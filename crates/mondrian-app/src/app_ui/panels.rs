@@ -174,7 +174,7 @@ use crate::app_ui::audio_processor_rack::{
 };
 use crate::app_ui::icons::AppIcon;
 use crate::app_ui::inspector_source_timing::{
-    inspector_forward_rate_action, inspector_freeze_action, inspector_source_timing_model,
+    inspector_hold_action, inspector_rate_action, inspector_source_timing_model,
 };
 pub use crate::app_ui::inspector_source_timing::{
     InspectorSourceTimingMode, InspectorSourceTimingModel,
@@ -6063,20 +6063,20 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
         ));
     if let Some(source_timing) = model.source_timing {
         match source_timing.mode {
-            InspectorSourceTimingMode::Forward { rate_percent } => {
-                let rate_enabled = can_edit && source_timing.can_set_forward_rate;
+            InspectorSourceTimingMode::Rate { rate_percent } => {
+                let rate_enabled = can_edit && source_timing.can_set_rate;
                 timing_section = timing_section.with_row(PropertyRow::new(
                     "速度 (%)",
                     numeric_slider_input_control_with_hard_range(
                         rate_percent,
-                        1.0,
+                        -400.0,
                         400.0,
-                        0.01,
+                        -10_000.0,
                         10_000.0,
                         Some(0.01),
                         2,
                         rate_enabled,
-                        move |value| inspector_forward_rate_action(selected_clip, value),
+                        move |value| inspector_rate_action(selected_clip, value),
                     ),
                 ));
             }
@@ -6085,7 +6085,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                     "源时间",
                     Box::new(Label::new("定格").muted()),
                 ));
-                let rate_enabled = can_edit && source_timing.can_set_forward_rate;
+                let rate_enabled = can_edit && source_timing.can_set_rate;
                 timing_section = timing_section.with_row(PropertyRow::new(
                     "恢复速度 (%)",
                     numeric_slider_input_control_with_hard_range(
@@ -6097,14 +6097,8 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                         Some(0.01),
                         2,
                         rate_enabled,
-                        move |value| inspector_forward_rate_action(selected_clip, value),
+                        move |value| inspector_rate_action(selected_clip, value),
                     ),
-                ));
-            }
-            InspectorSourceTimingMode::ReverseUnsupported { rate_percent } => {
-                timing_section = timing_section.with_row(PropertyRow::new(
-                    "源时间",
-                    Box::new(Label::new(format!("反向 {rate_percent:.2}%（暂不可编辑）")).muted()),
                 ));
             }
         }
@@ -6120,7 +6114,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                 Box::new(
                     Button::new(label)
                         .enabled(can_edit && freeze_target.is_some())
-                        .on_click(inspector_freeze_action(selected_clip, freeze_target)),
+                        .on_click(inspector_hold_action(selected_clip, freeze_target)),
                 ),
             ));
         }
@@ -7605,9 +7599,9 @@ mod tests {
         let source_timing = model.source_timing.expect("source-timing model");
         assert_eq!(
             source_timing.mode,
-            InspectorSourceTimingMode::Forward { rate_percent: 150.0 }
+            InspectorSourceTimingMode::Rate { rate_percent: 150.0 }
         );
-        assert!(source_timing.can_set_forward_rate);
+        assert!(source_timing.can_set_rate);
         assert!(source_timing.supports_picture_hold);
         assert_eq!(
             source_timing.freeze_at_playhead,
@@ -7623,7 +7617,7 @@ mod tests {
         let held_model = InspectorPanelModel::from_app_state(&state);
         let held_timing = held_model.source_timing.expect("held source-timing model");
         assert_eq!(held_timing.mode, InspectorSourceTimingMode::Hold);
-        assert!(held_timing.can_set_forward_rate);
+        assert!(held_timing.can_set_rate);
         assert_eq!(
             held_timing.freeze_at_playhead,
             Some(FramePosition::new(4, time_base))
@@ -7636,11 +7630,14 @@ mod tests {
         let reverse_timing = reverse_model.source_timing.expect("reverse source-timing model");
         assert_eq!(
             reverse_timing.mode,
-            InspectorSourceTimingMode::ReverseUnsupported { rate_percent: 100.0 }
+            InspectorSourceTimingMode::Rate { rate_percent: -100.0 }
         );
-        assert!(!reverse_timing.can_set_forward_rate);
-        assert!(!reverse_timing.supports_picture_hold);
-        assert_eq!(reverse_timing.freeze_at_playhead, None);
+        assert!(reverse_timing.can_set_rate);
+        assert!(reverse_timing.supports_picture_hold);
+        assert_eq!(
+            reverse_timing.freeze_at_playhead,
+            Some(FramePosition::new(4, time_base))
+        );
 
         drop(state);
         let _ = std::fs::remove_dir_all(root);
@@ -7683,37 +7680,43 @@ mod tests {
             clip_id: ClipId::new(),
         };
         assert_eq!(
-            inspector_forward_rate_action(Some(selection), 150.0),
-            Some(Action::SetClipForwardRate {
-                clip_id: selection.clip_id,
-                rate: TimeScale::new(3, 2).expect("exact 150 percent rate"),
-                include_linked: true,
-            })
+            inspector_rate_action(Some(selection), 150.0),
+            Some(crate::app::ui_actions::clip_set_rate_action(
+                crate::app::product_action::ClipSetRatePayload {
+                    clip_id: selection.clip_id,
+                    rate: TimeScale::new(3, 2).expect("exact 150 percent rate"),
+                    include_linked: true,
+                },
+            ))
         );
         assert_eq!(
-            inspector_forward_rate_action(Some(selection), 33.33),
-            Some(Action::SetClipForwardRate {
-                clip_id: selection.clip_id,
-                rate: TimeScale::new(3_333, 10_000).expect("basis-point rate"),
-                include_linked: true,
-            })
+            inspector_rate_action(Some(selection), -33.33),
+            Some(crate::app::ui_actions::clip_set_rate_action(
+                crate::app::product_action::ClipSetRatePayload {
+                    clip_id: selection.clip_id,
+                    rate: TimeScale::new(-3_333, 10_000).expect("signed basis-point rate"),
+                    include_linked: true,
+                },
+            ))
         );
-        assert_eq!(inspector_forward_rate_action(None, 100.0), None);
-        for invalid in [f32::NAN, f32::INFINITY, -1.0, 0.0, 10_000.01] {
-            assert_eq!(
-                inspector_forward_rate_action(Some(selection), invalid),
-                None
-            );
+        assert_eq!(inspector_rate_action(None, 100.0), None);
+        for invalid in [f32::NAN, f32::INFINITY, 0.0, 10_000.01, -10_000.01] {
+            assert_eq!(inspector_rate_action(Some(selection), invalid), None);
         }
 
         let sequence_time = FramePosition::new(42, Rational::new(1, 25));
         assert_eq!(
-            inspector_freeze_action(Some(selection), Some(sequence_time)),
-            Some(Action::FreezeVideoClipAt { clip_id: selection.clip_id, sequence_time })
+            inspector_hold_action(Some(selection), Some(sequence_time)),
+            Some(crate::app::ui_actions::clip_hold_frame_action(
+                crate::app::product_action::ClipHoldFramePayload {
+                    clip_id: selection.clip_id,
+                    sequence_time,
+                },
+            ))
         );
-        assert_eq!(inspector_freeze_action(Some(selection), None), None);
+        assert_eq!(inspector_hold_action(Some(selection), None), None);
         assert_eq!(
-            inspector_freeze_action(
+            inspector_hold_action(
                 Some(SelectedClipRef { is_video_track: false, ..selection }),
                 Some(sequence_time),
             ),

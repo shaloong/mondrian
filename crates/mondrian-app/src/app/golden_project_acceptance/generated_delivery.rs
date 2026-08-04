@@ -1097,7 +1097,7 @@ fn reimport_export(
         asset_id: asset.id,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Ignore,
-        source_time: TimelineTime::ZERO,
+        source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
         target_resolution: reference.resolution,
         input_color,
         cpu_working_required: false,

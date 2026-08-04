@@ -14,7 +14,7 @@ use mondrian_core::types::{
     KeyframeId, SequenceId, TrackId, VideoTransitionId,
 };
 use mondrian_core::{
-    Color, ProjectColorEnvironment, ProjectSettings, TimelineTime, TimelineTimeRange,
+    Color, ProjectColorEnvironment, ProjectSettings, TimeScale, TimelineTime, TimelineTimeRange,
 };
 use mondrian_editor_state::Action;
 use mondrian_export::preset::{BuiltinExportPreset, ExportPreset, TimelineExportRange};
@@ -28,6 +28,7 @@ use mondrian_timeline::{
 use serde::{Deserialize, Serialize};
 
 use super::exporting::TimelineExportRequest;
+use super::timeline_editing::clip_link_group_member_ids;
 use super::{AppState, CrashRecoveryCandidate};
 
 /// External custom-action namespace for Timeline product operations.
@@ -94,6 +95,10 @@ pub const CLIP_NAMESPACE: &str = "ui.clip";
 pub const CLIP_SET_ENABLED: &str = "set_enabled";
 /// External action name for changing one Solid Color Clip's source color.
 pub const CLIP_SET_SOLID_COLOR: &str = "set_solid_color";
+/// External action name for changing one Clip or linked group to an exact signed rate.
+pub const CLIP_SET_RATE: &str = "set_rate";
+/// External action name for holding one video Clip at an exact Sequence frame.
+pub const CLIP_HOLD_FRAME: &str = "hold_frame";
 /// External action name for atomically writing stable-address Clip parameters.
 pub const CLIP_WRITE_PARAMETER_VALUES: &str = "write_parameter_values";
 /// External action name for editing one numeric Clip curve by stable identity.
@@ -339,6 +344,10 @@ pub enum ClipProductAction {
     SetEnabled(ClipSetEnabledPayload),
     /// Change the generated source color of one Solid Color Clip.
     SetSolidColor(ClipSetSolidColorPayload),
+    /// Set an exact nonzero forward or reverse source-time rate.
+    SetRate(ClipSetRatePayload),
+    /// Hold a video Clip at the picture selected on the Sequence grid.
+    HoldFrame(ClipHoldFramePayload),
     /// Atomically write one or more persistent Clip-owned parameters.
     WriteParameterValues(Box<ClipWriteParameterValuesPayload>),
     /// Insert, edit, or remove one complete numeric key by stable identity.
@@ -686,6 +695,12 @@ impl ProductAction {
                 CLIP_SET_SOLID_COLOR => Ok(Some(Self::Clip(ClipProductAction::SetSolidColor(
                     decode_payload(namespace, name, payload)?,
                 )))),
+                CLIP_SET_RATE => Ok(Some(Self::Clip(ClipProductAction::SetRate(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                CLIP_HOLD_FRAME => Ok(Some(Self::Clip(ClipProductAction::HoldFrame(
+                    decode_payload(namespace, name, payload)?,
+                )))),
                 CLIP_WRITE_PARAMETER_VALUES => {
                     Ok(Some(Self::Clip(ClipProductAction::WriteParameterValues(
                         Box::new(decode_payload(namespace, name, payload)?),
@@ -1020,6 +1035,12 @@ impl ProductAction {
                 CLIP_SET_SOLID_COLOR,
                 serde_json::json!(payload),
             ),
+            Self::Clip(ClipProductAction::SetRate(payload)) => {
+                (CLIP_NAMESPACE, CLIP_SET_RATE, serde_json::json!(payload))
+            }
+            Self::Clip(ClipProductAction::HoldFrame(payload)) => {
+                (CLIP_NAMESPACE, CLIP_HOLD_FRAME, serde_json::json!(payload))
+            }
             Self::Clip(ClipProductAction::WriteParameterValues(payload)) => (
                 CLIP_NAMESPACE,
                 CLIP_WRITE_PARAMETER_VALUES,
@@ -1804,6 +1825,28 @@ pub struct ClipSetSolidColorPayload {
     pub color: Color,
 }
 
+/// Change one Clip and, optionally, its complete link group to an exact signed rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipSetRatePayload {
+    /// Canonical Clip identity; current Track placement is derived at dispatch.
+    pub clip_id: ClipId,
+    /// Nonzero exact source-time delta per unit of placement time.
+    pub rate: TimeScale,
+    /// Whether the complete Sequence-local link group changes atomically.
+    pub include_linked: bool,
+}
+
+/// Hold one video Clip at the source picture visible on an exact Sequence frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipHoldFramePayload {
+    /// Canonical video Clip identity.
+    pub clip_id: ClipId,
+    /// Exact frame coordinate in the active Sequence Evaluation Grid.
+    pub sequence_time: FramePosition,
+}
+
 /// One stable-address parameter value in an atomic Clip write.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2090,7 +2133,7 @@ impl<'a> ProductActionAvailability<'a> {
     }
 
     fn allows_clip(&self, action: &ClipProductAction) -> bool {
-        let Some(_sequence) = self.state.active_sequence() else {
+        let Some(sequence) = self.state.active_sequence() else {
             return false;
         };
         match action {
@@ -2102,6 +2145,33 @@ impl<'a> ProductActionAvailability<'a> {
                 .state
                 .clip_solid_color_write_would_change(payload.clip_id, payload.color)
                 .unwrap_or(false),
+            ClipProductAction::SetRate(payload) => {
+                if payload.rate.numerator() == 0 {
+                    return false;
+                }
+                let clip_ids = if payload.include_linked {
+                    clip_link_group_member_ids(sequence, payload.clip_id)
+                } else {
+                    vec![payload.clip_id]
+                };
+                !clip_ids.is_empty()
+                    && clip_ids.iter().all(|clip_id| {
+                        product_clip(sequence, *clip_id).is_some_and(|target| target.track_unlocked)
+                    })
+                    && clip_ids.iter().any(|clip_id| {
+                        product_clip(sequence, *clip_id)
+                            .is_some_and(|target| target.clip.source_time_scale() != payload.rate)
+                    })
+            }
+            ClipProductAction::HoldFrame(payload) => product_clip(sequence, payload.clip_id)
+                .is_some_and(|target| {
+                    target.track_unlocked
+                        && target.is_video_track
+                        && target.clip.source_time_scale().numerator() != 0
+                        && payload.sequence_time.time_base == sequence.time_base()
+                        && TimelineTime::from_frame_position(payload.sequence_time)
+                            .is_ok_and(|time| target.clip.contains(time).unwrap_or(false))
+                }),
             ClipProductAction::WriteParameterValues(payload) => {
                 self.state.clip_parameter_writes_would_change(payload).unwrap_or(false)
             }
@@ -2277,6 +2347,10 @@ struct VisualEffectClip<'a> {
     is_video_track: bool,
 }
 
+fn product_clip(sequence: &Sequence, clip_id: ClipId) -> Option<VisualEffectClip<'_>> {
+    visual_effect_clip(sequence, clip_id)
+}
+
 #[derive(Clone, Copy)]
 struct VisualEffectTarget<'a> {
     clip: &'a Clip,
@@ -2345,7 +2419,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_core::types::AssetId;
+    use mondrian_core::types::{AssetId, ClipLinkGroupId};
     use mondrian_core::Rational;
     use mondrian_timeline::{
         audio::{AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID},
@@ -2821,6 +2895,30 @@ mod tests {
             let decoded = ProductAction::decode_external(&external)
                 .expect("valid external payload")
                 .expect("recognized Viewer product action");
+            assert_eq!(decoded, expected);
+        }
+    }
+
+    #[test]
+    fn external_codec_round_trips_signed_rate_and_hold_actions() {
+        let clip_id = ClipId::new();
+        let actions = [
+            ProductAction::Clip(ClipProductAction::SetRate(ClipSetRatePayload {
+                clip_id,
+                rate: TimeScale::new(-3, 2).expect("signed rate"),
+                include_linked: true,
+            })),
+            ProductAction::Clip(ClipProductAction::HoldFrame(ClipHoldFramePayload {
+                clip_id,
+                sequence_time: FramePosition::new(42, mondrian_core::Rational::new(1, 25)),
+            })),
+        ];
+
+        for expected in actions {
+            let external = expected.clone().into_external_action();
+            let decoded = ProductAction::decode_external(&external)
+                .expect("valid external payload")
+                .expect("recognized Clip timing action");
             assert_eq!(decoded, expected);
         }
     }
@@ -3468,6 +3566,47 @@ mod tests {
                 )
             ))
         );
+    }
+
+    #[test]
+    fn timing_availability_observes_the_complete_link_group_and_hold_noops() {
+        let mut sequence = Sequence::new("timing availability");
+        let time_base = sequence.time_base();
+        let group = ClipLinkGroupId::new();
+        let mut video =
+            Clip::new(AssetId::new(), TimelineTime::ZERO, tt(20, time_base)).expect("video Clip");
+        video.link_group = Some(group);
+        video
+            .set_constant_source_time_map(TimelineTime::ZERO, TimeScale::ZERO)
+            .expect("held video");
+        let video_id = video.id;
+        let mut audio =
+            Clip::new(AssetId::new(), TimelineTime::ZERO, tt(20, time_base)).expect("audio Clip");
+        audio.link_group = Some(group);
+        let audio_id = audio.id;
+        sequence.video_tracks[0].add_clip(video).expect("add video");
+        sequence.audio_tracks[0].add_clip(audio).expect("add audio");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+
+        let linked_rate = ProductAction::Clip(ClipProductAction::SetRate(ClipSetRatePayload {
+            clip_id: audio_id,
+            rate: TimeScale::ONE,
+            include_linked: true,
+        }));
+        let unlinked_rate = ProductAction::Clip(ClipProductAction::SetRate(ClipSetRatePayload {
+            clip_id: audio_id,
+            rate: TimeScale::ONE,
+            include_linked: false,
+        }));
+        let held_again = ProductAction::Clip(ClipProductAction::HoldFrame(ClipHoldFramePayload {
+            clip_id: video_id,
+            sequence_time: FramePosition::new(5, time_base),
+        }));
+        let availability = state.product_action_availability();
+        assert!(availability.allows(&linked_rate));
+        assert!(!availability.allows(&unlinked_rate));
+        assert!(!availability.allows(&held_again));
     }
 
     #[test]

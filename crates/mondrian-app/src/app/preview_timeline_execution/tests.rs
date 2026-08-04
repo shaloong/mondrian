@@ -1,5 +1,5 @@
 use mondrian_core::types::Rational;
-use mondrian_core::{ensure_mondrian_default_ocio_loaded, Color};
+use mondrian_core::{ensure_mondrian_default_ocio_loaded, Color, TimelineTime};
 use mondrian_timeline::clip::Clip;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -115,7 +115,7 @@ fn ready_temporal_media_frame(
     let mut identity =
         PreviewSemanticIdentityBuilder::new(b"mondrian.preview.test-temporal-media.v1");
     std::hash::Hash::hash(&request.asset_id, &mut identity);
-    std::hash::Hash::hash(&request.source_time, &mut identity);
+    std::hash::Hash::hash(&request.source_sample, &mut identity);
     std::hash::Hasher::write_u64(&mut identity, identity_salt);
     PreviewTimelineMediaFrame::Ready(MediaPreviewFrame::from_working(
         CpuColorFrame::working(WorkingRgbaF32Frame {
@@ -433,9 +433,9 @@ fn temporal_preview_schedules_the_complete_cross_zero_set_before_publishing() {
     assert!(scheduled
         .iter()
         .all(|request| request.asset_id == asset_id && request.cpu_working_required));
-    assert_eq!(scheduled[0].source_time, TimelineTime::ZERO);
+    assert_eq!(scheduled[0].source_sample.time(), TimelineTime::ZERO);
     assert_eq!(
-        scheduled[1].source_time,
+        scheduled[1].source_sample.time(),
         TimelineTime::new(-1, 30).expect("signed source request"),
         "the generic temporal planner must not clamp history at Timeline zero"
     );
@@ -448,7 +448,7 @@ fn temporal_preview_schedules_the_complete_cross_zero_set_before_publishing() {
         PreviewResolutionScale::Full,
         color_context(&sequence),
         &mut |request: PreviewTimelineMediaRequest| {
-            let red = if request.source_time < TimelineTime::ZERO {
+            let red = if request.source_sample.time() < TimelineTime::ZERO {
                 0.0
             } else {
                 1.0
@@ -506,7 +506,7 @@ fn temporal_preview_schedules_and_publishes_finite_lookahead() {
         }
     ));
     assert_eq!(
-        scheduled.iter().map(|request| request.source_time).collect::<Vec<_>>(),
+        scheduled.iter().map(|request| request.source_sample.time()).collect::<Vec<_>>(),
         vec![
             TimelineTime::ZERO,
             TimelineTime::new(1, 30).expect("future time")
@@ -521,7 +521,7 @@ fn temporal_preview_schedules_and_publishes_finite_lookahead() {
         PreviewResolutionScale::Full,
         color_context(&sequence),
         &mut |request: PreviewTimelineMediaRequest| {
-            let red = if request.source_time.is_zero() {
+            let red = if request.source_sample.time().is_zero() {
                 0.0
             } else {
                 1.0
@@ -564,7 +564,7 @@ fn temporal_preview_cache_identity_is_generation_and_source_complete() {
             heterogeneous_graph_budget: standalone_preview_heterogeneous_graph_budget(),
         };
         let mut media = |request: PreviewTimelineMediaRequest| {
-            let red = if request.source_time < TimelineTime::ZERO {
+            let red = if request.source_sample.time() < TimelineTime::ZERO {
                 0.0
             } else {
                 1.0
@@ -989,7 +989,7 @@ fn nested_temporal_preview_and_export_share_prepared_semantics_and_pixels() {
     {
         let mondrian_renderer::PreparedVisualExecutionTemporalSourceKindTrace::NestedSequence {
             sequence_id,
-            source_time,
+            source_sample,
             child_node_index,
             ..
         } = &sample.source
@@ -997,7 +997,7 @@ fn nested_temporal_preview_and_export_share_prepared_semantics_and_pixels() {
             panic!("the parity gate must retain nested temporal source semantics");
         };
         assert_eq!(*sequence_id, child.id);
-        assert_eq!(*source_time, expected_time);
+        assert_eq!(source_sample.time(), expected_time);
         let child_node = &preview.semantic_trace.nodes[*child_node_index];
         assert_eq!(child_node.sequence_id, child.id);
         assert_eq!(child_node.time, expected_time);
@@ -1022,7 +1022,7 @@ fn nested_temporal_preview_and_export_share_prepared_semantics_and_pixels() {
     assert_eq!(
         root.nested_bindings
             .iter()
-            .map(|binding| binding.source_time)
+            .map(|binding| binding.source_sample.time())
             .collect::<Vec<_>>(),
         vec![one_frame, TimelineTime::ZERO]
     );
@@ -1207,7 +1207,7 @@ fn nested_sequence_projects_exact_time_onto_the_child_evaluation_grid() {
     assert_eq!(demands.len(), 1);
     assert_eq!(demands[0].asset_id, asset_id);
     assert_eq!(
-        demands[0].source_time,
+        demands[0].source_sample.time(),
         mondrian_core::TimelineTime::new(1, 2).expect("exact half second")
     );
 }
@@ -1415,7 +1415,7 @@ fn nested_sequence_propagates_non_reusable_inner_execution_semantics() {
         let mut identity =
             PreviewSemanticIdentityBuilder::new(b"mondrian.preview.test-nested-source.v1");
         std::hash::Hash::hash(&request.asset_id, &mut identity);
-        std::hash::Hash::hash(&request.source_time, &mut identity);
+        std::hash::Hash::hash(&request.source_sample, &mut identity);
         PreviewTimelineMediaFrame::Ready(
             MediaPreviewFrame::from_working(
                 CpuColorFrame::working(mondrian_core::WorkingRgbaF32Frame {

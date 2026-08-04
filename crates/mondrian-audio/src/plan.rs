@@ -54,6 +54,8 @@ pub struct CompiledSourceTimeMap {
     pub source_origin: TimelineTime,
     /// Exact source delta per component-local delta.
     pub scale: TimeScale,
+    /// Half-open sample ownership retained from the canonical Clip map.
+    pub sampling_boundary: mondrian_core::SourceSamplingBoundary,
 }
 
 impl CompiledSourceTimeMap {

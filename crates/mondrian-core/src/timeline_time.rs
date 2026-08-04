@@ -177,6 +177,86 @@ pub enum FrameRounding {
     Nearest,
 }
 
+/// Half-open source-sampling rule attached to one exact source coordinate.
+///
+/// This is not ordinary numeric rounding. It records which side of an exact
+/// presentation boundary owns the sample after a source-time transform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceSamplingBoundary {
+    /// Select the presentation interval that contains the exact coordinate.
+    Covering,
+    /// Select the latest presentation interval whose start is strictly before
+    /// the exact coordinate. Reverse maps use this at exclusive source edges.
+    StrictPredecessor,
+}
+
+/// Exact source-local coordinate plus its half-open sampling ownership.
+///
+/// Timeline, Renderer, media, nested Sequence, Preview, and Export pass this
+/// value unchanged until one Adapter lowers it onto a concrete frame/PTS grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SourceSampleTarget {
+    time: TimelineTime,
+    boundary: SourceSamplingBoundary,
+}
+
+impl SourceSampleTarget {
+    /// Build an ordinary covering sample target.
+    pub const fn covering(time: TimelineTime) -> Self {
+        Self { time, boundary: SourceSamplingBoundary::Covering }
+    }
+
+    /// Build a reverse-edge strict-predecessor sample target.
+    pub const fn strict_predecessor(time: TimelineTime) -> Self {
+        Self {
+            time,
+            boundary: SourceSamplingBoundary::StrictPredecessor,
+        }
+    }
+
+    /// Derive boundary ownership from one canonical source-time scale.
+    pub const fn for_scale(time: TimelineTime, scale: TimeScale) -> Self {
+        if scale.numerator() < 0 {
+            Self::strict_predecessor(time)
+        } else {
+            Self::covering(time)
+        }
+    }
+
+    /// Exact source-local coordinate before evaluation-grid lowering.
+    pub const fn time(self) -> TimelineTime {
+        self.time
+    }
+
+    /// Half-open boundary ownership used at the concrete sampling Seam.
+    pub const fn boundary(self) -> SourceSamplingBoundary {
+        self.boundary
+    }
+
+    /// Lower once onto a concrete evaluation grid without an epsilon.
+    ///
+    /// Covering uses floor. Strict predecessor uses `ceil(time) - 1`, which
+    /// selects the previous grid cell at an exact boundary and the containing
+    /// cell for an interior coordinate.
+    pub fn to_frame_position(
+        self,
+        frame_rate: Rational,
+    ) -> Result<FramePosition, TimelineTimeError> {
+        match self.boundary {
+            SourceSamplingBoundary::Covering => {
+                self.time.to_frame_position(frame_rate, FrameRounding::Floor)
+            }
+            SourceSamplingBoundary::StrictPredecessor => {
+                let mut position = self.time.to_frame_position(frame_rate, FrameRounding::Ceil)?;
+                position.frame =
+                    position.frame.checked_sub(1).ok_or(TimelineTimeError::Overflow)?;
+                Ok(position)
+            }
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for TimelineTime {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -234,6 +314,8 @@ impl fmt::Display for TimelineTime {
 pub struct TimeScale(TimelineTime);
 
 impl TimeScale {
+    /// Non-invertible hold scale.
+    pub const ZERO: Self = Self(TimelineTime { numerator: 0, denominator: 1 });
     /// Identity scale.
     pub const ONE: Self = Self(TimelineTime { numerator: 1, denominator: 1 });
     /// Sign-reversing identity scale.

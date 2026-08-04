@@ -119,7 +119,9 @@ pub(super) fn execute_retime_media_evidence(
     let author_step = dispatch_author_transition(
         state,
         "set-proxy-relink-half-rate",
-        Action::SetClipForwardRate { clip_id, rate, include_linked: true },
+        crate::app::ui_actions::clip_set_rate_action(
+            crate::app::product_action::ClipSetRatePayload { clip_id, rate, include_linked: true },
+        ),
     )?;
     let sequence = state.active_sequence().cloned().context("Retime Hero Sequence is absent")?;
     let time_base = sequence.time_base();
@@ -275,7 +277,7 @@ fn plan_source_time(
         media.len() == 1,
         "retime frame did not resolve exactly one target media layer"
     );
-    Ok(media[0].source_time)
+    Ok(media[0].source_sample.time())
 }
 
 fn render_program_reference(
@@ -317,7 +319,7 @@ fn render_program_reference(
             .and_then(|asset| decode_media(state, &request, asset, decode_context));
         match outcome {
             Ok(media) => {
-                request_source_time = Some(request.source_time);
+                request_source_time = Some(request.source_sample.time());
                 decode_execution = Some(media.frame.decode_execution());
                 match source_rgba(&media.frame) {
                     Ok(rgba) => {
@@ -497,7 +499,7 @@ fn reimport_and_compare(
         asset_id: asset.id,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Ignore,
-        source_time: TimelineTime::ZERO,
+        source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
         target_resolution: expected.resolution,
         input_color,
         cpu_working_required: false,

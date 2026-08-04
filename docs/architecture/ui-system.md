@@ -894,17 +894,18 @@ and source revision prevents a
 same-asset relink from presenting stale waveform data.
 
 Constant retime also enters through typed semantic Actions rather than a panel
-mutating Clip fields. `SetClipForwardRate` carries an exact positive
-`TimeScale` and an explicit link-group policy; `FreezeVideoClipAt` carries one
-Sequence-grid `FramePosition` and never retimes linked audio. The Inspector
+mutating Clip fields. `ClipProductAction::SetRate` carries an exact signed,
+nonzero `TimeScale` and an explicit link-group policy;
+`ClipProductAction::HoldFrame` carries one Sequence-grid `FramePosition` and
+never retimes linked audio. The Inspector
 projects the canonical source map only for file-backed media and nested
-Sequences. Positive rates use a combined slider/number input; displayed
+Sequences. Signed rates use a combined slider/number input; displayed
 percentages are quantized at the Action seam to exact 0.01-percent basis points,
-so `150.00%` becomes `TimeScale(3/2)` rather than a floating-point author value.
-The Inspector applies positive rates to the selected Clip's complete link group
+so `-150.00%` becomes `TimeScale(-3/2)` rather than a floating-point author value.
+The Inspector applies signed rates to the selected Clip's complete link group
 and offers picture hold only for a video Clip whose dependency is resolved and
 whose playhead lies inside its half-open placement. A held picture may resume at
-an explicit positive rate; linked audio is left at its existing rate by the
+an explicit signed rate; linked audio is left at its existing rate by the
 hold itself.
 
 This low-frequency projection is only product availability guidance. The App
@@ -913,9 +914,9 @@ Track locks, source extents, and Transition handles immediately before atomic
 commit. Known still-image Assets have no speed control: their zero-rate map is
 intrinsic placement semantics, not a user-created freeze frame. Missing
 dependencies disable mutation without hiding the persisted map. Negative maps
-remain visible as a read-only reverse state; the Inspector cannot synthesize or
-edit reverse until direction-aware strict-predecessor sampling exists across
-Preview, audio, and Export.
+remain editable signed rate state. The App validates the complete source extent
+and same-span direction change before commit; reverse boundaries are not panel
+arithmetic and remain the canonical Timeline map's responsibility.
 
 Asset thumbnails follow the same Window boundary but retain an independent
 execution policy. `AppUiHost` owns one

@@ -1,6 +1,7 @@
 use mondrian_core::{
     AuthoringTimeDomain, DomainTime, FramePosition, FrameRounding, Rational, SequenceId,
-    SmpteCountingMode, TimeScale, TimeTransform, TimelineDisplaySettings, TimelineTime,
+    SmpteCountingMode, SourceSampleTarget, TimeScale, TimeTransform, TimelineDisplaySettings,
+    TimelineTime,
 };
 use serde::Deserialize;
 
@@ -215,5 +216,45 @@ fn long_project_keeps_exact_time_while_smpte_wraps_by_declared_contract() {
             .format_timeline_time(time, FrameRounding::Nearest)
             .expect("unbounded frame label"),
         fixture.expected_frame_label
+    );
+}
+
+#[test]
+fn source_sample_target_lowers_half_open_boundaries_without_epsilon() {
+    let rate = Rational::new(25, 1);
+    let exact_boundary = TimelineTime::new(10, 25).expect("exact boundary");
+    let interior = TimelineTime::new(21, 50).expect("interior time");
+
+    assert_eq!(
+        SourceSampleTarget::covering(exact_boundary)
+            .to_frame_position(rate)
+            .expect("covering boundary")
+            .frame,
+        10
+    );
+    assert_eq!(
+        SourceSampleTarget::strict_predecessor(exact_boundary)
+            .to_frame_position(rate)
+            .expect("strict predecessor boundary")
+            .frame,
+        9
+    );
+    assert_eq!(
+        SourceSampleTarget::covering(interior)
+            .to_frame_position(rate)
+            .expect("covering interior")
+            .frame,
+        10
+    );
+    assert_eq!(
+        SourceSampleTarget::strict_predecessor(interior)
+            .to_frame_position(rate)
+            .expect("strict predecessor interior")
+            .frame,
+        10
+    );
+    assert_eq!(
+        SourceSampleTarget::for_scale(exact_boundary, TimeScale::NEGATIVE_ONE),
+        SourceSampleTarget::strict_predecessor(exact_boundary)
     );
 }

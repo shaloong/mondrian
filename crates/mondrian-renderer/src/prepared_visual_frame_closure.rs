@@ -15,7 +15,7 @@ use crate::{
 };
 use mondrian_core::timeline_data::{NestedColorProcessing, TimelineClipExecutionRef};
 use mondrian_core::{
-    FramePosition, FrameRounding, Resolution, SequenceId, SequenceRevision, TimelineTime,
+    FramePosition, Resolution, SequenceId, SequenceRevision, SourceSampleTarget, TimelineTime,
     WorkingColorSpace,
 };
 use mondrian_effects::EffectTemporalFrameRequest;
@@ -179,7 +179,7 @@ pub struct PreparedVisualNestedBinding {
     child: PreparedVisualFrameNodeId,
     placement: TimelineClipExecutionRef,
     sample: PreparedVisualNestedSample,
-    source_time: TimelineTime,
+    source_sample: SourceSampleTarget,
     parent_working_color_space: WorkingColorSpace,
     child_working_color_space: WorkingColorSpace,
 }
@@ -205,9 +205,9 @@ impl PreparedVisualNestedBinding {
         self.sample
     }
 
-    /// Exact child-local time before projection to the child Evaluation Grid.
-    pub const fn source_time(&self) -> TimelineTime {
-        self.source_time
+    /// Exact child-local sample contract before projection to the child Evaluation Grid.
+    pub const fn source_sample(&self) -> SourceSampleTarget {
+        self.source_sample
     }
 
     /// Working space produced by the parent node.
@@ -406,7 +406,7 @@ struct NestedDemand {
     placement: TimelineClipExecutionRef,
     sample: PreparedVisualNestedSample,
     sequence_id: SequenceId,
-    source_time: TimelineTime,
+    source_sample: SourceSampleTarget,
     color_processing: NestedColorProcessing,
 }
 
@@ -638,14 +638,14 @@ where
                     }
                 }
                 let child_frame = demand
-                    .source_time
-                    .to_frame_position(child.settings.frame_rate, FrameRounding::Floor)
+                    .source_sample
+                    .to_frame_position(child.settings.frame_rate)
                     .map_err(
                         |error| PreparedVisualFrameClosureError::NestedTimeProjection {
                             parent_sequence_id: sequence.id,
                             nested_sequence_id: child.id,
                             placement: Box::new(demand.placement),
-                            source_time: demand.source_time,
+                            source_time: demand.source_sample.time(),
                             reason: error.to_string(),
                         },
                     )?
@@ -655,7 +655,7 @@ where
                         parent_sequence_id: sequence.id,
                         nested_sequence_id: child.id,
                         placement: Box::new(demand.placement),
-                        source_time: demand.source_time,
+                        source_time: demand.source_sample.time(),
                     });
                 }
                 let child_context = child
@@ -680,7 +680,7 @@ where
                     child: child_id,
                     placement: demand.placement,
                     sample: demand.sample,
-                    source_time: demand.source_time,
+                    source_sample: demand.source_sample,
                     parent_working_color_space: color_context.working_color_space,
                     child_working_color_space: child_context.working_color_space,
                 };
@@ -783,7 +783,7 @@ fn collect_nested_demands(
                         placement: nested.placement,
                         sample: PreparedVisualNestedSample::Current,
                         sequence_id: nested.sequence_id,
-                        source_time: nested.source_time,
+                        source_sample: nested.source_sample,
                         color_processing: nested.color_processing,
                     });
                 }
@@ -810,7 +810,7 @@ fn collect_nested_demands(
         for demand in batch.source_demands() {
             if let TimelineTemporalSource::NestedSequence {
                 sequence_id,
-                source_time,
+                source_sample,
                 color_processing,
             } = &demand.source
             {
@@ -818,7 +818,7 @@ fn collect_nested_demands(
                     placement: demand.placement,
                     sample: PreparedVisualNestedSample::Temporal(demand.effect_request),
                     sequence_id: *sequence_id,
-                    source_time: *source_time,
+                    source_sample: *source_sample,
                     color_processing: *color_processing,
                 });
             }
@@ -840,7 +840,7 @@ fn collect_transition_nested_demand(
             placement: nested.placement,
             sample: PreparedVisualNestedSample::Current,
             sequence_id: nested.sequence_id,
-            source_time: nested.source_time,
+            source_sample: nested.source_sample,
             color_processing: nested.color_processing,
         });
     }
@@ -1609,8 +1609,10 @@ mod tests {
         .expect("prepared closure");
         let binding = &closure.node(closure.root()).expect("root").bindings()[0];
         assert_eq!(
-            binding.source_time(),
-            TimelineTime::new(1, 2).expect("half second")
+            binding.source_sample(),
+            mondrian_core::SourceSampleTarget::covering(
+                TimelineTime::new(1, 2).expect("half second"),
+            )
         );
         let child_node = closure.node(binding.child()).expect("child");
         assert_eq!(child_node.frame(), 15);

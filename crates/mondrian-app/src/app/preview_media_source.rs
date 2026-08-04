@@ -72,7 +72,7 @@ pub(crate) struct PreviewMediaSourceRequest<'a> {
     pub(crate) asset: &'a AssetRecord,
     pub(crate) color_space_override: Option<ColorSpace>,
     pub(crate) alpha_interpretation: AlphaInterpretation,
-    pub(crate) source_time: TimelineTime,
+    pub(crate) source_sample: mondrian_core::SourceSampleTarget,
     pub(crate) target_resolution: Resolution,
     pub(crate) input_color: &'a MediaInputColorContext,
     pub(crate) prefer_proxy: bool,
@@ -151,11 +151,11 @@ pub(crate) fn resolve_preview_media_source(
     if !matches!(request.asset.kind, AssetKind::Video | AssetKind::StillImage) {
         return unavailable(&request, PreviewMediaSourceUnavailableReason::NotVideo);
     }
-    if request.source_time.is_negative() {
+    if request.source_sample.time().is_negative() {
         return unavailable(
             &request,
             PreviewMediaSourceUnavailableReason::NegativeSourceTime {
-                source_time: request.source_time,
+                source_time: request.source_sample.time(),
             },
         );
     }
@@ -260,7 +260,7 @@ pub(crate) fn resolve_preview_media_source(
         }
     };
     let decode =
-        match PreviewDecodeKey::new(decode_source, request.source_time, geometry, source_color) {
+        match PreviewDecodeKey::new(decode_source, request.source_sample, geometry, source_color) {
             Ok(decode) => decode,
             Err(error) => {
                 return unavailable(

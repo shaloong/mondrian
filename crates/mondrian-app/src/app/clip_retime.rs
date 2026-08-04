@@ -13,19 +13,19 @@ use super::video_transitions::validate_retimed_transition_handles_with_extents;
 use super::AppState;
 
 impl AppState {
-    /// Apply one exact positive forward playback rate as one Author Transaction.
+    /// Apply one exact nonzero forward or reverse playback rate as one Author Transaction.
     ///
     /// Timeline duration and Clip-local visual time are preserved. When
     /// requested, the complete Sequence-local link group is retimed atomically.
-    pub(super) fn set_clip_forward_rate_from_action(
+    pub(super) fn set_clip_rate_from_action(
         &mut self,
         clip_id: ClipId,
         rate: TimeScale,
         include_linked: bool,
-    ) -> mondrian_core::Result<()> {
-        if rate.numerator() <= 0 {
+    ) -> mondrian_core::Result<bool> {
+        if rate.numerator() == 0 {
             return Err(retime_error(
-                "forward playback rate must be a strictly positive exact ratio",
+                "playback rate must be a nonzero exact ratio; use hold-frame for zero",
             ));
         }
         let before = self.active_sequence().ok_or_else(no_active_sequence)?;
@@ -37,6 +37,11 @@ impl AppState {
                 .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?
         };
         validate_retime_content(before, &clip_ids, false)?;
+        if clip_ids.iter().all(|clip_id| {
+            find_clip(before, *clip_id).is_some_and(|clip| clip.source_time_scale() == rate)
+        }) {
+            return Ok(false);
+        }
         let sequence_id = before.id;
         let source_extents = self.resolved_retime_source_extents(before, &clip_ids)?;
         let transition_extents =
@@ -51,7 +56,7 @@ impl AppState {
                     sequence,
                     &ClipConstantRetimeRequest {
                         clip_ids,
-                        retime: ClipConstantRetime::ForwardRate { rate },
+                        retime: ClipConstantRetime::SetRate { rate },
                     },
                 )?;
                 if outcome.changed_clip_ids.is_empty() {
@@ -72,18 +77,18 @@ impl AppState {
         if changed {
             self.settle_preview_access_source();
         }
-        Ok(())
+        Ok(changed)
     }
 
     /// Freeze one video Clip at the picture visible at a Sequence-local time.
     ///
     /// Linked audio is intentionally not modified: repeating one audio sample
     /// is not a valid freeze-frame operation.
-    pub(super) fn freeze_video_clip_from_action(
+    pub(super) fn hold_video_clip_from_action(
         &mut self,
         clip_id: ClipId,
         sequence_time: mondrian_core::FramePosition,
-    ) -> mondrian_core::Result<()> {
+    ) -> mondrian_core::Result<bool> {
         let before = self.active_sequence().ok_or_else(no_active_sequence)?;
         let (_, is_video, _) = find_clip_track_lock(before, clip_id)
             .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
@@ -99,6 +104,13 @@ impl AppState {
             ));
         }
         let sequence_time = TimelineTime::from_frame_position(sequence_time)?;
+        let current = find_clip(before, clip_id)
+            .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
+        if current.source_time_scale().numerator() == 0
+            && current.source_origin() == current.timeline_to_source_time(sequence_time)?
+        {
+            return Ok(false);
+        }
         let sequence_id = before.id;
         let source_extents = self.resolved_retime_source_extents(before, &[clip_id])?;
         let transition_extents =
@@ -131,7 +143,7 @@ impl AppState {
         if changed {
             self.settle_preview_access_source();
         }
-        Ok(())
+        Ok(changed)
     }
 
     fn resolved_retime_source_extents(
@@ -225,17 +237,38 @@ fn validate_retimed_clip_extents(
             )));
         }
         if clip.source_time_scale().numerator() == 0 {
-            if origin >= extent {
+            let sample_exists = match clip.source_sampling_boundary() {
+                mondrian_core::SourceSamplingBoundary::Covering => origin < extent,
+                mondrian_core::SourceSamplingBoundary::StrictPredecessor => {
+                    !origin.is_zero() && origin <= extent
+                }
+            };
+            if !sample_exists {
                 return Err(retime_error(format!(
                     "Clip {} hold sample is outside the source extent",
                     clip.id
                 )));
             }
-        } else if clip.source_terminal_boundary()? > extent {
-            return Err(retime_error(format!(
-                "Clip {} forward retime exceeds the source extent",
-                clip.id
-            )));
+        } else if clip.source_time_scale().numerator() > 0 {
+            if clip.source_terminal_boundary()? > extent {
+                return Err(retime_error(format!(
+                    "Clip {} forward retime exceeds the source extent",
+                    clip.id
+                )));
+            }
+        } else {
+            if origin.is_zero() || origin > extent {
+                return Err(retime_error(format!(
+                    "Clip {} reverse in-edge is outside the source extent",
+                    clip.id
+                )));
+            }
+            if clip.source_terminal_boundary()?.is_negative() {
+                return Err(retime_error(format!(
+                    "Clip {} reverse retime precedes the source extent",
+                    clip.id
+                )));
+            }
         }
     }
     Ok(())
@@ -297,8 +330,24 @@ mod tests {
     };
     use mondrian_timeline::Clip;
 
+    fn set_rate_action(
+        clip_id: ClipId,
+        rate: TimeScale,
+        include_linked: bool,
+    ) -> mondrian_editor_state::Action {
+        crate::app::ui_actions::clip_set_rate_action(
+            crate::app::product_action::ClipSetRatePayload { clip_id, rate, include_linked },
+        )
+    }
+
+    fn hold_action(clip_id: ClipId, sequence_time: FramePosition) -> mondrian_editor_state::Action {
+        crate::app::ui_actions::clip_hold_frame_action(
+            crate::app::product_action::ClipHoldFramePayload { clip_id, sequence_time },
+        )
+    }
+
     #[test]
-    fn linked_forward_rate_and_video_hold_are_atomic_undoable_product_actions() {
+    fn linked_signed_rate_and_video_hold_are_atomic_undoable_product_actions() {
         let (root, asset_library, asset_id) = retime_media_fixture();
         let mut state = AppState::new();
         let mut sequence = Sequence::new("retime");
@@ -322,24 +371,18 @@ mod tests {
         state.test_set_asset_library(Some(asset_library));
         let history_before_noop =
             state.authoring_history().expect("history").diagnostics().undo_entries;
-        state
-            .dispatch_action(mondrian_editor_state::Action::SetClipForwardRate {
-                clip_id: video_id,
-                rate: TimeScale::ONE,
-                include_linked: true,
-            })
-            .expect("no-op rate");
+        assert!(state.dispatch_action(set_rate_action(video_id, TimeScale::ONE, true)).is_err());
         assert_eq!(
             state.authoring_history().expect("history").diagnostics().undo_entries,
             history_before_noop
         );
 
         state
-            .dispatch_action(mondrian_editor_state::Action::SetClipForwardRate {
-                clip_id: video_id,
-                rate: TimeScale::new(2, 1).expect("2x"),
-                include_linked: true,
-            })
+            .dispatch_action(set_rate_action(
+                video_id,
+                TimeScale::new(2, 1).expect("2x"),
+                true,
+            ))
             .expect("linked retime");
         let sequence = state.active_sequence().expect("Sequence");
         assert_eq!(
@@ -352,18 +395,36 @@ mod tests {
         );
 
         state
-            .dispatch_action(mondrian_editor_state::Action::FreezeVideoClipAt {
-                clip_id: video_id,
-                sequence_time: FramePosition::new(5, time_base),
-            })
+            .dispatch_action(set_rate_action(
+                video_id,
+                TimeScale::new(-2, 1).expect("reverse 2x"),
+                true,
+            ))
+            .expect("linked reverse retime");
+        let sequence = state.active_sequence().expect("Sequence");
+        for clip_id in [video_id, audio_id] {
+            let clip = find_clip(sequence, clip_id).expect("linked Clip");
+            assert_eq!(clip.source_origin(), frame_time(40, time_base));
+            assert_eq!(
+                clip.source_time_scale(),
+                TimeScale::new(-2, 1).expect("reverse 2x")
+            );
+        }
+
+        state
+            .dispatch_action(hold_action(video_id, FramePosition::new(5, time_base)))
             .expect("freeze");
         let sequence = state.active_sequence().expect("Sequence");
         let video = find_clip(sequence, video_id).expect("video");
-        assert_eq!(video.source_origin(), frame_time(10, time_base));
-        assert_eq!(video.source_time_scale().numerator(), 0);
+        assert_eq!(video.source_origin(), frame_time(30, time_base));
+        assert_eq!(video.source_time_scale(), TimeScale::ZERO);
+        assert_eq!(
+            video.source_sampling_boundary(),
+            mondrian_core::SourceSamplingBoundary::StrictPredecessor
+        );
         assert_eq!(
             find_clip(sequence, audio_id).expect("audio").source_time_scale(),
-            TimeScale::new(2, 1).expect("2x")
+            TimeScale::new(-2, 1).expect("reverse 2x")
         );
 
         assert!(state.undo_timeline().expect("undo"));
@@ -371,7 +432,7 @@ mod tests {
             find_clip(state.active_sequence().expect("Sequence"), video_id)
                 .expect("video")
                 .source_time_scale(),
-            TimeScale::new(2, 1).expect("2x")
+            TimeScale::new(-2, 1).expect("reverse 2x")
         );
         drop(state);
         std::fs::remove_dir_all(root).expect("remove media fixture");
@@ -406,30 +467,27 @@ mod tests {
         let history_before = state.authoring_history().expect("history").diagnostics().undo_entries;
 
         assert!(state
-            .dispatch_action(mondrian_editor_state::Action::SetClipForwardRate {
-                clip_id: video_id,
-                rate: TimeScale::new(0, 1).expect("zero rate"),
-                include_linked: true,
-            })
+            .dispatch_action(set_rate_action(
+                video_id,
+                TimeScale::new(0, 1).expect("zero rate"),
+                true,
+            ))
             .is_err());
         assert!(state
-            .dispatch_action(mondrian_editor_state::Action::FreezeVideoClipAt {
-                clip_id: audio_id,
-                sequence_time: FramePosition::new(5, time_base),
-            })
+            .dispatch_action(hold_action(audio_id, FramePosition::new(5, time_base)))
             .is_err());
         assert!(state
-            .dispatch_action(mondrian_editor_state::Action::FreezeVideoClipAt {
-                clip_id: video_id,
-                sequence_time: FramePosition::new(5, Rational::new(1, 30)),
-            })
+            .dispatch_action(hold_action(
+                video_id,
+                FramePosition::new(5, Rational::new(1, 30)),
+            ))
             .is_err());
         assert!(state
-            .dispatch_action(mondrian_editor_state::Action::SetClipForwardRate {
-                clip_id: video_id,
-                rate: TimeScale::new(2, 1).expect("2x"),
-                include_linked: true,
-            })
+            .dispatch_action(set_rate_action(
+                video_id,
+                TimeScale::new(2, 1).expect("2x"),
+                true,
+            ))
             .is_err());
 
         let sequence = state.active_sequence().expect("Sequence");
@@ -465,11 +523,11 @@ mod tests {
             .diagnostics()
             .undo_entries;
         assert!(unresolved_state
-            .dispatch_action(mondrian_editor_state::Action::SetClipForwardRate {
-                clip_id: unresolved_clip_id,
-                rate: TimeScale::new(2, 1).expect("2x"),
-                include_linked: false,
-            })
+            .dispatch_action(set_rate_action(
+                unresolved_clip_id,
+                TimeScale::new(2, 1).expect("2x"),
+                false,
+            ))
             .is_err());
         assert_eq!(
             find_clip(
@@ -522,11 +580,11 @@ mod tests {
         let history_before = state.authoring_history().expect("history").diagnostics().undo_entries;
 
         assert!(state
-            .dispatch_action(mondrian_editor_state::Action::SetClipForwardRate {
-                clip_id: left_id,
-                rate: TimeScale::new(2, 1).expect("2x"),
-                include_linked: false,
-            })
+            .dispatch_action(set_rate_action(
+                left_id,
+                TimeScale::new(2, 1).expect("2x"),
+                false,
+            ))
             .is_err());
 
         assert_eq!(

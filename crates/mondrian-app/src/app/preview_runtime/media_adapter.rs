@@ -14,7 +14,6 @@ use crate::app::preview_media_source::{
 use crate::app::preview_timeline_execution::{
     PreviewTimelineMediaFrame, PreviewTimelineMediaRequest,
 };
-use mondrian_core::TimelineTime;
 
 impl<O: Clone> PreviewProductionRuntime<O> {
     pub(super) fn media_frame_for_plan(
@@ -226,7 +225,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             &request.asset_id,
             request.color_space_override,
             request.alpha_interpretation,
-            request.source_time,
+            request.source_sample,
             request.target_resolution.width,
             request.target_resolution.height,
             &request.input_color,
@@ -246,7 +245,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         asset_id: &AssetId,
         color_space_override: Option<ColorSpace>,
         alpha_interpretation: AlphaInterpretation,
-        source_time: TimelineTime,
+        source_time: mondrian_core::TimelineTime,
         target_width: u32,
         target_height: u32,
         input_color: &MediaInputColorContext,
@@ -259,7 +258,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             asset_id,
             color_space_override,
             alpha_interpretation,
-            source_time,
+            mondrian_core::SourceSampleTarget::covering(source_time),
             target_width,
             target_height,
             input_color,
@@ -278,7 +277,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         asset_id: &AssetId,
         color_space_override: Option<ColorSpace>,
         alpha_interpretation: AlphaInterpretation,
-        source_time: TimelineTime,
+        source_sample: mondrian_core::SourceSampleTarget,
         target_width: u32,
         target_height: u32,
         input_color: &MediaInputColorContext,
@@ -324,7 +323,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             asset: &asset,
             color_space_override,
             alpha_interpretation,
-            source_time,
+            source_sample,
             target_resolution: Resolution { width: target_width, height: target_height },
             input_color,
             prefer_proxy,

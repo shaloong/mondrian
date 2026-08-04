@@ -1235,7 +1235,7 @@ impl PreviewDecodeSession {
 
     fn decode_at(
         &mut self,
-        source_time: TimelineTime,
+        source_sample: SourceSampleTarget,
         access_mode: PreviewDecodeAccessMode,
         adaptive_hints: PreviewDecodeAdaptiveHints,
         should_cancel: &(dyn Fn() -> bool + Send + Sync),
@@ -1248,12 +1248,11 @@ impl PreviewDecodeSession {
         }
 
         let target_pts =
-            source_time_to_stream_pts(source_time, self.stream_tb, self.stream_start_pts).map_err(
-                |reason| MondrianError::DecodeFailed {
+            source_sample_to_stream_pts(source_sample, self.stream_tb, self.stream_start_pts)
+                .map_err(|reason| MondrianError::DecodeFailed {
                     asset_id: self.path.display().to_string(),
                     reason,
-                },
-            )?;
+                })?;
         let policy = PreviewDecodeAccessPolicy::for_access_mode(access_mode).adapt_for_request(
             &self.seek_index,
             target_pts,
@@ -1558,7 +1557,7 @@ impl PreviewDecodeSession {
                         reason: format!("invalid exact seek window: {error}"),
                     }
                 })?;
-                let seek_window_pts = source_time_to_time_base_ticks(
+                let seek_window_pts = duration_to_time_base_ticks(
                     seek_window,
                     i64::from(self.stream_tb.numerator()),
                     i64::from(self.stream_tb.denominator()),
@@ -2069,7 +2068,7 @@ fn decode_preview_frame_outcome_in_sessions(
     let PreviewDecodeRequest {
         path,
         video_stream_index,
-        source_time,
+        source_sample,
         max_width,
         max_height,
         access_mode,
@@ -2217,7 +2216,8 @@ fn decode_preview_frame_outcome_in_sessions(
             if let Some(result) = try_decode_with_external_ffmpeg_cpu_rgba(
                 path,
                 video_stream_index,
-                source_time,
+                source_sample,
+                session.stream_tb,
                 session.target_width,
                 session.target_height,
                 source_color,
@@ -2286,7 +2286,7 @@ fn decode_preview_frame_outcome_in_sessions(
         }
 
         let outcome = match session.decode_at(
-            source_time,
+            source_sample,
             access_mode,
             adaptive_hints,
             should_cancel.as_ref(),
@@ -2555,7 +2555,7 @@ mod session_topology_tests {
         let mut context = PreviewDecodeSessionContext::with_worker_resources(resources.clone());
         let request = PreviewDecodeRequest::new(
             path.as_path(),
-            TimelineTime::ZERO,
+            SourceSampleTarget::covering(TimelineTime::ZERO),
             PreviewDecodeAccessMode::RandomAccessStillFrame,
             PreviewSourceColorContract::automatic(ColorSpace::Rec709, DecodedVideoRange::Limited),
         )

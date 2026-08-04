@@ -16,9 +16,7 @@ use std::sync::Arc;
 
 use mondrian_core::timeline_data::{AlphaInterpretation, TimelineClipExecutionRef};
 use mondrian_core::types::{AssetId, ColorSpace, SequenceId};
-use mondrian_core::{
-    ExecutionCancellationToken, FramePosition, Resolution, TimelineTime, WorkingRgbaF32Frame,
-};
+use mondrian_core::{ExecutionCancellationToken, FramePosition, Resolution, WorkingRgbaF32Frame};
 use mondrian_effects::{
     CompiledEffectGraph, EffectFrameExtent, EffectFrameTileF32, EffectGraphExecutionBudget,
     EffectTemporalSourceIdentity, PreparedTemporalFrameSet,
@@ -69,7 +67,7 @@ pub(crate) struct PreviewTimelineMediaRequest {
     pub(crate) alpha_interpretation: AlphaInterpretation,
     /// Exact source-local decode target. The media Adapter alone lowers this
     /// value into an FFmpeg stream PTS.
-    pub(crate) source_time: TimelineTime,
+    pub(crate) source_sample: mondrian_core::SourceSampleTarget,
     pub(crate) target_resolution: Resolution,
     pub(crate) input_color: MediaInputColorContext,
     /// Temporal CPU execution and renderer-owned heterogeneous Effect
@@ -873,14 +871,14 @@ where
     match &demand.source {
         TimelineTemporalSource::Media {
             asset_id,
-            source_time,
+            source_sample,
             color_space_override,
             alpha_interpretation,
             auto_tone_map,
         } => {
             let request = preview_temporal_media_request(
                 *asset_id,
-                *source_time,
+                *source_sample,
                 *color_space_override,
                 *alpha_interpretation,
                 *auto_tone_map,
@@ -910,7 +908,7 @@ where
             )
             .map(PreviewTemporalSourceResolution::Ready)
         }
-        TimelineTemporalSource::NestedSequence { sequence_id, source_time, .. } => {
+        TimelineTemporalSource::NestedSequence { sequence_id, source_sample, .. } => {
             let child_id = prepared_nested_child(
                 execution.closure,
                 parent_node_id,
@@ -948,12 +946,20 @@ where
                     ),
                 ));
             }
-            if child_node.time() > *source_time {
+            let projection_is_valid = match source_sample.boundary() {
+                mondrian_core::SourceSamplingBoundary::Covering => {
+                    child_node.time() <= source_sample.time()
+                }
+                mondrian_core::SourceSamplingBoundary::StrictPredecessor => {
+                    child_node.time() < source_sample.time()
+                }
+            };
+            if !projection_is_valid {
                 return Err(PreviewTimelineAbort::Unavailable(
                     PreviewUnavailability::failed(
                         PreviewOutputStage::TimelineEvaluation,
                         format!(
-                            "temporal nested closure projected Sequence {sequence_id} beyond requested source time {source_time}"
+                            "temporal nested closure projected Sequence {sequence_id} outside requested source sample {source_sample:?}"
                         ),
                     ),
                 ));
@@ -1188,7 +1194,7 @@ fn collect_prepared_visual_media_demands(
             for demand in batch.source_demands() {
                 if let TimelineTemporalSource::Media {
                     asset_id,
-                    source_time,
+                    source_sample,
                     color_space_override,
                     alpha_interpretation,
                     auto_tone_map,
@@ -1196,7 +1202,7 @@ fn collect_prepared_visual_media_demands(
                 {
                     demands.push(preview_temporal_media_request(
                         *asset_id,
-                        *source_time,
+                        *source_sample,
                         *color_space_override,
                         *alpha_interpretation,
                         *auto_tone_map,
@@ -1933,7 +1939,7 @@ fn preview_timeline_media_request(
         asset_id: media.asset_id,
         color_space_override: media.color_space_override,
         alpha_interpretation: media.alpha_interpretation,
-        source_time: media.source_time,
+        source_sample: media.source_sample,
         target_resolution,
         input_color: color_context.media_input(media.auto_tone_map),
         cpu_working_required: route.requires_cpu_working_frame(),
@@ -1963,7 +1969,7 @@ fn prepared_preview_heterogeneous_route(
 
 fn preview_temporal_media_request(
     asset_id: AssetId,
-    source_time: TimelineTime,
+    source_sample: mondrian_core::SourceSampleTarget,
     color_space_override: Option<ColorSpace>,
     alpha_interpretation: AlphaInterpretation,
     auto_tone_map: bool,
@@ -1974,7 +1980,7 @@ fn preview_temporal_media_request(
         asset_id,
         color_space_override,
         alpha_interpretation,
-        source_time,
+        source_sample,
         target_resolution,
         input_color: color_context.media_input(auto_tone_map),
         cpu_working_required: true,

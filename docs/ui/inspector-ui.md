@@ -41,21 +41,22 @@ Timing section. Generated content and adjustment layers do not own a finite
 source dependency, and known still images do not show speed controls: a still
 placement is intrinsically held and is not a recoverable `0%` video speed.
 
-Positive constant speed is entered in percent with two-decimal precision. The
+Signed nonzero constant speed is entered in percent with two-decimal precision. The
 UI converts the submitted value to an exact basis-point `TimeScale` and emits
-`SetClipForwardRate` with linked-member inclusion enabled. It does not write
+`ClipProductAction::SetRate` with linked-member inclusion enabled. It does not write
 Clip fields or infer a new source terminal. A hold displays `定格`, provides an
-explicit positive-rate resume control, and—on video Tracks—may sample the exact
-active-Sequence playhead through `FreezeVideoClipAt`. The hold button is
+explicit signed-rate resume control, and—on video Tracks—may sample the exact
+active-Sequence playhead through `ClipProductAction::HoldFrame`. The hold button is
 disabled while the playhead lies outside the selected half-open Clip range.
 
 Asset/child availability and Track lock shape control availability, but are not
 commit authority. The App re-resolves the selected stable Clip ID, complete
 link group, finite source extent, and resolved Transition handles inside one
 author transaction. A failed preflight leaves every member unchanged.
-Persisted negative maps are shown as read-only reverse state until strict
-direction-aware sampling is implemented end to end; a negative percentage is
-never accepted as a shortcut.
+Negative input is ordinary reverse intent, but the App still owns same-span
+direction-change and finite source-extent validation. The UI never subtracts a
+nominal frame or epsilon; the canonical source map carries the strict-predecessor
+boundary through Preview, audio, nesting, and Export.
 
 ## Parameter Controls
 

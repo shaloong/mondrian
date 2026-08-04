@@ -14,8 +14,8 @@ use mondrian_core::timeline_data::{
     AlphaInterpretation, NestedColorProcessing, TimelineClipExecutionRef,
 };
 use mondrian_core::{
-    AssetId, Color, ColorSpace, ExecutionCancellationToken, FrameRounding, MondrianError,
-    SequenceId, TimelineTime,
+    AssetId, Color, ColorSpace, ExecutionCancellationToken, MondrianError, SequenceId,
+    SourceSampleTarget, TimelineTime,
 };
 use mondrian_effects::{
     identity_compiled_effect_graph, CompiledEffectGraph, EffectExecutionContinuity,
@@ -47,7 +47,7 @@ pub enum TimelineTemporalSource {
         asset_id: AssetId,
         /// Exact source time after the Clip retime and optional interpretation
         /// frame grid.
-        source_time: TimelineTime,
+        source_sample: SourceSampleTarget,
         /// Explicit input color override, if authored.
         color_space_override: Option<ColorSpace>,
         /// Explicit alpha interpretation that must be normalized before the
@@ -61,7 +61,7 @@ pub enum TimelineTemporalSource {
         /// Child Sequence identity.
         sequence_id: SequenceId,
         /// Exact child-local time from the sole Clip retime map.
-        source_time: TimelineTime,
+        source_sample: SourceSampleTarget,
         /// Child-to-parent working-space contract.
         color_processing: NestedColorProcessing,
     },
@@ -557,33 +557,31 @@ fn collect_media_batch(
         cancellation,
         session,
         |request| {
-            let source_time =
-                program.sample_clip_source(media.placement, request.time()).map_err(|error| {
+            let source_sample = program
+                .sample_clip_source(media.placement, request.time())
+                .map_err(|error| TimelineTemporalPreparationError::SourceSampling {
+                    clip_id: media.placement.clip_id,
+                    reason: error.to_string(),
+                })?;
+            let source_sample = if let Some(rate) = media.frame_rate_override {
+                let position = source_sample.to_frame_position(rate).map_err(|error| {
                     TimelineTemporalPreparationError::SourceSampling {
                         clip_id: media.placement.clip_id,
                         reason: error.to_string(),
                     }
                 })?;
-            let source_time = if let Some(rate) = media.frame_rate_override {
-                let position =
-                    source_time.to_frame_position(rate, FrameRounding::Floor).map_err(|error| {
-                        TimelineTemporalPreparationError::SourceSampling {
-                            clip_id: media.placement.clip_id,
-                            reason: error.to_string(),
-                        }
-                    })?;
-                TimelineTime::from_frame_position(position).map_err(|error| {
-                    TimelineTemporalPreparationError::SourceSampling {
+                SourceSampleTarget::covering(TimelineTime::from_frame_position(position).map_err(
+                    |error| TimelineTemporalPreparationError::SourceSampling {
                         clip_id: media.placement.clip_id,
                         reason: error.to_string(),
-                    }
-                })?
+                    },
+                )?)
             } else {
-                source_time
+                source_sample
             };
             Ok(TimelineTemporalSource::Media {
                 asset_id: media.asset_id,
-                source_time,
+                source_sample,
                 color_space_override: media.color_space_override,
                 alpha_interpretation: media.alpha_interpretation,
                 auto_tone_map: media.auto_tone_map,
@@ -619,7 +617,7 @@ fn collect_nested_batch(
         cancellation,
         session,
         |request| {
-            let source_time = program
+            let source_sample = program
                 .sample_clip_source(nested.placement, request.time())
                 .map_err(|error| TimelineTemporalPreparationError::SourceSampling {
                     clip_id: nested.placement.clip_id,
@@ -627,7 +625,7 @@ fn collect_nested_batch(
                 })?;
             Ok(TimelineTemporalSource::NestedSequence {
                 sequence_id: nested.sequence_id,
-                source_time,
+                source_sample,
                 color_processing: nested.color_processing,
             })
         },
@@ -1039,7 +1037,7 @@ mod tests {
         for (demand, expected_time) in batch.source_demands().iter().zip(expected) {
             let TimelineTemporalSource::Media {
                 asset_id: demand_asset,
-                source_time,
+                source_sample,
                 color_space_override,
                 alpha_interpretation,
                 ..
@@ -1048,7 +1046,7 @@ mod tests {
                 panic!("media demand");
             };
             assert_eq!(*demand_asset, asset_id);
-            assert_eq!(*source_time, expected_time);
+            assert_eq!(source_sample.time(), expected_time);
             assert_eq!(*color_space_override, Some(ColorSpace::Rec2100Pq));
             assert_eq!(*alpha_interpretation, AlphaInterpretation::Premultiplied);
         }
@@ -1101,7 +1099,7 @@ mod tests {
             .source_demands()
             .iter()
             .map(|demand| match demand.source {
-                TimelineTemporalSource::Media { source_time, .. } => source_time,
+                TimelineTemporalSource::Media { source_sample, .. } => source_sample.time(),
                 _ => panic!("media demand"),
             })
             .collect::<Vec<_>>();

@@ -509,19 +509,20 @@ through a bounded reader directly into its typed Manifest or
 The value-based registry remains the explicit seam for future migrations
 without imposing its peak-memory cost on current Projects.
 
-Document schema v23 is the sole accepted Alpha author schema. It persists the
+Document schema v24 is the sole accepted Alpha author schema. It persists the
 Project-owned color environment and future-Sequence template, exact rational
 `TimelineTime`, canonical signal layouts and channel mappings, typed Routes and
 processor schemas, canonical proxy membership, closed `ClipContent`,
 multi-member link groups, strong visual Transitions, complete Mask and Basic
 Title properties, a Clip-local visual author origin, closed Sequence `color`
-and `delivery` structures, and one tagged `ClipSourceTimeMap` whose terminal
-boundary is derived from duration. Unknown fields and older or future document
-versions fail closed; no alias, fallback, default synthesis, or inferred
-migration is promised during Alpha.
+and `delivery` structures, and one tagged `ClipSourceTimeMap` whose constant
+variant persists exact origin, signed scale, and covering/strict-predecessor
+sampling boundary while deriving its terminal boundary from duration. Unknown
+fields and older or future document versions fail closed; no alias, fallback,
+default synthesis, or inferred migration is promised during Alpha.
 
 SQLite schema ownership remains in `mondrian-assets`; the current version is
-v4. Its ordered `PRAGMA user_version` registry applies each step in one
+v5. Its ordered `PRAGMA user_version` registry applies each step in one
 transaction, validates the resulting tables and columns, and rolls back both
 DDL and version on failure. SQLite migrates only the extracted runtime copy;
 opening never rewrites the source `.mdp`.

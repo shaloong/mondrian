@@ -184,13 +184,6 @@ impl AppState {
             Action::TrimClipEnd { clip_id, new_source_out } => {
                 self.trim_clip_source_from_action(clip_id, TrimEdge::Out, new_source_out)
             }
-            Action::SetClipForwardRate { clip_id, rate, include_linked } => {
-                self.set_clip_forward_rate_from_action(clip_id, rate, include_linked)
-            }
-            Action::FreezeVideoClipAt { clip_id, sequence_time } => {
-                self.freeze_video_clip_from_action(clip_id, sequence_time)
-            }
-
             // ── 项目操作 ──────────────────────────────────────────────────
             Action::OpenProject(path) => self.open_project_from_action(path),
             Action::SaveProject => {
@@ -1415,6 +1408,20 @@ impl AppState {
                 self.set_clip_solid_color_by_id(payload.clip_id, payload.color)?,
                 "clip_set_solid_color",
                 "Solid Color Clip already has the requested source color",
+            ),
+            ClipProductAction::SetRate(payload) => require_action_executed(
+                self.set_clip_rate_from_action(
+                    payload.clip_id,
+                    payload.rate,
+                    payload.include_linked,
+                )?,
+                "clip_set_rate",
+                "Clip already has the requested source-time rate",
+            ),
+            ClipProductAction::HoldFrame(payload) => require_action_executed(
+                self.hold_video_clip_from_action(payload.clip_id, payload.sequence_time)?,
+                "clip_hold_frame",
+                "Clip already holds the requested source picture",
             ),
             ClipProductAction::WriteParameterValues(payload) => require_action_executed(
                 self.write_clip_parameter_values(*payload)?,

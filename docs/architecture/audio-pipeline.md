@@ -61,15 +61,17 @@ It cannot contain a Track ID, Sequence range, Clip speed, source range, nested
 Sequence ID, Route, or output. Compilation derives those from the owning
 Track/Clip. This prevents two editable copies of placement from diverging.
 
-The forward-rate product Action may expand a complete linked video/audio Clip
+The signed-rate product Action may expand a complete linked video/audio Clip
 group and replaces every member's canonical source map in one author
-transaction. Audio compilation then lowers the new positive exact scale through
-the existing dense schedule; placement duration and Component Edit origins do
-not move. Freeze frame is video-only. Audio is never converted to a zero-rate
+transaction. Audio compilation lowers either direction through the existing
+dense schedule with the map's exact covering/strict-predecessor boundary;
+placement duration and Component Edit origins do not move. A direction change
+anchors the same half-open source span at its old exclusive terminal boundary.
+Picture hold is video-only. Audio is never converted to a zero-rate
 single-sample hold as an incidental consequence of a picture operation.
 The focused Retime Hero gate recompiles the persisted linked audio Clip after a
 durable Project reopen, prepares the complete routed Track closure into the
-dense schedule, and checks the exact source coordinate there. Its metadata-only
+dense schedule, and checks the exact source target there. Its metadata-only
 source is semantic evidence, not PCM decode or export-audio evidence.
 
 `mondrian-assets` persists one `AssetAudioComponentCatalog` per Asset. Initial
@@ -670,6 +672,16 @@ duplicates, treat negative coordinates as silence, and either fill the complete
 pre-zeroed block or fail it. This keeps exact time mapping outside media decode
 while permitting a decoder, nested Runtime, or future resampler to optimize
 contiguous runs internally.
+
+Prepared source spans retain the Clip map's `SourceSamplingBoundary`. Dense
+schedule lowering uses floor for covering targets and exact
+`ceil(source_position) - 1` for strict-predecessor reverse targets, including
+fractional rates; it never subtracts one output sample or a floating epsilon.
+Zero-rate holds retain the captured boundary and therefore repeat the same
+resolved source frame. Stateless nested audio may consume signed indexed
+demands freely. A stateful nested reverse occurrence remains a typed admission
+failure until checkpoint/replay or processor-specific reverse state proves
+correct continuity; the compiler must not turn that blocker into silence.
 
 The normative signal order is:
 

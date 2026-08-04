@@ -3300,7 +3300,7 @@ struct ExportDecodeCacheKey {
     source_path: PathBuf,
     source_fingerprint: MediaFileFingerprint,
     video_stream_index: u32,
-    source_time: TimelineTime,
+    source_sample: mondrian_core::SourceSampleTarget,
     input_color_space: ColorSpace,
     input_video_range: DecodedVideoRangeContract,
     alpha_interpretation: AlphaInterpretation,
@@ -3314,7 +3314,7 @@ impl ExportDecodeCacheKey {
     fn new(
         asset_id: AssetId,
         dependency: &crate::preset::ExportMediaDependency,
-        source_time: TimelineTime,
+        source_sample: mondrian_core::SourceSampleTarget,
         input_color_space: ColorSpace,
         input_video_range: DecodedVideoRangeContract,
         alpha_interpretation: AlphaInterpretation,
@@ -3342,7 +3342,7 @@ impl ExportDecodeCacheKey {
             source_path: dependency.path.clone(),
             source_fingerprint: dependency.source_fingerprint,
             video_stream_index,
-            source_time,
+            source_sample,
             input_color_space,
             input_video_range,
             alpha_interpretation,
@@ -4271,7 +4271,7 @@ fn decode_export_media_plan(
     let key = ExportDecodeCacheKey::new(
         media.asset_id,
         dependency,
-        media.source_time,
+        media.source_sample,
         input_color_space,
         input_video_range,
         media.alpha_interpretation,
@@ -4295,7 +4295,7 @@ fn decode_export_media_plan(
         ExportVideoLayerDecodeRequest {
             asset_id: media.asset_id,
             dependency,
-            source_time: media.source_time,
+            source_sample: media.source_sample,
             decode_resolution: Resolution { width, height },
             source_resolution,
             source_color: PreviewSourceColorContract::new(input_color_space, input_video_range),
@@ -4501,7 +4501,7 @@ fn resolve_export_temporal_source(
     let (frame, source_resolution) = match &demand.source {
         TimelineTemporalSource::Media {
             asset_id,
-            source_time,
+            source_sample,
             color_space_override,
             alpha_interpretation,
             auto_tone_map,
@@ -4514,7 +4514,7 @@ fn resolve_export_temporal_source(
                 field_order_override: None,
                 alpha_interpretation: *alpha_interpretation,
                 frame_rate_override: None,
-                source_time: *source_time,
+                source_sample: *source_sample,
                 opacity: 1.0,
                 blend_mode: mondrian_core::BlendMode::Normal,
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -4712,15 +4712,19 @@ fn export_temporal_source_identity(
         match &demand.source {
             TimelineTemporalSource::Media {
                 asset_id,
-                source_time,
+                source_sample,
                 color_space_override,
                 alpha_interpretation,
                 auto_tone_map,
             } => {
                 hasher.update([0]);
                 hasher.update(asset_id.0.as_bytes());
-                hasher.update(source_time.numerator().to_le_bytes());
-                hasher.update(source_time.denominator().to_le_bytes());
+                hasher.update(source_sample.time().numerator().to_le_bytes());
+                hasher.update(source_sample.time().denominator().to_le_bytes());
+                hasher.update([match source_sample.boundary() {
+                    mondrian_core::SourceSamplingBoundary::Covering => 0,
+                    mondrian_core::SourceSamplingBoundary::StrictPredecessor => 1,
+                }]);
                 hasher.update(
                     serde_json::to_vec(color_space_override).map_err(|error| error.to_string())?,
                 );
@@ -4731,13 +4735,17 @@ fn export_temporal_source_identity(
             }
             TimelineTemporalSource::NestedSequence {
                 sequence_id,
-                source_time,
+                source_sample,
                 color_processing,
             } => {
                 hasher.update([1]);
                 hasher.update(sequence_id.0.as_bytes());
-                hasher.update(source_time.numerator().to_le_bytes());
-                hasher.update(source_time.denominator().to_le_bytes());
+                hasher.update(source_sample.time().numerator().to_le_bytes());
+                hasher.update(source_sample.time().denominator().to_le_bytes());
+                hasher.update([match source_sample.boundary() {
+                    mondrian_core::SourceSamplingBoundary::Covering => 0,
+                    mondrian_core::SourceSamplingBoundary::StrictPredecessor => 1,
+                }]);
                 hasher.update(
                     serde_json::to_vec(color_processing).map_err(|error| error.to_string())?,
                 );
@@ -5030,7 +5038,7 @@ fn finish_empty_sequence_target(
 struct ExportVideoLayerDecodeRequest<'a> {
     asset_id: AssetId,
     dependency: &'a crate::preset::ExportMediaDependency,
-    source_time: TimelineTime,
+    source_sample: mondrian_core::SourceSampleTarget,
     decode_resolution: Resolution,
     source_resolution: Resolution,
     source_color: PreviewSourceColorContract,
@@ -5056,7 +5064,7 @@ fn decode_video_layer_scaled(
     let ExportVideoLayerDecodeRequest {
         asset_id,
         dependency,
-        source_time,
+        source_sample,
         decode_resolution,
         source_resolution,
         source_color,
@@ -5082,7 +5090,7 @@ fn decode_video_layer_scaled(
     })?;
     let media_request = PreviewDecodeRequest::new(
         path,
-        source_time,
+        source_sample,
         PreviewDecodeAccessMode::RandomAccessStillFrame,
         source_color,
     )
@@ -6264,7 +6272,7 @@ mod tests {
             ExportDecodeCacheKey::new(
                 asset_id,
                 &dependency,
-                TimelineTime::ZERO,
+                mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
                 ColorSpace::Rec709,
                 DecodedVideoRangeContract::OverrideFull,
                 AlphaInterpretation::Straight,
@@ -6309,7 +6317,7 @@ mod tests {
             ExportVideoLayerDecodeRequest {
                 asset_id: AssetId::new(),
                 dependency: &dependency,
-                source_time: TimelineTime::ZERO,
+                source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
                 decode_resolution: Resolution { width: 16, height: 16 },
                 source_resolution: Resolution { width: 16, height: 16 },
                 source_color: PreviewSourceColorContract::new(
@@ -6362,7 +6370,7 @@ mod tests {
                 ExportVideoLayerDecodeRequest {
                     asset_id,
                     dependency: &dependency,
-                    source_time,
+                    source_sample: mondrian_core::SourceSampleTarget::covering(source_time),
                     decode_resolution: Resolution { width: 16, height: 16 },
                     source_resolution: Resolution { width: 16, height: 16 },
                     source_color: PreviewSourceColorContract::new(
@@ -6443,7 +6451,7 @@ mod tests {
             ExportVideoLayerDecodeRequest {
                 asset_id: AssetId::new(),
                 dependency: &dependency,
-                source_time: TimelineTime::ZERO,
+                source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
                 decode_resolution: Resolution { width: 16, height: 16 },
                 source_resolution: Resolution { width: 16, height: 16 },
                 source_color: PreviewSourceColorContract::new(
@@ -6486,7 +6494,7 @@ mod tests {
         let original = ExportDecodeCacheKey::new(
             asset_id,
             &dependency,
-            TimelineTime::ZERO,
+            mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
             ColorSpace::Rec709,
             DecodedVideoRangeContract::OverrideFull,
             AlphaInterpretation::Straight,
@@ -6511,7 +6519,12 @@ mod tests {
         changed.video_stream_index = changed.video_stream_index.saturating_add(1);
         assert_ne!(original, changed);
         let mut changed = original.clone();
-        changed.source_time = tt(1, Rational::new(1, 25));
+        changed.source_sample =
+            mondrian_core::SourceSampleTarget::covering(tt(1, Rational::new(1, 25)));
+        assert_ne!(original, changed);
+        let mut changed = original.clone();
+        changed.source_sample =
+            mondrian_core::SourceSampleTarget::strict_predecessor(TimelineTime::ZERO);
         assert_ne!(original, changed);
         let mut changed = original.clone();
         changed.input_color_space = ColorSpace::Srgb;
@@ -6549,7 +6562,7 @@ mod tests {
         let error = ExportDecodeCacheKey::new(
             asset_id,
             &dependency,
-            TimelineTime::ZERO,
+            mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
             ColorSpace::Rec709,
             DecodedVideoRangeContract::OverrideLimited,
             AlphaInterpretation::Straight,

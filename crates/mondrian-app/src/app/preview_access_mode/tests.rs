@@ -2,7 +2,7 @@ use super::*;
 use std::path::PathBuf;
 
 use mondrian_core::types::ColorSpace;
-use mondrian_core::Resolution;
+use mondrian_core::{Resolution, TimelineTime};
 use mondrian_media::{DecodedVideoRange, PreviewSourceColorContract};
 
 #[test]
@@ -1543,7 +1543,7 @@ fn media_preview_job_queue_promotes_existing_prefetch_to_current() {
     assert_eq!(promoted_job.key, promoted);
     assert_eq!(promoted_job.priority, MediaPreviewRequestPriority::Current);
     assert_eq!(promoted_job.generation, 7);
-    assert_eq!(promoted_job.key.source_time(), promoted.source_time());
+    assert_eq!(promoted_job.key.source_sample(), promoted.source_sample());
     assert_eq!(
         promoted_job.enqueued_at, original_enqueued_at,
         "metadata promotion must preserve the queued execution payload"

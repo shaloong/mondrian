@@ -32,14 +32,15 @@ pub use super::product_action::{
     AssetImportFilesPayload, AssetLibraryMovePayload, AssetLibrarySelectionPayload,
     AssetRelinkPayload, AssetRenameFolderPayload, AssetRenamePayload,
     AssetSetInterpretationPayload, AssetSetProxyModePayload, AssetTargetPayload,
-    ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
-    ClipParameterValueWrite, ClipSetEnabledPayload, ClipSetSolidColorPayload,
-    ClipWriteParameterValuesPayload, ExportDraftEdit, ProjectCreateWithSettingsPayload,
-    ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
-    ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
-    TimelineClipSelectionModePayload, TimelineDropAssetPayload, TimelineInOutPointKind,
-    TimelineInsertAssetPayload, TimelineMoveClipPayload, TimelinePrecomposeSelectionPayload,
-    TimelineSeekPayload, TimelineSeekSource, TimelineSelectClipPayload, TimelineSelectionEdit,
+    ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipHoldFramePayload,
+    ClipNormalizedCurvePointPayload, ClipParameterValueWrite, ClipSetEnabledPayload,
+    ClipSetRatePayload, ClipSetSolidColorPayload, ClipWriteParameterValuesPayload, ExportDraftEdit,
+    ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
+    ProjectUpdateColorEnvironmentPayload, ProjectUpdateNewSequenceDefaultsPayload,
+    SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineClipSelectionModePayload,
+    TimelineDropAssetPayload, TimelineInOutPointKind, TimelineInsertAssetPayload,
+    TimelineMoveClipPayload, TimelinePrecomposeSelectionPayload, TimelineSeekPayload,
+    TimelineSeekSource, TimelineSelectClipPayload, TimelineSelectionEdit,
     TimelineSetInOutPointPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TrackAddKind,
     TrackAddPayload, TrackAuthorControl, TrackEditPolicyControl, TrackMovePayload,
     TrackSetAuthorControlPayload, TrackSetEditPolicyPayload,
@@ -729,6 +730,16 @@ pub fn clip_set_enabled_action(payload: ClipSetEnabledPayload) -> Action {
 /// Build an action that changes one Solid Color Clip source color.
 pub fn clip_set_solid_color_action(payload: ClipSetSolidColorPayload) -> Action {
     ProductAction::Clip(ClipProductAction::SetSolidColor(payload)).into_external_action()
+}
+
+/// Build an action that changes one Clip or linked group to an exact signed rate.
+pub fn clip_set_rate_action(payload: ClipSetRatePayload) -> Action {
+    ProductAction::Clip(ClipProductAction::SetRate(payload)).into_external_action()
+}
+
+/// Build an action that holds one video Clip at an exact Sequence frame.
+pub fn clip_hold_frame_action(payload: ClipHoldFramePayload) -> Action {
+    ProductAction::Clip(ClipProductAction::HoldFrame(payload)).into_external_action()
 }
 
 /// Build an action that atomically writes persistent Clip-owned parameters.

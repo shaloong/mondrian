@@ -34,7 +34,7 @@ use migration::JsonMigrationRegistry;
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 23;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 24;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 5;
 

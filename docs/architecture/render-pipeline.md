@@ -53,12 +53,14 @@ Subframe shutter/temporal samples use the same Timeline Time representation and
 do not introduce a renderer-private tick scale.
 
 Flattening retains two independent exact coordinates for each active Clip:
-`clip_time` for all Clip-owned visual processing and `source_time` for
-media/nested sampling. Transform, Opacity, visual Effect compilation, Masks,
+`clip_time` for all Clip-owned visual processing and `source_sample` for
+media/nested sampling. `source_sample` is a `SourceSampleTarget`, not a naked
+time: its `Covering` or `StrictPredecessor` boundary is part of plan, cache, and
+validation identity. Transform, Opacity, visual Effect compilation, Masks,
 and Basic Title evaluation consume only `clip_time`; decoder and nested
-Sequence Adapters consume only `source_time`. Preview and Export invoke this
+Sequence Adapters consume only `source_sample`. Preview and Export invoke this
 same lowering and may differ in scheduling or quality policy, never in time
-interpretation. Timeline lowering obtains `source_time` only through the
+interpretation. Timeline lowering obtains `source_sample` only through the
 Clip's canonical source-time map; the renderer never reads or reconstructs a
 parallel source range or speed field.
 
@@ -118,8 +120,9 @@ One `TimelineRenderPlan` describes one Sequence instance only. The renderer
 then constructs one transient `PreparedVisualFrameClosure` for the requested
 root frame. This is the sole recursive visual execution authority shared by
 Preview and Export. It fixes every exact child instance before source
-materialization: nested `source_time` is projected with the child's Evaluation
-Grid and `Floor` policy; active-path cycles and the product depth limit fail
+materialization: nested `source_sample` is projected with the child's Evaluation
+Grid using its exact covering/strict-predecessor rule, then becomes a covering
+target for that resolved child frame; active-path cycles and the product depth limit fail
 closed; each child receives its own authored/Preview canvas and composed
 `ProgramColorContext`; ordinary placements, both Transition endpoint sides,
 and every exact temporal request receive typed bindings. Equal
@@ -791,16 +794,18 @@ therefore never publish a false identity frame; only an explicitly disabled
 Effect is identity. Backend-specific admission remains separate from
 author/resource preparation.
 
-`TimelineMediaPlan::source_time` is the sole media-decode target emitted by
+`TimelineMediaPlan::source_sample` is the sole media-decode target emitted by
 Timeline evaluation. It remains exact through Preview scheduling, frame-store
 identity, Export decode caching, and `PreviewDecodeRequest`; those consumers do
-not rebuild seconds or microseconds. Without a media frame-rate override, the
-Clip Time Transform result is preserved exactly. An explicit override creates
-one declared source Evaluation Grid and applies `Floor` once. A
-`TimelineNestedSequencePlan` likewise retains child-local exact time; Preview
-and Export receive the child-grid frame already projected once by the
+not rebuild seconds or microseconds and cannot omit the sampling boundary from
+cache identity. Without a media frame-rate override, the complete Clip target
+is preserved until the decoder stream grid. An explicit override consumes its
+boundary once on that declared source Evaluation Grid. A
+`TimelineNestedSequencePlan` likewise retains the complete child-local target;
+Preview and Export receive the child-grid frame already projected once by the
 renderer-owned `PreparedVisualFrameClosure`, then materialize that addressed
-child evaluation. Parent frame numbers are never reused as child frame numbers.
+child evaluation. Parent frame numbers are never reused as child frame numbers,
+and no layer emulates reverse by subtracting an epsilon or nominal frame.
 
 `timeline_composite` exposes one color-managed composition contract:
 `composite_timeline_elements_color_frame(...)`. It returns a typed

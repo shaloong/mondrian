@@ -1499,7 +1499,7 @@ impl Sequence {
             let track_opacity = track.evaluate_opacity(time).clamp(0.0, 1.0);
             for clip in track.active_clips_at(time)? {
                 let clip_time = clip.timeline_to_clip_time(time)?;
-                let source_time = clip.timeline_to_source_time(time)?;
+                let source_sample = clip.timeline_to_source_sample(time)?;
                 let transform_mat = clip.transform.evaluate_matrix(clip_time);
                 let opacity =
                     (clip.transform.evaluate_opacity(clip_time) * track_opacity).clamp(0.0, 1.0);
@@ -1507,7 +1507,7 @@ impl Sequence {
                     clip: clip.clone(),
                     track_index: i,
                     clip_time,
-                    source_time,
+                    source_sample,
                     transform_matrix: transform_mat,
                     opacity,
                     blend_mode: clip.blend_mode.unwrap_or(track.blend_mode),
@@ -2530,7 +2530,7 @@ pub(crate) fn flatten_visual_clip_with_effect_snapshots(
         effects,
         masks,
         clip_time,
-        source_time: clip.timeline_to_source_time(time)?,
+        source_sample: clip.timeline_to_source_sample(time)?,
         transform_matrix: [
             matrix.x_axis.x,
             matrix.x_axis.y,
@@ -3663,7 +3663,7 @@ mod tests {
 
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].clip_time, tt(10, tb));
-        assert_eq!(active[0].source_time, tt(110, tb));
+        assert_eq!(active[0].source_sample.time(), tt(110, tb));
         assert!((active[0].opacity - 0.5).abs() < 1.0e-6);
     }
 

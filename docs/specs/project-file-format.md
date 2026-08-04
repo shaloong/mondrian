@@ -44,14 +44,17 @@ could otherwise select one by name. Project JSON and Library entries are
 written with ZIP64 size fields from the start; readers must therefore support
 ZIP64 even when a particular Project remains below 4 GiB.
 
-The current independent versions are archive v1, document schema v23, and
-library schema v4. Document schema v23 is the sole accepted Alpha author
+The current independent versions are archive v1, document schema v24, and
+library schema v5. Document schema v24 is the sole accepted Alpha author
 contract. It requires closed Project/Sequence/Clip structures, including one
 mandatory tagged `source_time_map`; its constant variant contains
-`source_origin` and exact `scale`, and derives the terminal source boundary from
-Clip duration. Future retiming extends this closed algebra rather than adding
-parallel mutable range fields. Older and future document versions and unknown
-author fields fail closed because no compatibility migration is promised yet.
+`source_origin`, exact signed `scale`, and mandatory `sampling_boundary`, and
+derives the terminal source boundary from Clip duration. Positive/negative
+maps require covering/strict-predecessor respectively; a zero-rate hold retains
+the boundary of its captured picture. Future retiming extends this closed
+algebra rather than adding parallel mutable range fields. Older and future
+document versions and unknown author fields fail closed because no
+compatibility migration is promised yet.
 
 ## Required Evolution Rules
 

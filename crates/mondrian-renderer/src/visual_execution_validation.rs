@@ -102,8 +102,8 @@ pub struct PreparedVisualExecutionNestedBindingTrace {
     pub placement: TimelineClipExecutionRef,
     /// Current or temporal sample role.
     pub sample: PreparedVisualExecutionSampleTrace,
-    /// Exact child-local time before Evaluation Grid projection.
-    pub source_time: TimelineTime,
+    /// Exact child-local sample contract before Evaluation Grid projection.
+    pub source_sample: mondrian_core::SourceSampleTarget,
     /// Parent working domain.
     pub parent_working_color_space: WorkingColorSpace,
     /// Child working domain.
@@ -149,8 +149,8 @@ pub enum PreparedVisualExecutionTemporalSourceKindTrace {
     Media {
         /// Stable project Asset identity.
         asset_id: AssetId,
-        /// Exact source-local sample time.
-        source_time: TimelineTime,
+        /// Exact source-local sample contract.
+        source_sample: mondrian_core::SourceSampleTarget,
         /// Explicit authored input override.
         color_space_override: Option<ColorSpace>,
         /// Explicit alpha interpretation.
@@ -162,8 +162,8 @@ pub enum PreparedVisualExecutionTemporalSourceKindTrace {
     NestedSequence {
         /// Child Sequence identity.
         sequence_id: SequenceId,
-        /// Exact child-local sample time before grid projection.
-        source_time: TimelineTime,
+        /// Exact child-local sample contract before grid projection.
+        source_sample: mondrian_core::SourceSampleTarget,
         /// Child-to-parent working-space contract.
         color_processing: NestedColorProcessing,
         /// Closure-local child occurrence selected by this temporal request.
@@ -205,7 +205,7 @@ pub fn prepared_visual_execution_semantic_trace<T>(
                     child_node_index: binding.child().index(),
                     placement: binding.placement(),
                     sample: normalized_sample(binding.sample()),
-                    source_time: binding.source_time(),
+                    source_sample: binding.source_sample(),
                     parent_working_color_space: binding.parent_working_color_space(),
                     child_working_color_space: binding.child_working_color_space(),
                 })
@@ -252,20 +252,20 @@ fn trace_temporal_batch<T>(
             let source = match &demand.source {
                 TimelineTemporalSource::Media {
                     asset_id,
-                    source_time,
+                    source_sample,
                     color_space_override,
                     alpha_interpretation,
                     auto_tone_map,
                 } => PreparedVisualExecutionTemporalSourceKindTrace::Media {
                     asset_id: *asset_id,
-                    source_time: *source_time,
+                    source_sample: *source_sample,
                     color_space_override: *color_space_override,
                     alpha_interpretation: *alpha_interpretation,
                     auto_tone_map: *auto_tone_map,
                 },
                 TimelineTemporalSource::NestedSequence {
                     sequence_id,
-                    source_time,
+                    source_sample,
                     color_processing,
                 } => {
                     let child = parent
@@ -281,7 +281,7 @@ fn trace_temporal_batch<T>(
                         })?;
                     PreparedVisualExecutionTemporalSourceKindTrace::NestedSequence {
                         sequence_id: *sequence_id,
-                        source_time: *source_time,
+                        source_sample: *source_sample,
                         color_processing: *color_processing,
                         child_node_index: child.index(),
                     }

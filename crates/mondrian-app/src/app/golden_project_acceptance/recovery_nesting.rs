@@ -494,7 +494,8 @@ fn execute_nested_frame(state: &AppState, frame: i64) -> anyhow::Result<NestedEx
         .find(|candidate| candidate.id == nested_plans[0].sequence_id)
         .context("Export root plan targets a missing nested Sequence")?;
     let nested_frame = nested_plans[0]
-        .source_time
+        .source_sample
+        .time()
         .to_frame_position(
             nested_sequence.settings.frame_rate,
             mondrian_core::FrameRounding::Floor,

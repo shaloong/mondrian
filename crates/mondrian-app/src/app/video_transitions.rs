@@ -750,10 +750,15 @@ fn source_extent_in_sequence_time(
 ) -> mondrian_core::Result<Option<TimelineTimeRange>> {
     if clip.source_time_scale().numerator() == 0 {
         let end = extent.end()?;
-        return Ok(
-            (clip.source_origin() >= extent.start && clip.source_origin() < end)
-                .then_some(TimelineTimeRange::new(clip.position, clip.duration)?),
-        );
+        let admitted = match clip.source_sampling_boundary() {
+            mondrian_core::SourceSamplingBoundary::Covering => {
+                clip.source_origin() >= extent.start && clip.source_origin() < end
+            }
+            mondrian_core::SourceSamplingBoundary::StrictPredecessor => {
+                clip.source_origin() > extent.start && clip.source_origin() <= end
+            }
+        };
+        return Ok(admitted.then_some(TimelineTimeRange::new(clip.position, clip.duration)?));
     }
     let first = clip.source_to_timeline_time(extent.start)?;
     let second = clip.source_to_timeline_time(extent.end()?)?;
