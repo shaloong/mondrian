@@ -349,6 +349,7 @@ pub(super) fn execute_foundation_stage(
     };
 
     let audio_track_id = state.active_sequence().context("sequence missing")?.audio_tracks[0].id;
+    let time_base = state.active_sequence().context("sequence missing")?.time_base();
     let clips_before = state.active_sequence().context("sequence missing")?.audio_tracks[0]
         .clips
         .iter()
@@ -357,8 +358,7 @@ pub(super) fn execute_foundation_stage(
     state.dispatch_action(timeline_drop_asset_action(TimelineDropAssetPayload {
         asset_id: asset.id,
         target_track_id: audio_track_id,
-        is_video_track: false,
-        frame: 0,
+        position: FramePosition::new(0, time_base),
     }))?;
     let clip_id = state.active_sequence().context("sequence missing")?.audio_tracks[0]
         .clips
@@ -367,7 +367,6 @@ pub(super) fn execute_foundation_stage(
         .map(|clip| clip.id)
         .context("timeline drop did not create an audio Clip")?;
 
-    let time_base = state.active_sequence().context("sequence missing")?.time_base();
     state.dispatch_action(Action::TrimClipEnd {
         clip_id,
         new_source_out: FramePosition::new(contract.timeline.duration_frames, time_base),

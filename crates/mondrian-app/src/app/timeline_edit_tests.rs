@@ -368,7 +368,6 @@ fn delete_sequence_rejects_nested_references() {
 fn precompose_clips_creates_nested_sequence_and_replacement_clip() {
     let mut state = create_state_with_sequence();
     let tb = state.active_sequence().expect("sequence should exist").time_base();
-    let track_id = state.active_sequence().expect("sequence should exist").video_tracks[0].id;
     let clip = Clip::new(AssetId::new(), tt(12, tb), tt(30, tb)).expect("valid clip");
     let clip_id = clip.id;
     let unaffected_video =
@@ -414,7 +413,7 @@ fn precompose_clips_creates_nested_sequence_and_replacement_clip() {
     };
 
     let nested_clip_id = state
-        .precompose_clips_as_sequence(&[(track_id, true, clip_id)], "Precomp 01")
+        .precompose_clips_as_sequence(&[clip_id], "Precomp 01")
         .expect("precompose");
 
     let parent = state.active_sequence().expect("sequence should exist");

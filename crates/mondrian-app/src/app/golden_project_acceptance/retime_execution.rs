@@ -143,9 +143,9 @@ fn golden_hero_retime_is_one_exact_contract_across_author_preview_audio_export_a
         author_transition(workflow.app_mut(), "insert-linked-retime-source", |state| {
             Ok(state.insert_asset_from_ui(TimelineInsertAssetPayload {
                 asset_id,
-                insert_frame: 0,
-                source_in_frame: 0,
-                duration_frames: 48,
+                at: TimelineTime::ZERO,
+                source_in: TimelineTime::ZERO,
+                duration: TimelineTime::from_frame_position(FramePosition::new(48, time_base))?,
                 video_target_track_id: Some(video_track_id),
                 audio_target_track_id: Some(audio_track_id),
                 ripple_track_ids: vec![video_track_id, audio_track_id],

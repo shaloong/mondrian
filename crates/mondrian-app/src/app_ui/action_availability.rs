@@ -9,10 +9,8 @@ use mondrian_editor_state::Action;
 
 use crate::app::product_action::ProductAction;
 use crate::app::ui_actions::{
-    TimelineInsertAssetPayload, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
-    APP_SHELL_PROJECT_SETTINGS, APP_SHELL_QUIT, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
-    APP_SHELL_SEQUENCE_SETTINGS, TIMELINE_CREATE_BASIC_TITLE, TIMELINE_INSERT_ASSET,
-    TIMELINE_NAMESPACE,
+    APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_PROJECT_SETTINGS, APP_SHELL_QUIT,
+    APP_SHELL_SAVE_PROJECT_AS_DIALOG, APP_SHELL_SEQUENCE_SETTINGS,
 };
 use crate::app::AppState;
 use mondrian_core::types::ClipId;
@@ -95,17 +93,6 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         {
             state.active_sequence().is_some()
         }
-        Action::Custom { namespace, name, .. }
-            if namespace == TIMELINE_NAMESPACE && name == TIMELINE_CREATE_BASIC_TITLE =>
-        {
-            state.active_sequence().is_some()
-        }
-        Action::Custom { namespace, name, payload }
-            if namespace == TIMELINE_NAMESPACE && name == TIMELINE_INSERT_ASSET =>
-        {
-            parse_payload::<TimelineInsertAssetPayload>(payload)
-                .is_some_and(|payload| timeline_insert_scope_is_available(state, &payload))
-        }
         _ => true,
     }
 }
@@ -125,46 +112,6 @@ fn valid_transport_seek(state: &AppState, position: FramePosition) -> bool {
             .ok()
         })
         .is_some_and(|position| position.frame >= 0)
-}
-
-fn timeline_insert_scope_is_available(
-    state: &AppState,
-    payload: &TimelineInsertAssetPayload,
-) -> bool {
-    if payload.insert_frame < 0
-        || payload.source_in_frame < 0
-        || payload.duration_frames <= 0
-        || payload.ripple_track_ids.is_empty()
-    {
-        return false;
-    }
-    let Some(sequence) = state.active_sequence() else {
-        return false;
-    };
-    let ripple_tracks = payload
-        .ripple_track_ids
-        .iter()
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>();
-    let targets = [payload.video_target_track_id, payload.audio_target_track_id]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-    if targets.is_empty() || targets.iter().any(|track_id| !ripple_tracks.contains(track_id)) {
-        return false;
-    }
-    ripple_tracks.iter().all(|track_id| {
-        sequence
-            .video_tracks
-            .iter()
-            .chain(&sequence.audio_tracks)
-            .find(|track| track.id == *track_id)
-            .is_some_and(|track| !track.is_locked)
-    })
-}
-
-fn parse_payload<T: serde::de::DeserializeOwned>(payload: &serde_json::Value) -> Option<T> {
-    serde_json::from_value(payload.clone()).ok()
 }
 
 fn has_timeline_selection(state: &AppState) -> bool {

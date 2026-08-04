@@ -124,15 +124,14 @@ use crate::app::ui_actions::{
     ClipParameterValueWrite, ClipSetEnabledPayload, ClipSetSolidColorPayload,
     ClipWriteParameterValuesPayload, DockDropAreaPayload, ExportDraftEdit,
     ExportOutputDialogPayload, ImportMediaDialogPayload, InspectorAudioComponentSourcePayload,
-    InspectorSetAudioComponentSourcePayload, TimelineClipSelectionModePayload,
-    TimelineDropAssetPayload, TimelineExportRequest, TimelineInOutPointKind,
-    TimelineMoveClipPayload, TimelineOpenNestedSequencePayload,
-    TimelineSeekSource as AppTimelineSeekSource, TimelineSelectClipPayload,
-    TimelineSetInOutPointPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TrackAddKind,
-    TrackAddPayload, TrackAuthorControl, TrackEditPolicyControl, TrackMovePayload,
-    TrackSetAuthorControlPayload, TrackSetEditPolicyPayload,
-    VideoTransitionCreateCrossDissolvePayload, VideoTransitionHandlePolicy,
-    VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
+    InspectorSetAudioComponentSourcePayload, SequenceTargetPayload,
+    TimelineClipSelectionModePayload, TimelineDropAssetPayload, TimelineExportRequest,
+    TimelineInOutPointKind, TimelineMoveClipPayload, TimelineSeekSource as AppTimelineSeekSource,
+    TimelineSelectClipPayload, TimelineSetInOutPointPayload, TimelineTrimClipsPayload,
+    TimelineTrimPayloadEdge, TrackAddKind, TrackAddPayload, TrackAuthorControl,
+    TrackEditPolicyControl, TrackMovePayload, TrackSetAuthorControlPayload,
+    TrackSetEditPolicyPayload, VideoTransitionCreateCrossDissolvePayload,
+    VideoTransitionHandlePolicy, VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
     ViewerSetPreviewResolutionScalePayload, ViewerSetZoomScalePayload,
     VisualEffectAddToClipPayload, VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
     VisualEffectSetParameterValuePayload, VisualEffectTargetPayload,
@@ -1404,17 +1403,14 @@ impl TimelinePanelModel {
         })
     }
 
-    fn open_nested_payload(
-        &self,
-        clip_ref: TimelineClipRef,
-    ) -> Option<TimelineOpenNestedSequencePayload> {
+    fn open_nested_payload(&self, clip_ref: TimelineClipRef) -> Option<SequenceTargetPayload> {
         let sequence_id = self
             .nested_sequence_refs
             .get(clip_ref.track_index)?
             .get(clip_ref.clip_index)
             .copied()
             .flatten()?;
-        Some(TimelineOpenNestedSequencePayload { sequence_id })
+        Some(SequenceTargetPayload { sequence_id })
     }
 
     fn track_identity(&self, track_ref: TimelineTrackRef) -> Option<AppTimelineTrackRef> {
@@ -1476,11 +1472,14 @@ impl TimelinePanelModel {
 
     fn asset_drop_payload(&self, drop: TimelineAssetDrop) -> Option<TimelineDropAssetPayload> {
         let target = self.track_identity(drop.track_ref)?;
+        let frame_rate = self.timeline_display.frame_rate();
         Some(TimelineDropAssetPayload {
             asset_id: drop.asset_id,
             target_track_id: target.track_id,
-            is_video_track: target.is_video_track,
-            frame: drop.frame.max(0),
+            position: FramePosition::new(
+                drop.frame.max(0),
+                Rational::new(frame_rate.den, frame_rate.num),
+            ),
         })
     }
 
@@ -7240,7 +7239,7 @@ mod tests {
             parameter_id: mondrian_core::ParameterId::new_static(parameter_id),
         }
     }
-    use crate::app::product_action::{ProductAction, TimelineProductAction};
+    use crate::app::product_action::{ProductAction, SequenceProductAction, TimelineProductAction};
     use crate::app::ui_actions::{
         AppShellInterpretAssetDialogPayload, AppShellRelinkAssetDialogPayload,
         AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveSelectionPayload,
@@ -7252,9 +7251,8 @@ mod tests {
         ASSET_REBIND_AUDIO_COMPONENT, ASSET_REFRESH_AUDIO_COMPONENTS, ASSET_REMOVE_ENTRIES,
         ASSET_RENAME, ASSET_SET_PROXY_MODE, AUDIO_EDIT_COMPONENT, AUDIO_NAMESPACE,
         CLIP_EDIT_NUMERIC_CURVE, CLIP_NAMESPACE, CLIP_WRITE_PARAMETER_VALUES, INSPECTOR_NAMESPACE,
-        INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_DROP_ASSET,
-        TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_SELECT_CLIP,
-        TIMELINE_SET_IN_OUT_POINT, TRACK_ADD, TRACK_MOVE, TRACK_NAMESPACE,
+        INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_NAMESPACE,
+        TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT, TRACK_ADD, TRACK_MOVE, TRACK_NAMESPACE,
         VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE, VIDEO_TRANSITION_NAMESPACE,
         VIDEO_TRANSITION_SELECT, VIDEO_TRANSITION_SET_RANGE, VISUAL_EFFECT_ADD_TO_CLIP,
         VISUAL_EFFECT_NAMESPACE, VISUAL_EFFECT_SELECT, VISUAL_EFFECT_SET_PARAMETER_VALUE,
@@ -9585,8 +9583,8 @@ mod tests {
 
         assert_eq!(payload.asset_id, asset_id);
         assert_eq!(payload.target_track_id, target_track_id);
-        assert!(!payload.is_video_track);
-        assert_eq!(payload.frame, 0);
+        assert_eq!(payload.position.frame, 0);
+        assert_eq!(payload.position.time_base, sequence.time_base());
         assert!(model
             .asset_drop_payload(TimelineAssetDrop {
                 asset_id,
@@ -9804,25 +9802,23 @@ mod tests {
         );
 
         let recorded = actions.borrow();
-        let drop_action = recorded
+        let payload = recorded
             .iter()
-            .find(|action| {
-                matches!(
-                    action,
-                    Action::Custom { namespace, name, .. }
-                        if namespace == TIMELINE_NAMESPACE && name == TIMELINE_DROP_ASSET
-                )
-            })
+            .find_map(
+                |action| match ProductAction::decode_external(action).ok().flatten()? {
+                    ProductAction::Timeline(TimelineProductAction::PlaceAsset(payload)) => {
+                        Some(payload)
+                    }
+                    _ => None,
+                },
+            )
             .expect("drop asset action");
-        let Action::Custom { payload, .. } = drop_action else {
-            panic!("expected custom drop-asset action");
-        };
-        let payload: TimelineDropAssetPayload =
-            serde_json::from_value(payload.clone()).expect("drop asset payload");
         assert_eq!(payload.asset_id, asset_id);
         assert_eq!(payload.target_track_id, target.track_id);
-        assert!(payload.is_video_track);
-        assert_eq!(payload.frame, 10);
+        assert_eq!(
+            payload.position,
+            FramePosition::new(10, Rational::new(1, 25))
+        );
     }
 
     #[test]
@@ -9901,25 +9897,23 @@ mod tests {
 
         assert!(router.active_drag_payload().is_none());
         let recorded = actions.borrow();
-        let drop_action = recorded
+        let payload = recorded
             .iter()
-            .find(|action| {
-                matches!(
-                    action,
-                    Action::Custom { namespace, name, .. }
-                        if namespace == TIMELINE_NAMESPACE && name == TIMELINE_DROP_ASSET
-                )
-            })
+            .find_map(
+                |action| match ProductAction::decode_external(action).ok().flatten()? {
+                    ProductAction::Timeline(TimelineProductAction::PlaceAsset(payload)) => {
+                        Some(payload)
+                    }
+                    _ => None,
+                },
+            )
             .expect("drop asset action");
-        let Action::Custom { payload, .. } = drop_action else {
-            panic!("expected custom drop-asset action");
-        };
-        let payload: TimelineDropAssetPayload =
-            serde_json::from_value(payload.clone()).expect("drop asset payload");
         assert_eq!(payload.asset_id, asset_id);
         assert_eq!(payload.target_track_id, target.track_id);
-        assert!(payload.is_video_track);
-        assert_eq!(payload.frame, 10);
+        assert_eq!(
+            payload.position,
+            FramePosition::new(10, Rational::new(1, 25))
+        );
     }
 
     #[test]
@@ -10285,13 +10279,14 @@ mod tests {
             }),
         );
 
-        let Some(Action::Custom { namespace, name, payload }) = action else {
-            panic!("expected open nested custom action");
+        let Some(action) = action else {
+            panic!("expected open nested action");
         };
-        assert_eq!(namespace, TIMELINE_NAMESPACE);
-        assert_eq!(name, TIMELINE_OPEN_NESTED_SEQUENCE);
-        let payload: TimelineOpenNestedSequencePayload =
-            serde_json::from_value(payload).expect("open nested payload");
+        let Some(ProductAction::Sequence(SequenceProductAction::OpenNested(payload))) =
+            ProductAction::decode_external(&action).expect("decode open nested action")
+        else {
+            panic!("expected typed open nested action");
+        };
         assert_eq!(payload.sequence_id, nested_id);
 
         assert_eq!(

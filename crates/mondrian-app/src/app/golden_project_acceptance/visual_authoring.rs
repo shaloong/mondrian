@@ -805,6 +805,7 @@ pub(super) fn execute_visual_stage(
     let solid_asset_id = new_solid_asset(state)?;
     let video_track_id =
         state.active_sequence().context("active Sequence is absent")?.video_tracks[0].id;
+    let time_base = state.active_sequence().context("active Sequence is absent")?.time_base();
     let before = state.active_sequence().context("active Sequence is absent")?.video_tracks[0]
         .clips
         .iter()
@@ -816,8 +817,7 @@ pub(super) fn execute_visual_stage(
         timeline_drop_asset_action(TimelineDropAssetPayload {
             asset_id: solid_asset_id,
             target_track_id: video_track_id,
-            is_video_track: true,
-            frame: window.start_frame,
+            position: FramePosition::new(window.start_frame, time_base),
         }),
     )?;
     let left_clip_id = new_clip_after(state, video_track_id, &before)?;
@@ -842,8 +842,7 @@ pub(super) fn execute_visual_stage(
         timeline_drop_asset_action(TimelineDropAssetPayload {
             asset_id: solid_asset_id,
             target_track_id: video_track_id,
-            is_video_track: true,
-            frame: edit_frame,
+            position: FramePosition::new(edit_frame, time_base),
         }),
     )?;
     let right_clip_id = new_clip_after(state, video_track_id, &before)?;

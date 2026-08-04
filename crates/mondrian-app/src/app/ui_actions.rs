@@ -6,7 +6,6 @@
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{
     AssetId, AudioComponentEditId, AudioSourceComponentId, ClipId, JobId, ProgramOutputId,
-    SequenceId, TrackId,
 };
 use mondrian_core::{
     ColorEngine, ColorSpace, DisplayToneMapPolicy, Rational, Resolution, TimelineDisplayFormat,
@@ -40,7 +39,8 @@ pub use super::product_action::{
     ClipWriteParameterValuesPayload, ExportDraftEdit, ProjectCreateWithSettingsPayload,
     ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
     ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
-    TimelineClipSelectionModePayload, TimelineInOutPointKind, TimelineMoveClipPayload,
+    TimelineClipSelectionModePayload, TimelineDropAssetPayload, TimelineInOutPointKind,
+    TimelineInsertAssetPayload, TimelineMoveClipPayload, TimelinePrecomposeSelectionPayload,
     TimelineSeekPayload, TimelineSeekSource, TimelineSelectClipPayload, TimelineSelectionEdit,
     TimelineSetInOutPointPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TrackAddKind,
     TrackAddPayload, TrackAuthorControl, TrackEditPolicyControl, TrackMovePayload,
@@ -59,13 +59,14 @@ pub use super::product_action::{
     EXPORT_ENQUEUE, EXPORT_NAMESPACE, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
     PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_UPDATE_COLOR_ENVIRONMENT,
     PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS, SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE,
-    SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE,
-    SEQUENCE_UPDATE_SETTINGS, TIMELINE_APPLY_RANGE_EDIT, TIMELINE_CLEAR_IN_OUT_POINTS,
-    TIMELINE_EDIT_SELECTION, TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK,
-    TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT, TIMELINE_TRIM_CLIPS, TRACK_ADD, TRACK_MOVE,
-    TRACK_NAMESPACE, TRACK_SET_AUTHOR_CONTROL, TRACK_SET_EDIT_POLICY,
-    VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE, VIDEO_TRANSITION_NAMESPACE, VIDEO_TRANSITION_REMOVE,
-    VIDEO_TRANSITION_SELECT, VIDEO_TRANSITION_SET_RANGE, VIEWER_NAMESPACE,
+    SEQUENCE_NEW, SEQUENCE_OPEN_NESTED, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT,
+    SEQUENCE_SWITCH_ACTIVE, SEQUENCE_UPDATE_SETTINGS, TIMELINE_APPLY_RANGE_EDIT,
+    TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_CREATE_BASIC_TITLE, TIMELINE_EDIT_SELECTION,
+    TIMELINE_INSERT_ASSET, TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_PLACE_ASSET,
+    TIMELINE_PRECOMPOSE_SELECTION, TIMELINE_SEEK, TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT,
+    TIMELINE_TRIM_CLIPS, TRACK_ADD, TRACK_MOVE, TRACK_NAMESPACE, TRACK_SET_AUTHOR_CONTROL,
+    TRACK_SET_EDIT_POLICY, VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE, VIDEO_TRANSITION_NAMESPACE,
+    VIDEO_TRANSITION_REMOVE, VIDEO_TRANSITION_SELECT, VIDEO_TRANSITION_SET_RANGE, VIEWER_NAMESPACE,
     VISUAL_EFFECT_ADD_TO_CLIP, VISUAL_EFFECT_NAMESPACE, VISUAL_EFFECT_REMOVE,
     VISUAL_EFFECT_REORDER, VISUAL_EFFECT_SELECT, VISUAL_EFFECT_SET_ENABLED,
     VISUAL_EFFECT_SET_PARAMETER_VALUE,
@@ -75,17 +76,6 @@ use super::product_action::{
     ProjectProductAction, SequenceProductAction, TimelineProductAction, TrackProductAction,
     VideoTransitionProductAction, ViewerProductAction, VisualEffectProductAction,
 };
-
-/// Action name for creating a generated Basic Title at the current edit range.
-pub const TIMELINE_CREATE_BASIC_TITLE: &str = "create_basic_title";
-/// Action name for dropping one prepared asset onto a timeline track.
-pub const TIMELINE_DROP_ASSET: &str = "drop_asset";
-/// Action name for inserting one Asset through explicit target/ripple scope.
-pub const TIMELINE_INSERT_ASSET: &str = "insert_asset";
-/// Action name for replacing the current clip selection with a nested Sequence.
-pub const TIMELINE_PRECOMPOSE_SELECTION: &str = "precompose_selection";
-/// Action name for opening a nested sequence clip.
-pub const TIMELINE_OPEN_NESTED_SEQUENCE: &str = "open_nested_sequence";
 
 /// Custom action namespace for inspector UI operations.
 pub const INSPECTOR_NAMESPACE: &str = "ui.inspector";
@@ -296,63 +286,11 @@ pub struct AppShellRelocatePanelPayload {
     pub tab_index: Option<usize>,
 }
 
-/// Replace the current clip selection with one nested Sequence placement.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimelinePrecomposeSelectionPayload {
-    /// User-facing name assigned to the new nested Sequence.
-    pub name: String,
-}
-
-/// Open one nested sequence from a timeline clip.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimelineOpenNestedSequencePayload {
-    /// Nested sequence to make active.
-    pub sequence_id: SequenceId,
-}
-
 /// Change the shell-local viewer canvas zoom.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ViewerSetZoomScalePayload {
     /// Fixed canvas scale. `None` means fit to available viewer space.
     pub scale: Option<f32>,
-}
-
-/// Drop an asset onto one timeline track at a target frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimelineDropAssetPayload {
-    /// Asset being dropped.
-    pub asset_id: AssetId,
-    /// Track that should receive the created clip.
-    pub target_track_id: TrackId,
-    /// Whether `target_track_id` is a video track rather than an audio track.
-    pub is_video_track: bool,
-    /// Target timeline frame for the new clip start.
-    pub frame: i64,
-}
-
-/// Insert one Asset through an explicit professional edit scope.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimelineInsertAssetPayload {
-    /// Asset whose selected source interval should be inserted.
-    pub asset_id: AssetId,
-    /// Insert boundary on the active Sequence video evaluation grid.
-    pub insert_frame: i64,
-    /// Source selection start on the active Sequence video evaluation grid.
-    pub source_in_frame: i64,
-    /// Positive selected source duration on the active Sequence video grid.
-    pub duration_frames: i64,
-    /// Target video Track, when this insertion contains picture.
-    pub video_target_track_id: Option<TrackId>,
-    /// Target audio Track, when this insertion contains audio.
-    pub audio_target_track_id: Option<TrackId>,
-    /// Exact Track set resolved from targeting and Sync-Lock UI state.
-    pub ripple_track_ids: Vec<TrackId>,
-    /// Sequence-time automation behavior.
-    pub automation_policy: mondrian_timeline::InsertAutomationPolicy,
-    /// Disposition for Transitions intersected by the edit.
-    pub transition_policy: mondrian_timeline::InsertTransitionPolicy,
-    /// Playhead and In/Out behavior.
-    pub timeline_state_policy: mondrian_timeline::InsertTimelineStatePolicy,
 }
 
 /// Logical source selected for one placement-local audio Component Edit.
@@ -682,7 +620,7 @@ pub fn video_transition_create_cross_dissolve_action(
 
 /// Build an action that creates a generated Basic Title.
 pub fn timeline_create_basic_title_action() -> Action {
-    custom_timeline_action(TIMELINE_CREATE_BASIC_TITLE, ())
+    ProductAction::Timeline(TimelineProductAction::CreateBasicTitle).into_external_action()
 }
 
 /// Build an action that changes one visual Transition range.
@@ -793,22 +731,24 @@ pub fn track_move_action(payload: TrackMovePayload) -> Action {
 
 /// Build an action that drops an asset onto a timeline track.
 pub fn timeline_drop_asset_action(payload: TimelineDropAssetPayload) -> Action {
-    custom_timeline_action(TIMELINE_DROP_ASSET, payload)
+    ProductAction::Timeline(TimelineProductAction::PlaceAsset(payload)).into_external_action()
 }
 
 /// Build an action that performs one professional Insert Edit from an Asset.
 pub fn timeline_insert_asset_action(payload: TimelineInsertAssetPayload) -> Action {
-    custom_timeline_action(TIMELINE_INSERT_ASSET, payload)
+    ProductAction::Timeline(TimelineProductAction::InsertAsset(Box::new(payload)))
+        .into_external_action()
 }
 
 /// Build an action that precomposes the current clip selection.
 pub fn timeline_precompose_selection_action(payload: TimelinePrecomposeSelectionPayload) -> Action {
-    custom_timeline_action(TIMELINE_PRECOMPOSE_SELECTION, payload)
+    ProductAction::Timeline(TimelineProductAction::PrecomposeSelection(payload))
+        .into_external_action()
 }
 
 /// Build an action that opens one nested sequence from the timeline.
-pub fn timeline_open_nested_sequence_action(payload: TimelineOpenNestedSequencePayload) -> Action {
-    custom_timeline_action(TIMELINE_OPEN_NESTED_SEQUENCE, payload)
+pub fn timeline_open_nested_sequence_action(payload: SequenceTargetPayload) -> Action {
+    ProductAction::Sequence(SequenceProductAction::OpenNested(payload)).into_external_action()
 }
 
 /// Build an action that changes one Clip enabled state.
@@ -1426,14 +1366,6 @@ pub fn app_shell_window_drag_action() -> Action {
 /// Build an app-shell request for relocating one dock panel tab.
 pub fn app_shell_relocate_panel_action(payload: AppShellRelocatePanelPayload) -> Action {
     custom_app_shell_action_with_payload(APP_SHELL_RELOCATE_PANEL, payload)
-}
-
-fn custom_timeline_action<T: Serialize>(name: &'static str, payload: T) -> Action {
-    Action::Custom {
-        namespace: TIMELINE_NAMESPACE.into(),
-        name: name.into(),
-        payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
-    }
 }
 
 fn custom_inspector_action<T: Serialize>(name: &'static str, payload: T) -> Action {

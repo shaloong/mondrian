@@ -1,11 +1,11 @@
 //! Product Adapter for Asset-backed professional Insert Edit.
 
-use super::ui_actions::TimelineInsertAssetPayload;
+use super::product_action::TimelineInsertAssetPayload;
 use super::AppState;
 use mondrian_assets::AssetKind;
 use mondrian_core::{
-    events::AppEvent, AudioSourceComponentId, ClipLinkGroupId, FramePosition, MondrianError,
-    TimelineTime,
+    events::AppEvent, AudioSourceComponentId, ClipLinkGroupId, FramePosition, FrameRounding,
+    MondrianError, TimelineTime,
 };
 use mondrian_timeline::{
     apply_insert_edit, Clip, InsertEditOutcome, InsertEditPlacement, InsertEditRequest,
@@ -14,56 +14,44 @@ use mondrian_timeline::{
 use std::collections::BTreeSet;
 
 impl AppState {
+    /// Whether one exact Asset Insert can execute against current author state.
+    pub fn can_insert_asset_from_product_action(
+        &self,
+        payload: &TimelineInsertAssetPayload,
+    ) -> bool {
+        self.prepare_insert_asset(payload).is_ok()
+    }
+
     /// Insert one Asset source selection through explicit target/ripple scope.
     ///
-    /// The UI payload is converted from the Sequence video grid into exact
-    /// author time once. Scope registration, structural editing, validation,
-    /// revision advancement, and Undo publication form one Author Transaction.
+    /// The Product payload already carries exact canonical author time. Scope
+    /// registration, structural editing, validation, revision advancement, and
+    /// Undo publication form one Author Transaction.
     pub fn insert_asset_from_ui(
         &mut self,
         payload: TimelineInsertAssetPayload,
     ) -> mondrian_core::Result<InsertEditOutcome> {
-        if payload.insert_frame < 0 || payload.source_in_frame < 0 || payload.duration_frames <= 0 {
-            return Err(insert_error(
-                "insert/source frames must be non-negative and duration must be positive",
-            ));
-        }
-        let asset = self
-            .asset_library()
-            .ok_or_else(|| insert_error("Asset Library is not connected"))?
-            .get_asset(payload.asset_id)?
-            .ok_or_else(|| MondrianError::AssetNotFound {
-                asset_id: payload.asset_id.to_string(),
-            })?;
-        validate_asset_targets(&asset, &payload)?;
+        let asset = self.prepare_insert_asset(&payload)?;
 
         let timeline_state_policy = payload.timeline_state_policy;
-        let insert_frame = payload.insert_frame;
-        let duration_frames = payload.duration_frames;
-        let playhead_frame_before = self.current_frame();
+        let insert_at = payload.at;
+        let duration = payload.duration;
+        let (playhead_time_before, frame_rate) = {
+            let sequence = self.active_sequence().ok_or_else(|| insert_error("当前无序列"))?;
+            (
+                TimelineTime::from_frame_position(FramePosition::new(
+                    self.current_frame(),
+                    sequence.time_base(),
+                ))?,
+                sequence.settings.frame_rate,
+            )
+        };
         let (sequence_id, outcome) =
             self.commit_active_sequence_edit("插入编辑", move |sequence| {
-                let time_base = sequence.time_base();
-                let at = TimelineTime::from_frame_position(FramePosition::new(
-                    payload.insert_frame,
-                    time_base,
-                ))?;
-                let source_in = TimelineTime::from_frame_position(FramePosition::new(
-                    payload.source_in_frame,
-                    time_base,
-                ))?;
-                let duration = TimelineTime::from_frame_position(FramePosition::new(
-                    payload.duration_frames,
-                    time_base,
-                ))?;
+                let at = payload.at;
+                let source_in = payload.source_in;
+                let duration = payload.duration;
                 let media_probe = asset.media_probe();
-                validate_source_interval(
-                    asset.kind.clone(),
-                    media_probe.map(|probe| probe.duration),
-                    source_in,
-                    duration,
-                    time_base.to_f64(),
-                )?;
 
                 let mut placements = Vec::with_capacity(2);
                 let mut link_group = None;
@@ -127,20 +115,99 @@ impl AppState {
             self.event_bus.publish(AppEvent::ClipAdded { sequence_id, clip_id: *clip_id });
         }
         if timeline_state_policy == InsertTimelineStatePolicy::FollowEdit
-            && playhead_frame_before >= insert_frame
+            && playhead_time_before >= insert_at
         {
-            if let Some(frame) = playhead_frame_before.checked_add(duration_frames) {
-                self.reconcile_playhead_after_committed_authoring_change(frame, "timeline_insert");
-            } else {
-                tracing::error!(
-                    playhead_frame_before,
-                    duration_frames,
-                    "failed to move playhead after committed Insert: frame arithmetic overflow"
-                );
-            }
+            let next = playhead_time_before.checked_add(duration)?;
+            let frame = next.to_frame_position(frame_rate, FrameRounding::Nearest)?.frame.max(0);
+            self.reconcile_playhead_after_committed_authoring_change(frame, "timeline_insert");
         }
         Ok(outcome)
     }
+
+    fn prepare_insert_asset(
+        &self,
+        payload: &TimelineInsertAssetPayload,
+    ) -> mondrian_core::Result<mondrian_assets::AssetRecord> {
+        if payload.at.is_negative()
+            || payload.source_in.is_negative()
+            || payload.duration <= TimelineTime::ZERO
+        {
+            return Err(insert_error(
+                "insert/source time must be non-negative and duration must be positive",
+            ));
+        }
+        let sequence = self.active_sequence().ok_or_else(|| insert_error("当前无序列"))?;
+        validate_insert_tracks(sequence, payload)?;
+        let asset = self
+            .asset_library()
+            .ok_or_else(|| insert_error("Asset Library is not connected"))?
+            .get_asset(payload.asset_id)?
+            .ok_or_else(|| MondrianError::AssetNotFound {
+                asset_id: payload.asset_id.to_string(),
+            })?;
+        validate_asset_targets(&asset, payload)?;
+        validate_source_interval(
+            asset.kind.clone(),
+            asset.media_probe().map(|probe| probe.duration),
+            payload.source_in,
+            payload.duration,
+            sequence.time_base().to_f64(),
+        )?;
+        Ok(asset)
+    }
+}
+
+fn validate_insert_tracks(
+    sequence: &mondrian_timeline::Sequence,
+    payload: &TimelineInsertAssetPayload,
+) -> mondrian_core::Result<()> {
+    let ripple_tracks = payload.ripple_track_ids.iter().copied().collect::<BTreeSet<_>>();
+    if ripple_tracks.is_empty() {
+        return Err(insert_error(
+            "Insert requires an explicit non-empty ripple Track closure",
+        ));
+    }
+    let targets = [payload.video_target_track_id, payload.audio_target_track_id]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if targets.is_empty() || targets.iter().any(|track_id| !ripple_tracks.contains(track_id)) {
+        return Err(insert_error(
+            "every target Track must belong to the ripple closure",
+        ));
+    }
+    if let Some(track_id) = payload.video_target_track_id {
+        let track = sequence
+            .video_tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .ok_or_else(|| MondrianError::TrackNotFound { track_id: track_id.to_string() })?;
+        if track.is_locked {
+            return Err(MondrianError::TrackLocked { track_id: track_id.to_string() });
+        }
+    }
+    if let Some(track_id) = payload.audio_target_track_id {
+        let track = sequence
+            .audio_tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .ok_or_else(|| MondrianError::TrackNotFound { track_id: track_id.to_string() })?;
+        if track.is_locked {
+            return Err(MondrianError::TrackLocked { track_id: track_id.to_string() });
+        }
+    }
+    for track_id in ripple_tracks {
+        let track = sequence
+            .video_tracks
+            .iter()
+            .chain(&sequence.audio_tracks)
+            .find(|track| track.id == track_id)
+            .ok_or_else(|| MondrianError::TrackNotFound { track_id: track_id.to_string() })?;
+        if track.is_locked {
+            return Err(MondrianError::TrackLocked { track_id: track_id.to_string() });
+        }
+    }
+    Ok(())
 }
 
 fn validate_asset_targets(

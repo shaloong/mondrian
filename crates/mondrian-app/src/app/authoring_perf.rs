@@ -1417,6 +1417,7 @@ fn run_authoring_scale(
         .chain(&state.active_sequence().expect("active Sequence").audio_tracks)
         .map(|track| track.id)
         .collect::<Vec<_>>();
+    let insert_time_base = state.active_sequence().expect("active Sequence").time_base();
     cases.push(measure_reversible(
         &mut state,
         scale,
@@ -1426,10 +1427,12 @@ fn run_authoring_scale(
             state
                 .insert_asset_from_ui(TimelineInsertAssetPayload {
                     asset_id: handles.insert_asset_id,
-                    insert_frame: handles.first_clip_position_frame
-                        + handles.first_clip_duration_frames,
-                    source_in_frame: 0,
-                    duration_frames: 12,
+                    at: timeline_time_from_frame(
+                        handles.first_clip_position_frame + handles.first_clip_duration_frames,
+                        insert_time_base,
+                    )?,
+                    source_in: TimelineTime::ZERO,
+                    duration: timeline_time_from_frame(12, insert_time_base)?,
                     video_target_track_id: Some(handles.first_track_id),
                     audio_target_track_id: None,
                     ripple_track_ids: ripple_tracks.clone(),
@@ -1456,10 +1459,7 @@ fn run_authoring_scale(
         |state| state.apply_timeline_range_edit(RangeEditKind::Extract).map(|_| ()),
     )?);
 
-    let precompose_selection = vec![
-        (handles.first_track_id, true, handles.first_clip_id),
-        (handles.first_track_id, true, handles.second_clip_id),
-    ];
+    let precompose_selection = vec![handles.first_clip_id, handles.second_clip_id];
     cases.push(measure_reversible(
         &mut state,
         scale,

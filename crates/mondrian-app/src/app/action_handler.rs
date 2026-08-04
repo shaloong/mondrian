@@ -18,7 +18,9 @@ use crate::app::product_action::{
     VisualEffectSetParameterValuePayload,
 };
 #[cfg(test)]
-use crate::app::product_action::{TimelineMoveClipPayload, TimelineSelectClipPayload};
+use crate::app::product_action::{
+    TimelineMoveClipPayload, TimelineSelectClipPayload, TIMELINE_NAMESPACE,
+};
 use crate::app::proxy_generation::{
     resolve_app_state_proxy_color_contract, ProxyGenerationOrigin, ProxyGenerationRequestOutcome,
 };
@@ -28,10 +30,7 @@ use crate::app::timeline_editing::{
 };
 use crate::app::ui_actions::{
     InspectorAudioComponentSourcePayload, InspectorSetAudioComponentSourcePayload,
-    TimelineDropAssetPayload, TimelineInsertAssetPayload, TimelineOpenNestedSequencePayload,
-    TimelinePrecomposeSelectionPayload, INSPECTOR_NAMESPACE, INSPECTOR_SET_AUDIO_COMPONENT_SOURCE,
-    TIMELINE_CREATE_BASIC_TITLE, TIMELINE_DROP_ASSET, TIMELINE_INSERT_ASSET, TIMELINE_NAMESPACE,
-    TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_PRECOMPOSE_SELECTION,
+    INSPECTOR_NAMESPACE, INSPECTOR_SET_AUDIO_COMPONENT_SOURCE,
 };
 #[cfg(test)]
 use crate::app::SelectedClipRef;
@@ -211,11 +210,21 @@ impl AppState {
             }
             Action::ImportMedia(paths) => self.import_media_from_action(paths),
 
-            Action::Custom { namespace, name, payload } if namespace == TIMELINE_NAMESPACE => {
-                self.dispatch_timeline_ui_action(&name, payload)
-            }
             Action::Custom { namespace, name, payload } if namespace == INSPECTOR_NAMESPACE => {
                 self.dispatch_inspector_ui_action(&name, payload)
+            }
+            Action::Custom { namespace, name, .. } => {
+                if let Some(error) = ProductAction::unknown_external_action_error(&namespace, &name)
+                {
+                    Err(error)
+                } else {
+                    Err(MondrianError::WorkflowStepFailed {
+                        step_id: "dispatch_action".to_owned(),
+                        reason: format!(
+                            "Action has no AppState product Interface implementation: Custom {{ namespace: {namespace:?}, name: {name:?} }}"
+                        ),
+                    })
+                }
             }
             unsupported => Err(MondrianError::WorkflowStepFailed {
                 step_id: "dispatch_action".to_owned(),
@@ -1003,7 +1012,11 @@ impl AppState {
         }
     }
 
-    fn select_clip_for_action(&mut self, step_id: &'static str, clip_id: ClipId) -> Result<()> {
+    pub(super) fn select_clip_for_action(
+        &mut self,
+        step_id: &'static str,
+        clip_id: ClipId,
+    ) -> Result<()> {
         if self.active_sequence().is_none() {
             return Err(missing_sequence_error(step_id));
         }
@@ -1250,6 +1263,16 @@ impl AppState {
                 self.apply_timeline_range_edit(kind).map(|_| ())
             }
             TimelineProductAction::EditSelection(edit) => self.apply_timeline_selection_edit(edit),
+            TimelineProductAction::CreateBasicTitle => {
+                self.create_basic_title_at_playhead().map(|_| ())
+            }
+            TimelineProductAction::PlaceAsset(payload) => self.place_asset_on_timeline(payload),
+            TimelineProductAction::InsertAsset(payload) => {
+                self.insert_asset_from_ui(*payload).map(|_| ())
+            }
+            TimelineProductAction::PrecomposeSelection(payload) => {
+                self.precompose_selection(payload)
+            }
         }
     }
 
@@ -1369,49 +1392,6 @@ impl AppState {
                 "visual_effect_set_parameter_value",
                 "Effect parameter already has the requested value at the current author time",
             ),
-        }
-    }
-
-    fn dispatch_timeline_ui_action(
-        &mut self,
-        name: &str,
-        payload: serde_json::Value,
-    ) -> Result<()> {
-        match name {
-            TIMELINE_CREATE_BASIC_TITLE => self.create_basic_title_at_playhead().map(|_| ()),
-            TIMELINE_DROP_ASSET => {
-                let payload = parse_ui_payload::<TimelineDropAssetPayload>(
-                    "timeline_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.drop_asset_from_ui(payload)
-            }
-            TIMELINE_INSERT_ASSET => {
-                let payload = parse_ui_payload::<TimelineInsertAssetPayload>(
-                    "timeline_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.insert_asset_from_ui(payload).map(|_| ())
-            }
-            TIMELINE_PRECOMPOSE_SELECTION => {
-                let payload = parse_ui_payload::<TimelinePrecomposeSelectionPayload>(
-                    "timeline_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.precompose_selection_from_ui(payload)
-            }
-            TIMELINE_OPEN_NESTED_SEQUENCE => {
-                let payload = parse_ui_payload::<TimelineOpenNestedSequencePayload>(
-                    "timeline_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.open_nested_sequence(payload.sequence_id)
-            }
-            _ => Err(unknown_ui_action_error("timeline_ui_action", name)),
         }
     }
 
@@ -1585,6 +1565,9 @@ impl AppState {
             SequenceProductAction::SwitchActive(payload) => {
                 self.switch_active_sequence(payload.sequence_id)
             }
+            SequenceProductAction::OpenNested(payload) => {
+                self.open_nested_sequence(payload.sequence_id)
+            }
             SequenceProductAction::Duplicate(payload) => {
                 let source = self.sequence_by_id(payload.sequence_id).ok_or_else(|| {
                     MondrianError::WorkflowStepFailed {
@@ -1641,7 +1624,7 @@ impl AppState {
         Ok(())
     }
 
-    fn prepare_asset_drag(&mut self, payload: AssetTargetPayload) -> Result<()> {
+    pub(super) fn prepare_asset_drag(&mut self, payload: AssetTargetPayload) -> Result<()> {
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("素材准备失败：{reason}"), true);
@@ -1708,32 +1691,6 @@ impl AppState {
         Ok(())
     }
 
-    fn drop_asset_from_ui(&mut self, payload: TimelineDropAssetPayload) -> Result<()> {
-        let needs_prepare = self
-            .dragging_asset()
-            .is_none_or(|dragging| dragging.asset_id != payload.asset_id);
-        if needs_prepare {
-            self.prepare_asset_drag(AssetTargetPayload { asset_id: payload.asset_id })?;
-        }
-
-        let result = if payload.is_video_track {
-            self.drop_dragging_asset_to_video_track(payload.target_track_id, payload.frame)
-        } else {
-            self.drop_dragging_asset_to_audio_track(payload.target_track_id, payload.frame)
-        };
-
-        match result {
-            Ok(_) => {
-                self.set_status_hint("已添加素材到时间线".to_string(), false);
-                Ok(())
-            }
-            Err(err) => {
-                self.set_status_hint(format!("素材放置失败：{err}"), true);
-                Err(err)
-            }
-        }
-    }
-
     fn set_effect_parameter_value(
         &mut self,
         payload: VisualEffectSetParameterValuePayload,
@@ -1790,34 +1747,6 @@ impl AppState {
                 Ok(sequence.id)
             })?;
         Ok(true)
-    }
-
-    fn precompose_selection_from_ui(
-        &mut self,
-        payload: TimelinePrecomposeSelectionPayload,
-    ) -> Result<()> {
-        let name = payload.name.trim();
-        if name.is_empty() {
-            return Err(MondrianError::WorkflowStepFailed {
-                step_id: "timeline_precompose_selection".to_owned(),
-                reason: "嵌套序列名称不能为空".to_owned(),
-            });
-        }
-        let selections = self
-            .selected_clips()
-            .iter()
-            .map(|selection| {
-                (
-                    selection.track_id,
-                    selection.is_video_track,
-                    selection.clip_id,
-                )
-            })
-            .collect::<Vec<_>>();
-        let nested_clip_id = self.precompose_clips_as_sequence(&selections, name)?;
-        self.select_clip_for_action("timeline_precompose_selection", nested_clip_id)?;
-        self.set_status_hint(format!("已创建嵌套序列“{name}”"), false);
-        Ok(())
     }
 
     fn set_audio_component_source_from_ui(
@@ -2271,12 +2200,12 @@ mod tests {
         ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
         ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload,
         SequenceUpdateSettingsPayload, TimelineDropAssetPayload, TimelineExportRequest,
-        TimelineInOutPointKind, TimelineInsertAssetPayload, TimelineOpenNestedSequencePayload,
-        TimelineSeekSource, TimelineSetInOutPointPayload, TimelineTrimClipsPayload,
-        TimelineTrimPayloadEdge, TrackAddKind, TrackAddPayload, TrackAuthorControl,
-        TrackEditPolicyControl, TrackMovePayload, TrackSetAuthorControlPayload,
-        TrackSetEditPolicyPayload, ViewerSetPreviewResolutionScalePayload,
-        VisualEffectAddToClipPayload, VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
+        TimelineInOutPointKind, TimelineInsertAssetPayload, TimelineSeekSource,
+        TimelineSetInOutPointPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+        TrackAddKind, TrackAddPayload, TrackAuthorControl, TrackEditPolicyControl,
+        TrackMovePayload, TrackSetAuthorControlPayload, TrackSetEditPolicyPayload,
+        ViewerSetPreviewResolutionScalePayload, VisualEffectAddToClipPayload,
+        VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
         VisualEffectSetParameterValuePayload, VisualEffectTargetPayload,
     };
     use mondrian_assets::AssetLibrary;
@@ -2969,7 +2898,7 @@ mod tests {
 
         state
             .dispatch_action(timeline_open_nested_sequence_action(
-                TimelineOpenNestedSequencePayload { sequence_id: child_id },
+                SequenceTargetPayload { sequence_id: child_id },
             ))
             .expect("open nested sequence");
 
@@ -2979,6 +2908,28 @@ mod tests {
             Some(child_id)
         );
         assert_eq!(state.test_navigation_stack().len(), 1);
+    }
+
+    #[test]
+    fn nested_navigation_rejects_sequence_not_referenced_by_active_parent() {
+        let mut state = AppState::new();
+        let parent = Sequence::new("parent");
+        let parent_id = parent.id;
+        let unrelated = Sequence::new("unrelated");
+        let unrelated_id = unrelated.id;
+        state.test_set_active_sequence(parent_id);
+        state.test_set_sequence(Some(parent));
+        state.test_add_sequence(unrelated);
+
+        let error = state
+            .dispatch_action(timeline_open_nested_sequence_action(
+                SequenceTargetPayload { sequence_id: unrelated_id },
+            ))
+            .expect_err("unrelated Sequence must not enter nested navigation");
+
+        assert!(matches!(error, MondrianError::ActionNotExecuted { .. }));
+        assert_eq!(state.active_sequence_id(), Some(parent_id));
+        assert!(state.test_navigation_stack().is_empty());
     }
 
     #[test]
@@ -3485,13 +3436,13 @@ mod tests {
             .create_solid_color_asset(Some("Slate"))
             .expect("create solid color asset");
         state.test_set_asset_library(Some(library));
+        let time_base = state.active_sequence().expect("sequence").time_base();
 
         state
             .dispatch_action(timeline_drop_asset_action(TimelineDropAssetPayload {
                 asset_id,
                 target_track_id,
-                is_video_track: true,
-                frame: 40,
+                position: FramePosition::new(40, time_base),
             }))
             .expect("drop asset");
 
@@ -3524,14 +3475,15 @@ mod tests {
             .create_solid_color_asset(Some("Insert"))
             .expect("create solid color asset");
         state.test_set_asset_library(Some(library));
+        let time_base = state.active_sequence().expect("sequence").time_base();
 
         let generation_before = state.project_author_generation();
         state
             .dispatch_action(timeline_insert_asset_action(TimelineInsertAssetPayload {
                 asset_id,
-                insert_frame: 15,
-                source_in_frame: 0,
-                duration_frames: 5,
+                at: tt(15, time_base),
+                source_in: TimelineTime::ZERO,
+                duration: tt(5, time_base),
                 video_target_track_id: Some(target_track_id),
                 audio_target_track_id: None,
                 ripple_track_ids: vec![target_track_id, secondary_track_id],
@@ -3587,13 +3539,13 @@ mod tests {
             .create_solid_color_asset(Some("Video Only"))
             .expect("create solid color asset");
         state.test_set_asset_library(Some(library));
+        let time_base = state.active_sequence().expect("sequence").time_base();
 
         let err = state
             .dispatch_action(timeline_drop_asset_action(TimelineDropAssetPayload {
                 asset_id,
                 target_track_id,
-                is_video_track: false,
-                frame: 12,
+                position: FramePosition::new(12, time_base),
             }))
             .expect_err("solid color should not drop onto audio track");
 
@@ -3602,7 +3554,7 @@ mod tests {
             state.active_sequence().expect("sequence").audio_tracks[0].clips.len(),
             initial_audio_clip_count
         );
-        assert!(state.dragging_asset().is_some());
+        assert!(state.dragging_asset().is_none());
         assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
 
         remove_temp_path(&library_root);

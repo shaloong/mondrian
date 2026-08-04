@@ -586,11 +586,14 @@ pub(super) fn execute_proxy_relink_stage(
 
     let clips_before = BTreeSet::new();
     let (_, place_clip) = author_transition(state, "place-proxy-relink-video", |state| {
+        let time_base = state
+            .active_sequence()
+            .context("proxy/relink Sequence is absent before placement")?
+            .time_base();
         state.dispatch_action(timeline_drop_asset_action(TimelineDropAssetPayload {
             asset_id: asset.id,
             target_track_id: video_track_id,
-            is_video_track: true,
-            frame: window.start_frame,
+            position: FramePosition::new(window.start_frame, time_base),
         }))?;
         Ok(())
     })?;

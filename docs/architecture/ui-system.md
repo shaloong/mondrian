@@ -358,9 +358,12 @@ targeted contract.
 
 Precompose is likewise a semantic Timeline Action, not a Widget-side graph
 rewrite. Its payload carries only the requested nested Sequence name; the App
-resolves the current stable-ID Clip selection, expands complete link groups,
-rejects locked or empty ranges, projects selected content and transitions into
-child-local time, and replaces the parent range in one Project transaction.
+deep Module resolves the current stable-ID Clip selection, requires every
+identity to remain present, expands complete link groups, rejects locked or
+empty ranges, and prepares exact child geometry plus parent target Tracks before
+mutation. Execution consumes that plan, projects selected content and
+transitions into child-local time, and replaces the parent range in one Project
+transaction while detaching only affected Track Clip lists.
 The new child uses `NestedComposition`, retains the parent Sequence settings,
 forks placement-local audio identities where required, and becomes reachable
 only through ordinary nested Clip content. After commit the App selects the
@@ -439,13 +442,18 @@ Inside each migrated App slice, product meaning is carried by the closed
 `ProductAction` algebra. `Action::Custom` remains the external Widget,
 scripting, and plugin transport Seam; it must not become a second product-domain
 model. The current Timeline slice covers Clip selection, Clip movement, bulk
-trim, seek, exact In/Out mutation, atomic Lift/Extract intent, and the complete
-current-selection edit algebra. Track operations use the closed Interface
-above. The sole `ui.timeline` codecs for Range and Selection Edit reject legacy
-bare-frame payloads, unknown variants, and unknown fields; dispatch and
-availability consume the decoded algebra rather than repeating namespace/name
-interpretation. The five replaced per-command selection action names do not
-coexist with this Interface.
+trim, seek, exact In/Out mutation, atomic Lift/Extract intent, the complete
+current-selection edit algebra, Basic Title creation, direct Asset placement,
+exact-time Insert, and Precompose. Track operations use the closed Interface
+above. The sole `ui.timeline` codec rejects legacy bare-frame creation payloads,
+unknown variants, and unknown fields; dispatch and availability consume the
+decoded algebra rather than repeating namespace/name interpretation. Direct
+placement carries `AssetId + TrackId + FramePosition`; the App derives Track
+kind instead of trusting a copied media boolean. Insert carries canonical
+`TimelineTime` values. The old Timeline string dispatcher and replaced
+per-command action names do not coexist with this Interface. Opening a nested
+Sequence is navigation, so it belongs to `SequenceProductAction`; dispatch
+revalidates that the active parent currently contains the requested child.
 Sequence-owned visual Transition operations use
 a separate closed `VideoTransitionProductAction`: Select, product-default Cross
 Dissolve creation, exact-range edit, and Remove. The

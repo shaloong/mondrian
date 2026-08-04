@@ -49,6 +49,14 @@ pub const TIMELINE_CLEAR_IN_OUT_POINTS: &str = "clear_in_out_points";
 pub const TIMELINE_APPLY_RANGE_EDIT: &str = "apply_range_edit";
 /// External action name for editing the current Timeline Clip selection.
 pub const TIMELINE_EDIT_SELECTION: &str = "edit_selection";
+/// External action name for creating a generated Basic Title at the current edit range.
+pub const TIMELINE_CREATE_BASIC_TITLE: &str = "create_basic_title";
+/// External action name for placing one Asset on a stable Timeline Track.
+pub const TIMELINE_PLACE_ASSET: &str = "place_asset";
+/// External action name for inserting one Asset through an explicit edit scope.
+pub const TIMELINE_INSERT_ASSET: &str = "insert_asset";
+/// External action name for replacing the current Clip selection with a nested Sequence.
+pub const TIMELINE_PRECOMPOSE_SELECTION: &str = "precompose_selection";
 
 /// External custom-action namespace for Timeline Track operations.
 pub const TRACK_NAMESPACE: &str = "ui.track";
@@ -114,6 +122,8 @@ pub const SEQUENCE_SET_ACTIVE_DEFAULT: &str = "set_active_default";
 pub const SEQUENCE_NEW: &str = "new";
 /// External action name for switching the active Sequence.
 pub const SEQUENCE_SWITCH_ACTIVE: &str = "switch_active";
+/// External action name for entering a nested Sequence from the active parent.
+pub const SEQUENCE_OPEN_NESTED: &str = "open_nested";
 /// External action name for duplicating a Sequence.
 pub const SEQUENCE_DUPLICATE: &str = "duplicate";
 /// External action name for deleting a Sequence.
@@ -282,6 +292,8 @@ pub enum SequenceProductAction {
     New,
     /// Switch the active Sequence.
     SwitchActive(SequenceTargetPayload),
+    /// Enter one child Sequence referenced by the active parent Timeline.
+    OpenNested(SequenceTargetPayload),
     /// Duplicate one Sequence with fresh author identities.
     Duplicate(SequenceTargetPayload),
     /// Delete one Sequence when author references permit it.
@@ -378,6 +390,14 @@ pub enum TimelineProductAction {
     ApplyRangeEdit(RangeEditKind),
     /// Apply one selection-scoped editorial intent against current Session state.
     EditSelection(TimelineSelectionEdit),
+    /// Create one generated Basic Title using current edit state.
+    CreateBasicTitle,
+    /// Place one Asset on one stable Track at an explicit evaluation coordinate.
+    PlaceAsset(TimelineDropAssetPayload),
+    /// Insert one Asset through an exact author-time edit scope.
+    InsertAsset(Box<TimelineInsertAssetPayload>),
+    /// Replace the current Clip selection with one nested Sequence atomically.
+    PrecomposeSelection(TimelinePrecomposeSelectionPayload),
 }
 
 /// Closed editorial operations whose operands are the current Clip selection.
@@ -447,25 +467,42 @@ pub struct ProductActionDecodeError {
 
 impl ProductActionDecodeError {
     pub(crate) fn dispatch_step_id(&self) -> String {
-        let domain = match self.namespace.as_str() {
-            TIMELINE_NAMESPACE => "timeline_ui_action",
-            TRACK_NAMESPACE => "track_action",
-            VIDEO_TRANSITION_NAMESPACE => "video_transition_action",
-            AUDIO_NAMESPACE => "audio_action",
-            ASSET_NAMESPACE => "asset_action",
-            VIEWER_NAMESPACE => "viewer_action",
-            CLIP_NAMESPACE => "clip_action",
-            PROJECT_NAMESPACE => "project_action",
-            SEQUENCE_NAMESPACE => "sequence_action",
-            EXPORT_NAMESPACE => "export_action",
-            VISUAL_EFFECT_NAMESPACE => "visual_effect_action",
-            _ => "product_action",
-        };
+        let domain = product_dispatch_domain(&self.namespace).unwrap_or("product_action");
         format!("{domain}.{}", self.name)
     }
 }
 
+fn product_dispatch_domain(namespace: &str) -> Option<&'static str> {
+    match namespace {
+        TIMELINE_NAMESPACE => Some("timeline_ui_action"),
+        TRACK_NAMESPACE => Some("track_action"),
+        VIDEO_TRANSITION_NAMESPACE => Some("video_transition_action"),
+        AUDIO_NAMESPACE => Some("audio_action"),
+        ASSET_NAMESPACE => Some("asset_action"),
+        VIEWER_NAMESPACE => Some("viewer_action"),
+        CLIP_NAMESPACE => Some("clip_action"),
+        PROJECT_NAMESPACE => Some("project_action"),
+        SEQUENCE_NAMESPACE => Some("sequence_action"),
+        EXPORT_NAMESPACE => Some("export_action"),
+        VISUAL_EFFECT_NAMESPACE => Some("visual_effect_action"),
+        _ => None,
+    }
+}
+
 impl ProductAction {
+    /// Classify an external namespace owned exclusively by the Product codec.
+    pub(crate) fn unknown_external_action_error(
+        namespace: &str,
+        name: &str,
+    ) -> Option<mondrian_core::MondrianError> {
+        product_dispatch_domain(namespace).map(|domain| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: format!("{domain}.{name}"),
+                reason: format!("unknown app UI action: {name}"),
+            }
+        })
+    }
+
     /// Decode one recognized product Action from the external intent envelope.
     ///
     /// This is the sole namespace/name/payload interpretation for the migrated
@@ -507,6 +544,19 @@ impl ProductAction {
                             decode_payload(namespace, name, payload)?;
                         TimelineProductAction::EditSelection(payload.into())
                     }
+                    TIMELINE_CREATE_BASIC_TITLE => {
+                        decode_payload::<()>(namespace, name, payload)?;
+                        TimelineProductAction::CreateBasicTitle
+                    }
+                    TIMELINE_PLACE_ASSET => {
+                        TimelineProductAction::PlaceAsset(decode_payload(namespace, name, payload)?)
+                    }
+                    TIMELINE_INSERT_ASSET => TimelineProductAction::InsertAsset(Box::new(
+                        decode_payload(namespace, name, payload)?,
+                    )),
+                    TIMELINE_PRECOMPOSE_SELECTION => TimelineProductAction::PrecomposeSelection(
+                        decode_payload(namespace, name, payload)?,
+                    ),
                     _ => return Ok(None),
                 };
                 Ok(Some(Self::Timeline(timeline_action)))
@@ -688,6 +738,9 @@ impl ProductAction {
                 }
                 SEQUENCE_SWITCH_ACTIVE => Ok(Some(Self::Sequence(
                     SequenceProductAction::SwitchActive(decode_payload(namespace, name, payload)?),
+                ))),
+                SEQUENCE_OPEN_NESTED => Ok(Some(Self::Sequence(
+                    SequenceProductAction::OpenNested(decode_payload(namespace, name, payload)?),
                 ))),
                 SEQUENCE_DUPLICATE => Ok(Some(Self::Sequence(SequenceProductAction::Duplicate(
                     decode_payload(namespace, name, payload)?,
@@ -890,6 +943,26 @@ impl ProductAction {
                 TIMELINE_EDIT_SELECTION,
                 serde_json::json!(TimelineSelectionEditWirePayload::from(edit)),
             ),
+            Self::Timeline(TimelineProductAction::CreateBasicTitle) => (
+                TIMELINE_NAMESPACE,
+                TIMELINE_CREATE_BASIC_TITLE,
+                serde_json::Value::Null,
+            ),
+            Self::Timeline(TimelineProductAction::PlaceAsset(payload)) => (
+                TIMELINE_NAMESPACE,
+                TIMELINE_PLACE_ASSET,
+                serde_json::json!(payload),
+            ),
+            Self::Timeline(TimelineProductAction::InsertAsset(payload)) => (
+                TIMELINE_NAMESPACE,
+                TIMELINE_INSERT_ASSET,
+                serde_json::json!(payload),
+            ),
+            Self::Timeline(TimelineProductAction::PrecomposeSelection(payload)) => (
+                TIMELINE_NAMESPACE,
+                TIMELINE_PRECOMPOSE_SELECTION,
+                serde_json::json!(payload),
+            ),
             Self::Track(TrackProductAction::Add(payload)) => {
                 (TRACK_NAMESPACE, TRACK_ADD, serde_json::json!(payload))
             }
@@ -1005,6 +1078,11 @@ impl ProductAction {
             Self::Sequence(SequenceProductAction::SwitchActive(payload)) => (
                 SEQUENCE_NAMESPACE,
                 SEQUENCE_SWITCH_ACTIVE,
+                serde_json::json!(payload),
+            ),
+            Self::Sequence(SequenceProductAction::OpenNested(payload)) => (
+                SEQUENCE_NAMESPACE,
+                SEQUENCE_OPEN_NESTED,
                 serde_json::json!(payload),
             ),
             Self::Sequence(SequenceProductAction::Duplicate(payload)) => (
@@ -1342,6 +1420,55 @@ pub struct TimelineSetInOutPointPayload {
     pub point: TimelineInOutPointKind,
     /// Exact frame coordinate and its declared evaluation time base.
     pub position: FramePosition,
+}
+
+/// Place one Asset on a stable Track at one explicitly gridded Timeline coordinate.
+///
+/// Track media kind is resolved from current author state at dispatch; callers do
+/// not transport a parallel video/audio assertion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TimelineDropAssetPayload {
+    /// Asset being placed.
+    pub asset_id: AssetId,
+    /// Track that should receive the created Clip.
+    pub target_track_id: TrackId,
+    /// Exact input frame coordinate and its declared evaluation time base.
+    pub position: FramePosition,
+}
+
+/// Insert one Asset through an exact professional edit scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TimelineInsertAssetPayload {
+    /// Asset whose selected source interval should be inserted.
+    pub asset_id: AssetId,
+    /// Exact insertion boundary in the active Sequence author domain.
+    pub at: TimelineTime,
+    /// Exact selected source start in the Asset source domain.
+    pub source_in: TimelineTime,
+    /// Positive exact selected source and placement duration.
+    pub duration: TimelineTime,
+    /// Target video Track when this insertion contains picture.
+    pub video_target_track_id: Option<TrackId>,
+    /// Target audio Track when this insertion contains sound.
+    pub audio_target_track_id: Option<TrackId>,
+    /// Complete Track set admitted for the ripple closure.
+    pub ripple_track_ids: Vec<TrackId>,
+    /// Sequence-time automation behavior.
+    pub automation_policy: mondrian_timeline::InsertAutomationPolicy,
+    /// Disposition for Transitions intersected by the edit.
+    pub transition_policy: mondrian_timeline::InsertTransitionPolicy,
+    /// Playhead and In/Out behavior.
+    pub timeline_state_policy: mondrian_timeline::InsertTimelineStatePolicy,
+}
+
+/// Replace the current Clip selection with one nested Sequence placement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TimelinePrecomposeSelectionPayload {
+    /// User-facing name assigned to the new nested Sequence.
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1886,6 +2013,16 @@ impl<'a> ProductActionAvailability<'a> {
             TimelineProductAction::EditSelection(edit) => {
                 self.state.can_apply_timeline_selection_edit(*edit)
             }
+            TimelineProductAction::CreateBasicTitle => true,
+            TimelineProductAction::PlaceAsset(payload) => {
+                self.state.can_place_asset_on_timeline(*payload)
+            }
+            TimelineProductAction::InsertAsset(payload) => {
+                self.state.can_insert_asset_from_product_action(payload)
+            }
+            TimelineProductAction::PrecomposeSelection(payload) => {
+                self.state.can_precompose_selection(&payload.name)
+            }
         }
     }
 
@@ -2027,6 +2164,9 @@ impl<'a> ProductActionAvailability<'a> {
             SequenceProductAction::SwitchActive(payload) => {
                 active != payload.sequence_id
                     && document.sequences.sequence(payload.sequence_id).is_some()
+            }
+            SequenceProductAction::OpenNested(payload) => {
+                self.state.can_open_nested_sequence(payload.sequence_id)
             }
             SequenceProductAction::Duplicate(payload) => {
                 document.sequences.sequence(payload.sequence_id).is_some()
@@ -2339,6 +2479,32 @@ mod tests {
             ProductAction::Timeline(TimelineProductAction::EditSelection(
                 TimelineSelectionEdit::SetClipsEnabled { enabled: false },
             )),
+            ProductAction::Timeline(TimelineProductAction::CreateBasicTitle),
+            ProductAction::Timeline(TimelineProductAction::PlaceAsset(
+                TimelineDropAssetPayload {
+                    asset_id: AssetId::new(),
+                    target_track_id: track_id,
+                    position: FramePosition::new(33, Rational::new(1, 25)),
+                },
+            )),
+            ProductAction::Timeline(TimelineProductAction::InsertAsset(Box::new(
+                TimelineInsertAssetPayload {
+                    asset_id: AssetId::new(),
+                    at: tt(40, Rational::new(1, 25)),
+                    source_in: TimelineTime::ZERO,
+                    duration: tt(12, Rational::new(1, 25)),
+                    video_target_track_id: Some(track_id),
+                    audio_target_track_id: None,
+                    ripple_track_ids: vec![track_id],
+                    automation_policy:
+                        mondrian_timeline::InsertAutomationPolicy::FollowEditorialContent,
+                    transition_policy: mondrian_timeline::InsertTransitionPolicy::RejectAffected,
+                    timeline_state_policy: mondrian_timeline::InsertTimelineStatePolicy::FollowEdit,
+                },
+            ))),
+            ProductAction::Timeline(TimelineProductAction::PrecomposeSelection(
+                TimelinePrecomposeSelectionPayload { name: "Nested 01".to_owned() },
+            )),
         ];
 
         for expected in actions {
@@ -2401,6 +2567,57 @@ mod tests {
             error.dispatch_step_id(),
             "timeline_ui_action.edit_selection"
         );
+    }
+
+    #[test]
+    fn external_timeline_creation_codec_rejects_legacy_or_ambiguous_payloads() {
+        let legacy_drop = Action::Custom {
+            namespace: TIMELINE_NAMESPACE.to_owned(),
+            name: "drop_asset".to_owned(),
+            payload: serde_json::json!({
+                "asset_id": AssetId::new(),
+                "target_track_id": TrackId::new(),
+                "is_video_track": true,
+                "frame": 12,
+            }),
+        };
+        assert!(ProductAction::decode_external(&legacy_drop)
+            .expect("legacy name is not recognized")
+            .is_none());
+
+        let copied_track_kind = Action::Custom {
+            namespace: TIMELINE_NAMESPACE.to_owned(),
+            name: TIMELINE_PLACE_ASSET.to_owned(),
+            payload: serde_json::json!({
+                "asset_id": AssetId::new(),
+                "target_track_id": TrackId::new(),
+                "position": FramePosition::new(12, Rational::new(1, 25)),
+                "is_video_track": true,
+            }),
+        };
+        ProductAction::decode_external(&copied_track_kind)
+            .expect_err("parallel Track media kind must fail closed");
+
+        let legacy_insert_frames = Action::Custom {
+            namespace: TIMELINE_NAMESPACE.to_owned(),
+            name: TIMELINE_INSERT_ASSET.to_owned(),
+            payload: serde_json::json!({
+                "asset_id": AssetId::new(),
+                "insert_frame": 12,
+                "source_in_frame": 0,
+                "duration_frames": 8,
+            }),
+        };
+        ProductAction::decode_external(&legacy_insert_frames)
+            .expect_err("bare Insert frame coordinates must fail closed");
+
+        let title_with_payload = Action::Custom {
+            namespace: TIMELINE_NAMESPACE.to_owned(),
+            name: TIMELINE_CREATE_BASIC_TITLE.to_owned(),
+            payload: serde_json::json!({ "duration_frames": 125 }),
+        };
+        ProductAction::decode_external(&title_with_payload)
+            .expect_err("Basic Title creation owns its current edit-range policy");
     }
 
     #[test]
@@ -2697,6 +2914,9 @@ mod tests {
             ProductAction::Sequence(SequenceProductAction::SetActiveDefault),
             ProductAction::Sequence(SequenceProductAction::New),
             ProductAction::Sequence(SequenceProductAction::SwitchActive(SequenceTargetPayload {
+                sequence_id,
+            })),
+            ProductAction::Sequence(SequenceProductAction::OpenNested(SequenceTargetPayload {
                 sequence_id,
             })),
             ProductAction::Sequence(SequenceProductAction::Duplicate(SequenceTargetPayload {

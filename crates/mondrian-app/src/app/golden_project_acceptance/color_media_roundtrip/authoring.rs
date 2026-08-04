@@ -370,6 +370,7 @@ pub(super) fn setup_stage(
         "Alpha Track is not directly above the HLG base Track"
     );
 
+    let time_base = state.active_sequence().context("color-media Sequence is absent")?.time_base();
     let hlg_before = state
         .active_sequence()
         .context("color-media Sequence is absent")?
@@ -387,8 +388,7 @@ pub(super) fn setup_stage(
         timeline_drop_asset_action(TimelineDropAssetPayload {
             asset_id: hlg_asset.id,
             target_track_id: hlg_track_id,
-            is_video_track: true,
-            frame: start_frame,
+            position: FramePosition::new(start_frame, time_base),
         }),
     )?;
     let hlg_clip_id = find_new_clip(state, hlg_track_id, &hlg_before)?;
@@ -410,8 +410,7 @@ pub(super) fn setup_stage(
         timeline_drop_asset_action(TimelineDropAssetPayload {
             asset_id: alpha_asset.id,
             target_track_id: alpha_track_id,
-            is_video_track: true,
-            frame: start_frame,
+            position: FramePosition::new(start_frame, time_base),
         }),
     )?;
     let alpha_clip_id = find_new_clip(state, alpha_track_id, &alpha_before)?;

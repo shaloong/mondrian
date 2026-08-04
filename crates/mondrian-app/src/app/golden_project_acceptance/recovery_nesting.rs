@@ -625,6 +625,10 @@ pub(super) fn execute_recovery_nesting_stage(
         created_tracks.len()
     );
     let video_track_id = created_tracks[0];
+    let time_base = state
+        .active_sequence()
+        .context("active Sequence is absent before nested placement")?
+        .time_base();
     let clips_before = BTreeSet::new();
     let drop_step = dispatch_author_transition(
         state,
@@ -632,8 +636,7 @@ pub(super) fn execute_recovery_nesting_stage(
         timeline_drop_asset_action(TimelineDropAssetPayload {
             asset_id: solid_asset_id,
             target_track_id: video_track_id,
-            is_video_track: true,
-            frame: window.start_frame,
+            position: FramePosition::new(window.start_frame, time_base),
         }),
     )?;
     let source_clip_id = new_video_clip_after(state, video_track_id, &clips_before)?;

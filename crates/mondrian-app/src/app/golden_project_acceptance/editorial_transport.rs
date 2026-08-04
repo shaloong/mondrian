@@ -25,7 +25,9 @@ use crate::app::ui_actions::{
 use crate::app::AppState;
 use anyhow::{ensure, Context};
 use mondrian_assets::AssetKind;
-use mondrian_core::{AssetId, ClipId, FramePosition, FrameRounding, SequenceId, TrackId};
+use mondrian_core::{
+    AssetId, ClipId, FramePosition, FrameRounding, SequenceId, TimelineTime, TrackId,
+};
 use mondrian_editor_state::action::SelectionTarget;
 use mondrian_editor_state::Action;
 use mondrian_media::info::{AudioCodec, ChannelLayout};
@@ -711,11 +713,15 @@ pub(super) fn execute_editorial_stage(
         clip_range(state, secondary_track_id, secondary_downstream_clip_id)?;
     let (insert_outcome, insert_step) =
         author_transition(state, "insert-aac-multitrack", |state| {
+            let time_base = state
+                .active_sequence()
+                .context("active Sequence is absent before Insert")?
+                .time_base();
             Ok(state.insert_asset_from_ui(TimelineInsertAssetPayload {
                 asset_id: asset.id,
-                insert_frame: 60,
-                source_in_frame: 0,
-                duration_frames: 10,
+                at: TimelineTime::from_frame_position(FramePosition::new(60, time_base))?,
+                source_in: TimelineTime::ZERO,
+                duration: TimelineTime::from_frame_position(FramePosition::new(10, time_base))?,
                 video_target_track_id: None,
                 audio_target_track_id: Some(track_id),
                 ripple_track_ids: vec![track_id, secondary_track_id],

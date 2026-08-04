@@ -763,7 +763,12 @@ share mutable instance identity.
 
 Precompose is a structural Project transaction because it replaces one parent
 Sequence and creates one nested Sequence atomically. Its candidate construction
-must nevertheless preserve copy-on-write locality: only Tracks containing a
+is owned by the deep `timeline_precompose` Module. Product availability and
+execution share one read-only plan that resolves every requested stable Clip
+identity, expands complete Link Groups, validates every participating Track
+lock, and fixes exact child-local geometry plus parent replacement Tracks. A
+stale or partially resolvable identity set fails as a whole. Candidate
+construction must preserve copy-on-write locality: only Tracks containing a
 selected placement may detach their Clip lists. Post-edit compaction first
 derives singleton link groups, invalid visual/audio Transitions, and unreferenced
 audio processing scopes through shared reads; it enters mutable COW storage only
@@ -854,13 +859,24 @@ is already local and moves through Clip placement/local-origin mapping rather
 than having its keys rewritten. Navigation/range coordinates independently use
 `PreserveSequenceTime` or `FollowEdit`.
 
-The application Asset Adapter converts frame-grid UI fields to exact
-`TimelineTime` once, creates picture/audio placements and processing scopes, and
-invokes this operation inside one `AuthoringSession` transaction. A linked
+The application Asset Adapter admits Insert only through an exact-time Product
+payload. It validates `at`, `source_in`, and `duration` in canonical
+`TimelineTime`, resolves all stable target/ripple Track IDs and current Asset
+evidence once, creates picture/audio placements and processing scopes, and
+invokes this operation inside one `AuthoringSession` transaction. It never
+reconstructs author time from a bare frame integer. A linked
 picture/audio insertion therefore advances Author Generation and Sequence
 Revision exactly once and is one Undo step. The old local overlap option is
 named `ClipOverlapMode::PushForward`; it is deliberately not presented as
 Insert Edit.
+
+Direct Asset placement is a separate closed Product intent because it does not
+open program time. Its payload contains `AssetId`, stable `TrackId`, and one
+explicit `FramePosition`. The `timeline_asset_placement` Module checked-converts
+the coordinate and requires an exact round trip on the active Sequence grid,
+then re-resolves Track kind/lock and Asset compatibility from current state.
+There is no caller-supplied video/audio flag and drag/drop does not own a second
+authoring implementation.
 
 ### Lift and Extract Range Edit
 

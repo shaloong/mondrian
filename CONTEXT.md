@@ -638,14 +638,18 @@ _Avoid_: Persisted Track flags, selected Track as implicit target, hidden expans
 The sole product-operation Interface for Timeline Track creation, stable relative ordering, persistent Visibility/Mute/Lock authoring, and transient Target/Sync-Lock policy. Existing Tracks are addressed only by `TrackId`; ordering uses a same-kind stable anchor in canonical author order. Persistent controls enter one Author Transaction, while edit policy changes only the open Session.
 _Avoid_: Display/list index as author address, redundant video/audio boolean beside `TrackId`, audio Visibility, video Mute, Target/Sync-Lock in Project History, repeated value reported as success
 
+**Timeline Asset Placement**:
+A closed Timeline Product intent that addresses one Asset, one existing Track, and one explicit frame-grid position. The App placement Module converts that coordinate exactly once, re-resolves Track kind and lock state from current author state, and derives compatible media placement from current Asset evidence before entering one Author Transaction.
+_Avoid_: Copied video/audio booleans, display Track index, bare frame integer, Widget-owned media compatibility, separate drag/drop author path
+
 **Range Edit**:
 One atomic Lift or Extract over an exact half-open Sequence-time range and explicit content/ripple Track sets. Lift removes intersecting targeted content without changing program time; Extract removes it and closes the interval on its admitted ripple closure.
 The Product Action carries only the closed edit kind and resolves the latest authored In/Out plus open-Session Target/Sync-Lock policy into this complete request at dispatch. Ruler-authored In/Out input carries an explicit frame grid and lowers once to canonical author time.
 _Avoid_: Repeated per-Track deletes, Widget-owned ripple rules, copied stale range/Track snapshots, bare frame integers, silent cutting of untargeted Sync-Locked content, local PushForward collision mode
 
 **Precompose Action**:
-One Project-scoped Author Transaction that resolves the current stable-ID Clip selection, expands complete link groups, projects selected author content into a new Nested Composition Sequence, and replaces only the represented video/audio placement kinds in the parent.
-_Avoid_: Widget-built child graph, invisible video placement for audio-only content, separately committed child and parent edits, duplicated external Project
+One Project-scoped Author Transaction that resolves the current stable-ID Clip selection, expands complete link groups, prepares the complete identity/lock/time/Track plan without mutation, projects selected author content into a new Nested Composition Sequence, and replaces only the represented video/audio placement kinds in the parent. Candidate construction detaches only affected Track Clip lists.
+_Avoid_: Widget-built child graph, stale or partially resolved Clip identity, invisible video placement for audio-only content, separately committed child and parent edits, whole-Project COW detachment
 
 **Video Transition**:
 A Sequence-owned, typed two-input visual author entity with strong adjacent Clip endpoints, an exact Sequence-time interval, stable instance identity, and validated source-handle demand.
@@ -803,6 +807,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - A manual save may retire **Recovery Authority** only when its completion covers current author and Asset Library state. It publishes an empty canonical Recovery Manifest before deleting archives; stale completion and cleanup failure cannot fabricate successful retirement.
 - Save As keeps the live Session runtime root stable. An author-generation-stale completion inside the still-current **Persistence Generation** and **Manual Project Destination Binding** may rebind retained **Recovery Authority** to the newly published canonical path without deleting it; a completion for a retired Session, prior Persistence Generation, or superseded destination has no such authority. Exact recovery selection reuses the manifest's actual runtime authority rather than deriving one from the changed path.
 - A **Precompose Action** commits parent replacement and child Sequence creation once. Video-only or audio-only input produces only that placement kind; linked A/V input produces one linked pair targeting the same nested Sequence.
+- A **Timeline Asset Placement** carries no Track-kind snapshot. Availability and execution use the same authoritative placement preparation, and a position not exactly representable on the active Sequence grid is rejected rather than silently moved.
 - Manual save and autosave share **Durable Project Publication**, but only manual save advances the durable baseline; autosave advances recovery coverage and never makes an unsaved Project appear saved.
 - Every Clip has exactly one **Clip Content** variant. Unknown or legacy parallel content fields fail current-schema loading rather than being ignored.
 - Every non-null **Clip Link Group** has at least two members. Selection and commands expand a selected member to the complete set, validate all locked Tracks and zero-boundary constraints before mutation, and compact broken/singleton membership before commit. Explicit Link retains the sole existing group identity when adding unlinked members, creates a fresh identity when merging multiple groups, and never commits a no-op; Unlink clears every expanded group atomically.
