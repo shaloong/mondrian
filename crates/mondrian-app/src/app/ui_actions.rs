@@ -11,8 +11,8 @@ use mondrian_core::types::{
     ProgramOutputId, SequenceId, TrackId, VideoTransitionId,
 };
 use mondrian_core::{
-    ColorEngine, ColorSpace, DisplayToneMapPolicy, ProjectColorEnvironment, ProjectSettings,
-    Rational, Resolution, TimelineDisplayFormat, WorkingColorSpace,
+    ColorEngine, ColorSpace, DisplayToneMapPolicy, Rational, Resolution, TimelineDisplayFormat,
+    WorkingColorSpace,
 };
 use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
@@ -25,7 +25,7 @@ use mondrian_timeline::{
     sequence::{ColorWorkflow, DeliveryBitDepth, MissingColorMetadataPolicy, VideoRange},
     AudioChannelLayout, AudioChannelStripEditRequest, AudioDisplayFormat,
     AudioProcessorRackEditRequest, AudioRoutingEditRequest, EditingMode, FieldOrder,
-    PixelAspectRatio, PreviewRenderFormat, SequenceSettings,
+    PixelAspectRatio, PreviewRenderFormat,
 };
 use mondrian_ui_theme::ThemePreference;
 use mondrian_ui_widgets::{ViewerCanvasBackground, WaveformDisplay};
@@ -33,17 +33,23 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use super::product_action::{
-    AudioProductAction, ProductAction, TimelineProductAction, ViewerProductAction,
+    AudioProductAction, ProductAction, ProjectProductAction, SequenceProductAction,
+    TimelineProductAction, ViewerProductAction,
 };
 pub use super::product_action::{
-    TimelineClipSelectionModePayload, TimelineMoveClipPayload, TimelineSeekPayload,
-    TimelineSeekSource, TimelineSelectClipPayload, TimelineTrimClipsPayload,
-    TimelineTrimPayloadEdge, ViewerSetClipTransformPayload, ViewerSetPreviewResolutionScalePayload,
-    ViewerTransformPositionPayload, AUDIO_EDIT_COMPONENT, AUDIO_EDIT_PROCESSOR_RACK,
-    AUDIO_NAMESPACE, TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
-    TIMELINE_TRIM_CLIPS, VIEWER_NAMESPACE,
+    ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
+    ProjectUpdateColorEnvironmentPayload, ProjectUpdateNewSequenceDefaultsPayload,
+    SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineClipSelectionModePayload,
+    TimelineMoveClipPayload, TimelineSeekPayload, TimelineSeekSource, TimelineSelectClipPayload,
+    TimelineTrimClipsPayload, TimelineTrimPayloadEdge, ViewerSetClipTransformPayload,
+    ViewerSetPreviewResolutionScalePayload, ViewerTransformPositionPayload, AUDIO_EDIT_COMPONENT,
+    AUDIO_EDIT_PROCESSOR_RACK, AUDIO_NAMESPACE, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
+    PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_UPDATE_COLOR_ENVIRONMENT,
+    PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS, SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE,
+    SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE,
+    SEQUENCE_UPDATE_SETTINGS, TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK,
+    TIMELINE_SELECT_CLIP, TIMELINE_TRIM_CLIPS, VIEWER_NAMESPACE,
 };
-use super::CrashRecoveryCandidate;
 
 /// Action name for linking the current Clip selection.
 pub const TIMELINE_LINK_SELECTED_CLIPS: &str = "link_selected_clips";
@@ -178,36 +184,6 @@ pub const EXPORT_CLEAR_COMPLETED: &str = "clear_completed";
 pub const VIEWER_CYCLE_ZOOM: &str = "cycle_zoom";
 /// Shell-local action name for setting viewer canvas zoom.
 pub const VIEWER_SET_ZOOM_SCALE: &str = "set_zoom_scale";
-
-/// Custom action namespace for project lifecycle operations supplied by shell UI.
-pub const PROJECT_NAMESPACE: &str = "ui.project";
-
-/// Action name for creating a project with explicit settings.
-pub const PROJECT_CREATE_WITH_SETTINGS: &str = "create_with_settings";
-/// Action name for replacing the template copied into future Sequences.
-pub const PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS: &str = "update_new_sequence_defaults";
-/// Action name for atomically replacing the Project-wide color engine.
-pub const PROJECT_UPDATE_COLOR_ENVIRONMENT: &str = "update_color_environment";
-/// Action name for recovering a project from an autosave snapshot.
-pub const PROJECT_RECOVER_FROM_AUTOSAVE: &str = "recover_from_autosave";
-
-/// Custom action namespace for sequence management operations.
-pub const SEQUENCE_NAMESPACE: &str = "ui.sequence";
-
-/// Action name for returning from a nested sequence to its parent sequence.
-pub const SEQUENCE_RETURN_TO_PARENT: &str = "return_to_parent";
-/// Action name for making the active sequence the project default sequence.
-pub const SEQUENCE_SET_ACTIVE_DEFAULT: &str = "set_active_default";
-/// Action name for creating a new sequence with product defaults.
-pub const SEQUENCE_NEW: &str = "new";
-/// Action name for switching the active sequence.
-pub const SEQUENCE_SWITCH_ACTIVE: &str = "switch_active";
-/// Action name for duplicating a sequence.
-pub const SEQUENCE_DUPLICATE: &str = "duplicate";
-/// Action name for deleting a sequence.
-pub const SEQUENCE_DELETE: &str = "delete";
-/// Action name for updating sequence identity/settings from app UI.
-pub const SEQUENCE_UPDATE_SETTINGS: &str = "update_settings";
 
 /// Custom action namespace for app-shell operations resolved by native adapters.
 pub const APP_SHELL_NAMESPACE: &str = "app.shell";
@@ -360,13 +336,6 @@ pub struct AppShellOpenRecentProjectPayload {
     pub project_file: PathBuf,
 }
 
-/// Project autosave candidate selected from the app UI startup surface.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProjectRecoverFromAutosavePayload {
-    /// Exact discovery evidence selected by the user.
-    pub candidate: CrashRecoveryCandidate,
-}
-
 /// File-system path to reveal through the native file manager.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppShellRevealInFileManagerPayload {
@@ -481,24 +450,6 @@ pub struct TimelinePrecomposeSelectionPayload {
 pub struct TimelineOpenNestedSequencePayload {
     /// Nested sequence to make active.
     pub sequence_id: SequenceId,
-}
-
-/// Target one project sequence from an app UI sequence menu.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SequenceTargetPayload {
-    /// Sequence to operate on.
-    pub sequence_id: SequenceId,
-}
-
-/// Apply edited settings to one sequence.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SequenceUpdateSettingsPayload {
-    /// Sequence whose name/settings should be replaced.
-    pub sequence_id: SequenceId,
-    /// User-facing sequence name.
-    pub name: String,
-    /// Full sequence settings after applying shell-local edits.
-    pub settings: SequenceSettings,
 }
 
 /// Change the shell-local viewer canvas zoom.
@@ -1058,35 +1009,6 @@ pub struct ExportOutputDialogPayload {
     pub extension: String,
 }
 
-/// Create a project at a user-selected path with explicit initial settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectCreateWithSettingsPayload {
-    /// Target `.mdp` project container path.
-    pub project_file: PathBuf,
-    /// Initial project and sequence display name.
-    pub name: String,
-    /// Initial sequence settings.
-    pub sequence_settings: SequenceSettings,
-    /// Project-wide color engine shared by every Sequence.
-    pub color_environment: ProjectColorEnvironment,
-    /// Initial project-level settings.
-    pub project_settings: ProjectSettings,
-}
-
-/// Replace the complete template copied into future Sequences.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ProjectUpdateNewSequenceDefaultsPayload {
-    /// Complete validated Sequence settings template.
-    pub settings: SequenceSettings,
-}
-
-/// Atomically replace the Project-wide color engine.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProjectUpdateColorEnvironmentPayload {
-    /// Complete version-pinned engine environment.
-    pub color_environment: ProjectColorEnvironment,
-}
-
 /// One mutation to the shell-local new-project draft.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NewProjectDraftUpdatePayload {
@@ -1568,61 +1490,65 @@ pub fn viewer_set_zoom_scale_action(payload: ViewerSetZoomScalePayload) -> Actio
 
 /// Build an action that creates a project from shell UI.
 pub fn project_create_with_settings_action(payload: ProjectCreateWithSettingsPayload) -> Action {
-    custom_project_action(PROJECT_CREATE_WITH_SETTINGS, payload)
+    ProductAction::Project(ProjectProductAction::CreateWithSettings(payload)).into_external_action()
 }
 
 /// Build a project action that atomically replaces new-Sequence defaults.
 pub fn project_update_new_sequence_defaults_action(
     payload: ProjectUpdateNewSequenceDefaultsPayload,
 ) -> Action {
-    custom_project_action(PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS, payload)
+    ProductAction::Project(ProjectProductAction::UpdateNewSequenceDefaults(payload))
+        .into_external_action()
 }
 
 /// Build a project action that atomically replaces the shared color engine.
 pub fn project_update_color_environment_action(
     payload: ProjectUpdateColorEnvironmentPayload,
 ) -> Action {
-    custom_project_action(PROJECT_UPDATE_COLOR_ENVIRONMENT, payload)
+    ProductAction::Project(ProjectProductAction::UpdateColorEnvironment(payload))
+        .into_external_action()
 }
 
 /// Build an action that recovers a project from an autosave snapshot.
 pub fn project_recover_from_autosave_action(payload: ProjectRecoverFromAutosavePayload) -> Action {
-    custom_project_action(PROJECT_RECOVER_FROM_AUTOSAVE, payload)
+    ProductAction::Project(ProjectProductAction::RecoverFromAutosave(payload))
+        .into_external_action()
 }
 
 /// Build an action that returns from a nested sequence to its parent.
 pub fn sequence_return_to_parent_action() -> Action {
-    custom_sequence_action(SEQUENCE_RETURN_TO_PARENT)
+    ProductAction::Sequence(SequenceProductAction::ReturnToParent).into_external_action()
 }
 
 /// Build an action that makes the current active sequence the project default.
 pub fn sequence_set_active_default_action() -> Action {
-    custom_sequence_action(SEQUENCE_SET_ACTIVE_DEFAULT)
+    ProductAction::Sequence(SequenceProductAction::SetActiveDefault).into_external_action()
 }
 
 /// Build an action that creates a new sequence with product defaults.
 pub fn sequence_new_action() -> Action {
-    custom_sequence_action(SEQUENCE_NEW)
+    ProductAction::Sequence(SequenceProductAction::New).into_external_action()
 }
 
 /// Build an action that switches the active sequence.
 pub fn sequence_switch_active_action(payload: SequenceTargetPayload) -> Action {
-    custom_sequence_action_with_payload(SEQUENCE_SWITCH_ACTIVE, payload)
+    ProductAction::Sequence(SequenceProductAction::SwitchActive(payload)).into_external_action()
 }
 
 /// Build an action that duplicates one sequence.
 pub fn sequence_duplicate_action(payload: SequenceTargetPayload) -> Action {
-    custom_sequence_action_with_payload(SEQUENCE_DUPLICATE, payload)
+    ProductAction::Sequence(SequenceProductAction::Duplicate(payload)).into_external_action()
 }
 
 /// Build an action that deletes one sequence.
 pub fn sequence_delete_action(payload: SequenceTargetPayload) -> Action {
-    custom_sequence_action_with_payload(SEQUENCE_DELETE, payload)
+    ProductAction::Sequence(SequenceProductAction::Delete(payload)).into_external_action()
 }
 
 /// Build an action that applies edited settings to one sequence.
 pub fn sequence_update_settings_action(payload: SequenceUpdateSettingsPayload) -> Action {
-    custom_sequence_action_with_payload(SEQUENCE_UPDATE_SETTINGS, payload)
+    ProductAction::Sequence(SequenceProductAction::UpdateSettings(Box::new(payload)))
+        .into_external_action()
 }
 
 /// Build an app-shell request for creating a new project.
@@ -1919,30 +1845,6 @@ fn custom_export_action<T: Serialize>(name: &'static str, payload: T) -> Action 
 fn custom_viewer_action<T: Serialize>(name: &'static str, payload: T) -> Action {
     Action::Custom {
         namespace: VIEWER_NAMESPACE.into(),
-        name: name.into(),
-        payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
-    }
-}
-
-fn custom_project_action<T: Serialize>(name: &'static str, payload: T) -> Action {
-    Action::Custom {
-        namespace: PROJECT_NAMESPACE.into(),
-        name: name.into(),
-        payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
-    }
-}
-
-fn custom_sequence_action(name: &'static str) -> Action {
-    Action::Custom {
-        namespace: SEQUENCE_NAMESPACE.into(),
-        name: name.into(),
-        payload: serde_json::Value::Null,
-    }
-}
-
-fn custom_sequence_action_with_payload<T: Serialize>(name: &'static str, payload: T) -> Action {
-    Action::Custom {
-        namespace: SEQUENCE_NAMESPACE.into(),
         name: name.into(),
         payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
     }

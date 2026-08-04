@@ -1164,51 +1164,44 @@ impl AppState {
     }
 
     /// Create a Sequence as one project-level authoring transaction.
-    pub fn new_sequence(&mut self, name: &str) {
-        let sequence = match Sequence::with_settings(name, self.new_sequence_defaults().clone()) {
-            Ok(sequence) => sequence,
-            Err(error) => {
-                tracing::error!(%error, "新建序列默认模板无效");
-                self.set_status_hint(format!("新建序列失败：{error}"), true);
-                return;
-            }
-        };
-        let sequence_id = sequence.id;
-        if let Err(error) = self.stop() {
-            tracing::error!(%error, "failed to stop transport before creating Sequence");
-            self.set_status_hint(format!("新建序列失败：{error}"), true);
-            return;
-        }
-        let result = self
+    pub fn new_sequence(&mut self, name: &str) -> mondrian_core::Result<SequenceId> {
+        let defaults = self
             .authoring
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "new_sequence".to_owned(),
                 reason: "当前没有打开的项目".to_owned(),
-            })
-            .and_then(|session| {
-                let before = session.document().clone();
-                let mut after = before.clone();
-                after.sequences.add_sequence(sequence)?;
-                let commit = session.commit_project_snapshot("新建序列", before, after)?;
-                session
-                    .switch_active_sequence(sequence_id, SequenceNavigationIntent::ReplaceRoot)?;
-                Ok(commit)
-            });
-        match result {
-            Ok(Some(commit)) => {
-                self.consume_authoring_commit(commit);
-                self.settle_preview_access_source();
-                tracing::info!(%sequence_id, "新建序列: {name}");
-            }
-            Ok(None) => {
-                tracing::warn!(%sequence_id, "新建序列事务被归一化为无操作");
-            }
-            Err(error) => {
-                tracing::error!(%error, "新建序列失败");
-                self.set_status_hint(format!("新建序列失败：{error}"), true);
-            }
-        }
+            })?
+            .document()
+            .new_sequence_defaults
+            .clone();
+        let sequence = Sequence::with_settings(name, defaults)?;
+        let sequence_id = sequence.id;
+        self.stop()?;
+        let commit = {
+            let session = self.authoring.as_mut().ok_or_else(|| {
+                mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "new_sequence".to_owned(),
+                    reason: "当前没有打开的项目".to_owned(),
+                }
+            })?;
+            let before = session.document().clone();
+            let mut after = before.clone();
+            after.sequences.add_sequence(sequence)?;
+            let commit =
+                session.commit_project_snapshot("新建序列", before, after)?.ok_or_else(|| {
+                    mondrian_core::MondrianError::WorkflowStepFailed {
+                        step_id: "new_sequence".to_owned(),
+                        reason: "新建序列事务未产生作者状态变更".to_owned(),
+                    }
+                })?;
+            session.switch_active_sequence(sequence_id, SequenceNavigationIntent::ReplaceRoot)?;
+            commit
+        };
+        self.consume_authoring_commit(commit);
+        self.settle_preview_access_source();
+        tracing::info!(%sequence_id, "新建序列: {name}");
+        Ok(sequence_id)
     }
 
     pub fn precompose_clips_as_sequence(

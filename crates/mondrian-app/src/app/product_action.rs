@@ -4,18 +4,19 @@
 //! `Action::Custom` remains a compatibility transport for reusable Widgets,
 //! scripting, and future plugin Adapters; it is decoded only at this seam.
 
-use std::collections::HashMap;
+use std::path::PathBuf;
 
-use mondrian_core::types::{ClipId, FramePosition, TrackId};
-use mondrian_core::{Rational, TimelineTime};
+use mondrian_core::types::{ClipId, FramePosition, SequenceId, TrackId};
+use mondrian_core::{ProjectColorEnvironment, ProjectSettings, TimelineTime};
 use mondrian_editor_state::Action;
 use mondrian_timeline::{
-    sequence::Sequence, AudioAutomationEditRequest, AudioChannelStripEditRequest,
-    AudioComponentEditRequest, AudioProcessorRackEditRequest, AudioRoutingEditRequest,
+    sequence::{Sequence, SequenceSettings},
+    AudioAutomationEditRequest, AudioChannelStripEditRequest, AudioComponentEditRequest,
+    AudioProcessorRackEditRequest, AudioRoutingEditRequest,
 };
 use serde::{Deserialize, Serialize};
 
-use super::AppState;
+use super::{AppState, CrashRecoveryCandidate};
 
 /// External custom-action namespace for Timeline product operations.
 pub const TIMELINE_NAMESPACE: &str = "ui.timeline";
@@ -36,6 +37,36 @@ pub const VIEWER_NAMESPACE: &str = "ui.viewer";
 pub const VIEWER_SET_PREVIEW_RESOLUTION_SCALE: &str = "set_preview_resolution_scale";
 /// External action name for changing one Clip transform from monitor editing.
 pub const VIEWER_SET_CLIP_TRANSFORM: &str = "set_clip_transform";
+
+/// External custom-action namespace for Project product operations.
+pub const PROJECT_NAMESPACE: &str = "ui.project";
+
+/// External action name for creating a Project with explicit settings.
+pub const PROJECT_CREATE_WITH_SETTINGS: &str = "create_with_settings";
+/// External action name for replacing the template copied into future Sequences.
+pub const PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS: &str = "update_new_sequence_defaults";
+/// External action name for atomically replacing the Project-wide color engine.
+pub const PROJECT_UPDATE_COLOR_ENVIRONMENT: &str = "update_color_environment";
+/// External action name for recovering a Project from an autosave snapshot.
+pub const PROJECT_RECOVER_FROM_AUTOSAVE: &str = "recover_from_autosave";
+
+/// External custom-action namespace for Sequence product operations.
+pub const SEQUENCE_NAMESPACE: &str = "ui.sequence";
+
+/// External action name for returning from a nested Sequence to its parent.
+pub const SEQUENCE_RETURN_TO_PARENT: &str = "return_to_parent";
+/// External action name for making the active Sequence the Project default.
+pub const SEQUENCE_SET_ACTIVE_DEFAULT: &str = "set_active_default";
+/// External action name for creating a new Sequence from Project defaults.
+pub const SEQUENCE_NEW: &str = "new";
+/// External action name for switching the active Sequence.
+pub const SEQUENCE_SWITCH_ACTIVE: &str = "switch_active";
+/// External action name for duplicating a Sequence.
+pub const SEQUENCE_DUPLICATE: &str = "duplicate";
+/// External action name for deleting a Sequence.
+pub const SEQUENCE_DELETE: &str = "delete";
+/// External action name for updating Sequence identity and settings.
+pub const SEQUENCE_UPDATE_SETTINGS: &str = "update_settings";
 
 /// External custom-action namespace for Sequence audio authoring operations.
 pub const AUDIO_NAMESPACE: &str = "ui.audio";
@@ -67,6 +98,42 @@ pub enum ProductAction {
     Audio(AudioProductAction),
     /// An operation owned by the Viewer product Interface.
     Viewer(ViewerProductAction),
+    /// An operation owned by the Project lifecycle or authoring Interface.
+    Project(ProjectProductAction),
+    /// An operation owned by the Sequence management Interface.
+    Sequence(SequenceProductAction),
+}
+
+/// Closed Project lifecycle and authoring operations.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProjectProductAction {
+    /// Create one Project at an explicitly selected publication path.
+    CreateWithSettings(ProjectCreateWithSettingsPayload),
+    /// Replace the complete template copied into future Sequences.
+    UpdateNewSequenceDefaults(ProjectUpdateNewSequenceDefaultsPayload),
+    /// Atomically replace the Project-wide color engine.
+    UpdateColorEnvironment(ProjectUpdateColorEnvironmentPayload),
+    /// Recover one exact durable autosave candidate.
+    RecoverFromAutosave(ProjectRecoverFromAutosavePayload),
+}
+
+/// Closed Sequence management operations.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SequenceProductAction {
+    /// Return from a nested Sequence to its parent.
+    ReturnToParent,
+    /// Make the active Sequence the Project default.
+    SetActiveDefault,
+    /// Create a new Sequence from Project defaults.
+    New,
+    /// Switch the active Sequence.
+    SwitchActive(SequenceTargetPayload),
+    /// Duplicate one Sequence with fresh author identities.
+    Duplicate(SequenceTargetPayload),
+    /// Delete one Sequence when author references permit it.
+    Delete(SequenceTargetPayload),
+    /// Replace one Sequence's name and complete settings atomically.
+    UpdateSettings(Box<SequenceUpdateSettingsPayload>),
 }
 
 /// Closed Viewer operations that mutate product state.
@@ -131,6 +198,8 @@ impl ProductActionDecodeError {
             TIMELINE_NAMESPACE => "timeline_ui_action",
             AUDIO_NAMESPACE => "audio_action",
             VIEWER_NAMESPACE => "viewer_action",
+            PROJECT_NAMESPACE => "project_action",
+            SEQUENCE_NAMESPACE => "sequence_action",
             _ => "product_action",
         };
         format!("{domain}.{}", self.name)
@@ -203,6 +272,60 @@ impl ProductAction {
                 VIEWER_SET_CLIP_TRANSFORM => {
                     Ok(Some(Self::Viewer(ViewerProductAction::SetClipTransform(
                         decode_payload(namespace, name, payload)?,
+                    ))))
+                }
+                _ => Ok(None),
+            },
+            PROJECT_NAMESPACE => match name.as_str() {
+                PROJECT_CREATE_WITH_SETTINGS => Ok(Some(Self::Project(
+                    ProjectProductAction::CreateWithSettings(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
+                PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS => Ok(Some(Self::Project(
+                    ProjectProductAction::UpdateNewSequenceDefaults(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
+                PROJECT_UPDATE_COLOR_ENVIRONMENT => Ok(Some(Self::Project(
+                    ProjectProductAction::UpdateColorEnvironment(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
+                PROJECT_RECOVER_FROM_AUTOSAVE => Ok(Some(Self::Project(
+                    ProjectProductAction::RecoverFromAutosave(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
+                _ => Ok(None),
+            },
+            SEQUENCE_NAMESPACE => match name.as_str() {
+                SEQUENCE_RETURN_TO_PARENT => {
+                    decode_payload::<()>(namespace, name, payload)?;
+                    Ok(Some(Self::Sequence(SequenceProductAction::ReturnToParent)))
+                }
+                SEQUENCE_SET_ACTIVE_DEFAULT => {
+                    decode_payload::<()>(namespace, name, payload)?;
+                    Ok(Some(Self::Sequence(
+                        SequenceProductAction::SetActiveDefault,
+                    )))
+                }
+                SEQUENCE_NEW => {
+                    decode_payload::<()>(namespace, name, payload)?;
+                    Ok(Some(Self::Sequence(SequenceProductAction::New)))
+                }
+                SEQUENCE_SWITCH_ACTIVE => Ok(Some(Self::Sequence(
+                    SequenceProductAction::SwitchActive(decode_payload(namespace, name, payload)?),
+                ))),
+                SEQUENCE_DUPLICATE => Ok(Some(Self::Sequence(SequenceProductAction::Duplicate(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                SEQUENCE_DELETE => Ok(Some(Self::Sequence(SequenceProductAction::Delete(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                SEQUENCE_UPDATE_SETTINGS => {
+                    Ok(Some(Self::Sequence(SequenceProductAction::UpdateSettings(
+                        Box::new(decode_payload(namespace, name, payload)?),
                     ))))
                 }
                 _ => Ok(None),
@@ -296,6 +419,59 @@ impl ProductAction {
             Self::Viewer(ViewerProductAction::SetClipTransform(payload)) => (
                 VIEWER_NAMESPACE,
                 VIEWER_SET_CLIP_TRANSFORM,
+                serde_json::json!(payload),
+            ),
+            Self::Project(ProjectProductAction::CreateWithSettings(payload)) => (
+                PROJECT_NAMESPACE,
+                PROJECT_CREATE_WITH_SETTINGS,
+                serde_json::json!(payload),
+            ),
+            Self::Project(ProjectProductAction::UpdateNewSequenceDefaults(payload)) => (
+                PROJECT_NAMESPACE,
+                PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS,
+                serde_json::json!(payload),
+            ),
+            Self::Project(ProjectProductAction::UpdateColorEnvironment(payload)) => (
+                PROJECT_NAMESPACE,
+                PROJECT_UPDATE_COLOR_ENVIRONMENT,
+                serde_json::json!(payload),
+            ),
+            Self::Project(ProjectProductAction::RecoverFromAutosave(payload)) => (
+                PROJECT_NAMESPACE,
+                PROJECT_RECOVER_FROM_AUTOSAVE,
+                serde_json::json!(payload),
+            ),
+            Self::Sequence(SequenceProductAction::ReturnToParent) => (
+                SEQUENCE_NAMESPACE,
+                SEQUENCE_RETURN_TO_PARENT,
+                serde_json::Value::Null,
+            ),
+            Self::Sequence(SequenceProductAction::SetActiveDefault) => (
+                SEQUENCE_NAMESPACE,
+                SEQUENCE_SET_ACTIVE_DEFAULT,
+                serde_json::Value::Null,
+            ),
+            Self::Sequence(SequenceProductAction::New) => {
+                (SEQUENCE_NAMESPACE, SEQUENCE_NEW, serde_json::Value::Null)
+            }
+            Self::Sequence(SequenceProductAction::SwitchActive(payload)) => (
+                SEQUENCE_NAMESPACE,
+                SEQUENCE_SWITCH_ACTIVE,
+                serde_json::json!(payload),
+            ),
+            Self::Sequence(SequenceProductAction::Duplicate(payload)) => (
+                SEQUENCE_NAMESPACE,
+                SEQUENCE_DUPLICATE,
+                serde_json::json!(payload),
+            ),
+            Self::Sequence(SequenceProductAction::Delete(payload)) => (
+                SEQUENCE_NAMESPACE,
+                SEQUENCE_DELETE,
+                serde_json::json!(payload),
+            ),
+            Self::Sequence(SequenceProductAction::UpdateSettings(payload)) => (
+                SEQUENCE_NAMESPACE,
+                SEQUENCE_UPDATE_SETTINGS,
                 serde_json::json!(payload),
             ),
         };
@@ -427,6 +603,66 @@ pub struct TimelineSeekPayload {
     pub source: TimelineSeekSource,
 }
 
+/// Create a Project at a user-selected path with explicit initial settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectCreateWithSettingsPayload {
+    /// Target `.mdp` Project container path.
+    pub project_file: PathBuf,
+    /// Initial Project and Sequence display name.
+    pub name: String,
+    /// Initial Sequence settings.
+    pub sequence_settings: SequenceSettings,
+    /// Project-wide color engine shared by every Sequence.
+    pub color_environment: ProjectColorEnvironment,
+    /// Initial Project-level settings.
+    pub project_settings: ProjectSettings,
+}
+
+/// Replace the complete template copied into future Sequences.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectUpdateNewSequenceDefaultsPayload {
+    /// Complete validated Sequence settings template.
+    pub settings: SequenceSettings,
+}
+
+/// Atomically replace the Project-wide color engine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectUpdateColorEnvironmentPayload {
+    /// Complete version-pinned engine environment.
+    pub color_environment: ProjectColorEnvironment,
+}
+
+/// Recover a Project from one exact durable autosave candidate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectRecoverFromAutosavePayload {
+    /// Exact discovery evidence selected by the user.
+    pub candidate: CrashRecoveryCandidate,
+}
+
+/// Target one Project Sequence from a product operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SequenceTargetPayload {
+    /// Sequence to operate on.
+    pub sequence_id: SequenceId,
+}
+
+/// Apply edited identity and settings to one Sequence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SequenceUpdateSettingsPayload {
+    /// Sequence whose name and settings should be replaced.
+    pub sequence_id: SequenceId,
+    /// User-facing Sequence name.
+    pub name: String,
+    /// Complete Sequence settings after applying shell-local edits.
+    pub settings: SequenceSettings,
+}
+
 /// Change the active Viewer preview resolution scale.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -477,49 +713,21 @@ impl ViewerSetClipTransformPayload {
 /// Its facts are deliberately private. UI Adapters can ask whether a typed
 /// operation is currently useful, but cannot observe or reinterpret Sequence,
 /// Track, Clip, authoring-session, or execution internals.
-#[derive(Debug, Clone, Default)]
-pub struct ProductActionAvailability {
-    sequence: Option<TimelineInteractionSequenceFacts>,
-}
-
-#[derive(Debug, Clone)]
-struct TimelineInteractionSequenceFacts {
-    time_base: Rational,
-    tracks: HashMap<(TrackId, bool), TimelineInteractionTrackFacts>,
-    clips: HashMap<ClipId, TimelineInteractionClipFacts>,
+pub struct ProductActionAvailability<'a> {
+    state: &'a AppState,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct TimelineInteractionTrackFacts {
-    unlocked: bool,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct TimelineInteractionClipFacts {
+struct ClipAdmissionFacts {
     source_track_unlocked: bool,
     is_video_track: bool,
     position: TimelineTime,
     end: Option<TimelineTime>,
 }
 
-impl ProductActionAvailability {
-    fn from_sequence(sequence: Option<&Sequence>) -> Self {
-        let Some(sequence) = sequence else {
-            return Self::default();
-        };
-
-        let mut facts = TimelineInteractionSequenceFacts {
-            time_base: sequence.time_base(),
-            tracks: HashMap::new(),
-            clips: HashMap::new(),
-        };
-        for track in &sequence.video_tracks {
-            facts.insert_track(track, true);
-        }
-        for track in &sequence.audio_tracks {
-            facts.insert_track(track, false);
-        }
-        Self { sequence: Some(facts) }
+impl<'a> ProductActionAvailability<'a> {
+    fn new(state: &'a AppState) -> Self {
+        Self { state }
     }
 
     /// Return whether a typed product operation has a useful current target.
@@ -528,89 +736,164 @@ impl ProductActionAvailability {
     /// transport Interface still revalidates authoritative state at dispatch.
     pub fn allows(&self, action: &ProductAction) -> bool {
         match action {
-            ProductAction::Timeline(action) => {
-                self.sequence.as_ref().is_some_and(|sequence| sequence.allows_timeline(action))
-            }
-            ProductAction::Audio(_) => self.sequence.is_some(),
-            ProductAction::Viewer(action) => {
-                self.sequence.as_ref().is_some_and(|sequence| sequence.allows_viewer(action))
-            }
+            ProductAction::Timeline(action) => self.allows_timeline(action),
+            ProductAction::Audio(_) => self.state.active_sequence().is_some(),
+            ProductAction::Viewer(action) => self.allows_viewer(action),
+            ProductAction::Project(action) => self.allows_project(action),
+            ProductAction::Sequence(action) => self.allows_sequence(action),
         }
     }
-}
 
-impl TimelineInteractionSequenceFacts {
     fn allows_timeline(&self, action: &TimelineProductAction) -> bool {
+        let Some(sequence) = self.state.active_sequence() else {
+            return false;
+        };
         match action {
-            TimelineProductAction::SelectClip(payload) => self.clips.contains_key(&payload.clip_id),
-            TimelineProductAction::MoveClip(payload) => {
-                self.clips.get(&payload.clip_id).is_some_and(|clip| {
-                    clip.source_track_unlocked && clip.is_video_track == payload.is_video_track
-                }) && self
-                    .tracks
-                    .get(&(payload.target_track_id, payload.is_video_track))
-                    .is_some_and(|track| track.unlocked)
+            TimelineProductAction::SelectClip(payload) => {
+                clip_admission_facts(sequence, payload.clip_id).is_some()
             }
-            TimelineProductAction::TrimClips(payload) => self.allows_trim(payload),
+            TimelineProductAction::MoveClip(payload) => {
+                clip_admission_facts(sequence, payload.clip_id).is_some_and(|clip| {
+                    clip.source_track_unlocked && clip.is_video_track == payload.is_video_track
+                }) && track_is_unlocked(sequence, payload.target_track_id, payload.is_video_track)
+            }
+            TimelineProductAction::TrimClips(payload) => allows_trim(sequence, payload),
             TimelineProductAction::Seek(payload) => payload.frame >= 0,
         }
     }
 
     fn allows_viewer(&self, action: &ViewerProductAction) -> bool {
+        let Some(sequence) = self.state.active_sequence() else {
+            return false;
+        };
         match action {
             ViewerProductAction::SetPreviewResolutionScale(_) => true,
             ViewerProductAction::SetClipTransform(payload) => {
                 payload.has_mutation()
                     && payload.values_are_finite()
-                    && self
-                        .clips
-                        .get(&payload.clip_id)
+                    && clip_admission_facts(sequence, payload.clip_id)
                         .is_some_and(|clip| clip.source_track_unlocked && clip.is_video_track)
             }
         }
     }
 
-    fn insert_track(&mut self, track: &mondrian_timeline::track::Track, is_video_track: bool) {
-        let unlocked = !track.is_locked;
-        self.tracks.insert(
-            (track.id, is_video_track),
-            TimelineInteractionTrackFacts { unlocked },
-        );
-        for clip in &track.clips {
-            self.clips.insert(
-                clip.id,
-                TimelineInteractionClipFacts {
-                    source_track_unlocked: unlocked,
-                    is_video_track,
-                    position: clip.position,
-                    end: clip.end_position().ok(),
-                },
-            );
+    fn allows_project(&self, action: &ProjectProductAction) -> bool {
+        match action {
+            ProjectProductAction::CreateWithSettings(payload) => {
+                !payload.project_file.as_os_str().is_empty()
+            }
+            ProjectProductAction::RecoverFromAutosave(payload) => {
+                recovery_candidate_is_addressable(&payload.candidate)
+            }
+            ProjectProductAction::UpdateNewSequenceDefaults(payload) => {
+                self.state.authoring.as_ref().is_some_and(|session| {
+                    session.document().new_sequence_defaults != payload.settings
+                })
+            }
+            ProjectProductAction::UpdateColorEnvironment(payload) => {
+                self.state.authoring.as_ref().is_some_and(|session| {
+                    session.document().color_environment != payload.color_environment
+                })
+            }
         }
     }
 
-    fn allows_trim(&self, payload: &TimelineTrimClipsPayload) -> bool {
-        if payload.clip_ids.is_empty() {
-            return false;
-        }
-        let Ok(target) =
-            TimelineTime::from_frame_position(FramePosition::new(payload.frame, self.time_base))
-        else {
+    fn allows_sequence(&self, action: &SequenceProductAction) -> bool {
+        let Some(session) = self.state.authoring.as_ref() else {
             return false;
         };
-        payload.clip_ids.iter().all(|clip_id| {
-            self.clips.get(clip_id).is_some_and(|clip| {
-                clip.source_track_unlocked
-                    && clip.end.is_some_and(|end| target > clip.position && target < end)
-            })
-        })
+        let document = session.document();
+        let active = document.sequences.active_sequence_id;
+        match action {
+            SequenceProductAction::ReturnToParent => !session.navigation_stack().is_empty(),
+            SequenceProductAction::SetActiveDefault => {
+                document.sequences.default_sequence_id != active
+            }
+            SequenceProductAction::New => true,
+            SequenceProductAction::SwitchActive(payload) => {
+                active != payload.sequence_id
+                    && document.sequences.sequence(payload.sequence_id).is_some()
+            }
+            SequenceProductAction::Duplicate(payload) => {
+                document.sequences.sequence(payload.sequence_id).is_some()
+            }
+            SequenceProductAction::Delete(payload) => {
+                document.sequences.sequences.len() > 1
+                    && document.sequences.sequence(payload.sequence_id).is_some()
+            }
+            SequenceProductAction::UpdateSettings(payload) => {
+                document.sequences.sequence(payload.sequence_id).is_some_and(|sequence| {
+                    let name = payload.name.trim();
+                    !name.is_empty()
+                        && (sequence.name != name || sequence.settings != payload.settings)
+                })
+            }
+        }
     }
 }
 
+fn clip_admission_facts(sequence: &Sequence, clip_id: ClipId) -> Option<ClipAdmissionFacts> {
+    sequence
+        .video_tracks
+        .iter()
+        .map(|track| (track, true))
+        .chain(sequence.audio_tracks.iter().map(|track| (track, false)))
+        .find_map(|(track, is_video_track)| {
+            track
+                .clips
+                .iter()
+                .find(|clip| clip.id == clip_id)
+                .map(|clip| ClipAdmissionFacts {
+                    source_track_unlocked: !track.is_locked,
+                    is_video_track,
+                    position: clip.position,
+                    end: clip.end_position().ok(),
+                })
+        })
+}
+
+fn track_is_unlocked(sequence: &Sequence, track_id: TrackId, is_video_track: bool) -> bool {
+    let tracks = if is_video_track {
+        &sequence.video_tracks
+    } else {
+        &sequence.audio_tracks
+    };
+    tracks
+        .iter()
+        .find(|track| track.id == track_id)
+        .is_some_and(|track| !track.is_locked)
+}
+
+fn allows_trim(sequence: &Sequence, payload: &TimelineTrimClipsPayload) -> bool {
+    if payload.clip_ids.is_empty() {
+        return false;
+    }
+    let Ok(target) =
+        TimelineTime::from_frame_position(FramePosition::new(payload.frame, sequence.time_base()))
+    else {
+        return false;
+    };
+    payload.clip_ids.iter().all(|clip_id| {
+        clip_admission_facts(sequence, *clip_id).is_some_and(|clip| {
+            clip.source_track_unlocked
+                && clip.end.is_some_and(|end| target > clip.position && target < end)
+        })
+    })
+}
+
+fn recovery_candidate_is_addressable(candidate: &CrashRecoveryCandidate) -> bool {
+    !candidate.runtime_root.as_os_str().is_empty()
+        && !candidate.project_file.as_os_str().is_empty()
+        && !candidate.autosave_file.as_os_str().is_empty()
+        && candidate.archive_sha256.len() == 64
+        && candidate.archive_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && candidate.total_snapshots > 0
+}
+
 impl AppState {
-    /// Project the minimal App-owned facts needed to admit migrated Actions.
-    pub fn product_action_availability(&self) -> ProductActionAvailability {
-        ProductActionAvailability::from_sequence(self.active_sequence())
+    /// Borrow the read-only admission Interface for migrated product Actions.
+    pub fn product_action_availability(&self) -> ProductActionAvailability<'_> {
+        ProductActionAvailability::new(self)
     }
 }
 
@@ -618,6 +901,7 @@ impl AppState {
 mod tests {
     use super::*;
     use mondrian_core::types::AssetId;
+    use mondrian_core::Rational;
     use mondrian_timeline::{
         audio::{AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID},
         clip::Clip,
@@ -691,6 +975,85 @@ mod tests {
             let decoded = ProductAction::decode_external(&external)
                 .expect("valid external payload")
                 .expect("recognized Viewer product action");
+            assert_eq!(decoded, expected);
+        }
+    }
+
+    #[test]
+    fn external_codec_round_trips_every_project_product_action() {
+        let actions = [
+            ProductAction::Project(ProjectProductAction::CreateWithSettings(
+                ProjectCreateWithSettingsPayload {
+                    project_file: PathBuf::from("edit.mdp"),
+                    name: "Edit".to_owned(),
+                    sequence_settings: SequenceSettings::default(),
+                    color_environment: ProjectColorEnvironment::default(),
+                    project_settings: ProjectSettings::default(),
+                },
+            )),
+            ProductAction::Project(ProjectProductAction::UpdateNewSequenceDefaults(
+                ProjectUpdateNewSequenceDefaultsPayload { settings: SequenceSettings::default() },
+            )),
+            ProductAction::Project(ProjectProductAction::UpdateColorEnvironment(
+                ProjectUpdateColorEnvironmentPayload {
+                    color_environment: ProjectColorEnvironment::default(),
+                },
+            )),
+            ProductAction::Project(ProjectProductAction::RecoverFromAutosave(
+                ProjectRecoverFromAutosavePayload {
+                    candidate: CrashRecoveryCandidate {
+                        project_id: mondrian_core::ProjectId::new(),
+                        runtime_root: PathBuf::from("runtime"),
+                        project_file: PathBuf::from("edit.mdp"),
+                        autosave_file: PathBuf::from("autosave.mdp"),
+                        author_generation: 4,
+                        asset_library_revision: 3,
+                        document_revision: 2,
+                        archive_sha256: "a".repeat(64),
+                        saved_at_unix_ms: 1,
+                        total_snapshots: 1,
+                    },
+                },
+            )),
+        ];
+
+        for expected in actions {
+            let decoded = ProductAction::decode_external(&expected.clone().into_external_action())
+                .expect("valid external payload")
+                .expect("recognized Project product action");
+            assert_eq!(decoded, expected);
+        }
+    }
+
+    #[test]
+    fn external_codec_round_trips_every_sequence_product_action() {
+        let sequence_id = SequenceId::new();
+        let actions = [
+            ProductAction::Sequence(SequenceProductAction::ReturnToParent),
+            ProductAction::Sequence(SequenceProductAction::SetActiveDefault),
+            ProductAction::Sequence(SequenceProductAction::New),
+            ProductAction::Sequence(SequenceProductAction::SwitchActive(SequenceTargetPayload {
+                sequence_id,
+            })),
+            ProductAction::Sequence(SequenceProductAction::Duplicate(SequenceTargetPayload {
+                sequence_id,
+            })),
+            ProductAction::Sequence(SequenceProductAction::Delete(SequenceTargetPayload {
+                sequence_id,
+            })),
+            ProductAction::Sequence(SequenceProductAction::UpdateSettings(Box::new(
+                SequenceUpdateSettingsPayload {
+                    sequence_id,
+                    name: "Updated".to_owned(),
+                    settings: SequenceSettings::default(),
+                },
+            ))),
+        ];
+
+        for expected in actions {
+            let decoded = ProductAction::decode_external(&expected.clone().into_external_action())
+                .expect("valid external payload")
+                .expect("recognized Sequence product action");
             assert_eq!(decoded, expected);
         }
     }
@@ -896,6 +1259,35 @@ mod tests {
         let error = ProductAction::decode_external(&malformed_viewer)
             .expect_err("recognized malformed Viewer payload fails closed");
         assert_eq!(error.dispatch_step_id(), "viewer_action.set_clip_transform");
+
+        for (namespace, name, step_id) in [
+            (
+                PROJECT_NAMESPACE,
+                PROJECT_CREATE_WITH_SETTINGS,
+                "project_action.create_with_settings",
+            ),
+            (SEQUENCE_NAMESPACE, SEQUENCE_NEW, "sequence_action.new"),
+        ] {
+            let malformed = Action::Custom {
+                namespace: namespace.to_owned(),
+                name: name.to_owned(),
+                payload: serde_json::json!({}),
+            };
+            let error = ProductAction::decode_external(&malformed)
+                .expect_err("recognized malformed product payload fails closed");
+            assert_eq!(error.dispatch_step_id(), step_id);
+        }
+
+        for namespace in [PROJECT_NAMESPACE, SEQUENCE_NAMESPACE] {
+            let unknown = Action::Custom {
+                namespace: namespace.to_owned(),
+                name: "plugin_extension".to_owned(),
+                payload: serde_json::Value::Null,
+            };
+            assert!(ProductAction::decode_external(&unknown)
+                .expect("unknown product name remains available to another Adapter")
+                .is_none());
+        }
     }
 
     #[test]
@@ -906,9 +1298,12 @@ mod tests {
             Clip::new(AssetId::new(), tt(10, time_base), tt(20, time_base)).expect("valid clip");
         let clip_id = clip.id;
         let track_id = sequence.video_tracks[0].id;
+        let audio_track_id = sequence.audio_tracks[0].id;
         sequence.video_tracks[0].add_clip(clip).expect("add clip");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
 
-        let projection = ProductActionAvailability::from_sequence(Some(&sequence));
+        let projection = state.product_action_availability();
         assert!(
             projection.allows(&ProductAction::Timeline(TimelineProductAction::SelectClip(
                 TimelineSelectClipPayload {
@@ -930,7 +1325,7 @@ mod tests {
         assert!(
             !projection.allows(&ProductAction::Timeline(TimelineProductAction::MoveClip(
                 TimelineMoveClipPayload {
-                    target_track_id: sequence.audio_tracks[0].id,
+                    target_track_id: audio_track_id,
                     is_video_track: false,
                     clip_id,
                     frame: 12,
@@ -985,8 +1380,8 @@ mod tests {
             })
         )));
 
-        sequence.video_tracks[0].is_locked = true;
-        let locked = ProductActionAvailability::from_sequence(Some(&sequence));
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked = true;
+        let locked = state.product_action_availability();
         assert!(
             !locked.allows(&ProductAction::Timeline(TimelineProductAction::MoveClip(
                 TimelineMoveClipPayload {
@@ -1025,8 +1420,9 @@ mod tests {
             )))
         );
 
+        let empty = AppState::new();
         assert!(
-            !ProductActionAvailability::default().allows(&ProductAction::Timeline(
+            !empty.product_action_availability().allows(&ProductAction::Timeline(
                 TimelineProductAction::Seek(TimelineSeekPayload {
                     frame: 0,
                     source: TimelineSeekSource::Settled
@@ -1034,11 +1430,115 @@ mod tests {
             ))
         );
         assert!(
-            !ProductActionAvailability::default().allows(&ProductAction::Viewer(
+            !empty.product_action_availability().allows(&ProductAction::Viewer(
                 ViewerProductAction::SetPreviewResolutionScale(
                     ViewerSetPreviewResolutionScalePayload { scale: 0.25 }
                 )
             ))
         );
+    }
+
+    #[test]
+    fn product_availability_uses_authoritative_project_and_sequence_targets() {
+        let mut state = AppState::new();
+        let first = Sequence::new("First");
+        let first_id = first.id;
+        state.test_set_sequence(Some(first));
+
+        let create = ProductAction::Project(ProjectProductAction::CreateWithSettings(
+            ProjectCreateWithSettingsPayload {
+                project_file: PathBuf::from("edit.mdp"),
+                name: "Edit".to_owned(),
+                sequence_settings: SequenceSettings::default(),
+                color_environment: ProjectColorEnvironment::default(),
+                project_settings: ProjectSettings::default(),
+            },
+        ));
+        assert!(state.product_action_availability().allows(&create));
+        let empty_create = ProductAction::Project(ProjectProductAction::CreateWithSettings(
+            ProjectCreateWithSettingsPayload {
+                project_file: PathBuf::new(),
+                name: "Edit".to_owned(),
+                sequence_settings: SequenceSettings::default(),
+                color_environment: ProjectColorEnvironment::default(),
+                project_settings: ProjectSettings::default(),
+            },
+        ));
+        assert!(!state.product_action_availability().allows(&empty_create));
+
+        let unchanged_defaults =
+            ProductAction::Project(ProjectProductAction::UpdateNewSequenceDefaults(
+                ProjectUpdateNewSequenceDefaultsPayload { settings: SequenceSettings::default() },
+            ));
+        assert!(!state.product_action_availability().allows(&unchanged_defaults));
+        let mut changed_settings = SequenceSettings::default();
+        changed_settings.preview.resolution_scale = 0.25;
+        let changed_defaults =
+            ProductAction::Project(ProjectProductAction::UpdateNewSequenceDefaults(
+                ProjectUpdateNewSequenceDefaultsPayload { settings: changed_settings },
+            ));
+        assert!(state.product_action_availability().allows(&changed_defaults));
+
+        assert!(state
+            .product_action_availability()
+            .allows(&ProductAction::Sequence(SequenceProductAction::New)));
+        let second_id = state.new_sequence("Second").expect("new sequence");
+        let first_target = SequenceTargetPayload { sequence_id: first_id };
+        let second_target = SequenceTargetPayload { sequence_id: second_id };
+        assert!(
+            state.product_action_availability().allows(&ProductAction::Sequence(
+                SequenceProductAction::SwitchActive(first_target)
+            ))
+        );
+        assert!(
+            !state.product_action_availability().allows(&ProductAction::Sequence(
+                SequenceProductAction::SwitchActive(second_target)
+            ))
+        );
+        assert!(
+            !state.product_action_availability().allows(&ProductAction::Sequence(
+                SequenceProductAction::SwitchActive(SequenceTargetPayload {
+                    sequence_id: SequenceId::new(),
+                })
+            ))
+        );
+        assert!(
+            state.product_action_availability().allows(&ProductAction::Sequence(
+                SequenceProductAction::Duplicate(first_target)
+            ))
+        );
+        assert!(
+            state.product_action_availability().allows(&ProductAction::Sequence(
+                SequenceProductAction::Delete(first_target)
+            ))
+        );
+        assert!(
+            state.product_action_availability().allows(&ProductAction::Sequence(
+                SequenceProductAction::SetActiveDefault
+            ))
+        );
+        assert!(
+            !state.product_action_availability().allows(&ProductAction::Sequence(
+                SequenceProductAction::ReturnToParent
+            ))
+        );
+
+        let second = state.sequence_by_id(second_id).expect("second sequence");
+        let unchanged = ProductAction::Sequence(SequenceProductAction::UpdateSettings(Box::new(
+            SequenceUpdateSettingsPayload {
+                sequence_id: second_id,
+                name: second.name.clone(),
+                settings: second.settings.clone(),
+            },
+        )));
+        assert!(!state.product_action_availability().allows(&unchanged));
+        let changed = ProductAction::Sequence(SequenceProductAction::UpdateSettings(Box::new(
+            SequenceUpdateSettingsPayload {
+                sequence_id: second_id,
+                name: "Renamed".to_owned(),
+                settings: second.settings.clone(),
+            },
+        )));
+        assert!(state.product_action_availability().allows(&changed));
     }
 }

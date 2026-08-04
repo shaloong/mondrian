@@ -8,8 +8,10 @@ use crate::app::exporting::TimelineExportRequest;
 use crate::app::media_asset_mutation::MediaAssetMutationKind;
 use crate::app::preview_quality::normalize_preview_resolution_scale;
 use crate::app::product_action::{
-    ProductAction, TimelineClipSelectionModePayload, TimelineProductAction,
-    TimelineTrimPayloadEdge, ViewerProductAction, ViewerSetClipTransformPayload,
+    ProductAction, ProjectCreateWithSettingsPayload, ProjectProductAction,
+    ProjectRecoverFromAutosavePayload, SequenceProductAction, SequenceUpdateSettingsPayload,
+    TimelineClipSelectionModePayload, TimelineProductAction, TimelineTrimPayloadEdge,
+    ViewerProductAction, ViewerSetClipTransformPayload,
 };
 #[cfg(test)]
 use crate::app::product_action::{TimelineMoveClipPayload, TimelineSelectClipPayload};
@@ -34,12 +36,9 @@ use crate::app::ui_actions::{
     InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
     InspectorSetClipPropertyPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
-    InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
-    ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
-    ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
-    TimelineAddTrackKind, TimelineAddTrackPayload, TimelineCreateCrossDissolvePayload,
-    TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineInsertAssetPayload,
-    TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
+    InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
+    TimelineCreateCrossDissolvePayload, TimelineDropAssetPayload, TimelineInOutPointPayloadKind,
+    TimelineInsertAssetPayload, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
     TimelinePrecomposeSelectionPayload, TimelineSelectVideoTransitionPayload,
     TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
     TimelineSetTrackControlPayload, TimelineSetTrackTargetingPayload,
@@ -56,11 +55,7 @@ use crate::app::ui_actions::{
     INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, INSPECTOR_SET_CLIP_ENABLED,
     INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_PROPERTY, INSPECTOR_SET_CLIP_TINT,
     INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
-    INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
-    PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_UPDATE_COLOR_ENVIRONMENT,
-    PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS, SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE,
-    SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE,
-    SEQUENCE_UPDATE_SETTINGS, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
+    INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
     TIMELINE_CREATE_BASIC_TITLE, TIMELINE_CREATE_CROSS_DISSOLVE, TIMELINE_DROP_ASSET,
     TIMELINE_EXTRACT_RANGE, TIMELINE_INSERT_ASSET, TIMELINE_LIFT_RANGE,
     TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
@@ -266,13 +261,6 @@ impl AppState {
             Action::Custom { namespace, name, payload } if namespace == EXPORT_NAMESPACE => {
                 self.dispatch_export_ui_action(&name, payload)
             }
-            Action::Custom { namespace, name, payload } if namespace == PROJECT_NAMESPACE => {
-                self.dispatch_project_ui_action(&name, payload)
-            }
-            Action::Custom { namespace, name, payload } if namespace == SEQUENCE_NAMESPACE => {
-                self.dispatch_sequence_ui_action(&name, payload)
-            }
-
             unsupported => Err(MondrianError::WorkflowStepFailed {
                 step_id: "dispatch_action".to_owned(),
                 reason: format!(
@@ -1218,6 +1206,8 @@ impl AppState {
             ProductAction::Timeline(action) => self.dispatch_timeline_product_action(action),
             ProductAction::Audio(action) => self.dispatch_audio_product_action(action),
             ProductAction::Viewer(action) => self.dispatch_viewer_product_action(action),
+            ProductAction::Project(action) => self.dispatch_project_product_action(action),
+            ProductAction::Sequence(action) => self.dispatch_sequence_product_action(action),
         }
     }
 
@@ -1850,102 +1840,60 @@ impl AppState {
         }
     }
 
-    fn dispatch_project_ui_action(&mut self, name: &str, payload: serde_json::Value) -> Result<()> {
-        match name {
-            PROJECT_CREATE_WITH_SETTINGS => {
-                let payload = parse_ui_payload::<ProjectCreateWithSettingsPayload>(
-                    "project_ui_action",
-                    name,
-                    payload,
-                )?;
+    fn dispatch_project_product_action(&mut self, action: ProjectProductAction) -> Result<()> {
+        match action {
+            ProjectProductAction::CreateWithSettings(payload) => {
                 self.create_project_from_ui(payload)
             }
-            PROJECT_RECOVER_FROM_AUTOSAVE => {
-                let payload = parse_ui_payload::<ProjectRecoverFromAutosavePayload>(
-                    "project_ui_action",
-                    name,
-                    payload,
-                )?;
+            ProjectProductAction::RecoverFromAutosave(payload) => {
                 self.recover_project_from_autosave_ui(payload)
             }
-            PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS => {
-                let payload = parse_ui_payload::<ProjectUpdateNewSequenceDefaultsPayload>(
-                    "project_ui_action",
-                    name,
-                    payload,
-                )?;
+            ProjectProductAction::UpdateNewSequenceDefaults(payload) => {
                 self.update_new_sequence_defaults(payload.settings)
             }
-            PROJECT_UPDATE_COLOR_ENVIRONMENT => {
-                let payload = parse_ui_payload::<ProjectUpdateColorEnvironmentPayload>(
-                    "project_ui_action",
-                    name,
-                    payload,
-                )?;
+            ProjectProductAction::UpdateColorEnvironment(payload) => {
                 self.update_project_color_environment(payload.color_environment)
             }
-            _ => Err(unknown_ui_action_error("project_ui_action", name)),
         }
     }
 
-    fn dispatch_sequence_ui_action(
-        &mut self,
-        name: &str,
-        payload: serde_json::Value,
-    ) -> Result<()> {
-        match name {
-            SEQUENCE_NEW => {
+    fn dispatch_sequence_product_action(&mut self, action: SequenceProductAction) -> Result<()> {
+        match action {
+            SequenceProductAction::New => {
                 let next = self.export_sequences_snapshot().len() + 1;
-                self.new_sequence(&format!("Sequence {next}"));
-                Ok(())
+                self.new_sequence(&format!("Sequence {next}")).map(|_| ())
             }
-            SEQUENCE_RETURN_TO_PARENT => {
-                self.return_to_parent_sequence()?;
-                Ok(())
-            }
-            SEQUENCE_SET_ACTIVE_DEFAULT => {
+            SequenceProductAction::ReturnToParent => require_action_executed(
+                self.return_to_parent_sequence()?,
+                "return_to_parent_sequence",
+                "当前不在嵌套序列中",
+            ),
+            SequenceProductAction::SetActiveDefault => {
                 let sequence_id =
                     self.active_sequence_id().ok_or_else(|| MondrianError::WorkflowStepFailed {
-                        step_id: "sequence_ui_action".to_owned(),
+                        step_id: "set_default_sequence".to_owned(),
                         reason: "当前没有活动序列".to_owned(),
                     })?;
                 self.set_default_sequence(sequence_id)
             }
-            SEQUENCE_SWITCH_ACTIVE => {
-                let payload =
-                    parse_ui_payload::<SequenceTargetPayload>("sequence_ui_action", name, payload)?;
+            SequenceProductAction::SwitchActive(payload) => {
                 self.switch_active_sequence(payload.sequence_id)
             }
-            SEQUENCE_DUPLICATE => {
-                let payload =
-                    parse_ui_payload::<SequenceTargetPayload>("sequence_ui_action", name, payload)?;
+            SequenceProductAction::Duplicate(payload) => {
                 let source = self.sequence_by_id(payload.sequence_id).ok_or_else(|| {
                     MondrianError::WorkflowStepFailed {
-                        step_id: "sequence_ui_action".to_owned(),
+                        step_id: "duplicate_sequence".to_owned(),
                         reason: format!("序列不存在: {}", payload.sequence_id),
                     }
                 })?;
                 let name = format!("{} Copy", source.name);
                 self.duplicate_sequence(payload.sequence_id, name).map(|_| ())
             }
-            SEQUENCE_DELETE => {
-                let payload =
-                    parse_ui_payload::<SequenceTargetPayload>("sequence_ui_action", name, payload)?;
-                self.delete_sequence(payload.sequence_id)
+            SequenceProductAction::Delete(payload) => self.delete_sequence(payload.sequence_id),
+            SequenceProductAction::UpdateSettings(payload) => {
+                let SequenceUpdateSettingsPayload { sequence_id, name, settings } = *payload;
+                self.update_sequence_identity_and_settings(sequence_id, name, settings)
             }
-            SEQUENCE_UPDATE_SETTINGS => {
-                let payload = parse_ui_payload::<SequenceUpdateSettingsPayload>(
-                    "sequence_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.update_sequence_identity_and_settings(
-                    payload.sequence_id,
-                    payload.name,
-                    payload.settings,
-                )
-            }
-            _ => Err(unknown_ui_action_error("sequence_ui_action", name)),
         }
     }
 
@@ -2529,7 +2477,7 @@ impl AppState {
             });
         }
 
-        self.ensure_clip_track_unlocked(STEP_ID, payload.clip_id)?;
+        self.ensure_video_clip_track_unlocked(STEP_ID, payload.clip_id)?;
         let Some(sequence_id) = self.active_sequence_id() else {
             return Err(missing_sequence_error(STEP_ID));
         };
@@ -2790,6 +2738,27 @@ impl AppState {
         let Some((track_id, _, is_locked)) = find_clip_track_lock(seq, clip_id) else {
             return Err(missing_clip_error(step_id, clip_id));
         };
+        if is_locked {
+            return Err(MondrianError::TrackLocked { track_id: track_id.to_string() });
+        }
+        Ok(())
+    }
+
+    fn ensure_video_clip_track_unlocked(
+        &self,
+        step_id: &'static str,
+        clip_id: ClipId,
+    ) -> Result<()> {
+        let Some(sequence) = self.active_sequence() else {
+            return Err(missing_sequence_error(step_id));
+        };
+        let Some((track_id, is_video_track, is_locked)) = find_clip_track_lock(sequence, clip_id)
+        else {
+            return Err(missing_clip_error(step_id, clip_id));
+        };
+        if !is_video_track {
+            return Err(clip_media_type_mismatch_error(step_id, clip_id));
+        }
         if is_locked {
             return Err(MondrianError::TrackLocked { track_id: track_id.to_string() });
         }
@@ -3463,8 +3432,6 @@ mod tests {
             (EFFECTS_NAMESPACE, "effects_ui_action.unknown"),
             (ASSETS_NAMESPACE, "assets_ui_action.unknown"),
             (EXPORT_NAMESPACE, "export_ui_action.unknown"),
-            (PROJECT_NAMESPACE, "project_ui_action.unknown"),
-            (SEQUENCE_NAMESPACE, "sequence_ui_action.unknown"),
         ] {
             let mut state = AppState::new();
             let err = state
@@ -3502,6 +3469,39 @@ mod tests {
                 assert!(reason.contains("recognized product action"));
             }
             other => panic!("expected product decode workflow error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_project_and_sequence_product_actions_fail_closed_on_malformed_payloads() {
+        for (namespace, name, expected_step) in [
+            (
+                crate::app::product_action::PROJECT_NAMESPACE,
+                crate::app::product_action::PROJECT_CREATE_WITH_SETTINGS,
+                "project_action.create_with_settings",
+            ),
+            (
+                crate::app::product_action::SEQUENCE_NAMESPACE,
+                crate::app::product_action::SEQUENCE_NEW,
+                "sequence_action.new",
+            ),
+        ] {
+            let mut state = AppState::new();
+            let error = state
+                .dispatch_action(mondrian_editor_state::Action::Custom {
+                    namespace: namespace.to_owned(),
+                    name: name.to_owned(),
+                    payload: serde_json::json!({}),
+                })
+                .expect_err("recognized malformed product payload must fail closed");
+
+            match error {
+                MondrianError::WorkflowStepFailed { step_id, reason } => {
+                    assert_eq!(step_id, expected_step);
+                    assert!(reason.contains("invalid payload"));
+                }
+                other => panic!("expected malformed product payload failure, got {other:?}"),
+            }
         }
     }
 
@@ -3790,7 +3790,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_sequence_ui_returns_to_parent_sequence() {
+    fn dispatch_sequence_product_action_returns_to_parent_sequence() {
         let mut state = AppState::new();
         let child = Sequence::new("child");
         let child_id = child.id;
@@ -3814,7 +3814,20 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_sequence_ui_sets_active_sequence_as_default() {
+    fn sequence_return_to_parent_without_parent_is_not_reported_as_success() {
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(Sequence::new("root")));
+
+        let error = state
+            .dispatch_action(sequence_return_to_parent_action())
+            .expect_err("root Sequence has no parent transition to execute");
+
+        assert!(matches!(error, MondrianError::ActionNotExecuted { .. }));
+        assert!(state.test_navigation_stack().is_empty());
+    }
+
+    #[test]
+    fn dispatch_sequence_product_action_sets_active_sequence_as_default() {
         let mut state = AppState::new();
         let sequence = Sequence::new("default candidate");
         let sequence_id = sequence.id;
@@ -3830,7 +3843,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_sequence_ui_creates_new_sequence() {
+    fn dispatch_sequence_product_action_creates_new_sequence() {
         let mut state = AppState::new();
         state.test_set_sequence(Some(Sequence::new("Existing")));
 
@@ -3848,7 +3861,23 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_sequence_ui_switches_active_sequence() {
+    fn sequence_new_without_authoring_session_returns_the_real_failure() {
+        let mut state = AppState::new();
+
+        let error = state
+            .dispatch_action(sequence_new_action())
+            .expect_err("Sequence creation requires an Authoring Session");
+
+        assert!(
+            matches!(error, MondrianError::WorkflowStepFailed { .. }),
+            "{error:?}"
+        );
+        assert!(state.sequences().is_empty());
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_sequence_product_action_switches_active_sequence() {
         let mut state = AppState::new();
         let first = Sequence::new("first");
         let second = Sequence::new("second");
@@ -3872,7 +3901,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_sequence_ui_duplicates_sequence_and_activates_copy() {
+    fn dispatch_sequence_product_action_duplicates_sequence_and_activates_copy() {
         let mut state = AppState::new();
         let source = Sequence::new("source");
         let source_id = source.id;
@@ -3895,7 +3924,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_sequence_ui_deletes_sequence_and_keeps_fallback_active() {
+    fn dispatch_sequence_product_action_deletes_sequence_and_keeps_fallback_active() {
         let mut state = AppState::new();
         let first = Sequence::new("first");
         let first_id = first.id;
@@ -3923,7 +3952,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_sequence_ui_updates_settings_atomically() {
+    fn dispatch_sequence_product_action_updates_settings_atomically() {
         let mut state = AppState::new();
         let sequence = Sequence::new("offline");
         let sequence_id = sequence.id;
@@ -3963,7 +3992,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_sequence_ui_rejects_invalid_settings_without_renaming() {
+    fn dispatch_sequence_product_action_rejects_invalid_settings_without_renaming() {
         let mut state = AppState::new();
         let sequence = Sequence::new("original");
         let sequence_id = sequence.id;
@@ -3993,7 +4022,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_sequence_ui_rejects_custom_ocio_working_space_mismatch_atomically() {
+    fn dispatch_sequence_product_action_rejects_custom_ocio_working_space_mismatch_atomically() {
         let mut state = AppState::new();
         let sequence = Sequence::new("original");
         let sequence_id = sequence.id;
@@ -4024,7 +4053,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_sequence_ui_rejects_standard_working_space_mismatch_atomically() {
+    fn dispatch_sequence_product_action_rejects_standard_working_space_mismatch_atomically() {
         let mut state = AppState::new();
         let sequence = Sequence::new("original");
         let sequence_id = sequence.id;
@@ -4058,7 +4087,7 @@ mod tests {
         let defaults = state.test_new_sequence_defaults_mut();
         defaults.color.working_color_space = WorkingColorSpace::AcesCg;
 
-        state.new_sequence("Custom Working");
+        state.new_sequence("Custom Working").expect("new sequence");
 
         assert_eq!(
             state
@@ -6300,7 +6329,7 @@ mod tests {
             ))
             .expect("update defaults");
         assert_eq!(state.sequences()[0].settings, existing_settings);
-        state.new_sequence("Created From Defaults");
+        state.new_sequence("Created From Defaults").expect("new sequence");
         assert_eq!(
             state.active_sequence().expect("new active sequence").settings,
             defaults
@@ -7475,6 +7504,34 @@ mod tests {
                 }),
             ))
             .expect_err("non-finite monitor gesture is not an author mutation");
+
+        assert!(matches!(error, MondrianError::WorkflowStepFailed { .. }));
+        assert_eq!(state.active_sequence().expect("sequence"), &before);
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn viewer_transform_rejects_audio_track_clip_before_author_state_changes() {
+        let (mut state, _, _) = state_with_two_video_tracks();
+        let time_base = state.active_sequence().expect("sequence").time_base();
+        let audio_clip =
+            Clip::new(AssetId::new(), TimelineTime::ZERO, tt(10, time_base)).expect("audio clip");
+        let audio_clip_id = audio_clip.id;
+        state.active_sequence_mut_uncommitted().expect("sequence").audio_tracks[0]
+            .add_clip(audio_clip)
+            .expect("add audio clip");
+        let before = state.active_sequence().expect("sequence").clone();
+
+        let error = state
+            .dispatch_product_action(ProductAction::Viewer(
+                ViewerProductAction::SetClipTransform(ViewerSetClipTransformPayload {
+                    clip_id: audio_clip_id,
+                    position: Some(ViewerTransformPositionPayload { x: 10.0, y: 20.0 }),
+                    scale_percent: None,
+                    rotation_degrees: None,
+                }),
+            ))
+            .expect_err("Viewer transform is defined only for video Track Clips");
 
         assert!(matches!(error, MondrianError::WorkflowStepFailed { .. }));
         assert_eq!(state.active_sequence().expect("sequence"), &before);

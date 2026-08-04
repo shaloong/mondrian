@@ -10,17 +10,14 @@ use mondrian_editor_state::Action;
 use crate::app::product_action::ProductAction;
 use crate::app::ui_actions::{
     AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveSelectionPayload,
-    ProjectCreateWithSettingsPayload, TimelineCreateCrossDissolvePayload,
-    TimelineInsertAssetPayload, TimelineMoveTrackPayload, TimelineSelectVideoTransitionPayload,
-    TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
-    TimelineSetTrackControlPayload, TimelineSetTrackTargetingPayload,
-    TimelineSetVideoTransitionRangePayload, TimelineTrimPayloadEdge,
-    TimelineTrimSelectedClipsToPlayheadPayload, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
-    APP_SHELL_PROJECT_SETTINGS, APP_SHELL_QUIT, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
-    APP_SHELL_SEQUENCE_SETTINGS, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
-    ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
-    SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE, SEQUENCE_RETURN_TO_PARENT,
-    SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE, TIMELINE_ADD_TRACK,
+    TimelineCreateCrossDissolvePayload, TimelineInsertAssetPayload, TimelineMoveTrackPayload,
+    TimelineSelectVideoTransitionPayload, TimelineSetInOutPointPayload,
+    TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
+    TimelineSetTrackTargetingPayload, TimelineSetVideoTransitionRangePayload,
+    TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
+    APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_PROJECT_SETTINGS, APP_SHELL_QUIT,
+    APP_SHELL_SAVE_PROJECT_AS_DIALOG, APP_SHELL_SEQUENCE_SETTINGS, ASSETS_DELETE_SELECTION,
+    ASSETS_IMPORT_FILES, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE, TIMELINE_ADD_TRACK,
     TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_CREATE_BASIC_TITLE, TIMELINE_CREATE_CROSS_DISSOLVE,
     TIMELINE_EXTRACT_RANGE, TIMELINE_INSERT_ASSET, TIMELINE_LIFT_RANGE,
     TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
@@ -113,12 +110,6 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_SAVE_PROJECT_AS_DIALOG =>
         {
             state.active_sequence().is_some()
-        }
-        Action::Custom { namespace, name, payload }
-            if namespace == PROJECT_NAMESPACE && name == PROJECT_CREATE_WITH_SETTINGS =>
-        {
-            parse_payload::<ProjectCreateWithSettingsPayload>(payload)
-                .is_some_and(|payload| !payload.project_file.as_os_str().is_empty())
         }
         Action::Custom { namespace, name, payload }
             if namespace == ASSETS_NAMESPACE && name == ASSETS_IMPORT_FILES =>
@@ -256,35 +247,6 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         {
             parse_payload::<TimelineInsertAssetPayload>(payload)
                 .is_some_and(|payload| timeline_insert_scope_is_available(state, &payload))
-        }
-        Action::Custom { namespace, name, .. }
-            if namespace == SEQUENCE_NAMESPACE && name == SEQUENCE_RETURN_TO_PARENT =>
-        {
-            state
-                .authoring
-                .as_ref()
-                .is_some_and(|session| !session.navigation_stack().is_empty())
-        }
-        Action::Custom { namespace, name, .. }
-            if namespace == SEQUENCE_NAMESPACE && name == SEQUENCE_SET_ACTIVE_DEFAULT =>
-        {
-            state.active_sequence_id().is_some()
-                && state.default_sequence_id() != state.active_sequence_id()
-        }
-        Action::Custom { namespace, name, .. }
-            if namespace == SEQUENCE_NAMESPACE && name == SEQUENCE_DUPLICATE =>
-        {
-            state.active_sequence_id().is_some()
-        }
-        Action::Custom { namespace, name, .. }
-            if namespace == SEQUENCE_NAMESPACE && name == SEQUENCE_DELETE =>
-        {
-            state.active_sequence_id().is_some() && state.export_sequences_snapshot().len() > 1
-        }
-        Action::Custom { namespace, name, .. }
-            if namespace == SEQUENCE_NAMESPACE && name == SEQUENCE_SWITCH_ACTIVE =>
-        {
-            state.active_sequence_id().is_some()
         }
         _ => true,
     }
@@ -623,7 +585,8 @@ mod tests {
     use crate::app::ui_actions::{
         app_shell_project_settings_action, assets_delete_selection_action,
         assets_import_files_action, assets_move_selection_action,
-        project_create_with_settings_action, timeline_add_track_action,
+        project_create_with_settings_action, sequence_new_action, sequence_switch_active_action,
+        sequence_update_settings_action, timeline_add_track_action,
         timeline_clear_in_out_points_action, timeline_extract_range_action,
         timeline_lift_range_action, timeline_move_clip_action, timeline_move_track_action,
         timeline_roll_selected_cut_to_playhead_action, timeline_seek_action,
@@ -633,13 +596,14 @@ mod tests {
         timeline_trim_selected_clips_to_playhead_action, viewer_set_clip_transform_action,
         viewer_set_preview_resolution_scale_action, AssetsDeleteSelectionPayload,
         AssetsImportFilesPayload, AssetsMoveSelectionPayload, ProjectCreateWithSettingsPayload,
-        TimelineAddTrackKind, TimelineAddTrackPayload, TimelineInOutPointPayloadKind,
-        TimelineMoveClipPayload, TimelineMoveTrackPayload, TimelineSelectClipPayload,
-        TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
-        TimelineSetTrackControlPayload, TimelineSetTrackTargetingPayload,
-        TimelineTrackControlPayloadKind, TimelineTrackTargetingControl, TimelineTrimClipsPayload,
-        TimelineTrimPayloadEdge, ViewerSetClipTransformPayload,
-        ViewerSetPreviewResolutionScalePayload, ViewerTransformPositionPayload,
+        SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineAddTrackKind,
+        TimelineAddTrackPayload, TimelineInOutPointPayloadKind, TimelineMoveClipPayload,
+        TimelineMoveTrackPayload, TimelineSelectClipPayload, TimelineSetInOutPointPayload,
+        TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
+        TimelineSetTrackTargetingPayload, TimelineTrackControlPayloadKind,
+        TimelineTrackTargetingControl, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+        ViewerSetClipTransformPayload, ViewerSetPreviewResolutionScalePayload,
+        ViewerTransformPositionPayload,
     };
     use crate::app::SelectedClipRef;
     use mondrian_core::types::{AssetId, ClipId, TrackId};
@@ -953,6 +917,43 @@ mod tests {
             rotation_degrees: None,
         });
         assert!(!app_state_action_enabled(&stale, &state));
+    }
+
+    #[test]
+    fn app_state_action_gate_uses_sequence_product_availability() {
+        let mut state = AppState::new();
+        assert!(!app_state_action_enabled(&sequence_new_action(), &state));
+
+        let first = Sequence::new("First");
+        let first_id = first.id;
+        state.test_set_sequence(Some(first));
+        assert!(app_state_action_enabled(&sequence_new_action(), &state));
+
+        let second_id = state.new_sequence("Second").expect("new sequence");
+        assert!(app_state_action_enabled(
+            &sequence_switch_active_action(SequenceTargetPayload { sequence_id: first_id }),
+            &state,
+        ));
+        assert!(!app_state_action_enabled(
+            &sequence_switch_active_action(SequenceTargetPayload { sequence_id: second_id }),
+            &state,
+        ));
+        assert!(!app_state_action_enabled(
+            &sequence_switch_active_action(SequenceTargetPayload {
+                sequence_id: mondrian_core::SequenceId::new(),
+            }),
+            &state,
+        ));
+
+        let sequence = state.sequence_by_id(second_id).expect("second sequence");
+        assert!(!app_state_action_enabled(
+            &sequence_update_settings_action(SequenceUpdateSettingsPayload {
+                sequence_id: second_id,
+                name: sequence.name.clone(),
+                settings: sequence.settings.clone(),
+            }),
+            &state,
+        ));
     }
 
     #[test]

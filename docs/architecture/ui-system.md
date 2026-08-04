@@ -416,10 +416,20 @@ The migrated Viewer slice carries authored preview-resolution changes and
 monitor-driven Clip transforms through `ViewerProductAction`. Transform intent
 addresses its canonical Clip by `ClipId`; it does not repeat Track identity or
 media-kind facts that the authoring Interface must resolve and validate. Empty
-or non-finite transform gestures fail before an author transaction, while an
-accepted multi-field gesture commits atomically with one Undo step. Canvas zoom
-is presentation state owned by the Window/Shell Adapter and deliberately
-remains outside the product algebra.
+or non-finite transform gestures and audio-Track Clip targets fail before an
+author transaction, while an accepted multi-field gesture commits atomically
+with one Undo step. Canvas zoom is presentation state owned by the Window/Shell
+Adapter and deliberately remains outside the product algebra.
+
+`ProjectProductAction` carries Project creation, durable recovery selection,
+future-Sequence defaults, and Project Color Environment replacement;
+`SequenceProductAction` carries navigation plus create/switch/duplicate/delete/
+settings authoring. The external payload is only intent. Recovery still enters
+the Recovery Module's lease-bound second verification, and Sequence mutation
+still enters the single `AuthoringSession`. In particular, Sequence creation
+returns its real transaction result and stable `SequenceId`; construction,
+transport-stop, or commit failure cannot be logged and then reported as a
+successful Action.
 
 `app_ui::audio_processor_rack` is the shared read-only Rack projection Module.
 It deduplicates Clip bindings by Processing Scope, consumes Timeline's binding
@@ -479,7 +489,7 @@ does not claim true peak, loudness, hold, decay, or broadcast conformance. Those
 presentation and standards layers must consume the same observation Interface
 rather than create another mixer graph.
 
-The Timeline production constructors likewise lower typed operations into the
+The migrated production constructors lower typed operations into the
 external envelope, and one App-owned codec is the only
 Implementation allowed to inspect their namespace, name, or JSON payload. A
 recognized name with an invalid payload fails closed before legacy routing; an
@@ -488,17 +498,19 @@ slices then matches the typed algebra and no longer repeats string or
 payload interpretation. This is a bounded migration, not a claim that every App
 Action already belongs to `ProductAction`.
 
-The migrated slices expose one read-only `ProductActionAvailability`. Its Track
-lock, Clip membership, media kind, placement range, and Sequence time-base facts
-are private; the stable UI Interface is only `allows(&ProductAction)`. Timeline,
-Audio, and Viewer controls therefore use the same admission Seam. Window and
-panel Adapters cannot reconstruct admission by traversing `AuthoringSession`,
-`Sequence`, `Track`, or `Clip`, and cannot observe playback or execution
-internals through this projection. Admission remains guidance: each App-owned
-authoring, monitoring, or transport Interface revalidates authoritative state
-at dispatch. Unmigrated custom Actions retain their current Adapters until an
-independently verifiable typed slice replaces them; this decision does not
-justify a parallel full action hierarchy.
+The migrated slices expose one borrowed, read-only
+`ProductActionAvailability`. Project/Sequence membership and navigation, Track
+lock, Clip membership/media kind, placement range, and Sequence time-base facts
+remain private; the stable UI Interface is only `allows(&ProductAction)`.
+Timeline, Audio, Viewer, Project, and Sequence controls therefore use the same
+admission Seam. The projection does not clone or index the author graph for each
+query. Window and panel Adapters cannot reconstruct admission by traversing
+`AuthoringSession`, `Sequence`, `Track`, or `Clip`, and cannot observe playback
+or execution internals through it. Admission remains guidance: each App-owned
+authoring, lifecycle, recovery, monitoring, or transport Interface revalidates
+authoritative state at dispatch. Unmigrated custom Actions retain their current
+Adapters until an independently verifiable typed slice replaces them; this
+decision does not justify a parallel full action hierarchy.
 
 Product Action constructors preserve the caller's complete intent, including
 invalid values needed for authoritative rejection; they never clamp a negative

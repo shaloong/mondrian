@@ -279,7 +279,7 @@ fn switching_sequences_preserves_independent_timelines() {
         .add_clip(Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip"))
         .expect("add clip");
 
-    state.new_sequence("second");
+    state.new_sequence("second").expect("new sequence");
     let second = state.active_sequence().expect("sequence should exist").id;
     let tb = state.active_sequence().expect("sequence should exist").time_base();
     state
@@ -348,7 +348,7 @@ fn delete_sequence_rejects_nested_references() {
     let parent_id = state.active_sequence().expect("parent").id;
     state.test_set_active_sequence(parent_id);
     state.test_set_default_sequence(parent_id);
-    state.new_sequence("child");
+    state.new_sequence("child").expect("new sequence");
     let child_id = state.active_sequence().expect("child").id;
     state.switch_active_sequence(parent_id).expect("switch parent");
     let tb = state.active_sequence().expect("parent").time_base();
