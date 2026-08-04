@@ -587,6 +587,14 @@ build; product startup must not depend on Cargo's test-only search path,
 Homebrew, or a developer-specific `PATH`.
 On Windows the sanitized gate retains only the staged directory and Windows
 system directories in `PATH`; the vcpkg build tree cannot heal an omitted DLL.
+Linux additionally resolves the recursive staged ELF graph after RPATH rewrite
+and rejects every non-baseline dependency whose canonical path escapes the
+package, so an installed build-host library cannot create a false pass. macOS
+builds the union dependency closure of Mondrian and both tools in one
+`dylibbundler` transaction, then checks the dependency edges of those three
+executables and every copied Framework image; each non-system edge must name an
+existing object below the App Bundle's `Contents/Frameworks`, with no residual
+Homebrew or unresolved `@rpath` edge.
 Linux release builds are pinned to the oldest supported Ubuntu/glibc baseline
 instead of `ubuntu-latest`, because a complete private dependency closure
 cannot make a binary compatible with an older glibc ABI. macOS declares its

@@ -318,11 +318,35 @@ jobs:
           for library in "$stage_dir"/lib/*.so*; do
             patchelf --set-rpath '$ORIGIN' "$library"
           done
+
+          # `ldd` reporting no missing objects is insufficient on the build
+          # host: it may silently satisfy an omitted private dependency from
+          # /usr/lib. Prove that every non-baseline object in the recursive
+          # closure resolves back into this staged package.
+          stage_root="$(realpath "$stage_dir")"
           for executable in "$stage_dir/mondrian" "$stage_dir/ffmpeg" "$stage_dir/ffprobe"; do
             if ldd "$executable" | grep -q 'not found'; then
               ldd "$executable"
               exit 1
             fi
+            while IFS= read -r dependency; do
+              [ -f "$dependency" ] || continue
+              resolved="$(realpath "$dependency")"
+              case "$resolved" in
+                "$stage_root"/*)
+                  continue
+                  ;;
+              esac
+              name="$(basename "$resolved")"
+              case "$name" in
+                ld-linux*|libc.so*|libm.so*|libdl.so*|libpthread.so*|librt.so*|libgcc_s.so*|libstdc++.so*)
+                  ;;
+                *)
+                  echo "Packaged Linux runtime resolved a private dependency from the host: $resolved"
+                  exit 1
+                  ;;
+              esac
+            done < <(lddtree -l "$executable" | sort -u)
           done
           "$stage_dir/ffmpeg" -hide_banner -version > "$stage_dir/MEDIA_RUNTIME_BUILD.txt"
           "$stage_dir/ffmpeg" -hide_banner -buildconf >> "$stage_dir/MEDIA_RUNTIME_BUILD.txt"
@@ -343,17 +367,48 @@ jobs:
           cp -L "$(command -v ffmpeg)" "$executable_dir/ffmpeg"
           cp -L "$(command -v ffprobe)" "$executable_dir/ffprobe"
           cp LICENSE "$stage_dir/LICENSE"
+          # One invocation is required: `-od` recreates the destination, so
+          # invoking it once per executable would leave only the final tool's
+          # dependency closure. Multiple `-x` inputs produce the union closure.
+          dylibbundler \
+            -od -b \
+            -x "$executable_dir/mondrian" \
+            -x "$executable_dir/ffmpeg" \
+            -x "$executable_dir/ffprobe" \
+            -d "$frameworks_dir" \
+            -p '@executable_path/../Frameworks/'
           for executable in "$executable_dir/mondrian" "$executable_dir/ffmpeg" "$executable_dir/ffprobe"; do
-            dylibbundler \
-              -od -b \
-              -x "$executable" \
-              -d "$frameworks_dir" \
-              -p '@executable_path/../Frameworks/'
             if otool -L "$executable" | grep -E '/(opt/homebrew|usr/local)/'; then
               echo "Packaged macOS executable still references Homebrew libraries: $executable"
               exit 1
             fi
           done
+          # Verify the complete rewritten graph, not only direct executable
+          # edges. A nested Homebrew or unresolved @rpath reference can appear
+          # healthy on the build host and fail on an end-user machine.
+          while IFS= read -r image; do
+            while IFS= read -r dependency; do
+              case "$dependency" in
+                /usr/lib/*|/System/Library/*)
+                  ;;
+                @executable_path/../Frameworks/*)
+                  relative="${dependency#@executable_path/../Frameworks/}"
+                  if [ ! -e "$frameworks_dir/$relative" ]; then
+                    echo "Packaged macOS runtime references a missing private dylib: $dependency from $image"
+                    exit 1
+                  fi
+                  ;;
+                *)
+                  echo "Packaged macOS runtime retains a non-system dependency: $dependency from $image"
+                  exit 1
+                  ;;
+              esac
+            done < <(otool -L "$image" | tail -n +2 | awk '{print $1}')
+          done < <(printf '%s\n' \
+            "$executable_dir/mondrian" \
+            "$executable_dir/ffmpeg" \
+            "$executable_dir/ffprobe"; \
+            find "$frameworks_dir" -type f -print)
           "$executable_dir/ffmpeg" -hide_banner -version > "$stage_dir/MEDIA_RUNTIME_BUILD.txt"
           "$executable_dir/ffmpeg" -hide_banner -buildconf >> "$stage_dir/MEDIA_RUNTIME_BUILD.txt"
           "$executable_dir/ffmpeg" -hide_banner -L > "$stage_dir/FFMPEG_LICENSE.txt"
