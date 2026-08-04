@@ -280,7 +280,13 @@ destination types.
 Disabled Clip or disabled Component Edit is absent from compilation. Persistent
 Track mute gates `PostMute` while preserving pre-mute taps. Solo is not stored
 on Track: an `AudioAuditionOverlay` selects a temporary closure without
-rewriting or exporting the canonical Program.
+rewriting or exporting the canonical Program. App owns that overlay for one
+open `AuthoringSessionId` and Sequence. Changing it rebuilds the root Playback
+Runtime at the authoritative transport anchor; a failed replacement restores
+the prior overlay. Recursive child Program Outputs always compile canonically,
+because parent Track identities have no meaning inside a nested Sequence.
+Paused playback clears its prepared source, while export, analysis, idle
+warmup, and other canonical consumers pass an empty overlay.
 
 ### Unified audio automation authoring
 
@@ -650,14 +656,20 @@ Nothing normalizes, clips, applies `tanh`, or inserts a limiter. A limiter,
 loudness target, dither, channel packager, or monitor calibration must be an
 explicit processor or downstream contract.
 
-Every successful Session block publishes fixed-size Program Output observation
-state after the final strip. A shared read-only `AudioMeterObserver` is obtained
-before callback ownership transfers and allows control/analysis threads to read
-an internally consistent owned `AudioMeterFrame`: exact Sequence sample range,
-a monotonic block serial, and per-channel finite sample peak, RMS,
-over-full-scale count, and non-finite count. Callback publication uses fixed
-atomic slots and allocates and locks nothing; snapshot allocation is confined
-to the reader. This is deliberately not labelled true peak or loudness: EBU
+Every prepared Track, Bus, and Program Output has one post-mute meter target.
+During a public render block the Session measures each target immediately after
+its strip, before liveness reuse may overwrite the scratch slot, but stages the
+result privately. Only complete success publishes the whole target bank under
+one block serial and one seqlock; a later node failure can therefore never
+expose a partially new graph. Hidden lookahead/entry priming does not enter the
+public bank. A shared read-only `AudioMeterObserver` is obtained before callback
+ownership transfers and allows control/analysis threads to read one internally
+consistent owned `AudioMeterFrame`: exact Sequence sample range, layout, stable
+target identity, and per-channel finite sample peak, RMS, over-full-scale count,
+and non-finite count. Callback publication uses fixed atomic slots and allocates
+and locks nothing; snapshot allocation is confined to the reader. A target
+absent from the compiled Signal Closure is absent from the bank rather than
+reported as false zero. This is deliberately not labelled true peak or loudness: EBU
 R128/ATSC A/85 filtering, windows, gating, channel weighting, oversampled true
 peak, hold/decay presentation, and offline normalization remain separate
 versioned observation or processing stages.
@@ -1080,8 +1092,11 @@ The automated suite must prove:
 - the optimized monotonic peak window matches an independent window-rescanning
   scalar reference across irregular block partitions, runtime SIMD gain
   application, and a non-zero fresh seek entry;
-- Program Output sample-peak/RMS observation preserves unclipped and non-finite
-  evidence without claiming loudness/true-peak conformance;
+- Track/Bus/Program Output sample-peak/RMS observation publishes one complete
+  block-atomic bank, preserves unclipped and non-finite evidence, and never
+  exposes hidden priming or claims loudness/true-peak conformance;
+- a root audition request retains only selected Track program sources, while
+  nested public outputs remain canonical independent Runtime instances;
 - timeline/audio crates compile and test independently;
 - app playback and export compile against the shared Runtime.
 - dense schedule lowering produces topological node slots, contiguous Route and

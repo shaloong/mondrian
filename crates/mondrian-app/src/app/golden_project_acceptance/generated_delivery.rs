@@ -905,6 +905,7 @@ fn render_program_audio_reference(
         state.asset_library_handle().context("Asset Library is absent")?,
         std::sync::Arc::clone(&state.audio_source_cache),
         state.execution_resource_decision().audio.runtime_grant,
+        mondrian_audio::AudioAuditionOverlay::default(),
         sample_rate,
         AudioChannelLayout::Stereo,
     )?;

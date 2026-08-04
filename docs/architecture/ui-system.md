@@ -395,6 +395,11 @@ canonical versioned instance at dispatch and then enters the same Rack
 transaction. This menu catalog is only a presentation catalog; persistent
 built-in, VST3, and CLAP identity remains the definition reference plus captured
 schema.
+The same closed algebra carries `SetTrackSolo`, but dispatch routes that intent
+to the App's open-Session monitoring Module rather than an author transaction.
+It never advances author generation, dirty state, or Undo/Redo. Runtime
+replacement is part of action success; failure rolls the monitoring intent
+back so the retained control cannot disagree with audible execution.
 
 `app_ui::audio_processor_rack` is the shared read-only Rack projection Module.
 It deduplicates Clip bindings by Processing Scope, consumes Timeline's binding
@@ -422,8 +427,14 @@ visible and editable.
 
 `app_ui::audio_mixer` projects audio Tracks in Timeline order, followed by
 authored Buses and Program Outputs, each with input trim, an honest static-or-
-automated fader state, Track mute where applicable, and both pre/post-fader Rack
-addresses. The Audio workspace owns a real `Mixer` panel whose Inspector is a
+automated fader state, persistent Track mute, transient Track solo, the latest
+complete post-mute sample-peak/RMS evidence, and both pre/post-fader Rack
+addresses. Meter projection reads one bank snapshot for the complete panel and
+matches stable Track/Bus/Program Output identities; a target outside the active
+compiled Signal Closure is shown as unexecuted, never synthetic zero. The Audio
+playback meter is projected only while transport is running, so a paused
+Session's last completed block is not presented as current signal. The Audio
+workspace owns a real `Mixer` panel whose Inspector is a
 secondary tab; panel focus and persisted layout use the stable `PanelKind`
 identity. The Mixer also projects existing outgoing Routes and incoming Route
 counts. A Bus creation action allocates identity only during dispatch and may
@@ -443,9 +454,10 @@ many connected Routes will be removed and uses Timeline's `Disconnect` policy
 rather than issuing N UI edits.
 Bus post-fader UI does not invent a mute stage: although the shared author port
 enum remains uniform, the product presents only real pre/post-fader choices.
-The current surface deliberately omits fake meter bars and transient solo until
-their execution evidence or session overlay is connected. Adding those
-features must extend this projection rather than create another mixer graph.
+Meter display is explicitly sample peak/RMS with clip and non-finite counts; it
+does not claim true peak, loudness, hold, decay, or broadcast conformance. Those
+presentation and standards layers must consume the same observation Interface
+rather than create another mixer graph.
 
 The Timeline production constructors likewise lower typed operations into the
 external envelope, and one App-owned codec is the only

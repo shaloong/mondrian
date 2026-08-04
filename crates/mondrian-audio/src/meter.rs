@@ -1,11 +1,22 @@
-//! Session-local, allocation-free Program Output block metering.
+//! Session-local, allocation-free Channel Strip metering.
 
-use mondrian_core::AudioChannelLayout;
+use mondrian_core::{AudioChannelLayout, MixBusId, ProgramOutputId, TrackId};
 use std::hint::spin_loop;
 use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-/// Per-channel facts measured from one completed Program Output block.
+/// Stable post-mute Channel Strip observed by one meter lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AudioMeterTarget {
+    /// One Sequence Track mixer channel.
+    Track(TrackId),
+    /// One Sequence Mix Bus.
+    Bus(MixBusId),
+    /// One public Program Output.
+    ProgramOutput(ProgramOutputId),
+}
+
+/// Per-channel facts measured from one completed block.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AudioChannelMeterReading {
     /// Maximum finite absolute sample value. Values above one are retained.
@@ -29,8 +40,18 @@ impl Default for AudioChannelMeterReading {
     }
 }
 
-/// Owned observation snapshot for the latest completed output block.
+/// One Channel Strip's readings inside a completed meter frame.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioMeterTargetFrame {
+    /// Stable Sequence-owned Channel Strip identity.
+    pub target: AudioMeterTarget,
+    /// Canonical interleaved-order channel readings.
+    pub channels: Vec<AudioChannelMeterReading>,
+}
+
+/// Owned observation snapshot for one successfully completed Session block.
 ///
+/// All targets carry the same block serial and exact Sequence sample range.
 /// This is a sample-peak/RMS meter, not an EBU R128/ATSC A/85 loudness result
 /// and not an oversampled true-peak meter. Loudness/true-peak analysis must be
 /// a separately versioned observation stage with its own filter, window,
@@ -43,21 +64,28 @@ pub struct AudioMeterFrame {
     pub start_sample: i64,
     /// Exact sample-frame count.
     pub frames: usize,
-    /// Semantic Program Output layout.
+    /// Semantic Program Output layout shared by every prepared node.
     pub channel_layout: AudioChannelLayout,
-    /// Canonical interleaved-order channel readings.
-    pub channels: Vec<AudioChannelMeterReading>,
+    /// Track, Bus, and Program Output readings in prepared topological order.
+    pub targets: Vec<AudioMeterTargetFrame>,
 }
 
-/// Shared read-only endpoint for Program Output meter observations.
+impl AudioMeterFrame {
+    /// Look up one stable Channel Strip reading.
+    pub fn target(&self, target: AudioMeterTarget) -> Option<&AudioMeterTargetFrame> {
+        self.targets.iter().find(|frame| frame.target == target)
+    }
+}
+
+/// Shared read-only endpoint for one Session's Channel Strip observations.
 ///
 /// Clone this handle before a Session enters an audio callback. The writer
-/// publishes through fixed atomic slots without allocation or locking;
-/// `latest` allocates an owned snapshot and belongs on a control, UI, or
-/// analysis thread.
+/// publishes the complete target bank through fixed atomic slots without
+/// allocation or locking; [`Self::latest`] allocates an owned snapshot and
+/// belongs on a control, UI, or analysis thread.
 #[derive(Debug, Clone)]
 pub struct AudioMeterObserver {
-    published: Arc<PublishedAudioMeter>,
+    published: Arc<PublishedAudioMeterBank>,
 }
 
 impl AudioMeterObserver {
@@ -87,8 +115,9 @@ impl Default for AtomicChannelMeterReading {
 }
 
 #[derive(Debug)]
-struct PublishedAudioMeter {
+struct PublishedAudioMeterBank {
     channel_layout: AudioChannelLayout,
+    targets: Vec<AudioMeterTarget>,
     publication_sequence: AtomicU64,
     block_serial: AtomicU64,
     start_sample: AtomicI64,
@@ -96,30 +125,32 @@ struct PublishedAudioMeter {
     channels: Vec<AtomicChannelMeterReading>,
 }
 
-impl PublishedAudioMeter {
-    fn new(channel_layout: AudioChannelLayout) -> Self {
-        let channels = channel_layout.channel_count();
+impl PublishedAudioMeterBank {
+    fn new(channel_layout: AudioChannelLayout, targets: &[AudioMeterTarget]) -> Self {
+        let channel_states = targets.len().saturating_mul(channel_layout.channel_count());
         Self {
             channel_layout,
+            targets: targets.to_vec(),
             publication_sequence: AtomicU64::new(0),
             block_serial: AtomicU64::new(0),
             start_sample: AtomicI64::new(0),
             frames: AtomicUsize::new(0),
-            channels: (0..channels).map(|_| AtomicChannelMeterReading::default()).collect(),
+            channels: (0..channel_states).map(|_| AtomicChannelMeterReading::default()).collect(),
         }
     }
 
     fn publish(&self, frame: &AudioMeterFrame) {
         debug_assert_eq!(frame.channel_layout, self.channel_layout);
-        debug_assert_eq!(frame.channels.len(), self.channels.len());
-        // A single Session writer toggles the sequence odd while replacing the
-        // fixed snapshot and even only after every field is visible. Sequential
-        // consistency keeps the seqlock proof independent of CPU memory model.
+        debug_assert_eq!(frame.targets.len(), self.targets.len());
+        // One Session writer toggles this bank-wide sequence odd while
+        // replacing every target and even only after the whole block is
+        // visible. Readers therefore never combine two render blocks.
         self.publication_sequence.fetch_add(1, Ordering::SeqCst);
         self.block_serial.store(frame.block_serial, Ordering::SeqCst);
         self.start_sample.store(frame.start_sample, Ordering::SeqCst);
         self.frames.store(frame.frames, Ordering::SeqCst);
-        for (source, destination) in frame.channels.iter().zip(&self.channels) {
+        let source_channels = frame.targets.iter().flat_map(|target| &target.channels);
+        for (source, destination) in source_channels.zip(&self.channels) {
             destination
                 .sample_peak_linear
                 .store(source.sample_peak_linear.to_bits(), Ordering::SeqCst);
@@ -155,15 +186,26 @@ impl PublishedAudioMeter {
                     clipped_sample_count: channel.clipped_sample_count.load(Ordering::SeqCst),
                     non_finite_sample_count: channel.non_finite_sample_count.load(Ordering::SeqCst),
                 })
-                .collect();
+                .collect::<Vec<_>>();
             let after = self.publication_sequence.load(Ordering::SeqCst);
             if before == after {
+                let channel_count = self.channel_layout.channel_count();
+                let targets = self
+                    .targets
+                    .iter()
+                    .copied()
+                    .zip(channels.chunks_exact(channel_count))
+                    .map(|(target, channels)| AudioMeterTargetFrame {
+                        target,
+                        channels: channels.to_vec(),
+                    })
+                    .collect();
                 return AudioMeterFrame {
                     block_serial,
                     start_sample,
                     frames,
                     channel_layout: self.channel_layout,
-                    channels,
+                    targets,
                 };
             }
         }
@@ -171,49 +213,80 @@ impl PublishedAudioMeter {
 }
 
 #[derive(Debug)]
-pub(crate) struct ProgramOutputMeter {
+pub(crate) struct AudioMeterBank {
     frame: AudioMeterFrame,
     sum_squares: Vec<f64>,
     finite_samples: Vec<u64>,
-    published: Arc<PublishedAudioMeter>,
+    measured_targets: Vec<bool>,
+    published: Arc<PublishedAudioMeterBank>,
 }
 
-impl ProgramOutputMeter {
-    pub(crate) fn new(channel_layout: AudioChannelLayout) -> Self {
-        let channels = channel_layout.channel_count();
+impl AudioMeterBank {
+    pub(crate) fn new(
+        channel_layout: AudioChannelLayout,
+        targets: impl IntoIterator<Item = AudioMeterTarget>,
+    ) -> Self {
+        let targets = targets.into_iter().collect::<Vec<_>>();
+        let channel_count = channel_layout.channel_count();
+        let target_frames = targets
+            .iter()
+            .copied()
+            .map(|target| AudioMeterTargetFrame {
+                target,
+                channels: vec![AudioChannelMeterReading::default(); channel_count],
+            })
+            .collect::<Vec<_>>();
+        let channel_states = target_frames.len().saturating_mul(channel_count);
         Self {
             frame: AudioMeterFrame {
                 block_serial: 0,
                 start_sample: 0,
                 frames: 0,
                 channel_layout,
-                channels: vec![AudioChannelMeterReading::default(); channels],
+                targets: target_frames,
             },
-            sum_squares: vec![0.0; channels],
-            finite_samples: vec![0; channels],
-            published: Arc::new(PublishedAudioMeter::new(channel_layout)),
+            sum_squares: vec![0.0; channel_states],
+            finite_samples: vec![0; channel_states],
+            measured_targets: vec![false; targets.len()],
+            published: Arc::new(PublishedAudioMeterBank::new(channel_layout, &targets)),
         }
     }
 
-    pub(crate) fn observe(
-        &mut self,
-        start_sample: i64,
-        frames: usize,
-        interleaved: &[f32],
-    ) -> bool {
-        let channels = self.frame.channels.len();
-        let Some(expected_samples) = frames.checked_mul(channels) else {
+    pub(crate) fn begin_block(&mut self, block_serial: u64, start_sample: i64, frames: usize) {
+        self.frame.block_serial = block_serial;
+        self.frame.start_sample = start_sample;
+        self.frame.frames = frames;
+        self.measured_targets.fill(false);
+    }
+
+    pub(crate) fn measure_target(&mut self, target_index: usize, interleaved: &[f32]) -> bool {
+        let channel_count = self.frame.channel_layout.channel_count();
+        let Some(expected_samples) = self.frame.frames.checked_mul(channel_count) else {
             return false;
         };
         if interleaved.len() != expected_samples {
             return false;
         }
-        self.sum_squares.fill(0.0);
-        self.finite_samples.fill(0);
-        self.frame.channels.fill(AudioChannelMeterReading::default());
-        for frame in interleaved.chunks_exact(channels) {
+        let Some(target) = self.frame.targets.get_mut(target_index) else {
+            return false;
+        };
+        let Some(measured) = self.measured_targets.get_mut(target_index) else {
+            return false;
+        };
+        let base = target_index.saturating_mul(channel_count);
+        let end = base.saturating_add(channel_count);
+        let Some(sum_squares) = self.sum_squares.get_mut(base..end) else {
+            return false;
+        };
+        let Some(finite_samples) = self.finite_samples.get_mut(base..end) else {
+            return false;
+        };
+        sum_squares.fill(0.0);
+        finite_samples.fill(0);
+        target.channels.fill(AudioChannelMeterReading::default());
+        for frame in interleaved.chunks_exact(channel_count) {
             for (channel, sample) in frame.iter().copied().enumerate() {
-                let reading = &mut self.frame.channels[channel];
+                let reading = &mut target.channels[channel];
                 if !sample.is_finite() {
                     reading.non_finite_sample_count =
                         reading.non_finite_sample_count.saturating_add(1);
@@ -225,19 +298,23 @@ impl ProgramOutputMeter {
                     reading.clipped_sample_count = reading.clipped_sample_count.saturating_add(1);
                 }
                 let sample = f64::from(sample);
-                self.sum_squares[channel] += sample * sample;
-                self.finite_samples[channel] = self.finite_samples[channel].saturating_add(1);
+                sum_squares[channel] += sample * sample;
+                finite_samples[channel] = finite_samples[channel].saturating_add(1);
             }
         }
-        for (channel, reading) in self.frame.channels.iter_mut().enumerate() {
-            if self.finite_samples[channel] > 0 {
-                reading.rms_linear =
-                    (self.sum_squares[channel] / self.finite_samples[channel] as f64).sqrt();
+        for (channel, reading) in target.channels.iter_mut().enumerate() {
+            if finite_samples[channel] > 0 {
+                reading.rms_linear = (sum_squares[channel] / finite_samples[channel] as f64).sqrt();
             }
         }
-        self.frame.block_serial = self.frame.block_serial.saturating_add(1);
-        self.frame.start_sample = start_sample;
-        self.frame.frames = frames;
+        *measured = true;
+        true
+    }
+
+    pub(crate) fn publish_completed_block(&self) -> bool {
+        if !self.measured_targets.iter().all(|measured| *measured) {
+            return false;
+        }
         self.published.publish(&self.frame);
         true
     }
@@ -250,8 +327,15 @@ impl ProgramOutputMeter {
         AudioMeterObserver { published: Arc::clone(&self.published) }
     }
 
+    pub(crate) fn target_count(&self) -> usize {
+        self.frame.targets.len()
+    }
+
     pub(crate) fn channel_state_count(&self) -> usize {
-        self.frame.channels.len()
+        self.frame
+            .targets
+            .len()
+            .saturating_mul(self.frame.channel_layout.channel_count())
     }
 }
 
@@ -259,34 +343,69 @@ impl ProgramOutputMeter {
 mod tests {
     use super::*;
 
+    fn targets() -> [AudioMeterTarget; 2] {
+        [
+            AudioMeterTarget::Track(TrackId::new()),
+            AudioMeterTarget::ProgramOutput(ProgramOutputId::new()),
+        ]
+    }
+
     #[test]
-    fn meter_keeps_unclipped_peak_rms_and_invalid_sample_evidence() {
-        let mut meter = ProgramOutputMeter::new(AudioChannelLayout::Stereo);
+    fn bank_keeps_unclipped_peak_rms_and_invalid_sample_evidence() {
+        let targets = targets();
+        let mut meter = AudioMeterBank::new(AudioChannelLayout::Stereo, targets);
         let observer = meter.observer();
-        assert!(meter.observe(12, 3, &[0.5, -0.5, 2.0, f32::NAN, -1.0, f32::INFINITY]));
+        meter.begin_block(1, 12, 3);
+        assert!(meter.measure_target(0, &[0.5, -0.5, 2.0, f32::NAN, -1.0, f32::INFINITY]));
+        assert!(meter.measure_target(1, &[0.25, -0.25, 0.5, -0.5, 0.75, -0.75]));
+        assert!(meter.publish_completed_block());
         let frame = observer.latest();
 
         assert_eq!(frame.block_serial, 1);
         assert_eq!(frame.start_sample, 12);
         assert_eq!(frame.frames, 3);
-        assert_eq!(frame.channels[0].sample_peak_linear, 2.0);
-        assert_eq!(frame.channels[0].clipped_sample_count, 1);
-        assert_eq!(frame.channels[0].non_finite_sample_count, 0);
-        assert!((frame.channels[0].rms_linear - (5.25_f64 / 3.0).sqrt()).abs() < 1.0e-12);
-        assert_eq!(frame.channels[1].sample_peak_linear, 0.5);
-        assert_eq!(frame.channels[1].non_finite_sample_count, 2);
-        assert_eq!(frame.channels[1].rms_linear, 0.5);
+        let track = frame.target(targets[0]).expect("Track meter");
+        assert_eq!(track.channels[0].sample_peak_linear, 2.0);
+        assert_eq!(track.channels[0].clipped_sample_count, 1);
+        assert_eq!(track.channels[0].non_finite_sample_count, 0);
+        assert!((track.channels[0].rms_linear - (5.25_f64 / 3.0).sqrt()).abs() < 1.0e-12);
+        assert_eq!(track.channels[1].sample_peak_linear, 0.5);
+        assert_eq!(track.channels[1].non_finite_sample_count, 2);
+        assert_eq!(track.channels[1].rms_linear, 0.5);
     }
 
     #[test]
-    fn observer_never_reads_a_torn_concurrent_publication() {
+    fn incomplete_block_never_replaces_the_last_complete_bank() {
+        let targets = targets();
+        let mut meter = AudioMeterBank::new(AudioChannelLayout::Stereo, targets);
+        let observer = meter.observer();
+        meter.begin_block(1, 0, 1);
+        assert!(meter.measure_target(0, &[0.25, -0.25]));
+        assert!(meter.measure_target(1, &[0.5, -0.5]));
+        assert!(meter.publish_completed_block());
+
+        meter.begin_block(2, 1, 1);
+        assert!(meter.measure_target(0, &[1.0, -1.0]));
+        assert!(!meter.publish_completed_block());
+
+        let frame = observer.latest();
+        assert_eq!(frame.block_serial, 1);
+        assert_eq!(frame.start_sample, 0);
+    }
+
+    #[test]
+    fn observer_never_reads_a_torn_concurrent_bank_publication() {
         const FINAL_SERIAL: u64 = 1_000;
-        let mut meter = ProgramOutputMeter::new(AudioChannelLayout::Stereo);
+        let targets = targets();
+        let mut meter = AudioMeterBank::new(AudioChannelLayout::Stereo, targets);
         let observer = meter.observer();
         let writer = std::thread::spawn(move || {
             for serial in 1..=FINAL_SERIAL {
                 let value = serial as f32;
-                assert!(meter.observe(serial as i64, 1, &[value, -value]));
+                meter.begin_block(serial, serial as i64, 1);
+                assert!(meter.measure_target(0, &[value, -value]));
+                assert!(meter.measure_target(1, &[value * 2.0, -value * 2.0]));
+                assert!(meter.publish_completed_block());
             }
         });
 
@@ -296,10 +415,11 @@ mod tests {
                 let expected = frame.block_serial as f32;
                 assert_eq!(frame.start_sample, frame.block_serial as i64);
                 assert_eq!(frame.frames, 1);
-                assert_eq!(frame.channels[0].sample_peak_linear, expected);
-                assert_eq!(frame.channels[1].sample_peak_linear, expected);
-                assert_eq!(frame.channels[0].rms_linear, f64::from(expected));
-                assert_eq!(frame.channels[1].rms_linear, f64::from(expected));
+                assert_eq!(frame.targets[0].channels[0].sample_peak_linear, expected);
+                assert_eq!(
+                    frame.targets[1].channels[0].sample_peak_linear,
+                    expected * 2.0
+                );
             }
             if frame.block_serial == FINAL_SERIAL {
                 break;

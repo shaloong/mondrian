@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 
+use mondrian_audio::{AudioChannelMeterReading, AudioMeterFrame, AudioMeterTarget};
 use mondrian_core::{AudioRouteId, MixBusId, TrackId};
 use mondrian_editor_state::Action;
 use mondrian_timeline::audio::{
@@ -21,9 +22,11 @@ use mondrian_timeline::{
     AudioRoutingEditBlocker, AudioRoutingEditRequest,
 };
 
+use crate::app::product_action::AudioTrackSoloPayload;
 use crate::app::ui_actions::{
-    audio_channel_strip_edit_action, audio_routing_edit_action, timeline_set_track_control_action,
-    TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind,
+    audio_channel_strip_edit_action, audio_routing_edit_action, audio_track_solo_action,
+    timeline_set_track_control_action, TimelineSetTrackControlPayload,
+    TimelineTrackControlPayloadKind,
 };
 use crate::app::AppState;
 
@@ -100,11 +103,20 @@ pub(crate) struct AudioMixerChannelModel {
     pub(crate) fader: AudioMixerGainModel,
     pub(crate) fader_automation: Option<AudioAutomationCurveModel>,
     pub(crate) track_muted: Option<bool>,
+    pub(crate) track_soloed: Option<bool>,
+    /// Latest complete post-mute block for this exact prepared Channel Strip.
+    pub(crate) meter: Option<AudioMixerMeterModel>,
     pub(crate) incoming_route_count: usize,
     pub(crate) outbound_routes: Vec<AudioMixerRouteModel>,
     pub(crate) route_create_options: Vec<AudioMixerRouteCreateOption>,
     pub(crate) bus_removal: Option<AudioMixerBusRemovalModel>,
     pub(crate) processor_racks: Vec<AudioProcessorRackModel>,
+}
+
+/// One complete block observation projected for a Mixer Channel Strip.
+#[derive(Debug, Clone)]
+pub(crate) struct AudioMixerMeterModel {
+    pub(crate) channels: Vec<AudioChannelMeterReading>,
 }
 
 impl AudioMixerPanelModel {
@@ -119,6 +131,7 @@ impl AudioMixerPanelModel {
                 ),
             };
         };
+        let meter = state.latest_audio_meter_frame();
         let mut channels = Vec::with_capacity(
             sequence
                 .audio_tracks
@@ -135,6 +148,8 @@ impl AudioMixerPanelModel {
                 AudioMixerChannelKind::Track,
                 track.name.clone(),
                 Some(track.is_muted),
+                Some(state.is_audio_track_soloed(track.id)),
+                meter.as_ref(),
             )
         }));
         channels.extend(sequence.audio_program.buses.iter().map(|bus| {
@@ -145,6 +160,8 @@ impl AudioMixerPanelModel {
                 AudioMixerChannelKind::Bus,
                 bus.name.clone(),
                 None,
+                None,
+                meter.as_ref(),
             )
         }));
         channels.extend(sequence.audio_program.outputs.iter().map(|output| {
@@ -155,6 +172,8 @@ impl AudioMixerPanelModel {
                 AudioMixerChannelKind::ProgramOutput,
                 output.name.clone(),
                 None,
+                None,
+                meter.as_ref(),
             )
         }));
         Self {
@@ -178,6 +197,8 @@ fn project_channel(
     kind: AudioMixerChannelKind,
     name: String,
     track_muted: Option<bool>,
+    track_soloed: Option<bool>,
+    meter: Option<&AudioMeterFrame>,
 ) -> AudioMixerChannelModel {
     let automation_viewport = sequence_automation_viewport(sequence);
     let inspection = inspect_audio_channel_strip(sequence, owner);
@@ -240,6 +261,19 @@ fn project_channel(
             )
         }),
         track_muted,
+        track_soloed,
+        meter: meter.and_then(|frame| {
+            let target = match owner {
+                AudioChannelStripOwner::Track { track_id } => AudioMeterTarget::Track(track_id),
+                AudioChannelStripOwner::Bus { bus_id } => AudioMeterTarget::Bus(bus_id),
+                AudioChannelStripOwner::ProgramOutput { output_id } => {
+                    AudioMeterTarget::ProgramOutput(output_id)
+                }
+            };
+            frame
+                .target(target)
+                .map(|target| AudioMixerMeterModel { channels: target.channels.clone() })
+        }),
         incoming_route_count,
         outbound_routes,
         route_create_options,
@@ -650,6 +684,10 @@ pub(crate) fn set_track_mute_action(track_id: TrackId, muted: bool) -> Action {
     })
 }
 
+pub(crate) fn set_track_solo_action(track_id: TrackId, soloed: bool) -> Action {
+    audio_track_solo_action(AudioTrackSoloPayload { track_id, soloed })
+}
+
 fn normalized_gain(value: f32) -> Option<f64> {
     let value = f64::from(value);
     (value.is_finite() && (AUDIO_GAIN_DB_MIN..=AUDIO_GAIN_DB_MAX).contains(&value)).then_some(value)
@@ -698,6 +736,8 @@ mod tests {
         ));
         assert!(!model.channels[0].outbound_routes.is_empty());
         assert!(!model.channels[0].route_create_options.is_empty());
+        assert_eq!(model.channels[0].track_soloed, Some(false));
+        assert!(model.channels.iter().all(|channel| channel.meter.is_none()));
         assert_eq!(
             model.channels[track_count + bus_count].incoming_route_count,
             track_count
@@ -755,6 +795,16 @@ mod tests {
             .expect("Bus channel");
         assert!(!bus.bus_removal.as_ref().expect("Bus removal").is_editable);
         let _mute = set_track_mute_action(track_id, true);
+        let solo = set_track_solo_action(track_id, true);
+        assert!(matches!(
+            ProductAction::decode_external(&solo).expect("decode"),
+            Some(ProductAction::Audio(AudioProductAction::SetTrackSolo(
+                crate::app::product_action::AudioTrackSoloPayload {
+                    track_id: projected,
+                    soloed: true,
+                }
+            ))) if projected == track_id
+        ));
 
         let mut sequence = state.active_sequence().expect("Sequence").clone();
         sequence.audio_tracks[0].is_locked = false;

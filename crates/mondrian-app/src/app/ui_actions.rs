@@ -1274,6 +1274,11 @@ pub fn audio_routing_edit_action(request: AudioRoutingEditRequest) -> Action {
     ProductAction::Audio(AudioProductAction::EditRouting(request)).into_external_action()
 }
 
+/// Build one open-Session Track audition action.
+pub fn audio_track_solo_action(payload: super::product_action::AudioTrackSoloPayload) -> Action {
+    ProductAction::Audio(AudioProductAction::SetTrackSolo(payload)).into_external_action()
+}
+
 /// Build an action that links the current Clip selection.
 pub fn timeline_link_selected_clips_action() -> Action {
     custom_timeline_action(TIMELINE_LINK_SELECTED_CLIPS, ())

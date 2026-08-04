@@ -271,6 +271,7 @@ impl AudioIdleWarmupExecutor for ProductionAudioIdleWarmupExecutor {
             library,
             source_cache,
             key.runtime_grant,
+            mondrian_audio::AudioAuditionOverlay::default(),
             key.sample_rate,
             key.channel_layout,
         );

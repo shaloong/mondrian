@@ -26,7 +26,10 @@ pub use compiler::{compile_audio_program, AudioCompileError};
 pub use dependency::{
     compile_audio_dependency_closure, AudioDependencyClosure, AudioDependencyError,
 };
-pub use meter::{AudioChannelMeterReading, AudioMeterFrame, AudioMeterObserver};
+pub use meter::{
+    AudioChannelMeterReading, AudioMeterFrame, AudioMeterObserver, AudioMeterTarget,
+    AudioMeterTargetFrame,
+};
 pub use plan::*;
 pub use processor::*;
 pub use render::{

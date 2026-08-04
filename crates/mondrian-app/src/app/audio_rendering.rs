@@ -1,13 +1,12 @@
 use super::*;
 use mondrian_audio::{
-    AudioContinuityEpoch, AudioDecodedSource, AudioKernelBackend, AudioMediaResolver,
-    AudioProcessingMode, AudioProgramExecutionDemand, AudioProgramRuntime, AudioRenderContract,
-    AudioRenderRequest, AudioRuntimeResourceGrant, AudioStateEntry, PreparedAudioChannelMixer,
-    ResolvedAudioSource,
+    AudioAuditionOverlay, AudioCompileRequest, AudioContinuityEpoch, AudioDecodedSource,
+    AudioKernelBackend, AudioMediaResolver, AudioMeterObserver, AudioProcessingMode,
+    AudioProgramExecutionDemand, AudioProgramRuntime, AudioRenderContract, AudioRenderRequest,
+    AudioRuntimeResourceGrant, AudioStateEntry, PreparedAudioChannelMixer, ResolvedAudioSource,
 };
 use mondrian_core::{
     AudioChannelLayout, AudioChannelMixMatrix, AudioSourceComponentId, ExecutionCancellationToken,
-    ProgramOutputId,
 };
 use mondrian_media::{AudioSourceReader, AudioSourceSelection};
 use parking_lot::Mutex;
@@ -37,6 +36,7 @@ impl TimelineAudioPcmRenderer {
         library: Arc<AssetLibrary>,
         source_cache: Arc<AudioSourceCache>,
         runtime_grant: AudioRuntimeResourceGrant,
+        audition: AudioAuditionOverlay,
         sample_rate: u32,
         channel_layout: AudioChannelLayout,
     ) -> mondrian_core::Result<Self> {
@@ -54,12 +54,16 @@ impl TimelineAudioPcmRenderer {
                 AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
         };
         let resolver = PlaybackMediaResolver { library, source_cache };
-        let runtime = AudioProgramRuntime::build_with_resource_grant(
+        let output_id =
+            sequence.audio_program.outputs.first().map(|output| output.id).ok_or_else(|| {
+                audio_render_error("timeline_audio_prepare", "Sequence has no Program Output")
+            })?;
+        let runtime = AudioProgramRuntime::build_with_compile_request_and_resource_grant(
             &sequence,
             &sequences,
             &resolver,
             contract,
-            None::<ProgramOutputId>,
+            AudioCompileRequest { output_id, audition },
             runtime_grant,
         )
         .map_err(|error| audio_render_error("timeline_audio_prepare", error.to_string()))?;
@@ -99,6 +103,11 @@ impl TimelineAudioPcmRenderer {
     /// Compiler-owned evidence for replacing this Program Output with silence.
     pub(super) fn execution_demand(&self) -> AudioProgramExecutionDemand {
         self.state.lock().runtime.execution_demand()
+    }
+
+    /// Lock-free meter observation bound to this exact prepared Runtime.
+    pub(super) fn meter_observer(&self) -> AudioMeterObserver {
+        self.state.lock().runtime.meter_observer()
     }
 }
 
@@ -335,6 +344,7 @@ mod tests {
             AssetLibrary::open(root.clone()).expect("asset library"),
             Arc::new(AudioSourceCache::new(48_000)),
             test_runtime_grant(),
+            AudioAuditionOverlay::default(),
             48_000,
             AudioChannelLayout::Stereo,
         )
@@ -405,6 +415,7 @@ mod tests {
             AssetLibrary::open(root.clone()).expect("asset library"),
             Arc::new(AudioSourceCache::new(48_000)),
             test_runtime_grant(),
+            AudioAuditionOverlay::default(),
             48_000,
             AudioChannelLayout::Stereo,
         )

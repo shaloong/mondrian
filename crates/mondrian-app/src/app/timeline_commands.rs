@@ -438,6 +438,7 @@ impl AppState {
         #[cfg(test)]
         mondrian_media::clear_thread_local_preview_decode_session();
         self.authoring = None;
+        self.audio_monitoring.reset();
         self.collect_released_project_libraries();
         self.project_runtime_lease = None;
         self.manual_project_file_destination = None;

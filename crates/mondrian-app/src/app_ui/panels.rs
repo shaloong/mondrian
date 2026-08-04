@@ -161,7 +161,8 @@ use crate::app_ui::audio_mixer::{
     set_input_trim_action as audio_mixer_set_input_trim_action,
     set_route_enabled_action as audio_mixer_set_route_enabled_action,
     set_route_gain_action as audio_mixer_set_route_gain_action,
-    set_track_mute_action as audio_mixer_set_track_mute_action, AudioMixerChannelKind,
+    set_track_mute_action as audio_mixer_set_track_mute_action,
+    set_track_solo_action as audio_mixer_set_track_solo_action, AudioMixerChannelKind,
     AudioMixerGainModel, AudioMixerPanelModel,
 };
 use crate::app_ui::audio_processor_rack::{
@@ -5326,6 +5327,21 @@ fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
                 ),
             ));
         }
+        if let (Some(soloed), mondrian_timeline::AudioChannelStripOwner::Track { track_id }) =
+            (channel.track_soloed, channel.owner)
+        {
+            section = section.with_row(PropertyRow::new(
+                "独奏",
+                Box::new(
+                    Checkbox::new("S", soloed)
+                        .on_change(move |value| audio_mixer_set_track_solo_action(track_id, value)),
+                ),
+            ));
+        }
+        section = section.with_row(PropertyRow::new(
+            "电平",
+            Box::new(Label::new(audio_mixer_meter_label(channel)).muted()),
+        ));
         let trim_channel = channel.clone();
         section = section.with_row(PropertyRow::new(
             "输入增益",
@@ -5530,6 +5546,43 @@ fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
         );
     }
     panel
+}
+
+fn audio_mixer_meter_label(channel: &crate::app_ui::audio_mixer::AudioMixerChannelModel) -> String {
+    let Some(meter) = &channel.meter else {
+        return "未执行".to_owned();
+    };
+    let peak = meter
+        .channels
+        .iter()
+        .map(|reading| reading.sample_peak_linear)
+        .fold(0.0_f32, f32::max);
+    let rms = meter.channels.iter().map(|reading| reading.rms_linear).fold(0.0_f64, f64::max);
+    let clipped = meter.channels.iter().map(|reading| reading.clipped_sample_count).sum::<u64>();
+    let invalid = meter
+        .channels
+        .iter()
+        .map(|reading| reading.non_finite_sample_count)
+        .sum::<u64>();
+    let warning = match (clipped, invalid) {
+        (0, 0) => String::new(),
+        (clipped, 0) => format!(" · CLIP {clipped}"),
+        (0, invalid) => format!(" · 非有限 {invalid}"),
+        (clipped, invalid) => format!(" · CLIP {clipped} · 非有限 {invalid}"),
+    };
+    format!(
+        "P {} · RMS {}{warning}",
+        audio_meter_dbfs_label(f64::from(peak)),
+        audio_meter_dbfs_label(rms),
+    )
+}
+
+fn audio_meter_dbfs_label(linear: f64) -> String {
+    if linear <= 0.0 {
+        "−∞ dBFS".to_owned()
+    } else {
+        format!("{:.1} dBFS", 20.0 * linear.log10())
+    }
 }
 
 fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {

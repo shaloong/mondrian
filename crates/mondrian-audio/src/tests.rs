@@ -831,6 +831,30 @@ fn clip_track_bus_output_math_is_unclipped_and_block_invariant() {
         }
     );
     let mut source = RampSource::default();
+    let mut meter_session = AudioRenderSession::new(Arc::clone(&plan)).expect("meter Session");
+    let mut meter_pcm = vec![0.0; 4];
+    meter_session
+        .render_into(
+            &mut source,
+            AudioRenderRequest { start_sample: 0, frames: 4 },
+            &mut meter_pcm,
+        )
+        .expect("metered graph");
+    let meter = meter_session.latest_meter_frame();
+    let track_peak = meter.target(AudioMeterTarget::Track(track_id)).expect("Track meter").channels
+        [0]
+    .sample_peak_linear;
+    let bus_peak = meter.target(AudioMeterTarget::Bus(bus_id)).expect("Bus meter").channels[0]
+        .sample_peak_linear;
+    let output_peak = meter
+        .target(AudioMeterTarget::ProgramOutput(output_id))
+        .expect("Program Output meter")
+        .channels[0]
+        .sample_peak_linear;
+    assert!(track_peak > 1.0);
+    assert_eq!(bus_peak, track_peak);
+    assert_eq!(output_peak, track_peak);
+
     let whole = render_audio(
         Arc::clone(&plan),
         &mut source,
@@ -1052,7 +1076,8 @@ fn processor_parameter_batches_are_sample_accurate_and_preallocated() {
     assert_eq!(session.capacity().maximum_processor_parameter_lanes, 1);
     assert_eq!(session.capacity().parameter_event_capacity, 8);
     assert_eq!(session.capacity().processor_session_scratch_bytes, 96);
-    assert_eq!(session.capacity().meter_channel_state_count, 1);
+    assert_eq!(session.capacity().meter_target_count, 4);
+    assert_eq!(session.capacity().meter_channel_state_count, 4);
 
     let lanes = session
         .processor_parameter_events_for_test(0, AudioRenderRequest { start_sample: 0, frames: 4 })
@@ -1441,7 +1466,8 @@ fn built_in_sample_delay_preserves_audible_delay_state_and_partitioned_pcm() {
     let mut whole = AudioRenderSession::new(Arc::clone(&plan)).expect("whole Session");
     assert_eq!(whole.capacity().processor_session_scratch_bytes, 8);
     assert_eq!(whole.capacity().public_output_lookahead_frames, 0);
-    assert_eq!(whole.capacity().meter_channel_state_count, 1);
+    assert_eq!(whole.capacity().meter_target_count, 3);
+    assert_eq!(whole.capacity().meter_channel_state_count, 3);
     whole
         .enter_state(AudioStateEntry {
             epoch: AudioContinuityEpoch::new(1),
@@ -1461,8 +1487,11 @@ fn built_in_sample_delay_preserves_audible_delay_state_and_partitioned_pcm() {
     let meter = whole.latest_meter_frame();
     assert_eq!(meter.block_serial, 1);
     assert_eq!(meter.start_sample, 0);
-    assert_eq!(meter.channels[0].sample_peak_linear, 8.0);
-    assert_eq!(meter.channels[0].clipped_sample_count, 4);
+    let output_meter = meter
+        .target(AudioMeterTarget::ProgramOutput(output))
+        .expect("Program Output meter");
+    assert_eq!(output_meter.channels[0].sample_peak_linear, 8.0);
+    assert_eq!(output_meter.channels[0].clipped_sample_count, 4);
 
     let mut split = AudioRenderSession::new(plan).expect("split Session");
     split
@@ -2202,6 +2231,112 @@ fn whole_program_runtime_does_not_bind_a_mute_gated_post_mute_source() {
         .render_into(AudioRenderRequest { start_sample: 0, frames: 4 }, &mut pcm)
         .expect("silent Runtime");
     assert_eq!(pcm, [0.0; 4]);
+}
+
+#[test]
+fn root_audition_compiles_only_soloed_tracks_and_meters_the_executed_closure() {
+    let mut sequence = sequence_with_audio_clip();
+    let first_track = sequence.audio_tracks[0].id;
+    let second_track = sequence.add_audio_track();
+    sequence
+        .add_media_audio_clip(
+            second_track,
+            Clip::new(AssetId::new(), TimelineTime::ZERO, tt(4, 1)).expect("second Clip"),
+            AudioSourceComponentId::primary(),
+        )
+        .expect("second audio Clip");
+    let output_id = sequence.audio_program.outputs[0].id;
+    let contract = AudioRenderContract {
+        sample_rate: 2,
+        channel_layout: AudioChannelLayout::Mono,
+        max_block_frames: 8,
+        processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+        public_output_lookahead_budget_frames:
+            AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+        compensation_delay_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+    };
+    let mut runtime = AudioProgramRuntime::build_with_compile_request_and_resource_grant(
+        &sequence,
+        &[],
+        &RampResolver,
+        contract,
+        AudioCompileRequest {
+            output_id,
+            audition: AudioAuditionOverlay {
+                soloed_tracks: std::collections::BTreeSet::from([second_track]),
+            },
+        },
+        AudioRuntimeResourceGrant::new(8, 64 * 1024 * 1024, 64 * 1024 * 1024),
+    )
+    .expect("soloed Runtime");
+    let mut pcm = [0.0; 4];
+    runtime
+        .render_into(AudioRenderRequest { start_sample: 0, frames: 4 }, &mut pcm)
+        .expect("soloed render");
+
+    assert_eq!(pcm, [1.0, 2.0, 3.0, 4.0]);
+    let meter = runtime.latest_meter_frame();
+    assert_eq!(meter.block_serial, 1);
+    assert!(meter.target(AudioMeterTarget::Track(first_track)).is_none());
+    assert!(meter.target(AudioMeterTarget::Track(second_track)).is_some());
+    assert!(meter.target(AudioMeterTarget::ProgramOutput(output_id)).is_some());
+}
+
+#[test]
+fn root_audition_does_not_leak_parent_track_identity_into_nested_programs() {
+    let child = sequence_with_audio_clip();
+    let child_output = child.audio_program.outputs[0].id;
+    let mut root = Sequence::new("soloed nested root");
+    root.settings.audio_channel_layout = AudioChannelLayout::Mono;
+    let root_track = root.audio_tracks[0].id;
+    root.add_nested_audio_clip(
+        root_track,
+        Clip::new_nested_sequence(
+            child.id,
+            TimelineTime::ZERO,
+            tt(4, 1),
+            Some("child".to_owned()),
+        )
+        .expect("nested Clip"),
+        child_output,
+    )
+    .expect("nested audio");
+    let contract = AudioRenderContract {
+        sample_rate: 2,
+        channel_layout: AudioChannelLayout::Mono,
+        max_block_frames: 8,
+        processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+        public_output_lookahead_budget_frames:
+            AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+        compensation_delay_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+    };
+    let root_output = root.audio_program.outputs[0].id;
+    let mut runtime = AudioProgramRuntime::build_with_compile_request_and_resource_grant(
+        &root,
+        std::slice::from_ref(&child),
+        &RampResolver,
+        contract,
+        AudioCompileRequest {
+            output_id: root_output,
+            audition: AudioAuditionOverlay {
+                soloed_tracks: std::collections::BTreeSet::from([root_track]),
+            },
+        },
+        AudioRuntimeResourceGrant::new(8, 64 * 1024 * 1024, 64 * 1024 * 1024),
+    )
+    .expect("nested solo Runtime");
+    let mut pcm = [0.0; 4];
+    runtime
+        .render_into(AudioRenderRequest { start_sample: 0, frames: 4 }, &mut pcm)
+        .expect("nested solo render");
+
+    assert_eq!(pcm, [1.0, 2.0, 3.0, 4.0]);
 }
 
 #[test]

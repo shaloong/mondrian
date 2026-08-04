@@ -222,8 +222,22 @@ fn built_in_lookahead_limiter_is_block_invariant_and_bounds_sample_peaks() {
         .expect("scalar limiter render");
     assert_eq!(&scalar_pcm[..3], &[0.125, 0.25, 1.0]);
     assert!(scalar_pcm.iter().all(|sample| sample.is_finite() && sample.abs() <= 1.0));
+    let output = sequence.audio_program.outputs[0].id;
+    let meter = scalar.latest_meter_frame();
     assert_eq!(
-        scalar.latest_meter_frame().channels[0].clipped_sample_count,
+        meter.block_serial, 1,
+        "hidden lookahead must not publish a meter block"
+    );
+    assert_eq!(
+        meter.start_sample, 0,
+        "meter range remains on the public Timeline coordinate"
+    );
+    assert_eq!(
+        meter
+            .target(AudioMeterTarget::ProgramOutput(output))
+            .expect("Program Output meter")
+            .channels[0]
+            .clipped_sample_count,
         0
     );
 

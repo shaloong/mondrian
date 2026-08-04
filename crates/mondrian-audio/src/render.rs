@@ -1,6 +1,6 @@
 use crate::delay::FixedDelayLine;
 use crate::dsp;
-use crate::meter::ProgramOutputMeter;
+use crate::meter::AudioMeterBank;
 use crate::processor_host::PreparedProcessorHost;
 use crate::schedule::{
     PreparedAudioPlan, PreparedAudioSchedule, PreparedAutomationCurve, PreparedContribution,
@@ -96,8 +96,10 @@ pub struct AudioRenderCapacity {
     pub public_output_lookahead_frames: usize,
     /// Processor-private Session scratch declared by all realized factories.
     pub processor_session_scratch_bytes: usize,
-    /// Fixed per-channel Program Output meter state.
+    /// Fixed per-channel state across every prepared meter target.
     pub meter_channel_state_count: usize,
+    /// Prepared Track, Bus, and Program Output meter targets.
+    pub meter_target_count: usize,
 }
 
 #[derive(Debug)]
@@ -171,7 +173,8 @@ pub struct AudioRenderSession {
     contribution_delay_lines: Vec<FixedDelayLine>,
     route_delay_lines: Vec<FixedDelayLine>,
     processor_host: PreparedProcessorHost,
-    output_meter: ProgramOutputMeter,
+    meter_bank: AudioMeterBank,
+    meter_block_serial: u64,
     continuity: SessionContinuity,
     capacity: AudioRenderCapacity,
 }
@@ -247,7 +250,16 @@ impl AudioRenderSession {
             return Err(AudioExecutionError::InvalidPreparedSchedule);
         }
         let processor_host = PreparedProcessorHost::new(&plan.schedule, contract)?;
-        let output_meter = ProgramOutputMeter::new(contract.channel_layout);
+        let meter_bank = AudioMeterBank::new(
+            contract.channel_layout,
+            plan.schedule.nodes.iter().map(|node| match node.origin {
+                PreparedNodeOrigin::Track(track_id) => crate::AudioMeterTarget::Track(track_id),
+                PreparedNodeOrigin::Bus(bus_id) => crate::AudioMeterTarget::Bus(bus_id),
+                PreparedNodeOrigin::Output(output_id) => {
+                    crate::AudioMeterTarget::ProgramOutput(output_id)
+                }
+            }),
+        );
         let capacity = AudioRenderCapacity {
             max_block_frames: contract.max_block_frames,
             channels: contract.channel_count(),
@@ -263,7 +275,8 @@ impl AudioRenderSession {
             parameter_event_capacity: processor_host.parameter_event_capacity(),
             public_output_lookahead_frames: plan.public_output_lookahead_frames(),
             processor_session_scratch_bytes: processor_host.session_scratch_bytes(),
-            meter_channel_state_count: output_meter.channel_state_count(),
+            meter_channel_state_count: meter_bank.channel_state_count(),
+            meter_target_count: meter_bank.target_count(),
         };
         Ok(Self {
             plan,
@@ -272,7 +285,8 @@ impl AudioRenderSession {
             contribution_delay_lines,
             route_delay_lines,
             processor_host,
-            output_meter,
+            meter_bank,
+            meter_block_serial: 0,
             continuity: SessionContinuity::Unentered,
             capacity,
         })
@@ -348,12 +362,12 @@ impl AudioRenderSession {
         self.capacity
     }
 
-    /// Clone the latest successfully completed Program Output meter block.
+    /// Clone the latest successfully completed Track/Bus/Output meter block.
     ///
     /// Cloning allocates and is therefore an observation/control-thread API,
     /// not part of `render_into`'s realtime contract.
     pub fn latest_meter_frame(&self) -> crate::AudioMeterFrame {
-        self.output_meter.snapshot()
+        self.meter_bank.snapshot()
     }
 
     /// Obtain a lock-free observation handle for another thread.
@@ -361,7 +375,7 @@ impl AudioRenderSession {
     /// Clone this before moving the Session into an audio callback. Snapshot
     /// allocation occurs only when the observer is read, never while publishing.
     pub fn meter_observer(&self) -> crate::AudioMeterObserver {
-        self.output_meter.observer()
+        self.meter_bank.observer()
     }
 
     /// Render into caller-owned interleaved float storage without Session-owned
@@ -434,18 +448,26 @@ impl AudioRenderSession {
                 self.render_internal(
                     source,
                     AudioRenderRequest { start_sample: execution_start_sample, frames },
+                    None,
                 )?;
                 execution_start_sample = checked_advance_sample(execution_start_sample, frames)?;
                 remaining -= frames;
             }
             alignment_primed = true;
         }
+        let meter_block_serial = self
+            .meter_block_serial
+            .checked_add(1)
+            .ok_or(AudioExecutionError::MeterSerialExhausted)?;
+        self.meter_bank
+            .begin_block(meter_block_serial, request.start_sample, request.frames);
         self.render_internal(
             source,
             AudioRenderRequest {
                 start_sample: execution_start_sample,
                 frames: request.frames,
             },
+            Some(request.start_sample),
         )?;
         let output_scratch = self
             .plan
@@ -455,9 +477,10 @@ impl AudioRenderSession {
             .ok_or(AudioExecutionError::InvalidPreparedSchedule)?
             .scratch_slot;
         destination.copy_from_slice(&self.node_buffers[output_scratch].post_mute[..samples]);
-        if !self.output_meter.observe(request.start_sample, request.frames, destination) {
+        if !self.meter_bank.publish_completed_block() {
             return Err(AudioExecutionError::InvalidPreparedSchedule);
         }
+        self.meter_block_serial = meter_block_serial;
         if let Some((epoch, _, _)) = active {
             self.continuity = SessionContinuity::Active {
                 epoch,
@@ -476,6 +499,7 @@ impl AudioRenderSession {
         &mut self,
         source: &mut impl AudioPcmSource,
         request: AudioRenderRequest,
+        meter_start_sample: Option<i64>,
     ) -> Result<(), AudioExecutionError> {
         let contract = self.plan.contract();
         if request.frames > contract.max_block_frames {
@@ -538,6 +562,14 @@ impl AudioRenderSession {
                 &mut self.scratch,
                 &mut self.processor_host,
             )?;
+            if meter_start_sample.is_some()
+                && !self.meter_bank.measure_target(
+                    node_slot,
+                    &self.node_buffers[scratch_slot].post_mute[..samples],
+                )
+            {
+                return Err(AudioExecutionError::InvalidPreparedSchedule);
+            }
         }
         Ok(())
     }
@@ -1146,6 +1178,9 @@ pub enum AudioExecutionError {
     /// Caller-provided output size disagrees with the Render Contract.
     #[error("audio render output size does not match the request")]
     OutputSizeMismatch,
+    /// Successful meter block identity can no longer advance safely.
+    #[error("audio meter block serial is exhausted")]
+    MeterSerialExhausted,
     /// Source storage did not match the prepared channel-mix source layout.
     #[error("audio channel-mix source size does not match its prepared layout")]
     ChannelMixSourceSizeMismatch,

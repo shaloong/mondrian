@@ -42,6 +42,8 @@ pub const AUDIO_EDIT_CHANNEL_STRIP: &str = "edit_channel_strip";
 pub const AUDIO_EDIT_ROUTING: &str = "edit_routing";
 /// External action name for one stable-address audio automation edit.
 pub const AUDIO_EDIT_AUTOMATION: &str = "edit_automation";
+/// External action name for one open-Session Track solo change.
+pub const AUDIO_SET_TRACK_SOLO: &str = "set_track_solo";
 
 /// One closed product operation accepted by the App composition root.
 ///
@@ -58,6 +60,8 @@ pub enum ProductAction {
 /// Closed Sequence audio authoring operations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioProductAction {
+    /// Change one transient Track audition flag without mutating author state.
+    SetTrackSolo(AudioTrackSoloPayload),
     /// Apply one exact owner-time curve mutation.
     EditAutomation(AudioAutomationEditRequest),
     /// Apply one stable-address Rack mutation in one author transaction.
@@ -142,6 +146,9 @@ impl ProductAction {
                 AUDIO_EDIT_AUTOMATION => Ok(Some(Self::Audio(AudioProductAction::EditAutomation(
                     decode_payload(namespace, name, payload)?,
                 )))),
+                AUDIO_SET_TRACK_SOLO => Ok(Some(Self::Audio(AudioProductAction::SetTrackSolo(
+                    decode_payload(namespace, name, payload)?,
+                )))),
                 AUDIO_EDIT_PROCESSOR_RACK => {
                     Ok(Some(Self::Audio(AudioProductAction::EditProcessorRack(
                         decode_payload(namespace, name, payload)?,
@@ -171,6 +178,11 @@ impl ProductAction {
     /// names or payloads.
     pub fn into_external_action(self) -> Action {
         let (namespace, name, payload) = match self {
+            Self::Audio(AudioProductAction::SetTrackSolo(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_SET_TRACK_SOLO,
+                serde_json::json!(payload),
+            ),
             Self::Audio(AudioProductAction::EditAutomation(request)) => (
                 AUDIO_NAMESPACE,
                 AUDIO_EDIT_AUTOMATION,
@@ -265,6 +277,16 @@ pub struct AudioProcessorInsertBuiltInPayload {
     pub preset: AudioProcessorBuiltInPreset,
     /// Stable position inside the Rack.
     pub placement: mondrian_timeline::AudioProcessorRackPlacement,
+}
+
+/// Transient Track audition intent owned by the open App Session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioTrackSoloPayload {
+    /// Audio Track whose program contribution changes audition state.
+    pub track_id: TrackId,
+    /// Whether the Track participates in the current solo set.
+    pub soloed: bool,
 }
 
 fn decode_payload<T: serde::de::DeserializeOwned>(
@@ -539,6 +561,22 @@ mod tests {
             },
         };
         let expected = ProductAction::Audio(AudioProductAction::EditProcessorRack(request));
+
+        let external = expected.clone().into_external_action();
+        let decoded = ProductAction::decode_external(&external)
+            .expect("valid external payload")
+            .expect("recognized product action");
+
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn external_codec_round_trips_transient_track_solo_intent() {
+        let expected =
+            ProductAction::Audio(AudioProductAction::SetTrackSolo(AudioTrackSoloPayload {
+                track_id: TrackId::new(),
+                soloed: true,
+            }));
 
         let external = expected.clone().into_external_action();
         let decoded = ProductAction::decode_external(&external)

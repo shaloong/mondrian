@@ -415,7 +415,7 @@ fn session_resource_footprint(
             summary.processor_occurrence_count,
             PROCESSOR_INSTANCE_METADATA_BYTES,
         ])?,
-        checked_product([channels, METER_CHANNEL_STATE_BYTES])?,
+        checked_product([summary.node_count, channels, METER_CHANNEL_STATE_BYTES])?,
     ])?;
     Ok(AudioSessionResourceFootprint {
         prepared_logical_bytes,

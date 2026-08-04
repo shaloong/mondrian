@@ -98,6 +98,7 @@ mod animation_authoring;
 mod animation_state;
 mod audio_authoring;
 mod audio_idle_warmup;
+mod audio_monitoring;
 #[cfg(test)]
 mod audio_playback_acceptance;
 mod audio_rendering;
@@ -420,6 +421,8 @@ pub struct AppState {
     // 音频时钟与 A/V 同步
     pub audio_sample_rate: u32,
     audio_playback: playback::AppAudioPlayback,
+    /// Open-Session audition intent and observations from the exact prepared Runtime.
+    audio_monitoring: audio_monitoring::AudioMonitoringState,
     pub audio_source_cache: Arc<AudioSourceCache>,
     audio_idle_warmup: AudioIdleWarmupService,
     audio_idle_warmup_terminal_cursor: u64,
@@ -473,6 +476,7 @@ impl AppState {
             proxy_terminal_observed_sequence: 0,
             audio_sample_rate,
             audio_playback: playback::AppAudioPlayback::product_default(audio_sample_rate),
+            audio_monitoring: audio_monitoring::AudioMonitoringState::default(),
             audio_source_cache,
             audio_idle_warmup: AudioIdleWarmupService::new(),
             audio_idle_warmup_terminal_cursor: 0,

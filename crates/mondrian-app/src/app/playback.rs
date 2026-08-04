@@ -3,6 +3,13 @@ use super::*;
 const MAX_PLAYBACK_WAKE_DELAY: Duration = Duration::from_millis(100);
 const AUDIO_CALLBACK_STALE_AFTER: Duration = Duration::from_millis(100);
 
+struct PreparedTimelineAudioSource {
+    renderer: Arc<dyn AudioPcmRenderer>,
+    meter_observer: mondrian_audio::AudioMeterObserver,
+    authoring_session_id: AuthoringSessionId,
+    sequence_id: SequenceId,
+}
+
 pub(super) enum AppAudioPlayback {
     Available(Box<AudioPlayback>),
     Unavailable { sample_rate: u32, reason: String },
@@ -822,7 +829,7 @@ impl AppState {
     fn audio_playback_renderer(
         &self,
         action: &str,
-    ) -> mondrian_core::Result<Option<Arc<dyn AudioPcmRenderer>>> {
+    ) -> mondrian_core::Result<Option<PreparedTimelineAudioSource>> {
         let sequence = self.active_sequence().ok_or_else(|| {
             transport_action_error(action, "there is no active Sequence to compile")
         })?;
@@ -841,37 +848,52 @@ impl AppState {
                 "the active Sequence has audio placements but no Asset Library authority",
             ));
         };
+        let authoring_session_id = self.authoring_session_id().ok_or_else(|| {
+            transport_action_error(action, "there is no Authoring Session to bind")
+        })?;
         let runtime_grant = self.execution_resources.decision().audio.runtime_grant;
+        let audition = self.audio_monitoring.audition_overlay(authoring_session_id, sequence);
         let renderer = TimelineAudioPcmRenderer::new(
             sequence.clone(),
             self.sequences().to_vec(),
             library,
             Arc::clone(&self.audio_source_cache),
             runtime_grant,
+            audition,
             self.audio_sample_rate,
             AUDIO_OUTPUT_LAYOUT,
         )
         .map_err(|error| transport_action_error(action, error))?;
-        Ok(renderer
-            .execution_demand()
-            .requires_execution()
-            .then(|| Arc::new(renderer) as Arc<dyn AudioPcmRenderer>))
+        let requires_execution = renderer.execution_demand().requires_execution();
+        let meter_observer = renderer.meter_observer();
+        Ok(requires_execution.then(|| PreparedTimelineAudioSource {
+            renderer: Arc::new(renderer),
+            meter_observer,
+            authoring_session_id,
+            sequence_id: sequence.id,
+        }))
     }
 
     fn commit_audio_playback(
         &mut self,
         action: &str,
         anchor: AudioSamplePosition,
-        renderer: Option<Arc<dyn AudioPcmRenderer>>,
+        source: Option<PreparedTimelineAudioSource>,
     ) -> mondrian_core::Result<()> {
-        if let Some(renderer) = renderer {
+        if let Some(source) = source {
             self.audio_playback
-                .prepare(anchor, renderer)
+                .prepare(anchor, source.renderer)
                 .map_err(|error| transport_action_error(action, error))?;
+            self.audio_monitoring.bind_meter(
+                source.authoring_session_id,
+                source.sequence_id,
+                source.meter_observer,
+            );
         } else {
             self.audio_playback
                 .clear_source(anchor)
                 .map_err(|error| transport_action_error(action, error))?;
+            self.audio_monitoring.clear_meter();
         }
         Ok(())
     }
@@ -883,7 +905,7 @@ impl AppState {
 
     /// Invalidate prepared audio after Timeline audio authoring or Asset source
     /// binding changes without changing transport authority.
-    pub(super) fn refresh_audio_playback_after_authoring_change(
+    pub(super) fn refresh_audio_playback_after_program_change(
         &mut self,
     ) -> mondrian_core::Result<()> {
         let anchor = self.authoritative_audio_anchor(
@@ -894,9 +916,7 @@ impl AppState {
         if self.is_playing() {
             self.prepare_audio_playback(anchor)
         } else {
-            self.audio_playback
-                .clear_source(anchor)
-                .map_err(|error| transport_action_error("refresh_audio_playback", error))
+            self.commit_audio_playback("refresh_audio_playback", anchor, None)
         }
     }
 
@@ -905,7 +925,7 @@ impl AppState {
     /// Failure clears the old source so stale PCM cannot masquerade as the new
     /// Sequence, then records both the primary and cleanup outcome explicitly.
     pub(super) fn reconcile_audio_after_committed_authoring_change(&mut self, context: &str) {
-        if let Err(error) = self.refresh_audio_playback_after_authoring_change() {
+        if let Err(error) = self.refresh_audio_playback_after_program_change() {
             tracing::error!(%error, context, "failed to prepare audio after committed authoring change");
             let cleanup = self
                 .authoritative_audio_anchor(
@@ -914,9 +934,12 @@ impl AppState {
                     "clear_stale_audio",
                 )
                 .and_then(|anchor| {
-                    self.audio_playback.clear_source(anchor).map_err(|cleanup_error| {
-                        transport_action_error("clear_stale_audio", cleanup_error)
-                    })
+                    self.audio_playback
+                        .clear_source(anchor)
+                        .map_err(|cleanup_error| {
+                            transport_action_error("clear_stale_audio", cleanup_error)
+                        })
+                        .map(|()| self.audio_monitoring.clear_meter())
                 });
             if let Err(cleanup_error) = cleanup {
                 tracing::error!(

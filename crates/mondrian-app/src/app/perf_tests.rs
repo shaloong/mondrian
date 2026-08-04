@@ -3269,6 +3269,7 @@ fn audio_bounded_source_external_render_smoke() -> anyhow::Result<()> {
             library,
             Arc::clone(&cache),
             AudioRuntimeResourceGrant::new(64, 768 * 1024 * 1024, 128 * 1024 * 1024),
+            mondrian_audio::AudioAuditionOverlay::default(),
             48_000,
             AudioChannelLayout::Stereo,
         )?;

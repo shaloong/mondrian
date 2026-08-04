@@ -22,6 +22,7 @@ impl AppState {
         action: AudioProductAction,
     ) -> Result<()> {
         match action {
+            AudioProductAction::SetTrackSolo(payload) => self.set_audio_track_solo(payload),
             AudioProductAction::EditAutomation(request) => self.edit_audio_automation(request),
             AudioProductAction::EditProcessorRack(request) => {
                 self.edit_audio_processor_rack(request)

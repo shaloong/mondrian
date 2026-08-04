@@ -377,6 +377,43 @@ impl AudioProgramRuntime {
         )
     }
 
+    /// Build a root Program from one explicit semantic compile request.
+    ///
+    /// The request may carry a transient root-Sequence audition overlay.
+    /// Nested public outputs always compile their own canonical Program without
+    /// inheriting parent Track identities or Session audition state.
+    pub fn build_with_compile_request_and_resource_grant(
+        root: &Sequence,
+        sequences: &[Sequence],
+        resolver: &dyn AudioMediaResolver,
+        contract: AudioRenderContract,
+        request: AudioCompileRequest,
+        resource_grant: AudioRuntimeResourceGrant,
+    ) -> Result<Self, AudioRuntimeBuildError> {
+        if contract.channel_layout != root.settings.audio_channel_layout {
+            return Err(AudioRuntimeBuildError::ProgramLayoutMismatch {
+                sequence_id: root.id,
+                authored: root.settings.audio_channel_layout,
+                prepared: contract.channel_layout,
+            });
+        }
+        let mut stack = BTreeSet::new();
+        let mut ledger = AudioRuntimeAdmissionLedger::new(resource_grant);
+        Self::build_inner(
+            root,
+            sequences,
+            resolver,
+            default_processor_resolver(),
+            contract,
+            Some(request),
+            None,
+            None,
+            &mut stack,
+            0,
+            &mut ledger,
+        )
+    }
+
     /// Build with an explicit processor resolver shared by the complete nested closure.
     pub fn build_with_processor_resolver(
         root: &Sequence,
@@ -422,7 +459,7 @@ impl AudioProgramRuntime {
             resolver,
             processor_resolver,
             contract,
-            output_id,
+            output_id.map(AudioCompileRequest::program),
             None,
             None,
             &mut stack,
@@ -462,7 +499,7 @@ impl AudioProgramRuntime {
             resolver,
             default_processor_resolver(),
             contract,
-            output_id,
+            output_id.map(AudioCompileRequest::program),
             Some(window),
             None,
             &mut stack,
@@ -503,7 +540,7 @@ impl AudioProgramRuntime {
             resolver,
             default_processor_resolver(),
             contract,
-            output_id,
+            output_id.map(AudioCompileRequest::program),
             Some(window),
             Some(prepared_closure),
             &mut stack,
@@ -518,7 +555,7 @@ impl AudioProgramRuntime {
         resolver: &dyn AudioMediaResolver,
         processor_resolver: &dyn AudioProcessorResolver,
         contract: AudioRenderContract,
-        output_id: Option<ProgramOutputId>,
+        compile_request: Option<AudioCompileRequest>,
         selection: Option<DependencyWindow>,
         prepared_closure: Option<&AudioDependencyClosure>,
         stack: &mut BTreeSet<SequenceId>,
@@ -536,9 +573,16 @@ impl AudioProgramRuntime {
         }
         let footprint_before = ledger.footprint;
         let result = (|| {
-            let output_id = output_id
-                .or_else(|| sequence.audio_program.outputs.first().map(|output| output.id))
+            let compile_request = compile_request
+                .or_else(|| {
+                    sequence
+                        .audio_program
+                        .outputs
+                        .first()
+                        .map(|output| AudioCompileRequest::program(output.id))
+                })
                 .ok_or(AudioRuntimeBuildError::MissingProgramOutput(sequence.id))?;
+            let output_id = compile_request.output_id;
             let program = if let Some(prepared_closure) = prepared_closure {
                 let window = selection.ok_or(AudioRuntimeBuildError::MissingPreparedProgram {
                     sequence_id: sequence.id,
@@ -551,8 +595,7 @@ impl AudioProgramRuntime {
                     },
                 )?
             } else {
-                let mut program =
-                    compile_audio_program(sequence, AudioCompileRequest::program(output_id))?;
+                let mut program = compile_audio_program(sequence, compile_request)?;
                 if let Some(window) = selection {
                     select_program_window(&mut program, window)
                         .map_err(AudioExecutionError::from)?;
@@ -634,7 +677,7 @@ impl AudioProgramRuntime {
                             resolver,
                             processor_resolver,
                             child_contract,
-                            Some(output_id),
+                            Some(AudioCompileRequest::program(output_id)),
                             child_selection,
                             prepared_closure,
                             stack,
