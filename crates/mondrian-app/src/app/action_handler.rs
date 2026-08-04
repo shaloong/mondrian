@@ -8,7 +8,8 @@ use crate::app::exporting::TimelineExportRequest;
 use crate::app::media_asset_mutation::MediaAssetMutationKind;
 use crate::app::preview_quality::normalize_preview_resolution_scale;
 use crate::app::product_action::{
-    ProductAction, TimelineClipSelectionModePayload, TimelineProductAction, TimelineTrimPayloadEdge,
+    ProductAction, TimelineClipSelectionModePayload, TimelineProductAction,
+    TimelineTrimPayloadEdge, ViewerProductAction, ViewerSetClipTransformPayload,
 };
 #[cfg(test)]
 use crate::app::product_action::{TimelineMoveClipPayload, TimelineSelectClipPayload};
@@ -44,7 +45,6 @@ use crate::app::ui_actions::{
     TimelineSetTrackControlPayload, TimelineSetTrackTargetingPayload,
     TimelineSetVideoTransitionRangePayload, TimelineTrackControlPayloadKind,
     TimelineTrackTargetingControl, TimelineTrimSelectedClipsToPlayheadPayload,
-    ViewerSetClipTransformPayload, ViewerSetPreviewResolutionScalePayload,
     ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
     ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
     ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
@@ -68,8 +68,7 @@ use crate::app::ui_actions::{
     TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SELECT_VIDEO_TRANSITION,
     TIMELINE_SET_IN_OUT_POINT, TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
     TIMELINE_SET_TRACK_TARGETING, TIMELINE_SET_VIDEO_TRANSITION_RANGE,
-    TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, TIMELINE_UNLINK_SELECTED_CLIPS, VIEWER_NAMESPACE,
-    VIEWER_SET_CLIP_TRANSFORM, VIEWER_SET_PREVIEW_RESOLUTION_SCALE,
+    TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, TIMELINE_UNLINK_SELECTED_CLIPS,
 };
 use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, ClipSelectionMode, SelectedClipRef};
 use glam::Vec2;
@@ -266,9 +265,6 @@ impl AppState {
             }
             Action::Custom { namespace, name, payload } if namespace == EXPORT_NAMESPACE => {
                 self.dispatch_export_ui_action(&name, payload)
-            }
-            Action::Custom { namespace, name, payload } if namespace == VIEWER_NAMESPACE => {
-                self.dispatch_viewer_ui_action(&name, payload)
             }
             Action::Custom { namespace, name, payload } if namespace == PROJECT_NAMESPACE => {
                 self.dispatch_project_ui_action(&name, payload)
@@ -1221,6 +1217,7 @@ impl AppState {
         match action {
             ProductAction::Timeline(action) => self.dispatch_timeline_product_action(action),
             ProductAction::Audio(action) => self.dispatch_audio_product_action(action),
+            ProductAction::Viewer(action) => self.dispatch_viewer_product_action(action),
         }
     }
 
@@ -1842,25 +1839,14 @@ impl AppState {
         }
     }
 
-    fn dispatch_viewer_ui_action(&mut self, name: &str, payload: serde_json::Value) -> Result<()> {
-        match name {
-            VIEWER_SET_PREVIEW_RESOLUTION_SCALE => {
-                let payload = parse_ui_payload::<ViewerSetPreviewResolutionScalePayload>(
-                    "viewer_ui_action",
-                    name,
-                    payload,
-                )?;
+    fn dispatch_viewer_product_action(&mut self, action: ViewerProductAction) -> Result<()> {
+        match action {
+            ViewerProductAction::SetPreviewResolutionScale(payload) => {
                 self.set_preview_resolution_scale_from_ui(payload.scale)
             }
-            VIEWER_SET_CLIP_TRANSFORM => {
-                let payload = parse_ui_payload::<ViewerSetClipTransformPayload>(
-                    "viewer_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.set_clip_transform_from_viewer_ui(payload)
+            ViewerProductAction::SetClipTransform(payload) => {
+                self.set_clip_transform_from_viewer(payload)
             }
-            _ => Err(unknown_ui_action_error("viewer_ui_action", name)),
         }
     }
 
@@ -2525,31 +2511,32 @@ impl AppState {
         })
     }
 
-    fn set_clip_transform_from_viewer_ui(
+    fn set_clip_transform_from_viewer(
         &mut self,
         payload: ViewerSetClipTransformPayload,
     ) -> Result<()> {
         const STEP_ID: &str = "viewer_set_clip_transform";
-        if payload
-            .position
-            .is_some_and(|position| !position.x.is_finite() || !position.y.is_finite())
-            || payload.scale_percent.is_some_and(|scale| !scale.is_finite())
-            || payload.rotation_degrees.is_some_and(|rotation| !rotation.is_finite())
-        {
+        if !payload.has_mutation() {
+            return Err(MondrianError::ActionNotExecuted {
+                action: STEP_ID.to_owned(),
+                reason: "viewer transform contains no changed field".to_owned(),
+            });
+        }
+        if !payload.values_are_finite() {
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: STEP_ID.to_string(),
                 reason: "transform values must be finite".to_string(),
             });
         }
 
-        self.ensure_clip_track_unlocked(STEP_ID, payload.clip.clip_id)?;
+        self.ensure_clip_track_unlocked(STEP_ID, payload.clip_id)?;
         let Some(sequence_id) = self.active_sequence_id() else {
             return Err(missing_sequence_error(STEP_ID));
         };
         self.commit_sequence_edit(sequence_id, "调整监视器片段变换", |sequence| {
             let playhead = sequence.playhead;
-            let clip = find_clip_mut(sequence, payload.clip.clip_id)
-                .ok_or_else(|| missing_clip_error(STEP_ID, payload.clip.clip_id))?;
+            let clip = find_clip_mut(sequence, payload.clip_id)
+                .ok_or_else(|| missing_clip_error(STEP_ID, payload.clip_id))?;
             let author_time = clip_visual_author_time_at(clip, playhead)?;
 
             if let Some(position) = payload.position {
@@ -4085,7 +4072,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_viewer_ui_updates_preview_scale_without_stopping_playback() {
+    fn dispatch_viewer_product_action_updates_preview_scale_without_stopping_playback() {
         let mut state = AppState::new();
         let sequence = Sequence::new("preview");
         let sequence_id = sequence.id;
@@ -4126,7 +4113,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_viewer_ui_clamps_out_of_range_preview_scale() {
+    fn dispatch_viewer_product_action_clamps_out_of_range_preview_scale() {
         let mut state = AppState::new();
         let sequence = Sequence::new("preview");
         let sequence_id = sequence.id;
@@ -7408,14 +7395,13 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_viewer_ui_sets_clip_transform_atomically() {
-        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
-        let clip_ref = inspector_clip_payload(track_id, clip_id);
+    fn dispatch_viewer_product_action_sets_clip_transform_atomically() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
 
         state
             .dispatch_action(viewer_set_clip_transform_action(
                 ViewerSetClipTransformPayload {
-                    clip: clip_ref,
+                    clip_id,
                     position: Some(ViewerTransformPositionPayload { x: 320.0, y: 180.0 }),
                     scale_percent: Some(125.0),
                     rotation_degrees: Some(8.5),
@@ -7451,6 +7437,48 @@ mod tests {
             glam::Vec2::ZERO
         );
         assert_eq!(clip.transform.get_scale(sequence.playhead), glam::Vec2::ONE);
+    }
+
+    #[test]
+    fn viewer_transform_without_a_mutation_fails_before_author_state_changes() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let before = state.active_sequence().expect("sequence").clone();
+
+        let error = state
+            .dispatch_product_action(ProductAction::Viewer(
+                ViewerProductAction::SetClipTransform(ViewerSetClipTransformPayload {
+                    clip_id,
+                    position: None,
+                    scale_percent: None,
+                    rotation_degrees: None,
+                }),
+            ))
+            .expect_err("empty monitor gesture is not a product mutation");
+
+        assert!(matches!(error, MondrianError::ActionNotExecuted { .. }));
+        assert_eq!(state.active_sequence().expect("sequence"), &before);
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn viewer_transform_with_non_finite_values_fails_before_author_state_changes() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let before = state.active_sequence().expect("sequence").clone();
+
+        let error = state
+            .dispatch_product_action(ProductAction::Viewer(
+                ViewerProductAction::SetClipTransform(ViewerSetClipTransformPayload {
+                    clip_id,
+                    position: Some(ViewerTransformPositionPayload { x: f32::NAN, y: 0.0 }),
+                    scale_percent: None,
+                    rotation_degrees: None,
+                }),
+            ))
+            .expect_err("non-finite monitor gesture is not an author mutation");
+
+        assert!(matches!(error, MondrianError::WorkflowStepFailed { .. }));
+        assert_eq!(state.active_sequence().expect("sequence"), &before);
+        assert!(!state.can_undo_action());
     }
 
     #[test]
@@ -7510,7 +7538,7 @@ mod tests {
                 value: 128.0,
             }),
             viewer_set_clip_transform_action(ViewerSetClipTransformPayload {
-                clip: clip_ref,
+                clip_id,
                 position: Some(ViewerTransformPositionPayload { x: 320.0, y: 180.0 }),
                 scale_percent: Some(125.0),
                 rotation_degrees: Some(8.5),

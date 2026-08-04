@@ -48,14 +48,8 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
             );
     }
     match ProductAction::decode_external(action) {
-        Ok(Some(ProductAction::Timeline(action))) => {
-            return state.timeline_interaction_projection().allows(&action);
-        }
-        Ok(Some(ProductAction::Audio(_))) => {
-            // Timeline audio Modules perform authoritative address, lock,
-            // identity, curve, and schema validation at dispatch. UI
-            // availability only projects whether an authoring target exists.
-            return state.active_sequence().is_some();
+        Ok(Some(action)) => {
+            return state.product_action_availability().allows(&action);
         }
         Err(_) => return false,
         Ok(None) => {}
@@ -636,14 +630,16 @@ mod tests {
         timeline_select_clip_action, timeline_set_in_out_point_action,
         timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
         timeline_set_track_targeting_action, timeline_trim_clips_action,
-        timeline_trim_selected_clips_to_playhead_action, AssetsDeleteSelectionPayload,
+        timeline_trim_selected_clips_to_playhead_action, viewer_set_clip_transform_action,
+        viewer_set_preview_resolution_scale_action, AssetsDeleteSelectionPayload,
         AssetsImportFilesPayload, AssetsMoveSelectionPayload, ProjectCreateWithSettingsPayload,
         TimelineAddTrackKind, TimelineAddTrackPayload, TimelineInOutPointPayloadKind,
         TimelineMoveClipPayload, TimelineMoveTrackPayload, TimelineSelectClipPayload,
         TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
         TimelineSetTrackControlPayload, TimelineSetTrackTargetingPayload,
         TimelineTrackControlPayloadKind, TimelineTrackTargetingControl, TimelineTrimClipsPayload,
-        TimelineTrimPayloadEdge,
+        TimelineTrimPayloadEdge, ViewerSetClipTransformPayload,
+        ViewerSetPreviewResolutionScalePayload, ViewerTransformPositionPayload,
     };
     use crate::app::SelectedClipRef;
     use mondrian_core::types::{AssetId, ClipId, TrackId};
@@ -920,6 +916,43 @@ mod tests {
         };
 
         assert!(!app_state_action_enabled(&action, &state));
+    }
+
+    #[test]
+    fn app_state_action_gate_uses_viewer_product_availability() {
+        let mut state = state_with_selected_clip();
+        let clip_id = state.selection.selected_clips[0].clip_id;
+        let preview_scale =
+            viewer_set_preview_resolution_scale_action(ViewerSetPreviewResolutionScalePayload {
+                scale: 0.25,
+            });
+        let transform = viewer_set_clip_transform_action(ViewerSetClipTransformPayload {
+            clip_id,
+            position: Some(ViewerTransformPositionPayload { x: 10.0, y: 20.0 }),
+            scale_percent: None,
+            rotation_degrees: None,
+        });
+        let empty_transform = viewer_set_clip_transform_action(ViewerSetClipTransformPayload {
+            clip_id,
+            position: None,
+            scale_percent: None,
+            rotation_degrees: None,
+        });
+
+        assert!(app_state_action_enabled(&preview_scale, &state));
+        assert!(app_state_action_enabled(&transform, &state));
+        assert!(!app_state_action_enabled(&empty_transform, &state));
+
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked = true;
+        assert!(!app_state_action_enabled(&transform, &state));
+
+        let stale = viewer_set_clip_transform_action(ViewerSetClipTransformPayload {
+            clip_id: ClipId::new(),
+            position: Some(ViewerTransformPositionPayload { x: 10.0, y: 20.0 }),
+            scale_percent: None,
+            rotation_degrees: None,
+        });
+        assert!(!app_state_action_enabled(&stale, &state));
     }
 
     #[test]

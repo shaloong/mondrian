@@ -412,6 +412,15 @@ It never advances author generation, dirty state, or Undo/Redo. Runtime
 replacement is part of action success; failure rolls the monitoring intent
 back so the retained control cannot disagree with audible execution.
 
+The migrated Viewer slice carries authored preview-resolution changes and
+monitor-driven Clip transforms through `ViewerProductAction`. Transform intent
+addresses its canonical Clip by `ClipId`; it does not repeat Track identity or
+media-kind facts that the authoring Interface must resolve and validate. Empty
+or non-finite transform gestures fail before an author transaction, while an
+accepted multi-field gesture commits atomically with one Undo step. Canvas zoom
+is presentation state owned by the Window/Shell Adapter and deliberately
+remains outside the product algebra.
+
 `app_ui::audio_processor_rack` is the shared read-only Rack projection Module.
 It deduplicates Clip bindings by Processing Scope, consumes Timeline's binding
 count and lock blocker, preserves unknown plugin definitions and parameter
@@ -474,18 +483,19 @@ The Timeline production constructors likewise lower typed operations into the
 external envelope, and one App-owned codec is the only
 Implementation allowed to inspect their namespace, name, or JSON payload. A
 recognized name with an invalid payload fails closed before legacy routing; an
-unknown name remains untouched for another owning Adapter. Dispatch for this
-these slices then matches the typed algebra and no longer repeats string or
+unknown name remains untouched for another owning Adapter. Dispatch for these
+slices then matches the typed algebra and no longer repeats string or
 payload interpretation. This is a bounded migration, not a claim that every App
 Action already belongs to `ProductAction`.
 
-The same slice exposes one read-only `TimelineInteractionProjection`. Its Track
-lock, Clip membership, placement range, and Sequence time-base facts are
-private; the stable UI Interface is only `allows(&TimelineProductAction)`.
-Window and panel Adapters therefore cannot reconstruct admission by traversing
-`AuthoringSession`, `Sequence`, `Track`, or `Clip`, and cannot observe playback
-or execution internals through this projection. Admission remains guidance:
-the App-owned authoring or transport Interface revalidates authoritative state
+The migrated slices expose one read-only `ProductActionAvailability`. Its Track
+lock, Clip membership, media kind, placement range, and Sequence time-base facts
+are private; the stable UI Interface is only `allows(&ProductAction)`. Timeline,
+Audio, and Viewer controls therefore use the same admission Seam. Window and
+panel Adapters cannot reconstruct admission by traversing `AuthoringSession`,
+`Sequence`, `Track`, or `Clip`, and cannot observe playback or execution
+internals through this projection. Admission remains guidance: each App-owned
+authoring, monitoring, or transport Interface revalidates authoritative state
 at dispatch. Unmigrated custom Actions retain their current Adapters until an
 independently verifiable typed slice replaces them; this decision does not
 justify a parallel full action hierarchy.

@@ -29,6 +29,14 @@ pub const TIMELINE_TRIM_CLIPS: &str = "trim_clips";
 /// External action name for seeking the active Timeline.
 pub const TIMELINE_SEEK: &str = "seek";
 
+/// External custom-action namespace for Viewer product operations.
+pub const VIEWER_NAMESPACE: &str = "ui.viewer";
+
+/// External action name for changing the active Sequence preview scale.
+pub const VIEWER_SET_PREVIEW_RESOLUTION_SCALE: &str = "set_preview_resolution_scale";
+/// External action name for changing one Clip transform from monitor editing.
+pub const VIEWER_SET_CLIP_TRANSFORM: &str = "set_clip_transform";
+
 /// External custom-action namespace for Sequence audio authoring operations.
 pub const AUDIO_NAMESPACE: &str = "ui.audio";
 
@@ -57,6 +65,17 @@ pub enum ProductAction {
     Timeline(TimelineProductAction),
     /// An operation owned by Sequence audio authoring.
     Audio(AudioProductAction),
+    /// An operation owned by the Viewer product Interface.
+    Viewer(ViewerProductAction),
+}
+
+/// Closed Viewer operations that mutate product state.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ViewerProductAction {
+    /// Change the active Sequence's authored preview resolution scale.
+    SetPreviewResolutionScale(ViewerSetPreviewResolutionScalePayload),
+    /// Change one Clip transform at the active Sequence playhead.
+    SetClipTransform(ViewerSetClipTransformPayload),
 }
 
 /// Closed Sequence audio authoring operations.
@@ -111,6 +130,7 @@ impl ProductActionDecodeError {
         let domain = match self.namespace.as_str() {
             TIMELINE_NAMESPACE => "timeline_ui_action",
             AUDIO_NAMESPACE => "audio_action",
+            VIEWER_NAMESPACE => "viewer_action",
             _ => "product_action",
         };
         format!("{domain}.{}", self.name)
@@ -172,6 +192,19 @@ impl ProductAction {
                 AUDIO_EDIT_ROUTING => Ok(Some(Self::Audio(AudioProductAction::EditRouting(
                     decode_payload(namespace, name, payload)?,
                 )))),
+                _ => Ok(None),
+            },
+            VIEWER_NAMESPACE => match name.as_str() {
+                VIEWER_SET_PREVIEW_RESOLUTION_SCALE => Ok(Some(Self::Viewer(
+                    ViewerProductAction::SetPreviewResolutionScale(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
+                VIEWER_SET_CLIP_TRANSFORM => {
+                    Ok(Some(Self::Viewer(ViewerProductAction::SetClipTransform(
+                        decode_payload(namespace, name, payload)?,
+                    ))))
+                }
                 _ => Ok(None),
             },
             _ => Ok(None),
@@ -254,6 +287,16 @@ impl ProductAction {
                 AUDIO_NAMESPACE,
                 AUDIO_EDIT_ROUTING,
                 serde_json::json!(request),
+            ),
+            Self::Viewer(ViewerProductAction::SetPreviewResolutionScale(payload)) => (
+                VIEWER_NAMESPACE,
+                VIEWER_SET_PREVIEW_RESOLUTION_SCALE,
+                serde_json::json!(payload),
+            ),
+            Self::Viewer(ViewerProductAction::SetClipTransform(payload)) => (
+                VIEWER_NAMESPACE,
+                VIEWER_SET_CLIP_TRANSFORM,
+                serde_json::json!(payload),
             ),
         };
         Action::Custom {
@@ -384,13 +427,58 @@ pub struct TimelineSeekPayload {
     pub source: TimelineSeekSource,
 }
 
-/// Stable read-only admission projection for high-frequency Timeline actions.
+/// Change the active Viewer preview resolution scale.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewerSetPreviewResolutionScalePayload {
+    /// Preview resolution scale requested by the UI.
+    pub scale: f32,
+}
+
+/// Sequence-space position emitted by monitor direct manipulation.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewerTransformPositionPayload {
+    /// Horizontal position in Sequence pixels.
+    pub x: f32,
+    /// Vertical position in Sequence pixels.
+    pub y: f32,
+}
+
+/// Change one Clip transform from the Viewer/monitor surface.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewerSetClipTransformPayload {
+    /// Stable Clip identity targeted by the monitor interaction.
+    pub clip_id: ClipId,
+    /// Optional absolute Sequence-space position.
+    pub position: Option<ViewerTransformPositionPayload>,
+    /// Optional uniform scale in UI percent units.
+    pub scale_percent: Option<f32>,
+    /// Optional rotation in degrees.
+    pub rotation_degrees: Option<f32>,
+}
+
+impl ViewerSetClipTransformPayload {
+    pub(crate) const fn has_mutation(self) -> bool {
+        self.position.is_some() || self.scale_percent.is_some() || self.rotation_degrees.is_some()
+    }
+
+    pub(crate) fn values_are_finite(self) -> bool {
+        self.position
+            .is_none_or(|position| position.x.is_finite() && position.y.is_finite())
+            && self.scale_percent.is_none_or(f32::is_finite)
+            && self.rotation_degrees.is_none_or(f32::is_finite)
+    }
+}
+
+/// Stable read-only admission projection for migrated product Actions.
 ///
 /// Its facts are deliberately private. UI Adapters can ask whether a typed
 /// operation is currently useful, but cannot observe or reinterpret Sequence,
 /// Track, Clip, authoring-session, or execution internals.
 #[derive(Debug, Clone, Default)]
-pub struct TimelineInteractionProjection {
+pub struct ProductActionAvailability {
     sequence: Option<TimelineInteractionSequenceFacts>,
 }
 
@@ -414,7 +502,7 @@ struct TimelineInteractionClipFacts {
     end: Option<TimelineTime>,
 }
 
-impl TimelineInteractionProjection {
+impl ProductActionAvailability {
     fn from_sequence(sequence: Option<&Sequence>) -> Self {
         let Some(sequence) = sequence else {
             return Self::default();
@@ -434,33 +522,54 @@ impl TimelineInteractionProjection {
         Self { sequence: Some(facts) }
     }
 
-    /// Return whether a typed Timeline operation has a valid current target.
+    /// Return whether a typed product operation has a useful current target.
     ///
     /// This is an early, read-only UI projection. The owning mutation or
     /// transport Interface still revalidates authoritative state at dispatch.
-    pub fn allows(&self, action: &TimelineProductAction) -> bool {
-        let Some(sequence) = &self.sequence else {
-            return false;
-        };
+    pub fn allows(&self, action: &ProductAction) -> bool {
         match action {
-            TimelineProductAction::SelectClip(payload) => {
-                sequence.clips.contains_key(&payload.clip_id)
+            ProductAction::Timeline(action) => {
+                self.sequence.as_ref().is_some_and(|sequence| sequence.allows_timeline(action))
             }
-            TimelineProductAction::MoveClip(payload) => {
-                sequence.clips.get(&payload.clip_id).is_some_and(|clip| {
-                    clip.source_track_unlocked && clip.is_video_track == payload.is_video_track
-                }) && sequence
-                    .tracks
-                    .get(&(payload.target_track_id, payload.is_video_track))
-                    .is_some_and(|track| track.unlocked)
+            ProductAction::Audio(_) => self.sequence.is_some(),
+            ProductAction::Viewer(action) => {
+                self.sequence.as_ref().is_some_and(|sequence| sequence.allows_viewer(action))
             }
-            TimelineProductAction::TrimClips(payload) => sequence.allows_trim(payload),
-            TimelineProductAction::Seek(payload) => payload.frame >= 0,
         }
     }
 }
 
 impl TimelineInteractionSequenceFacts {
+    fn allows_timeline(&self, action: &TimelineProductAction) -> bool {
+        match action {
+            TimelineProductAction::SelectClip(payload) => self.clips.contains_key(&payload.clip_id),
+            TimelineProductAction::MoveClip(payload) => {
+                self.clips.get(&payload.clip_id).is_some_and(|clip| {
+                    clip.source_track_unlocked && clip.is_video_track == payload.is_video_track
+                }) && self
+                    .tracks
+                    .get(&(payload.target_track_id, payload.is_video_track))
+                    .is_some_and(|track| track.unlocked)
+            }
+            TimelineProductAction::TrimClips(payload) => self.allows_trim(payload),
+            TimelineProductAction::Seek(payload) => payload.frame >= 0,
+        }
+    }
+
+    fn allows_viewer(&self, action: &ViewerProductAction) -> bool {
+        match action {
+            ViewerProductAction::SetPreviewResolutionScale(_) => true,
+            ViewerProductAction::SetClipTransform(payload) => {
+                payload.has_mutation()
+                    && payload.values_are_finite()
+                    && self
+                        .clips
+                        .get(&payload.clip_id)
+                        .is_some_and(|clip| clip.source_track_unlocked && clip.is_video_track)
+            }
+        }
+    }
+
     fn insert_track(&mut self, track: &mondrian_timeline::track::Track, is_video_track: bool) {
         let unlocked = !track.is_locked;
         self.tracks.insert(
@@ -499,9 +608,9 @@ impl TimelineInteractionSequenceFacts {
 }
 
 impl AppState {
-    /// Project the minimal App-owned facts needed to admit Timeline interactions.
-    pub fn timeline_interaction_projection(&self) -> TimelineInteractionProjection {
-        TimelineInteractionProjection::from_sequence(self.active_sequence())
+    /// Project the minimal App-owned facts needed to admit migrated Actions.
+    pub fn product_action_availability(&self) -> ProductActionAvailability {
+        ProductActionAvailability::from_sequence(self.active_sequence())
     }
 }
 
@@ -556,6 +665,32 @@ mod tests {
             let decoded = ProductAction::decode_external(&external)
                 .expect("valid external payload")
                 .expect("recognized product action");
+            assert_eq!(decoded, expected);
+        }
+    }
+
+    #[test]
+    fn external_codec_round_trips_every_viewer_product_action() {
+        let clip_id = ClipId::new();
+        let actions = [
+            ProductAction::Viewer(ViewerProductAction::SetPreviewResolutionScale(
+                ViewerSetPreviewResolutionScalePayload { scale: 0.25 },
+            )),
+            ProductAction::Viewer(ViewerProductAction::SetClipTransform(
+                ViewerSetClipTransformPayload {
+                    clip_id,
+                    position: Some(ViewerTransformPositionPayload { x: 320.0, y: 180.0 }),
+                    scale_percent: Some(125.0),
+                    rotation_degrees: Some(8.5),
+                },
+            )),
+        ];
+
+        for expected in actions {
+            let external = expected.clone().into_external_action();
+            let decoded = ProductAction::decode_external(&external)
+                .expect("valid external payload")
+                .expect("recognized Viewer product action");
             assert_eq!(decoded, expected);
         }
     }
@@ -743,6 +878,24 @@ mod tests {
         let error = ProductAction::decode_external(&malformed_audio)
             .expect_err("recognized malformed payload fails closed");
         assert_eq!(error.dispatch_step_id(), "audio_action.edit_processor_rack");
+
+        let shell_zoom = Action::Custom {
+            namespace: VIEWER_NAMESPACE.to_owned(),
+            name: "cycle_zoom".to_owned(),
+            payload: serde_json::json!(null),
+        };
+        assert!(ProductAction::decode_external(&shell_zoom)
+            .expect("shell-local Viewer names are not decode failures")
+            .is_none());
+
+        let malformed_viewer = Action::Custom {
+            namespace: VIEWER_NAMESPACE.to_owned(),
+            name: VIEWER_SET_CLIP_TRANSFORM.to_owned(),
+            payload: serde_json::json!({"clip_id": ClipId::new(), "position": {"x": 1.0}}),
+        };
+        let error = ProductAction::decode_external(&malformed_viewer)
+            .expect_err("recognized malformed Viewer payload fails closed");
+        assert_eq!(error.dispatch_step_id(), "viewer_action.set_clip_transform");
     }
 
     #[test]
@@ -755,78 +908,137 @@ mod tests {
         let track_id = sequence.video_tracks[0].id;
         sequence.video_tracks[0].add_clip(clip).expect("add clip");
 
-        let projection = TimelineInteractionProjection::from_sequence(Some(&sequence));
-        assert!(projection.allows(&TimelineProductAction::SelectClip(
-            TimelineSelectClipPayload {
-                clip_id,
-                mode: TimelineClipSelectionModePayload::Replace,
-            },
-        )));
+        let projection = ProductActionAvailability::from_sequence(Some(&sequence));
         assert!(
-            projection.allows(&TimelineProductAction::MoveClip(TimelineMoveClipPayload {
-                target_track_id: track_id,
-                is_video_track: true,
-                clip_id,
-                frame: 12,
-            }))
+            projection.allows(&ProductAction::Timeline(TimelineProductAction::SelectClip(
+                TimelineSelectClipPayload {
+                    clip_id,
+                    mode: TimelineClipSelectionModePayload::Replace,
+                },
+            )))
         );
         assert!(
-            !projection.allows(&TimelineProductAction::MoveClip(TimelineMoveClipPayload {
-                target_track_id: sequence.audio_tracks[0].id,
-                is_video_track: false,
-                clip_id,
-                frame: 12,
-            }))
+            projection.allows(&ProductAction::Timeline(TimelineProductAction::MoveClip(
+                TimelineMoveClipPayload {
+                    target_track_id: track_id,
+                    is_video_track: true,
+                    clip_id,
+                    frame: 12,
+                }
+            )))
         );
-        assert!(projection.allows(&TimelineProductAction::TrimClips(
-            TimelineTrimClipsPayload {
-                clip_ids: vec![clip_id],
-                edge: TimelineTrimPayloadEdge::In,
-                frame: 15,
-            },
+        assert!(
+            !projection.allows(&ProductAction::Timeline(TimelineProductAction::MoveClip(
+                TimelineMoveClipPayload {
+                    target_track_id: sequence.audio_tracks[0].id,
+                    is_video_track: false,
+                    clip_id,
+                    frame: 12,
+                }
+            )))
+        );
+        assert!(
+            projection.allows(&ProductAction::Timeline(TimelineProductAction::TrimClips(
+                TimelineTrimClipsPayload {
+                    clip_ids: vec![clip_id],
+                    edge: TimelineTrimPayloadEdge::In,
+                    frame: 15,
+                },
+            )))
+        );
+        assert!(
+            !projection.allows(&ProductAction::Timeline(TimelineProductAction::TrimClips(
+                TimelineTrimClipsPayload {
+                    clip_ids: vec![clip_id],
+                    edge: TimelineTrimPayloadEdge::In,
+                    frame: 10,
+                },
+            )))
+        );
+        assert!(projection.allows(&ProductAction::Viewer(
+            ViewerProductAction::SetPreviewResolutionScale(
+                ViewerSetPreviewResolutionScalePayload { scale: 0.25 }
+            )
         )));
-        assert!(!projection.allows(&TimelineProductAction::TrimClips(
-            TimelineTrimClipsPayload {
-                clip_ids: vec![clip_id],
-                edge: TimelineTrimPayloadEdge::In,
-                frame: 10,
-            },
+        assert!(projection.allows(&ProductAction::Viewer(
+            ViewerProductAction::SetClipTransform(ViewerSetClipTransformPayload {
+                clip_id,
+                position: Some(ViewerTransformPositionPayload { x: 10.0, y: 20.0 }),
+                scale_percent: None,
+                rotation_degrees: None,
+            })
+        )));
+        assert!(!projection.allows(&ProductAction::Viewer(
+            ViewerProductAction::SetClipTransform(ViewerSetClipTransformPayload {
+                clip_id,
+                position: None,
+                scale_percent: None,
+                rotation_degrees: None,
+            })
+        )));
+        assert!(!projection.allows(&ProductAction::Viewer(
+            ViewerProductAction::SetClipTransform(ViewerSetClipTransformPayload {
+                clip_id: ClipId::new(),
+                position: Some(ViewerTransformPositionPayload { x: 10.0, y: 20.0 }),
+                scale_percent: None,
+                rotation_degrees: None,
+            })
         )));
 
         sequence.video_tracks[0].is_locked = true;
-        let locked = TimelineInteractionProjection::from_sequence(Some(&sequence));
+        let locked = ProductActionAvailability::from_sequence(Some(&sequence));
         assert!(
-            !locked.allows(&TimelineProductAction::MoveClip(TimelineMoveClipPayload {
-                target_track_id: track_id,
-                is_video_track: true,
-                clip_id,
-                frame: 12,
-            }))
+            !locked.allows(&ProductAction::Timeline(TimelineProductAction::MoveClip(
+                TimelineMoveClipPayload {
+                    target_track_id: track_id,
+                    is_video_track: true,
+                    clip_id,
+                    frame: 12,
+                }
+            )))
         );
-        assert!(!locked.allows(&TimelineProductAction::TrimClips(
-            TimelineTrimClipsPayload {
-                clip_ids: vec![clip_id],
-                edge: TimelineTrimPayloadEdge::Out,
-                frame: 20,
-            },
+        assert!(
+            !locked.allows(&ProductAction::Timeline(TimelineProductAction::TrimClips(
+                TimelineTrimClipsPayload {
+                    clip_ids: vec![clip_id],
+                    edge: TimelineTrimPayloadEdge::Out,
+                    frame: 20,
+                },
+            )))
+        );
+        assert!(!locked.allows(&ProductAction::Viewer(
+            ViewerProductAction::SetClipTransform(ViewerSetClipTransformPayload {
+                clip_id,
+                position: Some(ViewerTransformPositionPayload { x: 10.0, y: 20.0 }),
+                scale_percent: None,
+                rotation_degrees: None,
+            })
         )));
         assert!(
-            locked.allows(&TimelineProductAction::Seek(TimelineSeekPayload {
-                frame: 0,
-                source: TimelineSeekSource::Settled,
-            }))
+            locked.allows(&ProductAction::Timeline(TimelineProductAction::Seek(
+                TimelineSeekPayload { frame: 0, source: TimelineSeekSource::Settled }
+            )))
         );
         assert!(
-            !locked.allows(&TimelineProductAction::Seek(TimelineSeekPayload {
-                frame: -1,
-                source: TimelineSeekSource::Settled
-            }))
+            !locked.allows(&ProductAction::Timeline(TimelineProductAction::Seek(
+                TimelineSeekPayload { frame: -1, source: TimelineSeekSource::Settled }
+            )))
         );
 
         assert!(
-            !TimelineInteractionProjection::default().allows(&TimelineProductAction::Seek(
-                TimelineSeekPayload { frame: 0, source: TimelineSeekSource::Settled }
-            ),)
+            !ProductActionAvailability::default().allows(&ProductAction::Timeline(
+                TimelineProductAction::Seek(TimelineSeekPayload {
+                    frame: 0,
+                    source: TimelineSeekSource::Settled
+                })
+            ))
+        );
+        assert!(
+            !ProductActionAvailability::default().allows(&ProductAction::Viewer(
+                ViewerProductAction::SetPreviewResolutionScale(
+                    ViewerSetPreviewResolutionScalePayload { scale: 0.25 }
+                )
+            ))
         );
     }
 }

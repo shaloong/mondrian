@@ -32,13 +32,16 @@ use mondrian_ui_widgets::{ViewerCanvasBackground, WaveformDisplay};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use super::product_action::{AudioProductAction, ProductAction, TimelineProductAction};
+use super::product_action::{
+    AudioProductAction, ProductAction, TimelineProductAction, ViewerProductAction,
+};
 pub use super::product_action::{
     TimelineClipSelectionModePayload, TimelineMoveClipPayload, TimelineSeekPayload,
     TimelineSeekSource, TimelineSelectClipPayload, TimelineTrimClipsPayload,
-    TimelineTrimPayloadEdge, AUDIO_EDIT_COMPONENT, AUDIO_EDIT_PROCESSOR_RACK, AUDIO_NAMESPACE,
-    TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
-    TIMELINE_TRIM_CLIPS,
+    TimelineTrimPayloadEdge, ViewerSetClipTransformPayload, ViewerSetPreviewResolutionScalePayload,
+    ViewerTransformPositionPayload, AUDIO_EDIT_COMPONENT, AUDIO_EDIT_PROCESSOR_RACK,
+    AUDIO_NAMESPACE, TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
+    TIMELINE_TRIM_CLIPS, VIEWER_NAMESPACE,
 };
 use super::CrashRecoveryCandidate;
 
@@ -171,13 +174,6 @@ pub const EXPORT_CANCEL_JOB: &str = "cancel_job";
 /// Action name for clearing completed export queue jobs.
 pub const EXPORT_CLEAR_COMPLETED: &str = "clear_completed";
 
-/// Custom action namespace for viewer operations.
-pub const VIEWER_NAMESPACE: &str = "ui.viewer";
-
-/// Action name for changing the active sequence preview resolution scale.
-pub const VIEWER_SET_PREVIEW_RESOLUTION_SCALE: &str = "set_preview_resolution_scale";
-/// Action name for changing one selected clip transform from monitor editing.
-pub const VIEWER_SET_CLIP_TRANSFORM: &str = "set_clip_transform";
 /// Shell-local action name for cycling viewer canvas zoom.
 pub const VIEWER_CYCLE_ZOOM: &str = "cycle_zoom";
 /// Shell-local action name for setting viewer canvas zoom.
@@ -505,40 +501,11 @@ pub struct SequenceUpdateSettingsPayload {
     pub settings: SequenceSettings,
 }
 
-/// Change the active viewer preview resolution scale.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct ViewerSetPreviewResolutionScalePayload {
-    /// Preview resolution scale requested by the UI.
-    pub scale: f32,
-}
-
 /// Change the shell-local viewer canvas zoom.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ViewerSetZoomScalePayload {
     /// Fixed canvas scale. `None` means fit to available viewer space.
     pub scale: Option<f32>,
-}
-
-/// Sequence-space position emitted by monitor direct manipulation.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct ViewerTransformPositionPayload {
-    /// Horizontal position in sequence pixels.
-    pub x: f32,
-    /// Vertical position in sequence pixels.
-    pub y: f32,
-}
-
-/// Change one clip transform from the viewer/monitor surface.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct ViewerSetClipTransformPayload {
-    /// Clip targeted by the monitor interaction.
-    pub clip: InspectorClipRefPayload,
-    /// Optional absolute sequence-space position.
-    pub position: Option<ViewerTransformPositionPayload>,
-    /// Optional uniform scale in UI percent units.
-    pub scale_percent: Option<f32>,
-    /// Optional rotation in degrees.
-    pub rotation_degrees: Option<f32>,
 }
 
 /// Track control targeted by the timeline header.
@@ -1580,12 +1547,13 @@ pub fn export_clear_completed_action() -> Action {
 pub fn viewer_set_preview_resolution_scale_action(
     payload: ViewerSetPreviewResolutionScalePayload,
 ) -> Action {
-    custom_viewer_action(VIEWER_SET_PREVIEW_RESOLUTION_SCALE, payload)
+    ProductAction::Viewer(ViewerProductAction::SetPreviewResolutionScale(payload))
+        .into_external_action()
 }
 
 /// Build a viewer request for changing one selected clip transform.
 pub fn viewer_set_clip_transform_action(payload: ViewerSetClipTransformPayload) -> Action {
-    custom_viewer_action(VIEWER_SET_CLIP_TRANSFORM, payload)
+    ProductAction::Viewer(ViewerProductAction::SetClipTransform(payload)).into_external_action()
 }
 
 /// Build a shell-local viewer request for cycling canvas zoom.
