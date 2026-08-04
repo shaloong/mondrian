@@ -104,6 +104,15 @@ impl AppAudioPlayback {
         }
     }
 
+    fn latest_output_device_evidence(
+        &self,
+    ) -> Option<mondrian_media::RealtimeAudioOutputDeviceEvidence> {
+        match self {
+            Self::Available(playback) => playback.latest_output_device_evidence().cloned(),
+            Self::Unavailable { .. } => None,
+        }
+    }
+
     #[cfg(all(feature = "validation", test))]
     fn request_controlled_output_recycle(
         &self,
@@ -506,9 +515,15 @@ impl AppState {
         handled_at: Instant,
     ) -> mondrian_core::Result<()> {
         match event {
-            AudioPlaybackEvent::DeviceOpened { stream_generation } => {
+            AudioPlaybackEvent::DeviceOpened { stream_generation, evidence } => {
                 tracing::info!(
                     stream_generation,
+                    host = %evidence.host_name,
+                    device = ?evidence.device_name,
+                    sample_rate = evidence.contract.sample_rate,
+                    channels = evidence.contract.channels(),
+                    sample_format = ?evidence.contract.sample_format,
+                    channel_semantics = ?evidence.contract.channel_semantics,
                     "audio output stream opened; starting preroll"
                 );
                 Ok(())
@@ -529,8 +544,16 @@ impl AppState {
                     self.handoff_audio_device_to_synthetic("audio_device_lost", handled_at)
                 }
             }
-            AudioPlaybackEvent::DeviceOpenFailed { retry_after, reason } => {
-                tracing::debug!(?retry_after, %reason, "audio output open failed; retry scheduled");
+            AudioPlaybackEvent::DeviceOpenFailed { retry_after, failure } => {
+                tracing::debug!(
+                    ?retry_after,
+                    code = ?failure.code,
+                    requested_sample_rate = failure.requested_sample_rate,
+                    requested_layout = %failure.requested_layout,
+                    candidates = ?failure.candidates,
+                    detail = %failure.detail,
+                    "audio output open failed; retry scheduled"
+                );
                 Ok(())
             }
             AudioPlaybackEvent::DeviceWorkerStartFailed { reason } => {
@@ -1143,6 +1166,16 @@ impl AppState {
     /// Return the current production Audio Playback lifecycle and CPAL callback evidence.
     pub fn audio_playback_snapshot(&self) -> AudioPlaybackSnapshot {
         self.audio_playback.snapshot(self.audio_playback_mode())
+    }
+
+    /// Latest successful CPAL host/device/configuration negotiation evidence.
+    ///
+    /// This remains available after device loss so diagnostics can explain
+    /// the exact physical contract preceding Synthetic Clock handoff.
+    pub fn latest_audio_output_device_evidence(
+        &self,
+    ) -> Option<mondrian_media::RealtimeAudioOutputDeviceEvidence> {
+        self.audio_playback.latest_output_device_evidence()
     }
 
     /// Request a real destroy-and-reopen cycle for the exact current CPAL
@@ -1883,7 +1916,7 @@ fn audio_device_clock_observation(
     activation_preroll_satisfied: bool,
     terminal_frozen: bool,
 ) -> Result<AudioDeviceClockObservation, mondrian_playback::PlaybackError> {
-    let sample_rate = AudioSampleRate::new(snapshot.sample_rate)
+    let sample_rate = AudioSampleRate::new(snapshot.contract.sample_rate)
         .map_err(|_| mondrian_playback::PlaybackError::InvalidAudioSampleRate)?;
     if media_anchor.rate() != sample_rate {
         return Err(mondrian_playback::PlaybackError::MismatchedAudioSampleRate);
@@ -1946,7 +1979,7 @@ fn audio_device_clock_observation(
     Ok(AudioDeviceClockObservation {
         epoch,
         stream_generation: snapshot.stream_generation,
-        sample_rate: snapshot.sample_rate,
+        sample_rate: snapshot.contract.sample_rate,
         consumed_frames: snapshot.active_callback_consumed_frames,
         media_anchor,
         observed_at,
@@ -2108,8 +2141,19 @@ mod tests {
         RealtimeAudioOutputSnapshot {
             captured_at: Instant::now(),
             stream_generation: 3,
-            sample_rate: 48_000,
-            channels: 2,
+            contract: mondrian_media::RealtimeAudioOutputContract {
+                sample_rate: 48_000,
+                channel_layout: AudioChannelLayout::Stereo,
+                sample_format: mondrian_media::RealtimeAudioSampleFormat::F32,
+                channel_semantics: mondrian_media::RealtimeAudioChannelSemantics::StereoConvention,
+                supported_buffer_size: mondrian_media::RealtimeAudioSupportedBufferSize::Unknown,
+                candidates: mondrian_media::RealtimeAudioCandidateCounts {
+                    enumerated: 1,
+                    matching_channels: 1,
+                    matching_sample_rate: 1,
+                    executable: 1,
+                },
+            },
             callback_consumed_frames: 960,
             active_callback_consumed_frames: 480,
             active_duration: Some(Duration::from_millis(10)),

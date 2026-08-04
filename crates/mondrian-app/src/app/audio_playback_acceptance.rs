@@ -384,8 +384,7 @@ pub(crate) fn evaluate_professional_audio_playback(
     let frozen_loss_valid = frozen_loss.zip(initial_output).is_some_and(|(loss, initial)| {
         loss.reason == RealtimeAudioOutputLossReason::ControlledRecycle
             && loss.final_output.stream_generation == initial.stream_generation
-            && loss.final_output.sample_rate == initial.sample_rate
-            && loss.final_output.channels == initial.channels
+            && loss.final_output.contract == initial.contract
             && loss.final_output.callback_count >= initial.callback_count
             && loss.final_output.active_callback_consumed_frames
                 >= initial.active_callback_consumed_frames
@@ -460,7 +459,7 @@ pub(crate) fn evaluate_professional_audio_playback(
             .unwrap_or(0);
         let callback_position_us = callback_consumed_frames
             .saturating_mul(1_000_000)
-            .checked_div(u64::from(output.sample_rate.max(1)))
+            .checked_div(u64::from(output.contract.sample_rate.max(1)))
             .unwrap_or(u64::MAX);
         callback_divergence_us = callback_position_us.abs_diff(callback_duration_us);
         let callback_divergence_limit_us = MAX_CALLBACK_TIMELINE_DIVERGENCE_FLOOR_US.max(
@@ -485,10 +484,15 @@ pub(crate) fn evaluate_professional_audio_playback(
         );
         require(
             &mut failures,
-            output.sample_rate == OUTPUT_SAMPLE_RATE && output.channels == OUTPUT_CHANNELS,
+            output.contract.sample_rate == OUTPUT_SAMPLE_RATE
+                && output.contract.channels() == OUTPUT_CHANNELS,
             "audio_output_contract_mismatch",
             format!("{OUTPUT_SAMPLE_RATE} Hz / {OUTPUT_CHANNELS} channels"),
-            format!("{} Hz / {} channels", output.sample_rate, output.channels),
+            format!(
+                "{} Hz / {} channels",
+                output.contract.sample_rate,
+                output.contract.channels()
+            ),
             "concrete CPAL output stream",
         );
         require(
@@ -694,8 +698,8 @@ pub(crate) fn evaluate_professional_audio_playback(
         frozen_loss_anchor_rate: frozen_loss
             .and_then(|loss| loss.final_media_anchor)
             .map(|anchor| anchor.rate().hz()),
-        output_sample_rate: output.map(|output| output.sample_rate),
-        output_channels: output.map(|output| output.channels),
+        output_sample_rate: output.map(|output| output.contract.sample_rate),
+        output_channels: output.map(|output| output.contract.channels()),
         active_callback_consumed_frames: callback_consumed_frames,
         active_callback_duration_us: callback_duration_us,
         callback_timeline_divergence_us: callback_divergence_us,
@@ -862,8 +866,19 @@ mod tests {
         RealtimeAudioOutputSnapshot {
             captured_at: Instant::now(),
             stream_generation,
-            sample_rate: OUTPUT_SAMPLE_RATE,
-            channels: OUTPUT_CHANNELS,
+            contract: mondrian_media::RealtimeAudioOutputContract {
+                sample_rate: OUTPUT_SAMPLE_RATE,
+                channel_layout: mondrian_core::AudioChannelLayout::Stereo,
+                sample_format: mondrian_media::RealtimeAudioSampleFormat::F32,
+                channel_semantics: mondrian_media::RealtimeAudioChannelSemantics::StereoConvention,
+                supported_buffer_size: mondrian_media::RealtimeAudioSupportedBufferSize::Unknown,
+                candidates: mondrian_media::RealtimeAudioCandidateCounts {
+                    enumerated: 1,
+                    matching_channels: 1,
+                    matching_sample_rate: 1,
+                    executable: 1,
+                },
+            },
             callback_consumed_frames: active_frames,
             active_callback_consumed_frames: active_frames,
             active_duration: Some(active_duration),

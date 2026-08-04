@@ -9,7 +9,10 @@ use crate::audio_output::RealtimeAudioOutputRecycleError;
 use crate::audio_output::{
     RealtimeAudioOutputEvent, RealtimeAudioOutputLossReason, RealtimeAudioOutputManager,
 };
-use crate::{AudioBuffer, RealtimeAudioOutputSnapshot};
+use crate::{
+    AudioBuffer, RealtimeAudioOutputContract, RealtimeAudioOutputDeviceEvidence,
+    RealtimeAudioOutputOpenFailure, RealtimeAudioOutputSnapshot,
+};
 use mondrian_core::{
     AudioChannelLayout, AudioSamplePosition, AudioSampleRate, AudioTimeError,
     ExecutionCancellationToken,
@@ -144,12 +147,11 @@ pub enum AudioPlaybackError {
         expected: AudioChannelLayout,
         actual: AudioChannelLayout,
     },
-    /// The callback stream channel count contradicts its semantic layout.
-    #[error("realtime output reports {actual} channels but layout {layout} requires {expected}")]
-    OutputChannelCountMismatch {
-        layout: AudioChannelLayout,
-        expected: u8,
-        actual: u8,
+    /// The low-frequency negotiation evidence and callback snapshot disagree.
+    #[error("realtime output negotiation contract changed before publication")]
+    OutputNegotiationEvidenceMismatch {
+        selected: RealtimeAudioOutputContract,
+        observed: RealtimeAudioOutputContract,
     },
     /// Callback-control or exact output trimming failed closed.
     #[error(transparent)]
@@ -368,7 +370,10 @@ pub struct AudioOutputLifecycleDiagnostics {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AudioPlaybackEvent {
     /// A concrete output stream opened and the render generation was reset.
-    DeviceOpened { stream_generation: u64 },
+    DeviceOpened {
+        stream_generation: u64,
+        evidence: RealtimeAudioOutputDeviceEvidence,
+    },
     /// A concrete output stream was destroyed and its callback evidence frozen.
     DeviceLost {
         reason: RealtimeAudioOutputLossReason,
@@ -378,7 +383,7 @@ pub enum AudioPlaybackEvent {
     /// One open attempt failed and will be retried.
     DeviceOpenFailed {
         retry_after: Duration,
-        reason: String,
+        failure: RealtimeAudioOutputOpenFailure,
     },
     /// The owned concrete-device lifecycle worker could not be created.
     DeviceWorkerStartFailed { reason: String },
@@ -601,7 +606,6 @@ trait AudioOutputAdapter {
     ) -> Result<(), RealtimeAudioOutputControlError>;
     fn buffered_frames(&self) -> usize;
     fn capacity_frames(&self) -> Option<usize>;
-    fn configured_channel_layout(&self) -> AudioChannelLayout;
     fn snapshot(&self) -> Option<RealtimeAudioOutputSnapshot>;
     #[cfg(feature = "validation")]
     fn request_controlled_recycle(
@@ -656,10 +660,6 @@ impl AudioOutputAdapter for RealtimeAudioOutputManager {
 
     fn capacity_frames(&self) -> Option<usize> {
         RealtimeAudioOutputManager::capacity_frames(self)
-    }
-
-    fn configured_channel_layout(&self) -> AudioChannelLayout {
-        RealtimeAudioOutputManager::configured_channel_layout(self)
     }
 
     fn snapshot(&self) -> Option<RealtimeAudioOutputSnapshot> {
@@ -717,6 +717,7 @@ pub struct AudioPlayback {
     underrun_recovery_count: u64,
     recovery_preroll: bool,
     output_lifecycle: AudioOutputLifecycleDiagnostics,
+    latest_output_device_evidence: Option<RealtimeAudioOutputDeviceEvidence>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -803,6 +804,7 @@ impl AudioPlayback {
             underrun_recovery_count: 0,
             recovery_preroll: false,
             output_lifecycle: AudioOutputLifecycleDiagnostics::default(),
+            latest_output_device_evidence: None,
         })
     }
 
@@ -989,25 +991,17 @@ impl AudioPlayback {
         let Some(snapshot) = self.output.snapshot() else {
             return Ok(());
         };
-        if snapshot.sample_rate != self.config.sample_rate {
+        if snapshot.contract.sample_rate != self.config.sample_rate {
             return Err(AudioPlaybackError::OutputSampleRateMismatch {
                 expected: self.config.sample_rate,
-                actual: snapshot.sample_rate,
+                actual: snapshot.contract.sample_rate,
             });
         }
-        let actual_layout = self.output.configured_channel_layout();
+        let actual_layout = snapshot.contract.channel_layout;
         if actual_layout != self.config.channel_layout {
             return Err(AudioPlaybackError::OutputChannelLayoutMismatch {
                 expected: self.config.channel_layout,
                 actual: actual_layout,
-            });
-        }
-        let expected_channels = actual_layout.channel_count_u8();
-        if snapshot.channels != expected_channels {
-            return Err(AudioPlaybackError::OutputChannelCountMismatch {
-                layout: actual_layout,
-                expected: expected_channels,
-                actual: snapshot.channels,
             });
         }
         Ok(())
@@ -1045,8 +1039,20 @@ impl AudioPlayback {
             // the next independently preflighted poll.
             if let Some(event) = self.output.poll() {
                 match event {
-                    RealtimeAudioOutputEvent::Opened { stream_generation } => {
+                    RealtimeAudioOutputEvent::Opened { stream_generation, evidence } => {
                         self.validate_output_contract()?;
+                        let observed = self
+                            .output
+                            .snapshot()
+                            .ok_or(RealtimeAudioOutputControlError::OutputUnavailable)?
+                            .contract;
+                        if evidence.contract != observed {
+                            return Err(AudioPlaybackError::OutputNegotiationEvidenceMismatch {
+                                selected: evidence.contract,
+                                observed,
+                            });
+                        }
+                        self.latest_output_device_evidence = Some(evidence.clone());
                         self.output_lifecycle.opened_count =
                             self.output_lifecycle.opened_count.saturating_add(1);
                         self.output_lifecycle.last_opened_generation = Some(stream_generation);
@@ -1061,7 +1067,8 @@ impl AudioPlayback {
                         elapsed_skip_frames = Some(0);
                         admission_target_frames = self.config.high_watermark_frames;
                         generation_rotations += 1;
-                        events.push(AudioPlaybackEvent::DeviceOpened { stream_generation });
+                        events
+                            .push(AudioPlaybackEvent::DeviceOpened { stream_generation, evidence });
                     }
                     RealtimeAudioOutputEvent::Lost { reason, final_snapshot } => {
                         let final_media_anchor = self
@@ -1107,8 +1114,8 @@ impl AudioPlayback {
                             final_media_anchor,
                         });
                     }
-                    RealtimeAudioOutputEvent::OpenFailed { retry_after, reason } => {
-                        events.push(AudioPlaybackEvent::DeviceOpenFailed { retry_after, reason });
+                    RealtimeAudioOutputEvent::OpenFailed { retry_after, failure } => {
+                        events.push(AudioPlaybackEvent::DeviceOpenFailed { retry_after, failure });
                     }
                     RealtimeAudioOutputEvent::WorkerStartFailed { reason } => {
                         events.push(AudioPlaybackEvent::DeviceWorkerStartFailed { reason });
@@ -1475,6 +1482,14 @@ impl AudioPlayback {
         true
     }
 
+    /// Most recent successful physical device/configuration negotiation.
+    ///
+    /// Evidence remains available after loss so diagnostics can explain which
+    /// concrete contract preceded the synthetic-clock handoff.
+    pub fn latest_output_device_evidence(&self) -> Option<&RealtimeAudioOutputDeviceEvidence> {
+        self.latest_output_device_evidence.as_ref()
+    }
+
     /// Return immutable state without advancing workers or lifecycle.
     pub fn snapshot(&self, mode: AudioPlaybackMode) -> AudioPlaybackSnapshot {
         let output = self.output.snapshot();
@@ -1618,6 +1633,36 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Instant;
 
+    fn output_contract(
+        sample_rate: u32,
+        channel_layout: AudioChannelLayout,
+    ) -> crate::RealtimeAudioOutputContract {
+        crate::RealtimeAudioOutputContract {
+            sample_rate,
+            channel_layout,
+            sample_format: crate::RealtimeAudioSampleFormat::F32,
+            channel_semantics: crate::RealtimeAudioChannelSemantics::StereoConvention,
+            supported_buffer_size: crate::RealtimeAudioSupportedBufferSize::Unknown,
+            candidates: crate::RealtimeAudioCandidateCounts {
+                enumerated: 1,
+                matching_channels: 1,
+                matching_sample_rate: 1,
+                executable: 1,
+            },
+        }
+    }
+
+    fn device_evidence(
+        contract: crate::RealtimeAudioOutputContract,
+    ) -> crate::RealtimeAudioOutputDeviceEvidence {
+        crate::RealtimeAudioOutputDeviceEvidence {
+            host_name: "test-host".to_owned(),
+            device_name: Some("test-output".to_owned()),
+            device_name_error: None,
+            contract,
+        }
+    }
+
     #[derive(Default)]
     struct FakeOutputState {
         events: VecDeque<RealtimeAudioOutputEvent>,
@@ -1645,9 +1690,9 @@ mod tests {
             let mut state = self.state.lock();
             let snapshot =
                 state.snapshot.ok_or(RealtimeAudioOutputEnqueueError::OutputUnavailable)?;
-            if buffer.sample_rate != snapshot.sample_rate {
+            if buffer.sample_rate != snapshot.contract.sample_rate {
                 return Err(RealtimeAudioOutputEnqueueError::SampleRateMismatch {
-                    expected: snapshot.sample_rate,
+                    expected: snapshot.contract.sample_rate,
                     actual: buffer.sample_rate,
                 });
             }
@@ -1784,12 +1829,8 @@ mod tests {
             self.state
                 .lock()
                 .snapshot
-                .and_then(|snapshot| usize::try_from(snapshot.sample_rate).ok())
+                .and_then(|snapshot| usize::try_from(snapshot.contract.sample_rate).ok())
                 .and_then(|sample_rate| sample_rate.checked_mul(2))
-        }
-
-        fn configured_channel_layout(&self) -> AudioChannelLayout {
-            self.state.lock().channel_layout
         }
 
         fn snapshot(&self) -> Option<RealtimeAudioOutputSnapshot> {
@@ -2051,11 +2092,11 @@ mod tests {
     }
 
     fn fake_output() -> (Box<dyn AudioOutputAdapter>, Arc<Mutex<FakeOutputState>>) {
+        let contract = output_contract(1_000, AudioChannelLayout::Stereo);
         let snapshot = RealtimeAudioOutputSnapshot {
             captured_at: std::time::Instant::now(),
             stream_generation: 4,
-            sample_rate: 1_000,
-            channels: 2,
+            contract,
             callback_consumed_frames: 0,
             active_callback_consumed_frames: 0,
             active_duration: None,
@@ -2069,7 +2110,10 @@ mod tests {
             active: false,
         };
         let state = Arc::new(Mutex::new(FakeOutputState {
-            events: VecDeque::from([RealtimeAudioOutputEvent::Opened { stream_generation: 4 }]),
+            events: VecDeque::from([RealtimeAudioOutputEvent::Opened {
+                stream_generation: 4,
+                evidence: device_evidence(contract),
+            }]),
             snapshot: Some(snapshot),
             channel_layout: AudioChannelLayout::Stereo,
             queued_frames: 0,
@@ -2136,7 +2180,10 @@ mod tests {
         let events = poll_until_settled(&mut playback, sample_position(40));
         let snapshot = playback.snapshot(AudioPlaybackMode::Consume);
 
-        assert!(events.contains(&AudioPlaybackEvent::DeviceOpened { stream_generation: 4 }));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AudioPlaybackEvent::DeviceOpened { stream_generation: 4, .. }
+        )));
         let requests = requests.lock();
         assert_eq!(
             requests.iter().map(|request| request.start_sample).collect::<Vec<_>>(),
@@ -2180,7 +2227,10 @@ mod tests {
         let primed_generation = primed.generation;
         let primed_frames = state.lock().queued_frames;
 
-        assert!(events.contains(&AudioPlaybackEvent::DeviceOpened { stream_generation: 4 }));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AudioPlaybackEvent::DeviceOpened { stream_generation: 4, .. }
+        )));
         assert_eq!(primed.state, AudioPlaybackState::Prerolling);
         assert!(primed.activation_preroll_satisfied);
         assert!(primed.output.is_some_and(|output| !output.active));
@@ -2934,13 +2984,13 @@ mod tests {
     }
 
     #[test]
-    fn output_rate_layout_and_channel_count_mismatch_fail_before_playback_mutation() {
+    fn output_rate_and_layout_mismatch_fail_before_playback_mutation() {
         let (output, state) = fake_output();
         let mut playback =
             AudioPlayback::with_output(test_config(), output).expect("spawn test render worker");
         let generation = playback.generation;
 
-        state.lock().snapshot.as_mut().expect("fake output").sample_rate = 48_000;
+        state.lock().snapshot.as_mut().expect("fake output").contract.sample_rate = 48_000;
         assert_eq!(
             playback.prepare(
                 sample_position(0),
@@ -2954,8 +3004,9 @@ mod tests {
         assert_eq!(playback.generation, generation);
         assert!(playback.renderer.is_none());
 
-        state.lock().snapshot.as_mut().expect("fake output").sample_rate = 1_000;
-        state.lock().channel_layout = AudioChannelLayout::Mono;
+        state.lock().snapshot.as_mut().expect("fake output").contract.sample_rate = 1_000;
+        state.lock().snapshot.as_mut().expect("fake output").contract.channel_layout =
+            AudioChannelLayout::Mono;
         assert_eq!(
             playback.validate_anchor(sample_position(0)),
             Err(AudioPlaybackError::OutputChannelLayoutMismatch {
@@ -2964,19 +3015,29 @@ mod tests {
             })
         );
         assert_eq!(playback.generation, generation);
+        assert_eq!(state.lock().queued_frames, 0);
+    }
 
-        state.lock().channel_layout = AudioChannelLayout::Stereo;
-        state.lock().snapshot.as_mut().expect("fake output").channels = 1;
+    #[test]
+    fn opened_device_evidence_must_match_the_observed_stream_contract() {
+        let (output, state) = fake_output();
+        let observed = state.lock().snapshot.expect("fake output").contract;
+        let mut selected = observed;
+        selected.sample_rate = 48_000;
+        state.lock().events = VecDeque::from([RealtimeAudioOutputEvent::Opened {
+            stream_generation: 4,
+            evidence: device_evidence(selected),
+        }]);
+        let mut playback =
+            AudioPlayback::with_output(test_config(), output).expect("spawn test render worker");
+        let generation = playback.generation;
+
         assert_eq!(
-            playback.validate_anchor(sample_position(0)),
-            Err(AudioPlaybackError::OutputChannelCountMismatch {
-                layout: AudioChannelLayout::Stereo,
-                expected: 2,
-                actual: 1,
-            })
+            playback.poll(AudioPlaybackMode::Preroll, sample_position(0)),
+            Err(AudioPlaybackError::OutputNegotiationEvidenceMismatch { selected, observed })
         );
         assert_eq!(playback.generation, generation);
-        assert_eq!(state.lock().queued_frames, 0);
+        assert!(playback.latest_output_device_evidence().is_none());
     }
 
     #[test]
@@ -2985,7 +3046,7 @@ mod tests {
         {
             let mut output = state.lock();
             output.events.clear();
-            output.snapshot.as_mut().expect("fake output").sample_rate = 48_000;
+            output.snapshot.as_mut().expect("fake output").contract.sample_rate = 48_000;
         }
         let mut config = test_config();
         config.sample_rate = 48_000;
@@ -3068,10 +3129,10 @@ mod tests {
         reopened.buffered_frames = 0;
         state.lock().snapshot = Some(reopened);
         state.lock().queued_frames = 0;
-        state
-            .lock()
-            .events
-            .push_back(RealtimeAudioOutputEvent::Opened { stream_generation: 5 });
+        state.lock().events.push_back(RealtimeAudioOutputEvent::Opened {
+            stream_generation: 5,
+            evidence: device_evidence(reopened.contract),
+        });
         let reopened = playback
             .poll(AudioPlaybackMode::Preroll, sample_position(40))
             .expect("install reopened output");

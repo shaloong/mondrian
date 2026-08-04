@@ -8,6 +8,7 @@
 //! - 代理文件生成（Proxy）
 
 pub mod audio;
+mod audio_device;
 mod audio_output;
 mod audio_playback;
 pub mod audio_source;
@@ -22,6 +23,12 @@ pub mod proxy;
 pub mod waveform;
 
 pub use audio::{AudioBuffer, RealtimeAudioOutputControlError, RealtimeAudioOutputSnapshot};
+pub use audio_device::{
+    RealtimeAudioCandidateCounts, RealtimeAudioChannelSemantics, RealtimeAudioOutputContract,
+    RealtimeAudioOutputDeviceEvidence, RealtimeAudioOutputOpenFailure,
+    RealtimeAudioOutputOpenFailureCode, RealtimeAudioSampleFormat,
+    RealtimeAudioSupportedBufferSize,
+};
 pub use audio_output::RealtimeAudioOutputLossReason;
 #[cfg(feature = "validation")]
 pub use audio_playback::AudioPlaybackValidationError;

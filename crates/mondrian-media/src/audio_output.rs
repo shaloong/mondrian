@@ -5,6 +5,7 @@ use crate::audio::{
     RealtimeAudioOutputEnqueueError, RealtimeAudioOutputHandle, RealtimeAudioOutputQuiescenceToken,
     RealtimeAudioOutputSnapshot,
 };
+use crate::{RealtimeAudioOutputDeviceEvidence, RealtimeAudioOutputOpenFailure};
 use mondrian_core::AudioChannelLayout;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,7 +23,10 @@ const DEVICE_HEALTH_POLL: Duration = Duration::from_millis(20);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RealtimeAudioOutputEvent {
     /// A new concrete stream is ready but remains inactive for PCM preroll.
-    Opened { stream_generation: u64 },
+    Opened {
+        stream_generation: u64,
+        evidence: RealtimeAudioOutputDeviceEvidence,
+    },
     /// The concrete stream was destroyed and its evidence is now frozen.
     Lost {
         reason: RealtimeAudioOutputLossReason,
@@ -31,7 +35,7 @@ pub enum RealtimeAudioOutputEvent {
     /// One background open attempt failed and a bounded retry was scheduled.
     OpenFailed {
         retry_after: Duration,
-        reason: String,
+        failure: RealtimeAudioOutputOpenFailure,
     },
     /// The owned device lifecycle worker could not be created.
     WorkerStartFailed { reason: String },
@@ -71,7 +75,7 @@ enum WorkerEvent {
     },
     OpenFailed {
         retry_after: Duration,
-        reason: String,
+        failure: RealtimeAudioOutputOpenFailure,
     },
 }
 
@@ -178,15 +182,16 @@ impl RealtimeAudioOutputManager {
         match event {
             WorkerEvent::Opened(handle) => {
                 let stream_generation = handle.snapshot().stream_generation;
+                let evidence = handle.device_evidence();
                 self.handle = Some(handle);
-                Some(RealtimeAudioOutputEvent::Opened { stream_generation })
+                Some(RealtimeAudioOutputEvent::Opened { stream_generation, evidence })
             }
             WorkerEvent::Lost { reason, final_snapshot } => {
                 self.handle = None;
                 Some(RealtimeAudioOutputEvent::Lost { reason, final_snapshot })
             }
-            WorkerEvent::OpenFailed { retry_after, reason } => {
-                Some(RealtimeAudioOutputEvent::OpenFailed { retry_after, reason })
+            WorkerEvent::OpenFailed { retry_after, failure } => {
+                Some(RealtimeAudioOutputEvent::OpenFailed { retry_after, failure })
             }
         }
     }
@@ -270,10 +275,6 @@ impl RealtimeAudioOutputManager {
     /// Fixed complete-frame capacity of the current stream queue.
     pub fn capacity_frames(&self) -> Option<usize> {
         self.handle.as_ref().map(RealtimeAudioOutputHandle::capacity_frames)
-    }
-
-    pub(crate) fn configured_channel_layout(&self) -> AudioChannelLayout {
-        self.channel_layout
     }
 
     /// Capture immutable callback and stream health evidence.
@@ -384,10 +385,8 @@ fn run_device_worker(
             Err(error) => {
                 consecutive_failures = consecutive_failures.saturating_add(1);
                 let retry_after = retry_delay(consecutive_failures);
-                if event_tx
-                    .send(WorkerEvent::OpenFailed { retry_after, reason: error.to_string() })
-                    .is_err()
-                {
+                let failure = error.into_open_failure(sample_rate, channel_layout);
+                if event_tx.send(WorkerEvent::OpenFailed { retry_after, failure }).is_err() {
                     break;
                 }
                 interruptible_sleep(retry_after, worker_shutdown);

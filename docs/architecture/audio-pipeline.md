@@ -897,6 +897,32 @@ underrun recovery, and device-clock evidence. The CPAL callback touches only a
 fixed-capacity queue and atomics; it does not allocate, decode, compile, log,
 inspect the Timeline, or lock a Session.
 
+`audio_device` is the sole Realtime Audio Output Negotiation Module. On every
+open/reopen attempt it enumerates the current default device's
+`supported_output_configs`; it never combines the default configuration's
+sample format with an unproven requested rate/channel tuple. Candidate
+selection requires the exact requested channel extent and a range containing
+the exact requested sample rate, then deterministically prefers F32/F64 and
+signed higher-precision integer formats before lower-precision/unsigned
+formats. The callback Adapter supports every scalar format represented by the
+current CPAL Interface and clamps only at this physical sink conversion; common
+float Program execution remains unclipped upstream.
+
+CPAL exposes channel count but no portable speaker-position evidence. The
+Module therefore admits versioned Mono and Stereo device conventions plus
+explicit ordinal Discrete layouts. A named 5.1/7.1/custom speaker layout is
+rejected even when the count matches until a platform Adapter proves the
+positions and order. Success publishes one `RealtimeAudioOutputContract` with
+semantic layout, exact rate, scalar format, buffer-range evidence, and counts
+for enumerated/channel/rate/executable candidates. Low-frequency device
+evidence also retains CPAL host, optional device name, and any nonfatal name
+query failure. Every callback snapshot embeds that exact Contract; Audio
+Playback rejects disagreement between the open event and callback observation.
+Open failures carry a stable code, request, candidate counts, optional selected
+Contract, and backend detail. `AppState` composes physical evidence with
+`AudioDeliveryEvidence` only while the current stream Contract and delivery
+target match, so diagnostics cannot join facts from different device states.
+
 Construction is fail-closed. `AudioPlayback` is returned only after its owned
 PCM render worker has spawned successfully; worker creation failure is a typed
 creation error, not a permanently empty completion queue. The App may retain
@@ -961,7 +987,8 @@ or any other control error remains terminal for the poll. This explicit
 transient closes the device-retirement race without weakening callback
 quiescence evidence.
 
-Every realtime output snapshot carries the wall-clock `captured_at` instant at
+Every realtime output snapshot carries its selected device Contract and the
+wall-clock `captured_at` instant at
 which its counters and callback age formed one coherent fact. The callback is
 the single non-blocking writer of one revisioned telemetry publication domain;
 activation/deactivation is a separate revisioned control domain serialized only

@@ -12,7 +12,36 @@ use mondrian_audio::{
 };
 use mondrian_core::{SequenceId, TrackId};
 use mondrian_editor_state::AuthoringSessionId;
+use mondrian_media::RealtimeAudioOutputDeviceEvidence;
 use mondrian_timeline::Sequence;
+
+/// Proven active path from one Sequence Program Output to one physical stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveAudioMonitoringPathEvidence {
+    /// Program-to-monitor semantic channel mapping selected before execution.
+    pub delivery: AudioDeliveryEvidence,
+    /// CPAL host/device/candidate selection for the current output contract.
+    pub device: RealtimeAudioOutputDeviceEvidence,
+    /// Concrete callback stream generation joining the two evidence sets.
+    pub stream_generation: u64,
+}
+
+fn bind_active_audio_monitoring_path(
+    delivery: AudioDeliveryEvidence,
+    device: RealtimeAudioOutputDeviceEvidence,
+    output: mondrian_media::RealtimeAudioOutputSnapshot,
+) -> Option<ActiveAudioMonitoringPathEvidence> {
+    if output.contract != device.contract
+        || delivery.target_layout != output.contract.channel_layout
+    {
+        return None;
+    }
+    Some(ActiveAudioMonitoringPathEvidence {
+        delivery,
+        device,
+        stream_generation: output.stream_generation,
+    })
+}
 
 #[derive(Default)]
 pub(super) struct AudioMonitoringState {
@@ -210,12 +239,83 @@ impl super::AppState {
             self.authoring_session_id().zip(self.active_sequence_id())?;
         self.audio_monitoring.delivery_evidence(session_id, sequence_id)
     }
+
+    /// Complete active Program Output to physical monitoring-stream evidence.
+    ///
+    /// A stale device selection, absent stream, or layout mismatch returns no
+    /// evidence instead of composing facts from different generations.
+    pub fn active_audio_monitoring_path_evidence(
+        &self,
+    ) -> Option<ActiveAudioMonitoringPathEvidence> {
+        let delivery = self.active_audio_delivery_evidence()?;
+        let device = self.latest_audio_output_device_evidence()?;
+        let output = self.audio_playback_snapshot().output?;
+        bind_active_audio_monitoring_path(delivery, device, output)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::product_action::AudioTrackSoloPayload;
+    use std::time::Instant;
+
+    fn output_contract() -> mondrian_media::RealtimeAudioOutputContract {
+        mondrian_media::RealtimeAudioOutputContract {
+            sample_rate: 48_000,
+            channel_layout: mondrian_core::AudioChannelLayout::Stereo,
+            sample_format: mondrian_media::RealtimeAudioSampleFormat::F32,
+            channel_semantics: mondrian_media::RealtimeAudioChannelSemantics::StereoConvention,
+            supported_buffer_size: mondrian_media::RealtimeAudioSupportedBufferSize::Unknown,
+            candidates: mondrian_media::RealtimeAudioCandidateCounts {
+                enumerated: 3,
+                matching_channels: 2,
+                matching_sample_rate: 2,
+                executable: 2,
+            },
+        }
+    }
+
+    #[test]
+    fn monitoring_path_binds_only_matching_delivery_and_physical_contracts() {
+        let contract = output_contract();
+        let device = RealtimeAudioOutputDeviceEvidence {
+            host_name: "test-host".to_owned(),
+            device_name: Some("test-device".to_owned()),
+            device_name_error: None,
+            contract,
+        };
+        let output = mondrian_media::RealtimeAudioOutputSnapshot {
+            captured_at: Instant::now(),
+            stream_generation: 17,
+            contract,
+            callback_consumed_frames: 0,
+            active_callback_consumed_frames: 0,
+            active_duration: None,
+            callback_count: 0,
+            underrun_frames: 0,
+            last_callback_frames: 0,
+            last_callback_playback_delay: None,
+            last_callback_age: None,
+            buffered_frames: 0,
+            stream_failed: false,
+            active: false,
+        };
+        let delivery = AudioDeliveryEvidence {
+            program_layout: mondrian_core::AudioChannelLayout::Mono,
+            target_layout: mondrian_core::AudioChannelLayout::Stereo,
+            mapping_kind: mondrian_audio::AudioDeliveryMappingKind::Standard,
+            coefficient_count: 2,
+        };
+        let bound = bind_active_audio_monitoring_path(delivery, device.clone(), output)
+            .expect("matching active path");
+        assert_eq!(bound.stream_generation, 17);
+        assert_eq!(bound.device.contract, contract);
+
+        let mut stale_device = device;
+        stale_device.contract.sample_rate = 44_100;
+        assert!(bind_active_audio_monitoring_path(delivery, stale_device, output).is_none());
+    }
 
     #[test]
     fn solo_is_session_local_idempotent_and_does_not_advance_author_state() {

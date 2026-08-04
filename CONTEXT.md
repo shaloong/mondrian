@@ -20,6 +20,10 @@ _Avoid_: Current video frame, UI timer
 A process-local nondecreasing elapsed-time source used for lifecycle ages, expiration, and execution evidence. It is never authored/media time and never advances a Playback Session.
 _Avoid_: Clock Master, Timeline Time, wall-clock timestamp, UI event-loop timer
 
+**Realtime Audio Output Negotiation**:
+The Media-owned, generation-local selection of one concrete physical monitoring contract from the current default device's enumerated CPAL output candidates. It requires the exact requested sample rate and channel extent, chooses one executable scalar format deterministically, retains host/device/configuration evidence and typed rejection codes, and never treats channel count as named speaker positions. CPAL Mono/Stereo use explicit versioned conventions; Discrete remains ordinal; named multichannel layouts require a platform Adapter that proves positions.
+_Avoid_: Default sample format plus arbitrary requested config, channel-count speaker inference, backend error string as the only evidence, device negotiation mutating a Sequence Program
+
 **Frame Work Deadline**:
 An opaque Adapter deadline paired with its remaining duration at admission, then lowered once into the Frame Work Broker's Monotonic Runtime Clock for queue, cancellation, and completion decisions.
 _Avoid_: UI comparison closure, decode-completion `Instant`, renewed timeout after queueing
