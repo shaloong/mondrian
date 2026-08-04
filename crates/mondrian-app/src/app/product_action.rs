@@ -6,9 +6,10 @@
 
 use std::path::PathBuf;
 
-use mondrian_core::types::{ClipId, FramePosition, SequenceId, TrackId};
+use mondrian_core::types::{ClipId, FramePosition, JobId, SequenceId, TrackId};
 use mondrian_core::{ProjectColorEnvironment, ProjectSettings, TimelineTime};
 use mondrian_editor_state::Action;
+use mondrian_export::preset::{BuiltinExportPreset, ExportPreset, TimelineExportRange};
 use mondrian_timeline::{
     sequence::{Sequence, SequenceSettings},
     AudioAutomationEditRequest, AudioChannelStripEditRequest, AudioComponentEditRequest,
@@ -16,6 +17,7 @@ use mondrian_timeline::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::exporting::TimelineExportRequest;
 use super::{AppState, CrashRecoveryCandidate};
 
 /// External custom-action namespace for Timeline product operations.
@@ -68,6 +70,18 @@ pub const SEQUENCE_DELETE: &str = "delete";
 /// External action name for updating Sequence identity and settings.
 pub const SEQUENCE_UPDATE_SETTINGS: &str = "update_settings";
 
+/// External custom-action namespace for Export product operations.
+pub const EXPORT_NAMESPACE: &str = "ui.export";
+
+/// External action name for updating the app-session Export draft.
+pub const EXPORT_EDIT_DRAFT: &str = "edit_draft";
+/// External action name for admitting an immutable Timeline Export Snapshot.
+pub const EXPORT_ENQUEUE: &str = "enqueue";
+/// External action name for requesting cancellation of one Export attempt.
+pub const EXPORT_CANCEL: &str = "cancel";
+/// External action name for clearing bounded terminal Export evidence.
+pub const EXPORT_CLEAR_TERMINAL_HISTORY: &str = "clear_terminal_history";
+
 /// External custom-action namespace for Sequence audio authoring operations.
 pub const AUDIO_NAMESPACE: &str = "ui.audio";
 
@@ -102,6 +116,8 @@ pub enum ProductAction {
     Project(ProjectProductAction),
     /// An operation owned by the Sequence management Interface.
     Sequence(SequenceProductAction),
+    /// An operation owned by Export draft or execution orchestration.
+    Export(ExportProductAction),
 }
 
 /// Closed Project lifecycle and authoring operations.
@@ -134,6 +150,19 @@ pub enum SequenceProductAction {
     Delete(SequenceTargetPayload),
     /// Replace one Sequence's name and complete settings atomically.
     UpdateSettings(Box<SequenceUpdateSettingsPayload>),
+}
+
+/// Closed Export draft and execution operations.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExportProductAction {
+    /// Apply one exact edit to the app-session Export draft.
+    EditDraft(Box<ExportDraftEdit>),
+    /// Admit one immutable Timeline Export request.
+    Enqueue(Box<TimelineExportRequest>),
+    /// Request cancellation for one retained Export attempt.
+    Cancel(JobId),
+    /// Remove all retained terminal Export evidence.
+    ClearTerminalHistory,
 }
 
 /// Closed Viewer operations that mutate product state.
@@ -200,6 +229,7 @@ impl ProductActionDecodeError {
             VIEWER_NAMESPACE => "viewer_action",
             PROJECT_NAMESPACE => "project_action",
             SEQUENCE_NAMESPACE => "sequence_action",
+            EXPORT_NAMESPACE => "export_action",
             _ => "product_action",
         };
         format!("{domain}.{}", self.name)
@@ -327,6 +357,27 @@ impl ProductAction {
                     Ok(Some(Self::Sequence(SequenceProductAction::UpdateSettings(
                         Box::new(decode_payload(namespace, name, payload)?),
                     ))))
+                }
+                _ => Ok(None),
+            },
+            EXPORT_NAMESPACE => match name.as_str() {
+                EXPORT_EDIT_DRAFT => Ok(Some(Self::Export(ExportProductAction::EditDraft(
+                    Box::new(decode_payload(namespace, name, payload)?),
+                )))),
+                EXPORT_ENQUEUE => Ok(Some(Self::Export(ExportProductAction::Enqueue(Box::new(
+                    decode_payload(namespace, name, payload)?,
+                ))))),
+                EXPORT_CANCEL => {
+                    let target: ExportCancelWirePayload = decode_payload(namespace, name, payload)?;
+                    Ok(Some(Self::Export(ExportProductAction::Cancel(
+                        target.job_id,
+                    ))))
+                }
+                EXPORT_CLEAR_TERMINAL_HISTORY => {
+                    decode_payload::<()>(namespace, name, payload)?;
+                    Ok(Some(Self::Export(
+                        ExportProductAction::ClearTerminalHistory,
+                    )))
                 }
                 _ => Ok(None),
             },
@@ -473,6 +524,22 @@ impl ProductAction {
                 SEQUENCE_NAMESPACE,
                 SEQUENCE_UPDATE_SETTINGS,
                 serde_json::json!(payload),
+            ),
+            Self::Export(ExportProductAction::EditDraft(edit)) => {
+                (EXPORT_NAMESPACE, EXPORT_EDIT_DRAFT, serde_json::json!(edit))
+            }
+            Self::Export(ExportProductAction::Enqueue(request)) => {
+                (EXPORT_NAMESPACE, EXPORT_ENQUEUE, serde_json::json!(request))
+            }
+            Self::Export(ExportProductAction::Cancel(job_id)) => (
+                EXPORT_NAMESPACE,
+                EXPORT_CANCEL,
+                serde_json::json!(ExportCancelWirePayload { job_id }),
+            ),
+            Self::Export(ExportProductAction::ClearTerminalHistory) => (
+                EXPORT_NAMESPACE,
+                EXPORT_CLEAR_TERMINAL_HISTORY,
+                serde_json::Value::Null,
             ),
         };
         Action::Custom {
@@ -663,6 +730,28 @@ pub struct SequenceUpdateSettingsPayload {
     pub settings: SequenceSettings,
 }
 
+/// One exact edit to the app-session Export draft.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportDraftEdit {
+    /// Reset the materialized draft from a stable built-in preset.
+    BuiltinPreset(BuiltinExportPreset),
+    /// Replace the complete typed delivery draft after one form edit.
+    Preset(ExportPreset),
+    /// Select the Sequence to export; `None` follows the active Sequence.
+    Sequence(Option<SequenceId>),
+    /// Select the Timeline range to export.
+    Range(TimelineExportRange),
+    /// Replace the user-entered output path without syntactic correction.
+    OutputPath(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportCancelWirePayload {
+    job_id: JobId,
+}
+
 /// Change the active Viewer preview resolution scale.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -741,6 +830,7 @@ impl<'a> ProductActionAvailability<'a> {
             ProductAction::Viewer(action) => self.allows_viewer(action),
             ProductAction::Project(action) => self.allows_project(action),
             ProductAction::Sequence(action) => self.allows_sequence(action),
+            ProductAction::Export(action) => self.allows_export(action),
         }
     }
 
@@ -827,6 +917,38 @@ impl<'a> ProductActionAvailability<'a> {
                     !name.is_empty()
                         && (sequence.name != name || sequence.settings != payload.settings)
                 })
+            }
+        }
+    }
+
+    fn allows_export(&self, action: &ExportProductAction) -> bool {
+        match action {
+            ExportProductAction::EditDraft(edit) => match edit.as_ref() {
+                ExportDraftEdit::BuiltinPreset(preset) => {
+                    self.state.export_draft.selected_builtin_preset != *preset
+                        || self.state.export_draft.preset != preset.preset()
+                }
+                ExportDraftEdit::Preset(preset) => self.state.export_draft.preset != *preset,
+                ExportDraftEdit::Sequence(sequence_id) => {
+                    sequence_id
+                        .is_none_or(|sequence_id| self.state.sequence_by_id(sequence_id).is_some())
+                        && self.state.export_draft.selected_sequence_id != *sequence_id
+                }
+                ExportDraftEdit::Range(range) => self.state.export_draft.range != *range,
+                ExportDraftEdit::OutputPath(output_path) => {
+                    self.state.export_draft.output_path != *output_path
+                }
+            },
+            ExportProductAction::Enqueue(request) => {
+                !request.output_path.as_os_str().is_empty()
+                    && request.sequence_id.map_or_else(
+                        || self.state.active_sequence().is_some(),
+                        |sequence_id| self.state.sequence_by_id(sequence_id).is_some(),
+                    )
+            }
+            ExportProductAction::Cancel(job_id) => self.state.render_queue.can_cancel(*job_id),
+            ExportProductAction::ClearTerminalHistory => {
+                self.state.render_queue.has_terminal_history()
             }
         }
     }
@@ -1059,6 +1181,48 @@ mod tests {
     }
 
     #[test]
+    fn external_codec_round_trips_every_export_product_action() {
+        let sequence_id = SequenceId::new();
+        let job_id = JobId::new();
+        let preset = ExportPreset::h264_aac_sdr_1080p();
+        let actions = [
+            ProductAction::Export(ExportProductAction::EditDraft(Box::new(
+                ExportDraftEdit::BuiltinPreset(BuiltinExportPreset::H264AacSdr1080p),
+            ))),
+            ProductAction::Export(ExportProductAction::EditDraft(Box::new(
+                ExportDraftEdit::Preset(preset.clone()),
+            ))),
+            ProductAction::Export(ExportProductAction::EditDraft(Box::new(
+                ExportDraftEdit::Sequence(Some(sequence_id)),
+            ))),
+            ProductAction::Export(ExportProductAction::EditDraft(Box::new(
+                ExportDraftEdit::Range(TimelineExportRange::EntireSequence),
+            ))),
+            ProductAction::Export(ExportProductAction::EditDraft(Box::new(
+                ExportDraftEdit::OutputPath("delivery.mp4".to_owned()),
+            ))),
+            ProductAction::Export(ExportProductAction::Enqueue(Box::new(
+                TimelineExportRequest {
+                    preset,
+                    sequence_id: Some(sequence_id),
+                    range: TimelineExportRange::EntireSequence,
+                    output_path: PathBuf::from("delivery.mp4"),
+                    output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
+                },
+            ))),
+            ProductAction::Export(ExportProductAction::Cancel(job_id)),
+            ProductAction::Export(ExportProductAction::ClearTerminalHistory),
+        ];
+
+        for expected in actions {
+            let decoded = ProductAction::decode_external(&expected.clone().into_external_action())
+                .expect("valid external payload")
+                .expect("recognized Export product action");
+            assert_eq!(decoded, expected);
+        }
+    }
+
+    #[test]
     fn external_codec_round_trips_audio_processor_rack_edits() {
         let request = AudioProcessorRackEditRequest {
             address: AudioProcessorRackAddress::ChannelStrip {
@@ -1267,6 +1431,11 @@ mod tests {
                 "project_action.create_with_settings",
             ),
             (SEQUENCE_NAMESPACE, SEQUENCE_NEW, "sequence_action.new"),
+            (
+                EXPORT_NAMESPACE,
+                EXPORT_CLEAR_TERMINAL_HISTORY,
+                "export_action.clear_terminal_history",
+            ),
         ] {
             let malformed = Action::Custom {
                 namespace: namespace.to_owned(),
@@ -1278,7 +1447,7 @@ mod tests {
             assert_eq!(error.dispatch_step_id(), step_id);
         }
 
-        for namespace in [PROJECT_NAMESPACE, SEQUENCE_NAMESPACE] {
+        for namespace in [PROJECT_NAMESPACE, SEQUENCE_NAMESPACE, EXPORT_NAMESPACE] {
             let unknown = Action::Custom {
                 namespace: namespace.to_owned(),
                 name: "plugin_extension".to_owned(),
@@ -1540,5 +1709,59 @@ mod tests {
             },
         )));
         assert!(state.product_action_availability().allows(&changed));
+    }
+
+    #[test]
+    fn export_availability_rejects_noops_and_stale_targets_without_cloning_jobs() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("Export");
+        let sequence_id = sequence.id;
+        state.test_set_sequence(Some(sequence));
+
+        let unchanged_builtin = ProductAction::Export(ExportProductAction::EditDraft(Box::new(
+            ExportDraftEdit::BuiltinPreset(state.export_draft.selected_builtin_preset),
+        )));
+        assert!(!state.product_action_availability().allows(&unchanged_builtin));
+        let output_edit = ProductAction::Export(ExportProductAction::EditDraft(Box::new(
+            ExportDraftEdit::OutputPath("delivery.mp4".to_owned()),
+        )));
+        assert!(state.product_action_availability().allows(&output_edit));
+        let select_sequence = ProductAction::Export(ExportProductAction::EditDraft(Box::new(
+            ExportDraftEdit::Sequence(Some(sequence_id)),
+        )));
+        assert!(state.product_action_availability().allows(&select_sequence));
+        let stale_sequence = ProductAction::Export(ExportProductAction::EditDraft(Box::new(
+            ExportDraftEdit::Sequence(Some(SequenceId::new())),
+        )));
+        assert!(!state.product_action_availability().allows(&stale_sequence));
+
+        let valid_request = TimelineExportRequest {
+            preset: ExportPreset::h264_aac_sdr_1080p(),
+            sequence_id: Some(sequence_id),
+            range: TimelineExportRange::EntireSequence,
+            output_path: PathBuf::from("delivery.mp4"),
+            output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
+        };
+        let valid_enqueue = ProductAction::Export(ExportProductAction::Enqueue(Box::new(
+            valid_request.clone(),
+        )));
+        assert!(state.product_action_availability().allows(&valid_enqueue));
+        let stale_enqueue = ProductAction::Export(ExportProductAction::Enqueue(Box::new(
+            TimelineExportRequest {
+                sequence_id: Some(SequenceId::new()),
+                ..valid_request
+            },
+        )));
+        assert!(!state.product_action_availability().allows(&stale_enqueue));
+        assert!(
+            !state.product_action_availability().allows(&ProductAction::Export(
+                ExportProductAction::Cancel(JobId::new())
+            ))
+        );
+        assert!(
+            !state.product_action_availability().allows(&ProductAction::Export(
+                ExportProductAction::ClearTerminalHistory
+            ))
+        );
     }
 }

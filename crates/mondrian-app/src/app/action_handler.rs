@@ -4,14 +4,13 @@
 //! through `AuthoringSession`; transport intent goes through `PlaybackEngine`.
 
 use crate::app::animation_authoring::{ClipNumericCurveEdit, NormalizedCurvePoint};
-use crate::app::exporting::TimelineExportRequest;
 use crate::app::media_asset_mutation::MediaAssetMutationKind;
 use crate::app::preview_quality::normalize_preview_resolution_scale;
 use crate::app::product_action::{
-    ProductAction, ProjectCreateWithSettingsPayload, ProjectProductAction,
-    ProjectRecoverFromAutosavePayload, SequenceProductAction, SequenceUpdateSettingsPayload,
-    TimelineClipSelectionModePayload, TimelineProductAction, TimelineTrimPayloadEdge,
-    ViewerProductAction, ViewerSetClipTransformPayload,
+    ExportDraftEdit, ExportProductAction, ProductAction, ProjectCreateWithSettingsPayload,
+    ProjectProductAction, ProjectRecoverFromAutosavePayload, SequenceProductAction,
+    SequenceUpdateSettingsPayload, TimelineClipSelectionModePayload, TimelineProductAction,
+    TimelineTrimPayloadEdge, ViewerProductAction, ViewerSetClipTransformPayload,
 };
 #[cfg(test)]
 use crate::app::product_action::{TimelineMoveClipPayload, TimelineSelectClipPayload};
@@ -29,8 +28,7 @@ use crate::app::ui_actions::{
     AssetsPrepareDragPayload, AssetsRebindAudioComponentPayload,
     AssetsRefreshAudioComponentsPayload, AssetsRelinkAssetPayload, AssetsRenameAssetPayload,
     AssetsRenameFolderPayload, AssetsSetInterpretationPayload, AssetsSetProxyModePayload,
-    EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
-    ExportJobTargetPayload, InspectorAudioComponentSourcePayload, InspectorClipTransformField,
+    EffectsAddToClipPayload, InspectorAudioComponentSourcePayload, InspectorClipTransformField,
     InspectorCurveEditPayload, InspectorEditClipCurvePayload, InspectorRemoveEffectPayload,
     InspectorSelectEffectPayload, InspectorSetAudioComponentSourcePayload,
     InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
@@ -49,15 +47,13 @@ use crate::app::ui_actions::{
     ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
     ASSETS_PREPARE_DRAG, ASSETS_REBIND_AUDIO_COMPONENT, ASSETS_REFRESH_AUDIO_COMPONENTS,
     ASSETS_RELINK_ASSET, ASSETS_RENAME_ASSET, ASSETS_RENAME_FOLDER, ASSETS_SET_INTERPRETATION,
-    ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, EXPORT_CANCEL_JOB,
-    EXPORT_CLEAR_COMPLETED, EXPORT_ENQUEUE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT,
-    INSPECTOR_EDIT_CLIP_CURVE, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT,
-    INSPECTOR_SELECT_EFFECT, INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, INSPECTOR_SET_CLIP_ENABLED,
-    INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_PROPERTY, INSPECTOR_SET_CLIP_TINT,
-    INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
-    INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
-    TIMELINE_CREATE_BASIC_TITLE, TIMELINE_CREATE_CROSS_DISSOLVE, TIMELINE_DROP_ASSET,
-    TIMELINE_EXTRACT_RANGE, TIMELINE_INSERT_ASSET, TIMELINE_LIFT_RANGE,
+    ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_EDIT_CLIP_CURVE,
+    INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT,
+    INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
+    INSPECTOR_SET_CLIP_PROPERTY, INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
+    INSPECTOR_SET_EFFECT_ENABLED, INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK,
+    TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_CREATE_BASIC_TITLE, TIMELINE_CREATE_CROSS_DISSOLVE,
+    TIMELINE_DROP_ASSET, TIMELINE_EXTRACT_RANGE, TIMELINE_INSERT_ASSET, TIMELINE_LIFT_RANGE,
     TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
     TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_PRECOMPOSE_SELECTION,
     TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SELECT_VIDEO_TRANSITION,
@@ -75,6 +71,7 @@ use mondrian_core::automation::{
 use mondrian_core::events::AppEvent;
 use mondrian_core::types::{AudioComponentEditId, ClipId, EffectId, FramePosition, Rational};
 use mondrian_core::{FrameRounding, MondrianError, Result, TimelineTime};
+use mondrian_export::queue::ExportCancelOutcome;
 use mondrian_timeline::audio::AudioComponentSource;
 use mondrian_timeline::clip::{Clip, Transform2D, TrimEdge};
 use mondrian_timeline::{
@@ -257,9 +254,6 @@ impl AppState {
             }
             Action::Custom { namespace, name, payload } if namespace == ASSETS_NAMESPACE => {
                 self.dispatch_assets_ui_action(&name, payload)
-            }
-            Action::Custom { namespace, name, payload } if namespace == EXPORT_NAMESPACE => {
-                self.dispatch_export_ui_action(&name, payload)
             }
             unsupported => Err(MondrianError::WorkflowStepFailed {
                 step_id: "dispatch_action".to_owned(),
@@ -1208,6 +1202,7 @@ impl AppState {
             ProductAction::Viewer(action) => self.dispatch_viewer_product_action(action),
             ProductAction::Project(action) => self.dispatch_project_product_action(action),
             ProductAction::Sequence(action) => self.dispatch_sequence_product_action(action),
+            ProductAction::Export(action) => self.dispatch_export_product_action(action),
         }
     }
 
@@ -1778,54 +1773,63 @@ impl AppState {
         }
     }
 
-    fn dispatch_export_ui_action(&mut self, name: &str, payload: serde_json::Value) -> Result<()> {
-        match name {
-            EXPORT_SET_DRAFT => {
-                let payload = parse_ui_payload::<ExportDraftUpdatePayload>(
-                    "export_ui_action",
-                    name,
-                    payload,
-                )?;
-                match payload {
-                    ExportDraftUpdatePayload::BuiltinPreset(preset) => {
-                        self.set_export_draft_builtin_preset(preset)
-                    }
-                    ExportDraftUpdatePayload::Preset(preset) => {
-                        self.set_export_draft_preset(preset)
-                    }
-                    ExportDraftUpdatePayload::Sequence(sequence_id) => {
-                        self.set_export_draft_sequence_id(sequence_id)
-                    }
-                    ExportDraftUpdatePayload::Range(range) => self.set_export_draft_range(range),
-                    ExportDraftUpdatePayload::OutputPath(output_path) => {
-                        self.set_export_draft_output_path(output_path)
+    fn dispatch_export_product_action(&mut self, action: ExportProductAction) -> Result<()> {
+        match action {
+            ExportProductAction::EditDraft(edit) => {
+                if let ExportDraftEdit::Sequence(Some(sequence_id)) = edit.as_ref() {
+                    if self.sequence_by_id(*sequence_id).is_none() {
+                        return Err(action_not_executed(
+                            "edit_export_draft",
+                            format!("Export draft Sequence no longer exists: {sequence_id}"),
+                        ));
                     }
                 }
-                Ok(())
+                let changed = match *edit {
+                    ExportDraftEdit::BuiltinPreset(preset) => {
+                        self.set_export_draft_builtin_preset(preset)
+                    }
+                    ExportDraftEdit::Preset(preset) => self.set_export_draft_preset(preset),
+                    ExportDraftEdit::Sequence(sequence_id) => {
+                        self.set_export_draft_sequence_id(sequence_id)
+                    }
+                    ExportDraftEdit::Range(range) => self.set_export_draft_range(range),
+                    ExportDraftEdit::OutputPath(output_path) => {
+                        self.set_export_draft_output_path(output_path)
+                    }
+                };
+                require_action_executed(
+                    changed,
+                    "edit_export_draft",
+                    "Export draft already has the requested value",
+                )
             }
-            EXPORT_ENQUEUE => {
-                let payload =
-                    parse_ui_payload::<ExportEnqueuePayload>("export_ui_action", name, payload)?;
-                self.enqueue_timeline_export(TimelineExportRequest {
-                    preset: payload.preset,
-                    sequence_id: payload.sequence_id,
-                    range: payload.range,
-                    output_path: payload.output_path,
-                    output_policy: payload.output_policy,
-                })
-                .map(|_| ())
+            ExportProductAction::Enqueue(request) => {
+                self.enqueue_timeline_export(*request).map(|_| ())
             }
-            EXPORT_CANCEL_JOB => {
-                let payload =
-                    parse_ui_payload::<ExportJobTargetPayload>("export_ui_action", name, payload)?;
-                self.cancel_export_job(payload.job_id);
-                Ok(())
-            }
-            EXPORT_CLEAR_COMPLETED => {
-                self.clear_completed_exports();
-                Ok(())
-            }
-            _ => Err(unknown_ui_action_error("export_ui_action", name)),
+            ExportProductAction::Cancel(job_id) => match self.cancel_export_job(job_id) {
+                ExportCancelOutcome::Requested => Ok(()),
+                ExportCancelOutcome::AlreadyRequested => Err(action_not_executed(
+                    "cancel_export",
+                    "Export cancellation was already requested",
+                )),
+                ExportCancelOutcome::TooLateCommitting => Err(action_not_executed(
+                    "cancel_export",
+                    "Export already crossed irreversible publication",
+                )),
+                ExportCancelOutcome::AlreadyTerminal => Err(action_not_executed(
+                    "cancel_export",
+                    "Export attempt is already terminal",
+                )),
+                ExportCancelOutcome::NotFound => Err(action_not_executed(
+                    "cancel_export",
+                    format!("Export job is no longer retained: {job_id}"),
+                )),
+            },
+            ExportProductAction::ClearTerminalHistory => require_action_executed(
+                self.clear_terminal_export_history() > 0,
+                "clear_terminal_export_history",
+                "Export queue has no retained terminal evidence",
+            ),
         }
     }
 
@@ -3090,8 +3094,8 @@ mod tests {
         assets_rebind_audio_component_action, assets_refresh_audio_components_action,
         assets_relink_asset_action, assets_rename_asset_action, assets_rename_folder_action,
         assets_set_interpretation_action, assets_set_proxy_mode_action,
-        audio_component_edit_action, effects_add_to_clip_action, export_cancel_job_action,
-        export_clear_completed_action, export_enqueue_action, export_set_draft_action,
+        audio_component_edit_action, effects_add_to_clip_action, export_cancel_action,
+        export_clear_terminal_history_action, export_edit_draft_action, export_enqueue_action,
         inspector_edit_clip_curve_action, inspector_remove_effect_action,
         inspector_select_effect_action, inspector_set_audio_component_source_action,
         inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
@@ -3118,18 +3122,18 @@ mod tests {
         AssetsPrepareDragPayload, AssetsRebindAudioComponentPayload,
         AssetsRefreshAudioComponentsPayload, AssetsRelinkAssetPayload, AssetsRenameAssetPayload,
         AssetsRenameFolderPayload, AssetsSetInterpretationPayload, AssetsSetProxyModePayload,
-        EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
-        ExportJobTargetPayload, InspectorAudioComponentSourcePayload, InspectorClipRefPayload,
-        InspectorClipTransformField, InspectorCurveEditPayload, InspectorCurvePointPayload,
-        InspectorEditClipCurvePayload, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
-        InspectorSetAudioComponentSourcePayload, InspectorSetClipEnabledPayload,
-        InspectorSetClipOpacityPayload, InspectorSetClipPropertyPayload,
-        InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
-        InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
-        ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
-        ProjectUpdateColorEnvironmentPayload, ProjectUpdateNewSequenceDefaultsPayload,
-        SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineAddTrackKind,
-        TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineInOutPointPayloadKind,
+        EffectsAddToClipPayload, ExportDraftEdit, InspectorAudioComponentSourcePayload,
+        InspectorClipRefPayload, InspectorClipTransformField, InspectorCurveEditPayload,
+        InspectorCurvePointPayload, InspectorEditClipCurvePayload, InspectorRemoveEffectPayload,
+        InspectorSelectEffectPayload, InspectorSetAudioComponentSourcePayload,
+        InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
+        InspectorSetClipPropertyPayload, InspectorSetClipTintPayload,
+        InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
+        InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
+        ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
+        ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload,
+        SequenceUpdateSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
+        TimelineDropAssetPayload, TimelineExportRequest, TimelineInOutPointPayloadKind,
         TimelineInsertAssetPayload, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
         TimelineSeekSource, TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
         TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
@@ -3431,7 +3435,6 @@ mod tests {
             (INSPECTOR_NAMESPACE, "inspector_ui_action.unknown"),
             (EFFECTS_NAMESPACE, "effects_ui_action.unknown"),
             (ASSETS_NAMESPACE, "assets_ui_action.unknown"),
-            (EXPORT_NAMESPACE, "export_ui_action.unknown"),
         ] {
             let mut state = AppState::new();
             let err = state
@@ -3473,7 +3476,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_project_and_sequence_product_actions_fail_closed_on_malformed_payloads() {
+    fn migrated_product_actions_fail_closed_on_malformed_payloads() {
         for (namespace, name, expected_step) in [
             (
                 crate::app::product_action::PROJECT_NAMESPACE,
@@ -3484,6 +3487,11 @@ mod tests {
                 crate::app::product_action::SEQUENCE_NAMESPACE,
                 crate::app::product_action::SEQUENCE_NEW,
                 "sequence_action.new",
+            ),
+            (
+                crate::app::product_action::EXPORT_NAMESPACE,
+                crate::app::product_action::EXPORT_CLEAR_TERMINAL_HISTORY,
+                "export_action.clear_terminal_history",
             ),
         ] {
             let mut state = AppState::new();
@@ -3506,12 +3514,12 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_export_ui_rejects_empty_output_path_without_queueing() {
+    fn dispatch_export_product_action_rejects_empty_output_path_without_queueing() {
         let mut state = AppState::new();
         state.test_set_sequence(Some(Sequence::new("export")));
 
         let err = state
-            .dispatch_action(export_enqueue_action(ExportEnqueuePayload {
+            .dispatch_action(export_enqueue_action(TimelineExportRequest {
                 preset: mondrian_export::preset::ExportPreset::h264_aac_sdr_1080p(),
                 sequence_id: None,
                 range: mondrian_export::preset::TimelineExportRange::EntireSequence,
@@ -3526,37 +3534,39 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_export_ui_updates_draft_fields() {
+    fn dispatch_export_product_action_updates_draft_fields() {
         let mut state = AppState::new();
-        let sequence_id = mondrian_core::types::SequenceId::new();
+        let sequence = Sequence::new("Export");
+        let sequence_id = sequence.id;
+        state.test_set_sequence(Some(sequence));
         let builtin = mondrian_export::preset::BuiltinExportPreset::ProRes4444Alpha;
         let mut customized = builtin.preset();
         customized.video_signal.range = mondrian_export::preset::ExportParameter::FollowSequence;
 
         state
-            .dispatch_action(export_set_draft_action(
-                ExportDraftUpdatePayload::BuiltinPreset(builtin),
-            ))
+            .dispatch_action(export_edit_draft_action(ExportDraftEdit::BuiltinPreset(
+                builtin,
+            )))
             .expect("set preset");
         state
-            .dispatch_action(export_set_draft_action(ExportDraftUpdatePayload::Preset(
+            .dispatch_action(export_edit_draft_action(ExportDraftEdit::Preset(
                 customized.clone(),
             )))
             .expect("customize preset");
         state
-            .dispatch_action(export_set_draft_action(ExportDraftUpdatePayload::Sequence(
-                Some(sequence_id),
-            )))
+            .dispatch_action(export_edit_draft_action(ExportDraftEdit::Sequence(Some(
+                sequence_id,
+            ))))
             .expect("set sequence");
         state
-            .dispatch_action(export_set_draft_action(ExportDraftUpdatePayload::Range(
+            .dispatch_action(export_edit_draft_action(ExportDraftEdit::Range(
                 mondrian_export::preset::TimelineExportRange::EntireSequence,
             )))
             .expect("set range");
         state
-            .dispatch_action(export_set_draft_action(
-                ExportDraftUpdatePayload::OutputPath("E:/renders/out.mp4".to_owned()),
-            ))
+            .dispatch_action(export_edit_draft_action(ExportDraftEdit::OutputPath(
+                "E:/renders/out.mp4".to_owned(),
+            )))
             .expect("set output path");
 
         assert_eq!(state.export_draft.selected_builtin_preset, builtin);
@@ -3570,16 +3580,41 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_export_ui_routes_queue_management_actions() {
+    fn export_draft_edit_rejects_noops_and_stale_sequence_targets() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("Export");
+        state.test_set_sequence(Some(sequence));
+
+        let error = state
+            .dispatch_action(export_edit_draft_action(ExportDraftEdit::BuiltinPreset(
+                state.export_draft.selected_builtin_preset,
+            )))
+            .expect_err("unchanged Export draft must not report a mutation");
+        assert_action_not_executed(error, "edit_export_draft");
+
+        let before = state.export_draft.clone();
+        let error = state
+            .dispatch_action(export_edit_draft_action(ExportDraftEdit::Sequence(Some(
+                mondrian_core::types::SequenceId::new(),
+            ))))
+            .expect_err("stale Sequence target must fail closed");
+        assert_action_not_executed(error, "edit_export_draft");
+        assert_eq!(state.export_draft, before);
+    }
+
+    #[test]
+    fn export_queue_actions_reject_stale_or_empty_targets() {
         let mut state = AppState::new();
         let job_id = mondrian_core::types::JobId::new();
 
-        state
-            .dispatch_action(export_cancel_job_action(ExportJobTargetPayload { job_id }))
-            .expect("cancel missing job should be a queue no-op");
-        state
-            .dispatch_action(export_clear_completed_action())
-            .expect("clear completed should be a queue no-op when empty");
+        let error = state
+            .dispatch_action(export_cancel_action(job_id))
+            .expect_err("cancel missing job must not report success");
+        assert_action_not_executed(error, "cancel_export");
+        let error = state
+            .dispatch_action(export_clear_terminal_history_action())
+            .expect_err("empty terminal history must not report a clear");
+        assert_action_not_executed(error, "clear_terminal_export_history");
 
         assert!(state.render_queue.list_jobs().is_empty());
     }

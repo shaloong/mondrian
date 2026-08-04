@@ -6886,7 +6886,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_completed_removes_all_terminal_jobs() {
+    fn clear_terminal_history_removes_all_terminal_jobs() {
         let calls = Arc::new(AtomicUsize::new(0));
         let queue = RenderQueue::new_with_executor(Arc::new(FakeExecutor {
             calls: Arc::clone(&calls),
@@ -6907,10 +6907,31 @@ mod tests {
             .iter()
             .all(|job| job.status.is_terminal())));
 
-        queue.clear_completed();
+        assert!(queue.has_terminal_history());
+        assert_eq!(queue.clear_terminal_history(), 3);
 
         assert!(queue.list_jobs().is_empty());
+        assert!(!queue.has_terminal_history());
         assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn cancellation_availability_is_non_allocating_guidance_not_an_outcome() {
+        let queue = RenderQueue::new_with_executor(Arc::new(FakeExecutor {
+            calls: Arc::new(AtomicUsize::new(0)),
+            delay_ms: 0,
+        }));
+        queue.set_dispatch_enabled(false);
+        let job_id = queue
+            .enqueue(RenderJob::new(dummy_config("pending-cancel.mp4")))
+            .expect("admit pending export");
+
+        assert!(queue.can_cancel(job_id));
+        assert!(!queue.can_cancel(JobId::new()));
+        assert_eq!(queue.cancel(job_id), ExportCancelOutcome::Requested);
+        assert!(!queue.can_cancel(job_id));
+        assert!(queue.has_terminal_history());
+        assert_eq!(queue.clear_terminal_history(), 1);
     }
 
     #[test]

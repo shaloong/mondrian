@@ -95,8 +95,8 @@ use crate::app::ui_actions::{
     assets_prepare_drag_action, assets_rebind_audio_component_action,
     assets_refresh_audio_components_action, assets_rename_asset_action,
     assets_rename_folder_action, assets_set_proxy_mode_action, effects_add_to_clip_action,
-    export_cancel_job_action, export_clear_completed_action, export_enqueue_action,
-    export_set_draft_action, inspector_edit_clip_curve_action, inspector_remove_effect_action,
+    export_cancel_action, export_clear_terminal_history_action, export_edit_draft_action,
+    export_enqueue_action, inspector_edit_clip_curve_action, inspector_remove_effect_action,
     inspector_select_effect_action, inspector_set_audio_component_source_action,
     inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
     inspector_set_clip_property_action, inspector_set_clip_tint_action,
@@ -121,19 +121,19 @@ use crate::app::ui_actions::{
     AssetsMoveSelectionPayload, AssetsOpenFolderPayload, AssetsPrepareDragPayload,
     AssetsRebindAudioComponentPayload, AssetsRefreshAudioComponentsPayload,
     AssetsRenameAssetPayload, AssetsRenameFolderPayload, AssetsSetProxyModePayload,
-    DockDropAreaPayload, EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
-    ExportJobTargetPayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
-    InspectorAudioComponentSourcePayload, InspectorClipRefPayload, InspectorClipTransformField,
-    InspectorCurveEditPayload, InspectorCurvePointPayload, InspectorEditClipCurvePayload,
-    InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
+    DockDropAreaPayload, EffectsAddToClipPayload, ExportDraftEdit, ExportOutputDialogPayload,
+    ImportMediaDialogPayload, InspectorAudioComponentSourcePayload, InspectorClipRefPayload,
+    InspectorClipTransformField, InspectorCurveEditPayload, InspectorCurvePointPayload,
+    InspectorEditClipCurvePayload, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
     InspectorSetAudioComponentSourcePayload, InspectorSetClipEnabledPayload,
     InspectorSetClipOpacityPayload, InspectorSetClipPropertyPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
     TimelineClipSelectionModePayload, TimelineCreateCrossDissolvePayload, TimelineDropAssetPayload,
-    TimelineInOutPointPayloadKind, TimelineMoveClipPayload, TimelineMoveTrackPayload,
-    TimelineOpenNestedSequencePayload, TimelineSeekSource as AppTimelineSeekSource,
-    TimelineSelectClipPayload, TimelineSelectVideoTransitionPayload, TimelineSetInOutPointPayload,
+    TimelineExportRequest, TimelineInOutPointPayloadKind, TimelineMoveClipPayload,
+    TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
+    TimelineSeekSource as AppTimelineSeekSource, TimelineSelectClipPayload,
+    TimelineSelectVideoTransitionPayload, TimelineSetInOutPointPayload,
     TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
     TimelineSetTrackTargetingPayload, TimelineSetVideoTransitionRangePayload,
     TimelineTrackControlPayloadKind, TimelineTrackTargetingControl, TimelineTrimClipsPayload,
@@ -1912,7 +1912,7 @@ pub struct ExportPanelModel {
     pub delivery_error: Option<String>,
     pub status: Option<(String, bool)>,
     pub jobs: Vec<ExportJobModel>,
-    pub can_clear_completed_jobs: bool,
+    pub can_clear_terminal_history: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -2101,7 +2101,7 @@ impl ExportPanelModel {
 
         let jobs = state.export_jobs_snapshot();
         let queue_count = jobs.len();
-        let can_clear_completed_jobs = jobs.iter().any(|job| job.status.is_terminal());
+        let can_clear_terminal_history = jobs.iter().any(|job| job.status.is_terminal());
         let jobs = jobs
             .into_iter()
             .rev()
@@ -2130,7 +2130,7 @@ impl ExportPanelModel {
             delivery_error,
             status: state.status_hint.clone(),
             jobs,
-            can_clear_completed_jobs,
+            can_clear_terminal_history,
         }
     }
 
@@ -2171,7 +2171,7 @@ impl ExportPanelModel {
         }
     }
 
-    fn enqueue_payload(&self) -> Option<ExportEnqueuePayload> {
+    fn enqueue_request(&self) -> Option<TimelineExportRequest> {
         let preset = self.selected_preset()?.clone();
         let sequence_id = self.selected_sequence_id?;
         if self.delivery_error.is_some() {
@@ -2181,7 +2181,7 @@ impl ExportPanelModel {
         if output_path.is_empty() {
             return None;
         }
-        Some(ExportEnqueuePayload {
+        Some(TimelineExportRequest {
             preset,
             sequence_id: Some(sequence_id),
             range: self.range,
@@ -4226,7 +4226,7 @@ fn node_graph_panel(model: &NodeGraphPanelModel) -> NodeGraphView {
 }
 
 fn export_preset_update_action(preset: ExportPreset) -> Action {
-    export_set_draft_action(ExportDraftUpdatePayload::Preset(preset))
+    export_edit_draft_action(ExportDraftEdit::Preset(preset))
 }
 
 fn export_container_label(container: &Container) -> &'static str {
@@ -4653,7 +4653,7 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         .map(|option| {
             MenuItem::new(
                 option.label.clone(),
-                export_set_draft_action(ExportDraftUpdatePayload::BuiltinPreset(option.id)),
+                export_edit_draft_action(ExportDraftEdit::BuiltinPreset(option.id)),
             )
         })
         .collect::<Vec<_>>();
@@ -4726,7 +4726,7 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         .map(|sequence| {
             MenuItem::new(
                 sequence.name.clone(),
-                export_set_draft_action(ExportDraftUpdatePayload::Sequence(Some(sequence.id))),
+                export_edit_draft_action(ExportDraftEdit::Sequence(Some(sequence.id))),
             )
         })
         .collect::<Vec<_>>();
@@ -4738,13 +4738,13 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         vec![
             MenuItem::new(
                 export_range_label(TimelineExportRange::SequenceInOut),
-                export_set_draft_action(ExportDraftUpdatePayload::Range(
+                export_edit_draft_action(ExportDraftEdit::Range(
                     TimelineExportRange::SequenceInOut,
                 )),
             ),
             MenuItem::new(
                 export_range_label(TimelineExportRange::EntireSequence),
-                export_set_draft_action(ExportDraftUpdatePayload::Range(
+                export_edit_draft_action(ExportDraftEdit::Range(
                     TimelineExportRange::EntireSequence,
                 )),
             ),
@@ -4767,23 +4767,21 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
     let output_input = TextInput::new("输出路径")
         .with_text(model.output_path.clone())
         .enabled(can_choose_output)
-        .on_change(|text| {
-            export_set_draft_action(ExportDraftUpdatePayload::OutputPath(text.to_owned()))
-        });
+        .on_change(|text| export_edit_draft_action(ExportDraftEdit::OutputPath(text.to_owned())));
     let output_row = FlexContainer::row(vec![
         FlexChild::flex(Box::new(output_input), 1.0),
         FlexChild::fixed(Box::new(output_browse)),
     ])
     .with_gap(8.0);
-    let enqueue_action = model.enqueue_payload().map(export_enqueue_action);
+    let enqueue_action = model.enqueue_request().map(export_enqueue_action);
     let enqueue_button = AppIcon::Export
         .text_button_or_label("Add to queue")
         .enabled(model.can_enqueue())
         .on_click(enqueue_action);
-    let clear_completed_button = AppIcon::Trash
-        .text_button_or_label("Clear completed")
-        .enabled(model.can_clear_completed_jobs)
-        .on_click(export_clear_completed_action());
+    let clear_terminal_button = AppIcon::Trash
+        .text_button_or_label("Clear finished")
+        .enabled(model.can_clear_terminal_history)
+        .on_click(export_clear_terminal_history_action());
 
     let sequence_summary = selected_sequence
         .map(|sequence| {
@@ -4979,7 +4977,7 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
             queue_section = queue_section.with_row(export_job_row(job));
         }
         queue_section =
-            queue_section.with_row(PropertyRow::new("", Box::new(clear_completed_button)));
+            queue_section.with_row(PropertyRow::new("", Box::new(clear_terminal_button)));
     }
 
     PropertyPanel::new("导出")
@@ -5043,9 +5041,9 @@ fn export_job_row(job: &ExportJobModel) -> PropertyRow {
     let summary = FlexContainer::column(summary_children).with_gap(4.0);
 
     let content: Box<dyn Widget> = if job.can_cancel {
-        let cancel = AppIcon::Trash.text_button_or_label("取消").on_click(
-            export_cancel_job_action(ExportJobTargetPayload { job_id: job.id }),
-        );
+        let cancel = AppIcon::Trash
+            .text_button_or_label("取消")
+            .on_click(export_cancel_action(job.id));
         Box::new(
             FlexContainer::row(vec![
                 FlexChild::flex(Box::new(summary), 1.0),
@@ -8124,7 +8122,7 @@ mod tests {
         assert!(model.can_choose_output());
         assert!(model.can_enqueue());
         assert_eq!(model.readiness_status(), "Ready to export");
-        let payload = model.enqueue_payload().expect("enqueue payload");
+        let payload = model.enqueue_request().expect("enqueue request");
         assert_eq!(payload.sequence_id, Some(sequence_id));
         assert_eq!(payload.range, TimelineExportRange::EntireSequence);
         assert_eq!(
@@ -8158,7 +8156,7 @@ mod tests {
         valid.video_signal.bit_depth = ExportParameter::Explicit(DeliveryBitDepth::Eight);
         state.set_export_draft_preset(valid.clone());
         let ready = ExportPanelModel::from_app_state(&state);
-        let payload = ready.enqueue_payload().expect("valid edited preset");
+        let payload = ready.enqueue_request().expect("valid edited preset");
 
         assert!(!ready.preset_customized);
         assert_eq!(payload.preset, valid);
@@ -8221,7 +8219,7 @@ mod tests {
         state.set_export_draft_preset(preset.clone());
 
         let model = ExportPanelModel::from_app_state(&state);
-        let payload = model.enqueue_payload().expect("valid explicit log target");
+        let payload = model.enqueue_request().expect("valid explicit log target");
 
         assert_eq!(payload.preset, preset);
         assert_eq!(
@@ -8231,7 +8229,7 @@ mod tests {
     }
 
     #[test]
-    fn export_panel_model_does_not_build_enqueue_payload_when_disabled() {
+    fn export_panel_model_does_not_build_enqueue_request_when_disabled() {
         let mut state = AppState::new();
         let sequence = Sequence::new("Deliverable");
         let sequence_id = sequence.id;
@@ -8245,7 +8243,7 @@ mod tests {
         assert!(model.can_select_range());
         assert!(model.can_choose_output());
         assert_eq!(model.readiness_status(), "选择输出路径后即可加入队列");
-        assert!(model.enqueue_payload().is_none());
+        assert!(model.enqueue_request().is_none());
     }
 
     #[test]
@@ -8266,7 +8264,7 @@ mod tests {
         let model = ExportPanelModel::from_app_state(&state);
 
         assert!(!model.can_enqueue());
-        assert!(model.enqueue_payload().is_none());
+        assert!(model.enqueue_request().is_none());
         assert!(model.delivery_error.as_deref().is_some_and(|error| error.contains("HDR")));
         assert!(model.readiness_status().starts_with("交付设置不兼容："));
     }
@@ -8283,7 +8281,7 @@ mod tests {
         assert!(!model.can_choose_output());
         assert!(!model.can_enqueue());
         assert_eq!(model.readiness_status(), "导出前请打开或选择序列");
-        assert!(model.enqueue_payload().is_none());
+        assert!(model.enqueue_request().is_none());
     }
 
     #[test]

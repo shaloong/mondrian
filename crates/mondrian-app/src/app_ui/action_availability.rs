@@ -584,7 +584,8 @@ mod tests {
     }
     use crate::app::ui_actions::{
         app_shell_project_settings_action, assets_delete_selection_action,
-        assets_import_files_action, assets_move_selection_action,
+        assets_import_files_action, assets_move_selection_action, export_cancel_action,
+        export_clear_terminal_history_action, export_edit_draft_action, export_enqueue_action,
         project_create_with_settings_action, sequence_new_action, sequence_switch_active_action,
         sequence_update_settings_action, timeline_add_track_action,
         timeline_clear_in_out_points_action, timeline_extract_range_action,
@@ -595,10 +596,11 @@ mod tests {
         timeline_set_track_targeting_action, timeline_trim_clips_action,
         timeline_trim_selected_clips_to_playhead_action, viewer_set_clip_transform_action,
         viewer_set_preview_resolution_scale_action, AssetsDeleteSelectionPayload,
-        AssetsImportFilesPayload, AssetsMoveSelectionPayload, ProjectCreateWithSettingsPayload,
-        SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineAddTrackKind,
-        TimelineAddTrackPayload, TimelineInOutPointPayloadKind, TimelineMoveClipPayload,
-        TimelineMoveTrackPayload, TimelineSelectClipPayload, TimelineSetInOutPointPayload,
+        AssetsImportFilesPayload, AssetsMoveSelectionPayload, ExportDraftEdit,
+        ProjectCreateWithSettingsPayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
+        TimelineAddTrackKind, TimelineAddTrackPayload, TimelineExportRequest,
+        TimelineInOutPointPayloadKind, TimelineMoveClipPayload, TimelineMoveTrackPayload,
+        TimelineSelectClipPayload, TimelineSetInOutPointPayload,
         TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
         TimelineSetTrackTargetingPayload, TimelineTrackControlPayloadKind,
         TimelineTrackTargetingControl, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
@@ -952,6 +954,43 @@ mod tests {
                 name: sequence.name.clone(),
                 settings: sequence.settings.clone(),
             }),
+            &state,
+        ));
+    }
+
+    #[test]
+    fn app_state_action_gate_uses_export_product_availability() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("Export");
+        let sequence_id = sequence.id;
+        state.test_set_sequence(Some(sequence));
+
+        assert!(!app_state_action_enabled(
+            &export_edit_draft_action(ExportDraftEdit::BuiltinPreset(
+                state.export_draft.selected_builtin_preset,
+            )),
+            &state,
+        ));
+        assert!(app_state_action_enabled(
+            &export_edit_draft_action(ExportDraftEdit::OutputPath("delivery.mp4".to_owned())),
+            &state,
+        ));
+        assert!(app_state_action_enabled(
+            &export_enqueue_action(TimelineExportRequest {
+                preset: mondrian_export::preset::ExportPreset::h264_aac_sdr_1080p(),
+                sequence_id: Some(sequence_id),
+                range: mondrian_export::preset::TimelineExportRange::EntireSequence,
+                output_path: std::path::PathBuf::from("delivery.mp4"),
+                output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
+            }),
+            &state,
+        ));
+        assert!(!app_state_action_enabled(
+            &export_cancel_action(mondrian_core::types::JobId::new()),
+            &state,
+        ));
+        assert!(!app_state_action_enabled(
+            &export_clear_terminal_history_action(),
             &state,
         ));
     }

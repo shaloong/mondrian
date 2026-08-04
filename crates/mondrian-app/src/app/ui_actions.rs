@@ -16,7 +16,6 @@ use mondrian_core::{
 };
 use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
-use mondrian_export::preset::{ExportPreset, TimelineExportRange};
 use mondrian_media::{
     DecodedVideoRange, DetectedColorInterpretation, ProvenVideoSampling, VideoColorMetadata,
     VideoColorMetadataHint,
@@ -32,19 +31,21 @@ use mondrian_ui_widgets::{ViewerCanvasBackground, WaveformDisplay};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub use super::exporting::TimelineExportRequest;
 use super::product_action::{
-    AudioProductAction, ProductAction, ProjectProductAction, SequenceProductAction,
-    TimelineProductAction, ViewerProductAction,
+    AudioProductAction, ExportProductAction, ProductAction, ProjectProductAction,
+    SequenceProductAction, TimelineProductAction, ViewerProductAction,
 };
 pub use super::product_action::{
-    ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
+    ExportDraftEdit, ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
     ProjectUpdateColorEnvironmentPayload, ProjectUpdateNewSequenceDefaultsPayload,
     SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineClipSelectionModePayload,
     TimelineMoveClipPayload, TimelineSeekPayload, TimelineSeekSource, TimelineSelectClipPayload,
     TimelineTrimClipsPayload, TimelineTrimPayloadEdge, ViewerSetClipTransformPayload,
     ViewerSetPreviewResolutionScalePayload, ViewerTransformPositionPayload, AUDIO_EDIT_COMPONENT,
-    AUDIO_EDIT_PROCESSOR_RACK, AUDIO_NAMESPACE, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
-    PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_UPDATE_COLOR_ENVIRONMENT,
+    AUDIO_EDIT_PROCESSOR_RACK, AUDIO_NAMESPACE, EXPORT_CANCEL, EXPORT_CLEAR_TERMINAL_HISTORY,
+    EXPORT_EDIT_DRAFT, EXPORT_ENQUEUE, EXPORT_NAMESPACE, PROJECT_CREATE_WITH_SETTINGS,
+    PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_UPDATE_COLOR_ENVIRONMENT,
     PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS, SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE,
     SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE,
     SEQUENCE_UPDATE_SETTINGS, TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK,
@@ -167,18 +168,6 @@ pub const ASSETS_MOVE_ASSET: &str = "move_asset";
 pub const ASSETS_MOVE_FOLDER: &str = "move_folder";
 /// Action name for moving multiple asset-browser items together.
 pub const ASSETS_MOVE_SELECTION: &str = "move_selection";
-
-/// Custom action namespace for export operations.
-pub const EXPORT_NAMESPACE: &str = "ui.export";
-
-/// Action name for enqueueing a timeline export job.
-pub const EXPORT_ENQUEUE: &str = "enqueue";
-/// Action name for updating the app UI export draft.
-pub const EXPORT_SET_DRAFT: &str = "set_draft";
-/// Action name for cancelling one export queue job.
-pub const EXPORT_CANCEL_JOB: &str = "cancel_job";
-/// Action name for clearing completed export queue jobs.
-pub const EXPORT_CLEAR_COMPLETED: &str = "clear_completed";
 
 /// Shell-local action name for cycling viewer canvas zoom.
 pub const VIEWER_CYCLE_ZOOM: &str = "cycle_zoom";
@@ -962,44 +951,6 @@ pub struct InterpretAssetDraftUpdatePayload {
     pub interpretation: AssetMediaInterpretation,
 }
 
-/// Enqueue a timeline export job from a UI frontend.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExportEnqueuePayload {
-    /// Preset used for codec/container defaults.
-    pub preset: ExportPreset,
-    /// Sequence to export; absent means the active sequence.
-    pub sequence_id: Option<SequenceId>,
-    /// Timeline range to render.
-    pub range: TimelineExportRange,
-    /// Output media file path.
-    pub output_path: PathBuf,
-    /// Final namespace policy. Missing legacy payloads default to create-only.
-    #[serde(default)]
-    pub output_policy: mondrian_export::preset::ExportOutputPolicy,
-}
-
-/// Target one export queue job from a UI frontend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExportJobTargetPayload {
-    /// Render queue job id.
-    pub job_id: JobId,
-}
-
-/// Update one field of the app UI export draft.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ExportDraftUpdatePayload {
-    /// Reset the materialized draft from a stable built-in preset.
-    BuiltinPreset(mondrian_export::preset::BuiltinExportPreset),
-    /// Replace the complete typed delivery draft after one product form edit.
-    Preset(ExportPreset),
-    /// Select the sequence to export.
-    Sequence(Option<SequenceId>),
-    /// Select the timeline range to render.
-    Range(TimelineExportRange),
-    /// Replace the output path text.
-    OutputPath(String),
-}
-
 /// Platform save-dialog defaults for choosing an export output file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExportOutputDialogPayload {
@@ -1446,23 +1397,23 @@ pub fn assets_open_folder_action(payload: AssetsOpenFolderPayload) -> Action {
 }
 
 /// Build an action that enqueues a timeline export.
-pub fn export_enqueue_action(payload: ExportEnqueuePayload) -> Action {
-    custom_export_action(EXPORT_ENQUEUE, payload)
+pub fn export_enqueue_action(request: TimelineExportRequest) -> Action {
+    ProductAction::Export(ExportProductAction::Enqueue(Box::new(request))).into_external_action()
 }
 
 /// Build an action that updates one export draft field.
-pub fn export_set_draft_action(payload: ExportDraftUpdatePayload) -> Action {
-    custom_export_action(EXPORT_SET_DRAFT, payload)
+pub fn export_edit_draft_action(edit: ExportDraftEdit) -> Action {
+    ProductAction::Export(ExportProductAction::EditDraft(Box::new(edit))).into_external_action()
 }
 
 /// Build an action that cancels one export queue job.
-pub fn export_cancel_job_action(payload: ExportJobTargetPayload) -> Action {
-    custom_export_action(EXPORT_CANCEL_JOB, payload)
+pub fn export_cancel_action(job_id: JobId) -> Action {
+    ProductAction::Export(ExportProductAction::Cancel(job_id)).into_external_action()
 }
 
-/// Build an action that clears completed export queue jobs.
-pub fn export_clear_completed_action() -> Action {
-    custom_export_action(EXPORT_CLEAR_COMPLETED, ())
+/// Build an action that clears retained terminal export evidence.
+pub fn export_clear_terminal_history_action() -> Action {
+    ProductAction::Export(ExportProductAction::ClearTerminalHistory).into_external_action()
 }
 
 /// Build a viewer request for changing preview resolution scale.
@@ -1829,14 +1780,6 @@ fn custom_effects_action<T: Serialize>(name: &'static str, payload: T) -> Action
 fn custom_assets_action<T: Serialize>(name: &'static str, payload: T) -> Action {
     Action::Custom {
         namespace: ASSETS_NAMESPACE.into(),
-        name: name.into(),
-        payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
-    }
-}
-
-fn custom_export_action<T: Serialize>(name: &'static str, payload: T) -> Action {
-    Action::Custom {
-        namespace: EXPORT_NAMESPACE.into(),
         name: name.into(),
         payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
     }

@@ -11,9 +11,11 @@ use mondrian_export::preset::{
 use mondrian_export::queue::{
     ExportCancelOutcome, ExportJobSnapshot, ExportQueueDiagnostics, RenderJob,
 };
+use serde::{Deserialize, Serialize};
 
 /// Request to enqueue a timeline export job.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TimelineExportRequest {
     /// Preset used for codec/container defaults.
     pub preset: ExportPreset,
@@ -93,11 +95,17 @@ pub fn export_preset_extension(preset: &ExportPreset) -> &'static str {
 
 impl AppState {
     /// Reset the editable export draft to one stable built-in preset.
-    pub fn set_export_draft_builtin_preset(&mut self, preset: BuiltinExportPreset) {
+    ///
+    /// Returns whether the preset identity, materialized settings, or a
+    /// container-following output extension changed.
+    pub fn set_export_draft_builtin_preset(&mut self, preset: BuiltinExportPreset) -> bool {
         let next = preset.preset();
-        self.rewrite_export_draft_extension_for(&next);
+        let changed =
+            self.export_draft.selected_builtin_preset != preset || self.export_draft.preset != next;
+        let extension_changed = self.rewrite_export_draft_extension_for(&next);
         self.export_draft.selected_builtin_preset = preset;
         self.export_draft.preset = next;
+        changed || extension_changed
     }
 
     /// Replace the draft's materialized delivery settings.
@@ -105,17 +113,20 @@ impl AppState {
     /// Syntactic editing stays permissive so a user can move between legal
     /// configurations without hidden auto-correction. The panel and queue both
     /// call `resolve_export_delivery` and fail closed until the complete
-    /// combination is valid.
-    pub fn set_export_draft_preset(&mut self, preset: ExportPreset) {
-        self.rewrite_export_draft_extension_for(&preset);
+    /// combination is valid. Returns whether settings or a
+    /// container-following output extension changed.
+    pub fn set_export_draft_preset(&mut self, preset: ExportPreset) -> bool {
+        let changed = self.export_draft.preset != preset;
+        let extension_changed = self.rewrite_export_draft_extension_for(&preset);
         self.export_draft.preset = preset;
+        changed || extension_changed
     }
 
-    fn rewrite_export_draft_extension_for(&mut self, next: &ExportPreset) {
+    fn rewrite_export_draft_extension_for(&mut self, next: &ExportPreset) -> bool {
         let previous_extension = export_preset_extension(&self.export_draft.preset);
         let next_extension = export_preset_extension(next);
         if previous_extension == next_extension || self.export_draft.output_path.trim().is_empty() {
-            return;
+            return false;
         }
         let mut path = PathBuf::from(&self.export_draft.output_path);
         let follows_previous_container = path
@@ -125,22 +136,38 @@ impl AppState {
         if follows_previous_container {
             path.set_extension(next_extension);
             self.export_draft.output_path = path.to_string_lossy().into_owned();
+            true
+        } else {
+            false
         }
     }
 
-    /// Update the export draft sequence.
-    pub fn set_export_draft_sequence_id(&mut self, sequence_id: Option<SequenceId>) {
+    /// Update the export draft Sequence, returning whether it changed.
+    pub fn set_export_draft_sequence_id(&mut self, sequence_id: Option<SequenceId>) -> bool {
+        if self.export_draft.selected_sequence_id == sequence_id {
+            return false;
+        }
         self.export_draft.selected_sequence_id = sequence_id;
+        true
     }
 
-    /// Update the export draft timeline range.
-    pub fn set_export_draft_range(&mut self, range: TimelineExportRange) {
+    /// Update the export draft Timeline range, returning whether it changed.
+    pub fn set_export_draft_range(&mut self, range: TimelineExportRange) -> bool {
+        if self.export_draft.range == range {
+            return false;
+        }
         self.export_draft.range = range;
+        true
     }
 
-    /// Update the export draft output path.
-    pub fn set_export_draft_output_path(&mut self, output_path: impl Into<String>) {
-        self.export_draft.output_path = output_path.into();
+    /// Update the export draft output path, returning whether it changed.
+    pub fn set_export_draft_output_path(&mut self, output_path: impl Into<String>) -> bool {
+        let output_path = output_path.into();
+        if self.export_draft.output_path == output_path {
+            return false;
+        }
+        self.export_draft.output_path = output_path;
+        true
     }
 
     /// Build and enqueue a render job from a timeline export request.
@@ -220,8 +247,10 @@ impl AppState {
     }
 
     /// Remove retained terminal export evidence after explicit user cleanup.
-    pub fn clear_completed_exports(&self) {
-        self.render_queue.clear_completed();
+    ///
+    /// Returns the exact number of terminal snapshots removed.
+    pub fn clear_terminal_export_history(&self) -> usize {
+        self.render_queue.clear_terminal_history()
     }
 
     /// Snapshot bounded offline export execution evidence.

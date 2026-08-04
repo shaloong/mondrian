@@ -563,3 +563,12 @@ new object but parent-directory durability is not confirmed, the terminal
 state is `DurabilityUnconfirmed`. An indeterminate namespace postcondition, or
 an untyped failure/panic after committing authority, is conservatively
 `OutcomeUnknown` and never mislabeled as successful cancellation.
+
+The Queue Interface also exposes allocation-free `can_cancel` and
+`has_terminal_history` observations for product-action availability. These are
+guidance only: `cancel` remains the sole authority and returns the exact
+`Requested`, `AlreadyRequested`, `TooLateCommitting`, `AlreadyTerminal`, or
+`NotFound` outcome under the queue lock. Terminal-history cleanup likewise
+returns the exact removal count from the same lock. “Terminal” includes
+Completed, Failed, and Cancelled evidence; the product must not label this as
+completed-only cleanup or report success when no evidence was removed.

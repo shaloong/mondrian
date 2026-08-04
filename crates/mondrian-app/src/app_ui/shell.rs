@@ -23,15 +23,15 @@ use std::path::Path;
 
 use crate::app::ui_actions::{
     assets_import_files_action, assets_relink_asset_action, assets_set_interpretation_action,
-    export_set_draft_action, project_create_with_settings_action,
+    export_edit_draft_action, project_create_with_settings_action,
     project_recover_from_autosave_action, project_update_color_environment_action,
     sequence_update_settings_action, AppShellCopySystemInfoPayload,
     AppShellInterpretAssetDialogPayload, AppShellOpenRecentProjectPayload,
     AppShellRelinkAssetDialogPayload, AppShellRelocatePanelPayload,
     AppShellRevealInFileManagerPayload, AssetsImportFilesPayload, AssetsRelinkAssetPayload,
-    DockDropAreaPayload, ExportDraftUpdatePayload, ExportOutputDialogPayload,
-    ImportMediaDialogPayload, InterpretAssetDraftUpdatePayload, NewProjectDraftUpdatePayload,
-    PreferencesTabPayload, ProjectRecoverFromAutosavePayload, ProjectSettingsDraftUpdatePayload,
+    DockDropAreaPayload, ExportDraftEdit, ExportOutputDialogPayload, ImportMediaDialogPayload,
+    InterpretAssetDraftUpdatePayload, NewProjectDraftUpdatePayload, PreferencesTabPayload,
+    ProjectRecoverFromAutosavePayload, ProjectSettingsDraftUpdatePayload,
     ProjectUpdateColorEnvironmentPayload, SequenceSettingsDraftUpdatePayload,
     SequenceSettingsTabPayload, ViewerSetZoomScalePayload, APP_SHELL_ABOUT,
     APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
@@ -458,7 +458,7 @@ pub fn try_resolve_app_shell_action(
                     &export_output_filters(&extension),
                 )
                 .map(|path| {
-                    export_set_draft_action(ExportDraftUpdatePayload::OutputPath(
+                    export_edit_draft_action(ExportDraftEdit::OutputPath(
                         path.display().to_string(),
                     ))
                 }))
@@ -2032,14 +2032,14 @@ mod tests {
         AppShellOpenRecentProjectPayload, AppShellRelinkAssetDialogPayload,
         AppShellRelocatePanelPayload, AppShellRevealInFileManagerPayload, AssetsImportFilesPayload,
         AssetsRelinkAssetPayload, AssetsSetInterpretationPayload, DockDropAreaPayload,
-        ExportDraftUpdatePayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
+        ExportDraftEdit, ExportOutputDialogPayload, ImportMediaDialogPayload,
         InterpretAssetDraftUpdatePayload, NewProjectDraftUpdatePayload, PreferencesTabPayload,
         ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
         ProjectSettingsDraftUpdatePayload, ProjectUpdateColorEnvironmentPayload,
         SequenceSettingsDraftUpdatePayload, SequenceSettingsTabPayload,
         SequenceUpdateSettingsPayload, ViewerSetZoomScalePayload, ASSETS_IMPORT_FILES,
-        ASSETS_NAMESPACE, ASSETS_RELINK_ASSET, ASSETS_SET_INTERPRETATION, EXPORT_NAMESPACE,
-        EXPORT_SET_DRAFT, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
+        ASSETS_NAMESPACE, ASSETS_RELINK_ASSET, ASSETS_SET_INTERPRETATION, EXPORT_EDIT_DRAFT,
+        EXPORT_NAMESPACE, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
         PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_UPDATE_COLOR_ENVIRONMENT, SEQUENCE_NAMESPACE,
         SEQUENCE_UPDATE_SETTINGS,
     };
@@ -4143,12 +4143,12 @@ mod tests {
             panic!("expected export draft action");
         };
         assert_eq!(namespace, EXPORT_NAMESPACE);
-        assert_eq!(name, EXPORT_SET_DRAFT);
-        let payload: ExportDraftUpdatePayload =
+        assert_eq!(name, EXPORT_EDIT_DRAFT);
+        let payload: ExportDraftEdit =
             serde_json::from_value(payload).expect("export draft payload");
         assert_eq!(
             payload,
-            ExportDraftUpdatePayload::OutputPath(
+            ExportDraftEdit::OutputPath(
                 PathBuf::from("E:/renders/deliverable.mp4").display().to_string()
             )
         );

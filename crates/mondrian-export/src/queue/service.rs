@@ -1061,6 +1061,34 @@ impl RenderQueue {
             .collect()
     }
 
+    /// Whether the retained job can still accept a new cancellation request.
+    ///
+    /// This is a non-authoritative UI projection. Callers must still inspect
+    /// [`Self::cancel`]'s exact outcome because execution can cross the
+    /// irreversible publication boundary immediately after this query.
+    pub fn can_cancel(&self, id: JobId) -> bool {
+        self.inner
+            .state
+            .lock()
+            .jobs
+            .iter()
+            .find(|entry| entry.snapshot.id == id)
+            .is_some_and(|entry| {
+                entry.snapshot.publication != ExportPublicationState::Committing
+                    && entry.snapshot.status.can_cancel()
+            })
+    }
+
+    /// Whether any bounded terminal job evidence is currently retained.
+    pub fn has_terminal_history(&self) -> bool {
+        self.inner
+            .state
+            .lock()
+            .jobs
+            .iter()
+            .any(|entry| entry.snapshot.status.is_terminal())
+    }
+
     /// Request monotonic cooperative cancellation.
     pub fn cancel(&self, id: JobId) -> ExportCancelOutcome {
         let mut state = self.inner.state.lock();
@@ -1117,15 +1145,18 @@ impl RenderQueue {
     }
 
     /// Remove all retained terminal snapshots. Active payloads are never affected.
-    pub fn clear_completed(&self) {
+    ///
+    /// Returns the exact number removed while holding queue authority.
+    pub fn clear_terminal_history(&self) -> usize {
         let mut state = self.inner.state.lock();
         let before = state.jobs.len();
         state.jobs.retain(|entry| !entry.snapshot.status.is_terminal());
-        let changed = state.jobs.len() != before;
+        let removed = before - state.jobs.len();
         drop(state);
-        if changed {
+        if removed > 0 {
             self.mark_jobs_changed();
         }
+        removed
     }
 
     /// Current wrapping observation token for all queue state and diagnostics.

@@ -1,7 +1,7 @@
 //! Shared Headless adapters for independent Golden execution slices.
 
 use super::fixture::sha256_file;
-use crate::app::ui_actions::{export_enqueue_action, ExportEnqueuePayload};
+use crate::app::ui_actions::{export_enqueue_action, TimelineExportRequest};
 use crate::app::AppState;
 use anyhow::{ensure, Context};
 use mondrian_core::{ExecutionTerminalDisposition, JobId, ProjectId, SequenceId};
@@ -339,7 +339,7 @@ pub(super) fn execute_export_job(
         .into_iter()
         .map(|snapshot| snapshot.id)
         .collect::<BTreeSet<_>>();
-    state.dispatch_action(export_enqueue_action(ExportEnqueuePayload {
+    state.dispatch_action(export_enqueue_action(TimelineExportRequest {
         preset,
         sequence_id,
         range,

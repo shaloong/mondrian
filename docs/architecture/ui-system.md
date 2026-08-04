@@ -431,6 +431,17 @@ returns its real transaction result and stable `SequenceId`; construction,
 transport-stop, or commit failure cannot be logged and then reported as a
 successful Action.
 
+`ExportProductAction` closes the complete product Export namespace: exact draft
+edits, immutable request admission, cancellation, and bounded terminal-history
+cleanup. Enqueue carries the existing `TimelineExportRequest` directly; there
+is no duplicate UI payload and no missing-field compatibility default that can
+silently change publication policy. Draft edits preserve permissive syntactic
+input but reject unchanged values and stale Sequence identities as executed
+actions. Cancellation availability reads a non-allocating Queue observation,
+while dispatch consumes the Queue's exact `ExportCancelOutcome`; only
+`Requested` is success. Terminal cleanup uses the Queue-locked removal count
+and treats Completed, Failed, and Cancelled entries consistently.
+
 `app_ui::audio_processor_rack` is the shared read-only Rack projection Module.
 It deduplicates Clip bindings by Processing Scope, consumes Timeline's binding
 count and lock blocker, preserves unknown plugin definitions and parameter
@@ -500,11 +511,12 @@ Action already belongs to `ProductAction`.
 
 The migrated slices expose one borrowed, read-only
 `ProductActionAvailability`. Project/Sequence membership and navigation, Track
-lock, Clip membership/media kind, placement range, and Sequence time-base facts
-remain private; the stable UI Interface is only `allows(&ProductAction)`.
-Timeline, Audio, Viewer, Project, and Sequence controls therefore use the same
-admission Seam. The projection does not clone or index the author graph for each
-query. Window and panel Adapters cannot reconstruct admission by traversing
+lock, Clip membership/media kind, placement range, Sequence time-base, Export
+draft difference, and Queue target facts remain private; the stable UI
+Interface is only `allows(&ProductAction)`. Timeline, Audio, Viewer, Project,
+Sequence, and Export controls therefore use the same admission Seam. The
+projection does not clone or index the author graph or clone the Export Job
+list for each query. Window and panel Adapters cannot reconstruct admission by traversing
 `AuthoringSession`, `Sequence`, `Track`, or `Clip`, and cannot observe playback
 or execution internals through it. Admission remains guidance: each App-owned
 authoring, lifecycle, recovery, monitoring, or transport Interface revalidates
