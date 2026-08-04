@@ -104,9 +104,8 @@ fn range_edit_error(reason: impl Into<String>) -> MondrianError {
 mod tests {
     use super::*;
     use crate::app::ui_actions::{
-        timeline_extract_range_action, timeline_lift_range_action,
-        timeline_set_track_targeting_action, TimelineSetTrackTargetingPayload,
-        TimelineTrackTargetingControl,
+        timeline_extract_range_action, timeline_lift_range_action, track_set_edit_policy_action,
+        TrackEditPolicyControl, TrackSetEditPolicyPayload,
     };
     use mondrian_core::{AssetId, FramePosition, Rational};
     use mondrian_timeline::{Clip, Sequence};
@@ -166,13 +165,11 @@ mod tests {
     fn product_extract_obeys_independent_target_and_sync_lock_controls() {
         let (mut state, first, second) = state_with_range();
         state
-            .dispatch_action(timeline_set_track_targeting_action(
-                TimelineSetTrackTargetingPayload {
-                    track_id: second,
-                    control: TimelineTrackTargetingControl::Target,
-                    enabled: false,
-                },
-            ))
+            .dispatch_action(track_set_edit_policy_action(TrackSetEditPolicyPayload {
+                track_id: second,
+                control: TrackEditPolicyControl::Target,
+                enabled: false,
+            }))
             .expect("untarget");
         state
             .dispatch_action(timeline_extract_range_action())
@@ -187,13 +184,11 @@ mod tests {
         sequence.in_point = Some(tt(10, sequence.time_base()));
         sequence.out_point = Some(tt(30, sequence.time_base()));
         state
-            .dispatch_action(timeline_set_track_targeting_action(
-                TimelineSetTrackTargetingPayload {
-                    track_id: second,
-                    control: TimelineTrackTargetingControl::SyncLock,
-                    enabled: false,
-                },
-            ))
+            .dispatch_action(track_set_edit_policy_action(TrackSetEditPolicyPayload {
+                track_id: second,
+                control: TrackEditPolicyControl::SyncLock,
+                enabled: false,
+            }))
             .expect("disable Sync-Lock");
         state
             .dispatch_action(timeline_extract_range_action())

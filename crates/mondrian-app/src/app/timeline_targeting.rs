@@ -48,7 +48,15 @@ impl TimelineTargetingState {
             .is_some_and(|state| state.sync_unlocked_tracks.contains(&track_id))
     }
 
-    fn set_track_targeted(&mut self, sequence_id: SequenceId, track_id: TrackId, targeted: bool) {
+    fn set_track_targeted(
+        &mut self,
+        sequence_id: SequenceId,
+        track_id: TrackId,
+        targeted: bool,
+    ) -> bool {
+        if self.track_targeted(sequence_id, track_id) == targeted {
+            return false;
+        }
         let state = self.by_sequence.entry(sequence_id).or_default();
         if targeted {
             state.untargeted_tracks.remove(&track_id);
@@ -56,6 +64,7 @@ impl TimelineTargetingState {
             state.untargeted_tracks.insert(track_id);
         }
         self.compact_sequence(sequence_id);
+        true
     }
 
     fn set_track_sync_locked(
@@ -63,7 +72,10 @@ impl TimelineTargetingState {
         sequence_id: SequenceId,
         track_id: TrackId,
         sync_locked: bool,
-    ) {
+    ) -> bool {
+        if self.track_sync_locked(sequence_id, track_id) == sync_locked {
+            return false;
+        }
         let state = self.by_sequence.entry(sequence_id).or_default();
         if sync_locked {
             state.sync_unlocked_tracks.remove(&track_id);
@@ -71,6 +83,7 @@ impl TimelineTargetingState {
             state.sync_unlocked_tracks.insert(track_id);
         }
         self.compact_sequence(sequence_id);
+        true
     }
 
     fn snapshot(&self, sequence: &Sequence) -> TimelineEditTargetSnapshot {
@@ -136,14 +149,13 @@ impl AppState {
         &mut self,
         track_id: TrackId,
         targeted: bool,
-    ) -> mondrian_core::Result<()> {
+    ) -> mondrian_core::Result<bool> {
         let sequence = self.active_sequence().ok_or_else(|| targeting_error("当前无序列"))?;
         if !sequence_has_track(sequence, track_id) {
             return Err(MondrianError::TrackNotFound { track_id: track_id.to_string() });
         }
         let sequence_id = sequence.id;
-        self.timeline_targeting.set_track_targeted(sequence_id, track_id, targeted);
-        Ok(())
+        Ok(self.timeline_targeting.set_track_targeted(sequence_id, track_id, targeted))
     }
 
     /// Change Sync-Lock participation without creating an author transaction.
@@ -151,15 +163,15 @@ impl AppState {
         &mut self,
         track_id: TrackId,
         sync_locked: bool,
-    ) -> mondrian_core::Result<()> {
+    ) -> mondrian_core::Result<bool> {
         let sequence = self.active_sequence().ok_or_else(|| targeting_error("当前无序列"))?;
         if !sequence_has_track(sequence, track_id) {
             return Err(MondrianError::TrackNotFound { track_id: track_id.to_string() });
         }
         let sequence_id = sequence.id;
-        self.timeline_targeting
-            .set_track_sync_locked(sequence_id, track_id, sync_locked);
-        Ok(())
+        Ok(self
+            .timeline_targeting
+            .set_track_sync_locked(sequence_id, track_id, sync_locked))
     }
 
     pub(super) fn reconcile_timeline_targeting(&mut self) {

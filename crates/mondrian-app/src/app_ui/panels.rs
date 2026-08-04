@@ -55,7 +55,7 @@ use mondrian_timeline::sequence::{
 };
 use mondrian_timeline::track::Track;
 use mondrian_timeline::VideoTransitionType;
-use mondrian_timeline::{AudioComponentMutation, EffectRelativePlacement};
+use mondrian_timeline::{AudioComponentMutation, EffectRelativePlacement, TrackRelativePlacement};
 use mondrian_ui_core::types::SplitDirection;
 use mondrian_ui_core::DragPayload;
 use mondrian_ui_core::Widget;
@@ -98,15 +98,15 @@ use crate::app::ui_actions::{
     assets_rename_folder_action, assets_set_proxy_mode_action, clip_edit_numeric_curve_action,
     clip_set_enabled_action, clip_set_solid_color_action, clip_write_parameter_values_action,
     export_cancel_action, export_clear_terminal_history_action, export_edit_draft_action,
-    export_enqueue_action, inspector_set_audio_component_source_action, timeline_add_track_action,
+    export_enqueue_action, inspector_set_audio_component_source_action,
     timeline_clear_in_out_points_action, timeline_drop_asset_action, timeline_extract_range_action,
     timeline_lift_range_action, timeline_link_selected_clips_action, timeline_move_clip_action,
-    timeline_move_track_action, timeline_open_nested_sequence_action,
-    timeline_roll_selected_cut_to_playhead_action, timeline_seek_with_source_action,
-    timeline_select_clip_action, timeline_set_in_out_point_action,
-    timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
-    timeline_set_track_targeting_action, timeline_trim_clips_action,
-    timeline_trim_selected_clips_to_playhead_action, timeline_unlink_selected_clips_action,
+    timeline_open_nested_sequence_action, timeline_roll_selected_cut_to_playhead_action,
+    timeline_seek_with_source_action, timeline_select_clip_action,
+    timeline_set_in_out_point_action, timeline_set_selected_clips_enabled_action,
+    timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
+    timeline_unlink_selected_clips_action, track_add_action, track_move_action,
+    track_set_author_control_action, track_set_edit_policy_action,
     video_transition_create_cross_dissolve_action, video_transition_select_action,
     video_transition_set_range_action, viewer_set_preview_resolution_scale_action,
     viewer_set_zoom_scale_action, visual_effect_add_to_clip_action, visual_effect_remove_action,
@@ -124,16 +124,16 @@ use crate::app::ui_actions::{
     ClipParameterValueWrite, ClipSetEnabledPayload, ClipSetSolidColorPayload,
     ClipWriteParameterValuesPayload, DockDropAreaPayload, ExportDraftEdit,
     ExportOutputDialogPayload, ImportMediaDialogPayload, InspectorAudioComponentSourcePayload,
-    InspectorSetAudioComponentSourcePayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-    TimelineClipSelectionModePayload, TimelineDropAssetPayload, TimelineExportRequest,
-    TimelineInOutPointPayloadKind, TimelineMoveClipPayload, TimelineMoveTrackPayload,
-    TimelineOpenNestedSequencePayload, TimelineSeekSource as AppTimelineSeekSource,
-    TimelineSelectClipPayload, TimelineSetInOutPointPayload,
-    TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
-    TimelineSetTrackTargetingPayload, TimelineTrackControlPayloadKind,
-    TimelineTrackTargetingControl, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
-    TimelineTrimSelectedClipsToPlayheadPayload, VideoTransitionCreateCrossDissolvePayload,
-    VideoTransitionHandlePolicy, VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
+    InspectorSetAudioComponentSourcePayload, TimelineClipSelectionModePayload,
+    TimelineDropAssetPayload, TimelineExportRequest, TimelineInOutPointPayloadKind,
+    TimelineMoveClipPayload, TimelineOpenNestedSequencePayload,
+    TimelineSeekSource as AppTimelineSeekSource, TimelineSelectClipPayload,
+    TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload, TimelineTrimClipsPayload,
+    TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload, TrackAddKind,
+    TrackAddPayload, TrackAuthorControl, TrackEditPolicyControl, TrackMovePayload,
+    TrackSetAuthorControlPayload, TrackSetEditPolicyPayload,
+    VideoTransitionCreateCrossDissolvePayload, VideoTransitionHandlePolicy,
+    VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
     ViewerSetPreviewResolutionScalePayload, ViewerSetZoomScalePayload,
     VisualEffectAddToClipPayload, VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
     VisualEffectSetParameterValuePayload, VisualEffectTargetPayload,
@@ -1435,22 +1435,15 @@ impl TimelinePanelModel {
         control: TimelineTrackControl,
         track_ref: TimelineTrackRef,
         track: &TimelineTrack,
-    ) -> Option<TimelineSetTrackControlPayload> {
+    ) -> Option<TrackSetAuthorControlPayload> {
         let identity = self.track_identity(track_ref)?;
         let (control, enabled) = match control {
             TimelineTrackControl::Target | TimelineTrackControl::SyncLock => return None,
-            TimelineTrackControl::Visibility => {
-                (TimelineTrackControlPayloadKind::Visibility, !track.visible)
-            }
-            TimelineTrackControl::Mute => (TimelineTrackControlPayloadKind::Mute, !track.muted),
-            TimelineTrackControl::Lock => (TimelineTrackControlPayloadKind::Lock, !track.locked),
+            TimelineTrackControl::Visibility => (TrackAuthorControl::Visibility, !track.visible),
+            TimelineTrackControl::Mute => (TrackAuthorControl::Mute, !track.muted),
+            TimelineTrackControl::Lock => (TrackAuthorControl::Lock, !track.locked),
         };
-        Some(TimelineSetTrackControlPayload {
-            track_id: identity.track_id,
-            is_video_track: identity.is_video_track,
-            control,
-            enabled,
-        })
+        Some(TrackSetAuthorControlPayload { track_id: identity.track_id, control, enabled })
     }
 
     fn track_targeting_payload(
@@ -1458,49 +1451,36 @@ impl TimelinePanelModel {
         control: TimelineTrackControl,
         track_ref: TimelineTrackRef,
         track: &TimelineTrack,
-    ) -> Option<TimelineSetTrackTargetingPayload> {
+    ) -> Option<TrackSetEditPolicyPayload> {
         let identity = self.track_identity(track_ref)?;
         let (control, enabled) = match control {
-            TimelineTrackControl::Target => {
-                (TimelineTrackTargetingControl::Target, !track.targeted)
-            }
+            TimelineTrackControl::Target => (TrackEditPolicyControl::Target, !track.targeted),
             TimelineTrackControl::SyncLock => {
-                (TimelineTrackTargetingControl::SyncLock, !track.sync_locked)
+                (TrackEditPolicyControl::SyncLock, !track.sync_locked)
             }
             TimelineTrackControl::Visibility
             | TimelineTrackControl::Mute
             | TimelineTrackControl::Lock => return None,
         };
-        Some(TimelineSetTrackTargetingPayload { track_id: identity.track_id, control, enabled })
+        Some(TrackSetEditPolicyPayload { track_id: identity.track_id, control, enabled })
     }
 
-    fn track_move_payload(&self, movement: TimelineTrackMove) -> Option<TimelineMoveTrackPayload> {
+    fn track_move_payload(&self, movement: TimelineTrackMove) -> Option<TrackMovePayload> {
         let source = self.track_identity(movement.track_ref)?;
         let target = *self.track_refs.get(movement.new_track_index)?;
-        if source.is_video_track != target.is_video_track {
+        if source.is_video_track != target.is_video_track
+            || movement.old_track_index == movement.new_track_index
+            || source.track_id == target.track_id
+        {
             return None;
         }
-        let display_target_index = self
-            .track_refs
-            .iter()
-            .take(movement.new_track_index)
-            .filter(|track| track.is_video_track == source.is_video_track)
-            .count();
-        let target_kind_count = self
-            .track_refs
-            .iter()
-            .filter(|track| track.is_video_track == source.is_video_track)
-            .count();
-        let target_index = if source.is_video_track {
-            target_kind_count.saturating_sub(1).saturating_sub(display_target_index)
+        let moved_toward_display_start = movement.new_track_index < movement.old_track_index;
+        let placement = if moved_toward_display_start == source.is_video_track {
+            TrackRelativePlacement::After(target.track_id)
         } else {
-            display_target_index
+            TrackRelativePlacement::Before(target.track_id)
         };
-        Some(TimelineMoveTrackPayload {
-            track_id: source.track_id,
-            is_video_track: source.is_video_track,
-            target_index,
-        })
+        Some(TrackMovePayload { track_id: source.track_id, placement })
     }
 
     fn asset_drop_payload(&self, drop: TimelineAssetDrop) -> Option<TimelineDropAssetPayload> {
@@ -4055,9 +4035,7 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
         })
         .on_track_move({
             let action_model = action_model.clone();
-            move |movement, _track| {
-                action_model.track_move_payload(movement).map(timeline_move_track_action)
-            }
+            move |movement, _track| action_model.track_move_payload(movement).map(track_move_action)
         })
         .on_track_control({
             let action_model = action_model.clone();
@@ -4068,20 +4046,20 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
                 ) {
                     action_model
                         .track_targeting_payload(control, track_ref, track)
-                        .map(timeline_set_track_targeting_action)
+                        .map(track_set_edit_policy_action)
                 } else {
                     action_model
                         .track_control_payload(control, track_ref, track)
-                        .map(timeline_set_track_control_action)
+                        .map(track_set_author_control_action)
                 }
             }
         })
         .on_track_add(|kind| {
             let kind = match kind {
-                mondrian_ui_widgets::TimelineTrackKind::Video => TimelineAddTrackKind::Video,
-                mondrian_ui_widgets::TimelineTrackKind::Audio => TimelineAddTrackKind::Audio,
+                mondrian_ui_widgets::TimelineTrackKind::Video => TrackAddKind::Video,
+                mondrian_ui_widgets::TimelineTrackKind::Audio => TrackAddKind::Audio,
             };
-            timeline_add_track_action(TimelineAddTrackPayload { kind })
+            track_add_action(TrackAddPayload { kind })
         })
         .on_asset_drop({
             let action_model = action_model.clone();
@@ -7295,10 +7273,10 @@ mod tests {
         ASSET_REBIND_AUDIO_COMPONENT, ASSET_REFRESH_AUDIO_COMPONENTS, ASSET_REMOVE_ENTRIES,
         ASSET_RENAME, ASSET_SET_PROXY_MODE, AUDIO_EDIT_COMPONENT, AUDIO_NAMESPACE,
         CLIP_EDIT_NUMERIC_CURVE, CLIP_NAMESPACE, CLIP_WRITE_PARAMETER_VALUES, INSPECTOR_NAMESPACE,
-        INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
-        TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
-        TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT,
-        TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
+        INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_DROP_ASSET,
+        TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_SELECT_CLIP,
+        TIMELINE_SET_IN_OUT_POINT, TIMELINE_SET_SELECTED_CLIPS_ENABLED,
+        TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, TRACK_ADD, TRACK_MOVE, TRACK_NAMESPACE,
         VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE, VIDEO_TRANSITION_NAMESPACE,
         VIDEO_TRANSITION_SELECT, VIDEO_TRANSITION_SET_RANGE, VISUAL_EFFECT_ADD_TO_CLIP,
         VISUAL_EFFECT_NAMESPACE, VISUAL_EFFECT_SELECT, VISUAL_EFFECT_SET_PARAMETER_VALUE,
@@ -9561,11 +9539,7 @@ mod tests {
             )
             .expect("visibility payload");
         assert_eq!(visibility.track_id, sequence.video_tracks[0].id);
-        assert!(visibility.is_video_track);
-        assert_eq!(
-            visibility.control,
-            TimelineTrackControlPayloadKind::Visibility
-        );
+        assert_eq!(visibility.control, TrackAuthorControl::Visibility);
         assert!(visibility.enabled);
 
         let mute = model
@@ -9576,18 +9550,18 @@ mod tests {
             )
             .expect("mute payload");
         assert_eq!(mute.track_id, sequence.audio_tracks[0].id);
-        assert!(!mute.is_video_track);
-        assert_eq!(mute.control, TimelineTrackControlPayloadKind::Mute);
+        assert_eq!(mute.control, TrackAuthorControl::Mute);
         assert!(!mute.enabled);
     }
 
     #[test]
-    fn timeline_model_maps_track_move_payload_to_media_local_index() {
+    fn timeline_model_maps_track_move_to_stable_author_order_anchor() {
         let mut sequence = Sequence::new("edit");
         sequence.add_video_track();
         sequence.add_audio_track();
         let video_count = sequence.video_tracks.len();
         let moved_track_id = sequence.video_tracks[1].id;
+        let anchor_track_id = sequence.video_tracks[video_count - 1].id;
         let first_audio_ref = TimelineTrackRef { track_index: sequence.video_tracks.len() };
         let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
         let moved_display_index = video_count - 1 - 1;
@@ -9601,8 +9575,10 @@ mod tests {
             .expect("same-kind video move payload");
 
         assert_eq!(payload.track_id, moved_track_id);
-        assert!(payload.is_video_track);
-        assert_eq!(payload.target_index, video_count - 1);
+        assert_eq!(
+            payload.placement,
+            TrackRelativePlacement::After(anchor_track_id)
+        );
         assert!(model
             .track_move_payload(TimelineTrackMove {
                 track_ref: TimelineTrackRef { track_index: 0 },
@@ -9687,17 +9663,18 @@ mod tests {
         let Action::Custom { namespace, name, payload } = &recorded[0] else {
             panic!("expected custom add-track action");
         };
-        assert_eq!(namespace, TIMELINE_NAMESPACE);
-        assert_eq!(name, TIMELINE_ADD_TRACK);
-        let payload: TimelineAddTrackPayload =
+        assert_eq!(namespace, TRACK_NAMESPACE);
+        assert_eq!(name, TRACK_ADD);
+        let payload: TrackAddPayload =
             serde_json::from_value(payload.clone()).expect("add track payload");
-        assert_eq!(payload.kind, TimelineAddTrackKind::Video);
+        assert_eq!(payload.kind, TrackAddKind::Video);
     }
 
     #[test]
     fn timeline_panel_track_header_drag_emits_typed_move_track_action() {
         let model = demo_timeline_model();
         let moved = model.track_identity(TimelineTrackRef { track_index: 1 }).expect("track");
+        let anchor = model.track_identity(TimelineTrackRef { track_index: 0 }).expect("anchor");
         let actions = RefCell::new(Vec::<Action>::new());
         let dispatch = |action| actions.borrow_mut().push(action);
         let mut panel = timeline_panel(&model);
@@ -9746,18 +9723,20 @@ mod tests {
                 matches!(
                     action,
                     Action::Custom { namespace, name, .. }
-                        if namespace == TIMELINE_NAMESPACE && name == TIMELINE_MOVE_TRACK
+                        if namespace == TRACK_NAMESPACE && name == TRACK_MOVE
                 )
             })
             .expect("move track action");
         let Action::Custom { payload, .. } = move_action else {
             panic!("expected custom move-track action");
         };
-        let payload: TimelineMoveTrackPayload =
+        let payload: TrackMovePayload =
             serde_json::from_value(payload.clone()).expect("move track payload");
         assert_eq!(payload.track_id, moved.track_id);
-        assert!(payload.is_video_track);
-        assert_eq!(payload.target_index, 2);
+        assert_eq!(
+            payload.placement,
+            TrackRelativePlacement::After(anchor.track_id)
+        );
     }
 
     #[test]

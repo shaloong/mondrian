@@ -1963,16 +1963,61 @@ impl Sequence {
         }
     }
 
-    pub fn move_video_track(&mut self, id: TrackId, new_index: usize) -> mondrian_core::Result<()> {
-        move_track_in_list(&mut self.video_tracks, id, new_index)?;
-        self.normalize_track_names();
-        Ok(())
+    /// Return whether a stable-identity relative Track move would change author order.
+    pub fn track_relative_placement_would_change(
+        &self,
+        id: TrackId,
+        placement: crate::TrackRelativePlacement,
+    ) -> mondrian_core::Result<bool> {
+        let anchor_id = track_placement_anchor(placement);
+        if anchor_id == id {
+            return Err(track_order_error(
+                "a Track cannot be ordered relative to itself",
+            ));
+        }
+
+        if self.video_tracks.iter().any(|track| track.id == id) {
+            ensure_track_anchor_kind(&self.video_tracks, &self.audio_tracks, anchor_id)?;
+            return track_relative_placement_would_change_in_list(
+                &self.video_tracks,
+                id,
+                placement,
+            );
+        }
+        if self.audio_tracks.iter().any(|track| track.id == id) {
+            ensure_track_anchor_kind(&self.audio_tracks, &self.video_tracks, anchor_id)?;
+            return track_relative_placement_would_change_in_list(
+                &self.audio_tracks,
+                id,
+                placement,
+            );
+        }
+        Err(mondrian_core::MondrianError::TrackNotFound { track_id: id.to_string() })
     }
 
-    pub fn move_audio_track(&mut self, id: TrackId, new_index: usize) -> mondrian_core::Result<()> {
-        move_track_in_list(&mut self.audio_tracks, id, new_index)?;
-        self.normalize_track_names();
-        Ok(())
+    /// Move one Track immediately before or after another same-kind Track.
+    ///
+    /// Returns `false` without mutation when the requested relation already
+    /// holds. Missing, cross-kind, or self-referential identities fail closed.
+    pub fn reorder_track_relative(
+        &mut self,
+        id: TrackId,
+        placement: crate::TrackRelativePlacement,
+    ) -> mondrian_core::Result<bool> {
+        if !self.track_relative_placement_would_change(id, placement)? {
+            return Ok(false);
+        }
+        let changed = if self.video_tracks.iter().any(|track| track.id == id) {
+            reorder_track_relative_in_list(&mut self.video_tracks, id, placement)?
+        } else if self.audio_tracks.iter().any(|track| track.id == id) {
+            reorder_track_relative_in_list(&mut self.audio_tracks, id, placement)?
+        } else {
+            return Err(mondrian_core::MondrianError::TrackNotFound { track_id: id.to_string() });
+        };
+        if changed {
+            self.normalize_track_names();
+        }
+        Ok(changed)
     }
 
     pub fn normalize_track_names(&mut self) {
@@ -2692,24 +2737,75 @@ impl SequenceCollection {
     }
 }
 
-fn move_track_in_list(
-    tracks: &mut Vec<Track>,
-    id: TrackId,
-    new_index: usize,
-) -> mondrian_core::Result<()> {
-    let current_index = tracks
-        .iter()
-        .position(|track| track.id == id)
-        .ok_or_else(|| mondrian_core::MondrianError::TrackNotFound { track_id: id.to_string() })?;
+fn track_placement_anchor(placement: crate::TrackRelativePlacement) -> TrackId {
+    match placement {
+        crate::TrackRelativePlacement::Before(anchor_id)
+        | crate::TrackRelativePlacement::After(anchor_id) => anchor_id,
+    }
+}
 
-    let clamped_index = new_index.min(tracks.len().saturating_sub(1));
-    if current_index == clamped_index {
+fn ensure_track_anchor_kind(
+    source_kind: &[Track],
+    other_kind: &[Track],
+    anchor_id: TrackId,
+) -> mondrian_core::Result<()> {
+    if source_kind.iter().any(|track| track.id == anchor_id) {
         return Ok(());
     }
+    if other_kind.iter().any(|track| track.id == anchor_id) {
+        return Err(track_order_error(
+            "moving Track and anchor must have the same media kind",
+        ));
+    }
+    Err(mondrian_core::MondrianError::TrackNotFound { track_id: anchor_id.to_string() })
+}
 
-    let track = tracks.remove(current_index);
-    tracks.insert(clamped_index, track);
-    Ok(())
+fn track_relative_placement_would_change_in_list(
+    tracks: &[Track],
+    id: TrackId,
+    placement: crate::TrackRelativePlacement,
+) -> mondrian_core::Result<bool> {
+    let source = track_index(tracks, id)?;
+    let anchor = track_index(tracks, track_placement_anchor(placement))?;
+    Ok(match placement {
+        crate::TrackRelativePlacement::Before(_) => source.checked_add(1) != Some(anchor),
+        crate::TrackRelativePlacement::After(_) => anchor.checked_add(1) != Some(source),
+    })
+}
+
+fn reorder_track_relative_in_list(
+    tracks: &mut Vec<Track>,
+    id: TrackId,
+    placement: crate::TrackRelativePlacement,
+) -> mondrian_core::Result<bool> {
+    if !track_relative_placement_would_change_in_list(tracks, id, placement)? {
+        return Ok(false);
+    }
+    let source = track_index(tracks, id)?;
+    let track = tracks.remove(source);
+    let anchor = track_index(tracks, track_placement_anchor(placement))?;
+    let target = match placement {
+        crate::TrackRelativePlacement::Before(_) => anchor,
+        crate::TrackRelativePlacement::After(_) => anchor
+            .checked_add(1)
+            .ok_or_else(|| track_order_error("Track insertion index overflowed author order"))?,
+    };
+    tracks.insert(target, track);
+    Ok(true)
+}
+
+fn track_index(tracks: &[Track], id: TrackId) -> mondrian_core::Result<usize> {
+    tracks
+        .iter()
+        .position(|track| track.id == id)
+        .ok_or_else(|| mondrian_core::MondrianError::TrackNotFound { track_id: id.to_string() })
+}
+
+fn track_order_error(reason: impl Into<String>) -> mondrian_core::MondrianError {
+    mondrian_core::MondrianError::WorkflowStepFailed {
+        step_id: "reorder_track_relative".to_owned(),
+        reason: reason.into(),
+    }
 }
 
 fn renumber_tracks(tracks: &mut [Track], prefix: &str) {
@@ -4307,18 +4403,62 @@ mod tests {
     fn moving_track_preserves_track_identity_and_clips() {
         let mut seq = Sequence::new("Track Move");
         let tb = seq.time_base();
+        let anchor_id = seq.video_tracks[0].id;
         let moved_id = seq.video_tracks[2].id;
         let clip = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip");
         let clip_id = clip.id;
         seq.video_tracks[2].add_clip(clip).expect("add clip to track");
 
-        seq.move_video_track(moved_id, 0).expect("move track to top");
+        assert!(seq
+            .reorder_track_relative(moved_id, crate::TrackRelativePlacement::Before(anchor_id))
+            .expect("move track before stable anchor"));
 
         assert_eq!(seq.video_tracks[0].id, moved_id);
         assert_eq!(seq.video_tracks[0].name, "V1");
         assert_eq!(seq.video_tracks[0].clips[0].id, clip_id);
         assert_eq!(seq.video_tracks[1].name, "V2");
         assert_eq!(seq.video_tracks[2].name, "V3");
+    }
+
+    #[test]
+    fn track_relative_order_rejects_cross_kind_and_elides_satisfied_relations() {
+        let mut seq = Sequence::new("Track Move Contract");
+        let first_video = seq.video_tracks[0].id;
+        let second_video = seq.video_tracks[1].id;
+        let first_audio = seq.audio_tracks[0].id;
+
+        assert!(!seq
+            .track_relative_placement_would_change(
+                first_video,
+                crate::TrackRelativePlacement::Before(second_video),
+            )
+            .expect("existing relation is valid"));
+        assert!(!seq
+            .reorder_track_relative(
+                first_video,
+                crate::TrackRelativePlacement::Before(second_video),
+            )
+            .expect("existing relation is a no-op"));
+        assert!(seq
+            .reorder_track_relative(
+                first_video,
+                crate::TrackRelativePlacement::After(second_video),
+            )
+            .expect("reverse the relation"));
+        assert_eq!(seq.video_tracks[1].id, first_video);
+
+        assert!(seq
+            .reorder_track_relative(
+                first_video,
+                crate::TrackRelativePlacement::Before(first_audio),
+            )
+            .is_err());
+        assert!(seq
+            .reorder_track_relative(
+                first_video,
+                crate::TrackRelativePlacement::Before(first_video),
+            )
+            .is_err());
     }
 
     // ── ColorEngine / ProgramColorContext tests ───────────────────────────────

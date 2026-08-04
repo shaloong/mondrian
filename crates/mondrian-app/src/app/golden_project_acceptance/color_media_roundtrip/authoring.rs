@@ -11,9 +11,9 @@ use crate::app::golden_project_acceptance::workflow::{
 };
 use crate::app::golden_project_acceptance::GoldenProjectContract;
 use crate::app::ui_actions::{
-    timeline_add_track_action, timeline_drop_asset_action, timeline_trim_clips_action,
-    TimelineAddTrackKind, TimelineAddTrackPayload, TimelineDropAssetPayload,
-    TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+    timeline_drop_asset_action, timeline_trim_clips_action, track_add_action,
+    TimelineDropAssetPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TrackAddKind,
+    TrackAddPayload,
 };
 use crate::app::AppState;
 use anyhow::{bail, ensure, Context};
@@ -312,7 +312,7 @@ pub(super) fn setup_stage(
     let add_hlg_track = dispatch_author_transition(
         state,
         "add-color-media-hlg-track",
-        timeline_add_track_action(TimelineAddTrackPayload { kind: TimelineAddTrackKind::Video }),
+        track_add_action(TrackAddPayload { kind: TrackAddKind::Video }),
     )?;
     let hlg_tracks = state
         .active_sequence()
@@ -338,7 +338,7 @@ pub(super) fn setup_stage(
     let add_alpha_track = dispatch_author_transition(
         state,
         "add-color-media-alpha-track",
-        timeline_add_track_action(TimelineAddTrackPayload { kind: TimelineAddTrackKind::Video }),
+        track_add_action(TrackAddPayload { kind: TrackAddKind::Video }),
     )?;
     let alpha_tracks = state
         .active_sequence()

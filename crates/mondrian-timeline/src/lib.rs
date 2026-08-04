@@ -87,6 +87,7 @@ pub use sequence::{
     SequencePreset, SequencePreviewSettings, SequenceRole, SequenceSettings,
 };
 pub use sequence_dependency::SequenceDependencyCertificate;
+pub use track::TrackRelativePlacement;
 pub use track::{Track, TrackType};
 pub use video_transition::{
     validate_selected_video_transition_source_handles, PictureSourceExtent, PictureSourceRef,

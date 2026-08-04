@@ -23,6 +23,7 @@ use mondrian_timeline::{
     sequence::{Sequence, SequenceSettings},
     AudioAutomationEditRequest, AudioChannelStripEditRequest, AudioComponentEditRequest,
     AudioProcessorRackEditRequest, AudioRoutingEditRequest, EffectRelativePlacement,
+    TrackRelativePlacement,
 };
 use serde::{Deserialize, Serialize};
 
@@ -40,6 +41,18 @@ pub const TIMELINE_MOVE_CLIP: &str = "move_clip";
 pub const TIMELINE_TRIM_CLIPS: &str = "trim_clips";
 /// External action name for seeking the active Timeline.
 pub const TIMELINE_SEEK: &str = "seek";
+
+/// External custom-action namespace for Timeline Track operations.
+pub const TRACK_NAMESPACE: &str = "ui.track";
+
+/// External action name for adding one video or audio Track.
+pub const TRACK_ADD: &str = "add";
+/// External action name for moving one Track relative to a stable same-kind anchor.
+pub const TRACK_MOVE: &str = "move";
+/// External action name for changing one persistent Track control.
+pub const TRACK_SET_AUTHOR_CONTROL: &str = "set_author_control";
+/// External action name for changing one open-Session edit-policy control.
+pub const TRACK_SET_EDIT_POLICY: &str = "set_edit_policy";
 
 /// External custom-action namespace for Sequence-owned visual Transitions.
 pub const VIDEO_TRANSITION_NAMESPACE: &str = "ui.video_transition";
@@ -184,6 +197,8 @@ pub const ASSET_MOVE_ENTRIES: &str = "move_entries";
 pub enum ProductAction {
     /// An operation owned by the active Timeline Interface.
     Timeline(TimelineProductAction),
+    /// An operation owned by one Timeline Track or its editor-session policy.
+    Track(TrackProductAction),
     /// An operation owned by a Sequence-local visual Transition.
     VideoTransition(VideoTransitionProductAction),
     /// An operation owned by Sequence audio authoring.
@@ -349,6 +364,19 @@ pub enum TimelineProductAction {
     Seek(TimelineSeekPayload),
 }
 
+/// Closed operations addressed to Timeline Tracks by stable identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrackProductAction {
+    /// Add one Track of a supported media kind to the active Sequence.
+    Add(TrackAddPayload),
+    /// Move one Track relative to a stable same-kind anchor.
+    Move(TrackMovePayload),
+    /// Change one persistent author control in a single Author Transaction.
+    SetAuthorControl(TrackSetAuthorControlPayload),
+    /// Change one transient editor-session targeting policy.
+    SetEditPolicy(TrackSetEditPolicyPayload),
+}
+
 /// Closed operations owned by Sequence-local visual Transitions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VideoTransitionProductAction {
@@ -381,6 +409,7 @@ impl ProductActionDecodeError {
     pub(crate) fn dispatch_step_id(&self) -> String {
         let domain = match self.namespace.as_str() {
             TIMELINE_NAMESPACE => "timeline_ui_action",
+            TRACK_NAMESPACE => "track_action",
             VIDEO_TRANSITION_NAMESPACE => "video_transition_action",
             AUDIO_NAMESPACE => "audio_action",
             ASSET_NAMESPACE => "asset_action",
@@ -425,6 +454,21 @@ impl ProductAction {
                 };
                 Ok(Some(Self::Timeline(timeline_action)))
             }
+            TRACK_NAMESPACE => match name.as_str() {
+                TRACK_ADD => Ok(Some(Self::Track(TrackProductAction::Add(decode_payload(
+                    namespace, name, payload,
+                )?)))),
+                TRACK_MOVE => Ok(Some(Self::Track(TrackProductAction::Move(decode_payload(
+                    namespace, name, payload,
+                )?)))),
+                TRACK_SET_AUTHOR_CONTROL => Ok(Some(Self::Track(
+                    TrackProductAction::SetAuthorControl(decode_payload(namespace, name, payload)?),
+                ))),
+                TRACK_SET_EDIT_POLICY => Ok(Some(Self::Track(TrackProductAction::SetEditPolicy(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                _ => Ok(None),
+            },
             VIDEO_TRANSITION_NAMESPACE => match name.as_str() {
                 VIDEO_TRANSITION_SELECT => Ok(Some(Self::VideoTransition(
                     VideoTransitionProductAction::Select(decode_payload(namespace, name, payload)?),
@@ -768,6 +812,22 @@ impl ProductAction {
                     "frame": payload.frame,
                     "source": payload.source,
                 }),
+            ),
+            Self::Track(TrackProductAction::Add(payload)) => {
+                (TRACK_NAMESPACE, TRACK_ADD, serde_json::json!(payload))
+            }
+            Self::Track(TrackProductAction::Move(payload)) => {
+                (TRACK_NAMESPACE, TRACK_MOVE, serde_json::json!(payload))
+            }
+            Self::Track(TrackProductAction::SetAuthorControl(payload)) => (
+                TRACK_NAMESPACE,
+                TRACK_SET_AUTHOR_CONTROL,
+                serde_json::json!(payload),
+            ),
+            Self::Track(TrackProductAction::SetEditPolicy(payload)) => (
+                TRACK_NAMESPACE,
+                TRACK_SET_EDIT_POLICY,
+                serde_json::json!(payload),
             ),
             Self::VideoTransition(VideoTransitionProductAction::Select(payload)) => (
                 VIDEO_TRANSITION_NAMESPACE,
@@ -1183,6 +1243,80 @@ pub struct TimelineSeekPayload {
     pub source: TimelineSeekSource,
 }
 
+/// Media kind supported by the product Add Track operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackAddKind {
+    /// Add a video Track.
+    Video,
+    /// Add an audio Track.
+    Audio,
+}
+
+/// Add one Track to the active Sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackAddPayload {
+    /// Media kind of the new Track.
+    pub kind: TrackAddKind,
+}
+
+/// Move one Track relative to a stable same-kind anchor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackMovePayload {
+    /// Stable identity of the Track being moved.
+    pub track_id: TrackId,
+    /// Requested relation in canonical Sequence author order.
+    pub placement: TrackRelativePlacement,
+}
+
+/// Persistent Track control owned by Sequence author state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackAuthorControl {
+    /// Video Track participation in picture compositing.
+    Visibility,
+    /// Audio Track participation in the authored mix.
+    Mute,
+    /// Video or audio Track protection from author edits.
+    Lock,
+}
+
+/// Change one persistent Track control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackSetAuthorControlPayload {
+    /// Stable identity of the Track being changed.
+    pub track_id: TrackId,
+    /// Author control being changed.
+    pub control: TrackAuthorControl,
+    /// Requested control state.
+    pub enabled: bool,
+}
+
+/// Transient Track policy owned by the open editor Session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackEditPolicyControl {
+    /// Whether structural content edits directly affect this Track.
+    Target,
+    /// Whether downstream placements follow program-time ripple edits.
+    SyncLock,
+}
+
+/// Change one transient Track edit-policy control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackSetEditPolicyPayload {
+    /// Stable Track identity in the active Sequence.
+    pub track_id: TrackId,
+    /// Session policy being changed.
+    pub control: TrackEditPolicyControl,
+    /// Requested policy state.
+    pub enabled: bool,
+}
+
 /// Create a Project at a user-selected path with explicit initial settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1484,6 +1618,7 @@ impl<'a> ProductActionAvailability<'a> {
     pub fn allows(&self, action: &ProductAction) -> bool {
         match action {
             ProductAction::Timeline(action) => self.allows_timeline(action),
+            ProductAction::Track(action) => self.allows_track(action),
             ProductAction::VideoTransition(action) => self.allows_video_transition(action),
             ProductAction::Audio(_) => self.state.active_sequence().is_some(),
             ProductAction::Asset(action) => self.allows_asset(action),
@@ -1572,6 +1707,57 @@ impl<'a> ProductActionAvailability<'a> {
             }
             TimelineProductAction::TrimClips(payload) => allows_trim(sequence, payload),
             TimelineProductAction::Seek(payload) => payload.frame >= 0,
+        }
+    }
+
+    fn allows_track(&self, action: &TrackProductAction) -> bool {
+        let Some(sequence) = self.state.active_sequence() else {
+            return false;
+        };
+        match action {
+            TrackProductAction::Add(_) => true,
+            TrackProductAction::Move(payload) => sequence
+                .track_relative_placement_would_change(payload.track_id, payload.placement)
+                .unwrap_or(false),
+            TrackProductAction::SetAuthorControl(payload) => {
+                let Some(track) = sequence
+                    .video_tracks
+                    .iter()
+                    .chain(&sequence.audio_tracks)
+                    .find(|track| track.id == payload.track_id)
+                else {
+                    return false;
+                };
+                match payload.control {
+                    TrackAuthorControl::Visibility => {
+                        track.track_type == mondrian_timeline::TrackType::Video
+                            && track.is_visible != payload.enabled
+                    }
+                    TrackAuthorControl::Mute => {
+                        track.track_type == mondrian_timeline::TrackType::Audio
+                            && track.is_muted != payload.enabled
+                    }
+                    TrackAuthorControl::Lock => track.is_locked != payload.enabled,
+                }
+            }
+            TrackProductAction::SetEditPolicy(payload) => {
+                let exists = sequence
+                    .video_tracks
+                    .iter()
+                    .chain(&sequence.audio_tracks)
+                    .any(|track| track.id == payload.track_id);
+                exists
+                    && match payload.control {
+                        TrackEditPolicyControl::Target => {
+                            self.state.timeline_track_targeted(sequence.id, payload.track_id)
+                                != payload.enabled
+                        }
+                        TrackEditPolicyControl::SyncLock => {
+                            self.state.timeline_track_sync_locked(sequence.id, payload.track_id)
+                                != payload.enabled
+                        }
+                    }
+            }
         }
     }
 
@@ -1957,6 +2143,71 @@ mod tests {
                 .expect("recognized product action");
             assert_eq!(decoded, expected);
         }
+    }
+
+    #[test]
+    fn external_codec_round_trips_every_track_product_action() {
+        let track_id = TrackId::new();
+        let anchor_id = TrackId::new();
+        let actions = [
+            ProductAction::Track(TrackProductAction::Add(TrackAddPayload {
+                kind: TrackAddKind::Video,
+            })),
+            ProductAction::Track(TrackProductAction::Move(TrackMovePayload {
+                track_id,
+                placement: TrackRelativePlacement::After(anchor_id),
+            })),
+            ProductAction::Track(TrackProductAction::SetAuthorControl(
+                TrackSetAuthorControlPayload {
+                    track_id,
+                    control: TrackAuthorControl::Lock,
+                    enabled: true,
+                },
+            )),
+            ProductAction::Track(TrackProductAction::SetEditPolicy(
+                TrackSetEditPolicyPayload {
+                    track_id,
+                    control: TrackEditPolicyControl::SyncLock,
+                    enabled: false,
+                },
+            )),
+        ];
+
+        for expected in actions {
+            let decoded = ProductAction::decode_external(&expected.clone().into_external_action())
+                .expect("valid external payload")
+                .expect("recognized Track product action");
+            assert_eq!(decoded, expected);
+        }
+    }
+
+    #[test]
+    fn external_track_codec_rejects_unknown_fields_and_malformed_relative_placement() {
+        let unknown_field = Action::Custom {
+            namespace: TRACK_NAMESPACE.to_owned(),
+            name: TRACK_SET_AUTHOR_CONTROL.to_owned(),
+            payload: serde_json::json!({
+                "track_id": TrackId::new(),
+                "control": "lock",
+                "enabled": true,
+                "is_video_track": true,
+            }),
+        };
+        let error = ProductAction::decode_external(&unknown_field)
+            .expect_err("recognized Track payload must reject legacy fields");
+        assert_eq!(error.dispatch_step_id(), "track_action.set_author_control");
+
+        let malformed_placement = Action::Custom {
+            namespace: TRACK_NAMESPACE.to_owned(),
+            name: TRACK_MOVE.to_owned(),
+            payload: serde_json::json!({
+                "track_id": TrackId::new(),
+                "placement": { "before": null },
+            }),
+        };
+        let error = ProductAction::decode_external(&malformed_placement)
+            .expect_err("malformed stable placement must fail closed");
+        assert_eq!(error.dispatch_step_id(), "track_action.move");
     }
 
     #[test]

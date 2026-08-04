@@ -486,7 +486,7 @@ contradictory delivery metadata.
 
 ## Track
 
-`Track` owns an ordered `Vec<Clip>` and track-level state:
+`Track` owns an ordered copy-on-write `AuthoringList<Clip>` and track-level state:
 
 - `track_type`: Video, Audio, Subtitle
 - `height`
@@ -498,6 +498,18 @@ Video tracks use visibility and opacity. Audio tracks persist mute; solo is a
 transient audition overlay outside the canonical author snapshot. UI must not
 show speaker controls for video tracks or visibility controls for audio tracks
 unless a future explicit domain feature is added.
+
+Track order is author state, but a projected numeric index is not author
+identity. Reorder requests therefore use `TrackRelativePlacement::Before |
+After(TrackId)`. `Sequence` resolves the moving Track and anchor against its
+current canonical lists, requires both identities to have the same media kind,
+and rejects missing, cross-kind, and self anchors before mutation. An already
+satisfied relation returns `false`, detaches no Track list, advances no
+Sequence revision, and creates no History entry. A real reorder preserves the
+Track allocation and every Clip/Audio Program reference, then normalizes the
+display names once. Video display order may be reversed by a Timeline Adapter,
+but that Adapter must lower the gesture to this canonical author-order relation
+before dispatch; the domain Interface never accepts a display index.
 
 Audio authoring keeps the Timeline Track as the editorial container and keys
 its Track Mixer Channel state by the same `TrackId` inside the Sequence-owned

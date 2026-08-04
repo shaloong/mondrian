@@ -25,11 +25,11 @@ use crate::app::preview_timeline_execution::{
 use crate::app::preview_unavailability::{PreviewOutputStage, PreviewUnavailability};
 use crate::app::ui_actions::{
     assets_create_solid_color_action, project_recover_from_autosave_action,
-    timeline_add_track_action, timeline_drop_asset_action, timeline_precompose_selection_action,
-    timeline_select_clip_action, timeline_trim_clips_action, AssetsCreateAssetPayload,
-    ProjectRecoverFromAutosavePayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-    TimelineDropAssetPayload, TimelinePrecomposeSelectionPayload, TimelineSelectClipPayload,
-    TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+    timeline_drop_asset_action, timeline_precompose_selection_action, timeline_select_clip_action,
+    timeline_trim_clips_action, track_add_action, AssetsCreateAssetPayload,
+    ProjectRecoverFromAutosavePayload, TimelineDropAssetPayload,
+    TimelinePrecomposeSelectionPayload, TimelineSelectClipPayload, TimelineTrimClipsPayload,
+    TimelineTrimPayloadEdge, TrackAddKind, TrackAddPayload,
 };
 use crate::app::{discover_crash_recovery_candidates, AppState};
 use anyhow::{ensure, Context};
@@ -609,7 +609,7 @@ pub(super) fn execute_recovery_nesting_stage(
     let add_video_track = dispatch_author_transition(
         state,
         "add-recovery-nesting-track",
-        timeline_add_track_action(TimelineAddTrackPayload { kind: TimelineAddTrackKind::Video }),
+        track_add_action(TrackAddPayload { kind: TrackAddKind::Video }),
     )?;
     let created_tracks = state
         .active_sequence()

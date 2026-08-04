@@ -16,11 +16,11 @@ use super::{load_json, GoldenProjectContract};
 use crate::app::playback::PlaybackAdvanceStatus;
 use crate::app::ui_actions::{
     assets_prepare_drag_action, timeline_extract_range_action, timeline_lift_range_action,
-    timeline_seek_with_source_action, timeline_set_in_out_point_action,
-    timeline_set_track_targeting_action, timeline_trim_clips_action, AssetsPrepareDragPayload,
-    TimelineInOutPointPayloadKind, TimelineInsertAssetPayload, TimelineSeekSource,
-    TimelineSetInOutPointPayload, TimelineSetTrackTargetingPayload, TimelineTrackTargetingControl,
-    TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+    timeline_seek_with_source_action, timeline_set_in_out_point_action, timeline_trim_clips_action,
+    track_set_edit_policy_action, AssetsPrepareDragPayload, TimelineInOutPointPayloadKind,
+    TimelineInsertAssetPayload, TimelineSeekSource, TimelineSetInOutPointPayload,
+    TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TrackEditPolicyControl,
+    TrackSetEditPolicyPayload,
 };
 use crate::app::AppState;
 use anyhow::{ensure, Context};
@@ -387,20 +387,16 @@ fn configure_range_edit_scope(
     let sequence_revision = sequence.revision.get();
 
     for track_id in all_track_ids {
-        state.dispatch_action(timeline_set_track_targeting_action(
-            TimelineSetTrackTargetingPayload {
-                track_id,
-                control: TimelineTrackTargetingControl::Target,
-                enabled: track_id == primary_track_id,
-            },
-        ))?;
-        state.dispatch_action(timeline_set_track_targeting_action(
-            TimelineSetTrackTargetingPayload {
-                track_id,
-                control: TimelineTrackTargetingControl::SyncLock,
-                enabled: track_id == primary_track_id || track_id == secondary_track_id,
-            },
-        ))?;
+        state.dispatch_action(track_set_edit_policy_action(TrackSetEditPolicyPayload {
+            track_id,
+            control: TrackEditPolicyControl::Target,
+            enabled: track_id == primary_track_id,
+        }))?;
+        state.dispatch_action(track_set_edit_policy_action(TrackSetEditPolicyPayload {
+            track_id,
+            control: TrackEditPolicyControl::SyncLock,
+            enabled: track_id == primary_track_id || track_id == secondary_track_id,
+        }))?;
     }
 
     let sequence =

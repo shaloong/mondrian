@@ -7,6 +7,7 @@ use mondrian_timeline::clip::{AlphaInterpretation, MediaInterpretation, Transfor
 use mondrian_timeline::sequence::{
     ColorWorkflow, DeliveryBitDepth, FieldOrder, PixelAspectRatio, VideoRange,
 };
+use mondrian_timeline::TrackRelativePlacement;
 
 fn create_state_with_sequence() -> AppState {
     let mut state = AppState::new();
@@ -674,9 +675,7 @@ fn track_lock_change_is_undoable() {
     let mut state = create_state_with_sequence();
     let track_id = state.active_sequence().expect("sequence should exist").video_tracks[0].id;
 
-    state
-        .set_track_locked(track_id, true, true)
-        .expect("set track locked should succeed");
+    state.set_track_locked(track_id, true).expect("set track locked should succeed");
     assert!(state.active_sequence().expect("sequence should exist").video_tracks[0].is_locked);
     assert_eq!(
         state.authoring_history().and_then(|history| history.undo_description()),
@@ -1414,6 +1413,8 @@ fn moving_track_is_undoable_and_preserves_clips() {
     let mut state = create_state_with_sequence();
     let tb = state.active_sequence().expect("sequence should exist").time_base();
     let moved_track_id = state.active_sequence().expect("sequence should exist").video_tracks[2].id;
+    let anchor_track_id =
+        state.active_sequence().expect("sequence should exist").video_tracks[0].id;
     let clip = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip");
     let clip_id = clip.id;
     state
@@ -1423,7 +1424,12 @@ fn moving_track_is_undoable_and_preserves_clips() {
         .add_clip(clip)
         .expect("add clip");
 
-    state.move_track(moved_track_id, true, 0).expect("move track");
+    state
+        .move_track(
+            moved_track_id,
+            TrackRelativePlacement::Before(anchor_track_id),
+        )
+        .expect("move track");
 
     let seq = state.active_sequence().expect("sequence should exist");
     assert_eq!(seq.video_tracks[0].id, moved_track_id);
@@ -1490,7 +1496,14 @@ fn dropping_linked_clip_after_video_reorder_uses_current_track_index() {
     let mut state = create_state_with_sequence();
     let moved_video_track_id =
         state.active_sequence().expect("sequence should exist").video_tracks[2].id;
-    state.move_track(moved_video_track_id, true, 0).expect("move track before drop");
+    let anchor_track_id =
+        state.active_sequence().expect("sequence should exist").video_tracks[0].id;
+    state
+        .move_track(
+            moved_video_track_id,
+            TrackRelativePlacement::Before(anchor_track_id),
+        )
+        .expect("move track before drop");
 
     state.begin_drag_asset(
         AssetId::new(),
@@ -1540,7 +1553,14 @@ fn moving_video_track_keeps_existing_linked_audio_on_its_audio_track() {
 
     let moved_video_track_id =
         state.active_sequence().expect("sequence should exist").video_tracks[2].id;
-    state.move_track(moved_video_track_id, true, 0).expect("move video track");
+    let anchor_track_id =
+        state.active_sequence().expect("sequence should exist").video_tracks[0].id;
+    state
+        .move_track(
+            moved_video_track_id,
+            TrackRelativePlacement::Before(anchor_track_id),
+        )
+        .expect("move video track");
 
     let seq = state.active_sequence().expect("sequence should exist");
     assert!(seq.video_tracks[0].clips.iter().any(|clip| clip.id == video_id));

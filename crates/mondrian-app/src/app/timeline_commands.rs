@@ -870,120 +870,128 @@ impl AppState {
     pub fn move_track(
         &mut self,
         track_id: TrackId,
-        is_video: bool,
-        new_index: usize,
-    ) -> mondrian_core::Result<()> {
-        self.commit_active_sequence_edit("移动轨道", |seq| {
-            if is_video {
-                seq.move_video_track(track_id, new_index)?;
-            } else {
-                seq.move_audio_track(track_id, new_index)?;
+        placement: mondrian_timeline::TrackRelativePlacement,
+    ) -> mondrian_core::Result<bool> {
+        let sequence = self.active_sequence().ok_or_else(|| {
+            mondrian_core::MondrianError::ActionNotExecuted {
+                action: "track_move".to_owned(),
+                reason: "there is no active Sequence".to_owned(),
             }
-            Ok(())
         })?;
-        Ok(())
+        if !sequence.track_relative_placement_would_change(track_id, placement)? {
+            return Ok(false);
+        }
+        let changed = self.commit_active_sequence_edit("移动轨道", |sequence| {
+            sequence.reorder_track_relative(track_id, placement)
+        })?;
+        Ok(changed)
     }
 
     pub fn set_track_visible(
         &mut self,
         track_id: TrackId,
-        is_video: bool,
         visible: bool,
-    ) -> mondrian_core::Result<()> {
-        if self
-            .active_sequence()
-            .and_then(|seq| {
-                if is_video {
-                    seq.video_tracks.iter().find(|track| track.id == track_id)
-                } else {
-                    seq.audio_tracks.iter().find(|track| track.id == track_id)
-                }
-            })
-            .is_some_and(|track| track.is_visible == visible)
-        {
-            return Ok(());
+    ) -> mondrian_core::Result<bool> {
+        let sequence = self.active_sequence().ok_or_else(|| {
+            mondrian_core::MondrianError::ActionNotExecuted {
+                action: "track_set_author_control".to_owned(),
+                reason: "there is no active Sequence".to_owned(),
+            }
+        })?;
+        let Some(track) = sequence.video_tracks.iter().find(|track| track.id == track_id) else {
+            if sequence.audio_tracks.iter().any(|track| track.id == track_id) {
+                return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "set_track_visible".to_owned(),
+                    reason: "visibility is defined only for video Tracks".to_owned(),
+                });
+            }
+            return Err(mondrian_core::MondrianError::TrackNotFound {
+                track_id: track_id.to_string(),
+            });
+        };
+        if track.is_visible == visible {
+            return Ok(false);
         }
         self.commit_active_sequence_edit("切换轨道可见性", |seq| {
-            let track = if is_video {
-                seq.video_track_mut(track_id)
-            } else {
-                seq.audio_track_mut(track_id)
-            }
-            .ok_or_else(|| mondrian_core::MondrianError::TrackNotFound {
-                track_id: track_id.to_string(),
+            let track = seq.video_track_mut(track_id).ok_or_else(|| {
+                mondrian_core::MondrianError::TrackNotFound { track_id: track_id.to_string() }
             })?;
             track.is_visible = visible;
             Ok(())
         })?;
-        Ok(())
+        Ok(true)
     }
 
     pub fn set_track_muted(
         &mut self,
         track_id: TrackId,
-        is_video: bool,
         muted: bool,
-    ) -> mondrian_core::Result<()> {
-        if self
-            .active_sequence()
-            .and_then(|seq| {
-                if is_video {
-                    seq.video_tracks.iter().find(|track| track.id == track_id)
-                } else {
-                    seq.audio_tracks.iter().find(|track| track.id == track_id)
-                }
-            })
-            .is_some_and(|track| track.is_muted == muted)
-        {
-            return Ok(());
+    ) -> mondrian_core::Result<bool> {
+        let sequence = self.active_sequence().ok_or_else(|| {
+            mondrian_core::MondrianError::ActionNotExecuted {
+                action: "track_set_author_control".to_owned(),
+                reason: "there is no active Sequence".to_owned(),
+            }
+        })?;
+        let Some(track) = sequence.audio_tracks.iter().find(|track| track.id == track_id) else {
+            if sequence.video_tracks.iter().any(|track| track.id == track_id) {
+                return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "set_track_muted".to_owned(),
+                    reason: "mute is defined only for audio Tracks".to_owned(),
+                });
+            }
+            return Err(mondrian_core::MondrianError::TrackNotFound {
+                track_id: track_id.to_string(),
+            });
+        };
+        if track.is_muted == muted {
+            return Ok(false);
         }
         self.commit_active_sequence_edit("切换轨道静音", |seq| {
-            let track = if is_video {
-                seq.video_track_mut(track_id)
-            } else {
-                seq.audio_track_mut(track_id)
-            }
-            .ok_or_else(|| mondrian_core::MondrianError::TrackNotFound {
-                track_id: track_id.to_string(),
+            let track = seq.audio_track_mut(track_id).ok_or_else(|| {
+                mondrian_core::MondrianError::TrackNotFound { track_id: track_id.to_string() }
             })?;
             track.is_muted = muted;
             Ok(())
         })?;
-        Ok(())
+        Ok(true)
     }
 
     pub fn set_track_locked(
         &mut self,
         track_id: TrackId,
-        is_video: bool,
         locked: bool,
-    ) -> mondrian_core::Result<()> {
-        if self
-            .active_sequence()
-            .and_then(|seq| {
-                if is_video {
-                    seq.video_tracks.iter().find(|track| track.id == track_id)
-                } else {
-                    seq.audio_tracks.iter().find(|track| track.id == track_id)
-                }
-            })
-            .is_some_and(|track| track.is_locked == locked)
-        {
-            return Ok(());
-        }
-        self.commit_active_sequence_edit("切换轨道锁定", |seq| {
-            let track = if is_video {
-                seq.video_track_mut(track_id)
-            } else {
-                seq.audio_track_mut(track_id)
+    ) -> mondrian_core::Result<bool> {
+        let sequence = self.active_sequence().ok_or_else(|| {
+            mondrian_core::MondrianError::ActionNotExecuted {
+                action: "track_set_author_control".to_owned(),
+                reason: "there is no active Sequence".to_owned(),
             }
+        })?;
+        let track = sequence
+            .video_tracks
+            .iter()
+            .chain(&sequence.audio_tracks)
+            .find(|track| track.id == track_id)
             .ok_or_else(|| mondrian_core::MondrianError::TrackNotFound {
                 track_id: track_id.to_string(),
             })?;
+        if track.is_locked == locked {
+            return Ok(false);
+        }
+        self.commit_active_sequence_edit("切换轨道锁定", |seq| {
+            let track = seq
+                .video_tracks
+                .iter_mut()
+                .chain(seq.audio_tracks.iter_mut())
+                .find(|track| track.id == track_id)
+                .ok_or_else(|| mondrian_core::MondrianError::TrackNotFound {
+                    track_id: track_id.to_string(),
+                })?;
             track.is_locked = locked;
             Ok(())
         })?;
-        Ok(())
+        Ok(true)
     }
 
     pub fn set_clips_disabled_bulk(

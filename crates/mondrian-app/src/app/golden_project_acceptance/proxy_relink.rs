@@ -20,10 +20,10 @@ use crate::app::preview_media_source::{
 };
 use crate::app::proxy_generation::resolve_app_state_proxy_color_contract;
 use crate::app::ui_actions::{
-    assets_relink_asset_action, assets_set_proxy_mode_action, timeline_add_track_action,
-    timeline_drop_asset_action, timeline_trim_clips_action, AssetsRelinkAssetPayload,
-    AssetsSetProxyModePayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-    TimelineDropAssetPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+    assets_relink_asset_action, assets_set_proxy_mode_action, timeline_drop_asset_action,
+    timeline_trim_clips_action, track_add_action, AssetsRelinkAssetPayload,
+    AssetsSetProxyModePayload, TimelineDropAssetPayload, TimelineTrimClipsPayload,
+    TimelineTrimPayloadEdge, TrackAddKind, TrackAddPayload,
 };
 use crate::app::AppState;
 use anyhow::{ensure, Context};
@@ -520,8 +520,8 @@ pub(super) fn execute_proxy_relink_stage(
     let expected_duration = expected_end.checked_sub(expected_position)?;
     let tracks_before = sequence.video_tracks.iter().map(|track| track.id).collect::<BTreeSet<_>>();
     let (_, add_video_track) = author_transition(state, "add-proxy-relink-track", |state| {
-        state.dispatch_action(timeline_add_track_action(TimelineAddTrackPayload {
-            kind: TimelineAddTrackKind::Video,
+        state.dispatch_action(track_add_action(TrackAddPayload {
+            kind: TrackAddKind::Video,
         }))?;
         Ok(())
     })?;

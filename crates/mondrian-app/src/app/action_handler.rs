@@ -12,7 +12,8 @@ use crate::app::product_action::{
     ClipCurveEditPayload, ClipProductAction, ExportDraftEdit, ExportProductAction, ProductAction,
     ProjectCreateWithSettingsPayload, ProjectProductAction, ProjectRecoverFromAutosavePayload,
     SequenceProductAction, SequenceUpdateSettingsPayload, TimelineClipSelectionModePayload,
-    TimelineProductAction, TimelineTrimPayloadEdge, VideoTransitionProductAction,
+    TimelineProductAction, TimelineTrimPayloadEdge, TrackAddKind, TrackAuthorControl,
+    TrackEditPolicyControl, TrackProductAction, VideoTransitionProductAction,
     VideoTransitionTargetPayload, ViewerProductAction, VisualEffectProductAction,
     VisualEffectSetParameterValuePayload,
 };
@@ -27,20 +28,17 @@ use crate::app::timeline_editing::{
 };
 use crate::app::ui_actions::{
     InspectorAudioComponentSourcePayload, InspectorSetAudioComponentSourcePayload,
-    TimelineAddTrackKind, TimelineAddTrackPayload, TimelineDropAssetPayload,
-    TimelineInOutPointPayloadKind, TimelineInsertAssetPayload, TimelineMoveTrackPayload,
+    TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineInsertAssetPayload,
     TimelineOpenNestedSequencePayload, TimelinePrecomposeSelectionPayload,
     TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
-    TimelineSetTrackControlPayload, TimelineSetTrackTargetingPayload,
-    TimelineTrackControlPayloadKind, TimelineTrackTargetingControl,
     TimelineTrimSelectedClipsToPlayheadPayload, INSPECTOR_NAMESPACE,
-    INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
+    INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, TIMELINE_CLEAR_IN_OUT_POINTS,
     TIMELINE_CREATE_BASIC_TITLE, TIMELINE_DROP_ASSET, TIMELINE_EXTRACT_RANGE,
-    TIMELINE_INSERT_ASSET, TIMELINE_LIFT_RANGE, TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_MOVE_TRACK,
-    TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_PRECOMPOSE_SELECTION,
+    TIMELINE_INSERT_ASSET, TIMELINE_LIFT_RANGE, TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_NAMESPACE,
+    TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_PRECOMPOSE_SELECTION,
     TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SET_IN_OUT_POINT,
-    TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL, TIMELINE_SET_TRACK_TARGETING,
-    TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, TIMELINE_UNLINK_SELECTED_CLIPS,
+    TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
+    TIMELINE_UNLINK_SELECTED_CLIPS,
 };
 #[cfg(test)]
 use crate::app::SelectedClipRef;
@@ -1111,6 +1109,7 @@ impl AppState {
     fn dispatch_product_action(&mut self, action: ProductAction) -> Result<()> {
         match action {
             ProductAction::Timeline(action) => self.dispatch_timeline_product_action(action),
+            ProductAction::Track(action) => self.dispatch_track_product_action(action),
             ProductAction::VideoTransition(action) => {
                 self.dispatch_video_transition_product_action(action)
             }
@@ -1256,6 +1255,69 @@ impl AppState {
         }
     }
 
+    fn dispatch_track_product_action(&mut self, action: TrackProductAction) -> Result<()> {
+        match action {
+            TrackProductAction::Add(payload) => {
+                if self.active_sequence().is_none() {
+                    return Err(action_not_executed(
+                        "track_add",
+                        "there is no active Sequence",
+                    ));
+                }
+                match payload.kind {
+                    TrackAddKind::Video => self.add_video_track(),
+                    TrackAddKind::Audio => self.add_audio_track(),
+                }
+                .map_err(|error| MondrianError::WorkflowStepFailed {
+                    step_id: "track_add".to_owned(),
+                    reason: error.to_string(),
+                })
+            }
+            TrackProductAction::Move(payload) => {
+                self.move_track(payload.track_id, payload.placement).and_then(|changed| {
+                    require_action_executed(
+                        changed,
+                        "track_move",
+                        "Track already has the requested relative placement",
+                    )
+                })
+            }
+            TrackProductAction::SetAuthorControl(payload) => {
+                let changed = match payload.control {
+                    TrackAuthorControl::Visibility => {
+                        self.set_track_visible(payload.track_id, payload.enabled)?
+                    }
+                    TrackAuthorControl::Mute => {
+                        self.set_track_muted(payload.track_id, payload.enabled)?
+                    }
+                    TrackAuthorControl::Lock => {
+                        self.set_track_locked(payload.track_id, payload.enabled)?
+                    }
+                };
+                require_action_executed(
+                    changed,
+                    "track_set_author_control",
+                    "Track author control already has the requested value",
+                )
+            }
+            TrackProductAction::SetEditPolicy(payload) => {
+                let changed = match payload.control {
+                    TrackEditPolicyControl::Target => {
+                        self.set_timeline_track_targeted(payload.track_id, payload.enabled)?
+                    }
+                    TrackEditPolicyControl::SyncLock => {
+                        self.set_timeline_track_sync_locked(payload.track_id, payload.enabled)?
+                    }
+                };
+                require_action_executed(
+                    changed,
+                    "track_set_edit_policy",
+                    "Track edit policy already has the requested value",
+                )
+            }
+        }
+    }
+
     fn dispatch_visual_effect_product_action(
         &mut self,
         action: VisualEffectProductAction,
@@ -1360,72 +1422,6 @@ impl AppState {
                     payload,
                 )?;
                 self.set_selected_clips_enabled_from_ui(payload.enabled)
-            }
-            TIMELINE_SET_TRACK_CONTROL => {
-                let payload = parse_ui_payload::<TimelineSetTrackControlPayload>(
-                    "timeline_ui_action",
-                    name,
-                    payload,
-                )?;
-                match payload.control {
-                    TimelineTrackControlPayloadKind::Visibility => self.set_track_visible(
-                        payload.track_id,
-                        payload.is_video_track,
-                        payload.enabled,
-                    ),
-                    TimelineTrackControlPayloadKind::Mute => self.set_track_muted(
-                        payload.track_id,
-                        payload.is_video_track,
-                        payload.enabled,
-                    ),
-                    TimelineTrackControlPayloadKind::Lock => self.set_track_locked(
-                        payload.track_id,
-                        payload.is_video_track,
-                        payload.enabled,
-                    ),
-                }
-            }
-            TIMELINE_SET_TRACK_TARGETING => {
-                let payload = parse_ui_payload::<TimelineSetTrackTargetingPayload>(
-                    "timeline_ui_action",
-                    name,
-                    payload,
-                )?;
-                match payload.control {
-                    TimelineTrackTargetingControl::Target => {
-                        self.set_timeline_track_targeted(payload.track_id, payload.enabled)
-                    }
-                    TimelineTrackTargetingControl::SyncLock => {
-                        self.set_timeline_track_sync_locked(payload.track_id, payload.enabled)
-                    }
-                }
-            }
-            TIMELINE_ADD_TRACK => {
-                let payload = parse_ui_payload::<TimelineAddTrackPayload>(
-                    "timeline_ui_action",
-                    name,
-                    payload,
-                )?;
-                match payload.kind {
-                    TimelineAddTrackKind::Video => self.add_video_track(),
-                    TimelineAddTrackKind::Audio => self.add_audio_track(),
-                }
-                .map_err(|err| MondrianError::WorkflowStepFailed {
-                    step_id: "timeline_add_track".to_string(),
-                    reason: err.to_string(),
-                })
-            }
-            TIMELINE_MOVE_TRACK => {
-                let payload = parse_ui_payload::<TimelineMoveTrackPayload>(
-                    "timeline_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.move_track(
-                    payload.track_id,
-                    payload.is_video_track,
-                    payload.target_index,
-                )
             }
             TIMELINE_DROP_ASSET => {
                 let payload = parse_ui_payload::<TimelineDropAssetPayload>(
@@ -2472,15 +2468,16 @@ mod tests {
         project_update_new_sequence_defaults_action, sequence_delete_action,
         sequence_duplicate_action, sequence_new_action, sequence_return_to_parent_action,
         sequence_set_active_default_action, sequence_switch_active_action,
-        sequence_update_settings_action, timeline_add_track_action,
-        timeline_clear_in_out_points_action, timeline_create_basic_title_action,
-        timeline_drop_asset_action, timeline_insert_asset_action,
-        timeline_link_selected_clips_action, timeline_move_clip_action, timeline_move_track_action,
-        timeline_open_nested_sequence_action, timeline_roll_selected_cut_to_playhead_action,
-        timeline_seek_action, timeline_seek_with_source_action, timeline_select_clip_action,
+        sequence_update_settings_action, timeline_clear_in_out_points_action,
+        timeline_create_basic_title_action, timeline_drop_asset_action,
+        timeline_insert_asset_action, timeline_link_selected_clips_action,
+        timeline_move_clip_action, timeline_open_nested_sequence_action,
+        timeline_roll_selected_cut_to_playhead_action, timeline_seek_action,
+        timeline_seek_with_source_action, timeline_select_clip_action,
         timeline_set_in_out_point_action, timeline_set_selected_clips_enabled_action,
-        timeline_set_track_control_action, timeline_trim_clips_action,
-        timeline_trim_selected_clips_to_playhead_action, timeline_unlink_selected_clips_action,
+        timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
+        timeline_unlink_selected_clips_action, track_add_action, track_move_action,
+        track_set_author_control_action, track_set_edit_policy_action,
         viewer_set_preview_resolution_scale_action, visual_effect_add_to_clip_action,
         visual_effect_remove_action, visual_effect_reorder_action, visual_effect_select_action,
         visual_effect_set_enabled_action, visual_effect_set_parameter_value_action,
@@ -2496,14 +2493,14 @@ mod tests {
         InspectorSetAudioComponentSourcePayload, ProjectCreateWithSettingsPayload,
         ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
         ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload,
-        SequenceUpdateSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-        TimelineDropAssetPayload, TimelineExportRequest, TimelineInOutPointPayloadKind,
-        TimelineInsertAssetPayload, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
-        TimelineSeekSource, TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
-        TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
-        TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
-        ViewerSetPreviewResolutionScalePayload, VisualEffectAddToClipPayload,
-        VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
+        SequenceUpdateSettingsPayload, TimelineDropAssetPayload, TimelineExportRequest,
+        TimelineInOutPointPayloadKind, TimelineInsertAssetPayload,
+        TimelineOpenNestedSequencePayload, TimelineSeekSource, TimelineSetInOutPointPayload,
+        TimelineSetSelectedClipsEnabledPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+        TimelineTrimSelectedClipsToPlayheadPayload, TrackAddKind, TrackAddPayload,
+        TrackAuthorControl, TrackEditPolicyControl, TrackMovePayload, TrackSetAuthorControlPayload,
+        TrackSetEditPolicyPayload, ViewerSetPreviewResolutionScalePayload,
+        VisualEffectAddToClipPayload, VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
         VisualEffectSetParameterValuePayload, VisualEffectTargetPayload,
     };
     use mondrian_assets::AssetLibrary;
@@ -2525,7 +2522,7 @@ mod tests {
     use mondrian_timeline::{
         AudioComponentAddress, AudioComponentEditRequest, AudioComponentMutation,
         EffectRelativePlacement, InsertAutomationPolicy, InsertTimelineStatePolicy,
-        InsertTransitionPolicy,
+        InsertTransitionPolicy, TrackRelativePlacement,
     };
 
     fn audio_component_action(
@@ -3592,11 +3589,10 @@ mod tests {
         let audio_track_id = state.active_sequence().expect("sequence").audio_tracks[0].id;
 
         state
-            .dispatch_action(timeline_set_track_control_action(
-                TimelineSetTrackControlPayload {
+            .dispatch_action(track_set_author_control_action(
+                TrackSetAuthorControlPayload {
                     track_id: video_track_id,
-                    is_video_track: true,
-                    control: TimelineTrackControlPayloadKind::Visibility,
+                    control: TrackAuthorControl::Visibility,
                     enabled: false,
                 },
             ))
@@ -3605,11 +3601,10 @@ mod tests {
         assert!(state.can_undo_action());
 
         state
-            .dispatch_action(timeline_set_track_control_action(
-                TimelineSetTrackControlPayload {
+            .dispatch_action(track_set_author_control_action(
+                TrackSetAuthorControlPayload {
                     track_id: audio_track_id,
-                    is_video_track: false,
-                    control: TimelineTrackControlPayloadKind::Mute,
+                    control: TrackAuthorControl::Mute,
                     enabled: true,
                 },
             ))
@@ -3617,11 +3612,10 @@ mod tests {
         assert!(state.active_sequence().expect("sequence").audio_tracks[0].is_muted);
 
         state
-            .dispatch_action(timeline_set_track_control_action(
-                TimelineSetTrackControlPayload {
+            .dispatch_action(track_set_author_control_action(
+                TrackSetAuthorControlPayload {
                     track_id: video_track_id,
-                    is_video_track: true,
-                    control: TimelineTrackControlPayloadKind::Lock,
+                    control: TrackAuthorControl::Lock,
                     enabled: true,
                 },
             ))
@@ -3635,23 +3629,75 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_timeline_ui_moves_track_to_target_index() {
+    fn track_product_actions_separate_author_history_from_session_policy_and_reject_noops() {
+        let (mut state, video_track_id, _) = state_with_two_video_tracks();
+        let sequence_id = state.active_sequence_id().expect("active Sequence");
+        let initial_generation = state.project_author_generation();
+        let initial_history = state
+            .authoring_history()
+            .and_then(|history| history.undo_description())
+            .map(str::to_owned);
+
+        let edit_policy = track_set_edit_policy_action(TrackSetEditPolicyPayload {
+            track_id: video_track_id,
+            control: TrackEditPolicyControl::Target,
+            enabled: false,
+        });
+        state.dispatch_action(edit_policy.clone()).expect("disable Track Target");
+        assert!(!state.timeline_track_targeted(sequence_id, video_track_id));
+        assert_eq!(state.project_author_generation(), initial_generation);
+        assert_eq!(
+            state.authoring_history().and_then(|history| history.undo_description()),
+            initial_history.as_deref()
+        );
+        assert_action_not_executed(
+            state.dispatch_action(edit_policy).expect_err("repeated policy is a no-op"),
+            "track_set_edit_policy",
+        );
+        assert_eq!(state.project_author_generation(), initial_generation);
+
+        let author_control = track_set_author_control_action(TrackSetAuthorControlPayload {
+            track_id: video_track_id,
+            control: TrackAuthorControl::Visibility,
+            enabled: false,
+        });
+        state.dispatch_action(author_control.clone()).expect("hide video Track");
+        assert_eq!(state.project_author_generation(), initial_generation + 1);
+        assert_eq!(
+            state.authoring_history().and_then(|history| history.undo_description()),
+            Some("切换轨道可见性")
+        );
+        assert_action_not_executed(
+            state
+                .dispatch_action(author_control)
+                .expect_err("repeated author value is a no-op"),
+            "track_set_author_control",
+        );
+        assert_eq!(state.project_author_generation(), initial_generation + 1);
+    }
+
+    #[test]
+    fn dispatch_track_product_action_moves_track_relative_to_stable_anchor() {
         let (mut state, first_track_id, _) = state_with_two_video_tracks();
         let second_track_id = state.active_sequence().expect("sequence").video_tracks[1].id;
 
-        state
-            .dispatch_action(timeline_move_track_action(TimelineMoveTrackPayload {
-                track_id: second_track_id,
-                is_video_track: true,
-                target_index: 0,
-            }))
-            .expect("move track");
+        let action = track_move_action(TrackMovePayload {
+            track_id: second_track_id,
+            placement: TrackRelativePlacement::Before(first_track_id),
+        });
+        state.dispatch_action(action.clone()).expect("move track");
 
         let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks[0].id, second_track_id);
         assert_eq!(sequence.video_tracks[1].id, first_track_id);
         assert!(state.can_undo_action());
+        let generation = state.project_author_generation();
+        assert_action_not_executed(
+            state.dispatch_action(action).expect_err("satisfied Track relation is a no-op"),
+            "track_move",
+        );
+        assert_eq!(state.project_author_generation(), generation);
     }
 
     #[test]
@@ -3793,13 +3839,13 @@ mod tests {
         let initial_audio_tracks = state.active_sequence().expect("sequence").audio_tracks.len();
 
         state
-            .dispatch_action(timeline_add_track_action(TimelineAddTrackPayload {
-                kind: TimelineAddTrackKind::Video,
+            .dispatch_action(track_add_action(TrackAddPayload {
+                kind: TrackAddKind::Video,
             }))
             .expect("add video track");
         state
-            .dispatch_action(timeline_add_track_action(TimelineAddTrackPayload {
-                kind: TimelineAddTrackKind::Audio,
+            .dispatch_action(track_add_action(TrackAddPayload {
+                kind: TrackAddKind::Audio,
             }))
             .expect("add audio track");
 

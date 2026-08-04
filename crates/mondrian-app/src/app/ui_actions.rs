@@ -42,7 +42,9 @@ pub use super::product_action::{
     ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
     TimelineClipSelectionModePayload, TimelineMoveClipPayload, TimelineSeekPayload,
     TimelineSeekSource, TimelineSelectClipPayload, TimelineTrimClipsPayload,
-    TimelineTrimPayloadEdge, VideoTransitionCreateCrossDissolvePayload,
+    TimelineTrimPayloadEdge, TrackAddKind, TrackAddPayload, TrackAuthorControl,
+    TrackEditPolicyControl, TrackMovePayload, TrackSetAuthorControlPayload,
+    TrackSetEditPolicyPayload, VideoTransitionCreateCrossDissolvePayload,
     VideoTransitionHandlePolicy, VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
     ViewerSetPreviewResolutionScalePayload, VisualEffectAddToClipPayload,
     VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
@@ -58,7 +60,8 @@ pub use super::product_action::{
     PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS, SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE,
     SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE,
     SEQUENCE_UPDATE_SETTINGS, TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_SEEK,
-    TIMELINE_SELECT_CLIP, TIMELINE_TRIM_CLIPS, VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE,
+    TIMELINE_SELECT_CLIP, TIMELINE_TRIM_CLIPS, TRACK_ADD, TRACK_MOVE, TRACK_NAMESPACE,
+    TRACK_SET_AUTHOR_CONTROL, TRACK_SET_EDIT_POLICY, VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE,
     VIDEO_TRANSITION_NAMESPACE, VIDEO_TRANSITION_REMOVE, VIDEO_TRANSITION_SELECT,
     VIDEO_TRANSITION_SET_RANGE, VIEWER_NAMESPACE, VISUAL_EFFECT_ADD_TO_CLIP,
     VISUAL_EFFECT_NAMESPACE, VISUAL_EFFECT_REMOVE, VISUAL_EFFECT_REORDER, VISUAL_EFFECT_SELECT,
@@ -66,7 +69,7 @@ pub use super::product_action::{
 };
 use super::product_action::{
     AssetProductAction, AudioProductAction, ClipProductAction, ExportProductAction, ProductAction,
-    ProjectProductAction, SequenceProductAction, TimelineProductAction,
+    ProjectProductAction, SequenceProductAction, TimelineProductAction, TrackProductAction,
     VideoTransitionProductAction, ViewerProductAction, VisualEffectProductAction,
 };
 
@@ -90,14 +93,6 @@ pub const TIMELINE_LIFT_RANGE: &str = "lift_range";
 pub const TIMELINE_EXTRACT_RANGE: &str = "extract_range";
 /// Action name for toggling the current timeline clip selection.
 pub const TIMELINE_SET_SELECTED_CLIPS_ENABLED: &str = "set_selected_clips_enabled";
-/// Action name for changing one timeline track header control.
-pub const TIMELINE_SET_TRACK_CONTROL: &str = "set_track_control";
-/// Action name for changing Track Targeting or Sync-Lock session policy.
-pub const TIMELINE_SET_TRACK_TARGETING: &str = "set_track_targeting";
-/// Action name for adding a video or audio timeline track.
-pub const TIMELINE_ADD_TRACK: &str = "add_track";
-/// Action name for reordering one timeline track.
-pub const TIMELINE_MOVE_TRACK: &str = "move_track";
 /// Action name for dropping one prepared asset onto a timeline track.
 pub const TIMELINE_DROP_ASSET: &str = "drop_asset";
 /// Action name for inserting one Asset through explicit target/ripple scope.
@@ -365,77 +360,6 @@ pub struct TimelineOpenNestedSequencePayload {
 pub struct ViewerSetZoomScalePayload {
     /// Fixed canvas scale. `None` means fit to available viewer space.
     pub scale: Option<f32>,
-}
-
-/// Track control targeted by the timeline header.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TimelineTrackControlPayloadKind {
-    /// Track visibility in video/compositing output.
-    Visibility,
-    /// Track muted state.
-    Mute,
-    /// Track locked state.
-    Lock,
-}
-
-/// Set one track-level control from the timeline header.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimelineSetTrackControlPayload {
-    /// Track targeted by the timeline header.
-    pub track_id: TrackId,
-    /// Whether `track_id` is a video track rather than an audio track.
-    pub is_video_track: bool,
-    /// Control being changed.
-    pub control: TimelineTrackControlPayloadKind,
-    /// New value for that control.
-    pub enabled: bool,
-}
-
-/// Editor-session Track control targeted by the timeline header.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TimelineTrackTargetingControl {
-    /// Whether content edits directly affect this Track.
-    Target,
-    /// Whether downstream placements follow ripple edits.
-    SyncLock,
-}
-
-/// Change Track Targeting or Sync-Lock without an author transaction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimelineSetTrackTargetingPayload {
-    /// Stable Track identity in the active Sequence.
-    pub track_id: TrackId,
-    /// Session policy being changed.
-    pub control: TimelineTrackTargetingControl,
-    /// New enabled state.
-    pub enabled: bool,
-}
-
-/// Track category for adding tracks from timeline UI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TimelineAddTrackKind {
-    /// Add a video track.
-    Video,
-    /// Add an audio track.
-    Audio,
-}
-
-/// Add a track to the active timeline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimelineAddTrackPayload {
-    /// Track category to add.
-    pub kind: TimelineAddTrackKind,
-}
-
-/// Move a track within its video or audio track list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimelineMoveTrackPayload {
-    /// Track being moved.
-    pub track_id: TrackId,
-    /// Whether `track_id` is a video track rather than an audio track.
-    pub is_video_track: bool,
-    /// Target index within the matching video/audio track list.
-    pub target_index: usize,
 }
 
 /// Drop an asset onto one timeline track at a target frame.
@@ -875,24 +799,24 @@ pub fn timeline_seek_with_source_action(frame: i64, source: TimelineSeekSource) 
     .into_external_action()
 }
 
-/// Build an action that changes a timeline track header control.
-pub fn timeline_set_track_control_action(payload: TimelineSetTrackControlPayload) -> Action {
-    custom_timeline_action(TIMELINE_SET_TRACK_CONTROL, payload)
+/// Build an action that changes one persistent Track control.
+pub fn track_set_author_control_action(payload: TrackSetAuthorControlPayload) -> Action {
+    ProductAction::Track(TrackProductAction::SetAuthorControl(payload)).into_external_action()
 }
 
 /// Build an action that changes Track Targeting or Sync-Lock session policy.
-pub fn timeline_set_track_targeting_action(payload: TimelineSetTrackTargetingPayload) -> Action {
-    custom_timeline_action(TIMELINE_SET_TRACK_TARGETING, payload)
+pub fn track_set_edit_policy_action(payload: TrackSetEditPolicyPayload) -> Action {
+    ProductAction::Track(TrackProductAction::SetEditPolicy(payload)).into_external_action()
 }
 
-/// Build an action that adds a timeline track.
-pub fn timeline_add_track_action(payload: TimelineAddTrackPayload) -> Action {
-    custom_timeline_action(TIMELINE_ADD_TRACK, payload)
+/// Build an action that adds a Timeline Track.
+pub fn track_add_action(payload: TrackAddPayload) -> Action {
+    ProductAction::Track(TrackProductAction::Add(payload)).into_external_action()
 }
 
-/// Build an action that moves a timeline track.
-pub fn timeline_move_track_action(payload: TimelineMoveTrackPayload) -> Action {
-    custom_timeline_action(TIMELINE_MOVE_TRACK, payload)
+/// Build an action that moves a Timeline Track by stable relative placement.
+pub fn track_move_action(payload: TrackMovePayload) -> Action {
+    ProductAction::Track(TrackProductAction::Move(payload)).into_external_action()
 }
 
 /// Build an action that drops an asset onto a timeline track.

@@ -12,6 +12,19 @@ use mondrian_core::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Stable relative placement for one Track inside its media-kind list.
+///
+/// Track indexes are snapshot-local presentation data. Authoring therefore
+/// addresses both the moving Track and its anchor by stable [`TrackId`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackRelativePlacement {
+    /// Place the moving Track immediately before the anchor in author order.
+    Before(TrackId),
+    /// Place the moving Track immediately after the anchor in author order.
+    After(TrackId),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrackType {
     Video,

@@ -9,16 +9,14 @@ use mondrian_editor_state::Action;
 
 use crate::app::product_action::ProductAction;
 use crate::app::ui_actions::{
-    TimelineInsertAssetPayload, TimelineMoveTrackPayload, TimelineSetInOutPointPayload,
-    TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
-    TimelineSetTrackTargetingPayload, TimelineTrimPayloadEdge,
+    TimelineInsertAssetPayload, TimelineSetInOutPointPayload,
+    TimelineSetSelectedClipsEnabledPayload, TimelineTrimPayloadEdge,
     TimelineTrimSelectedClipsToPlayheadPayload, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
     APP_SHELL_PROJECT_SETTINGS, APP_SHELL_QUIT, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
-    APP_SHELL_SEQUENCE_SETTINGS, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
-    TIMELINE_CREATE_BASIC_TITLE, TIMELINE_EXTRACT_RANGE, TIMELINE_INSERT_ASSET,
-    TIMELINE_LIFT_RANGE, TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
-    TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SET_IN_OUT_POINT,
-    TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL, TIMELINE_SET_TRACK_TARGETING,
+    APP_SHELL_SEQUENCE_SETTINGS, TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_CREATE_BASIC_TITLE,
+    TIMELINE_EXTRACT_RANGE, TIMELINE_INSERT_ASSET, TIMELINE_LIFT_RANGE,
+    TIMELINE_LINK_SELECTED_CLIPS, TIMELINE_NAMESPACE, TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD,
+    TIMELINE_SET_IN_OUT_POINT, TIMELINE_SET_SELECTED_CLIPS_ENABLED,
     TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, TIMELINE_UNLINK_SELECTED_CLIPS,
 };
 use crate::app::AppState;
@@ -161,31 +159,6 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         {
             parse_payload::<TimelineSetSelectedClipsEnabledPayload>(payload).is_some()
                 && selected_clips_are_editable(state)
-        }
-        Action::Custom { namespace, name, payload }
-            if namespace == TIMELINE_NAMESPACE && name == TIMELINE_SET_TRACK_CONTROL =>
-        {
-            parse_payload::<TimelineSetTrackControlPayload>(payload).is_some_and(|payload| {
-                sequence_has_track(state, payload.track_id, payload.is_video_track)
-            })
-        }
-        Action::Custom { namespace, name, payload }
-            if namespace == TIMELINE_NAMESPACE && name == TIMELINE_SET_TRACK_TARGETING =>
-        {
-            parse_payload::<TimelineSetTrackTargetingPayload>(payload)
-                .is_some_and(|payload| sequence_has_any_track(state, payload.track_id))
-        }
-        Action::Custom { namespace, name, .. }
-            if namespace == TIMELINE_NAMESPACE && name == TIMELINE_ADD_TRACK =>
-        {
-            state.active_sequence().is_some()
-        }
-        Action::Custom { namespace, name, payload }
-            if namespace == TIMELINE_NAMESPACE && name == TIMELINE_MOVE_TRACK =>
-        {
-            parse_payload::<TimelineMoveTrackPayload>(payload).is_some_and(|payload| {
-                sequence_has_track(state, payload.track_id, payload.is_video_track)
-            })
         }
         Action::Custom { namespace, name, payload }
             if namespace == TIMELINE_NAMESPACE && name == TIMELINE_INSERT_ASSET =>
@@ -359,23 +332,6 @@ fn clip_link_edit_available(state: &AppState, kind: ClipLinkEditKind) -> bool {
     assess_clip_link_edit(sequence, &request).is_ok_and(|assessment| assessment.would_change)
 }
 
-fn sequence_has_track(state: &AppState, track_id: TrackId, is_video_track: bool) -> bool {
-    state
-        .active_sequence()
-        .and_then(|sequence| track_for_ref(sequence, track_id, is_video_track))
-        .is_some()
-}
-
-fn sequence_has_any_track(state: &AppState, track_id: TrackId) -> bool {
-    state.active_sequence().is_some_and(|sequence| {
-        sequence
-            .video_tracks
-            .iter()
-            .chain(&sequence.audio_tracks)
-            .any(|track| track.id == track_id)
-    })
-}
-
 fn selected_clip_trim_to_playhead_is_available(
     state: &AppState,
     edge: TimelineTrimPayloadEdge,
@@ -513,30 +469,29 @@ mod tests {
         clip_write_parameter_values_action, export_cancel_action,
         export_clear_terminal_history_action, export_edit_draft_action, export_enqueue_action,
         project_create_with_settings_action, sequence_new_action, sequence_switch_active_action,
-        sequence_update_settings_action, timeline_add_track_action,
-        timeline_clear_in_out_points_action, timeline_extract_range_action,
-        timeline_lift_range_action, timeline_move_clip_action, timeline_move_track_action,
+        sequence_update_settings_action, timeline_clear_in_out_points_action,
+        timeline_extract_range_action, timeline_lift_range_action, timeline_move_clip_action,
         timeline_roll_selected_cut_to_playhead_action, timeline_seek_action,
         timeline_select_clip_action, timeline_set_in_out_point_action,
-        timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
-        timeline_set_track_targeting_action, timeline_trim_clips_action,
-        timeline_trim_selected_clips_to_playhead_action,
+        timeline_set_selected_clips_enabled_action, timeline_trim_clips_action,
+        timeline_trim_selected_clips_to_playhead_action, track_add_action, track_move_action,
+        track_set_author_control_action, track_set_edit_policy_action,
         viewer_set_preview_resolution_scale_action, AssetsDeleteSelectionPayload,
         AssetsImportFilesPayload, AssetsMoveSelectionPayload, ClipParameterValueWrite,
         ClipWriteParameterValuesPayload, ExportDraftEdit, ProjectCreateWithSettingsPayload,
-        SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineAddTrackKind,
-        TimelineAddTrackPayload, TimelineExportRequest, TimelineInOutPointPayloadKind,
-        TimelineMoveClipPayload, TimelineMoveTrackPayload, TimelineSelectClipPayload,
+        SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineExportRequest,
+        TimelineInOutPointPayloadKind, TimelineMoveClipPayload, TimelineSelectClipPayload,
         TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
-        TimelineSetTrackControlPayload, TimelineSetTrackTargetingPayload,
-        TimelineTrackControlPayloadKind, TimelineTrackTargetingControl, TimelineTrimClipsPayload,
-        TimelineTrimPayloadEdge, ViewerSetPreviewResolutionScalePayload,
+        TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TrackAddKind, TrackAddPayload,
+        TrackAuthorControl, TrackEditPolicyControl, TrackMovePayload, TrackSetAuthorControlPayload,
+        TrackSetEditPolicyPayload, ViewerSetPreviewResolutionScalePayload,
     };
     use crate::app::SelectedClipRef;
     use mondrian_core::automation::PropertyValue;
     use mondrian_core::types::{AssetId, ClipId, TrackId};
     use mondrian_timeline::clip::{Clip, Transform2D};
     use mondrian_timeline::sequence::Sequence;
+    use mondrian_timeline::TrackRelativePlacement;
 
     fn state_with_selected_clip() -> AppState {
         let mut state = AppState::new();
@@ -702,6 +657,8 @@ mod tests {
         let selection = state.selection.selected_clips[0];
         let clip_id = selection.clip_id;
         let track_id = selection.track_id;
+        let anchor_id =
+            state.active_sequence_mut_uncommitted().expect("sequence").add_video_track();
 
         for action in [
             timeline_select_clip_action(TimelineSelectClipPayload {
@@ -730,24 +687,20 @@ mod tests {
                 enabled: false,
             }),
             timeline_seek_action(42),
-            timeline_set_track_control_action(TimelineSetTrackControlPayload {
+            track_set_author_control_action(TrackSetAuthorControlPayload {
                 track_id,
-                is_video_track: true,
-                control: TimelineTrackControlPayloadKind::Lock,
+                control: TrackAuthorControl::Lock,
                 enabled: true,
             }),
-            timeline_set_track_targeting_action(TimelineSetTrackTargetingPayload {
+            track_set_edit_policy_action(TrackSetEditPolicyPayload {
                 track_id,
-                control: TimelineTrackTargetingControl::Target,
+                control: TrackEditPolicyControl::Target,
                 enabled: false,
             }),
-            timeline_add_track_action(TimelineAddTrackPayload {
-                kind: TimelineAddTrackKind::Video,
-            }),
-            timeline_move_track_action(TimelineMoveTrackPayload {
+            track_add_action(TrackAddPayload { kind: TrackAddKind::Video }),
+            track_move_action(TrackMovePayload {
                 track_id,
-                is_video_track: true,
-                target_index: 0,
+                placement: TrackRelativePlacement::After(anchor_id),
             }),
         ] {
             assert!(app_state_action_enabled(&action, &state), "{action:?}");
@@ -777,21 +730,19 @@ mod tests {
                 edge: TimelineTrimPayloadEdge::In,
                 frame: 15,
             }),
-            timeline_set_track_control_action(TimelineSetTrackControlPayload {
+            track_set_author_control_action(TrackSetAuthorControlPayload {
                 track_id: stale_track,
-                is_video_track: true,
-                control: TimelineTrackControlPayloadKind::Visibility,
+                control: TrackAuthorControl::Visibility,
                 enabled: false,
             }),
-            timeline_set_track_targeting_action(TimelineSetTrackTargetingPayload {
+            track_set_edit_policy_action(TrackSetEditPolicyPayload {
                 track_id: stale_track,
-                control: TimelineTrackTargetingControl::SyncLock,
+                control: TrackEditPolicyControl::SyncLock,
                 enabled: false,
             }),
-            timeline_move_track_action(TimelineMoveTrackPayload {
+            track_move_action(TrackMovePayload {
                 track_id: stale_track,
-                is_video_track: true,
-                target_index: 0,
+                placement: TrackRelativePlacement::After(TrackId::new()),
             }),
         ] {
             assert!(!app_state_action_enabled(&action, &state), "{action:?}");

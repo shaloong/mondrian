@@ -87,8 +87,26 @@ Project dirty.
 
 The Timeline Track header exposes independent T and S controls for video and
 audio Tracks. Their checked state is projected from `AppState`; Widgets retain
-no competing policy. Typed Actions address a stable `TrackId`, are rejected for
-stale identities, and only update session policy. This state is intentionally
+no competing policy. `TrackProductAction` is the sole product-operation
+Interface for Add, Move, persistent Track controls, Target, and Sync-Lock. Its
+`ui.track` codec is the only namespace/name/payload interpretation. Every
+existing-Track operation addresses a stable `TrackId`; Move additionally uses
+`TrackRelativePlacement::Before | After(TrackId)`, never a display or
+video/audio-list index. The Timeline Adapter alone reverses video display order
+into canonical author order. Dispatch revalidates both identities, same-kind
+membership, control applicability, and exact no-op status against the current
+Sequence.
+
+Persistent Visibility (video only), Mute (audio only), and Lock (both) enter
+one Author Transaction and Undo/Redo. Target and Sync-Lock route to the
+open-Session `TimelineTargetingState`, never advance Author Generation or
+History, and reject repeated values as `ActionNotExecuted`. Add allocates the
+new Track identity only at dispatch, so retained Widget projection cannot
+manufacture author identities. Stale identities, cross-kind anchors,
+self-anchors, and already-satisfied relations are rejected without dirtying the
+Project. The replaced `ui.timeline` Track names, redundant `is_video_track`
+flags, and projected `target_index` interpretation do not coexist with this
+Interface. This state is intentionally
 not yet durable workspace preference: reopen returns to the documented
 default-on policy until a versioned workspace-state owner is introduced.
 
@@ -402,7 +420,8 @@ Inside each migrated App slice, product meaning is carried by the closed
 `ProductAction` algebra. `Action::Custom` remains the external Widget,
 scripting, and plugin transport Seam; it must not become a second product-domain
 model. The current high-frequency Timeline slice covers Clip selection, Clip
-movement, bulk trim, and seek. Sequence-owned visual Transition operations use
+movement, bulk trim, and seek; Track operations use the closed Interface above.
+Sequence-owned visual Transition operations use
 a separate closed `VideoTransitionProductAction`: Select, product-default Cross
 Dissolve creation, exact-range edit, and Remove. The
 `ui.video_transition` envelope is decoded only at the Product Action Seam.

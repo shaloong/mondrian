@@ -25,8 +25,7 @@ use mondrian_timeline::{
 use crate::app::product_action::AudioTrackSoloPayload;
 use crate::app::ui_actions::{
     audio_channel_strip_edit_action, audio_routing_edit_action, audio_track_solo_action,
-    timeline_set_track_control_action, TimelineSetTrackControlPayload,
-    TimelineTrackControlPayloadKind,
+    track_set_author_control_action, TrackAuthorControl, TrackSetAuthorControlPayload,
 };
 use crate::app::AppState;
 
@@ -676,10 +675,9 @@ pub(crate) fn set_fader_action(channel: &AudioMixerChannelModel, value_db: f32) 
 }
 
 pub(crate) fn set_track_mute_action(track_id: TrackId, muted: bool) -> Action {
-    timeline_set_track_control_action(TimelineSetTrackControlPayload {
+    track_set_author_control_action(TrackSetAuthorControlPayload {
         track_id,
-        is_video_track: false,
-        control: TimelineTrackControlPayloadKind::Mute,
+        control: TrackAuthorControl::Mute,
         enabled: muted,
     })
 }
