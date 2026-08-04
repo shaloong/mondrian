@@ -8,7 +8,9 @@ use std::time::Duration;
 use anyhow::{bail, ensure, Context};
 use mondrian_assets::AssetKind;
 use mondrian_core::timeline_data::AlphaInterpretation;
-use mondrian_core::{AssetId, ClipId, FramePosition, Resolution, TimeScale, TimelineTime};
+use mondrian_core::{
+    AssetId, ClipId, FramePosition, Resolution, SourceSampleTarget, TimeScale, TimelineTime,
+};
 use mondrian_editor_state::Action;
 use mondrian_export::preset::TimelineExportRange;
 use mondrian_media::{PreviewDecodeSessionContext, VideoCodecProfile};
@@ -55,9 +57,10 @@ pub(super) struct GoldenRetimeMediaEvidence {
     author_step: AuthorTransitionEvidence,
     rate: TimeScale,
     sample_frame: i64,
-    expected_source_time: TimelineTime,
-    preview_source_time: TimelineTime,
-    export_source_time: TimelineTime,
+    expected_source_sample: SourceSampleTarget,
+    resolved_source_frame: i64,
+    preview_source_sample: SourceSampleTarget,
+    export_source_sample: SourceSampleTarget,
     presentation: GoldenViewerPresentationEvidence,
     viewer: GoldenHeadlessViewerEvidence,
     expected_program: ProgramReferenceEvidence,
@@ -74,7 +77,8 @@ impl GoldenRetimeMediaEvidence {
 
 #[derive(Debug, Serialize)]
 struct ProgramReferenceEvidence {
-    source_time: TimelineTime,
+    source_sample: SourceSampleTarget,
+    resolved_source_frame: i64,
     source_rgba_sha256: String,
     program_rgba_sha256: String,
     decode_execution: crate::app::preview_execution::PreviewDecodeExecutionSummary,
@@ -143,25 +147,34 @@ pub(super) fn execute_retime_media_evidence(
     );
     let sample_time =
         TimelineTime::from_frame_position(FramePosition::new(sample_frame, time_base))?;
-    let expected_source_time = clip.timeline_to_source_time(sample_time)?;
+    let expected_source_sample = clip.timeline_to_source_sample(sample_time)?;
     ensure!(
-        expected_source_time
-            == TimelineTime::from_frame_position(FramePosition::new(25, time_base))?,
-        "50% Golden retime did not map the sample frame to exact source frame 25"
+        expected_source_sample
+            == SourceSampleTarget::covering(TimelineTime::from_frame_position(
+                FramePosition::new(25, time_base),
+            )?),
+        "50% Golden retime did not map the sample frame to exact covering source frame 25"
     );
-    let preview_source_time = plan_source_time(
+    let resolved_source_frame =
+        expected_source_sample.to_frame_position(sequence.settings.frame_rate)?.frame;
+    ensure!(
+        resolved_source_frame == 25,
+        "50% Golden retime lowered to the wrong physical source frame"
+    );
+    let preview_source_sample = plan_source_sample(
         &sequence,
         asset_id,
         TimelineEvaluationRequest::preview(FramePosition::new(sample_frame, time_base), 1.0),
     )?;
-    let export_source_time = plan_source_time(
+    let export_source_sample = plan_source_sample(
         &sequence,
         asset_id,
         TimelineEvaluationRequest::export(FramePosition::new(sample_frame, time_base)),
     )?;
     ensure!(
-        preview_source_time == expected_source_time && export_source_time == expected_source_time,
-        "Preview and Export plans disagree with the canonical retime source time"
+        preview_source_sample == expected_source_sample
+            && export_source_sample == expected_source_sample,
+        "Preview and Export plans disagree with the canonical retime source sample"
     );
 
     let output_resolution = contract
@@ -180,7 +193,7 @@ pub(super) fn execute_retime_media_evidence(
         sample_frame,
         output_resolution,
         asset_id,
-        expected_source_time,
+        expected_source_sample,
         &mut decode_context,
     )?;
 
@@ -188,10 +201,11 @@ pub(super) fn execute_retime_media_evidence(
     let counterfactual_clip = find_clip_mut(&mut counterfactual_sequence, clip_id)?;
     counterfactual_clip
         .set_constant_source_time_map(counterfactual_clip.source_origin(), TimeScale::ONE)?;
-    let counterfactual_source_time = counterfactual_clip.timeline_to_source_time(sample_time)?;
+    let counterfactual_source_sample =
+        counterfactual_clip.timeline_to_source_sample(sample_time)?;
     ensure!(
-        counterfactual_source_time != expected_source_time,
-        "counterfactual 100% map did not produce a distinct source time"
+        counterfactual_source_sample != expected_source_sample,
+        "counterfactual 100% map did not produce a distinct source sample"
     );
     let counterfactual_program = render_program_reference(
         state,
@@ -199,7 +213,7 @@ pub(super) fn execute_retime_media_evidence(
         sample_frame,
         output_resolution,
         asset_id,
-        counterfactual_source_time,
+        counterfactual_source_sample,
         &mut decode_context,
     )?;
     ensure!(
@@ -246,9 +260,10 @@ pub(super) fn execute_retime_media_evidence(
         author_step,
         rate,
         sample_frame,
-        expected_source_time,
-        preview_source_time,
-        export_source_time,
+        expected_source_sample,
+        resolved_source_frame,
+        preview_source_sample,
+        export_source_sample,
         presentation,
         viewer: viewer_evidence,
         expected_program: expected_program.evidence,
@@ -258,11 +273,11 @@ pub(super) fn execute_retime_media_evidence(
     })
 }
 
-fn plan_source_time(
+fn plan_source_sample(
     sequence: &Sequence,
     asset_id: AssetId,
     request: TimelineEvaluationRequest,
-) -> anyhow::Result<TimelineTime> {
+) -> anyhow::Result<SourceSampleTarget> {
     let program = PreparedVisualProgram::prepare(sequence)?;
     let plan = evaluate_prepared_visual_program(&program, request)?;
     let media = plan
@@ -277,7 +292,7 @@ fn plan_source_time(
         media.len() == 1,
         "retime frame did not resolve exactly one target media layer"
     );
-    Ok(media[0].source_sample.time())
+    Ok(media[0].source_sample)
 }
 
 fn render_program_reference(
@@ -286,7 +301,7 @@ fn render_program_reference(
     frame: i64,
     resolution: Resolution,
     asset_id: AssetId,
-    expected_source_time: TimelineTime,
+    expected_source_sample: SourceSampleTarget,
     decode_context: &mut PreviewDecodeSessionContext,
 ) -> anyhow::Result<ProgramReference> {
     let assets = state
@@ -296,7 +311,7 @@ fn render_program_reference(
         .into_iter()
         .map(|asset| (asset.id, asset))
         .collect::<HashMap<_, _>>();
-    let mut request_source_time = None;
+    let mut request_source_sample = None;
     let mut source_rgba_sha256 = None;
     let mut decode_execution = None;
     let mut adapter_failure = None;
@@ -319,7 +334,7 @@ fn render_program_reference(
             .and_then(|asset| decode_media(state, &request, asset, decode_context));
         match outcome {
             Ok(media) => {
-                request_source_time = Some(request.source_sample.time());
+                request_source_sample = Some(request.source_sample);
                 decode_execution = Some(media.frame.decode_execution());
                 match source_rgba(&media.frame) {
                     Ok(rgba) => {
@@ -385,8 +400,8 @@ fn render_program_reference(
         "retime Program reference did not resolve exactly one target media layer"
     );
     ensure!(
-        request_source_time == Some(expected_source_time),
-        "real media Adapter received a source time different from the canonical map"
+        request_source_sample == Some(expected_source_sample),
+        "real media Adapter received a source sample different from the canonical map"
     );
     let mut scratch = TimelineCompositeScratch::default();
     let working = composite_resolved_preview_working(
@@ -429,7 +444,10 @@ fn render_program_reference(
         .into_rgba();
     Ok(ProgramReference {
         evidence: ProgramReferenceEvidence {
-            source_time: expected_source_time,
+            source_sample: expected_source_sample,
+            resolved_source_frame: expected_source_sample
+                .to_frame_position(sequence.settings.frame_rate)?
+                .frame,
             source_rgba_sha256: source_rgba_sha256
                 .context("retime decode produced no source raster hash")?,
             program_rgba_sha256: sha256_bytes(&rgba),

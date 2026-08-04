@@ -744,6 +744,7 @@ fn prepared_source_schedule_preserves_fractional_forward_retime() {
 fn prepared_source_schedule_preserves_fractional_reverse_retime() {
     let mut sequence = sequence_with_audio_clip();
     let clip = &mut sequence.audio_tracks[0].clips[0];
+    let clip_id = clip.id;
     clip.set_constant_source_time_map(
         tt(3, 1),
         TimeScale::new(-1, 2).expect("exact reverse scale"),
@@ -760,6 +761,29 @@ fn prepared_source_schedule_preserves_fractional_reverse_retime() {
 
     assert_eq!(source.block_reads, 1);
     assert_eq!(pcm, vec![6.0, 6.0, 5.0, 5.0]);
+    let output_id = sequence.audio_program.outputs[0].id;
+    let compiled = compile_audio_program(&sequence, AudioCompileRequest::program(output_id))
+        .expect("compile reverse Program");
+    let contribution = compiled
+        .contributions()
+        .iter()
+        .find(|contribution| contribution.clip_id == clip_id)
+        .expect("reverse contribution");
+    let target = contribution
+        .source_time_map
+        .sample(TimelineTime::ZERO)
+        .expect("complete reverse target");
+    assert_eq!(
+        target,
+        mondrian_core::SourceSampleTarget::strict_predecessor(tt(3, 1))
+    );
+    assert_eq!(
+        target
+            .to_frame_position(mondrian_core::Rational::new(2, 1))
+            .expect("lower reverse target")
+            .frame,
+        5
+    );
 }
 
 #[test]

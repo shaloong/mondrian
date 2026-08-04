@@ -180,13 +180,15 @@ Proxy/Relink adds one dedicated video Track, trims the imported H.264 Clip to
 `200..350`, and proves Proxy→Original→Proxy plus offline Relink and replacement
 proxy generation without changing any preceding Track-owned anchor. It then
 authors an exact `1/2` source map through the normal product Action. At timeline
-frame 250, Preview and Export plans must both resolve source time 1 second. A
-production Headless Viewer presents the proxy-backed current frame; the
+frame 250, Preview and Export plans must both retain the same complete covering
+source target at 1 second, and the physical 25 fps Adapter must resolve frame 25.
+A production Headless Viewer presents the proxy-backed current frame; the
 immutable export snapshot instead renders exact single-frame range `250..251`
 from the relinked original through H.264/AAC. Ordinary reimport/decode must be close to the 50% Program reference
 and materially farther from a separately rendered 100% counterfactual at source
 time 2 seconds. This rejects metadata-only retime, Preview/Export disagreement,
-wrong proxy/original authority, and an encoded output sampled from the old rate.
+wrong proxy/original authority, a dropped sampling boundary, and an encoded
+output sampled from the old rate.
 Recovery must then preserve every earlier scoped anchor while its exact
 `175..200` parent placement, nested child, Autosave recovery, and covering
 manual reopen remain identical.

@@ -1,7 +1,7 @@
 use mondrian_core::{
     AudioChannelLayout, AudioComponentEditId, AudioProcessingScopeId, AudioProcessorInstanceId,
-    ExactAutomationCurve, MixBusId, ProgramOutputId, SequenceId, TimeScale, TimelineTime,
-    TimelineTimeRange, TrackId,
+    ExactAutomationCurve, MixBusId, ProgramOutputId, SequenceId, SourceSampleTarget, TimeScale,
+    TimelineTime, TimelineTimeRange, TrackId,
 };
 use mondrian_timeline::audio::{
     AudioComponentChannelMapping, AudioFadeCurve, AudioProcessorDefinitionRef,
@@ -67,6 +67,23 @@ impl CompiledSourceTimeMap {
         let local = sequence_time.checked_sub(self.sequence_start)?;
         let source_local = local.checked_scale(self.scale)?;
         self.source_origin.checked_add(source_local)
+    }
+
+    /// Resolve one Sequence time into the complete source-sampling contract.
+    ///
+    /// The exact coordinate and its half-open ownership stay coupled until the
+    /// prepared renderer lowers them onto the physical audio sample grid.
+    pub fn sample(
+        self,
+        sequence_time: TimelineTime,
+    ) -> Result<SourceSampleTarget, mondrian_core::TimelineTimeError> {
+        let time = self.map(sequence_time)?;
+        Ok(match self.sampling_boundary {
+            mondrian_core::SourceSamplingBoundary::Covering => SourceSampleTarget::covering(time),
+            mondrian_core::SourceSamplingBoundary::StrictPredecessor => {
+                SourceSampleTarget::strict_predecessor(time)
+            }
+        })
     }
 }
 

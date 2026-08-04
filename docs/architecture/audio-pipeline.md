@@ -1177,7 +1177,9 @@ The automated suite must prove:
 - scalar and runtime-vectorized kernels are sample-for-sample identical for the supported DSP
   set, including awkward block sizes and an eight-Track full-schedule render;
 - exact fractional forward and reverse source mappings remain block-shaped and
-  preserve floor semantics;
+  preserve their complete source-sampling contract; the semantic Program exposes
+  that target without reconstructing boundary policy, and the dense schedule
+  consumes `Covering` as floor or `StrictPredecessor` as `ceil - 1` exactly once;
 - the ignored fixed-reference load matrix exercises 1/8/32/64 Tracks at
   64/256/1024-frame blocks, compares scalar and SIMD PCM, and fails when p99
   exceeds the block deadline;

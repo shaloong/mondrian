@@ -774,7 +774,8 @@ the two Sequences present at the Recovery boundary, earlier stage content,
 relinked Asset intent, its exact `1/2` Clip source map, and both typed reimport
 profiles. Proxy/Relink owns the fixed-corpus constant-retime product evidence:
 the Inspector-independent Action advances one author transaction, Preview and
-Export plans must lower the same exact source time, a Headless Viewer presents
+Export plans must retain the same complete `SourceSampleTarget` and the media
+Adapter must record the resolved physical frame, a Headless Viewer presents
 through the production proxy path, and a production H.264/AAC export from the
 immutable original-source snapshot is reimported and compared with both the
 correct Program reference and an incorrect 100% counterfactual. The later Color
@@ -796,6 +797,14 @@ its aggregate report hash is
 Earlier eight-Sequence runs remain diagnostic history.
 Qualified release-machine capture and independent HDR/Log numeric references
 remain separate acceptance obligations.
+
+The fixture-independent focused Retime gate exercises a wider semantic matrix
+without claiming decode pixels: linked `+3/2` and `-3/2`, reverse-edge
+`StrictPredecessor`, reverse picture hold with unaffected linked audio,
+Undo/Redo, durable reopen, Prepared Visual Preview/Export agreement, and a real
+dense Audio Session lowering onto the 48 kHz physical sample grid. Equality is
+always over the complete target; checking only its `TimelineTime` is not valid
+evidence because the adjacent reverse frame would then be indistinguishable.
 
 ## Playback Tick Ownership
 

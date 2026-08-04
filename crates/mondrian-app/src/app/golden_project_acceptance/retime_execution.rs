@@ -12,12 +12,13 @@ use super::{load_golden_contract, repository_root, sequence_settings_from_contra
 use crate::app::ui_actions::TimelineInsertAssetPayload;
 use anyhow::{ensure, Context};
 use mondrian_audio::{
-    compile_audio_program, AudioCompileRequest, AudioProcessingMode, AudioRenderContract,
-    PreparedAudioPlan,
+    compile_audio_program, render_audio, AudioCompileRequest, AudioExecutionError, AudioPcmSource,
+    AudioProcessingMode, AudioRenderContract, AudioRenderRequest, PreparedAudioPlan,
 };
 use mondrian_core::{
-    ClipId, ColorSpace, FramePosition, ProjectColorEnvironment, ProjectSettings, Rational,
-    TimeScale, TimelineTime,
+    AudioChannelLayout, AudioComponentEditId, ClipId, ColorSpace, FramePosition,
+    ProjectColorEnvironment, ProjectSettings, Rational, SourceSampleTarget, TimeScale,
+    TimelineTime,
 };
 use mondrian_media::info::{AudioCodec, ChannelLayout, PixelFormat, VideoCodec};
 use mondrian_media::{
@@ -138,6 +139,7 @@ fn golden_hero_retime_is_one_exact_contract_across_author_preview_audio_export_a
     let video_track_id = sequence.video_tracks[0].id;
     let audio_track_id = sequence.audio_tracks[0].id;
     let time_base = sequence.time_base();
+    let frame_rate = sequence.settings.frame_rate;
     let (inserted, _) =
         author_transition(workflow.app_mut(), "insert-linked-retime-source", |state| {
             Ok(state.insert_asset_from_ui(TimelineInsertAssetPayload {
@@ -184,8 +186,8 @@ fn golden_hero_retime_is_one_exact_contract_across_author_preview_audio_export_a
         TimeScale::new(3, 2)?,
     )?;
     let sample_frame = 12;
-    let expected_forward_source = frame_time(18, time_base)?;
-    assert_visual_source_time(
+    let expected_forward_source = SourceSampleTarget::covering(frame_time(18, time_base)?);
+    assert_visual_source_sample(
         workflow.app().active_sequence().context("Hero is absent")?,
         sample_frame,
         expected_forward_source,
@@ -200,6 +202,46 @@ fn golden_hero_retime_is_one_exact_contract_across_author_preview_audio_export_a
 
     dispatch_author_transition(
         workflow.app_mut(),
+        "set-linked-reverse-rate",
+        crate::app::ui_actions::clip_set_rate_action(
+            crate::app::product_action::ClipSetRatePayload {
+                clip_id: video_clip_id,
+                rate: TimeScale::new(-3, 2)?,
+                include_linked: true,
+            },
+        ),
+    )?;
+    assert_clip_scale(
+        workflow.app().active_sequence().context("Hero is absent")?,
+        video_clip_id,
+        TimeScale::new(-3, 2)?,
+    )?;
+    assert_clip_scale(
+        workflow.app().active_sequence().context("Hero is absent")?,
+        audio_clip_id,
+        TimeScale::new(-3, 2)?,
+    )?;
+    let expected_reverse_source =
+        SourceSampleTarget::strict_predecessor(frame_time(54, time_base)?);
+    ensure!(
+        expected_reverse_source.to_frame_position(frame_rate)?.frame == 53,
+        "reverse sample did not select the frame before its exclusive boundary"
+    );
+    assert_visual_source_sample(
+        workflow.app().active_sequence().context("Hero is absent")?,
+        sample_frame,
+        expected_reverse_source,
+    )?;
+    assert_prepared_audio_source_time(
+        workflow.app().active_sequence().context("Hero is absent")?,
+        audio_clip_id,
+        frame_time(sample_frame, time_base)?,
+        expected_reverse_source,
+        TimeScale::new(-3, 2)?,
+    )?;
+
+    dispatch_author_transition(
+        workflow.app_mut(),
         "freeze-linked-picture-only",
         crate::app::ui_actions::clip_hold_frame_action(
             crate::app::product_action::ClipHoldFramePayload {
@@ -210,15 +252,15 @@ fn golden_hero_retime_is_one_exact_contract_across_author_preview_audio_export_a
     )?;
     let held_sequence = workflow.app().active_sequence().context("Hero is absent")?;
     assert_clip_scale(held_sequence, video_clip_id, TimeScale::new(0, 1)?)?;
-    assert_clip_scale(held_sequence, audio_clip_id, TimeScale::new(3, 2)?)?;
-    assert_visual_source_time(held_sequence, sample_frame, expected_forward_source)?;
-    assert_visual_source_time(held_sequence, 36, expected_forward_source)?;
+    assert_clip_scale(held_sequence, audio_clip_id, TimeScale::new(-3, 2)?)?;
+    assert_visual_source_sample(held_sequence, sample_frame, expected_reverse_source)?;
+    assert_visual_source_sample(held_sequence, 36, expected_reverse_source)?;
     assert_prepared_audio_source_time(
         held_sequence,
         audio_clip_id,
         frame_time(36, time_base)?,
-        frame_time(54, time_base)?,
-        TimeScale::new(3, 2)?,
+        SourceSampleTarget::strict_predecessor(frame_time(18, time_base)?),
+        TimeScale::new(-3, 2)?,
     )?;
 
     author_transition(workflow.app_mut(), "undo-picture-hold", |state| {
@@ -228,18 +270,42 @@ fn golden_hero_retime_is_one_exact_contract_across_author_preview_audio_export_a
     assert_clip_scale(
         workflow.app().active_sequence().context("Hero is absent")?,
         video_clip_id,
-        TimeScale::new(3, 2)?,
+        TimeScale::new(-3, 2)?,
     )?;
-    author_transition(workflow.app_mut(), "undo-linked-rate", |state| {
-        ensure!(state.undo_timeline()?, "linked rate had no Undo entry");
+    author_transition(workflow.app_mut(), "undo-linked-reverse-rate", |state| {
+        ensure!(
+            state.undo_timeline()?,
+            "linked reverse rate had no Undo entry"
+        );
+        Ok(())
+    })?;
+    let forward_sequence = workflow.app().active_sequence().context("Hero is absent")?;
+    assert_clip_scale(forward_sequence, video_clip_id, TimeScale::new(3, 2)?)?;
+    assert_clip_scale(forward_sequence, audio_clip_id, TimeScale::new(3, 2)?)?;
+
+    author_transition(workflow.app_mut(), "undo-linked-forward-rate", |state| {
+        ensure!(
+            state.undo_timeline()?,
+            "linked forward rate had no Undo entry"
+        );
         Ok(())
     })?;
     let original_sequence = workflow.app().active_sequence().context("Hero is absent")?;
     assert_clip_scale(original_sequence, video_clip_id, TimeScale::ONE)?;
     assert_clip_scale(original_sequence, audio_clip_id, TimeScale::ONE)?;
 
-    author_transition(workflow.app_mut(), "redo-linked-rate", |state| {
-        ensure!(state.redo_timeline()?, "linked rate had no Redo entry");
+    author_transition(workflow.app_mut(), "redo-linked-forward-rate", |state| {
+        ensure!(
+            state.redo_timeline()?,
+            "linked forward rate had no Redo entry"
+        );
+        Ok(())
+    })?;
+    author_transition(workflow.app_mut(), "redo-linked-reverse-rate", |state| {
+        ensure!(
+            state.redo_timeline()?,
+            "linked reverse rate had no Redo entry"
+        );
         Ok(())
     })?;
     author_transition(workflow.app_mut(), "redo-picture-hold", |state| {
@@ -259,14 +325,14 @@ fn golden_hero_retime_is_one_exact_contract_across_author_preview_audio_export_a
 
     let reopened = workflow.app().active_sequence().context("reopened Hero is absent")?;
     assert_clip_scale(reopened, video_clip_id, TimeScale::new(0, 1)?)?;
-    assert_clip_scale(reopened, audio_clip_id, TimeScale::new(3, 2)?)?;
-    assert_visual_source_time(reopened, 36, expected_forward_source)?;
+    assert_clip_scale(reopened, audio_clip_id, TimeScale::new(-3, 2)?)?;
+    assert_visual_source_sample(reopened, 36, expected_reverse_source)?;
     assert_prepared_audio_source_time(
         reopened,
         audio_clip_id,
         frame_time(36, time_base)?,
-        frame_time(54, time_base)?,
-        TimeScale::new(3, 2)?,
+        SourceSampleTarget::strict_predecessor(frame_time(18, time_base)?),
+        TimeScale::new(-3, 2)?,
     )?;
     Ok(())
 }
@@ -311,10 +377,10 @@ fn assert_clip_scale(
     Ok(())
 }
 
-fn assert_visual_source_time(
+fn assert_visual_source_sample(
     sequence: &Sequence,
     timeline_frame: i64,
-    expected: TimelineTime,
+    expected: SourceSampleTarget,
 ) -> anyhow::Result<()> {
     let position = FramePosition::new(timeline_frame, sequence.time_base());
     for request in [
@@ -332,8 +398,8 @@ fn assert_visual_source_time(
             })
             .collect::<Vec<_>>();
         ensure!(
-            media.len() == 1 && media[0].source_sample.time() == expected,
-            "Preview/Export render plan did not preserve the exact source-time map"
+            media.len() == 1 && media[0].source_sample == expected,
+            "Preview/Export render plan did not preserve the complete source-sampling contract"
         );
     }
     Ok(())
@@ -343,7 +409,7 @@ fn assert_prepared_audio_source_time(
     sequence: &Sequence,
     clip_id: ClipId,
     sequence_time: TimelineTime,
-    expected_source_time: TimelineTime,
+    expected_source_sample: SourceSampleTarget,
     expected_scale: TimeScale,
 ) -> anyhow::Result<()> {
     let output_id = sequence.audio_program.outputs[0].id;
@@ -371,8 +437,8 @@ fn assert_prepared_audio_source_time(
         .with_context(|| format!("prepared audio contribution is absent: {clip_id}"))?;
     ensure!(
         contribution.source_time_map.scale == expected_scale
-            && contribution.source_time_map.map(sequence_time)? == expected_source_time,
-        "prepared audio contribution changed the exact source-time map"
+            && contribution.source_time_map.sample(sequence_time)? == expected_source_sample,
+        "prepared audio contribution changed the complete source-sampling contract"
     );
     let summary = prepared.schedule_summary();
     ensure!(
@@ -381,7 +447,41 @@ fn assert_prepared_audio_source_time(
             && summary.node_count >= summary.track_count,
         "audio prepare did not lower one contribution through the complete routed Track closure"
     );
+    let sample_grid = Rational::new(sequence.settings.audio_sample_rate as i64, 1);
+    let start_sample = sequence_time
+        .to_frame_position(sample_grid, mondrian_core::FrameRounding::Nearest)?
+        .frame;
+    let expected_source_frame = expected_source_sample.to_frame_position(sample_grid)?.frame;
+    let mut source = SourceFrameRecorder::default();
+    let _pcm = render_audio(
+        Arc::new(prepared),
+        &mut source,
+        AudioRenderRequest { start_sample, frames: 1 },
+    )?;
+    ensure!(
+        source.frames == [expected_source_frame],
+        "dense audio schedule lowered the exact target to the wrong physical sample"
+    );
     Ok(())
+}
+
+#[derive(Default)]
+struct SourceFrameRecorder {
+    frames: Vec<i64>,
+}
+
+impl AudioPcmSource for SourceFrameRecorder {
+    fn read_indexed_interleaved(
+        &mut self,
+        _edit: AudioComponentEditId,
+        source_frames: &[i64],
+        _source_layout: AudioChannelLayout,
+        destination: &mut [f32],
+    ) -> Result<(), AudioExecutionError> {
+        self.frames.extend_from_slice(source_frames);
+        destination.fill(0.0);
+        Ok(())
+    }
 }
 
 fn frame_time(frame: i64, time_base: mondrian_core::Rational) -> anyhow::Result<TimelineTime> {
