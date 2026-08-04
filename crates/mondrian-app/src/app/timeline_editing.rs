@@ -533,38 +533,6 @@ pub(super) fn slide_clip_in_track(
     Ok(true)
 }
 
-pub(super) fn trim_clip_edge_internal(
-    seq: &mut Sequence,
-    clip_id: ClipId,
-    edge: TrimEdge,
-    target_frame: i64,
-) -> mondrian_core::Result<bool> {
-    let time_base = seq.time_base();
-    for track in &mut seq.video_tracks {
-        if let Some(index) = track.clips.iter().position(|clip| clip.id == clip_id) {
-            if track.is_locked {
-                return Err(mondrian_core::MondrianError::TrackLocked {
-                    track_id: track.id.to_string(),
-                });
-            }
-            return trim_clip_in_track(track, index, edge, target_frame, time_base);
-        }
-    }
-
-    for track in &mut seq.audio_tracks {
-        if let Some(index) = track.clips.iter().position(|clip| clip.id == clip_id) {
-            if track.is_locked {
-                return Err(mondrian_core::MondrianError::TrackLocked {
-                    track_id: track.id.to_string(),
-                });
-            }
-            return trim_clip_in_track(track, index, edge, target_frame, time_base);
-        }
-    }
-
-    Err(mondrian_core::MondrianError::ClipNotFound { clip_id: clip_id.to_string() })
-}
-
 pub(super) fn can_trim_clip_edge(
     seq: &Sequence,
     clip_id: ClipId,
@@ -584,25 +552,7 @@ pub(super) fn can_trim_clip_edge(
     Ok(false)
 }
 
-pub(super) fn trim_clip_in_track(
-    track: &mut mondrian_timeline::track::Track,
-    index: usize,
-    edge: TrimEdge,
-    target_frame: i64,
-    time_base: Rational,
-) -> mondrian_core::Result<bool> {
-    let Some(original) = track.clips.get(index).cloned() else {
-        return Ok(false);
-    };
-    let Some(updated) = prepare_trimmed_clip(&original, edge, target_frame, time_base)? else {
-        return Ok(false);
-    };
-    track.clips[index] = updated;
-    track.clips.sort_by_key(|clip| clip.position);
-    Ok(true)
-}
-
-fn prepare_trimmed_clip(
+pub(super) fn prepare_trimmed_clip(
     original: &Clip,
     edge: TrimEdge,
     target_frame: i64,
@@ -660,13 +610,12 @@ pub(super) fn ensure_audio_track_index(seq: &mut Sequence, index: usize) {
     }
 }
 
-pub(super) fn move_existing_clip_to_track_index(
+pub(super) fn move_existing_clip_to_track_index_at_time(
     seq: &mut Sequence,
     is_video_track: bool,
     clip_id: ClipId,
     target_track_index: usize,
-    new_start: i64,
-    time_base: Rational,
+    target_position: TimelineTime,
 ) -> bool {
     if is_video_track {
         if target_track_index >= seq.video_tracks.len() {
@@ -681,10 +630,7 @@ pub(super) fn move_existing_clip_to_track_index(
             if let Some(clip) =
                 seq.video_tracks[source_track_index].clips.iter_mut().find(|c| c.id == clip_id)
             {
-                let Ok(position) = author_time_from_frame(new_start, time_base) else {
-                    return false;
-                };
-                clip.position = position;
+                clip.position = target_position;
                 return true;
             }
             return false;
@@ -697,10 +643,7 @@ pub(super) fn move_existing_clip_to_track_index(
         };
 
         let mut clip = seq.video_tracks[source_track_index].clips.remove(clip_index);
-        let Ok(position) = author_time_from_frame(new_start, time_base) else {
-            return false;
-        };
-        clip.position = position;
+        clip.position = target_position;
         seq.video_tracks[target_track_index].clips.push(clip);
         true
     } else {
@@ -716,10 +659,7 @@ pub(super) fn move_existing_clip_to_track_index(
             if let Some(clip) =
                 seq.audio_tracks[source_track_index].clips.iter_mut().find(|c| c.id == clip_id)
             {
-                let Ok(position) = author_time_from_frame(new_start, time_base) else {
-                    return false;
-                };
-                clip.position = position;
+                clip.position = target_position;
                 return true;
             }
             return false;
@@ -732,10 +672,7 @@ pub(super) fn move_existing_clip_to_track_index(
         };
 
         let mut clip = seq.audio_tracks[source_track_index].clips.remove(clip_index);
-        let Ok(position) = author_time_from_frame(new_start, time_base) else {
-            return false;
-        };
-        clip.position = position;
+        clip.position = target_position;
         seq.audio_tracks[target_track_index].clips.push(clip);
         true
     }

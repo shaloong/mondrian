@@ -8,8 +8,8 @@ use mondrian_core::types::{
     AssetId, AudioComponentEditId, AudioSourceComponentId, ClipId, JobId, ProgramOutputId,
 };
 use mondrian_core::{
-    ColorEngine, ColorSpace, DisplayToneMapPolicy, Rational, Resolution, TimelineDisplayFormat,
-    WorkingColorSpace,
+    ColorEngine, ColorSpace, DisplayToneMapPolicy, FramePosition, Rational, Resolution,
+    TimelineDisplayFormat, WorkingColorSpace,
 };
 use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
@@ -696,14 +696,17 @@ pub fn timeline_set_selected_clips_enabled_action(enabled: bool) -> Action {
 }
 
 /// Build an action that seeks the active timeline.
-pub fn timeline_seek_action(frame: i64) -> Action {
-    timeline_seek_with_source_action(frame, TimelineSeekSource::Settled)
+pub fn timeline_seek_action(position: FramePosition) -> Action {
+    timeline_seek_with_source_action(position, TimelineSeekSource::Settled)
 }
 
 /// Build an action that seeks the active timeline with explicit interaction source.
-pub fn timeline_seek_with_source_action(frame: i64, source: TimelineSeekSource) -> Action {
+pub fn timeline_seek_with_source_action(
+    position: FramePosition,
+    source: TimelineSeekSource,
+) -> Action {
     ProductAction::Timeline(TimelineProductAction::Seek(TimelineSeekPayload {
-        frame,
+        position,
         source,
     }))
     .into_external_action()

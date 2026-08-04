@@ -12,10 +12,9 @@ use crate::app::product_action::{
     ClipCurveEditPayload, ClipProductAction, ExportDraftEdit, ExportProductAction, ProductAction,
     ProjectCreateWithSettingsPayload, ProjectProductAction, ProjectRecoverFromAutosavePayload,
     SequenceProductAction, SequenceUpdateSettingsPayload, TimelineClipSelectionModePayload,
-    TimelineProductAction, TimelineTrimPayloadEdge, TrackAddKind, TrackAuthorControl,
-    TrackEditPolicyControl, TrackProductAction, VideoTransitionProductAction,
-    VideoTransitionTargetPayload, ViewerProductAction, VisualEffectProductAction,
-    VisualEffectSetParameterValuePayload,
+    TimelineProductAction, TrackAddKind, TrackAuthorControl, TrackEditPolicyControl,
+    TrackProductAction, VideoTransitionProductAction, VideoTransitionTargetPayload,
+    ViewerProductAction, VisualEffectProductAction, VisualEffectSetParameterValuePayload,
 };
 #[cfg(test)]
 use crate::app::product_action::{
@@ -25,9 +24,8 @@ use crate::app::proxy_generation::{
     resolve_app_state_proxy_color_contract, ProxyGenerationOrigin, ProxyGenerationRequestOutcome,
 };
 use crate::app::selection::resolve_track_selection;
-use crate::app::timeline_editing::{
-    clip_link_group_member_ids, find_clip, find_clip_mut, find_clip_track_lock,
-};
+use crate::app::timeline_editing::{find_clip, find_clip_mut, find_clip_track_lock};
+use crate::app::timeline_position::lower_nearest_sequence_frame;
 use crate::app::ui_actions::{
     InspectorAudioComponentSourcePayload, InspectorSetAudioComponentSourcePayload,
     INSPECTOR_NAMESPACE, INSPECTOR_SET_AUDIO_COMPONENT_SOURCE,
@@ -876,12 +874,13 @@ impl AppState {
         if delta_frames == 0 {
             return Err(action_not_executed("nudge_clip", "移动帧数不能为零"));
         }
-        let (track_id, is_video_track, frame) = self.clip_action_location("nudge_clip", clip_id)?;
-        self.move_clip_with_snapshot(
+        let (track_id, _is_video_track, frame) =
+            self.clip_action_location("nudge_clip", clip_id)?;
+        self.move_clip_to_track_with_mode(
             track_id,
-            is_video_track,
             clip_id,
             frame.saturating_add(delta_frames).max(0),
+            ClipOverlapMode::Overwrite,
         )
     }
 
@@ -891,9 +890,12 @@ impl AppState {
         target_track_id: mondrian_core::types::TrackId,
         frame: i64,
     ) -> Result<()> {
-        let (_track_id, is_video_track, _frame) =
-            self.clip_action_location("move_clip_to_track", clip_id)?;
-        self.move_clip_with_snapshot(target_track_id, is_video_track, clip_id, frame.max(0))
+        self.move_clip_to_track_with_mode(
+            target_track_id,
+            clip_id,
+            frame.max(0),
+            ClipOverlapMode::Overwrite,
+        )
     }
 
     /// Lower one exact Action position onto the active Sequence evaluation
@@ -905,17 +907,8 @@ impl AppState {
         step_id: &'static str,
         position: FramePosition,
     ) -> Result<i64> {
-        let time = TimelineTime::from_frame_position(position)?;
-        if time.is_negative() {
-            return Err(MondrianError::WorkflowStepFailed {
-                step_id: step_id.to_owned(),
-                reason: "Sequence position must be nonnegative".to_owned(),
-            });
-        }
         let sequence = self.active_sequence().ok_or_else(|| missing_sequence_error(step_id))?;
-        Ok(time
-            .to_frame_position(sequence.settings.frame_rate, FrameRounding::Nearest)?
-            .frame)
+        lower_nearest_sequence_frame(sequence, position, step_id)
     }
 
     fn trim_clip_source_from_action(
@@ -953,40 +946,6 @@ impl AppState {
             .to_frame_position(seq.settings.frame_rate, FrameRounding::Nearest)?
             .frame;
         Ok((track_id, is_video_track, frame))
-    }
-
-    fn move_clip_with_snapshot(
-        &mut self,
-        target_track_id: mondrian_core::types::TrackId,
-        is_video_track: bool,
-        clip_id: ClipId,
-        frame: i64,
-    ) -> Result<()> {
-        let Some(seq) = self.active_sequence() else {
-            return Err(missing_sequence_error("move_clip"));
-        };
-        let (current_track_id, current_is_video_track, current_frame) =
-            self.clip_action_location("move_clip", clip_id)?;
-        if current_is_video_track != is_video_track {
-            return Err(clip_media_type_mismatch_error("move_clip", clip_id));
-        }
-        if current_track_id == target_track_id
-            && current_is_video_track == is_video_track
-            && current_frame == frame
-        {
-            return Ok(());
-        }
-
-        let linked_clip_ids = clip_link_group_member_ids(seq, clip_id);
-        self.move_clip_to_track_with_mode(
-            target_track_id,
-            is_video_track,
-            clip_id,
-            frame,
-            ClipOverlapMode::Overwrite,
-        )?;
-        self.refresh_selected_clip_locations(&linked_clip_ids);
-        Ok(())
     }
 
     fn select_from_action(
@@ -1238,23 +1197,11 @@ impl AppState {
                     .map(|_| ())
                     .ok_or_else(|| missing_clip_error("timeline_select_clip", payload.clip_id))
             }
-            TimelineProductAction::MoveClip(payload) => self.move_clip_with_snapshot(
-                payload.target_track_id,
-                payload.is_video_track,
-                payload.clip_id,
-                payload.frame,
-            ),
+            TimelineProductAction::MoveClip(payload) => self.move_clip_from_product_action(payload),
             TimelineProductAction::TrimClips(payload) => {
-                let edge = match payload.edge {
-                    TimelineTrimPayloadEdge::In => TrimEdge::In,
-                    TimelineTrimPayloadEdge::Out => TrimEdge::Out,
-                };
-                self.trim_clips_bulk_to_frame(&payload.clip_ids, edge, payload.frame)
-                    .map(|_| ())
+                self.trim_clips_from_product_action(payload).map(|_| ())
             }
-            TimelineProductAction::Seek(payload) => {
-                self.seek_with_source(payload.frame, payload.source)
-            }
+            TimelineProductAction::Seek(payload) => self.seek_from_product_action(payload),
             TimelineProductAction::SetInOutPoint(payload) => {
                 self.set_timeline_in_out_point(payload)
             }
@@ -2121,13 +2068,6 @@ fn missing_audio_component_edit_error(
     }
 }
 
-fn clip_media_type_mismatch_error(step_id: &'static str, clip_id: ClipId) -> MondrianError {
-    MondrianError::WorkflowStepFailed {
-        step_id: step_id.to_string(),
-        reason: format!("片段媒体类型与目标轨道类型不匹配: {clip_id}"),
-    }
-}
-
 fn missing_effect_error(
     step_id: &'static str,
     clip_id: ClipId,
@@ -2839,10 +2779,11 @@ mod tests {
     #[test]
     fn dispatch_timeline_ui_seek_updates_playback_frame() {
         let (mut state, _, _) = state_with_two_video_tracks();
+        let time_base = state.active_sequence().expect("sequence").time_base();
 
         state
             .dispatch_action(timeline_seek_with_source_action(
-                33,
+                FramePosition::new(33, time_base),
                 TimelineSeekSource::PointerDrag,
             ))
             .expect("dispatch seek");
@@ -2853,7 +2794,9 @@ mod tests {
             TimelineSeekSource::PointerDrag
         );
 
-        state.dispatch_action(timeline_seek_action(44)).expect("dispatch seek");
+        state
+            .dispatch_action(timeline_seek_action(FramePosition::new(44, time_base)))
+            .expect("dispatch seek");
 
         assert_eq!(state.current_frame(), 44);
         assert_eq!(state.last_timeline_seek_source, TimelineSeekSource::Settled);
@@ -2862,12 +2805,13 @@ mod tests {
     #[test]
     fn rejected_timeline_product_seek_does_not_change_transport() {
         let (mut state, _, _) = state_with_two_video_tracks();
+        let time_base = state.active_sequence().expect("sequence").time_base();
         state.seek(12).expect("initial seek");
         let before = state.playback_engine.snapshot();
         let source_before = state.last_timeline_seek_source;
 
         state
-            .dispatch_action(timeline_seek_action(-1))
+            .dispatch_action(timeline_seek_action(FramePosition::new(-1, time_base)))
             .expect_err("negative product seek must fail closed");
 
         assert_eq!(state.playback_engine.snapshot(), before);
@@ -3599,6 +3543,7 @@ mod tests {
     #[test]
     fn dispatch_timeline_ui_moves_clip_to_target_track() {
         let (mut state, source_track_id, clip_id) = state_with_two_video_tracks();
+        let time_base = state.active_sequence().expect("sequence").time_base();
         let target_track_id = state.active_sequence().unwrap().video_tracks[1].id;
         state.selection.selected_clips = vec![SelectedClipRef {
             track_id: source_track_id,
@@ -3609,9 +3554,8 @@ mod tests {
         state
             .dispatch_action(timeline_move_clip_action(TimelineMoveClipPayload {
                 target_track_id,
-                is_video_track: true,
                 clip_id,
-                frame: 42,
+                position: FramePosition::new(42, time_base),
             }))
             .expect("dispatch move");
 
@@ -3668,6 +3612,48 @@ mod tests {
     }
 
     #[test]
+    fn product_timeline_gestures_lower_their_explicit_input_grid_once() {
+        let input_grid = Rational::new(1, 24);
+
+        let (mut move_state, _, move_clip_id) =
+            state_with_two_video_tracks_at_rate(Rational::FPS_2997);
+        let target_track = move_state.active_sequence().expect("sequence").video_tracks[1].id;
+        move_state
+            .dispatch_action(timeline_move_clip_action(TimelineMoveClipPayload {
+                target_track_id: target_track,
+                clip_id: move_clip_id,
+                position: FramePosition::new(24, input_grid),
+            }))
+            .expect("move exact one second onto Sequence grid");
+        let move_time_base = move_state.active_sequence().expect("sequence").time_base();
+        assert_eq!(
+            move_state.active_sequence().expect("sequence").video_tracks[1].clips[0].position,
+            tt(30, move_time_base)
+        );
+
+        let (mut trim_state, _, trim_clip_id) =
+            state_with_two_video_tracks_at_rate(Rational::FPS_2997);
+        trim_state
+            .dispatch_action(timeline_trim_clips_action(TimelineTrimClipsPayload {
+                clip_ids: vec![trim_clip_id],
+                edge: TimelineTrimPayloadEdge::In,
+                position: FramePosition::new(16, input_grid),
+            }))
+            .expect("trim two-thirds of one second onto Sequence grid");
+        let trim_time_base = trim_state.active_sequence().expect("sequence").time_base();
+        assert_eq!(
+            trim_state.active_sequence().expect("sequence").video_tracks[0].clips[0].position,
+            tt(20, trim_time_base)
+        );
+
+        let (mut seek_state, _, _) = state_with_two_video_tracks_at_rate(Rational::FPS_2997);
+        seek_state
+            .dispatch_action(timeline_seek_action(FramePosition::new(24, input_grid)))
+            .expect("seek exact one second onto Sequence grid");
+        assert_eq!(seek_state.current_frame(), 30);
+    }
+
+    #[test]
     fn semantic_sequence_positions_fail_closed_for_invalid_time_bases() {
         let (mut state, source_track, clip_id) =
             state_with_two_video_tracks_at_rate(Rational::FPS_2997);
@@ -3702,6 +3688,7 @@ mod tests {
     #[test]
     fn dispatch_timeline_ui_rejects_cross_media_clip_move() {
         let (mut state, source_track_id, clip_id) = state_with_two_video_tracks();
+        let time_base = state.active_sequence().expect("sequence").time_base();
         let target_track_id = state.active_sequence().unwrap().audio_tracks[0].id;
         state.selection.selected_clips = vec![SelectedClipRef {
             track_id: source_track_id,
@@ -3712,9 +3699,8 @@ mod tests {
         let err = state
             .dispatch_action(timeline_move_clip_action(TimelineMoveClipPayload {
                 target_track_id,
-                is_video_track: false,
                 clip_id,
-                frame: 42,
+                position: FramePosition::new(42, time_base),
             }))
             .expect_err("cross-media move should fail");
 
@@ -3741,12 +3727,13 @@ mod tests {
     #[test]
     fn dispatch_timeline_ui_trims_clip_edge() {
         let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let time_base = state.active_sequence().expect("sequence").time_base();
 
         state
             .dispatch_action(timeline_trim_clips_action(TimelineTrimClipsPayload {
                 clip_ids: vec![clip_id],
                 edge: TimelineTrimPayloadEdge::In,
-                frame: 16,
+                position: FramePosition::new(16, time_base),
             }))
             .expect("dispatch trim");
 
@@ -3771,7 +3758,7 @@ mod tests {
             .dispatch_action(timeline_trim_clips_action(TimelineTrimClipsPayload {
                 clip_ids: vec![first_clip_id, second_clip_id],
                 edge: TimelineTrimPayloadEdge::In,
-                frame: 16,
+                position: FramePosition::new(16, tb),
             }))
             .expect("dispatch batch trim");
 

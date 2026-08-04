@@ -1,3 +1,5 @@
+use super::product_action::TimelineSeekPayload;
+use super::timeline_position::lower_nearest_sequence_frame;
 use super::*;
 
 const MAX_PLAYBACK_WAKE_DELAY: Duration = Duration::from_millis(100);
@@ -393,6 +395,28 @@ impl AppState {
 
     pub fn seek(&mut self, frame: i64) -> mondrian_core::Result<()> {
         self.seek_with_source(frame, TimelineSeekSource::Settled)
+    }
+
+    /// Whether one typed Timeline seek has a valid active Sequence coordinate.
+    pub fn can_seek_from_product_action(&self, payload: TimelineSeekPayload) -> bool {
+        self.active_sequence().is_some_and(|sequence| {
+            lower_nearest_sequence_frame(sequence, payload.position, "timeline_seek").is_ok()
+        })
+    }
+
+    /// Lower one externally gridded Timeline seek exactly once, then enter the
+    /// Playback-owned transport Interface.
+    pub fn seek_from_product_action(
+        &mut self,
+        payload: TimelineSeekPayload,
+    ) -> mondrian_core::Result<()> {
+        let frame = {
+            let sequence = self
+                .active_sequence()
+                .ok_or_else(|| transport_action_error("seek", "there is no active Sequence"))?;
+            lower_nearest_sequence_frame(sequence, payload.position, "timeline_seek")?
+        };
+        self.seek_with_source(frame, payload.source)
     }
 
     pub(crate) fn settle_preview_access_source(&mut self) {

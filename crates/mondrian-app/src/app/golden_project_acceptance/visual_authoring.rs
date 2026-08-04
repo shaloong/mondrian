@@ -827,7 +827,7 @@ pub(super) fn execute_visual_stage(
         timeline_trim_clips_action(TimelineTrimClipsPayload {
             clip_ids: vec![left_clip_id],
             edge: TimelineTrimPayloadEdge::Out,
-            frame: edit_frame,
+            position: FramePosition::new(edit_frame, time_base),
         }),
     )?;
 
@@ -852,7 +852,7 @@ pub(super) fn execute_visual_stage(
         timeline_trim_clips_action(TimelineTrimClipsPayload {
             clip_ids: vec![right_clip_id],
             edge: TimelineTrimPayloadEdge::Out,
-            frame: window.end_frame_exclusive,
+            position: FramePosition::new(window.end_frame_exclusive, time_base),
         }),
     )?;
 
@@ -1015,7 +1015,10 @@ pub(super) fn execute_visual_stage(
         end_frame_exclusive: transition_end,
     };
 
-    state.dispatch_action(timeline_seek_action(window.start_frame))?;
+    state.dispatch_action(timeline_seek_action(FramePosition::new(
+        window.start_frame,
+        state.active_sequence().context("active Sequence is absent")?.time_base(),
+    )))?;
     let title_create_step = dispatch_author_transition(
         state,
         "create-basic-title",

@@ -420,13 +420,14 @@ that author state changed. The Window Adapter consults action availability and
 does not dispatch disabled Undo/Redo gestures; direct, Headless, scripting, and
 automation callers retain the fail-closed product contract.
 
-The `Action::Seek` and `Action::MoveClipToTrack` variants retain the complete
-input `FramePosition`. The App-owned Action Adapter checked-converts its time
+Move, edge Trim, and Seek retain the complete input `FramePosition`. The
+App-owned Timeline Position Module checked-converts its time
 base to exact Sequence-local time and performs one documented nearest-frame
 lowering on the active Sequence evaluation grid. It never reads only `frame`,
 and malformed or negative positions cannot reach Playback or an author
-transaction. Source trim uses the Clip's exact source-to-Sequence mapping before
-that same lowering Seam; it cannot reinterpret a source-grid frame number as a
+transaction. Direct Timeline edge Trim is Sequence-position intent; source-local
+timing edits use the Clip's exact source-to-Sequence mapping before their own
+lowering Seam. Neither may reinterpret a source-grid frame number as a
 Sequence-grid frame.
 
 The serializable `Action` algebra contains only real semantic intents. A
@@ -445,11 +446,14 @@ model. The current Timeline slice covers Clip selection, Clip movement, bulk
 trim, seek, exact In/Out mutation, atomic Lift/Extract intent, the complete
 current-selection edit algebra, Basic Title creation, direct Asset placement,
 exact-time Insert, and Precompose. Track operations use the closed Interface
-above. The sole `ui.timeline` codec rejects legacy bare-frame creation payloads,
+above. The sole `ui.timeline` codec rejects legacy bare-frame Move/Trim/Seek and
+creation payloads,
 unknown variants, and unknown fields; dispatch and availability consume the
-decoded algebra rather than repeating namespace/name interpretation. Direct
-placement carries `AssetId + TrackId + FramePosition`; the App derives Track
-kind instead of trusting a copied media boolean. Insert carries canonical
+decoded algebra rather than repeating namespace/name interpretation. Move
+carries `ClipId + target TrackId + FramePosition`, Trim carries stable Clip
+identities plus edge and `FramePosition`, and direct placement carries
+`AssetId + TrackId + FramePosition`; the App derives Track kind instead of
+trusting a copied media boolean. Insert carries canonical
 `TimelineTime` values. The old Timeline string dispatcher and replaced
 per-command action names do not coexist with this Interface. Opening a nested
 Sequence is navigation, so it belongs to `SequenceProductAction`; dispatch

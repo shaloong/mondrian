@@ -5,9 +5,10 @@
 //! prepares the current Asset binding, and owns status plus execution routing.
 
 use super::product_action::{AssetTargetPayload, TimelineDropAssetPayload};
+use super::timeline_position::lower_exact_sequence_frame;
 use super::AppState;
 use mondrian_assets::{AssetKind, AssetRecord};
-use mondrian_core::{FrameRounding, MondrianError, TimelineTime};
+use mondrian_core::MondrianError;
 use mondrian_timeline::TrackType;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,19 +92,7 @@ fn resolve_placement_target(
     sequence: &mondrian_timeline::Sequence,
     payload: TimelineDropAssetPayload,
 ) -> mondrian_core::Result<(i64, PlacementTrackKind)> {
-    let time = TimelineTime::from_frame_position(payload.position)?;
-    if time.is_negative() {
-        return Err(placement_error(
-            "Timeline placement time must be non-negative",
-        ));
-    }
-    let resolved = time.to_frame_position(sequence.settings.frame_rate, FrameRounding::Nearest)?;
-    let resolved_time = TimelineTime::from_frame_position(resolved)?;
-    if resolved_time != time {
-        return Err(placement_error(
-            "Timeline placement time is not aligned to the active Sequence frame grid",
-        ));
-    }
+    let frame = lower_exact_sequence_frame(sequence, payload.position, "timeline_place_asset")?;
 
     let track = sequence
         .video_tracks
@@ -125,7 +114,7 @@ fn resolve_placement_target(
             });
         }
     };
-    Ok((resolved.frame, kind))
+    Ok((frame, kind))
 }
 
 fn validate_placement_asset(

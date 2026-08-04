@@ -599,10 +599,14 @@ pub(super) fn execute_proxy_relink_stage(
     })?;
     let clip_id = find_new_video_clip(state, video_track_id, &clips_before)?;
     let (_, trim_to_window) = author_transition(state, "trim-proxy-relink-window", |state| {
+        let time_base = state
+            .active_sequence()
+            .context("proxy/relink Sequence is absent before trim")?
+            .time_base();
         state.dispatch_action(timeline_trim_clips_action(TimelineTrimClipsPayload {
             clip_ids: vec![clip_id],
             edge: TimelineTrimPayloadEdge::Out,
-            frame: window.end_frame_exclusive,
+            position: FramePosition::new(window.end_frame_exclusive, time_base),
         }))?;
         Ok(())
     })?;

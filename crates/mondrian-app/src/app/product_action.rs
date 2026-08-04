@@ -899,29 +899,17 @@ impl ProductAction {
             Self::Timeline(TimelineProductAction::MoveClip(payload)) => (
                 TIMELINE_NAMESPACE,
                 TIMELINE_MOVE_CLIP,
-                serde_json::json!({
-                    "target_track_id": payload.target_track_id,
-                    "is_video_track": payload.is_video_track,
-                    "clip_id": payload.clip_id,
-                    "frame": payload.frame,
-                }),
+                serde_json::json!(payload),
             ),
             Self::Timeline(TimelineProductAction::TrimClips(payload)) => (
                 TIMELINE_NAMESPACE,
                 TIMELINE_TRIM_CLIPS,
-                serde_json::json!({
-                    "clip_ids": payload.clip_ids,
-                    "edge": payload.edge,
-                    "frame": payload.frame,
-                }),
+                serde_json::json!(payload),
             ),
             Self::Timeline(TimelineProductAction::Seek(payload)) => (
                 TIMELINE_NAMESPACE,
                 TIMELINE_SEEK,
-                serde_json::json!({
-                    "frame": payload.frame,
-                    "source": payload.source,
-                }),
+                serde_json::json!(payload),
             ),
             Self::Timeline(TimelineProductAction::SetInOutPoint(payload)) => (
                 TIMELINE_NAMESPACE,
@@ -1347,17 +1335,16 @@ pub struct TimelineSelectClipPayload {
     pub mode: TimelineClipSelectionModePayload,
 }
 
-/// Move one Clip to a target Track and frame in the active Sequence.
+/// Move one Clip to a target Track and explicitly gridded position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TimelineMoveClipPayload {
     /// Track that should own the Clip after the move.
     pub target_track_id: TrackId,
-    /// Whether `target_track_id` is a video Track rather than an audio Track.
-    pub is_video_track: bool,
     /// Clip being moved.
     pub clip_id: ClipId,
-    /// Target Sequence evaluation frame for the Clip start.
-    pub frame: i64,
+    /// Target coordinate and the evaluation grid that produced it.
+    pub position: FramePosition,
 }
 
 /// Clip edge addressed by a Timeline trim interaction.
@@ -1369,15 +1356,16 @@ pub enum TimelineTrimPayloadEdge {
     Out,
 }
 
-/// Trim one or more Clip edges to one Sequence frame.
+/// Trim one or more Clip edges to one explicitly gridded position.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TimelineTrimClipsPayload {
     /// Clips being trimmed in one author transaction.
     pub clip_ids: Vec<ClipId>,
     /// Edge that should be trimmed.
     pub edge: TimelineTrimPayloadEdge,
-    /// Target Sequence evaluation frame for every selected edge.
-    pub frame: i64,
+    /// Target coordinate and the evaluation grid that produced it.
+    pub position: FramePosition,
 }
 
 /// User interaction source for a Timeline seek.
@@ -1389,11 +1377,12 @@ pub enum TimelineSeekSource {
     Settled,
 }
 
-/// Seek the active Timeline to one Sequence frame.
+/// Seek the active Timeline to one explicitly gridded position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TimelineSeekPayload {
-    /// Target Sequence evaluation frame.
-    pub frame: i64,
+    /// Target coordinate and the evaluation grid that produced it.
+    pub position: FramePosition,
     /// User interaction source for this seek.
     pub source: TimelineSeekSource,
 }
@@ -1892,14 +1881,6 @@ pub struct ProductActionAvailability<'a> {
     state: &'a AppState,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ClipAdmissionFacts {
-    source_track_unlocked: bool,
-    is_video_track: bool,
-    position: TimelineTime,
-    end: Option<TimelineTime>,
-}
-
 impl<'a> ProductActionAvailability<'a> {
     fn new(state: &'a AppState) -> Self {
         Self { state }
@@ -1992,15 +1973,17 @@ impl<'a> ProductActionAvailability<'a> {
         };
         match action {
             TimelineProductAction::SelectClip(payload) => {
-                clip_admission_facts(sequence, payload.clip_id).is_some()
+                visual_effect_clip(sequence, payload.clip_id).is_some()
             }
             TimelineProductAction::MoveClip(payload) => {
-                clip_admission_facts(sequence, payload.clip_id).is_some_and(|clip| {
-                    clip.source_track_unlocked && clip.is_video_track == payload.is_video_track
-                }) && track_is_unlocked(sequence, payload.target_track_id, payload.is_video_track)
+                self.state.can_move_clip_from_product_action(*payload)
             }
-            TimelineProductAction::TrimClips(payload) => allows_trim(sequence, payload),
-            TimelineProductAction::Seek(payload) => payload.frame >= 0,
+            TimelineProductAction::TrimClips(payload) => {
+                self.state.can_trim_clips_from_product_action(payload)
+            }
+            TimelineProductAction::Seek(payload) => {
+                self.state.can_seek_from_product_action(*payload)
+            }
             TimelineProductAction::SetInOutPoint(payload) => {
                 self.state.can_set_timeline_in_out_point(*payload)
             }
@@ -2343,55 +2326,6 @@ fn visual_effect_author_time(
     clip.timeline_to_clip_time(sequence_time.clamp(clip.position, end)).ok()
 }
 
-fn clip_admission_facts(sequence: &Sequence, clip_id: ClipId) -> Option<ClipAdmissionFacts> {
-    sequence
-        .video_tracks
-        .iter()
-        .map(|track| (track, true))
-        .chain(sequence.audio_tracks.iter().map(|track| (track, false)))
-        .find_map(|(track, is_video_track)| {
-            track
-                .clips
-                .iter()
-                .find(|clip| clip.id == clip_id)
-                .map(|clip| ClipAdmissionFacts {
-                    source_track_unlocked: !track.is_locked,
-                    is_video_track,
-                    position: clip.position,
-                    end: clip.end_position().ok(),
-                })
-        })
-}
-
-fn track_is_unlocked(sequence: &Sequence, track_id: TrackId, is_video_track: bool) -> bool {
-    let tracks = if is_video_track {
-        &sequence.video_tracks
-    } else {
-        &sequence.audio_tracks
-    };
-    tracks
-        .iter()
-        .find(|track| track.id == track_id)
-        .is_some_and(|track| !track.is_locked)
-}
-
-fn allows_trim(sequence: &Sequence, payload: &TimelineTrimClipsPayload) -> bool {
-    if payload.clip_ids.is_empty() {
-        return false;
-    }
-    let Ok(target) =
-        TimelineTime::from_frame_position(FramePosition::new(payload.frame, sequence.time_base()))
-    else {
-        return false;
-    };
-    payload.clip_ids.iter().all(|clip_id| {
-        clip_admission_facts(sequence, *clip_id).is_some_and(|clip| {
-            clip.source_track_unlocked
-                && clip.end.is_some_and(|end| target > clip.position && target < end)
-        })
-    })
-}
-
 fn recovery_candidate_is_addressable(candidate: &CrashRecoveryCandidate) -> bool {
     !candidate.runtime_root.as_os_str().is_empty()
         && !candidate.project_file.as_os_str().is_empty()
@@ -2440,17 +2374,16 @@ mod tests {
             )),
             ProductAction::Timeline(TimelineProductAction::MoveClip(TimelineMoveClipPayload {
                 target_track_id: track_id,
-                is_video_track: true,
                 clip_id,
-                frame: 17,
+                position: FramePosition::new(17, Rational::new(1, 24)),
             })),
             ProductAction::Timeline(TimelineProductAction::TrimClips(TimelineTrimClipsPayload {
                 clip_ids: vec![clip_id],
                 edge: TimelineTrimPayloadEdge::Out,
-                frame: 29,
+                position: FramePosition::new(29, Rational::new(1, 24)),
             })),
             ProductAction::Timeline(TimelineProductAction::Seek(TimelineSeekPayload {
-                frame: 21,
+                position: FramePosition::new(21, Rational::new(1, 24)),
                 source: TimelineSeekSource::PointerDrag,
             })),
             ProductAction::Timeline(TimelineProductAction::SetInOutPoint(
@@ -2567,6 +2500,59 @@ mod tests {
             error.dispatch_step_id(),
             "timeline_ui_action.edit_selection"
         );
+    }
+
+    #[test]
+    fn external_timeline_gesture_codec_requires_explicit_grids_and_authoritative_tracks() {
+        let clip_id = ClipId::new();
+        let track_id = TrackId::new();
+        for (name, payload) in [
+            (
+                TIMELINE_MOVE_CLIP,
+                serde_json::json!({
+                    "target_track_id": track_id,
+                    "clip_id": clip_id,
+                    "frame": 12,
+                    "is_video_track": true,
+                }),
+            ),
+            (
+                TIMELINE_TRIM_CLIPS,
+                serde_json::json!({
+                    "clip_ids": [clip_id],
+                    "edge": "out",
+                    "frame": 20,
+                }),
+            ),
+            (
+                TIMELINE_SEEK,
+                serde_json::json!({
+                    "frame": 8,
+                    "source": "settled",
+                }),
+            ),
+        ] {
+            let action = Action::Custom {
+                namespace: TIMELINE_NAMESPACE.to_owned(),
+                name: name.to_owned(),
+                payload,
+            };
+            ProductAction::decode_external(&action)
+                .expect_err("bare gesture frame or copied Track kind must fail closed");
+        }
+
+        let copied_track_kind = Action::Custom {
+            namespace: TIMELINE_NAMESPACE.to_owned(),
+            name: TIMELINE_MOVE_CLIP.to_owned(),
+            payload: serde_json::json!({
+                "target_track_id": track_id,
+                "clip_id": clip_id,
+                "position": FramePosition::new(12, Rational::new(1, 25)),
+                "is_video_track": true,
+            }),
+        };
+        ProductAction::decode_external(&copied_track_kind)
+            .expect_err("Move must derive Track media kind from stable Track identity");
     }
 
     #[test]
@@ -3313,9 +3299,8 @@ mod tests {
             projection.allows(&ProductAction::Timeline(TimelineProductAction::MoveClip(
                 TimelineMoveClipPayload {
                     target_track_id: track_id,
-                    is_video_track: true,
                     clip_id,
-                    frame: 12,
+                    position: FramePosition::new(12, time_base),
                 }
             )))
         );
@@ -3323,9 +3308,8 @@ mod tests {
             !projection.allows(&ProductAction::Timeline(TimelineProductAction::MoveClip(
                 TimelineMoveClipPayload {
                     target_track_id: audio_track_id,
-                    is_video_track: false,
                     clip_id,
-                    frame: 12,
+                    position: FramePosition::new(12, time_base),
                 }
             )))
         );
@@ -3334,7 +3318,7 @@ mod tests {
                 TimelineTrimClipsPayload {
                     clip_ids: vec![clip_id],
                     edge: TimelineTrimPayloadEdge::In,
-                    frame: 15,
+                    position: FramePosition::new(15, time_base),
                 },
             )))
         );
@@ -3343,7 +3327,7 @@ mod tests {
                 TimelineTrimClipsPayload {
                     clip_ids: vec![clip_id],
                     edge: TimelineTrimPayloadEdge::In,
-                    frame: 10,
+                    position: FramePosition::new(10, time_base),
                 },
             )))
         );
@@ -3383,9 +3367,8 @@ mod tests {
             !locked.allows(&ProductAction::Timeline(TimelineProductAction::MoveClip(
                 TimelineMoveClipPayload {
                     target_track_id: track_id,
-                    is_video_track: true,
                     clip_id,
-                    frame: 12,
+                    position: FramePosition::new(12, time_base),
                 }
             )))
         );
@@ -3394,7 +3377,7 @@ mod tests {
                 TimelineTrimClipsPayload {
                     clip_ids: vec![clip_id],
                     edge: TimelineTrimPayloadEdge::Out,
-                    frame: 20,
+                    position: FramePosition::new(20, time_base),
                 },
             )))
         );
@@ -3409,12 +3392,18 @@ mod tests {
         )));
         assert!(
             locked.allows(&ProductAction::Timeline(TimelineProductAction::Seek(
-                TimelineSeekPayload { frame: 0, source: TimelineSeekSource::Settled }
+                TimelineSeekPayload {
+                    position: FramePosition::new(0, time_base),
+                    source: TimelineSeekSource::Settled,
+                }
             )))
         );
         assert!(
             !locked.allows(&ProductAction::Timeline(TimelineProductAction::Seek(
-                TimelineSeekPayload { frame: -1, source: TimelineSeekSource::Settled }
+                TimelineSeekPayload {
+                    position: FramePosition::new(-1, time_base),
+                    source: TimelineSeekSource::Settled,
+                }
             )))
         );
 
@@ -3422,7 +3411,7 @@ mod tests {
         assert!(
             !empty.product_action_availability().allows(&ProductAction::Timeline(
                 TimelineProductAction::Seek(TimelineSeekPayload {
-                    frame: 0,
+                    position: FramePosition::new(0, time_base),
                     source: TimelineSeekSource::Settled
                 })
             ))

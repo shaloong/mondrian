@@ -646,7 +646,7 @@ pub(super) fn execute_recovery_nesting_stage(
         timeline_trim_clips_action(TimelineTrimClipsPayload {
             clip_ids: vec![source_clip_id],
             edge: TimelineTrimPayloadEdge::Out,
-            frame: window.end_frame_exclusive,
+            position: FramePosition::new(window.end_frame_exclusive, time_base),
         }),
     )?;
     let source_clip = state

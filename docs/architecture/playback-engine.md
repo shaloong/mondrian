@@ -175,6 +175,12 @@ untimed demand for the authoritative pause position, so a delayed still-frame
 presentation cannot be misclassified against the obsolete realtime deadline.
 Binding and position time bases must match or the complete transition fails
 without partial mutation.
+The external Timeline Seek Product payload retains its complete
+`FramePosition`; `app::playback` owns the sole Product-to-Playback Adapter. It
+converts the input grid to exact nonnegative `TimelineTime`, lowers once onto
+the bound Sequence grid, and only then calls the atomic timeline seek Interface.
+UI, panels, scripting, and Headless callers do not pre-discard the input time
+base or compose reset and seek transitions themselves.
 Every public transport operation returns a typed result; dispatch through the
 ordinary `Action` envelope and the closed `TimelineProductAction` algebra
 preserves that result. Before publishing a new Engine snapshot, the App Adapter

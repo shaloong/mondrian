@@ -420,7 +420,7 @@ pub(super) fn setup_stage(
         timeline_trim_clips_action(TimelineTrimClipsPayload {
             clip_ids: vec![hlg_clip_id, alpha_clip_id],
             edge: TimelineTrimPayloadEdge::Out,
-            frame: end_frame_exclusive,
+            position: FramePosition::new(end_frame_exclusive, time_base),
         }),
     )?;
     let sequence = state.active_sequence().context("color-media Sequence is absent")?;

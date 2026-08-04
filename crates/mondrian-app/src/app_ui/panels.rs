@@ -1492,9 +1492,14 @@ impl TimelinePanelModel {
         }
         Some(TimelineMoveClipPayload {
             target_track_id: target.track_id,
-            is_video_track: target.is_video_track,
             clip_id,
-            frame: movement.new_start_frame.max(0),
+            position: FramePosition::new(
+                movement.new_start_frame.max(0),
+                Rational::new(
+                    self.timeline_display.frame_rate().den,
+                    self.timeline_display.frame_rate().num,
+                ),
+            ),
         })
     }
 
@@ -1506,9 +1511,19 @@ impl TimelinePanelModel {
         };
         let frame = match trim.edge {
             TimelineTrimEdge::In => trim.new_start_frame,
-            TimelineTrimEdge::Out => trim.new_start_frame + trim.new_duration_frames,
+            TimelineTrimEdge::Out => trim.new_start_frame.checked_add(trim.new_duration_frames)?,
         };
-        Some(TimelineTrimClipsPayload { clip_ids: vec![clip_id], edge, frame: frame.max(0) })
+        Some(TimelineTrimClipsPayload {
+            clip_ids: vec![clip_id],
+            edge,
+            position: FramePosition::new(
+                frame.max(0),
+                Rational::new(
+                    self.timeline_display.frame_rate().den,
+                    self.timeline_display.frame_rate().num,
+                ),
+            ),
+        })
     }
 }
 
@@ -1582,6 +1597,8 @@ pub struct InspectorPanelModel {
     pub out_frame: f32,
     /// Maximum timeline frame used by timing sliders.
     pub max_frame: f32,
+    /// Explicit Sequence evaluation time base for timing gestures.
+    pub timeline_time_base: Rational,
     /// Canonical source-time state for file-backed or nested content.
     pub source_timing: Option<InspectorSourceTimingModel>,
     /// Preferred color-picker area style for this inspector instance.
@@ -1811,6 +1828,7 @@ impl InspectorPanelModel {
                 })
                 .map(|position| position.frame.max(1) as f32)
                 .unwrap_or(1.0),
+            timeline_time_base: sequence.time_base(),
             source_timing: inspector_source_timing_model(
                 state,
                 sequence,
@@ -1861,6 +1879,7 @@ impl InspectorPanelModel {
             in_frame: 0.0,
             out_frame: 1.0,
             max_frame: 1.0,
+            timeline_time_base: Rational::new(1, 25),
             source_timing: None,
             tint_area_mode: ColorPickerAreaMode::Wheel,
             opacity_curve: None,
@@ -1891,6 +1910,7 @@ impl InspectorPanelModel {
             in_frame: 0.0,
             out_frame: 96.0,
             max_frame: 240.0,
+            timeline_time_base: Rational::new(1, 25),
             source_timing: None,
             tint_area_mode: ColorPickerAreaMode::Wheel,
             opacity_curve: None,
@@ -4084,7 +4104,7 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
                 position: FramePosition::new(frame.max(0), in_out_time_base),
             })
         })
-        .on_seek(timeline_seek_action_from_widget)
+        .on_seek(move |seek| timeline_seek_action_from_widget(seek, in_out_time_base))
         .with_waveform_display(model.waveform_display);
     let timeline = if let Some(source) = model.waveform_source.clone() {
         timeline.with_waveform_lookup(
@@ -4103,8 +4123,11 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
     with_timeline_toolbar_icons(timeline)
 }
 
-fn timeline_seek_action_from_widget(seek: TimelineSeek) -> Action {
-    timeline_seek_with_source_action(seek.frame, timeline_seek_source_from_widget(seek.source))
+fn timeline_seek_action_from_widget(seek: TimelineSeek, time_base: Rational) -> Action {
+    timeline_seek_with_source_action(
+        FramePosition::new(seek.frame, time_base),
+        timeline_seek_source_from_widget(seek.source),
+    )
 }
 
 fn timeline_seek_source_from_widget(source: WidgetTimelineSeekSource) -> AppTimelineSeekSource {
@@ -5999,6 +6022,7 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
             )),
     );
 
+    let timeline_time_base = model.timeline_time_base;
     let mut timing_section = PropertySection::new("时间")
         .with_row(PropertyRow::new(
             "In",
@@ -6010,7 +6034,12 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                 0,
                 can_edit,
                 move |value| {
-                    inspector_timing_action(selected_clip, TimelineTrimPayloadEdge::In, value)
+                    inspector_timing_action(
+                        selected_clip,
+                        TimelineTrimPayloadEdge::In,
+                        value,
+                        timeline_time_base,
+                    )
                 },
             ),
         ))
@@ -6024,7 +6053,12 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                 0,
                 can_edit,
                 move |value| {
-                    inspector_timing_action(selected_clip, TimelineTrimPayloadEdge::Out, value)
+                    inspector_timing_action(
+                        selected_clip,
+                        TimelineTrimPayloadEdge::Out,
+                        value,
+                        timeline_time_base,
+                    )
                 },
             ),
         ));
@@ -6588,6 +6622,7 @@ fn inspector_timing_action(
     selection: Option<SelectedClipRef>,
     edge: TimelineTrimPayloadEdge,
     frame: f32,
+    time_base: Rational,
 ) -> Option<Action> {
     let frame = if frame.is_finite() {
         frame.round() as i64
@@ -6598,7 +6633,7 @@ fn inspector_timing_action(
         return Some(timeline_trim_clips_action(TimelineTrimClipsPayload {
             clip_ids: vec![selection.clip_id],
             edge,
-            frame: frame.max(0),
+            position: FramePosition::new(frame.max(0), time_base),
         }));
     }
     None
@@ -9230,7 +9265,12 @@ mod tests {
 
         assert_eq!(identity.mode, TimelineClipSelectionModePayload::Replace);
         assert_eq!(movement.clip_id, identity.clip_id);
-        assert_eq!(movement.frame, 120);
+        assert_eq!(movement.position.frame, 120);
+        let frame_rate = model.timeline_display.frame_rate();
+        assert_eq!(
+            movement.position.time_base,
+            Rational::new(frame_rate.den, frame_rate.num)
+        );
         assert_eq!(movement.target_track_id, model.track_refs[2].track_id);
     }
 
@@ -12574,7 +12614,12 @@ mod tests {
             None
         );
         assert_eq!(
-            inspector_timing_action(None, TimelineTrimPayloadEdge::In, 10.0),
+            inspector_timing_action(
+                None,
+                TimelineTrimPayloadEdge::In,
+                10.0,
+                Rational::new(1, 25),
+            ),
             None
         );
         assert_eq!(
@@ -12645,6 +12690,7 @@ mod tests {
             in_frame: 0.0,
             out_frame: 30.0,
             max_frame: 60.0,
+            timeline_time_base: Rational::new(1, 25),
             source_timing: None,
             tint_area_mode: ColorPickerAreaMode::Wheel,
             opacity_curve: None,
@@ -12719,6 +12765,7 @@ mod tests {
             in_frame: 0.0,
             out_frame: 30.0,
             max_frame: 60.0,
+            timeline_time_base: Rational::new(1, 25),
             source_timing: None,
             tint_area_mode: ColorPickerAreaMode::Wheel,
             opacity_curve: None,

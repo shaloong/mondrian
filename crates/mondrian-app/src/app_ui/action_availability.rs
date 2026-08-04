@@ -458,14 +458,13 @@ mod tests {
             }),
             timeline_move_clip_action(TimelineMoveClipPayload {
                 target_track_id: track_id,
-                is_video_track: true,
                 clip_id,
-                frame: 12,
+                position: FramePosition::new(12, time_base),
             }),
             timeline_trim_clips_action(TimelineTrimClipsPayload {
                 clip_ids: vec![clip_id],
                 edge: TimelineTrimPayloadEdge::In,
-                frame: 15,
+                position: FramePosition::new(15, time_base),
             }),
             timeline_trim_selected_clips_to_playhead_action(TimelineTrimPayloadEdge::In),
             timeline_set_in_out_point_action(TimelineSetInOutPointPayload {
@@ -473,7 +472,7 @@ mod tests {
                 position: FramePosition::new(15, time_base),
             }),
             timeline_set_selected_clips_enabled_action(false),
-            timeline_seek_action(42),
+            timeline_seek_action(FramePosition::new(42, time_base)),
             track_set_author_control_action(TrackSetAuthorControlPayload {
                 track_id,
                 control: TrackAuthorControl::Lock,
@@ -500,6 +499,7 @@ mod tests {
         state.seek(15).expect("seek");
         let stale_clip = ClipId::new();
         let stale_track = TrackId::new();
+        let time_base = state.active_sequence().expect("sequence").time_base();
 
         for action in [
             timeline_select_clip_action(TimelineSelectClipPayload {
@@ -508,14 +508,13 @@ mod tests {
             }),
             timeline_move_clip_action(TimelineMoveClipPayload {
                 target_track_id: stale_track,
-                is_video_track: true,
                 clip_id: stale_clip,
-                frame: 12,
+                position: FramePosition::new(12, time_base),
             }),
             timeline_trim_clips_action(TimelineTrimClipsPayload {
                 clip_ids: vec![stale_clip],
                 edge: TimelineTrimPayloadEdge::In,
-                frame: 15,
+                position: FramePosition::new(15, time_base),
             }),
             track_set_author_control_action(TrackSetAuthorControlPayload {
                 track_id: stale_track,
@@ -709,19 +708,19 @@ mod tests {
         let mut state = state_with_selected_clip();
         state.seek(15).expect("seek");
         let selection = state.selection.selected_clips[0];
+        let time_base = state.active_sequence().expect("sequence").time_base();
         state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked = true;
 
         for action in [
             timeline_move_clip_action(TimelineMoveClipPayload {
                 target_track_id: selection.track_id,
-                is_video_track: true,
                 clip_id: selection.clip_id,
-                frame: 12,
+                position: FramePosition::new(12, time_base),
             }),
             timeline_trim_clips_action(TimelineTrimClipsPayload {
                 clip_ids: vec![selection.clip_id],
                 edge: TimelineTrimPayloadEdge::In,
-                frame: 15,
+                position: FramePosition::new(15, time_base),
             }),
             timeline_trim_selected_clips_to_playhead_action(TimelineTrimPayloadEdge::In),
             timeline_set_selected_clips_enabled_action(false),

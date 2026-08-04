@@ -18,8 +18,8 @@ video evaluation/snap grid and display-timecode input, not the universal storage
 time base; audio edits may therefore retain sample-accurate boundaries without
 creating a second Timeline model.
 
-The `Action::MoveClipToTrack` and `Action::Seek` semantic inputs may receive a
-`FramePosition` from an input Adapter, but its `time_base` is never discarded.
+The semantic Move/Trim/Seek inputs receive a complete `FramePosition` from an
+input Adapter, and its `time_base` is never discarded.
 The App Action Adapter first converts the complete value to exact
 Sequence-local `TimelineTime`, then lowers it exactly once onto the active
 Sequence video evaluation grid with
@@ -877,6 +877,41 @@ the coordinate and requires an exact round trip on the active Sequence grid,
 then re-resolves Track kind/lock and Asset compatibility from current state.
 There is no caller-supplied video/audio flag and drag/drop does not own a second
 authoring implementation.
+
+### Direct Clip Gestures
+
+Direct Move and edge Trim enter the App through the closed
+`TimelineProductAction` Interface. Move carries only `ClipId`, target `TrackId`,
+and `FramePosition`; Trim carries a non-empty Clip identity set, edge, and
+`FramePosition`. The external codec denies unknown fields and no payload may
+copy video/audio kind beside a stable Track identity. The
+`timeline_clip_gesture` Module is the sole Adapter from those product values to
+the internal frame-grid edit Implementation. The sibling `timeline_position`
+Module owns the shared nonnegative exact-time conversion and distinguishes
+semantic nearest-grid lowering from exact-grid admission; Playback, semantic
+Actions, and direct Asset placement reuse that policy without depending on the
+Clip gesture Implementation.
+
+The Module converts input-grid position to exact `TimelineTime`, rejects
+negative or invalid time, and lowers once with nearest rounding on the current
+Sequence grid. It then re-resolves current Clip placement, Track kind and every
+source/destination lock. Move expands the complete Link Group, applies one exact
+`TimelineTime` delta so sample-accurate member offsets survive, preserves the
+same-kind Track-index delta, uses checked arithmetic,
+and rejects the whole request when any linked destination is absent or outside
+its Track set. It never clamps one member onto a different Track. Conflict
+resolution runs on the transaction candidate with the complete moved focus set
+before author validation and publication.
+
+Bulk Trim rejects every stale requested identity before expanding complete Link
+Groups. Offset Link Group edges are currently rejected until the gesture carries
+an explicit J/L trim policy; the Implementation never silently aligns them.
+Co-timed edges prepare all changed Clip values without mutating live author state;
+one locked member or invalid boundary rejects the complete gesture. Product
+no-ops return `ActionNotExecuted`, so Author Generation, Sequence Revision and
+History advance exactly once only for a real accepted gesture. Internal callers
+that already own a Sequence-grid frame reuse the same preparation and commit
+Implementation rather than reconstructing the edit in UI or command routing.
 
 ### Lift and Extract Range Edit
 

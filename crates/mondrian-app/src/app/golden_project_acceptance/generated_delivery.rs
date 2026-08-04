@@ -1293,7 +1293,7 @@ pub(super) fn execute_delivery_stage(
         timeline_trim_clips_action(TimelineTrimClipsPayload {
             clip_ids: vec![solid_clip_id],
             edge: TimelineTrimPayloadEdge::Out,
-            frame: window.end_frame_exclusive,
+            position: FramePosition::new(window.end_frame_exclusive, time_base),
         }),
     )?;
     let sequence = state.active_sequence().context("active Sequence is absent")?;

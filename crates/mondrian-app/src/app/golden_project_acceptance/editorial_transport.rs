@@ -513,13 +513,14 @@ fn trim_audio_out(
     end_frame_exclusive: i64,
     intent: &'static str,
 ) -> anyhow::Result<AuthorTransitionEvidence> {
+    let time_base = state.active_sequence().context("active Sequence is absent")?.time_base();
     dispatch_author_transition(
         state,
         intent,
         timeline_trim_clips_action(TimelineTrimClipsPayload {
             clip_ids: vec![clip_id],
             edge: TimelineTrimPayloadEdge::Out,
-            frame: end_frame_exclusive,
+            position: FramePosition::new(end_frame_exclusive, time_base),
         }),
     )
 }
@@ -895,12 +896,13 @@ pub(super) fn execute_editorial_stage(
     };
 
     let mut viewer = GoldenHeadlessPreview::new()?;
+    let time_base = state.active_sequence().context("active Sequence is absent")?.time_base();
     let scrub_before = state.playback_evidence_report();
     let target_frames = vec![5, 15, 30];
     let mut scrub_presentations = Vec::with_capacity(target_frames.len());
     for frame in &target_frames {
         state.dispatch_action(timeline_seek_with_source_action(
-            *frame,
+            FramePosition::new(*frame, time_base),
             TimelineSeekSource::PointerDrag,
         ))?;
         scrub_presentations.push(viewer.present_current(state, VIEWER_PRESENTATION_TIMEOUT)?);
@@ -933,7 +935,7 @@ pub(super) fn execute_editorial_stage(
     let accurate_target = 40;
     let accurate_before = state.playback_evidence_report();
     state.dispatch_action(timeline_seek_with_source_action(
-        accurate_target,
+        FramePosition::new(accurate_target, time_base),
         TimelineSeekSource::Settled,
     ))?;
     let accurate_presentation = viewer.present_current(state, VIEWER_PRESENTATION_TIMEOUT)?;

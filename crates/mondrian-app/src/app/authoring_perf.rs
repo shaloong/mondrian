@@ -1350,9 +1350,8 @@ fn run_authoring_scale(
         "sequence.move_clip",
         AuthoringOperationClass::Interactive,
         |state| {
-            state.move_clip_in_track_with_mode(
+            state.move_clip_to_track_with_mode(
                 handles.first_track_id,
-                true,
                 handles.first_clip_id,
                 handles.first_clip_position_frame + 1,
                 ClipOverlapMode::Overwrite,

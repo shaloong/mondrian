@@ -4342,14 +4342,14 @@ mod tests {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let mut host = AppUiHost::new(workspace_app_state());
         let could_undo_before = host.app_state().can_undo_action();
+        let time_base = host.app_state().active_sequence().expect("sequence").time_base();
         let pending = PendingUiActions::default();
 
         pending.push(crate::app::ui_actions::timeline_move_clip_action(
             crate::app::ui_actions::TimelineMoveClipPayload {
                 target_track_id: TrackId::new(),
-                is_video_track: true,
                 clip_id: ClipId::new(),
-                frame: 12,
+                position: FramePosition::new(12, time_base),
             },
         ));
         let commands = host.drain_pending_actions(
