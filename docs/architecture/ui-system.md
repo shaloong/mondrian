@@ -135,18 +135,21 @@ Target/Sync-Lock state into the complete `RangeEditRequest` at dispatch. This
 avoids both bare-frame ambiguity and stale duplicated range/Track snapshots.
 
 Inspector audio source controls project existing author state rather than own
-it. Each command carries only canonical `ClipId` plus one stable
-`AudioComponentEditId`; current Track placement and media kind are never copied
-into the payload. Media choices carry
-only Asset `AudioSourceComponentId` values and nested choices carry only child
-`ProgramOutputId` values. The application validates source domain, Asset/child
-membership, track lock, and the complete audio author aggregate before it
-records one undoable Sequence snapshot. A neighboring Asset stream-mapping row
-is intentionally a different command family: refresh acquires current probe
-evidence without retargeting, and rebind atomically changes one Asset catalog
-binding while preserving its logical ID. UI labels may describe physical stream
-indices, language, title, and layout, but those indices never enter Timeline
-authoring payloads.
+it. Each command emits the same complete `AudioComponentEditRequest` used by
+all Component fields, with the canonical stable
+`(TrackId, ClipId, AudioComponentEditId)` address and an
+`AudioComponentSource` value. Media choices carry only Asset
+`AudioSourceComponentId` values and nested choices carry only child
+`ProgramOutputId` values. Timeline re-resolves exact ownership, lock and source
+kind, while the App audio-authoring Adapter proves current Asset/child
+membership before it records one undoable Sequence snapshot. A stale Track
+address therefore fails instead of silently retargeting a moved Clip. The old
+`ui.inspector` source payload and dispatcher are deleted. A neighboring Asset
+stream-mapping row is intentionally a different command family: refresh
+acquires current probe evidence without retargeting, and rebind atomically
+changes one Asset catalog binding while preserving its logical ID. UI labels
+may describe physical stream indices, language, title, and layout, but those
+indices never enter Timeline authoring payloads.
 
 The same Component section projects enabled state, static dB volume,
 normalized pan/balance, and independent exact edge fades. Every interaction
@@ -488,6 +491,11 @@ canonical versioned instance at dispatch and then enters the same Rack
 transaction. This menu catalog is only a presentation catalog; persistent
 built-in, VST3, and CLAP identity remains the definition reference plus captured
 schema.
+Logical Component source selection is a `SetSource` mutation on the same
+stable-address Component request; it has no Inspector-only model or alternate
+dispatcher. The App Module proves the requested recoverable dependency before
+the Timeline transaction, while Timeline remains authoritative for source kind,
+duplicate selection and aggregate validity.
 The same closed algebra carries `SetTrackSolo`, but dispatch routes that intent
 to the App's open-Session monitoring Module rather than an author transaction.
 It never advances author generation, dirty state, or Undo/Redo. Runtime

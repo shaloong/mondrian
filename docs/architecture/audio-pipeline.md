@@ -99,22 +99,30 @@ streams but cannot repair or remove an existing binding. Rebind changes only the
 chosen binding. This keeps automatic evidence acquisition separate from user
 authoring intent.
 
-The Inspector selects the logical source of each `AudioComponentEdit` by its
-stable edit ID. Media Clips offer Asset Component IDs; nested Clips offer only
-the child Sequence's stable public outputs. Independent typed field actions
-address enabled state, static volume, static pan/balance, fade-in, fade-out, or
-the complete channel-mapping policy. They never round-trip or replace the
+The Inspector projects the canonical logical source of each
+`AudioComponentEdit`. Media Clips offer Asset Component IDs; nested Clips offer
+only the child Sequence's stable public outputs. Source selection and field
+edits both enter one complete `AudioComponentEditRequest`, addressed by
+`(TrackId, ClipId, AudioComponentEditId)`. Its closed mutation algebra covers
+source, enabled state, static volume, static pan/balance, fade-in, fade-out, and
+the complete channel-mapping policy. It never round-trips or replaces the
 complete edit, so an interaction cannot overwrite unrelated automation, Role,
-or processing state. `AudioComponentEditRequest` is the sole stable-address
-Timeline Interface for these mutations: it resolves Track/Clip/Edit ownership,
-admits the Track lock, rejects static volume or pan while its curve is signal
-authority, validates the complete Audio Program candidate, and replaces the
-Sequence only after success. Matrix replacement is atomic; a partially edited
-or non-canonical matrix never enters an immutable snapshot. A rejected or no-op
-action does not advance revision/history. Successful source or field changes
-are undoable and invalidate the prepared Runtime at the current transport anchor;
-running playback re-prepares, while paused/stopped playback releases the stale
-source.
+or processing state.
+
+The Timeline Interface resolves the exact Track/Clip/Edit ownership, admits
+the Track lock, validates media-versus-nested source kind and duplicate source
+selection, rejects static volume or pan while its curve is signal authority,
+and validates the complete Audio Program candidate before replacement. The App
+audio-authoring Adapter adds only recoverable dependency proof: the current
+Asset catalog must expose a requested media Component, or the Project-contained
+child Sequence must expose a requested public Output. Neither UI nor the media
+Adapter mutates Timeline storage. Matrix replacement is atomic; a partially
+edited or non-canonical matrix never enters an immutable snapshot. Rejected and
+no-op actions advance neither revision nor history. Successful source or field
+changes are one undoable transaction and invalidate the prepared Runtime at the
+current transport anchor; running playback re-prepares, while paused/stopped
+playback releases the stale source. The former Inspector-specific source
+payload and dispatcher do not coexist with this Interface.
 
 Physical stream refresh/rebind remains an Asset-library action and is never put
 into Timeline JSON or Timeline Undo. It is deliberately separate from

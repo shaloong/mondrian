@@ -3081,31 +3081,76 @@ mod tests {
 
     #[test]
     fn external_codec_round_trips_audio_component_edits() {
-        let expected = ProductAction::Audio(AudioProductAction::EditComponent(
-            AudioComponentEditRequest {
-                address: mondrian_timeline::AudioComponentAddress {
-                    track_id: TrackId::new(),
-                    clip_id: ClipId::new(),
-                    edit_id: mondrian_core::AudioComponentEditId::new(),
+        let address = mondrian_timeline::AudioComponentAddress {
+            track_id: TrackId::new(),
+            clip_id: ClipId::new(),
+            edit_id: mondrian_core::AudioComponentEditId::new(),
+        };
+        let actions = [
+            ProductAction::Audio(AudioProductAction::EditComponent(
+                AudioComponentEditRequest {
+                    address,
+                    mutation: mondrian_timeline::AudioComponentMutation::SetSource {
+                        value: mondrian_timeline::audio::AudioComponentSource::Media {
+                            component_id: AudioSourceComponentId::new(),
+                        },
+                    },
                 },
-                mutation: mondrian_timeline::AudioComponentMutation::SetChannelMapping {
-                    value: mondrian_timeline::audio::AudioComponentChannelMapping::Explicit(
-                        mondrian_core::AudioChannelMixMatrix::standard(
-                            mondrian_core::AudioChannelLayout::Mono,
-                            mondrian_core::AudioChannelLayout::Stereo,
-                        )
-                        .expect("standard matrix"),
-                    ),
+            )),
+            ProductAction::Audio(AudioProductAction::EditComponent(
+                AudioComponentEditRequest {
+                    address: mondrian_timeline::AudioComponentAddress {
+                        track_id: TrackId::new(),
+                        clip_id: ClipId::new(),
+                        edit_id: mondrian_core::AudioComponentEditId::new(),
+                    },
+                    mutation: mondrian_timeline::AudioComponentMutation::SetChannelMapping {
+                        value: mondrian_timeline::audio::AudioComponentChannelMapping::Explicit(
+                            mondrian_core::AudioChannelMixMatrix::standard(
+                                mondrian_core::AudioChannelLayout::Mono,
+                                mondrian_core::AudioChannelLayout::Stereo,
+                            )
+                            .expect("standard matrix"),
+                        ),
+                    },
                 },
-            },
-        ));
+            )),
+        ];
 
-        let external = expected.clone().into_external_action();
-        let decoded = ProductAction::decode_external(&external)
-            .expect("valid external payload")
-            .expect("recognized product action");
+        for expected in actions {
+            let external = expected.clone().into_external_action();
+            let decoded = ProductAction::decode_external(&external)
+                .expect("valid external payload")
+                .expect("recognized product action");
 
-        assert_eq!(decoded, expected);
+            assert_eq!(decoded, expected);
+        }
+    }
+
+    #[test]
+    fn external_audio_component_codec_rejects_unknown_mutation_fields() {
+        let action = Action::Custom {
+            namespace: AUDIO_NAMESPACE.to_owned(),
+            name: AUDIO_EDIT_COMPONENT.to_owned(),
+            payload: serde_json::json!({
+                "address": {
+                    "track_id": TrackId::new(),
+                    "clip_id": ClipId::new(),
+                    "edit_id": mondrian_core::AudioComponentEditId::new(),
+                },
+                "mutation": {
+                    "operation": "set_source",
+                    "value": {
+                        "Media": { "component_id": AudioSourceComponentId::new() },
+                    },
+                    "legacy_clip_id": ClipId::new(),
+                },
+            }),
+        };
+
+        let error = ProductAction::decode_external(&action)
+            .expect_err("recognized Component mutation must reject unknown fields");
+        assert_eq!(error.dispatch_step_id(), "audio_action.edit_component");
     }
 
     #[test]

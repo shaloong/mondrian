@@ -5,12 +5,14 @@
 
 use mondrian_core::{MondrianError, Result};
 use mondrian_timeline::audio::{
-    AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID, BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID,
+    AudioComponentSource, AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID,
+    BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID,
 };
 use mondrian_timeline::{
     apply_audio_automation_edit, apply_audio_channel_strip_edit, apply_audio_component_edit,
-    apply_audio_processor_rack_edit, apply_audio_routing_edit, AudioAutomationEditRequest,
-    AudioChannelStripEditRequest, AudioComponentEditRequest, AudioProcessorRackEdit,
+    apply_audio_processor_rack_edit, apply_audio_routing_edit, inspect_audio_component,
+    AudioAutomationEditRequest, AudioChannelStripEditRequest, AudioComponentEditBlocker,
+    AudioComponentEditRequest, AudioComponentMutation, AudioProcessorRackEdit,
     AudioProcessorRackEditRequest, AudioRoutingEditRequest,
 };
 
@@ -71,6 +73,7 @@ impl AppState {
     }
 
     fn edit_audio_component(&mut self, request: AudioComponentEditRequest) -> Result<()> {
+        self.validate_audio_component_source_dependency(&request)?;
         let sequence_id =
             self.active_sequence_id().ok_or_else(|| MondrianError::WorkflowStepFailed {
                 step_id: "audio_edit_component".to_owned(),
@@ -85,8 +88,100 @@ impl AppState {
                     }
                 })
             })?;
-        if outcome.changed {
-            self.reconcile_audio_after_committed_authoring_change("audio_edit_component");
+        if !outcome.changed {
+            return Err(MondrianError::ActionNotExecuted {
+                action: "audio_edit_component".to_owned(),
+                reason: "Audio Component already has the requested value".to_owned(),
+            });
+        }
+        self.reconcile_audio_after_committed_authoring_change("audio_edit_component");
+        Ok(())
+    }
+
+    fn validate_audio_component_source_dependency(
+        &self,
+        request: &AudioComponentEditRequest,
+    ) -> Result<()> {
+        const STEP_ID: &str = "audio_edit_component";
+        let AudioComponentMutation::SetSource { value } = &request.mutation else {
+            return Ok(());
+        };
+        let sequence = self.active_sequence().ok_or_else(|| MondrianError::WorkflowStepFailed {
+            step_id: STEP_ID.to_owned(),
+            reason: "当前没有活动序列".to_owned(),
+        })?;
+        let inspection = inspect_audio_component(sequence, request.address).map_err(|error| {
+            MondrianError::WorkflowStepFailed {
+                step_id: STEP_ID.to_owned(),
+                reason: error.to_string(),
+            }
+        })?;
+        if let Some(AudioComponentEditBlocker::LockedTrack(track_id)) = inspection.edit_blocker() {
+            return Err(MondrianError::TrackLocked { track_id: track_id.to_string() });
+        }
+        if &inspection.component().source == value {
+            return Ok(());
+        }
+
+        let clip = inspection.owning_clip();
+        match value {
+            AudioComponentSource::Media { component_id } => {
+                let asset_id =
+                    clip.media_asset_id().ok_or_else(|| MondrianError::WorkflowStepFailed {
+                        step_id: STEP_ID.to_owned(),
+                        reason: "only a media Clip can select an Asset audio Component".to_owned(),
+                    })?;
+                let library =
+                    self.asset_library().ok_or_else(|| MondrianError::WorkflowStepFailed {
+                        step_id: STEP_ID.to_owned(),
+                        reason: "asset library is unavailable".to_owned(),
+                    })?;
+                let asset = library.get_asset(asset_id)?.ok_or_else(|| {
+                    MondrianError::AssetNotFound { asset_id: asset_id.to_string() }
+                })?;
+                asset.audio_components.validate().map_err(|error| {
+                    MondrianError::WorkflowStepFailed {
+                        step_id: STEP_ID.to_owned(),
+                        reason: format!("invalid Asset audio Component catalog: {error}"),
+                    }
+                })?;
+                if !asset
+                    .audio_components
+                    .components
+                    .iter()
+                    .any(|component| component.id == *component_id)
+                {
+                    return Err(MondrianError::WorkflowStepFailed {
+                        step_id: STEP_ID.to_owned(),
+                        reason: format!(
+                            "Asset {asset_id} does not expose audio Component {component_id}"
+                        ),
+                    });
+                }
+            }
+            AudioComponentSource::NestedOutput { output_id } => {
+                let child_id =
+                    clip.nested_sequence_id().ok_or_else(|| MondrianError::WorkflowStepFailed {
+                        step_id: STEP_ID.to_owned(),
+                        reason: "only a nested Sequence Clip can select a child Program Output"
+                            .to_owned(),
+                    })?;
+                let child =
+                    self.sequences().iter().find(|candidate| candidate.id == child_id).ok_or_else(
+                        || MondrianError::WorkflowStepFailed {
+                            step_id: STEP_ID.to_owned(),
+                            reason: format!("nested Sequence {child_id} is unavailable"),
+                        },
+                    )?;
+                if !child.audio_program.outputs.iter().any(|output| output.id == *output_id) {
+                    return Err(MondrianError::WorkflowStepFailed {
+                        step_id: STEP_ID.to_owned(),
+                        reason: format!(
+                            "nested Sequence {child_id} does not expose output {output_id}"
+                        ),
+                    });
+                }
+            }
         }
         Ok(())
     }

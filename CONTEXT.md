@@ -386,8 +386,8 @@ A presentation contract for formatting timeline positions with a start offset, n
 _Avoid_: Timeline storage coordinate, arithmetic duration, Clock Master
 
 **Audio Component Edit**:
-One persistent, placement-local selection and edit of a media audio component or nested Sequence Output, owned by exactly one Timeline Clip. It owns enable/Role, edit-local gain/pan/fades/automation, and a restricted binding into an Audio Processing Scope; Track and Sequence range are always derived from the owning Clip.
-_Avoid_: Duplicated Track/range placement, entire audiovisual Clip treated as one audio stream, routing Bus
+One persistent, placement-local selection and edit of a media audio component or nested Sequence Output, owned by exactly one Timeline Clip. Its stable author address is `(TrackId, ClipId, AudioComponentEditId)`; logical source selection and all field mutations use that same address and one atomic candidate-validation Interface. It owns enable/Role, edit-local gain/pan/fades/automation, and a restricted binding into an Audio Processing Scope; Track and Sequence range are always derived from the owning Clip. Timeline validates source kind and aggregate coherence, while an application Adapter separately proves recoverable Asset-catalog or child-Output membership before commit.
+_Avoid_: Inspector-specific source payload, duplicated Track/range placement, entire audiovisual Clip treated as one audio stream, routing Bus
 
 **Audio Processing Scope**:
 One Sequence-owned shareable audio processing definition containing input trim/automation and an ordered Processor Rack. Multiple Audio Component Edits may bind to it with only a Scope ID and exact `scope_in`; it never owns placement, speed, source selection, or output routing.

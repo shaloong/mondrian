@@ -98,19 +98,19 @@ use crate::app::ui_actions::{
     assets_rename_folder_action, assets_set_proxy_mode_action, clip_edit_numeric_curve_action,
     clip_set_enabled_action, clip_set_solid_color_action, clip_write_parameter_values_action,
     export_cancel_action, export_clear_terminal_history_action, export_edit_draft_action,
-    export_enqueue_action, inspector_set_audio_component_source_action,
-    timeline_clear_in_out_points_action, timeline_drop_asset_action, timeline_extract_range_action,
-    timeline_lift_range_action, timeline_link_selected_clips_action, timeline_move_clip_action,
-    timeline_open_nested_sequence_action, timeline_roll_selected_cut_to_playhead_action,
-    timeline_seek_with_source_action, timeline_select_clip_action,
-    timeline_set_in_out_point_action, timeline_set_selected_clips_enabled_action,
-    timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
-    timeline_unlink_selected_clips_action, track_add_action, track_move_action,
-    track_set_author_control_action, track_set_edit_policy_action,
-    video_transition_create_cross_dissolve_action, video_transition_select_action,
-    video_transition_set_range_action, viewer_set_preview_resolution_scale_action,
-    viewer_set_zoom_scale_action, visual_effect_add_to_clip_action, visual_effect_remove_action,
-    visual_effect_reorder_action, visual_effect_select_action, visual_effect_set_enabled_action,
+    export_enqueue_action, timeline_clear_in_out_points_action, timeline_drop_asset_action,
+    timeline_extract_range_action, timeline_lift_range_action, timeline_link_selected_clips_action,
+    timeline_move_clip_action, timeline_open_nested_sequence_action,
+    timeline_roll_selected_cut_to_playhead_action, timeline_seek_with_source_action,
+    timeline_select_clip_action, timeline_set_in_out_point_action,
+    timeline_set_selected_clips_enabled_action, timeline_trim_clips_action,
+    timeline_trim_selected_clips_to_playhead_action, timeline_unlink_selected_clips_action,
+    track_add_action, track_move_action, track_set_author_control_action,
+    track_set_edit_policy_action, video_transition_create_cross_dissolve_action,
+    video_transition_select_action, video_transition_set_range_action,
+    viewer_set_preview_resolution_scale_action, viewer_set_zoom_scale_action,
+    visual_effect_add_to_clip_action, visual_effect_remove_action, visual_effect_reorder_action,
+    visual_effect_select_action, visual_effect_set_enabled_action,
     visual_effect_set_parameter_value_action, AppShellInputColorPipelineDiagnostics,
     AppShellInterpretAssetDialogPayload, AppShellRelinkAssetDialogPayload,
     AppShellRelocatePanelPayload, AppShellRevealInFileManagerPayload,
@@ -123,8 +123,7 @@ use crate::app::ui_actions::{
     ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
     ClipParameterValueWrite, ClipSetEnabledPayload, ClipSetSolidColorPayload,
     ClipWriteParameterValuesPayload, DockDropAreaPayload, ExportDraftEdit,
-    ExportOutputDialogPayload, ImportMediaDialogPayload, InspectorAudioComponentSourcePayload,
-    InspectorSetAudioComponentSourcePayload, SequenceTargetPayload,
+    ExportOutputDialogPayload, ImportMediaDialogPayload, SequenceTargetPayload,
     TimelineClipSelectionModePayload, TimelineDropAssetPayload, TimelineExportRequest,
     TimelineInOutPointKind, TimelineMoveClipPayload, TimelineSeekSource as AppTimelineSeekSource,
     TimelineSelectClipPayload, TimelineSetInOutPointPayload, TimelineTrimClipsPayload,
@@ -1652,7 +1651,7 @@ pub struct InspectorAudioSourceOptionModel {
     /// Human-readable Component or public-output label.
     pub label: String,
     /// Typed target; physical media indices never enter Timeline authoring.
-    pub source: InspectorAudioComponentSourcePayload,
+    pub source: AudioComponentSource,
     /// Whether this option is the edit's current source.
     pub selected: bool,
     /// Whether selecting it preserves the Clip's author invariants.
@@ -3334,9 +3333,7 @@ fn inspector_audio_components(
                         });
                         InspectorAudioSourceOptionModel {
                             label: asset_audio_component_label(asset, component.id),
-                            source: InspectorAudioComponentSourcePayload::Media {
-                                component_id: component.id,
-                            },
+                            source: AudioComponentSource::Media { component_id: component.id },
                             selected,
                             selectable: selected || !used_by_sibling,
                         }
@@ -3395,9 +3392,7 @@ fn inspector_audio_components(
                             .iter()
                             .map(|output| InspectorAudioSourceOptionModel {
                                 label: format!("{} · {}", output.name, output.id),
-                                source: InspectorAudioComponentSourcePayload::NestedOutput {
-                                    output_id: output.id,
-                                },
+                                source: AudioComponentSource::NestedOutput { output_id: output.id },
                                 selected: output.id == output_id,
                                 selectable: true,
                             })
@@ -5810,7 +5805,11 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                 .map(|option| {
                     let mut item = MenuItem::new(
                         option.label.clone(),
-                        inspector_audio_source_action(selected_clip, edit_id, option.source),
+                        inspector_audio_source_action(
+                            selected_clip,
+                            edit_id,
+                            option.source.clone(),
+                        ),
                     )
                     .checked(option.selected);
                     if !option.selectable {
@@ -6506,15 +6505,13 @@ fn inspector_bool_action(selection: Option<SelectedClipRef>, value: bool) -> Opt
 fn inspector_audio_source_action(
     selection: Option<SelectedClipRef>,
     edit_id: AudioComponentEditId,
-    source: InspectorAudioComponentSourcePayload,
+    source: AudioComponentSource,
 ) -> Option<Action> {
-    selection.map(|selection| {
-        inspector_set_audio_component_source_action(InspectorSetAudioComponentSourcePayload {
-            clip_id: selection.clip_id,
-            edit_id,
-            source,
-        })
-    })
+    audio_component_mutation_action(
+        selection,
+        edit_id,
+        AudioComponentMutation::SetSource { value: source },
+    )
 }
 
 const INSPECTOR_AUDIO_FADE_TIMESCALE: u32 = 1_000;
@@ -7285,9 +7282,9 @@ mod tests {
         ASSET_IMPORT_FILES, ASSET_MOVE_ENTRIES, ASSET_NAMESPACE, ASSET_PREPARE_DRAG,
         ASSET_REBIND_AUDIO_COMPONENT, ASSET_REFRESH_AUDIO_COMPONENTS, ASSET_REMOVE_ENTRIES,
         ASSET_RENAME, ASSET_SET_PROXY_MODE, AUDIO_EDIT_COMPONENT, AUDIO_NAMESPACE,
-        CLIP_EDIT_NUMERIC_CURVE, CLIP_NAMESPACE, CLIP_WRITE_PARAMETER_VALUES, INSPECTOR_NAMESPACE,
-        INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_NAMESPACE,
-        TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT, TRACK_ADD, TRACK_MOVE, TRACK_NAMESPACE,
+        CLIP_EDIT_NUMERIC_CURVE, CLIP_NAMESPACE, CLIP_WRITE_PARAMETER_VALUES,
+        TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_NAMESPACE, TIMELINE_SELECT_CLIP,
+        TIMELINE_SET_IN_OUT_POINT, TRACK_ADD, TRACK_MOVE, TRACK_NAMESPACE,
         VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE, VIDEO_TRANSITION_NAMESPACE,
         VIDEO_TRANSITION_SELECT, VIDEO_TRANSITION_SET_RANGE, VISUAL_EFFECT_ADD_TO_CLIP,
         VISUAL_EFFECT_NAMESPACE, VISUAL_EFFECT_SELECT, VISUAL_EFFECT_SET_PARAMETER_VALUE,
@@ -12496,20 +12493,23 @@ mod tests {
         let source_action = inspector_audio_source_action(
             Some(selection),
             edit_id,
-            InspectorAudioComponentSourcePayload::Media { component_id },
+            AudioComponentSource::Media { component_id },
         );
         let Some(Action::Custom { namespace, name, payload }) = source_action else {
             panic!("expected typed Inspector audio source action");
         };
-        assert_eq!(namespace, INSPECTOR_NAMESPACE);
-        assert_eq!(name, INSPECTOR_SET_AUDIO_COMPONENT_SOURCE);
-        let payload: InspectorSetAudioComponentSourcePayload =
+        assert_eq!(namespace, AUDIO_NAMESPACE);
+        assert_eq!(name, AUDIO_EDIT_COMPONENT);
+        let payload: mondrian_timeline::AudioComponentEditRequest =
             serde_json::from_value(payload).expect("audio source payload");
-        assert_eq!(payload.clip_id, selection.clip_id);
-        assert_eq!(payload.edit_id, edit_id);
+        assert_eq!(payload.address.track_id, selection.track_id);
+        assert_eq!(payload.address.clip_id, selection.clip_id);
+        assert_eq!(payload.address.edit_id, edit_id);
         assert_eq!(
-            payload.source,
-            InspectorAudioComponentSourcePayload::Media { component_id }
+            payload.mutation,
+            AudioComponentMutation::SetSource {
+                value: AudioComponentSource::Media { component_id }
+            }
         );
 
         let field_action = audio_component_mutation_action(
@@ -12587,9 +12587,7 @@ mod tests {
             inspector_audio_source_action(
                 None,
                 AudioComponentEditId::new(),
-                InspectorAudioComponentSourcePayload::Media {
-                    component_id: AudioSourceComponentId::new(),
-                },
+                AudioComponentSource::Media { component_id: AudioSourceComponentId::new() },
             ),
             None
         );

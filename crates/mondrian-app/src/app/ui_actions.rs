@@ -4,9 +4,7 @@
 //! to `Action::Custom` payloads before actions reach the app state layer.
 
 use mondrian_core::timeline_data::AssetMediaInterpretation;
-use mondrian_core::types::{
-    AssetId, AudioComponentEditId, AudioSourceComponentId, ClipId, JobId, ProgramOutputId,
-};
+use mondrian_core::types::{AssetId, JobId};
 use mondrian_core::{
     ColorEngine, ColorSpace, DisplayToneMapPolicy, FramePosition, Rational, Resolution,
     TimelineDisplayFormat, WorkingColorSpace,
@@ -77,11 +75,6 @@ use super::product_action::{
     VideoTransitionProductAction, ViewerProductAction, VisualEffectProductAction,
 };
 
-/// Custom action namespace for inspector UI operations.
-pub const INSPECTOR_NAMESPACE: &str = "ui.inspector";
-
-/// Action name for selecting the logical source of one Clip audio Component Edit.
-pub const INSPECTOR_SET_AUDIO_COMPONENT_SOURCE: &str = "set_audio_component_source";
 /// Shell-local action name for cycling viewer canvas zoom.
 pub const VIEWER_CYCLE_ZOOM: &str = "cycle_zoom";
 /// Shell-local action name for setting viewer canvas zoom.
@@ -291,32 +284,6 @@ pub struct AppShellRelocatePanelPayload {
 pub struct ViewerSetZoomScalePayload {
     /// Fixed canvas scale. `None` means fit to available viewer space.
     pub scale: Option<f32>,
-}
-
-/// Logical source selected for one placement-local audio Component Edit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum InspectorAudioComponentSourcePayload {
-    /// Stable audio Component owned by the media Clip's Asset.
-    Media {
-        /// Asset-owned logical Component identity.
-        component_id: AudioSourceComponentId,
-    },
-    /// Stable public output owned by the nested Sequence.
-    NestedOutput {
-        /// Child Sequence output identity.
-        output_id: ProgramOutputId,
-    },
-}
-
-/// Change the logical source of one placement-local audio Component Edit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InspectorSetAudioComponentSourcePayload {
-    /// Canonical Clip identity; current Track placement is derived at dispatch.
-    pub clip_id: ClipId,
-    /// Stable edit being changed; source identity is not edit identity.
-    pub edit_id: AudioComponentEditId,
-    /// New logical source in the owning Clip's source domain.
-    pub source: InspectorAudioComponentSourcePayload,
 }
 
 /// Open one folder in the app UI asset browser, or the root view.
@@ -774,13 +741,6 @@ pub fn clip_write_parameter_values_action(payload: ClipWriteParameterValuesPaylo
 pub fn clip_edit_numeric_curve_action(payload: ClipEditNumericCurvePayload) -> Action {
     ProductAction::Clip(ClipProductAction::EditNumericCurve(Box::new(payload)))
         .into_external_action()
-}
-
-/// Build an action that changes one Clip audio Component Edit's logical source.
-pub fn inspector_set_audio_component_source_action(
-    payload: InspectorSetAudioComponentSourcePayload,
-) -> Action {
-    custom_inspector_action(INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, payload)
 }
 
 /// Build an action that inserts one registered visual Effect on a Clip.
@@ -1369,14 +1329,6 @@ pub fn app_shell_window_drag_action() -> Action {
 /// Build an app-shell request for relocating one dock panel tab.
 pub fn app_shell_relocate_panel_action(payload: AppShellRelocatePanelPayload) -> Action {
     custom_app_shell_action_with_payload(APP_SHELL_RELOCATE_PANEL, payload)
-}
-
-fn custom_inspector_action<T: Serialize>(name: &'static str, payload: T) -> Action {
-    Action::Custom {
-        namespace: INSPECTOR_NAMESPACE.into(),
-        name: name.into(),
-        payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
-    }
 }
 
 fn custom_viewer_action<T: Serialize>(name: &'static str, payload: T) -> Action {

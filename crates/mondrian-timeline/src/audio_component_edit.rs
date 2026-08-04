@@ -6,8 +6,10 @@
 //! storage directly.
 
 use crate::audio::{
-    AudioAuthoringError, AudioComponentChannelMapping, AudioComponentEdit, AudioFade,
+    AudioAuthoringError, AudioComponentChannelMapping, AudioComponentEdit, AudioComponentSource,
+    AudioFade,
 };
+use crate::clip::Clip;
 use crate::sequence::Sequence;
 use mondrian_core::{AudioComponentEditId, ClipId, TrackId};
 use serde::{Deserialize, Serialize};
@@ -28,6 +30,15 @@ pub struct AudioComponentAddress {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AudioComponentMutation {
+    /// Select one canonical media Component or nested public Output.
+    ///
+    /// The Timeline Module validates Clip/source-kind coherence and duplicate
+    /// media selections. The App Adapter must additionally prove the requested
+    /// recoverable media catalog or Project-contained nested Output exists.
+    SetSource {
+        /// Stable logical source identity in the owning Clip's source domain.
+        value: AudioComponentSource,
+    },
     /// Include or exclude this Component from the compiled Audio Program.
     SetEnabled {
         /// New contribution state.
@@ -153,12 +164,18 @@ pub enum AudioComponentEditError {
 /// Read-only projection of one resolved Component and edit admission.
 #[derive(Debug, Clone)]
 pub struct AudioComponentInspection<'a> {
+    owning_clip: &'a Clip,
     component: &'a AudioComponentEdit,
     destination_layout: mondrian_core::AudioChannelLayout,
     edit_blocker: Option<AudioComponentEditBlocker>,
 }
 
 impl<'a> AudioComponentInspection<'a> {
+    /// Canonical Clip placement that owns this Component Edit.
+    pub fn owning_clip(&self) -> &'a Clip {
+        self.owning_clip
+    }
+
     /// Resolved canonical placement-local Component Edit.
     pub fn component(&self) -> &'a AudioComponentEdit {
         self.component
@@ -204,6 +221,7 @@ pub fn inspect_audio_component(
             address.edit_id,
         ))?;
     Ok(AudioComponentInspection {
+        owning_clip: clip,
         component,
         destination_layout: sequence.settings.audio_channel_layout,
         edit_blocker: track.is_locked.then_some(AudioComponentEditBlocker::LockedTrack(track.id)),
@@ -269,6 +287,9 @@ fn apply_mutation(
     mutation: &AudioComponentMutation,
 ) -> Result<bool, AudioComponentEditError> {
     match mutation {
+        AudioComponentMutation::SetSource { value } => {
+            Ok(replace(&mut component.source, value.clone()))
+        }
         AudioComponentMutation::SetEnabled { value } => Ok(replace(&mut component.enabled, *value)),
         AudioComponentMutation::SetVolumeDb { value } => {
             if component.volume_automation.is_some() {
@@ -385,6 +406,7 @@ mod tests {
     #[test]
     fn one_interface_edits_static_fields_and_exact_matrix_atomically() {
         let (mut sequence, address) = sequence_with_component();
+        let alternate_source = AudioSourceComponentId::new();
         let fade = AudioFade {
             duration: TimelineTime::new(1, 2).expect("fade"),
             curve: AudioFadeCurve::EqualPower,
@@ -395,6 +417,9 @@ mod tests {
         )
         .expect("standard matrix");
         for mutation in [
+            AudioComponentMutation::SetSource {
+                value: AudioComponentSource::Media { component_id: alternate_source },
+            },
             AudioComponentMutation::SetEnabled { value: false },
             AudioComponentMutation::SetVolumeDb { value: -6.0 },
             AudioComponentMutation::SetPan { value: 0.25 },
@@ -410,6 +435,11 @@ mod tests {
             );
         }
         let inspection = inspect_audio_component(&sequence, address).expect("Component");
+        assert_eq!(
+            inspection.component().source,
+            AudioComponentSource::Media { component_id: alternate_source }
+        );
+        assert_eq!(inspection.owning_clip().id, address.clip_id);
         assert!(!inspection.component().enabled);
         assert_eq!(inspection.component().volume_db, -6.0);
         assert_eq!(inspection.component().pan, 0.25);
@@ -435,6 +465,40 @@ mod tests {
             .expect("no-op")
             .changed
         );
+        assert!(
+            !apply_audio_component_edit(
+                &mut sequence,
+                &request(
+                    address,
+                    AudioComponentMutation::SetSource {
+                        value: AudioComponentSource::Media {
+                            component_id: AudioSourceComponentId::primary(),
+                        },
+                    },
+                ),
+            )
+            .expect("source no-op")
+            .changed
+        );
+
+        let before_wrong_source = sequence.clone();
+        assert!(matches!(
+            apply_audio_component_edit(
+                &mut sequence,
+                &request(
+                    address,
+                    AudioComponentMutation::SetSource {
+                        value: AudioComponentSource::NestedOutput {
+                            output_id: mondrian_core::ProgramOutputId::new(),
+                        },
+                    },
+                ),
+            ),
+            Err(AudioComponentEditError::AuthorState(
+                AudioAuthoringError::InvalidComponentSource(id)
+            )) if id == address.edit_id
+        ));
+        assert_eq!(sequence, before_wrong_source);
 
         let before_invalid = sequence.clone();
         let wrong_destination = AudioChannelMixMatrix::identity(AudioChannelLayout::Mono);
@@ -466,6 +530,100 @@ mod tests {
             ))
         );
         assert_eq!(sequence, before_locked);
+    }
+
+    #[test]
+    fn duplicate_media_and_nested_source_selection_is_rejected_atomically() {
+        let (mut media_sequence, first_address) = sequence_with_component();
+        let alternate_media_source = AudioSourceComponentId::new();
+        let mut second_media_edit =
+            media_sequence.audio_tracks[0].clips[0].audio_components[0].clone();
+        second_media_edit.id = AudioComponentEditId::new();
+        second_media_edit.source =
+            AudioComponentSource::Media { component_id: alternate_media_source };
+        let second_media_address =
+            AudioComponentAddress { edit_id: second_media_edit.id, ..first_address };
+        media_sequence.audio_tracks[0].clips[0].audio_components.push(second_media_edit);
+        media_sequence
+            .audio_program
+            .validate(
+                &media_sequence.audio_tracks,
+                &media_sequence.audio_roles,
+                media_sequence.settings.audio_channel_layout,
+            )
+            .expect("distinct media Component sources");
+        let media_before = media_sequence.clone();
+        assert!(matches!(
+            apply_audio_component_edit(
+                &mut media_sequence,
+                &request(
+                    second_media_address,
+                    AudioComponentMutation::SetSource {
+                        value: AudioComponentSource::Media {
+                            component_id: AudioSourceComponentId::primary(),
+                        },
+                    },
+                ),
+            ),
+            Err(AudioComponentEditError::AuthorState(
+                AudioAuthoringError::InvalidComponentSource(id)
+            )) if id == second_media_address.edit_id
+        ));
+        assert_eq!(media_sequence, media_before);
+
+        let mut nested_sequence = Sequence::new("nested Component authoring");
+        let nested_track_id = nested_sequence.audio_tracks[0].id;
+        let initial_output = mondrian_core::ProgramOutputId::new();
+        let alternate_output = mondrian_core::ProgramOutputId::new();
+        let nested_clip = Clip::new_nested_sequence(
+            mondrian_core::SequenceId::new(),
+            TimelineTime::ZERO,
+            TimelineTime::new(10, 1).expect("duration"),
+            None,
+        )
+        .expect("nested Clip");
+        let nested_clip_id = nested_sequence
+            .add_nested_audio_clip(nested_track_id, nested_clip, initial_output)
+            .expect("nested audio Clip");
+        let mut second_nested_edit =
+            nested_sequence.audio_tracks[0].clips[0].audio_components[0].clone();
+        second_nested_edit.id = AudioComponentEditId::new();
+        second_nested_edit.source =
+            AudioComponentSource::NestedOutput { output_id: alternate_output };
+        let second_nested_address = AudioComponentAddress {
+            track_id: nested_track_id,
+            clip_id: nested_clip_id,
+            edit_id: second_nested_edit.id,
+        };
+        nested_sequence.audio_tracks[0].clips[0]
+            .audio_components
+            .push(second_nested_edit);
+        nested_sequence
+            .audio_program
+            .validate(
+                &nested_sequence.audio_tracks,
+                &nested_sequence.audio_roles,
+                nested_sequence.settings.audio_channel_layout,
+            )
+            .expect("distinct child Outputs");
+        let nested_before = nested_sequence.clone();
+        assert!(matches!(
+            apply_audio_component_edit(
+                &mut nested_sequence,
+                &request(
+                    second_nested_address,
+                    AudioComponentMutation::SetSource {
+                        value: AudioComponentSource::NestedOutput {
+                            output_id: initial_output,
+                        },
+                    },
+                ),
+            ),
+            Err(AudioComponentEditError::AuthorState(
+                AudioAuthoringError::InvalidComponentSource(id)
+            )) if id == second_nested_address.edit_id
+        ));
+        assert_eq!(nested_sequence, nested_before);
     }
 
     #[test]

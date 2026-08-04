@@ -1342,7 +1342,8 @@ impl AudioProgram {
                 if clip.audio_components.is_empty() {
                     return Err(AudioAuthoringError::MissingAudioComponents(clip.id));
                 }
-                let mut source_ids = BTreeSet::new();
+                let mut media_source_ids = BTreeSet::new();
+                let mut nested_output_ids = BTreeSet::new();
                 for edit in &clip.audio_components {
                     if edits.insert(edit.id, (clip, track.id)).is_some() {
                         return Err(AudioAuthoringError::DuplicateComponentEdit);
@@ -1355,12 +1356,12 @@ impl AudioProgram {
                     }
                     match edit.source {
                         AudioComponentSource::Media { component_id } => {
-                            if clip.is_nested_sequence() || !source_ids.insert(component_id) {
+                            if clip.is_nested_sequence() || !media_source_ids.insert(component_id) {
                                 return Err(AudioAuthoringError::InvalidComponentSource(edit.id));
                             }
                         }
-                        AudioComponentSource::NestedOutput { .. } => {
-                            if !clip.is_nested_sequence() {
+                        AudioComponentSource::NestedOutput { output_id } => {
+                            if !clip.is_nested_sequence() || !nested_output_ids.insert(output_id) {
                                 return Err(AudioAuthoringError::InvalidComponentSource(edit.id));
                             }
                         }

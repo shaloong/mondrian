@@ -26,10 +26,6 @@ use crate::app::proxy_generation::{
 use crate::app::selection::resolve_track_selection;
 use crate::app::timeline_editing::{find_clip, find_clip_mut, find_clip_track_lock};
 use crate::app::timeline_position::lower_nearest_sequence_frame;
-use crate::app::ui_actions::{
-    InspectorAudioComponentSourcePayload, InspectorSetAudioComponentSourcePayload,
-    INSPECTOR_NAMESPACE, INSPECTOR_SET_AUDIO_COMPONENT_SOURCE,
-};
 #[cfg(test)]
 use crate::app::SelectedClipRef;
 use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, ClipSelectionMode};
@@ -38,9 +34,10 @@ use mondrian_core::automation::PropertyHost;
 #[cfg(test)]
 use mondrian_core::automation::{PropertyMutation, PropertyValue};
 use mondrian_core::events::AppEvent;
-use mondrian_core::types::{AudioComponentEditId, ClipId, EffectId, FramePosition};
+use mondrian_core::types::{ClipId, EffectId, FramePosition};
 use mondrian_core::{FrameRounding, MondrianError, Result, TimelineTime};
 use mondrian_export::queue::ExportCancelOutcome;
+#[cfg(test)]
 use mondrian_timeline::audio::AudioComponentSource;
 #[cfg(test)]
 use mondrian_timeline::clip::Transform2D;
@@ -208,9 +205,6 @@ impl AppState {
             }
             Action::ImportMedia(paths) => self.import_media_from_action(paths),
 
-            Action::Custom { namespace, name, payload } if namespace == INSPECTOR_NAMESPACE => {
-                self.dispatch_inspector_ui_action(&name, payload)
-            }
             Action::Custom { namespace, name, .. } => {
                 if let Some(error) = ProductAction::unknown_external_action_error(&namespace, &name)
                 {
@@ -1342,24 +1336,6 @@ impl AppState {
         }
     }
 
-    fn dispatch_inspector_ui_action(
-        &mut self,
-        name: &str,
-        payload: serde_json::Value,
-    ) -> Result<()> {
-        match name {
-            INSPECTOR_SET_AUDIO_COMPONENT_SOURCE => {
-                let payload = parse_ui_payload::<InspectorSetAudioComponentSourcePayload>(
-                    "inspector_ui_action",
-                    name,
-                    payload,
-                )?;
-                self.set_audio_component_source_from_ui(payload)
-            }
-            _ => Err(unknown_ui_action_error("inspector_ui_action", name)),
-        }
-    }
-
     fn dispatch_export_product_action(&mut self, action: ExportProductAction) -> Result<()> {
         match action {
             ExportProductAction::EditDraft(edit) => {
@@ -1696,173 +1672,6 @@ impl AppState {
         Ok(true)
     }
 
-    fn set_audio_component_source_from_ui(
-        &mut self,
-        payload: InspectorSetAudioComponentSourcePayload,
-    ) -> Result<()> {
-        const STEP_ID: &str = "inspector_set_audio_component_source";
-        self.ensure_audio_component_edit_target(STEP_ID, payload.clip_id, payload.edit_id)?;
-
-        let target_source = {
-            let sequence = self.active_sequence().ok_or_else(|| missing_sequence_error(STEP_ID))?;
-            let clip = find_clip(sequence, payload.clip_id)
-                .ok_or_else(|| missing_clip_error(STEP_ID, payload.clip_id))?;
-            let current_source = clip
-                .audio_components
-                .iter()
-                .find(|edit| edit.id == payload.edit_id)
-                .map(|edit| edit.source.clone())
-                .ok_or_else(|| MondrianError::WorkflowStepFailed {
-                    step_id: STEP_ID.to_string(),
-                    reason: format!(
-                        "audio Component Edit {} is absent from Clip {}",
-                        payload.edit_id, payload.clip_id
-                    ),
-                })?;
-            let requested_source = match payload.source {
-                InspectorAudioComponentSourcePayload::Media { component_id } => {
-                    AudioComponentSource::Media { component_id }
-                }
-                InspectorAudioComponentSourcePayload::NestedOutput { output_id } => {
-                    AudioComponentSource::NestedOutput { output_id }
-                }
-            };
-            if current_source == requested_source {
-                return Ok(());
-            }
-            match payload.source {
-                InspectorAudioComponentSourcePayload::Media { component_id } => {
-                    if clip.is_nested_sequence() {
-                        return Err(MondrianError::WorkflowStepFailed {
-                            step_id: STEP_ID.to_string(),
-                            reason: "nested Sequence Clip cannot select an Asset Component"
-                                .to_string(),
-                        });
-                    }
-                    let library =
-                        self.asset_library().ok_or_else(|| MondrianError::WorkflowStepFailed {
-                            step_id: STEP_ID.to_string(),
-                            reason: "asset library is unavailable".to_string(),
-                        })?;
-                    let asset_id =
-                        clip.media_asset_id().ok_or_else(|| MondrianError::WorkflowStepFailed {
-                            step_id: STEP_ID.to_string(),
-                            reason: "non-media Clip cannot select an Asset Component".to_string(),
-                        })?;
-                    let asset = library.get_asset(asset_id)?.ok_or_else(|| {
-                        MondrianError::AssetNotFound { asset_id: asset_id.to_string() }
-                    })?;
-                    asset.audio_components.validate().map_err(|error| {
-                        MondrianError::WorkflowStepFailed {
-                            step_id: STEP_ID.to_string(),
-                            reason: format!("invalid Asset audio Component catalog: {error}"),
-                        }
-                    })?;
-                    if !asset
-                        .audio_components
-                        .components
-                        .iter()
-                        .any(|component| component.id == component_id)
-                    {
-                        return Err(MondrianError::WorkflowStepFailed {
-                            step_id: STEP_ID.to_string(),
-                            reason: format!(
-                                "Asset {} does not expose audio Component {component_id}",
-                                asset_id
-                            ),
-                        });
-                    }
-                    requested_source
-                }
-                InspectorAudioComponentSourcePayload::NestedOutput { output_id } => {
-                    let child_id = clip.nested_sequence_id().ok_or_else(|| {
-                        MondrianError::WorkflowStepFailed {
-                            step_id: STEP_ID.to_string(),
-                            reason: "media Clip cannot select a nested Sequence output".to_string(),
-                        }
-                    })?;
-                    let child = self
-                        .sequences()
-                        .iter()
-                        .find(|candidate| candidate.id == child_id)
-                        .ok_or_else(|| MondrianError::WorkflowStepFailed {
-                            step_id: STEP_ID.to_string(),
-                            reason: format!("nested Sequence {child_id} is unavailable"),
-                        })?;
-                    if !child.audio_program.outputs.iter().any(|output| output.id == output_id) {
-                        return Err(MondrianError::WorkflowStepFailed {
-                            step_id: STEP_ID.to_string(),
-                            reason: format!(
-                                "nested Sequence {child_id} does not expose output {output_id}"
-                            ),
-                        });
-                    }
-                    requested_source
-                }
-            }
-        };
-
-        let Some(sequence_id) = self.active_sequence_id() else {
-            return Err(missing_sequence_error(STEP_ID));
-        };
-        self.commit_sequence_edit(
-            sequence_id,
-            "切换片段音频 Component",
-            move |sequence| {
-                let clip = find_clip_mut(sequence, payload.clip_id)
-                    .ok_or_else(|| missing_clip_error(STEP_ID, payload.clip_id))?;
-                let edit = clip
-                    .audio_components
-                    .iter_mut()
-                    .find(|edit| edit.id == payload.edit_id)
-                    .ok_or_else(|| MondrianError::WorkflowStepFailed {
-                        step_id: STEP_ID.to_string(),
-                        reason: format!("audio Component Edit {} disappeared", payload.edit_id),
-                    })?;
-                edit.source = target_source;
-                if let Err(error) = sequence.audio_program.validate(
-                    &sequence.audio_tracks,
-                    &sequence.audio_roles,
-                    sequence.settings.audio_channel_layout,
-                ) {
-                    return Err(MondrianError::WorkflowStepFailed {
-                        step_id: STEP_ID.to_string(),
-                        reason: format!("audio authoring rejected source selection: {error}"),
-                    });
-                }
-                Ok(())
-            },
-        )?;
-        self.reconcile_audio_after_committed_authoring_change("rebind_audio_component");
-        Ok(())
-    }
-
-    fn ensure_audio_component_edit_target(
-        &self,
-        step_id: &'static str,
-        clip_id: ClipId,
-        edit_id: AudioComponentEditId,
-    ) -> Result<()> {
-        self.ensure_clip_track_unlocked(step_id, clip_id)?;
-        let sequence = self.active_sequence().ok_or_else(|| missing_sequence_error(step_id))?;
-        let (_, is_video_track, _) = find_clip_track_lock(sequence, clip_id)
-            .ok_or_else(|| missing_clip_error(step_id, clip_id))?;
-        if is_video_track {
-            return Err(MondrianError::WorkflowStepFailed {
-                step_id: step_id.to_string(),
-                reason: "audio Component Edit must belong to an audio Track Clip".to_string(),
-            });
-        }
-        let clip =
-            find_clip(sequence, clip_id).ok_or_else(|| missing_clip_error(step_id, clip_id))?;
-        if !clip.audio_components.iter().any(|edit| edit.id == edit_id) {
-            return Err(missing_audio_component_edit_error(
-                step_id, clip_id, edit_id,
-            ));
-        }
-        Ok(())
-    }
-
     fn ensure_clip_track_unlocked(&self, step_id: &'static str, clip_id: ClipId) -> Result<()> {
         let Some(seq) = self.active_sequence() else {
             return Err(missing_sequence_error(step_id));
@@ -2000,24 +1809,6 @@ fn poll_media_asset_mutations_until_idle(state: &mut AppState) {
     }
 }
 
-fn parse_ui_payload<T: serde::de::DeserializeOwned>(
-    step_prefix: &str,
-    name: &str,
-    payload: serde_json::Value,
-) -> Result<T> {
-    serde_json::from_value(payload).map_err(|err| MondrianError::WorkflowStepFailed {
-        step_id: format!("{step_prefix}.{name}"),
-        reason: format!("invalid action payload: {err}"),
-    })
-}
-
-fn unknown_ui_action_error(step_prefix: &'static str, name: &str) -> MondrianError {
-    MondrianError::WorkflowStepFailed {
-        step_id: format!("{step_prefix}.{name}"),
-        reason: format!("unknown app UI action: {name}"),
-    }
-}
-
 fn action_not_executed(action: &'static str, reason: impl Into<String>) -> MondrianError {
     MondrianError::ActionNotExecuted { action: action.to_owned(), reason: reason.into() }
 }
@@ -2054,17 +1845,6 @@ fn missing_clip_error(step_id: &'static str, clip_id: ClipId) -> MondrianError {
     MondrianError::WorkflowStepFailed {
         step_id: step_id.to_string(),
         reason: format!("片段不存在: {clip_id}"),
-    }
-}
-
-fn missing_audio_component_edit_error(
-    step_id: &'static str,
-    clip_id: ClipId,
-    edit_id: AudioComponentEditId,
-) -> MondrianError {
-    MondrianError::WorkflowStepFailed {
-        step_id: step_id.to_string(),
-        reason: format!("audio Component Edit {edit_id} is absent from Clip {clip_id}"),
     }
 }
 
@@ -2109,17 +1889,16 @@ mod tests {
         audio_component_edit_action, clip_edit_numeric_curve_action, clip_set_enabled_action,
         clip_set_solid_color_action, clip_write_parameter_values_action, export_cancel_action,
         export_clear_terminal_history_action, export_edit_draft_action, export_enqueue_action,
-        inspector_set_audio_component_source_action, project_create_with_settings_action,
-        project_recover_from_autosave_action, project_update_color_environment_action,
-        project_update_new_sequence_defaults_action, sequence_delete_action,
-        sequence_duplicate_action, sequence_new_action, sequence_return_to_parent_action,
-        sequence_set_active_default_action, sequence_switch_active_action,
-        sequence_update_settings_action, timeline_clear_in_out_points_action,
-        timeline_create_basic_title_action, timeline_drop_asset_action,
-        timeline_insert_asset_action, timeline_link_selected_clips_action,
-        timeline_move_clip_action, timeline_open_nested_sequence_action,
-        timeline_roll_selected_cut_to_playhead_action, timeline_seek_action,
-        timeline_seek_with_source_action, timeline_select_clip_action,
+        project_create_with_settings_action, project_recover_from_autosave_action,
+        project_update_color_environment_action, project_update_new_sequence_defaults_action,
+        sequence_delete_action, sequence_duplicate_action, sequence_new_action,
+        sequence_return_to_parent_action, sequence_set_active_default_action,
+        sequence_switch_active_action, sequence_update_settings_action,
+        timeline_clear_in_out_points_action, timeline_create_basic_title_action,
+        timeline_drop_asset_action, timeline_insert_asset_action,
+        timeline_link_selected_clips_action, timeline_move_clip_action,
+        timeline_open_nested_sequence_action, timeline_roll_selected_cut_to_playhead_action,
+        timeline_seek_action, timeline_seek_with_source_action, timeline_select_clip_action,
         timeline_set_in_out_point_action, timeline_set_selected_clips_enabled_action,
         timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
         timeline_unlink_selected_clips_action, track_add_action, track_move_action,
@@ -2135,8 +1914,7 @@ mod tests {
         AssetsRenameFolderPayload, AssetsSetInterpretationPayload, AssetsSetProxyModePayload,
         ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
         ClipParameterValueWrite, ClipSetEnabledPayload, ClipSetSolidColorPayload,
-        ClipWriteParameterValuesPayload, ExportDraftEdit, InspectorAudioComponentSourcePayload,
-        InspectorSetAudioComponentSourcePayload, ProjectCreateWithSettingsPayload,
+        ClipWriteParameterValuesPayload, ExportDraftEdit, ProjectCreateWithSettingsPayload,
         ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
         ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload,
         SequenceUpdateSettingsPayload, TimelineDropAssetPayload, TimelineExportRequest,
@@ -2152,7 +1930,8 @@ mod tests {
     use mondrian_core::automation::AnimationParameterAddress;
     use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
     use mondrian_core::types::{
-        AssetId, AudioSourceComponentId, ClipLinkGroupId, EffectId, FramePosition, MaskId, TrackId,
+        AssetId, AudioComponentEditId, AudioSourceComponentId, ClipLinkGroupId, EffectId,
+        FramePosition, MaskId, TrackId,
     };
     use mondrian_core::{Color, ColorSpace};
     use mondrian_core::{ProjectSettings, Rational, Resolution, WorkingColorSpace};
@@ -2457,27 +2236,22 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_registered_ui_namespaces_reject_unknown_action_names() {
-        for (namespace, expected_step) in [
-            (TIMELINE_NAMESPACE, "timeline_ui_action.unknown"),
-            (INSPECTOR_NAMESPACE, "inspector_ui_action.unknown"),
-        ] {
-            let mut state = AppState::new();
-            let err = state
-                .dispatch_action(mondrian_editor_state::Action::Custom {
-                    namespace: namespace.into(),
-                    name: "unknown".into(),
-                    payload: serde_json::Value::Null,
-                })
-                .expect_err("registered UI namespace should reject unknown action names");
+    fn dispatch_timeline_ui_namespace_rejects_unknown_action_names() {
+        let mut state = AppState::new();
+        let err = state
+            .dispatch_action(mondrian_editor_state::Action::Custom {
+                namespace: TIMELINE_NAMESPACE.into(),
+                name: "unknown".into(),
+                payload: serde_json::Value::Null,
+            })
+            .expect_err("registered UI namespace should reject unknown action names");
 
-            match err {
-                MondrianError::WorkflowStepFailed { step_id, reason } => {
-                    assert_eq!(step_id, expected_step);
-                    assert!(reason.contains("unknown app UI action"));
-                }
-                other => panic!("expected unknown UI action workflow error, got {other:?}"),
+        match err {
+            MondrianError::WorkflowStepFailed { step_id, reason } => {
+                assert_eq!(step_id, "timeline_ui_action.unknown");
+                assert!(reason.contains("unknown app UI action"));
             }
+            other => panic!("expected unknown UI action workflow error, got {other:?}"),
         }
     }
 
@@ -6264,17 +6038,18 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_inspector_audio_source_selection_is_validated_and_undoable() {
-        let (root, mut state, _, clip_id, edit_id, alternate_component) = state_with_audio_asset();
+    fn dispatch_audio_component_source_selection_is_validated_and_undoable() {
+        let (root, mut state, track_id, clip_id, edit_id, alternate_component) =
+            state_with_audio_asset();
+        let generation_before = state.project_author_generation();
 
         state
-            .dispatch_action(inspector_set_audio_component_source_action(
-                InspectorSetAudioComponentSourcePayload {
-                    clip_id,
-                    edit_id,
-                    source: InspectorAudioComponentSourcePayload::Media {
-                        component_id: alternate_component,
-                    },
+            .dispatch_action(audio_component_action(
+                track_id,
+                clip_id,
+                edit_id,
+                AudioComponentMutation::SetSource {
+                    value: AudioComponentSource::Media { component_id: alternate_component },
                 },
             ))
             .expect("select alternate Component");
@@ -6284,8 +6059,54 @@ mod tests {
                 .source,
             AudioComponentSource::Media { component_id: alternate_component }
         );
+        assert_eq!(state.project_author_generation(), generation_before + 1);
         assert!(state.can_undo_action());
         assert!(state.undo_timeline().expect("undo source selection"));
+        assert_eq!(
+            state.active_sequence().expect("sequence").audio_tracks[0].clips[0].audio_components[0]
+                .source,
+            AudioComponentSource::Media { component_id: AudioSourceComponentId::primary() }
+        );
+        assert!(state.redo_timeline().expect("redo source selection"));
+        assert_eq!(
+            state.active_sequence().expect("sequence").audio_tracks[0].clips[0].audio_components[0]
+                .source,
+            AudioComponentSource::Media { component_id: alternate_component }
+        );
+        drop(state);
+        remove_temp_path(&root);
+    }
+
+    #[test]
+    fn dispatch_audio_component_source_rejects_locked_track_without_history() {
+        let (root, mut state, track_id, clip_id, edit_id, alternate_component) =
+            state_with_audio_asset();
+        let mut locked = state.active_sequence().expect("sequence").clone();
+        locked.audio_tracks[0].is_locked = true;
+        state.test_set_sequence(Some(locked));
+        let generation_before = state.project_author_generation();
+        let history_before = state
+            .authoring_history()
+            .and_then(|history| history.undo_description())
+            .map(str::to_owned);
+
+        let error = state
+            .dispatch_action(audio_component_action(
+                track_id,
+                clip_id,
+                edit_id,
+                AudioComponentMutation::SetSource {
+                    value: AudioComponentSource::Media { component_id: alternate_component },
+                },
+            ))
+            .expect_err("locked Track must reject source selection");
+
+        assert!(matches!(error, MondrianError::TrackLocked { .. }));
+        assert_eq!(state.project_author_generation(), generation_before);
+        assert_eq!(
+            state.authoring_history().and_then(|history| history.undo_description()),
+            history_before.as_deref()
+        );
         assert_eq!(
             state.active_sequence().expect("sequence").audio_tracks[0].clips[0].audio_components[0]
                 .source,
@@ -6296,17 +6117,55 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_inspector_audio_source_rejects_unknown_component_without_mutation() {
-        let (root, mut state, _, clip_id, edit_id, _) = state_with_audio_asset();
+    fn dispatch_audio_component_same_source_is_a_noop_without_catalog_evidence() {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("audio source no-op");
+        let track_id = sequence.audio_tracks[0].id;
+        let clip = Clip::new(
+            AssetId::new(),
+            TimelineTime::ZERO,
+            tt(25, sequence.time_base()),
+        )
+        .expect("audio Clip");
+        let clip_id = clip.id;
+        sequence
+            .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
+            .expect("add audio Clip");
+        let edit_id = sequence.audio_tracks[0].clips[0].audio_components[0].id;
+        state.test_set_sequence(Some(sequence));
+        let generation_before = state.project_author_generation();
+
+        let error = state
+            .dispatch_action(audio_component_action(
+                track_id,
+                clip_id,
+                edit_id,
+                AudioComponentMutation::SetSource {
+                    value: AudioComponentSource::Media {
+                        component_id: AudioSourceComponentId::primary(),
+                    },
+                },
+            ))
+            .expect_err("same source must not report execution");
+
+        assert!(matches!(error, MondrianError::ActionNotExecuted { .. }));
+        assert_eq!(state.project_author_generation(), generation_before);
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_audio_component_source_rejects_unknown_component_without_mutation() {
+        let (root, mut state, track_id, clip_id, edit_id, _) = state_with_audio_asset();
         let before = serde_json::to_vec(state.active_sequence().expect("sequence"))
             .expect("serialize before Sequence");
 
         let error = state
-            .dispatch_action(inspector_set_audio_component_source_action(
-                InspectorSetAudioComponentSourcePayload {
-                    clip_id,
-                    edit_id,
-                    source: InspectorAudioComponentSourcePayload::Media {
+            .dispatch_action(audio_component_action(
+                track_id,
+                clip_id,
+                edit_id,
+                AudioComponentMutation::SetSource {
+                    value: AudioComponentSource::Media {
                         component_id: AudioSourceComponentId::new(),
                     },
                 },
@@ -6316,7 +6175,7 @@ mod tests {
         assert!(matches!(
             error,
             MondrianError::WorkflowStepFailed { step_id, .. }
-                if step_id == "inspector_set_audio_component_source"
+                if step_id == "audio_edit_component"
         ));
         assert_eq!(
             serde_json::to_vec(state.active_sequence().expect("sequence"))
@@ -6423,17 +6282,18 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_inspector_audio_component_noop_does_not_create_history() {
+    fn dispatch_audio_component_noop_is_not_reported_as_executed() {
         let (root, mut state, track_id, clip_id, edit_id, _) = state_with_audio_asset();
-        state
+        let error = state
             .dispatch_action(audio_component_action(
                 track_id,
                 clip_id,
                 edit_id,
                 AudioComponentMutation::SetVolumeDb { value: 0.0 },
             ))
-            .expect("no-op audio mutation");
+            .expect_err("no-op audio mutation must not report success");
 
+        assert!(matches!(error, MondrianError::ActionNotExecuted { .. }));
         assert!(!state.can_undo_action());
         drop(state);
         remove_temp_path(&root);
@@ -6537,7 +6397,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_inspector_nested_audio_source_accepts_only_child_public_output() {
+    fn dispatch_audio_component_nested_source_accepts_only_child_public_output() {
         let mut child = Sequence::new("child");
         let initial_output = child.audio_program.outputs[0].id;
         let alternate_output = mondrian_core::ProgramOutputId::new();
@@ -6567,13 +6427,12 @@ mod tests {
         state.test_set_sequences(vec![child]);
 
         state
-            .dispatch_action(inspector_set_audio_component_source_action(
-                InspectorSetAudioComponentSourcePayload {
-                    clip_id,
-                    edit_id,
-                    source: InspectorAudioComponentSourcePayload::NestedOutput {
-                        output_id: alternate_output,
-                    },
+            .dispatch_action(audio_component_action(
+                track_id,
+                clip_id,
+                edit_id,
+                AudioComponentMutation::SetSource {
+                    value: AudioComponentSource::NestedOutput { output_id: alternate_output },
                 },
             ))
             .expect("select child public output");
@@ -6589,6 +6448,26 @@ mod tests {
                 .source,
             AudioComponentSource::NestedOutput { output_id: initial_output }
         );
+
+        let before = state.active_sequence().expect("parent").clone();
+        let error = state
+            .dispatch_action(audio_component_action(
+                track_id,
+                clip_id,
+                edit_id,
+                AudioComponentMutation::SetSource {
+                    value: AudioComponentSource::NestedOutput {
+                        output_id: mondrian_core::ProgramOutputId::new(),
+                    },
+                },
+            ))
+            .expect_err("unknown child output must fail closed");
+        assert!(matches!(
+            error,
+            MondrianError::WorkflowStepFailed { step_id, .. }
+                if step_id == "audio_edit_component"
+        ));
+        assert_eq!(state.active_sequence().expect("parent"), &before);
     }
 
     #[test]
