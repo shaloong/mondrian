@@ -78,6 +78,17 @@ canonical locator captured for the manifest. There is no independent
 with the purpose. Admission rejects a manual destination from another
 Authoring Session before queue state changes.
 
+Save-request payload admission is bounded independently from the FIFO control
+barrier. A request must first reserve one of the four waiting slots and only
+then may a manual request retain kernel-backed publication authority for its
+destination. Failure to reserve the slot therefore has no filesystem,
+destination-binding, document-revision, or path-lock effect. If target-lock
+acquisition fails after reservation, that slot is returned before the error is
+reported. Once the request is admitted, its target authority deliberately
+remains attached to the logical Project Session until all possible queued
+publishers and retained completion paths are gone; caller-side completion is
+not sufficient proof that the path can be released.
+
 Manual save, Save As, and autosave all enter the dedicated
 `ProjectPersistenceService`. The worker first uses SQLite's online backup API
 to create a self-consistent database snapshot, then writes the archive from the
@@ -176,6 +187,13 @@ the applied durable baseline. A failed publication resumes admission at a new
 Persistence Generation, keeps the Project open, and permits correction/retry;
 it is distinct from a handoff protocol fault and never silently degrades to
 Discard.
+
+The saturated-queue lifecycle gate holds one active publication, fills every
+waiting slot, rejects a further Save As, proves another Project can immediately
+lease that rejected target, and then closes behind the exact final admitted
+Save. This is the executable boundary between an attempted UI intent and an
+admitted persistence authority; changing queue capacity, lock ordering, or
+close draining must preserve the same invariant.
 
 ## Live Project and Runtime Authority
 

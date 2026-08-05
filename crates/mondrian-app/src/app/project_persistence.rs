@@ -23,7 +23,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const PERSISTENCE_QUEUE_CAPACITY: usize = 4;
+pub(super) const PERSISTENCE_QUEUE_CAPACITY: usize = 4;
 const MAX_COMPLETIONS_PER_POLL: usize = 8;
 const PERSISTENCE_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -599,7 +599,6 @@ impl ProjectPersistenceService {
                     "manual Project destination belongs to another Authoring Session".to_owned(),
                 );
             }
-            runtime_lease.retain_publication_target(destination.project_file())?;
         }
         runtime_lease.validate()?;
         let reserved_manual_document_revision =
@@ -629,6 +628,18 @@ impl ProjectPersistenceService {
             self.queued.fetch_sub(1, Ordering::AcqRel);
             return Err("project persistence request identity exhausted".to_owned());
         };
+        // A rejected request must not acquire namespace authority. Reserve the
+        // bounded payload slot before retaining a manual target, and release
+        // that slot if target admission itself fails. Once retained, the lock
+        // deliberately survives for the Session lifetime because a queued
+        // publisher may still own the route after caller-side completion.
+        if let ProjectPersistencePurpose::Manual { destination } = &purpose {
+            if let Err(error) = runtime_lease.retain_publication_target(destination.project_file())
+            {
+                self.queued.fetch_sub(1, Ordering::AcqRel);
+                return Err(error);
+            }
+        }
         self.next_request_id = next_request_id;
         let request = ProjectPersistenceRequest {
             id,

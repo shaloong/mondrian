@@ -3,6 +3,8 @@ use super::project_library_generation::{
     retained_project_runtime_lease, sweep_orphaned_project_libraries,
     ProjectLibraryGenerationCandidate, RetiredProjectLibraryGeneration,
 };
+#[cfg(test)]
+use super::project_persistence::PERSISTENCE_QUEUE_CAPACITY;
 use super::project_persistence::{
     ProjectPersistenceCompletion, ProjectPersistencePauseTicket, ProjectPersistencePauseToken,
     ProjectPersistenceRequestId,
@@ -1564,6 +1566,64 @@ mod persistence_lifecycle_tests {
             .expect("retry establishes the retained Save As destination");
         assert_eq!(state.current_project_path(), Some(target.as_path()));
         state.close_project().expect("close retried Project");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn queue_rejected_save_as_acquires_no_target_authority_and_close_drains_admitted_work() {
+        let root = unique_root("queue-rejected-save-as");
+        let mut state = test_state(&root);
+        let original = state.current_project_path().expect("Project path").to_path_buf();
+        let rejected_target = root.join("rejected-save-as.mdp");
+        let gate = state.project_persistence.gate_next_request();
+        let first = state.request_project_save().expect("admit active save");
+        gate.wait_until_running();
+
+        let mut admitted = vec![first];
+        for _ in 0..PERSISTENCE_QUEUE_CAPACITY {
+            admitted.push(state.request_project_save().expect("fill bounded save queue"));
+        }
+        let rejection = state
+            .request_project_save_as(rejected_target.clone())
+            .expect_err("Save As beyond the bounded queue must be rejected");
+        assert!(rejection.to_string().contains("queue is full"));
+        assert_eq!(
+            state
+                .manual_project_file_destination
+                .as_ref()
+                .expect("admitted manual destination")
+                .project_file(),
+            original
+        );
+
+        let competing_project = ProjectId::new();
+        let competing_lease = claim_project_runtime_lease_for_test(
+            &root.join("runtime-roots"),
+            &rejected_target,
+            competing_project,
+        )
+        .expect("a rejected Save As must not retain publication-target authority");
+        drop(competing_lease);
+
+        let required = *admitted.last().expect("at least one admitted save");
+        assert!(state
+            .begin_project_close_after_save(required)
+            .expect("begin close behind the admitted queue"));
+        gate.release();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match state.poll_project_close() {
+                ProjectClosePoll::Pending => {
+                    assert!(Instant::now() < deadline, "Project close timed out");
+                    std::thread::yield_now();
+                }
+                ProjectClosePoll::Closed => break,
+                unexpected => panic!("unexpected saturated-queue close result: {unexpected:?}"),
+            }
+        }
+        assert!(original.is_file());
+        assert!(!rejected_target.exists());
         let _ = fs::remove_dir_all(root);
     }
 
