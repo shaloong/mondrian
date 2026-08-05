@@ -1087,8 +1087,13 @@ Overflow, skip-plus-preroll beyond capacity, or exact-discard shortage fails
 closed and leaves output inactive under Synthetic Clock Master.
 
 Normal playback may qualify consumed device samples as Audio Device Clock
-Master. Device loss or rejected phase handoff returns authority to Synthetic
-Clock Master; video presentation is never Clock Master. See
+Master only after active callback consumption covers the host-reported
+remaining playback delay. Before that boundary, subtracting latency would
+produce a negative effective device position: the observation is `Uncertain`
+and Synthetic Clock retains authority. The Adapter may not clamp that position
+to zero or label accepted-but-not-yet-played frames as device progress. Device
+loss or rejected phase handoff returns authority to Synthetic Clock Master;
+video presentation is never Clock Master. See
 [Playback Engine](playback-engine.md) for the full state and evidence contract.
 
 The ignored `playback_professional_cpal_av_gate` is the fail-closed physical-
@@ -1097,8 +1102,8 @@ long enough for the exact
 30-minute 30000/1001 observation, qualifies a concrete 48 kHz stereo CPAL
 generation, then drives the normal App event-loop seams at real wall cadence
 while a generated picture completes through the real headless Viewer GPU
-Adapter. Its versioned `cpal_av_48khz_30min_v1` policy requires at least 99.5%
-current-video readiness, completed GPU presentation, Audio Device Clock Master
+Adapter. Its versioned `cpal_av_48khz_30min_recovery_v2` policy requires at
+least 99.5% current-video readiness, completed GPU presentation, Audio Device Clock Master
 residency except at most five seconds of startup fallback, absolute delivery
 clock drift at most 20 ms, callback-frame versus monotonic-duration divergence
 at most 1,000 ppm with a 100 ms minimum allowance, no callback

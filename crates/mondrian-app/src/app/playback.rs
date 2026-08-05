@@ -1999,14 +1999,6 @@ fn audio_device_clock_observation(
             _ => false,
         };
     let stream_available = terminal_frozen || (snapshot.active && !snapshot.stream_failed);
-    let usable = stream_available
-        && snapshot.callback_count > 0
-        && callback_period_frames > 0
-        && snapshot.active_callback_consumed_frames > 0
-        && snapshot.active_callback_consumed_frames <= snapshot.callback_consumed_frames
-        && callback_fresh
-        && callback_position_plausible
-        && (already_audio_master || activation_preroll_satisfied);
     let playback_delay = snapshot
         .last_callback_playback_delay
         .map(Ok)
@@ -2019,6 +2011,22 @@ fn audio_device_clock_observation(
         sample_rate,
     )?)
     .map_err(|_| mondrian_playback::PlaybackError::TransportArithmeticOverflow)?;
+    // Callback consumption names frames accepted by the host, not frames that
+    // have necessarily crossed the device boundary. Until consumption covers
+    // the remaining host-reported playback delay, the effective device
+    // position would be negative relative to this activation interval. Keep
+    // Synthetic authority instead of clamping or publishing a false position.
+    let effective_position_available =
+        snapshot.active_callback_consumed_frames >= u64::from(estimated_latency_frames);
+    let usable = stream_available
+        && snapshot.callback_count > 0
+        && callback_period_frames > 0
+        && snapshot.active_callback_consumed_frames > 0
+        && snapshot.active_callback_consumed_frames <= snapshot.callback_consumed_frames
+        && effective_position_available
+        && callback_fresh
+        && callback_position_plausible
+        && (already_audio_master || activation_preroll_satisfied);
     let uncertainty_frames = match callback_age_frames {
         Some(frames) => u32::try_from(frames.max(callback_period_frames))
             .map_err(|_| mondrian_playback::PlaybackError::TransportArithmeticOverflow)?,
@@ -2328,6 +2336,39 @@ mod tests {
             .state,
             AudioDeviceClockState::Running
         );
+    }
+
+    #[test]
+    fn audio_adapter_waits_until_consumption_covers_reported_latency() {
+        let mut state = state_with_sequence(20);
+        play_ready(&mut state);
+        let mut snapshot = audio_snapshot();
+        snapshot.callback_consumed_frames = 14_950;
+        snapshot.active_callback_consumed_frames = 512;
+        snapshot.active_duration = Some(Duration::from_micros(1_078));
+        snapshot.callback_count = 28;
+        snapshot.last_callback_frames = 512;
+        snapshot.last_callback_playback_delay = Some(Duration::from_micros(12_792));
+        snapshot.last_callback_age = Some(Duration::from_micros(521));
+
+        let observation = audio_device_clock_observation(
+            snapshot,
+            state.playback_engine.snapshot().epoch,
+            state.playback_engine.monotonic_high_water(),
+            false,
+            audio_anchor(38_796),
+            true,
+            false,
+        )
+        .expect("internally consistent early callback observation");
+
+        assert_eq!(observation.estimated_latency_frames, 590);
+        assert_eq!(observation.state, AudioDeviceClockState::Uncertain);
+        state
+            .playback_engine
+            .observe_audio_device_clock(observation)
+            .expect("early device position remains non-authoritative");
+        assert_eq!(state.playback_clock_master(), Some(ClockMaster::Synthetic));
     }
 
     #[test]
