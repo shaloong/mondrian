@@ -276,17 +276,19 @@ changing semantic status. This current evidence supersedes v10 for the Golden
 release repetition obligation only and is historical after v12.
 
 The current v12 supervisor run
-`20260805T055754Z-complete-golden-a405aa50` passed `3/3` against the repository
-fixture root after `Pr/All` reference-asset validation. The three processes used
-distinct run and Project identities, exited naturally, and published complete
-reports in 65.888 s, 64.087 s, and 63.167 s. Each report binds all seven stages
-to its one Hero Sequence and retains exactly Hero plus the strong-reference
-nested child after final durable reopen. The aggregate report SHA-256 is
-`93e15bd69aaefb28a5b94fb7c8234e22c80c7158ea540516aed1556974c82db5`;
+`20260805T163443Z-complete-golden-58886bac` passed `3/3` against the repository
+fixture root after `Pr/All` reference-asset validation. It was rebuilt from the
+current source with incremental compilation disabled in 467.818 s. The three
+processes used distinct run and Project identities, exited naturally without
+terminal-report recovery, and published complete reports in 67.656 s, 64.158 s,
+and 64.860 s. Each report binds all seven stages to its one Hero Sequence and
+retains exactly Hero plus the strong-reference nested child after final durable
+reopen. The aggregate report SHA-256 is
+`20fa59a873180594c927ec1566f4bef225a610eaf6310da0c655e271c0a16633`;
 the ordered pass-report hashes are
-`ce9e34c107cf9594941046976129382b08b4d01c4bf6e0d88903b6880b95227c`,
-`097fb7433aa515135febfd1c9cd75e47d95a90d41b25c0e918d3a2221d3ff82d`,
-and `8c2d8e10ee01a26f5ed05ad7658d685c7639b2892ba1fe4af1f9ab536f8f6492`.
+`5d5e77bbaa0e5956b316d2a418e25a6347a3bec2b2c52f55e175ca2d4645bd72`,
+`89c15d2b3dd42380b310b8919b0e5f3ae581de39ec7417a981b74fb8bdfb559b`,
+and `aa2da824abe8ca2385a4c31b9af304b7e1847d6a0735070baeffcd2e88b05877`.
 This closes only the versioned complete-Golden repetition obligation; it does
 not claim qualified-machine throughput, long-duration device/A/V, memory, or
 independent absolute color-reference evidence.
