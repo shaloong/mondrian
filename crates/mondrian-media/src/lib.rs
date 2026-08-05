@@ -24,9 +24,12 @@ pub mod waveform;
 
 pub use audio::{AudioBuffer, RealtimeAudioOutputControlError, RealtimeAudioOutputSnapshot};
 pub use audio_device::{
-    RealtimeAudioCandidateCounts, RealtimeAudioChannelSemantics, RealtimeAudioOutputContract,
-    RealtimeAudioOutputDeviceEvidence, RealtimeAudioOutputOpenFailure,
-    RealtimeAudioOutputOpenFailureCode, RealtimeAudioSampleFormat,
+    discover_realtime_audio_output_devices, RealtimeAudioCandidateCounts,
+    RealtimeAudioChannelSemantics, RealtimeAudioOutputContract, RealtimeAudioOutputDeviceCatalog,
+    RealtimeAudioOutputDeviceDescriptor, RealtimeAudioOutputDeviceEvidence,
+    RealtimeAudioOutputDeviceId, RealtimeAudioOutputDeviceIdError,
+    RealtimeAudioOutputDeviceSelection, RealtimeAudioOutputDiscoveryFailure,
+    RealtimeAudioOutputOpenFailure, RealtimeAudioOutputOpenFailureCode, RealtimeAudioSampleFormat,
     RealtimeAudioSupportedBufferSize,
 };
 pub use audio_output::RealtimeAudioOutputLossReason;

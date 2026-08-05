@@ -281,6 +281,10 @@ mod tests {
         let contract = output_contract();
         let device = RealtimeAudioOutputDeviceEvidence {
             host_name: "test-host".to_owned(),
+            device_id: mondrian_media::RealtimeAudioOutputDeviceId::new("test:test-device")
+                .expect("test device identity"),
+            selection: mondrian_media::RealtimeAudioOutputDeviceSelection::SystemDefault,
+            was_system_default: true,
             device_name: Some("test-device".to_owned()),
             device_name_error: None,
             contract,

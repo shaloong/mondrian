@@ -18,7 +18,7 @@ mondrian-core = { workspace = true }
 ffmpeg-next = "8"
 
 # 音频
-cpal    = "0.15"    # 跨平台音频输出
+cpal    = "0.18.1"  # 跨平台音频输出与稳定设备身份
 rubato  = "0.15"    # 高质量重采样
 
 # 异步

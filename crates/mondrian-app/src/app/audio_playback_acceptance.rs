@@ -943,6 +943,8 @@ mod tests {
                 controlled_recycle_count: 1,
                 backend_loss_count: 0,
                 deactivation_failed_count: 0,
+                default_device_change_count: 0,
+                device_selection_change_count: 0,
                 last_opened_generation: Some(12),
                 last_lost_generation: Some(11),
                 last_loss: Some(AudioOutputLossSnapshot {

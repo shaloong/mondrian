@@ -51,6 +51,7 @@ use crate::app::ui_actions::{
 };
 use crate::app::waveform_service::AudioWaveformSource;
 use crate::app::AppState;
+use crate::app_ui::audio_device_catalog::AudioOutputDeviceCatalogState;
 use crate::app_ui::interpret_asset_dialog::AppUiInterpretAssetDraft;
 use crate::app_ui::menu_bar::MenuBar;
 use crate::app_ui::modal::ShellModal;
@@ -595,6 +596,7 @@ pub struct AppUiAppRoot {
     models: AppUiPanelModels,
     asset_folder_id: Option<String>,
     preferences_model: AppUiPreferencesModel,
+    audio_output_device_catalog: AudioOutputDeviceCatalogState,
     workspace_preset: WorkspacePreset,
     custom_workspace_layout: Option<AppUiWorkspaceLayout>,
     viewer_zoom_mode: ViewerZoomMode,
@@ -663,7 +665,7 @@ impl AppUiAppRoot {
                 ),
             ),
             models,
-            AppUiPreferencesModel::from_app_state_with_shortcut_overrides(
+            AppUiPreferencesModel::from_app_state_with_shortcut_overrides_and_audio_output(
                 state,
                 preferences.workspace_preset,
                 preferences.theme_preference,
@@ -671,6 +673,8 @@ impl AppUiAppRoot {
                 &preferences.shortcut_overrides,
                 preferences.waveform_display,
                 preferences.viewer_canvas_background,
+                preferences.audio_output_device.clone(),
+                AudioOutputDeviceCatalogState::Loading,
             ),
             preferences.workspace_preset,
             preferences.custom_workspace_layout.clone(),
@@ -733,6 +737,7 @@ impl AppUiAppRoot {
             workspace_preset,
             custom_workspace_layout.as_ref(),
         );
+        let audio_output_device_catalog = preferences_model.audio_output_device_catalog.clone();
         let mut root = Self {
             id: WidgetId::new(),
             title_bar,
@@ -745,6 +750,7 @@ impl AppUiAppRoot {
             models,
             asset_folder_id: None,
             preferences_model,
+            audio_output_device_catalog,
             workspace_preset,
             custom_workspace_layout,
             viewer_zoom_mode,
@@ -915,6 +921,7 @@ impl AppUiAppRoot {
             custom_workspace_layout: self.custom_workspace_layout.clone(),
             waveform_display: WaveformDisplay::BottomAligned,
             viewer_canvas_background: self.models.viewer.canvas_background,
+            audio_output_device: Default::default(),
         };
         self.refresh_from_app_state_with_preferences(state, &preferences);
     }
@@ -1015,20 +1022,35 @@ impl AppUiAppRoot {
         apply_viewer_canvas_background(&mut models, preferences.viewer_canvas_background);
         apply_viewer_zoom_mode(&mut models, self.viewer_zoom_mode);
         self.set_models(models);
-        let preferences_model = AppUiPreferencesModel::from_app_state_with_shortcut_overrides(
-            state,
-            self.workspace_preset,
-            preferences.theme_preference,
-            preferences.theme_preference.resolve(ThemePreset::Dark),
-            &preferences.shortcut_overrides,
-            preferences.waveform_display,
-            preferences.viewer_canvas_background,
-        );
+        let preferences_model =
+            AppUiPreferencesModel::from_app_state_with_shortcut_overrides_and_audio_output(
+                state,
+                self.workspace_preset,
+                preferences.theme_preference,
+                preferences.theme_preference.resolve(ThemePreset::Dark),
+                &preferences.shortcut_overrides,
+                preferences.waveform_display,
+                preferences.viewer_canvas_background,
+                preferences.audio_output_device.clone(),
+                self.audio_output_device_catalog.clone(),
+            );
         self.preferences_model = preferences_model.clone();
         if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_preferences_mut) {
             dialog.set_model(preferences_model);
         }
         self.refresh_shell_menu_checked_state();
+    }
+
+    /// Publish one device-catalog observation without rebuilding editor panels.
+    pub fn set_audio_output_device_catalog(&mut self, catalog: AudioOutputDeviceCatalogState) {
+        if self.audio_output_device_catalog == catalog {
+            return;
+        }
+        self.audio_output_device_catalog = catalog.clone();
+        self.preferences_model.set_audio_output_device_catalog(catalog);
+        if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_preferences_mut) {
+            dialog.set_model(self.preferences_model.clone());
+        }
     }
 
     /// Activate a dock panel or grouped tab in the default app UI layout.

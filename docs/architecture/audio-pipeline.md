@@ -917,10 +917,14 @@ underrun recovery, and device-clock evidence. The CPAL callback touches only a
 fixed-capacity queue and atomics; it does not allocate, decode, compile, log,
 inspect the Timeline, or lock a Session.
 
-`audio_device` is the sole Realtime Audio Output Negotiation Module. On every
-open/reopen attempt it enumerates the current default device's
-`supported_output_configs`; it never combines the default configuration's
-sample format with an unproven requested rate/channel tuple. Candidate
+`audio_device` is the sole Realtime Audio Output Negotiation Module. Runtime
+selection is an app preference, never Project or Sequence authoring. It is
+either `SystemDefault` or one exact, bounded CPAL stable `DeviceId`; a missing
+specific device remains the selected intent and produces a typed unavailable
+failure rather than silently falling back. On every open/reopen attempt the
+Module resolves that intent and enumerates the selected device's
+`supported_output_configs`; it never combines a default configuration's sample
+format with an unproven requested rate/channel tuple. Candidate
 selection requires the exact requested channel extent and a range containing
 the exact requested sample rate, then deterministically prefers F32/F64 and
 signed higher-precision integer formats before lower-precision/unsigned
@@ -935,13 +939,27 @@ rejected even when the count matches until a platform Adapter proves the
 positions and order. Success publishes one `RealtimeAudioOutputContract` with
 semantic layout, exact rate, scalar format, buffer-range evidence, and counts
 for enumerated/channel/rate/executable candidates. Low-frequency device
-evidence also retains CPAL host, optional device name, and any nonfatal name
+evidence also retains CPAL host, stable device identity, resolved selection,
+whether it was the system default, optional device name, and any nonfatal name
 query failure. Every callback snapshot embeds that exact Contract; Audio
 Playback rejects disagreement between the open event and callback observation.
 Open failures carry a stable code, request, candidate counts, optional selected
 Contract, and backend detail. `AppState` composes physical evidence with
 `AudioDeliveryEvidence` only while the current stream Contract and delivery
 target match, so diagnostics cannot join facts from different device states.
+
+Physical discovery is a separate low-frequency Window Adapter. It performs no
+CPAL call on the UI thread or realtime callback, owns at most one bounded
+one-shot attempt, and publishes an immutable catalog snapshot. Preferences may
+select a catalog identity or request rediscovery. The device worker observes
+the latest selection outside the callback. A selection change retires the old
+stream through the ordinary destroy-then-observe `Lost` path and opens a new
+checked stream generation. While following `SystemDefault`, it also compares
+the current default's stable identity at low frequency and performs the same
+generation handoff when the OS default changes. Failure, absence, or switching
+uses the existing Synthetic Clock Master continuity policy; it never promotes
+video to Clock Master. A transient discovery failure does not tear down an
+already healthy stream.
 
 Construction is fail-closed. `AudioPlayback` is returned only after its owned
 PCM render worker has spawned successfully; worker creation failure is a typed

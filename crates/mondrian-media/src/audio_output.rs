@@ -5,19 +5,25 @@ use crate::audio::{
     RealtimeAudioOutputEnqueueError, RealtimeAudioOutputHandle, RealtimeAudioOutputQuiescenceToken,
     RealtimeAudioOutputSnapshot,
 };
-use crate::{RealtimeAudioOutputDeviceEvidence, RealtimeAudioOutputOpenFailure};
+use crate::audio_device::current_default_realtime_audio_output_device_id;
+use crate::{
+    RealtimeAudioOutputDeviceEvidence, RealtimeAudioOutputDeviceId,
+    RealtimeAudioOutputDeviceSelection, RealtimeAudioOutputOpenFailure,
+};
 use mondrian_core::AudioChannelLayout;
+use parking_lot::Mutex;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(250);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(5);
 const DEVICE_HEALTH_POLL: Duration = Duration::from_millis(20);
+const DEFAULT_DEVICE_IDENTITY_POLL: Duration = Duration::from_secs(1);
 
 /// One lifecycle transition emitted while polling [`RealtimeAudioOutputManager`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +58,10 @@ pub enum RealtimeAudioOutputLossReason {
     ControlledRecycle,
     /// Callback deactivation failed, so retirement forced silence before drop.
     DeactivationFailed,
+    /// A `SystemDefault` selection observed a different stable default identity.
+    DefaultDeviceChanged,
+    /// The user/runtime selected a different explicit device intent.
+    DeviceSelectionChanged,
 }
 
 /// Failure to create the owned realtime device lifecycle worker.
@@ -104,6 +114,7 @@ pub(crate) enum RealtimeAudioOutputRecycleError {
 pub struct RealtimeAudioOutputManager {
     sample_rate: u32,
     channel_layout: AudioChannelLayout,
+    device_selection: Arc<Mutex<RealtimeAudioOutputDeviceSelection>>,
     handle: Option<RealtimeAudioOutputHandle>,
     event_rx: Option<Receiver<WorkerEvent>>,
     command_tx: Option<Sender<WorkerCommand>>,
@@ -114,9 +125,23 @@ pub struct RealtimeAudioOutputManager {
 impl RealtimeAudioOutputManager {
     /// Create a dormant manager. The first poll starts its device lifecycle thread.
     pub fn new(sample_rate: u32, channel_layout: AudioChannelLayout) -> Self {
+        Self::new_with_device_selection(
+            sample_rate,
+            channel_layout,
+            RealtimeAudioOutputDeviceSelection::SystemDefault,
+        )
+    }
+
+    /// Create a dormant manager bound to one explicit runtime device intent.
+    pub fn new_with_device_selection(
+        sample_rate: u32,
+        channel_layout: AudioChannelLayout,
+        device_selection: RealtimeAudioOutputDeviceSelection,
+    ) -> Self {
         Self {
             sample_rate,
             channel_layout,
+            device_selection: Arc::new(Mutex::new(device_selection)),
             handle: None,
             event_rx: None,
             command_tx: None,
@@ -135,6 +160,7 @@ impl RealtimeAudioOutputManager {
         spawner: impl FnOnce(
             u32,
             AudioChannelLayout,
+            Arc<Mutex<RealtimeAudioOutputDeviceSelection>>,
             Arc<AtomicBool>,
             Sender<WorkerEvent>,
             Receiver<WorkerCommand>,
@@ -149,6 +175,7 @@ impl RealtimeAudioOutputManager {
         let worker = spawner(
             self.sample_rate,
             self.channel_layout,
+            Arc::clone(&self.device_selection),
             worker_shutdown,
             event_tx,
             command_rx,
@@ -282,6 +309,20 @@ impl RealtimeAudioOutputManager {
         self.handle.as_ref().map(RealtimeAudioOutputHandle::snapshot)
     }
 
+    /// Replace the latest-wins runtime device intent.
+    ///
+    /// The device worker observes this low-frequency value outside the audio
+    /// callback, retires any stream opened for the old intent, and publishes a
+    /// normal Lost/Open generation handoff. Returns `false` for a no-op.
+    pub fn set_device_selection(&self, selection: RealtimeAudioOutputDeviceSelection) -> bool {
+        let mut current = self.device_selection.lock();
+        if *current == selection {
+            return false;
+        }
+        *current = selection;
+        true
+    }
+
     #[cfg(feature = "validation")]
     pub(crate) fn request_controlled_recycle(
         &self,
@@ -326,6 +367,7 @@ impl Drop for RealtimeAudioOutputManager {
 fn spawn_device_worker(
     sample_rate: u32,
     channel_layout: AudioChannelLayout,
+    device_selection: Arc<Mutex<RealtimeAudioOutputDeviceSelection>>,
     worker_shutdown: Arc<AtomicBool>,
     event_tx: Sender<WorkerEvent>,
     command_rx: Receiver<WorkerCommand>,
@@ -334,6 +376,7 @@ fn spawn_device_worker(
         run_device_worker(
             sample_rate,
             channel_layout,
+            device_selection,
             &worker_shutdown,
             &event_tx,
             &command_rx,
@@ -344,22 +387,28 @@ fn spawn_device_worker(
 fn run_device_worker(
     sample_rate: u32,
     channel_layout: AudioChannelLayout,
+    device_selection: Arc<Mutex<RealtimeAudioOutputDeviceSelection>>,
     worker_shutdown: &AtomicBool,
     event_tx: &Sender<WorkerEvent>,
     command_rx: &Receiver<WorkerCommand>,
 ) {
     let mut consecutive_failures = 0_u32;
     while !worker_shutdown.load(Ordering::Acquire) {
-        match RealtimeAudioOutput::try_new(sample_rate, channel_layout) {
+        let opened_selection = device_selection.lock().clone();
+        match RealtimeAudioOutput::try_new(&opened_selection, sample_rate, channel_layout) {
             Ok((output, handle, observer)) => {
                 consecutive_failures = 0;
                 let stream_generation = handle.snapshot().stream_generation;
+                let selected_device_id = handle.device_evidence().device_id;
                 if event_tx.send(WorkerEvent::Opened(handle)).is_err() {
                     break;
                 }
                 let Some(mut loss_reason) = wait_for_stream_retirement(
                     &output,
                     stream_generation,
+                    &opened_selection,
+                    &device_selection,
+                    &selected_device_id,
                     worker_shutdown,
                     command_rx,
                 ) else {
@@ -398,17 +447,36 @@ fn run_device_worker(
 fn wait_for_stream_retirement(
     output: &RealtimeAudioOutput,
     stream_generation: u64,
+    opened_selection: &RealtimeAudioOutputDeviceSelection,
+    desired_selection: &Mutex<RealtimeAudioOutputDeviceSelection>,
+    selected_device_id: &RealtimeAudioOutputDeviceId,
     worker_shutdown: &AtomicBool,
     command_rx: &Receiver<WorkerCommand>,
 ) -> Option<RealtimeAudioOutputLossReason> {
     #[cfg(not(feature = "validation"))]
     let _ = stream_generation;
+    let mut last_default_device_poll = Instant::now();
     loop {
         if worker_shutdown.load(Ordering::Acquire) {
             return None;
         }
         if output.snapshot().stream_failed {
             return Some(RealtimeAudioOutputLossReason::BackendFailure);
+        }
+        if &*desired_selection.lock() != opened_selection {
+            return Some(RealtimeAudioOutputLossReason::DeviceSelectionChanged);
+        }
+        if last_default_device_poll.elapsed() >= DEFAULT_DEVICE_IDENTITY_POLL {
+            last_default_device_poll = Instant::now();
+            if let Ok(observed) = current_default_realtime_audio_output_device_id() {
+                if should_rebind_system_default(
+                    opened_selection,
+                    selected_device_id,
+                    observed.as_ref(),
+                ) {
+                    return Some(RealtimeAudioOutputLossReason::DefaultDeviceChanged);
+                }
+            }
         }
         match command_rx.recv_timeout(DEVICE_HEALTH_POLL) {
             #[cfg(feature = "validation")]
@@ -425,6 +493,15 @@ fn wait_for_stream_retirement(
             Err(mpsc::RecvTimeoutError::Disconnected) => return None,
         }
     }
+}
+
+fn should_rebind_system_default(
+    selection: &RealtimeAudioOutputDeviceSelection,
+    selected_device_id: &RealtimeAudioOutputDeviceId,
+    observed_default: Option<&RealtimeAudioOutputDeviceId>,
+) -> bool {
+    matches!(selection, RealtimeAudioOutputDeviceSelection::SystemDefault)
+        && observed_default.is_some_and(|observed| observed != selected_device_id)
 }
 
 fn drop_freeze_and_publish<T, Snapshot, PublishError>(
@@ -457,6 +534,47 @@ mod tests {
     use parking_lot::Mutex;
 
     #[test]
+    fn only_system_default_intent_rebinds_to_a_new_observed_identity() {
+        let selected =
+            RealtimeAudioOutputDeviceId::new("wasapi:selected").expect("selected identity");
+        let replacement =
+            RealtimeAudioOutputDeviceId::new("wasapi:replacement").expect("replacement identity");
+        assert!(should_rebind_system_default(
+            &RealtimeAudioOutputDeviceSelection::SystemDefault,
+            &selected,
+            Some(&replacement),
+        ));
+        assert!(!should_rebind_system_default(
+            &RealtimeAudioOutputDeviceSelection::SystemDefault,
+            &selected,
+            Some(&selected),
+        ));
+        assert!(!should_rebind_system_default(
+            &RealtimeAudioOutputDeviceSelection::SystemDefault,
+            &selected,
+            None,
+        ));
+        assert!(!should_rebind_system_default(
+            &RealtimeAudioOutputDeviceSelection::Specific { device_id: selected.clone() },
+            &selected,
+            Some(&replacement),
+        ));
+    }
+
+    #[test]
+    fn manager_device_selection_is_latest_wins_and_rejects_noop() {
+        let manager = RealtimeAudioOutputManager::new(48_000, AudioChannelLayout::Stereo);
+        assert!(!manager.set_device_selection(RealtimeAudioOutputDeviceSelection::SystemDefault));
+        let specific = RealtimeAudioOutputDeviceSelection::Specific {
+            device_id: RealtimeAudioOutputDeviceId::new("wasapi:selected")
+                .expect("specific identity"),
+        };
+        assert!(manager.set_device_selection(specific.clone()));
+        assert!(!manager.set_device_selection(specific));
+        assert!(manager.set_device_selection(RealtimeAudioOutputDeviceSelection::SystemDefault));
+    }
+
+    #[test]
     fn retry_delay_is_exponential_and_bounded() {
         assert_eq!(retry_delay(1), Duration::from_millis(250));
         assert_eq!(retry_delay(2), Duration::from_millis(500));
@@ -468,7 +586,7 @@ mod tests {
     fn injected_device_worker_spawn_failure_remains_a_structured_start_error() {
         let mut manager = RealtimeAudioOutputManager::new(48_000, AudioChannelLayout::Stereo);
 
-        let result = manager.ensure_worker_started_with(|_, _, _, _, _| {
+        let result = manager.ensure_worker_started_with(|_, _, _, _, _, _| {
             Err(io::Error::other("injected device-worker spawn failure"))
         });
 
@@ -484,7 +602,7 @@ mod tests {
         let exited = Arc::new(AtomicBool::new(false));
         let worker_exited = Arc::clone(&exited);
         manager
-            .ensure_worker_started_with(move |_, _, shutdown, _, _| {
+            .ensure_worker_started_with(move |_, _, _, shutdown, _, _| {
                 thread::Builder::new().name("mondrian-audio-device-test".to_owned()).spawn(
                     move || {
                         while !shutdown.load(Ordering::Acquire) {

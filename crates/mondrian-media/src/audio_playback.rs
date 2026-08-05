@@ -11,7 +11,8 @@ use crate::audio_output::{
 };
 use crate::{
     AudioBuffer, RealtimeAudioOutputContract, RealtimeAudioOutputDeviceEvidence,
-    RealtimeAudioOutputOpenFailure, RealtimeAudioOutputSnapshot,
+    RealtimeAudioOutputDeviceSelection, RealtimeAudioOutputOpenFailure,
+    RealtimeAudioOutputSnapshot,
 };
 use mondrian_core::{
     AudioChannelLayout, AudioSamplePosition, AudioSampleRate, AudioTimeError,
@@ -358,6 +359,10 @@ pub struct AudioOutputLifecycleDiagnostics {
     pub backend_loss_count: u64,
     /// Losses whose callback deactivation token could not be allocated.
     pub deactivation_failed_count: u64,
+    /// Losses caused by a successful new system-default identity observation.
+    pub default_device_change_count: u64,
+    /// Losses caused by a latest-wins explicit device-selection update.
+    pub device_selection_change_count: u64,
     /// Most recently installed concrete stream generation.
     pub last_opened_generation: Option<u64>,
     /// Most recently destroyed concrete stream generation.
@@ -494,6 +499,8 @@ impl AudioPlaybackSnapshot {
                 controlled_recycle_count: 0,
                 backend_loss_count: 0,
                 deactivation_failed_count: 0,
+                default_device_change_count: 0,
+                device_selection_change_count: 0,
                 last_opened_generation: None,
                 last_lost_generation: None,
                 last_loss: None,
@@ -607,6 +614,10 @@ trait AudioOutputAdapter {
     fn buffered_frames(&self) -> usize;
     fn capacity_frames(&self) -> Option<usize>;
     fn snapshot(&self) -> Option<RealtimeAudioOutputSnapshot>;
+
+    fn set_device_selection(&self, _selection: RealtimeAudioOutputDeviceSelection) -> bool {
+        false
+    }
     #[cfg(feature = "validation")]
     fn request_controlled_recycle(
         &self,
@@ -664,6 +675,10 @@ impl AudioOutputAdapter for RealtimeAudioOutputManager {
 
     fn snapshot(&self) -> Option<RealtimeAudioOutputSnapshot> {
         RealtimeAudioOutputManager::snapshot(self)
+    }
+
+    fn set_device_selection(&self, selection: RealtimeAudioOutputDeviceSelection) -> bool {
+        RealtimeAudioOutputManager::set_device_selection(self, selection)
     }
 
     #[cfg(feature = "validation")]
@@ -750,6 +765,19 @@ impl AudioPlayback {
     /// Construct production Audio Playback with a dedicated CPAL lifecycle thread and render worker.
     pub fn new(config: AudioPlaybackConfig) -> Result<Self, AudioPlaybackCreateError> {
         let output = RealtimeAudioOutputManager::new(config.sample_rate, config.channel_layout);
+        Self::with_output(config, Box::new(output))
+    }
+
+    /// Construct production Audio Playback with one explicit runtime device intent.
+    pub fn new_with_output_device(
+        config: AudioPlaybackConfig,
+        selection: RealtimeAudioOutputDeviceSelection,
+    ) -> Result<Self, AudioPlaybackCreateError> {
+        let output = RealtimeAudioOutputManager::new_with_device_selection(
+            config.sample_rate,
+            config.channel_layout,
+            selection,
+        );
         Self::with_output(config, Box::new(output))
     }
 
@@ -1095,6 +1123,18 @@ impl AudioPlayback {
                                 self.output_lifecycle.deactivation_failed_count = self
                                     .output_lifecycle
                                     .deactivation_failed_count
+                                    .saturating_add(1);
+                            }
+                            RealtimeAudioOutputLossReason::DefaultDeviceChanged => {
+                                self.output_lifecycle.default_device_change_count = self
+                                    .output_lifecycle
+                                    .default_device_change_count
+                                    .saturating_add(1);
+                            }
+                            RealtimeAudioOutputLossReason::DeviceSelectionChanged => {
+                                self.output_lifecycle.device_selection_change_count = self
+                                    .output_lifecycle
+                                    .device_selection_change_count
                                     .saturating_add(1);
                             }
                         }
@@ -1482,6 +1522,18 @@ impl AudioPlayback {
         true
     }
 
+    /// Publish a latest-wins runtime output-device intent.
+    ///
+    /// A changed intent is observed by the device lifecycle worker and lowered
+    /// through the same Lost/Open generation handoff as physical device loss.
+    /// It does not mutate Project or Sequence state.
+    pub fn set_output_device_selection(
+        &self,
+        selection: RealtimeAudioOutputDeviceSelection,
+    ) -> bool {
+        self.output.set_device_selection(selection)
+    }
+
     /// Most recent successful physical device/configuration negotiation.
     ///
     /// Evidence remains available after loss so diagnostics can explain which
@@ -1657,6 +1709,10 @@ mod tests {
     ) -> crate::RealtimeAudioOutputDeviceEvidence {
         crate::RealtimeAudioOutputDeviceEvidence {
             host_name: "test-host".to_owned(),
+            device_id: crate::RealtimeAudioOutputDeviceId::new("test:test-output")
+                .expect("test device identity"),
+            selection: crate::RealtimeAudioOutputDeviceSelection::SystemDefault,
+            was_system_default: true,
             device_name: Some("test-output".to_owned()),
             device_name_error: None,
             contract,

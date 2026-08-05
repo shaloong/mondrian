@@ -36,6 +36,18 @@ The worker then opens a distinct checked stream generation. The validation seam
 is feature-gated and reachable publicly only through `AudioPlayback`; normal
 builds cannot synthesize lifecycle events.
 
+Output selection uses CPAL's cross-process stable `DeviceId`, not display name
+or enumeration index. `SystemDefault` and `Specific(DeviceId)` are distinct
+runtime intents. A specific identity that is absent fails closed and remains
+recoverable; it is never redirected to a similarly named or default device.
+The worker observes selection changes and low-frequency system-default identity
+changes outside the callback, destroys the old stream, publishes typed loss
+evidence, and then negotiates a fresh generation. Catalog enumeration is a
+separate App Window Adapter so operating-system device discovery cannot block
+the UI or callback. CPAL still supplies only portable channel counts: named
+multichannel speaker layouts remain blocked until an OS Adapter proves channel
+positions and order.
+
 Realtime transport, Clock Master selection, Frame Demand deadlines, and the
 interpretation of Frame Deliveries belong to the app Playback Engine described
 in [Playback Engine](playback-engine.md). `mondrian-media` executes bounded

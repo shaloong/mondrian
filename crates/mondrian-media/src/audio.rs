@@ -1,8 +1,8 @@
 //! 音频缓冲区与混合器
 
 use crate::audio_device::{
-    prepare_default_realtime_audio_output, RealtimeAudioOutputContract,
-    RealtimeAudioOutputDeviceEvidence, RealtimeAudioOutputOpenFailure,
+    prepare_realtime_audio_output, RealtimeAudioOutputContract, RealtimeAudioOutputDeviceEvidence,
+    RealtimeAudioOutputDeviceSelection, RealtimeAudioOutputOpenFailure,
     RealtimeAudioOutputOpenFailureCode,
 };
 use cpal::traits::{DeviceTrait, StreamTrait};
@@ -592,13 +592,14 @@ fn saturating_atomic_add(value: &AtomicU64, increment: u64) {
 
 impl RealtimeAudioOutput {
     pub(crate) fn try_new(
+        selection: &RealtimeAudioOutputDeviceSelection,
         sample_rate: u32,
         channel_layout: AudioChannelLayout,
     ) -> std::result::Result<
         (Self, RealtimeAudioOutputHandle, RealtimeAudioOutputObserver),
         RealtimeAudioOutputCreateError,
     > {
-        let prepared = prepare_default_realtime_audio_output(sample_rate, channel_layout)?;
+        let prepared = prepare_realtime_audio_output(selection, sample_rate, channel_layout)?;
         let contract = prepared.evidence.contract;
         let channels = contract.channels();
 
@@ -632,7 +633,7 @@ impl RealtimeAudioOutput {
             telemetry_for_error.stream_failed.store(true, Ordering::Release);
         };
 
-        let build = |error: cpal::BuildStreamError| {
+        let build = |error: cpal::Error| {
             RealtimeAudioOutputOpenFailure::after_selection(
                 RealtimeAudioOutputOpenFailureCode::StreamBuildFailed,
                 contract,
@@ -1084,14 +1085,14 @@ fn build_sample_stream<T>(
     queue: Arc<ArrayQueue<f32>>,
     callback_control: Arc<RealtimeAudioCallbackControl>,
     telemetry: Arc<RealtimeAudioOutputTelemetry>,
-    err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
-) -> std::result::Result<cpal::Stream, cpal::BuildStreamError>
+    err_fn: impl FnMut(cpal::Error) + Send + 'static,
+) -> std::result::Result<cpal::Stream, cpal::Error>
 where
     T: SizedSample + FromSample<f32>,
 {
     let channels = config.channels.max(1) as usize;
     device.build_output_stream(
-        config,
+        *config,
         move |data: &mut [T], info| {
             let frames = data.len() / channels;
             let playback_delay = callback_playback_delay(info);
@@ -1123,7 +1124,7 @@ where
 
 fn callback_playback_delay(info: &cpal::OutputCallbackInfo) -> Duration {
     let timestamp = info.timestamp();
-    timestamp.playback.duration_since(&timestamp.callback).unwrap_or(Duration::ZERO)
+    timestamp.playback.duration_since(timestamp.callback)
 }
 
 #[cfg(test)]
@@ -1215,6 +1216,10 @@ mod tests {
     ) -> Arc<RealtimeAudioOutputDeviceEvidence> {
         Arc::new(RealtimeAudioOutputDeviceEvidence {
             host_name: "test".to_owned(),
+            device_id: crate::RealtimeAudioOutputDeviceId::new("test:test-output")
+                .expect("test device identity"),
+            selection: crate::RealtimeAudioOutputDeviceSelection::SystemDefault,
+            was_system_default: true,
             device_name: Some("test-output".to_owned()),
             device_name_error: None,
             contract,

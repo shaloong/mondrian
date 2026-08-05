@@ -36,16 +36,18 @@ use crate::app::preview_runtime::{
 };
 use crate::app::preview_work_notification::PreviewWorkWatch;
 use crate::app::ui_actions::{
-    AssetsOpenFolderPayload, PreferencesShortcutPayload, PreferencesShortcutReboundPayload,
-    PreferencesThemePayload, PreferencesViewerBackgroundPayload, PreferencesWaveformDisplayPayload,
-    APP_SHELL_ASSET_BROWSER_OPEN_FOLDER, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG,
-    APP_SHELL_CLOSE_MODAL, APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_CONFIRM_RECOVERY_DIALOG,
-    APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
+    AssetsOpenFolderPayload, PreferencesAudioOutputDevicePayload, PreferencesShortcutPayload,
+    PreferencesShortcutReboundPayload, PreferencesThemePayload, PreferencesViewerBackgroundPayload,
+    PreferencesWaveformDisplayPayload, APP_SHELL_ASSET_BROWSER_OPEN_FOLDER,
+    APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
+    APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_CONFIRM_RECOVERY_DIALOG, APP_SHELL_NAMESPACE,
+    APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
     APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PENDING_CLOSE_CANCEL,
     APP_SHELL_PENDING_CLOSE_DISCARD, APP_SHELL_PENDING_CLOSE_SAVE_CONTINUE,
-    APP_SHELL_PREFERENCES_SHORTCUT_DISABLED, APP_SHELL_PREFERENCES_SHORTCUT_REBOUND,
-    APP_SHELL_PREFERENCES_SHORTCUT_RESET, APP_SHELL_PREFERENCES_THEME_CHANGED,
-    APP_SHELL_PREFERENCES_VIEWER_BACKGROUND_CHANGED,
+    APP_SHELL_PREFERENCES_AUDIO_OUTPUT_DEVICE_CHANGED,
+    APP_SHELL_PREFERENCES_REFRESH_AUDIO_OUTPUT_DEVICES, APP_SHELL_PREFERENCES_SHORTCUT_DISABLED,
+    APP_SHELL_PREFERENCES_SHORTCUT_REBOUND, APP_SHELL_PREFERENCES_SHORTCUT_RESET,
+    APP_SHELL_PREFERENCES_THEME_CHANGED, APP_SHELL_PREFERENCES_VIEWER_BACKGROUND_CHANGED,
     APP_SHELL_PREFERENCES_WAVEFORM_DISPLAY_CHANGED, APP_SHELL_QUIT, APP_SHELL_RECOVERY_DIALOG,
     APP_SHELL_RECOVER_PROJECT, APP_SHELL_WINDOW_DRAG, APP_SHELL_WINDOW_MINIMIZE,
     APP_SHELL_WINDOW_TOGGLE_MAXIMIZE,
@@ -59,6 +61,7 @@ use crate::app::{
 use crate::app_ui::action_availability::app_state_action_enabled;
 use crate::app_ui::action_queue::PendingUiActions;
 use crate::app_ui::asset_thumbnails::AssetThumbnailAdapter;
+use crate::app_ui::audio_device_catalog::AudioOutputDeviceCatalogAdapter;
 use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
 use crate::app_ui::pending_close_dialog::PendingCloseDialogAction;
 use crate::app_ui::playback_feedback::ViewerPlaybackFeedback;
@@ -139,6 +142,7 @@ pub struct AppUiHost {
     preferences_path: PathBuf,
     recovery_candidates: Vec<CrashRecoveryCandidate>,
     asset_thumbnails: AssetThumbnailAdapter,
+    audio_device_catalog: AudioOutputDeviceCatalogAdapter,
     waveform_service: Arc<AudioWaveformService>,
     preview_service: WindowPreviewAdapter,
     window_preview_state: RefCell<ViewerPreviewState>,
@@ -196,6 +200,7 @@ impl AppUiHost {
         preferences: AppUiPreferences,
         preferences_path: PathBuf,
     ) -> Self {
+        app_state.set_audio_output_device_selection(preferences.audio_output_device.clone());
         let system_theme_preset = ThemePreset::Dark;
         set_theme_preset(preferences.theme_preference.resolve(system_theme_preset));
         let asset_thumbnails = AssetThumbnailAdapter::new();
@@ -213,13 +218,15 @@ impl AppUiHost {
         let window_preview_state = preview_service.viewer_preview_for_state(&app_state);
         let window_preview_snapshot =
             WindowPreviewSnapshot::new(&window_preview_state, &preview_service);
-        let root = AppUiAppRoot::from_app_state_with_preferences_thumbnails_and_preview(
+        let audio_device_catalog = AudioOutputDeviceCatalogAdapter::new();
+        let mut root = AppUiAppRoot::from_app_state_with_preferences_thumbnails_and_preview(
             &app_state,
             &preferences,
             Some(&asset_thumbnails),
             Some(&window_preview_snapshot),
             Some(waveform_service.source()),
         );
+        root.set_audio_output_device_catalog(audio_device_catalog.state().clone());
         let playback_feedback = root.viewer_playback_feedback();
         let mode = if app_state.has_open_project() {
             AppUiMode::Workspace
@@ -240,6 +247,7 @@ impl AppUiHost {
             preferences_path,
             recovery_candidates,
             asset_thumbnails,
+            audio_device_catalog,
             waveform_service,
             preview_service,
             window_preview_state: RefCell::new(window_preview_state),
@@ -890,6 +898,11 @@ impl AppUiHost {
             };
         let export_queue_changed = self.app_state.borrow_mut().poll_export_queue();
         let thumbnails_changed = self.asset_thumbnails.poll_finished();
+        let audio_devices_changed = self.audio_device_catalog.poll_finished();
+        if audio_devices_changed {
+            self.root
+                .set_audio_output_device_catalog(self.audio_device_catalog.state().clone());
+        }
         let preview_outcome =
             pump_playback_preview(&mut self.app_state.borrow_mut(), &self.preview_service);
         let waveform_changed = self.waveform_service.poll_finished();
@@ -910,6 +923,7 @@ impl AppUiHost {
             || waveform_changed;
         let mut outcome =
             AppUiBackgroundTaskPollOutcome::from_changes(full_model_changed, preview_outcome);
+        outcome.repaint_required |= audio_devices_changed;
         outcome.quit_requested = quit_requested;
         if !full_model_changed {
             if preview_outcome.visible_change {
@@ -1372,6 +1386,20 @@ impl AppUiHost {
                     }
                     PreferencesUpdate::ViewerBackground(payload) => {
                         self.preferences.viewer_canvas_background = payload.background;
+                    }
+                    PreferencesUpdate::AudioOutputDevice(payload) => {
+                        self.preferences.audio_output_device = payload.selection.clone();
+                        self.app_state
+                            .borrow()
+                            .set_audio_output_device_selection(payload.selection);
+                    }
+                    PreferencesUpdate::RefreshAudioOutputDevices => {
+                        self.audio_device_catalog.request_refresh();
+                        self.root.set_audio_output_device_catalog(
+                            self.audio_device_catalog.state().clone(),
+                        );
+                        TreeWalker::layout(&mut self.root, bounds);
+                        return true;
                     }
                     PreferencesUpdate::ShortcutDisabled(payload) => {
                         if !is_known_shortcut_id(&payload.id) {
@@ -1999,6 +2027,8 @@ enum PreferencesUpdate {
     Theme(PreferencesThemePayload),
     WaveformDisplay(PreferencesWaveformDisplayPayload),
     ViewerBackground(PreferencesViewerBackgroundPayload),
+    AudioOutputDevice(PreferencesAudioOutputDevicePayload),
+    RefreshAudioOutputDevices,
     ShortcutDisabled(PreferencesShortcutPayload),
     ShortcutReset(PreferencesShortcutPayload),
     ShortcutRebound(PreferencesShortcutReboundPayload),
@@ -2024,6 +2054,18 @@ fn parse_preferences_update(
                 && name == APP_SHELL_PREFERENCES_VIEWER_BACKGROUND_CHANGED =>
         {
             Some(serde_json::from_value(payload.clone()).map(PreferencesUpdate::ViewerBackground))
+        }
+        Action::Custom { namespace, name, payload }
+            if namespace == APP_SHELL_NAMESPACE
+                && name == APP_SHELL_PREFERENCES_AUDIO_OUTPUT_DEVICE_CHANGED =>
+        {
+            Some(serde_json::from_value(payload.clone()).map(PreferencesUpdate::AudioOutputDevice))
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE
+                && name == APP_SHELL_PREFERENCES_REFRESH_AUDIO_OUTPUT_DEVICES =>
+        {
+            Some(Ok(PreferencesUpdate::RefreshAudioOutputDevices))
         }
         Action::Custom { namespace, name, payload }
             if namespace == APP_SHELL_NAMESPACE
@@ -3588,6 +3630,7 @@ mod tests {
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
+                audio_output_device: Default::default(),
             },
             temp_preferences_path("initial-workspace"),
         );
@@ -3661,6 +3704,7 @@ mod tests {
                 custom_workspace_layout: Some(layout.clone()),
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
+                audio_output_device: Default::default(),
             },
             temp_preferences_path("initial-custom-workspace"),
         );
@@ -4033,6 +4077,41 @@ mod tests {
     }
 
     #[test]
+    fn host_persists_specific_audio_device_intent_without_authoring_state() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let path = temp_preferences_path("audio-output-device-preferences");
+        let mut host = AppUiHost::new_with_preferences_path(
+            AppState::new(),
+            AppUiPreferences::default(),
+            path.clone(),
+        );
+        let device_id =
+            mondrian_media::RealtimeAudioOutputDeviceId::new("wasapi:host-preference-device")
+                .expect("fixture device identity");
+        let selection = mondrian_media::RealtimeAudioOutputDeviceSelection::Specific { device_id };
+        let pending = PendingUiActions::default();
+        pending.push(
+            crate::app::ui_actions::app_shell_preferences_audio_output_device_changed_action(
+                selection.clone(),
+            ),
+        );
+
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, AppUiShellCommands::default());
+        assert_eq!(host.preferences().audio_output_device, selection);
+        assert_eq!(
+            load_app_ui_preferences_from(&path).audio_output_device,
+            selection
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn host_resolves_system_theme_preference_from_desktop_theme() {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let mut host = AppUiHost::new_with_preferences_path(
@@ -4141,6 +4220,7 @@ mod tests {
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
+                audio_output_device: Default::default(),
             },
             path.clone(),
         );
@@ -4242,6 +4322,7 @@ mod tests {
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
+                audio_output_device: Default::default(),
             },
             path.clone(),
         );

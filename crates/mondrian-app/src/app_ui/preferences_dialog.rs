@@ -7,24 +7,28 @@
 use mondrian_core::Color;
 use mondrian_editor_state::state::WorkspacePreset;
 use mondrian_export::preset::TimelineExportRange;
+use mondrian_media::{RealtimeAudioOutputDeviceCatalog, RealtimeAudioOutputDeviceSelection};
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, Widget};
 use mondrian_ui_theme::{ThemePreference, ThemePreset};
 use mondrian_ui_widgets::{
-    Button, ContextMenu, DialogSurface, Label, MenuItem, SegmentedButtonGroup, SegmentedButtonItem,
-    TextInput, VectorIcon, ViewerCanvasBackground, WaveformDisplay,
+    Button, ContextMenu, DialogSurface, Dropdown, Label, MenuItem, SegmentedButtonGroup,
+    SegmentedButtonItem, TextInput, VectorIcon, ViewerCanvasBackground, WaveformDisplay,
 };
 
 use crate::app::ui_actions::{
-    app_shell_close_modal_action, app_shell_preferences_shortcut_disabled_action,
-    app_shell_preferences_shortcut_rebound_action, app_shell_preferences_shortcut_reset_action,
-    app_shell_preferences_tab_changed_action, app_shell_preferences_theme_changed_action,
+    app_shell_close_modal_action, app_shell_preferences_audio_output_device_changed_action,
+    app_shell_preferences_refresh_audio_output_devices_action,
+    app_shell_preferences_shortcut_disabled_action, app_shell_preferences_shortcut_rebound_action,
+    app_shell_preferences_shortcut_reset_action, app_shell_preferences_tab_changed_action,
+    app_shell_preferences_theme_changed_action,
     app_shell_preferences_viewer_background_changed_action,
     app_shell_preferences_waveform_display_changed_action, PreferencesShortcutReboundPayload,
     PreferencesTabPayload,
 };
 use crate::app::AppState;
+use crate::app_ui::audio_device_catalog::AudioOutputDeviceCatalogState;
 use crate::app_ui::commands::{command_by_id, AppUiCommandCategory};
 use crate::app_ui::shortcuts::{
     active_shortcuts, default_shortcuts, AppUiShortcutBinding, AppUiShortcutKey,
@@ -60,7 +64,7 @@ const SHORTCUT_KEYCAP_PADDING_X: f32 = 8.0;
 const SHORTCUT_KEYCAP_MIN_WIDTH: f32 = 24.0;
 const SHORTCUT_KEYCAP_ACTION_GAP: f32 = 14.0;
 const SHORTCUT_CHEVRON_SIZE: f32 = 12.0;
-const PREFERENCES_INTERACTIVE_CHILD_COUNT: usize = PreferencesDialogTab::ALL.len() + 5;
+const PREFERENCES_INTERACTIVE_CHILD_COUNT: usize = PreferencesDialogTab::ALL.len() + 6;
 
 const CHEVRON_RIGHT_SVG: &str = r#"<svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
 const CHEVRON_DOWN_SVG: &str = r#"<svg viewBox="0 0 16 16"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
@@ -77,6 +81,9 @@ pub struct AppUiPreferencesModel {
     pub proxy_mode: String,
     pub audio_clock: String,
     pub audio_sample_rate: String,
+    pub audio_output_device_selection: RealtimeAudioOutputDeviceSelection,
+    pub audio_output_device_label: String,
+    pub audio_output_device_catalog: AudioOutputDeviceCatalogState,
     pub export_range: String,
     pub export_output: String,
     pub runtime_diagnostics: String,
@@ -104,6 +111,13 @@ pub struct ShortcutPreferenceRow {
 }
 
 impl AppUiPreferencesModel {
+    /// Replace only the low-frequency physical-device observation.
+    pub fn set_audio_output_device_catalog(&mut self, catalog: AudioOutputDeviceCatalogState) {
+        self.audio_output_device_label =
+            audio_output_device_label(&self.audio_output_device_selection, &catalog);
+        self.audio_output_device_catalog = catalog;
+    }
+
     /// Build the preferences model from the state actually owned by the
     /// app UI product shell.
     pub fn from_app_state(
@@ -133,6 +147,32 @@ impl AppUiPreferencesModel {
         waveform_display: WaveformDisplay,
         viewer_canvas_background: ViewerCanvasBackground,
     ) -> Self {
+        Self::from_app_state_with_shortcut_overrides_and_audio_output(
+            state,
+            workspace,
+            theme_preference,
+            resolved_theme_preset,
+            shortcut_overrides,
+            waveform_display,
+            viewer_canvas_background,
+            RealtimeAudioOutputDeviceSelection::SystemDefault,
+            AudioOutputDeviceCatalogState::Loading,
+        )
+    }
+
+    /// Build the preferences model with one runtime audio-device observation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_app_state_with_shortcut_overrides_and_audio_output(
+        state: &AppState,
+        workspace: WorkspacePreset,
+        theme_preference: ThemePreference,
+        resolved_theme_preset: ThemePreset,
+        shortcut_overrides: &[AppUiShortcutOverride],
+        waveform_display: WaveformDisplay,
+        viewer_canvas_background: ViewerCanvasBackground,
+        audio_output_device_selection: RealtimeAudioOutputDeviceSelection,
+        audio_output_device_catalog: AudioOutputDeviceCatalogState,
+    ) -> Self {
         let project_status = state
             .current_project_path()
             .map(|path| path.display().to_string())
@@ -149,6 +189,8 @@ impl AppUiPreferencesModel {
                 )
             })
             .unwrap_or_else(|| "没有活动序列".to_owned());
+        let audio_output_device_label =
+            audio_output_device_label(&audio_output_device_selection, &audio_output_device_catalog);
         Self {
             theme_preference,
             resolved_theme_preset,
@@ -162,6 +204,9 @@ impl AppUiPreferencesModel {
                 .map(|master| format!("{master:?}"))
                 .unwrap_or_else(|| "Inactive".to_owned()),
             audio_sample_rate: format!("{} Hz", state.audio_sample_rate),
+            audio_output_device_selection,
+            audio_output_device_label,
+            audio_output_device_catalog,
             export_range: export_range_label(state.export_draft.range).to_owned(),
             export_output: if state.export_draft.output_path.trim().is_empty() {
                 "未选择".to_owned()
@@ -195,6 +240,9 @@ impl Default for AppUiPreferencesModel {
             proxy_mode: enabled_label(false),
             audio_clock: "Inactive".to_owned(),
             audio_sample_rate: "48000 Hz".to_owned(),
+            audio_output_device_selection: RealtimeAudioOutputDeviceSelection::SystemDefault,
+            audio_output_device_label: "系统默认".to_owned(),
+            audio_output_device_catalog: AudioOutputDeviceCatalogState::Loading,
             export_range: export_range_label(TimelineExportRange::SequenceInOut).to_owned(),
             export_output: "未选择".to_owned(),
             runtime_diagnostics: "跟踪已启用".to_owned(),
@@ -274,6 +322,7 @@ pub struct PreferencesDialog {
     theme_group: SegmentedButtonGroup,
     waveform_group: SegmentedButtonGroup,
     viewer_background_group: SegmentedButtonGroup,
+    audio_output_device_dropdown: Dropdown,
     content_labels: Vec<Label>,
     close_button: Button,
 }
@@ -398,6 +447,7 @@ impl PreferencesDialog {
             ],
             viewer_background_selected,
         );
+        let audio_output_device_dropdown = audio_output_device_dropdown(&model);
         let mut dialog = Self {
             id: WidgetId::new(),
             active_tab,
@@ -424,6 +474,7 @@ impl PreferencesDialog {
             theme_group,
             waveform_group,
             viewer_background_group,
+            audio_output_device_dropdown,
             content_labels: Vec::new(),
             close_button: Button::new("关闭").on_click(app_shell_close_modal_action()),
         };
@@ -465,6 +516,10 @@ impl PreferencesDialog {
             } else {
                 1
             },
+        );
+        self.audio_output_device_dropdown.set_model(
+            self.model.audio_output_device_label.clone(),
+            audio_output_device_items(&self.model),
         );
         if self
             .shortcut_capture
@@ -816,10 +871,22 @@ impl Widget for PreferencesDialog {
                 160.0,
                 SEGMENTED_GROUP_HEIGHT,
             ));
+            self.audio_output_device_dropdown.layout(Rect::ZERO);
+        } else if self.active_tab == PreferencesDialogTab::Media {
+            self.theme_group.layout(Rect::ZERO);
+            self.waveform_group.layout(Rect::ZERO);
+            self.viewer_background_group.layout(Rect::ZERO);
+            self.audio_output_device_dropdown.layout(Rect::new(
+                content_x + 126.0,
+                body_top + 3.0 * ROW_HEIGHT + (ROW_HEIGHT - SEGMENTED_GROUP_HEIGHT) * 0.5,
+                320.0,
+                SEGMENTED_GROUP_HEIGHT,
+            ));
         } else {
             self.theme_group.layout(Rect::ZERO);
             self.waveform_group.layout(Rect::ZERO);
             self.viewer_background_group.layout(Rect::ZERO);
+            self.audio_output_device_dropdown.layout(Rect::ZERO);
         }
         if self.active_tab == PreferencesDialogTab::Shortcuts {
             self.shortcut_search.layout(Rect::new(
@@ -914,6 +981,11 @@ impl Widget for PreferencesDialog {
             if self.viewer_background_group.event(event, ctx) == EventResult::Handled {
                 return EventResult::Handled;
             }
+        }
+        if self.active_tab == PreferencesDialogTab::Media
+            && self.audio_output_device_dropdown.event(event, ctx) == EventResult::Handled
+        {
+            return EventResult::Handled;
         }
         if self.active_tab == PreferencesDialogTab::Shortcuts {
             if let Some(menu_state) = &mut self.shortcut_actions_menu {
@@ -1052,6 +1124,9 @@ impl Widget for PreferencesDialog {
             self.waveform_group.paint(ctx);
             self.viewer_background_group.paint(ctx);
         }
+        if self.active_tab == PreferencesDialogTab::Media {
+            self.audio_output_device_dropdown.paint(ctx);
+        }
         if self.active_tab == PreferencesDialogTab::Shortcuts {
             self.shortcut_search.paint(ctx);
             ctx.push_clip(self.shortcut_viewport);
@@ -1154,7 +1229,12 @@ impl Widget for PreferencesDialog {
             return (self.active_tab == PreferencesDialogTab::General)
                 .then_some(&self.viewer_background_group as &dyn Widget);
         }
-        let search_index = viewer_background_index + 1;
+        let audio_output_device_index = viewer_background_index + 1;
+        if index == audio_output_device_index {
+            return (self.active_tab == PreferencesDialogTab::Media)
+                .then_some(&self.audio_output_device_dropdown as &dyn Widget);
+        }
+        let search_index = audio_output_device_index + 1;
         if index == search_index {
             return (self.active_tab == PreferencesDialogTab::Shortcuts)
                 .then_some(&self.shortcut_search as &dyn Widget);
@@ -1186,7 +1266,12 @@ impl Widget for PreferencesDialog {
             return (self.active_tab == PreferencesDialogTab::General)
                 .then_some(&mut self.viewer_background_group as &mut dyn Widget);
         }
-        let search_index = viewer_background_index + 1;
+        let audio_output_device_index = viewer_background_index + 1;
+        if index == audio_output_device_index {
+            return (self.active_tab == PreferencesDialogTab::Media)
+                .then_some(&mut self.audio_output_device_dropdown as &mut dyn Widget);
+        }
+        let search_index = audio_output_device_index + 1;
         if index == search_index {
             return (self.active_tab == PreferencesDialogTab::Shortcuts)
                 .then_some(&mut self.shortcut_search as &mut dyn Widget);
@@ -1602,6 +1687,7 @@ fn content_rows_for_tab(
             heading("预览"),
             detail(format!("自动代理：{}", model.proxy_mode)),
             heading("音频"),
+            detail("输出设备："),
             detail(format!("时钟：{}", model.audio_clock)),
             detail(format!("采样率：{}", model.audio_sample_rate)),
             heading("导出草稿"),
@@ -1617,6 +1703,107 @@ fn content_rows_for_tab(
             detail(format!("后台工作线程：{}", model.background_workers)),
         ],
     }
+}
+
+fn audio_output_device_label(
+    selection: &RealtimeAudioOutputDeviceSelection,
+    catalog: &AudioOutputDeviceCatalogState,
+) -> String {
+    match selection {
+        RealtimeAudioOutputDeviceSelection::SystemDefault => {
+            let default_name = match catalog {
+                AudioOutputDeviceCatalogState::Ready(catalog) => catalog
+                    .devices
+                    .iter()
+                    .find(|device| device.is_system_default)
+                    .map(|device| device.display_name.as_str()),
+                AudioOutputDeviceCatalogState::Loading
+                | AudioOutputDeviceCatalogState::Failed(_) => None,
+            };
+            default_name.map_or_else(
+                || "系统默认".to_owned(),
+                |name| format!("系统默认 — {name}"),
+            )
+        }
+        RealtimeAudioOutputDeviceSelection::Specific { device_id } => match catalog {
+            AudioOutputDeviceCatalogState::Ready(catalog) => catalog
+                .devices
+                .iter()
+                .find(|device| device.device_id.as_ref() == Some(device_id))
+                .map(|device| device.display_name.clone())
+                .unwrap_or_else(|| "已选设备当前不可用".to_owned()),
+            AudioOutputDeviceCatalogState::Loading => "正在确认已选设备…".to_owned(),
+            AudioOutputDeviceCatalogState::Failed(_) => "无法确认已选设备".to_owned(),
+        },
+    }
+}
+
+fn audio_output_device_dropdown(model: &AppUiPreferencesModel) -> Dropdown {
+    Dropdown::new(
+        model.audio_output_device_label.clone(),
+        audio_output_device_items(model),
+    )
+    .with_max_visible_items(10)
+}
+
+fn audio_output_device_items(model: &AppUiPreferencesModel) -> Vec<MenuItem> {
+    let mut items = vec![MenuItem::new(
+        "跟随系统默认设备",
+        app_shell_preferences_audio_output_device_changed_action(
+            RealtimeAudioOutputDeviceSelection::SystemDefault,
+        ),
+    )
+    .checked(matches!(
+        model.audio_output_device_selection,
+        RealtimeAudioOutputDeviceSelection::SystemDefault
+    ))];
+    match &model.audio_output_device_catalog {
+        AudioOutputDeviceCatalogState::Loading => {
+            items.push(MenuItem::inert("正在发现输出设备…"));
+        }
+        AudioOutputDeviceCatalogState::Failed(detail) => {
+            items.push(MenuItem::inert(format!("设备发现失败：{detail}")));
+        }
+        AudioOutputDeviceCatalogState::Ready(catalog) => {
+            items.extend(selectable_audio_output_device_items(
+                catalog,
+                &model.audio_output_device_selection,
+            ));
+        }
+    }
+    items.push(MenuItem::separator());
+    items.push(MenuItem::new(
+        "刷新设备列表",
+        app_shell_preferences_refresh_audio_output_devices_action(),
+    ));
+    items
+}
+
+fn selectable_audio_output_device_items(
+    catalog: &RealtimeAudioOutputDeviceCatalog,
+    selection: &RealtimeAudioOutputDeviceSelection,
+) -> Vec<MenuItem> {
+    catalog
+        .devices
+        .iter()
+        .map(|device| {
+            let Some(device_id) = device.device_id.clone() else {
+                return MenuItem::inert(format!("{}（身份不可用）", device.display_name));
+            };
+            let checked = matches!(
+                selection,
+                RealtimeAudioOutputDeviceSelection::Specific { device_id: selected }
+                    if selected == &device_id
+            );
+            MenuItem::new(
+                device.display_name.clone(),
+                app_shell_preferences_audio_output_device_changed_action(
+                    RealtimeAudioOutputDeviceSelection::Specific { device_id },
+                ),
+            )
+            .checked(checked)
+        })
+        .collect()
 }
 
 fn enabled_label(enabled: bool) -> String {
@@ -1654,8 +1841,9 @@ mod tests {
     use mondrian_ui_core::widget::EventRequests;
 
     use crate::app::ui_actions::{
-        PreferencesShortcutPayload, PreferencesShortcutReboundPayload, APP_SHELL_CLOSE_MODAL,
-        APP_SHELL_NAMESPACE, APP_SHELL_PREFERENCES_SHORTCUT_DISABLED,
+        PreferencesAudioOutputDevicePayload, PreferencesShortcutPayload,
+        PreferencesShortcutReboundPayload, APP_SHELL_CLOSE_MODAL, APP_SHELL_NAMESPACE,
+        APP_SHELL_PREFERENCES_AUDIO_OUTPUT_DEVICE_CHANGED, APP_SHELL_PREFERENCES_SHORTCUT_DISABLED,
         APP_SHELL_PREFERENCES_SHORTCUT_REBOUND, APP_SHELL_PREFERENCES_SHORTCUT_RESET,
         APP_SHELL_PREFERENCES_TAB_CHANGED, APP_SHELL_PREFERENCES_THEME_CHANGED,
     };
@@ -1756,7 +1944,8 @@ mod tests {
         let theme_index = PreferencesDialogTab::ALL.len();
         let waveform_index = theme_index + 1;
         let viewer_background_index = waveform_index + 1;
-        let search_index = viewer_background_index + 1;
+        let audio_output_device_index = viewer_background_index + 1;
+        let search_index = audio_output_device_index + 1;
         let close_index = search_index + 1;
         let close_id = dialog.close_button.id();
 
@@ -1764,6 +1953,7 @@ mod tests {
         assert!(dialog.child(theme_index).is_some());
         assert!(dialog.child(waveform_index).is_some());
         assert!(dialog.child(viewer_background_index).is_some());
+        assert!(dialog.child(audio_output_device_index).is_none());
         assert!(dialog.child(search_index).is_none());
         assert_eq!(dialog.child(close_index).map(Widget::id), Some(close_id));
         let close = dialog.child(close_index).expect("close child");
@@ -1778,6 +1968,7 @@ mod tests {
         assert!(dialog.child(theme_index).is_none());
         assert!(dialog.child(waveform_index).is_none());
         assert!(dialog.child(viewer_background_index).is_none());
+        assert!(dialog.child(audio_output_device_index).is_some());
         assert!(dialog.child(search_index).is_none());
         assert_eq!(dialog.child(close_index).map(Widget::id), Some(close_id));
         assert!(dialog.child(close_index).expect("close child").can_focus());
@@ -1787,6 +1978,7 @@ mod tests {
         assert!(dialog.child(theme_index).is_none());
         assert!(dialog.child(waveform_index).is_none());
         assert!(dialog.child(viewer_background_index).is_none());
+        assert!(dialog.child(audio_output_device_index).is_none());
         assert!(dialog.child(search_index).is_some());
         assert_eq!(dialog.child(close_index).map(Widget::id), Some(close_id));
         assert!(dialog.child(close_index).expect("close child").can_focus());
@@ -2297,6 +2489,49 @@ mod tests {
         );
 
         assert_eq!(model.proxy_mode, "已禁用");
+    }
+
+    #[test]
+    fn audio_device_model_preserves_specific_identity_and_marks_current_row() {
+        let device_id = mondrian_media::RealtimeAudioOutputDeviceId::new("wasapi:studio-out")
+            .expect("fixture identity");
+        let selection =
+            RealtimeAudioOutputDeviceSelection::Specific { device_id: device_id.clone() };
+        let model = AppUiPreferencesModel::from_app_state_with_shortcut_overrides_and_audio_output(
+            &AppState::new(),
+            WorkspacePreset::Editing,
+            ThemePreference::System,
+            ThemePreset::Dark,
+            &[],
+            WaveformDisplay::BottomAligned,
+            ViewerCanvasBackground::Checkerboard,
+            selection.clone(),
+            AudioOutputDeviceCatalogState::Ready(RealtimeAudioOutputDeviceCatalog {
+                host_name: "WASAPI".to_owned(),
+                devices: vec![mondrian_media::RealtimeAudioOutputDeviceDescriptor {
+                    device_id: Some(device_id),
+                    display_name: "Studio Output".to_owned(),
+                    is_system_default: false,
+                    device_id_error: None,
+                    description_error: None,
+                }],
+            }),
+        );
+
+        assert_eq!(model.audio_output_device_label, "Studio Output");
+        let items = audio_output_device_items(&model);
+        let selected = items.iter().find(|item| item.checked).expect("checked device row");
+        let action = selected.action().expect("device selection action");
+        let Action::Custom { name, payload, .. } = action else {
+            panic!("expected custom device selection action");
+        };
+        assert_eq!(name, APP_SHELL_PREFERENCES_AUDIO_OUTPUT_DEVICE_CHANGED);
+        assert_eq!(
+            serde_json::from_value::<PreferencesAudioOutputDevicePayload>(payload.clone())
+                .expect("device payload")
+                .selection,
+            selection
+        );
     }
 
     #[test]

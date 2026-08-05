@@ -46,6 +46,9 @@ pub struct AppUiPreferences {
     /// Presentation-only background visible through transparent Viewer pixels.
     #[serde(default)]
     pub viewer_canvas_background: ViewerCanvasBackground,
+    /// Runtime output-device intent. This is a user preference, never Project state.
+    #[serde(default)]
+    pub audio_output_device: mondrian_media::RealtimeAudioOutputDeviceSelection,
 }
 
 impl Default for AppUiPreferences {
@@ -59,6 +62,7 @@ impl Default for AppUiPreferences {
             custom_workspace_layout: None,
             waveform_display: WaveformDisplay::BottomAligned,
             viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
+            audio_output_device: mondrian_media::RealtimeAudioOutputDeviceSelection::SystemDefault,
         }
     }
 }
@@ -203,6 +207,7 @@ mod tests {
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
+                audio_output_device: Default::default(),
             })
             .expect("serialize preferences"),
         )
@@ -229,6 +234,12 @@ mod tests {
             }],
             waveform_display: WaveformDisplay::BottomAligned,
             viewer_canvas_background: ViewerCanvasBackground::Black,
+            audio_output_device: mondrian_media::RealtimeAudioOutputDeviceSelection::Specific {
+                device_id: mondrian_media::RealtimeAudioOutputDeviceId::new(
+                    "wasapi:round-trip-device",
+                )
+                .expect("fixture device identity"),
+            },
             custom_workspace_layout: Some(AppUiWorkspaceLayout::Split {
                 direction: SplitDirection::Horizontal,
                 ratio: 0.37,
@@ -272,6 +283,7 @@ mod tests {
                 shortcut_overrides: Vec::new(),
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
+                audio_output_device: Default::default(),
                 custom_workspace_layout: Some(AppUiWorkspaceLayout::Split {
                     direction: SplitDirection::Vertical,
                     ratio: 12.0,
@@ -333,6 +345,7 @@ mod tests {
                 shortcut_overrides: Vec::new(),
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
+                audio_output_device: Default::default(),
                 custom_workspace_layout: Some(AppUiWorkspaceLayout::Panel {
                     kind: mondrian_editor_state::state::PanelKind::Assets,
                     active_index: 0,
@@ -401,6 +414,7 @@ mod tests {
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
+                audio_output_device: Default::default(),
             })
             .expect("serialize preferences"),
         )
@@ -431,6 +445,7 @@ mod tests {
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
+                audio_output_device: Default::default(),
             })
             .expect("serialize preferences"),
         )

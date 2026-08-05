@@ -10,6 +10,7 @@ pub mod action_queue;
 pub mod asset_thumbnails;
 mod audio_automation;
 mod audio_component_mapping;
+mod audio_device_catalog;
 mod audio_mixer;
 mod audio_processor_rack;
 mod color_management_controls;

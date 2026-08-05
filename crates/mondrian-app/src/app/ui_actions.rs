@@ -12,8 +12,8 @@ use mondrian_core::{
 use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
 use mondrian_media::{
-    DecodedVideoRange, DetectedColorInterpretation, ProvenVideoSampling, VideoColorMetadata,
-    VideoColorMetadataHint,
+    DecodedVideoRange, DetectedColorInterpretation, ProvenVideoSampling,
+    RealtimeAudioOutputDeviceSelection, VideoColorMetadata, VideoColorMetadataHint,
 };
 use mondrian_timeline::{
     sequence::{ColorWorkflow, DeliveryBitDepth, MissingColorMetadataPolicy, VideoRange},
@@ -151,6 +151,12 @@ pub const APP_SHELL_PREFERENCES_WAVEFORM_DISPLAY_CHANGED: &str =
 /// App-shell request to switch the presentation-only Viewer canvas background.
 pub const APP_SHELL_PREFERENCES_VIEWER_BACKGROUND_CHANGED: &str =
     "preferences_viewer_background_changed";
+/// App-shell request to switch the runtime audio output-device intent.
+pub const APP_SHELL_PREFERENCES_AUDIO_OUTPUT_DEVICE_CHANGED: &str =
+    "preferences_audio_output_device_changed";
+/// App-shell request to rediscover physical audio output devices.
+pub const APP_SHELL_PREFERENCES_REFRESH_AUDIO_OUTPUT_DEVICES: &str =
+    "preferences_refresh_audio_output_devices";
 /// App-shell request to disable one app UI shortcut descriptor.
 pub const APP_SHELL_PREFERENCES_SHORTCUT_DISABLED: &str = "preferences_shortcut_disabled";
 /// App-shell request to restore one app UI shortcut descriptor to default.
@@ -210,6 +216,13 @@ pub struct PreferencesWaveformDisplayPayload {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreferencesViewerBackgroundPayload {
     pub background: ViewerCanvasBackground,
+}
+
+/// Runtime audio output-device intent selected by the preferences UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreferencesAudioOutputDevicePayload {
+    /// Follow-system-default or exact stable-device selection.
+    pub selection: RealtimeAudioOutputDeviceSelection,
 }
 
 /// Stable shortcut descriptor selected in the app UI preferences UI.
@@ -1278,6 +1291,21 @@ pub fn app_shell_preferences_viewer_background_changed_action(
         APP_SHELL_PREFERENCES_VIEWER_BACKGROUND_CHANGED,
         PreferencesViewerBackgroundPayload { background },
     )
+}
+
+/// Build an app-shell request for switching the runtime audio output device.
+pub fn app_shell_preferences_audio_output_device_changed_action(
+    selection: RealtimeAudioOutputDeviceSelection,
+) -> Action {
+    custom_app_shell_action_with_payload(
+        APP_SHELL_PREFERENCES_AUDIO_OUTPUT_DEVICE_CHANGED,
+        PreferencesAudioOutputDevicePayload { selection },
+    )
+}
+
+/// Build an app-shell request for a fresh physical output-device observation.
+pub fn app_shell_preferences_refresh_audio_output_devices_action() -> Action {
+    custom_app_shell_action(APP_SHELL_PREFERENCES_REFRESH_AUDIO_OUTPUT_DEVICES)
 }
 
 /// Build an app-shell request for disabling one shortcut descriptor.

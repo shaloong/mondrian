@@ -115,6 +115,16 @@ impl AppAudioPlayback {
         }
     }
 
+    fn set_output_device_selection(
+        &self,
+        selection: mondrian_media::RealtimeAudioOutputDeviceSelection,
+    ) -> bool {
+        match self {
+            Self::Available(playback) => playback.set_output_device_selection(selection),
+            Self::Unavailable { .. } => false,
+        }
+    }
+
     #[cfg(all(feature = "validation", test))]
     fn request_controlled_output_recycle(
         &self,
@@ -128,6 +138,20 @@ impl AppAudioPlayback {
                 Err(mondrian_media::AudioPlaybackValidationError::UnsupportedAdapter)
             }
         }
+    }
+}
+
+impl AppState {
+    /// Publish a latest-wins user/runtime audio-output selection.
+    ///
+    /// This preference is deliberately outside Project authoring. A changed
+    /// selection rotates the concrete stream through the existing
+    /// Audio→Synthetic→Audio generation handoff on subsequent playback polls.
+    pub fn set_audio_output_device_selection(
+        &self,
+        selection: mondrian_media::RealtimeAudioOutputDeviceSelection,
+    ) -> bool {
+        self.audio_playback.set_output_device_selection(selection)
     }
 }
 
