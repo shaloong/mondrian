@@ -15,10 +15,10 @@ mod process_memory;
 pub use mondrian_platform_core::{
     ClipboardError, DisplayHdrProbe, DisplayHdrProbeDetails, DisplayHdrProbeResult,
     DisplayIccProfileProbeResult, DisplayProbeBackend, DisplayProfileProbe,
-    DisplayProfileProbeTarget, ExecutionMemoryProbe, FileFilter, NoopPlatformService,
-    PhysicalMemoryCapacityProbe, PhysicalMemoryCapacityProbeBackend,
-    PhysicalMemoryCapacityProbeResult, PlatformService, ProcessMemoryProbe,
-    ProcessMemoryProbeBackend, ProcessMemoryProbeResult, ProcessMemoryScope,
+    DisplayProfileProbeTarget, ExecutionMemoryProbe, FileDialogError, FileDialogOutcome,
+    FileFilter, FileRevealError, NoopPlatformService, PhysicalMemoryCapacityProbe,
+    PhysicalMemoryCapacityProbeBackend, PhysicalMemoryCapacityProbeResult, PlatformService,
+    ProcessMemoryProbe, ProcessMemoryProbeBackend, ProcessMemoryProbeResult, ProcessMemoryScope,
     ProcessPrivateMemoryMetric, SystemMemoryProbe, SystemMemoryProbeBackend,
     SystemMemoryProbeResult,
 };
@@ -50,8 +50,15 @@ impl PlatformService for SystemPlatformService {
         }
     }
 
-    fn open_file_dialog(&self, title: &str, filters: &[FileFilter]) -> Option<Vec<PathBuf>> {
-        configured_file_dialog(title, filters).pick_files()
+    fn open_file_dialog(
+        &self,
+        title: &str,
+        filters: &[FileFilter],
+    ) -> Result<FileDialogOutcome<Vec<PathBuf>>, FileDialogError> {
+        Ok(match configured_file_dialog(title, filters).pick_files() {
+            Some(paths) => FileDialogOutcome::Selected(paths),
+            None => FileDialogOutcome::Cancelled,
+        })
     }
 
     fn save_file_dialog(
@@ -59,12 +66,17 @@ impl PlatformService for SystemPlatformService {
         title: &str,
         default_name: &str,
         filters: &[FileFilter],
-    ) -> Option<PathBuf> {
-        configured_file_dialog(title, filters).set_file_name(default_name).save_file()
+    ) -> Result<FileDialogOutcome<PathBuf>, FileDialogError> {
+        Ok(
+            match configured_file_dialog(title, filters).set_file_name(default_name).save_file() {
+                Some(path) => FileDialogOutcome::Selected(path),
+                None => FileDialogOutcome::Cancelled,
+            },
+        )
     }
 
-    fn reveal_in_file_manager(&self, path: &Path) {
-        reveal_path_in_file_manager(path);
+    fn reveal_in_file_manager(&self, path: &Path) -> Result<(), FileRevealError> {
+        reveal_path_in_file_manager(path)
     }
 }
 
@@ -153,7 +165,7 @@ fn system_display_hdr_state(_target: DisplayProfileProbeTarget) -> DisplayHdrPro
     )
 }
 
-fn reveal_path_in_file_manager(path: &Path) {
+fn reveal_path_in_file_manager(path: &Path) -> Result<(), FileRevealError> {
     #[cfg(target_os = "windows")]
     {
         let target = if path.exists() {
@@ -161,7 +173,10 @@ fn reveal_path_in_file_manager(path: &Path) {
         } else {
             path.parent().unwrap_or(path)
         };
-        let _ = Command::new("explorer").arg(format!("/select,{}", target.display())).spawn();
+        Command::new("explorer")
+            .arg(format!("/select,{}", target.display()))
+            .spawn()
+            .map_err(|error| FileRevealError::LaunchFailed { reason: error.to_string() })?;
     }
 
     #[cfg(target_os = "macos")]
@@ -171,7 +186,11 @@ fn reveal_path_in_file_manager(path: &Path) {
         } else {
             path.parent().unwrap_or(path)
         };
-        let _ = Command::new("open").arg("-R").arg(target).spawn();
+        Command::new("open")
+            .arg("-R")
+            .arg(target)
+            .spawn()
+            .map_err(|error| FileRevealError::LaunchFailed { reason: error.to_string() })?;
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -181,8 +200,17 @@ fn reveal_path_in_file_manager(path: &Path) {
         } else {
             path.parent().unwrap_or(path)
         };
-        let _ = Command::new("xdg-open").arg(target).spawn();
+        Command::new("xdg-open")
+            .arg(target)
+            .spawn()
+            .map_err(|error| FileRevealError::LaunchFailed { reason: error.to_string() })?;
     }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
+    return Err(FileRevealError::Unavailable);
+
+    #[cfg(any(target_os = "windows", target_os = "macos", unix))]
+    Ok(())
 }
 
 fn configured_file_dialog(title: &str, filters: &[FileFilter]) -> rfd::FileDialog {
@@ -247,21 +275,30 @@ mod tests {
     }
 
     #[test]
-    fn noop_open_file_dialog_returns_none() {
+    fn noop_open_file_dialog_reports_unavailable() {
         let svc = NoopPlatformService;
-        assert_eq!(svc.open_file_dialog("Open", &[]), None);
+        assert_eq!(
+            svc.open_file_dialog("Open", &[]),
+            Err(FileDialogError::Unavailable)
+        );
     }
 
     #[test]
-    fn noop_save_file_dialog_returns_none() {
+    fn noop_save_file_dialog_reports_unavailable() {
         let svc = NoopPlatformService;
-        assert_eq!(svc.save_file_dialog("Save", "test.txt", &[]), None);
+        assert_eq!(
+            svc.save_file_dialog("Save", "test.txt", &[]),
+            Err(FileDialogError::Unavailable)
+        );
     }
 
     #[test]
-    fn noop_file_reveal_does_not_panic() {
+    fn noop_file_reveal_reports_unavailable() {
         let svc = NoopPlatformService;
-        svc.reveal_in_file_manager(Path::new("/tmp/test.txt"));
+        assert_eq!(
+            svc.reveal_in_file_manager(Path::new("/tmp/test.txt")),
+            Err(FileRevealError::Unavailable)
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -372,8 +409,15 @@ mod tests {
             self.clipboard_content.clone()
         }
 
-        fn open_file_dialog(&self, _title: &str, _filters: &[FileFilter]) -> Option<Vec<PathBuf>> {
-            self.file_dialog_result.clone()
+        fn open_file_dialog(
+            &self,
+            _title: &str,
+            _filters: &[FileFilter],
+        ) -> Result<FileDialogOutcome<Vec<PathBuf>>, FileDialogError> {
+            Ok(match self.file_dialog_result.clone() {
+                Some(paths) => FileDialogOutcome::Selected(paths),
+                None => FileDialogOutcome::Cancelled,
+            })
         }
 
         fn save_file_dialog(
@@ -381,11 +425,16 @@ mod tests {
             _title: &str,
             _default_name: &str,
             _filters: &[FileFilter],
-        ) -> Option<PathBuf> {
-            self.save_dialog_result.clone()
+        ) -> Result<FileDialogOutcome<PathBuf>, FileDialogError> {
+            Ok(match self.save_dialog_result.clone() {
+                Some(path) => FileDialogOutcome::Selected(path),
+                None => FileDialogOutcome::Cancelled,
+            })
         }
 
-        fn reveal_in_file_manager(&self, _path: &Path) {}
+        fn reveal_in_file_manager(&self, _path: &Path) -> Result<(), FileRevealError> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -399,11 +448,15 @@ mod tests {
         assert_eq!(mock.clipboard_paste(), Ok(Some("copied text".into())));
         assert_eq!(
             mock.open_file_dialog("", &[]),
-            Some(vec![PathBuf::from("/test/file.mp4")])
+            Ok(FileDialogOutcome::Selected(vec![PathBuf::from(
+                "/test/file.mp4"
+            )]))
         );
         assert_eq!(
             mock.save_file_dialog("", "", &[]),
-            Some(PathBuf::from("/test/output.mp4"))
+            Ok(FileDialogOutcome::Selected(PathBuf::from(
+                "/test/output.mp4"
+            )))
         );
     }
 }

@@ -218,11 +218,18 @@ impl AppUiStartupScreen {
                 if draft.validate().is_err() {
                     return Ok(None);
                 }
-                let Some(path) = platform.save_file_dialog(
-                    "Create Mondrian Project",
-                    &default_project_file_name(&draft.name),
-                    &project_file_filters(),
-                ) else {
+                let Some(path) = platform
+                    .save_file_dialog(
+                        "Create Mondrian Project",
+                        &default_project_file_name(&draft.name),
+                        &project_file_filters(),
+                    )
+                    .map_err(|error| MondrianError::WorkflowStepFailed {
+                        step_id: "startup.create_project_dialog".to_owned(),
+                        reason: error.to_string(),
+                    })?
+                    .into_selection()
+                else {
                     return Ok(None);
                 };
                 self.modal = None;
@@ -840,7 +847,10 @@ mod tests {
     };
     use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_editor_state::Action;
-    use mondrian_platform::{ClipboardError, FileFilter, PlatformService};
+    use mondrian_platform::{
+        ClipboardError, FileDialogError, FileDialogOutcome, FileFilter, FileRevealError,
+        PlatformService,
+    };
     use mondrian_ui_core::widget::{DrawCommandEncoder, EventRequests};
     use std::cell::RefCell;
     use std::path::Path;
@@ -860,8 +870,15 @@ mod tests {
             Err(ClipboardError::Unavailable)
         }
 
-        fn open_file_dialog(&self, _title: &str, _filters: &[FileFilter]) -> Option<Vec<PathBuf>> {
-            self.open_file.clone().map(|path| vec![path])
+        fn open_file_dialog(
+            &self,
+            _title: &str,
+            _filters: &[FileFilter],
+        ) -> Result<FileDialogOutcome<Vec<PathBuf>>, FileDialogError> {
+            Ok(match self.open_file.clone() {
+                Some(path) => FileDialogOutcome::Selected(vec![path]),
+                None => FileDialogOutcome::Cancelled,
+            })
         }
 
         fn save_file_dialog(
@@ -869,11 +886,13 @@ mod tests {
             _title: &str,
             _default_name: &str,
             _filters: &[FileFilter],
-        ) -> Option<PathBuf> {
-            Some(self.project_file.clone())
+        ) -> Result<FileDialogOutcome<PathBuf>, FileDialogError> {
+            Ok(FileDialogOutcome::Selected(self.project_file.clone()))
         }
 
-        fn reveal_in_file_manager(&self, _path: &Path) {}
+        fn reveal_in_file_manager(&self, _path: &Path) -> Result<(), FileRevealError> {
+            Ok(())
+        }
     }
 
     fn action_name(action: &Action) -> (&str, &str) {

@@ -9,7 +9,10 @@ mod desktop;
 mod display;
 mod memory;
 
-pub use desktop::{ClipboardError, FileFilter, PlatformService};
+pub use desktop::{
+    ClipboardError, FileDialogError, FileDialogOutcome, FileFilter, FileRevealError,
+    PlatformService,
+};
 pub use display::{
     DisplayHdrProbe, DisplayHdrProbeDetails, DisplayHdrProbeResult, DisplayIccProfileProbeResult,
     DisplayProbeBackend, DisplayProfileProbe, DisplayProfileProbeTarget,

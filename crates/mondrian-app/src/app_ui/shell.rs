@@ -348,11 +348,14 @@ pub fn try_resolve_app_shell_action(
         Action::Custom { namespace, name, .. }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_NEW_PROJECT_DIALOG =>
         {
-            let path = platform.save_file_dialog(
-                "创建 Mondrian 项目",
-                &format!("未命名.{PROJECT_FILE_EXTENSION}"),
-                &project_file_filters(),
-            );
+            let path = platform
+                .save_file_dialog(
+                    "创建 Mondrian 项目",
+                    &format!("未命名.{PROJECT_FILE_EXTENSION}"),
+                    &project_file_filters(),
+                )
+                .map_err(|error| native_shell_error(&name, error))?
+                .into_selection();
             let Some(path) = path else {
                 return Ok(None);
             };
@@ -364,8 +367,10 @@ pub fn try_resolve_app_shell_action(
         Action::Custom { namespace, name, .. }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_OPEN_PROJECT_DIALOG =>
         {
-            let Some(paths) =
-                platform.open_file_dialog("打开 Mondrian 项目", &project_file_filters())
+            let Some(paths) = platform
+                .open_file_dialog("打开 Mondrian 项目", &project_file_filters())
+                .map_err(|error| native_shell_error(&name, error))?
+                .into_selection()
             else {
                 return Ok(None);
             };
@@ -393,7 +398,10 @@ pub fn try_resolve_app_shell_action(
             } else {
                 serde_json::from_value(payload).map_err(|err| app_shell_action_error(&name, err))?
             };
-            let Some(paths) = platform.open_file_dialog("导入媒体", &media_import_filters())
+            let Some(paths) = platform
+                .open_file_dialog("导入媒体", &media_import_filters())
+                .map_err(|error| native_shell_error(&name, error))?
+                .into_selection()
             else {
                 return Ok(None);
             };
@@ -413,7 +421,9 @@ pub fn try_resolve_app_shell_action(
         {
             let payload: AppShellRevealInFileManagerPayload = serde_json::from_value(payload)
                 .map_err(|err| app_shell_action_error(&name, err))?;
-            platform.reveal_in_file_manager(&payload.path);
+            platform
+                .reveal_in_file_manager(&payload.path)
+                .map_err(|error| native_shell_error(&name, error))?;
             Ok(None)
         }
         Action::Custom { namespace, name, payload }
@@ -421,7 +431,10 @@ pub fn try_resolve_app_shell_action(
         {
             let payload: AppShellRelinkAssetDialogPayload = serde_json::from_value(payload)
                 .map_err(|err| app_shell_action_error(&name, err))?;
-            let Some(paths) = platform.open_file_dialog("重新链接媒体", &media_import_filters())
+            let Some(paths) = platform
+                .open_file_dialog("重新链接媒体", &media_import_filters())
+                .map_err(|error| native_shell_error(&name, error))?
+                .into_selection()
             else {
                 return Ok(None);
             };
@@ -442,6 +455,8 @@ pub fn try_resolve_app_shell_action(
                 .unwrap_or_else(|| format!("未命名.{PROJECT_FILE_EXTENSION}"));
             Ok(platform
                 .save_file_dialog("另存 Mondrian 项目", &default_name, &project_file_filters())
+                .map_err(|error| native_shell_error(&name, error))?
+                .into_selection()
                 .map(Action::SaveProjectAs))
         }
         Action::Custom { namespace, name, payload }
@@ -458,6 +473,8 @@ pub fn try_resolve_app_shell_action(
                     &default_name,
                     &export_output_filters(&extension),
                 )
+                .map_err(|error| native_shell_error(&name, error))?
+                .into_selection()
                 .map(|path| {
                     export_edit_draft_action(ExportDraftEdit::OutputPath(
                         path.display().to_string(),
@@ -475,6 +492,13 @@ fn app_shell_action_error(name: &str, err: serde_json::Error) -> MondrianError {
     MondrianError::WorkflowStepFailed {
         step_id: format!("app_shell_action.{name}"),
         reason: format!("invalid action payload: {err}"),
+    }
+}
+
+fn native_shell_error(name: &str, error: impl std::fmt::Display) -> MondrianError {
+    MondrianError::WorkflowStepFailed {
+        step_id: format!("app_shell_action.{name}"),
+        reason: error.to_string(),
     }
 }
 
@@ -1318,11 +1342,15 @@ impl AppUiAppRoot {
                 if draft.validate().is_err() {
                     return Ok(None);
                 }
-                let Some(path) = platform.save_file_dialog(
-                    "创建 Mondrian 项目",
-                    &default_project_file_name(&draft.name),
-                    &project_file_filters(),
-                ) else {
+                let Some(path) = platform
+                    .save_file_dialog(
+                        "创建 Mondrian 项目",
+                        &default_project_file_name(&draft.name),
+                        &project_file_filters(),
+                    )
+                    .map_err(|error| native_shell_error(&name, error))?
+                    .into_selection()
+                else {
                     return Ok(None);
                 };
                 self.modal = None;
@@ -2076,7 +2104,7 @@ mod tests {
         ColorSpace, ProjectId, Rational, Resolution, SmpteCountingMode, TimelineDisplayFormat,
         VideoContentLightMetadata, VideoMasteringDisplayMetadata, WorkingColorSpace,
     };
-    use mondrian_platform::ClipboardError;
+    use mondrian_platform::{ClipboardError, FileDialogError, FileDialogOutcome, FileRevealError};
     use mondrian_timeline::sequence::{
         AudioChannelLayout, AudioDisplayFormat, ColorWorkflow, DeliveryBitDepth, EditingMode,
         FieldOrder, MissingColorMetadataPolicy, PixelAspectRatio, PreviewRenderFormat, Sequence,
@@ -2153,8 +2181,15 @@ mod tests {
             Err(ClipboardError::Unavailable)
         }
 
-        fn open_file_dialog(&self, _title: &str, _filters: &[FileFilter]) -> Option<Vec<PathBuf>> {
-            self.open_paths.clone()
+        fn open_file_dialog(
+            &self,
+            _title: &str,
+            _filters: &[FileFilter],
+        ) -> Result<FileDialogOutcome<Vec<PathBuf>>, FileDialogError> {
+            Ok(match self.open_paths.clone() {
+                Some(paths) => FileDialogOutcome::Selected(paths),
+                None => FileDialogOutcome::Cancelled,
+            })
         }
 
         fn save_file_dialog(
@@ -2162,12 +2197,16 @@ mod tests {
             _title: &str,
             _default_name: &str,
             _filters: &[FileFilter],
-        ) -> Option<PathBuf> {
-            self.save_path.clone()
+        ) -> Result<FileDialogOutcome<PathBuf>, FileDialogError> {
+            Ok(match self.save_path.clone() {
+                Some(path) => FileDialogOutcome::Selected(path),
+                None => FileDialogOutcome::Cancelled,
+            })
         }
 
-        fn reveal_in_file_manager(&self, path: &Path) {
+        fn reveal_in_file_manager(&self, path: &Path) -> Result<(), FileRevealError> {
             self.revealed_paths.lock().expect("revealed path lock").push(path.to_path_buf());
+            Ok(())
         }
     }
 
@@ -4177,6 +4216,18 @@ mod tests {
             resolve_app_shell_action(app_shell_open_project_dialog_action(), &platform, None);
 
         assert_eq!(action, None);
+    }
+
+    #[test]
+    fn try_resolve_app_shell_dialog_unavailable_is_not_user_cancel() {
+        let error = try_resolve_app_shell_action(
+            app_shell_open_project_dialog_action(),
+            &mondrian_platform::NoopPlatformService,
+            None,
+        )
+        .expect_err("unavailable native dialog must remain an actionable failure");
+
+        assert!(error.to_string().contains("native file dialog is unavailable"));
     }
 
     #[test]

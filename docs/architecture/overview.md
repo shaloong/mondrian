@@ -149,7 +149,10 @@ Lower layers cannot depend on higher layers:
   the same boundary in deep `memory`, `process_memory`, `playback_scheduling`,
   `display/{windows,macos,linux}`, `global_pointer`, and `eyedropper` Modules.
   Its `lib.rs` is only the composition root: OS display APIs and desktop-capture
-  session state do not live beside `PlatformService` wiring. Playback scheduling is
+  session state do not live beside `PlatformService` wiring. Native file-dialog
+  outcomes distinguish `Selected` from user `Cancelled`, while an unavailable
+  or failed Adapter is an error; file-manager dispatch likewise reports
+  unavailable/launch failure instead of silently succeeding. Playback scheduling is
   thread-affine and exactly restored: Windows uses MMCSS Playback, macOS uses
   user-interactive pthread QoS, and Linux attempts a bounded per-thread nice
   improvement. Permission denial is a typed portable fallback. The desktop UI

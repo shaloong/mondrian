@@ -519,6 +519,10 @@ absent from `AssetProductAction`.
 The migrated Viewer slice carries only authored preview-resolution changes
 through `ViewerProductAction`. Canvas zoom is presentation state owned by the
 Window/Shell Adapter and deliberately remains outside the product algebra.
+The Adapter treats a native dialog cancellation as a successful no-action
+outcome, but propagates typed platform unavailability/backend failure through
+the existing workflow error path. File-manager reveal follows the same rule:
+dispatch failure is observable and is never presented as successful execution.
 Viewer gestures that manipulate picture geometry do not create a second Viewer
 transform model: they emit the same `ClipProductAction` used by Inspector,
 Headless, scripting, and future plugin Adapters.

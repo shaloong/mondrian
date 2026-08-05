@@ -27,6 +27,8 @@ pub(crate) fn choose_custom_ocio_config(
             "选择 OpenColorIO 配置",
             &[FileFilter::new("OpenColorIO 配置", vec!["ocio"])],
         )
+        .map_err(|error| error.to_string())?
+        .into_selection()
         .and_then(|paths| paths.into_iter().next())
     else {
         return Ok(None);

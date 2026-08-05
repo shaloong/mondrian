@@ -883,7 +883,10 @@ mod tests {
     use super::*;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_editor_state::Action;
-    use mondrian_platform_core::{ClipboardError, FileFilter, PlatformService};
+    use mondrian_platform_core::{
+        ClipboardError, FileDialogError, FileDialogOutcome, FileFilter, FileRevealError,
+        PlatformService,
+    };
     use mondrian_ui_core::widget::{DrawCommandEncoder, EventRequests};
     use mondrian_ui_theme::ThemePreset;
     use std::cell::RefCell;
@@ -1001,8 +1004,12 @@ mod tests {
             self.paste_result.clone()
         }
 
-        fn open_file_dialog(&self, _title: &str, _filters: &[FileFilter]) -> Option<Vec<PathBuf>> {
-            None
+        fn open_file_dialog(
+            &self,
+            _title: &str,
+            _filters: &[FileFilter],
+        ) -> Result<FileDialogOutcome<Vec<PathBuf>>, FileDialogError> {
+            Err(FileDialogError::Unavailable)
         }
 
         fn save_file_dialog(
@@ -1010,11 +1017,13 @@ mod tests {
             _title: &str,
             _default_name: &str,
             _filters: &[FileFilter],
-        ) -> Option<PathBuf> {
-            None
+        ) -> Result<FileDialogOutcome<PathBuf>, FileDialogError> {
+            Err(FileDialogError::Unavailable)
         }
 
-        fn reveal_in_file_manager(&self, _path: &Path) {}
+        fn reveal_in_file_manager(&self, _path: &Path) -> Result<(), FileRevealError> {
+            Err(FileRevealError::Unavailable)
+        }
     }
 
     #[derive(Debug, PartialEq)]
