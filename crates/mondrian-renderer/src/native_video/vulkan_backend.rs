@@ -79,7 +79,7 @@ impl VulkanNativeVideoImportBackend {
         if device.features().contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM) {
             formats.push(GpuNativeDecodedFrameTextureFormat::P010);
         }
-        let support = GpuNativeDecodedFrameImportSupport::ready(
+        let support = GpuNativeDecodedFrameImportSupport::ready_zero_copy(
             vec![DecodedGpuFrameHandleKind::VaapiSurface],
             formats,
         )

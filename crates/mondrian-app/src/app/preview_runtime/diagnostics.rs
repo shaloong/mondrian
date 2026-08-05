@@ -115,19 +115,13 @@ pub struct PreviewHardwareDecodeAdmissionDiagnostics {
     pub renderer_native_import_support_known: bool,
     /// Whether the renderer reports native decoded-frame import support.
     pub renderer_native_import_ready: bool,
-    /// Whether the platform reports native texture import support for a renderer-supported handle.
-    pub platform_native_import_ready: bool,
+    /// Physical transfer mode implemented by the active Renderer backend.
+    pub renderer_import_mode: Option<mondrian_renderer::GpuNativeDecodedFrameImportMode>,
     /// Whether playback is allowed to request GPU-resident decode.
     pub native_import_admission_ready: bool,
     /// Stable reason playback cannot request GPU-resident decode, when gated.
     pub admission_blocker:
         Option<crate::app::native_video_import::PreviewHardwareDecodeAdmissionBlocker>,
-    /// Whether the platform native texture import probe is available.
-    pub platform_discovery_available: bool,
-    /// Whether the platform reports a zero-copy native texture path.
-    pub platform_zero_copy_supported: bool,
-    /// Whether the platform reports a declared low-copy fallback path.
-    pub platform_low_copy_fallback_supported: bool,
     /// Renderer-supported native decoder handle-kind count.
     pub renderer_supported_handle_kinds: u8,
     /// Renderer-supported decoded source texture-format count.

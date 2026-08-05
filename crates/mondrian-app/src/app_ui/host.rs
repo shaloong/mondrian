@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime};
 #[cfg(test)]
 use mondrian_core::ProjectId;
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
-use mondrian_platform::{NativeVideoTextureImportProbeResult, PlatformService};
+use mondrian_platform::PlatformService;
 use mondrian_renderer::GpuNativeDecodedFrameImportSupport;
 use mondrian_ui_core::types::{Point, Rect};
 use mondrian_ui_core::{TreeWalker, Widget};
@@ -337,9 +337,8 @@ impl AppUiHost {
     pub(crate) fn set_native_decoded_frame_import_support(
         &self,
         support: GpuNativeDecodedFrameImportSupport,
-        platform_probe: &NativeVideoTextureImportProbeResult,
     ) {
-        let admission = resolve_playback_hardware_decode_admission(&support, platform_probe);
+        let admission = resolve_playback_hardware_decode_admission(&support);
         self.preview_service.set_playback_hardware_decode_admission(admission);
     }
 
@@ -2069,9 +2068,7 @@ mod tests {
     use mondrian_editor_state::state::PanelKind;
     use mondrian_editor_state::Action;
     use mondrian_media::PreviewHardwareDecodeRequest;
-    use mondrian_platform::{
-        ClipboardError, FileFilter, NativeVideoTextureImportProbeResult, NoopPlatformService,
-    };
+    use mondrian_platform::{ClipboardError, FileFilter, NoopPlatformService};
     use mondrian_timeline::{Clip, Sequence};
     use mondrian_ui_core::tree::TreeWalker;
     use mondrian_ui_core::types::{Modifiers, MouseButton, Point, Rect, SplitDirection};
@@ -2150,7 +2147,6 @@ mod tests {
 
         host.set_native_decoded_frame_import_support(
             GpuNativeDecodedFrameImportSupport::unavailable(),
-            &NativeVideoTextureImportProbeResult::unsupported("test probe unavailable"),
         );
         assert_eq!(
             host.preview_service.playback_hardware_decode_request_for_test(),
@@ -2256,15 +2252,7 @@ mod tests {
             None
         }
 
-        fn open_folder_dialog(&self, _title: &str) -> Option<PathBuf> {
-            None
-        }
-
-        fn open_url(&self, _url: &str) {}
-
         fn reveal_in_file_manager(&self, _path: &Path) {}
-
-        fn send_notification(&self, _title: &str, _body: &str) {}
     }
 
     impl PlatformService for StartupProjectPlatform {
@@ -2289,15 +2277,7 @@ mod tests {
             Some(self.project_file.clone())
         }
 
-        fn open_folder_dialog(&self, _title: &str) -> Option<PathBuf> {
-            None
-        }
-
-        fn open_url(&self, _url: &str) {}
-
         fn reveal_in_file_manager(&self, _path: &Path) {}
-
-        fn send_notification(&self, _title: &str, _body: &str) {}
     }
 
     impl PlatformService for ProjectDialogPlatform {
@@ -2322,15 +2302,7 @@ mod tests {
             self.save_path.clone()
         }
 
-        fn open_folder_dialog(&self, _title: &str) -> Option<PathBuf> {
-            None
-        }
-
-        fn open_url(&self, _url: &str) {}
-
         fn reveal_in_file_manager(&self, _path: &Path) {}
-
-        fn send_notification(&self, _title: &str, _body: &str) {}
     }
 
     fn temp_preferences_path(name: &str) -> PathBuf {

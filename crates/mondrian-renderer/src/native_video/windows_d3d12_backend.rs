@@ -211,7 +211,7 @@ impl D3D12NativeVideoImportBackend {
         let formats = conformed_decoder_surface_formats(device.features())?;
         let renderer_adapter_luid = renderer_adapter_luid(adapter)?;
         let decoder_adapter_index = renderer_adapter_dxgi_index(adapter)?;
-        let support = GpuNativeDecodedFrameImportSupport::ready(
+        let support = GpuNativeDecodedFrameImportSupport::ready_gpu_bridge_copy(
             vec![DecodedGpuFrameHandleKind::D3D12Resource],
             formats,
         )

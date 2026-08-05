@@ -1,6 +1,6 @@
 //! Canonical Viewer GPU-output residency diagnostics.
 //!
-//! The Window supplies platform and renderer facts. This Module alone lowers
+//! The Window supplies device-bound renderer facts. This Module alone lowers
 //! declared preview input or an executed renderer record into serializable
 //! residency evidence, so planned work is never reported as observed zero-copy
 //! execution.
@@ -10,7 +10,6 @@ use crate::app::native_video_import::{
     NativeVideoImportReadinessInput,
 };
 use crate::app::preview_execution::{PreviewGpuFrame, PreviewGpuWorkingInput};
-use mondrian_platform::NativeVideoTextureImportProbeResult;
 use mondrian_renderer::{
     GpuNativeDecodedFrameImportSupport, ViewerGpuExecutionLayer, ViewerGpuExecutionResidency,
     ViewerGpuNativeVideoFacts, ViewerGpuSourceLayer, ViewerGpuTransitionInput,
@@ -33,6 +32,8 @@ pub(crate) struct ViewerGpuOutputFrameResidency {
     pub low_copy: bool,
     /// Uploads observed during actual execution.
     pub upload_count: u32,
+    /// Native decoder layers that used one declared GPU-local bridge copy.
+    pub native_bridge_copy_count: u32,
     /// Readbacks observed during actual execution.
     pub readback_count: u32,
     /// Stable human-readable explanation of the residency evidence.
@@ -99,7 +100,6 @@ pub(crate) enum ViewerGpuOutputInputTransformPath {
 /// success. Actual facts replace this provisional record after execution.
 pub(crate) fn declared_viewer_gpu_output_residency(
     frame: &PreviewGpuFrame,
-    platform_probe: NativeVideoTextureImportProbeResult,
 ) -> ViewerGpuOutputFrameResidency {
     match &frame.working_input {
         PreviewGpuWorkingInput::GpuComposite { layers } => {
@@ -113,7 +113,6 @@ pub(crate) fn declared_viewer_gpu_output_residency(
                 counts.gpu_input_eligible_layers,
                 counts.native_media_layers,
                 counts.media_layers.saturating_add(counts.procedural_layers),
-                platform_probe,
             )
         }
     }
@@ -194,7 +193,6 @@ fn declared_residency_from_layer_counts(
     gpu_input_eligible_layers: u32,
     native_media_layers: u32,
     total_layers: u32,
-    platform_probe: NativeVideoTextureImportProbeResult,
 ) -> ViewerGpuOutputFrameResidency {
     let has_media = media_layers > 0;
     let has_procedural = total_layers > media_layers;
@@ -233,6 +231,7 @@ fn declared_residency_from_layer_counts(
         zero_copy: false,
         low_copy: false,
         upload_count: 0,
+        native_bridge_copy_count: 0,
         readback_count: 0,
         reason: declared_residency_reason(
             has_media,
@@ -242,7 +241,6 @@ fn declared_residency_from_layer_counts(
         native_video_import: native_video_import_readiness(
             has_media,
             None,
-            platform_probe,
             GpuNativeDecodedFrameImportSupport::unavailable(),
         ),
     }
@@ -252,16 +250,11 @@ fn declared_residency_from_layer_counts(
 pub(crate) fn executed_viewer_gpu_output_residency(
     summary: ViewerGpuExecutionResidency,
     renderer_support: GpuNativeDecodedFrameImportSupport,
-    platform_probe: NativeVideoTextureImportProbeResult,
 ) -> ViewerGpuOutputFrameResidency {
     let has_media = summary.media_layers > 0;
     let has_procedural = summary.procedural_layers > 0;
-    let native_video_import = native_video_import_readiness(
-        has_media,
-        summary.native_video_import,
-        platform_probe,
-        renderer_support,
-    );
+    let native_video_import =
+        native_video_import_readiness(has_media, summary.native_video_import, renderer_support);
     let all_media_native_gpu =
         has_media && summary.native_decoder_gpu_layers == summary.media_layers;
     let has_native_gpu_media = summary.native_decoder_gpu_layers > 0;
@@ -269,6 +262,11 @@ pub(crate) fn executed_viewer_gpu_output_residency(
         .as_ref()
         .map(|readiness| readiness.zero_copy_ready && all_media_native_gpu)
         .unwrap_or(false);
+    let native_low_copy_ready = native_video_import
+        .as_ref()
+        .map(|readiness| readiness.low_copy_ready && all_media_native_gpu)
+        .unwrap_or(false);
+    let upload_count = summary.gpu_input_layers.saturating_add(summary.cpu_upload_layers);
     ViewerGpuOutputFrameResidency {
         decode_residency: match (
             has_media,
@@ -292,8 +290,13 @@ pub(crate) fn executed_viewer_gpu_output_residency(
         input_transform_path: executed_input_transform_path(summary),
         execution_observed: true,
         zero_copy: !has_media || native_zero_copy_ready,
-        low_copy: has_media && !native_zero_copy_ready,
-        upload_count: summary.gpu_input_layers.saturating_add(summary.cpu_upload_layers),
+        low_copy: has_media && (native_low_copy_ready || upload_count > 0),
+        upload_count,
+        native_bridge_copy_count: if native_low_copy_ready {
+            summary.native_decoder_gpu_layers
+        } else {
+            0
+        },
         readback_count: 0,
         reason: executed_residency_reason(summary),
         native_video_import,
@@ -303,7 +306,6 @@ pub(crate) fn executed_viewer_gpu_output_residency(
 fn native_video_import_readiness(
     has_media: bool,
     facts: Option<ViewerGpuNativeVideoFacts>,
-    platform_probe: NativeVideoTextureImportProbeResult,
     renderer_support: GpuNativeDecodedFrameImportSupport,
 ) -> Option<NativeVideoImportReadiness> {
     let facts = facts.unwrap_or_default();
@@ -313,7 +315,6 @@ fn native_video_import_readiness(
             decoder_handle_kind: facts.decoder_handle_kind,
             source_texture_format: facts.source_texture_format,
             source_video_sampling: facts.source_video_sampling,
-            platform_probe,
             renderer_support,
         })
     })
@@ -402,22 +403,20 @@ mod tests {
     use super::*;
     use mondrian_core::types::ColorSpace;
     use mondrian_media::{DecodedFrameResidency, DecodedGpuFrameHandleKind};
-    use mondrian_platform::NativeVideoTextureHandleKind;
     use mondrian_renderer::{
         GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling,
         GpuVideoChromaLocation, GpuVideoRange,
     };
 
-    fn native_platform_probe() -> NativeVideoTextureImportProbeResult {
-        NativeVideoTextureImportProbeResult::found(
-            vec![NativeVideoTextureHandleKind::D3D11Texture2D],
-            true,
-            true,
+    fn native_renderer_support() -> GpuNativeDecodedFrameImportSupport {
+        GpuNativeDecodedFrameImportSupport::ready_zero_copy(
+            vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
+            vec![GpuNativeDecodedFrameTextureFormat::Nv12],
         )
     }
 
-    fn native_renderer_support() -> GpuNativeDecodedFrameImportSupport {
-        GpuNativeDecodedFrameImportSupport::ready(
+    fn native_bridge_copy_renderer_support() -> GpuNativeDecodedFrameImportSupport {
+        GpuNativeDecodedFrameImportSupport::ready_gpu_bridge_copy(
             vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
             vec![GpuNativeDecodedFrameTextureFormat::Nv12],
         )
@@ -441,7 +440,7 @@ mod tests {
 
     #[test]
     fn declared_native_media_never_claims_execution_or_zero_copy() {
-        let residency = declared_residency_from_layer_counts(1, 1, 1, 1, native_platform_probe());
+        let residency = declared_residency_from_layer_counts(1, 1, 1, 1);
 
         assert_eq!(
             residency.decode_residency,
@@ -455,6 +454,7 @@ mod tests {
         assert!(!residency.zero_copy);
         assert!(!residency.low_copy);
         assert_eq!(residency.upload_count, 0);
+        assert_eq!(residency.native_bridge_copy_count, 0);
         assert_eq!(residency.readback_count, 0);
         assert!(residency.reason.contains("have not been observed"));
     }
@@ -470,7 +470,6 @@ mod tests {
                 ..ViewerGpuExecutionResidency::default()
             },
             GpuNativeDecodedFrameImportSupport::unavailable(),
-            NativeVideoTextureImportProbeResult::unsupported("not required for CPU media"),
         );
 
         assert!(residency.execution_observed);
@@ -481,6 +480,7 @@ mod tests {
         assert!(!residency.zero_copy);
         assert!(residency.low_copy);
         assert_eq!(residency.upload_count, 2);
+        assert_eq!(residency.native_bridge_copy_count, 0);
         assert_eq!(
             residency.input_transform_path,
             ViewerGpuOutputInputTransformPath::MixedCpuOcioAndGpuOcio
@@ -488,29 +488,33 @@ mod tests {
     }
 
     #[test]
-    fn executed_native_media_requires_platform_and_renderer_proof_for_zero_copy() {
+    fn executed_native_media_requires_device_bound_renderer_proof_for_zero_copy() {
         let summary = ViewerGpuExecutionResidency {
             media_layers: 1,
             native_decoder_gpu_layers: 1,
             native_video_import: Some(native_video_facts()),
             ..ViewerGpuExecutionResidency::default()
         };
-        let ready = executed_viewer_gpu_output_residency(
-            summary,
-            native_renderer_support(),
-            native_platform_probe(),
-        );
+        let ready = executed_viewer_gpu_output_residency(summary, native_renderer_support());
         assert!(ready.execution_observed);
         assert!(ready.zero_copy);
         assert!(!ready.low_copy);
         assert_eq!(ready.upload_count, 0);
+        assert_eq!(ready.native_bridge_copy_count, 0);
+
+        let bridge_copy =
+            executed_viewer_gpu_output_residency(summary, native_bridge_copy_renderer_support());
+        assert!(!bridge_copy.zero_copy);
+        assert!(bridge_copy.low_copy);
+        assert_eq!(bridge_copy.upload_count, 0);
+        assert_eq!(bridge_copy.native_bridge_copy_count, 1);
 
         let renderer_unavailable = executed_viewer_gpu_output_residency(
             summary,
             GpuNativeDecodedFrameImportSupport::unavailable(),
-            native_platform_probe(),
         );
         assert!(!renderer_unavailable.zero_copy);
-        assert!(renderer_unavailable.low_copy);
+        assert!(!renderer_unavailable.low_copy);
+        assert_eq!(renderer_unavailable.native_bridge_copy_count, 0);
     }
 }

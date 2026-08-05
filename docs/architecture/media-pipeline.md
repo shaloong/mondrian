@@ -1012,7 +1012,7 @@ FFmpeg hardware decode even when decoded frames must transfer back to CPU RGBA,
 access mode/backend can provide one, and `RequireGpuResident` means fail closed
 instead of silently returning a CPU RGBA frame. The app playback scheduler may
 use `PreferHardwareDecode` for `PlaybackCursor` while renderer native import is
-not ready, then upgrade to `PreferGpuResident` only after renderer/platform
+not ready, then upgrade to `PreferGpuResident` only after device-scoped Renderer
 native decoded-frame import admission succeeds. Scrub and still-frame work
 should remain `Auto` unless a future backend explicitly supports those access
 patterns.
@@ -1320,8 +1320,9 @@ access modes. Reverting scrub or still requests to `Auto` would silently move a
 4K Main10 interaction from the admitted native P010 path back to CPU decode and
 is forbidden. CPU-only preview services retain the default `Auto` policy
 because no GPU Adapter admission is installed.
-UI-independent `app::preview_hardware_admission` stores the renderer/platform
-observation as one Copy snapshot (or the explicit pre-discovery `None` state).
+UI-independent `app::preview_hardware_admission` stores the device-scoped
+Renderer observation as one Copy snapshot (or the explicit pre-discovery
+`None` state).
 Base request, native-surface-specific downgrade, and device selector are always
 projected from that same observation; independently updated booleans cannot
 manufacture a mixed admission state. The concrete Preview module only projects
@@ -1702,14 +1703,16 @@ request. A GPU preference must resolve to a structured CPU RGBA reason such as
 `CpuRgbaHardwareUnavailable`,
 `CpuRgbaBackendUnavailable`, `CpuRgbaCodecUnsupported`,
 `CpuRgbaBackendBoundary`, or `HardwareDecodeCpuTransfer` until the selected
-decoder actually produces a native surface admitted by the caller's combined
-renderer/platform capability check.
+decoder actually produces a native surface admitted by the caller's exact media
+facts and device-scoped Renderer capability check.
 `HardwareDecodeCpuTransfer` means in-process FFmpeg hardware decode was
 configured and hardware frames are transferred back to CPU before RGBA preview;
 it is active hardware decode, but it is not zero-copy, GPU texture residency, or
 a native renderer import contract. `GpuResidentNative` is valid only when the
-decoder probe reports active hardware decode, zero-copy/GPU texture residency,
-and a native handle kind. Renderer/platform readiness is a separate app
+decoder probe reports active hardware decode, GPU texture residency, and a
+native handle kind. Whether Renderer consumption is zero-copy or uses one GPU
+bridge copy comes only from the device-scoped Renderer support contract.
+Renderer readiness is a separate app
 admission fact. External FFmpeg CPU RGBA
 is always a backend boundary, even if the CLI used platform hwaccel internally.
 `HwAccelProbe` reports the selected hardware backend, decoded frame residency,
@@ -1785,7 +1788,7 @@ does not permit CPU transfer or software-frame fallback. A failed device-context
 probe is `CpuRgbaHardwareUnavailable`; a
 successful hardware decode session that still transfers frames to CPU is
 `HardwareDecodeCpuTransfer`; a future zero-copy adapter that cannot import into
-the renderer should use renderer/platform import diagnostics instead of this
+the renderer should use Renderer import diagnostics instead of this
 CPU-transfer state.
 The temporary FFmpeg hardware CPU-transfer fallback must report a structured
 `PreviewHardwareDecodeCpuTransferStatus`: `NotAttempted`,
@@ -1795,18 +1798,16 @@ decode counters. They remain a diagnostic fallback state only; `Observed` means
 hardware frames were transferred back to CPU, not that Mondrian achieved
 GPU-resident playback.
 Playback hardware-decode admission is an app-layer aggregation contract, not a
-media, renderer, or platform responsibility. UI-independent
-`app::native_video_import` combines renderer native decoded-frame import
-support and OS native texture import probing into one
+media or Renderer responsibility. UI-independent `app::native_video_import`
+combines exact media-surface facts and the active device's Renderer native
+decoded-frame import support into one
 `PlaybackHardwareDecodeAdmission`; Window and Headless composition roots pass
 that same value to the concrete Preview Adapter. Preview diagnostics project,
 but do not own, its playback request, renderer readiness and supported handle/
-source-format counts, platform discovery/zero-copy/low-copy facts, and stable
-`PreviewHardwareDecodeAdmissionBlocker` variants such as
-`RendererImportUnavailable`, `PlatformDiscoveryUnavailable`,
-`PlatformCopyPathUnavailable`, or `PlatformHandleUnsupported`. The scheduler
-may request `PreferGpuResident` only when renderer import and platform import
-are both ready for a shared handle family. Otherwise playback may request
+source-format counts, and stable blockers `SupportUnknown`,
+`HandleSupportMissing`, or `SourceTextureFormatSupportMissing`. The scheduler may
+request `PreferGpuResident` only when the active Renderer device is ready for
+the exact media surface family and sampling format. Otherwise playback may request
 `PreferHardwareDecode` to use FFmpeg hardware decode with CPU-transfer fallback,
 and the performance report must still identify the precise native-import
 admission blocker. Do not report FFmpeg hardware CPU-transfer as the production
@@ -2011,23 +2012,21 @@ without requiring an app restart or manual cache clear.
 surface family that FFmpeg/hardware decode produced, such as D3D12 resource,
 D3D11 texture, legacy DXVA2 surface, CVPixelBuffer, VA-API surface, legacy
 VDPAU surface, or CUDA device memory. It does not imply that the renderer can
-import or sample that handle. Platform capability discovery is reported
-separately by `mondrian-platform-core` as native texture import support, and
-renderer readiness is reported by
+import or sample that handle. Device-scoped readiness is reported only by
 `mondrian-renderer` through
-`GpuNativeDecodedFrameImportSupport` / `GpuNativeDecodedFrameImportPlan`. App
-code must not infer zero-copy playback from the media handle kind alone.
-On Windows, platform capability discovery performs real D3D12 and D3D11 device
-probes and reports `D3D12Resource` and/or `D3D11Texture2D` with a low-copy
-staging fallback when those device probes succeed. That is OS/device evidence
-only: zero-copy remains false until the renderer exposes a native import
-backend, and CPU-transfer hardware decode must still report CPU RGBA residency.
-On macOS the platform Adapter exposes the CVPixelBuffer handle family and the
-renderer admits it only when the active wgpu device is Metal and a
-`CVMetalTextureCache` can be created for that exact device. On Linux the platform
-Adapter exposes DMA-BUF while renderer admission additionally requires the
-active Vulkan device's `VULKAN_EXTERNAL_MEMORY_DMA_BUF` feature. These OS facts
-cannot override renderer/device rejection.
+`GpuNativeDecodedFrameImportSupport` / `GpuNativeDecodedFrameImportPlan`. Ready
+support also declares `GpuNativeDecodedFrameImportMode::{ZeroCopy,
+GpuBridgeCopy}`; missing transfer mode fails closed. App code must not infer
+zero-copy playback from the media handle kind or generic import readiness alone.
+An independent platform probe is forbidden because it can bind a different
+physical device and cannot prove allocation or synchronization compatibility.
+On macOS the Renderer admits CVPixelBuffer only when the active wgpu device is
+Metal and a
+`CVMetalTextureCache` can be created for that exact device. On Linux the media
+Adapter exposes DMA-BUF while Renderer admission requires the active
+Vulkan device's `VULKAN_EXTERNAL_MEMORY_DMA_BUF` feature. On Windows the same
+rule binds D3D12 resource import to the active DX12 device. CPU-transfer hardware
+decode still reports CPU RGBA residency on every platform.
 
 The preview decoder's experimental external-process path is named
 `PreviewDecodeBackend::ExternalFfmpegCpuRgba` and is enabled only by explicitly
@@ -2244,18 +2243,17 @@ create the hardware device context, the decision should be
 `CpuRgbaHardwareUnavailable`. When FFmpeg can create the device context and
 hardware frames are observed but Mondrian still transfers them to CPU RGBA, the
 decision should be `HardwareDecodeCpuTransfer`; this should improve decode CPU
-pressure but is not the final residency model. Only after an adapter produces
-native GPU residency should later readiness failures move to renderer or
-platform import diagnostics.
+pressure but is not the final residency model. Only after an Adapter produces
+native GPU residency should later readiness failures move to Renderer import
+diagnostics.
 Every Viewer GPU Adapter must preserve those media facts in its frame-residency
 telemetry. Media decode diagnostics feed the renderer-owned
 `ViewerGpuMediaSource` contract, while a retained native payload feeds
 `ViewerGpuNativeSource`. The latter keeps physical source extent separate from
 the renderer materialization extent, so a 4K decoder surface need not allocate
 and color-transform a 4K working frame for a quarter-resolution Viewer. App
-product admission combines decoder
-residency/handle/format with the platform import probe and renderer import
-support. This does not make CPU RGBA preview hardware
+product admission combines decoder residency/handle/format with the active
+device's Renderer import support. This does not make CPU RGBA preview hardware
 decoded; it prevents the future hardware decoder adapter from being hidden
 behind a generic "GPU input upload" label once it starts producing NV12/P010
 native surfaces.
@@ -2484,13 +2482,13 @@ service from the coherent `app::native_video_import` snapshot. The media
 request default remains `PreviewHardwareDecodeRequest::Auto`; Window or
 Headless composition code may raise playback jobs to `PreferHardwareDecode` for
 FFmpeg hardware CPU-transfer fallback, and to `PreferGpuResident` only after the
-renderer native decoded-frame import contract reports ready and the platform
-probe supports at least one renderer-supported native handle family with
-zero-copy or declared low-copy import. This prevents CPU-transfer playback from
+Renderer native decoded-frame import contract reports ready and the media
+surface facts match at least one Renderer-supported native handle and format
+with a sampling backend. This prevents CPU-transfer playback from
 being mistaken for native GPU residency while still avoiding a pure software
 decode default for sustained playback. The same admission state must be
-serialized in preview diagnostics and performance reports as separate renderer,
-platform, and final-admission facts; a known native-import blocker must produce
+serialized in preview diagnostics and performance reports as separate media,
+Renderer, and final-admission facts; a known native-import blocker must produce
 a specific gated-admission root cause instead of disappearing as a generic
 media-layer software decode.
 Playback reports must also distinguish hardware-decode intent from effective

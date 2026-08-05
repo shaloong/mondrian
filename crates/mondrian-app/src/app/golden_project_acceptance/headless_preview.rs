@@ -5,7 +5,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure, Context};
-use mondrian_platform::{NativeVideoTextureImportProbe, SystemPlatformService};
 use serde::Serialize;
 
 use crate::app::headless_preview_presentation::{
@@ -70,10 +69,8 @@ impl GoldenHeadlessPreview {
         let mut gpu =
             HeadlessViewerGpuAdapter::new().context("create Golden Headless Viewer GPU Adapter")?;
         gpu.install_completion_waker(runtime.work_watch().completion_waker());
-        let hardware_admission = resolve_playback_hardware_decode_admission(
-            &gpu.native_import_support(),
-            &SystemPlatformService.native_video_texture_import(),
-        );
+        let hardware_admission =
+            resolve_playback_hardware_decode_admission(&gpu.native_import_support());
         runtime.set_playback_hardware_decode_admission(hardware_admission);
         Ok(Self {
             runtime,

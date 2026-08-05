@@ -6,9 +6,9 @@
 //! through the second inventory, so PID reuse, process exit, or a newly visible
 //! descendant makes the bounded attempt fail instead of silently undercounting.
 
-use mondrian_platform_core::{
-    ProcessMemoryProbeBackend, ProcessMemoryProbeResult, ProcessMemoryScope,
-};
+#[cfg(target_os = "windows")]
+use mondrian_platform_core::ProcessMemoryProbeBackend;
+use mondrian_platform_core::{ProcessMemoryProbeResult, ProcessMemoryScope};
 
 #[cfg(target_os = "linux")]
 mod linux;

@@ -172,15 +172,28 @@ impl std::fmt::Debug for NativePlaybackThreadScheduling {
 #[cfg(target_os = "macos")]
 impl NativePlaybackThreadScheduling {
     fn enter() -> Result<Option<Self>, PlaybackThreadSchedulingError> {
+        let mut previous_class = libc::qos_class_t::QOS_CLASS_UNSPECIFIED;
         let mut previous_priority = 0_i32;
-        // SAFETY: This reads only the current live pthread and initializes the
-        // provided priority value without retaining its pointer.
-        let previous_class =
-            unsafe { libc::pthread_get_qos_class_np(libc::pthread_self(), &mut previous_priority) };
+        // SAFETY: This reads only the current live pthread and initializes both
+        // output values without retaining either pointer.
+        let query_result = unsafe {
+            libc::pthread_get_qos_class_np(
+                libc::pthread_self(),
+                &mut previous_class,
+                &mut previous_priority,
+            )
+        };
+        if query_result != 0 {
+            return Err(PlaybackThreadSchedulingError::new(
+                "pthread_get_qos_class_np",
+                std::io::Error::from_raw_os_error(query_result).to_string(),
+            ));
+        }
         // SAFETY: This changes only the current thread. The thread-affine guard
         // restores the captured class before it can leave that thread.
-        let result =
-            unsafe { libc::pthread_set_qos_class_self_np(libc::QOS_CLASS_USER_INTERACTIVE, 0) };
+        let result = unsafe {
+            libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0)
+        };
         if result != 0 {
             return Err(PlaybackThreadSchedulingError::new(
                 "pthread_set_qos_class_self_np",

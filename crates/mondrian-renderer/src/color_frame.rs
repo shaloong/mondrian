@@ -1647,6 +1647,15 @@ impl GpuNativeDecodedFrameVideoSampling {
     }
 }
 
+/// Physical transfer mode used before a native decoded surface is sampled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+pub enum GpuNativeDecodedFrameImportMode {
+    /// The active Renderer samples external decoder storage without copying its pixels.
+    ZeroCopy,
+    /// The active Renderer performs one GPU-local bridge copy before sampling.
+    GpuBridgeCopy,
+}
+
 /// Renderer backend capability contract for importing native decoded frames.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GpuNativeDecodedFrameImportSupport {
@@ -1660,6 +1669,8 @@ pub struct GpuNativeDecodedFrameImportSupport {
     pub supported_handle_kinds: Vec<DecodedGpuFrameHandleKind>,
     /// Decoder source texture formats accepted by the backend.
     pub supported_source_texture_formats: Vec<GpuNativeDecodedFrameTextureFormat>,
+    /// Physical transfer mode implemented by this exact backend/device binding.
+    pub import_mode: Option<GpuNativeDecodedFrameImportMode>,
     /// Decoder device that produces resources on the renderer's physical adapter.
     pub hardware_decode_device_selector: Option<mondrian_media::HwAccelDeviceSelector>,
 }
@@ -1675,6 +1686,7 @@ impl GpuNativeDecodedFrameImportSupport {
             ),
             supported_handle_kinds: Vec::new(),
             supported_source_texture_formats: Vec::new(),
+            import_mode: None,
             hardware_decode_device_selector: None,
         }
     }
@@ -1690,14 +1702,39 @@ impl GpuNativeDecodedFrameImportSupport {
             unavailable_reason: Some(reason.into()),
             supported_handle_kinds: Vec::new(),
             supported_source_texture_formats: Vec::new(),
+            import_mode: None,
             hardware_decode_device_selector: None,
         }
     }
 
-    /// Build an explicit support value for a renderer backend implementation.
-    pub fn ready(
+    /// Build support for a backend that directly samples external decoder storage.
+    pub fn ready_zero_copy(
         supported_handle_kinds: Vec<DecodedGpuFrameHandleKind>,
         supported_source_texture_formats: Vec<GpuNativeDecodedFrameTextureFormat>,
+    ) -> Self {
+        Self::ready_with_mode(
+            supported_handle_kinds,
+            supported_source_texture_formats,
+            GpuNativeDecodedFrameImportMode::ZeroCopy,
+        )
+    }
+
+    /// Build support for a backend that performs one GPU-local bridge copy.
+    pub fn ready_gpu_bridge_copy(
+        supported_handle_kinds: Vec<DecodedGpuFrameHandleKind>,
+        supported_source_texture_formats: Vec<GpuNativeDecodedFrameTextureFormat>,
+    ) -> Self {
+        Self::ready_with_mode(
+            supported_handle_kinds,
+            supported_source_texture_formats,
+            GpuNativeDecodedFrameImportMode::GpuBridgeCopy,
+        )
+    }
+
+    fn ready_with_mode(
+        supported_handle_kinds: Vec<DecodedGpuFrameHandleKind>,
+        supported_source_texture_formats: Vec<GpuNativeDecodedFrameTextureFormat>,
+        import_mode: GpuNativeDecodedFrameImportMode,
     ) -> Self {
         Self {
             renderer_backend_ready: true,
@@ -1705,6 +1742,7 @@ impl GpuNativeDecodedFrameImportSupport {
             unavailable_reason: None,
             supported_handle_kinds,
             supported_source_texture_formats,
+            import_mode: Some(import_mode),
             hardware_decode_device_selector: None,
         }
     }
@@ -3371,7 +3409,7 @@ mod tests {
     #[test]
     fn native_decoded_frame_import_rejects_unsupported_handle_kind() {
         let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
-        let support = GpuNativeDecodedFrameImportSupport::ready(
+        let support = GpuNativeDecodedFrameImportSupport::ready_zero_copy(
             vec![DecodedGpuFrameHandleKind::CVPixelBuffer],
             vec![GpuNativeDecodedFrameTextureFormat::Nv12],
         );
@@ -3394,7 +3432,7 @@ mod tests {
     #[test]
     fn native_decoded_frame_import_rejects_unsupported_source_format() {
         let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
-        let support = GpuNativeDecodedFrameImportSupport::ready(
+        let support = GpuNativeDecodedFrameImportSupport::ready_zero_copy(
             vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
             vec![GpuNativeDecodedFrameTextureFormat::P010],
         );
@@ -3417,7 +3455,7 @@ mod tests {
     #[test]
     fn native_decoded_frame_import_requires_gpu_ocio_input_transform() {
         let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
-        let support = GpuNativeDecodedFrameImportSupport::ready(
+        let support = GpuNativeDecodedFrameImportSupport::ready_zero_copy(
             vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
             vec![GpuNativeDecodedFrameTextureFormat::Nv12],
         );
@@ -3443,7 +3481,7 @@ mod tests {
     #[test]
     fn native_decoded_frame_import_plan_produces_renderer_owned_working_frame() {
         let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
-        let support = GpuNativeDecodedFrameImportSupport::ready(
+        let support = GpuNativeDecodedFrameImportSupport::ready_zero_copy(
             vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
             vec![GpuNativeDecodedFrameTextureFormat::Nv12],
         );
@@ -3520,7 +3558,7 @@ mod tests {
     #[test]
     fn native_decoded_frame_import_preserves_decoder_matrix_independent_of_rgb_space() {
         let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
-        let support = GpuNativeDecodedFrameImportSupport::ready(
+        let support = GpuNativeDecodedFrameImportSupport::ready_zero_copy(
             vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
             vec![GpuNativeDecodedFrameTextureFormat::Nv12],
         );
@@ -3537,7 +3575,7 @@ mod tests {
     #[test]
     fn native_decoded_frame_import_rejects_sampling_transfer_color_space_mismatch() {
         let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
-        let support = GpuNativeDecodedFrameImportSupport::ready(
+        let support = GpuNativeDecodedFrameImportSupport::ready_zero_copy(
             vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
             vec![GpuNativeDecodedFrameTextureFormat::Nv12],
         );
@@ -3561,7 +3599,7 @@ mod tests {
     #[test]
     fn native_decoded_frame_import_rejects_p010_with_wrong_bit_depth() {
         let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
-        let support = GpuNativeDecodedFrameImportSupport::ready(
+        let support = GpuNativeDecodedFrameImportSupport::ready_zero_copy(
             vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
             vec![GpuNativeDecodedFrameTextureFormat::P010],
         );
@@ -3591,7 +3629,7 @@ mod tests {
     #[test]
     fn native_decoded_frame_import_rejects_ycbcr_without_chroma_location() {
         let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
-        let support = GpuNativeDecodedFrameImportSupport::ready(
+        let support = GpuNativeDecodedFrameImportSupport::ready_zero_copy(
             vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
             vec![GpuNativeDecodedFrameTextureFormat::Nv12],
         );
@@ -3612,7 +3650,7 @@ mod tests {
     #[test]
     fn native_decoded_frame_import_rejects_rgb_surface_with_ycbcr_matrix() {
         let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
-        let support = GpuNativeDecodedFrameImportSupport::ready(
+        let support = GpuNativeDecodedFrameImportSupport::ready_zero_copy(
             vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
             vec![GpuNativeDecodedFrameTextureFormat::Rgba8Unorm],
         );
@@ -3685,7 +3723,7 @@ mod tests {
     impl FakeNativeImportBackend {
         fn ready() -> Self {
             Self {
-                support: GpuNativeDecodedFrameImportSupport::ready(
+                support: GpuNativeDecodedFrameImportSupport::ready_zero_copy(
                     vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
                     vec![GpuNativeDecodedFrameTextureFormat::Nv12],
                 ),

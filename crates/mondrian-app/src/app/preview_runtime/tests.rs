@@ -3658,12 +3658,9 @@ fn preview_playback_schedule_counts_native_import_unavailable_current_frames() {
         request: PreviewHardwareDecodeRequest::PreferHardwareDecode,
         hardware_decode_device_selector: None,
         renderer_native_import_ready: false,
-        platform_native_import_ready: false,
+        renderer_import_mode: None,
         native_import_admission_ready: false,
         admission_blocker: Some(PreviewHardwareDecodeAdmissionBlocker::RendererImportUnavailable),
-        platform_discovery_available: true,
-        platform_zero_copy_supported: false,
-        platform_low_copy_fallback_supported: false,
         renderer_supported_handle_kinds: 0,
         renderer_supported_source_texture_formats: 0,
         renderer_supports_nv12: false,
@@ -5080,14 +5077,11 @@ fn preview_decode_performance_report_flags_hardware_decode_admission_gate() {
             playback_request: PreviewHardwareDecodeRequest::PreferHardwareDecode,
             renderer_native_import_support_known: true,
             renderer_native_import_ready: false,
-            platform_native_import_ready: true,
+            renderer_import_mode: None,
             native_import_admission_ready: false,
             admission_blocker: Some(
                 PreviewHardwareDecodeAdmissionBlocker::RendererImportUnavailable,
             ),
-            platform_discovery_available: true,
-            platform_zero_copy_supported: false,
-            platform_low_copy_fallback_supported: true,
             renderer_supported_handle_kinds: 0,
             renderer_supported_source_texture_formats: 0,
         },
@@ -5116,10 +5110,6 @@ fn preview_decode_performance_report_flags_hardware_decode_admission_gate() {
             && root.evidence.contains("renderer_native_import_ready=false")
             && root.evidence.contains("renderer_supported_handle_kinds=0")
             && root.evidence.contains("renderer_supported_source_texture_formats=0")
-            && root.evidence.contains("platform_discovery_available=true")
-            && root.evidence.contains("platform_zero_copy_supported=false")
-            && root.evidence.contains("platform_low_copy_fallback_supported=true")
-            && root.evidence.contains("platform_native_import_ready=true")
             && root.evidence.contains("native_import_admission_ready=false")
     }));
     assert!(report.actions.iter().any(|action| {
@@ -11161,12 +11151,9 @@ fn gpu_viewer_hardware_decode_admission_covers_every_access_mode() {
         request: PreviewHardwareDecodeRequest::PreferGpuResident,
         hardware_decode_device_selector: Some(HwAccelDeviceSelector::D3D12VaAdapterIndex(1)),
         renderer_native_import_ready: true,
-        platform_native_import_ready: true,
+        renderer_import_mode: Some(mondrian_renderer::GpuNativeDecodedFrameImportMode::ZeroCopy),
         native_import_admission_ready: true,
         admission_blocker: None,
-        platform_discovery_available: true,
-        platform_zero_copy_supported: true,
-        platform_low_copy_fallback_supported: false,
         renderer_supported_handle_kinds: 1,
         renderer_supported_source_texture_formats: 1,
         renderer_supports_nv12: true,
@@ -11212,12 +11199,9 @@ fn gpu_viewer_hardware_decode_admission_does_not_invent_native_payload_contract(
         request: PreviewHardwareDecodeRequest::PreferGpuResident,
         hardware_decode_device_selector: Some(HwAccelDeviceSelector::D3D12VaAdapterIndex(1)),
         renderer_native_import_ready: true,
-        platform_native_import_ready: true,
+        renderer_import_mode: Some(mondrian_renderer::GpuNativeDecodedFrameImportMode::ZeroCopy),
         native_import_admission_ready: true,
         admission_blocker: None,
-        platform_discovery_available: true,
-        platform_zero_copy_supported: true,
-        platform_low_copy_fallback_supported: false,
         renderer_supported_handle_kinds: 1,
         renderer_supported_source_texture_formats: 1,
         renderer_supports_nv12: true,

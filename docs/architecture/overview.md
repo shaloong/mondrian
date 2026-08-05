@@ -44,7 +44,7 @@ foundation:
   replacement.
 - `mondrian-editor-ui`: product-level panel/workspace descriptors. It should define editor UI concepts, not render widgets.
 - `mondrian-platform-core`: platform service traits and native-fact result types. No OS calls.
-- `mondrian-platform`: desktop platform implementations such as clipboard, dialogs, file reveal, eyedropper, display discovery, native video import capability, and explicitly scoped process-memory observation.
+- `mondrian-platform`: desktop platform implementations such as clipboard, dialogs, file reveal, eyedropper/global pointer capture, display discovery, playback-thread scheduling, and explicitly scoped memory observation. It owns OS services and facts, not device-bound Renderer capability; native video import support belongs to the active Renderer Adapter/Device runtime.
 - `mondrian-ui-core`: retained widget trait, events, accessibility metadata, focus/shortcut/tooltip traits, tree traversal.
 - `mondrian-ui-theme`: semantic theme tokens. Only Dark and Light are concrete themes; System is a resolver mode.
 - `mondrian-ui-layout`: reusable layout algorithms.

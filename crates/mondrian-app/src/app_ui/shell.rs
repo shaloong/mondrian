@@ -2144,17 +2144,9 @@ mod tests {
             self.save_path.clone()
         }
 
-        fn open_folder_dialog(&self, _title: &str) -> Option<PathBuf> {
-            None
-        }
-
-        fn open_url(&self, _url: &str) {}
-
         fn reveal_in_file_manager(&self, path: &Path) {
             self.revealed_paths.lock().expect("revealed path lock").push(path.to_path_buf());
         }
-
-        fn send_notification(&self, _title: &str, _body: &str) {}
     }
 
     fn drag_root_splitter_to(root: &mut AppUiAppRoot, x: f32) {

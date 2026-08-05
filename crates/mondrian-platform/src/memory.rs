@@ -178,6 +178,10 @@ mod platform {
 
     use super::*;
 
+    unsafe extern "C" {
+        fn mach_host_self() -> libc::mach_port_t;
+    }
+
     pub(super) fn physical_memory_capacity() -> PhysicalMemoryCapacityProbeResult {
         let backend = PhysicalMemoryCapacityProbeBackend::MacOsHwMemsizeSysctl;
         match sysctl_u64(c"hw.memsize") {
@@ -211,7 +215,7 @@ mod platform {
         // buffer and Mach retains no pointer after returning.
         let result = unsafe {
             libc::host_statistics64(
-                libc::mach_host_self(),
+                mach_host_self(),
                 libc::HOST_VM_INFO64,
                 statistics.as_mut_ptr().cast(),
                 &mut count,

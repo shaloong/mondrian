@@ -8,7 +8,6 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-mondrian-core          = { workspace = true }
 mondrian-platform-core = { workspace = true }
 arboard                = { workspace = true }
 rfd                    = "0.15"

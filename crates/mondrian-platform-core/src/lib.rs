@@ -153,119 +153,6 @@ pub struct DisplayHdrProbeResult {
     pub error: Option<String>,
 }
 
-/// Native video texture handle family that a platform adapter may be able to
-/// import into the renderer backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum NativeVideoTextureHandleKind {
-    /// Windows D3D12 `ID3D12Resource` decode surface.
-    D3D12Resource,
-    /// Windows D3D11 `ID3D11Texture2D` decode surface.
-    D3D11Texture2D,
-    /// Legacy Windows DXVA2 `IDirect3DSurface9` decode surface.
-    Dxva2Surface,
-    /// macOS/iOS `CVPixelBuffer`/IOSurface-backed decode surface.
-    CVPixelBuffer,
-    /// Linux DMABUF-exportable VA-API surface.
-    DmaBuf,
-    /// Legacy Linux VDPAU `VdpVideoSurface`.
-    VdpauVideoSurface,
-    /// CUDA/NVDEC device allocation.
-    CudaDeviceMemory,
-}
-
-impl NativeVideoTextureHandleKind {
-    /// Stable handle-kind name for diagnostics.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::D3D12Resource => "D3D12Resource",
-            Self::D3D11Texture2D => "D3D11Texture2D",
-            Self::Dxva2Surface => "Dxva2Surface",
-            Self::CVPixelBuffer => "CVPixelBuffer",
-            Self::DmaBuf => "DmaBuf",
-            Self::VdpauVideoSurface => "VdpauVideoSurface",
-            Self::CudaDeviceMemory => "CudaDeviceMemory",
-        }
-    }
-}
-
-/// OS/platform capability probe for native video texture import.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeVideoTextureImportProbeResult {
-    /// Whether this platform adapter has a native texture import probe.
-    pub discovery_available: bool,
-    /// Native handle families the platform adapter can currently import.
-    pub supported_handle_kinds: Vec<NativeVideoTextureHandleKind>,
-    /// Whether imported textures can remain GPU-resident through renderer use.
-    pub zero_copy_supported: bool,
-    /// Whether an unsupported path can still use a low-copy staging upload.
-    pub low_copy_fallback_supported: bool,
-    /// Structured diagnostic reason when import is unavailable or partial.
-    pub error: Option<String>,
-}
-
-impl NativeVideoTextureImportProbeResult {
-    /// Build a successful native texture import probe result.
-    pub fn found(
-        supported_handle_kinds: Vec<NativeVideoTextureHandleKind>,
-        zero_copy_supported: bool,
-        low_copy_fallback_supported: bool,
-    ) -> Self {
-        Self {
-            discovery_available: true,
-            supported_handle_kinds,
-            zero_copy_supported,
-            low_copy_fallback_supported,
-            error: None,
-        }
-    }
-
-    /// Build a native texture import probe result with partial readiness.
-    ///
-    /// Use this when OS/device discovery succeeded but some higher-level piece,
-    /// such as zero-copy renderer import, is still unavailable.
-    pub fn found_partial(
-        supported_handle_kinds: Vec<NativeVideoTextureHandleKind>,
-        zero_copy_supported: bool,
-        low_copy_fallback_supported: bool,
-        reason: impl Into<String>,
-    ) -> Self {
-        Self {
-            discovery_available: true,
-            supported_handle_kinds,
-            zero_copy_supported,
-            low_copy_fallback_supported,
-            error: Some(reason.into()),
-        }
-    }
-
-    /// Build a result for a platform adapter that is present but not ready.
-    pub fn missing(reason: impl Into<String>) -> Self {
-        Self {
-            discovery_available: true,
-            supported_handle_kinds: Vec::new(),
-            zero_copy_supported: false,
-            low_copy_fallback_supported: false,
-            error: Some(reason.into()),
-        }
-    }
-
-    /// Build a result for a platform with no native import adapter.
-    pub fn unsupported(reason: impl Into<String>) -> Self {
-        Self {
-            discovery_available: false,
-            supported_handle_kinds: Vec::new(),
-            zero_copy_supported: false,
-            low_copy_fallback_supported: false,
-            error: Some(reason.into()),
-        }
-    }
-
-    /// Whether the probe reports support for a handle family.
-    pub fn supports(&self, handle_kind: NativeVideoTextureHandleKind) -> bool {
-        self.supported_handle_kinds.contains(&handle_kind)
-    }
-}
-
 impl DisplayHdrProbeResult {
     /// Build a successful HDR / EDR probe result.
     pub fn found(
@@ -441,13 +328,6 @@ pub trait DisplayHdrProbe: Send + Sync {
     /// Resolve the current display's HDR / Advanced Color state, when the
     /// platform can provide it.
     fn display_hdr_state(&self, target: DisplayProfileProbeTarget) -> DisplayHdrProbeResult;
-}
-
-/// Interface for OS-backed native video texture import capability probing.
-pub trait NativeVideoTextureImportProbe: Send + Sync {
-    /// Resolve whether this platform/backend can import decoder-owned native
-    /// video textures into renderer-owned GPU resources.
-    fn native_video_texture_import(&self) -> NativeVideoTextureImportProbeResult;
 }
 
 /// Explicit ownership scope for one native process-memory observation.
@@ -924,17 +804,8 @@ pub trait PlatformService: Send + Sync {
         filters: &[FileFilter],
     ) -> Option<PathBuf>;
 
-    /// Open a native folder picker.
-    fn open_folder_dialog(&self, title: &str) -> Option<PathBuf>;
-
-    /// Open a URL in the default browser.
-    fn open_url(&self, url: &str);
-
     /// Reveal a file or folder in the platform file manager.
     fn reveal_in_file_manager(&self, path: &Path);
-
-    /// Send a platform notification.
-    fn send_notification(&self, title: &str, body: &str);
 }
 
 /// Empty platform implementation for tests and headless UI execution.
@@ -963,15 +834,7 @@ impl PlatformService for NoopPlatformService {
         None
     }
 
-    fn open_folder_dialog(&self, _title: &str) -> Option<PathBuf> {
-        None
-    }
-
-    fn open_url(&self, _url: &str) {}
-
     fn reveal_in_file_manager(&self, _path: &Path) {}
-
-    fn send_notification(&self, _title: &str, _body: &str) {}
 }
 
 impl DisplayProfileProbe for NoopPlatformService {
@@ -989,14 +852,6 @@ impl DisplayHdrProbe for NoopPlatformService {
     fn display_hdr_state(&self, _target: DisplayProfileProbeTarget) -> DisplayHdrProbeResult {
         DisplayHdrProbeResult::unsupported(
             "OS HDR / Advanced Color discovery unavailable in noop platform adapter",
-        )
-    }
-}
-
-impl NativeVideoTextureImportProbe for NoopPlatformService {
-    fn native_video_texture_import(&self) -> NativeVideoTextureImportProbeResult {
-        NativeVideoTextureImportProbeResult::unsupported(
-            "native video texture import unavailable in noop platform adapter",
         )
     }
 }
@@ -1075,12 +930,6 @@ mod tests {
     }
 
     #[test]
-    fn noop_open_folder_dialog_returns_none() {
-        let svc = NoopPlatformService;
-        assert_eq!(svc.open_folder_dialog("Select Folder"), None);
-    }
-
-    #[test]
     fn noop_display_profile_probe_reports_unsupported() {
         let svc = NoopPlatformService;
         let result = svc.display_icc_profile(DisplayProfileProbeTarget::new((0, 0), (1920, 1080)));
@@ -1120,89 +969,6 @@ mod tests {
         assert_eq!(result.details.hdr_supported, Some(true));
         assert_eq!(result.details.hdr_enabled, None);
         assert!(result.evidence().contains("enabled=None"));
-    }
-
-    #[test]
-    fn noop_native_video_texture_import_probe_reports_unsupported() {
-        let svc = NoopPlatformService;
-        let result = svc.native_video_texture_import();
-
-        assert!(!result.discovery_available);
-        assert!(result.supported_handle_kinds.is_empty());
-        assert!(!result.zero_copy_supported);
-        assert!(!result.low_copy_fallback_supported);
-        assert!(result.error.as_deref().unwrap_or_default().contains("noop"));
-    }
-
-    #[test]
-    fn native_video_texture_import_probe_supports_handle_kinds() {
-        let result = NativeVideoTextureImportProbeResult::found(
-            vec![
-                NativeVideoTextureHandleKind::D3D12Resource,
-                NativeVideoTextureHandleKind::D3D11Texture2D,
-                NativeVideoTextureHandleKind::CVPixelBuffer,
-            ],
-            true,
-            false,
-        );
-
-        assert!(result.discovery_available);
-        assert!(result.supports(NativeVideoTextureHandleKind::D3D12Resource));
-        assert!(result.supports(NativeVideoTextureHandleKind::D3D11Texture2D));
-        assert!(result.supports(NativeVideoTextureHandleKind::CVPixelBuffer));
-        assert!(!result.supports(NativeVideoTextureHandleKind::DmaBuf));
-        assert!(!result.supports(NativeVideoTextureHandleKind::VdpauVideoSurface));
-        assert!(result.zero_copy_supported);
-        assert!(!result.low_copy_fallback_supported);
-        assert_eq!(result.error, None);
-    }
-
-    #[test]
-    fn native_video_texture_import_probe_preserves_partial_readiness_reason() {
-        let result = NativeVideoTextureImportProbeResult::found_partial(
-            vec![NativeVideoTextureHandleKind::D3D11Texture2D],
-            false,
-            true,
-            "renderer import not connected",
-        );
-
-        assert!(result.discovery_available);
-        assert!(result.supports(NativeVideoTextureHandleKind::D3D11Texture2D));
-        assert!(!result.zero_copy_supported);
-        assert!(result.low_copy_fallback_supported);
-        assert_eq!(
-            result.error.as_deref(),
-            Some("renderer import not connected")
-        );
-    }
-
-    #[test]
-    fn native_video_texture_handle_kind_names_are_stable() {
-        assert_eq!(
-            NativeVideoTextureHandleKind::D3D12Resource.as_str(),
-            "D3D12Resource"
-        );
-        assert_eq!(
-            NativeVideoTextureHandleKind::D3D11Texture2D.as_str(),
-            "D3D11Texture2D"
-        );
-        assert_eq!(
-            NativeVideoTextureHandleKind::Dxva2Surface.as_str(),
-            "Dxva2Surface"
-        );
-        assert_eq!(
-            NativeVideoTextureHandleKind::CVPixelBuffer.as_str(),
-            "CVPixelBuffer"
-        );
-        assert_eq!(NativeVideoTextureHandleKind::DmaBuf.as_str(), "DmaBuf");
-        assert_eq!(
-            NativeVideoTextureHandleKind::VdpauVideoSurface.as_str(),
-            "VdpauVideoSurface"
-        );
-        assert_eq!(
-            NativeVideoTextureHandleKind::CudaDeviceMemory.as_str(),
-            "CudaDeviceMemory"
-        );
     }
 
     #[test]
@@ -1252,11 +1018,9 @@ mod tests {
     }
 
     #[test]
-    fn noop_system_methods_do_not_panic() {
+    fn noop_file_reveal_does_not_panic() {
         let svc = NoopPlatformService;
-        svc.open_url("https://example.com");
         svc.reveal_in_file_manager(Path::new("/tmp/test.txt"));
-        svc.send_notification("Title", "Body");
     }
 
     #[test]

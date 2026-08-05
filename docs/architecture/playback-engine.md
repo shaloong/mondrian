@@ -1293,7 +1293,7 @@ and its fully lowered immutable decode keys, reservations, and hardware request
 contract. Its identity includes the open Authoring Session and Author
 Generation, root Sequence identity/revision, Effect Registry revision, runtime
 scale, target extent, complete Program Color Context, Asset Library revision,
-Proxy configuration, and the coherent renderer/platform hardware-admission
+Proxy configuration, and the coherent device-scoped Renderer hardware-admission
 observation. An identity change clears the complete window; lifecycle and
 hardware-admission edges also clear it eagerly. Sequential playback therefore
 evaluates and lowers at most the newly entered frame after the initial window
@@ -1595,8 +1595,8 @@ Headless actually enters candidate evaluation and acknowledges it; merely
 polling work cannot lose retry authority during a same-turn Transport change.
 Generation rotation, invalidation, and transport retirement clear all such
 waiters and retained requests. Headless otherwise claims no UI publication.
-Renderer/platform native
-decode admission is consumed by both Adapters and remains separate from media
+Device-scoped Renderer native decode admission is consumed by both Adapters and
+remains separate from media
 decode capability probes.
 
 ## Required invariants

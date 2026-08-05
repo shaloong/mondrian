@@ -67,12 +67,12 @@ pub use color_frame::{
     GpuColorFrameWgpuResourcePoolDiagnostics, GpuColorFrameWgpuResourcePoolOptions,
     GpuNativeDecodedFrameImportBackend, GpuNativeDecodedFrameImportContract,
     GpuNativeDecodedFrameImportError, GpuNativeDecodedFrameImportExecution,
-    GpuNativeDecodedFrameImportPlan, GpuNativeDecodedFrameImportPlanError,
-    GpuNativeDecodedFrameImportSource, GpuNativeDecodedFrameImportSupport,
-    GpuNativeDecodedFrameSourceDescriptor, GpuNativeDecodedFrameSourceFormatError,
-    GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuVideoChromaLocation,
-    GpuVideoRange, LinearFloatSource, SourceAlphaInterpretationError,
-    ViewerGpuPresentationOutputLease,
+    GpuNativeDecodedFrameImportMode, GpuNativeDecodedFrameImportPlan,
+    GpuNativeDecodedFrameImportPlanError, GpuNativeDecodedFrameImportSource,
+    GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameSourceDescriptor,
+    GpuNativeDecodedFrameSourceFormatError, GpuNativeDecodedFrameTextureFormat,
+    GpuNativeDecodedFrameVideoSampling, GpuVideoChromaLocation, GpuVideoRange, LinearFloatSource,
+    SourceAlphaInterpretationError, ViewerGpuPresentationOutputLease,
 };
 pub use color_reference::{
     import_external_color_reference, ColorReferenceDecoder, ColorReferenceDescriptor,

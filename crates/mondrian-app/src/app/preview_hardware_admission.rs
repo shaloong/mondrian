@@ -1,7 +1,7 @@
 //! Coherent UI-independent hardware-decode admission state.
 //!
 //! Request, device selection, native surface-format support, and diagnostics
-//! must be projected from one renderer/platform observation. Window and
+//! must be projected from one device-bound renderer observation. Window and
 //! Headless Adapters cannot maintain parallel booleans or downgrade rules.
 
 use mondrian_media::{
@@ -10,7 +10,7 @@ use mondrian_media::{
 
 use super::native_video_import::PlaybackHardwareDecodeAdmission;
 
-/// One coherent renderer/platform admission observation.
+/// One coherent device-bound renderer admission observation.
 ///
 /// `None` is the explicit pre-discovery state. A reported observation is
 /// replaced as a whole so no consumer can combine fields from different probes.
@@ -18,7 +18,7 @@ use super::native_video_import::PlaybackHardwareDecodeAdmission;
 pub(crate) struct PreviewHardwareDecodeAdmissionState(Option<PlaybackHardwareDecodeAdmission>);
 
 impl PreviewHardwareDecodeAdmissionState {
-    /// Replace the complete renderer/platform observation.
+    /// Replace the complete renderer-device observation.
     pub(crate) const fn reported(admission: PlaybackHardwareDecodeAdmission) -> Self {
         Self(Some(admission))
     }
@@ -28,7 +28,7 @@ impl PreviewHardwareDecodeAdmissionState {
         self.0
     }
 
-    /// Base request selected by renderer/platform admission.
+    /// Base request selected by renderer-device admission.
     pub(crate) fn request(self) -> PreviewHardwareDecodeRequest {
         self.0.map_or(PreviewHardwareDecodeRequest::Auto, |admission| {
             admission.request
@@ -61,7 +61,7 @@ impl PreviewHardwareDecodeAdmissionState {
         }
     }
 
-    /// Hardware device selected by the same renderer/platform observation.
+    /// Hardware device selected by the same renderer-device observation.
     pub(crate) fn device_selector(self) -> Option<HwAccelDeviceSelector> {
         self.0.and_then(|admission| admission.hardware_decode_device_selector)
     }
@@ -77,12 +77,11 @@ mod tests {
             request: PreviewHardwareDecodeRequest::PreferGpuResident,
             hardware_decode_device_selector: Some(HwAccelDeviceSelector::D3D12VaAdapterIndex(3)),
             renderer_native_import_ready: true,
-            platform_native_import_ready: true,
+            renderer_import_mode: Some(
+                mondrian_renderer::GpuNativeDecodedFrameImportMode::ZeroCopy,
+            ),
             native_import_admission_ready: true,
             admission_blocker: None::<PreviewHardwareDecodeAdmissionBlocker>,
-            platform_discovery_available: true,
-            platform_zero_copy_supported: false,
-            platform_low_copy_fallback_supported: true,
             renderer_supported_handle_kinds: 1,
             renderer_supported_source_texture_formats: 1,
             renderer_supports_nv12: false,

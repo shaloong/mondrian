@@ -743,7 +743,7 @@ pub enum DecodedVideoMatrix {
 ///
 /// This enum names the cross-crate contract only. It does not claim that
 /// Mondrian can import the handle into the renderer; that requires a separate
-/// renderer/platform import probe.
+/// support contract from the active Renderer Adapter/Device runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum DecodedGpuFrameHandleKind {
     /// Windows D3D12 `ID3D12Resource` hardware decode surface.

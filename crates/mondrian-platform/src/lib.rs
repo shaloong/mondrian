@@ -6,16 +6,15 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use mondrian_core::Color;
 mod display;
+mod global_pointer;
 mod memory;
 mod playback_scheduling;
 mod process_memory;
 pub use mondrian_platform_core::{
     ClipboardError, DisplayHdrProbe, DisplayHdrProbeDetails, DisplayHdrProbeResult,
     DisplayIccProfileProbeResult, DisplayProbeBackend, DisplayProfileProbe,
-    DisplayProfileProbeTarget, ExecutionMemoryProbe, FileFilter, NativeVideoTextureHandleKind,
-    NativeVideoTextureImportProbe, NativeVideoTextureImportProbeResult, NoopPlatformService,
+    DisplayProfileProbeTarget, ExecutionMemoryProbe, FileFilter, NoopPlatformService,
     PhysicalMemoryCapacityProbe, PhysicalMemoryCapacityProbeBackend,
     PhysicalMemoryCapacityProbeResult, PlatformService, ProcessMemoryProbe,
     ProcessMemoryProbeBackend, ProcessMemoryProbeResult, ProcessMemoryScope,
@@ -25,9 +24,9 @@ pub use mondrian_platform_core::{
 
 /// Default desktop platform implementation.
 ///
-/// Stage 1 implements clipboard operations. File dialogs, URL opening, file
-/// reveal, and notifications intentionally stay as no-ops until their app-shell
-/// policies are defined.
+/// Clipboard, native dialogs, and file reveal use cross-platform desktop
+/// adapters. Speculative operations are not part of the platform-neutral
+/// Interface until a product caller and a typed failure contract exist.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemPlatformService;
 
@@ -62,17 +61,9 @@ impl PlatformService for SystemPlatformService {
         configured_file_dialog(title, filters).set_file_name(default_name).save_file()
     }
 
-    fn open_folder_dialog(&self, title: &str) -> Option<PathBuf> {
-        rfd::FileDialog::new().set_title(title).pick_folder()
-    }
-
-    fn open_url(&self, _url: &str) {}
-
     fn reveal_in_file_manager(&self, path: &Path) {
         reveal_path_in_file_manager(path);
     }
-
-    fn send_notification(&self, _title: &str, _body: &str) {}
 }
 
 impl DisplayProfileProbe for SystemPlatformService {
@@ -87,12 +78,6 @@ impl DisplayProfileProbe for SystemPlatformService {
 impl DisplayHdrProbe for SystemPlatformService {
     fn display_hdr_state(&self, target: DisplayProfileProbeTarget) -> DisplayHdrProbeResult {
         system_display_hdr_state(target)
-    }
-}
-
-impl NativeVideoTextureImportProbe for SystemPlatformService {
-    fn native_video_texture_import(&self) -> NativeVideoTextureImportProbeResult {
-        system_native_video_texture_import()
     }
 }
 
@@ -164,243 +149,6 @@ fn system_display_hdr_state(_target: DisplayProfileProbeTarget) -> DisplayHdrPro
     DisplayHdrProbeResult::unsupported(
         "OS HDR / Advanced Color discovery is not implemented for this platform",
     )
-}
-
-fn system_native_video_texture_import() -> NativeVideoTextureImportProbeResult {
-    #[cfg(target_os = "windows")]
-    {
-        windows_native_video_texture_import::probe()
-    }
-    #[cfg(target_os = "macos")]
-    {
-        NativeVideoTextureImportProbeResult::found(
-            vec![mondrian_platform_core::NativeVideoTextureHandleKind::CVPixelBuffer],
-            true,
-            false,
-        )
-    }
-    #[cfg(target_os = "linux")]
-    {
-        NativeVideoTextureImportProbeResult::found(
-            vec![mondrian_platform_core::NativeVideoTextureHandleKind::DmaBuf],
-            true,
-            false,
-        )
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    {
-        NativeVideoTextureImportProbeResult::unsupported(
-            "native video texture import is not implemented for this platform",
-        )
-    }
-}
-
-#[cfg(target_os = "windows")]
-mod windows_native_video_texture_import {
-    use std::ffi::{c_void, OsStr};
-    use std::os::windows::ffi::OsStrExt;
-    use std::ptr;
-
-    use mondrian_platform_core::{
-        NativeVideoTextureHandleKind, NativeVideoTextureImportProbeResult,
-    };
-    use windows_sys::Win32::Foundation::FreeLibrary;
-    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
-
-    const D3D_DRIVER_TYPE_HARDWARE: u32 = 1;
-    const D3D11_CREATE_DEVICE_BGRA_SUPPORT: u32 = 0x20;
-    const D3D11_SDK_VERSION: u32 = 7;
-    const D3D_FEATURE_LEVEL_11_1: u32 = 0xb100;
-    const D3D_FEATURE_LEVEL_11_0: u32 = 0xb000;
-    const D3D_FEATURE_LEVEL_10_1: u32 = 0xa100;
-    const IID_ID3D12_DEVICE: Guid = Guid {
-        data1: 0x189819f1,
-        data2: 0x1db6,
-        data3: 0x4b57,
-        data4: [0xbe, 0x54, 0x18, 0x21, 0x33, 0x9b, 0x85, 0xf7],
-    };
-
-    #[repr(C)]
-    struct Guid {
-        data1: u32,
-        data2: u16,
-        data3: u16,
-        data4: [u8; 8],
-    }
-
-    type D3D11CreateDeviceFn = unsafe extern "system" fn(
-        padapter: *mut c_void,
-        drivertype: u32,
-        software: *mut c_void,
-        flags: u32,
-        pfeaturelevels: *const u32,
-        featurelevels: u32,
-        sdkversion: u32,
-        ppdevice: *mut *mut c_void,
-        pfeaturelevel: *mut u32,
-        ppimmediatecontext: *mut *mut c_void,
-    ) -> i32;
-
-    type D3D12CreateDeviceFn = unsafe extern "system" fn(
-        padapter: *mut c_void,
-        minimum_feature_level: u32,
-        riid: *const Guid,
-        ppdevice: *mut *mut c_void,
-    ) -> i32;
-
-    #[repr(C)]
-    struct IUnknownVtbl {
-        query_interface:
-            unsafe extern "system" fn(*mut c_void, *const c_void, *mut *mut c_void) -> i32,
-        add_ref: unsafe extern "system" fn(*mut c_void) -> u32,
-        release: unsafe extern "system" fn(*mut c_void) -> u32,
-    }
-
-    /// Probe Windows D3D12/D3D11 native video texture staging capability.
-    pub fn probe() -> NativeVideoTextureImportProbeResult {
-        let mut supported_handle_kinds = Vec::new();
-        let mut reasons = Vec::new();
-
-        match probe_d3d12_device() {
-            Ok(feature_level) => {
-                supported_handle_kinds.push(NativeVideoTextureHandleKind::D3D12Resource);
-                reasons.push(format!(
-                    "D3D12 device probe succeeded at minimum feature level 0x{feature_level:x}"
-                ));
-            }
-            Err(reason) => reasons.push(reason),
-        }
-        match probe_d3d11_device() {
-            Ok(feature_level) => {
-                supported_handle_kinds.push(NativeVideoTextureHandleKind::D3D11Texture2D);
-                reasons.push(format!(
-                    "D3D11 device probe succeeded at feature level 0x{feature_level:x}"
-                ));
-            }
-            Err(reason) => reasons.push(reason),
-        }
-
-        if supported_handle_kinds.is_empty() {
-            NativeVideoTextureImportProbeResult::missing(reasons.join("; "))
-        } else {
-            reasons.push(
-                "native zero-copy renderer import is still gated by renderer backend support"
-                    .to_owned(),
-            );
-            NativeVideoTextureImportProbeResult::found_partial(
-                supported_handle_kinds,
-                false,
-                true,
-                reasons.join("; "),
-            )
-        }
-    }
-
-    fn probe_d3d12_device() -> Result<u32, String> {
-        let library = unsafe { LoadLibraryW(wide_null("d3d12.dll").as_ptr()) };
-        if library.is_null() {
-            return Err(
-                "d3d12.dll is unavailable; D3D12 native video texture probe failed".to_owned(),
-            );
-        }
-
-        let result = unsafe { probe_d3d12_device_with_library(library) };
-        unsafe {
-            FreeLibrary(library);
-        }
-        result
-    }
-
-    unsafe fn probe_d3d12_device_with_library(library: *mut c_void) -> Result<u32, String> {
-        let symbol = GetProcAddress(library, c"D3D12CreateDevice".as_ptr().cast::<u8>());
-        let Some(symbol) = symbol else {
-            return Err("d3d12.dll does not export D3D12CreateDevice".to_owned());
-        };
-        let create_device: D3D12CreateDeviceFn = std::mem::transmute(symbol);
-        let mut device: *mut c_void = ptr::null_mut();
-        let hr = create_device(
-            ptr::null_mut(),
-            D3D_FEATURE_LEVEL_11_0,
-            &IID_ID3D12_DEVICE,
-            &mut device,
-        );
-
-        release_unknown(device);
-
-        if hr < 0 {
-            return Err(format!(
-                "D3D12CreateDevice failed with HRESULT 0x{:08x}",
-                hr as u32
-            ));
-        }
-        Ok(D3D_FEATURE_LEVEL_11_0)
-    }
-
-    fn probe_d3d11_device() -> Result<u32, String> {
-        let library = unsafe { LoadLibraryW(wide_null("d3d11.dll").as_ptr()) };
-        if library.is_null() {
-            return Err(
-                "d3d11.dll is unavailable; D3D11 native video texture probe failed".to_owned(),
-            );
-        }
-
-        let result = unsafe { probe_d3d11_device_with_library(library) };
-        unsafe {
-            FreeLibrary(library);
-        }
-        result
-    }
-
-    unsafe fn probe_d3d11_device_with_library(library: *mut c_void) -> Result<u32, String> {
-        let symbol = GetProcAddress(library, c"D3D11CreateDevice".as_ptr().cast::<u8>());
-        let Some(symbol) = symbol else {
-            return Err("d3d11.dll does not export D3D11CreateDevice".to_owned());
-        };
-        let create_device: D3D11CreateDeviceFn = std::mem::transmute(symbol);
-        let feature_levels = [
-            D3D_FEATURE_LEVEL_11_1,
-            D3D_FEATURE_LEVEL_11_0,
-            D3D_FEATURE_LEVEL_10_1,
-        ];
-        let mut device: *mut c_void = ptr::null_mut();
-        let mut context: *mut c_void = ptr::null_mut();
-        let mut resolved_feature_level = 0;
-        let hr = create_device(
-            ptr::null_mut(),
-            D3D_DRIVER_TYPE_HARDWARE,
-            ptr::null_mut(),
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            feature_levels.as_ptr(),
-            feature_levels.len() as u32,
-            D3D11_SDK_VERSION,
-            &mut device,
-            &mut resolved_feature_level,
-            &mut context,
-        );
-
-        release_unknown(context);
-        release_unknown(device);
-
-        if hr < 0 {
-            return Err(format!(
-                "D3D11CreateDevice failed with HRESULT 0x{:08x}",
-                hr as u32
-            ));
-        }
-        Ok(resolved_feature_level)
-    }
-
-    unsafe fn release_unknown(ptr: *mut c_void) {
-        if ptr.is_null() {
-            return;
-        }
-        let vtbl = *(ptr as *mut *mut IUnknownVtbl);
-        ((*vtbl).release)(ptr);
-    }
-
-    fn wide_null(value: &str) -> Vec<u16> {
-        OsStr::new(value).encode_wide().chain(Some(0)).collect()
-    }
 }
 
 fn reveal_path_in_file_manager(path: &Path) {
@@ -925,6 +673,30 @@ pub struct DesktopPoint {
     pub y: i32,
 }
 
+/// One byte-exact color sampled from the composed desktop image.
+///
+/// This is display-referred platform evidence, not a Project or working-space
+/// color. The App Adapter decides how to present or author it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesktopRgba8 {
+    /// Red display code value.
+    pub r: u8,
+    /// Green display code value.
+    pub g: u8,
+    /// Blue display code value.
+    pub b: u8,
+    /// Alpha code value supplied by the capture Adapter.
+    pub a: u8,
+}
+
+impl DesktopRgba8 {
+    /// Opaque black used when desktop capture cannot provide a sample.
+    pub const BLACK: Self = Self { r: 0, g: 0, b: 0, a: u8::MAX };
+    /// Opaque white.
+    #[cfg(test)]
+    const WHITE: Self = Self { r: u8::MAX, g: u8::MAX, b: u8::MAX, a: u8::MAX };
+}
+
 impl DesktopPoint {
     /// Create a desktop-space point.
     pub fn new(x: i32, y: i32) -> Self {
@@ -938,12 +710,13 @@ impl DesktopPoint {
 /// owns window-local coordinate conversion. This module owns the platform work:
 /// screen capture, desktop-coordinate sampling, and best-effort global pointer
 /// polling.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DesktopEyedropper {
     active: bool,
     snapshot: Option<ScreenSnapshot>,
-    preview: Color,
+    preview: DesktopRgba8,
     primary_button_down: bool,
+    global_pointer: global_pointer::GlobalPointerSession,
 }
 
 impl Default for DesktopEyedropper {
@@ -951,8 +724,9 @@ impl Default for DesktopEyedropper {
         Self {
             active: false,
             snapshot: None,
-            preview: Color::BLACK,
+            preview: DesktopRgba8::BLACK,
             primary_button_down: false,
+            global_pointer: global_pointer::GlobalPointerSession::default(),
         }
     }
 }
@@ -969,7 +743,7 @@ impl DesktopEyedropper {
     }
 
     /// Last sampled preview color.
-    pub fn preview_color(&self) -> Color {
+    pub fn preview_color(&self) -> DesktopRgba8 {
         self.preview
     }
 
@@ -982,28 +756,33 @@ impl DesktopEyedropper {
         self.active = true;
         self.primary_button_down = false;
         self.snapshot = ScreenSnapshot::capture_at(point);
-        self.preview = self.sample(point).unwrap_or(Color::BLACK);
+        self.preview = self.sample(point).unwrap_or(DesktopRgba8::BLACK);
     }
 
     /// Begin sampling at the global cursor position, or use `fallback`.
     pub fn begin_at_cursor_or(&mut self, fallback: DesktopPoint) {
-        self.begin(global_cursor_position().unwrap_or(fallback));
+        self.begin(
+            self.global_pointer
+                .snapshot()
+                .map(|snapshot| snapshot.position)
+                .unwrap_or(fallback),
+        );
     }
 
     /// Cancel sampling and release cached screen data.
     pub fn cancel(&mut self) {
         self.active = false;
         self.snapshot = None;
-        self.preview = Color::BLACK;
+        self.preview = DesktopRgba8::BLACK;
         self.primary_button_down = false;
     }
 
     /// Update the preview from a desktop-space point.
-    pub fn update_preview(&mut self, point: DesktopPoint) -> Option<Color> {
+    pub fn update_preview(&mut self, point: DesktopPoint) -> Option<DesktopRgba8> {
         if !self.active {
             return None;
         }
-        self.preview = self.sample(point).unwrap_or(Color::BLACK);
+        self.preview = self.sample(point).unwrap_or(DesktopRgba8::BLACK);
         Some(self.preview)
     }
 
@@ -1015,14 +794,14 @@ impl DesktopEyedropper {
         if !self.active {
             return None;
         }
-        let point = global_cursor_position()?;
+        let point = self.global_pointer.snapshot()?.position;
         let _ = self.update_preview(point);
         Some(point)
     }
 
     /// Finish sampling at a desktop-space point and return the final color.
-    pub fn finish_at(&mut self, point: DesktopPoint) -> Color {
-        let color = self.sample(point).unwrap_or(Color::BLACK);
+    pub fn finish_at(&mut self, point: DesktopPoint) -> DesktopRgba8 {
+        let color = self.sample(point).unwrap_or(DesktopRgba8::BLACK);
         self.cancel();
         color
     }
@@ -1032,21 +811,19 @@ impl DesktopEyedropper {
     /// On platforms without a global-pointer adapter this still updates the
     /// internal button latch to `false` and returns `None`; callers should keep
     /// using normal window events as a fallback.
-    pub fn poll_global_primary_press(&mut self) -> Option<(DesktopPoint, Color)> {
+    pub fn poll_global_primary_press(&mut self) -> Option<(DesktopPoint, DesktopRgba8)> {
         if !self.active {
             self.primary_button_down = false;
             return None;
         }
 
-        let Some(point) = global_cursor_position() else {
+        let Some(snapshot) = self.global_pointer.snapshot() else {
             self.primary_button_down = false;
             return None;
         };
+        let point = snapshot.position;
         let _ = self.update_preview(point);
-        let Some(is_down) = global_primary_button_down() else {
-            self.primary_button_down = false;
-            return None;
-        };
+        let is_down = snapshot.primary_button_down;
         let pressed_now = is_down && !self.primary_button_down;
         self.primary_button_down = is_down;
         pressed_now.then(|| {
@@ -1055,7 +832,7 @@ impl DesktopEyedropper {
         })
     }
 
-    fn sample(&mut self, point: DesktopPoint) -> Option<Color> {
+    fn sample(&mut self, point: DesktopPoint) -> Option<DesktopRgba8> {
         if let Some(color) = self.snapshot.as_ref().and_then(|snapshot| snapshot.sample(point)) {
             return Some(color);
         }
@@ -1086,7 +863,7 @@ impl ScreenSnapshot {
         })
     }
 
-    fn sample(&self, point: DesktopPoint) -> Option<Color> {
+    fn sample(&self, point: DesktopPoint) -> Option<DesktopRgba8> {
         let ux = point.x.checked_sub(self.x)?;
         let uy = point.y.checked_sub(self.y)?;
         if ux < 0 || uy < 0 {
@@ -1098,41 +875,10 @@ impl ScreenSnapshot {
             return None;
         }
         let idx = (uy as usize * self.width as usize + ux as usize) * 4;
-        self.data.get(idx..idx + 4).map(|b| Color {
-            r: b[0] as f32 / 255.0,
-            g: b[1] as f32 / 255.0,
-            b: b[2] as f32 / 255.0,
-            a: 1.0,
-        })
+        self.data
+            .get(idx..idx + 4)
+            .map(|b| DesktopRgba8 { r: b[0], g: b[1], b: b[2], a: b[3] })
     }
-}
-
-#[cfg(target_os = "windows")]
-fn global_cursor_position() -> Option<DesktopPoint> {
-    use windows_sys::Win32::Foundation::POINT as WinPoint;
-    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
-
-    let mut point = WinPoint { x: 0, y: 0 };
-    let ok = unsafe { GetCursorPos(&mut point) };
-    (ok != 0).then_some(DesktopPoint::new(point.x, point.y))
-}
-
-#[cfg(not(target_os = "windows"))]
-fn global_cursor_position() -> Option<DesktopPoint> {
-    None
-}
-
-#[cfg(target_os = "windows")]
-fn global_primary_button_down() -> Option<bool> {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
-
-    let state = unsafe { GetAsyncKeyState(VK_LBUTTON as i32) };
-    Some((state & 0x8000u16 as i16) != 0)
-}
-
-#[cfg(not(target_os = "windows"))]
-fn global_primary_button_down() -> Option<bool> {
-    None
 }
 
 #[cfg(test)]
@@ -1197,17 +943,9 @@ mod tests {
     }
 
     #[test]
-    fn noop_open_folder_dialog_returns_none() {
+    fn noop_file_reveal_does_not_panic() {
         let svc = NoopPlatformService;
-        assert_eq!(svc.open_folder_dialog("Select Folder"), None);
-    }
-
-    #[test]
-    fn noop_system_methods_do_not_panic() {
-        let svc = NoopPlatformService;
-        svc.open_url("https://example.com");
         svc.reveal_in_file_manager(Path::new("/tmp/test.txt"));
-        svc.send_notification("Title", "Body");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1244,7 +982,7 @@ mod tests {
             .sample(DesktopPoint::new(-9, 21))
             .expect("point should be inside snapshot");
 
-        assert_eq!(color, Color::WHITE);
+        assert_eq!(color, DesktopRgba8::WHITE);
     }
 
     #[test]
@@ -1261,25 +999,6 @@ mod tests {
         assert_eq!(snapshot.sample(DesktopPoint::new(-8, 20)), None);
         assert_eq!(snapshot.sample(DesktopPoint::new(-10, 19)), None);
         assert_eq!(snapshot.sample(DesktopPoint::new(-10, 22)), None);
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_native_video_texture_probe_reports_direct3d_without_zero_copy_claim() {
-        let result = system_native_video_texture_import();
-
-        assert!(result.discovery_available);
-        assert!(!result.zero_copy_supported);
-        if result.supports(NativeVideoTextureHandleKind::D3D12Resource)
-            || result.supports(NativeVideoTextureHandleKind::D3D11Texture2D)
-        {
-            assert!(result.low_copy_fallback_supported);
-            assert!(result.error.as_deref().unwrap_or_default().contains("D3D"));
-            assert!(result.error.as_deref().unwrap_or_default().contains("zero-copy"));
-        } else {
-            assert!(!result.low_copy_fallback_supported);
-            assert!(result.error.is_some());
-        }
     }
 
     #[cfg(target_os = "windows")]
@@ -1364,7 +1083,6 @@ mod tests {
         clipboard_content: Result<Option<String>, ClipboardError>,
         file_dialog_result: Option<Vec<PathBuf>>,
         save_dialog_result: Option<PathBuf>,
-        folder_dialog_result: Option<PathBuf>,
     }
 
     impl PlatformService for MockPlatformService {
@@ -1389,15 +1107,7 @@ mod tests {
             self.save_dialog_result.clone()
         }
 
-        fn open_folder_dialog(&self, _title: &str) -> Option<PathBuf> {
-            self.folder_dialog_result.clone()
-        }
-
-        fn open_url(&self, _url: &str) {}
-
         fn reveal_in_file_manager(&self, _path: &Path) {}
-
-        fn send_notification(&self, _title: &str, _body: &str) {}
     }
 
     #[test]
@@ -1406,7 +1116,6 @@ mod tests {
             clipboard_content: Ok(Some("copied text".into())),
             file_dialog_result: Some(vec![PathBuf::from("/test/file.mp4")]),
             save_dialog_result: Some(PathBuf::from("/test/output.mp4")),
-            folder_dialog_result: Some(PathBuf::from("/test/folder")),
         };
 
         assert_eq!(mock.clipboard_paste(), Ok(Some("copied text".into())));
@@ -1417,10 +1126,6 @@ mod tests {
         assert_eq!(
             mock.save_file_dialog("", "", &[]),
             Some(PathBuf::from("/test/output.mp4"))
-        );
-        assert_eq!(
-            mock.open_folder_dialog(""),
-            Some(PathBuf::from("/test/folder")),
         );
     }
 }

@@ -1014,15 +1014,7 @@ mod tests {
             None
         }
 
-        fn open_folder_dialog(&self, _title: &str) -> Option<PathBuf> {
-            None
-        }
-
-        fn open_url(&self, _url: &str) {}
-
         fn reveal_in_file_manager(&self, _path: &Path) {}
-
-        fn send_notification(&self, _title: &str, _body: &str) {}
     }
 
     #[derive(Debug, PartialEq)]

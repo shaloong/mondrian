@@ -60,9 +60,7 @@ use crate::app_ui::startup::{STARTUP_WINDOW_HEIGHT, STARTUP_WINDOW_WIDTH};
 use mondrian_core::types::ColorSpace;
 use mondrian_core::WaveformMode;
 use mondrian_editor_state::state::PanelKind;
-use mondrian_platform::{
-    NativeVideoTextureImportProbe, NativeVideoTextureImportProbeResult, SystemPlatformService,
-};
+use mondrian_platform::SystemPlatformService;
 #[cfg(test)]
 use mondrian_renderer::RenderOutputColorBoundary;
 use mondrian_renderer::{
@@ -1166,7 +1164,6 @@ struct AppUiWindowSession {
     display_calibration: Option<Arc<mondrian_core::display_calibration::DisplayCalibrationLut3d>>,
     color_engine: mondrian_core::ColorEngine,
     display_management_policy: mondrian_core::color_models::DisplayManagementPolicy,
-    native_video_import_probe: NativeVideoTextureImportProbeResult,
     frame_renderer: AppUiFrameRenderer,
     renderer_device: wgpu::Device,
     renderer_queue: wgpu::Queue,
@@ -3939,8 +3936,7 @@ fn prepare_viewer_gpu_preview(
         host.clear_external_viewer_frame();
         finish_prepare!();
     };
-    let declared_residency =
-        declared_viewer_gpu_output_residency(&frame, session.native_video_import_probe.clone());
+    let declared_residency = declared_viewer_gpu_output_residency(&frame);
     session.viewer_gpu_output_telemetry.record_frame_context(
         &frame,
         texture_key_base.as_str().to_owned(),
@@ -4267,7 +4263,6 @@ fn prepare_viewer_gpu_preview(
         preview_gpu_composite_frame_residency(
             record.residency,
             session.viewer_gpu_execution.native_import_support(),
-            session.native_video_import_probe.clone(),
         ),
     );
     for reason in &record.fallback_reasons {
@@ -4977,7 +4972,6 @@ fn refresh_display_output_contract(
         session.frame_renderer = AppUiFrameRenderer::new(device, session.config.format);
         host.set_native_decoded_frame_import_support(
             session.viewer_gpu_execution.native_import_support(),
-            &session.native_video_import_probe,
         );
     }
 
@@ -5082,11 +5076,7 @@ impl AppUiWindowSession {
             None => ViewerGpuDeviceGenerationMember::empty(),
         };
         let viewer_gpu_submissions = ViewerGpuSubmissionLifecycle::new();
-        let native_video_import_probe = SystemPlatformService.native_video_texture_import();
-        host.set_native_decoded_frame_import_support(
-            viewer_gpu_execution.native_import_support(),
-            &native_video_import_probe,
-        );
+        host.set_native_decoded_frame_import_support(viewer_gpu_execution.native_import_support());
 
         Ok(Self {
             viewer_gpu_device_progress,
@@ -5099,7 +5089,6 @@ impl AppUiWindowSession {
             display_calibration: initial_display_resolution.calibration,
             color_engine,
             display_management_policy,
-            native_video_import_probe,
             frame_renderer,
             renderer_device: device.clone(),
             renderer_queue: queue.clone(),
@@ -5541,7 +5530,6 @@ mod tests {
     use mondrian_core::WorkingColorSpace;
     use mondrian_editor_state::Action;
     use mondrian_media::{DecodedFrameResidency, DecodedGpuFrameHandleKind};
-    use mondrian_platform::{NativeVideoTextureHandleKind, NativeVideoTextureImportProbeResult};
     use mondrian_renderer::{
         GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat,
         GpuNativeDecodedFrameVideoSampling, GpuVideoChromaLocation, GpuVideoRange,
@@ -5812,14 +5800,6 @@ mod tests {
 
     fn native_import_support_unavailable() -> GpuNativeDecodedFrameImportSupport {
         GpuNativeDecodedFrameImportSupport::unavailable()
-    }
-
-    fn test_native_video_import_probe() -> NativeVideoTextureImportProbeResult {
-        NativeVideoTextureImportProbeResult::found(
-            vec![NativeVideoTextureHandleKind::D3D11Texture2D],
-            true,
-            true,
-        )
     }
 
     fn native_video_sampling() -> GpuNativeDecodedFrameVideoSampling {
@@ -7094,7 +7074,6 @@ mod tests {
                 ..ViewerGpuExecutionResidency::default()
             },
             native_import_support_unavailable(),
-            test_native_video_import_probe(),
         );
 
         assert_eq!(
@@ -7139,7 +7118,6 @@ mod tests {
                 ..ViewerGpuExecutionResidency::default()
             },
             native_import_support_unavailable(),
-            test_native_video_import_probe(),
         );
 
         assert_eq!(
@@ -7164,7 +7142,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_gpu_composite_residency_reports_native_video_import_path() {
+    fn preview_gpu_composite_residency_does_not_invent_a_native_copy_mode() {
         let residency = preview_gpu_composite_frame_residency(
             ViewerGpuExecutionResidency {
                 media_layers: 1,
@@ -7178,7 +7156,6 @@ mod tests {
                 ..ViewerGpuExecutionResidency::default()
             },
             native_import_support_unavailable(),
-            test_native_video_import_probe(),
         );
 
         assert_eq!(
@@ -7191,7 +7168,8 @@ mod tests {
         );
         assert_eq!(residency.upload_count, 0);
         assert!(!residency.zero_copy);
-        assert!(residency.low_copy);
+        assert!(!residency.low_copy);
+        assert_eq!(residency.native_bridge_copy_count, 0);
         let native_video_import = residency
             .native_video_import
             .expect("native decoded media reports import readiness");
@@ -7216,11 +7194,10 @@ mod tests {
                 }),
                 ..ViewerGpuExecutionResidency::default()
             },
-            GpuNativeDecodedFrameImportSupport::ready(
+            GpuNativeDecodedFrameImportSupport::ready_zero_copy(
                 vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
                 vec![GpuNativeDecodedFrameTextureFormat::Nv12],
             ),
-            test_native_video_import_probe(),
         );
 
         assert_eq!(
@@ -7250,7 +7227,6 @@ mod tests {
                 ..ViewerGpuExecutionResidency::default()
             },
             native_import_support_unavailable(),
-            test_native_video_import_probe(),
         );
 
         assert_eq!(
@@ -7270,7 +7246,6 @@ mod tests {
                 ..ViewerGpuExecutionResidency::default()
             },
             native_import_support_unavailable(),
-            test_native_video_import_probe(),
         );
 
         assert_eq!(
@@ -7471,6 +7446,7 @@ mod tests {
                 zero_copy: false,
                 low_copy: true,
                 upload_count: 1,
+                native_bridge_copy_count: 0,
                 readback_count: 0,
                 reason: "test residency".to_owned(),
                 native_video_import: None,

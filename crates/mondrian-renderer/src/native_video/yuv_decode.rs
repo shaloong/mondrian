@@ -679,7 +679,7 @@ mod tests {
         let import = GpuNativeDecodedFrameImportPlan::from_contract(
             &mut ids,
             import_contract(),
-            &GpuNativeDecodedFrameImportSupport::ready(
+            &GpuNativeDecodedFrameImportSupport::ready_zero_copy(
                 vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
                 vec![GpuNativeDecodedFrameTextureFormat::P010],
             ),
@@ -1038,7 +1038,7 @@ mod tests {
                 ),
                 label: "native-ocio-working".to_owned(),
             },
-            &GpuNativeDecodedFrameImportSupport::ready(
+            &GpuNativeDecodedFrameImportSupport::ready_zero_copy(
                 vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
                 vec![GpuNativeDecodedFrameTextureFormat::Nv12],
             ),

@@ -84,8 +84,8 @@ use mondrian_media::{
     PreviewDecodeStageDurations, VideoColorDiagnostic, VideoColorDiagnosticIssueAggregate,
 };
 use mondrian_platform::{
-    NativeVideoTextureImportProbe, PlaybackThreadScheduling, PlaybackThreadSchedulingStatus,
-    ProcessMemoryProbe, SystemPlatformService,
+    PlaybackThreadScheduling, PlaybackThreadSchedulingStatus, ProcessMemoryProbe,
+    SystemPlatformService,
 };
 use mondrian_playback::{PlaybackClockPhaseErrorSummary, PlaybackEvidenceReport};
 use mondrian_renderer::profile::{GpuTimestampSample, GpuTimestampStageDurations};
@@ -6013,10 +6013,8 @@ fn configure_headless_gpu_decode_admission(
     gpu_adapter: &mut HeadlessViewerGpuAdapter,
 ) {
     gpu_adapter.install_completion_waker(preview_service.work_watch().completion_waker());
-    let admission = resolve_playback_hardware_decode_admission(
-        &gpu_adapter.native_import_support(),
-        &SystemPlatformService.native_video_texture_import(),
-    );
+    let admission =
+        resolve_playback_hardware_decode_admission(&gpu_adapter.native_import_support());
     preview_service.set_playback_hardware_decode_admission(admission);
 }
 

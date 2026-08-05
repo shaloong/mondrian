@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use mondrian_core::Color;
 use mondrian_editor_state::Action;
-use mondrian_platform::{DesktopEyedropper, DesktopPoint};
+use mondrian_platform::{DesktopEyedropper, DesktopPoint, DesktopRgba8};
 use mondrian_ui_core::tree::WidgetTreeView;
 use mondrian_ui_core::types::{
     DragPayload, EventResult, KeyCode, Modifiers, MouseButton, Point, Rect, SplitDirection, UiEvent,
@@ -64,7 +64,7 @@ impl WinitUiRuntime {
 
     /// Current preview color for shell-rendered eyedropper affordances.
     pub fn eyedropper_preview_color(&self) -> Color {
-        self.eyedropper.preview_color()
+        desktop_sample_to_ui_color(self.eyedropper.preview_color())
     }
 
     /// Latest cursor requested by routed widgets.
@@ -219,7 +219,7 @@ impl WinitUiRuntime {
     ) {
         let screen = window_to_desktop_point(window, point)
             .unwrap_or_else(|| DesktopPoint::new(point.x.round() as i32, point.y.round() as i32));
-        let color = self.eyedropper.finish_at(screen);
+        let color = desktop_sample_to_ui_color(self.eyedropper.finish_at(screen));
         let _ = self.route_window_event(
             window,
             router,
@@ -264,7 +264,7 @@ impl WinitUiRuntime {
                 window,
                 router,
                 root,
-                UiEvent::EyedropperSample { color },
+                UiEvent::EyedropperSample { color: desktop_sample_to_ui_color(color) },
                 dispatch,
             );
         }
@@ -293,7 +293,7 @@ impl WinitUiRuntime {
                         encoder,
                         theme,
                         cursor,
-                        self.eyedropper.preview_color(),
+                        desktop_sample_to_ui_color(self.eyedropper.preview_color()),
                     );
                 }
                 ShellOverlayLayer::Tooltip => {
@@ -369,6 +369,15 @@ impl WinitUiRuntime {
         if router.take_repaint_request() {
             window.request_redraw();
         }
+    }
+}
+
+fn desktop_sample_to_ui_color(sample: DesktopRgba8) -> Color {
+    Color {
+        r: f32::from(sample.r) / 255.0,
+        g: f32::from(sample.g) / 255.0,
+        b: f32::from(sample.b) / 255.0,
+        a: f32::from(sample.a) / 255.0,
     }
 }
 

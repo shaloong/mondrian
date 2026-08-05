@@ -153,6 +153,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.92.0
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -242,6 +243,9 @@ jobs:
 
       - name: 编译
         run: cargo build --workspace --exclude mondrian-app
+
+      - name: 检查平台 Adapter
+        run: cargo clippy -p mondrian-platform-core -p mondrian-platform --all-targets -- -D warnings
 
       - name: 测试
         run: cargo test --workspace --exclude mondrian-app

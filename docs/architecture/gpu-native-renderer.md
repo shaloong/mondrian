@@ -79,12 +79,13 @@ separate resource contracts.
 ## Native Decoded Frame Import
 
 Hardware decode and renderer texture import are separate contracts. Media owns
-the decoder fact (`DecodedGpuFrameHandleKind` and frame residency), platform
-owns OS/backend capability discovery (`NativeVideoTextureImportProbe`), and
-the renderer owns the graph contract for turning a decoder surface into a
-linear working frame (`GpuNativeDecodedFrameImportPlan`). App code may schedule
-or diagnose this path, but it must not translate OS decoder handles directly
-into renderer resources.
+the decoder fact (`DecodedGpuFrameHandleKind` and frame residency), while the
+device-scoped Renderer runtime owns both import support and the graph contract
+for turning that exact decoder surface into a linear working frame
+(`GpuNativeDecodedFrameImportSupport` / `GpuNativeDecodedFrameImportPlan`). App
+code may schedule or diagnose this path, but it must not translate OS decoder
+handles directly into Renderer resources or ask Platform code to probe a second
+graphics device.
 
 Native decoded surfaces are not modeled as `GpuColorFrameHandle` values because
 they may be multi-plane YCbCr surfaces such as NV12 or P010. The renderer import
@@ -146,34 +147,35 @@ native-surface sampling and OCIO input backend must use
 `GpuNativeDecodedFrameImportSupport::unavailable()` and planning must return
 `RendererBackendUnavailable`. Windows DX12 is the first concrete backend: it
 advertises `D3D12Resource` plus only the NV12/P010 formats enabled on the actual
-wgpu device. A decoder reporting a GPU handle kind, or a platform probe reporting
-a potentially importable OS family, is not enough by itself to claim hardware
-decode playback, zero-copy, or low-copy frame residency.
-Diagnostics should report the specific missing layer: decoder GPU handle absent,
-platform import unsupported/missing, renderer backend not ready, unsupported
-handle kind, or unsupported source format.
+wgpu device. A decoder reporting a GPU handle kind, or an OS name implying a
+potentially importable family, is not enough by itself to claim hardware decode
+playback, zero-copy, or low-copy frame residency. Diagnostics report the
+specific missing layer: decoder GPU handle absent, renderer backend not ready,
+unsupported handle kind, or unsupported source format.
 Legacy DXVA2 and VDPAU can be FFmpeg CPU-transfer fallbacks, but they must not
 be presented as the modern GPU-native renderer import path.
 
 The app layer owns the combined readiness report because it is the first layer
-that can see media decode facts, platform probes, and renderer backend support
+that can see media decode facts and device-scoped renderer backend support
 together. UI-independent `app::native_video_import` evaluates those facts into
 one playback admission and one stable readiness report; Window and Headless
 Adapters only project the result into their telemetry. This avoids giving media
-a renderer dependency, giving the renderer a platform dependency, or making a
-Widget module the owner of execution admission. CPU-decoded frames remain
-`CpuDecodedMedia`; retained D3D12VA resources can report `ReadyLowCopy` only
-when platform probing, renderer support, sampling metadata, and actual backend
-construction all agree. D3D11VA remains a media hardware-decode CPU-transfer
+a renderer dependency or making a Widget module the owner of execution
+admission. CPU-decoded frames remain `CpuDecodedMedia`. Every ready support
+contract declares `GpuNativeDecodedFrameImportMode`: Metal/Vulkan direct
+external-texture backends may report `ZeroCopy`, while the current D3D12VA
+shared-texture bridge reports `GpuBridgeCopy` and App readiness is
+`ReadyLowCopy`. A missing mode fails closed; backend construction or a native
+handle alone can never imply zero-copy. D3D11VA remains a media
+hardware-decode CPU-transfer
 fallback; the renderer does not advertise the rejected D3D11-to-D3D12
 cross-API sharing experiment.
-On Windows, `mondrian-platform` performs lightweight D3D12 and D3D11 device
-probes by loading `d3d12.dll`/`d3d11.dll` and calling
-`D3D12CreateDevice`/`D3D11CreateDevice`. Successful results prove only that the
-OS/device layer can support the `ID3D12Resource` and/or `ID3D11Texture2D`
-handle families. The current D3D12 renderer bridge is GPU-resident low-copy:
-it performs one GPU resource copy into a shareable renderer-owned texture and
-does not claim strict end-to-end zero-copy.
+There is deliberately no independent platform graphics-device probe. Such a
+probe can select a different physical adapter and cannot prove feature,
+allocation, queue, or synchronization compatibility with the active Renderer
+device. The concrete import runtime created from that active Adapter/Device/Queue
+is the sole capability authority. Any copy step must be reported from actual
+execution evidence rather than a preflight label.
 Media may report a platform-preferred hardware decode candidate such as
 D3D12VA, D3D11VA, VideoToolbox, or VA-API plus expected NV12/P010 surface
 formats, but a candidate is not renderer readiness. Windows candidates must be
@@ -205,8 +207,8 @@ NV12/P010 resource descriptor, visible-versus-storage extent, single-resource,
 single-mip/sample layout, decode-fence device ownership, and exact adapter LUID
 equality with the active wgpu DX12 adapter.
 Codec-aligned storage dimensions may exceed the visible frame; smaller storage
-is invalid. App, core, and generic platform probes must not duplicate or weaken
-these renderer resource invariants.
+is invalid. App, Core, and generic Platform code must not duplicate or weaken
+these Renderer resource invariants.
 Backend construction also resolves the active DX12 adapter LUID to the same
 DXGI enumeration index consumed by FFmpeg's D3D12VA device creator. The
 backend-specific `D3D12VaAdapterIndex` selector travels through renderer support, app playback
@@ -355,11 +357,11 @@ combines decoder sampling with the resolved source color space into
 `GpuNativeDecodedFrameVideoSampling` only at the app readiness seam. Unknown
 range, unsupported chroma siting, bit depth mismatches, or RGB surfaces whose
 resolved source color space does not have an RGB matrix fail closed before
-readiness can report zero-copy. Frame residency diagnostics can therefore
+readiness can report its declared transfer mode. Frame residency diagnostics can therefore
 distinguish CPU-decoded media, native GPU-decoded media, native media blocked
 by missing sampling facts, mixed CPU/native stacks, and procedural GPU-native
-content across the concrete Windows backend and still-unimplemented
-VideoToolbox/VA-API import adapters.
+content across the concrete D3D12, VideoToolbox/Metal, and VA-API/Vulkan
+Adapters.
 The renderer owns `ViewerNativeVideoImportRuntime` independently from the
 swapchain UI renderer. On Windows it constructs the concrete renderer
 backend from the active adapter/device/queue and publishes that backend's support
@@ -368,11 +370,11 @@ runtime survives surface-format/UI-renderer rebuilds so display changes do not
 discard decoder bridge pools. It allocates native import frame ids from the same
 `RenderGpuOutputBoundaryRuntime` namespace that will receive the returned
 working resources, preventing resource-table id collisions.
-Renderer/platform readiness must remain in
+Renderer readiness must remain in
 `PreviewHardwareDecodeAdmissionDiagnostics`. It must not be copied into
 media `HwAccelProbe`, `PreviewDecodeDiagnostics`, hardware-decode decisions, or
 media blocker enums. Media reports whether decode produced a retained native
-surface; the app separately reports whether renderer and platform capabilities
+surface; the app separately reports whether the active Renderer capability
 allowed requesting that surface. Only the app admission boundary combines
 those facts.
 Concrete import execution belongs behind
@@ -488,13 +490,13 @@ Window registration key, playback ticket, cache key, or headless completion
 policy. App code consumes these contracts directly; it must not re-export them
 under App-owned aliases.
 
-Native decoded-frame format and sampling resolution is renderer policy and
+Native decoded-frame format and sampling resolution is Renderer policy and
 therefore lives beside `ViewerNativeVideoImportRuntime`. Unknown range,
 bit-depth mismatch, unsupported chroma location, or an RGB/YUV matrix mismatch
-fails closed before backend execution. Platform capability discovery and
-product admission explanations remain App Adapter responsibilities: they may
-combine media, platform, and renderer evidence, but cannot reproduce import
-format policy or construct renderer resources.
+fails closed before backend execution. Product admission explanations remain an
+App Adapter responsibility: they may combine exact media facts with the
+device-scoped Renderer support snapshot, but cannot reproduce import format
+policy, probe another graphics device, or construct Renderer resources.
 
 `viewer_runtime.rs` owns the complete device-scoped Viewer execution lifetime.
 Its immutable `ViewerGpuExecutionRequest` is independent of Window widgets,
@@ -908,8 +910,8 @@ diagnostics, and cumulative health counts for
 ready/degraded/blocked/failed/rejected/waiting outcomes. Frame residency reports
 whether the candidate was CPU-decoded media, procedural GPU-native content, or a
 mixed stack; whether working composition was CPU or GPU resident; whether input
-transform was CPU OCIO or GPU-native; upload/readback counts; and whether the
-frame is truly zero-copy/low-copy. The same
+transform was CPU OCIO or GPU-native; upload/readback/native bridge-copy counts;
+and whether the frame is truly zero-copy/low-copy. The same
 records also carry the latest structured viewer color rejection and its machine
 issue summary when missing-metadata policy rejects preview media. This gives
 playback/scrubbing sessions a persistent health stream that can be budgeted and

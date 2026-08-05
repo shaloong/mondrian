@@ -6,7 +6,7 @@ use mondrian_media::PreviewDecodeGeometry;
 impl<O: Clone> PreviewProductionRuntime<O> {
     /// Set playback hardware-decode admission selected by the app runtime.
     ///
-    /// The default is `Auto` until renderer/platform readiness is reported. The
+    /// The default is `Auto` until renderer-device readiness is reported. The
     /// runtime may raise playback to `PreferHardwareDecode` for FFmpeg
     /// CPU-transfer fallback or to `PreferGpuResident` once native video import
     /// support is actually ready.
@@ -40,12 +40,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             playback_request: admission.request,
             renderer_native_import_support_known: true,
             renderer_native_import_ready: admission.renderer_native_import_ready,
-            platform_native_import_ready: admission.platform_native_import_ready,
+            renderer_import_mode: admission.renderer_import_mode,
             native_import_admission_ready: admission.native_import_admission_ready,
             admission_blocker: admission.admission_blocker,
-            platform_discovery_available: admission.platform_discovery_available,
-            platform_zero_copy_supported: admission.platform_zero_copy_supported,
-            platform_low_copy_fallback_supported: admission.platform_low_copy_fallback_supported,
             renderer_supported_handle_kinds: admission.renderer_supported_handle_kinds,
             renderer_supported_source_texture_formats: admission
                 .renderer_supported_source_texture_formats,

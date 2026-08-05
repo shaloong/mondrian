@@ -1929,36 +1929,27 @@ fn push_preview_decode_root_causes_and_actions(
             PreviewDecodePerformanceArea::Scheduling,
             "preview_decode_hardware_decode_admission_gated",
             format!(
-                "playback_hardware_decode_request={:?} admission_blocker={:?} renderer_native_import_support_known={} renderer_native_import_ready={} renderer_supported_handle_kinds={} renderer_supported_source_texture_formats={} platform_discovery_available={} platform_zero_copy_supported={} platform_low_copy_fallback_supported={} platform_native_import_ready={} native_import_admission_ready={} playback_frames={} current_decode_decisions={} current_drop_late_decisions={}",
+                "playback_hardware_decode_request={:?} admission_blocker={:?} renderer_native_import_support_known={} renderer_native_import_ready={} renderer_import_mode={:?} renderer_supported_handle_kinds={} renderer_supported_source_texture_formats={} native_import_admission_ready={} playback_frames={} current_decode_decisions={} current_drop_late_decisions={}",
                 summary.hardware_decode_admission.playback_request,
                 summary.hardware_decode_admission.admission_blocker,
                 summary
                     .hardware_decode_admission
                     .renderer_native_import_support_known,
                 summary.hardware_decode_admission.renderer_native_import_ready,
+                summary.hardware_decode_admission.renderer_import_mode,
                 summary
                     .hardware_decode_admission
                     .renderer_supported_handle_kinds,
                 summary
                     .hardware_decode_admission
                     .renderer_supported_source_texture_formats,
-                summary
-                    .hardware_decode_admission
-                    .platform_discovery_available,
-                summary
-                    .hardware_decode_admission
-                    .platform_zero_copy_supported,
-                summary
-                    .hardware_decode_admission
-                    .platform_low_copy_fallback_supported,
-                summary.hardware_decode_admission.platform_native_import_ready,
                 summary.hardware_decode_admission.native_import_admission_ready,
                 summary.playback_cursor_frames,
                 summary.playback_schedule.current_decode_decisions,
                 summary.playback_schedule.current_drop_late_decisions
             ),
             "connect_native_import_before_enabling_hardware_decode_admission",
-            "Keep playback hardware decode admission disabled until renderer and platform native video import are ready; then allow GPU-resident playback jobs instead of hardware CPU-transfer fallback.",
+            "Keep GPU-resident playback decode disabled until the exact renderer-device native import Adapter is ready; otherwise retain the hardware CPU-transfer or software fallback.",
             PreviewDecodePerformanceSeverity::Warn,
         );
     }
