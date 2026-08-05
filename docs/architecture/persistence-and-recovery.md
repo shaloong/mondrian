@@ -527,8 +527,19 @@ pre-namespace, durability-unconfirmed, or namespace-indeterminate evidence
 through its Recovery Module Interface; the lifecycle Adapter renders it as
 warning text only when producing product-status output. No post-publication
 state may be inferred by parsing that text.
-Conflicts, permission failures, disk-full errors, invalid candidates, and
-failed retirement remain explicit and retryable.
+Terminal failure evidence has two independent axes. `ProjectPersistenceFailure`
+classifies the actionable cause as storage exhausted, permission denied, target
+conflict/unavailable, invalid data, other I/O, internal failure, or request
+rejection. `ProjectPersistencePublicationFailure` separately records whether
+the archive or Recovery Manifest failed before namespace mutation, after a
+visible but not durably confirmed mutation, or with an indeterminate namespace
+postcondition. Product UI may combine these facts, but must never infer either
+one from the other's diagnostic text. Deterministic worker I/O injection proves
+that storage exhaustion and permission denial preserve canonical Project bytes;
+the lifecycle gate additionally proves storage exhaustion keeps the Session
+open and leaves the existing Recovery Authority manifest byte-for-byte intact.
+Conflicts, invalid candidates, and failed retirement remain explicit and
+retryable.
 
 Golden recovery verification must exercise the same production autosave,
 manifest, staging, Session replacement, and covering-save path. It must retain

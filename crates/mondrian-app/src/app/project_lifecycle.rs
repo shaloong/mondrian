@@ -922,15 +922,24 @@ impl AppState {
                 failure.phase, failure.kind, failure.reason
             )
         });
-        if completion.result.is_ok() && publication_context.is_some() {
+        let failure_context = completion.failure.as_ref().map(|failure| {
+            format!(
+                "failure category={:?}: {}",
+                failure.category, failure.reason
+            )
+        });
+        if completion.result.is_ok() && (publication_context.is_some() || failure_context.is_some())
+        {
             return Err(
-                "successful persistence completion carries contradictory publication-failure evidence"
+                "successful persistence completion carries contradictory terminal-failure evidence"
                     .to_owned(),
             );
         }
-        let persisted = completion.result.map_err(|reason| match publication_context {
-            Some(context) => format!("{reason}; {context}"),
-            None => reason,
+        let persisted = completion.result.map_err(|reason| {
+            [failure_context, publication_context]
+                .into_iter()
+                .flatten()
+                .fold(reason, |message, context| format!("{message}; {context}"))
         })?;
         if persisted.asset_library_revision != completion.asset_library_revision {
             return Err(
@@ -2089,6 +2098,36 @@ mod persistence_lifecycle_tests {
             manifest["snapshots"].as_array().map(Vec::len),
             Some(0),
             "retirement must first publish an empty canonical manifest"
+        );
+        state.close_project().expect("close project");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn storage_exhaustion_keeps_project_open_and_preserves_recovery_authority() {
+        let root = unique_root("retain-recovery-on-storage-exhaustion");
+        let mut state = test_state(&root);
+        let runtime_root = state.authoring.as_ref().expect("session").runtime_root().to_path_buf();
+        let autosave = state.write_autosave_snapshot(4, 7).expect("write autosave");
+        let manifest_path = AppState::autosave_manifest_path(&runtime_root);
+        let manifest_before = fs::read(&manifest_path).expect("recovery manifest");
+        state
+            .project_persistence
+            .fail_next_worker_io_for_test(std::io::ErrorKind::StorageFull);
+
+        let request = state.request_project_save().expect("submit manual save");
+        let error = state
+            .wait_for_persistence_request(request)
+            .expect_err("storage exhaustion must fail manual save");
+
+        assert!(error.to_string().contains("StorageExhausted"));
+        assert!(state.has_open_project());
+        assert!(state.has_unsaved_project_changes());
+        assert!(autosave.is_file());
+        assert_eq!(
+            fs::read(&manifest_path).expect("preserved recovery manifest"),
+            manifest_before,
+            "failed manual save must not rewrite or retire Recovery Authority"
         );
         state.close_project().expect("close project");
         let _ = fs::remove_dir_all(root);

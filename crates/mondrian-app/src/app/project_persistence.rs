@@ -395,6 +395,9 @@ pub struct ProjectPersistenceCompletion {
     pub purpose: ProjectPersistencePurpose,
     /// Durable result. Error strings retain the full worker-side cause chain.
     pub result: Result<PersistedProjectState, String>,
+    /// Stable, actionable terminal failure evidence. This is orthogonal to
+    /// irreversible namespace state in `publication_failure`.
+    pub failure: Option<ProjectPersistenceFailure>,
     /// Typed irreversible-boundary failure, when publication reached one of
     /// the archive or Recovery Manifest seams.
     pub publication_failure: Option<ProjectPersistencePublicationFailure>,
@@ -402,6 +405,36 @@ pub struct ProjectPersistenceCompletion {
     archive_publication: ArchivePublicationState,
     /// Exact lease instance that admitted the request, without retaining it.
     pub(super) runtime_lease_id: ProjectRuntimeLeaseId,
+}
+
+/// Stable product-facing category for one terminal persistence failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectPersistenceFailureCategory {
+    /// The destination filesystem or quota has no remaining capacity.
+    StorageExhausted,
+    /// The current identity cannot write or replace the requested destination.
+    PermissionDenied,
+    /// Create-only publication found an existing target.
+    TargetConflict,
+    /// A required source or destination ancestor disappeared.
+    TargetUnavailable,
+    /// Persisted input or a filesystem object has an invalid shape.
+    InvalidData,
+    /// Another classified operating-system I/O failure occurred.
+    Io,
+    /// A non-I/O invariant, dependency, or request failure occurred.
+    Internal,
+    /// The worker rejected a request before persistence execution.
+    RequestRejected,
+}
+
+/// Cloneable typed failure delivered with a persistence completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectPersistenceFailure {
+    /// Stable category used by product recovery guidance.
+    pub category: ProjectPersistenceFailureCategory,
+    /// Complete worker-side diagnostic.
+    pub reason: String,
 }
 
 /// Persistence publication phase that produced a typed terminal failure.
@@ -458,6 +491,8 @@ struct ProjectPersistenceRequest {
     runtime_lease: Arc<ProjectRuntimeLease>,
     #[cfg(test)]
     worker_gate: Option<TestPersistenceWorkerGate>,
+    #[cfg(test)]
+    worker_io_failure: Option<std::io::ErrorKind>,
 }
 
 struct ProjectPersistenceBarrier {
@@ -493,6 +528,8 @@ pub struct ProjectPersistenceService {
     next_barrier_observer: Option<SyncSender<()>>,
     #[cfg(test)]
     next_submission_error: Option<String>,
+    #[cfg(test)]
+    next_worker_io_failure: Option<std::io::ErrorKind>,
 }
 
 impl ProjectPersistenceService {
@@ -532,6 +569,8 @@ impl ProjectPersistenceService {
             next_barrier_observer: None,
             #[cfg(test)]
             next_submission_error: None,
+            #[cfg(test)]
+            next_worker_io_failure: None,
         }
     }
 
@@ -600,6 +639,8 @@ impl ProjectPersistenceService {
             runtime_lease,
             #[cfg(test)]
             worker_gate: self.next_request_gate.take(),
+            #[cfg(test)]
+            worker_io_failure: self.next_worker_io_failure.take(),
         };
         // Publish request ownership before the worker can observe the message.
         self.pending.fetch_add(1, Ordering::AcqRel);
@@ -997,6 +1038,15 @@ impl ProjectPersistenceService {
     pub(super) fn fail_next_submission_for_test(&mut self, reason: impl Into<String>) {
         self.next_submission_error = Some(reason.into());
     }
+
+    #[cfg(test)]
+    pub(super) fn fail_next_worker_io_for_test(&mut self, kind: std::io::ErrorKind) {
+        assert!(
+            self.next_worker_io_failure.is_none(),
+            "only one injected persistence worker I/O failure may be pending"
+        );
+        self.next_worker_io_failure = Some(kind);
+    }
 }
 
 impl Default for ProjectPersistenceService {
@@ -1163,6 +1213,8 @@ fn execute_persistence_request(
         purpose,
         document_revision_to_publish,
         runtime_lease,
+        #[cfg(test)]
+        worker_io_failure,
         ..
     } = request;
     let AuthoringSnapshot {
@@ -1176,8 +1228,15 @@ fn execute_persistence_request(
     let target_file = purpose.target_file().to_path_buf();
     let mut archive_publication = ArchivePublicationState::NotPublished;
     let mut publication_failure = None;
+    let mut failure = None;
     let result = (|| {
         runtime_lease.validate()?;
+        #[cfg(test)]
+        if let Some(kind) = worker_io_failure {
+            let error = std::io::Error::from(kind);
+            failure = Some(project_persistence_failure(&error, error.to_string()));
+            return Err(error.to_string());
+        }
         let mut document = document;
         if let ProjectPersistencePurpose::Autosave { .. } = &purpose {
             prepare_recovery_archive_target(&runtime_lease, &target_file)?;
@@ -1202,6 +1261,7 @@ fn execute_persistence_request(
                 evidence
             }
             Err(error) => {
+                failure = Some(project_persistence_failure(&error, error.to_string()));
                 let kind = match &error {
                     ProjectArchivePublicationFailure::BeforeNamespace(_) => {
                         archive_publication = ArchivePublicationState::NotPublished;
@@ -1243,6 +1303,7 @@ fn execute_persistence_request(
                 max_recovery_points: *max_recovery_points,
                 retention_days: *retention_days,
             }) {
+                failure = Some(project_persistence_failure(&error, error.to_string()));
                 let kind = match &error {
                     RecoveryManifestPublicationFailure::BeforeNamespace(_) => {
                         ProjectPersistencePublicationFailureKind::BeforeNamespace
@@ -1268,6 +1329,12 @@ fn execute_persistence_request(
             meta: document.meta,
         })
     })();
+    if result.is_err() && failure.is_none() {
+        failure = Some(ProjectPersistenceFailure {
+            category: ProjectPersistenceFailureCategory::Internal,
+            reason: result.as_ref().expect_err("failure result").clone(),
+        });
+    }
     // Quiescence relies on these being destroyed before the worker can process
     // the next FIFO barrier. Completions carry only the scalar lease identity.
     drop(asset_library);
@@ -1280,6 +1347,7 @@ fn execute_persistence_request(
         asset_library_revision,
         purpose,
         result,
+        failure,
         publication_failure,
         archive_publication,
         runtime_lease_id,
@@ -1306,10 +1374,72 @@ fn reject_persistence_request(
         generation: snapshot.generation,
         asset_library_revision: snapshot.asset_library_revision,
         purpose,
-        result: Err(reason),
+        result: Err(reason.clone()),
+        failure: Some(ProjectPersistenceFailure {
+            category: ProjectPersistenceFailureCategory::RequestRejected,
+            reason: reason.clone(),
+        }),
         publication_failure: None,
         archive_publication: ArchivePublicationState::NotPublished,
         runtime_lease_id,
+    }
+}
+
+fn project_persistence_failure(
+    error: &(dyn std::error::Error + 'static),
+    reason: String,
+) -> ProjectPersistenceFailure {
+    let mut source = Some(error);
+    while let Some(current) = source {
+        if let Some(io_error) = current.downcast_ref::<std::io::Error>() {
+            return ProjectPersistenceFailure {
+                category: classify_persistence_io_error(io_error),
+                reason,
+            };
+        }
+        source = current.source();
+    }
+    ProjectPersistenceFailure {
+        category: ProjectPersistenceFailureCategory::Internal,
+        reason,
+    }
+}
+
+fn classify_persistence_io_error(error: &std::io::Error) -> ProjectPersistenceFailureCategory {
+    use std::io::ErrorKind;
+
+    match error.kind() {
+        ErrorKind::StorageFull => ProjectPersistenceFailureCategory::StorageExhausted,
+        ErrorKind::PermissionDenied => ProjectPersistenceFailureCategory::PermissionDenied,
+        ErrorKind::AlreadyExists => ProjectPersistenceFailureCategory::TargetConflict,
+        ErrorKind::NotFound => ProjectPersistenceFailureCategory::TargetUnavailable,
+        ErrorKind::InvalidData | ErrorKind::InvalidInput => {
+            ProjectPersistenceFailureCategory::InvalidData
+        }
+        _ if is_storage_exhausted_os_error(error.raw_os_error()) => {
+            ProjectPersistenceFailureCategory::StorageExhausted
+        }
+        _ => ProjectPersistenceFailureCategory::Io,
+    }
+}
+
+fn is_storage_exhausted_os_error(raw: Option<i32>) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        matches!(raw, Some(39 | 112 | 1816))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        matches!(raw, Some(28 | 122))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        matches!(raw, Some(28 | 69))
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    {
+        let _ = raw;
+        false
     }
 }
 
@@ -1425,6 +1555,10 @@ mod tests {
             asset_library_revision: snapshot.asset_library_revision,
             purpose: ProjectPersistencePurpose::Manual { destination },
             result: Err("platform durability barrier was not confirmed".to_owned()),
+            failure: Some(ProjectPersistenceFailure {
+                category: ProjectPersistenceFailureCategory::Io,
+                reason: "modeled durability uncertainty".to_owned(),
+            }),
             publication_failure: Some(ProjectPersistencePublicationFailure {
                 phase: ProjectPersistencePublicationPhase::Archive,
                 kind: ProjectPersistencePublicationFailureKind::DurabilityUnconfirmed,
@@ -1725,6 +1859,59 @@ mod tests {
             baseline
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn injected_storage_and_permission_failures_preserve_canonical_project_bytes() {
+        let cases = [
+            (
+                std::io::ErrorKind::StorageFull,
+                ProjectPersistenceFailureCategory::StorageExhausted,
+            ),
+            (
+                std::io::ErrorKind::PermissionDenied,
+                ProjectPersistenceFailureCategory::PermissionDenied,
+            ),
+        ];
+
+        for (io_kind, expected_category) in cases {
+            let root = unique_root("typed-worker-io-failure");
+            std::fs::create_dir_all(&root).expect("create root");
+            let (authoring, lease) = session(&root);
+            let target = root.join("project.mdp");
+            let sentinel = format!("canonical-before-{expected_category:?}").into_bytes();
+            std::fs::write(&target, &sentinel).expect("write canonical sentinel");
+            let snapshot = authoring.snapshot().expect("authoring snapshot");
+            let destination =
+                ManualProjectFileDestination::initial(snapshot.session_id, target.clone())
+                    .expect("manual destination");
+            let mut service = ProjectPersistenceService::new();
+            service.fail_next_worker_io_for_test(io_kind);
+
+            let request = service
+                .submit(
+                    snapshot,
+                    ProjectPersistencePurpose::Manual { destination },
+                    lease,
+                )
+                .expect("submit injected failure");
+            let completion = wait_for(&service, request);
+
+            assert!(completion.result.is_err());
+            assert_eq!(
+                completion.failure.as_ref().map(|failure| failure.category),
+                Some(expected_category)
+            );
+            assert!(
+                completion.publication_failure.is_none(),
+                "failure before publication must not invent namespace evidence"
+            );
+            assert_eq!(
+                std::fs::read(&target).expect("read canonical sentinel"),
+                sentinel
+            );
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 
     #[test]
