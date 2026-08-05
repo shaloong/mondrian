@@ -143,11 +143,13 @@ Lower layers cannot depend on higher layers:
   traversing authoring or execution internals. A custom slice may be replaced
   only atomically with equivalent typed behavior.
 - Platform services are injected into event/app layers; widgets never call OS APIs directly. Windows, macOS, Linux, and Headless implement one Platform Execution Contract throughout M1/M2. D3D12, Vulkan, Metal, native media surfaces, window-system objects, audio devices, and display payloads remain concrete Adapter details; shared Project, Timeline, Playback, Audio, Effects, Color, Viewer, and Export Interfaces carry only typed capability, ownership, synchronization, fallback, and terminal evidence. Windows is the current real-device qualification platform, not the semantic owner of the production Implementation.
-- Platform implementation keeps Locality in deep `memory`, `process_memory`,
-  `playback_scheduling`, `display/{windows,macos,linux}`, `global_pointer`, and
-  `eyedropper` Modules. `lib.rs` is only the composition root: OS display APIs
-  and desktop-capture session state do not live beside `PlatformService`
-  wiring. Playback scheduling is
+- Platform contracts keep Locality in independent `desktop`, `display`, and
+  `memory` Modules; the crate root only re-exports their stable public API and
+  defines the capability-empty Headless adapter. Platform implementation keeps
+  the same boundary in deep `memory`, `process_memory`, `playback_scheduling`,
+  `display/{windows,macos,linux}`, `global_pointer`, and `eyedropper` Modules.
+  Its `lib.rs` is only the composition root: OS display APIs and desktop-capture
+  session state do not live beside `PlatformService` wiring. Playback scheduling is
   thread-affine and exactly restored: Windows uses MMCSS Playback, macOS uses
   user-interactive pthread QoS, and Linux attempts a bounded per-thread nice
   improvement. Permission denial is a typed portable fallback. The desktop UI
