@@ -93,6 +93,7 @@ serde     = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 sha2 = { workspace = true }
+chrono = { workspace = true }
 # 并发
 parking_lot = { workspace = true }
 glam  = { workspace = true }

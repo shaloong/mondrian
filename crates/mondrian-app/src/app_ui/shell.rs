@@ -2865,6 +2865,7 @@ mod tests {
                 project_id: ProjectId::new(),
                 runtime_root: PathBuf::from("E:/runtime"),
                 project_file: PathBuf::from("E:/projects/recover.mdp"),
+                canonical_target: crate::app::RecoveryCanonicalTargetEvidence::Missing,
                 autosave_file: PathBuf::from("E:/runtime/autosave/project.autosave.mdp"),
                 author_generation: 4,
                 asset_library_revision: 2,

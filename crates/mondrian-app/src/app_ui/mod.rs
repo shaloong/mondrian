@@ -30,6 +30,7 @@ pub mod preferences_store;
 pub mod preview;
 pub(crate) mod preview_scale;
 pub mod project_settings_dialog;
+pub mod recovery_dialog;
 pub mod rendering;
 pub mod runtime;
 pub(crate) mod scopes;

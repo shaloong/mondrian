@@ -44,7 +44,7 @@ use project_persistence::{
     ProjectPersistenceService,
 };
 pub(crate) use project_recovery::discover_crash_recovery_candidates;
-pub use project_recovery::CrashRecoveryCandidate;
+pub use project_recovery::{CrashRecoveryCandidate, RecoveryCanonicalTargetEvidence};
 use serde::{Deserialize, Serialize};
 
 const PROJECT_EXTENSION: &str = "mdp";

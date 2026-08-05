@@ -19,16 +19,19 @@ use std::sync::OnceLock;
 use crate::app::ui_actions::{
     app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
     app_shell_open_recent_project_action, app_shell_quit_action, app_shell_recover_project_action,
-    app_shell_window_drag_action, project_create_with_settings_action,
-    AppShellOpenRecentProjectPayload, NewProjectDraftUpdatePayload,
-    ProjectRecoverFromAutosavePayload, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
-    APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
-    APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_SELECT_CUSTOM_OCIO_CONFIG,
+    app_shell_recovery_dialog_action, app_shell_window_drag_action,
+    project_create_with_settings_action, AppShellOpenRecentProjectPayload,
+    NewProjectDraftUpdatePayload, ProjectRecoverFromAutosavePayload,
+    APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
+    APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_CONFIRM_RECOVERY_DIALOG, APP_SHELL_NAMESPACE,
+    APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_RECOVERY_DIALOG,
+    APP_SHELL_SELECT_CUSTOM_OCIO_CONFIG,
 };
 use crate::app::CrashRecoveryCandidate;
 use crate::app_ui::icons::AppIcon;
 use crate::app_ui::modal::ShellModal;
 use crate::app_ui::new_project_dialog::{default_project_file_name, AppUiNewProjectDraft};
+use crate::app_ui::recovery_dialog::RecoveryConfirmationModel;
 use crate::app_ui::shell::project_file_filters;
 
 /// Startup window logical size used by the app UI product entrypoint.
@@ -181,6 +184,19 @@ impl AppUiStartupScreen {
                 }
                 Ok(None)
             }
+            Action::Custom { namespace, name, payload }
+                if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_RECOVERY_DIALOG =>
+            {
+                let payload: ProjectRecoverFromAutosavePayload = serde_json::from_value(payload)
+                    .map_err(|err| startup_shell_action_error(APP_SHELL_RECOVERY_DIALOG, err))?;
+                self.modal = Some(ShellModal::recovery(
+                    RecoveryConfirmationModel::from_candidate(payload.candidate),
+                ));
+                if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
+                    self.layout(self.bounds);
+                }
+                Ok(None)
+            }
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE
                     && (name == APP_SHELL_CANCEL_NEW_PROJECT_DIALOG
@@ -212,6 +228,23 @@ impl AppUiStartupScreen {
                 self.modal = None;
                 Ok(Some(project_create_with_settings_action(
                     draft.into_payload(path),
+                )))
+            }
+            Action::Custom { namespace, name, .. }
+                if namespace == APP_SHELL_NAMESPACE
+                    && name == APP_SHELL_CONFIRM_RECOVERY_DIALOG =>
+            {
+                let Some(candidate) = self
+                    .modal
+                    .as_ref()
+                    .and_then(ShellModal::as_recovery)
+                    .map(|dialog| dialog.candidate().clone())
+                else {
+                    return Ok(None);
+                };
+                self.modal = None;
+                Ok(Some(app_shell_recover_project_action(
+                    ProjectRecoverFromAutosavePayload { candidate },
                 )))
             }
             action => Ok(Some(action)),
@@ -269,7 +302,7 @@ impl AppUiStartupScreen {
                 let Some(project) = self.recovery_projects.get(index) else {
                     return;
                 };
-                app_shell_recover_project_action(ProjectRecoverFromAutosavePayload {
+                app_shell_recovery_dialog_action(ProjectRecoverFromAutosavePayload {
                     candidate: project.candidate.clone(),
                 })
             }
@@ -1100,7 +1133,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_screen_dispatches_recovery_project_action() {
+    fn startup_screen_requires_recovery_inspection_before_project_action() {
         let mut screen = AppUiStartupScreen::new();
         let project_file = PathBuf::from("E:/projects/recover.mdp");
         let autosave_file = PathBuf::from("E:/runtime/autosave/project.autosave.mdp");
@@ -1108,6 +1141,7 @@ mod tests {
             project_id: ProjectId::new(),
             runtime_root: PathBuf::from("E:/runtime"),
             project_file: project_file.clone(),
+            canonical_target: crate::app::RecoveryCanonicalTargetEvidence::Missing,
             autosave_file: autosave_file.clone(),
             author_generation: 5,
             asset_library_revision: 2,
@@ -1136,10 +1170,37 @@ mod tests {
             panic!("expected recovery custom action");
         };
         assert_eq!(namespace, APP_SHELL_NAMESPACE);
-        assert_eq!(name, APP_SHELL_RECOVER_PROJECT);
+        assert_eq!(name, APP_SHELL_RECOVERY_DIALOG);
         let payload: ProjectRecoverFromAutosavePayload =
             serde_json::from_value(payload.clone()).expect("recovery payload");
         assert_eq!(payload.candidate, candidate);
+
+        let platform = SaveProjectPlatform {
+            project_file: PathBuf::from("E:/unused.mdp"),
+            open_file: None,
+        };
+        assert!(screen
+            .try_handle_shell_action(recovery_actions[0].clone(), &platform)
+            .expect("open recovery inspection")
+            .is_none());
+        assert!(screen.has_modal());
+
+        let resolved = screen
+            .try_handle_shell_action(
+                crate::app::ui_actions::app_shell_confirm_recovery_dialog_action(),
+                &platform,
+            )
+            .expect("confirm recovery inspection")
+            .expect("recovery project action");
+        let Action::Custom { namespace, name, payload } = resolved else {
+            panic!("expected confirmed recovery custom action");
+        };
+        assert_eq!(namespace, APP_SHELL_NAMESPACE);
+        assert_eq!(name, APP_SHELL_RECOVER_PROJECT);
+        let payload: ProjectRecoverFromAutosavePayload =
+            serde_json::from_value(payload).expect("confirmed recovery payload");
+        assert_eq!(payload.candidate, candidate);
+        assert!(!screen.has_modal());
     }
 
     #[test]

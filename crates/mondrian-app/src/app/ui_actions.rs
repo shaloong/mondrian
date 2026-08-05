@@ -106,6 +106,10 @@ pub const APP_SHELL_OPEN_PROJECT_DIALOG: &str = "open_project_dialog";
 pub const APP_SHELL_OPEN_RECENT_PROJECT: &str = "open_recent_project";
 /// App-shell request to recover a project from a startup autosave candidate.
 pub const APP_SHELL_RECOVER_PROJECT: &str = "recover_project";
+/// App-shell request to inspect one recovery candidate before admission.
+pub const APP_SHELL_RECOVERY_DIALOG: &str = "recovery_dialog";
+/// App-shell request to confirm the currently inspected recovery candidate.
+pub const APP_SHELL_CONFIRM_RECOVERY_DIALOG: &str = "confirm_recovery_dialog";
 /// App-shell request to open a platform media import dialog.
 pub const APP_SHELL_IMPORT_MEDIA_DIALOG: &str = "import_media_dialog";
 /// App-shell request to navigate the Asset browser to one folder.
@@ -1146,6 +1150,16 @@ pub fn app_shell_open_recent_project_action(payload: AppShellOpenRecentProjectPa
 /// Build an app-shell request for recovering one startup autosave candidate.
 pub fn app_shell_recover_project_action(payload: ProjectRecoverFromAutosavePayload) -> Action {
     custom_app_shell_action_with_payload(APP_SHELL_RECOVER_PROJECT, payload)
+}
+
+/// Build an app-shell request for inspecting one startup recovery candidate.
+pub fn app_shell_recovery_dialog_action(payload: ProjectRecoverFromAutosavePayload) -> Action {
+    custom_app_shell_action_with_payload(APP_SHELL_RECOVERY_DIALOG, payload)
+}
+
+/// Build an app-shell request for confirming the inspected recovery candidate.
+pub fn app_shell_confirm_recovery_dialog_action() -> Action {
+    custom_app_shell_action(APP_SHELL_CONFIRM_RECOVERY_DIALOG)
 }
 
 /// Build an app-shell request for importing media files.

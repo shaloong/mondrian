@@ -49,6 +49,9 @@ pub struct CrashRecoveryCandidate {
     pub runtime_root: PathBuf,
     /// Absolute canonical Project publication path recorded by the manifest.
     pub project_file: PathBuf,
+    /// Read-only state of the canonical publication target at discovery.
+    /// Selection admission verifies this again before taking a live lease.
+    pub canonical_target: RecoveryCanonicalTargetEvidence,
     /// Absolute autosave archive path selected within `runtime_root/autosave`.
     pub autosave_file: PathBuf,
     /// Authoring generation captured by the autosave publication.
@@ -63,6 +66,32 @@ pub struct CrashRecoveryCandidate {
     pub saved_at_unix_ms: u64,
     /// Number of currently admissible snapshots in this exact manifest.
     pub total_snapshots: usize,
+}
+
+/// Canonical publication target evidence attached to a recovery choice.
+///
+/// This is presentation and stale-selection evidence, not filesystem mutation
+/// authority. Recovery admission re-reads the target and requires the same
+/// state before opening the autosave into a dirty Authoring Session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RecoveryCanonicalTargetEvidence {
+    /// The manifest's intended canonical Project path did not exist.
+    Missing,
+    /// A valid canonical archive for the same Project existed.
+    Present {
+        /// Durable document revision observed in the canonical archive.
+        document_revision: u64,
+    },
+}
+
+impl RecoveryCanonicalTargetEvidence {
+    fn document_revision(self) -> Option<u64> {
+        match self {
+            Self::Missing => None,
+            Self::Present { document_revision } => Some(document_revision),
+        }
+    }
 }
 
 /// Complete immutable facts required to publish one recovery point.
@@ -186,6 +215,7 @@ pub(super) struct RecoverySelectionEvidence {
     /// Durable Project identity that must be leased before any mutation.
     pub project_id: ProjectId,
     project_file: PathBuf,
+    canonical_target: RecoveryCanonicalTargetEvidence,
     exact_entry: RecoverySnapshotEntry,
 }
 
@@ -626,15 +656,17 @@ pub(super) fn preflight_recovery_selection(
         return Err("selected recovery point evidence changed after discovery".to_owned());
     }
     verify_entry(entry, &autosave_dir, manifest.project_id)?;
-    validate_canonical_recovery_freshness(
+    validate_canonical_recovery_target(
         project_file,
         manifest.project_id,
         entry.document_revision,
+        candidate.canonical_target,
     )?;
     Ok(RecoverySelectionEvidence {
         runtime_root: runtime_root.to_path_buf(),
         project_id: manifest.project_id,
         project_file: project_file.to_path_buf(),
+        canonical_target: candidate.canonical_target,
         exact_entry: entry.clone(),
     })
 }
@@ -739,10 +771,11 @@ fn validate_recovery_evidence_under_lease(
         return Err("selected recovery point evidence changed before lease admission".to_owned());
     }
     verify_entry(current, &autosave_dir, evidence.project_id)?;
-    validate_canonical_recovery_freshness(
+    validate_canonical_recovery_target(
         &evidence.project_file,
         evidence.project_id,
         current.document_revision,
+        evidence.canonical_target,
     )?;
     Ok(())
 }
@@ -785,16 +818,17 @@ fn discover_crash_recovery_candidates_under(root: &Path) -> Vec<CrashRecoveryCan
         {
             continue;
         }
-        let canonical_document_revision =
-            match canonical_project_document(&manifest.project_file, manifest.project_id) {
-                Ok(document) => document.map(|document| document.document_revision),
+        let canonical_target =
+            match canonical_recovery_target(&manifest.project_file, manifest.project_id) {
+                Ok(target) => target,
                 Err(_) => continue,
             };
         let verified = manifest
             .snapshots
             .iter()
             .filter(|snapshot| {
-                canonical_document_revision
+                canonical_target
+                    .document_revision()
                     .is_none_or(|canonical| snapshot.document_revision >= canonical)
                     && verify_entry(snapshot, &autosave_dir, manifest.project_id).is_ok()
             })
@@ -805,6 +839,7 @@ fn discover_crash_recovery_candidates_under(root: &Path) -> Vec<CrashRecoveryCan
                 project_id: manifest.project_id,
                 runtime_root: runtime_root.clone(),
                 project_file: manifest.project_file.clone(),
+                canonical_target,
                 autosave_file: snapshot.file.clone(),
                 author_generation: snapshot.author_generation,
                 asset_library_revision: snapshot.asset_library_revision,
@@ -848,16 +883,37 @@ fn canonical_project_document(
     }
 }
 
-fn validate_canonical_recovery_freshness(
+fn canonical_recovery_target(
+    project_file: &Path,
+    project_id: ProjectId,
+) -> Result<RecoveryCanonicalTargetEvidence, String> {
+    Ok(
+        match canonical_project_document(project_file, project_id)? {
+            Some(document) => RecoveryCanonicalTargetEvidence::Present {
+                document_revision: document.document_revision,
+            },
+            None => RecoveryCanonicalTargetEvidence::Missing,
+        },
+    )
+}
+
+fn validate_canonical_recovery_target(
     project_file: &Path,
     project_id: ProjectId,
     snapshot_document_revision: u64,
+    expected: RecoveryCanonicalTargetEvidence,
 ) -> Result<(), String> {
-    if let Some(canonical) = canonical_project_document(project_file, project_id)? {
-        if snapshot_document_revision < canonical.document_revision {
+    let current = canonical_recovery_target(project_file, project_id)?;
+    if current != expected {
+        return Err(format!(
+            "canonical Project target changed after recovery discovery (expected {expected:?}, observed {current:?})"
+        ));
+    }
+    if let Some(canonical_revision) = current.document_revision() {
+        if snapshot_document_revision < canonical_revision {
             return Err(format!(
                 "selected recovery point document revision {} is older than canonical revision {}",
-                snapshot_document_revision, canonical.document_revision
+                snapshot_document_revision, canonical_revision
             ));
         }
     }
@@ -1401,6 +1457,11 @@ mod tests {
         CrashRecoveryCandidate {
             project_id: manifest.project_id,
             runtime_root: runtime_lease.runtime_root().to_path_buf(),
+            canonical_target: canonical_recovery_target(
+                &manifest.project_file,
+                manifest.project_id,
+            )
+            .expect("canonical target evidence"),
             project_file: manifest.project_file,
             autosave_file: entry.file,
             author_generation: entry.author_generation,
@@ -1628,23 +1689,34 @@ mod tests {
             saved_at,
         ))
         .expect("publish recovery point");
-        let candidate = candidate_for(&runtime_lease, &autosave);
+        let missing_candidates = discover_crash_recovery_candidates_under(&scan_root);
+        assert_eq!(missing_candidates.len(), 1);
         assert_eq!(
-            discover_crash_recovery_candidates_under(&scan_root).len(),
-            1,
-            "a missing canonical archive must preserve recovery authority"
+            missing_candidates[0].canonical_target,
+            RecoveryCanonicalTargetEvidence::Missing,
+            "a missing canonical archive must remain explicit recovery evidence"
         );
+        let missing_target_candidate = missing_candidates[0].clone();
 
         let library =
             AssetLibrary::open(runtime_lease.runtime_root().join("library")).expect("library");
         save_project_archive(&document, &library.database_path(), &project_file)
             .expect("publish equal canonical revision");
+        let equal_candidates = discover_crash_recovery_candidates_under(&scan_root);
+        assert_eq!(equal_candidates.len(), 1);
         assert_eq!(
-            discover_crash_recovery_candidates_under(&scan_root).len(),
-            1,
-            "an equal canonical revision remains an admissible recovery choice"
+            equal_candidates[0].canonical_target,
+            RecoveryCanonicalTargetEvidence::Present {
+                document_revision: document.document_revision,
+            },
+            "an equal canonical revision remains an explicit admissible target"
         );
-        preflight_recovery_selection(&candidate).expect("equal revision remains selectable");
+        let error = preflight_recovery_selection(&missing_target_candidate)
+            .expect_err("a target created after discovery requires fresh user confirmation");
+        assert!(error.contains("target changed after recovery discovery"));
+        let equal_target_candidate = equal_candidates[0].clone();
+        preflight_recovery_selection(&equal_target_candidate)
+            .expect("fresh equal-revision evidence remains selectable");
 
         document.document_revision += 1;
         save_project_archive(&document, &library.database_path(), &project_file)
@@ -1653,8 +1725,15 @@ mod tests {
             discover_crash_recovery_candidates_under(&scan_root).is_empty(),
             "an autosave older than the same Project canonical revision is stale"
         );
-        let error = preflight_recovery_selection(&candidate)
-            .expect_err("stale candidate must also fail direct admission");
+        let error = preflight_recovery_selection(&equal_target_candidate)
+            .expect_err("a canonical target changed after confirmation must fail admission");
+        assert!(error.contains("target changed after recovery discovery"));
+        let mut stale_candidate = equal_target_candidate;
+        stale_candidate.canonical_target = RecoveryCanonicalTargetEvidence::Present {
+            document_revision: document.document_revision,
+        };
+        let error = preflight_recovery_selection(&stale_candidate)
+            .expect_err("a recovery point older than a freshly observed target must fail");
         assert!(error.contains("older than canonical revision"));
 
         drop(runtime_lease);

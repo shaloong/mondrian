@@ -472,6 +472,13 @@ hides only snapshots whose document revision is lower than the canonical
 revision; an equal revision remains visible and a missing canonical archive
 preserves recovery authority. The Archive Publication evidence consumed when
 the entry was first admitted is not retained as later path authority.
+Each visible candidate also carries typed canonical-target evidence: `Missing`
+or `Present { document_revision }` for a validated archive with the same
+Project identity. This evidence is the sole input to product presentation; the
+Window Adapter does not reopen the canonical archive or infer safety from path
+metadata. Startup confirmation names the exact autosave source, capture time,
+intended canonical target, and target state, and states that confirmation opens
+a dirty Session without immediately publishing over the target.
 Discovery and every later admission prove the current direct file object's
 complete hash and parsed archive identity again; a Manifest entry never turns a
 replaced or tampered pathname into a trusted archive.
@@ -498,6 +505,11 @@ the loader consumes the exact verified staging handle rather than reopening its
 pathname. The staging handle is owned by an RAII guard: all success and error
 paths close it and remove the same namespace object, while a Unix replacement
 inode is never deleted as if it were the verified file.
+Canonical target presence and revision are checked both before lease acquisition
+and under the live lease. A target created, removed, or advanced after discovery
+invalidates the old confirmation and fails closed; the user must select a fresh
+candidate whose displayed evidence matches current state. UI text is never
+overwrite authority and a confirmed click never suppresses this revalidation.
 
 Crash-artifact cleanup runs only after persistence is quiesced and the exact
 runtime lease has been acquired. It may remove direct regular

@@ -7,7 +7,7 @@
 use std::cell::{Cell, Ref, RefCell};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
 #[cfg(test)]
 use mondrian_core::ProjectId;
@@ -39,15 +39,16 @@ use crate::app::ui_actions::{
     AssetsOpenFolderPayload, PreferencesShortcutPayload, PreferencesShortcutReboundPayload,
     PreferencesThemePayload, PreferencesViewerBackgroundPayload, PreferencesWaveformDisplayPayload,
     APP_SHELL_ASSET_BROWSER_OPEN_FOLDER, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG,
-    APP_SHELL_CLOSE_MODAL, APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_NAMESPACE,
-    APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
+    APP_SHELL_CLOSE_MODAL, APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_CONFIRM_RECOVERY_DIALOG,
+    APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
     APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PENDING_CLOSE_CANCEL,
     APP_SHELL_PENDING_CLOSE_DISCARD, APP_SHELL_PENDING_CLOSE_SAVE_CONTINUE,
     APP_SHELL_PREFERENCES_SHORTCUT_DISABLED, APP_SHELL_PREFERENCES_SHORTCUT_REBOUND,
     APP_SHELL_PREFERENCES_SHORTCUT_RESET, APP_SHELL_PREFERENCES_THEME_CHANGED,
     APP_SHELL_PREFERENCES_VIEWER_BACKGROUND_CHANGED,
-    APP_SHELL_PREFERENCES_WAVEFORM_DISPLAY_CHANGED, APP_SHELL_QUIT, APP_SHELL_RECOVER_PROJECT,
-    APP_SHELL_WINDOW_DRAG, APP_SHELL_WINDOW_MINIMIZE, APP_SHELL_WINDOW_TOGGLE_MAXIMIZE,
+    APP_SHELL_PREFERENCES_WAVEFORM_DISPLAY_CHANGED, APP_SHELL_QUIT, APP_SHELL_RECOVERY_DIALOG,
+    APP_SHELL_RECOVER_PROJECT, APP_SHELL_WINDOW_DRAG, APP_SHELL_WINDOW_MINIMIZE,
+    APP_SHELL_WINDOW_TOGGLE_MAXIMIZE,
 };
 use crate::app::waveform_service::AudioWaveformService;
 use crate::app::{
@@ -66,6 +67,7 @@ use crate::app_ui::preferences_store::{
     AppUiPreferences,
 };
 use crate::app_ui::preview::{viewer_frame_content, WindowPreviewAdapter, WindowPreviewSnapshot};
+use crate::app_ui::recovery_dialog::recovery_age_label;
 use crate::app_ui::shell::{try_resolve_app_shell_action, AppUiAppRoot};
 use crate::app_ui::shortcuts::{
     default_shortcuts, is_known_shortcut_id, AppUiShortcutBinding, AppUiShortcutKey,
@@ -1292,6 +1294,7 @@ impl AppUiHost {
     }
 
     fn dispatch_editor_action(&mut self, action: Action) -> mondrian_core::Result<()> {
+        let refresh_recovery_after_failure = is_recovery_project_action(&action);
         let previous_project_path =
             self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
         let previous_status_hint = self.app_state.borrow().status_hint.clone();
@@ -1307,6 +1310,9 @@ impl AppUiHost {
             }
         } else if let Err(err) = &result {
             self.set_unreported_action_error_status(previous_status_hint, err);
+            if refresh_recovery_after_failure {
+                self.refresh_recovery_candidates();
+            }
         }
         result
     }
@@ -1801,6 +1807,14 @@ fn is_startup_project_action(action: &Action) -> bool {
     )
 }
 
+fn is_recovery_project_action(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_RECOVER_PROJECT
+    )
+}
+
 fn is_startup_local_shell_action(action: &Action) -> bool {
     matches!(
         action,
@@ -1810,6 +1824,8 @@ fn is_startup_local_shell_action(action: &Action) -> bool {
                     || name == APP_SHELL_NEW_PROJECT_DRAFT_CHANGED
                     || name == APP_SHELL_CANCEL_NEW_PROJECT_DIALOG
                     || name == APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG
+                    || name == APP_SHELL_RECOVERY_DIALOG
+                    || name == APP_SHELL_CONFIRM_RECOVERY_DIALOG
                     || name == APP_SHELL_CLOSE_MODAL)
     )
 }
@@ -1861,23 +1877,6 @@ fn recent_project_title(project_file: &Path) -> String {
         .filter(|name| !name.trim().is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| project_file.display().to_string())
-}
-
-fn recovery_age_label(saved_at_unix_ms: u64) -> String {
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(saved_at_unix_ms);
-    let age_secs = now_ms.saturating_sub(saved_at_unix_ms) / 1000;
-    if age_secs < 60 {
-        format!("{age_secs} 秒前")
-    } else if age_secs < 3600 {
-        format!("{} 分钟前", age_secs / 60)
-    } else if age_secs < 86_400 {
-        format!("{} 小时前", age_secs / 3600)
-    } else {
-        format!("{} 天前", age_secs / 86_400)
-    }
 }
 
 fn recent_project_subtitle(project_file: &Path) -> String {
@@ -3584,6 +3583,7 @@ mod tests {
             project_id: ProjectId::new(),
             runtime_root: PathBuf::from("E:/runtime"),
             project_file: project_file.clone(),
+            canonical_target: crate::app::RecoveryCanonicalTargetEvidence::Missing,
             autosave_file: autosave_file.clone(),
             author_generation: 7,
             asset_library_revision: 3,

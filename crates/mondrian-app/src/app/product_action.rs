@@ -2970,6 +2970,7 @@ mod tests {
                         project_id: mondrian_core::ProjectId::new(),
                         runtime_root: PathBuf::from("runtime"),
                         project_file: PathBuf::from("edit.mdp"),
+                        canonical_target: crate::app::RecoveryCanonicalTargetEvidence::Missing,
                         autosave_file: PathBuf::from("autosave.mdp"),
                         author_generation: 4,
                         asset_library_revision: 3,

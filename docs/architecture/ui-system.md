@@ -548,6 +548,20 @@ returns its real transaction result and stable `SequenceId`; construction,
 transport-stop, or commit failure cannot be logged and then reported as a
 successful Action.
 
+Startup recovery is intentionally a two-step product flow. A recovery row emits
+a shell-local inspection request, and the resulting modal projects the exact
+source archive, absolute and relative capture time, canonical save target, and
+typed target-presence/revision evidence already produced by the Recovery
+Module. Confirming the modal forwards the unchanged candidate through
+`ProjectProductAction`; it neither reads the filesystem nor grants overwrite
+authority. Recovery preflight and lease-bound admission revalidate the target,
+Manifest, source hash, archive identity, and revision, so a target change while
+the dialog is open fails closed and requires a refreshed choice. The Window
+Adapter refreshes recovery candidates after such a failed recovery Action while
+retaining the typed failure reason for product status. The dialog also makes
+clear that recovery opens a dirty Session and does not publish the target until
+a later explicit Save.
+
 `ExportProductAction` closes the complete product Export namespace: exact draft
 edits, immutable request admission, cancellation, and bounded terminal-history
 cleanup. Enqueue carries the existing `TimelineExportRequest` directly; there

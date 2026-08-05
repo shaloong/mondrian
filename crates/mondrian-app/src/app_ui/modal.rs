@@ -16,6 +16,7 @@ use crate::app_ui::preferences_dialog::{
     AppUiPreferencesModel, PreferencesDialog, PreferencesDialogTab,
 };
 use crate::app_ui::project_settings_dialog::{AppUiProjectSettingsDraft, ProjectSettingsDialog};
+use crate::app_ui::recovery_dialog::{RecoveryConfirmationDialog, RecoveryConfirmationModel};
 use crate::app_ui::sequence_settings_dialog::{AppUiSequenceSettingsDraft, SequenceSettingsDialog};
 
 /// Shell-local modal dialog.
@@ -26,6 +27,7 @@ pub enum ShellModal {
     PendingClose(Box<PendingCloseDialog>),
     Preferences(Box<PreferencesDialog>),
     ProjectSettings(Box<ProjectSettingsDialog>),
+    Recovery(Box<RecoveryConfirmationDialog>),
     SequenceSettings(Box<SequenceSettingsDialog>),
 }
 
@@ -63,6 +65,11 @@ impl ShellModal {
     /// Build the project-level color-settings modal.
     pub fn project_settings(draft: AppUiProjectSettingsDraft) -> Self {
         Self::ProjectSettings(Box::new(ProjectSettingsDialog::new(draft)))
+    }
+
+    /// Build the startup recovery inspection modal.
+    pub fn recovery(model: RecoveryConfirmationModel) -> Self {
+        Self::Recovery(Box::new(RecoveryConfirmationDialog::new(model)))
     }
 
     /// Build the active-sequence settings modal.
@@ -150,6 +157,14 @@ impl ShellModal {
         }
     }
 
+    /// Access the recovery confirmation modal when it is active.
+    pub fn as_recovery(&self) -> Option<&RecoveryConfirmationDialog> {
+        match self {
+            Self::Recovery(dialog) => Some(dialog.as_ref()),
+            _ => None,
+        }
+    }
+
     /// Access the sequence-settings modal when it is active.
     pub fn as_sequence_settings(&self) -> Option<&SequenceSettingsDialog> {
         match self {
@@ -176,6 +191,7 @@ impl Widget for ShellModal {
             Self::PendingClose(dialog) => dialog.id(),
             Self::Preferences(dialog) => dialog.id(),
             Self::ProjectSettings(dialog) => dialog.id(),
+            Self::Recovery(dialog) => dialog.id(),
             Self::SequenceSettings(dialog) => dialog.id(),
         }
     }
@@ -188,6 +204,7 @@ impl Widget for ShellModal {
             Self::PendingClose(dialog) => dialog.measure(constraint),
             Self::Preferences(dialog) => dialog.measure(constraint),
             Self::ProjectSettings(dialog) => dialog.measure(constraint),
+            Self::Recovery(dialog) => dialog.measure(constraint),
             Self::SequenceSettings(dialog) => dialog.measure(constraint),
         }
     }
@@ -200,6 +217,7 @@ impl Widget for ShellModal {
             Self::PendingClose(dialog) => dialog.layout(bounds),
             Self::Preferences(dialog) => dialog.layout(bounds),
             Self::ProjectSettings(dialog) => dialog.layout(bounds),
+            Self::Recovery(dialog) => dialog.layout(bounds),
             Self::SequenceSettings(dialog) => dialog.layout(bounds),
         }
     }
@@ -212,6 +230,7 @@ impl Widget for ShellModal {
             Self::PendingClose(dialog) => dialog.event(event, ctx),
             Self::Preferences(dialog) => dialog.event(event, ctx),
             Self::ProjectSettings(dialog) => dialog.event(event, ctx),
+            Self::Recovery(dialog) => dialog.event(event, ctx),
             Self::SequenceSettings(dialog) => dialog.event(event, ctx),
         }
     }
@@ -224,6 +243,7 @@ impl Widget for ShellModal {
             Self::PendingClose(dialog) => dialog.paint(ctx),
             Self::Preferences(dialog) => dialog.paint(ctx),
             Self::ProjectSettings(dialog) => dialog.paint(ctx),
+            Self::Recovery(dialog) => dialog.paint(ctx),
             Self::SequenceSettings(dialog) => dialog.paint(ctx),
         }
     }
@@ -236,6 +256,7 @@ impl Widget for ShellModal {
             Self::PendingClose(dialog) => dialog.hit_test(point),
             Self::Preferences(dialog) => dialog.hit_test(point),
             Self::ProjectSettings(dialog) => dialog.hit_test(point),
+            Self::Recovery(dialog) => dialog.hit_test(point),
             Self::SequenceSettings(dialog) => dialog.hit_test(point),
         }
     }
@@ -252,6 +273,7 @@ impl Widget for ShellModal {
             Self::PendingClose(dialog) => dialog.can_focus(),
             Self::Preferences(dialog) => dialog.can_focus(),
             Self::ProjectSettings(dialog) => dialog.can_focus(),
+            Self::Recovery(dialog) => dialog.can_focus(),
             Self::SequenceSettings(dialog) => dialog.can_focus(),
         }
     }
@@ -264,6 +286,7 @@ impl Widget for ShellModal {
             Self::PendingClose(dialog) => dialog.accepts_text_input(),
             Self::Preferences(dialog) => dialog.accepts_text_input(),
             Self::ProjectSettings(dialog) => dialog.accepts_text_input(),
+            Self::Recovery(dialog) => dialog.accepts_text_input(),
             Self::SequenceSettings(dialog) => dialog.accepts_text_input(),
         }
     }
@@ -276,6 +299,7 @@ impl Widget for ShellModal {
             Self::PendingClose(dialog) => dialog.child_count(),
             Self::Preferences(dialog) => dialog.child_count(),
             Self::ProjectSettings(dialog) => dialog.child_count(),
+            Self::Recovery(dialog) => dialog.child_count(),
             Self::SequenceSettings(dialog) => dialog.child_count(),
         }
     }
@@ -288,6 +312,7 @@ impl Widget for ShellModal {
             Self::PendingClose(dialog) => dialog.child(index),
             Self::Preferences(dialog) => dialog.child(index),
             Self::ProjectSettings(dialog) => dialog.child(index),
+            Self::Recovery(dialog) => dialog.child(index),
             Self::SequenceSettings(dialog) => dialog.child(index),
         }
     }
@@ -300,6 +325,7 @@ impl Widget for ShellModal {
             Self::PendingClose(dialog) => dialog.child_mut(index),
             Self::Preferences(dialog) => dialog.child_mut(index),
             Self::ProjectSettings(dialog) => dialog.child_mut(index),
+            Self::Recovery(dialog) => dialog.child_mut(index),
             Self::SequenceSettings(dialog) => dialog.child_mut(index),
         }
     }

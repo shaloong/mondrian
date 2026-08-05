@@ -4949,6 +4949,7 @@ mod tests {
                         project_id: mondrian_core::ProjectId::new(),
                         runtime_root: root.clone(),
                         project_file,
+                        canonical_target: crate::app::RecoveryCanonicalTargetEvidence::Missing,
                         autosave_file,
                         author_generation: 1,
                         asset_library_revision: 0,
