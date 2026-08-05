@@ -594,7 +594,27 @@ plan on the qualified 16 GiB Windows reference machine and was classified
 `passed-baseline`. Its generated artifacts and evidence bundle remain
 intentionally disposable under `target`; the repository commits the recipes,
 contracts, and this reproducible result record rather than a multi-gigabyte
-machine-specific bundle. The Golden v12 contract resolves PCM, AAC, CFR and
+machine-specific bundle.
+
+The clean `0175f35` partial run
+`20260805T172741Z-local-windows-16g-3194bed3` reran the current Video gate on
+the qualified 16 GiB Windows reference machine without regenerating or
+committing the generated fixture. It observed 45,002 timeline frames over
+1,800,042,719 microseconds, with 45,003/45,003 native P010 hardware-presented
+media layers, zero CPU transfers, Viewer fallbacks, readbacks, or GPU blockers,
+and 45,105/45,105 native-import GPU timing samples with no missing, dropped,
+duplicate, or orphan evidence. The same process completed 50 warm seeks at
+15,392 microseconds p95, 52 accurate seeks at 356,722 microseconds p95, and
+100 latest-wins supersessions with zero rejected terminal deliveries or final
+Broker residency. Across 1,802 product-process-tree samples, Windows Private
+Commit peaked at 1,215,262,720 bytes, settled growth was 17,589,808 bytes, and
+the post-stress sample was 942,784,512 bytes. The structured professional
+profile passed with no failures and the decode journal was present. The
+supervisor correctly classified the run as `passed-diagnostic`, not baseline,
+because `-Gate Video` omits the required Audio gate; this result closes the
+current-revision Windows long-video slice only.
+
+The Golden v12 contract resolves PCM, AAC, CFR and
 VFR Rec.709 H.264, HLG Main10, and sRGB Alpha fixture identities and assigns
 all six to executable slices.
 `foundation-audio-authoring-v1`, `visual-authoring-roundtrip-v1`,
