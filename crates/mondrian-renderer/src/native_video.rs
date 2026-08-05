@@ -1,5 +1,7 @@
 //! Platform renderer admission for hardware-decoded native video resources.
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod direct_backend;
 mod gpu_timing;
 
 pub use gpu_timing::{
@@ -94,6 +96,10 @@ pub use yuv_decode::{
 #[cfg(target_os = "windows")]
 mod sync_timeline;
 
+#[cfg(target_os = "macos")]
+mod metal_backend;
+#[cfg(target_os = "linux")]
+mod vulkan_backend;
 #[cfg(target_os = "windows")]
 mod windows_adapter;
 #[cfg(target_os = "windows")]
@@ -103,6 +109,12 @@ mod windows_d3d12_backend;
 #[cfg(target_os = "windows")]
 mod windows_d3d12_bridge;
 
+#[cfg(target_os = "macos")]
+pub use metal_backend::{MetalNativeVideoImportBackend, MetalNativeVideoImportBackendCreateError};
+#[cfg(target_os = "linux")]
+pub use vulkan_backend::{
+    VulkanNativeVideoImportBackend, VulkanNativeVideoImportBackendCreateError,
+};
 #[cfg(target_os = "windows")]
 pub use windows_adapter::{NativeVideoAdapterError, NativeVideoAdapterLuid};
 #[cfg(target_os = "windows")]

@@ -419,7 +419,7 @@ impl AuthoringProcessMemoryAccumulator {
             self.record_probe_error(error);
         }
 
-        if let Some(private_committed_bytes) = sample.private_committed_bytes {
+        if let Some(private_committed_bytes) = sample.private_memory_bytes {
             self.observed_private_samples = self.observed_private_samples.saturating_add(1);
             self.peak_private_committed_bytes = Some(
                 self.peak_private_committed_bytes

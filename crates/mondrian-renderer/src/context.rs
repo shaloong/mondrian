@@ -57,7 +57,8 @@ impl Drop for TestGpuContextPermit {
 /// can add the result to `DeviceDescriptor::required_features` without turning
 /// an unsupported native-video format into device creation failure.
 pub fn native_video_texture_device_features(adapter_features: wgpu::Features) -> wgpu::Features {
-    let mut required = adapter_features & wgpu::Features::TEXTURE_FORMAT_NV12;
+    let mut required = adapter_features
+        & (wgpu::Features::TEXTURE_FORMAT_NV12 | wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF);
     let p010_requirements =
         wgpu::Features::TEXTURE_FORMAT_P010 | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM;
     if adapter_features.contains(p010_requirements) {
@@ -253,11 +254,13 @@ mod tests {
                 unrelated
                     | wgpu::Features::TEXTURE_FORMAT_NV12
                     | wgpu::Features::TEXTURE_FORMAT_P010
-                    | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM,
+                    | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
+                    | wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF,
             ),
             wgpu::Features::TEXTURE_FORMAT_NV12
                 | wgpu::Features::TEXTURE_FORMAT_P010
                 | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
+                | wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF
         );
     }
 

@@ -1306,8 +1306,11 @@ native hardware decode are reported separately; both are actual hardware
 execution, while candidate/config/device probes are not.
 The same long gate samples `ProductProcessTree`, never `CurrentProcess`:
 the App root, isolated demux helpers, and any other live descendant must all be
-present in one complete OS inventory before their checked aggregate Private
-Commit can contribute to the plateau. Missing or changing child membership,
+present in one complete OS inventory before their checked aggregate typed
+private-memory metric can contribute to the plateau. The current Windows
+qualification profile requires Windows Private Commit; Linux anonymous resident
+memory and macOS physical footprint are separate future profile metrics, not
+aliases. Missing or changing child membership,
 one inaccessible process, or an unsupported platform Adapter fails the memory
 gate closed; whole-system available-memory pressure is useful policy evidence
 but cannot replace product ownership accounting.
@@ -1721,7 +1724,7 @@ DXVA2/IDirect3DSurface9 only as a lower-priority CPU-transfer fallback. If
 FFmpeg, the codec, or the local device cannot use D3D12VA, playback admission
 may fall through to D3D11VA and then DXVA2. On macOS the candidate is
 VideoToolbox/CVPixelBuffer. On Linux the ordered list must prefer
-VA-API/DMABUF-style surfaces before legacy VDPAU. Until D3D12VA/D3D11VA,
+VA-API/DRM-PRIME DMA-BUF surfaces before legacy VDPAU. Until D3D12VA/D3D11VA,
 VideoToolbox, VA-API, VDPAU, DXVA2, or CUDA/NVDEC hardware frames are actually
 exported through a concrete media adapter and imported through the renderer
 native decoded-frame import contract,
@@ -1729,11 +1732,14 @@ native decoded-frame import contract,
 `decoder_adapter_available=false`, `hardware_decode_active=false`,
 `zero_copy_active=false`, `DecodedFrameResidency::CpuRgba`, no active GPU
 handle kind. Platform preference alone is
-not a valid hardware decode signal. The Windows media adapter supports FFmpeg's
-`AV_PIX_FMT_D3D12` and preferred `AV_PIX_FMT_D3D11` frame ABIs. It does not make
-legacy `AV_PIX_FMT_D3D11VA_VLD`, DXVA2, VideoToolbox, VA-API, VDPAU, or CUDA
-native automatically; GPU-resident planning skips backend candidates without a
-matching concrete media adapter.
+not a valid hardware decode signal. The media Module now has concrete retained
+resource Adapters for FFmpeg `AV_PIX_FMT_D3D12`/preferred `AV_PIX_FMT_D3D11`,
+VideoToolbox `AV_PIX_FMT_VIDEOTOOLBOX`, and VA-API `AV_PIX_FMT_VAAPI`. The first
+borrows the documented D3D resource ABI, VideoToolbox validates the retained
+`CVPixelBufferRef`, and VA-API performs one cached read-only mapping to a fully
+validated DRM PRIME descriptor. Legacy `AV_PIX_FMT_D3D11VA_VLD`, DXVA2, VDPAU,
+and CUDA do not become native automatically; GPU-resident planning skips any
+backend without a matching concrete media Adapter on the current OS.
 For a concrete video stream, media may also run a read-only FFmpeg hardware
 codec config probe with `avcodec_get_hw_config`. That probe records whether the
 linked FFmpeg build lists the candidate hardware device type, whether the
@@ -2016,6 +2022,12 @@ probes and reports `D3D12Resource` and/or `D3D11Texture2D` with a low-copy
 staging fallback when those device probes succeed. That is OS/device evidence
 only: zero-copy remains false until the renderer exposes a native import
 backend, and CPU-transfer hardware decode must still report CPU RGBA residency.
+On macOS the platform Adapter exposes the CVPixelBuffer handle family and the
+renderer admits it only when the active wgpu device is Metal and a
+`CVMetalTextureCache` can be created for that exact device. On Linux the platform
+Adapter exposes DMA-BUF while renderer admission additionally requires the
+active Vulkan device's `VULKAN_EXTERNAL_MEMORY_DMA_BUF` feature. These OS facts
+cannot override renderer/device rejection.
 
 The preview decoder's experimental external-process path is named
 `PreviewDecodeBackend::ExternalFfmpegCpuRgba` and is enabled only by explicitly
@@ -2172,10 +2184,16 @@ payload and passes the complete frame, including its opaque handle token and
 residency/sampling facts, into GPU preview admission. App adapters must not
 flatten that payload into diagnostics and discard the token. On Windows DX12,
 admitted D3D12VA NV12/P010 resources remain GPU-resident through the renderer's
-same-API shared-texture bridge and OCIO input stage. Other native handle
-families remain renderer-readiness blockers unless their concrete backend is
-implemented; they are not media decode failures or implicit CPU fallback
-frames.
+same-API shared-texture bridge and OCIO input stage. On macOS, the Metal Adapter
+validates the CVPixelBuffer FourCC/plane extent and retains each
+`CVMetalTexture` through the corresponding wgpu texture lifetime. On Linux, the
+Vulkan Adapter accepts only a typed one-layer NV12/P010 DRM PRIME descriptor
+with exactly two bounds-checked planes, duplicates each selected object FD for
+Vulkan ownership, and preserves offset/pitch/modifier; other DRM layouts fail
+closed to the declared fallback instead of being reinterpreted. All three enter
+the same renderer-owned YUV sampling and source-to-working OCIO execution
+Module. Other native handle families remain renderer-readiness blockers; they
+are not media decode failures or implicit CPU fallback frames.
 The renderer owns the fallible mapping from media `DecodedVideoSurfaceFormat`
 to its native texture-format contract and implements its source-descriptor
 trait for `PreviewNativeDecodedFrame`. App readiness code delegates to that

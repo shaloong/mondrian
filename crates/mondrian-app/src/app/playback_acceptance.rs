@@ -357,14 +357,16 @@ pub(crate) struct PreviewPlaybackQualificationGateReport {
 
 /// Bounded, whole-product memory evidence collected by a native platform Adapter.
 ///
-/// The collector keeps only scalar aggregates. It deliberately uses private
-/// commit summed across the verified Mondrian process tree for acceptance and
-/// reports reclaimable working sets as diagnostics. A complete current-process
-/// sample is rejected because it cannot account for demux or FFmpeg children.
+/// The collector keeps only scalar aggregates. The current professional gate
+/// deliberately requires Windows private commit summed across the verified
+/// Mondrian process tree and reports reclaimable working sets as diagnostics.
+/// Other platform-native private metrics remain valid resource-policy evidence
+/// but cannot be relabelled into this Windows qualification profile.
 #[derive(Debug, Clone, Default, Serialize)]
 pub(crate) struct PreviewProcessMemoryEvidenceReport {
     scope: Option<String>,
     backend: Option<String>,
+    private_memory_metric: Option<String>,
     discovery_available: bool,
     inventory_complete: bool,
     attempted_samples: u64,
@@ -475,6 +477,17 @@ impl PreviewProcessMemoryEvidenceCollector {
             }
             self.report.backend = Some(backend);
         }
+        if let Some(metric) = sample.private_memory_metric {
+            let metric = metric.as_str().to_owned();
+            if self.report.private_memory_metric.as_ref().is_some_and(|known| known != &metric) {
+                self.report.probe_errors = self.report.probe_errors.saturating_add(1);
+                self.report.last_probe_error = Some(
+                    "process private-memory metric changed during one acceptance run".to_owned(),
+                );
+                return None;
+            }
+            self.report.private_memory_metric = Some(metric);
+        }
         if !sample.is_complete_for(mondrian_platform::ProcessMemoryScope::ProductProcessTree) {
             self.report.probe_errors = self.report.probe_errors.saturating_add(1);
             self.report.last_probe_error = sample.error.or_else(|| {
@@ -488,7 +501,7 @@ impl PreviewProcessMemoryEvidenceCollector {
             });
             return None;
         }
-        let Some(private_bytes) = sample.private_committed_bytes else {
+        let Some(private_bytes) = sample.private_memory_bytes else {
             self.report.probe_errors = self.report.probe_errors.saturating_add(1);
             self.report.last_probe_error = sample.error.or_else(|| {
                 Some("process-memory sample omitted private committed bytes".to_owned())
@@ -523,6 +536,7 @@ pub(crate) struct PreviewProcessMemoryGateReport {
     profile: &'static str,
     scope: Option<String>,
     backend: Option<String>,
+    private_memory_metric: Option<String>,
     inventory_complete: bool,
     minimum_observed_process_count: Option<u32>,
     maximum_observed_process_count: u32,
@@ -1514,6 +1528,17 @@ fn evaluate_process_memory(
             evidence.last_probe_error.as_deref().unwrap_or("no native backend"),
         );
     }
+    if evidence.private_memory_metric.as_deref()
+        != Some(mondrian_platform::ProcessPrivateMemoryMetric::WindowsPrivateCommit.as_str())
+    {
+        push_failure(
+            failures,
+            "process_memory_metric_not_windows_private_commit",
+            mondrian_platform::ProcessPrivateMemoryMetric::WindowsPrivateCommit.as_str(),
+            evidence.private_memory_metric.as_deref().unwrap_or("unavailable"),
+            "this qualification profile is Windows-specific; platform-native footprint metrics are not interchangeable",
+        );
+    }
     if !evidence.inventory_complete
         || evidence.minimum_observed_process_count.is_none_or(|count| count == 0)
     {
@@ -1635,6 +1660,7 @@ fn evaluate_process_memory(
         profile: "product_process_tree_private_commit_v2",
         scope: evidence.scope.clone(),
         backend: evidence.backend.clone(),
+        private_memory_metric: evidence.private_memory_metric.clone(),
         inventory_complete: evidence.inventory_complete,
         minimum_observed_process_count: evidence.minimum_observed_process_count,
         maximum_observed_process_count: evidence.maximum_observed_process_count,
@@ -2499,6 +2525,11 @@ mod tests {
                 mondrian_platform::ProcessMemoryScope::ProductProcessTree.as_str().to_owned(),
             ),
             backend: Some("test-product-process-tree-private-commit".to_owned()),
+            private_memory_metric: Some(
+                mondrian_platform::ProcessPrivateMemoryMetric::WindowsPrivateCommit
+                    .as_str()
+                    .to_owned(),
+            ),
             discovery_available: true,
             inventory_complete: true,
             attempted_samples: 601,

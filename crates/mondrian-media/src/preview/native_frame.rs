@@ -12,6 +12,8 @@ use std::num::NonZeroU64;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
+use std::sync::OnceLock;
 
 /// Exact outstanding-native-output count for one decode ownership domain.
 ///
@@ -178,6 +180,9 @@ pub struct FfmpegNativeDecodedFrameResource {
     kind: DecodedGpuFrameHandleKind,
     id: NonZeroU64,
     _session_output_lease: Option<PreviewDecodeSessionOutputLease>,
+    #[cfg(target_os = "linux")]
+    drm_prime_frame:
+        OnceLock<std::result::Result<FfmpegDrmPrimeFrame, FfmpegNativeDecodedFrameResourceError>>,
 }
 
 // SAFETY: This resource has the same ownership and synchronization contract as
@@ -216,6 +221,8 @@ impl FfmpegNativeDecodedFrameResource {
             kind,
             id,
             _session_output_lease: session_output_lease,
+            #[cfg(target_os = "linux")]
+            drm_prime_frame: OnceLock::new(),
         })
     }
 
@@ -231,6 +238,29 @@ impl FfmpegNativeDecodedFrameResource {
         &self,
     ) -> std::result::Result<FfmpegD3D12TextureView, FfmpegNativeDecodedFrameResourceError> {
         parse_ffmpeg_d3d12_texture(self.frame, self.pixel_format)
+    }
+
+    /// Borrow the `CVPixelBufferRef` retained by a VideoToolbox frame.
+    ///
+    /// The pointer remains valid only while this resource is retained. A Metal
+    /// Adapter must retain its own CVMetalTexture/MTLTexture view before
+    /// releasing the native decoded-frame handle.
+    pub fn cv_pixel_buffer(
+        &self,
+    ) -> std::result::Result<NonNull<c_void>, FfmpegNativeDecodedFrameResourceError> {
+        parse_ffmpeg_cv_pixel_buffer(self.frame, self.pixel_format)
+    }
+
+    /// Map one VA-API frame to an owned DRM PRIME descriptor without a CPU
+    /// pixel transfer.
+    #[cfg(target_os = "linux")]
+    pub fn drm_prime_frame(
+        &self,
+    ) -> std::result::Result<&FfmpegDrmPrimeFrame, FfmpegNativeDecodedFrameResourceError> {
+        self.drm_prime_frame
+            .get_or_init(|| FfmpegDrmPrimeFrame::map(self.frame, self.pixel_format))
+            .as_ref()
+            .map_err(Clone::clone)
     }
 
     /// Hardware pixel format retained by this frame.
@@ -364,6 +394,46 @@ pub enum FfmpegNativeDecodedFrameResourceError {
     /// A D3D12 hardware frame did not carry its decode-completion fence.
     #[error("FFmpeg D3D12 frame is missing its ID3D12Fence pointer")]
     MissingD3D12Fence,
+    /// Only VideoToolbox frames carry a `CVPixelBufferRef` in `data[3]`.
+    #[error(
+        "FFmpeg frame format {pixel_format:?} does not use the VideoToolbox CVPixelBuffer ABI"
+    )]
+    NotVideoToolboxFrame {
+        /// Actual retained hardware pixel format.
+        pixel_format: ffmpeg::util::format::pixel::Pixel,
+    },
+    /// A VideoToolbox frame did not carry its `CVPixelBufferRef`.
+    #[error("FFmpeg VideoToolbox frame is missing its CVPixelBufferRef")]
+    MissingCvPixelBuffer,
+    /// Only VA-API frames can be mapped to the Linux DRM PRIME Adapter.
+    #[error("FFmpeg frame format {pixel_format:?} cannot be mapped as a VA-API DRM PRIME frame")]
+    NotVaapiFrame {
+        /// Actual retained hardware pixel format.
+        pixel_format: ffmpeg::util::format::pixel::Pixel,
+    },
+    /// FFmpeg failed to allocate a destination frame for DRM PRIME mapping.
+    #[error("FFmpeg could not allocate a DRM PRIME mapping frame")]
+    DrmPrimeFrameAllocationFailed,
+    /// FFmpeg could not map the retained VA-API frame as DRM PRIME.
+    #[error("FFmpeg av_hwframe_map to DRM PRIME failed with code {code}")]
+    DrmPrimeMapFailed {
+        /// Negative FFmpeg error code.
+        code: i32,
+    },
+    /// FFmpeg returned an incomplete or internally inconsistent DRM descriptor.
+    #[error("FFmpeg DRM PRIME descriptor is invalid: {reason}")]
+    InvalidDrmPrimeDescriptor {
+        /// Validation failure.
+        reason: String,
+    },
+    /// A DMA-BUF descriptor could not be duplicated for Vulkan ownership.
+    #[error("could not duplicate DRM PRIME object {object_index} file descriptor: {reason}")]
+    DrmPrimeFileDescriptorDuplicationFailed {
+        /// Object index in the FFmpeg descriptor.
+        object_index: usize,
+        /// Operating-system error.
+        reason: String,
+    },
 }
 
 fn next_ffmpeg_native_frame_id(
@@ -448,6 +518,252 @@ fn parse_ffmpeg_d3d12_texture(
         fence,
         fence_value: native.sync_ctx.fence_value,
     })
+}
+
+fn parse_ffmpeg_cv_pixel_buffer(
+    frame: NonNull<ffmpeg::ffi::AVFrame>,
+    pixel_format: ffmpeg::util::format::pixel::Pixel,
+) -> std::result::Result<NonNull<c_void>, FfmpegNativeDecodedFrameResourceError> {
+    if pixel_format != ffmpeg::util::format::pixel::Pixel::VIDEOTOOLBOX {
+        return Err(FfmpegNativeDecodedFrameResourceError::NotVideoToolboxFrame { pixel_format });
+    }
+    // SAFETY: The retained AVFrame is alive for this borrow. FFmpeg documents
+    // AV_PIX_FMT_VIDEOTOOLBOX data[3] as its retained CVPixelBufferRef.
+    let frame = unsafe { frame.as_ref() };
+    NonNull::new(frame.data[3].cast::<c_void>())
+        .ok_or(FfmpegNativeDecodedFrameResourceError::MissingCvPixelBuffer)
+}
+
+/// One DRM PRIME object retained by an FFmpeg mapping.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FfmpegDrmPrimeObject {
+    fd: std::os::fd::RawFd,
+    size: usize,
+    format_modifier: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl FfmpegDrmPrimeObject {
+    /// Total bytes in the DMA-BUF object.
+    pub fn size(self) -> usize {
+        self.size
+    }
+
+    /// DRM format modifier for this object.
+    pub fn format_modifier(self) -> u64 {
+        self.format_modifier
+    }
+}
+
+/// One plane within a DRM PRIME layer.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FfmpegDrmPrimePlane {
+    /// Index into [`FfmpegDrmPrimeFrame::objects`].
+    pub object_index: usize,
+    /// Byte offset within the selected object.
+    pub offset: u64,
+    /// Row pitch in bytes.
+    pub pitch: u64,
+}
+
+/// One DRM format layer and its ordered planes.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FfmpegDrmPrimeLayer {
+    /// DRM FourCC format.
+    pub format: u32,
+    /// Ordered plane descriptors.
+    pub planes: Vec<FfmpegDrmPrimePlane>,
+}
+
+/// Owned FFmpeg VA-API to DRM PRIME mapping.
+#[cfg(target_os = "linux")]
+pub struct FfmpegDrmPrimeFrame {
+    frame: NonNull<ffmpeg::ffi::AVFrame>,
+    objects: Vec<FfmpegDrmPrimeObject>,
+    layers: Vec<FfmpegDrmPrimeLayer>,
+}
+
+#[cfg(target_os = "linux")]
+// SAFETY: The mapped AVFrame is immutable after construction, its AVBufferRef
+// ownership is released only by Drop, and accessors expose copied metadata or
+// newly duplicated file descriptors.
+unsafe impl Send for FfmpegDrmPrimeFrame {}
+#[cfg(target_os = "linux")]
+// SAFETY: See the Send implementation.
+unsafe impl Sync for FfmpegDrmPrimeFrame {}
+
+#[cfg(target_os = "linux")]
+impl fmt::Debug for FfmpegDrmPrimeFrame {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FfmpegDrmPrimeFrame")
+            .field("objects", &self.objects)
+            .field("layers", &self.layers)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl FfmpegDrmPrimeFrame {
+    fn map(
+        source: NonNull<ffmpeg::ffi::AVFrame>,
+        pixel_format: ffmpeg::util::format::pixel::Pixel,
+    ) -> std::result::Result<Self, FfmpegNativeDecodedFrameResourceError> {
+        if pixel_format != ffmpeg::util::format::pixel::Pixel::VAAPI {
+            return Err(FfmpegNativeDecodedFrameResourceError::NotVaapiFrame { pixel_format });
+        }
+        // SAFETY: FFmpeg returns a fresh AVFrame allocation or null. Ownership
+        // transfers immediately into `mapped`.
+        let mapped = NonNull::new(unsafe { ffmpeg::ffi::av_frame_alloc() })
+            .ok_or(FfmpegNativeDecodedFrameResourceError::DrmPrimeFrameAllocationFailed)?;
+        // SAFETY: `mapped` is uniquely owned. This is the documented requested
+        // destination format for a VA-API DRM PRIME mapping.
+        unsafe {
+            (*mapped.as_ptr()).format = ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_DRM_PRIME as i32;
+        }
+        // SAFETY: Both frames are live, the destination is uniquely owned, and
+        // FFmpeg retains all required buffer references on success.
+        let result = unsafe {
+            ffmpeg::ffi::av_hwframe_map(
+                mapped.as_ptr(),
+                source.as_ptr(),
+                ffmpeg::ffi::AV_HWFRAME_MAP_READ as i32,
+            )
+        };
+        if result < 0 {
+            let mut raw = mapped.as_ptr();
+            // SAFETY: `mapped` is the sole owner after the failed map.
+            unsafe { ffmpeg::ffi::av_frame_free(&mut raw) };
+            return Err(FfmpegNativeDecodedFrameResourceError::DrmPrimeMapFailed { code: result });
+        }
+        match Self::from_mapped_frame(mapped) {
+            Ok(frame) => Ok(frame),
+            Err(error) => {
+                let mut raw = mapped.as_ptr();
+                // SAFETY: validation failed before ownership escaped.
+                unsafe { ffmpeg::ffi::av_frame_free(&mut raw) };
+                Err(error)
+            }
+        }
+    }
+
+    fn from_mapped_frame(
+        frame: NonNull<ffmpeg::ffi::AVFrame>,
+    ) -> std::result::Result<Self, FfmpegNativeDecodedFrameResourceError> {
+        // SAFETY: The caller owns a successfully mapped DRM PRIME AVFrame.
+        let raw_frame = unsafe { frame.as_ref() };
+        let descriptor =
+            NonNull::new(raw_frame.data[0].cast::<ffmpeg::ffi::AVDRMFrameDescriptor>())
+                .ok_or_else(|| invalid_drm_descriptor("data[0] is null"))?;
+        // SAFETY: AV_PIX_FMT_DRM_PRIME data[0] has this documented ABI and is
+        // retained by `frame`.
+        let descriptor = unsafe { descriptor.as_ref() };
+        let object_count = descriptor_count(descriptor.nb_objects, "object")?;
+        let layer_count = descriptor_count(descriptor.nb_layers, "layer")?;
+        let mut objects = Vec::with_capacity(object_count);
+        for object in descriptor.objects.iter().take(object_count) {
+            if object.fd < 0 {
+                return Err(invalid_drm_descriptor("object file descriptor is negative"));
+            }
+            if object.size == 0 {
+                return Err(invalid_drm_descriptor("object size is zero"));
+            }
+            objects.push(FfmpegDrmPrimeObject {
+                fd: object.fd,
+                size: object.size,
+                format_modifier: object.format_modifier,
+            });
+        }
+        let mut layers = Vec::with_capacity(layer_count);
+        for layer in descriptor.layers.iter().take(layer_count) {
+            let plane_count = descriptor_count(layer.nb_planes, "plane")?;
+            let mut planes = Vec::with_capacity(plane_count);
+            for plane in layer.planes.iter().take(plane_count) {
+                let object_index = usize::try_from(plane.object_index)
+                    .map_err(|_| invalid_drm_descriptor("plane object index is negative"))?;
+                if object_index >= object_count {
+                    return Err(invalid_drm_descriptor("plane object index is out of range"));
+                }
+                let offset = u64::try_from(plane.offset)
+                    .map_err(|_| invalid_drm_descriptor("plane offset is negative"))?;
+                let pitch = u64::try_from(plane.pitch)
+                    .map_err(|_| invalid_drm_descriptor("plane pitch is negative"))?;
+                if pitch == 0 {
+                    return Err(invalid_drm_descriptor("plane pitch is zero"));
+                }
+                planes.push(FfmpegDrmPrimePlane { object_index, offset, pitch });
+            }
+            layers.push(FfmpegDrmPrimeLayer { format: layer.format, planes });
+        }
+        Ok(Self { frame, objects, layers })
+    }
+
+    /// Ordered DRM objects retained by this mapping.
+    pub fn objects(&self) -> &[FfmpegDrmPrimeObject] {
+        &self.objects
+    }
+
+    /// Ordered DRM layers retained by this mapping.
+    pub fn layers(&self) -> &[FfmpegDrmPrimeLayer] {
+        &self.layers
+    }
+
+    /// Duplicate one object FD for ownership transfer to Vulkan.
+    pub fn duplicate_object_fd(
+        &self,
+        object_index: usize,
+    ) -> std::result::Result<std::os::fd::OwnedFd, FfmpegNativeDecodedFrameResourceError> {
+        use std::os::fd::FromRawFd;
+
+        let object = self.objects.get(object_index).ok_or_else(|| {
+            invalid_drm_descriptor(format!("object index {object_index} is out of range"))
+        })?;
+        // SAFETY: `object.fd` remains live through `self`; dup returns a new
+        // independently owned descriptor on success.
+        let duplicated = unsafe { libc::dup(object.fd) };
+        if duplicated < 0 {
+            return Err(
+                FfmpegNativeDecodedFrameResourceError::DrmPrimeFileDescriptorDuplicationFailed {
+                    object_index,
+                    reason: std::io::Error::last_os_error().to_string(),
+                },
+            );
+        }
+        // SAFETY: dup returned a fresh owned descriptor.
+        Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(duplicated) })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for FfmpegDrmPrimeFrame {
+    fn drop(&mut self) {
+        let mut frame = self.frame.as_ptr();
+        // SAFETY: this object solely owns the mapped AVFrame allocation.
+        unsafe { ffmpeg::ffi::av_frame_free(&mut frame) };
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn descriptor_count(
+    raw: i32,
+    kind: &str,
+) -> std::result::Result<usize, FfmpegNativeDecodedFrameResourceError> {
+    let count = usize::try_from(raw)
+        .map_err(|_| invalid_drm_descriptor(format!("{kind} count is negative")))?;
+    if !(1..=ffmpeg::ffi::AV_DRM_MAX_PLANES as usize).contains(&count) {
+        return Err(invalid_drm_descriptor(format!(
+            "{kind} count {count} exceeds the DRM descriptor extent"
+        )));
+    }
+    Ok(count)
+}
+
+#[cfg(target_os = "linux")]
+fn invalid_drm_descriptor(reason: impl Into<String>) -> FfmpegNativeDecodedFrameResourceError {
+    FfmpegNativeDecodedFrameResourceError::InvalidDrmPrimeDescriptor { reason: reason.into() }
 }
 
 /// Shared lease for one backend-owned native decoder resource.

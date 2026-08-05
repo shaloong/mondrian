@@ -2495,6 +2495,7 @@ dependencies = [
  "dashmap",
  "ffmpeg-next",
  "futures",
+ "libc",
  "lru",
  "mondrian-core",
  "mondrian-storage",
@@ -2514,6 +2515,7 @@ name = "mondrian-platform"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "libc",
  "mondrian-core",
  "mondrian-platform-core",
  "objc2 0.6.4",
@@ -2574,6 +2576,9 @@ dependencies = [
  "mondrian-media",
  "mondrian-timeline",
  "naga",
+ "objc2-core-foundation",
+ "objc2-core-video",
+ "objc2-metal 0.3.2",
  "parking_lot",
  "pollster",
  "serde",
@@ -3136,6 +3141,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-io-surface",
+ "objc2-metal 0.3.2",
 ]
 
 [[package]]

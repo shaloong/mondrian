@@ -1386,15 +1386,17 @@ to enforce the half-frame presentation-phase contract. Other platforms retain
 the same revision predicate and bounded wait Interface.
 
 The concrete product Window coordinator and the Headless realtime validation
-coordinator share one platform scheduling seam. During active playback on
-Windows, their owning thread joins the MMCSS `Playback` task at critical relative
-priority; Pause/Stop/End and owner destruction revert the thread-local
-registration. Activation failure is explicit (a product warning and a
-fail-closed Windows realtime gate), while an unimplemented platform reports
-`Unsupported` and continues under the portable scheduler contract. This seam
-does not elevate decode/analysis workers, alter process priority, or change the
-system timer period, so resource arbitration and bounded domain queues remain
-authoritative.
+coordinator share one platform scheduling seam. During active playback, Windows
+joins the MMCSS `Playback` task at critical relative priority, macOS applies
+thread-local user-interactive pthread QoS, and Linux requests a bounded
+per-thread nice improvement without moving the fallible UI/event loop into a
+realtime scheduling class. Pause/Stop/End and owner destruction restore the
+captured thread-local state. Activation failure is explicit (and fails the exact
+native scheduling qualification profile); an unavailable privilege or unknown
+platform enters stable `PortableFallback` for the current residency and retries
+only after that residency ends. This seam does not elevate decode/analysis
+workers, alter process priority, or change the system timer period, so resource
+arbitration and bounded domain queues remain authoritative.
 
 Each coordinator turn applies the newest coherent Audio Device callback
 observation before advancing the video Clock and deriving a new Frame Demand.

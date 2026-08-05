@@ -143,20 +143,29 @@ Lower layers cannot depend on higher layers:
   traversing authoring or execution internals. A custom slice may be replaced
   only atomically with equivalent typed behavior.
 - Platform services are injected into event/app layers; widgets never call OS APIs directly. Windows, macOS, Linux, and Headless implement one Platform Execution Contract throughout M1/M2. D3D12, Vulkan, Metal, native media surfaces, window-system objects, audio devices, and display payloads remain concrete Adapter details; shared Project, Timeline, Playback, Audio, Effects, Color, Viewer, and Export Interfaces carry only typed capability, ownership, synchronization, fallback, and terminal evidence. Windows is the current real-device qualification platform, not the semantic owner of the production Implementation.
+- Platform implementation keeps Locality in deep `memory`, `process_memory`,
+  `playback_scheduling`, and display Modules. Playback scheduling is
+  thread-affine and exactly restored: Windows uses MMCSS Playback, macOS uses
+  user-interactive pthread QoS, and Linux attempts a bounded per-thread nice
+  improvement. Permission denial is a typed portable fallback. The desktop UI
+  event loop is never promoted to Linux `SCHED_FIFO`/`SCHED_RR`; realtime audio
+  scheduling requires its own allocation-free callback-domain contract.
 - `mondrian-core::ExecutionCancellationToken` is the payload-agnostic monotonic cancellation primitive. Domain schedulers own when to cancel; lower execution and media Adapters only observe it. Reusing or resetting a canceled token is forbidden.
 - Native process-memory observation is a separate read-only `ProcessMemoryProbe`
   Seam with non-interchangeable `CurrentProcess` and `ProductProcessTree`
-  scopes. Windows uses Process Status for one process; the product-tree Backend
-  recursively discovers the Mondrian root and descendants with Tool Help,
-  requires two matching inventories while every queried member handle remains
-  active, and checked-sums Private Commit/current Working Set/member peak
-  Working Set. Each result carries its scope, Backend, process count, bounded
-  inventory-attempt count, and completeness. A PID/exit/topology race, any
-  member query failure, or aggregation overflow is an incomplete failure—not a
-  smaller successful sample. Linux/macOS currently return explicit unsupported
-  product-tree evidence for future native Adapters. Acceptance policy lives
-  above the platform crate and accepts only complete `ProductProcessTree`
-  samples; it never substitutes whole-system pressure or current-process data.
+  scopes. Windows uses Process Status and Tool Help, Linux uses `/proc`, and
+  macOS uses `proc_pidinfo`/`proc_pid_rusage`. Product-tree Adapters require two
+  matching inventories plus stable PID/start identity and checked-sum every
+  member; a PID/exit/topology race, query failure, or overflow invalidates the
+  complete sample. Each result names its non-interchangeable private-memory
+  metric: Windows Private Commit, Linux anonymous resident memory, or macOS
+  physical footprint. Current/peak resident values remain diagnostics, and an
+  unavailable peak is absent rather than synthesized. Installed/system memory
+  likewise use `GetPhysicallyInstalledSystemMemory`/`GlobalMemoryStatusEx`,
+  `/proc/meminfo`, or `hw.memsize`/Mach host statistics behind one Interface.
+  Policy above the platform crate accepts only complete `ProductProcessTree`
+  evidence and an exact metric required by the active qualification profile; it
+  never substitutes whole-system pressure or current-process data.
 - Professional playback acceptance is likewise policy above the execution Modules. The real-cadence CPAL A/V Adapter drives the ordinary App transport, Audio Playback, bounded media-source cache, Playback Evidence, headless Viewer GPU execution, and process-memory probe; it does not own a second transport or test-only mixer. A CPAL callback report is intentionally distinct from an acoustic loopback measurement.
 - Golden Project acceptance is an App-level Headless Adapter over production
   authoring, playback, persistence, recovery, Preview, Export, and reimport

@@ -15,10 +15,13 @@ use mondrian_media::{
 };
 
 #[cfg(target_os = "windows")]
-use crate::{
-    execute_native_decoded_frame_import, D3D12NativeVideoImportBackend,
-    GpuNativeDecodedFrameImportBackend,
-};
+use crate::D3D12NativeVideoImportBackend;
+#[cfg(target_os = "macos")]
+use crate::MetalNativeVideoImportBackend;
+#[cfg(target_os = "linux")]
+use crate::VulkanNativeVideoImportBackend;
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+use crate::{execute_native_decoded_frame_import, GpuNativeDecodedFrameImportBackend};
 use crate::{
     CpuColorFrame, CpuSourceColorFrame, GpuColorFrameIdAllocator, GpuColorFrameResource,
     GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool, GpuNativeDecodedFrameImportContract,
@@ -160,6 +163,10 @@ pub struct ViewerNativeVideoImportRuntime {
     support: GpuNativeDecodedFrameImportSupport,
     #[cfg(target_os = "windows")]
     backend: Option<D3D12NativeVideoImportBackend>,
+    #[cfg(target_os = "macos")]
+    backend: Option<MetalNativeVideoImportBackend>,
+    #[cfg(target_os = "linux")]
+    backend: Option<VulkanNativeVideoImportBackend>,
 }
 
 impl ViewerNativeVideoImportRuntime {
@@ -235,7 +242,51 @@ impl ViewerNativeVideoImportRuntime {
                 },
             }
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "macos")]
+        {
+            let _ = gpu_timing_policy;
+            match MetalNativeVideoImportBackend::new_with_resource_pool(
+                adapter,
+                device,
+                queue,
+                resource_pool,
+            ) {
+                Ok(backend) => Self {
+                    support: backend.support().clone(),
+                    backend: Some(backend),
+                },
+                Err(error) => Self {
+                    support: GpuNativeDecodedFrameImportSupport::unavailable_with_reason(
+                        format!("{:?}", adapter.get_info().backend),
+                        format!("native VideoToolbox Metal + OCIO backend unavailable: {error}"),
+                    ),
+                    backend: None,
+                },
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let _ = gpu_timing_policy;
+            match VulkanNativeVideoImportBackend::new_with_resource_pool(
+                adapter,
+                device,
+                queue,
+                resource_pool,
+            ) {
+                Ok(backend) => Self {
+                    support: backend.support().clone(),
+                    backend: Some(backend),
+                },
+                Err(error) => Self {
+                    support: GpuNativeDecodedFrameImportSupport::unavailable_with_reason(
+                        format!("{:?}", adapter.get_info().backend),
+                        format!("native VA-API Vulkan + OCIO backend unavailable: {error}"),
+                    ),
+                    backend: None,
+                },
+            }
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
         {
             let _ = (device, queue, resource_pool, gpu_timing_policy);
             Self {
@@ -281,6 +332,14 @@ impl ViewerNativeVideoImportRuntime {
         if let Some(backend) = self.backend.as_ref() {
             return backend.frame_cpu_timings();
         }
+        #[cfg(target_os = "macos")]
+        if let Some(backend) = self.backend.as_ref() {
+            return backend.frame_cpu_timings();
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(backend) = self.backend.as_ref() {
+            return backend.frame_cpu_timings();
+        }
         NativeVideoImportCpuTimings::default()
     }
 
@@ -306,6 +365,13 @@ impl ViewerNativeVideoImportRuntime {
         #[cfg(target_os = "windows")]
         if let Some(backend) = self.backend.as_ref() {
             return backend.gpu_timing_diagnostics();
+        }
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        if self.support.available {
+            return NativeVideoImportGpuTimingDiagnostics::inactive(
+                false,
+                "native-import GPU timestamp attribution is not implemented for this backend",
+            );
         }
         NativeVideoImportGpuTimingDiagnostics::inactive(
             false,
@@ -399,7 +465,35 @@ impl ViewerNativeVideoImportRuntime {
             execute_native_decoded_frame_import(backend, ids, contract, native_frame)
                 .map(|execution| execution.resource)
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "macos")]
+        {
+            let backend = self.backend.as_mut().ok_or_else(|| {
+                GpuNativeDecodedFrameImportError::BackendRejected {
+                    reason: self
+                        .support
+                        .unavailable_reason
+                        .clone()
+                        .unwrap_or_else(|| "native video backend is unavailable".to_owned()),
+                }
+            })?;
+            execute_native_decoded_frame_import(backend, ids, contract, native_frame)
+                .map(|execution| execution.resource)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let backend = self.backend.as_mut().ok_or_else(|| {
+                GpuNativeDecodedFrameImportError::BackendRejected {
+                    reason: self
+                        .support
+                        .unavailable_reason
+                        .clone()
+                        .unwrap_or_else(|| "native video backend is unavailable".to_owned()),
+                }
+            })?;
+            execute_native_decoded_frame_import(backend, ids, contract, native_frame)
+                .map(|execution| execution.resource)
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
         {
             let _ = (ids, contract, native_frame);
             Err(GpuNativeDecodedFrameImportError::BackendRejected {
@@ -495,7 +589,7 @@ fn decoded_chroma_location_to_gpu(
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 fn unavailable_native_import_support(
     adapter: &wgpu::Adapter,
     device_features: wgpu::Features,

@@ -128,6 +128,10 @@ pub use native_frame::{
     PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
     PreviewNativeDecodedFrameResource,
 };
+#[cfg(target_os = "linux")]
+pub use native_frame::{
+    FfmpegDrmPrimeFrame, FfmpegDrmPrimeLayer, FfmpegDrmPrimeObject, FfmpegDrmPrimePlane,
+};
 
 /// Exact still/playback safety limit for forward decode from a keyframe.
 ///

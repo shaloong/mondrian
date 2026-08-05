@@ -385,7 +385,10 @@ fn materialize_native_decoded_frame(
 ) -> std::result::Result<PreviewNativeDecodedFrame, PreviewNativeFrameMaterializationError> {
     use ffmpeg::util::format::pixel::Pixel;
 
-    if !matches!(decoded.format(), Pixel::D3D12 | Pixel::D3D11) {
+    if !matches!(
+        decoded.format(),
+        Pixel::D3D12 | Pixel::D3D11 | Pixel::VIDEOTOOLBOX | Pixel::VAAPI
+    ) {
         return Err(
             PreviewNativeFrameMaterializationError::UnsupportedHardwarePixelFormat {
                 pixel_format: decoded.format(),
@@ -405,6 +408,21 @@ fn materialize_native_decoded_frame(
         }
         Pixel::D3D11 => {
             resource.d3d11_texture()?;
+        }
+        Pixel::VIDEOTOOLBOX => {
+            resource.cv_pixel_buffer()?;
+        }
+        #[cfg(target_os = "linux")]
+        Pixel::VAAPI => {
+            resource.drm_prime_frame()?;
+        }
+        #[cfg(not(target_os = "linux"))]
+        Pixel::VAAPI => {
+            return Err(
+                PreviewNativeFrameMaterializationError::UnsupportedHardwarePixelFormat {
+                    pixel_format: decoded.format(),
+                },
+            );
         }
         _ => unreachable!("native frame pixel format was validated above"),
     }

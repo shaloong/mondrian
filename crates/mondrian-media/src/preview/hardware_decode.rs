@@ -476,8 +476,10 @@ pub(super) fn preview_hardware_frame_format(format: ffmpeg::util::format::pixel:
 }
 
 pub(super) fn ffmpeg_native_resource_adapter_available(config: &HwAccelCodecConfigProbe) -> bool {
-    matches!(
-        config.hw_pixel_format,
-        Some(HwAccelPixelFormat::D3D12 | HwAccelPixelFormat::D3D11)
-    )
+    match config.hw_pixel_format {
+        Some(HwAccelPixelFormat::D3D12 | HwAccelPixelFormat::D3D11) => cfg!(target_os = "windows"),
+        Some(HwAccelPixelFormat::VideoToolbox) => cfg!(target_os = "macos"),
+        Some(HwAccelPixelFormat::Vaapi) => cfg!(target_os = "linux"),
+        _ => false,
+    }
 }

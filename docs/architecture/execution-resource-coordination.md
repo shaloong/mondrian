@@ -10,10 +10,10 @@ inputs into a versioned immutable decision:
 - a fixed-cadence product-process-tree memory observation plus independent
   whole-system pressure (`Nominal`, `Elevated`, or `Critical`).
 
-On Windows, the default profile Adapter reads physically installed memory
-through `GetPhysicallyInstalledSystemMemory`. A platform without a reliable
-Adapter is classified as `UnknownConservative`, not falsely reported as an
-8 GiB machine. Measured machines below 8 GiB are explicitly
+The default profile Adapter reads physically installed memory through Windows
+`GetPhysicallyInstalledSystemMemory`, Linux `/proc/meminfo`, or macOS
+`hw.memsize`. A platform or failed probe without reliable evidence is classified
+as `UnknownConservative`, not falsely reported as an 8 GiB machine. Measured machines below 8 GiB are explicitly
 `BelowMinimum`; the half-open range [8 GiB, 16 GiB) is `MinimumSupported`,
 [16 GiB, 32 GiB) is `Standard`, and 32 GiB or more is `Professional`.
 Unknown capacity uses the same conservative budgets as the 8 GiB policy while
@@ -188,8 +188,8 @@ One process-owned monotonic origin drives a one-second pressure-observation
 cadence independently from presentation frequency. The injectable
 `observe_pressure_from_probe_at` Seam makes the exact cadence testable; calls
 inside one interval neither re-probe nor republish a decision, and a late tick
-does not manufacture catch-up samples. Pressure uses checked aggregate Private
-Commit for the complete Mondrian root-plus-descendant process tree relative to
+does not manufacture catch-up samples. Pressure uses the checked platform-native
+private-memory metric for the complete Mondrian root-plus-descendant process tree relative to
 physically installed memory, plus independent available/load evidence when the
 platform exposes it. The retained observation preserves the requested scope,
 Backend, member count, inventory attempts, completeness, and failure instead
@@ -199,8 +199,11 @@ opens every member for memory query and synchronization, retains those handles
 through the second inventory, and accepts the sample only when membership is
 unchanged and every non-blocking handle wait reports `WAIT_TIMEOUT`. A signaled
 handle means the sampled process exited; `WAIT_FAILED` or any other wait status
-is a distinct liveness-query failure. Neither result may be collapsed into a
-complete sample. An unsupported tree Adapter, mismatched scope, unstable child
+is a distinct liveness-query failure. Linux `/proc` and macOS libproc use the
+same two-inventory rule plus PID/start identity to reject PID reuse. Windows
+Private Commit, Linux `RssAnon`, and macOS physical footprint remain typed,
+non-interchangeable metrics. Neither result may be collapsed into a complete
+sample. An unsupported tree Adapter, mismatched scope/metric, unstable child
 inventory, failed member query, or partial sample places policy at least in
 Elevated pressure while retaining the prior Critical state when applicable;
 whole-system evidence may raise pressure further but cannot prove product

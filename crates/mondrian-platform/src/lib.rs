@@ -8,6 +8,8 @@ use std::process::Command;
 
 use mondrian_core::Color;
 mod display;
+mod memory;
+mod playback_scheduling;
 mod process_memory;
 pub use mondrian_platform_core::{
     ClipboardError, DisplayHdrProbe, DisplayHdrProbeDetails, DisplayHdrProbeResult,
@@ -16,8 +18,9 @@ pub use mondrian_platform_core::{
     NativeVideoTextureImportProbe, NativeVideoTextureImportProbeResult, NoopPlatformService,
     PhysicalMemoryCapacityProbe, PhysicalMemoryCapacityProbeBackend,
     PhysicalMemoryCapacityProbeResult, PlatformService, ProcessMemoryProbe,
-    ProcessMemoryProbeBackend, ProcessMemoryProbeResult, ProcessMemoryScope, SystemMemoryProbe,
-    SystemMemoryProbeBackend, SystemMemoryProbeResult,
+    ProcessMemoryProbeBackend, ProcessMemoryProbeResult, ProcessMemoryScope,
+    ProcessPrivateMemoryMetric, SystemMemoryProbe, SystemMemoryProbeBackend,
+    SystemMemoryProbeResult,
 };
 
 /// Default desktop platform implementation.
@@ -28,175 +31,9 @@ pub use mondrian_platform_core::{
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemPlatformService;
 
-/// Observable state of the current thread's product playback scheduling class.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlaybackThreadSchedulingStatus {
-    /// No playback scheduling class is active.
-    Inactive,
-    /// The native multimedia playback class is active on this thread.
-    Active,
-    /// This platform has no native implementation yet; playback remains valid
-    /// under the portable scheduler contract.
-    Unsupported,
-}
-
-/// Failure to enter the native multimedia playback scheduling class.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlaybackThreadSchedulingError {
-    operation: &'static str,
-    detail: String,
-}
-
-impl PlaybackThreadSchedulingError {
-    fn new(operation: &'static str, detail: impl Into<String>) -> Self {
-        Self { operation, detail: detail.into() }
-    }
-}
-
-impl std::fmt::Display for PlaybackThreadSchedulingError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{} failed: {}", self.operation, self.detail)
-    }
-}
-
-impl std::error::Error for PlaybackThreadSchedulingError {}
-
-/// Thread-affine native scheduling state for the product playback coordinator.
-///
-/// The owner synchronizes this object with transport residency. On Windows it
-/// joins the MMCSS `Playback` task at critical relative priority and reverts that
-/// registration when playback stops or the owner is dropped. It deliberately
-/// does not change process-wide timer resolution or worker-pool policy.
-#[derive(Debug, Default)]
-pub struct PlaybackThreadScheduling {
-    native: Option<NativePlaybackThreadScheduling>,
-    activation_attempted: bool,
-}
-
-impl PlaybackThreadScheduling {
-    /// Enter or leave the native scheduling class to match playback residency.
-    ///
-    /// A failed activation is reported once for the current active residency;
-    /// calling with `active = false` resets that attempt for a later playback
-    /// session. Unsupported platforms return an explicit portable status.
-    pub fn synchronize(
-        &mut self,
-        active: bool,
-    ) -> Result<PlaybackThreadSchedulingStatus, PlaybackThreadSchedulingError> {
-        if !active {
-            self.native = None;
-            self.activation_attempted = false;
-            return Ok(PlaybackThreadSchedulingStatus::Inactive);
-        }
-        if self.native.is_some() {
-            return Ok(PlaybackThreadSchedulingStatus::Active);
-        }
-        if self.activation_attempted {
-            return Ok(native_playback_scheduling_absent_status());
-        }
-        self.activation_attempted = true;
-        match NativePlaybackThreadScheduling::enter()? {
-            Some(native) => {
-                self.native = Some(native);
-                Ok(PlaybackThreadSchedulingStatus::Active)
-            }
-            None => Ok(PlaybackThreadSchedulingStatus::Unsupported),
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn native_playback_scheduling_absent_status() -> PlaybackThreadSchedulingStatus {
-    PlaybackThreadSchedulingStatus::Inactive
-}
-
-#[cfg(not(target_os = "windows"))]
-fn native_playback_scheduling_absent_status() -> PlaybackThreadSchedulingStatus {
-    PlaybackThreadSchedulingStatus::Unsupported
-}
-
-#[cfg(target_os = "windows")]
-struct NativePlaybackThreadScheduling {
-    handle: windows_sys::Win32::Foundation::HANDLE,
-    _thread_affine: std::marker::PhantomData<std::rc::Rc<()>>,
-}
-
-#[cfg(target_os = "windows")]
-impl std::fmt::Debug for NativePlaybackThreadScheduling {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("NativePlaybackThreadScheduling").finish_non_exhaustive()
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl NativePlaybackThreadScheduling {
-    fn enter() -> Result<Option<Self>, PlaybackThreadSchedulingError> {
-        use windows_sys::Win32::System::Threading::{
-            AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, AvSetMmThreadPriority,
-            AVRT_PRIORITY_CRITICAL,
-        };
-
-        const PLAYBACK_TASK: &[u16] = &[
-            b'P' as u16,
-            b'l' as u16,
-            b'a' as u16,
-            b'y' as u16,
-            b'b' as u16,
-            b'a' as u16,
-            b'c' as u16,
-            b'k' as u16,
-            0,
-        ];
-        let mut task_index = 0_u32;
-        // SAFETY: PLAYBACK_TASK is a static NUL-terminated UTF-16 string and
-        // task_index remains valid for the duration of the call.
-        let handle =
-            unsafe { AvSetMmThreadCharacteristicsW(PLAYBACK_TASK.as_ptr(), &mut task_index) };
-        if handle.is_null() {
-            return Err(PlaybackThreadSchedulingError::new(
-                "AvSetMmThreadCharacteristicsW",
-                std::io::Error::last_os_error().to_string(),
-            ));
-        }
-        // SAFETY: handle is the live registration returned above and is owned
-        // by this current thread until reverted below or in Drop.
-        if unsafe { AvSetMmThreadPriority(handle, AVRT_PRIORITY_CRITICAL) } == 0 {
-            let error = std::io::Error::last_os_error().to_string();
-            // SAFETY: the handle is still live and owned by this thread.
-            unsafe { AvRevertMmThreadCharacteristics(handle) };
-            return Err(PlaybackThreadSchedulingError::new(
-                "AvSetMmThreadPriority",
-                error,
-            ));
-        }
-        Ok(Some(Self {
-            handle,
-            _thread_affine: std::marker::PhantomData,
-        }))
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl Drop for NativePlaybackThreadScheduling {
-    fn drop(&mut self) {
-        use windows_sys::Win32::System::Threading::AvRevertMmThreadCharacteristics;
-
-        // SAFETY: this non-Send guard can only be dropped on the thread that
-        // owns its still-live MMCSS registration.
-        unsafe { AvRevertMmThreadCharacteristics(self.handle) };
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-#[derive(Debug)]
-struct NativePlaybackThreadScheduling;
-
-#[cfg(not(target_os = "windows"))]
-impl NativePlaybackThreadScheduling {
-    fn enter() -> Result<Option<Self>, PlaybackThreadSchedulingError> {
-        Ok(None)
-    }
-}
+pub use playback_scheduling::{
+    PlaybackThreadScheduling, PlaybackThreadSchedulingError, PlaybackThreadSchedulingStatus,
+};
 
 impl PlatformService for SystemPlatformService {
     fn clipboard_copy(&self, text: &str) -> Result<(), ClipboardError> {
@@ -277,77 +114,12 @@ impl SystemMemoryProbe for SystemPlatformService {
     }
 }
 
-#[cfg(target_os = "windows")]
 fn system_physical_memory_capacity() -> PhysicalMemoryCapacityProbeResult {
-    let mut kib = 0_u64;
-    // SAFETY: Windows writes one u64 to the valid pointer for the duration of
-    // this call and retains no reference.
-    let result = unsafe {
-        windows_sys::Win32::System::SystemInformation::GetPhysicallyInstalledSystemMemory(&mut kib)
-    };
-    if result == 0 {
-        return PhysicalMemoryCapacityProbeResult::failed(
-            PhysicalMemoryCapacityProbeBackend::WindowsInstalledSystemMemory,
-            format!(
-                "GetPhysicallyInstalledSystemMemory failed with OS error {}",
-                std::io::Error::last_os_error()
-            ),
-        );
-    }
-    match kib.checked_mul(1024) {
-        Some(bytes) => PhysicalMemoryCapacityProbeResult::observed(
-            PhysicalMemoryCapacityProbeBackend::WindowsInstalledSystemMemory,
-            bytes,
-        ),
-        None => PhysicalMemoryCapacityProbeResult::failed(
-            PhysicalMemoryCapacityProbeBackend::WindowsInstalledSystemMemory,
-            "installed physical memory exceeds the supported byte range",
-        ),
-    }
+    memory::physical_memory_capacity()
 }
 
-#[cfg(not(target_os = "windows"))]
-fn system_physical_memory_capacity() -> PhysicalMemoryCapacityProbeResult {
-    PhysicalMemoryCapacityProbeResult::unsupported(
-        "installed physical memory discovery is not implemented for this platform",
-    )
-}
-
-#[cfg(target_os = "windows")]
 fn system_memory() -> SystemMemoryProbeResult {
-    use std::mem;
-    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
-
-    let mut status = MEMORYSTATUSEX {
-        dwLength: mem::size_of::<MEMORYSTATUSEX>() as u32,
-        ..MEMORYSTATUSEX::default()
-    };
-    // SAFETY: Windows writes one complete MEMORYSTATUSEX to the valid,
-    // correctly sized pointer and retains no reference.
-    let result = unsafe { GlobalMemoryStatusEx(&mut status) };
-    if result == 0 {
-        return SystemMemoryProbeResult::failed(
-            SystemMemoryProbeBackend::WindowsGlobalMemoryStatus,
-            format!(
-                "GlobalMemoryStatusEx failed with OS error {}",
-                std::io::Error::last_os_error()
-            ),
-        );
-    }
-
-    SystemMemoryProbeResult::observed(
-        SystemMemoryProbeBackend::WindowsGlobalMemoryStatus,
-        status.ullTotalPhys,
-        status.ullAvailPhys,
-        status.dwMemoryLoad,
-    )
-}
-
-#[cfg(not(target_os = "windows"))]
-fn system_memory() -> SystemMemoryProbeResult {
-    SystemMemoryProbeResult::unsupported(
-        "native whole-system memory discovery is not implemented for this platform",
-    )
+    memory::system_memory()
 }
 
 #[cfg(target_os = "windows")]
@@ -401,14 +173,18 @@ fn system_native_video_texture_import() -> NativeVideoTextureImportProbeResult {
     }
     #[cfg(target_os = "macos")]
     {
-        NativeVideoTextureImportProbeResult::missing(
-            "VideoToolbox CVPixelBuffer/IOSurface import is not connected to the wgpu renderer",
+        NativeVideoTextureImportProbeResult::found(
+            vec![mondrian_platform_core::NativeVideoTextureHandleKind::CVPixelBuffer],
+            true,
+            false,
         )
     }
     #[cfg(target_os = "linux")]
     {
-        NativeVideoTextureImportProbeResult::missing(
-            "VA-API/DMABUF texture import is not connected to the wgpu renderer",
+        NativeVideoTextureImportProbeResult::found(
+            vec![mondrian_platform_core::NativeVideoTextureHandleKind::DmaBuf],
+            true,
+            false,
         )
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
@@ -1533,7 +1309,7 @@ mod tests {
         );
         assert_eq!(result.observed_process_count, 1);
         assert!(result.inventory_complete);
-        assert!(result.private_committed_bytes.is_some_and(|bytes| bytes > 0));
+        assert!(result.private_memory_bytes.is_some_and(|bytes| bytes > 0));
         assert!(result.resident_bytes.is_some_and(|bytes| bytes > 0));
         assert!(result.peak_resident_bytes.is_some_and(|bytes| bytes > 0));
         assert!(result.error.is_none());
@@ -1553,7 +1329,7 @@ mod tests {
         assert!(result.observed_process_count >= 1);
         assert!(result.inventory_complete);
         assert!(result.inventory_attempts >= 1);
-        assert!(result.private_committed_bytes.is_some_and(|bytes| bytes > 0));
+        assert!(result.private_memory_bytes.is_some_and(|bytes| bytes > 0));
         assert!(result.resident_bytes.is_some_and(|bytes| bytes > 0));
         assert!(result.peak_resident_bytes.is_some_and(|bytes| bytes > 0));
         assert!(result.error.is_none());

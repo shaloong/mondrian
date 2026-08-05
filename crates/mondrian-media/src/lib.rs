@@ -91,6 +91,10 @@ pub use preview::{
     PreviewSeekIndexCachePolicy, PreviewSeekIndexSource, PreviewSourceColorContract,
     PreviewTemporalExtentSource, RgbaFrame,
 };
+#[cfg(target_os = "linux")]
+pub use preview::{
+    FfmpegDrmPrimeFrame, FfmpegDrmPrimeLayer, FfmpegDrmPrimeObject, FfmpegDrmPrimePlane,
+};
 pub use process_supervisor::{
     run_supervised_command, run_supervised_command_while, SupervisedChild, SupervisedProcessError,
     SupervisedProcessOutput, SupervisedProcessPolicy, SupervisedProcessStage,

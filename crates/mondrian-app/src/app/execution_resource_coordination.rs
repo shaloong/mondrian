@@ -699,12 +699,12 @@ impl ExecutionResourceCoordinator {
         state.native_pressure_request_pending = false;
         let process_tree_complete =
             product_process_tree.is_complete_for(ProcessMemoryScope::ProductProcessTree);
-        let product_private_committed_bytes = if process_tree_complete {
-            product_process_tree.private_committed_bytes
+        let product_private_memory_bytes = if process_tree_complete {
+            product_process_tree.private_memory_bytes
         } else {
             None
         };
-        let has_dynamic_evidence = product_private_committed_bytes.is_some()
+        let has_dynamic_evidence = product_private_memory_bytes.is_some()
             || system.available_physical_bytes.is_some()
             || system.memory_load_percent.is_some();
         let process_tree_unavailable = !process_tree_complete;
@@ -722,7 +722,7 @@ impl ExecutionResourceCoordinator {
         } else {
             classify_memory_pressure(
                 state.pressure,
-                product_private_committed_bytes,
+                product_private_memory_bytes,
                 state.profile.installed_memory_bytes,
                 system.total_physical_bytes,
                 system.available_physical_bytes,

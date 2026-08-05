@@ -478,6 +478,14 @@ pub enum ProcessMemoryProbeBackend {
     /// Windows Tool Help process-tree inventory plus Process Status queries for
     /// every verified member.
     WindowsToolhelpProcessTree,
+    /// Linux `/proc/self/status` counters for exactly the calling process.
+    LinuxCurrentProcessStatus,
+    /// Linux `/proc` process inventory plus per-process status counters.
+    LinuxProcfsProcessTree,
+    /// macOS `proc_pid_rusage` counters for exactly the calling process.
+    MacOsCurrentProcessRusage,
+    /// macOS `libproc` inventory plus `proc_pid_rusage` counters.
+    MacOsLibprocProcessTree,
 }
 
 impl ProcessMemoryProbeBackend {
@@ -486,6 +494,10 @@ impl ProcessMemoryProbeBackend {
         match self {
             Self::WindowsCurrentProcessStatus => "windows-current-process-status",
             Self::WindowsToolhelpProcessTree => "windows-toolhelp-process-tree-status",
+            Self::LinuxCurrentProcessStatus => "linux-current-process-status",
+            Self::LinuxProcfsProcessTree => "linux-procfs-process-tree-status",
+            Self::MacOsCurrentProcessRusage => "macos-current-process-rusage",
+            Self::MacOsLibprocProcessTree => "macos-libproc-process-tree-rusage",
         }
     }
 
@@ -494,14 +506,61 @@ impl ProcessMemoryProbeBackend {
         match self {
             Self::WindowsCurrentProcessStatus => ProcessMemoryScope::CurrentProcess,
             Self::WindowsToolhelpProcessTree => ProcessMemoryScope::ProductProcessTree,
+            Self::LinuxCurrentProcessStatus | Self::MacOsCurrentProcessRusage => {
+                ProcessMemoryScope::CurrentProcess
+            }
+            Self::LinuxProcfsProcessTree | Self::MacOsLibprocProcessTree => {
+                ProcessMemoryScope::ProductProcessTree
+            }
+        }
+    }
+
+    /// Platform-native private-footprint metric returned by this backend.
+    pub fn private_memory_metric(self) -> ProcessPrivateMemoryMetric {
+        match self {
+            Self::WindowsCurrentProcessStatus | Self::WindowsToolhelpProcessTree => {
+                ProcessPrivateMemoryMetric::WindowsPrivateCommit
+            }
+            Self::LinuxCurrentProcessStatus | Self::LinuxProcfsProcessTree => {
+                ProcessPrivateMemoryMetric::LinuxAnonymousResident
+            }
+            Self::MacOsCurrentProcessRusage | Self::MacOsLibprocProcessTree => {
+                ProcessPrivateMemoryMetric::MacOsPhysicalFootprint
+            }
+        }
+    }
+}
+
+/// Meaning of the platform-native private-footprint byte counter.
+///
+/// These metrics are intentionally not numerically interchangeable. They are
+/// suitable for same-platform plateau and budget evidence, while reports must
+/// preserve the metric whenever samples cross a persistence or telemetry Seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessPrivateMemoryMetric {
+    /// Windows private committed virtual memory (`PrivateUsage`).
+    WindowsPrivateCommit,
+    /// Linux anonymous resident memory (`RssAnon`).
+    LinuxAnonymousResident,
+    /// macOS physical footprint reported by `proc_pid_rusage`.
+    MacOsPhysicalFootprint,
+}
+
+impl ProcessPrivateMemoryMetric {
+    /// Stable metric label for evidence and diagnostics.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WindowsPrivateCommit => "windows-private-commit",
+            Self::LinuxAnonymousResident => "linux-anonymous-resident",
+            Self::MacOsPhysicalFootprint => "macos-physical-footprint",
         }
     }
 }
 
 /// Point-in-time scoped memory facts from a native operating-system API.
 ///
-/// `private_committed_bytes` is the acceptance-grade leak/plateau metric when
-/// the backend exposes it. Resident-set values remain diagnostic because the
+/// `private_memory_bytes` is the platform-native acceptance-grade
+/// leak/plateau metric identified by `private_memory_metric`. Resident-set values remain diagnostic because the
 /// operating system may reclaim shared or file-backed pages independently of
 /// application lifetime. A professional whole-product gate must additionally
 /// require `ProductProcessTree`, a complete inventory, and a non-zero observed
@@ -520,8 +579,10 @@ pub struct ProcessMemoryProbeResult {
     pub inventory_attempts: u32,
     /// Whether the Adapter proved a stable inventory and queried every member.
     pub inventory_complete: bool,
-    /// Aggregate bytes privately committed in the declared scope, when complete.
-    pub private_committed_bytes: Option<u64>,
+    /// Semantics of `private_memory_bytes`, when a complete sample is present.
+    pub private_memory_metric: Option<ProcessPrivateMemoryMetric>,
+    /// Aggregate platform-native private-footprint bytes in the declared scope.
+    pub private_memory_bytes: Option<u64>,
     /// Aggregate current physical resident-set or working-set bytes.
     pub resident_bytes: Option<u64>,
     /// Checked sum of member peak resident-set or working-set bytes.
@@ -537,9 +598,31 @@ impl ProcessMemoryProbeResult {
         backend: ProcessMemoryProbeBackend,
         observed_process_count: u32,
         inventory_attempts: u32,
-        private_committed_bytes: u64,
+        private_memory_bytes: u64,
         resident_bytes: u64,
         peak_resident_bytes: u64,
+    ) -> Self {
+        Self::observed_with_optional_peak(
+            scope,
+            backend,
+            observed_process_count,
+            inventory_attempts,
+            private_memory_bytes,
+            resident_bytes,
+            Some(peak_resident_bytes),
+        )
+    }
+
+    /// Build a complete native sample when the platform exposes no truthful
+    /// lifetime peak-resident counter for arbitrary process-tree members.
+    pub fn observed_with_optional_peak(
+        scope: ProcessMemoryScope,
+        backend: ProcessMemoryProbeBackend,
+        observed_process_count: u32,
+        inventory_attempts: u32,
+        private_memory_bytes: u64,
+        resident_bytes: u64,
+        peak_resident_bytes: Option<u64>,
     ) -> Self {
         Self {
             scope,
@@ -548,9 +631,10 @@ impl ProcessMemoryProbeResult {
             observed_process_count,
             inventory_attempts,
             inventory_complete: true,
-            private_committed_bytes: Some(private_committed_bytes),
+            private_memory_metric: Some(backend.private_memory_metric()),
+            private_memory_bytes: Some(private_memory_bytes),
             resident_bytes: Some(resident_bytes),
-            peak_resident_bytes: Some(peak_resident_bytes),
+            peak_resident_bytes,
             error: None,
         }
     }
@@ -570,7 +654,8 @@ impl ProcessMemoryProbeResult {
             observed_process_count,
             inventory_attempts,
             inventory_complete: false,
-            private_committed_bytes: None,
+            private_memory_metric: None,
+            private_memory_bytes: None,
             resident_bytes: None,
             peak_resident_bytes: None,
             error: Some(reason.into()),
@@ -586,7 +671,8 @@ impl ProcessMemoryProbeResult {
             observed_process_count: 0,
             inventory_attempts: 0,
             inventory_complete: false,
-            private_committed_bytes: None,
+            private_memory_metric: None,
+            private_memory_bytes: None,
             resident_bytes: None,
             peak_resident_bytes: None,
             error: Some(reason.into()),
@@ -601,9 +687,10 @@ impl ProcessMemoryProbeResult {
             && self.observed_process_count > 0
             && self.inventory_attempts > 0
             && self.backend.is_some_and(|backend| backend.scope() == scope)
-            && self.private_committed_bytes.is_some()
+            && self.private_memory_metric
+                == self.backend.map(ProcessMemoryProbeBackend::private_memory_metric)
+            && self.private_memory_bytes.is_some()
             && self.resident_bytes.is_some()
-            && self.peak_resident_bytes.is_some()
             && self.error.is_none()
     }
 }
@@ -629,6 +716,10 @@ pub trait ProcessMemoryProbe: Send + Sync {
 pub enum PhysicalMemoryCapacityProbeBackend {
     /// Windows `GetPhysicallyInstalledSystemMemory`.
     WindowsInstalledSystemMemory,
+    /// Linux `/proc/meminfo` `MemTotal` capacity.
+    LinuxProcfsMemTotal,
+    /// macOS `hw.memsize` sysctl capacity.
+    MacOsHwMemsizeSysctl,
 }
 
 impl PhysicalMemoryCapacityProbeBackend {
@@ -636,6 +727,8 @@ impl PhysicalMemoryCapacityProbeBackend {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::WindowsInstalledSystemMemory => "windows-installed-system-memory",
+            Self::LinuxProcfsMemTotal => "linux-procfs-mem-total",
+            Self::MacOsHwMemsizeSysctl => "macos-hw-memsize-sysctl",
         }
     }
 }
@@ -703,6 +796,10 @@ pub trait PhysicalMemoryCapacityProbe: Send + Sync {
 pub enum SystemMemoryProbeBackend {
     /// Windows `GlobalMemoryStatusEx`.
     WindowsGlobalMemoryStatus,
+    /// Linux `/proc/meminfo` `MemTotal` and `MemAvailable`.
+    LinuxProcfsMeminfo,
+    /// macOS Mach host virtual-memory statistics plus `hw.memsize`.
+    MacOsMachHostStatistics,
 }
 
 impl SystemMemoryProbeBackend {
@@ -710,6 +807,8 @@ impl SystemMemoryProbeBackend {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::WindowsGlobalMemoryStatus => "windows-global-memory-status",
+            Self::LinuxProcfsMeminfo => "linux-procfs-meminfo",
+            Self::MacOsMachHostStatistics => "macos-mach-host-statistics",
         }
     }
 }
@@ -1104,6 +1203,52 @@ mod tests {
             NativeVideoTextureHandleKind::CudaDeviceMemory.as_str(),
             "CudaDeviceMemory"
         );
+    }
+
+    #[test]
+    fn process_memory_backends_preserve_scope_and_metric() {
+        let cases = [
+            (
+                ProcessMemoryProbeBackend::WindowsCurrentProcessStatus,
+                ProcessMemoryScope::CurrentProcess,
+                ProcessPrivateMemoryMetric::WindowsPrivateCommit,
+            ),
+            (
+                ProcessMemoryProbeBackend::WindowsToolhelpProcessTree,
+                ProcessMemoryScope::ProductProcessTree,
+                ProcessPrivateMemoryMetric::WindowsPrivateCommit,
+            ),
+            (
+                ProcessMemoryProbeBackend::LinuxCurrentProcessStatus,
+                ProcessMemoryScope::CurrentProcess,
+                ProcessPrivateMemoryMetric::LinuxAnonymousResident,
+            ),
+            (
+                ProcessMemoryProbeBackend::LinuxProcfsProcessTree,
+                ProcessMemoryScope::ProductProcessTree,
+                ProcessPrivateMemoryMetric::LinuxAnonymousResident,
+            ),
+            (
+                ProcessMemoryProbeBackend::MacOsCurrentProcessRusage,
+                ProcessMemoryScope::CurrentProcess,
+                ProcessPrivateMemoryMetric::MacOsPhysicalFootprint,
+            ),
+            (
+                ProcessMemoryProbeBackend::MacOsLibprocProcessTree,
+                ProcessMemoryScope::ProductProcessTree,
+                ProcessPrivateMemoryMetric::MacOsPhysicalFootprint,
+            ),
+        ];
+
+        for (backend, scope, metric) in cases {
+            assert_eq!(backend.scope(), scope);
+            assert_eq!(backend.private_memory_metric(), metric);
+            let sample = ProcessMemoryProbeResult::observed_with_optional_peak(
+                scope, backend, 1, 1, 1024, 2048, None,
+            );
+            assert!(sample.is_complete_for(scope));
+            assert_eq!(sample.private_memory_metric, Some(metric));
+        }
     }
 
     #[test]

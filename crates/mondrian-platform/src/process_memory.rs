@@ -10,6 +10,11 @@ use mondrian_platform_core::{
     ProcessMemoryProbeBackend, ProcessMemoryProbeResult, ProcessMemoryScope,
 };
 
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+
 pub(super) fn system_process_memory(scope: ProcessMemoryScope) -> ProcessMemoryProbeResult {
     #[cfg(target_os = "windows")]
     {
@@ -19,7 +24,17 @@ pub(super) fn system_process_memory(scope: ProcessMemoryScope) -> ProcessMemoryP
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::process_memory(scope)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        macos::process_memory(scope)
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     {
         ProcessMemoryProbeResult::unsupported(
             scope,
