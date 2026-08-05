@@ -3,16 +3,18 @@
 use crate::app::preview_access_mode::{MediaPreviewJob, MediaPreviewRequestPriority};
 use crate::app::preview_hardware_admission::PreviewHardwareDecodeAdmissionState;
 use crate::app::preview_media_source::{
-    resolve_preview_media_source, PreviewMediaSourceOutcome, PreviewMediaSourceRequest,
+    resolve_preview_media_source, PreviewMediaDecodePathResolution, PreviewMediaSourceOutcome,
+    PreviewMediaSourceRequest,
 };
 use crate::app::preview_media_task::decode_media_preview_with_context;
 use crate::app::preview_timeline_execution::PreviewTimelineMediaRequest;
+use crate::app::proxy_generation::resolve_app_state_proxy_color_contract;
 use crate::app::AppState;
 use anyhow::{bail, ensure, Context};
 use mondrian_assets::AssetRecord;
 use mondrian_media::{
     PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewDecodeSessionContext,
-    PreviewHardwareDecodeRequest,
+    PreviewDecodeTemporalSelection, PreviewHardwareDecodeRequest,
 };
 use mondrian_renderer::CpuSourceColorFrame;
 use mondrian_timeline::sequence::InputColorResolutionSource;
@@ -22,6 +24,7 @@ use std::time::Instant;
 pub(super) struct DecodedMedia {
     pub(super) frame: crate::app::preview_media_frame::MediaPreviewFrame,
     pub(super) input_color_resolution: InputColorResolutionSource,
+    pub(super) path_resolution: PreviewMediaDecodePathResolution,
 }
 
 pub(super) fn decode_media(
@@ -30,7 +33,21 @@ pub(super) fn decode_media(
     asset: &AssetRecord,
     decode_context: &mut PreviewDecodeSessionContext,
 ) -> anyhow::Result<DecodedMedia> {
+    decode_media_with_preference(state, request, asset, decode_context, false)
+}
+
+pub(super) fn decode_media_with_preference(
+    state: &AppState,
+    request: &PreviewTimelineMediaRequest,
+    asset: &AssetRecord,
+    decode_context: &mut PreviewDecodeSessionContext,
+    prefer_proxy: bool,
+) -> anyhow::Result<DecodedMedia> {
     let proxy_config = state.proxy_config();
+    let proxy_color = prefer_proxy
+        .then(|| resolve_app_state_proxy_color_contract(state, asset))
+        .transpose()
+        .map_err(anyhow::Error::msg)?;
     let resolved = match resolve_preview_media_source(PreviewMediaSourceRequest {
         asset,
         color_space_override: request.color_space_override,
@@ -38,10 +55,10 @@ pub(super) fn decode_media(
         source_sample: request.source_sample,
         target_resolution: request.target_resolution,
         input_color: &request.input_color,
-        prefer_proxy: false,
+        prefer_proxy,
         request_missing_proxy_generation: false,
         proxy_config: &proxy_config,
-        proxy_color: None,
+        proxy_color,
         hardware_admission: PreviewHardwareDecodeAdmissionState::default(),
         cpu_working_required: request.cpu_working_required,
     }) {
@@ -87,6 +104,7 @@ pub(super) fn decode_media(
     Ok(DecodedMedia {
         frame,
         input_color_resolution: resolved.input_color_resolution.source,
+        path_resolution: resolved.path_resolution,
     })
 }
 
@@ -98,6 +116,14 @@ pub(super) fn source_rgba(
         CpuSourceColorFrame::EncodedRgba8(frame) => Ok(frame.rgba().to_vec()),
         CpuSourceColorFrame::LinearFloat(_) => bail!("color fixture unexpectedly decoded as float"),
     }
+}
+
+pub(super) fn source_temporal_selection(
+    frame: &crate::app::preview_media_frame::MediaPreviewFrame,
+) -> anyhow::Result<PreviewDecodeTemporalSelection> {
+    frame
+        .temporal_selection()
+        .context("decoded media did not retain temporal-selection evidence")
 }
 
 pub(super) fn rgba8_at(rgba: &[u8], width: u32, x: u32, y: u32) -> anyhow::Result<[u8; 4]> {

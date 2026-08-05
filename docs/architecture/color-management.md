@@ -1044,7 +1044,7 @@ stable RGBA hash, compare the shared preview/export color-health fields for the
 same frame, and compare normalized report verdict/check/root-cause/action
 signatures. The product Color Media Golden uses the shared Hero Sequence rather
 than an isolated color document: its HLG Main10 and sRGB straight-Alpha sources
-occupy two adjacent stage-owned Tracks in the exact `350..375` window, with HLG
+occupy two adjacent stage-owned Tracks in the exact `500..525` window, with HLG
 below Alpha. Reference execution explicitly selects the original source, never a
 proxy; the HLG Clip keeps its exact source interval, the PNG keeps a zero-rate
 hold, and durable reopen retains typed Track/Clip/Asset identities plus canonical

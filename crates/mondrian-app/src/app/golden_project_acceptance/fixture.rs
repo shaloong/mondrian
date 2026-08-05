@@ -147,7 +147,7 @@ pub(super) fn resolve_fixture(
         "Golden fixture is absent: {}",
         artifact_path.display()
     );
-    let artifact_path = artifact_path.canonicalize()?;
+    let artifact_path = mondrian_assets::canonical_asset_file_path(&artifact_path)?;
     let artifact_size = artifact_path.metadata()?.len();
     let artifact_hash = sha256_file(&artifact_path)?;
 

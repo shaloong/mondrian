@@ -116,6 +116,36 @@ fn decoded_temporal_extent_is_end_exclusive_and_unknown_is_point_only() {
 }
 
 #[test]
+fn decoder_temporal_selection_projects_only_complete_bounded_evidence() {
+    let mut diagnostics = PreviewDecodeDiagnostics::new(PreviewDecodePath::InProcessFfmpegCpuRgba);
+    diagnostics.requested_pts = Some(1_020);
+    diagnostics.selected_pts = Some(1_000);
+    diagnostics.selected_duration_pts = Some(40);
+    diagnostics.selected_temporal_extent_source = super::PreviewTemporalExtentSource::FrameDuration;
+    let selection = diagnostics.temporal_selection().expect("complete temporal selection");
+    assert_eq!(selection.requested_pts, 1_020);
+    assert_eq!(selection.selected_pts, 1_000);
+    assert_eq!(selection.selected_duration_pts, 40);
+    assert_eq!(
+        selection.extent_source,
+        super::PreviewTemporalExtentSource::FrameDuration
+    );
+    assert!(!selection.temporal_approximation);
+
+    diagnostics.selected_temporal_extent_source = super::PreviewTemporalExtentSource::Unknown;
+    assert!(diagnostics.temporal_selection().is_none());
+    diagnostics.selected_temporal_extent_source = super::PreviewTemporalExtentSource::FrameDuration;
+    diagnostics.selected_duration_pts = Some(0);
+    assert!(diagnostics.temporal_selection().is_none());
+    diagnostics.selected_pts = Some(i64::MAX);
+    diagnostics.selected_duration_pts = Some(1);
+    assert!(diagnostics.temporal_selection().is_none());
+    diagnostics.selected_pts = Some(1_000);
+    diagnostics.requested_pts = None;
+    assert!(diagnostics.temporal_selection().is_none());
+}
+
+#[test]
 fn real_concat_duration_selects_covering_before_even_when_successor_is_nearer() {
     let before = DecodedTemporalExtent::from_duration(735_560_143, 55_882);
     let after = DecodedTemporalExtent::from_duration(735_616_025, 20_020);

@@ -11,7 +11,7 @@ control exists.
   purposes. Fixed files pin bytes globally; generated files pin the recipe and
   are byte-pinned by each run.
 - `tests/validation/golden-project.json` defines the five-minute editing and
-  export workflow. Contract identity `windows-alpha-golden-v11` uses closed
+  export workflow. Contract identity `windows-alpha-golden-v12` uses closed
   schema v4 and fixes exact Hero Sequence raster/timing/color/audio
   values, fixture-role purposes, stable built-in delivery preset identities,
   resolved profile/depth/chroma/range/Alpha expectations, and independently
@@ -75,7 +75,7 @@ cannot satisfy a color golden even when it carries valid CICP tags.
 
 An execution slice is intentionally narrower than the complete Golden Project.
 It passes only if its exact required fixture roles, operations, and content have
-typed postcondition evidence. Golden v11 rejects unknown fields; requirement IDs
+typed postcondition evidence. Golden v12 rejects unknown fields; requirement IDs
 select evidence obligations but cannot substitute for observed author, media,
 delivery, or persistence facts.
 Every slice report explicitly records `complete_golden_project: false`. A
@@ -159,7 +159,7 @@ Generated Delivery, Proxy/Relink, Recovery/Nesting, and Color Media on the same 
 7,500-frame Hero Sequence and crosses every durable reopen. Before Recovery it requires one
 unchanged Project ID/path and exactly one Sequence; Recovery must retain that
 Hero primary and add exactly one nested child. Color Media must keep the total
-at exactly two Sequences while adding two adjacent Tracks in `350..375`, with
+at exactly two Sequences while adding two adjacent Tracks in `500..525`, with
 HLG below Alpha, exact HLG source mapping, explicit still hold, and
 original-source reference execution. Visual must leave the complete Hero audio
 projection unchanged.
@@ -176,19 +176,21 @@ ranges and prove complete one-step Undo/Redo author roundtrips. Delivery
 reuses the Foundation PCM placement instead of importing a duplicate, uses the
 nonzero `150..175` Work Area, and preserves all earlier Track-owned authoring
 while it authors Trim, Transform, and Opacity.
-Proxy/Relink adds one dedicated video Track, trims the imported H.264 Clip to
-`200..350`, and proves Proxy→Original→Proxy plus offline Relink and replacement
-proxy generation without changing any preceding Track-owned anchor. It then
-authors an exact `1/2` source map through the normal product Action. At timeline
-frame 250, Preview and Export plans must both retain the same complete covering
-source target at 1 second, and the physical 25 fps Adapter must resolve frame 25.
-A production Headless Viewer presents the proxy-backed current frame; the
-immutable export snapshot instead renders exact single-frame range `250..251`
-from the relinked original through H.264/AAC. Ordinary reimport/decode must be close to the 50% Program reference
-and materially farther from a separately rendered 100% counterfactual at source
-time 2 seconds. This rejects metadata-only retime, Preview/Export disagreement,
-wrong proxy/original authority, a dropped sampling boundary, and an encoded
-output sampled from the old rate.
+Proxy/Relink adds one dedicated video Track with adjacent CFR `200..350` and
+VFR `350..500` Clips. Both imports and proxies execute through production
+workers. The CFR source proves Proxy→Original→Proxy plus asynchronous offline
+Relink and replacement proxy generation without changing preceding anchors.
+Each Clip then executes exact `1/2`, `-1/2`, and reverse hold through normal
+product Actions. Preview and Export must retain the same complete covering or
+strict-predecessor source target. The CFR oracle verifies physical frame 25/49;
+the VFR oracle instead verifies exact requested/selected/duration PTS and a
+60 ms predecessor immediately before a 20 ms covering interval. Headless
+presents reverse and hold from proxies, while immutable snapshots export each
+held frame from originals through H.264/AAC. Ordinary reimport/decode must be
+both absolutely and proportionally closer to the expected Program than
+adjacent-covering and wrong-direction counterfactuals. This rejects nominal
+average-rate sampling, metadata-only retime, Preview/Export disagreement,
+wrong proxy/original authority, dropped boundary kind, and proxy delivery.
 Recovery must then preserve every earlier scoped anchor while its exact
 `175..200` parent placement, nested child, Autosave recovery, and covering
 manual reopen remain identical.
@@ -353,7 +355,7 @@ cargo test -p mondrian-app --lib `
 
 The slice requires first-class `StillImage` import, a zero-rate Media hold,
 two directly adjacent product-authored Hero video Tracks, exact placement in
-`350..375`, and durable reopen. HLG is below Alpha; the HLG Clip retains its
+`500..525`, and durable reopen. HLG is below Alpha; the HLG Clip retains its
 exact source interval, and color-reference execution selects the original source
 rather than a proxy. It
 then decodes through the production Preview media Adapter, uses the shared
@@ -371,27 +373,33 @@ Run the Proxy/Original and Offline Relink slice:
 ```powershell
 pwsh -File scripts/validation/generate-golden-editorial-video.ps1 `
   -OutputRoot target/validation/golden-fixtures/large -Force
+pwsh -File scripts/validation/generate-golden-vfr-retime-video.ps1 `
+  -OutputRoot target/validation/golden-fixtures/large -Force
 $env:MONDRIAN_GOLDEN_FIXTURE_ROOT = "target/validation/golden-fixtures"
 cargo test -p mondrian-app --lib `
   golden_project_proxy_original_offline_relink_gate -j1 -- `
   --ignored --nocapture --test-threads=1
 ```
 
-The slice copies the attested fixture into two run-local source locations and
-imports the first through the production media worker. The stage reuses the
-Hero Sequence, creates one dedicated video Track, and trims its Clip to the
-exact `200..350` window through ordinary Timeline Actions. Import-driven proxy
-generation must cross a real worker boundary and publish a fresh proxy. Product
+The slice copies the attested CFR fixture into two run-local Relink locations
+and the attested VFR fixture into a third source location. The stage imports
+both through the production media worker, reuses Hero, creates one dedicated
+video Track, and authors adjacent `200..350` CFR and `350..500` VFR placements
+through ordinary Timeline Actions. Both import-driven proxies must cross real
+worker boundaries and publish fresh artifacts. CFR Product
 Actions then switch Preview to original, back to the exact same fresh proxy,
 and finally to original again; every switch is exactly one Project author
 transaction and does not revise the Sequence. The run-local source is then
 made offline. Preview must report a structured unavailable source, the ordinary
-Relink Action must advance only the Asset Library revision, publish its reload
-event, and retain the same typed Asset/Clip identities and authored name.
+Relink Action must complete its bounded two-phase probe/commit operation,
+advance only the Asset Library revision, publish its reload event, and retain
+the same typed Asset/Clip identities and authored name.
 Because proxy identity includes the source path and fingerprint contract, the
 old proxy must be ineligible for the replacement path; a second real generation
-must publish a distinct fresh proxy. Report schema v3 captures the exact
-Track/Clip/Asset projection and project/asset proxy intent so the following
+must publish a distinct fresh proxy. Report schema v5 captures both placement
+anchors, Relink operation/generation/terminal evidence, signed CFR/VFR source
+targets, physical PTS intervals, proxy/original bindings, Headless completions,
+two exports/reimports, and project/asset proxy intent so the following
 Recovery stage can prove they survive a new Session and covering reopen. The
 report remains a partial slice and never claims independent color-reference or
 complete Golden status.
@@ -559,8 +567,8 @@ the terminal boundary cannot grow that denominator.
 The manifest contains the committed Standard numeric color corpus, two
 project-generated M0 workload recipes (1812 seconds of 4K25 HEVC Main10
 Long-GOP Rec.709 code-pattern video and 1835 seconds of 48 kHz stereo AAC), the
-305-second Golden PCM authoring fixture, and the short H.264 High editorial
-fixture used only for proxy/relink semantics.
+305-second Golden PCM authoring fixture, and short CFR/VFR H.264 High editorial
+fixtures used only for proxy/relink/time semantics.
 They make the professional playback run reproducible without importing local
 downloads or asserting false color correctness. The clean `c484c47` run
 `20260722T065141Z-local-windows-dev-01-f4fc3eff` completed the full Video+Audio
@@ -568,23 +576,24 @@ plan on the qualified 16 GiB Windows reference machine and was classified
 `passed-baseline`. Its generated artifacts and evidence bundle remain
 intentionally disposable under `target`; the repository commits the recipes,
 contracts, and this reproducible result record rather than a multi-gigabyte
-machine-specific bundle. The Golden v11 contract resolves PCM, AAC, Rec.709
-H.264, HLG Main10, and sRGB Alpha fixture identities and assigns all five to
-executable slices.
+machine-specific bundle. The Golden v12 contract resolves PCM, AAC, CFR and
+VFR Rec.709 H.264, HLG Main10, and sRGB Alpha fixture identities and assigns
+all six to executable slices.
 `foundation-audio-authoring-v1`, `visual-authoring-roundtrip-v1`,
 `editorial-transport-v2`, `generated-delivery-roundtrip-v1`,
 `proxy-relink-v1`, `recovery-nesting-v1`, and `color-media-roundtrip-v1`
 now share one Hero Sequence. Recovery adds one nested child while Proxy/Relink
 retains a real focused Headless product-workflow gate rather than becoming a
-declaration-only check. The same real H.264 fixture now closes exact 50% source
-mapping through proxy presentation, original-source production export, ordinary
-reimport, and a 100% counterfactual comparison; its manifest purpose is explicit
-and the fixture is still not eligible as a color reference.
-Color Media adds real file-backed color/Alpha execution in `350..375`, while
+declaration-only check. The CFR and VFR fixtures close forward/reverse/hold
+source mapping through proxy presentation, original-source production export,
+ordinary reimport, physical PTS interval evidence, and adjacent/wrong-direction
+counterfactuals; their manifest purposes are explicit and neither is eligible
+as a color reference.
+Color Media adds real file-backed color/Alpha execution in `500..525`, while
 explicitly retaining the independent absolute HLG/PQ/Log gap. The H.264
-editorial fixture is not eligible to close
+editorial fixtures are not eligible to close
 primary-color or LUT coverage. Stress coverage
-also still lacks 4K60 and broader Log/VFR/multichannel/damaged-media fixtures,
+also still lacks 4K60 and broader real-device VFR/Log/multichannel/damaged-media fixtures,
 so `Nightly/Release -Scope All` correctly remains blocked.
 
 A separate non-ignored Retime Hero seam gate uses the same production

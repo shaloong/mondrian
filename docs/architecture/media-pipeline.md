@@ -1875,14 +1875,17 @@ Sequence edit. Preview re-resolves the live record, observes a missing
 replacement proxy, and may request a fresh artifact through the same service.
 No UI-owned cache invalidation list is required for correctness.
 The Golden Proxy/Relink Adapter exercises that production boundary inside the
-shared Hero Sequence. It owns one dedicated video Track, trims the imported
-H.264 Clip to the exact `200..350` window, waits for both original-source and
-replacement-source proxy attempts to publish terminal completion evidence, and
-captures a Track/Clip/Asset-scoped anchor. Later Autosave recovery and durable
-reopen may add unrelated Hero authoring, but they must retain that exact
-placement, relinked Asset record, project/asset proxy intent, and the distinct
-replacement proxy identity. This is codec/proxy/relink evidence, not an
-independent Rec.709 color reference.
+shared Hero Sequence. It owns one dedicated video Track and two adjacent
+placements: CFR H.264 in `200..350` and attested VFR H.264 in `350..500`.
+Both imports cross the bounded worker and publish fresh proxies. The CFR source
+then proves Proxy→Original→Proxy, asynchronous two-phase offline Relink,
+replacement-source proxy generation, exact Asset Library revision, and reload
+notification. The report captures both Clip/Asset anchors and the Relink
+operation/generation/terminal evidence. Later Recovery and durable reopen may
+add unrelated Hero authoring, but they must retain both placements, the
+relinked CFR record, project/asset proxy intent, and distinct replacement proxy
+identity. These generated code patterns are codec/proxy/time evidence, not
+independent Rec.709 color references.
 `ProxyCodec::Auto` selects H.264 High 8-bit only for ordinary 8-bit SDR and
 selects H.265 Main10 for HDR, camera-log, or greater-than-8-bit sources.
 Explicit H.264 requests for high-precision sources fail closed. H.265 Main10
@@ -2752,6 +2755,17 @@ Every successful Preview media result carries an exact
 result, not a synonym for “not reused.” A playback-ring hit remains
 `BypassedCache` when the outer Session owner attaches request evidence; it must
 not be overwritten with the compatible Session's `Reused` state.
+
+Exact decode also projects one narrow `PreviewDecodeTemporalSelection` from
+the full diagnostics at the media-payload boundary. It exists only when
+requested PTS, selected PTS, a positive non-overflowing selected duration, and
+the duration's evidence source are all present. It preserves physical
+presentation identity for validation without making downstream caches depend
+on decoder policy/performance diagnostics. Golden signed-retime evidence
+requires the requested PTS to lie in the selected end-exclusive interval and
+rejects approximation. For VFR, average frame rate is never a physical frame
+oracle: the gate compares an exact strict-predecessor request against the
+adjacent covering request and proves the decoded 60 ms and 20 ms intervals.
 
 Concrete cancellation evidence remains separate from successful-frame
 profiles. It carries the Session disposition reached by that request and the

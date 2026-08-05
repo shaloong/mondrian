@@ -579,7 +579,7 @@ fn execute_complete_golden_project(
         proxy_relink::PROXY_RELINK_SLICE_ID.to_owned(),
         proxy_relink_sequence_id,
     );
-    let proxy_relink_asset_id = proxy_relink.asset_id();
+    let proxy_relink_asset_id = proxy_relink.asset_id()?;
     let proxy_relink_asset = run
         .workflow
         .app()

@@ -135,7 +135,9 @@ pub(super) fn author_transition<T>(
     );
     ensure!(
         before.author_generation.checked_add(1) == Some(after.author_generation),
-        "{intent} did not advance Author Generation exactly once"
+        "{intent} did not advance Author Generation exactly once: before {}, after {}",
+        before.author_generation,
+        after.author_generation
     );
     ensure!(
         before.active_sequence_id == after.active_sequence_id,
@@ -143,7 +145,9 @@ pub(super) fn author_transition<T>(
     );
     ensure!(
         before.sequence_revision.checked_add(1) == Some(after.sequence_revision),
-        "{intent} did not advance Sequence Author Revision exactly once"
+        "{intent} did not advance Sequence Author Revision exactly once: before {}, after {}",
+        before.sequence_revision,
+        after.sequence_revision
     );
     Ok((output, AuthorTransitionEvidence { intent, before, after }))
 }
@@ -376,12 +380,13 @@ pub(super) fn execute_export_job(
             && terminal.disposition == ExecutionTerminalDisposition::Completed,
         "export terminal evidence disagrees with completed queue state"
     );
-    let output_path = output_path.canonicalize().with_context(|| {
-        format!(
-            "completed export is not present at {}",
-            output_path.display()
-        )
-    })?;
+    let output_path =
+        mondrian_assets::canonical_asset_file_path(&output_path).with_context(|| {
+            format!(
+                "completed export is not present at {}",
+                output_path.display()
+            )
+        })?;
     Ok(CompletedExportEvidence {
         job_id,
         generation: snapshot.generation,

@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "corpus_revision": "2026-07-24",
+  "corpus_revision": "2026-08-05",
   "entries": [
     {
       "id": "mondrian-standard-quality-v1",
@@ -154,6 +154,46 @@
         "proxy-original-switch",
         "offline-relink",
         "constant-retime"
+      ]
+    },
+    {
+      "id": "generated-golden-rec709-h264-vfr-v1",
+      "path": "large/golden-rec709-h264-vfr-v1.mp4",
+      "availability": "generated",
+      "sha256": null,
+      "size_bytes": null,
+      "generation": {
+        "recipe_path": "scripts/validation/generate-golden-vfr-retime-video.ps1",
+        "recipe_sha256": "d09f6faae4aced87338d9a814329c5d9f26e4cd19040f0c2ae905d6a8e1dd773",
+        "profile": "SignedRetimeVfr",
+        "attestation_suffix": ".attestation.json",
+        "artifact_hash_scope": "reference-run"
+      },
+      "provenance": {
+        "source": "Deterministic FFmpeg lavfi testsrc2 code-pattern recipe with alternating 20/60 ms presentation intervals; not a color reference",
+        "rights_basis": "project-generated-synthetic-stimulus",
+        "redistribution": "permitted"
+      },
+      "media": {
+        "kind": "video",
+        "container": "mp4",
+        "codec": "h264-high",
+        "width": 1920,
+        "height": 1080,
+        "frame_rate": "5000/199",
+        "frame_rate_mode": "variable",
+        "bit_depth": 8,
+        "primaries": "bt709",
+        "transfer": "bt709",
+        "matrix": "bt709",
+        "range": "limited",
+        "minimum_stream_duration_seconds": 7.9,
+        "color_reference_eligible": false
+      },
+      "purposes": [
+        "golden-rec709-h264-vfr-picture",
+        "constant-retime",
+        "vfr-presentation-interval"
       ]
     },
     {

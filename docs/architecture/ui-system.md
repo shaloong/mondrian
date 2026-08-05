@@ -675,7 +675,7 @@ values observed under a distinct fresh Session after load. Action admission or
 a human-readable status hint alone cannot satisfy a Golden operation.
 
 Golden validation has one UI-independent planning Module. It compiles the
-closed schema-v4 / `windows-alpha-golden-v11` contract into two deterministic
+closed schema-v4 / `windows-alpha-golden-v12` contract into two deterministic
 ledgers of required fixture roles, operations, content, and exports. The global
 ledger finds work absent from every slice; the Hero ledger independently finds
 work that exists only in isolated diagnostic Sequences. A slice declares one
@@ -733,9 +733,10 @@ production Preview, audio Program Runtime, export queue, output validator,
 media import worker, preview decoder, and bounded audio source reader. The
 Headless Adapter attempts GPU execution first and records an explicit CPU
 Raster fallback when a valid effect cannot execute on GPU. Proxy/Relink owns a
-dedicated Hero Track in the exact `200..350` window. Its local evidence binds
-the trimmed Clip, stable Asset identity, relinked record, and proxy intent so a
-later stage can add unrelated Hero authoring without weakening verification.
+dedicated Hero Track with adjacent CFR `200..350` and VFR `350..500`
+placements. Its local evidence binds both Clips and Assets, the asynchronously
+relinked CFR record, and both proxy intents so a later stage can add unrelated
+Hero authoring without weakening verification.
 Recovery/Nesting adds a dedicated Hero Track in the exact `175..200` window,
 keeps Hero as its primary identity, and owns one auxiliary Nested Composition
 child. Its Autosave recovery and covering manual reopen must preserve the
@@ -771,15 +772,17 @@ deterministic execution evidence. The recovered Session must remain dirty and
 the recovery archive authoritative until a covering manual save atomically
 retires it. A final composed reopen must preserve the fixed Project binding,
 the two Sequences present at the Recovery boundary, earlier stage content,
-relinked Asset intent, its exact `1/2` Clip source map, and both typed reimport
-profiles. Proxy/Relink owns the fixed-corpus constant-retime product evidence:
-the Inspector-independent Action advances one author transaction, Preview and
-Export plans must retain the same complete `SourceSampleTarget` and the media
-Adapter must record the resolved physical frame, a Headless Viewer presents
-through the production proxy path, and a production H.264/AAC export from the
-immutable original-source snapshot is reimported and compared with both the
-correct Program reference and an incorrect 100% counterfactual. The later Color
-Media stage keeps that count at two, reuses Hero in the `350..375` window, and
+relinked Asset intent, both retained exact `1/2` Clip source maps, and all typed
+reimport profiles. Proxy/Relink owns the fixed-corpus signed-retime product
+evidence: CFR and VFR each advance through `1/2`, `-1/2`, and reverse hold;
+Preview and Export retain the same complete `SourceSampleTarget`; the decoder
+records a proven physical PTS interval; Headless presents reverse and hold via
+the production proxy path; and immutable-original H.264/AAC exports are
+reimported against expected, adjacent-covering, and wrong-direction Program
+references. Undo occurs before reimport because automatic proxy intent for a
+newly imported delivery is a legitimate Project History entry and must not be
+mistaken for the preceding Sequence edit. The later Color Media stage keeps
+that count at two, reuses Hero in the `500..525` window, and
 retains its two adjacent file-backed Track/Clip/Asset anchors without changing
 the Recovery parent Track or child. All seven stage primaries now share Hero. The
 supervised run `20260725T172841Z-complete-golden-d631639d` passed three distinct
@@ -789,11 +792,14 @@ fresh run/Project identities with Lift/Extract required and observed; its
 aggregate report hash is
 `4edaeb0404fad68b813f5592a0533b86788414b3f3142ac88be04e46fb5ca8aa`.
 It is historical after the v11 constant-retime obligation and cannot satisfy
-the current three-run gate. The official v11 run
+that superseding gate. The official v11 run
 `20260726T075954Z-complete-golden-30ffb812` passed three fresh run/Project
 identities with the fixed-corpus constant-retime evidence required and observed;
 its aggregate report hash is
 `e596fc2756eada710d84a0873dcd5e13f49c7d33ee35b8c959e6e130465ece4f`.
+It is historical after v12 added attested VFR signed-retime, physical PTS
+interval, dual Headless/Export/reimport, and two-placement retention evidence;
+v12 has not yet completed the required supervised three-run gate.
 Earlier eight-Sequence runs remain diagnostic history.
 Qualified release-machine capture and independent HDR/Log numeric references
 remain separate acceptance obligations.

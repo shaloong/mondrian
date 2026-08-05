@@ -7,6 +7,8 @@
 use std::sync::{Arc, OnceLock};
 
 use mondrian_core::types::{ColorSpace, Resolution};
+#[cfg(any(test, feature = "validation"))]
+use mondrian_media::PreviewDecodeTemporalSelection;
 use mondrian_media::{
     DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoSampling,
     DecodedVideoSurfaceFormat, PreviewDecodeDiagnostics, PreviewNativeDecodedFrame,
@@ -223,6 +225,16 @@ impl MediaPreviewFrame {
         self.decode_execution
     }
 
+    /// Physical PTS interval selected by the decoder for this media payload.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn temporal_selection(&self) -> Option<PreviewDecodeTemporalSelection> {
+        match &self.payload {
+            MediaPreviewPayload::Working(_) => None,
+            MediaPreviewPayload::Source(source) => source.temporal_selection,
+            MediaPreviewPayload::Native(source) => source.temporal_selection,
+        }
+    }
+
     pub(crate) fn gpu_source(&self) -> Option<ViewerGpuMediaSource> {
         let MediaPreviewPayload::Source(source) = &self.payload else {
             return None;
@@ -357,6 +369,8 @@ pub(crate) struct MediaPreviewGpuSourceFrame {
     pub(crate) decoder_handle_kind: Option<DecodedGpuFrameHandleKind>,
     pub(crate) decoded_surface_format: DecodedVideoSurfaceFormat,
     pub(crate) decoded_video_sampling: DecodedVideoSampling,
+    #[cfg(any(test, feature = "validation"))]
+    temporal_selection: Option<PreviewDecodeTemporalSelection>,
     working_cache:
         Arc<OnceLock<Result<MediaPreviewWorkingFrameCacheEntry, Arc<RenderColorTransformError>>>>,
 }
@@ -366,6 +380,8 @@ pub(crate) struct MediaPreviewNativeSourceFrame {
     pub(crate) source_color_space: ColorSpace,
     pub(crate) input_transform: RenderInputTransform,
     pub(crate) native_frame: Arc<PreviewNativeDecodedFrame>,
+    #[cfg(any(test, feature = "validation"))]
+    temporal_selection: Option<PreviewDecodeTemporalSelection>,
 }
 
 impl MediaPreviewNativeSourceFrame {
@@ -374,10 +390,14 @@ impl MediaPreviewNativeSourceFrame {
         source_color_space: ColorSpace,
         input_transform: RenderInputTransform,
     ) -> Self {
+        #[cfg(any(test, feature = "validation"))]
+        let temporal_selection = native_frame.diagnostics.temporal_selection();
         Self {
             source_color_space,
             input_transform,
             native_frame: Arc::new(native_frame),
+            #[cfg(any(test, feature = "validation"))]
+            temporal_selection,
         }
     }
 }
@@ -395,6 +415,8 @@ impl MediaPreviewGpuSourceFrame {
             decoder_handle_kind: None,
             decoded_surface_format: DecodedVideoSurfaceFormat::Unknown,
             decoded_video_sampling: DecodedVideoSampling::default(),
+            #[cfg(any(test, feature = "validation"))]
+            temporal_selection: None,
             working_cache: Arc::new(OnceLock::new()),
         }
     }
@@ -404,6 +426,8 @@ impl MediaPreviewGpuSourceFrame {
         input_transform: RenderInputTransform,
         diagnostics: PreviewDecodeDiagnostics,
     ) -> Self {
+        #[cfg(any(test, feature = "validation"))]
+        let temporal_selection = diagnostics.temporal_selection();
         Self {
             source: Arc::new(source.into()),
             input_transform,
@@ -411,6 +435,8 @@ impl MediaPreviewGpuSourceFrame {
             decoder_handle_kind: diagnostics.gpu_frame_handle_kind,
             decoded_surface_format: diagnostics.decoded_surface_format,
             decoded_video_sampling: diagnostics.decoded_video_sampling,
+            #[cfg(any(test, feature = "validation"))]
+            temporal_selection,
             working_cache: Arc::new(OnceLock::new()),
         }
     }

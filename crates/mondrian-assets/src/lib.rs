@@ -18,6 +18,16 @@ mod migration;
 mod native_path;
 pub use migration::ASSET_LIBRARY_SCHEMA_VERSION;
 
+/// Resolve an existing file into the ordinary canonical native namespace used
+/// by persisted Asset Library identity.
+///
+/// On Windows this deliberately removes the physical-I/O `\\?\` spelling;
+/// callers comparing a candidate with [`AssetRecord::file_path`] must use this
+/// boundary instead of `std::fs::canonicalize` directly.
+pub fn canonical_asset_file_path(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    native_path::ordinary_canonical_path(path)
+}
+
 #[cfg(test)]
 mod dependency_direction_tests {
     #[test]

@@ -356,6 +356,13 @@ the current SQLite TEXT schema. Row decoding fails closed on relative paths,
 dot/parent traversal, device namespaces, non-file verbatim namespaces, or
 non-ordinary spelling; offline media does not weaken that admission.
 
+`canonical_asset_file_path` is the public normalization boundary for callers
+that must compare an existing candidate or completed output with
+`AssetRecord::file_path`. On Windows it removes the `\\?\` physical-I/O
+spelling after canonicalization, matching the ordinary namespace persisted by
+the Library; direct comparison with `std::fs::canonicalize` output is forbidden
+because two spellings of one file must not become distinct author identities.
+
 Windows verbatim prefixes are not persisted into Project data, manifests,
 runtime allocation identity, or Asset records. Immediately before opening the
 live database or an opaque backup sibling through SQLite, the Asset Adapter

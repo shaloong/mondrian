@@ -34,7 +34,7 @@ use mondrian_export::preset::{
 use mondrian_timeline::sequence::{
     DeliveryBitDepth, FieldOrder, PixelAspectRatio, SequenceSettings, VideoRange,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -112,7 +112,7 @@ pub(super) struct GoldenExecutionSlice {
     pub(super) timeline_window: Option<GoldenTimelineWindow>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct GoldenTimelineWindow {
     pub(super) start_frame: i64,
@@ -569,7 +569,7 @@ fn golden_contract_is_closed_and_matches_product_delivery_presets() -> anyhow::R
     let contract = load_golden_contract(&root)?;
     let settings = sequence_settings_from_contract(&contract.timeline)?;
     ensure!(
-        contract.id == "windows-alpha-golden-v11"
+        contract.id == "windows-alpha-golden-v12"
             && contract
                 .required_operations
                 .iter()
@@ -584,8 +584,10 @@ fn golden_contract_is_closed_and_matches_product_delivery_presets() -> anyhow::R
     ensure!(
         proxy_relink.required_operations
             == ["proxy-original-switch", "offline-relink", "constant-retime"]
+            && proxy_relink.required_fixture_roles
+                == ["rec709-h264-picture", "rec709-h264-vfr-picture"]
             && proxy_relink.required_exports == ["h264-aac-sdr"],
-        "Proxy/Relink must close constant retime with a real H.264 delivery"
+        "Proxy/Relink must close constant retime with real CFR/VFR H.264 deliveries"
     );
     ensure!(
         contract.exports.len() == 2,

@@ -757,6 +757,26 @@ pub enum PreviewTemporalExtentSource {
     SuccessorBoundary,
 }
 
+/// Narrow immutable temporal-selection evidence retained beyond the decoder.
+///
+/// This is the physical PTS interval actually selected for one exact source
+/// target. It intentionally excludes decoder policy and performance diagnostics
+/// so Preview caches, presentation, and acceptance evidence can retain temporal
+/// identity without depending on the complete decoder implementation record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewDecodeTemporalSelection {
+    /// Requested stream-local PTS after exact source-target lowering.
+    pub requested_pts: i64,
+    /// First PTS of the selected presentation interval.
+    pub selected_pts: i64,
+    /// Positive duration of the selected presentation interval.
+    pub selected_duration_pts: i64,
+    /// Evidence that established the interval's exclusive end.
+    pub extent_source: PreviewTemporalExtentSource,
+    /// Whether the selection deliberately approximated the request.
+    pub temporal_approximation: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DecodedTemporalExtent {
     start_pts: i64,
@@ -1306,6 +1326,22 @@ impl PreviewDecodeDiagnostics {
             };
         }
         PreviewDecodeExecutionPath::SoftwareCpu
+    }
+
+    /// Project complete decoder diagnostics into stable temporal identity.
+    pub fn temporal_selection(&self) -> Option<PreviewDecodeTemporalSelection> {
+        let requested_pts = self.requested_pts?;
+        let selected_pts = self.selected_pts?;
+        let selected_duration_pts = self.selected_duration_pts.filter(|duration| *duration > 0)?;
+        (self.selected_temporal_extent_source != PreviewTemporalExtentSource::Unknown
+            && selected_pts.checked_add(selected_duration_pts).is_some())
+        .then_some(PreviewDecodeTemporalSelection {
+            requested_pts,
+            selected_pts,
+            selected_duration_pts,
+            extent_source: self.selected_temporal_extent_source,
+            temporal_approximation: self.temporal_approximation,
+        })
     }
 
     fn with_elapsed(mut self, elapsed: Duration) -> Self {

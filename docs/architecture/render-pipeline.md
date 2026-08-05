@@ -1768,26 +1768,28 @@ deliverables are decoded through the production Preview media Adapter and
 compared at the same coordinates. This remains deterministic Mondrian
 regression evidence; it does not replace the independent external color
 references described below.
-The Golden v11 Proxy/Relink gate adds fixed-corpus retime evidence without a
-second time interpreter. One exact `1/2` Clip source map is lowered by the
-ordinary Preview and Export requests at timeline frame 250; both must demand
-source time 1 second. The gate renders a Program reference from that canonical
-time and a separate 100% counterfactual at source time 2 seconds. It then
-presents the proxy-backed current frame through the production Headless Viewer,
-exports `250..251` from an immutable original-source snapshot through the
-production H.264/AAC queue, and reimports/decodes the published file. The
-encoded raster must remain within the bounded lossy-codec tolerance of the
-correct Program reference and materially farther from the counterfactual. Exact
-source-time equality, proxy/original resolution evidence, decode provenance,
-GPU presentation completion, export terminal disposition, stream boundaries,
-and both pixel distances are retained in one operation report. A metadata-only
-speed change, a parallel Export mapping, or a proxy accidentally used as the
-delivery source therefore fails closed.
-The Color Media Hero gate adds a file-backed proof at frame 350. It imports HLG
+The Golden v12 Proxy/Relink gate adds fixed-corpus signed-retime evidence
+without a second time interpreter. CFR and VFR Clips each execute exact `1/2`,
+`-1/2`, and reverse hold maps. Preview and Export plans must preserve the same
+complete `SourceSampleTarget`; reverse uses `StrictPredecessor`, never a
+rounded time or nominal frame number. Each fixture renders the expected
+Program plus adjacent-covering and wrong-direction counterfactuals, presents
+reverse and hold through the proxy-backed production Headless Viewer, exports
+the held frame from an immutable original-source snapshot, and ordinarily
+reimports/decodes the published H.264/AAC file. The VFR proof additionally
+binds physical requested/selected/duration PTS and crosses unequal 60/20 ms
+presentation intervals, so `avg_frame_rate` cannot masquerade as cadence.
+Bounded lossy-codec error must be both absolutely and proportionally closer to
+the expected Program than either counterfactual. Source-target equality,
+proxy/original resolution, decode provenance, GPU completions, export terminal
+disposition, stream boundaries, Undo restoration, and pixel distances remain
+one typed operation report. Metadata-only speed, parallel Export mapping,
+covering-for-reverse, or proxy-backed delivery therefore fails closed.
+The Color Media Hero gate adds a file-backed proof at frame 500. It imports HLG
 Main10 and sRGB straight-Alpha through production media authoring, evaluates the
 original rather than proxy source on two adjacent Hero Tracks, shares the
 float-linear composite and Program Output path with Preview, and exports/reimports
-frame `350..351`. Its exact Track/Clip/Asset placement anchor must survive the
+frame `500..501`. Its exact Track/Clip/Asset placement anchor must survive the
 stage reopen and the complete run's final reopen. The gate is valid coexistence
 and roundtrip evidence, not an independent absolute HLG/PQ/Log reference.
 

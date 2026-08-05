@@ -318,12 +318,17 @@ pub(super) fn execute_foundation_stage(
     let state = workflow.app_mut();
     state.dispatch_action(Action::ImportMedia(vec![fixture.path.clone()]))?;
     wait_for_media_imports(state)?;
+    let import_diagnostics = state.media_import_diagnostics();
     let library = state.asset_library().context("asset library missing after import")?;
     let assets = library.list_assets()?;
     let asset = assets
         .into_iter()
         .find(|asset| asset.file_path() == Some(fixture.path.as_path()))
-        .context("imported PCM fixture is absent from the Asset Library")?;
+        .with_context(|| {
+            format!(
+                "imported PCM fixture is absent from the Asset Library: {import_diagnostics:#?}"
+            )
+        })?;
     ensure!(
         asset.kind == AssetKind::Audio,
         "PCM fixture imported as a non-audio asset"

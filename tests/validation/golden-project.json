@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "id": "windows-alpha-golden-v11",
+  "id": "windows-alpha-golden-v12",
   "kind": "golden",
   "hero_sequence": {
     "role": "hero",
@@ -33,6 +33,12 @@
       "fixture_id": "generated-golden-rec709-h264-25fps-v1",
       "required": true,
       "required_purpose": "golden-rec709-h264-picture"
+    },
+    {
+      "role": "rec709-h264-vfr-picture",
+      "fixture_id": "generated-golden-rec709-h264-vfr-v1",
+      "required": true,
+      "required_purpose": "golden-rec709-h264-vfr-picture"
     },
     {
       "role": "srgb-alpha-still",
@@ -133,7 +139,8 @@
       "id": "proxy-relink-v1",
       "sequence_role": "hero",
       "required_fixture_roles": [
-        "rec709-h264-picture"
+        "rec709-h264-picture",
+        "rec709-h264-vfr-picture"
       ],
       "required_operations": [
         "proxy-original-switch",
@@ -146,7 +153,7 @@
       ],
       "timeline_window": {
         "start_frame": 200,
-        "end_frame_exclusive": 350
+        "end_frame_exclusive": 500
       }
     },
     {
@@ -224,8 +231,8 @@
       "required_content": [],
       "required_exports": [],
       "timeline_window": {
-        "start_frame": 350,
-        "end_frame_exclusive": 375
+        "start_frame": 500,
+        "end_frame_exclusive": 525
       }
     }
   ],

@@ -31,7 +31,7 @@ use mondrian_assets::{AssetKind, AssetRecord};
 use mondrian_core::events::AppEvent;
 use mondrian_core::timeline_data::AlphaInterpretation;
 use mondrian_core::{
-    AssetId, ClipId, ExecutionTerminalDisposition, FramePosition, SequenceId, TimeScale,
+    AssetId, ClipId, ExecutionTerminalDisposition, FramePosition, Rational, SequenceId, TimeScale,
     TimelineTime, TrackId,
 };
 use mondrian_editor_state::Action;
@@ -48,6 +48,10 @@ const RUN_ROOT_ENV: &str = "MONDRIAN_GOLDEN_PROXY_RELINK_RUN_ROOT";
 #[cfg(test)]
 const OUTPUT_ENV: &str = "MONDRIAN_GOLDEN_PROXY_RELINK_OUTPUT";
 const PROXY_TIMEOUT: Duration = Duration::from_secs(120);
+const CFR_WINDOW_START_FRAME: i64 = 200;
+const CFR_WINDOW_END_FRAME_EXCLUSIVE: i64 = 350;
+const VFR_WINDOW_START_FRAME: i64 = 350;
+const VFR_WINDOW_END_FRAME_EXCLUSIVE: i64 = 500;
 
 #[derive(Debug, Clone, Serialize)]
 struct ImportedVideoObservation {
@@ -58,16 +62,17 @@ struct ImportedVideoObservation {
     width: u32,
     height: u32,
     frame_rate: String,
+    total_frames: Option<u64>,
     color_space: String,
     range: DecodedVideoRange,
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct ResolvedPathEvidence {
-    path: PathBuf,
-    path_sha256: String,
-    resolution: &'static str,
-    fingerprint: MediaFileFingerprint,
+pub(super) struct ResolvedPathEvidence {
+    pub(super) path: PathBuf,
+    pub(super) path_sha256: String,
+    pub(super) resolution: &'static str,
+    pub(super) fingerprint: MediaFileFingerprint,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -84,6 +89,10 @@ struct ProxyExecutionEvidence {
 struct LibraryRelinkTransitionEvidence {
     before: AuthorCheckpoint,
     after: AuthorCheckpoint,
+    operation_id: u64,
+    generation: u64,
+    disposition: ExecutionTerminalDisposition,
+    elapsed_ms: u128,
     asset_library_revision_before: u64,
     asset_library_revision_after: u64,
     reload_event_published: bool,
@@ -142,32 +151,45 @@ impl OperationEvidence {
 #[derive(Debug, Clone, Serialize)]
 struct ProxyRelinkSetupEvidence {
     stage: GoldenSequenceStageEvidence,
-    asset_id: AssetId,
-    clip_id: ClipId,
     video_track_id: TrackId,
-    imported_video: ImportedVideoObservation,
     add_video_track: AuthorTransitionEvidence,
-    place_clip: AuthorTransitionEvidence,
-    trim_to_window: AuthorTransitionEvidence,
-    source_copy_sha256: String,
+    placements: Vec<ProxyRelinkPlacementEvidence>,
     replacement_copy_sha256: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct ProxyRelinkPlacementEvidence {
+    role: &'static str,
+    asset_id: AssetId,
+    clip_id: ClipId,
+    window: super::GoldenTimelineWindow,
+    imported_video: ImportedVideoObservation,
+    place_clip: AuthorTransitionEvidence,
+    trim_to_window: AuthorTransitionEvidence,
+    source_copy_sha256: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct GoldenProxyRelinkAuthoringAnchor {
-    sequence_id: SequenceId,
-    video_track_id: TrackId,
+struct ProxyRelinkClipAnchor {
+    role: &'static str,
     clip_id: ClipId,
     asset_id: AssetId,
-    track_sha256: String,
     asset_sha256: String,
     position: TimelineTime,
     duration: TimelineTime,
     source_origin: TimelineTime,
     source_scale: TimeScale,
     source_terminal_boundary: TimelineTime,
-    project_proxy_enabled: bool,
     asset_proxy_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct GoldenProxyRelinkAuthoringAnchor {
+    sequence_id: SequenceId,
+    video_track_id: TrackId,
+    track_sha256: String,
+    clips: Vec<ProxyRelinkClipAnchor>,
+    project_proxy_enabled: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -178,7 +200,7 @@ pub(super) struct GoldenProxyRelinkReport {
     corpus_revision: String,
     status: &'static str,
     complete_golden_project: bool,
-    fixture: FixtureEvidence,
+    fixtures: Vec<FixtureEvidence>,
     setup: ProxyRelinkSetupEvidence,
     operations: Vec<OperationEvidence>,
     authoring: GoldenProxyRelinkAuthoringAnchor,
@@ -189,8 +211,12 @@ impl GoldenProxyRelinkReport {
         self.setup.stage.sequence_id()
     }
 
-    pub(super) const fn asset_id(&self) -> AssetId {
-        self.setup.asset_id
+    pub(super) fn asset_id(&self) -> anyhow::Result<AssetId> {
+        self.setup
+            .placements
+            .first()
+            .map(|placement| placement.asset_id)
+            .context("Proxy/Relink report has no primary placement")
     }
 
     fn capture_authoring_anchor(
@@ -201,8 +227,12 @@ impl GoldenProxyRelinkReport {
             state,
             self.primary_sequence_id(),
             self.setup.video_track_id,
-            self.setup.clip_id,
-            self.setup.asset_id,
+            &self
+                .setup
+                .placements
+                .iter()
+                .map(|placement| (placement.role, placement.clip_id, placement.asset_id))
+                .collect::<Vec<_>>(),
         )
     }
 
@@ -236,7 +266,7 @@ fn new_run_paths(root: &Path) -> anyhow::Result<GoldenRunPaths> {
     })
 }
 
-fn path_resolution_label(resolution: PreviewMediaDecodePathResolution) -> &'static str {
+pub(super) fn path_resolution_label(resolution: PreviewMediaDecodePathResolution) -> &'static str {
     match resolution {
         PreviewMediaDecodePathResolution::Source => "source",
         PreviewMediaDecodePathResolution::Proxy => "proxy",
@@ -250,6 +280,16 @@ fn resolve_media_path(
     state: &AppState,
     asset: &AssetRecord,
 ) -> anyhow::Result<ResolvedPathEvidence> {
+    let prefer_proxy =
+        state.project_settings().proxy_enabled && state.is_asset_proxy_mode(asset.id);
+    resolve_media_path_for_preference(state, asset, prefer_proxy)
+}
+
+pub(super) fn resolve_media_path_for_preference(
+    state: &AppState,
+    asset: &AssetRecord,
+    prefer_proxy: bool,
+) -> anyhow::Result<ResolvedPathEvidence> {
     let sequence = state.active_sequence().context("active Sequence is absent")?;
     let input_color = sequence
         .settings
@@ -257,8 +297,6 @@ fn resolve_media_path(
         .media_input(sequence.settings.color.input.auto_tone_map_media);
     let proxy_config = state.proxy_config();
     let proxy_color = resolve_app_state_proxy_color_contract(state, asset).ok();
-    let prefer_proxy =
-        state.project_settings().proxy_enabled && state.is_asset_proxy_mode(asset.id);
     let outcome = resolve_preview_media_source(PreviewMediaSourceRequest {
         asset,
         color_space_override: None,
@@ -322,6 +360,53 @@ fn latest_proxy_attempt_id(state: &AppState) -> u64 {
         .unwrap_or(0)
 }
 
+fn latest_asset_mutation_operation_id(state: &AppState) -> u64 {
+    state
+        .media_asset_mutation_diagnostics()
+        .terminals
+        .iter()
+        .map(|record| record.operation_id)
+        .max()
+        .unwrap_or(0)
+}
+
+fn wait_for_relink_completion(
+    state: &mut AppState,
+    asset_id: AssetId,
+    after_operation_id: u64,
+) -> anyhow::Result<crate::app::media_asset_mutation::MediaAssetMutationTerminalRecord> {
+    let deadline = Instant::now() + PROXY_TIMEOUT;
+    loop {
+        state.poll_media_asset_mutations();
+        if let Some(record) = state
+            .media_asset_mutation_diagnostics()
+            .terminals
+            .into_iter()
+            .rev()
+            .find(|record| {
+                record.asset_id == asset_id
+                    && record.operation_id > after_operation_id
+                    && record.kind
+                        == crate::app::media_asset_mutation::MediaAssetMutationKind::Relink
+            })
+        {
+            ensure!(
+                record.evidence.disposition == ExecutionTerminalDisposition::Completed
+                    && record.detail.is_none(),
+                "relink ended as {:?}: {:?}",
+                record.evidence.disposition,
+                record.detail
+            );
+            return Ok(record);
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "timed out waiting for Asset relink completion"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 fn wait_for_proxy_completion(
     state: &mut AppState,
     asset_id: AssetId,
@@ -381,10 +466,71 @@ fn copy_fixture_pair(
         "run-local relink copies differ from the attested fixture"
     );
     Ok((
-        original.canonicalize()?,
-        replacement.canonicalize()?,
+        mondrian_assets::canonical_asset_file_path(&original)?,
+        mondrian_assets::canonical_asset_file_path(&replacement)?,
         fixture_hash,
     ))
+}
+
+fn copy_fixture_once(
+    fixture: &FixtureEvidence,
+    output_directory: &Path,
+    directory_name: &str,
+) -> anyhow::Result<(PathBuf, String)> {
+    let file_name = fixture.path.file_name().context("Golden fixture has no file name")?;
+    let directory = output_directory.join("media").join(directory_name);
+    std::fs::create_dir_all(&directory)?;
+    let destination = directory.join(file_name);
+    std::fs::copy(&fixture.path, &destination)?;
+    let fixture_hash = sha256_file(&fixture.path)?;
+    ensure!(
+        sha256_file(&destination)? == fixture_hash,
+        "run-local media copy differs from its attested fixture"
+    );
+    Ok((
+        mondrian_assets::canonical_asset_file_path(&destination)?,
+        fixture_hash,
+    ))
+}
+
+fn observe_imported_video(
+    asset: &AssetRecord,
+    expected_frame_rate: Rational,
+    expected_total_frames: u64,
+    label: &str,
+) -> anyhow::Result<ImportedVideoObservation> {
+    let video = asset
+        .media_probe()
+        .with_context(|| format!("{label} fixture has no coherent media probe"))?
+        .primary_video()
+        .with_context(|| format!("{label} fixture has no video stream"))?;
+    ensure!(
+        asset.kind == AssetKind::Video
+            && video.codec == VideoCodec::H264
+            && video.codec_profile == VideoCodecProfile::H264High
+            && video.pixel_format == PixelFormat::Yuv420p
+            && video.bit_depth == 8
+            && video.width == 1920
+            && video.height == 1080
+            && video.frame_rate == expected_frame_rate
+            && video.frame_rate_proven
+            && video.total_frames == Some(expected_total_frames)
+            && video.executable_color_space() == Some(mondrian_core::ColorSpace::Rec709)
+            && video.color_range == DecodedVideoRange::Limited,
+        "imported {label} media differs from the editorial fixture contract"
+    );
+    Ok(ImportedVideoObservation {
+        codec: video.codec.clone(),
+        codec_profile: video.codec_profile,
+        pixel_format: video.pixel_format,
+        bit_depth: video.bit_depth,
+        width: video.width,
+        height: video.height,
+        frame_rate: video.frame_rate.to_string(),
+        total_frames: video.total_frames,
+        color_space: "rec709".to_owned(),
+        range: video.color_range,
+    })
 }
 
 fn find_new_video_clip(
@@ -424,8 +570,7 @@ fn capture_proxy_relink_authoring_anchor(
     state: &AppState,
     sequence_id: SequenceId,
     video_track_id: TrackId,
-    clip_id: ClipId,
-    asset_id: AssetId,
+    expected_clips: &[(&'static str, ClipId, AssetId)],
 ) -> anyhow::Result<GoldenProxyRelinkAuthoringAnchor> {
     let sequence = state
         .sequence_by_id(sequence_id)
@@ -436,33 +581,42 @@ fn capture_proxy_relink_authoring_anchor(
         .find(|track| track.id == video_track_id)
         .context("Proxy/Relink video Track is absent")?;
     ensure!(
-        track.clips.len() == 1,
-        "Proxy/Relink video Track no longer contains exactly one owned Clip"
+        track.clips.len() == expected_clips.len(),
+        "Proxy/Relink video Track contains {} Clips instead of its {} owned placements",
+        track.clips.len(),
+        expected_clips.len()
     );
-    let clip = track
-        .clips
-        .iter()
-        .find(|clip| clip.id == clip_id)
-        .context("Proxy/Relink Clip is absent")?;
-    ensure!(
-        clip.library_asset_id() == Some(asset_id),
-        "Proxy/Relink Clip changed its Asset identity"
-    );
-    let asset = asset_by_id(state, asset_id)?;
+    let mut clips = Vec::with_capacity(expected_clips.len());
+    for &(role, clip_id, asset_id) in expected_clips {
+        let clip = track
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_id)
+            .with_context(|| format!("Proxy/Relink {role} Clip is absent"))?;
+        ensure!(
+            clip.library_asset_id() == Some(asset_id),
+            "Proxy/Relink {role} Clip changed its Asset identity"
+        );
+        let asset = asset_by_id(state, asset_id)?;
+        clips.push(ProxyRelinkClipAnchor {
+            role,
+            clip_id,
+            asset_id,
+            asset_sha256: sha256_bytes(&serde_json::to_vec(&asset)?),
+            position: clip.position,
+            duration: clip.duration,
+            source_origin: clip.source_origin(),
+            source_scale: clip.source_time_scale(),
+            source_terminal_boundary: clip.source_terminal_boundary()?,
+            asset_proxy_enabled: state.is_asset_proxy_mode(asset_id),
+        });
+    }
     Ok(GoldenProxyRelinkAuthoringAnchor {
         sequence_id,
         video_track_id,
-        clip_id,
-        asset_id,
         track_sha256: sha256_bytes(&serde_json::to_vec(track)?),
-        asset_sha256: sha256_bytes(&serde_json::to_vec(&asset)?),
-        position: clip.position,
-        duration: clip.duration,
-        source_origin: clip.source_origin(),
-        source_scale: clip.source_time_scale(),
-        source_terminal_boundary: clip.source_terminal_boundary()?,
+        clips,
         project_proxy_enabled: state.project_settings().proxy_enabled,
-        asset_proxy_enabled: state.is_asset_proxy_mode(asset_id),
     })
 }
 
@@ -478,7 +632,7 @@ pub(super) fn execute_proxy_relink_stage(
         .find(|slice| slice.id == PROXY_RELINK_SLICE_ID)
         .context("proxy/relink Golden execution slice is missing")?;
     ensure!(
-        slice.required_fixture_roles == ["rec709-h264-picture"]
+        slice.required_fixture_roles == ["rec709-h264-picture", "rec709-h264-vfr-picture"]
             && slice.required_operations
                 == ["proxy-original-switch", "offline-relink", "constant-retime"]
             && slice.required_content.is_empty()
@@ -487,20 +641,37 @@ pub(super) fn execute_proxy_relink_stage(
     );
     let window = slice.timeline_window.context("proxy/relink slice has no timeline window")?;
     ensure!(
-        window.start_frame == 200 && window.end_frame_exclusive == 350,
+        window.start_frame == CFR_WINDOW_START_FRAME
+            && window.end_frame_exclusive == VFR_WINDOW_END_FRAME_EXCLUSIVE,
         "proxy/relink slice timeline window drifted"
     );
+    let cfr_window = super::GoldenTimelineWindow {
+        start_frame: CFR_WINDOW_START_FRAME,
+        end_frame_exclusive: CFR_WINDOW_END_FRAME_EXCLUSIVE,
+    };
+    let vfr_window = super::GoldenTimelineWindow {
+        start_frame: VFR_WINDOW_START_FRAME,
+        end_frame_exclusive: VFR_WINDOW_END_FRAME_EXCLUSIVE,
+    };
 
     let manifest: CorpusManifest = load_json(&root.join("tests/validation/corpus-manifest.json"))?;
-    let fixture = resolve_fixture(
+    let cfr_fixture = resolve_fixture(
         root,
         &fixture_root(root),
         contract,
         &manifest,
         "rec709-h264-picture",
     )?;
-    let (original_path, replacement_path, fixture_hash) =
-        copy_fixture_pair(&fixture, output_directory)?;
+    let vfr_fixture = resolve_fixture(
+        root,
+        &fixture_root(root),
+        contract,
+        &manifest,
+        "rec709-h264-vfr-picture",
+    )?;
+    let (original_path, replacement_path, cfr_fixture_hash) =
+        copy_fixture_pair(&cfr_fixture, output_directory)?;
+    let (vfr_path, vfr_fixture_hash) = copy_fixture_once(&vfr_fixture, output_directory, "vfr")?;
     let stage = workflow.bind_slice_primary_sequence(contract, PROXY_RELINK_SLICE_ID)?;
     let sequence_id = stage.sequence_id();
     ensure!(
@@ -509,15 +680,24 @@ pub(super) fn execute_proxy_relink_stage(
     );
     let state = workflow.app_mut();
     let sequence = state.active_sequence().context("active Sequence is absent")?;
-    let expected_position = TimelineTime::from_frame_position(FramePosition::new(
-        window.start_frame,
+    let cfr_expected_position = TimelineTime::from_frame_position(FramePosition::new(
+        cfr_window.start_frame,
         sequence.time_base(),
     ))?;
-    let expected_end = TimelineTime::from_frame_position(FramePosition::new(
-        window.end_frame_exclusive,
+    let cfr_expected_end = TimelineTime::from_frame_position(FramePosition::new(
+        cfr_window.end_frame_exclusive,
         sequence.time_base(),
     ))?;
-    let expected_duration = expected_end.checked_sub(expected_position)?;
+    let cfr_expected_duration = cfr_expected_end.checked_sub(cfr_expected_position)?;
+    let vfr_expected_position = TimelineTime::from_frame_position(FramePosition::new(
+        vfr_window.start_frame,
+        sequence.time_base(),
+    ))?;
+    let vfr_expected_end = TimelineTime::from_frame_position(FramePosition::new(
+        vfr_window.end_frame_exclusive,
+        sequence.time_base(),
+    ))?;
+    let vfr_expected_duration = vfr_expected_end.checked_sub(vfr_expected_position)?;
     let tracks_before = sequence.video_tracks.iter().map(|track| track.id).collect::<BTreeSet<_>>();
     let (_, add_video_track) = author_transition(state, "add-proxy-relink-track", |state| {
         state.dispatch_action(track_add_action(TrackAddPayload {
@@ -541,51 +721,38 @@ pub(super) fn execute_proxy_relink_stage(
     let video_track_id = created_tracks[0];
 
     let import_attempt_floor = latest_proxy_attempt_id(state);
-    state.dispatch_action(Action::ImportMedia(vec![original_path.clone()]))?;
+    state.dispatch_action(Action::ImportMedia(vec![
+        original_path.clone(),
+        vfr_path.clone(),
+    ]))?;
     wait_for_media_imports(state)?;
-    let asset = state
+    let imported_assets = state
         .asset_library()
-        .context("Asset Library is absent after H.264 import")?
-        .list_assets()?
-        .into_iter()
+        .context("Asset Library is absent after CFR/VFR H.264 import")?
+        .list_assets()?;
+    let asset = imported_assets
+        .iter()
         .find(|asset| asset.file_path() == Some(original_path.as_path()))
-        .context("run-local H.264 import is absent")?;
+        .cloned()
+        .context("run-local CFR H.264 import is absent")?;
+    let vfr_asset = imported_assets
+        .iter()
+        .find(|asset| asset.file_path() == Some(vfr_path.as_path()))
+        .cloned()
+        .context("run-local VFR H.264 import is absent")?;
     ensure!(
-        asset.kind == AssetKind::Video && state.is_asset_proxy_mode(asset.id),
-        "H.264 import did not enter the enabled project proxy workflow"
+        state.is_asset_proxy_mode(asset.id) && state.is_asset_proxy_mode(vfr_asset.id),
+        "CFR/VFR H.264 imports did not enter the enabled project proxy workflow"
     );
-    let video = asset
-        .media_probe()
-        .context("H.264 fixture has no coherent media probe")?
-        .primary_video()
-        .context("H.264 fixture has no video stream")?;
-    ensure!(
-        video.codec == VideoCodec::H264
-            && video.codec_profile == VideoCodecProfile::H264High
-            && video.pixel_format == PixelFormat::Yuv420p
-            && video.bit_depth == 8
-            && video.width == 1920
-            && video.height == 1080
-            && video.frame_rate == mondrian_core::Rational::FPS_25
-            && video.executable_color_space() == Some(mondrian_core::ColorSpace::Rec709)
-            && video.color_range == DecodedVideoRange::Limited,
-        "imported H.264 media differs from the editorial fixture contract"
-    );
-    let imported_video = ImportedVideoObservation {
-        codec: video.codec.clone(),
-        codec_profile: video.codec_profile,
-        pixel_format: video.pixel_format,
-        bit_depth: video.bit_depth,
-        width: video.width,
-        height: video.height,
-        frame_rate: video.frame_rate.to_string(),
-        color_space: "rec709".to_owned(),
-        range: video.color_range,
-    };
+    let cfr_imported_video = observe_imported_video(&asset, Rational::FPS_25, 200, "CFR H.264")?;
+    let vfr_imported_video =
+        observe_imported_video(&vfr_asset, Rational::new(5_000, 199), 200, "VFR H.264")?;
     let initial_generation = wait_for_proxy_completion(state, asset.id, import_attempt_floor)?;
+    let _vfr_initial_generation =
+        wait_for_proxy_completion(state, vfr_asset.id, import_attempt_floor)?;
 
     let clips_before = BTreeSet::new();
-    let (_, place_clip) = author_transition(state, "place-proxy-relink-video", |state| {
+    let (_, place_clip) = author_transition(state, "place-proxy-relink-cfr-video", |state| {
         let time_base = state
             .active_sequence()
             .context("proxy/relink Sequence is absent before placement")?
@@ -593,12 +760,12 @@ pub(super) fn execute_proxy_relink_stage(
         state.dispatch_action(timeline_drop_asset_action(TimelineDropAssetPayload {
             asset_id: asset.id,
             target_track_id: video_track_id,
-            position: FramePosition::new(window.start_frame, time_base),
+            position: FramePosition::new(cfr_window.start_frame, time_base),
         }))?;
         Ok(())
     })?;
     let clip_id = find_new_video_clip(state, video_track_id, &clips_before)?;
-    let (_, trim_to_window) = author_transition(state, "trim-proxy-relink-window", |state| {
+    let (_, trim_to_window) = author_transition(state, "trim-proxy-relink-cfr-window", |state| {
         let time_base = state
             .active_sequence()
             .context("proxy/relink Sequence is absent before trim")?
@@ -606,10 +773,44 @@ pub(super) fn execute_proxy_relink_stage(
         state.dispatch_action(timeline_trim_clips_action(TimelineTrimClipsPayload {
             clip_ids: vec![clip_id],
             edge: TimelineTrimPayloadEdge::Out,
-            position: FramePosition::new(window.end_frame_exclusive, time_base),
+            position: FramePosition::new(cfr_window.end_frame_exclusive, time_base),
         }))?;
         Ok(())
     })?;
+    let clips_after_cfr = BTreeSet::from([clip_id]);
+    let (_, place_vfr_clip) = author_transition(state, "place-proxy-relink-vfr-video", |state| {
+        let time_base = state
+            .active_sequence()
+            .context("proxy/relink Sequence is absent before VFR placement")?
+            .time_base();
+        state.dispatch_action(timeline_drop_asset_action(TimelineDropAssetPayload {
+            asset_id: vfr_asset.id,
+            target_track_id: video_track_id,
+            position: FramePosition::new(vfr_window.start_frame, time_base),
+        }))?;
+        Ok(())
+    })?;
+    let vfr_clip_id = find_new_video_clip(state, video_track_id, &clips_after_cfr)?;
+    let (_, trim_vfr_to_window) =
+        author_transition(state, "trim-proxy-relink-vfr-window", |state| {
+            let time_base = state
+                .active_sequence()
+                .context("proxy/relink Sequence is absent before VFR trim")?
+                .time_base();
+            state.dispatch_action(timeline_trim_clips_action(TimelineTrimClipsPayload {
+                clip_ids: vec![vfr_clip_id],
+                edge: TimelineTrimPayloadEdge::Out,
+                position: FramePosition::new(vfr_window.end_frame_exclusive, time_base),
+            }))?;
+            Ok(())
+        })?;
+    let track = state
+        .active_sequence()
+        .context("Proxy/Relink Hero Sequence is absent")?
+        .video_tracks
+        .iter()
+        .find(|track| track.id == video_track_id)
+        .context("Proxy/Relink Track is absent")?;
     let placed_clip = state
         .active_sequence()
         .context("Proxy/Relink Hero Sequence is absent")?
@@ -618,13 +819,23 @@ pub(super) fn execute_proxy_relink_stage(
         .find(|track| track.id == video_track_id)
         .and_then(|track| track.clips.iter().find(|clip| clip.id == clip_id))
         .context("trimmed Proxy/Relink Clip is absent")?;
+    let placed_vfr_clip = track
+        .clips
+        .iter()
+        .find(|clip| clip.id == vfr_clip_id)
+        .context("trimmed Proxy/Relink VFR Clip is absent")?;
     ensure!(
-        placed_clip.position == expected_position
-            && placed_clip.duration == expected_duration
+        placed_clip.position == cfr_expected_position
+            && placed_clip.duration == cfr_expected_duration
             && placed_clip.source_origin() == TimelineTime::ZERO
-            && placed_clip.source_terminal_boundary()? == expected_duration
-            && placed_clip.end_position()? == expected_end,
-        "Proxy/Relink Clip did not occupy the exact Hero slice window"
+            && placed_clip.source_terminal_boundary()? == cfr_expected_duration
+            && placed_clip.end_position()? == cfr_expected_end
+            && placed_vfr_clip.position == vfr_expected_position
+            && placed_vfr_clip.duration == vfr_expected_duration
+            && placed_vfr_clip.source_origin() == TimelineTime::ZERO
+            && placed_vfr_clip.source_terminal_boundary()? == vfr_expected_duration
+            && placed_vfr_clip.end_position()? == vfr_expected_end,
+        "Proxy/Relink CFR/VFR Clips did not occupy their exact Hero windows"
     );
 
     let proxy_before = resolve_media_path(state, &asset)?;
@@ -701,10 +912,12 @@ pub(super) fn execute_proxy_relink_stage(
     let asset_library_revision_before = library.database_revision()?;
     let before_relink = author_checkpoint(state)?;
     let events = state.event_bus.subscribe();
+    let relink_operation_floor = latest_asset_mutation_operation_id(state);
     state.dispatch_action(assets_relink_asset_action(AssetsRelinkAssetPayload {
         asset_id: asset.id,
         path: replacement_path.clone(),
     }))?;
+    let relink_terminal = wait_for_relink_completion(state, asset.id, relink_operation_floor)?;
     let after_relink = author_checkpoint(state)?;
     let asset_library_revision_after = library.database_revision()?;
     ensure!(
@@ -745,7 +958,7 @@ pub(super) fn execute_proxy_relink_stage(
     ensure!(
         replacement_source.resolution == "source"
             && replacement_source.path == replacement_path
-            && replacement_source.path_sha256 == fixture_hash,
+            && replacement_source.path_sha256 == cfr_fixture_hash,
         "relinked original did not resolve through the replacement path"
     );
 
@@ -787,6 +1000,10 @@ pub(super) fn execute_proxy_relink_stage(
         relink: LibraryRelinkTransitionEvidence {
             before: before_relink,
             after: after_relink,
+            operation_id: relink_terminal.operation_id,
+            generation: relink_terminal.evidence.generation,
+            disposition: relink_terminal.evidence.disposition,
+            elapsed_ms: relink_terminal.elapsed.as_millis(),
             asset_library_revision_before,
             asset_library_revision_after,
             reload_event_published,
@@ -807,7 +1024,10 @@ pub(super) fn execute_proxy_relink_stage(
         output_directory,
         clip_id,
         asset.id,
-        window,
+        cfr_window,
+        vfr_clip_id,
+        vfr_asset.id,
+        vfr_window,
     )?;
     ensure_exact_requirement_evidence(
         &slice.required_exports,
@@ -828,41 +1048,76 @@ pub(super) fn execute_proxy_relink_stage(
         state,
         sequence_id,
         video_track_id,
-        clip_id,
-        asset.id,
+        &[
+            ("cfr", clip_id, asset.id),
+            ("vfr", vfr_clip_id, vfr_asset.id),
+        ],
     )?;
+    let cfr_authoring = authoring
+        .clips
+        .iter()
+        .find(|clip| clip.role == "cfr")
+        .context("Proxy/Relink CFR authoring anchor is absent")?;
+    let vfr_authoring = authoring
+        .clips
+        .iter()
+        .find(|clip| clip.role == "vfr")
+        .context("Proxy/Relink VFR authoring anchor is absent")?;
     ensure!(
-        authoring.position == expected_position
-            && authoring.duration == expected_duration
-            && authoring.source_origin == TimelineTime::ZERO
-            && authoring.source_scale == TimeScale::new(1, 2)?
-            && authoring.source_terminal_boundary
-                == expected_duration.checked_scale(TimeScale::new(1, 2)?)?
-            && authoring.project_proxy_enabled
-            && authoring.asset_proxy_enabled,
-        "Proxy/Relink retained authoring differs from the exact Hero window or proxy intent"
+        cfr_authoring.position == cfr_expected_position
+            && cfr_authoring.duration == cfr_expected_duration
+            && cfr_authoring.source_origin == TimelineTime::ZERO
+            && cfr_authoring.source_scale == TimeScale::new(1, 2)?
+            && cfr_authoring.source_terminal_boundary
+                == cfr_expected_duration.checked_scale(TimeScale::new(1, 2)?)?
+            && cfr_authoring.asset_proxy_enabled
+            && vfr_authoring.position == vfr_expected_position
+            && vfr_authoring.duration == vfr_expected_duration
+            && vfr_authoring.source_origin == TimelineTime::ZERO
+            && vfr_authoring.source_scale == TimeScale::new(1, 2)?
+            && vfr_authoring.source_terminal_boundary
+                == vfr_expected_duration.checked_scale(TimeScale::new(1, 2)?)?
+            && vfr_authoring.asset_proxy_enabled
+            && authoring.project_proxy_enabled,
+        "Proxy/Relink retained CFR/VFR authoring differs from exact Hero windows or proxy intent"
     );
     workflow.verify_binding()?;
 
     Ok(GoldenProxyRelinkReport {
-        schema_version: 4,
+        schema_version: 5,
         profile: PROXY_RELINK_SLICE_ID,
         contract_id: contract.id.clone(),
         corpus_revision: manifest.corpus_revision,
         status: "passed",
         complete_golden_project: false,
-        fixture,
+        fixtures: vec![cfr_fixture, vfr_fixture],
         setup: ProxyRelinkSetupEvidence {
             stage,
-            asset_id: asset.id,
-            clip_id,
             video_track_id,
-            imported_video,
             add_video_track,
-            place_clip,
-            trim_to_window,
-            source_copy_sha256: fixture_hash.clone(),
-            replacement_copy_sha256: fixture_hash,
+            placements: vec![
+                ProxyRelinkPlacementEvidence {
+                    role: "cfr",
+                    asset_id: asset.id,
+                    clip_id,
+                    window: cfr_window,
+                    imported_video: cfr_imported_video,
+                    place_clip,
+                    trim_to_window,
+                    source_copy_sha256: cfr_fixture_hash.clone(),
+                },
+                ProxyRelinkPlacementEvidence {
+                    role: "vfr",
+                    asset_id: vfr_asset.id,
+                    clip_id: vfr_clip_id,
+                    window: vfr_window,
+                    imported_video: vfr_imported_video,
+                    place_clip: place_vfr_clip,
+                    trim_to_window: trim_vfr_to_window,
+                    source_copy_sha256: vfr_fixture_hash,
+                },
+            ],
+            replacement_copy_sha256: cfr_fixture_hash,
         },
         operations,
         authoring,
@@ -915,7 +1170,7 @@ fn golden_project_proxy_original_offline_relink_gate() -> anyhow::Result<()> {
         }
         Err(error) => {
             let failure = serde_json::json!({
-                "schema_version": 4,
+                "schema_version": 5,
                 "profile": PROXY_RELINK_SLICE_ID,
                 "status": "failed",
                 "complete_golden_project": false,

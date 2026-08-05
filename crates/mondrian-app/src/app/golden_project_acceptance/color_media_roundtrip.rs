@@ -103,7 +103,7 @@ pub(super) fn execute_color_media_stage(
     );
     let window = slice.timeline_window.context("color-media slice has no timeline window")?;
     ensure!(
-        window.start_frame == 350 && window.end_frame_exclusive == 375,
+        window.start_frame == 500 && window.end_frame_exclusive == 525,
         "color-media slice timeline window drifted"
     );
     ensure_exact_requirement_evidence(
