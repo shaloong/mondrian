@@ -390,16 +390,20 @@ fn configure_range_edit_scope(
     let sequence_revision = sequence.revision.get();
 
     for track_id in all_track_ids {
-        state.dispatch_action(track_set_edit_policy_action(TrackSetEditPolicyPayload {
+        converge_track_edit_policy(
+            state,
+            sequence_id,
             track_id,
-            control: TrackEditPolicyControl::Target,
-            enabled: track_id == primary_track_id,
-        }))?;
-        state.dispatch_action(track_set_edit_policy_action(TrackSetEditPolicyPayload {
+            TrackEditPolicyControl::Target,
+            track_id == primary_track_id,
+        )?;
+        converge_track_edit_policy(
+            state,
+            sequence_id,
             track_id,
-            control: TrackEditPolicyControl::SyncLock,
-            enabled: track_id == primary_track_id || track_id == secondary_track_id,
-        }))?;
+            TrackEditPolicyControl::SyncLock,
+            track_id == primary_track_id || track_id == secondary_track_id,
+        )?;
     }
 
     let sequence =
@@ -424,6 +428,93 @@ fn configure_range_edit_scope(
         unchanged_author_generation: author_generation,
         unchanged_sequence_revision: sequence_revision,
     })
+}
+
+fn converge_track_edit_policy(
+    state: &mut AppState,
+    sequence_id: SequenceId,
+    track_id: TrackId,
+    control: TrackEditPolicyControl,
+    enabled: bool,
+) -> anyhow::Result<()> {
+    let current = match control {
+        TrackEditPolicyControl::Target => state.timeline_track_targeted(sequence_id, track_id),
+        TrackEditPolicyControl::SyncLock => state.timeline_track_sync_locked(sequence_id, track_id),
+    };
+    if current == enabled {
+        return Ok(());
+    }
+    state.dispatch_action(track_set_edit_policy_action(TrackSetEditPolicyPayload {
+        track_id,
+        control,
+        enabled,
+    }))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod range_edit_scope_tests {
+    use super::*;
+    use mondrian_timeline::Sequence;
+    use std::collections::BTreeSet;
+
+    fn assert_expected_scope(
+        evidence: RangeEditScopeEvidence,
+        primary_track_id: TrackId,
+        secondary_track_id: TrackId,
+    ) {
+        assert_eq!(
+            evidence.targeted_track_ids.into_iter().collect::<BTreeSet<_>>(),
+            BTreeSet::from([primary_track_id])
+        );
+        assert_eq!(
+            evidence.ripple_track_ids.into_iter().collect::<BTreeSet<_>>(),
+            BTreeSet::from([primary_track_id, secondary_track_id])
+        );
+    }
+
+    #[test]
+    fn range_edit_scope_converges_from_default_session_policy() -> anyhow::Result<()> {
+        let sequence = Sequence::new("Golden range-edit scope");
+        let sequence_id = sequence.id;
+        let primary_track_id = sequence.video_tracks[0].id;
+        let secondary_track_id = sequence.audio_tracks[0].id;
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+
+        let evidence = configure_range_edit_scope(
+            &mut state,
+            sequence_id,
+            primary_track_id,
+            secondary_track_id,
+        )?;
+
+        assert_expected_scope(evidence, primary_track_id, secondary_track_id);
+        Ok(())
+    }
+
+    #[test]
+    fn range_edit_scope_converges_from_opposite_session_overrides() -> anyhow::Result<()> {
+        let sequence = Sequence::new("Golden range-edit overrides");
+        let sequence_id = sequence.id;
+        let primary_track_id = sequence.video_tracks[0].id;
+        let secondary_track_id = sequence.audio_tracks[0].id;
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.set_timeline_track_targeted(primary_track_id, false)?;
+        state.set_timeline_track_sync_locked(primary_track_id, false)?;
+        state.set_timeline_track_sync_locked(secondary_track_id, false)?;
+
+        let evidence = configure_range_edit_scope(
+            &mut state,
+            sequence_id,
+            primary_track_id,
+            secondary_track_id,
+        )?;
+
+        assert_expected_scope(evidence, primary_track_id, secondary_track_id);
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

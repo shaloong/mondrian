@@ -501,7 +501,7 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 ### 退出门槛
 
 - Windows、Linux、macOS 的产品入口与共享 CPU reference 在常规 CI 中编译/测试；各平台图形、媒体、音频和显示 Adapter 的 capability/fallback/blocked 结果均为类型化且不改变项目、时间、色彩或 Alpha 语义。Linux/macOS 缺少真实设备报告不阻止 Windows Alpha，缺少生产 Adapter 或平台专属类型泄漏则阻止。
-- [ ] 最终候选的 `windows-alpha-golden-v12`/schema v4 完整工作流按第 5.2 节连续 3 次通过；每轮使用独立 run/Project identity，七个 stage 绑定同一 Hero，最终仅保留 Hero 与一个强引用 child，并观察全部切片、CFR/VFR signed-retime 反事实、物理 PTS 区间、Preview/Export/Headless/重导入证据。当前仅聚焦 Proxy/Relink slice 已通过，不继承旧三轮运行状态。
+- [x] 最终候选的 `windows-alpha-golden-v12`/schema v4 完整工作流按第 5.2 节连续 3 次通过；每轮使用独立 run/Project identity，七个 stage 绑定同一 Hero，最终仅保留 Hero 与一个强引用 child，并观察全部切片、CFR/VFR signed-retime 反事实、物理 PTS 区间、Preview/Export/Headless/重导入证据。正式运行 `20260805T055754Z-complete-golden-a405aa50` 在 `Pr/All` 素材身份检查后连续 `3/3` 通过，三个进程自然退出；aggregate SHA-256 为 `93e15bd69aaefb28a5b94fb7c8234e22c80c7158ea540516aed1556974c82db5`。该证据只关闭版本化完整 Golden 重复门槛，不替代 4K/长时 A/V、内存、真实设备或独立绝对色彩 reference 门禁。
 - 达到第 5.4 节 4K 播放、seek、UI 响应、30 分钟同步和导出门槛。
 - 所有运行路径被分类为 Verified、Explicitly degraded 或 Blocked/Unresolved。
 - 已知 P0 数据损坏、错误色彩、A/V 失步和不可取消卡死为零。

@@ -17,9 +17,10 @@ use mondrian_core::{
 };
 use mondrian_effects::effect_registry_revision;
 use mondrian_renderer::{
-    prepare_visual_range_closure, BasicTitleFontQuery, PreparedBasicTitleFontSet,
-    PreparedVisualNestedRange, PreparedVisualProgram, PreparedVisualProgramCache,
-    PreparedVisualProgramError, PreparedVisualRangeClosure, PreparedVisualRangeClosureError,
+    prepare_visual_range_closure, BasicTitleFontQuery, BasicTitleRasterError,
+    PreparedBasicTitleFontSet, PreparedVisualNestedRange, PreparedVisualProgram,
+    PreparedVisualProgramCache, PreparedVisualProgramError, PreparedVisualRangeClosure,
+    PreparedVisualRangeClosureError,
 };
 use mondrian_timeline::{
     validate_selected_video_transition_source_handles, PictureSourceExtent, PictureSourceRef,
@@ -122,6 +123,22 @@ impl PreparedTimelineVisualSnapshot {
         }
         self.title_fonts = Some(title_fonts);
         Ok(())
+    }
+
+    /// Freeze every selected Basic Title font into this execution attempt.
+    pub(crate) fn freeze_title_fonts(
+        &mut self,
+        max_retained_bytes: usize,
+    ) -> Result<(), TimelineExportDependencyError> {
+        if self.title_fonts.is_some() {
+            return Ok(());
+        }
+        let title_fonts = PreparedBasicTitleFontSet::prepare(
+            self.basic_title_font_queries().iter().cloned(),
+            max_retained_bytes,
+        )
+        .map_err(TimelineExportDependencyError::TitleFontPreparation)?;
+        self.install_title_fonts(title_fonts)
     }
 
     /// Exact frame selection whose reachability produced this closure.
@@ -359,6 +376,9 @@ pub enum TimelineExportDependencyError {
     /// Frozen title-font bindings are not the exact selected query closure.
     #[error("frozen Basic Title font closure evidence mismatch")]
     TitleFontClosureEvidenceMismatch,
+    /// Selected font faces could not be byte-frozen for this execution attempt.
+    #[error("failed to freeze Basic Title font dependencies: {0}")]
+    TitleFontPreparation(#[source] BasicTitleRasterError),
     /// Audio delivery is enabled but the frozen attachment contains no audio snapshot.
     #[error("audio-enabled export has no exact frozen root Program evidence")]
     MissingPreparedAudioProgram,

@@ -12,9 +12,7 @@ use mondrian_core::{
     ExecutionTerminalDisposition, ExecutionTerminalEvidence, JobId,
 };
 use mondrian_media::AudioSourceCacheConfig;
-use mondrian_renderer::{
-    PreparedBasicTitleFontSet, RenderGpuOutputExecutionResourceGrant, TimelineCpuWorkingSetGrant,
-};
+use mondrian_renderer::{RenderGpuOutputExecutionResourceGrant, TimelineCpuWorkingSetGrant};
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 
@@ -904,29 +902,18 @@ impl RenderQueue {
                 });
             }
         }
-        let Some(prepared_execution) = job.config.timeline.prepared_execution() else {
+        if job.config.timeline.prepared_execution().is_none() {
             return self.reject(ExportAdmissionError::InvalidDelivery {
                 detail: "immutable export visual execution snapshot is unavailable".to_owned(),
             });
-        };
-        let prepared_visual = prepared_execution.visual();
-        if prepared_visual.title_fonts().is_none() {
-            let title_fonts = match PreparedBasicTitleFontSet::prepare(
-                prepared_visual.basic_title_font_queries().iter().cloned(),
-                resource_policy.title_font_bytes,
-            ) {
-                Ok(title_fonts) => title_fonts,
-                Err(error) => {
-                    return self.reject(ExportAdmissionError::InvalidDelivery {
-                        detail: format!("failed to freeze Basic Title font dependencies: {error}"),
-                    });
-                }
-            };
-            if let Err(error) = job.config.timeline.install_prepared_title_fonts(title_fonts) {
-                return self.reject(ExportAdmissionError::InvalidDelivery {
-                    detail: format!("failed to seal Basic Title font dependency closure: {error}"),
-                });
-            }
+        }
+        if let Err(error) = job
+            .config
+            .timeline
+            .freeze_prepared_title_fonts(resource_policy.title_font_bytes)
+        {
+            return self
+                .reject(ExportAdmissionError::InvalidDelivery { detail: error.to_string() });
         }
         let Some(prepared_execution) = job.config.timeline.prepared_execution() else {
             return self.reject(ExportAdmissionError::InvalidDelivery {

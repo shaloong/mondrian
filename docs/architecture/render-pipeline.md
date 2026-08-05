@@ -1625,6 +1625,18 @@ skip PCM preparation. `RequiresExecution` builds the Runtime even when there is
 no media Component, because a selected Bus/output processor may generate
 signal or retain a tail. Runtime preparation consumes the frozen Program
 occurrences directly and never recompiles author routing.
+
+Immediate export frame probes are separate bounded execution attempts, not
+queue-admitted jobs. A probe consumes the caller's exact prepared range and, if
+that attachment still carries unresolved Basic Title queries, freezes the
+selected font bytes into a probe-local visual snapshot under the probe resource
+grant before constructing renderer state. It never mutates or relaxes the
+caller's snapshot. A frame-specific probe must capture the corresponding
+one-frame half-open Work Area; capturing `EntireSequence` would admit unrelated
+media, nested, temporal, and font dependencies and is not valid evidence for
+that frame. Queue workers remain stricter: their font bytes are sealed into the
+owned immutable job before it becomes visible or executable.
+
 Timeline export writes accumulated render-path color diagnostics into
 `RenderJob.diagnostics.color`. The worker updates this snapshot while frames are
 actually rendered. App panels, logs, and JSONL reports should consume

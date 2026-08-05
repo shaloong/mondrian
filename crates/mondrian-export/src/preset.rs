@@ -695,9 +695,9 @@ impl TimelineExportSnapshot {
         self.prepared_execution = Some(prepared_execution);
     }
 
-    pub(crate) fn install_prepared_title_fonts(
+    pub(crate) fn freeze_prepared_title_fonts(
         &mut self,
-        title_fonts: mondrian_renderer::PreparedBasicTitleFontSet,
+        max_retained_bytes: usize,
     ) -> Result<(), crate::TimelineExportDependencyError> {
         self.prepared_execution
             .as_mut()
@@ -707,7 +707,7 @@ impl TimelineExportSnapshot {
                 },
             )?
             .visual_mut()
-            .install_title_fonts(title_fonts)
+            .freeze_title_fonts(max_retained_bytes)
     }
 }
 

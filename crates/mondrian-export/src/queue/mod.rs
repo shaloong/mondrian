@@ -3154,10 +3154,19 @@ impl ExportVisualRenderSession {
         if let Some(prepared_visual) =
             timeline.prepared_execution().map(|execution| execution.visual())
         {
+            let admitted_visual = if prepared_visual.title_fonts().is_none() {
+                let mut candidate = prepared_visual.clone();
+                candidate
+                    .freeze_title_fonts(resource_policy.title_font_bytes)
+                    .map_err(|error| error.to_string())?;
+                Some(candidate)
+            } else {
+                None
+            };
             return Self::for_execution_generation(
                 effect_execution_generation,
                 resource_policy,
-                prepared_visual,
+                admitted_visual.as_ref().unwrap_or(prepared_visual),
             );
         }
         #[cfg(test)]
@@ -7806,6 +7815,53 @@ mod tests {
         assert!(error.contains("Basic Title generation failed closed"));
         assert!(error.contains("Mondrian Font That Must Never Exist 8E43D879"));
         assert!(output.is_none());
+    }
+
+    #[test]
+    fn direct_export_probe_admits_unresolved_title_font_dependencies() {
+        let missing_family = "Mondrian Probe Font That Must Never Exist 73A4146C";
+        let mut sequence = Sequence::new("direct probe title-font admission");
+        sequence.settings.resolution = mondrian_core::Resolution { width: 320, height: 180 };
+        let time_base = sequence.time_base();
+        sequence.video_tracks[0]
+            .add_clip(
+                Clip::new_basic_title(
+                    "Mondrian",
+                    missing_family,
+                    tt(0, time_base),
+                    tt(24, time_base),
+                )
+                .expect("valid author title"),
+            )
+            .expect("title placement");
+        let dependencies = crate::prepare_timeline_export_dependencies(
+            &sequence,
+            &[],
+            TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 1 },
+            false,
+        )
+        .expect("prepare unresolved title dependency");
+        assert!(dependencies.execution_snapshot().visual().title_fonts().is_none());
+        let timeline = TimelineExportSnapshot::captured(
+            mondrian_core::ProjectColorEnvironment::default(),
+            sequence,
+            Vec::new(),
+            HashMap::new(),
+            TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 1 },
+            dependencies.execution_snapshot().clone(),
+        );
+
+        let error = export_composite_diagnostics_for_frame(&timeline, 0, 320, 180)
+            .expect_err("missing selected font must fail one direct probe admission");
+
+        assert!(
+            error.contains(missing_family),
+            "unexpected diagnostic: {error}"
+        );
+        assert!(
+            !error.contains("font dependency closure is unavailable"),
+            "direct probe skipped font dependency admission: {error}"
+        );
     }
 
     #[test]

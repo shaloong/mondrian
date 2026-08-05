@@ -523,7 +523,12 @@ fn execute_nested_frame(state: &AppState, frame: i64) -> anyhow::Result<NestedEx
         state,
         sequence.clone(),
         sequences.to_vec(),
-        TimelineExportRange::EntireSequence,
+        TimelineExportRange::WorkArea {
+            start_frame: frame,
+            end_frame_exclusive: frame
+                .checked_add(1)
+                .context("nested export diagnostic frame overflowed")?,
+        },
         false,
     )
     .map_err(anyhow::Error::msg)?;

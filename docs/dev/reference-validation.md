@@ -273,7 +273,23 @@ Each process emitted and durably published its complete passing report in
 roughly 57–58 seconds, then required the documented five-second process-detach
 recovery; the supervisor recorded `forced_after_terminal_report: true` without
 changing semantic status. This current evidence supersedes v10 for the Golden
-release repetition obligation only.
+release repetition obligation only and is historical after v12.
+
+The current v12 supervisor run
+`20260805T055754Z-complete-golden-a405aa50` passed `3/3` against the repository
+fixture root after `Pr/All` reference-asset validation. The three processes used
+distinct run and Project identities, exited naturally, and published complete
+reports in 65.888 s, 64.087 s, and 63.167 s. Each report binds all seven stages
+to its one Hero Sequence and retains exactly Hero plus the strong-reference
+nested child after final durable reopen. The aggregate report SHA-256 is
+`93e15bd69aaefb28a5b94fb7c8234e22c80c7158ea540516aed1556974c82db5`;
+the ordered pass-report hashes are
+`ce9e34c107cf9594941046976129382b08b4d01c4bf6e0d88903b6880b95227c`,
+`097fb7433aa515135febfd1c9cd75e47d95a90d41b25c0e918d3a2221d3ff82d`,
+and `8c2d8e10ee01a26f5ed05ad7658d685c7639b2892ba1fe4af1f9ab536f8f6492`.
+This closes only the versioned complete-Golden repetition obligation; it does
+not claim qualified-machine throughput, long-duration device/A/V, memory, or
+independent absolute color-reference evidence.
 
 Heavy GPU/media work intentionally runs on a dedicated process main lifetime,
 not a libtest worker. The terminal JSON report is the semantic completion
