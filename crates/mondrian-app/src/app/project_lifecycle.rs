@@ -1403,10 +1403,13 @@ impl AppState {
 #[cfg(test)]
 mod persistence_lifecycle_tests {
     use super::*;
-    use crate::app::project_runtime::claim_project_runtime_lease_for_test;
+    use crate::app::project_runtime::{
+        claim_project_runtime_lease_for_test, TEST_PROJECT_RUNTIME_NAMESPACE_ENV,
+    };
     use mondrian_project::save_project_archive;
     use std::collections::BTreeSet;
     use std::collections::HashMap;
+    use std::process::Command;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -1635,6 +1638,146 @@ mod persistence_lifecycle_tests {
                 candidate.project_file == project_file && candidate.autosave_file == autosave_file
             })
             .expect("exact recovery candidate")
+    }
+
+    const CRASH_HELPER_MODE_ENV: &str = "MONDRIAN_TEST_RECOVERY_CRASH_HELPER";
+    const CRASH_HELPER_PROJECT_ENV: &str = "MONDRIAN_TEST_RECOVERY_CRASH_PROJECT";
+    const CRASH_HELPER_STAGE_ENV: &str = "MONDRIAN_TEST_RECOVERY_CRASH_STAGE";
+    const CRASH_HELPER_PREVIOUS_NAME_ENV: &str = "MONDRIAN_TEST_RECOVERY_PREVIOUS_NAME";
+    const CRASH_HELPER_TEST: &str = concat!(
+        "app::project_lifecycle::persistence_lifecycle_tests::",
+        "recovery_crash_writer_subprocess_helper"
+    );
+
+    fn recovery_candidates_for_project(project_file: &Path) -> Vec<CrashRecoveryCandidate> {
+        discover_crash_recovery_candidates()
+            .into_iter()
+            .filter(|candidate| candidate.project_file == project_file)
+            .collect()
+    }
+
+    fn run_recovery_crash_writer(project_file: &Path, stage: u32, previous_name: Option<&str>) {
+        let mut command = Command::new(std::env::current_exe().expect("current test binary"));
+        command
+            .arg(CRASH_HELPER_TEST)
+            .arg("--exact")
+            .arg("--ignored")
+            .arg("--nocapture")
+            .env(CRASH_HELPER_MODE_ENV, "1")
+            .env(CRASH_HELPER_PROJECT_ENV, project_file)
+            .env(CRASH_HELPER_STAGE_ENV, stage.to_string())
+            .env(
+                TEST_PROJECT_RUNTIME_NAMESPACE_ENV,
+                std::process::id().to_string(),
+            );
+        if let Some(previous_name) = previous_name {
+            command.env(CRASH_HELPER_PREVIOUS_NAME_ENV, previous_name);
+        } else {
+            command.env_remove(CRASH_HELPER_PREVIOUS_NAME_ENV);
+        }
+        let status = command.status().expect("launch crash-writer subprocess");
+        assert!(
+            !status.success(),
+            "crash-writer subprocess returned normally instead of terminating abnormally"
+        );
+        assert!(
+            !recovery_candidates_for_project(project_file).is_empty(),
+            "abnormal termination did not leave a discoverable Recovery Authority"
+        );
+    }
+
+    #[test]
+    #[ignore = "subprocess crash/recovery qualification; intentionally aborts three child processes"]
+    fn repeated_process_crashes_preserve_latest_recovery_and_final_save_retires_authority() {
+        let root = unique_root("repeated-process-crash-recovery");
+        fs::create_dir_all(&root).expect("create crash qualification root");
+        let project_file = root.join("repeated-crash.mdp");
+
+        run_recovery_crash_writer(&project_file, 1, None);
+        run_recovery_crash_writer(&project_file, 2, Some("Crash Stage 1"));
+        run_recovery_crash_writer(&project_file, 3, Some("Crash Stage 2"));
+
+        let candidate = recovery_candidates_for_project(&project_file)
+            .into_iter()
+            .next()
+            .expect("latest recovery candidate");
+        let mut recovered = AppState::new();
+        recovered
+            .open_project_from_autosave_snapshot(candidate)
+            .expect("recover after repeated abnormal termination");
+        assert_eq!(
+            recovered.active_sequence().map(|sequence| sequence.name.as_str()),
+            Some("Crash Stage 3")
+        );
+        assert!(recovered.has_unsaved_project_changes());
+        let runtime_root = recovered
+            .authoring
+            .as_ref()
+            .expect("recovered session")
+            .runtime_root()
+            .to_path_buf();
+
+        recovered
+            .save_project_file()
+            .expect("cover repeated-crash recovery with a durable manual save");
+        assert!(
+            recovery_candidates_for_project(&project_file).is_empty(),
+            "covering manual save must retire every repeated-crash recovery point"
+        );
+        recovered.close_project().expect("close recovered Project");
+        let _ = fs::remove_dir_all(runtime_root);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[ignore = "child entrypoint for repeated process-crash qualification"]
+    fn recovery_crash_writer_subprocess_helper() {
+        if std::env::var_os(CRASH_HELPER_MODE_ENV).as_deref() != Some(std::ffi::OsStr::new("1")) {
+            return;
+        }
+        let project_file = PathBuf::from(
+            std::env::var_os(CRASH_HELPER_PROJECT_ENV).expect("crash helper Project path"),
+        );
+        let stage = std::env::var(CRASH_HELPER_STAGE_ENV)
+            .expect("crash helper stage")
+            .parse::<u32>()
+            .expect("numeric crash helper stage");
+        let mut state = AppState::new();
+        if stage == 1 {
+            state
+                .create_new_project_at(
+                    project_file.clone(),
+                    "Repeated Crash Recovery",
+                    1920,
+                    1080,
+                    Rational::new(25, 1),
+                )
+                .expect("create crash qualification Project");
+        } else {
+            let candidate = recovery_candidates_for_project(&project_file)
+                .into_iter()
+                .next()
+                .expect("crash helper recovery candidate");
+            state
+                .open_project_from_autosave_snapshot(candidate)
+                .expect("crash helper recovery open");
+            let previous_name = std::env::var(CRASH_HELPER_PREVIOUS_NAME_ENV)
+                .expect("previous recovered Sequence name");
+            assert_eq!(
+                state.active_sequence().map(|sequence| sequence.name.as_str()),
+                Some(previous_name.as_str()),
+                "each crash cycle must resume the preceding durable Recovery Authority"
+            );
+        }
+        let sequence_id = state.active_sequence().expect("active Sequence").id;
+        state
+            .rename_sequence(sequence_id, format!("Crash Stage {stage}"))
+            .expect("commit crash-stage edit");
+        state
+            .write_autosave_snapshot(8, 30)
+            .expect("durably publish crash-stage recovery point");
+
+        std::process::abort();
     }
 
     #[test]

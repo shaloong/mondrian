@@ -744,10 +744,27 @@ pub(super) fn project_runtime_parent() -> Result<PathBuf, String> {
 }
 
 #[cfg(test)]
+pub(super) const TEST_PROJECT_RUNTIME_NAMESPACE_ENV: &str =
+    "MONDRIAN_TEST_PROJECT_RUNTIME_NAMESPACE";
+
+#[cfg(test)]
+fn test_project_runtime_namespace() -> Result<String, String> {
+    let namespace = std::env::var(TEST_PROJECT_RUNTIME_NAMESPACE_ENV)
+        .unwrap_or_else(|_| std::process::id().to_string());
+    if namespace.is_empty()
+        || namespace.len() > 20
+        || !namespace.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err("test Project runtime namespace must contain 1..=20 ASCII digits".to_owned());
+    }
+    Ok(namespace)
+}
+
+#[cfg(test)]
 pub(super) fn project_runtime_parent() -> Result<PathBuf, String> {
     Ok(std::env::temp_dir().join(format!(
         "mondrian-project-runtime-state-tests-{}",
-        std::process::id()
+        test_project_runtime_namespace()?
     )))
 }
 
@@ -828,7 +845,7 @@ fn project_authority_root() -> Result<PathBuf, String> {
 fn project_authority_root() -> Result<PathBuf, String> {
     Ok(std::env::temp_dir().join(format!(
         "mondrian-project-authority-tests-{}",
-        std::process::id()
+        test_project_runtime_namespace()?
     )))
 }
 

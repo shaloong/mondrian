@@ -560,6 +560,17 @@ Session and a final durable reopen; stable IDs or a Project hash alone are
 insufficient. This product-path evidence does not replace filesystem
 fault-injection or conflict-UX qualification.
 
+The repeated-crash qualification uses three independent child processes. Each
+process opens the preceding Recovery Authority, verifies the recovered author
+state, commits a new edit, durably publishes an autosave, and terminates through
+`abort` without running Rust destructors. The parent and children share a
+strictly numeric test-only runtime namespace so ordinary parallel tests retain
+PID isolation while this gate exercises real cross-process OS-lock release. The
+parent must recover the third edit as dirty state, publish one covering manual
+save, and observe every recovery candidate retired. This proves abnormal
+process exit rather than an in-process `Drop` simulation; it does not replace
+platform filesystem-capacity and permission fault matrices.
+
 The runtime *family* is derived from the complete, domain-separated SHA-256 of
 the normalized Project publication target. Normalization resolves the longest
 existing canonical parent-directory prefix before appending unresolved
