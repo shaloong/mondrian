@@ -1356,14 +1356,18 @@ impl AppState {
 
     /// Estimate how long an execution loop can wait before advancing playback.
     pub fn playback_next_wake_delay(&self) -> Option<Duration> {
+        self.playback_next_wake().map(|wake| clamp_playback_wake_delay(wake.after()))
+    }
+
+    /// Return the next Engine wake together with its authoritative reason.
+    pub fn playback_next_wake(&self) -> Option<mondrian_playback::PlaybackWake> {
         if !self.is_playing() {
             return None;
         }
         self.playback_engine
-            .time_until_next_wake(self.playback_engine.monotonic_high_water())
+            .next_wake(self.playback_engine.monotonic_high_water())
             .ok()
             .flatten()
-            .map(clamp_playback_wake_delay)
     }
 
     pub fn current_frame(&self) -> i64 {

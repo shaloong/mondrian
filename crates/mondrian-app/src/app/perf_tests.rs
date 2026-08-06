@@ -2,7 +2,7 @@
 use super::audio_playback_acceptance::{
     evaluate_professional_audio_playback, AudioPlaybackMediaProbeReport,
     ProfessionalAudioPlaybackObservation, ProfessionalAudioRecoveryObservation,
-    ProfessionalVideoReadinessObservation,
+    ProfessionalVideoCoordinatorObservation, ProfessionalVideoReadinessObservation,
 };
 use super::playback_acceptance::{
     evaluate_playback_qualification, evaluate_professional_playback,
@@ -3711,6 +3711,7 @@ fn run_professional_cpal_av_probe(
             unavailable: readiness.unavailable as u64,
             missed_deadline: readiness.missed_deadline as u64,
         },
+        video_coordinator: realtime_driver.timing.professional_observation(),
         gpu_presented_frames: gpu_summary.presented_unique_frame_completions as u64,
     });
     let report_json = serde_json::to_string(&report)?;
@@ -4032,7 +4033,7 @@ fn run_headless_realtime_interval(
         if state.playback_epoch() != sampled_epoch || state.current_frame() != sampled_frame {
             let sample = driver.sample(sampled_intent, preview_service);
             interval_timing.total.observe(interval_started.elapsed());
-            driver.timing.record_interval(sample, interval_timing);
+            driver.timing.record_interval(sample, driver.candidate_status, interval_timing);
             return Ok(HeadlessRealtimeIntervalOutcome::Advanced {
                 epoch: sampled_epoch,
                 frame: sampled_frame,
@@ -4157,6 +4158,11 @@ struct HeadlessRealtimeIntervalTiming {
 struct HeadlessRealtimeCoordinatorTiming {
     intervals: u64,
     stale_intervals: u64,
+    stale_bursts: u64,
+    max_consecutive_stale: u64,
+    stale_candidate_status: HeadlessRealtimeCandidateStatusCounts,
+    #[serde(skip)]
+    current_consecutive_stale: u64,
     total: HeadlessRealtimeStageTiming,
     audio_pump: HeadlessRealtimeStageTiming,
     clock_advance: HeadlessRealtimeStageTiming,
@@ -4169,17 +4175,71 @@ impl HeadlessRealtimeCoordinatorTiming {
     fn record_interval(
         &mut self,
         sample: HeadlessPreviewSample,
+        candidate_status: HeadlessGpuCandidateStatus,
         interval: HeadlessRealtimeIntervalTiming,
     ) {
         self.intervals = self.intervals.saturating_add(1);
-        self.stale_intervals =
-            self.stale_intervals.saturating_add(u64::from(!sample.current_gpu_ready));
+        if sample.current_gpu_ready {
+            self.current_consecutive_stale = 0;
+        } else {
+            self.stale_intervals = self.stale_intervals.saturating_add(1);
+            self.current_consecutive_stale = self.current_consecutive_stale.saturating_add(1);
+            if self.current_consecutive_stale == 1 {
+                self.stale_bursts = self.stale_bursts.saturating_add(1);
+            }
+            self.max_consecutive_stale =
+                self.max_consecutive_stale.max(self.current_consecutive_stale);
+            self.stale_candidate_status.record(candidate_status);
+        }
         self.total.merge(interval.total);
         self.audio_pump.merge(interval.audio_pump);
         self.clock_advance.merge(interval.clock_advance);
         self.preview_pump.merge(interval.preview_pump);
         self.candidate.merge(interval.candidate);
         self.wait.merge(interval.wait);
+    }
+
+    #[cfg(feature = "validation")]
+    fn professional_observation(self) -> ProfessionalVideoCoordinatorObservation {
+        ProfessionalVideoCoordinatorObservation {
+            intervals: self.intervals,
+            stale_intervals: self.stale_intervals,
+            stale_bursts: self.stale_bursts,
+            max_consecutive_stale: self.max_consecutive_stale,
+            stale_ready: self.stale_candidate_status.ready,
+            stale_queued_ready: self.stale_candidate_status.queued_ready,
+            stale_in_flight: self.stale_candidate_status.in_flight,
+            stale_loading: self.stale_candidate_status.loading,
+            stale_backpressured: self.stale_candidate_status.backpressured,
+            stale_dropped_late: self.stale_candidate_status.dropped_late,
+            stale_unavailable: self.stale_candidate_status.unavailable,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+struct HeadlessRealtimeCandidateStatusCounts {
+    ready: u64,
+    queued_ready: u64,
+    in_flight: u64,
+    loading: u64,
+    backpressured: u64,
+    dropped_late: u64,
+    unavailable: u64,
+}
+
+impl HeadlessRealtimeCandidateStatusCounts {
+    fn record(&mut self, status: HeadlessGpuCandidateStatus) {
+        let counter = match status {
+            HeadlessGpuCandidateStatus::Ready => &mut self.ready,
+            HeadlessGpuCandidateStatus::QueuedReady => &mut self.queued_ready,
+            HeadlessGpuCandidateStatus::InFlight => &mut self.in_flight,
+            HeadlessGpuCandidateStatus::Loading => &mut self.loading,
+            HeadlessGpuCandidateStatus::Backpressured => &mut self.backpressured,
+            HeadlessGpuCandidateStatus::DroppedLate => &mut self.dropped_late,
+            HeadlessGpuCandidateStatus::Unavailable => &mut self.unavailable,
+        };
+        *counter = counter.saturating_add(1);
     }
 }
 
@@ -4829,23 +4889,23 @@ fn run_external_continuous_playback_gate(
             report_json
         );
     }
-    if let Some(gates) = &report.real_media_gates {
-        if !gates.passed {
-            anyhow::bail!(
-                "preview media external continuous playback real-media gates failed: {:?}; report: {}",
-                gates.failures,
-                report_json
-            );
-        }
+    if let Some(gates) = &report.real_media_gates
+        && !gates.passed
+    {
+        anyhow::bail!(
+            "preview media external continuous playback real-media gates failed: {:?}; report: {}",
+            gates.failures,
+            report_json
+        );
     }
-    if let Some(gates) = &report.professional_media_gates {
-        if !gates.passed {
-            anyhow::bail!(
-                "professional 4K HEVC Main10 hardware playback gates failed: {:?}; report: {}",
-                gates.failures,
-                report_json
-            );
-        }
+    if let Some(gates) = &report.professional_media_gates
+        && !gates.passed
+    {
+        anyhow::bail!(
+            "professional 4K HEVC Main10 hardware playback gates failed: {:?}; report: {}",
+            gates.failures,
+            report_json
+        );
     }
 
     Ok(())

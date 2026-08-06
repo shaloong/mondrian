@@ -246,10 +246,49 @@ pub enum ClockMaster {
     Synthetic,
 }
 
+/// Why the Playback Engine requires its coordinator to wake next.
+///
+/// Adapters may use the reason to select a platform wait primitive, but cannot
+/// reinterpret or extend the accompanying duration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackWakeReason {
+    /// Startup preroll reached its bounded fallback deadline.
+    PrimingDeadline,
+    /// The current Frame Demand reaches its final useful presentation time.
+    PresentationDeadline,
+    /// The authoritative media phase reaches the next exact video-frame boundary.
+    FrameBoundary,
+    /// Bounded fallback poll for a newly published Audio Device observation.
+    AudioDevicePoll,
+}
+
+/// Exact next-wake obligation emitted by the Playback Engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaybackWake {
+    after: Duration,
+    reason: PlaybackWakeReason,
+}
+
+impl PlaybackWake {
+    /// Remaining monotonic duration before the required wake.
+    pub const fn after(self) -> Duration {
+        self.after
+    }
+
+    /// Authoritative reason for the wake.
+    pub const fn reason(self) -> PlaybackWakeReason {
+        self.reason
+    }
+}
+
 /// Quality grade of one audio-device clock observation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AudioClockObservationGrade {
-    /// Cumulative frames requested by the device callback with bounded uncertainty.
+    /// Callback-consumed samples corrected by CPAL's predicted playback delay.
+    ///
+    /// This is not an exact hardware playback-head position. Its uncertainty
+    /// remains explicit because CPAL backends derive the prediction from
+    /// different native queue and latency evidence.
     CallbackConsumptionEstimate,
 }
 
@@ -986,16 +1025,15 @@ impl PlaybackEngine {
         now: MonotonicTimestamp,
     ) -> Result<PlaybackSnapshot, PlaybackError> {
         self.accept_timestamp(now)?;
-        if self.state == TransportState::Priming {
-            if let Some(deadline) = self
+        if self.state == TransportState::Priming
+            && let Some(deadline) = self
                 .active_demand
                 .and_then(|demand| demand.deadline)
                 .filter(|deadline| now >= *deadline)
-            {
-                self.state = TransportState::Playing;
-                self.clock_master = Some(ClockMaster::Synthetic);
-                self.reanchor(deadline)?;
-            }
+        {
+            self.state = TransportState::Playing;
+            self.clock_master = Some(ClockMaster::Synthetic);
+            self.reanchor(deadline)?;
         }
         self.advance_position(now)?;
         match self.state {
@@ -1014,24 +1052,37 @@ impl PlaybackEngine {
     ///
     /// Priming exposes its bounded fallback deadline even after the current
     /// Frame Demand has received a terminal non-presentable delivery. Running
-    /// Running playback exposes the earlier of the pending presentation phase
+    /// playback exposes the earlier of the pending presentation phase
     /// deadline and its normal Clock wake. Audio Device playback retains a
     /// bounded polling fallback because a callback sample may arrive earlier.
     pub fn time_until_next_wake(
         &self,
         now: MonotonicTimestamp,
     ) -> Result<Option<Duration>, PlaybackError> {
+        Ok(self.next_wake(now)?.map(PlaybackWake::after))
+    }
+
+    /// Return the exact next-wake duration together with its scheduling reason.
+    pub fn next_wake(
+        &self,
+        now: MonotonicTimestamp,
+    ) -> Result<Option<PlaybackWake>, PlaybackError> {
         if self.state == TransportState::Priming {
             let Some(deadline) = self.active_demand.and_then(|demand| demand.deadline) else {
                 return Ok(None);
             };
             if now >= deadline {
-                return Ok(Some(Duration::ZERO));
+                return Ok(Some(PlaybackWake {
+                    after: Duration::ZERO,
+                    reason: PlaybackWakeReason::PrimingDeadline,
+                }));
             }
             return deadline
                 .duration_since_origin()
                 .checked_sub(now.duration_since_origin())
-                .map(Some)
+                .map(|after| {
+                    Some(PlaybackWake { after, reason: PlaybackWakeReason::PrimingDeadline })
+                })
                 .ok_or(PlaybackError::NonMonotonicTimestamp);
         }
         if !matches!(
@@ -1042,28 +1093,55 @@ impl PlaybackEngine {
         }
         let presentation_wake =
             self.pending_frame_demand().and_then(|demand| demand.deadline).map(|deadline| {
-                deadline
-                    .duration_since_origin()
-                    .checked_sub(now.duration_since_origin())
-                    .unwrap_or(Duration::ZERO)
+                PlaybackWake {
+                    after: deadline
+                        .duration_since_origin()
+                        .checked_sub(now.duration_since_origin())
+                        .unwrap_or(Duration::ZERO),
+                    reason: PlaybackWakeReason::PresentationDeadline,
+                }
             });
+        let phase_ns = self.clock_phase_reference_ns(now)?;
+        let current_frame = timeline_frame_at_ns(phase_ns, self.position.time_base)?;
+        let successor =
+            current_frame.checked_add(1).ok_or(PlaybackError::TransportArithmeticOverflow)?;
+        let next_boundary_ns =
+            timeline_frame_boundary_ns(FramePosition::new(successor, self.position.time_base))?;
+        let remaining_ns = next_boundary_ns
+            .checked_sub(phase_ns)
+            .ok_or(PlaybackError::TransportArithmeticOverflow)?;
+        let frame_boundary_wake = nonnegative_ns_duration(remaining_ns)?;
         let clock_wake = if self.clock_master == Some(ClockMaster::AudioDevice) {
-            Duration::from_millis(2)
+            // Callback publication can move the physical Audio Device Clock
+            // earlier than its extrapolated position, so retain a bounded poll.
+            // The projected video boundary is independently authoritative:
+            // sleeping the full poll when that boundary is closer would mint
+            // the successor Frame Demand late and needlessly spend its phase
+            // budget before any Presentation Adapter could act.
+            if frame_boundary_wake <= Duration::from_millis(2) {
+                PlaybackWake {
+                    after: frame_boundary_wake,
+                    reason: PlaybackWakeReason::FrameBoundary,
+                }
+            } else {
+                PlaybackWake {
+                    after: Duration::from_millis(2),
+                    reason: PlaybackWakeReason::AudioDevicePoll,
+                }
+            }
         } else {
-            let phase_ns = self.synthetic_phase_ns_at(now)?;
-            let current_frame = timeline_frame_at_ns(phase_ns, self.position.time_base)?;
-            let successor =
-                current_frame.checked_add(1).ok_or(PlaybackError::TransportArithmeticOverflow)?;
-            let next_boundary_ns =
-                timeline_frame_boundary_ns(FramePosition::new(successor, self.position.time_base))?;
-            let remaining_ns = next_boundary_ns
-                .checked_sub(phase_ns)
-                .ok_or(PlaybackError::TransportArithmeticOverflow)?;
-            nonnegative_ns_duration(remaining_ns)?
+            PlaybackWake {
+                after: frame_boundary_wake,
+                reason: PlaybackWakeReason::FrameBoundary,
+            }
         };
-        Ok(Some(
-            presentation_wake.map_or(clock_wake, |wake| wake.min(clock_wake)),
-        ))
+        Ok(Some(presentation_wake.map_or(clock_wake, |wake| {
+            if wake.after <= clock_wake.after {
+                wake
+            } else {
+                clock_wake
+            }
+        })))
     }
 
     /// Hand off from an unavailable audio device to a continuous synthetic clock.
@@ -1110,18 +1188,18 @@ impl PlaybackEngine {
             .filter(|_| self.clock_master == Some(ClockMaster::AudioDevice))
             .map(|anchor| anchor.stream_generation);
         let mut final_observation_applied = false;
-        if authoritative_generation == Some(stream_generation) {
-            if let Some(observation) = final_observation.filter(|observation| {
+        if authoritative_generation == Some(stream_generation)
+            && let Some(observation) = final_observation.filter(|observation| {
                 observation.epoch == self.epoch
                     && observation.stream_generation == stream_generation
                     && observation.observed_at >= self.last_timestamp
                     && observation.observed_at <= observed_at
-            }) {
-                let mut observed_candidate = self.clone();
-                if observed_candidate.observe_audio_device_clock_in_place(observation).is_ok() {
-                    *self = observed_candidate;
-                    final_observation_applied = true;
-                }
+            })
+        {
+            let mut observed_candidate = self.clone();
+            if observed_candidate.observe_audio_device_clock_in_place(observation).is_ok() {
+                *self = observed_candidate;
+                final_observation_applied = true;
             }
         }
         let snapshot = self.audio_device_lost_in_place(observed_at)?;

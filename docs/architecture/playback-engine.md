@@ -265,18 +265,25 @@ time.
 ### Audio clock observation quality
 
 CPAL callback activity alone is not automatically a hardware playback-head
-measurement. The Audio Playback Engine classifies every device clock
-observation:
+measurement. The current portable Adapter therefore publishes only
+`CallbackConsumptionEstimate`: cumulative callback-consumed frames corrected
+by CPAL's predicted output-playback delay, with a bounded recorded uncertainty.
+CPAL backends derive that prediction differently (for example endpoint padding
+and stream latency on WASAPI, host time plus configured latency on CoreAudio,
+or queue delay on ALSA/PipeWire), so Mondrian must not relabel the portable
+result as an exact device position. A future native Adapter may add a stronger
+grade only when it supplies a stream-correlated hardware position and a
+backend-specific uncertainty contract.
 
-- `DevicePosition`: an OS/backend position correlated to the active stream and
-  corrected by measured output latency;
-- `CallbackConsumptionEstimate`: cumulative callback-consumed frames plus a
-  bounded, recorded latency estimate;
+Availability is independent of observation grade:
+
+- `Running`: the observation is fresh, plausible, and inside its uncertainty
+  policy;
 - `Uncertain`: a previously healthy active stream has temporarily stopped
   producing fresh callback evidence, but has not reported loss or failure;
 - `Unavailable`: no sufficiently monotonic or stream-correlated observation.
 
-Both usable grades must carry stream generation, sample rate, an exact
+Every usable observation must carry stream generation, sample rate, an exact
 `AudioSamplePosition` media anchor on that same rate, integer consumed frames,
 observation timestamp, latency estimate, monotonicity status, and uncertainty.
 Rate/anchor mismatch, a negative realtime anchor, or unrepresentable position
@@ -419,7 +426,11 @@ Reissuing the same target for a quality revision or Clock Master handoff may
 conservatively retain an earlier deadline but can never renew it. The same
 pending deadline participates in the Engine's next-wake result, so a scheduler
 cannot sleep until the successor frame boundary after phase authority has
-expired. Paused and natural-end demands remain untimed. Prefetch is advisory,
+expired. The next-wake result also retains its typed reason (`PrimingDeadline`,
+`PresentationDeadline`, `FrameBoundary`, or `AudioDevicePoll`) so a host may
+select a suitable wait primitive without reconstructing Engine timing policy.
+
+Paused and natural-end demands remain untimed. Prefetch is advisory,
 playback-only, slack-only, and cannot displace visible current-frame work.
 
 When either Synthetic or Audio Device Clock Master reaches natural end, the

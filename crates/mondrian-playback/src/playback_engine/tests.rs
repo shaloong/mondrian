@@ -1250,6 +1250,35 @@ fn next_wake_delay_uses_remaining_presentation_phase_budget() {
 }
 
 #[test]
+fn audio_clock_wake_does_not_sleep_past_the_projected_video_boundary() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).unwrap();
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+    engine
+        .observe_audio_device_clock(audio_observation(&engine, 1_000, ts(0)))
+        .expect("audio handoff");
+    let demand = engine.pending_frame_demand().expect("initial audio demand");
+    let delivery = FramePresentationTicket::for_demand(demand, FramePresentationQuality::Ready)
+        .complete_at(ts(1));
+    assert!(engine.observe_frame_delivery(delivery).unwrap().accepted());
+
+    assert_eq!(
+        engine.next_wake(ts(20)).unwrap(),
+        Some(PlaybackWake {
+            after: Duration::from_millis(2),
+            reason: PlaybackWakeReason::AudioDevicePoll,
+        })
+    );
+    assert_eq!(
+        engine.next_wake(ts(39)).unwrap(),
+        Some(PlaybackWake {
+            after: Duration::from_millis(1),
+            reason: PlaybackWakeReason::FrameBoundary,
+        })
+    );
+}
+
+#[test]
 fn invalid_recovery_policy_is_rejected_at_the_interface() {
     let result = PlaybackEngine::new(
         Rational::new(1, 25),

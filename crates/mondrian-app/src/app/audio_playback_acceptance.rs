@@ -97,6 +97,7 @@ pub(crate) struct ProfessionalAudioPlaybackObservation<'a> {
     pub(crate) playback_evidence: &'a PlaybackEvidenceReport,
     pub(crate) process_memory: &'a PreviewProcessMemoryEvidenceReport,
     pub(crate) video_readiness: ProfessionalVideoReadinessObservation,
+    pub(crate) video_coordinator: ProfessionalVideoCoordinatorObservation,
     pub(crate) gpu_presented_frames: u64,
 }
 
@@ -117,6 +118,38 @@ impl ProfessionalVideoReadinessObservation {
             .saturating_add(self.stale)
             .saturating_add(self.unavailable)
             .saturating_add(self.missed_deadline)
+    }
+}
+
+/// Long-run scheduling shape behind sampled Headless Viewer readiness.
+///
+/// Aggregate readiness alone cannot distinguish isolated operating-system
+/// jitter from a sustained execution stall. Candidate-state counts remain
+/// mutually exclusive and cover every non-ready interval.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub(crate) struct ProfessionalVideoCoordinatorObservation {
+    pub(crate) intervals: u64,
+    pub(crate) stale_intervals: u64,
+    pub(crate) stale_bursts: u64,
+    pub(crate) max_consecutive_stale: u64,
+    pub(crate) stale_ready: u64,
+    pub(crate) stale_queued_ready: u64,
+    pub(crate) stale_in_flight: u64,
+    pub(crate) stale_loading: u64,
+    pub(crate) stale_backpressured: u64,
+    pub(crate) stale_dropped_late: u64,
+    pub(crate) stale_unavailable: u64,
+}
+
+impl ProfessionalVideoCoordinatorObservation {
+    fn classified_stale(self) -> u64 {
+        self.stale_ready
+            .saturating_add(self.stale_queued_ready)
+            .saturating_add(self.stale_in_flight)
+            .saturating_add(self.stale_loading)
+            .saturating_add(self.stale_backpressured)
+            .saturating_add(self.stale_dropped_late)
+            .saturating_add(self.stale_unavailable)
     }
 }
 
@@ -188,6 +221,7 @@ pub(crate) struct ProfessionalAudioPlaybackGateReport {
     video_missed_deadline_samples: u64,
     video_total_samples: u64,
     video_ready_basis_points: u64,
+    video_coordinator: ProfessionalVideoCoordinatorObservation,
     gpu_presented_frames: u64,
     source_cache: AudioSourceCacheDiagnostics,
     process_memory: PreviewProcessMemoryGateReport,
@@ -560,6 +594,21 @@ pub(crate) fn evaluate_professional_audio_playback(
 
     let video_total_samples = observation.video_readiness.total();
     let ready_basis_points = basis_points(observation.video_readiness.ready, video_total_samples);
+    let coordinator = observation.video_coordinator;
+    require(
+        &mut failures,
+        coordinator.intervals == video_total_samples
+            && coordinator.stale_intervals == observation.video_readiness.stale
+            && coordinator.classified_stale() == coordinator.stale_intervals
+            && coordinator.stale_bursts <= coordinator.stale_intervals
+            && coordinator.max_consecutive_stale <= coordinator.stale_intervals
+            && (coordinator.stale_intervals > 0
+                || (coordinator.stale_bursts == 0 && coordinator.max_consecutive_stale == 0)),
+        "video_coordinator_evidence_inconsistent",
+        "coordinator intervals close against readiness and every stale interval has one candidate-state classification",
+        format!("{coordinator:?}"),
+        "headless realtime coordinator evidence",
+    );
     require(
         &mut failures,
         video_total_samples > 0 && ready_basis_points >= MIN_VIDEO_READY_BASIS_POINTS,
@@ -718,6 +767,7 @@ pub(crate) fn evaluate_professional_audio_playback(
         video_missed_deadline_samples: observation.video_readiness.missed_deadline,
         video_total_samples,
         video_ready_basis_points: ready_basis_points,
+        video_coordinator: coordinator,
         gpu_presented_frames: observation.gpu_presented_frames,
         source_cache: cache,
         process_memory,
@@ -1063,6 +1113,10 @@ mod tests {
                 ready: 1,
                 ..ProfessionalVideoReadinessObservation::default()
             },
+            video_coordinator: ProfessionalVideoCoordinatorObservation {
+                intervals: 1,
+                ..ProfessionalVideoCoordinatorObservation::default()
+            },
             gpu_presented_frames: 1,
         })
     }
@@ -1156,6 +1210,14 @@ mod tests {
                 stale: 100,
                 ..ProfessionalVideoReadinessObservation::default()
             },
+            video_coordinator: ProfessionalVideoCoordinatorObservation {
+                intervals: 54_000,
+                stale_intervals: 100,
+                stale_bursts: 100,
+                max_consecutive_stale: 1,
+                stale_dropped_late: 100,
+                ..ProfessionalVideoCoordinatorObservation::default()
+            },
             gpu_presented_frames: 54_000,
         });
         assert!(report.passed, "{:?}", report.failures);
@@ -1184,6 +1246,7 @@ mod tests {
             playback_evidence: &evidence,
             process_memory: &memory,
             video_readiness: ProfessionalVideoReadinessObservation::default(),
+            video_coordinator: ProfessionalVideoCoordinatorObservation::default(),
             gpu_presented_frames: 0,
         });
         let codes: Vec<_> = report.failures.iter().map(|failure| failure.code).collect();
