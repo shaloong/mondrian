@@ -35,6 +35,7 @@ impl<K, O, L> ViewerGpuPhysicalPublication<K, O, L> {
     /// Consume the publication and return its semantic identity and artifact.
     ///
     /// The move-only lease is retired before this method returns.
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn into_key_and_artifact(self) -> (K, O) {
         let Self {
             output_key,
@@ -48,6 +49,7 @@ impl<K, O, L> ViewerGpuPhysicalPublication<K, O, L> {
     /// Consume the publication and return only its Adapter artifact.
     ///
     /// The move-only lease is retired before this method returns.
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn into_artifact(self) -> O {
         self.into_key_and_artifact().1
     }
@@ -140,6 +142,7 @@ impl<K: PartialEq, O, L> ViewerGpuPublicationSlots<K, O, L> {
     }
 
     /// Visible artifact only when it has the exact semantic output identity.
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn current_artifact_for_key(&self, output_key: &K) -> Option<&O> {
         self.current
             .as_ref()

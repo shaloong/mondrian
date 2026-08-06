@@ -3825,18 +3825,23 @@ fn prepare_viewer_gpu_preview(
     let mut frame = match host.gpu_preview_frame_for_current_state() {
         PreviewGpuFrameState::Ready(frame) => frame,
         PreviewGpuFrameState::Current(candidate) => {
-            if let Some(output_key) = host.exact_current_viewer_gpu_output_key() {
-                let promotion = session
-                    .viewer_gpu_presentation
-                    .publications
-                    .promote_prepared_exact(&output_key);
-                if let Some(previous) = promotion.into_retired() {
-                    session.frame_renderer.unregister_external_texture(previous.artifact());
-                    drop(previous);
-                }
-            }
-            let physical_is_exact =
-                session.viewer_gpu_presentation.published_output().is_some_and(|physical| {
+            let physical_slot_is_exact =
+                if let Some(output_key) = host.exact_current_viewer_gpu_output_key() {
+                    let promotion = session
+                        .viewer_gpu_presentation
+                        .publications
+                        .promote_prepared_exact(&output_key);
+                    let exact_output_available = promotion.exact_output_available();
+                    if let Some(previous) = promotion.into_retired() {
+                        session.frame_renderer.unregister_external_texture(previous.artifact());
+                        drop(previous);
+                    }
+                    exact_output_available
+                } else {
+                    false
+                };
+            let physical_is_exact = physical_slot_is_exact
+                && session.viewer_gpu_presentation.published_output().is_some_and(|physical| {
                     host.has_external_viewer_frame_artifact(
                         physical.output_key(),
                         physical.artifact().as_str(),

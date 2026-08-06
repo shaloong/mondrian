@@ -891,7 +891,6 @@ impl<G: PartialEq, K, O> PreviewExecutionCoordinator<G, K, O> {
     /// This is a read-only observation of an artifact that was already made
     /// usable. It does not re-resolve a semantic key, refresh stale authority,
     /// or publish an output.
-    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn exact_current_output(&self) -> Option<(&K, &O)> {
         self.has_exact_current_output().then(|| self.current_output()).flatten()
     }
