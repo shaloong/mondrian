@@ -1,6 +1,7 @@
 //! Physical-media preparation and Asset Library commit adapter.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use mondrian_assets::{AssetLibrary, AssetMediaProbeCandidate};
 use mondrian_core::types::AssetId;
@@ -12,6 +13,7 @@ use super::execution::{
     MediaImportCommitBackend, MediaImportPreparationBackend, MediaImportPublicationOutcome,
     MediaImportWorkerOutcome,
 };
+use super::MediaImportFailureReason;
 
 #[derive(Debug)]
 pub(super) struct MediaImportPreparedCandidate {
@@ -21,7 +23,17 @@ pub(super) struct MediaImportPreparedCandidate {
     pub(super) folder_id: Option<String>,
 }
 
-pub(super) struct AssetLibraryMediaImportBackend;
+pub(super) struct AssetLibraryMediaImportBackend {
+    helper_executable: Option<PathBuf>,
+}
+
+impl AssetLibraryMediaImportBackend {
+    pub(super) fn new() -> Self {
+        Self {
+            helper_executable: super::super::packaged_worker::discover_media_probe_worker(),
+        }
+    }
+}
 
 impl MediaImportPreparationBackend for AssetLibraryMediaImportBackend {
     fn prepare(
@@ -33,10 +45,24 @@ impl MediaImportPreparationBackend for AssetLibraryMediaImportBackend {
         if cancellation.is_canceled() {
             return MediaImportWorkerOutcome::Canceled;
         }
-        match prepare_media_import_candidate(path, folder_id) {
+        let Some(helper_executable) = self.helper_executable.as_deref() else {
+            return MediaImportWorkerOutcome::Failed {
+                detail: "未找到与当前产品运行时匹配的媒体 Probe Helper".to_owned(),
+                failure: MediaImportFailureReason::ProbeWorkerUnavailable,
+            };
+        };
+        match prepare_media_import_candidate(helper_executable, path, folder_id, cancellation) {
             Ok(_) if cancellation.is_canceled() => MediaImportWorkerOutcome::Canceled,
             Ok(candidate) => MediaImportWorkerOutcome::Prepared(Box::new(candidate)),
-            Err(error) => MediaImportWorkerOutcome::Failed(error.to_string()),
+            Err(error) if error.is_canceled() => MediaImportWorkerOutcome::Canceled,
+            Err(error) => MediaImportWorkerOutcome::Failed {
+                failure: if error.is_deadline_exceeded() {
+                    MediaImportFailureReason::ProbeDeadlineExceeded
+                } else {
+                    MediaImportFailureReason::ProbeFailed
+                },
+                detail: error.to_string(),
+            },
         }
     }
 }
@@ -55,26 +81,21 @@ impl MediaImportCommitBackend for AssetLibraryMediaImportBackend {
 }
 
 fn prepare_media_import_candidate(
+    helper_executable: &Path,
     path: &Path,
     folder_id: Option<&str>,
-) -> Result<MediaImportPreparedCandidate> {
-    let canonical_path = path.canonicalize().map_err(|error| MondrianError::MediaOpen {
-        path: path.display().to_string(),
-        reason: error.to_string(),
-    })?;
-    let source_fingerprint = MediaFileFingerprint::capture(&canonical_path);
-    let info = mondrian_media::probe_media_info(&canonical_path)?;
-    let verified_fingerprint = MediaFileFingerprint::capture(&canonical_path);
-    if !source_fingerprint.authorizes_reuse() || source_fingerprint != verified_fingerprint {
-        return Err(MondrianError::MediaOpen {
-            path: canonical_path.display().to_string(),
-            reason: "媒体文件在导入分析期间发生变化，未提交过期元数据".to_owned(),
-        });
-    }
+    cancellation: &ExecutionCancellationToken,
+) -> std::result::Result<MediaImportPreparedCandidate, mondrian_media::IsolatedMediaProbeError> {
+    let prepared = mondrian_media::prepare_media_probe_isolated(
+        helper_executable,
+        path,
+        cancellation,
+        Instant::now() + super::super::packaged_worker::MEDIA_PROBE_TIMEOUT,
+    )?;
     Ok(MediaImportPreparedCandidate {
-        canonical_path,
-        source_fingerprint,
-        info,
+        canonical_path: prepared.canonical_path,
+        source_fingerprint: prepared.source_fingerprint,
+        info: prepared.probe,
         folder_id: folder_id.map(str::to_owned),
     })
 }

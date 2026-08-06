@@ -159,6 +159,34 @@ impl MediaImportCommitBackend for BlockingCommitBackend {
     }
 }
 
+struct FailedPreparationBackend {
+    failure: MediaImportFailureReason,
+}
+
+impl MediaImportPreparationBackend for FailedPreparationBackend {
+    fn prepare(
+        &self,
+        _path: &Path,
+        _folder_id: Option<&str>,
+        _cancellation: &ExecutionCancellationToken,
+    ) -> MediaImportWorkerOutcome {
+        MediaImportWorkerOutcome::Failed {
+            detail: "typed preparation failure".to_owned(),
+            failure: self.failure,
+        }
+    }
+}
+
+impl MediaImportCommitBackend for FailedPreparationBackend {
+    fn commit(
+        &self,
+        _library: &AssetLibrary,
+        _candidate: MediaImportPreparedCandidate,
+    ) -> MediaImportPublicationOutcome {
+        panic!("failed preparation must not reach the Asset Library commit Seam")
+    }
+}
+
 fn library() -> Arc<AssetLibrary> {
     let root = std::env::temp_dir().join(format!("mondrian-import-service-{}", AssetId::new()));
     AssetLibrary::open(root).expect("test asset library")
@@ -183,6 +211,29 @@ fn wait_publications(
         std::thread::sleep(Duration::from_millis(2));
     }
     results
+}
+
+#[test]
+fn typed_probe_failure_survives_worker_transport_and_terminal_evidence() {
+    let backend = Arc::new(FailedPreparationBackend {
+        failure: MediaImportFailureReason::ProbeDeadlineExceeded,
+    });
+    let execution = MediaImportExecution::with_backend(1, backend);
+    execution.bind_project(Some(ProjectId::new()));
+    execution.admit_batch(paths(201, 1), None).expect("admit failed probe");
+
+    let publications = wait_publications(&execution, 1);
+
+    assert_eq!(publications.len(), 1);
+    assert_eq!(
+        publications[0].evidence.disposition,
+        ExecutionTerminalDisposition::Failed
+    );
+    let diagnostics = execution.diagnostics();
+    assert!(diagnostics
+        .terminal_records
+        .iter()
+        .any(|record| { record.failure == Some(MediaImportFailureReason::ProbeDeadlineExceeded) }));
 }
 
 #[test]

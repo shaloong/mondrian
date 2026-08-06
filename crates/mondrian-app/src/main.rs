@@ -1,10 +1,18 @@
 //! Product entrypoint for the app UI Mondrian editor shell.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::args_os().any(|argument| argument == "--internal-demux-worker-v2") {
+    let mode = std::env::args_os().nth(1);
+    if mode.as_deref() == Some(std::ffi::OsStr::new("--internal-demux-worker-v2")) {
         return run_internal_demux_worker().map_err(Into::into);
     }
-    if std::env::args_os().any(|argument| argument == "--verify-runtime") {
+    if mode.as_deref()
+        == Some(std::ffi::OsStr::new(
+            mondrian_media::MEDIA_PROBE_WORKER_ARGUMENT,
+        ))
+    {
+        return mondrian_media::run_media_probe_worker().map_err(Into::into);
+    }
+    if mode.as_deref() == Some(std::ffi::OsStr::new("--verify-runtime")) {
         mondrian_media::verify_ffmpeg_runtime()?;
         mondrian_core::ensure_mondrian_default_ocio_loaded().map_err(std::io::Error::other)?;
         println!("Mondrian packaged runtime is ready");

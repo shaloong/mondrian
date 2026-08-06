@@ -32,7 +32,14 @@ const MEDIA_IMPORT_MAX_RESULTS_PER_POLL: usize = 32;
 pub enum MediaImportFailureReason {
     /// The bounded batch or file capacity rejected work before execution.
     AdmissionRejected,
-    /// Immutable preparation or transactional Asset Library commit failed.
+    /// The packaged Probe Helper executable was unavailable.
+    ProbeWorkerUnavailable,
+    /// Physical source canonicalization, fingerprinting, probing, or protocol
+    /// validation failed before Asset Library publication.
+    ProbeFailed,
+    /// The isolated Probe Helper exceeded its admitted monotonic deadline.
+    ProbeDeadlineExceeded,
+    /// Transactional Asset Library commit failed after successful preparation.
     ImportFailed,
     /// Cancellation was observed before the file import committed.
     Canceled,

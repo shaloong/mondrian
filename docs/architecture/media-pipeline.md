@@ -298,9 +298,16 @@ video cannot count a longer container or unrelated stream as playable frames.
 
 Asset registration is separate from metadata probing. `AssetLibrary` cannot
 call FFmpeg and has no dependency on `mondrian-media`. The App media-import
-Module canonicalizes and fingerprints the file, calls `probe_media_info` on its
-bounded worker, rechecks cancellation/project generation/source revision, then
-constructs `AssetMediaProbeCandidate`. `commit_media_probe(candidate, folder)`
+Module supervises the packaged product executable in an exact, versioned
+one-shot Isolated Media Probe mode. The Helper canonicalizes the native path,
+captures a complete fingerprint, calls the bounded FFmpeg probe, verifies the
+same source revision again, and returns one typed snapshot. Parent-side
+cancellation or the 120-second monotonic deadline kills and reaps that Helper;
+stdout has a strict 8 MiB limit and stderr retains only a 64 KiB diagnostic
+tail. The App worker never owns in-process FFmpeg probe state. It rechecks
+cancellation and Project generation, then constructs
+`AssetMediaProbeCandidate`. `commit_media_probe(candidate, folder)` revalidates
+the source fingerprint and
 publishes source facts, stable audio bindings, and target-folder placement as
 one SQLite transaction. This preserves one deep Asset mutation Interface while
 keeping execution and authoring dependency direction correct.
@@ -311,7 +318,7 @@ preconditions on the event thread (library availability, target folder
 existence), admit the request into the instance-owned bounded Media Import
 execution Module, and return immediately. Its fixed worker lanes own
 generation, cancellation, dispatch policy, and result transport; the separate
-physical-media Adapter canonicalizes, fingerprints, probes, and only then
+physical-media Adapter supervises the Isolated Media Probe and only then
 crosses the Asset Library candidate Seam. `AppState` polls import completions
 during the normal background-task tick, publishes
 `AssetImported`, applies proxy policy, updates status, and saves the project
@@ -333,7 +340,9 @@ Existing file-Asset mutations use a separate narrow
 `MediaAssetMutationExecution` Module rather than reopening synchronous paths in
 action handling. Relink, audio Component refresh, and explicit Component
 rebind lower to one typed operation, enter a fixed-capacity ordered queue, and
-prepare the same immutable `AssetMediaProbeCandidate` on a single worker.
+prepare the same immutable `AssetMediaProbeCandidate` on a single worker. They
+reuse the same physical Isolated Media Probe Adapter as Import, but keep their
+own ordering, generation, publication gate, and terminal evidence.
 Single-worker ordering is intentional, and the Module admits at most one
 uncommitted operation for a given Asset: a later intent therefore cannot bind
 the old source path while an earlier relink is still pending. Product resource

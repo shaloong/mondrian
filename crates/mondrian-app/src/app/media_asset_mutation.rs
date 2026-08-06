@@ -15,10 +15,11 @@ use std::time::{Duration, Instant};
 use mondrian_assets::{AssetLibrary, AssetMediaProbeCandidate};
 use mondrian_core::events::AppEvent;
 use mondrian_core::types::{AssetId, AudioSourceComponentId, ProjectId};
+#[cfg(test)]
+use mondrian_core::MediaFileFingerprint;
 use mondrian_core::{
     ExecutionCancellationToken, ExecutionDeadlineStatus, ExecutionPriority,
-    ExecutionTerminalDisposition, ExecutionTerminalEvidence, MediaFileFingerprint, MondrianError,
-    Result,
+    ExecutionTerminalDisposition, ExecutionTerminalEvidence, MondrianError, Result,
 };
 use parking_lot::{Condvar, Mutex};
 
@@ -193,6 +194,7 @@ struct MediaAssetMutationInner {
     state: Mutex<MediaAssetMutationState>,
     available: Condvar,
     shutdown: AtomicBool,
+    probe_helper_executable: Option<PathBuf>,
     result_tx: mpsc::SyncSender<MediaAssetMutationWorkerResult>,
 }
 
@@ -210,6 +212,7 @@ impl MediaAssetMutationExecution {
             state: Mutex::new(MediaAssetMutationState::default()),
             available: Condvar::new(),
             shutdown: AtomicBool::new(false),
+            probe_helper_executable: super::packaged_worker::discover_media_probe_worker(),
             result_tx,
         });
         let worker_inner = Arc::clone(&inner);
@@ -508,7 +511,7 @@ impl Drop for MediaAssetMutationExecution {
             }
         } else {
             tracing::warn!(
-                "media Asset probe exceeded bounded shutdown grace; detached worker retains no Asset Library commit authority"
+                "supervised media Asset Probe Helper settlement exceeded bounded shutdown grace; detached parent worker retains no Asset Library commit authority"
             );
         }
     }
@@ -535,7 +538,8 @@ fn media_asset_mutation_worker(inner: Arc<MediaAssetMutationInner>) {
             }
         };
         let started = Instant::now();
-        let outcome = prepare_media_asset_mutation(request);
+        let outcome =
+            prepare_media_asset_mutation(request, inner.probe_helper_executable.as_deref());
         let operation_id = outcome.request().operation_id;
         let disconnected = inner
             .result_tx
@@ -556,11 +560,22 @@ fn media_asset_mutation_worker(inner: Arc<MediaAssetMutationInner>) {
 
 fn prepare_media_asset_mutation(
     request: MediaAssetMutationRequest,
+    helper_executable: Option<&Path>,
 ) -> MediaAssetMutationWorkerOutcome {
     if request.cancellation.is_canceled() {
         return MediaAssetMutationWorkerOutcome::Canceled(request);
     }
-    match prepare_probe_candidate(&request.source_path) {
+    let Some(helper_executable) = helper_executable else {
+        return MediaAssetMutationWorkerOutcome::Failed {
+            request,
+            reason: "未找到与当前产品运行时匹配的媒体 Probe Helper".to_owned(),
+        };
+    };
+    match prepare_probe_candidate(
+        helper_executable,
+        &request.source_path,
+        &request.cancellation,
+    ) {
         Ok(_) if request.cancellation.is_canceled() => {
             MediaAssetMutationWorkerOutcome::Canceled(request)
         }
@@ -570,27 +585,34 @@ fn prepare_media_asset_mutation(
                 candidate,
             }))
         }
+        Err(error) if error.is_canceled() => MediaAssetMutationWorkerOutcome::Canceled(request),
         Err(error) => {
             MediaAssetMutationWorkerOutcome::Failed { request, reason: error.to_string() }
         }
     }
 }
 
-fn prepare_probe_candidate(path: &Path) -> Result<AssetMediaProbeCandidate> {
-    let canonical_path = path.canonicalize().map_err(|error| MondrianError::MediaOpen {
-        path: path.display().to_string(),
-        reason: error.to_string(),
-    })?;
-    let source_fingerprint = MediaFileFingerprint::capture(&canonical_path);
-    let media_info = mondrian_media::probe_media_info(&canonical_path)?;
-    let verified_fingerprint = MediaFileFingerprint::capture(&canonical_path);
-    if !source_fingerprint.authorizes_reuse() || source_fingerprint != verified_fingerprint {
-        return Err(MondrianError::MediaOpen {
-            path: canonical_path.display().to_string(),
-            reason: "媒体文件在分析期间发生变化，未提交过期元数据".to_owned(),
-        });
-    }
-    AssetMediaProbeCandidate::new(canonical_path, source_fingerprint, media_info)
+fn prepare_probe_candidate(
+    helper_executable: &Path,
+    path: &Path,
+    cancellation: &ExecutionCancellationToken,
+) -> std::result::Result<AssetMediaProbeCandidate, mondrian_media::IsolatedMediaProbeError> {
+    let prepared = mondrian_media::prepare_media_probe_isolated(
+        helper_executable,
+        path,
+        cancellation,
+        Instant::now() + super::packaged_worker::MEDIA_PROBE_TIMEOUT,
+    )?;
+    AssetMediaProbeCandidate::new(
+        prepared.canonical_path,
+        prepared.source_fingerprint,
+        prepared.probe,
+    )
+    .map_err(
+        |error| mondrian_media::IsolatedMediaProbeError::SnapshotRejected {
+            detail: format!("isolated probe produced an invalid Asset candidate: {error}"),
+        },
+    )
 }
 
 fn commit_prepared_mutation(

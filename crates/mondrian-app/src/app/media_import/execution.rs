@@ -76,7 +76,10 @@ pub(super) struct MediaImportAdmission {
 #[derive(Debug)]
 pub(super) enum MediaImportWorkerOutcome {
     Prepared(Box<MediaImportPreparedCandidate>),
-    Failed(String),
+    Failed {
+        detail: String,
+        failure: MediaImportFailureReason,
+    },
     Canceled,
 }
 
@@ -227,7 +230,7 @@ impl MediaImportExecution {
     pub(in super::super) fn new() -> Self {
         Self::with_backend(
             media_import_worker_count(),
-            Arc::new(AssetLibraryMediaImportBackend),
+            Arc::new(AssetLibraryMediaImportBackend::new()),
         )
     }
 
@@ -532,12 +535,12 @@ impl MediaImportExecution {
                             }
                         }
                     }
-                    MediaImportWorkerOutcome::Failed(error) => {
+                    MediaImportWorkerOutcome::Failed { detail, failure } => {
                         state.counters.failed_files = state.counters.failed_files.saturating_add(1);
                         (
-                            MediaImportPublicationOutcome::Failed(error),
+                            MediaImportPublicationOutcome::Failed(detail),
                             ExecutionTerminalDisposition::Failed,
-                            Some(MediaImportFailureReason::ImportFailed),
+                            Some(failure),
                         )
                     }
                     MediaImportWorkerOutcome::Canceled => {

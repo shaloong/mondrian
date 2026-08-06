@@ -448,8 +448,11 @@ batch/file/result capacity, cooperative batch cancellation, and bounded
 terminal evidence. A batch binds the current Project generation, but workers
 never retain or write an Asset Library. Its two-stage execution is:
 
-1. a worker canonicalizes the path, captures a source fingerprint, probes
-   immutable media metadata, then verifies the source did not change;
+1. a worker supervises the packaged Isolated Media Probe Helper. The Helper
+   canonicalizes the path, captures a complete source fingerprint, probes
+   immutable media metadata, verifies the same revision, and returns one
+   versioned bounded response. Cancellation or a 120-second monotonic deadline
+   kills and reaps the process before the attempt becomes terminal;
 2. the serialized App poll/commit Seam locks the import generation, rechecks
    batch existence and cancellation, verifies the fingerprint again, and only
    then passes the candidate to the current Project's Asset Library. One
@@ -457,9 +460,10 @@ never retain or write an Asset Library. Its two-stage execution is:
    folder placement together.
 
 Preparation and commit are separate Interfaces. Worker state retains only the
-Preparation Adapter; the serialized execution owner retains the Asset Library
-Commit Adapter. This capability split makes “worker cannot write Project
-state” structural rather than a convention.
+Preparation Adapter and packaged executable path; the serialized execution
+owner retains the Asset Library Commit Adapter. Neither the Helper nor its
+supervising worker owns an Asset Library handle. This capability split makes
+“worker cannot write Project state” structural rather than a convention.
 
 Media Import exposes two wrapping, equality-only observation tokens. Its
 complete diagnostics revision covers resource-policy publication and worker
@@ -489,19 +493,21 @@ into a new Authoring Session bound to a fresh Project Library Generation).
 Project identity is not execution-binding
 identity.
 
-Import capacity accounting retains a superseded probe until its worker/result
-transport is actually released, but product demand counts only current-generation
-batch remainder. A blocked old-generation FFmpeg call can therefore reduce
-physical Import capacity without impersonating current user intent or starving
-the new Project's automatic Thumbnail, Waveform, and Proxy work.
+Import capacity accounting retains a superseded probe until its Helper has been
+terminated and reaped and the worker/result transport is released, but product
+demand counts only current-generation batch remainder. Superseded work cannot
+impersonate current user intent or retain an uninterruptible in-process FFmpeg
+call that starves the new Project's automatic Thumbnail, Waveform, and Proxy
+work.
 
 Explicit cancellation is available through a stable batch identity. Queued
-probes terminate immediately. A probe already inside FFmpeg may return, but its
-candidate cannot cross the commit Seam. `Drop` cancels and wakes every worker,
-then joins within a bounded grace period. Because a foreign FFmpeg probe is not
-guaranteed to be interruptible, a late worker may be detached after that grace;
-it owns no Project or Asset Library handle, its result receiver is gone, and it
-has no path to the serialized commit Seam.
+probes terminate immediately. A running Helper is killed and reaped before
+cancellation or deadline evidence is published, so no foreign FFmpeg call
+remains in the App process. `Drop` cancels and wakes every worker, then joins
+within a bounded grace period. Only the supervising parent worker may be
+detached after a rare settlement overrun; it owns no Project or Asset Library
+handle, its result receiver is gone, and it has no path to the serialized
+commit Seam.
 
 ## Proxy cooperative yield
 

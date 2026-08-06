@@ -16,6 +16,7 @@ pub mod decoder;
 mod ffmpeg_runtime;
 mod ffmpeg_tools;
 pub mod info;
+mod media_probe_process;
 pub mod multilevel_cache;
 pub mod preview;
 mod process_supervisor;
@@ -66,6 +67,10 @@ pub use info::{
     VideoColorMetadataHint, VideoColorMetadataHintAuthority, VideoColorMetadataHintScope,
     VideoColorSpaceSource, VideoColorTag, VideoHdrMetadataSummary, VideoHdrSideDataKind,
     VideoStreamInfo,
+};
+pub use media_probe_process::{
+    prepare_media_probe_isolated, run_media_probe_worker, IsolatedMediaProbeError,
+    IsolatedMediaProbeSnapshot, MEDIA_PROBE_WORKER_ARGUMENT,
 };
 pub use multilevel_cache::{CacheTier, MultiLevelCache, ResolvedMediaPath};
 pub use preview::{

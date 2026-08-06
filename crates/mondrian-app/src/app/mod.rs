@@ -117,6 +117,7 @@ pub(crate) mod headless_viewer_gpu;
 pub mod media_asset_mutation;
 mod media_import;
 pub(crate) mod native_video_import;
+mod packaged_worker;
 mod playback;
 pub(crate) mod viewer_gpu_device_progress;
 pub(crate) mod viewer_gpu_publication;
