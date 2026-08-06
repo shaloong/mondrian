@@ -19,6 +19,18 @@ targeting an sRGB, Display P3, PQ, or HLG surface.
 - `mondrian-ui-widgets`: controls and editor-specific reusable surfaces.
 - `mondrian-app::app_ui`: product shell and panel adapters.
 
+`app_ui::panels` is the aggregate projection and dock-composition Module, not
+the owner of every panel's control Implementation. Property-oriented Mixer and
+Inspector construction lives behind the internal
+`panels::property_panels` Seam: callers provide the already projected
+`AudioMixerPanelModel` or `InspectorPanelModel` and receive one retained
+`PropertyPanel`; numeric controls, Rack/automation rows, Mask/Effect controls,
+and typed Action lowering stay private to that Module. This keeps the external
+panel Interface unchanged while concentrating the most coupled property-editing
+knowledge in one place. The complete panel behavior suite is a sibling test
+Module and exercises the same parent Interface rather than being embedded in
+the production source file.
+
 ## Widget Contract
 
 `Widget` is retained-mode and exposes:
