@@ -1108,21 +1108,21 @@ fn contribution_envelope(
     transitions: &[PreparedTransitionBinding],
 ) -> Result<f32, AudioExecutionError> {
     let mut gain = 1.0_f32;
-    if let Some((duration, curve)) = contribution.semantic.fade_in {
-        if duration > TimelineTime::ZERO && clip_local < duration {
-            gain *= rising_curve(clip_local.to_f64() / duration.to_f64(), curve);
-        }
+    if let Some((duration, curve)) = contribution.semantic.fade_in
+        && duration > TimelineTime::ZERO
+        && clip_local < duration
+    {
+        gain *= rising_curve(clip_local.to_f64() / duration.to_f64(), curve);
     }
-    if let Some((duration, curve)) = contribution.semantic.fade_out {
-        if duration > TimelineTime::ZERO {
-            let remaining =
-                contribution.semantic.sequence_range.duration.checked_sub(clip_local)?;
-            if remaining < duration {
-                gain *= falling_curve(
-                    (remaining.to_f64() / duration.to_f64()).clamp(0.0, 1.0),
-                    curve,
-                );
-            }
+    if let Some((duration, curve)) = contribution.semantic.fade_out
+        && duration > TimelineTime::ZERO
+    {
+        let remaining = contribution.semantic.sequence_range.duration.checked_sub(clip_local)?;
+        if remaining < duration {
+            gain *= falling_curve(
+                (remaining.to_f64() / duration.to_f64()).clamp(0.0, 1.0),
+                curve,
+            );
         }
     }
     for transition in transitions {

@@ -206,10 +206,10 @@ fn rewrite_one_legacy_channel_layout(value: &mut serde_json::Value) -> anyhow::R
         *value = serde_json::json!({"Exact": serde_json::to_value(layout)?});
         return Ok(());
     }
-    if let Some(fields) = value.as_object_mut() {
-        if let Some(channels) = fields.remove("Other") {
-            fields.insert("Unsupported".to_owned(), channels);
-        }
+    if let Some(fields) = value.as_object_mut()
+        && let Some(channels) = fields.remove("Other")
+    {
+        fields.insert("Unsupported".to_owned(), channels);
     }
     Ok(())
 }

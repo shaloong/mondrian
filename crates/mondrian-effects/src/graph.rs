@@ -2037,7 +2037,7 @@ pub(crate) fn compile_effect_node_profiles(
                     output_cache_enabled,
                 }
             }
-            EffectGraphNodeKind::MaskSource { ref shape, feather, expansion, opacity } => {
+            EffectGraphNodeKind::MaskSource { shape, feather, expansion, opacity } => {
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 6u8.hash(&mut hasher);
                 shape_variant_hash(shape, &mut hasher);
@@ -2051,7 +2051,7 @@ pub(crate) fn compile_effect_node_profiles(
                     output_cache_enabled: false,
                 }
             }
-            EffectGraphNodeKind::MultiInput { ref inputs, blend_mode, opacity } => {
+            EffectGraphNodeKind::MultiInput { inputs, blend_mode, opacity } => {
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 7u8.hash(&mut hasher);
                 let mut cache_policy = if *blend_mode == mondrian_core::types::BlendMode::Dissolve {

@@ -746,10 +746,10 @@ impl Drop for VisualExecutionTask {
         // dropped, which releases its move-only lease before the join.
         self.results.take();
         self.broker.close();
-        if let Some(worker) = self.worker.take() {
-            if worker.join().is_err() {
-                tracing::warn!("Preview visual execution worker panicked during shutdown");
-            }
+        if let Some(worker) = self.worker.take()
+            && worker.join().is_err()
+        {
+            tracing::warn!("Preview visual execution worker panicked during shutdown");
         }
     }
 }

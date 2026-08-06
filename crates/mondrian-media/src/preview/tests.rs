@@ -2949,11 +2949,11 @@ fn canceled_codec_work_forces_seek_before_session_reuse() {
                 probe_checks.fetch_add(1, Ordering::AcqRel) >= cancel_after
             })
             .expect("cancellable playback frame");
-        if let PreviewDecodeOutcome::Canceled(cancellation) = outcome {
-            if cancellation.checkpoint == PreviewDecodeCancellationCheckpoint::Codec {
-                codec_cancellation = Some(cancellation);
-                break;
-            }
+        if let PreviewDecodeOutcome::Canceled(cancellation) = outcome
+            && cancellation.checkpoint == PreviewDecodeCancellationCheckpoint::Codec
+        {
+            codec_cancellation = Some(cancellation);
+            break;
         }
     }
     assert!(

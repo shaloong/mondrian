@@ -118,10 +118,10 @@ impl AudioWindowDecoder for PersistentFfmpegAudioWindowDecoder {
             Some(_) => WindowKind::RandomSeek,
         };
 
-        if kind == WindowKind::RandomSeek {
-            if let Some(mut previous) = session.take() {
-                previous.terminate();
-            }
+        if kind == WindowKind::RandomSeek
+            && let Some(mut previous) = session.take()
+        {
+            previous.terminate();
         }
 
         let started = Instant::now();
@@ -151,10 +151,8 @@ impl AudioWindowDecoder for PersistentFfmpegAudioWindowDecoder {
             result = Err(canceled_audio_decode(&source.path));
         }
         let failed = result.is_err();
-        if failed {
-            if let Some(mut failed) = session.take() {
-                failed.terminate();
-            }
+        if failed && let Some(mut failed) = session.take() {
+            failed.terminate();
         }
         drop(session);
         if failed {

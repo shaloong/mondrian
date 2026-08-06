@@ -109,12 +109,11 @@ impl AppState {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        if let Some(primary_clip_id) = primary_clip_id {
-            if let Some(index) =
+        if let Some(primary_clip_id) = primary_clip_id
+            && let Some(index) =
                 selections.iter().position(|selection| selection.clip_id == primary_clip_id)
-            {
-                selections.swap(0, index);
-            }
+        {
+            selections.swap(0, index);
         }
         self.replace_clip_selection(selections);
         self.set_status_hint(

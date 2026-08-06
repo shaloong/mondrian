@@ -131,10 +131,10 @@ impl Widget for List {
             | UiEvent::MouseUp { position, button: MouseButton::Left, .. } => Some(*position),
             _ => None,
         };
-        if let Some(position) = scrollbar_pointer {
-            if self.scroll.is_scrollbar_dragging() || self.scroll.scrollbar_hit_test(position) {
-                return self.forward_to_scroll(event, ctx);
-            }
+        if let Some(position) = scrollbar_pointer
+            && (self.scroll.is_scrollbar_dragging() || self.scroll.scrollbar_hit_test(position))
+        {
+            return self.forward_to_scroll(event, ctx);
         }
 
         match event {

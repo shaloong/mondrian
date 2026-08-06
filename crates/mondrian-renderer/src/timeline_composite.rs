@@ -986,21 +986,22 @@ pub fn admit_timeline_render_plan_for_cpu_compositor(
     if !scan.all_float_shapes_implemented && !encoded_domain_blockers.is_empty() {
         return Err(domain_blocker_error(encoded_domain_blockers));
     }
-    if scan.all_float_shapes_implemented && float_domain_blockers.is_empty() {
-        if let Some(Err(reason)) = float_admission {
-            return Err(execution_admission_error(
-                TimelineCpuCompositePrecision::Float32,
-                reason,
-            ));
-        }
+    if scan.all_float_shapes_implemented
+        && float_domain_blockers.is_empty()
+        && let Some(Err(reason)) = float_admission
+    {
+        return Err(execution_admission_error(
+            TimelineCpuCompositePrecision::Float32,
+            reason,
+        ));
     }
-    if encoded_domain_blockers.is_empty() {
-        if let Err(reason) = encoded_admission {
-            return Err(execution_admission_error(
-                TimelineCpuCompositePrecision::NormalizedU8,
-                reason,
-            ));
-        }
+    if encoded_domain_blockers.is_empty()
+        && let Err(reason) = encoded_admission
+    {
+        return Err(execution_admission_error(
+            TimelineCpuCompositePrecision::NormalizedU8,
+            reason,
+        ));
     }
     Err(domain_blocker_error(if scan.all_float_shapes_implemented {
         float_domain_blockers
@@ -1282,21 +1283,20 @@ pub fn composite_timeline_elements_color_frame_with_diagnostics(
         });
     }
     let mut execution = TimelineCompositeExecutionDiagnostics::default();
-    if !diagnostics.uses_legacy_rgba8() {
-        if let Some(frame) =
+    if !diagnostics.uses_legacy_rgba8()
+        && let Some(frame) =
             exact_zero_copy_identity_passthrough(width, height, elements, options, runtime)
-        {
-            // Graph shape alone is not an execution contract. Temporal,
-            // ordered-state, backend, precision, and domain obligations must
-            // fail closed before even a pixel-identity graph may bypass the
-            // compositor.
-            admit_composite_element_effect_graphs(elements, TimelineCpuCompositePrecision::Float32)
-                .map_err(EffectFloatExecutionError::ExecutionContract)?;
-            scratch.admit_cpu_active_working_set(0, TimelineCpuCompositePrecision::Float32)?;
-            execution.zero_copy_identity_passthroughs = 1;
-            scratch.enforce_retained_scratch_grant();
-            return Ok(TimelineCompositeFrame { frame: frame.clone(), diagnostics, execution });
-        }
+    {
+        // Graph shape alone is not an execution contract. Temporal,
+        // ordered-state, backend, precision, and domain obligations must
+        // fail closed before even a pixel-identity graph may bypass the
+        // compositor.
+        admit_composite_element_effect_graphs(elements, TimelineCpuCompositePrecision::Float32)
+            .map_err(EffectFloatExecutionError::ExecutionContract)?;
+        scratch.admit_cpu_active_working_set(0, TimelineCpuCompositePrecision::Float32)?;
+        execution.zero_copy_identity_passthroughs = 1;
+        scratch.enforce_retained_scratch_grant();
+        return Ok(TimelineCompositeFrame { frame: frame.clone(), diagnostics, execution });
     }
     let precision = if diagnostics.uses_legacy_rgba8() {
         TimelineCpuCompositePrecision::NormalizedU8
@@ -2107,14 +2107,13 @@ fn single_frame_semantic_blocker(
         if let Err(error) = graph
             .execution_envelope()
             .admit_single_frame_backend(EffectProcessingBackend::Cpu, working_precision)
-        {
-            if matches!(
+            && matches!(
                 error,
                 EffectExecutionAdmissionError::ContinuitySessionRequired
                     | EffectExecutionAdmissionError::TemporalInputRequired { .. }
-            ) {
-                return Some((precision, error));
-            }
+            )
+        {
+            return Some((precision, error));
         }
     }
     None

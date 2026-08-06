@@ -175,10 +175,10 @@ impl MediaPreviewCancellationObserver {
 
     fn shutdown_and_join(&mut self) {
         let _ = self.commands.send(MediaPreviewCancellationObserverCommand::Shutdown);
-        if let Some(worker) = self.worker.take() {
-            if worker.join().is_err() {
-                tracing::warn!("Preview media cancellation observer panicked during shutdown");
-            }
+        if let Some(worker) = self.worker.take()
+            && worker.join().is_err()
+        {
+            tracing::warn!("Preview media cancellation observer panicked during shutdown");
         }
     }
 }
@@ -591,10 +591,10 @@ fn media_preview_worker_with_decoder<DecodeJob>(
         if result.canceled && result.cancel_reason.is_none() {
             result.cancel_reason = Some(MediaPreviewCancelReason::Unknown);
         }
-        if result.canceled {
-            if let Some(evidence) = scheduler.execution_cancellation_evidence(execution_id) {
-                result.decode_elapsed_us = app_duration_us(evidence.execution_age);
-            }
+        if result.canceled
+            && let Some(evidence) = scheduler.execution_cancellation_evidence(execution_id)
+        {
+            result.decode_elapsed_us = app_duration_us(evidence.execution_age);
         }
         let publication = send_media_preview_result(
             lane,

@@ -51,18 +51,16 @@ impl ShortcutManager for ShortcutManagerImpl {
         modifiers: Modifiers,
         context: ShortcutContext,
     ) -> Option<Action> {
-        if let Some(widget) = context.widget {
-            if let Some(action) =
+        if let Some(widget) = context.widget
+            && let Some(action) =
                 self.resolve_in_scope(ShortcutScope::Widget(widget), key, modifiers)
-            {
-                return Some(action);
-            }
+        {
+            return Some(action);
         }
-        if let Some(panel) = context.panel {
-            if let Some(action) = self.resolve_in_scope(ShortcutScope::Panel(panel), key, modifiers)
-            {
-                return Some(action);
-            }
+        if let Some(panel) = context.panel
+            && let Some(action) = self.resolve_in_scope(ShortcutScope::Panel(panel), key, modifiers)
+        {
+            return Some(action);
         }
         self.resolve_in_scope(ShortcutScope::Workspace, key, modifiers)
             .or_else(|| self.resolve_in_scope(ShortcutScope::Global, key, modifiers))

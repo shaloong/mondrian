@@ -334,10 +334,9 @@ fn dependency_observer_worker(
                 if changed {
                     if !entries.contains_key(&sequence_id)
                         && entries.len() >= OBSERVED_PROGRAM_CAPACITY
+                        && let Some(stale) = recency.pop_front()
                     {
-                        if let Some(stale) = recency.pop_front() {
-                            entries.remove(&stale);
-                        }
+                        entries.remove(&stale);
                     }
                     entries.insert(
                         sequence_id,

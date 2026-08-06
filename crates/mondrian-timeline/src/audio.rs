@@ -577,12 +577,12 @@ impl AudioComponentEdit {
         if !self.pan.is_finite() || !(-1.0..=1.0).contains(&self.pan) {
             return Err(AudioAuthoringError::InvalidPan(self.id));
         }
-        if let AudioComponentChannelMapping::Explicit(matrix) = &self.channel_mapping {
-            if matrix.destination_layout() != sequence_layout {
-                return Err(AudioAuthoringError::ChannelMappingDestinationMismatch(
-                    self.id,
-                ));
-            }
+        if let AudioComponentChannelMapping::Explicit(matrix) = &self.channel_mapping
+            && matrix.destination_layout() != sequence_layout
+        {
+            return Err(AudioAuthoringError::ChannelMappingDestinationMismatch(
+                self.id,
+            ));
         }
         validate_optional_gain_curve(&self.volume_automation, CLIP_VOLUME_DB_PARAMETER_ID)?;
         validate_optional_curve(&self.pan_automation, CLIP_PAN_PARAMETER_ID)?;
@@ -1207,16 +1207,16 @@ impl AudioProgram {
     /// Add the mixer channel and default main-output Route for a new Track.
     pub fn add_track(&mut self, track_id: TrackId) {
         self.track_channels.entry(track_id).or_default();
-        if let Some(output) = self.outputs.first() {
-            if !self.routes.iter().any(|route| route.source.track_id() == Some(track_id)) {
-                self.routes.push(AudioRoute::new(
-                    AudioRouteSource::Track {
-                        track_id,
-                        port: AudioChannelStripOutputPort::PostMute,
-                    },
-                    AudioRouteDestination::Output(output.id),
-                ));
-            }
+        if let Some(output) = self.outputs.first()
+            && !self.routes.iter().any(|route| route.source.track_id() == Some(track_id))
+        {
+            self.routes.push(AudioRoute::new(
+                AudioRouteSource::Track {
+                    track_id,
+                    port: AudioChannelStripOutputPort::PostMute,
+                },
+                AudioRouteDestination::Output(output.id),
+            ));
         }
     }
 
@@ -1328,10 +1328,10 @@ impl AudioProgram {
                 return Err(AudioAuthoringError::EmptyName);
             }
             output.strip.validate()?;
-            if let ProgramOutputMainSource::SemanticProjection { role_id } = output.main_source {
-                if !role_ids.contains(&role_id) {
-                    return Err(AudioAuthoringError::UnknownOutputRole(role_id));
-                }
+            if let ProgramOutputMainSource::SemanticProjection { role_id } = output.main_source
+                && !role_ids.contains(&role_id)
+            {
+                return Err(AudioAuthoringError::UnknownOutputRole(role_id));
             }
         }
         validate_roles(audio_roles, &role_ids)?;
@@ -1565,10 +1565,10 @@ fn validate_bus_cycles(
             return Err(AudioAuthoringError::RouteCycle);
         }
         for route in routes {
-            if route.source.bus_id() == Some(bus) {
-                if let AudioRouteDestination::Bus(next) = route.destination {
-                    visit(next, routes, visiting, visited)?;
-                }
+            if route.source.bus_id() == Some(bus)
+                && let AudioRouteDestination::Bus(next) = route.destination
+            {
+                visit(next, routes, visiting, visited)?;
             }
         }
         visiting.remove(&bus);

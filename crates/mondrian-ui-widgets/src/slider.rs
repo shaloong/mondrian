@@ -167,10 +167,10 @@ impl Slider {
     }
 
     fn dispatch_change(&self, ctx: &mut EventContext) {
-        if let Some(action) = &self.on_change {
-            if let Some(action) = action(self.value()) {
-                (ctx.dispatch)(action);
-            }
+        if let Some(action) = &self.on_change
+            && let Some(action) = action(self.value())
+        {
+            (ctx.dispatch)(action);
         }
     }
 

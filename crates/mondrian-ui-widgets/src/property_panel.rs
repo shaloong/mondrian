@@ -581,14 +581,13 @@ impl Widget for PropertyPanel {
                     return EventResult::Handled;
                 }
             }
-            if let UiEvent::MouseDown { position, button: MouseButton::Left, .. } = event {
-                if section.bounds.contains(*position) || section.header_bounds.contains(*position) {
-                    if let Some(action) = section.select_action.clone() {
-                        (ctx.dispatch)(action);
-                        ctx.request_repaint();
-                        return EventResult::Handled;
-                    }
-                }
+            if let UiEvent::MouseDown { position, button: MouseButton::Left, .. } = event
+                && (section.bounds.contains(*position) || section.header_bounds.contains(*position))
+                && let Some(action) = section.select_action.clone()
+            {
+                (ctx.dispatch)(action);
+                ctx.request_repaint();
+                return EventResult::Handled;
             }
         }
         EventResult::Ignored

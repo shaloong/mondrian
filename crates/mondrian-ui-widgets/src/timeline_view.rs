@@ -1412,14 +1412,12 @@ impl TimelineView {
     }
 
     fn max_content_frame(&self) -> i64 {
-        let max_frame = self
-            .tracks
+        self.tracks
             .iter()
             .flat_map(|track| track.clips.iter().map(TimelineClip::end_frame))
             .max()
             .unwrap_or(240)
-            .max(240);
-        max_frame
+            .max(240)
     }
 
     fn content_height(&self) -> f32 {
@@ -2258,15 +2256,15 @@ impl TimelineView {
         self.selected_clip = Some(clip_ref);
         self.selected_transition = None;
         if let Some(clip) = self.clip(clip_ref) {
-            if mode == TimelineClipSelectionMode::Replace {
-                if let Some(action) = clip.select_action.clone() {
-                    (ctx.dispatch)(action);
-                }
+            if mode == TimelineClipSelectionMode::Replace
+                && let Some(action) = clip.select_action.clone()
+            {
+                (ctx.dispatch)(action);
             }
-            if let Some(factory) = &self.on_clip_select {
-                if let Some(action) = factory(clip_ref, clip, mode) {
-                    (ctx.dispatch)(action);
-                }
+            if let Some(factory) = &self.on_clip_select
+                && let Some(action) = factory(clip_ref, clip, mode)
+            {
+                (ctx.dispatch)(action);
             }
         }
         ctx.request_repaint();
@@ -2281,12 +2279,11 @@ impl TimelineView {
         self.selected_track = None;
         self.selected_clip = None;
         self.selected_transition = Some(transition_ref);
-        if let Some(transition) = self.transition(transition_ref) {
-            if let Some(factory) = &self.on_transition_select {
-                if let Some(action) = factory(transition_ref, transition) {
-                    (ctx.dispatch)(action);
-                }
-            }
+        if let Some(transition) = self.transition(transition_ref)
+            && let Some(factory) = &self.on_transition_select
+            && let Some(action) = factory(transition_ref, transition)
+        {
+            (ctx.dispatch)(action);
         }
         ctx.request_repaint();
         EventResult::Handled
@@ -2304,10 +2301,10 @@ impl TimelineView {
             if let Some(action) = track.select_action.clone() {
                 (ctx.dispatch)(action);
             }
-            if let Some(factory) = &self.on_track_select {
-                if let Some(action) = factory(track_ref, track) {
-                    (ctx.dispatch)(action);
-                }
+            if let Some(factory) = &self.on_track_select
+                && let Some(action) = factory(track_ref, track)
+            {
+                (ctx.dispatch)(action);
             }
         }
         ctx.request_repaint();
@@ -2320,12 +2317,11 @@ impl TimelineView {
         control: TimelineTrackControl,
         ctx: &mut EventContext,
     ) -> EventResult {
-        if let Some(track) = self.track(track_ref) {
-            if let Some(factory) = &self.on_track_control {
-                if let Some(action) = factory(control, track_ref, track) {
-                    (ctx.dispatch)(action);
-                }
-            }
+        if let Some(track) = self.track(track_ref)
+            && let Some(factory) = &self.on_track_control
+            && let Some(action) = factory(control, track_ref, track)
+        {
+            (ctx.dispatch)(action);
         }
         ctx.request_repaint();
         EventResult::Handled
@@ -2384,10 +2380,10 @@ impl TimelineView {
             old_track_index: drag.track_ref.track_index,
             new_track_index: drag.current_track_index,
         };
-        if let Some(factory) = &self.on_track_move {
-            if let Some(action) = factory(movement, track) {
-                (ctx.dispatch)(action);
-            }
+        if let Some(factory) = &self.on_track_move
+            && let Some(action) = factory(movement, track)
+        {
+            (ctx.dispatch)(action);
         }
         ctx.request_repaint();
         true
@@ -2571,14 +2567,12 @@ impl TimelineView {
             new_start_frame: drag.current_start_frame,
             new_track_index: drag.current_track_index,
         };
-        if movement.old_start_frame != movement.new_start_frame
-            || movement.clip_ref.track_index != movement.new_track_index
+        if (movement.old_start_frame != movement.new_start_frame
+            || movement.clip_ref.track_index != movement.new_track_index)
+            && let Some(factory) = &self.on_clip_move
+            && let Some(action) = factory(movement, clip)
         {
-            if let Some(factory) = &self.on_clip_move {
-                if let Some(action) = factory(movement, clip) {
-                    (ctx.dispatch)(action);
-                }
-            }
+            (ctx.dispatch)(action);
         }
         ctx.request_repaint();
         true
@@ -2603,14 +2597,12 @@ impl TimelineView {
             new_start_frame: drag.current_start_frame,
             new_duration_frames: drag.current_duration_frames,
         };
-        if trim.old_start_frame != trim.new_start_frame
-            || trim.old_duration_frames != trim.new_duration_frames
+        if (trim.old_start_frame != trim.new_start_frame
+            || trim.old_duration_frames != trim.new_duration_frames)
+            && let Some(factory) = &self.on_clip_trim
+            && let Some(action) = factory(trim, clip)
         {
-            if let Some(factory) = &self.on_clip_trim {
-                if let Some(action) = factory(trim, clip) {
-                    (ctx.dispatch)(action);
-                }
-            }
+            (ctx.dispatch)(action);
         }
         ctx.request_repaint();
         true
@@ -2634,10 +2626,10 @@ impl TimelineView {
             new_start_frame: drag.current_start_frame,
             new_duration_frames: drag.current_duration_frames,
         };
-        if let Some(factory) = &self.on_transition_resize {
-            if let Some(action) = factory(resize, transition) {
-                (ctx.dispatch)(action);
-            }
+        if let Some(factory) = &self.on_transition_resize
+            && let Some(action) = factory(resize, transition)
+        {
+            (ctx.dispatch)(action);
         }
         ctx.request_repaint();
         true
@@ -2687,20 +2679,20 @@ impl TimelineView {
             ctx.request_repaint();
             return true;
         }
-        if let Some(factory) = &self.on_in_out_point {
-            if let Some(action) = factory(drag.point, drag.current_frame) {
-                (ctx.dispatch)(action);
-            }
+        if let Some(factory) = &self.on_in_out_point
+            && let Some(action) = factory(drag.point, drag.current_frame)
+        {
+            (ctx.dispatch)(action);
         }
         ctx.request_repaint();
         true
     }
 
     fn dispatch_seek(&self, frame: i64, source: TimelineSeekSource, ctx: &mut EventContext) {
-        if let Some(factory) = &self.on_seek {
-            if let Some(action) = factory(TimelineSeek { frame: frame.max(0), source }) {
-                (ctx.dispatch)(action);
-            }
+        if let Some(factory) = &self.on_seek
+            && let Some(action) = factory(TimelineSeek { frame: frame.max(0), source })
+        {
+            (ctx.dispatch)(action);
         }
     }
 
@@ -2766,17 +2758,17 @@ impl TimelineView {
             ctx.request_repaint();
             return EventResult::Handled;
         };
-        if let Some(factory) = &self.on_asset_drop {
-            if let Some(action) = factory(
+        if let Some(factory) = &self.on_asset_drop
+            && let Some(action) = factory(
                 TimelineAssetDrop {
                     asset_id,
                     track_ref: TimelineTrackRef { track_index },
                     frame,
                 },
                 track,
-            ) {
-                (ctx.dispatch)(action);
-            }
+            )
+        {
+            (ctx.dispatch)(action);
         }
         ctx.request_repaint();
         EventResult::Handled
@@ -3331,11 +3323,11 @@ impl TimelineView {
                 if !enabled {
                     icon = color_with_alpha(icon, 0.44);
                 }
-                if let Some(slot) = Self::toolbar_icon_slot(button) {
-                    if let Some(vector_icon) = self.toolbar_icon(slot) {
-                        self.paint_toolbar_vector_icon(ctx, rect, vector_icon, icon);
-                        return;
-                    }
+                if let Some(slot) = Self::toolbar_icon_slot(button)
+                    && let Some(vector_icon) = self.toolbar_icon(slot)
+                {
+                    self.paint_toolbar_vector_icon(ctx, rect, vector_icon, icon);
+                    return;
                 }
                 self.paint_toolbar_fallback_icon(ctx, rect, button, icon);
             }
@@ -3521,11 +3513,11 @@ impl TimelineView {
         } else {
             colors.muted_foreground
         };
-        if let Some(slot) = Self::toolbar_icon_slot(TimelineToolbarButton::Tool(tool)) {
-            if let Some(vector_icon) = self.toolbar_icon(slot) {
-                self.paint_toolbar_vector_icon(ctx, rect, vector_icon, icon);
-                return;
-            }
+        if let Some(slot) = Self::toolbar_icon_slot(TimelineToolbarButton::Tool(tool))
+            && let Some(vector_icon) = self.toolbar_icon(slot)
+        {
+            self.paint_toolbar_vector_icon(ctx, rect, vector_icon, icon);
+            return;
         }
         match tool {
             TimelineTool::Select => {
@@ -3702,49 +3694,48 @@ impl TimelineView {
             }
         }
 
-        if let Some(drag) = self.clip_drag {
-            if let Some(clip) = self.clip(drag.clip_ref) {
-                let rect =
-                    self.clip_rect_at(drag.current_track_index, drag.current_start_frame, clip);
-                if rect.x <= self.body_rect.x + self.body_rect.width
-                    && rect.x + rect.width >= self.body_rect.x
-                    && rect.y <= self.body_rect.y + self.body_rect.height
-                    && rect.y + rect.height >= self.body_rect.y
-                {
-                    self.paint_clip(ctx, drag.clip_ref, clip, rect, true);
-                }
+        if let Some(drag) = self.clip_drag
+            && let Some(clip) = self.clip(drag.clip_ref)
+        {
+            let rect = self.clip_rect_at(drag.current_track_index, drag.current_start_frame, clip);
+            if rect.x <= self.body_rect.x + self.body_rect.width
+                && rect.x + rect.width >= self.body_rect.x
+                && rect.y <= self.body_rect.y + self.body_rect.height
+                && rect.y + rect.height >= self.body_rect.y
+            {
+                self.paint_clip(ctx, drag.clip_ref, clip, rect, true);
             }
         }
 
-        if let Some(drag) = self.trim_drag {
-            if let Some(clip) = self.clip(drag.clip_ref) {
-                let rect = self.clip_rect_for_preview(
-                    drag.clip_ref.track_index,
-                    drag.current_start_frame,
-                    drag.current_duration_frames,
-                );
-                if rect.x <= self.body_rect.x + self.body_rect.width
-                    && rect.x + rect.width >= self.body_rect.x
-                    && rect.y <= self.body_rect.y + self.body_rect.height
-                    && rect.y + rect.height >= self.body_rect.y
-                {
-                    self.paint_clip(ctx, drag.clip_ref, clip, rect, true);
-                }
+        if let Some(drag) = self.trim_drag
+            && let Some(clip) = self.clip(drag.clip_ref)
+        {
+            let rect = self.clip_rect_for_preview(
+                drag.clip_ref.track_index,
+                drag.current_start_frame,
+                drag.current_duration_frames,
+            );
+            if rect.x <= self.body_rect.x + self.body_rect.width
+                && rect.x + rect.width >= self.body_rect.x
+                && rect.y <= self.body_rect.y + self.body_rect.height
+                && rect.y + rect.height >= self.body_rect.y
+            {
+                self.paint_clip(ctx, drag.clip_ref, clip, rect, true);
             }
         }
 
-        if let Some(drag) = self.transition_resize_drag {
-            if let Some(transition) = self.transition(drag.transition_ref) {
-                let rect = self.transition_rect_for_preview(
-                    drag.transition_ref,
-                    drag.current_start_frame,
-                    drag.current_duration_frames,
-                );
-                if rect.x <= self.body_rect.x + self.body_rect.width
-                    && rect.x + rect.width >= self.body_rect.x
-                {
-                    self.paint_transition(ctx, drag.transition_ref, transition, rect, true);
-                }
+        if let Some(drag) = self.transition_resize_drag
+            && let Some(transition) = self.transition(drag.transition_ref)
+        {
+            let rect = self.transition_rect_for_preview(
+                drag.transition_ref,
+                drag.current_start_frame,
+                drag.current_duration_frames,
+            );
+            if rect.x <= self.body_rect.x + self.body_rect.width
+                && rect.x + rect.width >= self.body_rect.x
+            {
+                self.paint_transition(ctx, drag.transition_ref, transition, rect, true);
             }
         }
 
@@ -4859,72 +4850,72 @@ impl Widget for TimelineView {
                         return EventResult::Handled;
                     }
                 }
-                if let Some(thumb) = self.horizontal_scrollbar_thumb_rect() {
-                    if thumb.contains(*position) {
-                        self.scrollbar_drag = Some(TimelineScrollbarDrag {
-                            axis: TimelineScrollbarAxis::Horizontal,
-                            kind: TimelineScrollbarDragKind::Thumb,
-                            start_pointer: position.x,
-                            start_scroll: self.scroll_x,
-                            start_pixels_per_frame: self.pixels_per_frame,
-                            start_track_height: self.track_height,
-                        });
-                        self.horizontal_scrollbar_hovered = true;
-                        self.request_timeline_pointer_capture(ctx);
-                        ctx.set_cursor(CursorRequest::Grabbing);
+                if let Some(thumb) = self.horizontal_scrollbar_thumb_rect()
+                    && thumb.contains(*position)
+                {
+                    self.scrollbar_drag = Some(TimelineScrollbarDrag {
+                        axis: TimelineScrollbarAxis::Horizontal,
+                        kind: TimelineScrollbarDragKind::Thumb,
+                        start_pointer: position.x,
+                        start_scroll: self.scroll_x,
+                        start_pixels_per_frame: self.pixels_per_frame,
+                        start_track_height: self.track_height,
+                    });
+                    self.horizontal_scrollbar_hovered = true;
+                    self.request_timeline_pointer_capture(ctx);
+                    ctx.set_cursor(CursorRequest::Grabbing);
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                if let Some(thumb) = self.vertical_scrollbar_thumb_rect()
+                    && thumb.contains(*position)
+                {
+                    self.scrollbar_drag = Some(TimelineScrollbarDrag {
+                        axis: TimelineScrollbarAxis::Vertical,
+                        kind: TimelineScrollbarDragKind::Thumb,
+                        start_pointer: position.y,
+                        start_scroll: self.scroll_y,
+                        start_pixels_per_frame: self.pixels_per_frame,
+                        start_track_height: self.track_height,
+                    });
+                    self.vertical_scrollbar_hovered = true;
+                    self.request_timeline_pointer_capture(ctx);
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                if let Some(track) = self.horizontal_scrollbar_track_rect()
+                    && track.contains(*position)
+                {
+                    let thumb = self.horizontal_scrollbar_thumb_rect();
+                    let page = self.body_rect.width.max(1.0);
+                    let changed = if thumb.is_some_and(|thumb| position.x < thumb.x) {
+                        self.set_scroll_x(self.scroll_x - page)
+                    } else if thumb.is_some_and(|thumb| position.x > thumb.x + thumb.width) {
+                        self.set_scroll_x(self.scroll_x + page)
+                    } else {
+                        false
+                    };
+                    if changed {
                         ctx.request_repaint();
-                        return EventResult::Handled;
                     }
+                    return EventResult::Handled;
                 }
-                if let Some(thumb) = self.vertical_scrollbar_thumb_rect() {
-                    if thumb.contains(*position) {
-                        self.scrollbar_drag = Some(TimelineScrollbarDrag {
-                            axis: TimelineScrollbarAxis::Vertical,
-                            kind: TimelineScrollbarDragKind::Thumb,
-                            start_pointer: position.y,
-                            start_scroll: self.scroll_y,
-                            start_pixels_per_frame: self.pixels_per_frame,
-                            start_track_height: self.track_height,
-                        });
-                        self.vertical_scrollbar_hovered = true;
-                        self.request_timeline_pointer_capture(ctx);
+                if let Some(track) = self.vertical_scrollbar_track_rect()
+                    && track.contains(*position)
+                {
+                    let thumb = self.vertical_scrollbar_thumb_rect();
+                    let page = self.body_rect.height.max(1.0);
+                    let changed = if thumb.is_some_and(|thumb| position.y < thumb.y) {
+                        self.set_scroll_y(self.scroll_y - page)
+                    } else if thumb.is_some_and(|thumb| position.y > thumb.y + thumb.height) {
+                        self.set_scroll_y(self.scroll_y + page)
+                    } else {
+                        false
+                    };
+                    if changed {
                         ctx.request_repaint();
-                        return EventResult::Handled;
                     }
-                }
-                if let Some(track) = self.horizontal_scrollbar_track_rect() {
-                    if track.contains(*position) {
-                        let thumb = self.horizontal_scrollbar_thumb_rect();
-                        let page = self.body_rect.width.max(1.0);
-                        let changed = if thumb.is_some_and(|thumb| position.x < thumb.x) {
-                            self.set_scroll_x(self.scroll_x - page)
-                        } else if thumb.is_some_and(|thumb| position.x > thumb.x + thumb.width) {
-                            self.set_scroll_x(self.scroll_x + page)
-                        } else {
-                            false
-                        };
-                        if changed {
-                            ctx.request_repaint();
-                        }
-                        return EventResult::Handled;
-                    }
-                }
-                if let Some(track) = self.vertical_scrollbar_track_rect() {
-                    if track.contains(*position) {
-                        let thumb = self.vertical_scrollbar_thumb_rect();
-                        let page = self.body_rect.height.max(1.0);
-                        let changed = if thumb.is_some_and(|thumb| position.y < thumb.y) {
-                            self.set_scroll_y(self.scroll_y - page)
-                        } else if thumb.is_some_and(|thumb| position.y > thumb.y + thumb.height) {
-                            self.set_scroll_y(self.scroll_y + page)
-                        } else {
-                            false
-                        };
-                        if changed {
-                            ctx.request_repaint();
-                        }
-                        return EventResult::Handled;
-                    }
+                    return EventResult::Handled;
                 }
                 if self.ruler_rect.contains(*position) {
                     if let Some(point) = self.in_out_marker_at(*position) {

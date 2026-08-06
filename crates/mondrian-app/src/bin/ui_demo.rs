@@ -482,7 +482,7 @@ impl Widget for GalleryWidget {
         self.color_trigger.layout(Rect::new(x0, y, 32.0, 32.0));
         self.curve_editor.layout(Rect::new(x0 + 44.0, y, (col_w - 44.0).max(1.0), 96.0));
 
-        if let Some(ref mut cm) = &mut self.context_menu {
+        if let Some(cm) = &mut self.context_menu {
             let cm_size = cm.measure(LayoutConstraint::LOOSE);
             cm.layout(Rect::new(0.0, 0.0, cm_size.width, cm_size.height));
         }
@@ -494,13 +494,13 @@ impl Widget for GalleryWidget {
         }
 
         // Context menu always gets first dibs
-        if let Some(ref mut cm) = &mut self.context_menu {
-            if cm.event(event, ctx) == EventResult::Handled {
-                if !cm.is_visible() {
-                    self.context_menu = None;
-                }
-                return EventResult::Handled;
+        if let Some(cm) = &mut self.context_menu
+            && cm.event(event, ctx) == EventResult::Handled
+        {
+            if !cm.is_visible() {
+                self.context_menu = None;
             }
+            return EventResult::Handled;
         }
 
         let last_action: std::cell::RefCell<String> = std::cell::RefCell::new(String::new());
@@ -573,37 +573,34 @@ impl Widget for GalleryWidget {
             return EventResult::Handled;
         }
 
-        if let UiEvent::MouseDown { position, button: MouseButton::Left, .. } = event {
-            if self.bounds.contains(*position) {
-                self.set_focused_child(None, inner_ctx);
-            }
+        if let UiEvent::MouseDown { position, button: MouseButton::Left, .. } = event
+            && self.bounds.contains(*position)
+        {
+            self.set_focused_child(None, inner_ctx);
         }
 
         // Right-click opens context menu
-        if let UiEvent::MouseDown { position, button: MouseButton::Right, .. } = event {
-            if self.bounds.contains(*position) {
-                let items = vec![
-                    with_demo_menu_icon(
-                        MenuItem::new("剪切", Action::Cut).with_shortcut("Ctrl+X"),
-                        AppIcon::Cut,
-                    ),
-                    with_demo_menu_icon(
-                        MenuItem::new("复制", Action::Copy).with_shortcut("Ctrl+C"),
-                        AppIcon::Copy,
-                    ),
-                    with_demo_menu_icon(
-                        MenuItem::new("粘贴", Action::Paste).with_shortcut("Ctrl+V"),
-                        AppIcon::ClipboardText,
-                    ),
-                    MenuItem::separator(),
-                    with_demo_menu_icon(
-                        MenuItem::new("删除", demo_action("delete")),
-                        AppIcon::Trash,
-                    ),
-                ];
-                self.context_menu = Some(ContextMenu::new(*position, items));
-                return EventResult::Handled;
-            }
+        if let UiEvent::MouseDown { position, button: MouseButton::Right, .. } = event
+            && self.bounds.contains(*position)
+        {
+            let items = vec![
+                with_demo_menu_icon(
+                    MenuItem::new("剪切", Action::Cut).with_shortcut("Ctrl+X"),
+                    AppIcon::Cut,
+                ),
+                with_demo_menu_icon(
+                    MenuItem::new("复制", Action::Copy).with_shortcut("Ctrl+C"),
+                    AppIcon::Copy,
+                ),
+                with_demo_menu_icon(
+                    MenuItem::new("粘贴", Action::Paste).with_shortcut("Ctrl+V"),
+                    AppIcon::ClipboardText,
+                ),
+                MenuItem::separator(),
+                with_demo_menu_icon(MenuItem::new("删除", demo_action("delete")), AppIcon::Trash),
+            ];
+            self.context_menu = Some(ContextMenu::new(*position, items));
+            return EventResult::Handled;
         }
 
         EventResult::Ignored
@@ -658,7 +655,7 @@ impl Widget for GalleryWidget {
         self.dropdown.paint_overlay(ctx);
         self.color_picker.paint_overlay(ctx);
         self.color_trigger.paint_overlay(ctx);
-        if let Some(ref cm) = &self.context_menu {
+        if let Some(cm) = &self.context_menu {
             cm.paint_overlay(ctx);
         }
         self.tooltip.paint_overlay(ctx);

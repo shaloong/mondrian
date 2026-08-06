@@ -325,10 +325,10 @@ impl AudioMixerRoutingIndex {
             if let AudioRouteSource::Bus { bus_id, .. } = route.source {
                 connected_buses.push(bus_id);
             }
-            if let AudioRouteDestination::Bus(bus_id) = route.destination {
-                if !connected_buses.contains(&bus_id) {
-                    connected_buses.push(bus_id);
-                }
+            if let AudioRouteDestination::Bus(bus_id) = route.destination
+                && !connected_buses.contains(&bus_id)
+            {
+                connected_buses.push(bus_id);
             }
             for bus_id in connected_buses {
                 if let Some(removal) = index.bus_removals.get_mut(&bus_id) {

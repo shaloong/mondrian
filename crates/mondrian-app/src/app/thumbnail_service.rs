@@ -408,11 +408,11 @@ impl AssetThumbnailService {
         let key = ThumbnailRequestKey { asset_id: asset.id, path, fingerprint, color };
         {
             let mut state = self.state.lock();
-            if let Some(entry) = state.cache.get(&asset.id).cloned() {
-                if entry.key == key {
-                    touch_asset(&mut state.cache_lru, asset.id);
-                    return ThumbnailLookupState::Ready(entry.frame);
-                }
+            if let Some(entry) = state.cache.get(&asset.id).cloned()
+                && entry.key == key
+            {
+                touch_asset(&mut state.cache_lru, asset.id);
+                return ThumbnailLookupState::Ready(entry.frame);
             }
             if let Some(entry) = state.failures.get(&asset.id) {
                 let failure_key = ThumbnailFailureKey {
@@ -542,12 +542,11 @@ impl AssetThumbnailService {
                 "thumbnail service demand capacity is exhausted",
             ));
         }
-        if let Some(previous) = state.active.insert(key.asset_id, key.clone()) {
-            if previous != key {
-                if let Some(pending) = state.pending.get(&previous) {
-                    pending.cancellation.cancel();
-                }
-            }
+        if let Some(previous) = state.active.insert(key.asset_id, key.clone())
+            && previous != key
+            && let Some(pending) = state.pending.get(&previous)
+        {
+            pending.cancellation.cancel();
         }
         state.pending.insert(key.clone(), PendingThumbnail { generation, cancellation });
         if !state.dispatch_enabled {

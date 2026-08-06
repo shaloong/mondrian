@@ -157,13 +157,11 @@ pub(super) fn rebuild_visible_indices(items: &[PanelListItem], query: &str) -> V
     let mut hidden_child_depth = None;
     let mut visible_indices = Vec::new();
     for (index, item) in items.iter().enumerate() {
-        if !filtering {
-            if let Some(depth) = hidden_child_depth {
-                if item.tree_depth > depth {
-                    continue;
-                }
-                hidden_child_depth = None;
+        if !filtering && let Some(depth) = hidden_child_depth {
+            if item.tree_depth > depth {
+                continue;
             }
+            hidden_child_depth = None;
         }
 
         if item_matches_query(item, &query) {

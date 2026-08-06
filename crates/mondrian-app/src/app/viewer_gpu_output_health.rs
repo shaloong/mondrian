@@ -472,11 +472,11 @@ pub fn evaluate_jsonl(
                         ready_records_missing_preview_candidate_context.saturating_add(1)
                 }
                 Some(candidate_id) => {
-                    if let Some(last_candidate_id) = last_ready_preview_candidate_id {
-                        if candidate_id < last_candidate_id {
-                            preview_candidate_id_regressions =
-                                preview_candidate_id_regressions.saturating_add(1);
-                        }
+                    if let Some(last_candidate_id) = last_ready_preview_candidate_id
+                        && candidate_id < last_candidate_id
+                    {
+                        preview_candidate_id_regressions =
+                            preview_candidate_id_regressions.saturating_add(1);
                     }
                     last_ready_preview_candidate_id = Some(candidate_id);
                 }

@@ -483,12 +483,12 @@ impl Widget for Dropdown {
                     // Check submenu clicks first (outside parent menu rect but inside submenu).
                     let chain_len = self.submenu_chain.len();
                     for depth in (1..=chain_len).rev() {
-                        if let Some(sub_rect) = self.menu_rect_at_depth(depth) {
-                            if sub_rect.contains(*position) {
-                                // Will be handled in MouseUp; just record the pressed state.
-                                self.pressed_index = None;
-                                return EventResult::Handled;
-                            }
+                        if let Some(sub_rect) = self.menu_rect_at_depth(depth)
+                            && sub_rect.contains(*position)
+                        {
+                            // Will be handled in MouseUp; just record the pressed state.
+                            self.pressed_index = None;
+                            return EventResult::Handled;
                         }
                     }
                     if let Some(i) = self.item_at(*position) {
@@ -513,24 +513,20 @@ impl Widget for Dropdown {
                     // Check submenu clicks from deepest
                     let chain_len = self.submenu_chain.len();
                     for depth in (1..=chain_len).rev() {
-                        if let Some(sub_rect) = self.menu_rect_at_depth(depth) {
-                            if sub_rect.contains(*position) {
-                                let metrics = MenuMetrics::current();
-                                let rel_y = position.y - sub_rect.y - metrics.popup_padding;
-                                let sub_item =
-                                    (rel_y / self.item_height()).floor().max(0.0) as usize;
-                                if let Some(children) =
-                                    self.children_at(&self.submenu_chain[..depth])
-                                {
-                                    if let Some(child) = children.get(sub_item) {
-                                        if let Some(activation) = menu_item_activation(child) {
-                                            apply_menu_activation(activation, ctx);
-                                        }
-                                    }
-                                }
-                                self.close(ctx);
-                                return EventResult::Handled;
+                        if let Some(sub_rect) = self.menu_rect_at_depth(depth)
+                            && sub_rect.contains(*position)
+                        {
+                            let metrics = MenuMetrics::current();
+                            let rel_y = position.y - sub_rect.y - metrics.popup_padding;
+                            let sub_item = (rel_y / self.item_height()).floor().max(0.0) as usize;
+                            if let Some(children) = self.children_at(&self.submenu_chain[..depth])
+                                && let Some(child) = children.get(sub_item)
+                                && let Some(activation) = menu_item_activation(child)
+                            {
+                                apply_menu_activation(activation, ctx);
                             }
+                            self.close(ctx);
+                            return EventResult::Handled;
                         }
                     }
                     let released_index = self.item_at(*position);
@@ -567,24 +563,21 @@ impl Widget for Dropdown {
                     let mut handled = false;
                     for check_depth in (1..=self.submenu_chain.len()).rev() {
                         // Check if in this submenu
-                        if let Some(sub_rect) = self.menu_rect_at_depth(check_depth) {
-                            if sub_rect.contains(*position) {
-                                if let Some(hovered_idx) =
-                                    self.item_at_depth(*position, check_depth)
+                        if let Some(sub_rect) = self.menu_rect_at_depth(check_depth)
+                            && sub_rect.contains(*position)
+                        {
+                            if let Some(hovered_idx) = self.item_at_depth(*position, check_depth) {
+                                new_hover_depth = Some((check_depth, hovered_idx));
+                                let children =
+                                    self.children_at(&self.submenu_chain[..check_depth]).unwrap();
+                                if children[hovered_idx].is_submenu()
+                                    && self.submenu_chain.len() <= check_depth
                                 {
-                                    new_hover_depth = Some((check_depth, hovered_idx));
-                                    let children = self
-                                        .children_at(&self.submenu_chain[..check_depth])
-                                        .unwrap();
-                                    if children[hovered_idx].is_submenu()
-                                        && self.submenu_chain.len() <= check_depth
-                                    {
-                                        self.submenu_chain.push(hovered_idx);
-                                    }
+                                    self.submenu_chain.push(hovered_idx);
                                 }
-                                handled = true;
-                                break;
                             }
+                            handled = true;
+                            break;
                         }
 
                         // Check keep-alive for this depth
@@ -608,10 +601,11 @@ impl Widget for Dropdown {
                             .map(|i| (0, i));
 
                         // Auto-open submenu on hover
-                        if let Some((0, idx)) = new_hover_depth {
-                            if self.items[idx].is_submenu() && !self.submenu_chain.contains(&idx) {
-                                self.submenu_chain.push(idx);
-                            }
+                        if let Some((0, idx)) = new_hover_depth
+                            && self.items[idx].is_submenu()
+                            && !self.submenu_chain.contains(&idx)
+                        {
+                            self.submenu_chain.push(idx);
                         }
                     }
 

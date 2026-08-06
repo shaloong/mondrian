@@ -63,10 +63,10 @@ fn find_widget(widget: &dyn Widget, id: WidgetId) -> Option<&dyn Widget> {
         return Some(widget);
     }
     for index in 0..widget.child_count() {
-        if let Some(child) = widget.child(index) {
-            if let Some(found) = find_widget(child, id) {
-                return Some(found);
-            }
+        if let Some(child) = widget.child(index)
+            && let Some(found) = find_widget(child, id)
+        {
+            return Some(found);
         }
     }
     None
@@ -87,11 +87,11 @@ fn find_widget_path(widget: &dyn Widget, id: WidgetId) -> Option<Vec<usize>> {
         return Some(Vec::new());
     }
     for index in 0..widget.child_count() {
-        if let Some(child) = widget.child(index) {
-            if let Some(mut path) = find_widget_path(child, id) {
-                path.insert(0, index);
-                return Some(path);
-            }
+        if let Some(child) = widget.child(index)
+            && let Some(mut path) = find_widget_path(child, id)
+        {
+            path.insert(0, index);
+            return Some(path);
         }
     }
     None
@@ -118,10 +118,10 @@ fn find_parent_id(
     }
     let current = Some(widget.id());
     for index in 0..widget.child_count() {
-        if let Some(child) = widget.child(index) {
-            if let Some(found) = find_parent_id(child, target, current) {
-                return Some(found);
-            }
+        if let Some(child) = widget.child(index)
+            && let Some(found) = find_parent_id(child, target, current)
+        {
+            return Some(found);
         }
     }
     None
@@ -135,10 +135,10 @@ fn collect_focusable(tree: &dyn WidgetTree) -> Vec<WidgetId> {
 }
 
 fn collect_focusable_recursive(tree: &dyn WidgetTree, node: WidgetId, order: &mut Vec<WidgetId>) {
-    if let Some(w) = tree.get(node) {
-        if w.can_focus() {
-            order.push(node);
-        }
+    if let Some(w) = tree.get(node)
+        && w.can_focus()
+    {
+        order.push(node);
     }
     for child_id in tree.children_ids(node) {
         collect_focusable_recursive(tree, child_id, order);

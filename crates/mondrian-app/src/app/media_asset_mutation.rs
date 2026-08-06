@@ -375,15 +375,14 @@ impl MediaAssetMutationExecution {
                     && request.generation == state.generation
                     && !active.cancellation.is_canceled()
             });
-            if !current {
-                if let Some(position) = state
+            if !current
+                && let Some(position) = state
                     .retired_worker_operations
                     .iter()
                     .position(|operation_id| *operation_id == request.operation_id)
-                {
-                    state.retired_worker_operations.remove(position);
-                    continue;
-                }
+            {
+                state.retired_worker_operations.remove(position);
+                continue;
             }
             if current {
                 state.active.remove(&request.operation_id);

@@ -250,16 +250,16 @@ fn evaluate_main10_media_contract(
         ),
         Some(_) => {}
     }
-    if let Some(total_frames) = media.total_frames {
-        if total_frames < required_frames as u64 {
-            push_failure(
-                failures,
-                "media_video_frame_count_insufficient",
-                format!("at least {required_frames} frames"),
-                format!("{total_frames} frames"),
-                media.source,
-            );
-        }
+    if let Some(total_frames) = media.total_frames
+        && total_frames < required_frames as u64
+    {
+        push_failure(
+            failures,
+            "media_video_frame_count_insufficient",
+            format!("at least {required_frames} frames"),
+            format!("{total_frames} frames"),
+            media.source,
+        );
     }
 }
 

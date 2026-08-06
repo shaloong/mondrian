@@ -1183,23 +1183,23 @@ impl EffectExecutionSession {
         request: &EffectTemporalExecutionRequest,
         prepared: &PreparedScalarTemporalRequest,
     ) -> Result<Option<EffectTemporalExecutionOutput>, EffectTemporalExecutionError> {
-        if compiled.output_cache_enabled() {
-            if let Some(cached) = self.get_temporal_output(&prepared.cache_identity) {
-                let tile = EffectFrameTileF32::from_shared(
-                    request.output_time,
-                    prepared.demand.frame_extent(),
-                    prepared.demand.output_roi(),
-                    cached.frame_seed,
-                    cached.pixels,
-                )?;
-                return Ok(Some(EffectTemporalExecutionOutput {
-                    tile,
-                    cache_identity: prepared.cache_identity,
-                    provider_requests: 0,
-                    execution_tiles: 0,
-                    peak_working_bytes: 0,
-                }));
-            }
+        if compiled.output_cache_enabled()
+            && let Some(cached) = self.get_temporal_output(&prepared.cache_identity)
+        {
+            let tile = EffectFrameTileF32::from_shared(
+                request.output_time,
+                prepared.demand.frame_extent(),
+                prepared.demand.output_roi(),
+                cached.frame_seed,
+                cached.pixels,
+            )?;
+            return Ok(Some(EffectTemporalExecutionOutput {
+                tile,
+                cache_identity: prepared.cache_identity,
+                provider_requests: 0,
+                execution_tiles: 0,
+                peak_working_bytes: 0,
+            }));
         }
         if prepared.demand.output_roi().is_empty() || prepared.demand.frame_extent().is_empty() {
             let tile = EffectFrameTileF32::new(

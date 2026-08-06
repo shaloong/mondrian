@@ -218,12 +218,12 @@ fn validate_media_file_revision(source_revision: MediaFileFingerprint) -> io::Re
             "Preview demux request requires complete filesystem revision evidence",
         ));
     }
-    if let Some(MediaFileChangeStamp::Unix { nanoseconds, .. }) = source_revision.change_stamp {
-        if !(0..1_000_000_000).contains(&nanoseconds) {
-            return Err(invalid_data(
-                "Unix media change nanoseconds must be below one second",
-            ));
-        }
+    if let Some(MediaFileChangeStamp::Unix { nanoseconds, .. }) = source_revision.change_stamp
+        && !(0..1_000_000_000).contains(&nanoseconds)
+    {
+        return Err(invalid_data(
+            "Unix media change nanoseconds must be below one second",
+        ));
     }
     Ok(())
 }

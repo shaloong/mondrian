@@ -1567,75 +1567,75 @@ where
         .evaluation()
         .payload()
         .clone();
-    if let Some(placement) = transition_input_placement(&input) {
-        if let Some(temporal) = temporal_layers.get(&placement) {
-            let (opacity, blend_mode, transform, effect_graph, frame_seed) = match &input {
-                TimelineTransitionInputPlan::Media(media) => (
-                    media.opacity,
-                    media.blend_mode,
-                    media.transform,
-                    Arc::clone(&media.effect_graph),
-                    media.frame_seed,
-                ),
-                TimelineTransitionInputPlan::SolidColor(solid) => (
-                    solid.opacity,
-                    solid.blend_mode,
-                    solid.transform,
-                    Arc::clone(&solid.effect_graph),
-                    solid.frame_seed,
-                ),
-                TimelineTransitionInputPlan::NestedSequence(nested) => (
-                    nested.opacity,
-                    nested.blend_mode,
-                    nested.transform,
-                    Arc::clone(&nested.effect_graph),
-                    nested.frame_seed,
-                ),
-                TimelineTransitionInputPlan::BasicTitle(title) => (
-                    title.opacity,
-                    title.blend_mode,
-                    title.transform,
-                    Arc::clone(&title.effect_graph),
-                    title.frame_seed,
-                ),
-                TimelineTransitionInputPlan::Transparent => {
-                    return Err(PreviewTimelineAbort::Unavailable(
-                        PreviewUnavailability::failed(
-                            PreviewOutputStage::TimelineEvaluation,
-                            "transparent Transition input cannot own temporal pixels",
-                        ),
-                    ));
-                }
-            };
-            let transform = project_preview_media_transform(
-                transform,
-                &temporal.frame,
-                parent_author_resolution,
-                target_resolution,
-            )
-            .ok_or_else(|| {
-                PreviewTimelineAbort::Unavailable(PreviewUnavailability::blocked(
-                    PreviewOutputStage::TimelineEvaluation,
-                    format!(
-                        "temporal Transition input {} has invalid Preview transform geometry",
-                        placement.clip_id
+    if let Some(placement) = transition_input_placement(&input)
+        && let Some(temporal) = temporal_layers.get(&placement)
+    {
+        let (opacity, blend_mode, transform, effect_graph, frame_seed) = match &input {
+            TimelineTransitionInputPlan::Media(media) => (
+                media.opacity,
+                media.blend_mode,
+                media.transform,
+                Arc::clone(&media.effect_graph),
+                media.frame_seed,
+            ),
+            TimelineTransitionInputPlan::SolidColor(solid) => (
+                solid.opacity,
+                solid.blend_mode,
+                solid.transform,
+                Arc::clone(&solid.effect_graph),
+                solid.frame_seed,
+            ),
+            TimelineTransitionInputPlan::NestedSequence(nested) => (
+                nested.opacity,
+                nested.blend_mode,
+                nested.transform,
+                Arc::clone(&nested.effect_graph),
+                nested.frame_seed,
+            ),
+            TimelineTransitionInputPlan::BasicTitle(title) => (
+                title.opacity,
+                title.blend_mode,
+                title.transform,
+                Arc::clone(&title.effect_graph),
+                title.frame_seed,
+            ),
+            TimelineTransitionInputPlan::Transparent => {
+                return Err(PreviewTimelineAbort::Unavailable(
+                    PreviewUnavailability::failed(
+                        PreviewOutputStage::TimelineEvaluation,
+                        "transparent Transition input cannot own temporal pixels",
                     ),
-                ))
-            })?;
-            return Ok(ResolvedPreviewTransitionInput::Media {
-                frame: temporal.frame.clone(),
-                opacity,
-                blend_mode,
-                transform,
-                prepared_heterogeneous_route: prepared_preview_heterogeneous_route(
-                    &routes,
-                    placement,
-                    &effect_graph,
-                )?,
-                effect_graph,
-                frame_seed,
-            });
-        }
+                ));
+            }
+        };
+        let transform = project_preview_media_transform(
+            transform,
+            &temporal.frame,
+            parent_author_resolution,
+            target_resolution,
+        )
+        .ok_or_else(|| {
+            PreviewTimelineAbort::Unavailable(PreviewUnavailability::blocked(
+                PreviewOutputStage::TimelineEvaluation,
+                format!(
+                    "temporal Transition input {} has invalid Preview transform geometry",
+                    placement.clip_id
+                ),
+            ))
+        })?;
+        return Ok(ResolvedPreviewTransitionInput::Media {
+            frame: temporal.frame.clone(),
+            opacity,
+            blend_mode,
+            transform,
+            prepared_heterogeneous_route: prepared_preview_heterogeneous_route(
+                &routes,
+                placement,
+                &effect_graph,
+            )?,
+            effect_graph,
+            frame_seed,
+        });
     }
     Ok(match input {
         TimelineTransitionInputPlan::Transparent => ResolvedPreviewTransitionInput::Transparent,

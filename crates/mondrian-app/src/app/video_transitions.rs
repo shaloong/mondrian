@@ -280,10 +280,10 @@ impl AppState {
         // bounded number of times and publish only a revision-stable result.
         for _ in 0..2 {
             let key_before = self.video_transition_handle_diagnostics_key();
-            if let Some(key) = key_before {
-                if let Some(states) = self.video_transition_handle_diagnostics.get(key) {
-                    return states;
-                }
+            if let Some(key) = key_before
+                && let Some(states) = self.video_transition_handle_diagnostics.get(key)
+            {
+                return states;
             }
 
             let states = Arc::new(self.prepare_video_transition_handle_states());

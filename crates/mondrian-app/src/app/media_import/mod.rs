@@ -151,15 +151,15 @@ impl AppState {
             MondrianError::WorkflowStepFailed { step_id: "import_media".to_string(), reason }
         })?;
 
-        if let Some(folder_id) = folder_id.as_deref() {
-            if !library.folder_exists(folder_id)? {
-                let reason = format!("目标素材文件夹不存在：{folder_id}");
-                self.set_status_hint(format!("导入失败：{reason}"), true);
-                return Err(MondrianError::WorkflowStepFailed {
-                    step_id: "import_media".to_string(),
-                    reason,
-                });
-            }
+        if let Some(folder_id) = folder_id.as_deref()
+            && !library.folder_exists(folder_id)?
+        {
+            let reason = format!("目标素材文件夹不存在：{folder_id}");
+            self.set_status_hint(format!("导入失败：{reason}"), true);
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "import_media".to_string(),
+                reason,
+            });
         }
 
         let admission = self.media_import.admit_batch(paths, folder_id).map_err(|error| {

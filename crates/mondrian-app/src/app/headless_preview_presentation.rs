@@ -143,16 +143,16 @@ pub(crate) fn present_headless_preview_candidate(
     // the same semantic + physical artifact is not another publication and
     // must not require a replacement ticket. Generation rotation clears this
     // proof, so a seek or other changed intent cannot enter this branch.
-    if state.pending_playback_frame_demand_identity().is_none() {
-        if let Some(output_key) = preview.registered_exact_current_gpu_output_key() {
-            if headless_gpu_output_is_exact_current(preview, gpu, &output_key) {
-                return Ok(HeadlessPreviewCandidate::Ready {
-                    output: HeadlessPresentedOutput::CurrentGpu,
-                    completed_demand: None,
-                });
-            }
-            clear_mismatched_headless_gpu_output(preview, gpu, &output_key);
+    if state.pending_playback_frame_demand_identity().is_none()
+        && let Some(output_key) = preview.registered_exact_current_gpu_output_key()
+    {
+        if headless_gpu_output_is_exact_current(preview, gpu, &output_key) {
+            return Ok(HeadlessPreviewCandidate::Ready {
+                output: HeadlessPresentedOutput::CurrentGpu,
+                completed_demand: None,
+            });
         }
+        clear_mismatched_headless_gpu_output(preview, gpu, &output_key);
     }
     match state.preflight_pending_frame_presentation(Instant::now()) {
         FramePresentationPreflight::MaySubmit => {}
@@ -350,13 +350,13 @@ fn drive_headless_gpu_submission(
             HeadlessViewerGpuCompletionPoll::Idle
             | HeadlessViewerGpuCompletionPoll::Pending { .. } => {}
         }
-        if let Some(submission_id) = active_submission {
-            if let Some(execution) = gpu.take_heterogeneous_terminal(submission_id) {
-                observe_headless_visual_disposition(
-                    state,
-                    preview.fail_heterogeneous_gpu_execution(execution),
-                );
-            }
+        if let Some(submission_id) = active_submission
+            && let Some(execution) = gpu.take_heterogeneous_terminal(submission_id)
+        {
+            observe_headless_visual_disposition(
+                state,
+                preview.fail_heterogeneous_gpu_execution(execution),
+            );
         }
         return Err(HeadlessViewerGpuError::DeviceGenerationTerminal(terminal).into());
     }
@@ -415,10 +415,10 @@ fn drive_headless_gpu_submission(
             quarantine,
             revoked_current_physical_output,
         } => {
-            if let Some(revoked_output) = revoked_current_physical_output.as_ref() {
-                if let Some(key) = gpu.output_key(quarantine.submission_id) {
-                    clear_revoked_headless_gpu_output(preview, &key, revoked_output);
-                }
+            if let Some(revoked_output) = revoked_current_physical_output.as_ref()
+                && let Some(key) = gpu.output_key(quarantine.submission_id)
+            {
+                clear_revoked_headless_gpu_output(preview, &key, revoked_output);
             }
             if let Some(terminal) = gpu.take_heterogeneous_terminal(quarantine.submission_id) {
                 observe_headless_visual_disposition(
@@ -637,10 +637,10 @@ fn quarantine_headless_submission(
     let output_key = gpu.output_key(submission_id);
     let (_, revoked_current_physical_output) =
         gpu.quarantine_after_authority_revocation(submission_id, reason);
-    if let Some(revoked_output) = revoked_current_physical_output.as_ref() {
-        if let Some(key) = output_key.as_ref() {
-            clear_revoked_headless_gpu_output(preview, key, revoked_output);
-        }
+    if let Some(revoked_output) = revoked_current_physical_output.as_ref()
+        && let Some(key) = output_key.as_ref()
+    {
+        clear_revoked_headless_gpu_output(preview, key, revoked_output);
     }
     if let Some(terminal) = gpu.take_heterogeneous_terminal(submission_id) {
         observe_headless_visual_disposition(
@@ -667,10 +667,10 @@ fn observe_headless_visual_disposition(
     state: &mut AppState,
     disposition: PreviewVisualGpuCompletionDisposition,
 ) {
-    if let PreviewVisualGpuCompletionDisposition::TerminalCandidate(candidate) = disposition {
-        if state.pending_playback_frame_demand_identity() == Some(candidate.identity()) {
-            state.observe_frame_delivery_candidate(candidate, Instant::now());
-        }
+    if let PreviewVisualGpuCompletionDisposition::TerminalCandidate(candidate) = disposition
+        && state.pending_playback_frame_demand_identity() == Some(candidate.identity())
+    {
+        state.observe_frame_delivery_candidate(candidate, Instant::now());
     }
 }
 

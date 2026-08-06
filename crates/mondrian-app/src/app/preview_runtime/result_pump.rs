@@ -221,24 +221,22 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             }
             let completed_after_playback_deadline =
                 completion_resolution.deadline_status.is_missed();
-            if presentation_current {
-                if let Some(identity) = completion_demand_identity {
-                    let kind = playback_frame_delivery_kind(
-                        completed_after_playback_deadline,
-                        result.frame.is_some(),
-                        result.priority,
-                        result.decode_diagnostics.as_ref().map(PlaybackDecodeExecution::from),
-                    );
-                    match kind {
-                        mondrian_playback::FrameDeliveryKind::Ready => {
-                            // Successful decode is non-terminal: the Presentation Adapter
-                            // finishes the demand after its output is actually usable.
-                        }
-                        mondrian_playback::FrameDeliveryKind::Degraded => {}
-                        _ => outcome.frame_delivery_candidates.push(
-                            mondrian_playback::FrameDeliveryCandidate::for_demand(identity, kind),
-                        ),
+            if presentation_current && let Some(identity) = completion_demand_identity {
+                let kind = playback_frame_delivery_kind(
+                    completed_after_playback_deadline,
+                    result.frame.is_some(),
+                    result.priority,
+                    result.decode_diagnostics.as_ref().map(PlaybackDecodeExecution::from),
+                );
+                match kind {
+                    mondrian_playback::FrameDeliveryKind::Ready => {
+                        // Successful decode is non-terminal: the Presentation Adapter
+                        // finishes the demand after its output is actually usable.
                     }
+                    mondrian_playback::FrameDeliveryKind::Degraded => {}
+                    _ => outcome.frame_delivery_candidates.push(
+                        mondrian_playback::FrameDeliveryCandidate::for_demand(identity, kind),
+                    ),
                 }
             }
             if let Some(diagnostics) = result.decode_diagnostics {
@@ -303,21 +301,21 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                                     reason,
                                 );
                             }
-                            if owns_pending_playback_demand {
-                                if let Some(identity) = completion_demand_identity {
-                                    let kind = if reason
-                                        == MediaPreviewFailureReason::ResidencyCapacityRejected
-                                    {
-                                        mondrian_playback::FrameDeliveryKind::Blocked
-                                    } else {
-                                        mondrian_playback::FrameDeliveryKind::Failed
-                                    };
-                                    outcome.frame_delivery_candidates.push(
-                                        mondrian_playback::FrameDeliveryCandidate::for_demand(
-                                            identity, kind,
-                                        ),
-                                    );
-                                }
+                            if owns_pending_playback_demand
+                                && let Some(identity) = completion_demand_identity
+                            {
+                                let kind = if reason
+                                    == MediaPreviewFailureReason::ResidencyCapacityRejected
+                                {
+                                    mondrian_playback::FrameDeliveryKind::Blocked
+                                } else {
+                                    mondrian_playback::FrameDeliveryKind::Failed
+                                };
+                                outcome.frame_delivery_candidates.push(
+                                    mondrian_playback::FrameDeliveryCandidate::for_demand(
+                                        identity, kind,
+                                    ),
+                                );
                             }
                             outcome.visible_change |= presentation_current;
                             continue;

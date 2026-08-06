@@ -551,12 +551,10 @@ impl MediaImportExecution {
                     }
                 }
             };
-            if current {
-                if let Some(batch) = state.batches.get_mut(&result.batch_id) {
-                    batch.remaining = batch.remaining.saturating_sub(1);
-                    if batch.remaining == 0 {
-                        state.batches.remove(&result.batch_id);
-                    }
+            if current && let Some(batch) = state.batches.get_mut(&result.batch_id) {
+                batch.remaining = batch.remaining.saturating_sub(1);
+                if batch.remaining == 0 {
+                    state.batches.remove(&result.batch_id);
                 }
             }
             push_import_terminal(
@@ -691,12 +689,13 @@ fn media_import_worker(inner: Arc<MediaImportExecutionInner>) {
                 if inner.shutdown.load(Ordering::Acquire) {
                     return;
                 }
-                if state.dispatch_enabled && state.running_files < state.dispatch_parallelism {
-                    if let Some(job) = state.queue.pop_front() {
-                        state.running_files = state.running_files.saturating_add(1);
-                        inner.mark_diagnostics_changed();
-                        break job;
-                    }
+                if state.dispatch_enabled
+                    && state.running_files < state.dispatch_parallelism
+                    && let Some(job) = state.queue.pop_front()
+                {
+                    state.running_files = state.running_files.saturating_add(1);
+                    inner.mark_diagnostics_changed();
+                    break job;
                 }
                 inner.available.wait(&mut state);
             }

@@ -358,15 +358,15 @@ impl AppState {
             MondrianError::WorkflowStepFailed { step_id: "import_media".to_string(), reason }
         })?;
 
-        if let Some(folder_id) = folder_id {
-            if !library.folder_exists(folder_id)? {
-                let reason = format!("目标素材文件夹不存在：{folder_id}");
-                self.set_status_hint(format!("导入失败：{reason}"), true);
-                return Err(MondrianError::WorkflowStepFailed {
-                    step_id: "import_media".to_string(),
-                    reason,
-                });
-            }
+        if let Some(folder_id) = folder_id
+            && !library.folder_exists(folder_id)?
+        {
+            let reason = format!("目标素材文件夹不存在：{folder_id}");
+            self.set_status_hint(format!("导入失败：{reason}"), true);
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "import_media".to_string(),
+                reason,
+            });
         }
 
         drop(library);
@@ -1332,13 +1332,13 @@ impl AppState {
     fn dispatch_export_product_action(&mut self, action: ExportProductAction) -> Result<()> {
         match action {
             ExportProductAction::EditDraft(edit) => {
-                if let ExportDraftEdit::Sequence(Some(sequence_id)) = edit.as_ref() {
-                    if self.sequence_by_id(*sequence_id).is_none() {
-                        return Err(action_not_executed(
-                            "edit_export_draft",
-                            format!("Export draft Sequence no longer exists: {sequence_id}"),
-                        ));
-                    }
+                if let ExportDraftEdit::Sequence(Some(sequence_id)) = edit.as_ref()
+                    && self.sequence_by_id(*sequence_id).is_none()
+                {
+                    return Err(action_not_executed(
+                        "edit_export_draft",
+                        format!("Export draft Sequence no longer exists: {sequence_id}"),
+                    ));
                 }
                 let changed = match *edit {
                     ExportDraftEdit::BuiltinPreset(preset) => {

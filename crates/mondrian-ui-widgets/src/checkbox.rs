@@ -139,10 +139,10 @@ impl Checkbox {
         if let Some(action) = &self.on_toggle {
             (ctx.dispatch)(action.clone());
         }
-        if let Some(action) = &self.on_change {
-            if let Some(action) = action(self.checked) {
-                (ctx.dispatch)(action);
-            }
+        if let Some(action) = &self.on_change
+            && let Some(action) = action(self.checked)
+        {
+            (ctx.dispatch)(action);
         }
         ctx.request_repaint();
     }

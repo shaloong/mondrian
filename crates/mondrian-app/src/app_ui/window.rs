@@ -513,11 +513,9 @@ impl AppUiViewerGpuOutputTelemetry {
         );
         if self.last_display_issue_refresh_generation
             == Some(self.display_contract_refresh_generation)
+            && let Some(issue) = display_issue_summary.as_mut()
         {
-            if let Some(issue) = display_issue_summary.as_mut() {
-                issue.preceding_display_contract_refresh =
-                    self.last_display_contract_refresh.clone();
-            }
+            issue.preceding_display_contract_refresh = self.last_display_contract_refresh.clone();
         }
         let health = self.health_summary();
         AppUiViewerGpuOutputDiagnostics {
@@ -3878,11 +3876,10 @@ fn prepare_viewer_gpu_preview(
             if matches!(
                 disposition,
                 FramePresentationDisposition::Presented(_) | FramePresentationDisposition::NoDemand
-            ) {
-                if let Some(previous) = session.viewer_gpu_presentation.take_published_output() {
-                    session.frame_renderer.unregister_external_texture(&previous.texture_key);
-                    drop(previous);
-                }
+            ) && let Some(previous) = session.viewer_gpu_presentation.take_published_output()
+            {
+                session.frame_renderer.unregister_external_texture(&previous.texture_key);
+                drop(previous);
             }
             unregister_program_scopes_textures(session);
             session.program_scopes_refresh_requested = program_scopes_requested;
@@ -3963,36 +3960,36 @@ fn prepare_viewer_gpu_preview(
         );
     }
 
-    if let Some(ref snapshot) = session.display_snapshot {
-        if !snapshot.is_valid() {
-            tracing::warn!(
-                sequence_id = %frame.sequence_id,
-                frame = frame.frame,
-                validation_status = ?snapshot.validation_status,
-                blockers = ?snapshot.blockers,
-                monitor_profile = ?snapshot.monitor_profile_status,
-                hdr_status = ?snapshot.hdr_status,
-                "v2 display output contract invalid — blocking preview"
+    if let Some(ref snapshot) = session.display_snapshot
+        && !snapshot.is_valid()
+    {
+        tracing::warn!(
+            sequence_id = %frame.sequence_id,
+            frame = frame.frame,
+            validation_status = ?snapshot.validation_status,
+            blockers = ?snapshot.blockers,
+            monitor_profile = ?snapshot.monitor_profile_status,
+            hdr_status = ?snapshot.hdr_status,
+            "v2 display output contract invalid — blocking preview"
+        );
+        let preview_blockers =
+            crate::app::preview_display_contract::preview_blockers_from_snapshot(snapshot);
+        for blocker in &snapshot.blockers {
+            host.record_preview_gpu_output_blocker(
+                &preview_blockers
+                    .iter()
+                    .find(|b| b.code() == blocker.code())
+                    .cloned()
+                    .unwrap_or_else(|| PreviewGpuOutputBlocker::UnsupportedFeature {
+                        feature: blocker.code().to_owned(),
+                        reason: format!("{blocker:?}"),
+                    }),
             );
-            let preview_blockers =
-                crate::app::preview_display_contract::preview_blockers_from_snapshot(snapshot);
-            for blocker in &snapshot.blockers {
-                host.record_preview_gpu_output_blocker(
-                    &preview_blockers
-                        .iter()
-                        .find(|b| b.code() == blocker.code())
-                        .cloned()
-                        .unwrap_or_else(|| PreviewGpuOutputBlocker::UnsupportedFeature {
-                            feature: blocker.code().to_owned(),
-                            reason: format!("{blocker:?}"),
-                        }),
-                );
-            }
-            unregister_program_scopes_textures(session);
-            fail_viewer_gpu_frame(host, &mut frame);
-            host.clear_external_viewer_frame();
-            finish_prepare!();
         }
+        unregister_program_scopes_textures(session);
+        fail_viewer_gpu_frame(host, &mut frame);
+        host.clear_external_viewer_frame();
+        finish_prepare!();
     }
 
     if let Some(blocker) = session
@@ -4523,11 +4520,11 @@ fn publish_ordinary_window_viewer_gpu_submission(
     };
     if let Some(terminal) = session.viewer_gpu_device_progress.generation_terminal() {
         let _ = host.clear_external_viewer_frame_for_artifact(&output_key, texture_key.as_str());
-        if let Some(owner) = session.viewer_gpu_submissions.owner_mut(submission_id) {
-            if owner.texture_registered {
-                owner.texture_registered = false;
-                session.frame_renderer.unregister_external_texture(&owner.texture_key);
-            }
+        if let Some(owner) = session.viewer_gpu_submissions.owner_mut(submission_id)
+            && owner.texture_registered
+        {
+            owner.texture_registered = false;
+            session.frame_renderer.unregister_external_texture(&owner.texture_key);
         }
         drop(output_lease);
         tracing::warn!(
@@ -4573,11 +4570,11 @@ fn publish_ordinary_window_viewer_gpu_submission(
             }
         }
         FramePresentationDisposition::DroppedLate(_) => {
-            if let Some(owner) = session.viewer_gpu_submissions.owner_mut(submission_id) {
-                if owner.texture_registered {
-                    owner.texture_registered = false;
-                    session.frame_renderer.unregister_external_texture(&owner.texture_key);
-                }
+            if let Some(owner) = session.viewer_gpu_submissions.owner_mut(submission_id)
+                && owner.texture_registered
+            {
+                owner.texture_registered = false;
+                session.frame_renderer.unregister_external_texture(&owner.texture_key);
             }
             drop(output_lease);
         }
@@ -4860,11 +4857,11 @@ fn apply_surface_lifecycle_update(
         session,
         host,
     );
-    if update.relayout_root {
-        if let Some(bounds) = update.bounds {
-            session.current_bounds.set(bounds);
-            TreeWalker::layout(host.active_root_mut(), bounds);
-        }
+    if update.relayout_root
+        && let Some(bounds) = update.bounds
+    {
+        session.current_bounds.set(bounds);
+        TreeWalker::layout(host.active_root_mut(), bounds);
     }
     if update.request_redraw {
         session.window.request_redraw();
@@ -4926,14 +4923,14 @@ fn refresh_display_output_contract(
     );
     let snapshot = display_resolution.snapshot;
 
-    if let Some(ref prev_snapshot) = session.display_snapshot {
-        if prev_snapshot.display_id != snapshot.display_id {
-            tracing::warn!(
-                previous_display = ?previous_display_name,
-                new_display = ?new_display_name,
-                "display changed — previous contract may be stale"
-            );
-        }
+    if let Some(ref prev_snapshot) = session.display_snapshot
+        && prev_snapshot.display_id != snapshot.display_id
+    {
+        tracing::warn!(
+            previous_display = ?previous_display_name,
+            new_display = ?new_display_name,
+            "display changed — previous contract may be stale"
+        );
     }
 
     let snapshot_blockers =
@@ -5412,10 +5409,10 @@ fn widget_tree_accepts_text_input(
         return widget.accepts_text_input();
     }
     for index in 0..widget.child_count() {
-        if let Some(child) = widget.child(index) {
-            if widget_tree_accepts_text_input(child, focused) {
-                return true;
-            }
+        if let Some(child) = widget.child(index)
+            && widget_tree_accepts_text_input(child, focused)
+        {
+            return true;
         }
     }
     false

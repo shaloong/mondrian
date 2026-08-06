@@ -381,17 +381,16 @@ impl ProxyGenerationService {
             let mut state = self.inner.state.lock();
             preflight_request(&mut state, &request.key, origin)
         } {
-            if let ProxyGenerationRequestOutcome::RetainedFailure(failure) = &outcome {
-                if failure.publication.is_some()
-                    && matches!(self.inner.backend.status(&request), Ok(ProxyStatus::Fresh))
-                {
-                    let mut state = self.inner.state.lock();
-                    state.remove_failure(&request.key);
-                    state.counters.fresh_hits = state.counters.fresh_hits.saturating_add(1);
-                    drop(state);
-                    self.inner.mark_diagnostics_changed();
-                    return ProxyGenerationRequestOutcome::AlreadyFresh;
-                }
+            if let ProxyGenerationRequestOutcome::RetainedFailure(failure) = &outcome
+                && failure.publication.is_some()
+                && matches!(self.inner.backend.status(&request), Ok(ProxyStatus::Fresh))
+            {
+                let mut state = self.inner.state.lock();
+                state.remove_failure(&request.key);
+                state.counters.fresh_hits = state.counters.fresh_hits.saturating_add(1);
+                drop(state);
+                self.inner.mark_diagnostics_changed();
+                return ProxyGenerationRequestOutcome::AlreadyFresh;
             }
             match &outcome {
                 ProxyGenerationRequestOutcome::Deduplicated { promoted: true } => {

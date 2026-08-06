@@ -1034,21 +1034,21 @@ impl HeadlessViewerGpuAdapter {
             },
         );
         progress_permit.commit(submission_id, submission);
-        if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token) {
-            if let Err(error) = ring.after_submit(token) {
-                let reason = format!(
-                    "GPU timestamp tracking was disabled after submission {submission_id:?}: {error}"
-                );
-                if let Some(owner) = self.submission_lifecycle.owner_mut(submission_id) {
-                    owner.execution.gpu_timestamp_token = None;
-                    owner.execution.fallback_reasons.push(reason.clone());
-                }
-                // Timestamp telemetry is not publication authority. The queue
-                // callback still owns frame retirement and the render remains
-                // valid; disable this optional ring for later frames.
-                self.timestamp_ring = None;
-                tracing::warn!("{reason}");
+        if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token)
+            && let Err(error) = ring.after_submit(token)
+        {
+            let reason = format!(
+                "GPU timestamp tracking was disabled after submission {submission_id:?}: {error}"
+            );
+            if let Some(owner) = self.submission_lifecycle.owner_mut(submission_id) {
+                owner.execution.gpu_timestamp_token = None;
+                owner.execution.fallback_reasons.push(reason.clone());
             }
+            // Timestamp telemetry is not publication authority. The queue
+            // callback still owns frame retirement and the render remains
+            // valid; disable this optional ring for later frames.
+            self.timestamp_ring = None;
+            tracing::warn!("{reason}");
         }
         Ok(HeadlessViewerGpuSubmittedCandidate { submission_id, heterogeneous })
     }

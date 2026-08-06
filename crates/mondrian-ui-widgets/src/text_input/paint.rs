@@ -49,15 +49,15 @@ pub(super) fn paint_text_input(ctx: &mut PaintContext, snapshot: TextInputPaintS
     let text_x = snapshot.geometry.text_origin.x;
     let text_y = snapshot.geometry.text_origin.y;
 
-    if snapshot.enabled {
-        if let Some((byte_start, byte_end)) = snapshot.selection_byte_range {
-            let sel_x = text_x + measure_text_width(&snapshot.text[..byte_start], font_size);
-            let sel_w = measure_text_width(&snapshot.text[byte_start..byte_end], font_size);
-            let sel_h = font_size * 1.3;
-            let sel_y = snapshot.bounds.y + (snapshot.bounds.height - sel_h).max(0.0) * 0.5;
-            ctx.encoder
-                .draw_rect(Rect::new(sel_x, sel_y, sel_w, sel_h), tokens.primary, 0.0);
-        }
+    if snapshot.enabled
+        && let Some((byte_start, byte_end)) = snapshot.selection_byte_range
+    {
+        let sel_x = text_x + measure_text_width(&snapshot.text[..byte_start], font_size);
+        let sel_w = measure_text_width(&snapshot.text[byte_start..byte_end], font_size);
+        let sel_h = font_size * 1.3;
+        let sel_y = snapshot.bounds.y + (snapshot.bounds.height - sel_h).max(0.0) * 0.5;
+        ctx.encoder
+            .draw_rect(Rect::new(sel_x, sel_y, sel_w, sel_h), tokens.primary, 0.0);
     }
 
     if !snapshot.text.is_empty() {

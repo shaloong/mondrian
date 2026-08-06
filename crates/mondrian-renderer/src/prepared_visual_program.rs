@@ -34,10 +34,10 @@ pub const DEFAULT_PREPARED_VISUAL_PROGRAM_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_VISUAL_DEFINITION_BIND_RETRIES: usize = 32;
 
 fn visual_frame_seed(sequence_time: TimelineTime, rate: Rational) -> i64 {
-    if let Ok(position) = sequence_time.to_frame_position(rate, FrameRounding::Nearest) {
-        if TimelineTime::from_frame_position(position).ok() == Some(sequence_time) {
-            return position.frame;
-        }
+    if let Ok(position) = sequence_time.to_frame_position(rate, FrameRounding::Nearest)
+        && TimelineTime::from_frame_position(position).ok() == Some(sequence_time)
+    {
+        return position.frame;
     }
     let mut hasher = Sha256::new();
     hasher.update(b"mondrian.visual-off-grid-frame-seed.v1");
@@ -1558,14 +1558,12 @@ impl PreparedVisualProgramCache {
             self.author_snapshot_bindings.remove(&sequence.id);
         }
 
-        if let Some(failure) = self.author_snapshot_failures.get(&sequence.id) {
-            if failure.sequence_revision == sequence.revision
-                && failure.effect_registry_revision == registry_revision
-            {
-                self.author_snapshot_failure_hits =
-                    self.author_snapshot_failure_hits.saturating_add(1);
-                return Err(failure.error.clone());
-            }
+        if let Some(failure) = self.author_snapshot_failures.get(&sequence.id)
+            && failure.sequence_revision == sequence.revision
+            && failure.effect_registry_revision == registry_revision
+        {
+            self.author_snapshot_failure_hits = self.author_snapshot_failure_hits.saturating_add(1);
+            return Err(failure.error.clone());
         }
         self.author_snapshot_failures.remove(&sequence.id);
         self.author_snapshot_binding_misses = self.author_snapshot_binding_misses.saturating_add(1);

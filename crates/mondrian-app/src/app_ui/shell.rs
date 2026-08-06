@@ -805,10 +805,10 @@ impl AppUiAppRoot {
     /// Capture the live dock tree as a persistable workspace layout.
     pub fn workspace_layout(&self) -> Option<AppUiWorkspaceLayout> {
         let layout = AppUiWorkspaceLayout::from_dock(&self.dock)?;
-        if self.workspace_preset == WorkspacePreset::Custom {
-            if let Some(previous) = self.custom_workspace_layout.as_ref() {
-                return Some(layout.with_panel_metadata_from(previous));
-            }
+        if self.workspace_preset == WorkspacePreset::Custom
+            && let Some(previous) = self.custom_workspace_layout.as_ref()
+        {
+            return Some(layout.with_panel_metadata_from(previous));
         }
         Some(layout)
     }
@@ -1300,12 +1300,11 @@ impl AppUiAppRoot {
                 if namespace == APP_SHELL_NAMESPACE
                     && name == APP_SHELL_NEW_PROJECT_DRAFT_CHANGED =>
             {
-                if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_new_project_mut) {
-                    if let Ok(update) =
+                if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_new_project_mut)
+                    && let Ok(update) =
                         serde_json::from_value::<NewProjectDraftUpdatePayload>(payload)
-                    {
-                        dialog.apply_update(update);
-                    }
+                {
+                    dialog.apply_update(update);
                 }
                 Ok(None)
             }
@@ -1491,12 +1490,10 @@ impl AppUiAppRoot {
             {
                 if let Some(dialog) =
                     self.modal.as_mut().and_then(ShellModal::as_sequence_settings_mut)
-                {
-                    if let Ok(update) =
+                    && let Ok(update) =
                         serde_json::from_value::<SequenceSettingsDraftUpdatePayload>(payload)
-                    {
-                        dialog.apply_update(update);
-                    }
+                {
+                    dialog.apply_update(update);
                 }
                 Ok(None)
             }
@@ -1587,12 +1584,11 @@ fn build_dock_tree_for_workspace(
     preset: WorkspacePreset,
     custom_layout: Option<&AppUiWorkspaceLayout>,
 ) -> DockSplitter {
-    if preset == WorkspacePreset::Custom {
-        if let Some(layout) = custom_layout {
-            if let Some(dock) = build_dock_tree_from_layout(models.clone(), layout) {
-                return dock;
-            }
-        }
+    if preset == WorkspacePreset::Custom
+        && let Some(layout) = custom_layout
+        && let Some(dock) = build_dock_tree_from_layout(models.clone(), layout)
+    {
+        return dock;
     }
     build_dock_tree_for_preset(models, preset)
 }
@@ -1640,21 +1636,21 @@ fn activate_panel_in_widget(
     owner: PanelKind,
     active_index: usize,
 ) -> bool {
-    if let Some(panel) = widget.as_any_mut().and_then(|any| any.downcast_mut::<DockPanel>()) {
-        if panel.kind() == owner {
-            if active_index >= panel.tab_count() {
-                return false;
-            }
-            panel.set_active_index(active_index);
-            return true;
+    if let Some(panel) = widget.as_any_mut().and_then(|any| any.downcast_mut::<DockPanel>())
+        && panel.kind() == owner
+    {
+        if active_index >= panel.tab_count() {
+            return false;
         }
+        panel.set_active_index(active_index);
+        return true;
     }
 
     for index in 0..widget.child_count() {
-        if let Some(child) = widget.child_mut(index) {
-            if activate_panel_in_widget(child, owner, active_index) {
-                return true;
-            }
+        if let Some(child) = widget.child_mut(index)
+            && activate_panel_in_widget(child, owner, active_index)
+        {
+            return true;
         }
     }
     false
@@ -1756,10 +1752,10 @@ fn collect_dock_panel_state_into(widget: &dyn Widget, states: &mut Vec<DockPanel
 }
 
 fn restore_dock_panel_state(widget: &mut dyn Widget, states: &[DockPanelState]) {
-    if let Some(panel) = widget.as_any_mut().and_then(|any| any.downcast_mut::<DockPanel>()) {
-        if let Some(state) = states.iter().find(|state| state.owner == panel.kind()) {
-            panel.set_active_index(state.active_index);
-        }
+    if let Some(panel) = widget.as_any_mut().and_then(|any| any.downcast_mut::<DockPanel>())
+        && let Some(state) = states.iter().find(|state| state.owner == panel.kind())
+    {
+        panel.set_active_index(state.active_index);
     }
     for index in 0..widget.child_count() {
         if let Some(child) = widget.child_mut(index) {
@@ -1780,14 +1776,14 @@ fn collect_asset_grid_state_into(
     states: &mut Vec<AssetGridLocalState>,
 ) {
     let owner = widget.panel_kind().or(owner);
-    if let Some(grid) = widget.as_any().and_then(|any| any.downcast_ref::<AssetGrid>()) {
-        if let Some(owner) = owner {
-            states.push(AssetGridLocalState {
-                owner,
-                ordinal: states.iter().filter(|state| state.owner == owner).count(),
-                state: grid.state(),
-            });
-        }
+    if let Some(grid) = widget.as_any().and_then(|any| any.downcast_ref::<AssetGrid>())
+        && let Some(owner) = owner
+    {
+        states.push(AssetGridLocalState {
+            owner,
+            ordinal: states.iter().filter(|state| state.owner == owner).count(),
+            state: grid.state(),
+        });
     }
     for index in 0..widget.child_count() {
         if let Some(child) = widget.child(index) {
@@ -1808,17 +1804,17 @@ fn restore_asset_grid_state_into(
     restored: &mut Vec<(PanelKind, usize)>,
 ) {
     let owner = widget.panel_kind().or(owner);
-    if let Some(owner) = owner {
-        if let Some(grid) = widget.as_any_mut().and_then(|any| any.downcast_mut::<AssetGrid>()) {
-            let ordinal =
-                restored.iter().filter(|(restored_owner, _)| *restored_owner == owner).count();
-            if let Some(state) =
-                states.iter().find(|state| state.owner == owner && state.ordinal == ordinal)
-            {
-                grid.restore_state(&state.state);
-            }
-            restored.push((owner, ordinal));
+    if let Some(owner) = owner
+        && let Some(grid) = widget.as_any_mut().and_then(|any| any.downcast_mut::<AssetGrid>())
+    {
+        let ordinal =
+            restored.iter().filter(|(restored_owner, _)| *restored_owner == owner).count();
+        if let Some(state) =
+            states.iter().find(|state| state.owner == owner && state.ordinal == ordinal)
+        {
+            grid.restore_state(&state.state);
         }
+        restored.push((owner, ordinal));
     }
     for index in 0..widget.child_count() {
         if let Some(child) = widget.child_mut(index) {
@@ -1839,14 +1835,14 @@ fn collect_panel_list_state_into(
     states: &mut Vec<PanelListLocalState>,
 ) {
     let owner = widget.panel_kind().or(owner);
-    if let Some(list) = widget.as_any().and_then(|any| any.downcast_ref::<PanelList>()) {
-        if let Some(owner) = owner {
-            states.push(PanelListLocalState {
-                owner,
-                ordinal: states.iter().filter(|state| state.owner == owner).count(),
-                state: list.state(),
-            });
-        }
+    if let Some(list) = widget.as_any().and_then(|any| any.downcast_ref::<PanelList>())
+        && let Some(owner) = owner
+    {
+        states.push(PanelListLocalState {
+            owner,
+            ordinal: states.iter().filter(|state| state.owner == owner).count(),
+            state: list.state(),
+        });
     }
     for index in 0..widget.child_count() {
         if let Some(child) = widget.child(index) {
@@ -1867,17 +1863,17 @@ fn restore_panel_list_state_into(
     restored: &mut Vec<(PanelKind, usize)>,
 ) {
     let owner = widget.panel_kind().or(owner);
-    if let Some(owner) = owner {
-        if let Some(list) = widget.as_any_mut().and_then(|any| any.downcast_mut::<PanelList>()) {
-            let ordinal =
-                restored.iter().filter(|(restored_owner, _)| *restored_owner == owner).count();
-            if let Some(state) =
-                states.iter().find(|state| state.owner == owner && state.ordinal == ordinal)
-            {
-                list.restore_state(&state.state);
-            }
-            restored.push((owner, ordinal));
+    if let Some(owner) = owner
+        && let Some(list) = widget.as_any_mut().and_then(|any| any.downcast_mut::<PanelList>())
+    {
+        let ordinal =
+            restored.iter().filter(|(restored_owner, _)| *restored_owner == owner).count();
+        if let Some(state) =
+            states.iter().find(|state| state.owner == owner && state.ordinal == ordinal)
+        {
+            list.restore_state(&state.state);
         }
+        restored.push((owner, ordinal));
     }
     for index in 0..widget.child_count() {
         if let Some(child) = widget.child_mut(index) {
@@ -1891,10 +1887,10 @@ fn collect_timeline_view_state(widget: &dyn Widget) -> Option<TimelineViewState>
         return Some(timeline.state());
     }
     for index in 0..widget.child_count() {
-        if let Some(child) = widget.child(index) {
-            if let Some(state) = collect_timeline_view_state(child) {
-                return Some(state);
-            }
+        if let Some(child) = widget.child(index)
+            && let Some(state) = collect_timeline_view_state(child)
+        {
+            return Some(state);
         }
     }
     None
@@ -1955,17 +1951,17 @@ fn restore_panel_scroll_state_into(
     restored: &mut Vec<(PanelKind, usize)>,
 ) {
     let owner = widget.panel_kind().or(owner);
-    if let Some(owner) = owner {
-        if let Some(scroll) = widget.as_any_mut().and_then(|any| any.downcast_mut::<ScrollView>()) {
-            let ordinal =
-                restored.iter().filter(|(restored_owner, _)| *restored_owner == owner).count();
-            if let Some(state) =
-                states.iter().find(|state| state.owner == owner && state.ordinal == ordinal)
-            {
-                scroll.restore_state(&state.state);
-            }
-            restored.push((owner, ordinal));
+    if let Some(owner) = owner
+        && let Some(scroll) = widget.as_any_mut().and_then(|any| any.downcast_mut::<ScrollView>())
+    {
+        let ordinal =
+            restored.iter().filter(|(restored_owner, _)| *restored_owner == owner).count();
+        if let Some(state) =
+            states.iter().find(|state| state.owner == owner && state.ordinal == ordinal)
+        {
+            scroll.restore_state(&state.state);
         }
+        restored.push((owner, ordinal));
     }
     for index in 0..widget.child_count() {
         if let Some(child) = widget.child_mut(index) {
@@ -2295,32 +2291,32 @@ mod tests {
     }
 
     fn active_index_for_dock_panel(widget: &dyn Widget, kind: PanelKind) -> Option<usize> {
-        if let Some(panel) = widget.as_any().and_then(|any| any.downcast_ref::<DockPanel>()) {
-            if panel.kind() == kind {
-                return Some(panel.active_index());
-            }
+        if let Some(panel) = widget.as_any().and_then(|any| any.downcast_ref::<DockPanel>())
+            && panel.kind() == kind
+        {
+            return Some(panel.active_index());
         }
         for index in 0..widget.child_count() {
-            if let Some(child) = widget.child(index) {
-                if let Some(active) = active_index_for_dock_panel(child, kind) {
-                    return Some(active);
-                }
+            if let Some(child) = widget.child(index)
+                && let Some(active) = active_index_for_dock_panel(child, kind)
+            {
+                return Some(active);
             }
         }
         None
     }
 
     fn panel_list_state_for_title(widget: &dyn Widget, title: &str) -> Option<PanelListState> {
-        if let Some(list) = widget.as_any().and_then(|any| any.downcast_ref::<PanelList>()) {
-            if list.title() == title {
-                return Some(list.state());
-            }
+        if let Some(list) = widget.as_any().and_then(|any| any.downcast_ref::<PanelList>())
+            && list.title() == title
+        {
+            return Some(list.state());
         }
         for index in 0..widget.child_count() {
-            if let Some(child) = widget.child(index) {
-                if let Some(state) = panel_list_state_for_title(child, title) {
-                    return Some(state);
-                }
+            if let Some(child) = widget.child(index)
+                && let Some(state) = panel_list_state_for_title(child, title)
+            {
+                return Some(state);
             }
         }
         None
@@ -2331,16 +2327,16 @@ mod tests {
     }
 
     fn asset_grid_state_for_title(widget: &dyn Widget, title: &str) -> Option<AssetGridState> {
-        if let Some(grid) = widget.as_any().and_then(|any| any.downcast_ref::<AssetGrid>()) {
-            if grid.title() == title {
-                return Some(grid.state());
-            }
+        if let Some(grid) = widget.as_any().and_then(|any| any.downcast_ref::<AssetGrid>())
+            && grid.title() == title
+        {
+            return Some(grid.state());
         }
         for index in 0..widget.child_count() {
-            if let Some(child) = widget.child(index) {
-                if let Some(state) = asset_grid_state_for_title(child, title) {
-                    return Some(state);
-                }
+            if let Some(child) = widget.child(index)
+                && let Some(state) = asset_grid_state_for_title(child, title)
+            {
+                return Some(state);
             }
         }
         None
@@ -2357,10 +2353,10 @@ mod tests {
             return Some(timeline.state());
         }
         for index in 0..widget.child_count() {
-            if let Some(child) = widget.child(index) {
-                if let Some(state) = timeline_view_state(child) {
-                    return Some(state);
-                }
+            if let Some(child) = widget.child(index)
+                && let Some(state) = timeline_view_state(child)
+            {
+                return Some(state);
             }
         }
         None
@@ -2377,10 +2373,10 @@ mod tests {
             return true;
         }
         for index in 0..widget.child_count() {
-            if let Some(child) = widget.child_mut(index) {
-                if with_timeline_view_mut(child, update) {
-                    return true;
-                }
+            if let Some(child) = widget.child_mut(index)
+                && with_timeline_view_mut(child, update)
+            {
+                return true;
             }
         }
         false
@@ -2395,18 +2391,16 @@ mod tests {
             .as_any()
             .and_then(|any| any.downcast_ref::<AssetGrid>())
             .is_some_and(|grid| grid.title() == title)
+            && let Some(grid) = widget.as_any_mut().and_then(|any| any.downcast_mut::<AssetGrid>())
         {
-            if let Some(grid) = widget.as_any_mut().and_then(|any| any.downcast_mut::<AssetGrid>())
-            {
-                update(grid);
-                return true;
-            }
+            update(grid);
+            return true;
         }
         for index in 0..widget.child_count() {
-            if let Some(child) = widget.child_mut(index) {
-                if with_asset_grid_mut_for_title(child, title, update) {
-                    return true;
-                }
+            if let Some(child) = widget.child_mut(index)
+                && with_asset_grid_mut_for_title(child, title, update)
+            {
+                return true;
             }
         }
         false
@@ -2421,18 +2415,16 @@ mod tests {
             .as_any()
             .and_then(|any| any.downcast_ref::<PanelList>())
             .is_some_and(|list| list.title() == title)
+            && let Some(list) = widget.as_any_mut().and_then(|any| any.downcast_mut::<PanelList>())
         {
-            if let Some(list) = widget.as_any_mut().and_then(|any| any.downcast_mut::<PanelList>())
-            {
-                update(list);
-                return true;
-            }
+            update(list);
+            return true;
         }
         for index in 0..widget.child_count() {
-            if let Some(child) = widget.child_mut(index) {
-                if with_panel_list_mut_for_title(child, title, update) {
-                    return true;
-                }
+            if let Some(child) = widget.child_mut(index)
+                && with_panel_list_mut_for_title(child, title, update)
+            {
+                return true;
             }
         }
         false
@@ -2462,19 +2454,17 @@ mod tests {
         let owner = widget.panel_kind().or(owner);
         if owner == Some(panel)
             && widget.as_any().and_then(|any| any.downcast_ref::<ScrollView>()).is_some()
-        {
-            if let Some(scroll) =
+            && let Some(scroll) =
                 widget.as_any_mut().and_then(|any| any.downcast_mut::<ScrollView>())
-            {
-                update(scroll);
-                return true;
-            }
+        {
+            update(scroll);
+            return true;
         }
         for index in 0..widget.child_count() {
-            if let Some(child) = widget.child_mut(index) {
-                if with_scroll_view_mut_for_panel_inner(child, owner, panel, update) {
-                    return true;
-                }
+            if let Some(child) = widget.child_mut(index)
+                && with_scroll_view_mut_for_panel_inner(child, owner, panel, update)
+            {
+                return true;
             }
         }
         false

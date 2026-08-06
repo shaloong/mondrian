@@ -272,15 +272,15 @@ impl EventRouter {
                 let target = self.pointer_target(tree, *position);
 
                 if target != self.hovered {
-                    if let Some(old_id) = self.hovered {
-                        if let Some(old) = tree.get_mut(old_id) {
-                            let mut requests = EventRequests::default();
-                            {
-                                let mut ctx = self.make_event_context(dispatch, &mut requests);
-                                old.event(&event, &mut ctx);
-                            }
-                            self.apply_event_requests(requests);
+                    if let Some(old_id) = self.hovered
+                        && let Some(old) = tree.get_mut(old_id)
+                    {
+                        let mut requests = EventRequests::default();
+                        {
+                            let mut ctx = self.make_event_context(dispatch, &mut requests);
+                            old.event(&event, &mut ctx);
                         }
+                        self.apply_event_requests(requests);
                     }
                     self.hovered = target;
                 }
@@ -319,28 +319,28 @@ impl EventRouter {
             }
             _ => {
                 // ── Tab / Shift+Tab: framework-level focus traversal ──────────
-                if let UiEvent::KeyDown { key: KeyCode::Tab, modifiers } = &event {
-                    if let Some(reverse) = tab_traversal_reverse(*modifiers) {
-                        let current = self.focus_mgr.focused_widget();
-                        let traversal_origin = current.unwrap_or_default();
-                        let next = if reverse {
-                            TreeWalker::focus_prev(tree, traversal_origin)
-                        } else {
-                            TreeWalker::focus_next(tree, traversal_origin)
-                        };
-                        if next.is_none() {
-                            self.sync_focus_from_manager();
-                            return EventResult::Ignored;
-                        }
-                        if next == current {
-                            self.sync_focus_from_manager();
-                            return EventResult::Handled;
-                        }
-                        if let Some(next_id) = next {
-                            self.move_focus_to(tree, next_id, FocusSource::Keyboard, dispatch);
-                        }
+                if let UiEvent::KeyDown { key: KeyCode::Tab, modifiers } = &event
+                    && let Some(reverse) = tab_traversal_reverse(*modifiers)
+                {
+                    let current = self.focus_mgr.focused_widget();
+                    let traversal_origin = current.unwrap_or_default();
+                    let next = if reverse {
+                        TreeWalker::focus_prev(tree, traversal_origin)
+                    } else {
+                        TreeWalker::focus_next(tree, traversal_origin)
+                    };
+                    if next.is_none() {
+                        self.sync_focus_from_manager();
+                        return EventResult::Ignored;
+                    }
+                    if next == current {
+                        self.sync_focus_from_manager();
                         return EventResult::Handled;
                     }
+                    if let Some(next_id) = next {
+                        self.move_focus_to(tree, next_id, FocusSource::Keyboard, dispatch);
+                    }
+                    return EventResult::Handled;
                 }
 
                 let position = match &event {
@@ -535,10 +535,10 @@ impl EventRouter {
     }
 
     fn cancel_active_drag(&mut self, tree: &mut dyn WidgetTree, dispatch: &dyn Fn(Action)) {
-        if let Some(active_drag) = self.active_drag.take() {
-            if let Some(target) = active_drag.target {
-                self.dispatch_direct_event(tree, target, &UiEvent::DragLeave, dispatch);
-            }
+        if let Some(active_drag) = self.active_drag.take()
+            && let Some(target) = active_drag.target
+        {
+            self.dispatch_direct_event(tree, target, &UiEvent::DragLeave, dispatch);
         }
         self.capture.clear();
     }
@@ -873,10 +873,10 @@ fn normalize_focused_panel(focus: &mut FocusManagerImpl, tree: &dyn WidgetTree) 
     let Some(focused) = focus.focused_widget() else {
         return;
     };
-    if let Some(panel) = panel_kind_for_widget(tree, focused) {
-        if focus.focused_panel() != Some(panel) {
-            focus.set_focused_widget(Some(focused), Some(panel));
-        }
+    if let Some(panel) = panel_kind_for_widget(tree, focused)
+        && focus.focused_panel() != Some(panel)
+    {
+        focus.set_focused_widget(Some(focused), Some(panel));
     }
 }
 

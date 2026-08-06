@@ -817,12 +817,11 @@ impl AppState {
             sequences.into_iter().map(Self::test_normalize_sequence).collect::<Vec<_>>();
         let session = self.test_ensure_authoring();
         let document = session.document_mut_for_test_fixture();
-        if let Some(active) = document.sequences.active().cloned() {
-            if active.name != "__mondrian_test_fixture__"
-                && sequences.iter().all(|sequence| sequence.id != active.id)
-            {
-                sequences.push(active);
-            }
+        if let Some(active) = document.sequences.active().cloned()
+            && active.name != "__mondrian_test_fixture__"
+            && sequences.iter().all(|sequence| sequence.id != active.id)
+        {
+            sequences.push(active);
         }
         assert!(
             !sequences.is_empty(),
@@ -1001,10 +1000,9 @@ impl AppState {
             if terminal.evidence.disposition == mondrian_core::ExecutionTerminalDisposition::Failed
                 && terminal.executed
                 && terminal.evidence.generation == current_generation
+                && let Some(detail) = terminal.failure_detail
             {
-                if let Some(detail) = terminal.failure_detail {
-                    self.set_status_hint(format!("代理生成失败：{detail}"), true);
-                }
+                self.set_status_hint(format!("代理生成失败：{detail}"), true);
             }
         }
         let _ = self.refresh_internal_execution_resource_decision();

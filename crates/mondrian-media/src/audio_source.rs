@@ -511,13 +511,13 @@ impl AudioSourceCache {
         }
         loop {
             let mut state = self.state.lock();
-            if let Some(index) = state.entries.iter().position(|entry| entry.key == key) {
-                if let Some(entry) = state.entries.remove(index) {
-                    let buffer = Arc::clone(&entry.buffer);
-                    state.entries.push_front(entry);
-                    state.hits = state.hits.saturating_add(1);
-                    return Ok(buffer);
-                }
+            if let Some(index) = state.entries.iter().position(|entry| entry.key == key)
+                && let Some(entry) = state.entries.remove(index)
+            {
+                let buffer = Arc::clone(&entry.buffer);
+                state.entries.push_front(entry);
+                state.hits = state.hits.saturating_add(1);
+                return Ok(buffer);
             }
             if let Some(failure) = state.failures.iter().find(|failure| failure.key == key) {
                 return Err(MondrianError::DecodeFailed {

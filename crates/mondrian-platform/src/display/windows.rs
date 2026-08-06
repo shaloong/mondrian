@@ -135,17 +135,24 @@ unsafe extern "system" fn enum_monitor_proc(
     _rect: *mut RECT,
     lparam: LPARAM,
 ) -> windows_sys::core::BOOL {
-    let search = &mut *(lparam as *mut MonitorSearch);
+    // SAFETY: `probe_monitor_device_name` passes a live, uniquely borrowed
+    // `MonitorSearch` pointer to `EnumDisplayMonitors` for the synchronous
+    // duration of this callback enumeration.
+    let search = unsafe { &mut *(lparam as *mut MonitorSearch) };
     if search.matched_name.is_some() {
         return 0;
     }
 
     let mut info = MONITORINFOEXW::default();
     info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
-    let ok = GetMonitorInfoW(
-        monitor,
-        &mut info as *mut MONITORINFOEXW as *mut windows_sys::Win32::Graphics::Gdi::MONITORINFO,
-    );
+    // SAFETY: Windows supplied `monitor`; `info` is initialized with the
+    // required `cbSize` and remains writable for the duration of the call.
+    let ok = unsafe {
+        GetMonitorInfoW(
+            monitor,
+            &mut info as *mut MONITORINFOEXW as *mut windows_sys::Win32::Graphics::Gdi::MONITORINFO,
+        )
+    };
     if ok == 0 {
         return 1;
     }

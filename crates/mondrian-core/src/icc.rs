@@ -241,10 +241,10 @@ fn estimate_gamma_compensation(
 ) -> Option<f32> {
     let mut estimates = Vec::new();
     for tag in ["rTRC", "gTRC", "bTRC"] {
-        if let Some(tag_data) = decoded.tags.get(tag) {
-            if let Some(gamma) = estimate_gamma_from_tag(tag_data) {
-                estimates.push(gamma as f64);
-            }
+        if let Some(tag_data) = decoded.tags.get(tag)
+            && let Some(gamma) = estimate_gamma_from_tag(tag_data)
+        {
+            estimates.push(gamma as f64);
         }
     }
 

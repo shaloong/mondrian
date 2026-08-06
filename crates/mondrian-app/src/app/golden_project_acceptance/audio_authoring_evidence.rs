@@ -167,10 +167,10 @@ fn close_role_ancestors(
             .iter()
             .find(|role| role.id == role_id)
             .with_context(|| format!("audio evidence Role is absent: {role_id}"))?;
-        if let Some(parent_id) = role.parent_id {
-            if role_ids.insert(parent_id) {
-                pending.push(parent_id);
-            }
+        if let Some(parent_id) = role.parent_id
+            && role_ids.insert(parent_id)
+        {
+            pending.push(parent_id);
         }
     }
     Ok(())

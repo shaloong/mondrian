@@ -1896,14 +1896,13 @@ where
     {
         return Some(Evicted::Prefetch(queued.request.key.clone()));
     }
-    if request.work_class != FrameWorkClass::Still {
-        if let Some(queued) = state
+    if request.work_class != FrameWorkClass::Still
+        && let Some(queued) = state
             .queue
             .iter()
             .find(|queued| queued.request.work_class == FrameWorkClass::Still)
-        {
-            return Some(Evicted::Still(queued.request.key.clone()));
-        }
+    {
+        return Some(Evicted::Still(queued.request.key.clone()));
     }
     None
 }
@@ -2154,16 +2153,16 @@ where
             ExecutionCancellationCandidate { requested_at, cause },
         );
     }
-    if execution.in_flight_deadline_policy == FrameInFlightDeadlinePolicy::Cancel {
-        if let Some(deadline_at) = execution.deadline_at.filter(|deadline| *deadline <= now) {
-            candidate = earlier_cancellation(
-                candidate,
-                ExecutionCancellationCandidate {
-                    requested_at: deadline_at,
-                    cause: ExecutionCancellationCause::DeadlineExpired,
-                },
-            );
-        }
+    if execution.in_flight_deadline_policy == FrameInFlightDeadlinePolicy::Cancel
+        && let Some(deadline_at) = execution.deadline_at.filter(|deadline| *deadline <= now)
+    {
+        candidate = earlier_cancellation(
+            candidate,
+            ExecutionCancellationCandidate {
+                requested_at: deadline_at,
+                cause: ExecutionCancellationCause::DeadlineExpired,
+            },
+        );
     }
     if let Some(deadline_at) =
         execution.execution_cancellation_deadline_at.filter(|deadline| *deadline <= now)

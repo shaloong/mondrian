@@ -1171,30 +1171,30 @@ impl AudioPlayback {
             }
         }
 
-        if let Some(token) = self.quiescence_token {
-            if !self.output_generation_ready {
-                match self.output.is_quiescent(token) {
-                    Ok(true) => {
-                        // The acknowledgement closes every callback block that could
-                        // have observed the previous active revision. Clear once more
-                        // before admitting any PCM for the new render generation.
-                        self.output.clear();
-                        self.output_generation_ready = true;
-                    }
-                    Ok(false) => {}
-                    Err(RealtimeAudioOutputControlError::QuiescenceRevisionMismatch {
-                        token_revision,
-                        current_revision,
-                    }) if current_revision > token_revision => {
-                        // The device owner has begun a newer deactivation while
-                        // retiring this exact stream. The old token cannot admit
-                        // PCM or reactivate the callback, but the frozen Lost
-                        // event is published only after concrete stream drop.
-                        // Keep the generation closed until that lifecycle event
-                        // invalidates the old output on a later bounded poll.
-                    }
-                    Err(error) => return Err(error.into()),
+        if let Some(token) = self.quiescence_token
+            && !self.output_generation_ready
+        {
+            match self.output.is_quiescent(token) {
+                Ok(true) => {
+                    // The acknowledgement closes every callback block that could
+                    // have observed the previous active revision. Clear once more
+                    // before admitting any PCM for the new render generation.
+                    self.output.clear();
+                    self.output_generation_ready = true;
                 }
+                Ok(false) => {}
+                Err(RealtimeAudioOutputControlError::QuiescenceRevisionMismatch {
+                    token_revision,
+                    current_revision,
+                }) if current_revision > token_revision => {
+                    // The device owner has begun a newer deactivation while
+                    // retiring this exact stream. The old token cannot admit
+                    // PCM or reactivate the callback, but the frozen Lost
+                    // event is published only after concrete stream drop.
+                    // Keep the generation closed until that lifecycle event
+                    // invalidates the old output on a later bounded poll.
+                }
+                Err(error) => return Err(error.into()),
             }
         }
 
@@ -1323,109 +1323,104 @@ impl AudioPlayback {
         } else {
             None
         };
-        if let Some(output) = active_output {
-            if output.underrun_frames > self.last_underrun_frames {
-                let delta_frames = output.underrun_frames - self.last_underrun_frames;
-                let interval_total_frames =
-                    output.underrun_frames.saturating_sub(self.underrun_baseline_frames);
-                self.last_underrun_frames = output.underrun_frames;
-                events.push(AudioPlaybackEvent::UnderrunObserved {
+        if let Some(output) = active_output
+            && output.underrun_frames > self.last_underrun_frames
+        {
+            let delta_frames = output.underrun_frames - self.last_underrun_frames;
+            let interval_total_frames =
+                output.underrun_frames.saturating_sub(self.underrun_baseline_frames);
+            self.last_underrun_frames = output.underrun_frames;
+            events.push(AudioPlaybackEvent::UnderrunObserved {
+                stream_generation: output.stream_generation,
+                delta_frames,
+                interval_total_frames,
+            });
+            if interval_total_frames >= self.config.underrun_recovery_threshold_frames {
+                let final_media_anchor =
+                    self.media_anchor.ok_or(AudioPlaybackError::ActiveOutputMissingMediaAnchor)?;
+                events.push(AudioPlaybackEvent::UnderrunRecoveryStarted {
                     stream_generation: output.stream_generation,
-                    delta_frames,
-                    interval_total_frames,
+                    missing_frames: interval_total_frames,
+                    threshold_frames: self.config.underrun_recovery_threshold_frames,
+                    final_output: output,
+                    final_media_anchor,
                 });
-                if interval_total_frames >= self.config.underrun_recovery_threshold_frames {
-                    let final_media_anchor = self
-                        .media_anchor
-                        .ok_or(AudioPlaybackError::ActiveOutputMissingMediaAnchor)?;
-                    events.push(AudioPlaybackEvent::UnderrunRecoveryStarted {
-                        stream_generation: output.stream_generation,
-                        missing_frames: interval_total_frames,
-                        threshold_frames: self.config.underrun_recovery_threshold_frames,
-                        final_output: output,
-                        final_media_anchor,
-                    });
-                    self.underrun_recovery_count = self.underrun_recovery_count.saturating_add(1);
-                    debug_assert!(
-                        generation_rotations < MAX_GENERATION_ROTATIONS_PER_POLL,
-                        "poll generation-rotation bound must cover underrun recovery"
-                    );
-                    self.reprime_prevalidated(preflight.authority, true, self.renderer.clone())?;
-                    elapsed_skip_frames = Some(0);
-                    admission_target_frames = self.config.high_watermark_frames;
-                    generation_rotations += 1;
-                }
+                self.underrun_recovery_count = self.underrun_recovery_count.saturating_add(1);
+                debug_assert!(
+                    generation_rotations < MAX_GENERATION_ROTATIONS_PER_POLL,
+                    "poll generation-rotation bound must cover underrun recovery"
+                );
+                self.reprime_prevalidated(preflight.authority, true, self.renderer.clone())?;
+                elapsed_skip_frames = Some(0);
+                admission_target_frames = self.config.high_watermark_frames;
+                generation_rotations += 1;
             }
         }
 
-        if !self.render_blocked && self.output_generation_ready {
-            if let (Some(renderer), Some(_)) = (self.renderer.as_ref(), self.output.snapshot()) {
-                while self.has_pcm_admission_capacity(admission_target_frames) {
-                    // The poll preflight proved this addition for every one of
-                    // the at-most `max_in_flight` admissions from either the
-                    // pre-poll cursor or any reprime anchor.
-                    let next_start_sample = self.next_start_sample + preflight.chunk_frames;
-                    let request = AudioPcmRenderRequest {
-                        start_sample: self.next_start_sample,
-                        frame_count: self.config.chunk_frames,
-                        sample_rate: self.config.sample_rate,
-                        channel_layout: self.config.channel_layout,
-                        continuity: if self.generation_entry_pending {
-                            AudioPcmContinuity::Enter(AudioPcmRenderGeneration::new(
-                                self.generation,
-                            ))
-                        } else {
-                            AudioPcmContinuity::Continue(AudioPcmRenderGeneration::new(
-                                self.generation,
-                            ))
-                        },
-                    };
-                    let work = RenderWork {
-                        generation: self.generation,
-                        request,
-                        continuity_model: renderer.continuity_model(),
-                        renderer: Arc::clone(renderer),
-                        cancellation: self.generation_cancellation.clone(),
-                    };
-                    if self.render_queue.push(work).is_err() {
-                        break;
-                    }
-                    self.generation_entry_pending = false;
-                    self.in_flight += 1;
-                    self.next_start_sample = next_start_sample;
+        if !self.render_blocked
+            && self.output_generation_ready
+            && let (Some(renderer), Some(_)) = (self.renderer.as_ref(), self.output.snapshot())
+        {
+            while self.has_pcm_admission_capacity(admission_target_frames) {
+                // The poll preflight proved this addition for every one of
+                // the at-most `max_in_flight` admissions from either the
+                // pre-poll cursor or any reprime anchor.
+                let next_start_sample = self.next_start_sample + preflight.chunk_frames;
+                let request = AudioPcmRenderRequest {
+                    start_sample: self.next_start_sample,
+                    frame_count: self.config.chunk_frames,
+                    sample_rate: self.config.sample_rate,
+                    channel_layout: self.config.channel_layout,
+                    continuity: if self.generation_entry_pending {
+                        AudioPcmContinuity::Enter(AudioPcmRenderGeneration::new(self.generation))
+                    } else {
+                        AudioPcmContinuity::Continue(AudioPcmRenderGeneration::new(self.generation))
+                    },
+                };
+                let work = RenderWork {
+                    generation: self.generation,
+                    request,
+                    continuity_model: renderer.continuity_model(),
+                    renderer: Arc::clone(renderer),
+                    cancellation: self.generation_cancellation.clone(),
+                };
+                if self.render_queue.push(work).is_err() {
+                    break;
                 }
-                let activation_threshold = elapsed_skip_frames
-                    .and_then(|skip| skip.checked_add(self.config.preroll_frames));
-                if activation_threshold
-                    .is_some_and(|required| self.output.buffered_frames() >= required)
+                self.generation_entry_pending = false;
+                self.in_flight += 1;
+                self.next_start_sample = next_start_sample;
+            }
+            let activation_threshold =
+                elapsed_skip_frames.and_then(|skip| skip.checked_add(self.config.preroll_frames));
+            if activation_threshold
+                .is_some_and(|required| self.output.buffered_frames() >= required)
+            {
+                self.activation_preroll_satisfied = true;
+                self.consecutive_render_generation_failures = 0;
+                if mode.permits_consumption()
+                    && self.output.snapshot().is_some_and(|snapshot| !snapshot.active)
                 {
-                    self.activation_preroll_satisfied = true;
-                    self.consecutive_render_generation_failures = 0;
-                    if mode.permits_consumption()
-                        && self.output.snapshot().is_some_and(|snapshot| !snapshot.active)
-                    {
-                        let skip_frames =
-                            elapsed_skip_frames.ok_or(AudioPlaybackError::CoordinateOverflow)?;
-                        let token = self
-                            .quiescence_token
-                            .ok_or(AudioPlaybackError::MissingQuiescenceToken)?;
-                        match self.output.activate_after_discard(token, skip_frames) {
-                            Ok(()) => {
-                                self.media_anchor = Some(preflight.authority);
-                                self.stream_media_anchor =
-                                    Some((token.stream_generation, preflight.authority));
-                                self.recovery_preroll = false;
-                            }
-                            Err(RealtimeAudioOutputControlError::QuiescenceRevisionMismatch {
-                                token_revision,
-                                current_revision,
-                            }) if current_revision > token_revision => {
-                                // Device retirement won the atomic control
-                                // transition. No prefix was discarded and no
-                                // activation occurred; wait for frozen Lost.
-                            }
-                            Err(error) => return Err(error.into()),
+                    let skip_frames =
+                        elapsed_skip_frames.ok_or(AudioPlaybackError::CoordinateOverflow)?;
+                    let token =
+                        self.quiescence_token.ok_or(AudioPlaybackError::MissingQuiescenceToken)?;
+                    match self.output.activate_after_discard(token, skip_frames) {
+                        Ok(()) => {
+                            self.media_anchor = Some(preflight.authority);
+                            self.stream_media_anchor =
+                                Some((token.stream_generation, preflight.authority));
+                            self.recovery_preroll = false;
                         }
+                        Err(RealtimeAudioOutputControlError::QuiescenceRevisionMismatch {
+                            token_revision,
+                            current_revision,
+                        }) if current_revision > token_revision => {
+                            // Device retirement won the atomic control
+                            // transition. No prefix was discarded and no
+                            // activation occurred; wait for frozen Lost.
+                        }
+                        Err(error) => return Err(error.into()),
                     }
                 }
             }

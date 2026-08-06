@@ -439,17 +439,17 @@ impl Widget for ScrollView {
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
         match event {
             UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
-                if let Some(thumb) = self.vertical_scrollbar_thumb_rect() {
-                    if thumb.contains(*position) {
-                        self.start_thumb_drag(ScrollbarAxis::Vertical, *position, ctx);
-                        return EventResult::Handled;
-                    }
+                if let Some(thumb) = self.vertical_scrollbar_thumb_rect()
+                    && thumb.contains(*position)
+                {
+                    self.start_thumb_drag(ScrollbarAxis::Vertical, *position, ctx);
+                    return EventResult::Handled;
                 }
-                if let Some(thumb) = self.horizontal_scrollbar_thumb_rect() {
-                    if thumb.contains(*position) {
-                        self.start_thumb_drag(ScrollbarAxis::Horizontal, *position, ctx);
-                        return EventResult::Handled;
-                    }
+                if let Some(thumb) = self.horizontal_scrollbar_thumb_rect()
+                    && thumb.contains(*position)
+                {
+                    self.start_thumb_drag(ScrollbarAxis::Horizontal, *position, ctx);
+                    return EventResult::Handled;
                 }
                 if self.has_vertical_scrollbar()
                     && self.vertical_scrollbar_track_rect().contains(*position)
@@ -531,19 +531,18 @@ impl Widget for ScrollView {
             }
             UiEvent::MouseWheel { delta, position, modifiers } => {
                 if !self.bounds.contains(*position) {
-                    if self.child_overlay_hit_test(*position) {
-                        if let Some(ref mut child) = self.child {
-                            return child.event(event, ctx);
-                        }
+                    if self.child_overlay_hit_test(*position)
+                        && let Some(ref mut child) = self.child
+                    {
+                        return child.event(event, ctx);
                     }
                     return EventResult::Ignored;
                 }
-                if self.should_forward_pointer_to_child(*position) {
-                    if let Some(ref mut child) = self.child {
-                        if child.event(event, ctx) == EventResult::Handled {
-                            return EventResult::Handled;
-                        }
-                    }
+                if self.should_forward_pointer_to_child(*position)
+                    && let Some(ref mut child) = self.child
+                    && child.event(event, ctx) == EventResult::Handled
+                {
+                    return EventResult::Handled;
                 }
                 let changed = if modifiers.shift {
                     self.set_scroll_x(self.scroll_offset.x + *delta)

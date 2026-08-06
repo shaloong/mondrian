@@ -102,10 +102,10 @@ impl NumberInput {
     }
 
     fn dispatch_value(&self, value: f64, ctx: &mut EventContext) {
-        if let Some(factory) = &self.on_change {
-            if let Some(action) = factory(value) {
-                (ctx.dispatch)(action);
-            }
+        if let Some(factory) = &self.on_change
+            && let Some(action) = factory(value)
+        {
+            (ctx.dispatch)(action);
         }
     }
 
@@ -157,18 +157,20 @@ impl Widget for NumberInput {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
-        if self.focused && self.input.can_focus() {
-            if let UiEvent::KeyDown { key, modifiers } = event {
-                if !modifiers.ctrl && !modifiers.alt && !modifiers.meta {
-                    let step = self.model.keyboard_step(*modifiers);
-                    match key {
-                        KeyCode::Up => return self.nudge(step, ctx),
-                        KeyCode::Down => return self.nudge(-step, ctx),
-                        KeyCode::PageUp => return self.nudge(self.model.page_step(), ctx),
-                        KeyCode::PageDown => return self.nudge(-self.model.page_step(), ctx),
-                        _ => {}
-                    }
-                }
+        if self.focused
+            && self.input.can_focus()
+            && let UiEvent::KeyDown { key, modifiers } = event
+            && !modifiers.ctrl
+            && !modifiers.alt
+            && !modifiers.meta
+        {
+            let step = self.model.keyboard_step(*modifiers);
+            match key {
+                KeyCode::Up => return self.nudge(step, ctx),
+                KeyCode::Down => return self.nudge(-step, ctx),
+                KeyCode::PageUp => return self.nudge(self.model.page_step(), ctx),
+                KeyCode::PageDown => return self.nudge(-self.model.page_step(), ctx),
+                _ => {}
             }
         }
         if self.focused && matches!(event, UiEvent::KeyDown { key: KeyCode::Enter, .. }) {

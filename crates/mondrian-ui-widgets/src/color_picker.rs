@@ -542,10 +542,10 @@ impl ColorPicker {
     }
 
     fn dispatch_change(&self, ctx: &mut EventContext) {
-        if let Some(action) = &self.on_change {
-            if let Some(action) = action(self.color) {
-                (ctx.dispatch)(action);
-            }
+        if let Some(action) = &self.on_change
+            && let Some(action) = action(self.color)
+        {
+            (ctx.dispatch)(action);
         }
     }
 
@@ -765,12 +765,11 @@ impl Widget for ColorPicker {
             }
         }
 
-        if let Some(index) = self.field_pointer_captured {
-            if index < self.active_fields().len()
-                && self.send_field_event(index, event, ctx) == EventResult::Handled
-            {
-                return EventResult::Handled;
-            }
+        if let Some(index) = self.field_pointer_captured
+            && index < self.active_fields().len()
+            && self.send_field_event(index, event, ctx) == EventResult::Handled
+        {
+            return EventResult::Handled;
         }
 
         match event {
@@ -903,18 +902,17 @@ impl Widget for ColorPicker {
                     return EventResult::Handled;
                 }
             }
-        } else if let Some(index) = self.focused_field {
-            if index < self.active_fields().len()
-                && self.send_field_event(index, event, ctx) == EventResult::Handled
-            {
-                return EventResult::Handled;
-            }
+        } else if let Some(index) = self.focused_field
+            && index < self.active_fields().len()
+            && self.send_field_event(index, event, ctx) == EventResult::Handled
+        {
+            return EventResult::Handled;
         }
 
-        if let UiEvent::KeyDown { key, modifiers } = event {
-            if self.nudge_keyboard_target(*key, *modifiers, ctx) {
-                return EventResult::Handled;
-            }
+        if let UiEvent::KeyDown { key, modifiers } = event
+            && self.nudge_keyboard_target(*key, *modifiers, ctx)
+        {
+            return EventResult::Handled;
         }
         EventResult::Ignored
     }
@@ -1247,13 +1245,13 @@ impl Widget for ColorPickerTrigger {
         if self.open {
             // During eyedropper mode, don't close the popup on outside clicks.
             // The picker holds pointer capture and the user is sampling a color.
-            if !eyedropper_active {
-                if let UiEvent::MouseDown { position, button: MouseButton::Left, .. } = event {
-                    if !self.bounds.contains(*position) && !self.popup_rect().contains(*position) {
-                        self.close_popup(ctx, true);
-                        return EventResult::Handled;
-                    }
-                }
+            if !eyedropper_active
+                && let UiEvent::MouseDown { position, button: MouseButton::Left, .. } = event
+                && !self.bounds.contains(*position)
+                && !self.popup_rect().contains(*position)
+            {
+                self.close_popup(ctx, true);
+                return EventResult::Handled;
             }
 
             // During eyedropper, always route events to the picker (it holds

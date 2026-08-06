@@ -439,10 +439,10 @@ impl MultilineTextInput {
     }
 
     fn dispatch_change(&self, ctx: &mut EventContext) {
-        if let Some(factory) = &self.on_change {
-            if let Some(action) = factory(self.edit.text()) {
-                (ctx.dispatch)(action);
-            }
+        if let Some(factory) = &self.on_change
+            && let Some(action) = factory(self.edit.text())
+        {
+            (ctx.dispatch)(action);
         }
     }
 

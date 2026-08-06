@@ -1316,12 +1316,12 @@ impl AssetLibrary {
             rows.collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?
         };
-        if let Some(target_folder_id) = target_folder_id {
-            if !folders.iter().any(|(id, _)| id == target_folder_id) {
-                return Err(MondrianError::AssetDbError {
-                    reason: format!("目标文件夹不存在：{target_folder_id}"),
-                });
-            }
+        if let Some(target_folder_id) = target_folder_id
+            && !folders.iter().any(|(id, _)| id == target_folder_id)
+        {
+            return Err(MondrianError::AssetDbError {
+                reason: format!("目标文件夹不存在：{target_folder_id}"),
+            });
         }
 
         let mut assets_to_move = Vec::with_capacity(asset_ids.len());

@@ -330,10 +330,10 @@ fn topological_bus_order(
             AudioRouteSource::Bus { bus_id: source, .. },
             AudioRouteDestination::Bus(destination),
         ) = (route.source, route.destination)
+            && buses.contains(&source)
+            && buses.contains(&destination)
         {
-            if buses.contains(&source) && buses.contains(&destination) {
-                *indegree.entry(destination).or_default() += 1;
-            }
+            *indegree.entry(destination).or_default() += 1;
         }
     }
     let mut ready = indegree
@@ -344,14 +344,13 @@ fn topological_bus_order(
     while let Some(id) = ready.pop_first() {
         order.push(id);
         for route in routes {
-            if matches!(route.source, AudioRouteSource::Bus { bus_id, .. } if bus_id == id) {
-                if let AudioRouteDestination::Bus(destination) = route.destination {
-                    if let Some(value) = indegree.get_mut(&destination) {
-                        *value -= 1;
-                        if *value == 0 {
-                            ready.insert(destination);
-                        }
-                    }
+            if matches!(route.source, AudioRouteSource::Bus { bus_id, .. } if bus_id == id)
+                && let AudioRouteDestination::Bus(destination) = route.destination
+                && let Some(value) = indegree.get_mut(&destination)
+            {
+                *value -= 1;
+                if *value == 0 {
+                    ready.insert(destination);
                 }
             }
         }

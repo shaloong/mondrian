@@ -538,11 +538,11 @@ impl RetainedGpuResources {
 
 impl Drop for RetainedGpuResources {
     fn drop(&mut self) {
-        if self.reusable {
-            if let Some(pool) = &self.pool {
-                for resource in self.resources.drain(..) {
-                    pool.release(resource);
-                }
+        if self.reusable
+            && let Some(pool) = &self.pool
+        {
+            for resource in self.resources.drain(..) {
+                pool.release(resource);
             }
         }
     }
@@ -1298,10 +1298,10 @@ impl HeterogeneousGpuContinuationRuntime {
     }
 
     fn poison_after_submission(&mut self, output: crate::GpuColorFrameId, completed: bool) {
-        if let Some(resource) = self.table.remove(output) {
-            if completed {
-                self.resource_pool.release(resource);
-            }
+        if let Some(resource) = self.table.remove(output)
+            && completed
+        {
+            self.resource_pool.release(resource);
         }
         self.resource_pool.clear();
         self.compositor.clear_frame_resources();

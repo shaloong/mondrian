@@ -433,10 +433,10 @@ impl Widget for AppUiStartupScreen {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
-        if let Some(modal) = &mut self.modal {
-            if modal.event(event, ctx) == EventResult::Handled {
-                return EventResult::Handled;
-            }
+        if let Some(modal) = &mut self.modal
+            && modal.event(event, ctx) == EventResult::Handled
+        {
+            return EventResult::Handled;
         }
         match event {
             UiEvent::MouseMove { position, .. } => {

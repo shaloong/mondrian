@@ -556,10 +556,10 @@ impl AppState {
         let folders = library.list_folders()?;
         let mut next = 1usize;
         for folder in &folders {
-            if let Some(suffix) = folder.name.strip_prefix("文件夹 ") {
-                if let Ok(number) = suffix.trim().parse::<usize>() {
-                    next = next.max(number + 1);
-                }
+            if let Some(suffix) = folder.name.strip_prefix("文件夹 ")
+                && let Ok(number) = suffix.trim().parse::<usize>()
+            {
+                next = next.max(number + 1);
             }
         }
         self.create_folder_in_library(&format!("文件夹 {next}"), parent_id)
@@ -644,13 +644,13 @@ impl AppState {
             }
         })?;
 
-        if let Some(folder_id) = folder_id {
-            if !library.folder_exists(folder_id)? {
-                return Err(mondrian_core::MondrianError::WorkflowStepFailed {
-                    step_id: "create_adjustment_layer_asset".to_string(),
-                    reason: format!("目标素材文件夹不存在：{folder_id}"),
-                });
-            }
+        if let Some(folder_id) = folder_id
+            && !library.folder_exists(folder_id)?
+        {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "create_adjustment_layer_asset".to_string(),
+                reason: format!("目标素材文件夹不存在：{folder_id}"),
+            });
         }
 
         let asset_id = library.create_adjustment_layer_asset(name)?;
@@ -704,13 +704,13 @@ impl AppState {
                 reason: "素材库未连接".to_string(),
             }
         })?;
-        if let Some(folder_id) = folder_id {
-            if !library.folder_exists(folder_id)? {
-                return Err(mondrian_core::MondrianError::WorkflowStepFailed {
-                    step_id: "create_solid_color_asset".to_string(),
-                    reason: format!("目标素材文件夹不存在：{folder_id}"),
-                });
-            }
+        if let Some(folder_id) = folder_id
+            && !library.folder_exists(folder_id)?
+        {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "create_solid_color_asset".to_string(),
+                reason: format!("目标素材文件夹不存在：{folder_id}"),
+            });
         }
         let asset_id = library.create_solid_color_asset(name)?;
         library.move_asset_to_folder(asset_id, folder_id)?;
@@ -1051,12 +1051,11 @@ impl AppState {
 
             for clip_id in &clip_ids {
                 if let Some((track_id, _is_video, is_locked)) = find_clip_track_lock(seq, *clip_id)
+                    && is_locked
                 {
-                    if is_locked {
-                        return Err(mondrian_core::MondrianError::TrackLocked {
-                            track_id: track_id.to_string(),
-                        });
-                    }
+                    return Err(mondrian_core::MondrianError::TrackLocked {
+                        track_id: track_id.to_string(),
+                    });
                 }
             }
 
@@ -1703,16 +1702,17 @@ impl AppState {
                 };
                 clip.label = Some(dragging.name.clone());
                 // Auto-fit: set anchor to media center, position to seq center, scale to fit.
-                if let Some((mw, mh)) = media_dim {
-                    if mw > 0 && mh > 0 {
-                        let seq_w = seq.settings.resolution.width.max(1) as f32;
-                        let seq_h = seq.settings.resolution.height.max(1) as f32;
-                        let fit_scale = (seq_w / mw as f32).min(seq_h / mh as f32);
-                        clip.transform
-                            .set_anchor_point(glam::Vec2::new(mw as f32 * 0.5, mh as f32 * 0.5));
-                        clip.transform.set_scale(glam::Vec2::new(fit_scale, fit_scale));
-                        clip.transform.set_position(glam::Vec2::new(seq_w * 0.5, seq_h * 0.5));
-                    }
+                if let Some((mw, mh)) = media_dim
+                    && mw > 0
+                    && mh > 0
+                {
+                    let seq_w = seq.settings.resolution.width.max(1) as f32;
+                    let seq_h = seq.settings.resolution.height.max(1) as f32;
+                    let fit_scale = (seq_w / mw as f32).min(seq_h / mh as f32);
+                    clip.transform
+                        .set_anchor_point(glam::Vec2::new(mw as f32 * 0.5, mh as f32 * 0.5));
+                    clip.transform.set_scale(glam::Vec2::new(fit_scale, fit_scale));
+                    clip.transform.set_position(glam::Vec2::new(seq_w * 0.5, seq_h * 0.5));
                 }
                 let clip_id = clip.id;
 

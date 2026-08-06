@@ -541,17 +541,15 @@ impl SupervisedChild {
                 stderr.exceeded,
             ),
         ] {
-            if exceeded {
-                if let Some(limit_bytes) = capture.strict_limit() {
-                    return Err(SupervisedProcessError::OutputLimitExceeded {
-                        stage: match stream {
-                            SupervisedProcessStream::Stdout => SupervisedProcessStage::StdoutDrain,
-                            SupervisedProcessStream::Stderr => SupervisedProcessStage::StderrDrain,
-                        },
-                        stream,
-                        limit_bytes,
-                    });
-                }
+            if exceeded && let Some(limit_bytes) = capture.strict_limit() {
+                return Err(SupervisedProcessError::OutputLimitExceeded {
+                    stage: match stream {
+                        SupervisedProcessStream::Stdout => SupervisedProcessStage::StdoutDrain,
+                        SupervisedProcessStream::Stderr => SupervisedProcessStage::StderrDrain,
+                    },
+                    stream,
+                    limit_bytes,
+                });
             }
         }
         Ok(SupervisedProcessOutput {
@@ -627,17 +625,17 @@ impl SupervisedChild {
                     source: io::Error::other(format!("{} drain failed", drain.stream)),
                 });
             }
-            if drain.exceeded.load(Ordering::Acquire) {
-                if let Some(limit_bytes) = drain.capture.strict_limit() {
-                    return Err(SupervisedProcessError::OutputLimitExceeded {
-                        stage: match drain.stream {
-                            SupervisedProcessStream::Stdout => SupervisedProcessStage::StdoutDrain,
-                            SupervisedProcessStream::Stderr => SupervisedProcessStage::StderrDrain,
-                        },
-                        stream: drain.stream,
-                        limit_bytes,
-                    });
-                }
+            if drain.exceeded.load(Ordering::Acquire)
+                && let Some(limit_bytes) = drain.capture.strict_limit()
+            {
+                return Err(SupervisedProcessError::OutputLimitExceeded {
+                    stage: match drain.stream {
+                        SupervisedProcessStream::Stdout => SupervisedProcessStage::StdoutDrain,
+                        SupervisedProcessStream::Stderr => SupervisedProcessStage::StderrDrain,
+                    },
+                    stream: drain.stream,
+                    limit_bytes,
+                });
             }
         }
         Ok(())

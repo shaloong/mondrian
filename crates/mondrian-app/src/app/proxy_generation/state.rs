@@ -397,15 +397,15 @@ pub(super) fn preflight_request(
         state.counters.deduplications = state.counters.deduplications.saturating_add(1);
         let mut promoted = false;
         let mut queued_promotion = None;
-        if let Some(pending) = state.pending.get_mut(&attempt_id) {
-            if origin.rank() < pending.origin.rank() {
-                pending.origin = origin;
-                if pending.phase == ProxyAttemptPhase::Queued {
-                    pending.queue_revision = pending.queue_revision.saturating_add(1).max(1);
-                    queued_promotion = Some((pending.origin, pending.queue_revision));
-                }
-                promoted = true;
+        if let Some(pending) = state.pending.get_mut(&attempt_id)
+            && origin.rank() < pending.origin.rank()
+        {
+            pending.origin = origin;
+            if pending.phase == ProxyAttemptPhase::Queued {
+                pending.queue_revision = pending.queue_revision.saturating_add(1).max(1);
+                queued_promotion = Some((pending.origin, pending.queue_revision));
             }
+            promoted = true;
         }
         if let Some((promoted_origin, revision)) = queued_promotion {
             state.enqueue(attempt_id, promoted_origin, revision);

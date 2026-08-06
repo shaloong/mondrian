@@ -466,15 +466,15 @@ pub(super) fn preview_seek_index_contract_from_stream(
         }
         valid_ordinal = valid_ordinal.saturating_add(1);
     }
-    if let Some(last_pts) = last_pts {
-        if keyframe_pts.last().copied() != Some(last_pts) {
-            if keyframe_pts.len() == MAX_KEYFRAME_ANCHORS {
-                if let Some(last) = keyframe_pts.last_mut() {
-                    *last = last_pts;
-                }
-            } else {
-                keyframe_pts.push(last_pts);
+    if let Some(last_pts) = last_pts
+        && keyframe_pts.last().copied() != Some(last_pts)
+    {
+        if keyframe_pts.len() == MAX_KEYFRAME_ANCHORS {
+            if let Some(last) = keyframe_pts.last_mut() {
+                *last = last_pts;
             }
+        } else {
+            keyframe_pts.push(last_pts);
         }
     }
     let truncated = valid_count > keyframe_pts.len();

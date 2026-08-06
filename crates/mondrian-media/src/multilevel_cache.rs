@@ -96,22 +96,20 @@ impl MultiLevelCache {
             if let (Some(entry), Some(proxy_from_generator)) = (
                 self.l2_proxy_index.lock().get(&asset_id).cloned(),
                 proxy_from_generator.as_ref(),
+            ) && self.l2_entry_is_fresh(
+                &entry,
+                source_path,
+                proxy_from_generator,
+                proxy_generator,
+                proxy_color,
             ) {
-                if self.l2_entry_is_fresh(
-                    &entry,
-                    source_path,
-                    proxy_from_generator,
-                    proxy_generator,
-                    proxy_color,
-                ) {
-                    let resolved = ResolvedMediaPath {
-                        path: entry.proxy_path,
-                        tier: CacheTier::DiskProxyL2,
-                        is_proxy: true,
-                    };
-                    self.put_l1(asset_id, resolved.clone());
-                    return resolved;
-                }
+                let resolved = ResolvedMediaPath {
+                    path: entry.proxy_path,
+                    tier: CacheTier::DiskProxyL2,
+                    is_proxy: true,
+                };
+                self.put_l1(asset_id, resolved.clone());
+                return resolved;
             }
         }
 

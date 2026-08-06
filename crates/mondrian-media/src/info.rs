@@ -567,60 +567,59 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
 
                 if let Ok(context) =
                     ffmpeg::codec::context::Context::from_parameters(params.clone())
+                    && let Ok(decoder) = context.decoder().video()
                 {
-                    if let Ok(decoder) = context.decoder().video() {
-                        width = decoder.width();
-                        height = decoder.height();
-                        if let Some(probed_pixel_format) = map_pixel_format(decoder.format()) {
-                            pixel_format = probed_pixel_format;
-                            pixel_format_proven = true;
-                        }
-                        let color_range = decoded_video_range_from_ffmpeg(decoder.color_range());
-                        bit_depth = pixel_format.bit_depth();
-                        has_alpha = pixel_format.has_alpha();
-                        let raw_color_metadata = capture_color_metadata(
-                            decoder.color_primaries(),
-                            decoder.color_transfer_characteristic(),
-                            decoder.color_space(),
-                        );
-                        let color_interpretation = detect_color_space_from_metadata(
-                            &raw_color_metadata,
-                            &color_metadata_hints,
-                            icc_color_profile_hint(&hdr_metadata).as_ref(),
-                            pixel_format_proven.then_some(ProvenVideoSampling {
-                                pixel_format,
-                                bit_depth,
-                                has_alpha,
-                            }),
-                        );
-                        let (frame_rate, frame_rate_proven) = map_rational(stream.avg_frame_rate());
-                        video_streams.push(VideoStreamInfo {
-                            index: stream.index() as u32,
-                            codec: map_video_codec(params.id()),
-                            duration: stream_duration,
-                            codec_profile: map_video_codec_profile(decoder.profile()),
-                            width,
-                            height,
-                            frame_rate,
-                            frame_rate_proven,
+                    width = decoder.width();
+                    height = decoder.height();
+                    if let Some(probed_pixel_format) = map_pixel_format(decoder.format()) {
+                        pixel_format = probed_pixel_format;
+                        pixel_format_proven = true;
+                    }
+                    let color_range = decoded_video_range_from_ffmpeg(decoder.color_range());
+                    bit_depth = pixel_format.bit_depth();
+                    has_alpha = pixel_format.has_alpha();
+                    let raw_color_metadata = capture_color_metadata(
+                        decoder.color_primaries(),
+                        decoder.color_transfer_characteristic(),
+                        decoder.color_space(),
+                    );
+                    let color_interpretation = detect_color_space_from_metadata(
+                        &raw_color_metadata,
+                        &color_metadata_hints,
+                        icc_color_profile_hint(&hdr_metadata).as_ref(),
+                        pixel_format_proven.then_some(ProvenVideoSampling {
                             pixel_format,
-                            pixel_format_proven,
-                            color_range,
-                            color_interpretation,
-                            color_metadata: Some(raw_color_metadata),
-                            color_metadata_hints,
-                            hdr_metadata,
                             bit_depth,
                             has_alpha,
-                            avg_bitrate: 0,
-                            total_frames: if stream.frames() > 0 {
-                                Some(stream.frames() as u64)
-                            } else {
-                                None
-                            },
-                        });
-                        continue;
-                    }
+                        }),
+                    );
+                    let (frame_rate, frame_rate_proven) = map_rational(stream.avg_frame_rate());
+                    video_streams.push(VideoStreamInfo {
+                        index: stream.index() as u32,
+                        codec: map_video_codec(params.id()),
+                        duration: stream_duration,
+                        codec_profile: map_video_codec_profile(decoder.profile()),
+                        width,
+                        height,
+                        frame_rate,
+                        frame_rate_proven,
+                        pixel_format,
+                        pixel_format_proven,
+                        color_range,
+                        color_interpretation,
+                        color_metadata: Some(raw_color_metadata),
+                        color_metadata_hints,
+                        hdr_metadata,
+                        bit_depth,
+                        has_alpha,
+                        avg_bitrate: 0,
+                        total_frames: if stream.frames() > 0 {
+                            Some(stream.frames() as u64)
+                        } else {
+                            None
+                        },
+                    });
+                    continue;
                 }
 
                 let (frame_rate, frame_rate_proven) = map_rational(stream.avg_frame_rate());
@@ -662,13 +661,12 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
 
                 if let Ok(context) =
                     ffmpeg::codec::context::Context::from_parameters(params.clone())
+                    && let Ok(decoder) = context.decoder().audio()
                 {
-                    if let Ok(decoder) = context.decoder().audio() {
-                        sample_rate = decoder.rate();
-                        channels = decoder.channels() as u8;
-                        channel_layout = map_channel_layout(decoder.channel_layout(), channels);
-                        bit_depth = 16;
-                    }
+                    sample_rate = decoder.rate();
+                    channels = decoder.channels() as u8;
+                    channel_layout = map_channel_layout(decoder.channel_layout(), channels);
+                    bit_depth = 16;
                 }
 
                 let metadata = stream.metadata();

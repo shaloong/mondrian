@@ -60,10 +60,9 @@ impl PreviewPlaybackRing {
         let reserved_bytes = frame.reserved_cpu_bytes();
         if let Some(index) =
             self.entries.iter().position(|entry| entry.extent.start_pts == extent.start_pts)
+            && let Some(replaced) = self.entries.remove(index)
         {
-            if let Some(replaced) = self.entries.remove(index) {
-                self.reserved_bytes = self.reserved_bytes.saturating_sub(replaced.reserved_bytes);
-            }
+            self.reserved_bytes = self.reserved_bytes.saturating_sub(replaced.reserved_bytes);
         }
         if reserved_bytes > self.byte_budget {
             return false;

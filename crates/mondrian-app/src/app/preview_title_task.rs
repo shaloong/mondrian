@@ -299,13 +299,10 @@ impl PreviewTitleTask {
                 .cache
                 .get(&identity)
                 .is_some_and(|entry| !matches!(entry.state, PreviewTitleCacheState::Pending))
+                && let Some(entry) = self.cache.remove(&identity)
+                && let PreviewTitleCacheState::Ready(frame) = entry.state
             {
-                if let Some(entry) = self.cache.remove(&identity) {
-                    if let PreviewTitleCacheState::Ready(frame) = entry.state {
-                        self.completed_bytes =
-                            self.completed_bytes.saturating_sub(frame.retained_bytes());
-                    }
-                }
+                self.completed_bytes = self.completed_bytes.saturating_sub(frame.retained_bytes());
             }
         }
     }
@@ -315,10 +312,10 @@ impl Drop for PreviewTitleTask {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         self.jobs.take();
-        if let Some(worker) = self.worker.take() {
-            if worker.join().is_err() {
-                tracing::warn!("Basic Title Preview worker panicked during shutdown");
-            }
+        if let Some(worker) = self.worker.take()
+            && worker.join().is_err()
+        {
+            tracing::warn!("Basic Title Preview worker panicked during shutdown");
         }
     }
 }

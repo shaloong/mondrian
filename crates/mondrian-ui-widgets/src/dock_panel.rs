@@ -293,10 +293,10 @@ impl DockPanel {
             DockPanelDropArea::Bottom,
             DockPanelDropArea::Left,
         ] {
-            if let Some(quad) = geometry.quad(area) {
-                if quad_contains_point(quad, position) {
-                    return Some(area);
-                }
+            if let Some(quad) = geometry.quad(area)
+                && quad_contains_point(quad, position)
+            {
+                return Some(area);
             }
         }
         None

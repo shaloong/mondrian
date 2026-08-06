@@ -634,15 +634,14 @@ impl PreferencesDialog {
                 }));
             }
         }
-        if let Some(id) = self.hovered_shortcut_id.clone() {
-            if !self
+        if let Some(id) = self.hovered_shortcut_id.clone()
+            && !self
                 .shortcut_layout_rows
                 .iter()
                 .any(|row| matches!(&row.kind, ShortcutLayoutRowKind::Command { id: row_id } if row_id == &id))
             {
                 self.hovered_shortcut_id = None;
             }
-        }
     }
 
     fn find_shortcut_row(&self, id: &str) -> Option<&ShortcutPreferenceRow> {
@@ -930,10 +929,10 @@ impl Widget for PreferencesDialog {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
-        if let UiEvent::KeyDown { key, modifiers } = event {
-            if self.shortcut_capture.is_some() {
-                return self.capture_shortcut_key(*key, *modifiers, ctx);
-            }
+        if let UiEvent::KeyDown { key, modifiers } = event
+            && self.shortcut_capture.is_some()
+        {
+            return self.capture_shortcut_key(*key, *modifiers, ctx);
         }
         match event {
             UiEvent::KeyDown { key: KeyCode::Escape | KeyCode::Enter, .. }
@@ -950,22 +949,22 @@ impl Widget for PreferencesDialog {
             _ => {}
         }
 
-        if let UiEvent::MouseWheel { delta, position, .. } = event {
-            if self.active_tab == PreferencesDialogTab::Shortcuts
-                && self.shortcut_viewport.contains(*position)
-            {
-                return self.set_shortcut_scroll(self.shortcut_scroll_offset + *delta, ctx);
-            }
+        if let UiEvent::MouseWheel { delta, position, .. } = event
+            && self.active_tab == PreferencesDialogTab::Shortcuts
+            && self.shortcut_viewport.contains(*position)
+        {
+            return self.set_shortcut_scroll(self.shortcut_scroll_offset + *delta, ctx);
         }
 
         if self.close_button.event(event, ctx) == EventResult::Handled {
             return EventResult::Handled;
         }
         for button in &mut self.nav_buttons {
-            if let UiEvent::MouseDown { position, button: MouseButton::Left, .. } = event {
-                if button.hit_test(*position) && button.can_focus() {
-                    ctx.focus.request_focus(button.id());
-                }
+            if let UiEvent::MouseDown { position, button: MouseButton::Left, .. } = event
+                && button.hit_test(*position)
+                && button.can_focus()
+            {
+                ctx.focus.request_focus(button.id());
             }
             if button.event(event, ctx) == EventResult::Handled {
                 return EventResult::Handled;
@@ -1074,13 +1073,12 @@ impl Widget for PreferencesDialog {
                             }
                             if self.row_action_rect(row.rect).contains(*position)
                                 && self.hovered_shortcut_id.as_deref() == Some(id)
+                                && let Some(anchor) = self.action_menu_anchor_for(id)
                             {
-                                if let Some(anchor) = self.action_menu_anchor_for(id) {
-                                    self.shortcut_actions_menu =
-                                        self.shortcut_action_menu_for(id, anchor);
-                                    ctx.request_repaint();
-                                    return EventResult::Handled;
-                                }
+                                self.shortcut_actions_menu =
+                                    self.shortcut_action_menu_for(id, anchor);
+                                ctx.request_repaint();
+                                return EventResult::Handled;
                             }
                         }
                     }

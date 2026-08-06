@@ -273,10 +273,10 @@ impl NodeGraphView {
             return EventResult::Ignored;
         };
         self.selected_node_id = Some(node.id.clone());
-        if let Some(on_select) = &self.on_select {
-            if let Some(action) = on_select(&node.id) {
-                (ctx.dispatch)(action);
-            }
+        if let Some(on_select) = &self.on_select
+            && let Some(action) = on_select(&node.id)
+        {
+            (ctx.dispatch)(action);
         }
         ctx.request_repaint();
         EventResult::Handled

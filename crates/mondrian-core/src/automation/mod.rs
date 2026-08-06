@@ -1053,21 +1053,21 @@ impl AnimationChannel {
             let has_next = index + 1 < self.keyframes.len();
             let keyframe = &mut self.keyframes[index];
 
-            if keyframe.temporal_flags.auto_bezier {
-                if let Some((interp_in, interp_out)) = auto_handles.get(index).copied() {
-                    keyframe.interp_in = if has_prev {
-                        interp_in
-                    } else {
-                        keyframe.interp_in
-                    };
-                    keyframe.interp_out = if has_next {
-                        interp_out
-                    } else {
-                        keyframe.interp_out
-                    };
-                    keyframe.temporal_flags.continuous = has_prev && has_next;
-                    keyframe.temporal_flags.broken_handles = false;
-                }
+            if keyframe.temporal_flags.auto_bezier
+                && let Some((interp_in, interp_out)) = auto_handles.get(index).copied()
+            {
+                keyframe.interp_in = if has_prev {
+                    interp_in
+                } else {
+                    keyframe.interp_in
+                };
+                keyframe.interp_out = if has_next {
+                    interp_out
+                } else {
+                    keyframe.interp_out
+                };
+                keyframe.temporal_flags.continuous = has_prev && has_next;
+                keyframe.temporal_flags.broken_handles = false;
             }
         }
 
@@ -1184,13 +1184,13 @@ impl AnimatedProperty {
             }
             let mut previous_time = None;
             for keyframe in &channel.keyframes {
-                if let Some(existing_time) = keyframe_times.insert(keyframe.id, keyframe.time) {
-                    if existing_time != keyframe.time {
-                        return Err(parameter_value_error(
-                            &self.descriptor.path,
-                            "one keyframe identity cannot address different author times",
-                        ));
-                    }
+                if let Some(existing_time) = keyframe_times.insert(keyframe.id, keyframe.time)
+                    && existing_time != keyframe.time
+                {
+                    return Err(parameter_value_error(
+                        &self.descriptor.path,
+                        "one keyframe identity cannot address different author times",
+                    ));
                 }
                 if previous_time.is_some_and(|time| time >= keyframe.time) {
                     return Err(parameter_value_error(
@@ -1906,13 +1906,13 @@ impl AnimatedProperty {
             &self.descriptor.schema.default_value,
             &value,
         )?;
-        if let PropertyValue::Enum(key) = &value {
-            if !self.descriptor.schema.enum_options.iter().any(|option| option.key == *key) {
-                return Err(parameter_value_error(
-                    &self.descriptor.path,
-                    &format!("unknown enum key `{key}`"),
-                ));
-            }
+        if let PropertyValue::Enum(key) = &value
+            && !self.descriptor.schema.enum_options.iter().any(|option| option.key == *key)
+        {
+            return Err(parameter_value_error(
+                &self.descriptor.path,
+                &format!("unknown enum key `{key}`"),
+            ));
         }
         let channels = self.value_to_channel_values(&value)?;
         if channels.is_empty() {
@@ -1954,10 +1954,11 @@ impl AnimatedProperty {
     ) -> PropertyValue {
         if matches!(self.value_type(), PropertyValueType::Enum) {
             let index = channels.first().copied().unwrap_or(0.0).round();
-            if index.is_finite() && index >= 0.0 {
-                if let Some(option) = self.descriptor.schema.enum_options.get(index as usize) {
-                    return PropertyValue::Enum(option.key.clone());
-                }
+            if index.is_finite()
+                && index >= 0.0
+                && let Some(option) = self.descriptor.schema.enum_options.get(index as usize)
+            {
+                return PropertyValue::Enum(option.key.clone());
             }
             return fallback.clone();
         }

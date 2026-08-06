@@ -1951,10 +1951,10 @@ pub fn ensure_ocio_loaded(source: &OcioConfigSource) -> Result<(), String> {
 
 fn ensure_ocio_loaded_locked(source: &OcioConfigSource) -> Result<(), String> {
     // Check if the requested source is already loaded.
-    if let Ok(guard) = OCIO_STATE.lock() {
-        if guard.source.as_ref() == Some(source) {
-            return Ok(());
-        }
+    if let Ok(guard) = OCIO_STATE.lock()
+        && guard.source.as_ref() == Some(source)
+    {
+        return Ok(());
     }
     // Different source requested — load it.
     match source {
@@ -2170,12 +2170,12 @@ fn resolve_custom_ocio_output_identity(
             "Custom OCIO display/view '{display}/{view}' references missing display color space '{display_color_space}'"
         ));
     }
-    if let Some(recognized) = recognized_custom_ocio_output_target(config, &display_color_space) {
-        if recognized != output_color_space {
-            return Err(format!(
+    if let Some(recognized) = recognized_custom_ocio_output_target(config, &display_color_space)
+        && recognized != output_color_space
+    {
+        return Err(format!(
                 "Custom OCIO display/view '{display}/{view}' resolves to recognized {recognized:?} endpoint '{display_color_space}', not declared {output_color_space:?}"
             ));
-        }
     }
     Ok(CustomOcioOutputIdentity::from_resolved(
         output_color_space,
@@ -2241,15 +2241,13 @@ fn resolve_custom_ocio_view_for_output(
             "Custom OCIO config has no View with a recognized {output_color_space:?} display color-space endpoint; select an explicit display/view binding"
         ));
     }
-    if let Some(default_display) = config.default_display() {
-        if let Some(default_view) = config.default_view(&default_display) {
-            if candidates
-                .iter()
-                .any(|candidate| candidate.0 == default_display && candidate.1 == default_view)
-            {
-                return Ok((default_display, default_view));
-            }
-        }
+    if let Some(default_display) = config.default_display()
+        && let Some(default_view) = config.default_view(&default_display)
+        && candidates
+            .iter()
+            .any(|candidate| candidate.0 == default_display && candidate.1 == default_view)
+    {
+        return Ok((default_display, default_view));
     }
     let default_view_candidates = candidates
         .iter()

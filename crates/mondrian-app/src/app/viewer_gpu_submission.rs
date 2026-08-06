@@ -231,12 +231,12 @@ where
         let submission_id = in_flight.submission_id;
         let completion_deadline = in_flight.completion_deadline;
         let quarantined = in_flight.quarantine.is_some();
-        if !quarantined && now >= completion_deadline {
-            if let Some(quarantine) = self
+        if !quarantined
+            && now >= completion_deadline
+            && let Some(quarantine) = self
                 .begin_quarantine(ViewerGpuSubmissionQuarantineReason::CompletionDeadlineExceeded)
-            {
-                return ViewerGpuSubmissionPoll::QuarantineStarted(quarantine);
-            }
+        {
+            return ViewerGpuSubmissionPoll::QuarantineStarted(quarantine);
         }
         ViewerGpuSubmissionPoll::Pending { submission_id, quarantined }
     }

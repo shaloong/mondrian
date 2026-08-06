@@ -556,11 +556,11 @@ impl PreparedVisualTrack {
 
         let mut merged = Vec::with_capacity(intervals.len());
         for (next_start, next_end) in intervals {
-            if let Some((_, current_end)) = merged.last_mut() {
-                if next_start <= *current_end {
-                    *current_end = (*current_end).max(next_end);
-                    continue;
-                }
+            if let Some((_, current_end)) = merged.last_mut()
+                && next_start <= *current_end
+            {
+                *current_end = (*current_end).max(next_end);
+                continue;
             }
             merged.push((next_start, next_end));
         }
@@ -801,15 +801,15 @@ impl<T: Copy> IntervalNode<T> {
                 values.push(entry.value);
             }
         }
-        if first < self.center {
-            if let Some(left) = &self.left {
-                left.query_range(first, last, values, diagnostics);
-            }
+        if first < self.center
+            && let Some(left) = &self.left
+        {
+            left.query_range(first, last, values, diagnostics);
         }
-        if last > self.center {
-            if let Some(right) = &self.right {
-                right.query_range(first, last, values, diagnostics);
-            }
+        if last > self.center
+            && let Some(right) = &self.right
+        {
+            right.query_range(first, last, values, diagnostics);
         }
     }
 }

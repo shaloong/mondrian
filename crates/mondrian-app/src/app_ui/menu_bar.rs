@@ -465,26 +465,22 @@ impl Widget for MenuBar {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
-        if let UiEvent::MouseMove { position, .. } = event {
-            if let (Some(open), Some(target)) =
+        if let UiEvent::MouseMove { position, .. } = event
+            && let (Some(open), Some(target)) =
                 (self.open_menu_index(), self.trigger_index_at(*position))
-            {
-                if open != target {
-                    self.switch_open_menu_to(target, ctx);
-                    return EventResult::Handled;
-                }
-            }
+            && open != target
+        {
+            self.switch_open_menu_to(target, ctx);
+            return EventResult::Handled;
         }
 
-        if let UiEvent::MouseDown { position, button: MouseButton::Left, .. } = event {
-            if let (Some(open), Some(target)) =
+        if let UiEvent::MouseDown { position, button: MouseButton::Left, .. } = event
+            && let (Some(open), Some(target)) =
                 (self.open_menu_index(), self.trigger_index_at(*position))
-            {
-                if open != target {
-                    self.close_other_menus(target, ctx);
-                    return self.menus[target].event(event, ctx);
-                }
-            }
+            && open != target
+        {
+            self.close_other_menus(target, ctx);
+            return self.menus[target].event(event, ctx);
         }
 
         for menu in &mut self.menus {
@@ -632,10 +628,10 @@ mod tests {
                 if item.label == label {
                     return Some(item);
                 }
-                if let MenuItemKind::Submenu { children } = &item.kind {
-                    if let Some(found) = search_deep(children, label) {
-                        return Some(found);
-                    }
+                if let MenuItemKind::Submenu { children } = &item.kind
+                    && let Some(found) = search_deep(children, label)
+                {
+                    return Some(found);
                 }
             }
             None

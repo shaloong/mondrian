@@ -243,17 +243,17 @@ impl WinitUiRuntime {
             return;
         }
 
-        if let Some(screen) = self.eyedropper.poll_global_cursor() {
-            if let Some(local) = desktop_to_window_point(window, screen) {
-                *last_cursor = local;
-                let _ = self.route_window_event(
-                    window,
-                    router,
-                    root,
-                    UiEvent::MouseMove { position: *last_cursor, modifiers },
-                    dispatch,
-                );
-            }
+        if let Some(screen) = self.eyedropper.poll_global_cursor()
+            && let Some(local) = desktop_to_window_point(window, screen)
+        {
+            *last_cursor = local;
+            let _ = self.route_window_event(
+                window,
+                router,
+                root,
+                UiEvent::MouseMove { position: *last_cursor, modifiers },
+                dispatch,
+            );
         }
 
         if let Some((screen, color)) = self.eyedropper.poll_global_primary_press() {
@@ -691,16 +691,13 @@ fn apply_cursor_request(window: &winit::window::Window, cursor: CursorRequest) {
 
 fn apply_ime_request(window: &winit::window::Window, request: ImeRequest) {
     window.set_ime_allowed(request.enabled);
-    if request.enabled {
-        if let Some(area) = request.cursor_area {
-            window.set_ime_cursor_area(
-                winit::dpi::PhysicalPosition::new(area.x as f64, area.y as f64),
-                winit::dpi::PhysicalSize::new(
-                    area.width.max(1.0) as u32,
-                    area.height.max(1.0) as u32,
-                ),
-            );
-        }
+    if request.enabled
+        && let Some(area) = request.cursor_area
+    {
+        window.set_ime_cursor_area(
+            winit::dpi::PhysicalPosition::new(area.x as f64, area.y as f64),
+            winit::dpi::PhysicalSize::new(area.width.max(1.0) as u32, area.height.max(1.0) as u32),
+        );
     }
 }
 

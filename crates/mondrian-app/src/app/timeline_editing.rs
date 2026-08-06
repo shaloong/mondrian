@@ -713,11 +713,11 @@ fn merge_time_ranges(
     ranges.sort_by_key(|(start, _)| *start);
     let mut merged = Vec::with_capacity(ranges.len());
     for (start, end) in ranges {
-        if let Some((_, last_end)) = merged.last_mut() {
-            if start <= *last_end {
-                *last_end = (*last_end).max(end);
-                continue;
-            }
+        if let Some((_, last_end)) = merged.last_mut()
+            && start <= *last_end
+        {
+            *last_end = (*last_end).max(end);
+            continue;
         }
         merged.push((start, end));
     }

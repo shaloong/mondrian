@@ -468,14 +468,14 @@ fn wait_for_stream_retirement(
         }
         if last_default_device_poll.elapsed() >= DEFAULT_DEVICE_IDENTITY_POLL {
             last_default_device_poll = Instant::now();
-            if let Ok(observed) = current_default_realtime_audio_output_device_id() {
-                if should_rebind_system_default(
+            if let Ok(observed) = current_default_realtime_audio_output_device_id()
+                && should_rebind_system_default(
                     opened_selection,
                     selected_device_id,
                     observed.as_ref(),
-                ) {
-                    return Some(RealtimeAudioOutputLossReason::DefaultDeviceChanged);
-                }
+                )
+            {
+                return Some(RealtimeAudioOutputLossReason::DefaultDeviceChanged);
             }
         }
         match command_rx.recv_timeout(DEVICE_HEALTH_POLL) {

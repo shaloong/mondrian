@@ -421,15 +421,14 @@ fn validate_rgba8_alpha(
     alpha: ColorFrameAlpha,
     pixels: &[u8],
 ) -> Result<(), ColorReferenceValidationError> {
-    if alpha == ColorFrameAlpha::Opaque {
-        if let Some((pixel_index, pixel)) =
+    if alpha == ColorFrameAlpha::Opaque
+        && let Some((pixel_index, pixel)) =
             pixels.chunks_exact(4).enumerate().find(|(_, pixel)| pixel[3] != u8::MAX)
-        {
-            return Err(ColorReferenceValidationError::OpaqueAlphaMismatch {
-                pixel_index,
-                value: f32::from(pixel[3]) / 255.0,
-            });
-        }
+    {
+        return Err(ColorReferenceValidationError::OpaqueAlphaMismatch {
+            pixel_index,
+            value: f32::from(pixel[3]) / 255.0,
+        });
     }
     Ok(())
 }

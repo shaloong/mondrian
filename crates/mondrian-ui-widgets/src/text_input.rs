@@ -449,10 +449,10 @@ impl TextInput {
     }
 
     fn dispatch_change(&self, ctx: &mut EventContext) {
-        if let Some(factory) = &self.on_change {
-            if let Some(action) = factory(self.edit.text()) {
-                (ctx.dispatch)(action);
-            }
+        if let Some(factory) = &self.on_change
+            && let Some(action) = factory(self.edit.text())
+        {
+            (ctx.dispatch)(action);
         }
     }
 
@@ -473,12 +473,11 @@ impl TextInput {
     fn commit_edit_session(&mut self, ctx: &mut EventContext) {
         let changed =
             self.edit_session_origin.take().is_some_and(|origin| origin != self.edit.text);
-        if changed {
-            if let Some(factory) = &self.on_commit {
-                if let Some(action) = factory(self.edit.text()) {
-                    (ctx.dispatch)(action);
-                }
-            }
+        if changed
+            && let Some(factory) = &self.on_commit
+            && let Some(action) = factory(self.edit.text())
+        {
+            (ctx.dispatch)(action);
         }
     }
 

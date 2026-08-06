@@ -1274,34 +1274,32 @@ impl PreviewDecodeSession {
             .set_checkpoint(PreviewDecodeCancellationCheckpoint::CacheLookup);
         let cache_lookup_started_at = Instant::now();
         let allow_cpu_cache = !self.hardware_decode_request.prefers_gpu_residency();
-        if allow_cpu_cache && policy.use_playback_ring {
-            if let Some((selected_extent, hit)) = self.playback_ring.get(target_pts) {
-                if should_cancel() {
-                    return Ok(PreviewDecodeOutcome::Canceled(
-                        self.interrupt_state
-                            .cancellation(PreviewDecodeCancellationCheckpoint::CacheLookup)
-                            .with_session_attempt(
-                                PreviewDecodeSessionDisposition::BypassedCache,
-                                0,
-                            ),
-                    ));
-                }
-                return Ok(hit
-                    .into_playback_ring_hit(cache_lookup_started_at.elapsed())
-                    .with_temporal_selection(target_pts, Some(selected_extent))
-                    .with_access_policy(policy)
-                    .with_seek_index_diagnostics(
-                        self.seek_index.diagnostics(),
-                        PreviewSeekResolution::default(),
-                    )
-                    .with_stage_durations(PreviewDecodeStageDurations {
-                        cache_lookup_us: duration_us(cache_lookup_started_at.elapsed()),
-                        ..PreviewDecodeStageDurations::default()
-                    })
-                    .with_hardware_decode_plan(&self.hardware_decode_plan)
-                    .with_decoded_surface_format(self.decoded_surface_format)
-                    .into_outcome());
+        if allow_cpu_cache
+            && policy.use_playback_ring
+            && let Some((selected_extent, hit)) = self.playback_ring.get(target_pts)
+        {
+            if should_cancel() {
+                return Ok(PreviewDecodeOutcome::Canceled(
+                    self.interrupt_state
+                        .cancellation(PreviewDecodeCancellationCheckpoint::CacheLookup)
+                        .with_session_attempt(PreviewDecodeSessionDisposition::BypassedCache, 0),
+                ));
             }
+            return Ok(hit
+                .into_playback_ring_hit(cache_lookup_started_at.elapsed())
+                .with_temporal_selection(target_pts, Some(selected_extent))
+                .with_access_policy(policy)
+                .with_seek_index_diagnostics(
+                    self.seek_index.diagnostics(),
+                    PreviewSeekResolution::default(),
+                )
+                .with_stage_durations(PreviewDecodeStageDurations {
+                    cache_lookup_us: duration_us(cache_lookup_started_at.elapsed()),
+                    ..PreviewDecodeStageDurations::default()
+                })
+                .with_hardware_decode_plan(&self.hardware_decode_plan)
+                .with_decoded_surface_format(self.decoded_surface_format)
+                .into_outcome());
         }
         let cache_lookup_us = duration_us(cache_lookup_started_at.elapsed());
 
@@ -1422,13 +1420,13 @@ impl PreviewDecodeSession {
                         .with_hardware_decode_plan(&self.hardware_decode_plan)
                         .with_decoded_surface_format(self.decoded_surface_format)
                         .with_decode_execution();
-                    if policy.use_playback_ring {
-                        if let Some(selected_extent) = result.selected_extent {
-                            self.playback_ring.put(
-                                selected_extent,
-                                PreviewDecodedFramePayload::CpuRgba(frame.clone()),
-                            );
-                        }
+                    if policy.use_playback_ring
+                        && let Some(selected_extent) = result.selected_extent
+                    {
+                        self.playback_ring.put(
+                            selected_extent,
+                            PreviewDecodedFramePayload::CpuRgba(frame.clone()),
+                        );
                     }
                     return Ok(PreviewDecodeOutcome::Frame(frame));
                 }
@@ -1458,13 +1456,13 @@ impl PreviewDecodeSession {
                         .with_hardware_decode_plan(&self.hardware_decode_plan)
                         .with_decoded_surface_format(self.decoded_surface_format)
                         .with_decode_execution();
-                    if policy.use_playback_ring {
-                        if let Some(selected_extent) = result.selected_extent {
-                            self.playback_ring.put(
-                                selected_extent,
-                                PreviewDecodedFramePayload::CpuFloat(frame.clone()),
-                            );
-                        }
+                    if policy.use_playback_ring
+                        && let Some(selected_extent) = result.selected_extent
+                    {
+                        self.playback_ring.put(
+                            selected_extent,
+                            PreviewDecodedFramePayload::CpuFloat(frame.clone()),
+                        );
                     }
                     return Ok(PreviewDecodeOutcome::FloatFrame(frame));
                 }

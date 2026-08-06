@@ -2166,10 +2166,9 @@ fn execute_timeline_export(
             .delivery
             .static_hdr_metadata_policy
             .writes_authored_metadata()
+            && let Err(err) = apply_h265_hdr_metadata_args(&mut cmd, &timeline.sequence.settings)
         {
-            if let Err(err) = apply_h265_hdr_metadata_args(&mut cmd, &timeline.sequence.settings) {
-                return JobExecutionResult::Failed(err);
-            }
+            return JobExecutionResult::Failed(err);
         }
         if !matches!(&audio_input, TimelineAudioInput::Disabled) {
             apply_audio_codec_args(&mut cmd, &job.config.preset.audio);
@@ -2471,10 +2470,10 @@ fn render_timeline_audio_to_pcm_f32(
     if total_samples == 0 {
         return JobExecutionResult::ReversibleWorkCompleted;
     }
-    if delivery.requires_state_entry() {
-        if let Err(error) = delivery.enter_state(AudioContinuityEpoch::new(1), start_sample) {
-            return JobExecutionResult::Failed(format!("进入导出音频连续性状态失败: {error}"));
-        }
+    if delivery.requires_state_entry()
+        && let Err(error) = delivery.enter_state(AudioContinuityEpoch::new(1), start_sample)
+    {
+        return JobExecutionResult::Failed(format!("进入导出音频连续性状态失败: {error}"));
     }
 
     let chunk_frames_target = (sample_rate as usize / 5).clamp(1024, 16_384);
@@ -4116,12 +4115,13 @@ fn render_prepared_visual_node_into(
     let mut gpu_output_attempts = 0u64;
     let mut gpu_output_cpu_fallbacks = 0u64;
     let boundary = export_output_boundary_from_context(&color_context)?;
-    if color_context.output_tone_map && boundary.display_view.is_none() {
-        if let Some(diagnostics) = context.export_diagnostics.as_deref_mut() {
-            diagnostics.record_output_transform_issue(
-                ExportOutputTransformIssueReason::ToneMapRequestedWithoutExportViewTransform,
-            );
-        }
+    if color_context.output_tone_map
+        && boundary.display_view.is_none()
+        && let Some(diagnostics) = context.export_diagnostics.as_deref_mut()
+    {
+        diagnostics.record_output_transform_issue(
+            ExportOutputTransformIssueReason::ToneMapRequestedWithoutExportViewTransform,
+        );
     }
     let attempt = match context.visual_session.gpu_output.execute(
         &rendered.frame,
@@ -4782,10 +4782,10 @@ fn resolve_export_transition_input(
     temporal_layers: &HashMap<TimelineClipExecutionRef, PreparedExportTemporalLayer>,
 ) -> Result<ResolvedExportTransitionInput, String> {
     let Resolution { width, height } = resolution;
-    if let Some(placement) = transition_input_placement(input) {
-        if let Some(temporal) = temporal_layers.get(&placement) {
-            return Ok(ResolvedExportTransitionInput::Temporal(temporal.clone()));
-        }
+    if let Some(placement) = transition_input_placement(input)
+        && let Some(temporal) = temporal_layers.get(&placement)
+    {
+        return Ok(ResolvedExportTransitionInput::Temporal(temporal.clone()));
     }
     Ok(match input {
         TimelineTransitionInputPlan::Transparent => ResolvedExportTransitionInput::Transparent,

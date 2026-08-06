@@ -909,13 +909,13 @@ fn validate_canonical_recovery_target(
             "canonical Project target changed after recovery discovery (expected {expected:?}, observed {current:?})"
         ));
     }
-    if let Some(canonical_revision) = current.document_revision() {
-        if snapshot_document_revision < canonical_revision {
-            return Err(format!(
-                "selected recovery point document revision {} is older than canonical revision {}",
-                snapshot_document_revision, canonical_revision
-            ));
-        }
+    if let Some(canonical_revision) = current.document_revision()
+        && snapshot_document_revision < canonical_revision
+    {
+        return Err(format!(
+            "selected recovery point document revision {} is older than canonical revision {}",
+            snapshot_document_revision, canonical_revision
+        ));
     }
     Ok(())
 }

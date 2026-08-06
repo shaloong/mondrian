@@ -582,12 +582,12 @@ impl GpuColorFrameWgpuResource {
         create: impl FnOnce(&wgpu::TextureView) -> wgpu::BindGroup,
     ) -> (wgpu::BindGroup, bool) {
         let mut cache = self.cached_bind_groups.lock();
-        if let Some(position) = cache.iter().position(|entry| entry.key == key) {
-            if let Some(entry) = cache.remove(position) {
-                let bind_group = entry.bind_group.clone();
-                cache.push_back(entry);
-                return (bind_group, true);
-            }
+        if let Some(position) = cache.iter().position(|entry| entry.key == key)
+            && let Some(entry) = cache.remove(position)
+        {
+            let bind_group = entry.bind_group.clone();
+            cache.push_back(entry);
+            return (bind_group, true);
         }
         let bind_group = create(&self.texture_view);
         if cache.len() >= MAX_CACHED_BIND_GROUPS_PER_GPU_COLOR_FRAME {

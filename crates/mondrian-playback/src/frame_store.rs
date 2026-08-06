@@ -911,10 +911,9 @@ impl MediaResourceLedger {
         for record in self.records.values() {
             if record.class == MediaWorkReservationClass::Current
                 && record.phase == MediaResourcePhase::Work
+                && let Some(demand_id) = record.demand_id
             {
-                if let Some(demand_id) = record.demand_id {
-                    demands.insert(demand_id);
-                }
+                demands.insert(demand_id);
             }
             demands.extend(record.protections.keys().copied());
         }

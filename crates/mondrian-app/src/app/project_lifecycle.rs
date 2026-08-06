@@ -91,11 +91,10 @@ impl AppState {
             .project_runtime_lease
             .as_ref()
             .filter(|lease| lease.project_id() == project_id)
+            && lease.allocation_target_matches(project_file)?
         {
-            if lease.allocation_target_matches(project_file)? {
-                lease.retain_publication_target(project_file)?;
-                return Ok(Arc::clone(lease));
-            }
+            lease.retain_publication_target(project_file)?;
+            return Ok(Arc::clone(lease));
         }
         let expected_runtime_root = project_runtime_root_for_project(project_file, project_id)?;
         let shared_logical_authority = self
@@ -990,24 +989,24 @@ impl AppState {
                     Some((destination, completion.request_id));
             }
         }
-        if let Some((current_project_file, retire_all)) = recovery_reconciliation {
-            if let Err(reason) = reconcile_recovery_after_manual_save(
+        if let Some((current_project_file, retire_all)) = recovery_reconciliation
+            && let Err(reason) = reconcile_recovery_after_manual_save(
                 active_lease,
                 &current_project_file,
                 retire_all,
-            ) {
-                tracing::warn!(
-                    project_id = %active_lease.project_id(),
-                    runtime_root = %active_lease.runtime_root().display(),
-                    %reason,
-                    "manual Project save succeeded but recovery authority reconciliation failed"
-                );
-                return Ok(
-                    PersistenceCompletionDisposition::AppliedWithRecoveryWarning {
-                        reason: reason.to_string(),
-                    },
-                );
-            }
+            )
+        {
+            tracing::warn!(
+                project_id = %active_lease.project_id(),
+                runtime_root = %active_lease.runtime_root().display(),
+                %reason,
+                "manual Project save succeeded but recovery authority reconciliation failed"
+            );
+            return Ok(
+                PersistenceCompletionDisposition::AppliedWithRecoveryWarning {
+                    reason: reason.to_string(),
+                },
+            );
         }
         Ok(PersistenceCompletionDisposition::Applied)
     }

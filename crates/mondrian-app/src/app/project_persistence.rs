@@ -593,12 +593,12 @@ impl ProjectPersistenceService {
         if snapshot.document.project_id != runtime_lease.project_id() {
             return Err("project persistence snapshot belongs to another runtime lease".to_owned());
         }
-        if let ProjectPersistencePurpose::Manual { destination } = &purpose {
-            if destination.session_id() != snapshot.session_id {
-                return Err(
-                    "manual Project destination belongs to another Authoring Session".to_owned(),
-                );
-            }
+        if let ProjectPersistencePurpose::Manual { destination } = &purpose
+            && destination.session_id() != snapshot.session_id
+        {
+            return Err(
+                "manual Project destination belongs to another Authoring Session".to_owned(),
+            );
         }
         runtime_lease.validate()?;
         let reserved_manual_document_revision =
@@ -633,12 +633,11 @@ impl ProjectPersistenceService {
         // that slot if target admission itself fails. Once retained, the lock
         // deliberately survives for the Session lifetime because a queued
         // publisher may still own the route after caller-side completion.
-        if let ProjectPersistencePurpose::Manual { destination } = &purpose {
-            if let Err(error) = runtime_lease.retain_publication_target(destination.project_file())
-            {
-                self.queued.fetch_sub(1, Ordering::AcqRel);
-                return Err(error);
-            }
+        if let ProjectPersistencePurpose::Manual { destination } = &purpose
+            && let Err(error) = runtime_lease.retain_publication_target(destination.project_file())
+        {
+            self.queued.fetch_sub(1, Ordering::AcqRel);
+            return Err(error);
         }
         self.next_request_id = next_request_id;
         let request = ProjectPersistenceRequest {
@@ -986,12 +985,11 @@ impl ProjectPersistenceService {
         session_id: AuthoringSessionId,
         admission_generation: ProjectPersistenceGeneration,
     ) {
-        if let Some(admission) = self.session_admission.get_mut(&session_id) {
-            if admission.generation == admission_generation
-                && admission.phase == SessionAdmissionPhase::Pausing
-            {
-                admission.phase = SessionAdmissionPhase::Poisoned;
-            }
+        if let Some(admission) = self.session_admission.get_mut(&session_id)
+            && admission.generation == admission_generation
+            && admission.phase == SessionAdmissionPhase::Pausing
+        {
+            admission.phase = SessionAdmissionPhase::Poisoned;
         }
     }
 
@@ -1153,13 +1151,12 @@ fn persistence_worker(
                         ProjectArchivePublication::ReplaceExisting
                     }),
                 };
-                if matches!(&request.purpose, ProjectPersistencePurpose::Autosave { .. }) {
-                    if let Some(successful_revision) =
+                if matches!(&request.purpose, ProjectPersistencePurpose::Autosave { .. })
+                    && let Some(successful_revision) =
                         last_successful_manual_revision.get(&request.snapshot.session_id)
-                    {
-                        request.document_revision_to_publish =
-                            request.document_revision_to_publish.max(*successful_revision);
-                    }
+                {
+                    request.document_revision_to_publish =
+                        request.document_revision_to_publish.max(*successful_revision);
                 }
                 let completion = match effective_publication {
                     Ok(publication) => execute_persistence_request(request, publication),
@@ -1202,14 +1199,13 @@ fn update_worker_publication_state(
             ArchivePublicationState::NotPublished => {}
         }
     }
-    if let Ok(persisted) = &completion.result {
-        if matches!(
+    if let Ok(persisted) = &completion.result
+        && matches!(
             &completion.purpose,
             ProjectPersistencePurpose::Manual { .. }
-        ) {
-            last_successful_manual_revision
-                .insert(completion.session_id, persisted.document_revision);
-        }
+        )
+    {
+        last_successful_manual_revision.insert(completion.session_id, persisted.document_revision);
     }
 }
 
@@ -1303,8 +1299,7 @@ fn execute_persistence_request(
             retention_days,
             saved_at_unix_ms,
         } = &purpose
-        {
-            if let Err(error) = publish_recovery_point(RecoveryPointPublication {
+            && let Err(error) = publish_recovery_point(RecoveryPointPublication {
                 project_file: destination.canonical_project_file(),
                 runtime_lease: &runtime_lease,
                 archive_evidence,
@@ -1313,26 +1308,26 @@ fn execute_persistence_request(
                 saved_at_unix_ms: *saved_at_unix_ms,
                 max_recovery_points: *max_recovery_points,
                 retention_days: *retention_days,
-            }) {
-                failure = Some(project_persistence_failure(&error, error.to_string()));
-                let kind = match &error {
-                    RecoveryManifestPublicationFailure::BeforeNamespace(_) => {
-                        ProjectPersistencePublicationFailureKind::BeforeNamespace
-                    }
-                    RecoveryManifestPublicationFailure::DurabilityUnconfirmed(_) => {
-                        ProjectPersistencePublicationFailureKind::DurabilityUnconfirmed
-                    }
-                    RecoveryManifestPublicationFailure::NamespaceIndeterminate(_) => {
-                        ProjectPersistencePublicationFailureKind::NamespaceIndeterminate
-                    }
-                };
-                publication_failure = Some(ProjectPersistencePublicationFailure {
-                    phase: ProjectPersistencePublicationPhase::RecoveryManifest,
-                    kind,
-                    reason: error.to_string(),
-                });
-                return Err(error.to_string());
-            }
+            })
+        {
+            failure = Some(project_persistence_failure(&error, error.to_string()));
+            let kind = match &error {
+                RecoveryManifestPublicationFailure::BeforeNamespace(_) => {
+                    ProjectPersistencePublicationFailureKind::BeforeNamespace
+                }
+                RecoveryManifestPublicationFailure::DurabilityUnconfirmed(_) => {
+                    ProjectPersistencePublicationFailureKind::DurabilityUnconfirmed
+                }
+                RecoveryManifestPublicationFailure::NamespaceIndeterminate(_) => {
+                    ProjectPersistencePublicationFailureKind::NamespaceIndeterminate
+                }
+            };
+            publication_failure = Some(ProjectPersistencePublicationFailure {
+                phase: ProjectPersistencePublicationPhase::RecoveryManifest,
+                kind,
+                reason: error.to_string(),
+            });
+            return Err(error.to_string());
         }
         Ok(PersistedProjectState {
             document_revision: document.document_revision,

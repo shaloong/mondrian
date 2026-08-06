@@ -785,13 +785,13 @@ fn validate_program_scopes_contract(
     boundary: &RenderOutputColorBoundary,
     request: Option<GpuProgramScopesRequest>,
 ) -> Result<(), ViewerGpuExecutionError> {
-    if let Some(request) = request {
-        if boundary.output_color_space != request.signal_color_space() {
-            return Err(ViewerGpuExecutionError::ProgramScopesBoundaryMismatch {
-                program_boundary: boundary.output_color_space,
-                scopes_signal: request.signal_color_space(),
-            });
-        }
+    if let Some(request) = request
+        && boundary.output_color_space != request.signal_color_space()
+    {
+        return Err(ViewerGpuExecutionError::ProgramScopesBoundaryMismatch {
+            program_boundary: boundary.output_color_space,
+            scopes_signal: request.signal_color_space(),
+        });
     }
     Ok(())
 }

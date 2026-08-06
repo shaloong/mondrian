@@ -1012,10 +1012,10 @@ impl Widget for PanelList {
     fn layout(&mut self, bounds: Rect) {
         self.bounds = bounds;
         let header = self.header_height();
-        if let Some(rect) = self.filter_input_rect() {
-            if let Some(input) = &mut self.filter_input {
-                input.layout(rect);
-            }
+        if let Some(rect) = self.filter_input_rect()
+            && let Some(input) = &mut self.filter_input
+        {
+            input.layout(rect);
         }
         self.viewport = panel_model::viewport_rect(bounds, header);
         self.clamp_scroll();
@@ -1036,31 +1036,30 @@ impl Widget for PanelList {
                 }
                 if self.bounds.contains(*position) {
                     self.focus_visible = false;
-                    if let Some(thumb) = self.scrollbar_thumb_rect() {
-                        if thumb.contains(*position) {
-                            self.scrollbar_dragging = true;
-                            self.drag_start_y = position.y;
-                            self.drag_start_scroll_y = self.scroll_y;
-                            ctx.request_pointer_capture(self.id);
-                            ctx.request_repaint();
-                            return EventResult::Handled;
-                        }
+                    if let Some(thumb) = self.scrollbar_thumb_rect()
+                        && thumb.contains(*position)
+                    {
+                        self.scrollbar_dragging = true;
+                        self.drag_start_y = position.y;
+                        self.drag_start_scroll_y = self.scroll_y;
+                        ctx.request_pointer_capture(self.id);
+                        ctx.request_repaint();
+                        return EventResult::Handled;
                     }
-                    if let Some(track) = self.scrollbar_track_rect() {
-                        if track.contains(*position) {
-                            let page = self.viewport.height.max(self.row_height);
-                            let thumb_y =
-                                self.scrollbar_thumb_rect().map_or(track.y, |rect| rect.y);
-                            let target = if position.y < thumb_y {
-                                self.scroll_y - page
-                            } else {
-                                self.scroll_y + page
-                            };
-                            if self.set_scroll_y(target) {
-                                ctx.request_repaint();
-                            }
-                            return EventResult::Handled;
+                    if let Some(track) = self.scrollbar_track_rect()
+                        && track.contains(*position)
+                    {
+                        let page = self.viewport.height.max(self.row_height);
+                        let thumb_y = self.scrollbar_thumb_rect().map_or(track.y, |rect| rect.y);
+                        let target = if position.y < thumb_y {
+                            self.scroll_y - page
+                        } else {
+                            self.scroll_y + page
+                        };
+                        if self.set_scroll_y(target) {
+                            ctx.request_repaint();
                         }
+                        return EventResult::Handled;
                     }
                     if let Some(index) = self.index_at(*position) {
                         if self.items.get(index).is_some_and(|item| item.tree_expanded.is_some()) {

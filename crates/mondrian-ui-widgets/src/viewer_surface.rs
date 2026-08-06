@@ -842,25 +842,24 @@ impl Widget for ViewerSurface {
             }
             UiEvent::MouseUp { position, button: MouseButton::Left, .. } => {
                 let pressed_dropdown_index = self.pressed_dropdown_index.take();
-                if let Some((dropdown, hovered_index)) = self.dropdown_item_at(*position) {
-                    if pressed_dropdown_index == Some(hovered_index)
-                        && self.open_dropdown == Some(dropdown)
-                    {
-                        match dropdown {
-                            ViewerDropdown::Zoom => {
-                                let option = VIEWER_ZOOM_OPTIONS[hovered_index];
-                                self.dispatch_zoom(option.scale, ctx);
-                            }
-                            ViewerDropdown::PreviewQuality => {
-                                let option = VIEWER_PREVIEW_QUALITY_OPTIONS[hovered_index];
-                                self.dispatch_preview_quality(option.scale, ctx);
-                            }
+                if let Some((dropdown, hovered_index)) = self.dropdown_item_at(*position)
+                    && pressed_dropdown_index == Some(hovered_index)
+                    && self.open_dropdown == Some(dropdown)
+                {
+                    match dropdown {
+                        ViewerDropdown::Zoom => {
+                            let option = VIEWER_ZOOM_OPTIONS[hovered_index];
+                            self.dispatch_zoom(option.scale, ctx);
                         }
-                        self.open_dropdown = None;
-                        self.hovered_dropdown_index = None;
-                        ctx.request_repaint();
-                        return EventResult::Handled;
+                        ViewerDropdown::PreviewQuality => {
+                            let option = VIEWER_PREVIEW_QUALITY_OPTIONS[hovered_index];
+                            self.dispatch_preview_quality(option.scale, ctx);
+                        }
                     }
+                    self.open_dropdown = None;
+                    self.hovered_dropdown_index = None;
+                    ctx.request_repaint();
+                    return EventResult::Handled;
                 }
                 let pressed = self.pressed_control.take();
                 let hovered = self.control_at(*position);
@@ -995,26 +994,25 @@ impl Widget for ViewerSurface {
                 }
             }
         }
-        if self.frame_content.is_none() {
-            if let Some(message) =
+        if self.frame_content.is_none()
+            && let Some(message) =
                 self.empty_message.as_deref().filter(|message| !message.is_empty())
-            {
-                let message_rect = Rect::new(
-                    canvas.x + 12.0,
-                    canvas.y + (canvas.height - 22.0) * 0.5,
-                    (canvas.width - 24.0).max(1.0),
-                    22.0,
-                );
-                let mut muted = colors.muted_foreground;
-                muted.a *= 0.72;
-                ctx.encoder.draw_text_box(
-                    message,
-                    typography.body.font_size,
-                    Point::new(message_rect.x, message_rect.y),
-                    message_rect.width,
-                    muted,
-                );
-            }
+        {
+            let message_rect = Rect::new(
+                canvas.x + 12.0,
+                canvas.y + (canvas.height - 22.0) * 0.5,
+                (canvas.width - 24.0).max(1.0),
+                22.0,
+            );
+            let mut muted = colors.muted_foreground;
+            muted.a *= 0.72;
+            ctx.encoder.draw_text_box(
+                message,
+                typography.body.font_size,
+                Point::new(message_rect.x, message_rect.y),
+                message_rect.width,
+                muted,
+            );
         }
         paint::paint_safe_guides(ctx, canvas, self.enabled);
         ctx.pop_clip();

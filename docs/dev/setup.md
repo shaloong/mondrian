@@ -2,7 +2,9 @@
 
 ## Rust
 
-Use Rust 1.92 or newer, matching workspace `rust-version`.
+Use Rust 1.92 or newer, matching workspace `rust-version`. The workspace uses
+Rust edition 2024 and Cargo resolver 3; crate manifests inherit both policies
+from the workspace rather than selecting editions independently.
 
 ```bash
 rustup update

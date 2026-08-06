@@ -337,12 +337,12 @@ pub fn apply_audio_processor_rack_edit(
     let processor_id = request.edit.processor_id();
     ensure_editable(sequence, &request.address)?;
 
-    if let AudioProcessorRackEdit::Insert { processor, .. } = &request.edit {
-        if processor_id_exists(&sequence.audio_program, processor.id) {
-            return Err(AudioProcessorRackEditError::DuplicateProcessor(
-                processor.id,
-            ));
-        }
+    if let AudioProcessorRackEdit::Insert { processor, .. } = &request.edit
+        && processor_id_exists(&sequence.audio_program, processor.id)
+    {
+        return Err(AudioProcessorRackEditError::DuplicateProcessor(
+            processor.id,
+        ));
     }
 
     let mut candidate = sequence.clone();

@@ -343,18 +343,18 @@ impl CurveEditor {
     }
 
     fn dispatch_change(&self, ctx: &mut EventContext) {
-        if let Some(action) = &self.on_change {
-            if let Some(action) = action(&self.points) {
-                (ctx.dispatch)(action);
-            }
+        if let Some(action) = &self.on_change
+            && let Some(action) = action(&self.points)
+        {
+            (ctx.dispatch)(action);
         }
     }
 
     fn dispatch_edit(&self, edit: CurveEdit, ctx: &mut EventContext) {
-        if let Some(action) = &self.on_edit {
-            if let Some(action) = action(edit) {
-                (ctx.dispatch)(action);
-            }
+        if let Some(action) = &self.on_edit
+            && let Some(action) = action(edit)
+        {
+            (ctx.dispatch)(action);
         }
     }
 
@@ -373,10 +373,10 @@ impl CurveEditor {
             if let Some(point) = point {
                 self.dispatch_edit(CurveEdit::Insert { index, point }, ctx);
             }
-        } else if let (Some(origin), Some(point)) = (self.drag_origin, point) {
-            if origin != point {
-                self.dispatch_edit(CurveEdit::Move { index, point }, ctx);
-            }
+        } else if let (Some(origin), Some(point)) = (self.drag_origin, point)
+            && origin != point
+        {
+            self.dispatch_edit(CurveEdit::Move { index, point }, ctx);
         }
         self.drag_origin = None;
         self.drag_inserted = false;

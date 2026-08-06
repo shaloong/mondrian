@@ -287,8 +287,7 @@ fn execute_effect_graph(
             | EffectGraphNodeKind::DomainEffect { input: input_id, op, .. } => {
                 if let (Some(compiled), Some(input_fingerprint)) =
                     (compiled, source_input_fingerprint)
-                {
-                    if let Some(cached) = session.as_deref_mut().and_then(|session| {
+                    && let Some(cached) = session.as_deref_mut().and_then(|session| {
                         get_cached_node_output(
                             session,
                             compiled,
@@ -298,17 +297,17 @@ fn execute_effect_graph(
                             input_fingerprint,
                             frame_seed,
                         )
-                    }) {
-                        release_consumed_node_inputs(
-                            node,
-                            &mut outputs,
-                            &mut remaining_uses,
-                            &mut buffer_pool,
-                            required_len,
-                        );
-                        outputs.insert(node.id, cached);
-                        continue;
-                    }
+                    })
+                {
+                    release_consumed_node_inputs(
+                        node,
+                        &mut outputs,
+                        &mut remaining_uses,
+                        &mut buffer_pool,
+                        required_len,
+                    );
+                    outputs.insert(node.id, cached);
+                    continue;
                 }
                 let Some(mut source) = take_graph_input(
                     &mut outputs,
@@ -323,27 +322,25 @@ fn execute_effect_graph(
                 apply_render_op(&mut source, width, height, op, frame_seed)?;
                 if let (Some(compiled), Some(input_fingerprint)) =
                     (compiled, source_input_fingerprint)
+                    && let Some(session) = session.as_deref_mut()
                 {
-                    if let Some(session) = session.as_deref_mut() {
-                        put_cached_node_output(
-                            session,
-                            compiled,
-                            *node_id,
-                            width,
-                            height,
-                            input_fingerprint,
-                            frame_seed,
-                            &source,
-                        );
-                    }
+                    put_cached_node_output(
+                        session,
+                        compiled,
+                        *node_id,
+                        width,
+                        height,
+                        input_fingerprint,
+                        frame_seed,
+                        &source,
+                    );
                 }
                 outputs.insert(node.id, source);
             }
             EffectGraphNodeKind::Blend { base, overlay, blend_mode, opacity } => {
                 if let (Some(compiled), Some(input_fingerprint)) =
                     (compiled, source_input_fingerprint)
-                {
-                    if let Some(cached) = session.as_deref_mut().and_then(|session| {
+                    && let Some(cached) = session.as_deref_mut().and_then(|session| {
                         get_cached_node_output(
                             session,
                             compiled,
@@ -353,17 +350,17 @@ fn execute_effect_graph(
                             input_fingerprint,
                             frame_seed,
                         )
-                    }) {
-                        release_consumed_node_inputs(
-                            node,
-                            &mut outputs,
-                            &mut remaining_uses,
-                            &mut buffer_pool,
-                            required_len,
-                        );
-                        outputs.insert(node.id, cached);
-                        continue;
-                    }
+                    })
+                {
+                    release_consumed_node_inputs(
+                        node,
+                        &mut outputs,
+                        &mut remaining_uses,
+                        &mut buffer_pool,
+                        required_len,
+                    );
+                    outputs.insert(node.id, cached);
+                    continue;
                 }
                 let Some(mut base_frame) = take_graph_input(
                     &mut outputs,
@@ -393,23 +390,22 @@ fn execute_effect_graph(
                 release_execution_buffer(&mut buffer_pool, overlay_frame);
                 if let (Some(compiled), Some(input_fingerprint)) =
                     (compiled, source_input_fingerprint)
+                    && let Some(session) = session.as_deref_mut()
                 {
-                    if let Some(session) = session.as_deref_mut() {
-                        put_cached_node_output(
-                            session,
-                            compiled,
-                            *node_id,
-                            width,
-                            height,
-                            input_fingerprint,
-                            frame_seed,
-                            &base_frame,
-                        );
-                    }
+                    put_cached_node_output(
+                        session,
+                        compiled,
+                        *node_id,
+                        width,
+                        height,
+                        input_fingerprint,
+                        frame_seed,
+                        &base_frame,
+                    );
                 }
                 outputs.insert(node.id, base_frame);
             }
-            EffectGraphNodeKind::MaskSource { ref shape, feather, expansion, opacity } => {
+            EffectGraphNodeKind::MaskSource { shape, feather, expansion, opacity } => {
                 let cancellation = ExecutionCancellationToken::new();
                 let raster = crate::PreparedMaskRaster::prepare(
                     shape,
@@ -437,8 +433,7 @@ fn execute_effect_graph(
             EffectGraphNodeKind::Mask { input: input_id, mask, invert, mask_op } => {
                 if let (Some(compiled), Some(input_fingerprint)) =
                     (compiled, source_input_fingerprint)
-                {
-                    if let Some(cached) = session.as_deref_mut().and_then(|session| {
+                    && let Some(cached) = session.as_deref_mut().and_then(|session| {
                         get_cached_node_output(
                             session,
                             compiled,
@@ -448,17 +443,17 @@ fn execute_effect_graph(
                             input_fingerprint,
                             frame_seed,
                         )
-                    }) {
-                        release_consumed_node_inputs(
-                            node,
-                            &mut outputs,
-                            &mut remaining_uses,
-                            &mut buffer_pool,
-                            required_len,
-                        );
-                        outputs.insert(node.id, cached);
-                        continue;
-                    }
+                    })
+                {
+                    release_consumed_node_inputs(
+                        node,
+                        &mut outputs,
+                        &mut remaining_uses,
+                        &mut buffer_pool,
+                        required_len,
+                    );
+                    outputs.insert(node.id, cached);
+                    continue;
                 }
                 let Some(mut source) = take_graph_input(
                     &mut outputs,
@@ -482,23 +477,22 @@ fn execute_effect_graph(
                 release_execution_buffer(&mut buffer_pool, mask_frame);
                 if let (Some(compiled), Some(input_fingerprint)) =
                     (compiled, source_input_fingerprint)
+                    && let Some(session) = session.as_deref_mut()
                 {
-                    if let Some(session) = session.as_deref_mut() {
-                        put_cached_node_output(
-                            session,
-                            compiled,
-                            *node_id,
-                            width,
-                            height,
-                            input_fingerprint,
-                            frame_seed,
-                            &source,
-                        );
-                    }
+                    put_cached_node_output(
+                        session,
+                        compiled,
+                        *node_id,
+                        width,
+                        height,
+                        input_fingerprint,
+                        frame_seed,
+                        &source,
+                    );
                 }
                 outputs.insert(node.id, source);
             }
-            EffectGraphNodeKind::MultiInput { ref inputs, blend_mode, opacity } => {
+            EffectGraphNodeKind::MultiInput { inputs, blend_mode, opacity } => {
                 let Some(first_id) = inputs.first().copied() else {
                     return Err(EffectExecutionError::InvalidGraph);
                 };
@@ -1350,15 +1344,15 @@ fn validate_float_effect_domain(
             },
         });
     }
-    if !domain_processor_available {
-        if let Some(transition) = compiled.domain_plan().transitions.first() {
-            return Err(EffectFloatExecutionError::UnsupportedNode {
-                node_id: transition.consumer.unwrap_or(transition.input),
-                reason: EffectFloatUnsupportedReason::ColorDomainConversionRequired {
-                    transitions: compiled.domain_plan().transitions.len(),
-                },
-            });
-        }
+    if !domain_processor_available
+        && let Some(transition) = compiled.domain_plan().transitions.first()
+    {
+        return Err(EffectFloatExecutionError::UnsupportedNode {
+            node_id: transition.consumer.unwrap_or(transition.input),
+            reason: EffectFloatUnsupportedReason::ColorDomainConversionRequired {
+                transitions: compiled.domain_plan().transitions.len(),
+            },
+        });
     }
     Ok(())
 }

@@ -633,12 +633,11 @@ impl AudioWaveformService {
             );
             return;
         }
-        if let Some(previous) = state.active_keys.insert(key.asset_id, key.clone()) {
-            if previous != key {
-                if let Some(pending) = state.pending.get(&previous) {
-                    pending.cancellation.cancel();
-                }
-            }
+        if let Some(previous) = state.active_keys.insert(key.asset_id, key.clone())
+            && previous != key
+            && let Some(pending) = state.pending.get(&previous)
+        {
+            pending.cancellation.cancel();
         }
         state.pending.insert(key.clone(), PendingWaveform { generation, cancellation });
         if !state.dispatch_enabled {

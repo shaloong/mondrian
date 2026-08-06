@@ -212,14 +212,14 @@ impl IsolatedDemuxSession {
                 }
             }
         };
-        if let Some(requested) = video_stream_index {
-            if stream.stream_index != requested as usize {
-                let observed = stream.stream_index;
-                source.terminate(PreviewIsolatedDemuxTermination::Failed);
-                return Err(IsolatedDemuxOpenError::Failed(format!(
+        if let Some(requested) = video_stream_index
+            && stream.stream_index != requested as usize
+        {
+            let observed = stream.stream_index;
+            source.terminate(PreviewIsolatedDemuxTermination::Failed);
+            return Err(IsolatedDemuxOpenError::Failed(format!(
                     "Preview demux worker returned physical stream {observed} for requested stream {requested}"
                 )));
-            }
         }
         source.lifecycle.record_ready();
         Ok(IsolatedDemuxOpen { source, stream })

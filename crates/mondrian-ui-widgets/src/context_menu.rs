@@ -390,28 +390,26 @@ impl Widget for ContextMenu {
                 // Check submenu clicks first (deepest first).
                 let chain_len = self.submenu_chain.len();
                 for depth in (1..=chain_len).rev() {
-                    if let Some(sub_rect) = self.menu_rect_at_depth(depth) {
-                        if sub_rect.contains(*position) {
-                            if let Some(children) = self.children_at(&self.submenu_chain[..depth]) {
-                                if let Some(sub_idx) = geometry_item_at(
-                                    sub_rect,
-                                    children.len(),
-                                    self.item_height(),
-                                    0.0,
-                                    *position,
-                                ) {
-                                    if let Some(child) = children.get(sub_idx) {
-                                        if let Some(activation) = menu_item_activation(child) {
-                                            self.apply_activation(activation, ctx);
-                                            self.close();
-                                            return EventResult::Handled;
-                                        }
-                                    }
-                                }
-                            }
+                    if let Some(sub_rect) = self.menu_rect_at_depth(depth)
+                        && sub_rect.contains(*position)
+                    {
+                        if let Some(children) = self.children_at(&self.submenu_chain[..depth])
+                            && let Some(sub_idx) = geometry_item_at(
+                                sub_rect,
+                                children.len(),
+                                self.item_height(),
+                                0.0,
+                                *position,
+                            )
+                            && let Some(child) = children.get(sub_idx)
+                            && let Some(activation) = menu_item_activation(child)
+                        {
+                            self.apply_activation(activation, ctx);
                             self.close();
                             return EventResult::Handled;
                         }
+                        self.close();
+                        return EventResult::Handled;
                     }
                 }
 
@@ -439,21 +437,21 @@ impl Widget for ContextMenu {
 
                 // Check from deepest submenu upward
                 for check_depth in (1..=self.submenu_chain.len()).rev() {
-                    if let Some(sub_rect) = self.menu_rect_at_depth(check_depth) {
-                        if sub_rect.contains(*position) {
-                            if let Some(hovered_idx) = self.item_at_depth(*position, check_depth) {
-                                new_hover_depth = Some((check_depth, hovered_idx));
-                                let children =
-                                    self.children_at(&self.submenu_chain[..check_depth]).unwrap();
-                                if children[hovered_idx].is_submenu()
-                                    && self.submenu_chain.len() <= check_depth
-                                {
-                                    self.submenu_chain.push(hovered_idx);
-                                }
+                    if let Some(sub_rect) = self.menu_rect_at_depth(check_depth)
+                        && sub_rect.contains(*position)
+                    {
+                        if let Some(hovered_idx) = self.item_at_depth(*position, check_depth) {
+                            new_hover_depth = Some((check_depth, hovered_idx));
+                            let children =
+                                self.children_at(&self.submenu_chain[..check_depth]).unwrap();
+                            if children[hovered_idx].is_submenu()
+                                && self.submenu_chain.len() <= check_depth
+                            {
+                                self.submenu_chain.push(hovered_idx);
                             }
-                            handled = true;
-                            break;
                         }
+                        handled = true;
+                        break;
                     }
 
                     if self.is_in_submenu_keep_alive_zone(*position, check_depth) {
@@ -471,10 +469,11 @@ impl Widget for ContextMenu {
                         .filter(|i| self.items[*i].is_activatable())
                         .map(|i| (0, i));
 
-                    if let Some((0, idx)) = new_hover_depth {
-                        if self.items[idx].is_submenu() && !self.submenu_chain.contains(&idx) {
-                            self.submenu_chain.push(idx);
-                        }
+                    if let Some((0, idx)) = new_hover_depth
+                        && self.items[idx].is_submenu()
+                        && !self.submenu_chain.contains(&idx)
+                    {
+                        self.submenu_chain.push(idx);
                     }
                 }
 

@@ -2788,23 +2788,19 @@ fn timeline_clip_from_sequence_clip(
     if let Some(color) = timeline_clip_color(clip, is_video) {
         view = view.with_color(color);
     }
-    if kind == TimelineClipKind::Audio {
-        if let Some(lib) = library {
-            if let Some(asset_id) = clip.media_asset_id() {
-                if let Ok(Some(record)) = lib.get_asset(asset_id) {
-                    if let Some(selection) =
-                        record.admitted_audio_source_selection(AudioSourceComponentId::primary())
-                    {
-                        view = view.with_source_identity(
-                            record.id,
-                            selection,
-                            clip.source_origin().to_f64(),
-                            clip.source_terminal_boundary().ok()?.to_f64(),
-                        );
-                    }
-                }
-            }
-        }
+    if kind == TimelineClipKind::Audio
+        && let Some(lib) = library
+        && let Some(asset_id) = clip.media_asset_id()
+        && let Ok(Some(record)) = lib.get_asset(asset_id)
+        && let Some(selection) =
+            record.admitted_audio_source_selection(AudioSourceComponentId::primary())
+    {
+        view = view.with_source_identity(
+            record.id,
+            selection,
+            clip.source_origin().to_f64(),
+            clip.source_terminal_boundary().ok()?.to_f64(),
+        );
     }
     Some(view)
 }
@@ -7774,16 +7770,16 @@ mod tests {
     }
 
     fn dock_panel_for_kind(widget: &dyn Widget, kind: PanelKind) -> Option<&DockPanel> {
-        if let Some(panel) = widget.as_any().and_then(|any| any.downcast_ref::<DockPanel>()) {
-            if panel.kind() == kind {
-                return Some(panel);
-            }
+        if let Some(panel) = widget.as_any().and_then(|any| any.downcast_ref::<DockPanel>())
+            && panel.kind() == kind
+        {
+            return Some(panel);
         }
         for index in 0..widget.child_count() {
-            if let Some(child) = widget.child(index) {
-                if let Some(panel) = dock_panel_for_kind(child, kind) {
-                    return Some(panel);
-                }
+            if let Some(child) = widget.child(index)
+                && let Some(panel) = dock_panel_for_kind(child, kind)
+            {
+                return Some(panel);
             }
         }
         None
@@ -7821,10 +7817,10 @@ mod tests {
             return None;
         }
         for index in (0..widget.child_count()).rev() {
-            if let Some(child) = widget.child(index) {
-                if let Some(kind) = panel_at_point(child, point) {
-                    return Some(kind);
-                }
+            if let Some(child) = widget.child(index)
+                && let Some(kind) = panel_at_point(child, point)
+            {
+                return Some(kind);
             }
         }
         widget.panel_kind()

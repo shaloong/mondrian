@@ -276,14 +276,14 @@ impl Widget for SegmentedButtonGroup {
             );
         }
 
-        if let Some(hovered) = self.hovered_index {
-            if hovered != self.selected_index {
-                ctx.encoder.draw_rect(
-                    self.segment_rect(hovered).inset(2.0, 2.0),
-                    color_with_alpha(colors.foreground, 0.06),
-                    radius - 2.0,
-                );
-            }
+        if let Some(hovered) = self.hovered_index
+            && hovered != self.selected_index
+        {
+            ctx.encoder.draw_rect(
+                self.segment_rect(hovered).inset(2.0, 2.0),
+                color_with_alpha(colors.foreground, 0.06),
+                radius - 2.0,
+            );
         }
 
         for index in 1..self.items.len() {

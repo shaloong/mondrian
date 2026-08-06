@@ -765,10 +765,8 @@ where
                         false
                     }
                 };
-                if !release_admission {
-                    if let Some(admission) = generation_admission {
-                        std::mem::forget(admission);
-                    }
+                if !release_admission && let Some(admission) = generation_admission {
+                    std::mem::forget(admission);
                 }
             })
             .map_err(ViewerGpuDeviceProgressStartError::ThreadSpawn)?;

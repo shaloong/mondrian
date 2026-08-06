@@ -6723,10 +6723,10 @@ fn preview_asset_issue_summary_for_sequence(
                 );
                 continue;
             }
-            if let Some(asset_id) = clip.media_asset_id() {
-                if asset_color_diagnostics.contains_key(&asset_id) {
-                    asset_ids.insert(asset_id);
-                }
+            if let Some(asset_id) = clip.media_asset_id()
+                && asset_color_diagnostics.contains_key(&asset_id)
+            {
+                asset_ids.insert(asset_id);
             }
         }
     }

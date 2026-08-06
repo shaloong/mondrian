@@ -946,10 +946,10 @@ impl AssetGrid {
         if let Some(action) = item.select_action.clone() {
             (ctx.dispatch)(action);
         }
-        if let Some(factory) = &self.on_select {
-            if let Some(action) = factory(index, item) {
-                (ctx.dispatch)(action);
-            }
+        if let Some(factory) = &self.on_select
+            && let Some(action) = factory(index, item)
+        {
+            (ctx.dispatch)(action);
         }
     }
 
@@ -960,23 +960,23 @@ impl AssetGrid {
         if let Some(action) = item.activate_action.clone() {
             (ctx.dispatch)(action);
         }
-        if let Some(factory) = &self.on_activate {
-            if let Some(action) = factory(index, item) {
-                (ctx.dispatch)(action);
-            }
+        if let Some(factory) = &self.on_activate
+            && let Some(action) = factory(index, item)
+        {
+            (ctx.dispatch)(action);
         }
     }
 
     fn drop_payload(&self, payload: &DragPayload, position: Point, ctx: &mut EventContext) {
-        if let Some(index) = self.index_at(position) {
-            if let (Some(factory), Some(item)) = (&self.on_item_drop, self.items.get(index)) {
-                match factory(payload, index, item) {
-                    AssetGridDropOutcome::Unhandled => {}
-                    AssetGridDropOutcome::Consumed => return,
-                    AssetGridDropOutcome::Dispatch(action) => {
-                        (ctx.dispatch)(action);
-                        return;
-                    }
+        if let Some(index) = self.index_at(position)
+            && let (Some(factory), Some(item)) = (&self.on_item_drop, self.items.get(index))
+        {
+            match factory(payload, index, item) {
+                AssetGridDropOutcome::Unhandled => {}
+                AssetGridDropOutcome::Consumed => return,
+                AssetGridDropOutcome::Dispatch(action) => {
+                    (ctx.dispatch)(action);
+                    return;
                 }
             }
         }
@@ -1162,16 +1162,13 @@ impl AssetGrid {
         };
         let _ = editor.input.event(&UiEvent::FocusLost, ctx);
         let text = editor.input.text().trim().to_owned();
-        if !text.is_empty() {
-            if let (Some(item), Some(factory)) =
+        if !text.is_empty()
+            && let (Some(item), Some(factory)) =
                 (self.items.get(editor.index), self.on_rename.as_ref())
-            {
-                if text != item.title {
-                    if let Some(action) = factory(editor.index, item, &text) {
-                        (ctx.dispatch)(action);
-                    }
-                }
-            }
+            && text != item.title
+            && let Some(action) = factory(editor.index, item, &text)
+        {
+            (ctx.dispatch)(action);
         }
         self.focused = true;
         self.focus_visible = false;
@@ -1439,10 +1436,10 @@ impl Widget for AssetGrid {
 
     fn layout(&mut self, bounds: Rect) {
         self.bounds = bounds;
-        if let Some(rect) = self.filter_input_rect() {
-            if let Some(input) = &mut self.filter_input {
-                input.layout(rect);
-            }
+        if let Some(rect) = self.filter_input_rect()
+            && let Some(input) = &mut self.filter_input
+        {
+            input.layout(rect);
         }
         if let Some(menu) = &mut self.context_menu {
             menu.layout(bounds);
@@ -1457,12 +1454,11 @@ impl Widget for AssetGrid {
         self.columns = layout.columns;
         self.card_width = layout.card_width;
         self.viewport = layout.viewport;
-        if let Some(index) = self.rename_editor.as_ref().map(|editor| editor.index) {
-            if let Some(rect) = self.title_editor_rect(index) {
-                if let Some(editor) = &mut self.rename_editor {
-                    editor.input.layout(rect);
-                }
-            }
+        if let Some(index) = self.rename_editor.as_ref().map(|editor| editor.index)
+            && let Some(rect) = self.title_editor_rect(index)
+            && let Some(editor) = &mut self.rename_editor
+        {
+            editor.input.layout(rect);
         }
     }
 
@@ -1512,23 +1508,22 @@ impl Widget for AssetGrid {
                 if self.bounds.contains(*position) =>
             {
                 self.focus_visible = false;
-                if let Some(index) = self.index_at(*position) {
-                    if self.is_enabled_index(index) {
-                        if self.selected_indices.contains(&index) && self.selected_indices.len() > 1
-                        {
-                            let items = self.selection_context_menu_items();
-                            if self.open_context_menu(*position, items, None, ctx) {
-                                return EventResult::Handled;
-                            }
+                if let Some(index) = self.index_at(*position)
+                    && self.is_enabled_index(index)
+                {
+                    if self.selected_indices.contains(&index) && self.selected_indices.len() > 1 {
+                        let items = self.selection_context_menu_items();
+                        if self.open_context_menu(*position, items, None, ctx) {
+                            return EventResult::Handled;
                         }
-                        let items = self.card_context_menu_items(index);
-                        if items.iter().any(MenuItem::is_activatable) {
-                            if !self.selected_indices.contains(&index) {
-                                self.set_selected(Some(index));
-                            }
-                            if self.open_context_menu(*position, items, Some(index), ctx) {
-                                return EventResult::Handled;
-                            }
+                    }
+                    let items = self.card_context_menu_items(index);
+                    if items.iter().any(MenuItem::is_activatable) {
+                        if !self.selected_indices.contains(&index) {
+                            self.set_selected(Some(index));
+                        }
+                        if self.open_context_menu(*position, items, Some(index), ctx) {
+                            return EventResult::Handled;
                         }
                     }
                 }
@@ -1832,10 +1827,10 @@ impl Widget for AssetGrid {
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
         let filter_count = usize::from(self.filter_input.is_some());
-        if index == 0 {
-            if let Some(input) = &self.filter_input {
-                return Some(input.as_ref() as &dyn Widget);
-            }
+        if index == 0
+            && let Some(input) = &self.filter_input
+        {
+            return Some(input.as_ref() as &dyn Widget);
         }
         if index == filter_count {
             return self.rename_editor.as_ref().map(|editor| editor.input.as_ref() as &dyn Widget);
@@ -1845,10 +1840,10 @@ impl Widget for AssetGrid {
 
     fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
         let filter_count = usize::from(self.filter_input.is_some());
-        if index == 0 {
-            if let Some(input) = &mut self.filter_input {
-                return Some(input.as_mut() as &mut dyn Widget);
-            }
+        if index == 0
+            && let Some(input) = &mut self.filter_input
+        {
+            return Some(input.as_mut() as &mut dyn Widget);
         }
         if index == filter_count {
             return self
