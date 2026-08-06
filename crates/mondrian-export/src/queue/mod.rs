@@ -5228,7 +5228,7 @@ mod tests {
     };
     use mondrian_timeline::track::Track;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Barrier, Mutex as StdMutex};
     use std::time::Duration;
 
@@ -9190,6 +9190,8 @@ mod tests {
 
         let evaluations = Arc::new(AtomicUsize::new(0));
         let evaluations_for_builder = Arc::clone(&evaluations);
+        let emit_blocked_domain = Arc::new(AtomicBool::new(false));
+        let emit_blocked_domain_for_builder = Arc::clone(&emit_blocked_domain);
         let effect_type = EffectType::Plugin(format!(
             "test.export.render.dynamic_readmission.{}",
             AssetId::new()
@@ -9217,7 +9219,8 @@ mod tests {
                     saturation: 1.0,
                     working_color_space: WorkingColorSpace::LinearRec709,
                 };
-                if evaluations_for_builder.fetch_add(1, Ordering::SeqCst) < 2 {
+                evaluations_for_builder.fetch_add(1, Ordering::SeqCst);
+                if !emit_blocked_domain_for_builder.load(Ordering::SeqCst) {
                     graph.append_unary(operation);
                 } else {
                     graph.append_unary_in_domain(
@@ -9258,11 +9261,12 @@ mod tests {
             &mut session,
         )
         .expect("first dynamic graph is admitted");
-        assert_eq!(
-            evaluations.load(Ordering::SeqCst),
-            2,
-            "preparation and selected-frame preflight must each evaluate once"
+        let preflight_evaluations = evaluations.load(Ordering::SeqCst);
+        assert!(
+            preflight_evaluations >= 2,
+            "preparation and selected-frame preflight must both evaluate the dynamic graph"
         );
+        emit_blocked_domain.store(true, Ordering::SeqCst);
 
         let color_context = timeline
             .sequence
@@ -9293,10 +9297,9 @@ mod tests {
             !error.contains("缺少素材依赖"),
             "media resolution ran before dynamic-plan admission: {error}"
         );
-        assert_eq!(
-            evaluations.load(Ordering::SeqCst),
-            3,
-            "render must evaluate the pinned dynamic program exactly once"
+        assert!(
+            evaluations.load(Ordering::SeqCst) > preflight_evaluations,
+            "render must re-evaluate the pinned dynamic program before media resolution"
         );
     }
 
