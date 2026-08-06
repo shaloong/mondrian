@@ -312,22 +312,22 @@ still does not claim independent Blur/Sharpen reference quality, qualified
 machine throughput, long-duration device/A/V, memory, or absolute color
 reference evidence.
 
-The current v14 supervisor run
-`20260806T145420Z-complete-golden-cfda1141` passed `3/3` after `Pr/All`
+The final committed-state v14 supervisor run
+`20260806T181845Z-complete-golden-5714e158` passed `3/3` after `Pr/All`
 reference-asset validation. The non-incremental single-job product rebuild took
-282.511 s. Its three processes used distinct run and Project identities,
-exited naturally, and published complete reports in 68.656 s, 64.396 s, and
-64.757 s. Every report binds all seven stages to one Hero Sequence, retains
+271.196 s. Its three processes used distinct run and Project identities,
+exited naturally, and published complete reports in 67.376 s, 64.022 s, and
+63.960 s. Every report binds all seven stages to one Hero Sequence, retains
 exactly Hero plus the strong-reference nested child, and includes Visual report
 schema v10. That report adds `basic-mask` to the ordered visual content and
 proves stable Mask and shape-key identities, exact Clip-local shape animation,
 scalar parameters, Undo/Redo, durable reopen, and identical Preview/Export
 execution evidence. The aggregate report SHA-256 is
-`c54b5bf6d0a4977aeef1776f2b141625e7af2c9c34d15fa2fd554b35472284bf`;
+`496025e8b89ad241da15752106395ef7ce6b35efa027f4278d5801548fb1aec0`;
 the ordered pass-report hashes are
-`0b06d25a512bf41bdd773b4eb0f59c4e5d11753c3a4c267f485fb495787739f5`,
-`a10f36a4c9e03550cba96203db19427d3c68d4b3cf04df1de2908085e701e273`,
-and `33ad6fe9eceea7f6fb6072ef245e3b4ed261944fd9b3b5b21c187b265d3de9b8`.
+`c78728b726098b277d717798a3d322b827f825c669f63b9c832fdac5ce69c233`,
+`70016bf42bec8e73d8cfdbfc545a79c253def9c81e075ccda23480b9a576502c`,
+and `037541956430fe4534d56b2890609458da1851de05555a2e8af39dc0119733f9`.
 This supersedes v13 for the complete-Golden repetition obligation only; it
 does not claim Viewer geometry-handle interaction, freeform Path editing,
 tracking, independent Mask reference quality, or the broader performance and
