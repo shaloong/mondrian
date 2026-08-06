@@ -185,15 +185,15 @@ the Effect is neither omitted nor evaluated twice. The rewritten plan must
 still pass ordinary Float32 compositor admission.
 
 Float operation-shape support, color-domain resolvability, and exact
-execution-mode admission remain independent proofs. Interactive Preview first
-tries one complete CPU Float32 route, then may select one complete CPU
-NormalizedU8 route as an explicit diagnosed degradation; it never combines
-per-graph answers into an undeclared transfer path. Final Export retains
-Float32 through the complete working composite and its single root output
-boundary. Even an 8-bit SDR delivery authorizes quantization only there, never
-an implicit intermediate RGBA8 composite. A plan whose only executable route
-is NormalizedU8 therefore fails Export preflight before decode, audio render,
-or encoder startup. Dynamic evaluation rejects animated builder or topology
+execution-mode admission remain independent proofs. Preview and Export both
+require one complete Float32 working-composite route; neither may select a
+CPU-NormalizedU8 graph as an intermediate degradation. The encoded executor
+remains available only at explicit source/output boundaries and for isolated
+compatibility tests. Even an 8-bit SDR delivery authorizes quantization only at
+its root output boundary. A plan whose only executable route is NormalizedU8
+therefore fails preflight before decode, audio render, or encoder startup with
+the exact missing `(CPU, Float32)` mode or unsupported float-shape evidence.
+Dynamic evaluation rejects animated builder or topology
 failure; admission rejects temporal or continuity obligations, unsupported
 exact modes, unresolvable domains in the selected representation, and every
 heterogeneous shape or placement outside the bounded production Adapter.
@@ -925,18 +925,18 @@ fallback reason. Idle output-texture retention remains a separate pool policy.
 The estimate deliberately excludes OCIO backend caches and an upstream
 heterogeneous continuation because those have independent bounded owners.
 
-Graph identity is only a pixel fast path after execution admission. Both the
-float and RGBA8 entry points first admit every graph that can actually execute,
+Graph identity is only a pixel fast path after execution admission. The
+product Float32 entry point admits every graph that can actually execute,
 including active Adjustment layers and both Transition endpoints; an
 identity-shaped graph carrying temporal, ordered-state, or unsupported
 exact-mode obligations therefore fails before the output buffer is
-written. A legal CPU-Float32 identity stays on the working path, while a legal
-CPU-NormalizedU8-only identity selects the encoded route only for an explicitly
-degradable Preview. The same graph fails Final Export preflight instead of
-producing a nominally high-bit-depth file from an already quantized working
-composite. Export repeats this invariant after actual layer composition:
-observing any legacy-RGBA8 diagnostic is a terminal render error before the root
-output transform. Identity graphs with incompatible exact modes cannot make a
+written. A legal CPU-Float32 identity stays on the working path. A
+CPU-NormalizedU8-only identity is blocked identically in Preview and Export
+instead of producing either a misleading Preview frame or a nominally
+high-bit-depth file from an already quantized working composite. Direct
+composition repeats this invariant: observing any legacy-RGBA8 requirement is
+a terminal error before pixel allocation or the root output transform.
+Identity graphs with incompatible exact modes cannot make a
 mixed frame appear executable. A legal source-only identity graph remains a
 zero-operation passthrough. `TimelineCompositeExecutionDiagnostics` proves
 whether this zero-copy route actually executed; callers and performance gates
@@ -984,8 +984,8 @@ translate) are implemented
 in the float/linear path using inverse-affine mapping with bilinear sampling,
 so media and solid layers with non-identity transforms no longer require legacy
 RGBA8 fallback. Custom processors without a float ABI and non-unary effect graph
-nodes are handled separately: custom processors still require the diagnosed
-RGBA8 fallback, while built-in Blend, Mask, MaskSource, and ordered MultiInput
+nodes are handled separately: custom processors remain diagnosed blockers until
+they expose an exact Float32 mode, while built-in Blend, Mask, MaskSource, and ordered MultiInput
 nodes execute in the CPU float DAG. Clip masks rasterize directly to float matte
 coverage. Solid layers must materialize their float source when they carry an
 effect graph or affine transform, execute that same compiled graph, and then use
@@ -994,9 +994,11 @@ while bypassing its pixel semantics.
 Mask preparation and raster failures retain their typed `MaskRasterError` source
 through renderer diagnostics. Preview classifies this deterministic contract
 failure as blocked rather than a transient retryable execution failure.
-`TimelineCompositeDiagnostics` makes that fallback explicit: preview/export
-callers can see whether a composite stayed on the float/linear path or fell back
-to legacy RGBA8 because of transform or effect support. Blend-mode counters stay
+`TimelineCompositeDiagnostics` makes that unmet requirement explicit:
+preview/export callers can see whether a composite stayed on the float/linear
+path or would require forbidden legacy RGBA8 because of transform or effect
+support. These reason counters are failure evidence, not proof that a degraded
+frame was published. Blend-mode counters stay
 in the diagnostic contract for future unsupported blend contracts, but current
 built-in media, solid, and float-capable adjustment blend modes are expected to
 remain float/linear. Preview and export diagnostics must aggregate these

@@ -9081,8 +9081,7 @@ mod tests {
             panic!("ten-bit export must fail before an implicit RGBA8 working composite");
         };
         assert!(
-            reason.contains("requires a Float32 working composite")
-                && reason.contains("legacy NormalizedU8 route"),
+            reason.contains("ExecutionModeNotAdmitted") && reason.contains("Float32"),
             "unexpected high-precision rejection: {reason}"
         );
     }

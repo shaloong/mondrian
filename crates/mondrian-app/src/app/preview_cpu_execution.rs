@@ -89,7 +89,7 @@ impl PreviewCpuExecutionError {
 fn timeline_composite_is_blocked(error: &TimelineCompositeError) -> bool {
     match error {
         TimelineCompositeError::EffectDomainBlocked { .. } => true,
-        TimelineCompositeError::FinalExportRequiresFloatWorkingComposite { .. } => true,
+        TimelineCompositeError::LegacyRgba8WorkingCompositeForbidden { .. } => true,
         TimelineCompositeError::EncodedEffect(error) => matches!(
             error,
             EffectExecutionError::ColorDomainConversionRequired { .. }
@@ -463,9 +463,9 @@ mod tests {
     }
 
     #[test]
-    fn final_only_precision_rejection_fails_closed_if_projected_by_preview() {
+    fn forbidden_working_precision_is_a_blocked_preview_capability() {
         let error = PreviewCpuExecutionError::TimelineComposite(
-            TimelineCompositeError::FinalExportRequiresFloatWorkingComposite { effect_graphs: 1 },
+            TimelineCompositeError::LegacyRgba8WorkingCompositeForbidden { effect_graphs: 1 },
         );
 
         let unavailable = error.unavailability();

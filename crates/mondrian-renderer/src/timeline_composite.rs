@@ -576,12 +576,12 @@ pub enum TimelineCompositeError {
         solid_effect: u64,
         adjustment_effect: u64,
     },
-    /// Final export would quantize the working composite through legacy RGBA8.
+    /// Product execution would quantize the working composite through legacy RGBA8.
     #[error(
-        "final export requires a Float32 working composite, but {effect_graphs} active effect graph(s) require the legacy NormalizedU8 route"
+        "Timeline execution requires a Float32 working composite, but {effect_graphs} active effect graph(s) require the forbidden legacy NormalizedU8 route"
     )]
-    FinalExportRequiresFloatWorkingComposite {
-        /// Number of active Effect graphs in the rejected render plan.
+    LegacyRgba8WorkingCompositeForbidden {
+        /// Number of active Effect graphs that cannot enter the Float32 route.
         effect_graphs: usize,
     },
     /// The compositor-owned active or retained working set exceeds its
@@ -599,16 +599,16 @@ impl From<EffectFloatExecutionError> for TimelineCompositeError {
 /// Exact sample representation selected by the current CPU Timeline
 /// compositor for one complete render plan.
 ///
-/// The compositor intentionally selects one representation for the whole
-/// frame. A graph that cannot use float therefore moves the complete plan to
-/// the encoded fallback; every active graph must then admit that exact
-/// representation.
+/// Product Preview and Export select Float32 for the complete working
+/// composite. `NormalizedU8` remains only for explicit encoded-boundary tools
+/// and compatibility diagnostics; it is never an automatic product fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TimelineCpuCompositePrecision {
     /// Scene-linear float32 execution.
     Float32,
-    /// Legacy normalized RGBA8 execution.
+    /// Explicit legacy normalized RGBA8 execution outside the product working
+    /// composite.
     NormalizedU8,
 }
 
@@ -938,90 +938,34 @@ pub struct TimelineCpuCompositeAdmission {
 /// evaluation must already have succeeded while constructing `plan`; this
 /// function then rejects unresolved domains, temporal input, ordered state,
 /// unsupported backends/precisions, and heterogeneous routes that the current
-/// transfer-free CPU compositor cannot execute. Interactive Preview may select
-/// the explicit NormalizedU8 degradation route. Final Export must remain
-/// Float32 until its root output boundary and therefore fails closed when that
-/// route would be required.
+/// transfer-free CPU compositor cannot execute. Preview and Export both remain
+/// Float32 until an explicit output boundary and fail closed when a graph would
+/// require the legacy NormalizedU8 route.
 pub fn admit_timeline_render_plan_for_cpu_compositor(
     plan: &crate::TimelineRenderPlan,
 ) -> Result<TimelineCpuCompositeAdmission, TimelineCompositeError> {
     let scan = scan_render_plan_effect_graphs(plan);
-    if let Some((precision, reason)) = scan.semantic_blocker {
-        return Err(execution_admission_error(precision, reason));
-    }
-
     let float_domain_blockers =
         render_plan_domain_blockers(plan, TimelineCpuCompositePrecision::Float32);
-    let float_admission = scan
-        .all_float_shapes_implemented
-        .then(|| admit_render_plan_effect_graphs(plan, TimelineCpuCompositePrecision::Float32));
-    if scan.all_float_shapes_implemented
-        && float_domain_blockers.is_empty()
-        && matches!(float_admission.as_ref(), Some(Ok(())))
-    {
-        return Ok(TimelineCpuCompositeAdmission {
-            precision: TimelineCpuCompositePrecision::Float32,
-            effect_graphs: scan.effect_graphs,
-        });
+    if !float_domain_blockers.is_empty() {
+        return Err(domain_blocker_error(float_domain_blockers));
     }
-
-    let encoded_domain_blockers =
-        render_plan_domain_blockers(plan, TimelineCpuCompositePrecision::NormalizedU8);
-    let encoded_admission =
-        admit_render_plan_effect_graphs(plan, TimelineCpuCompositePrecision::NormalizedU8);
-    if encoded_domain_blockers.is_empty() && encoded_admission.is_ok() {
-        if matches!(plan.intent, crate::TimelineRenderIntent::Export) {
-            return Err(
-                TimelineCompositeError::FinalExportRequiresFloatWorkingComposite {
-                    effect_graphs: scan.effect_graphs,
-                },
-            );
-        }
-        return Ok(TimelineCpuCompositeAdmission {
-            precision: TimelineCpuCompositePrecision::NormalizedU8,
-            effect_graphs: scan.effect_graphs,
-        });
+    if scan.float_shape_blockers > 0 {
+        return Err(
+            TimelineCompositeError::LegacyRgba8WorkingCompositeForbidden {
+                effect_graphs: scan.float_shape_blockers,
+            },
+        );
     }
-
-    if !scan.all_float_shapes_implemented && !encoded_domain_blockers.is_empty() {
-        return Err(domain_blocker_error(encoded_domain_blockers));
-    }
-    if scan.all_float_shapes_implemented
-        && float_domain_blockers.is_empty()
-        && let Some(Err(reason)) = float_admission
-    {
-        return Err(execution_admission_error(
-            TimelineCpuCompositePrecision::Float32,
-            reason,
-        ));
-    }
-    if encoded_domain_blockers.is_empty()
-        && let Err(reason) = encoded_admission
-    {
-        return Err(execution_admission_error(
-            TimelineCpuCompositePrecision::NormalizedU8,
-            reason,
-        ));
-    }
-    Err(domain_blocker_error(if scan.all_float_shapes_implemented {
-        float_domain_blockers
-    } else {
-        encoded_domain_blockers
-    }))
-}
-
-fn execution_admission_error(
-    precision: TimelineCpuCompositePrecision,
-    reason: EffectExecutionAdmissionError,
-) -> TimelineCompositeError {
-    match precision {
-        TimelineCpuCompositePrecision::Float32 => TimelineCompositeError::FloatEffect {
+    admit_render_plan_effect_graphs(plan, TimelineCpuCompositePrecision::Float32).map_err(
+        |reason| TimelineCompositeError::FloatEffect {
             reason: EffectFloatExecutionError::ExecutionContract(reason),
         },
-        TimelineCpuCompositePrecision::NormalizedU8 => {
-            TimelineCompositeError::EncodedEffect(EffectExecutionError::ExecutionContract(reason))
-        }
-    }
+    )?;
+    Ok(TimelineCpuCompositeAdmission {
+        precision: TimelineCpuCompositePrecision::Float32,
+        effect_graphs: scan.effect_graphs,
+    })
 }
 
 fn domain_blocker_error(
@@ -1282,10 +1226,23 @@ pub fn composite_timeline_elements_color_frame_with_diagnostics(
             adjustment_effect: blockers.adjustment_effect,
         });
     }
+    if diagnostics.uses_legacy_rgba8() {
+        if let Err(reason) =
+            admit_composite_element_effect_graphs(elements, TimelineCpuCompositePrecision::Float32)
+        {
+            return Err(TimelineCompositeError::FloatEffect {
+                reason: EffectFloatExecutionError::ExecutionContract(reason),
+            });
+        }
+        return Err(
+            TimelineCompositeError::LegacyRgba8WorkingCompositeForbidden {
+                effect_graphs: diagnostics.legacy_breakdown().total() as usize,
+            },
+        );
+    }
     let mut execution = TimelineCompositeExecutionDiagnostics::default();
-    if !diagnostics.uses_legacy_rgba8()
-        && let Some(frame) =
-            exact_zero_copy_identity_passthrough(width, height, elements, options, runtime)
+    if let Some(frame) =
+        exact_zero_copy_identity_passthrough(width, height, elements, options, runtime)
     {
         // Graph shape alone is not an execution contract. Temporal,
         // ordered-state, backend, precision, and domain obligations must
@@ -1298,39 +1255,22 @@ pub fn composite_timeline_elements_color_frame_with_diagnostics(
         scratch.enforce_retained_scratch_grant();
         return Ok(TimelineCompositeFrame { frame: frame.clone(), diagnostics, execution });
     }
-    let precision = if diagnostics.uses_legacy_rgba8() {
-        TimelineCpuCompositePrecision::NormalizedU8
-    } else {
-        TimelineCpuCompositePrecision::Float32
-    };
+    let precision = TimelineCpuCompositePrecision::Float32;
     let estimate = estimate_timeline_cpu_working_set(width, height, elements, precision)?;
     scratch.prepare_cpu_working_set(estimate)?;
     let frame_result: Result<CpuColorFrame, TimelineCompositeError> =
-        if diagnostics.uses_legacy_rgba8() {
-            composite_timeline_elements(width, height, elements, options, scratch)
-                .map(|rgba| {
-                    CpuColorFrame::working(working_frame_from_normalized_rgba8(
-                        width,
-                        height,
-                        &rgba,
-                        runtime.working_color_space,
-                    ))
-                })
-                .map_err(TimelineCompositeError::from)
-        } else {
-            composite_supported_elements_to_working_frame(
-                width,
-                height,
-                elements,
-                options,
-                runtime.working_color_space,
-                runtime,
-                scratch,
-                &mut execution,
-            )
-            .map(CpuColorFrame::working)
-            .map_err(TimelineCompositeError::from)
-        };
+        composite_supported_elements_to_working_frame(
+            width,
+            height,
+            elements,
+            options,
+            runtime.working_color_space,
+            runtime,
+            scratch,
+            &mut execution,
+        )
+        .map(CpuColorFrame::working)
+        .map_err(TimelineCompositeError::from);
     scratch.enforce_retained_scratch_grant();
     Ok(TimelineCompositeFrame { frame: frame_result?, diagnostics, execution })
 }
@@ -1960,29 +1900,17 @@ fn visit_composite_transition_graph<'elements, 'frame>(
     }
 }
 
+#[derive(Default)]
 struct TimelineEffectGraphScan {
     effect_graphs: usize,
-    all_float_shapes_implemented: bool,
-    semantic_blocker: Option<(TimelineCpuCompositePrecision, EffectExecutionAdmissionError)>,
-}
-
-impl Default for TimelineEffectGraphScan {
-    fn default() -> Self {
-        Self {
-            effect_graphs: 0,
-            all_float_shapes_implemented: true,
-            semantic_blocker: None,
-        }
-    }
+    float_shape_blockers: usize,
 }
 
 impl TimelineEffectGraphScan {
     fn observe(&mut self, graph: TimelineEffectGraphRef<'_>) {
         self.effect_graphs = self.effect_graphs.saturating_add(1);
-        self.all_float_shapes_implemented &=
-            compiled_effect_graph_has_rgba_f32_execution_shape(graph.graph);
-        if self.semantic_blocker.is_none() {
-            self.semantic_blocker = single_frame_semantic_blocker(graph.graph);
+        if !compiled_effect_graph_has_rgba_f32_execution_shape(graph.graph) {
+            self.float_shape_blockers = self.float_shape_blockers.saturating_add(1);
         }
     }
 }
@@ -2089,34 +2017,6 @@ fn record_domain_blocker(
             }
         }
     }
-}
-
-fn single_frame_semantic_blocker(
-    graph: &CompiledEffectGraph,
-) -> Option<(TimelineCpuCompositePrecision, EffectExecutionAdmissionError)> {
-    for (precision, working_precision) in [
-        (
-            TimelineCpuCompositePrecision::Float32,
-            EffectWorkingPrecision::Float32,
-        ),
-        (
-            TimelineCpuCompositePrecision::NormalizedU8,
-            EffectWorkingPrecision::NormalizedU8,
-        ),
-    ] {
-        if let Err(error) = graph
-            .execution_envelope()
-            .admit_single_frame_backend(EffectProcessingBackend::Cpu, working_precision)
-            && matches!(
-                error,
-                EffectExecutionAdmissionError::ContinuitySessionRequired
-                    | EffectExecutionAdmissionError::TemporalInputRequired { .. }
-            )
-        {
-            return Some((precision, error));
-        }
-    }
-    None
 }
 
 fn effect_working_precision(precision: TimelineCpuCompositePrecision) -> EffectWorkingPrecision {
@@ -2480,6 +2380,7 @@ pub fn composite_timeline_elements_into(
     Ok(())
 }
 
+#[cfg(test)]
 fn working_frame_from_normalized_rgba8(
     width: u32,
     height: u32,
@@ -3404,7 +3305,7 @@ mod tests {
     }
 
     #[test]
-    fn u8_only_identity_selects_the_same_encoded_route_as_preflight() {
+    fn u8_only_identity_is_rejected_before_working_pixels_are_quantized() {
         let media = working_frame(&[20, 40, 80, 255], 1, 1);
         let encoded_identity = identity_graph_with_contract(
             "encoded_only",
@@ -3422,7 +3323,7 @@ mod tests {
             frame_seed: 0,
         })];
         let mut scratch = TimelineCompositeScratch::default();
-        let output = composite_timeline_elements_color_frame_with_diagnostics(
+        let error = composite_timeline_elements_color_frame_with_diagnostics(
             1,
             1,
             &elements,
@@ -3430,11 +3331,19 @@ mod tests {
             test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch,
         )
-        .expect("encoded-only identity composite");
-        assert_eq!(
-            output.diagnostics.color_path(),
-            TimelineCompositeColorPath::LegacyRgba8
-        );
+        .expect_err("encoded-only identity must not quantize the working composite");
+        assert!(matches!(
+            error,
+            TimelineCompositeError::FloatEffect {
+                reason: EffectFloatExecutionError::ExecutionContract(
+                    EffectExecutionAdmissionError::ExecutionModeNotAdmitted {
+                        backend: EffectProcessingBackend::Cpu,
+                        precision: EffectWorkingPrecision::Float32,
+                        ..
+                    }
+                )
+            }
+        ));
     }
 
     #[test]
@@ -3452,19 +3361,22 @@ mod tests {
             encoded_identity,
         );
 
-        assert_eq!(
+        assert!(matches!(
             admit_timeline_render_plan_for_cpu_compositor(&plan),
-            Err(
-                TimelineCompositeError::FinalExportRequiresFloatWorkingComposite {
-                    effect_graphs: 1,
-                }
-            ),
-            "Final Export must never admit an implicit RGBA8 working composite",
-        );
+            Err(TimelineCompositeError::FloatEffect {
+                reason: EffectFloatExecutionError::ExecutionContract(
+                    EffectExecutionAdmissionError::ExecutionModeNotAdmitted {
+                        backend: EffectProcessingBackend::Cpu,
+                        precision: EffectWorkingPrecision::Float32,
+                        ..
+                    }
+                )
+            })
+        ));
     }
 
     #[test]
-    fn interactive_preview_admission_retains_explicit_u8_degradation() {
+    fn interactive_preview_rejects_u8_working_composite_like_export() {
         let encoded_identity = identity_graph_with_contract(
             "preview_encoded_only",
             EffectExecutionContract {
@@ -3478,14 +3390,18 @@ mod tests {
             encoded_identity,
         );
 
-        assert_eq!(
+        assert!(matches!(
             admit_timeline_render_plan_for_cpu_compositor(&plan),
-            Ok(TimelineCpuCompositeAdmission {
-                precision: TimelineCpuCompositePrecision::NormalizedU8,
-                effect_graphs: 1,
-            }),
-            "interactive Preview may degrade explicitly while Final Export fails closed",
-        );
+            Err(TimelineCompositeError::FloatEffect {
+                reason: EffectFloatExecutionError::ExecutionContract(
+                    EffectExecutionAdmissionError::ExecutionModeNotAdmitted {
+                        backend: EffectProcessingBackend::Cpu,
+                        precision: EffectWorkingPrecision::Float32,
+                        ..
+                    }
+                )
+            })
+        ));
     }
 
     #[test]
@@ -4149,7 +4065,7 @@ mod tests {
     }
 
     #[test]
-    fn float_linear_compositor_falls_back_for_custom_effect_without_float_abi() {
+    fn diagnostics_report_custom_effect_that_would_require_forbidden_rgba8() {
         let effect_graph = custom_u8_graph(
             "rgba8-only",
             EffectColorDomainContract::SCENE_LINEAR,

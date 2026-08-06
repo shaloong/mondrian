@@ -803,7 +803,10 @@ Preview performance smoke reports and export job diagnostics must also include
 structured legacy RGBA8 composite reasons (`layer`, `reason`, `count`) derived
 from renderer composite diagnostics via `TimelineCompositeColorPathSummary`.
 These reason details are the migration contract for removing old
-blend/effect/transform paths. The summary is evidence; the versioned health
+blend/effect/transform paths. Product Timeline execution now treats any such
+working-composite requirement as a pre-pixel blocker; the counters must never
+be interpreted as a successfully published degraded frame. The summary is
+evidence; the versioned health
 report is the external contract. Dashboards, job panels, JSONL artifacts, and
 CI gates must consume the report verdict/check/root-cause/action model instead
 of re-inferring fallback causes from aggregate counters.

@@ -507,7 +507,7 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 - [x] Primary Color 与 LUT 的作者/执行地基已闭合：Primary 使用 Sequence working space、对应亮度系数和 0.18 scene-linear contrast pivot，CPU/GPU Render Op 与缓存身份一致；LUT 强制显式处理色彩空间，严格校验单一 3D `.cube`、`DOMAIN_MIN/MAX`、有限完整 payload，以四面体插值执行并用全文件 SHA-256 失效。Visual report schema v10 已通过产品添加/设参、单事务、Preview/Export 图签名和像素一致、保存重开身份/参数/内容哈希一致，并在 Hero Sequence 保留稳定类型化实体身份。该勾选只表示这两个算子的当前地基和生成回归切片，不表示 GPU LUT、独立色彩 reference、真实 Log/HDR LUT 或全部首批算子完成。
 - [ ] 每个算子通过通用 DoD；不以 effect enum、属性面板或未连接的 `TextLayer`/`Transition` 类型作为完成。
 - [ ] Hold、Linear、Bezier/Ease、关键帧增删移动复制、reset 和基础 curve editor 可完成 Golden Project。当前视觉 Golden 切片已证明 Hold/Linear/Bezier 两关键帧的正式作者接口、求值、单步 Undo/Redo、schema 保存重开和 Preview/Export 同义；曲线产品路径现按稳定 `AnimationTrackId + ParameterId + KeyframeId` 发出细粒度 Insert/Move/Delete，移动原子保留非 Linear 插值/handles/flags，一次拖动只提交一次事务，虚拟 Clip 边界与真实首尾关键帧也已分离。仍未证明 Ease/handle 编辑、复制/粘贴/reset、跨参数/多通道完整产品 UI 与完整 Golden 操作，因此本项保持未完成。
-- [ ] CPU fallback 不隐式 RGBA8，不在一帧内反复 GPU→CPU→GPU；fallback 原因在 Viewer/Export report 一致。
+- [ ] CPU fallback 不隐式 RGBA8，不在一帧内反复 GPU→CPU→GPU；fallback 原因在 Viewer/Export report 一致。当前唯一 Timeline working-composite admission 已对 Preview/Export 统一为 Float32-only：CPU-NormalizedU8-only 图在媒体解码、像素分配、音频渲染和编码器启动前以精确缺失 `(CPU, Float32)` mode 或 float-shape blocker 失败；直接 composite 也拒绝 legacy requirement，合法 RGBA8 只保留在显式 source/output boundary 与隔离兼容性 API。仍须关闭多次异构 transfer、GPU device-loss 后的完整单帧 transfer 账本和 Viewer/Export 产品报告 Golden，故本项不提前勾选。
 
 ### 导出与颜色
 

@@ -2129,7 +2129,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_preview_preflight_selects_explicit_encoded_fallback_for_u8_only_identity() {
+    fn dynamic_preview_preflight_rejects_encoded_working_fallback() {
         let contract = EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_U8,
             ..cpu_float_contract()
@@ -2144,12 +2144,18 @@ mod tests {
             TimelineEvaluationRequest::preview(fp(&sequence, 0), 1.0),
         )
         .expect("encoded-only Preview identity plan");
-        let admission = admit_timeline_render_plan_for_cpu_compositor(&plan)
-            .expect("Preview explicitly permits the encoded-only fallback route");
-        assert_eq!(
-            admission.precision,
-            crate::TimelineCpuCompositePrecision::NormalizedU8
-        );
+        assert!(matches!(
+            admit_timeline_render_plan_for_cpu_compositor(&plan),
+            Err(crate::TimelineCompositeError::FloatEffect {
+                reason: mondrian_effects::EffectFloatExecutionError::ExecutionContract(
+                    mondrian_effects::EffectExecutionAdmissionError::ExecutionModeNotAdmitted {
+                        backend: mondrian_effects::EffectProcessingBackend::Cpu,
+                        precision: mondrian_effects::EffectWorkingPrecision::Float32,
+                        ..
+                    }
+                )
+            })
+        ));
     }
 
     #[test]
