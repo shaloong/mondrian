@@ -813,6 +813,17 @@ drains both slots and clears their exact semantic artifacts before reevaluation;
 there is no path that silently drops a prepared lease while leaving its
 semantic successor advertised.
 
+Playback acceptance keeps execution conservation and presentation coverage as
+two independent invariants. Every completed new GPU execution has exactly one
+physical disposition: `PublishedCurrent`, `PreparedSuccessor`, `Released`, or
+`TerminalRejected`. A prepared successor is therefore classified execution,
+but it is not current presentation evidence. Only exact promotion/alias
+completion increments the separate unique `(Epoch, target frame)` presentation
+coverage. Qualification fails on either an unclassified execution or
+insufficient unique presentation, so successor preparation cannot be mistaken
+for a displayed frame and cannot make a correct speculative execution look
+leaked merely because it was not published immediately.
+
 The already-visible alias is the sole exception to sampling a new visibility
 timestamp: after the Clock crosses its exact frame boundary, Window or Headless
 may complete the new ticket at that same boundary observation because the

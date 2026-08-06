@@ -1253,23 +1253,29 @@ fn headless_gpu_summary_separates_execution_publication_and_terminal_rejection()
         None,
     );
     summary.record(
-        execution("late", 3, native_decode),
+        execution("prepared", 3, native_decode),
+        HeadlessGpuExecutionPublication::PreparedSuccessor,
+        None,
+    );
+    summary.record(
+        execution("late", 4, native_decode),
         HeadlessGpuExecutionPublication::TerminalRejected(
             mondrian_playback::FrameDeliveryKind::Late,
         ),
         None,
     );
-    assert_eq!(summary.rendered_frames, 3);
+    assert_eq!(summary.rendered_frames, 4);
     assert_eq!(summary.published_rendered_frames, 1);
+    assert_eq!(summary.prepared_successor_frames, 1);
     assert_eq!(summary.released_rendered_frames, 1);
     assert_eq!(summary.terminal_rejected_rendered_frames, 1);
     assert_eq!(summary.late_rejected_rendered_frames, 1);
     assert_eq!(summary.published_output_observations, 1);
     assert_eq!(summary.presented_demand_completions, 1);
-    assert_eq!(summary.rendered_decode_execution.hardware_native_layers, 3);
+    assert_eq!(summary.rendered_decode_execution.hardware_native_layers, 4);
     assert_eq!(
         summary.published_rendered_decode_execution.hardware_native_layers, 1,
-        "released or Late executions cannot become presented decode evidence"
+        "prepared, released, or Late executions cannot become presented decode evidence"
     );
 }
 
@@ -1676,6 +1682,8 @@ struct PreviewExternalPlaybackGateReport {
     gpu_completion_observed_frames: usize,
     /// Newly rendered executions published as the exact current output.
     gpu_published_rendered_frames: usize,
+    /// Completed executions retained under exact immediate-successor authority.
+    gpu_prepared_successor_frames: usize,
     /// Completed executions released after their visual lifecycle became stale.
     gpu_released_rendered_frames: usize,
     /// Completed executions rejected by an exact terminal Frame Delivery.
@@ -5083,6 +5091,7 @@ fn evaluate_external_playback_gates(
     }
     let classified_rendered_frames = headless_gpu
         .published_rendered_frames
+        .saturating_add(headless_gpu.prepared_successor_frames)
         .saturating_add(headless_gpu.released_rendered_frames)
         .saturating_add(headless_gpu.terminal_rejected_rendered_frames);
     if classified_rendered_frames != headless_gpu.rendered_frames {
@@ -5176,6 +5185,7 @@ fn evaluate_external_playback_gates(
         gpu_rendered_frames: headless_gpu.rendered_frames,
         gpu_completion_observed_frames: headless_gpu.gpu_completion_observed_frames,
         gpu_published_rendered_frames: headless_gpu.published_rendered_frames,
+        gpu_prepared_successor_frames: headless_gpu.prepared_successor_frames,
         gpu_released_rendered_frames: headless_gpu.released_rendered_frames,
         gpu_terminal_rejected_rendered_frames: headless_gpu.terminal_rejected_rendered_frames,
         gpu_late_rejected_rendered_frames: headless_gpu.late_rejected_rendered_frames,
@@ -8636,6 +8646,37 @@ fn external_playback_gates_pass_when_real_media_thresholds_hold() {
 
     assert!(gates.passed);
     assert!(gates.failures.is_empty());
+}
+
+#[test]
+fn external_playback_gates_classify_prepared_successor_executions_separately_from_presentation() {
+    let readiness = PreviewReadinessCounts { ready: 20, ..PreviewReadinessCounts::default() };
+    let decode = preview_decode_report_with_playback_p95(25_000, 4_000);
+    let diagnostics = PreviewDiagnostics::default();
+    let evidence = PlaybackEvidenceCollector::default().report();
+    let mut gpu = passing_headless_gpu_summary(20);
+    gpu.published_rendered_frames = 1;
+    gpu.prepared_successor_frames = 19;
+
+    let gates = evaluate_external_playback_gates(
+        &readiness,
+        &gpu,
+        20,
+        33_000,
+        &decode,
+        &diagnostics,
+        &evidence,
+        40_000,
+        10_000,
+        95,
+        9_000,
+    );
+
+    assert!(gates.passed);
+    assert!(gates.failures.is_empty());
+    assert_eq!(gates.gpu_published_rendered_frames, 1);
+    assert_eq!(gates.gpu_prepared_successor_frames, 19);
+    assert_eq!(gates.gpu_presented_unique_frame_completions, 20);
 }
 
 #[test]
