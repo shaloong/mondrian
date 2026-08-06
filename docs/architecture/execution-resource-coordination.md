@@ -182,6 +182,15 @@ increment that count. This statement is deliberately scoped to Headless
 Preview: it does not claim that a Headless presentation call owns or dispatches
 every other background execution domain.
 
+Every bounded Headless candidate turn advances that complete resource cycle
+before it polls an in-flight GPU submission, promotes a Prepared Viewer
+Successor, reuses an exact-current alias, or requests new Preview work. Those
+fast paths are output arbitration, not permission to suspend product-process-
+tree observation or pressure policy. The professional video profile therefore
+requires `resource_policy_applications >= planned observation frames`; a
+startup-only application or a cadence starved by successor/alias reuse fails
+the gate even when every frame and GPU submission otherwise succeeds.
+
 ## Pressure sampling and Preview residency
 
 One process-owned monotonic origin drives a one-second pressure-observation

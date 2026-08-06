@@ -149,6 +149,14 @@ pub(crate) fn present_headless_preview_candidate_at(
     gpu_completion_deadline: HeadlessGpuCompletionDeadline,
     already_visible_at: Option<Instant>,
 ) -> anyhow::Result<HeadlessPreviewCandidate> {
+    // Resource coordination is part of the Headless production turn, not
+    // merely preparation for a new Preview evaluation. Completion polling,
+    // prepared-successor promotion, and exact-current alias reuse may all
+    // return before the Runtime asks for new work, but long-running validation
+    // still has to advance native memory observation and apply pressure policy
+    // on those turns.
+    let viewer_resource_decision = advance_headless_execution_resource_policy(preview, state);
+    gpu.apply_resource_decision(&viewer_resource_decision)?;
     if let Some(candidate) = drive_headless_gpu_submission(preview, state, gpu)? {
         return Ok(candidate);
     }
@@ -181,13 +189,6 @@ pub(crate) fn present_headless_preview_candidate_at(
             return Ok(HeadlessPreviewCandidate::Loading);
         }
     }
-    // Headless validation is a production consumer, not a policy bypass.
-    // It has no Window-owned thumbnail/waveform demand, but it must still
-    // publish current transport demand and apply the same Preview trim
-    // decision before asking the Runtime for work.
-    let resource_decision = state.refresh_execution_resource_decision(Default::default());
-    preview.apply_resource_decision(&resource_decision.preview);
-    gpu.apply_resource_decision(&resource_decision.preview.viewer_gpu)?;
     match preview.gpu_preview_frame(state.preview_frame_execution_request(Instant::now())) {
         PreviewGpuFrameState::Ready(frame) => {
             match state.preflight_frame_presentation(frame.presentation_ticket(), Instant::now()) {
@@ -335,6 +336,23 @@ pub(crate) fn present_headless_preview_candidate_at(
             Ok(HeadlessPreviewCandidate::Unavailable(reason))
         }
     }
+}
+
+/// Advance the complete UI-independent resource cycle for one Headless turn.
+///
+/// Headless owns no Window Thumbnail, Waveform, or UI-raster demand, so those
+/// external facts are empty. AppState still samples every App-owned execution
+/// Module, advances the native-memory cadence, applies all internal domain
+/// projections, and returns the narrow Viewer GPU projection for the concrete
+/// Adapter. Keeping this operation ahead of candidate arbitration prevents a
+/// successful fast path from starving pressure observation.
+fn advance_headless_execution_resource_policy(
+    preview: &HeadlessPreviewRuntime,
+    state: &AppState,
+) -> super::execution_resource_coordination::PreviewViewerGpuExecutionDecision {
+    let resource_decision = state.refresh_execution_resource_decision(Default::default());
+    preview.apply_resource_decision(&resource_decision.preview);
+    resource_decision.preview.viewer_gpu
 }
 
 /// Opportunistically prepare the exact immediate successor through the same
@@ -901,6 +919,26 @@ mod tests {
     use std::time::Duration;
 
     use mondrian_playback::{FrameDeliveryKind, FramePresentationQuality};
+
+    #[test]
+    fn headless_turn_applies_complete_resource_policy_before_candidate_arbitration() {
+        let state = AppState::new();
+        let preview = HeadlessPreviewRuntime::new();
+        let before = preview.diagnostics().resource_decision_applications;
+
+        let viewer = advance_headless_execution_resource_policy(&preview, &state);
+
+        assert_eq!(
+            preview.diagnostics().resource_decision_applications,
+            before + 1,
+            "every Headless candidate turn must apply the complete Preview projection"
+        );
+        assert_eq!(
+            viewer,
+            state.execution_resource_decision().preview.viewer_gpu,
+            "the concrete GPU Adapter must receive the projection from the same decision"
+        );
+    }
 
     #[test]
     fn explicitly_degraded_output_completes_exact_headless_demand() {

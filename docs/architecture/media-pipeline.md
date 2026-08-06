@@ -1316,6 +1316,11 @@ actual P010/10-bit hardware provenance on media layers attached to completed
 headless Viewer GPU candidates. CPU-transfer hardware decode and retained
 native hardware decode are reported separately; both are actual hardware
 execution, while candidate/config/device probes are not.
+The `uhd_hevc_main10_hardware_1x_v7` report additionally requires the complete
+Headless execution-resource cycle to run at least once per planned observation
+frame. GPU-completion, Prepared Viewer Successor, and exact-current alias fast
+paths cannot bypass process-tree memory sampling or the Preview/Viewer resource
+projections merely because they avoid a new decode/render request.
 The same long gate samples `ProductProcessTree`, never `CurrentProcess`:
 the App root, isolated demux helpers, and any other live descendant must all be
 present in one complete OS inventory before their checked aggregate typed

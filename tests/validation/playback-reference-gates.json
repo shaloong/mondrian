@@ -31,7 +31,7 @@
       "decode_progress_environment": "MONDRIAN_PREVIEW_DECODE_EXECUTION_OUTPUT",
       "decode_progress_required": true,
       "packaged_demux_worker_required": true,
-      "expected_report_profile": "uhd_hevc_main10_hardware_1x_v6",
+      "expected_report_profile": "uhd_hevc_main10_hardware_1x_v7",
       "expected_report_path": "professional_media_gates"
     },
     {

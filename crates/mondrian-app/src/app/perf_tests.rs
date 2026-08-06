@@ -5271,10 +5271,11 @@ fn professional_playback_decode_evidence(
 }
 
 fn professional_runtime_acceptance_evidence(
-    _continuous: &PreviewDiagnostics,
+    continuous: &PreviewDiagnostics,
     post_window: &PreviewDiagnostics,
 ) -> PreviewRuntimeAcceptanceEvidence {
     PreviewRuntimeAcceptanceEvidence {
+        resource_policy_applications: continuous.resource_decision_applications,
         // All counters and high-water marks are cumulative for the Runtime
         // lifetime, while ownership and helper residency are instantaneous.
         // The final settled snapshot therefore preserves the continuous-window
@@ -5291,6 +5292,22 @@ fn professional_runtime_acceptance_evidence(
         decode_cancellation_checkpoints: post_window.decode_cancellation_checkpoints,
         decode_worker_execution: post_window.decode_worker_execution,
     }
+}
+
+#[test]
+fn professional_runtime_evidence_attributes_resource_cadence_to_continuous_window() {
+    let continuous = PreviewDiagnostics {
+        resource_decision_applications: 45_000,
+        ..PreviewDiagnostics::default()
+    };
+    let post_window = PreviewDiagnostics {
+        resource_decision_applications: 45_123,
+        ..PreviewDiagnostics::default()
+    };
+
+    let evidence = professional_runtime_acceptance_evidence(&continuous, &post_window);
+
+    assert_eq!(evidence.resource_policy_applications, 45_000);
 }
 
 fn decode_check_observed(

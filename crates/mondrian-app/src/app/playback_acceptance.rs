@@ -304,6 +304,8 @@ pub(crate) struct PreviewProfessionalPlaybackGateReport {
     broker_queued_jobs: usize,
     broker_in_flight_jobs: usize,
     broker_clock_regressions: u64,
+    min_resource_policy_applications: u64,
+    resource_policy_applications: u64,
     cpu_frame_store_within_budget: bool,
     cpu_frame_store_oversize_rejections: u64,
     process_memory: PreviewProcessMemoryGateReport,
@@ -848,6 +850,9 @@ pub(crate) struct ProfessionalNativeVideoGpuTimingEvidence {
 /// UI-independent point-in-time execution facts required by professional acceptance.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct PreviewRuntimeAcceptanceEvidence {
+    /// Complete Headless Preview resource projections applied by the end of
+    /// the measured continuous window.
+    pub(crate) resource_policy_applications: u64,
     pub(crate) scheduler: MediaPreviewSchedulerDiagnostics,
     pub(crate) worker_queue: MediaPreviewJobQueueDiagnostics,
     pub(crate) frame_store: mondrian_playback::PreviewFrameStoreDiagnostics,
@@ -1423,6 +1428,18 @@ pub(crate) fn evaluate_professional_playback(
             "Frame Work Broker runtime-clock evidence",
         );
     }
+    let min_resource_policy_applications = observation.frames as u64;
+    if diagnostics.resource_policy_applications < min_resource_policy_applications {
+        push_failure(
+            &mut failures,
+            "headless_resource_policy_cadence_incomplete",
+            format!(
+                "at least {min_resource_policy_applications} complete resource-policy applications"
+            ),
+            diagnostics.resource_policy_applications.to_string(),
+            "Headless Preview resource-cycle diagnostics over the continuous observation window",
+        );
+    }
     let isolated_demux =
         evaluate_isolated_demux(diagnostics.decode_worker_execution, &mut failures);
     let (cpu_frame_store_within_budget, cpu_frame_store_oversize_rejections) =
@@ -1447,7 +1464,7 @@ pub(crate) fn evaluate_professional_playback(
         .saturating_add(playback.hardware_decode_prefer_gpu_requested_frames)
         .saturating_add(playback.hardware_decode_require_gpu_requested_frames);
     PreviewProfessionalPlaybackGateReport {
-        profile: "uhd_hevc_main10_hardware_1x_v6",
+        profile: "uhd_hevc_main10_hardware_1x_v7",
         required_hardware_execution_percent,
         presented_media_layers: presented.presented_media_layers,
         presented_hardware_layers: presented.presented_hardware_layers,
@@ -1490,6 +1507,8 @@ pub(crate) fn evaluate_professional_playback(
         broker_queued_jobs: diagnostics.worker_queue.queued_jobs,
         broker_in_flight_jobs: diagnostics.worker_queue.in_flight_jobs,
         broker_clock_regressions: diagnostics.scheduler.clock_regressions,
+        min_resource_policy_applications,
+        resource_policy_applications: diagnostics.resource_policy_applications,
         cpu_frame_store_within_budget,
         cpu_frame_store_oversize_rejections,
         process_memory,
@@ -1974,17 +1993,54 @@ mod tests {
         let report = evaluate_professional_playback(observation);
 
         assert!(report.passed, "{:?}", report.failures);
-        assert_eq!(report.profile, "uhd_hevc_main10_hardware_1x_v6");
+        assert_eq!(report.profile, "uhd_hevc_main10_hardware_1x_v7");
         assert_eq!(
             report.required_hardware_execution_percent,
             PROFESSIONAL_REQUIRED_HARDWARE_EXECUTION_PERCENT
         );
         assert_eq!(report.presented_hardware_layers, 100);
         assert_eq!(report.hardware_execution_percent, 100);
+        assert_eq!(report.min_resource_policy_applications, 45_000);
+        assert_eq!(report.resource_policy_applications, 45_000);
         assert_eq!(
             report.native_video_gpu_timing,
             passing_native_video_gpu_timing_evidence()
         );
+    }
+
+    #[test]
+    fn rejects_professional_playback_when_headless_fast_paths_starve_resource_policy() {
+        let media = main10_media();
+        let evidence = passing_playback_evidence();
+        let mut diagnostics = passing_preview_diagnostics();
+        diagnostics.resource_policy_applications = 44_999;
+
+        let report = evaluate_professional_playback(ProfessionalPlaybackObservation {
+            media: &media,
+            rendered_decode_execution: PreviewDecodeExecutionSummary {
+                media_layers: 100,
+                hardware_native_layers: 100,
+                p010_10_bit_hardware_layers: 100,
+                ..PreviewDecodeExecutionSummary::default()
+            },
+            viewer_fallback_count: 0,
+            viewer_fallback_reasons: &[],
+            playback_decode: PreviewDecodeAccessModeProfile::default(),
+            playback_evidence: &evidence,
+            continuous_playback_evidence: &evidence,
+            continuous_playback_wall_duration_us: evidence.observed_duration_us,
+            preview_diagnostics: &diagnostics,
+            process_memory: &passing_process_memory_evidence(),
+            native_video_gpu_timing: &passing_native_video_gpu_timing_evidence(),
+            frames: 45_000,
+            frame_interval_ns: 40_000_000,
+        });
+
+        assert!(!report.passed);
+        assert!(report
+            .failures
+            .iter()
+            .any(|failure| { failure.code == "headless_resource_policy_cadence_incomplete" }));
     }
 
     #[test]
@@ -2475,6 +2531,7 @@ mod tests {
 
     fn passing_preview_diagnostics() -> PreviewDiagnostics {
         PreviewDiagnostics {
+            resource_policy_applications: 45_000,
             decode_worker_execution: PreviewDecodeWorkerExecutionDiagnostics {
                 playback: Some(mondrian_media::PreviewDecodeExecutionProgress {
                     isolated_demux: mondrian_media::PreviewIsolatedDemuxExecutionEvidence {

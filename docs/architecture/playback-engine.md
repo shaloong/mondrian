@@ -1713,4 +1713,8 @@ decode capability probes.
   `product_process_tree_private_commit_v2` memory and reports drops; every
   cadence sample covers the App plus demux/FFmpeg descendants with complete
   scope/count/inventory evidence, so current-process-only data fails closed;
+- every planned Headless observation advances the complete execution-resource
+  cycle before GPU completion, Prepared Successor, or exact-current reuse can
+  return; fewer resource-policy applications than planned observations fails
+  closed even when all frames were otherwise presented;
 - Golden/Stress Project runs use real media and structured evidence.
