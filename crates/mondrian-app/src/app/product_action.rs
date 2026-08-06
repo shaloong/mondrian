@@ -4,6 +4,10 @@
 //! `Action::Custom` remains an external transport for reusable Widgets,
 //! scripting, and future plugin Adapters; it is decoded only at this seam.
 
+mod visual_mask;
+
+pub use visual_mask::*;
+
 use std::path::PathBuf;
 
 use mondrian_core::automation::{AnimationParameterAddress, PropertyValue};
@@ -240,6 +244,8 @@ pub enum ProductAction {
     Export(ExportProductAction),
     /// An operation owned by Clip-local visual Effect authoring or selection.
     VisualEffect(VisualEffectProductAction),
+    /// An operation owned by Clip-local visual Mask authoring or selection.
+    VisualMask(VisualMaskProductAction),
 }
 
 /// Closed Project Asset Library operations.
@@ -494,6 +500,7 @@ fn product_dispatch_domain(namespace: &str) -> Option<&'static str> {
         SEQUENCE_NAMESPACE => Some("sequence_action"),
         EXPORT_NAMESPACE => Some("export_action"),
         VISUAL_EFFECT_NAMESPACE => Some("visual_effect_action"),
+        VISUAL_MASK_NAMESPACE => Some("visual_mask_action"),
         _ => None,
     }
 }
@@ -811,6 +818,40 @@ impl ProductAction {
                 ))),
                 VISUAL_EFFECT_SET_PARAMETER_VALUE => Ok(Some(Self::VisualEffect(
                     VisualEffectProductAction::SetParameterValue(Box::new(decode_payload(
+                        namespace, name, payload,
+                    )?)),
+                ))),
+                _ => Ok(None),
+            },
+            VISUAL_MASK_NAMESPACE => match name.as_str() {
+                VISUAL_MASK_ADD_TO_CLIP => Ok(Some(Self::VisualMask(
+                    VisualMaskProductAction::AddToClip(decode_payload(namespace, name, payload)?),
+                ))),
+                VISUAL_MASK_SELECT => Ok(Some(Self::VisualMask(VisualMaskProductAction::Select(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                VISUAL_MASK_SET_ENABLED => Ok(Some(Self::VisualMask(
+                    VisualMaskProductAction::SetEnabled(decode_payload(namespace, name, payload)?),
+                ))),
+                VISUAL_MASK_SET_LOCKED => Ok(Some(Self::VisualMask(
+                    VisualMaskProductAction::SetLocked(decode_payload(namespace, name, payload)?),
+                ))),
+                VISUAL_MASK_REMOVE => Ok(Some(Self::VisualMask(VisualMaskProductAction::Remove(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                VISUAL_MASK_REORDER => Ok(Some(Self::VisualMask(
+                    VisualMaskProductAction::Reorder(decode_payload(namespace, name, payload)?),
+                ))),
+                VISUAL_MASK_SET_SHAPE_ANIMATION_ENABLED => Ok(Some(Self::VisualMask(
+                    VisualMaskProductAction::SetShapeAnimationEnabled(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
+                VISUAL_MASK_WRITE_SHAPE => Ok(Some(Self::VisualMask(
+                    VisualMaskProductAction::WriteShape(decode_payload(namespace, name, payload)?),
+                ))),
+                VISUAL_MASK_SET_PARAMETER_VALUE => Ok(Some(Self::VisualMask(
+                    VisualMaskProductAction::SetParameterValue(Box::new(decode_payload(
                         namespace, name, payload,
                     )?)),
                 ))),
@@ -1153,6 +1194,51 @@ impl ProductAction {
             Self::VisualEffect(VisualEffectProductAction::SetParameterValue(payload)) => (
                 VISUAL_EFFECT_NAMESPACE,
                 VISUAL_EFFECT_SET_PARAMETER_VALUE,
+                serde_json::json!(payload),
+            ),
+            Self::VisualMask(VisualMaskProductAction::AddToClip(payload)) => (
+                VISUAL_MASK_NAMESPACE,
+                VISUAL_MASK_ADD_TO_CLIP,
+                serde_json::json!(payload),
+            ),
+            Self::VisualMask(VisualMaskProductAction::Select(payload)) => (
+                VISUAL_MASK_NAMESPACE,
+                VISUAL_MASK_SELECT,
+                serde_json::json!(payload),
+            ),
+            Self::VisualMask(VisualMaskProductAction::SetEnabled(payload)) => (
+                VISUAL_MASK_NAMESPACE,
+                VISUAL_MASK_SET_ENABLED,
+                serde_json::json!(payload),
+            ),
+            Self::VisualMask(VisualMaskProductAction::SetLocked(payload)) => (
+                VISUAL_MASK_NAMESPACE,
+                VISUAL_MASK_SET_LOCKED,
+                serde_json::json!(payload),
+            ),
+            Self::VisualMask(VisualMaskProductAction::Remove(payload)) => (
+                VISUAL_MASK_NAMESPACE,
+                VISUAL_MASK_REMOVE,
+                serde_json::json!(payload),
+            ),
+            Self::VisualMask(VisualMaskProductAction::Reorder(payload)) => (
+                VISUAL_MASK_NAMESPACE,
+                VISUAL_MASK_REORDER,
+                serde_json::json!(payload),
+            ),
+            Self::VisualMask(VisualMaskProductAction::SetShapeAnimationEnabled(payload)) => (
+                VISUAL_MASK_NAMESPACE,
+                VISUAL_MASK_SET_SHAPE_ANIMATION_ENABLED,
+                serde_json::json!(payload),
+            ),
+            Self::VisualMask(VisualMaskProductAction::WriteShape(payload)) => (
+                VISUAL_MASK_NAMESPACE,
+                VISUAL_MASK_WRITE_SHAPE,
+                serde_json::json!(payload),
+            ),
+            Self::VisualMask(VisualMaskProductAction::SetParameterValue(payload)) => (
+                VISUAL_MASK_NAMESPACE,
+                VISUAL_MASK_SET_PARAMETER_VALUE,
                 serde_json::json!(payload),
             ),
         };
@@ -1946,6 +2032,7 @@ impl<'a> ProductActionAvailability<'a> {
             ProductAction::Sequence(action) => self.allows_sequence(action),
             ProductAction::Export(action) => self.allows_export(action),
             ProductAction::VisualEffect(action) => self.allows_visual_effect(action),
+            ProductAction::VisualMask(action) => self.allows_visual_mask(action),
         }
     }
 
@@ -2338,6 +2425,10 @@ impl<'a> ProductActionAvailability<'a> {
             }
         }
     }
+
+    fn allows_visual_mask(&self, action: &VisualMaskProductAction) -> bool {
+        visual_mask_action_available(self.state, action)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2427,7 +2518,7 @@ mod tests {
         AudioAutomationEdit, AudioAutomationEditRequest, AudioAutomationTarget,
         AudioChannelStripOwner, AudioChannelStripRack, AudioProcessorRackAddress,
         AudioProcessorRackEdit, AudioProcessorRackPlacement, AudioRouteDestination,
-        AudioRoutingEdit, AudioRoutingEditRequest,
+        AudioRoutingEdit, AudioRoutingEditRequest, MaskRelativePlacement,
     };
 
     fn tt(frame: i64, time_base: Rational) -> TimelineTime {
@@ -3112,6 +3203,70 @@ mod tests {
             let decoded = ProductAction::decode_external(&expected.clone().into_external_action())
                 .expect("valid external payload")
                 .expect("recognized visual Effect product action");
+            assert_eq!(decoded, expected);
+        }
+    }
+
+    #[test]
+    fn external_codec_round_trips_every_visual_mask_product_action() {
+        let clip_id = ClipId::new();
+        let mask_id = mondrian_core::MaskId::new();
+        let anchor_id = mondrian_core::MaskId::new();
+        let parameter = AnimationParameterAddress {
+            animation_track_id: mondrian_core::AnimationTrackId::new(),
+            parameter_id: mondrian_core::ParameterId::new_static("mondrian.mask.opacity"),
+        };
+        let actions = [
+            ProductAction::VisualMask(VisualMaskProductAction::AddToClip(
+                VisualMaskAddToClipPayload {
+                    clip_id,
+                    shape: mondrian_core::mask_data::MaskShape::default(),
+                },
+            )),
+            ProductAction::VisualMask(VisualMaskProductAction::Select(VisualMaskTargetPayload {
+                clip_id,
+                mask_id,
+            })),
+            ProductAction::VisualMask(VisualMaskProductAction::SetEnabled(
+                VisualMaskSetEnabledPayload { clip_id, mask_id, enabled: false },
+            )),
+            ProductAction::VisualMask(VisualMaskProductAction::SetLocked(
+                VisualMaskSetLockedPayload { clip_id, mask_id, locked: true },
+            )),
+            ProductAction::VisualMask(VisualMaskProductAction::Remove(VisualMaskTargetPayload {
+                clip_id,
+                mask_id,
+            })),
+            ProductAction::VisualMask(VisualMaskProductAction::Reorder(VisualMaskReorderPayload {
+                clip_id,
+                mask_id,
+                placement: MaskRelativePlacement::After(anchor_id),
+            })),
+            ProductAction::VisualMask(VisualMaskProductAction::SetShapeAnimationEnabled(
+                VisualMaskSetShapeAnimationEnabledPayload { clip_id, mask_id, enabled: true },
+            )),
+            ProductAction::VisualMask(VisualMaskProductAction::WriteShape(
+                VisualMaskWriteShapePayload {
+                    clip_id,
+                    mask_id,
+                    shape: mondrian_core::mask_data::MaskShape::default(),
+                    interpolation: mondrian_core::mask_data::MaskShapeInterpolation::Linear,
+                },
+            )),
+            ProductAction::VisualMask(VisualMaskProductAction::SetParameterValue(Box::new(
+                VisualMaskSetParameterValuePayload {
+                    clip_id,
+                    mask_id,
+                    parameter,
+                    value: PropertyValue::Float(0.75),
+                },
+            ))),
+        ];
+
+        for expected in actions {
+            let decoded = ProductAction::decode_external(&expected.clone().into_external_action())
+                .expect("valid external payload")
+                .expect("recognized visual Mask product action");
             assert_eq!(decoded, expected);
         }
     }

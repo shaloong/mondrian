@@ -48,7 +48,10 @@ pub use super::product_action::{
     VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
     ViewerSetPreviewResolutionScalePayload, VisualEffectAddToClipPayload,
     VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
-    VisualEffectSetParameterValuePayload, VisualEffectTargetPayload, ASSET_CREATE_FOLDER,
+    VisualEffectSetParameterValuePayload, VisualEffectTargetPayload, VisualMaskAddToClipPayload,
+    VisualMaskReorderPayload, VisualMaskSetEnabledPayload, VisualMaskSetLockedPayload,
+    VisualMaskSetParameterValuePayload, VisualMaskSetShapeAnimationEnabledPayload,
+    VisualMaskTargetPayload, VisualMaskWriteShapePayload, ASSET_CREATE_FOLDER,
     ASSET_CREATE_GENERATED, ASSET_IMPORT_FILES, ASSET_MOVE_ENTRIES, ASSET_NAMESPACE,
     ASSET_PREPARE_DRAG, ASSET_REBIND_AUDIO_COMPONENT, ASSET_REFRESH_AUDIO_COMPONENTS, ASSET_RELINK,
     ASSET_REMOVE_ENTRIES, ASSET_RENAME, ASSET_RENAME_FOLDER, ASSET_SET_INTERPRETATION,
@@ -68,12 +71,16 @@ pub use super::product_action::{
     VIDEO_TRANSITION_REMOVE, VIDEO_TRANSITION_SELECT, VIDEO_TRANSITION_SET_RANGE, VIEWER_NAMESPACE,
     VISUAL_EFFECT_ADD_TO_CLIP, VISUAL_EFFECT_NAMESPACE, VISUAL_EFFECT_REMOVE,
     VISUAL_EFFECT_REORDER, VISUAL_EFFECT_SELECT, VISUAL_EFFECT_SET_ENABLED,
-    VISUAL_EFFECT_SET_PARAMETER_VALUE,
+    VISUAL_EFFECT_SET_PARAMETER_VALUE, VISUAL_MASK_ADD_TO_CLIP, VISUAL_MASK_NAMESPACE,
+    VISUAL_MASK_REMOVE, VISUAL_MASK_REORDER, VISUAL_MASK_SELECT, VISUAL_MASK_SET_ENABLED,
+    VISUAL_MASK_SET_LOCKED, VISUAL_MASK_SET_PARAMETER_VALUE,
+    VISUAL_MASK_SET_SHAPE_ANIMATION_ENABLED, VISUAL_MASK_WRITE_SHAPE,
 };
 use super::product_action::{
     AssetProductAction, AudioProductAction, ClipProductAction, ExportProductAction, ProductAction,
     ProjectProductAction, SequenceProductAction, TimelineProductAction, TrackProductAction,
     VideoTransitionProductAction, ViewerProductAction, VisualEffectProductAction,
+    VisualMaskProductAction,
 };
 
 /// Shell-local action name for cycling viewer canvas zoom.
@@ -803,6 +810,59 @@ pub fn visual_effect_set_parameter_value_action(
     payload: VisualEffectSetParameterValuePayload,
 ) -> Action {
     ProductAction::VisualEffect(VisualEffectProductAction::SetParameterValue(Box::new(
+        payload,
+    )))
+    .into_external_action()
+}
+
+/// Build an action that appends one Mask to a video Clip.
+pub fn visual_mask_add_to_clip_action(payload: VisualMaskAddToClipPayload) -> Action {
+    ProductAction::VisualMask(VisualMaskProductAction::AddToClip(payload)).into_external_action()
+}
+
+/// Build an action that selects one Clip-local Mask.
+pub fn visual_mask_select_action(payload: VisualMaskTargetPayload) -> Action {
+    ProductAction::VisualMask(VisualMaskProductAction::Select(payload)).into_external_action()
+}
+
+/// Build an action that changes one Mask's execution-enabled state.
+pub fn visual_mask_set_enabled_action(payload: VisualMaskSetEnabledPayload) -> Action {
+    ProductAction::VisualMask(VisualMaskProductAction::SetEnabled(payload)).into_external_action()
+}
+
+/// Build an action that changes one Mask's author-edit lock.
+pub fn visual_mask_set_locked_action(payload: VisualMaskSetLockedPayload) -> Action {
+    ProductAction::VisualMask(VisualMaskProductAction::SetLocked(payload)).into_external_action()
+}
+
+/// Build an action that removes one unlocked Mask.
+pub fn visual_mask_remove_action(payload: VisualMaskTargetPayload) -> Action {
+    ProductAction::VisualMask(VisualMaskProductAction::Remove(payload)).into_external_action()
+}
+
+/// Build an action that moves one Mask relative to a stable anchor.
+pub fn visual_mask_reorder_action(payload: VisualMaskReorderPayload) -> Action {
+    ProductAction::VisualMask(VisualMaskProductAction::Reorder(payload)).into_external_action()
+}
+
+/// Build an action that changes whether Mask geometry is keyframed.
+pub fn visual_mask_set_shape_animation_enabled_action(
+    payload: VisualMaskSetShapeAnimationEnabledPayload,
+) -> Action {
+    ProductAction::VisualMask(VisualMaskProductAction::SetShapeAnimationEnabled(payload))
+        .into_external_action()
+}
+
+/// Build an action that writes one complete Mask shape.
+pub fn visual_mask_write_shape_action(payload: VisualMaskWriteShapePayload) -> Action {
+    ProductAction::VisualMask(VisualMaskProductAction::WriteShape(payload)).into_external_action()
+}
+
+/// Build an action that writes one stable-address Mask parameter.
+pub fn visual_mask_set_parameter_value_action(
+    payload: VisualMaskSetParameterValuePayload,
+) -> Action {
+    ProductAction::VisualMask(VisualMaskProductAction::SetParameterValue(Box::new(
         payload,
     )))
     .into_external_action()

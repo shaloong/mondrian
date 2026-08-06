@@ -2825,7 +2825,7 @@ mod tests {
     use crate::clip::Clip;
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::effect_data::{EffectNode, EffectType};
-    use mondrian_core::mask_data::{BezierPoint, MaskComponent, MaskKeyframe, MaskShape};
+    use mondrian_core::mask_data::{BezierPoint, MaskComponent, MaskEvaluation, MaskShape};
     use mondrian_core::{
         AudioChannelMixEntry, AudioChannelMixMatrix, AudioSourceComponentId,
         AuthoringFootprintCollector, AuthoringSnapshot, DisplayToneMapPolicy, MixBusId,
@@ -2902,7 +2902,7 @@ mod tests {
         left.effects.push(EffectNode::new(EffectType::GaussianBlur));
         left.masks.push(MaskComponent::new(
             "Isolation Mask".to_owned(),
-            MaskKeyframe::default(),
+            MaskEvaluation::default(),
         ));
         left.audio_components.push(AudioComponentEdit::media(
             AudioSourceComponentId::primary(),
@@ -2958,7 +2958,7 @@ mod tests {
         clip.effects.push(effect);
         clip.masks.push(MaskComponent::new(
             "Mask".to_owned(),
-            MaskKeyframe::default(),
+            MaskEvaluation::default(),
         ));
         sequence.video_tracks[0].add_clip(clip).expect("place Clip");
         sequence
@@ -3080,7 +3080,7 @@ mod tests {
             "kernel": [1.0, 0.5, 0.25],
             "resource": "project://luts/glow.cube"
         });
-        clip.masks[0].shape_keyframes[0].1 = MaskShape::Path {
+        clip.masks[0].shape_keyframes[0].shape = MaskShape::Path {
             points: vec![
                 BezierPoint::new(glam::Vec2::new(0.1, 0.1)),
                 BezierPoint::new(glam::Vec2::new(0.9, 0.9)),

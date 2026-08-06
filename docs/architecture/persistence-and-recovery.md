@@ -18,7 +18,7 @@ plans, plugin runtime state, UI navigation, and device handles never enter the
 archive.
 
 The archive format, Project document schema, and SQLite schema are independent
-version axes. The current values are archive v1, document v24, and library v5.
+version axes. The current values are archive v1, document v25, and library v5.
 Library v5 canonicalizes persisted native audio layout evidence as exact,
 unspecified, or unsupported; its v4 migration is a field-scoped transactional
 JSON rewrite and never interprets asset names or stream labels. An archive is
@@ -695,7 +695,7 @@ runtime copy only; saving is the sole path back into `.mdp`.
 
 ## Document Schema Contract
 
-Document schema v24 is the current Alpha author contract. It persists the
+Document schema v25 is the current Alpha author contract. It persists the
 Project-owned color environment and future-Sequence template, exact rational
 author time, canonical audio layout/routing/processor schemas, canonical proxy
 membership, closed Clip content, multi-member link groups, strong visual

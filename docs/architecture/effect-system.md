@@ -603,7 +603,17 @@ time-domain transform, not visual parameter automation.
 
 ## Masks, Mattes, Blend Modes, Adjustment Layers
 
-- Masks are clip components that compile into mask graph nodes.
+- Masks are Clip-owned author components that compile into mask graph nodes.
+  Scalar values use stable `AnimationParameterAddress` identities. Complete
+  shape keys use stable key identities and exact Clip-local time; Hold is the
+  required boundary for incompatible primitive/path topology, while Linear is
+  admitted only for compatible endpoints. Mask stack order uses stable
+  `Before(MaskId)` / `After(MaskId)` placement rather than indexes.
+- The product Mask Interface is transactional and separate from Effect
+  definition insertion: Track placement/time are re-derived at dispatch,
+  Track and Mask locks are both enforced, and no string-path UUID parser is an
+  authoring authority. Preview and Export consume the same persisted Mask
+  state through the sole compiled Effect program.
 - Blend mode is clip/track compositing state, not a unary color effect.
 - Adjustment layers are clips whose effects apply to the accumulated lower image.
 - Mattes should be expressed as mask/graph inputs rather than hidden UI-only flags.
@@ -835,10 +845,13 @@ An executable Definition is not product completion by itself. The versioned
 `visual-authoring-roundtrip-v1` Golden slice enters every claimed effect through
 the same external product Action seam, requires one Author Generation and
 Sequence Revision per mutation, and records stable `EffectId`, parameter, and
-stack-order evidence. Visual report schema v9 extends that ordered stack from
-Primary Color and LUT to finite-kernel Gaussian Blur and Sharpen. Sharpen's
-static parameter is exercised through Undo/Redo, and durable close/reopen must
-preserve all four identities, values, and order.
+stack-order evidence. Visual report schema v10 extends that ordered stack from
+Primary Color and LUT to finite-kernel Gaussian Blur, Sharpen, and one
+Clip-local basic Mask authored through the closed Mask Action Interface.
+Sharpen's static parameter is exercised through Undo/Redo; the Mask proves
+stable Mask/shape-key identities, scalar parameters, Clip-local shape
+animation, and shared graph execution. Durable close/reopen must preserve the
+complete Effect order and Mask author state.
 
 The execution half compiles the same reopened stack independently for Preview
 and Export. Matching diagnostic signatures are necessary but not sufficient:

@@ -4,7 +4,7 @@
 //! in `mondrian-effects::mask_raster`.
 
 use crate::automation::{PropertyBag, PropertyValue};
-use crate::types::MaskId;
+use crate::types::{KeyframeId, MaskId};
 use crate::{AuthoringList, TimelineTime};
 use glam::Vec2;
 use serde::{Deserialize, Serialize};
@@ -66,6 +66,46 @@ impl Default for MaskShape {
     }
 }
 
+/// Interpolation applied from one Mask shape key to its successor.
+///
+/// Linear interpolation is valid only when both shapes have compatible
+/// topology. A deliberate topology change must use Hold instead of relying on
+/// an implicit midpoint snap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MaskShapeInterpolation {
+    /// Retain the current shape until the next key.
+    #[default]
+    Hold,
+    /// Interpolate every compatible geometric degree of freedom.
+    Linear,
+}
+
+/// One stable Clip-local Mask shape key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaskShapeKeyframe {
+    /// Stable author identity used by selection and future curve editing.
+    pub id: KeyframeId,
+    /// Exact Clip-local author time.
+    pub time: TimelineTime,
+    /// Complete shape value at this key.
+    pub shape: MaskShape,
+    /// Interpolation from this key to its successor.
+    pub interpolation: MaskShapeInterpolation,
+}
+
+impl MaskShapeKeyframe {
+    /// Create one shape key with a fresh stable identity.
+    pub fn new(
+        time: TimelineTime,
+        shape: MaskShape,
+        interpolation: MaskShapeInterpolation,
+    ) -> Self {
+        Self { id: KeyframeId::new(), time, shape, interpolation }
+    }
+}
+
 /// Mask boolean operation mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum MaskOp {
@@ -100,23 +140,32 @@ fn default_one() -> f32 {
     1.0
 }
 
-/// A mask keyframe — stores shape and legacy scalar fields.
+/// Complete Mask value evaluated at one Clip-local time.
+///
+/// This is not an author key: shape and scalar parameters retain independent
+/// key identities and interpolation contracts in [`MaskComponent`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MaskKeyframe {
+pub struct MaskEvaluation {
+    /// Evaluated geometry.
     pub shape: MaskShape,
+    /// Evaluated edge feather in pixels.
     #[serde(default)]
     pub feather: f32,
+    /// Evaluated normalized opacity.
     #[serde(default = "default_one")]
     pub opacity: f32,
+    /// Evaluated edge expansion in pixels.
     #[serde(default)]
     pub expansion: f32,
+    /// Whether coverage is inverted after geometry evaluation.
     #[serde(default)]
     pub invert: bool,
+    /// Evaluated stack-combination operation.
     #[serde(default)]
     pub mask_op: MaskOp,
 }
 
-impl Default for MaskKeyframe {
+impl Default for MaskEvaluation {
     fn default() -> Self {
         Self {
             shape: MaskShape::default(),
@@ -145,7 +194,7 @@ pub struct MaskComponent {
     pub name: String,
     /// Shape keyframes. When `shape_animation_enabled` is false, only the first
     /// entry is used (static shape). When enabled, shapes are interpolated by time.
-    pub shape_keyframes: AuthoringList<(TimelineTime, MaskShape)>,
+    pub shape_keyframes: AuthoringList<MaskShapeKeyframe>,
     /// Scalar animatable properties (feather, opacity, expansion, invert, mask_op).
     pub properties: PropertyBag,
     pub enabled: bool,
@@ -166,7 +215,7 @@ impl PartialEq for MaskComponent {
 }
 
 impl MaskComponent {
-    pub fn new(name: String, initial: MaskKeyframe) -> Self {
+    pub fn new(name: String, initial: MaskEvaluation) -> Self {
         let id = MaskId::new();
         let mut properties = PropertyBag::default();
         use crate::automation::{
@@ -256,7 +305,12 @@ impl MaskComponent {
         Self {
             id,
             name,
-            shape_keyframes: vec![(TimelineTime::ZERO, initial.shape)].into(),
+            shape_keyframes: vec![MaskShapeKeyframe::new(
+                TimelineTime::ZERO,
+                initial.shape,
+                MaskShapeInterpolation::Hold,
+            )]
+            .into(),
             properties,
             enabled: true,
             locked: false,
@@ -264,11 +318,11 @@ impl MaskComponent {
         }
     }
 
-    pub fn shape_keyframes(&self) -> &[(TimelineTime, MaskShape)] {
+    pub fn shape_keyframes(&self) -> &[MaskShapeKeyframe] {
         &self.shape_keyframes
     }
 
-    pub fn shape_keyframes_mut(&mut self) -> &mut Vec<(TimelineTime, MaskShape)> {
+    pub fn shape_keyframes_mut(&mut self) -> &mut Vec<MaskShapeKeyframe> {
         &mut self.shape_keyframes
     }
 
@@ -286,16 +340,39 @@ impl MaskComponent {
                 "a static mask must contain exactly one shape keyframe",
             ));
         }
+        let mut key_ids = std::collections::HashSet::with_capacity(self.shape_keyframes.len());
+        for key in &self.shape_keyframes {
+            if !key_ids.insert(key.id) {
+                return Err(mask_validation_error(
+                    self.id,
+                    format!("duplicate shape key identity: {}", key.id),
+                ));
+            }
+        }
+        if !self.shape_animation_enabled && self.shape_keyframes[0].time != TimelineTime::ZERO {
+            return Err(mask_validation_error(
+                self.id,
+                "a static mask shape key must use canonical Clip-local time zero",
+            ));
+        }
         for pair in self.shape_keyframes.windows(2) {
-            if pair[0].0 >= pair[1].0 {
+            if pair[0].time >= pair[1].time {
                 return Err(mask_validation_error(
                     self.id,
                     "shape keyframe times must be strictly increasing",
                 ));
             }
+            if pair[0].interpolation == MaskShapeInterpolation::Linear
+                && !shapes_have_compatible_topology(&pair[0].shape, &pair[1].shape)
+            {
+                return Err(mask_validation_error(
+                    self.id,
+                    "linear shape keys require compatible shape topology",
+                ));
+            }
         }
-        for (_, shape) in &self.shape_keyframes {
-            validate_shape(self.id, shape)?;
+        for key in &self.shape_keyframes {
+            validate_shape(self.id, &key.shape)?;
         }
 
         self.properties.validate()?;
@@ -320,44 +397,135 @@ impl MaskComponent {
     }
 
     pub fn current_shape(&self) -> Option<&MaskShape> {
-        self.shape_keyframes.first().map(|(_, shape)| shape)
+        self.shape_keyframes.first().map(|key| &key.shape)
     }
 
     pub fn property_path(mask_id: MaskId, property: &str) -> String {
         format!("mask.{mask_id}.{property}")
     }
 
+    /// Enable or disable shape animation without manufacturing a duplicate
+    /// key at the current time.
+    ///
+    /// Disabling collapses the evaluated current shape to one canonical static
+    /// key. An exact existing key retains its stable identity; otherwise the
+    /// collapsed value receives a new identity.
+    pub fn set_shape_animation_enabled(
+        &mut self,
+        enabled: bool,
+        time: TimelineTime,
+    ) -> Result<bool, crate::MondrianError> {
+        if self.shape_animation_enabled == enabled {
+            return Ok(false);
+        }
+        if enabled {
+            self.shape_animation_enabled = true;
+            return Ok(true);
+        }
+
+        let shape = self.evaluate_at(time).shape;
+        let retained_id = self
+            .shape_keyframes
+            .iter()
+            .find(|key| key.time == time)
+            .map(|key| key.id)
+            .unwrap_or_else(KeyframeId::new);
+        self.shape_keyframes = vec![MaskShapeKeyframe {
+            id: retained_id,
+            time: TimelineTime::ZERO,
+            shape,
+            interpolation: MaskShapeInterpolation::Hold,
+        }]
+        .into();
+        self.shape_animation_enabled = false;
+        Ok(true)
+    }
+
+    /// Write a complete Mask shape at exact Clip-local author time.
+    ///
+    /// Static Masks always retain one canonical time-zero key. Animated Masks
+    /// update an exact-time key without changing its identity or insert a new
+    /// stable key in time order. The return value is the affected key identity,
+    /// or `None` for a semantic no-op.
+    pub fn write_shape(
+        &mut self,
+        time: TimelineTime,
+        shape: MaskShape,
+        interpolation: MaskShapeInterpolation,
+    ) -> Result<Option<KeyframeId>, crate::MondrianError> {
+        validate_shape(self.id, &shape)?;
+        let time = if self.shape_animation_enabled {
+            time
+        } else {
+            TimelineTime::ZERO
+        };
+        let interpolation = if self.shape_animation_enabled {
+            interpolation
+        } else {
+            MaskShapeInterpolation::Hold
+        };
+        let mut candidate = self.clone();
+        if let Some(existing) = candidate.shape_keyframes.iter_mut().find(|key| key.time == time) {
+            if existing.shape == shape && existing.interpolation == interpolation {
+                return Ok(None);
+            }
+            existing.shape = shape;
+            existing.interpolation = interpolation;
+            let id = existing.id;
+            candidate.validate_author_state()?;
+            *self = candidate;
+            return Ok(Some(id));
+        }
+        if !self.shape_animation_enabled {
+            return Err(mask_validation_error(
+                self.id,
+                "static Mask lost its canonical shape key",
+            ));
+        }
+        let key = MaskShapeKeyframe::new(time, shape, interpolation);
+        let id = key.id;
+        candidate.shape_keyframes.push(key);
+        candidate.shape_keyframes.sort_by_key(|key| key.time);
+        candidate.validate_author_state()?;
+        *self = candidate;
+        Ok(Some(id))
+    }
+
     /// Evaluate the mask properties at a given time.
-    pub fn evaluate_at(&self, time: TimelineTime) -> MaskKeyframe {
+    pub fn evaluate_at(&self, time: TimelineTime) -> MaskEvaluation {
         let shape = if self.shape_keyframes.is_empty() {
             MaskShape::default()
         } else if !self.shape_animation_enabled
             || self.shape_keyframes.len() == 1
-            || time <= self.shape_keyframes[0].0
+            || time <= self.shape_keyframes[0].time
         {
-            self.shape_keyframes[0].1.clone()
+            self.shape_keyframes[0].shape.clone()
         } else if time
-            >= self
-                .shape_keyframes
-                .last()
-                .map(|(key_time, _)| *key_time)
-                .unwrap_or(TimelineTime::ZERO)
+            >= self.shape_keyframes.last().map(|key| key.time).unwrap_or(TimelineTime::ZERO)
         {
-            self.shape_keyframes.last().map(|(_, s)| s.clone()).unwrap_or_default()
+            self.shape_keyframes.last().map(|key| key.shape.clone()).unwrap_or_default()
         } else {
-            let mut result = self.shape_keyframes[0].1.clone();
+            let mut result = self.shape_keyframes[0].shape.clone();
             for pair in self.shape_keyframes.windows(2) {
-                let (t0, ref s0) = pair[0];
-                let (t1, ref s1) = pair[1];
+                let t0 = pair[0].time;
+                let t1 = pair[1].time;
                 if time >= t0 && time <= t1 {
-                    let duration = t1.checked_sub(t0).map(TimelineTime::to_f64).unwrap_or(0.0);
-                    let elapsed = time.checked_sub(t0).map(TimelineTime::to_f64).unwrap_or(0.0);
-                    let fraction = if duration > 0.0 {
-                        (elapsed / duration) as f32
-                    } else {
-                        0.0
+                    result = match pair[0].interpolation {
+                        MaskShapeInterpolation::Hold => pair[0].shape.clone(),
+                        MaskShapeInterpolation::Linear => {
+                            let duration =
+                                t1.checked_sub(t0).map(TimelineTime::to_f64).unwrap_or(0.0);
+                            let elapsed =
+                                time.checked_sub(t0).map(TimelineTime::to_f64).unwrap_or(0.0);
+                            let fraction = if duration > 0.0 {
+                                (elapsed / duration) as f32
+                            } else {
+                                0.0
+                            };
+                            interpolate_shape(&pair[0].shape, &pair[1].shape, fraction)
+                                .unwrap_or_else(|| pair[0].shape.clone())
+                        }
                     };
-                    result = interpolate_shape(s0, s1, fraction);
                     break;
                 }
             }
@@ -402,7 +570,7 @@ impl MaskComponent {
             })
             .unwrap_or_else(|| "Add".to_string());
 
-        MaskKeyframe {
+        MaskEvaluation {
             shape,
             feather,
             opacity,
@@ -460,13 +628,14 @@ pub fn shape_label(shape: &MaskShape) -> String {
     }
 }
 
-/// Linear interpolation between two MaskShapes.
+/// Linearly interpolate compatible Mask geometry.
 ///
-/// Rectangle→Rectangle and Ellipse→Ellipse interpolate smoothly.
-/// Cross-type morphs (e.g., Rectangle→Ellipse) snap: t < 0.5 returns
-/// shape A, t >= 0.5 returns shape B. Path morphing is not supported
-/// and also follows the snap behavior.
-pub fn interpolate_shape(a: &MaskShape, b: &MaskShape, t: f32) -> MaskShape {
+/// Rectangle and Ellipse geometry interpolate within their own shape type.
+/// Paths require identical point counts and closed state. Incompatible
+/// topology returns `None`; callers must use explicit Hold interpolation for a
+/// deliberate topology change.
+pub fn interpolate_shape(a: &MaskShape, b: &MaskShape, t: f32) -> Option<MaskShape> {
+    let t = t.clamp(0.0, 1.0);
     match (a, b) {
         (
             MaskShape::Rectangle {
@@ -483,27 +652,48 @@ pub fn interpolate_shape(a: &MaskShape, b: &MaskShape, t: f32) -> MaskShape {
                 height: bh,
                 corner_radius: br,
             },
-        ) => MaskShape::Rectangle {
+        ) => Some(MaskShape::Rectangle {
             x: ax + (bx - ax) * t,
             y: ay + (by - ay) * t,
             width: aw + (bw - aw) * t,
             height: ah + (bh - ah) * t,
             corner_radius: ar + (br - ar) * t,
-        },
+        }),
         (
             MaskShape::Ellipse { center: ac, radii: ar },
             MaskShape::Ellipse { center: bc, radii: br },
-        ) => MaskShape::Ellipse {
+        ) => Some(MaskShape::Ellipse {
             center: *ac + (*bc - *ac) * t,
             radii: *ar + (*br - *ar) * t,
-        },
-        _ => {
-            if t < 0.5 {
-                a.clone()
-            } else {
-                b.clone()
-            }
-        }
+        }),
+        (
+            MaskShape::Path { points: a_points, closed: a_closed },
+            MaskShape::Path { points: b_points, closed: b_closed },
+        ) if a_closed == b_closed && a_points.len() == b_points.len() => Some(MaskShape::Path {
+            points: a_points
+                .iter()
+                .zip(b_points)
+                .map(|(a, b)| BezierPoint {
+                    position: a.position + (b.position - a.position) * t,
+                    control_in: a.control_in + (b.control_in - a.control_in) * t,
+                    control_out: a.control_out + (b.control_out - a.control_out) * t,
+                })
+                .collect(),
+            closed: *a_closed,
+        }),
+        _ => None,
+    }
+}
+
+fn shapes_have_compatible_topology(a: &MaskShape, b: &MaskShape) -> bool {
+    match (a, b) {
+        (MaskShape::Rectangle { .. }, MaskShape::Rectangle { .. })
+        | (MaskShape::Ellipse { .. }, MaskShape::Ellipse { .. }) => true,
+        (
+            MaskShape::Path { points: a_points, closed: a_closed },
+            MaskShape::Path { points: b_points, closed: b_closed },
+        ) => a_closed == b_closed && a_points.len() == b_points.len(),
+        _ => false,
     }
 }
 
@@ -530,7 +720,7 @@ impl crate::AuthoringFootprint for BezierPoint {
     }
 }
 
-impl crate::AuthoringFootprint for MaskKeyframe {
+impl crate::AuthoringFootprint for MaskEvaluation {
     fn collect_authoring_footprint(
         &self,
         collector: &mut crate::AuthoringFootprintCollector,
@@ -543,6 +733,16 @@ impl crate::AuthoringFootprint for MaskKeyframe {
             invert: _,
             mask_op: _,
         } = self;
+        collector.collect(shape)
+    }
+}
+
+impl crate::AuthoringFootprint for MaskShapeKeyframe {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self { id: _, time: _, shape, interpolation: _ } = self;
         collector.collect(shape)
     }
 }
@@ -578,7 +778,7 @@ mod tests {
 
     #[test]
     fn mask_component_evaluates_single_keyframe() {
-        let kf = MaskKeyframe { feather: 5.0, ..Default::default() };
+        let kf = MaskEvaluation { feather: 5.0, ..Default::default() };
         let mc = MaskComponent::new("M1".into(), kf);
         let result = mc.evaluate_at(tt(0));
         assert_eq!(result.feather, 5.0);
@@ -588,7 +788,7 @@ mod tests {
 
     #[test]
     fn mask_component_interpolates_between_two_keyframes() {
-        let kf0 = MaskKeyframe { feather: 0.0, opacity: 1.0, ..Default::default() };
+        let kf0 = MaskEvaluation { feather: 0.0, opacity: 1.0, ..Default::default() };
         let mut mc = MaskComponent::new("M1".into(), kf0);
         mc.properties.enable_animation(MASK_PROP_FEATHER, tt(0)).unwrap();
         mc.properties
@@ -632,7 +832,7 @@ mod tests {
 
     #[test]
     fn mask_component_partial_eq_includes_animation_toggle() {
-        let kf = MaskKeyframe::default();
+        let kf = MaskEvaluation::default();
         let a = MaskComponent::new("A".into(), kf);
         let mut b = a.clone();
         assert_eq!(a, b);
@@ -642,7 +842,7 @@ mod tests {
 
     #[test]
     fn mask_component_partial_eq_includes_property_author_state() {
-        let mut original = MaskComponent::new("A".into(), MaskKeyframe::default());
+        let mut original = MaskComponent::new("A".into(), MaskEvaluation::default());
         let mut edited = original.clone();
         assert_eq!(original, edited);
 
@@ -675,9 +875,14 @@ mod tests {
             height: 200.0,
             corner_radius: 10.0,
         };
-        let a = MaskKeyframe { shape: shape_a, ..Default::default() };
+        let a = MaskEvaluation { shape: shape_a, ..Default::default() };
         let mut mc = MaskComponent::new("M1".into(), a);
-        mc.shape_keyframes.push((tt(100), shape_b));
+        mc.shape_keyframes.push(MaskShapeKeyframe::new(
+            tt(100),
+            shape_b,
+            MaskShapeInterpolation::Linear,
+        ));
+        mc.shape_keyframes[0].interpolation = MaskShapeInterpolation::Linear;
         mc.shape_animation_enabled = true;
 
         let mid = mc.evaluate_at(tt(50));
@@ -693,13 +898,36 @@ mod tests {
     }
 
     #[test]
+    fn mask_shape_keys_keep_identity_and_reject_implicit_topology_morphs() {
+        let mut mask = MaskComponent::new("M1".into(), MaskEvaluation::default());
+        let first_id = mask.shape_keyframes[0].id;
+        assert!(mask.set_shape_animation_enabled(true, TimelineTime::ZERO).unwrap());
+        assert_eq!(mask.shape_keyframes.len(), 1);
+        assert_eq!(mask.shape_keyframes[0].id, first_id);
+
+        let ellipse = MaskShape::Ellipse {
+            center: Vec2::new(0.5, 0.5),
+            radii: Vec2::new(0.25, 0.25),
+        };
+        let second_id = mask
+            .write_shape(tt(100), ellipse, MaskShapeInterpolation::Hold)
+            .unwrap()
+            .expect("insert shape key");
+        assert_ne!(first_id, second_id);
+        assert!(mask.validate_author_state().is_ok());
+
+        mask.shape_keyframes[0].interpolation = MaskShapeInterpolation::Linear;
+        assert!(mask.validate_author_state().is_err());
+    }
+
+    #[test]
     fn mask_author_state_rejects_unbounded_path_complexity() {
         let points = vec![BezierPoint::new(Vec2::ZERO); MAX_MASK_PATH_POINTS + 1];
         let mask = MaskComponent::new(
             "oversized".into(),
-            MaskKeyframe {
+            MaskEvaluation {
                 shape: MaskShape::Path { points, closed: true },
-                ..MaskKeyframe::default()
+                ..MaskEvaluation::default()
             },
         );
 

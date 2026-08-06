@@ -92,7 +92,8 @@ pub use lut::{
     LutPreparationCacheDiagnostics,
 };
 pub use mask::{
-    BezierPoint, MaskComponent, MaskId, MaskKeyframe, MaskOp, MaskShape, MAX_MASK_PATH_POINTS,
+    BezierPoint, MaskComponent, MaskEvaluation, MaskId, MaskOp, MaskShape, MaskShapeInterpolation,
+    MaskShapeKeyframe, MAX_MASK_PATH_POINTS,
 };
 pub use mask_raster::{rasterize_mask_shape, MaskRasterError, PreparedMaskRaster};
 pub use plugin_contract::{

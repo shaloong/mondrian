@@ -34,7 +34,7 @@ use migration::JsonMigrationRegistry;
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 24;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 25;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 5;
 
@@ -1611,7 +1611,7 @@ mod tests {
         InterpolationType, Keyframe, PropertyDescriptor, PropertyMutation, PropertyValue,
     };
     use mondrian_core::effect_data::{EffectNode, EffectType};
-    use mondrian_core::mask_data::{MaskComponent, MaskKeyframe};
+    use mondrian_core::mask_data::{MaskComponent, MaskEvaluation};
     use mondrian_core::{
         ExactAutomationCurve, ExactAutomationKeyframe, ParameterId, ParameterUnit, PropertyHost,
         TimelineTime,
@@ -2467,7 +2467,7 @@ mod tests {
             TimelineTime::new(5, 1).expect("duration"),
         )
         .expect("clip");
-        let mut mask = MaskComponent::new("Subject".to_owned(), MaskKeyframe::default());
+        let mut mask = MaskComponent::new("Subject".to_owned(), MaskEvaluation::default());
         let key_time = TimelineTime::new(2, 1).expect("key time");
         mask.properties
             .write_value(
@@ -2477,7 +2477,28 @@ mod tests {
                 InterpolationType::Linear,
             )
             .expect("mask opacity key");
+        mask.set_shape_animation_enabled(true, TimelineTime::ZERO)
+            .expect("enable shape animation");
+        mask.write_shape(
+            TimelineTime::ZERO,
+            mondrian_core::mask_data::MaskShape::default(),
+            mondrian_core::mask_data::MaskShapeInterpolation::Linear,
+        )
+        .expect("set outgoing linear interpolation");
+        mask.write_shape(
+            key_time,
+            mondrian_core::mask_data::MaskShape::Rectangle {
+                x: 0.2,
+                y: 0.15,
+                width: 0.6,
+                height: 0.7,
+                corner_radius: 0.1,
+            },
+            mondrian_core::mask_data::MaskShapeInterpolation::Hold,
+        )
+        .expect("insert stable shape key");
         let mask_id = mask.id;
+        let shape_key_ids = mask.shape_keyframes.iter().map(|key| key.id).collect::<Vec<_>>();
         clip.masks.push(mask);
         document.sequences.active_mut().expect("active sequence").video_tracks[0]
             .add_clip(clip)
@@ -2490,6 +2511,14 @@ mod tests {
             .masks[0];
 
         assert_eq!(reopened_mask.id, mask_id);
+        assert_eq!(
+            reopened_mask.shape_keyframes.iter().map(|key| key.id).collect::<Vec<_>>(),
+            shape_key_ids
+        );
+        assert_eq!(
+            reopened_mask.shape_keyframes[0].interpolation,
+            mondrian_core::mask_data::MaskShapeInterpolation::Linear
+        );
         assert_eq!(reopened_mask.evaluate_at(key_time).opacity, 0.25);
         reopened_mask.validate_author_state().expect("valid reopened mask");
     }

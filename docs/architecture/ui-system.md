@@ -592,6 +592,18 @@ allocates a Sequence transaction; selection remains transient and creates no
 Undo entry. The old `ui.effects`, Inspector Effect JSON payloads, and generic
 editor-state Effect variants do not coexist as alternate interpretations.
 
+`VisualMaskProductAction` closes the parallel Clip-local Mask slice without
+turning Masks into Effect definitions. Add/select, enabled and edit-lock state,
+stable relative reorder, removal, static/keyframed complete-shape writes, and
+stable-address scalar parameter writes share one codec and one transactional
+App Adapter. Payloads carry `ClipId`, `MaskId`, stable parameter addresses, and
+relative Mask anchors only; current Track placement and exact Clip-local author
+time are re-derived from the Authoring Session. Track lock and Mask lock remain
+separate authorities. The Inspector projects the same Interface for rectangle
+or ellipse creation, shape animation, order, enable/lock/removal, feather,
+opacity, expansion, invert, and operation. It never mutates `clip.masks`, parses
+a Mask UUID from a property path, or writes a Mask enum as arbitrary text.
+
 `app_ui::audio_processor_rack` is the shared read-only Rack projection Module.
 It deduplicates Clip bindings by Processing Scope, consumes Timeline's binding
 count and lock blocker, preserves unknown plugin definitions and parameter
@@ -664,7 +676,7 @@ The migrated slices expose one borrowed, read-only
 lock, Clip membership/media kind, placement range, Sequence time-base, Export
 draft difference, and Queue target facts remain private; the stable UI
 Interface is only `allows(&ProductAction)`. Timeline, Video Transition, Clip,
-Audio, Asset, Viewer, Project, Sequence, Export, and Visual Effect controls
+Audio, Asset, Viewer, Project, Sequence, Export, Visual Effect, and Visual Mask controls
 therefore use the same
 admission Seam. The
 projection does not clone or index the author graph or clone the Export Job
@@ -693,7 +705,7 @@ values observed under a distinct fresh Session after load. Action admission or
 a human-readable status hint alone cannot satisfy a Golden operation.
 
 Golden validation has one UI-independent planning Module. It compiles the
-closed schema-v4 / `windows-alpha-golden-v13` contract into two deterministic
+closed schema-v4 / `windows-alpha-golden-v14` contract into two deterministic
 ledgers of required fixture roles, operations, content, and exports. The global
 ledger finds work absent from every slice; the Hero ledger independently finds
 work that exists only in isolated diagnostic Sequences. A slice declares one

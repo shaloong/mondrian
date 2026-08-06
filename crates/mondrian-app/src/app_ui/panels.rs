@@ -20,7 +20,7 @@ use mondrian_core::display_labels::color_space_label;
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::types::{
     AssetId, AudioComponentEditId, AudioSourceComponentId, ClipId, ClipLinkGroupId, ColorSpace,
-    EffectId, JobId, KeyframeId, Rational, SequenceId, TrackId, VideoTransitionId,
+    EffectId, JobId, KeyframeId, MaskId, Rational, SequenceId, TrackId, VideoTransitionId,
 };
 use mondrian_core::{
     AudioChannelLayout, Color, FramePosition, FrameRounding, ParameterUnit, TimeScale,
@@ -29,7 +29,9 @@ use mondrian_core::{
 };
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
-use mondrian_effects::{effect_display_name, effect_library_types};
+use mondrian_effects::{
+    effect_display_name, effect_library_types, MaskShape, MaskShapeInterpolation,
+};
 use mondrian_export::delivery::resolve_export_delivery;
 use mondrian_export::preset::{
     AudioCodecConfig, Av1Profile, BuiltinExportPreset, Container, ExportAlphaMode,
@@ -55,7 +57,9 @@ use mondrian_timeline::sequence::{
 };
 use mondrian_timeline::track::Track;
 use mondrian_timeline::VideoTransitionType;
-use mondrian_timeline::{AudioComponentMutation, EffectRelativePlacement, TrackRelativePlacement};
+use mondrian_timeline::{
+    AudioComponentMutation, EffectRelativePlacement, MaskRelativePlacement, TrackRelativePlacement,
+};
 use mondrian_ui_core::types::SplitDirection;
 use mondrian_ui_core::DragPayload;
 use mondrian_ui_core::Widget;
@@ -111,7 +115,11 @@ use crate::app::ui_actions::{
     viewer_set_preview_resolution_scale_action, viewer_set_zoom_scale_action,
     visual_effect_add_to_clip_action, visual_effect_remove_action, visual_effect_reorder_action,
     visual_effect_select_action, visual_effect_set_enabled_action,
-    visual_effect_set_parameter_value_action, AppShellInputColorPipelineDiagnostics,
+    visual_effect_set_parameter_value_action, visual_mask_add_to_clip_action,
+    visual_mask_remove_action, visual_mask_reorder_action, visual_mask_select_action,
+    visual_mask_set_enabled_action, visual_mask_set_locked_action,
+    visual_mask_set_parameter_value_action, visual_mask_set_shape_animation_enabled_action,
+    visual_mask_write_shape_action, AppShellInputColorPipelineDiagnostics,
     AppShellInterpretAssetDialogPayload, AppShellRelinkAssetDialogPayload,
     AppShellRelocatePanelPayload, AppShellRevealInFileManagerPayload,
     AppShellVideoSignalDiagnostics, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
@@ -133,7 +141,10 @@ use crate::app::ui_actions::{
     VideoTransitionHandlePolicy, VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
     ViewerSetPreviewResolutionScalePayload, ViewerSetZoomScalePayload,
     VisualEffectAddToClipPayload, VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
-    VisualEffectSetParameterValuePayload, VisualEffectTargetPayload,
+    VisualEffectSetParameterValuePayload, VisualEffectTargetPayload, VisualMaskAddToClipPayload,
+    VisualMaskReorderPayload, VisualMaskSetEnabledPayload, VisualMaskSetLockedPayload,
+    VisualMaskSetParameterValuePayload, VisualMaskSetShapeAnimationEnabledPayload,
+    VisualMaskTargetPayload, VisualMaskWriteShapePayload,
 };
 use crate::app::waveform_service::AudioWaveformSource;
 use crate::app::{
@@ -1568,6 +1579,8 @@ pub struct InspectorPanelModel {
     pub empty_message: Option<String>,
     /// Selected effect nested inside the selected clip.
     pub selected_effect_id: Option<EffectId>,
+    /// Selected Mask nested inside the selected video Clip.
+    pub selected_mask_id: Option<MaskId>,
     /// Whether inspector controls may dispatch mutations for the selected clip.
     pub is_editable: bool,
     /// Human-readable reason shown when a selected clip cannot be edited.
@@ -1612,6 +1625,8 @@ pub struct InspectorPanelModel {
     pub clip_properties: Vec<InspectorEffectPropertyModel>,
     /// Effects currently attached to the selected clip.
     pub effects: Vec<InspectorEffectModel>,
+    /// Masks currently attached to the selected video Clip.
+    pub masks: Vec<InspectorMaskModel>,
 }
 
 /// One placement-local audio Component Edit shown by the Inspector.
@@ -1692,6 +1707,25 @@ pub struct InspectorEffectModel {
     /// Whether the effect is enabled.
     pub enabled: bool,
     /// Per-property editor values, one per row in the PropertyBag.
+    pub properties: Vec<InspectorEffectPropertyModel>,
+}
+
+/// One Clip-local visual Mask projected into the Inspector.
+#[derive(Debug, Clone)]
+pub struct InspectorMaskModel {
+    /// Stable Mask identity targeted by all mutations.
+    pub mask_id: MaskId,
+    /// Human-readable author label.
+    pub label: String,
+    /// Whether the Mask participates in picture execution.
+    pub enabled: bool,
+    /// Whether geometry, parameters, order, and removal are locked.
+    pub locked: bool,
+    /// Whether complete geometry is stored as exact Clip-local shape keys.
+    pub shape_animation_enabled: bool,
+    /// Current evaluated primitive family shown by the shape control.
+    pub shape_label: String,
+    /// Stable-address scalar Mask parameters.
     pub properties: Vec<InspectorEffectPropertyModel>,
 }
 
@@ -1791,6 +1825,9 @@ impl InspectorPanelModel {
                 (selection.clip.clip_id == resolved_selection.clip_id)
                     .then_some(selection.effect_id)
             }),
+            selected_mask_id: state.primary_selected_mask().and_then(|(mask_id, clip_id, _)| {
+                (clip_id == resolved_selection.clip_id).then_some(mask_id)
+            }),
             is_editable,
             edit_disabled_reason: (!is_editable).then(|| "所选剪辑所在轨道已锁定".to_owned()),
             enabled: !clip.is_disabled,
@@ -1856,6 +1893,34 @@ impl InspectorPanelModel {
                         .collect(),
                 })
                 .collect(),
+            masks: clip
+                .masks
+                .iter()
+                .map(|mask| {
+                    let evaluated = mask.evaluate_at(clip_author_time);
+                    let shape_label = match evaluated.shape {
+                        MaskShape::Rectangle { .. } => "矩形",
+                        MaskShape::Ellipse { .. } => "椭圆",
+                        MaskShape::Path { .. } => "路径",
+                    }
+                    .to_owned();
+                    InspectorMaskModel {
+                        mask_id: mask.id,
+                        label: mask.name.clone(),
+                        enabled: mask.enabled,
+                        locked: mask.locked,
+                        shape_animation_enabled: mask.shape_animation_enabled,
+                        shape_label,
+                        properties: mask
+                            .properties
+                            .iter()
+                            .map(|(path, property)| {
+                                inspector_property_model(path, property, clip_author_time)
+                            })
+                            .collect(),
+                    }
+                })
+                .collect(),
         }
     }
 
@@ -1864,6 +1929,7 @@ impl InspectorPanelModel {
             selected_clip: None,
             empty_message: Some("未选择剪辑\n选择剪辑、图层或效果后，可在这里调整参数。".into()),
             selected_effect_id: None,
+            selected_mask_id: None,
             is_editable: false,
             edit_disabled_reason: None,
             enabled: false,
@@ -1886,6 +1952,7 @@ impl InspectorPanelModel {
             audio_processor_racks: Vec::new(),
             clip_properties: Vec::new(),
             effects: Vec::new(),
+            masks: Vec::new(),
         }
     }
 
@@ -1895,6 +1962,7 @@ impl InspectorPanelModel {
             selected_clip: None,
             empty_message: None,
             selected_effect_id: None,
+            selected_mask_id: None,
             is_editable: false,
             edit_disabled_reason: None,
             enabled: true,
@@ -1917,6 +1985,7 @@ impl InspectorPanelModel {
             audio_processor_racks: Vec::new(),
             clip_properties: Vec::new(),
             effects: Vec::new(),
+            masks: Vec::new(),
         }
     }
 }
@@ -6117,6 +6186,142 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
     }
     panel = panel.with_section(timing_section);
 
+    if selected_clip.is_some_and(|selection| selection.is_video_track) {
+        panel = panel.with_section(
+            PropertySection::new("蒙版").with_row(PropertyRow::new(
+                "添加",
+                Box::new(
+                    Button::new("添加矩形蒙版")
+                        .enabled(can_edit)
+                        .on_click(inspector_add_mask_action(selected_clip)),
+                ),
+            )),
+        );
+    }
+
+    for (index, mask) in model.masks.iter().enumerate() {
+        let mask_id = mask.mask_id;
+        let mask_can_edit = can_edit && !mask.locked;
+        let can_move_up = mask_can_edit && index > 0;
+        let can_move_down = mask_can_edit && index + 1 < model.masks.len();
+        let shape_items = vec![
+            MenuItem::new(
+                "矩形",
+                inspector_mask_shape_action(selected_clip, mask_id, MaskShape::default()),
+            ),
+            MenuItem::new(
+                "椭圆",
+                inspector_mask_shape_action(
+                    selected_clip,
+                    mask_id,
+                    MaskShape::Ellipse {
+                        center: glam::Vec2::splat(0.5),
+                        radii: glam::Vec2::splat(0.4),
+                    },
+                ),
+            ),
+        ];
+        let mut section = PropertySection::new(mask.label.clone())
+            .selected(model.selected_mask_id == Some(mask_id))
+            .on_select(inspector_mask_select_action(selected_clip, mask_id))
+            .with_row(PropertyRow::new(
+                "控制",
+                Box::new(
+                    FlexContainer::row(vec![
+                        FlexChild::flex(
+                            Box::new(
+                                Checkbox::new("启用", mask.enabled).enabled(can_edit).on_change(
+                                    move |enabled| {
+                                        inspector_mask_enabled_action(
+                                            selected_clip,
+                                            mask_id,
+                                            enabled,
+                                        )
+                                    },
+                                ),
+                            ),
+                            1.0,
+                        ),
+                        FlexChild::fixed(effect_icon_button(
+                            AppIcon::CaretUp,
+                            "Up",
+                            "Move Mask up",
+                            can_move_up,
+                            can_move_up
+                                .then(|| {
+                                    inspector_reorder_mask_action(
+                                        selected_clip,
+                                        mask_id,
+                                        MaskRelativePlacement::Before(
+                                            model.masks[index - 1].mask_id,
+                                        ),
+                                    )
+                                })
+                                .flatten(),
+                        )),
+                        FlexChild::fixed(effect_icon_button(
+                            AppIcon::CaretDown,
+                            "Down",
+                            "Move Mask down",
+                            can_move_down,
+                            can_move_down
+                                .then(|| {
+                                    inspector_reorder_mask_action(
+                                        selected_clip,
+                                        mask_id,
+                                        MaskRelativePlacement::After(
+                                            model.masks[index + 1].mask_id,
+                                        ),
+                                    )
+                                })
+                                .flatten(),
+                        )),
+                        FlexChild::fixed(effect_icon_button(
+                            AppIcon::Trash,
+                            "Remove",
+                            "Remove Mask",
+                            mask_can_edit,
+                            inspector_remove_mask_action(selected_clip, mask_id),
+                        )),
+                    ])
+                    .with_gap(8.0),
+                ),
+            ))
+            .with_row(PropertyRow::new(
+                "锁定",
+                Box::new(
+                    Checkbox::new("锁定编辑", mask.locked).enabled(can_edit).on_change(
+                        move |locked| inspector_mask_locked_action(selected_clip, mask_id, locked),
+                    ),
+                ),
+            ))
+            .with_row(PropertyRow::new(
+                "形状",
+                Box::new(
+                    Dropdown::new(mask.shape_label.clone(), shape_items).enabled(mask_can_edit),
+                ),
+            ))
+            .with_row(PropertyRow::new(
+                "形状动画",
+                Box::new(
+                    Checkbox::new("关键帧", mask.shape_animation_enabled)
+                        .enabled(mask_can_edit)
+                        .on_change(move |enabled| {
+                            inspector_mask_shape_animation_action(selected_clip, mask_id, enabled)
+                        }),
+                ),
+            ));
+        for property in &mask.properties {
+            section = section.with_row(mask_property_row(
+                property,
+                mask_can_edit,
+                selected_clip,
+                mask_id,
+            ));
+        }
+        panel = panel.with_section(section);
+    }
+
     if !model.effects.is_empty() {
         for (index, effect) in model.effects.iter().enumerate() {
             let effect_id = effect.effect_id;
@@ -6678,6 +6883,104 @@ fn inspector_reorder_effect_action(
     })
 }
 
+fn inspector_add_mask_action(selection: Option<SelectedClipRef>) -> Option<Action> {
+    selection.filter(|selection| selection.is_video_track).map(|selection| {
+        visual_mask_add_to_clip_action(VisualMaskAddToClipPayload {
+            clip_id: selection.clip_id,
+            shape: MaskShape::default(),
+        })
+    })
+}
+
+fn inspector_mask_select_action(
+    selection: Option<SelectedClipRef>,
+    mask_id: MaskId,
+) -> Option<Action> {
+    selection.map(|selection| {
+        visual_mask_select_action(VisualMaskTargetPayload { clip_id: selection.clip_id, mask_id })
+    })
+}
+
+fn inspector_mask_enabled_action(
+    selection: Option<SelectedClipRef>,
+    mask_id: MaskId,
+    enabled: bool,
+) -> Option<Action> {
+    selection.map(|selection| {
+        visual_mask_set_enabled_action(VisualMaskSetEnabledPayload {
+            clip_id: selection.clip_id,
+            mask_id,
+            enabled,
+        })
+    })
+}
+
+fn inspector_mask_locked_action(
+    selection: Option<SelectedClipRef>,
+    mask_id: MaskId,
+    locked: bool,
+) -> Option<Action> {
+    selection.map(|selection| {
+        visual_mask_set_locked_action(VisualMaskSetLockedPayload {
+            clip_id: selection.clip_id,
+            mask_id,
+            locked,
+        })
+    })
+}
+
+fn inspector_mask_shape_animation_action(
+    selection: Option<SelectedClipRef>,
+    mask_id: MaskId,
+    enabled: bool,
+) -> Option<Action> {
+    selection.map(|selection| {
+        visual_mask_set_shape_animation_enabled_action(VisualMaskSetShapeAnimationEnabledPayload {
+            clip_id: selection.clip_id,
+            mask_id,
+            enabled,
+        })
+    })
+}
+
+fn inspector_mask_shape_action(
+    selection: Option<SelectedClipRef>,
+    mask_id: MaskId,
+    shape: MaskShape,
+) -> Option<Action> {
+    selection.map(|selection| {
+        visual_mask_write_shape_action(VisualMaskWriteShapePayload {
+            clip_id: selection.clip_id,
+            mask_id,
+            shape,
+            interpolation: MaskShapeInterpolation::Hold,
+        })
+    })
+}
+
+fn inspector_remove_mask_action(
+    selection: Option<SelectedClipRef>,
+    mask_id: MaskId,
+) -> Option<Action> {
+    selection.map(|selection| {
+        visual_mask_remove_action(VisualMaskTargetPayload { clip_id: selection.clip_id, mask_id })
+    })
+}
+
+fn inspector_reorder_mask_action(
+    selection: Option<SelectedClipRef>,
+    mask_id: MaskId,
+    placement: MaskRelativePlacement,
+) -> Option<Action> {
+    selection.map(|selection| {
+        visual_mask_reorder_action(VisualMaskReorderPayload {
+            clip_id: selection.clip_id,
+            mask_id,
+            placement,
+        })
+    })
+}
+
 fn inspector_curve_edit_action(
     selection: Option<SelectedClipRef>,
     model: &InspectorCurveModel,
@@ -6763,6 +7066,20 @@ fn effect_property_row(
     )
 }
 
+fn mask_property_row(
+    property: &InspectorEffectPropertyModel,
+    can_edit: bool,
+    selection: Option<SelectedClipRef>,
+    mask_id: MaskId,
+) -> PropertyRow {
+    inspector_property_row(
+        property,
+        can_edit,
+        selection,
+        InspectorPropertyTarget::Mask { mask_id, parameter: property.address.clone() },
+    )
+}
+
 fn clip_property_row(
     property: &InspectorEffectPropertyModel,
     can_edit: bool,
@@ -6845,6 +7162,10 @@ enum InspectorPropertyTarget {
     },
     Effect {
         effect_id: EffectId,
+        parameter: AnimationParameterAddress,
+    },
+    Mask {
+        mask_id: MaskId,
         parameter: AnimationParameterAddress,
     },
 }
@@ -7236,6 +7557,14 @@ fn inspector_property_action(
             visual_effect_set_parameter_value_action(VisualEffectSetParameterValuePayload {
                 clip_id: selection.clip_id,
                 effect_id,
+                parameter,
+                value,
+            })
+        }
+        InspectorPropertyTarget::Mask { mask_id, parameter } => {
+            visual_mask_set_parameter_value_action(VisualMaskSetParameterValuePayload {
+                clip_id: selection.clip_id,
+                mask_id,
                 parameter,
                 value,
             })
@@ -12673,6 +13002,7 @@ mod tests {
             selected_clip: Some(selection),
             empty_message: None,
             selected_effect_id: None,
+            selected_mask_id: None,
             is_editable: false,
             edit_disabled_reason: Some("所选剪辑所在轨道已锁定".to_owned()),
             enabled: true,
@@ -12695,6 +13025,7 @@ mod tests {
             audio_processor_racks: Vec::new(),
             clip_properties: Vec::new(),
             effects: Vec::new(),
+            masks: Vec::new(),
         };
         let mut panel = inspector_panel(&model);
         panel.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
@@ -12737,6 +13068,51 @@ mod tests {
     }
 
     #[test]
+    fn inspector_projects_mask_identity_and_emits_closed_product_actions() {
+        let mut sequence = Sequence::new("Inspector Mask");
+        sequence.add_video_track();
+        let track_id = sequence.video_tracks[0].id;
+        let mut clip = Clip::new(
+            AssetId::new(),
+            TimelineTime::ZERO,
+            TimelineTime::new(5, 1).expect("duration"),
+        )
+        .expect("Clip");
+        let mask_id = clip.add_mask_component(mondrian_core::mask_data::MaskComponent::new(
+            "Subject".to_owned(),
+            mondrian_core::mask_data::MaskEvaluation::default(),
+        ));
+        let clip_id = clip.id;
+        sequence.video_tracks[0].add_clip(clip).expect("add Clip");
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.select_clip_by_id(clip_id).expect("select Clip");
+
+        let model = InspectorPanelModel::from_app_state(&state);
+        assert_eq!(
+            model.selected_clip.map(|selection| selection.track_id),
+            Some(track_id)
+        );
+        assert_eq!(model.masks.len(), 1);
+        assert_eq!(model.masks[0].mask_id, mask_id);
+        assert_eq!(model.masks[0].properties.len(), 5);
+
+        let action = inspector_mask_shape_animation_action(model.selected_clip, mask_id, true)
+            .expect("Mask animation action");
+        let decoded = crate::app::product_action::ProductAction::decode_external(&action)
+            .expect("valid payload")
+            .expect("recognized Mask action");
+        assert_eq!(
+            decoded,
+            crate::app::product_action::ProductAction::VisualMask(
+                crate::app::product_action::VisualMaskProductAction::SetShapeAnimationEnabled(
+                    VisualMaskSetShapeAnimationEnabledPayload { clip_id, mask_id, enabled: true },
+                ),
+            )
+        );
+    }
+
+    #[test]
     fn inspector_effect_section_header_selects_effect_for_graph_sync() {
         let selection = SelectedClipRef {
             track_id: TrackId::new(),
@@ -12748,6 +13124,7 @@ mod tests {
             selected_clip: Some(selection),
             empty_message: None,
             selected_effect_id: None,
+            selected_mask_id: None,
             is_editable: true,
             edit_disabled_reason: None,
             enabled: true,
@@ -12775,6 +13152,7 @@ mod tests {
                 enabled: true,
                 properties: Vec::new(),
             }],
+            masks: Vec::new(),
         };
         let mut panel = inspector_panel(&model);
         panel.layout(Rect::new(0.0, 0.0, 340.0, 720.0));
@@ -12793,16 +13171,23 @@ mod tests {
             &dispatch,
         );
 
-        let result = panel.event(
-            &UiEvent::MouseDown {
-                position: Point::new(24.0, 408.0),
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-            },
-            &mut ctx,
-        );
+        let selected_at = (0..1_440).find_map(|step| {
+            let position = Point::new(24.0, step as f32 * 0.5);
+            (panel.event(
+                &UiEvent::MouseDown {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ) == EventResult::Handled)
+                .then_some(position)
+        });
 
-        assert_eq!(result, EventResult::Handled);
+        assert!(
+            selected_at.is_some(),
+            "laid-out effect section must expose a selectable label gutter"
+        );
         assert!(requests.repaint);
         let recorded = actions.borrow();
         assert_eq!(recorded.len(), 1);

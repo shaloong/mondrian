@@ -1277,10 +1277,24 @@ Grid and advance span cursors; they may not copy the interpolation formulas or
 reinterpret the persisted author curve.
 
 Mask scalar properties are part of the persisted Property Bag, not runtime
-defaults. Project validation requires the canonical feather, opacity,
-expansion, invert, and operation Parameter IDs, valid curves, finite geometry,
-and strictly ordered shape keys. Saving and reopening must therefore preserve
-the exact evaluated mask rather than silently reconstructing default values.
+defaults. Every complete shape key owns a stable `KeyframeId`, exact Clip-local
+`TimelineTime`, geometry, and an explicit Hold/Linear outgoing interpolation.
+Project validation requires the canonical feather, opacity, expansion, invert,
+and operation Parameter IDs; unique key identities; strict time order; finite,
+bounded geometry; and topology-compatible endpoints for Linear interpolation.
+Static Masks contain exactly one canonical time-zero Hold key. Enabling shape
+animation does not synthesize a duplicate key; disabling it collapses the
+evaluated shape atomically while retaining an exact-time key identity when one
+exists. Failed geometry or topology writes leave the detached candidate
+unchanged. Copy, split, fragment, precompose, and Sequence duplication fork all
+Mask and shape-key identities. Saving and reopening must preserve those exact
+identities and evaluated semantics rather than reconstructing defaults.
+
+`Clip` is the deep Mask authoring Interface. Add, enable, lock, remove, stable
+relative reorder, parameter preparation/application, shape-animation changes,
+and complete shape writes do not expose vector indexes or parse UUIDs from
+property strings. A locked Mask still permits execution enable/disable and
+unlocking, but rejects parameter, geometry, order, and removal edits.
 
 Every structural Timeline command ends by compacting the three dependent
 author graphs as one invariant-restoration step: Clip link groups, visual

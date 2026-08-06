@@ -19,7 +19,7 @@ use mondrian_core::{
     DisplayManagementPolicy, FrameRounding, ProjectId, ProjectSettings, TimelineTime,
 };
 use mondrian_editor_state::{AuthoringSession, AuthoringSessionId, SequenceNavigationIntent};
-use mondrian_effects::{EffectType, MaskComponent, MaskId, MaskKeyframe, MaskShape};
+use mondrian_effects::{EffectType, MaskId};
 use mondrian_export::queue::RenderQueue;
 use mondrian_media::audio::{AudioBuffer, RealtimeAudioOutputSnapshot};
 use mondrian_media::{
@@ -175,6 +175,7 @@ pub mod ui_actions;
 mod video_transitions;
 pub mod viewer_gpu_output_health;
 pub(crate) mod viewer_gpu_output_residency;
+mod visual_mask_authoring;
 pub mod waveform_service;
 
 use self::ui_actions::TimelineSeekSource;

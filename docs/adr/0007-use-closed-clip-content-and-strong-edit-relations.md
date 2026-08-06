@@ -67,10 +67,14 @@ exists until a future Project+History+SQLite authority can prove that identity
 unreachable; a genuinely missing row is invalid strong-reference state, not
 offline media.
 
-Mask scalar Property Bags are persisted with each Mask. Project validation
-requires canonical Parameter IDs, valid curves, finite shape geometry, and
-strict shape-key order. Runtime defaults are not a substitute for missing
-author data.
+Mask scalar Property Bags are persisted with each Mask. Every complete shape
+key has a stable `KeyframeId`, exact Clip-local time, and explicit outgoing
+Hold/Linear interpolation. Project validation requires canonical Parameter
+IDs, valid curves, unique key identities, strict time order, finite bounded
+geometry, and compatible topology for Linear interpolation. Static Masks have
+one canonical time-zero Hold key. Runtime defaults, index addressing, and
+UUIDs parsed from property strings are not substitutes for author data or
+stable identity.
 
 ## Consequences
 

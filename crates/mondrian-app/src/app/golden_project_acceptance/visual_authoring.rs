@@ -23,12 +23,16 @@ use crate::app::ui_actions::{
     clip_write_parameter_values_action, timeline_create_basic_title_action,
     timeline_drop_asset_action, timeline_seek_action, timeline_trim_clips_action,
     video_transition_create_cross_dissolve_action, visual_effect_add_to_clip_action,
-    visual_effect_set_parameter_value_action, AssetsCreateAssetPayload, ClipCurveEditPayload,
+    visual_effect_set_parameter_value_action, visual_mask_add_to_clip_action,
+    visual_mask_set_parameter_value_action, visual_mask_set_shape_animation_enabled_action,
+    visual_mask_write_shape_action, AssetsCreateAssetPayload, ClipCurveEditPayload,
     ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload, ClipParameterValueWrite,
     ClipSetSolidColorPayload, ClipWriteParameterValuesPayload, TimelineDropAssetPayload,
     TimelineTrimClipsPayload, TimelineTrimPayloadEdge, VideoTransitionCreateCrossDissolvePayload,
     VideoTransitionHandlePolicy, VisualEffectAddToClipPayload,
-    VisualEffectSetParameterValuePayload,
+    VisualEffectSetParameterValuePayload, VisualMaskAddToClipPayload,
+    VisualMaskSetParameterValuePayload, VisualMaskSetShapeAnimationEnabledPayload,
+    VisualMaskWriteShapePayload,
 };
 use crate::app::AppState;
 use anyhow::{bail, ensure, Context};
@@ -39,10 +43,12 @@ use mondrian_core::automation::{
 };
 use mondrian_core::{
     AssetId, BasicTitle, ClipId, Color, EffectId, EvaluatedBasicTitle, FramePosition,
-    FrameRounding, PropertyHost, Resolution, TimelineTime, TrackId, VideoTransitionId,
+    FrameRounding, MaskId, PropertyHost, Resolution, TimelineTime, TrackId, VideoTransitionId,
 };
 use mondrian_editor_state::Action;
-use mondrian_effects::{EffectGraphNodeKind, EffectNode, EffectRenderOp, EffectType};
+use mondrian_effects::{
+    EffectGraphNodeKind, EffectNode, EffectRenderOp, EffectType, MaskShape, MaskShapeInterpolation,
+};
 use mondrian_playback::PreviewResolutionScale;
 use mondrian_renderer::{
     evaluate_prepared_visual_program, BasicTitleRasterizer, PreparedVisualProgram,
@@ -179,6 +185,13 @@ enum ContentEvidence {
         effect_id: EffectId,
         amount: f32,
     },
+    BasicMask {
+        author_steps: Vec<AuthorTransitionEvidence>,
+        clip_id: ClipId,
+        mask_id: MaskId,
+        shape_key_ids: Vec<String>,
+        opacity: f32,
+    },
     CrossDissolve {
         author_step: AuthorTransitionEvidence,
         transition_id: VideoTransitionId,
@@ -223,6 +236,7 @@ impl ContentEvidence {
             Self::Lut { .. } => "lut",
             Self::GaussianBlur { .. } => "gaussian-blur",
             Self::Sharpen { .. } => "sharpen",
+            Self::BasicMask { .. } => "basic-mask",
             Self::CrossDissolve { .. } => "cross-dissolve",
             Self::BasicTitle { .. } => "basic-title",
             Self::HoldKeyframe { .. } => "hold-keyframe",
@@ -306,6 +320,18 @@ impl GoldenVisualReport {
             ),
             "Visual Hero Clip lost the ordered Primary Color/LUT/Blur/Sharpen stack"
         );
+        let mask_id = self
+            .content
+            .iter()
+            .find_map(|content| match content {
+                ContentEvidence::BasicMask { mask_id, .. } => Some(*mask_id),
+                _ => None,
+            })
+            .context("Visual report has no basic Mask evidence")?;
+        ensure!(
+            left.mask(mask_id).is_some(),
+            "Visual Hero Clip lost its stable basic Mask identity"
+        );
         Ok(())
     }
 }
@@ -371,6 +397,7 @@ fn visual_slice(slices: &[GoldenExecutionSlice]) -> anyhow::Result<&GoldenExecut
                 "lut",
                 "gaussian-blur",
                 "sharpen",
+                "basic-mask",
                 "cross-dissolve",
                 "basic-title",
                 "hold-keyframe",
@@ -443,6 +470,75 @@ fn add_effect(
         created.len()
     );
     Ok((created[0], step))
+}
+
+fn add_basic_mask(
+    state: &mut AppState,
+    clip_id: ClipId,
+) -> anyhow::Result<(MaskId, AuthorTransitionEvidence)> {
+    let before = find_video_clip(
+        state.active_sequence().context("active Sequence is absent")?,
+        clip_id,
+    )?
+    .0
+    .masks
+    .iter()
+    .map(|mask| mask.id)
+    .collect::<BTreeSet<_>>();
+    let step = dispatch_author_transition(
+        state,
+        "add-basic-mask",
+        visual_mask_add_to_clip_action(VisualMaskAddToClipPayload {
+            clip_id,
+            shape: MaskShape::default(),
+        }),
+    )?;
+    let created = find_video_clip(
+        state.active_sequence().context("active Sequence is absent")?,
+        clip_id,
+    )?
+    .0
+    .masks
+    .iter()
+    .filter(|mask| !before.contains(&mask.id))
+    .map(|mask| mask.id)
+    .collect::<Vec<_>>();
+    ensure!(
+        created.len() == 1,
+        "basic Mask action created {} candidates",
+        created.len()
+    );
+    Ok((created[0], step))
+}
+
+fn set_mask_parameter(
+    state: &mut AppState,
+    clip_id: ClipId,
+    mask_id: MaskId,
+    path: &'static str,
+    value: PropertyValue,
+) -> anyhow::Result<AuthorTransitionEvidence> {
+    let mask = find_video_clip(
+        state.active_sequence().context("active Sequence is absent")?,
+        clip_id,
+    )?
+    .0
+    .mask(mask_id)
+    .context("basic Mask is absent")?;
+    let property = mask
+        .properties
+        .property(path)
+        .with_context(|| format!("basic Mask property is absent: {path}"))?;
+    dispatch_author_transition(
+        state,
+        "set-basic-mask-opacity",
+        visual_mask_set_parameter_value_action(VisualMaskSetParameterValuePayload {
+            clip_id,
+            mask_id,
+            parameter: property.address(),
+            value,
+        }),
+    )
 }
 
 fn set_effect_parameter(
@@ -1138,6 +1234,71 @@ pub(super) fn execute_visual_stage(
         "Redo did not restore the authored Sharpen amount"
     );
 
+    state.dispatch_action(timeline_seek_action(FramePosition::new(
+        edit_frame - 1,
+        state.active_sequence().context("active Sequence is absent")?.time_base(),
+    )))?;
+    let mask_opacity = 0.68;
+    let (mask_id, mask_add_step) = add_basic_mask(state, left_clip_id)?;
+    let mask_opacity_step = set_mask_parameter(
+        state,
+        left_clip_id,
+        mask_id,
+        mondrian_core::mask_data::MASK_PROP_OPACITY,
+        PropertyValue::Float(mask_opacity),
+    )?;
+    let mask_animation_step = dispatch_author_transition(
+        state,
+        "enable-basic-mask-shape-animation",
+        visual_mask_set_shape_animation_enabled_action(VisualMaskSetShapeAnimationEnabledPayload {
+            clip_id: left_clip_id,
+            mask_id,
+            enabled: true,
+        }),
+    )?;
+    let mask_shape_step = dispatch_author_transition(
+        state,
+        "write-basic-mask-ellipse-key",
+        visual_mask_write_shape_action(VisualMaskWriteShapePayload {
+            clip_id: left_clip_id,
+            mask_id,
+            shape: MaskShape::Ellipse {
+                center: glam::Vec2::new(0.5, 0.5),
+                radii: glam::Vec2::new(0.32, 0.38),
+            },
+            interpolation: MaskShapeInterpolation::Hold,
+        }),
+    )?;
+    let authored_mask = find_video_clip(
+        state.active_sequence().context("active Sequence is absent")?,
+        left_clip_id,
+    )?
+    .0
+    .mask(mask_id)
+    .context("authored basic Mask is absent")?;
+    ensure!(
+        authored_mask.shape_keyframes.len() == 2
+            && authored_mask.shape_keyframes[0].id != authored_mask.shape_keyframes[1].id,
+        "basic Mask did not retain two stable shape-key identities"
+    );
+    let mask_shape_key_ids = authored_mask
+        .shape_keyframes
+        .iter()
+        .map(|key| key.id.to_string())
+        .collect::<Vec<_>>();
+    let mask_content = ContentEvidence::BasicMask {
+        author_steps: vec![
+            mask_add_step,
+            mask_opacity_step,
+            mask_animation_step,
+            mask_shape_step,
+        ],
+        clip_id: left_clip_id,
+        mask_id,
+        shape_key_ids: mask_shape_key_ids.clone(),
+        opacity: mask_opacity,
+    };
+
     let transitions_before = state
         .active_sequence()
         .context("active Sequence is absent")?
@@ -1427,6 +1588,7 @@ pub(super) fn execute_visual_stage(
         lut_content,
         blur_content,
         sharpen_content,
+        mask_content,
         transition_content,
         title_content,
         ContentEvidence::HoldKeyframe {
@@ -1492,6 +1654,23 @@ pub(super) fn execute_visual_stage(
                 sharpen_effect_id,
             ],
         "save/reopen changed Primary Color/LUT/Blur/Sharpen stack order"
+    );
+    let reopened_mask = reopened_left.mask(mask_id).context("save/reopen lost the basic Mask")?;
+    ensure!(
+        reopened_mask
+            .shape_keyframes
+            .iter()
+            .map(|key| key.id.to_string())
+            .collect::<Vec<_>>()
+            == mask_shape_key_ids,
+        "save/reopen changed basic Mask shape-key identity or order"
+    );
+    ensure!(
+        reopened_mask.properties.evaluate(
+            mondrian_core::mask_data::MASK_PROP_OPACITY,
+            TimelineTime::ZERO
+        ) == Some(PropertyValue::Float(mask_opacity)),
+        "save/reopen changed basic Mask opacity"
     );
     for (parameter, value) in [
         ("exposure", primary_exposure),
@@ -1616,7 +1795,7 @@ pub(super) fn execute_visual_stage(
     )?;
 
     Ok(GoldenVisualReport {
-        schema_version: 9,
+        schema_version: 10,
         profile: VISUAL_SLICE_ID,
         contract_id: contract.id.clone(),
         status: "passed",
@@ -1680,7 +1859,7 @@ fn golden_project_visual_authoring_roundtrip_gate() -> anyhow::Result<()> {
         }
         Err(error) => {
             let failure = serde_json::json!({
-                "schema_version": 9,
+                "schema_version": 10,
                 "profile": VISUAL_SLICE_ID,
                 "status": "failed",
                 "complete_golden_project": false,

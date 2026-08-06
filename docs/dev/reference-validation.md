@@ -11,7 +11,7 @@ control exists.
   purposes. Fixed files pin bytes globally; generated files pin the recipe and
   are byte-pinned by each run.
 - `tests/validation/golden-project.json` defines the five-minute editing and
-  export workflow. Contract identity `windows-alpha-golden-v13` uses closed
+  export workflow. Contract identity `windows-alpha-golden-v14` uses closed
   schema v4 and fixes exact Hero Sequence raster/timing/color/audio
   values, fixture-role purposes, stable built-in delivery preset identities,
   resolved profile/depth/chroma/range/Alpha expectations, and independently
@@ -75,7 +75,7 @@ cannot satisfy a color golden even when it carries valid CICP tags.
 
 An execution slice is intentionally narrower than the complete Golden Project.
 It passes only if its exact required fixture roles, operations, and content have
-typed postcondition evidence. Golden v13 rejects unknown fields; requirement IDs
+typed postcondition evidence. Golden v14 rejects unknown fields; requirement IDs
 select evidence obligations but cannot substitute for observed author, media,
 delivery, or persistence facts.
 Every slice report explicitly records `complete_golden_project: false`. A
@@ -311,6 +311,27 @@ This supersedes v12 for the complete-Golden repetition obligation only; it
 still does not claim independent Blur/Sharpen reference quality, qualified
 machine throughput, long-duration device/A/V, memory, or absolute color
 reference evidence.
+
+The current v14 supervisor run
+`20260806T145420Z-complete-golden-cfda1141` passed `3/3` after `Pr/All`
+reference-asset validation. The non-incremental single-job product rebuild took
+282.511 s. Its three processes used distinct run and Project identities,
+exited naturally, and published complete reports in 68.656 s, 64.396 s, and
+64.757 s. Every report binds all seven stages to one Hero Sequence, retains
+exactly Hero plus the strong-reference nested child, and includes Visual report
+schema v10. That report adds `basic-mask` to the ordered visual content and
+proves stable Mask and shape-key identities, exact Clip-local shape animation,
+scalar parameters, Undo/Redo, durable reopen, and identical Preview/Export
+execution evidence. The aggregate report SHA-256 is
+`c54b5bf6d0a4977aeef1776f2b141625e7af2c9c34d15fa2fd554b35472284bf`;
+the ordered pass-report hashes are
+`0b06d25a512bf41bdd773b4eb0f59c4e5d11753c3a4c267f485fb495787739f5`,
+`a10f36a4c9e03550cba96203db19427d3c68d4b3cf04df1de2908085e701e273`,
+and `33ad6fe9eceea7f6fb6072ef245e3b4ed261944fd9b3b5b21c187b265d3de9b8`.
+This supersedes v13 for the complete-Golden repetition obligation only; it
+does not claim Viewer geometry-handle interaction, freeform Path editing,
+tracking, independent Mask reference quality, or the broader performance and
+device obligations listed above.
 
 Heavy GPU/media work intentionally runs on a dedicated process main lifetime,
 not a libtest worker. The terminal JSON report is the semantic completion
@@ -641,7 +662,7 @@ supervisor correctly classified the run as `passed-diagnostic`, not baseline,
 because `-Gate Video` omits the required Audio gate; this result closes the
 current-revision Windows long-video slice only.
 
-The Golden v13 contract resolves PCM, AAC, CFR and
+The Golden v14 contract resolves PCM, AAC, CFR and
 VFR Rec.709 H.264, HLG Main10, and sRGB Alpha fixture identities and assigns
 all six to executable slices.
 `foundation-audio-authoring-v1`, `visual-authoring-roundtrip-v1`,

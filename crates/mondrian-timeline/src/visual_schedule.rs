@@ -834,7 +834,7 @@ mod tests {
         AnimatedProperty, Keyframe, PropertyDescriptor, PropertyValue,
     };
     use mondrian_core::effect_data::{EffectNode, EffectType};
-    use mondrian_core::mask_data::{MaskComponent, MaskKeyframe, MaskShape, MASK_PROP_OPACITY};
+    use mondrian_core::mask_data::{MaskComponent, MaskEvaluation, MaskShape, MASK_PROP_OPACITY};
     use mondrian_core::timeline_data::{
         FlatActiveClip, FlatVideoTransitionDefinition, FlatVisualItem,
     };
@@ -1039,7 +1039,7 @@ mod tests {
 
         let mut mask = MaskComponent::new(
             "Animated isolation".to_owned(),
-            MaskKeyframe {
+            MaskEvaluation {
                 shape: MaskShape::Rectangle {
                     x: 0.1,
                     y: 0.2,
@@ -1081,13 +1081,16 @@ mod tests {
             )
             .expect("mask end opacity");
         mask.shape_animation_enabled = true;
-        mask.shape_keyframes.push((
+        mask.shape_keyframes.push(mondrian_core::mask_data::MaskShapeKeyframe::new(
             tt(8),
             MaskShape::Ellipse {
                 center: Vec2::new(0.55, 0.45),
                 radii: Vec2::new(0.25, 0.3),
             },
+            mondrian_core::mask_data::MaskShapeInterpolation::Linear,
         ));
+        mask.shape_keyframes[0].interpolation =
+            mondrian_core::mask_data::MaskShapeInterpolation::Linear;
         left.masks.push(mask);
         let left_id = left.id;
 
@@ -1200,9 +1203,9 @@ mod tests {
                     }
                 }
                 for mask in &clip.masks {
-                    for (clip_time, _) in &mask.shape_keyframes {
+                    for shape_key in &mask.shape_keyframes {
                         boundaries.insert(
-                            clip.clip_to_timeline_time(*clip_time)
+                            clip.clip_to_timeline_time(shape_key.time)
                                 .expect("valid mask shape Sequence time"),
                         );
                     }

@@ -823,7 +823,7 @@ fn replace_effect_graph(
 mod tests {
     use super::*;
     use crate::evaluate_prepared_visual_program;
-    use mondrian_core::mask_data::{MaskComponent, MaskKeyframe, MaskShape};
+    use mondrian_core::mask_data::{MaskComponent, MaskEvaluation, MaskShape};
     use mondrian_core::timeline_data::{ClipContent, MediaInterpretation};
     use mondrian_core::{BlendMode, ColorSpace, FramePosition, Rational, TimeScale};
     use mondrian_effects::{
@@ -1130,7 +1130,7 @@ mod tests {
         clip.add_effect_node(temporal_dag_effect(offset));
         clip.masks.push(MaskComponent::new(
             "subject".to_owned(),
-            MaskKeyframe {
+            MaskEvaluation {
                 shape: MaskShape::Rectangle {
                     x: 0.2,
                     y: 0.2,
@@ -1139,7 +1139,7 @@ mod tests {
                     corner_radius: 0.1,
                 },
                 feather: 1.5,
-                ..MaskKeyframe::default()
+                ..MaskEvaluation::default()
             },
         ));
         track.add_clip(clip).expect("add Clip");

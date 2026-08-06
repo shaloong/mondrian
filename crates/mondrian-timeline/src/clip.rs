@@ -9,7 +9,7 @@ use mondrian_core::{
         PropertyMutation, PropertyValue,
     },
     effect_data::{EffectNode, EffectType},
-    mask_data::MaskComponent,
+    mask_data::{MaskComponent, MaskShape, MaskShapeInterpolation},
     types::*,
     AuthoringFootprint, AuthoringFootprintCollector, AuthoringFootprintError, AuthoringList,
     MondrianError, ParameterId, Result, TimeScale, TimelineTime,
@@ -36,6 +36,19 @@ pub enum EffectRelativePlacement {
     Before(EffectId),
     /// Place the moving Effect immediately after the anchor.
     After(EffectId),
+}
+
+/// Stable relative placement for one Mask inside a Clip's ordered Mask stack.
+///
+/// Collection indexes are projection data. Boolean Mask composition order is
+/// authored through stable `MaskId` identities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaskRelativePlacement {
+    /// Place the moving Mask immediately before the anchor.
+    Before(MaskId),
+    /// Place the moving Mask immediately after the anchor.
+    After(MaskId),
 }
 
 /// 2D 变换（位置 / 缩放 / 旋转 / 锚点 / 不透明度），所有属性可关键帧动画
@@ -914,6 +927,9 @@ impl Clip {
         }
         for mask in &mut self.masks {
             mask.id = MaskId::new();
+            for shape_key in &mut mask.shape_keyframes {
+                shape_key.id = mondrian_core::KeyframeId::new();
+            }
             mask.properties.fork_author_identities();
         }
     }
@@ -1071,11 +1087,197 @@ impl Clip {
     fn next_effect_group_label(&self, effect_type: &EffectType) -> String {
         effect_type.display_name().to_string()
     }
+
+    /// Append one fully initialized Mask author entity.
+    pub fn add_mask_component(&mut self, mask: MaskComponent) -> MaskId {
+        let mask_id = mask.id;
+        self.masks.push(mask);
+        mask_id
+    }
+
+    /// Resolve one Mask by stable identity.
+    pub fn mask(&self, mask_id: MaskId) -> Option<&MaskComponent> {
+        self.masks.iter().find(|mask| mask.id == mask_id)
+    }
+
+    /// Return whether one Mask participates in picture execution.
+    pub fn mask_enabled(&self, mask_id: MaskId) -> Option<bool> {
+        self.mask(mask_id).map(|mask| mask.enabled)
+    }
+
+    /// Return whether one Mask rejects geometry and parameter edits.
+    pub fn mask_locked(&self, mask_id: MaskId) -> Option<bool> {
+        self.mask(mask_id).map(|mask| mask.locked)
+    }
+
+    /// Change a Mask's execution-enabled state.
+    pub fn set_mask_enabled(&mut self, mask_id: MaskId, enabled: bool) -> Result<bool> {
+        let mask = self.mask_mut(mask_id)?;
+        if mask.enabled == enabled {
+            return Ok(false);
+        }
+        mask.enabled = enabled;
+        Ok(true)
+    }
+
+    /// Change a Mask's author-edit lock state.
+    pub fn set_mask_locked(&mut self, mask_id: MaskId, locked: bool) -> Result<bool> {
+        let mask = self.mask_mut(mask_id)?;
+        if mask.locked == locked {
+            return Ok(false);
+        }
+        mask.locked = locked;
+        Ok(true)
+    }
+
+    /// Remove one unlocked Mask by stable identity.
+    pub fn remove_mask(&mut self, mask_id: MaskId) -> Result<()> {
+        let index = self.mask_index(mask_id)?;
+        if self.masks[index].locked {
+            return Err(mask_author_error(format!("Mask is locked: {mask_id}")));
+        }
+        self.masks.remove(index);
+        Ok(())
+    }
+
+    /// Return whether one stable-identity Mask move would change composition.
+    pub fn mask_relative_placement_would_change(
+        &self,
+        mask_id: MaskId,
+        placement: MaskRelativePlacement,
+    ) -> Result<bool> {
+        let source = self.mask_index(mask_id)?;
+        if self.masks[source].locked {
+            return Err(mask_author_error(format!("Mask is locked: {mask_id}")));
+        }
+        let anchor_id = match placement {
+            MaskRelativePlacement::Before(anchor_id) | MaskRelativePlacement::After(anchor_id) => {
+                anchor_id
+            }
+        };
+        if anchor_id == mask_id {
+            return Err(mask_author_error(
+                "a Mask cannot be ordered relative to itself",
+            ));
+        }
+        let anchor = self.mask_index(anchor_id)?;
+        Ok(match placement {
+            MaskRelativePlacement::Before(_) => source.checked_add(1) != Some(anchor),
+            MaskRelativePlacement::After(_) => anchor.checked_add(1) != Some(source),
+        })
+    }
+
+    /// Move one unlocked Mask immediately before or after a stable anchor.
+    pub fn reorder_mask_relative(
+        &mut self,
+        mask_id: MaskId,
+        placement: MaskRelativePlacement,
+    ) -> Result<bool> {
+        if !self.mask_relative_placement_would_change(mask_id, placement)? {
+            return Ok(false);
+        }
+        let source = self.mask_index(mask_id)?;
+        let anchor_id = match placement {
+            MaskRelativePlacement::Before(anchor_id) | MaskRelativePlacement::After(anchor_id) => {
+                anchor_id
+            }
+        };
+        let mask = self.masks.remove(source);
+        let anchor = self.mask_index(anchor_id)?;
+        let target = match placement {
+            MaskRelativePlacement::Before(_) => anchor,
+            MaskRelativePlacement::After(_) => anchor
+                .checked_add(1)
+                .ok_or_else(|| mask_author_error("Mask insertion index overflowed"))?,
+        };
+        self.masks.insert(target, mask);
+        Ok(true)
+    }
+
+    /// Prepare one scalar Mask parameter write through stable author identity.
+    pub fn prepare_mask_parameter_value(
+        &self,
+        mask_id: MaskId,
+        address: &mondrian_core::automation::AnimationParameterAddress,
+        time: TimelineTime,
+        value: PropertyValue,
+    ) -> Result<Option<PropertyMutation>> {
+        let mask = self
+            .mask(mask_id)
+            .ok_or_else(|| mask_author_error(format!("Mask does not exist: {mask_id}")))?;
+        if mask.locked {
+            return Err(mask_author_error(format!("Mask is locked: {mask_id}")));
+        }
+        mask.properties.prepare_value_write_by_address(address, time, value)
+    }
+
+    /// Apply a previously prepared scalar Mask parameter mutation.
+    pub fn apply_mask_parameter_mutation(
+        &mut self,
+        mask_id: MaskId,
+        mutation: PropertyMutation,
+    ) -> Result<()> {
+        let mask = self.mask_mut(mask_id)?;
+        if mask.locked {
+            return Err(mask_author_error(format!("Mask is locked: {mask_id}")));
+        }
+        mask.properties.apply_mutation(mutation)
+    }
+
+    /// Enable or disable shape animation for one unlocked Mask.
+    pub fn set_mask_shape_animation_enabled(
+        &mut self,
+        mask_id: MaskId,
+        enabled: bool,
+        time: TimelineTime,
+    ) -> Result<bool> {
+        let mask = self.mask_mut(mask_id)?;
+        if mask.locked {
+            return Err(mask_author_error(format!("Mask is locked: {mask_id}")));
+        }
+        mask.set_shape_animation_enabled(enabled, time)
+    }
+
+    /// Write one complete shape on an unlocked Mask.
+    pub fn write_mask_shape(
+        &mut self,
+        mask_id: MaskId,
+        time: TimelineTime,
+        shape: MaskShape,
+        interpolation: MaskShapeInterpolation,
+    ) -> Result<Option<KeyframeId>> {
+        let mask = self.mask_mut(mask_id)?;
+        if mask.locked {
+            return Err(mask_author_error(format!("Mask is locked: {mask_id}")));
+        }
+        mask.write_shape(time, shape, interpolation)
+    }
+
+    fn mask_mut(&mut self, mask_id: MaskId) -> Result<&mut MaskComponent> {
+        self.masks
+            .iter_mut()
+            .find(|mask| mask.id == mask_id)
+            .ok_or_else(|| mask_author_error(format!("Mask does not exist: {mask_id}")))
+    }
+
+    fn mask_index(&self, mask_id: MaskId) -> Result<usize> {
+        self.masks
+            .iter()
+            .position(|mask| mask.id == mask_id)
+            .ok_or_else(|| mask_author_error(format!("Mask does not exist: {mask_id}")))
+    }
 }
 
 fn effect_order_error(reason: impl Into<String>) -> MondrianError {
     MondrianError::WorkflowStepFailed {
         step_id: "clip_effect_order".to_owned(),
+        reason: reason.into(),
+    }
+}
+
+fn mask_author_error(reason: impl Into<String>) -> MondrianError {
+    MondrianError::WorkflowStepFailed {
+        step_id: "clip_mask_authoring".to_owned(),
         reason: reason.into(),
     }
 }
@@ -1193,49 +1395,6 @@ impl PropertyHost for Clip {
                 }
             })?;
             title.apply_property_mutation(mutation)
-        } else if path.starts_with("mask.") {
-            // Path format: "mask.<uuid>.<short_prop>"
-            let parts: Vec<&str> = path.splitn(3, '.').collect();
-            if parts.len() == 3 {
-                let mask_uuid_prefix = parts[1];
-                let short_prop = parts[2];
-                let prefix = format!("mask.{}.", mask_uuid_prefix);
-                if let Some(mask) =
-                    self.masks.iter_mut().find(|m| m.id.0.to_string().starts_with(mask_uuid_prefix))
-                {
-                    // Shape is stored in shape_keyframes, not PropertyBag.
-                    if short_prop == mondrian_core::mask_data::MASK_PROP_SHAPE {
-                        match &mutation {
-                            PropertyMutation::ClearAnimation { time: _, .. } => {
-                                // Keep only the first shape keyframe.
-                                if let Some(first) = mask.shape_keyframes.first().cloned() {
-                                    mask.shape_keyframes.clear();
-                                    mask.shape_keyframes.push(first);
-                                }
-                                return Ok(());
-                            }
-                            _ => {
-                                // Other shape mutations (enable, disable) are handled
-                                // directly via set_mask_keyframe in the UI.
-                                return Ok(());
-                            }
-                        }
-                    }
-                    let short_mutation = mutation
-                        .map_path(|full| full.strip_prefix(&prefix).unwrap_or(&full).to_string());
-                    mask.properties.apply_mutation(short_mutation)
-                } else {
-                    Err(MondrianError::WorkflowStepFailed {
-                        step_id: "clip_apply_property_mutation".to_string(),
-                        reason: format!("蒙版未找到: {mask_uuid_prefix}"),
-                    })
-                }
-            } else {
-                Err(MondrianError::WorkflowStepFailed {
-                    step_id: "clip_apply_property_mutation".to_string(),
-                    reason: format!("无效的蒙版属性路径: {path}"),
-                })
-            }
         } else if path.starts_with("effect.") {
             if let Some(effect) = self.effects.iter_mut().find(|effect| {
                 effect.property_bag().ok().is_some_and(|bag| bag.property(path).is_some())
@@ -1309,7 +1468,7 @@ fn property_mutation_path(mutation: &PropertyMutation) -> &str {
 mod tests {
     use super::*;
     use mondrian_core::automation::{Keyframe, PropertyMutation, PropertyValue};
-    use mondrian_core::mask_data::MaskKeyframe;
+    use mondrian_core::mask_data::MaskEvaluation;
     use mondrian_effects::EffectRenderOp;
 
     fn tt(frame: i64) -> TimelineTime {
@@ -1537,6 +1696,87 @@ mod tests {
     }
 
     #[test]
+    fn mask_authoring_uses_stable_identity_lock_and_relative_order() {
+        let mut clip = Clip::new(AssetId::new(), tt(0), tt(30)).expect("valid Clip");
+        let first = clip.add_mask_component(MaskComponent::new(
+            "First".to_owned(),
+            MaskEvaluation::default(),
+        ));
+        let second = clip.add_mask_component(MaskComponent::new(
+            "Second".to_owned(),
+            MaskEvaluation::default(),
+        ));
+        let third = clip.add_mask_component(MaskComponent::new(
+            "Third".to_owned(),
+            MaskEvaluation::default(),
+        ));
+
+        assert!(!clip
+            .mask_relative_placement_would_change(first, MaskRelativePlacement::Before(second))
+            .expect("valid adjacency"));
+        assert!(clip
+            .reorder_mask_relative(first, MaskRelativePlacement::After(third))
+            .expect("stable relative move"));
+        assert_eq!(
+            clip.masks.iter().map(|mask| mask.id).collect::<Vec<_>>(),
+            vec![second, third, first]
+        );
+        assert!(clip.set_mask_locked(first, true).expect("lock Mask"));
+        assert!(clip.remove_mask(first).is_err());
+        assert!(clip
+            .reorder_mask_relative(first, MaskRelativePlacement::Before(second))
+            .is_err());
+        assert!(clip.set_mask_enabled(first, false).expect("disable locked Mask"));
+        assert!(clip.set_mask_locked(first, false).expect("unlock Mask"));
+        clip.remove_mask(first).expect("remove unlocked Mask");
+        assert!(clip.mask(first).is_none());
+    }
+
+    #[test]
+    fn mask_parameter_write_requires_stable_instance_address() {
+        let mut clip = Clip::new(AssetId::new(), tt(0), tt(30)).expect("valid Clip");
+        let mask_id = clip.add_mask_component(MaskComponent::new(
+            "Mask".to_owned(),
+            MaskEvaluation::default(),
+        ));
+        let address = clip
+            .mask(mask_id)
+            .and_then(|mask| mask.properties.property(mondrian_core::mask_data::MASK_PROP_OPACITY))
+            .map(|property| property.address())
+            .expect("stable Mask parameter address");
+        let mutation = clip
+            .prepare_mask_parameter_value(mask_id, &address, tt(5), PropertyValue::Float(0.4))
+            .expect("prepare stable write")
+            .expect("semantic change");
+        clip.apply_mask_parameter_mutation(mask_id, mutation)
+            .expect("apply stable write");
+        assert_eq!(
+            clip.mask(mask_id)
+                .expect("Mask")
+                .properties
+                .evaluate(mondrian_core::mask_data::MASK_PROP_OPACITY, tt(5)),
+            Some(PropertyValue::Float(0.4))
+        );
+
+        let stale = mondrian_core::automation::AnimationParameterAddress {
+            animation_track_id: mondrian_core::AnimationTrackId::new(),
+            parameter_id: address.parameter_id,
+        };
+        assert!(clip
+            .prepare_mask_parameter_value(mask_id, &stale, tt(5), PropertyValue::Float(0.2))
+            .is_err());
+        assert!(clip
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: MaskComponent::property_path(
+                    mask_id,
+                    mondrian_core::mask_data::MASK_PROP_OPACITY,
+                ),
+                value: PropertyValue::Float(0.1),
+            })
+            .is_err());
+    }
+
+    #[test]
     fn nested_sequence_constructor_marks_clip_kind() {
         let nested_id = SequenceId::new();
         let clip =
@@ -1707,7 +1947,7 @@ mod tests {
         ));
         original.masks.push(MaskComponent::new(
             "Mask".to_owned(),
-            MaskKeyframe::default(),
+            MaskEvaluation::default(),
         ));
         let mut copied = original.clone();
 

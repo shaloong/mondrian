@@ -8119,7 +8119,7 @@ fn preview_and_export_composite_color_path_summaries_match_for_frame() {
     solid.add_effect_node(blur);
     solid.masks.push(mondrian_core::mask_data::MaskComponent::new(
         "float-path-mask".to_owned(),
-        mondrian_core::mask_data::MaskKeyframe {
+        mondrian_core::mask_data::MaskEvaluation {
             shape: mondrian_core::mask_data::MaskShape::Rectangle {
                 x: 0.0,
                 y: 0.0,

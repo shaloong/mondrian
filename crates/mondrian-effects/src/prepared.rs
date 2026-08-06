@@ -877,7 +877,7 @@ mod tests {
     use super::*;
     use crate::{
         register_effect_definition, EffectColorDomainContract, EffectDefinition,
-        EffectGraphBuilder, EffectGraphPreparer, EffectNodeExt, EffectRenderOp, MaskKeyframe,
+        EffectGraphBuilder, EffectGraphPreparer, EffectNodeExt, EffectRenderOp, MaskEvaluation,
         MaskShape,
     };
     use mondrian_core::{
@@ -1072,7 +1072,7 @@ mod tests {
     fn prepared_mask_contract_preserves_exact_partial_roi() {
         let mask = MaskComponent::new(
             "subject".to_owned(),
-            MaskKeyframe {
+            MaskEvaluation {
                 shape: MaskShape::Rectangle {
                     x: 0.2,
                     y: 0.25,
@@ -1081,7 +1081,7 @@ mod tests {
                     corner_radius: 0.05,
                 },
                 feather: 7.0,
-                ..MaskKeyframe::default()
+                ..MaskEvaluation::default()
             },
         );
         let program = PreparedEffectProgram::prepare(&[], &[mask], WorkingColorSpace::LinearRec709)

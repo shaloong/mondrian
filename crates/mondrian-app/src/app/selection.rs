@@ -1,6 +1,6 @@
 use super::{AnimationKeyframeSelection, AnimationPropertySelection, AppState};
 use mondrian_core::automation::PropertyHost;
-use mondrian_core::types::{ClipId, EffectId, TrackId, VideoTransitionId};
+use mondrian_core::types::{ClipId, EffectId, MaskId, TrackId, VideoTransitionId};
 use mondrian_timeline::{clip_selection_unit, sequence::Sequence};
 use std::collections::{HashMap, HashSet};
 
@@ -70,6 +70,13 @@ impl AppState {
         let selection = self.selection.selected_effect?;
         let sequence = self.active_sequence()?;
         resolve_effect_selection(sequence, selection.clip.clip_id, selection.effect_id)
+    }
+
+    /// The selected Mask inside the primary video Clip, if it still exists.
+    pub fn primary_selected_mask(&self) -> Option<(MaskId, ClipId, TrackId)> {
+        let (mask_id, clip_id, _) = self.selection.selected_mask?;
+        self.active_sequence()
+            .and_then(|sequence| resolve_mask_selection(sequence, clip_id, mask_id))
     }
 
     /// The selected visual Transition, if it still belongs to the active Sequence.
@@ -209,6 +216,25 @@ impl AppState {
         Some(selection)
     }
 
+    /// Select one Mask by stable Clip and Mask identities.
+    pub fn select_mask_by_id(
+        &mut self,
+        clip_id: ClipId,
+        mask_id: MaskId,
+    ) -> Option<(MaskId, ClipId, TrackId)> {
+        let (mask_id, clip_id, track_id) = self
+            .active_sequence()
+            .and_then(|sequence| resolve_mask_selection(sequence, clip_id, mask_id))?;
+        let clip = resolve_clip_selection(self.active_sequence()?, clip_id)?;
+        self.selection.selected_track_ids.clear();
+        self.selection.selected_clips = vec![clip];
+        self.selection.selected_video_transition = None;
+        self.selection.selected_effect = None;
+        self.selection.selected_mask = Some((mask_id, clip_id, track_id));
+        self.clear_animation_selection();
+        Some((mask_id, clip_id, track_id))
+    }
+
     /// Select a visual Transition by stable identity in the active Sequence.
     pub fn select_video_transition_by_id(
         &mut self,
@@ -312,9 +338,7 @@ impl AppState {
 
         self.selection.selected_mask =
             self.selection.selected_mask.and_then(|(mask_id, clip_id, _track_id)| {
-                clip_updates
-                    .get(&clip_id)
-                    .map(|selection| (mask_id, clip_id, selection.track_id))
+                resolve_mask_selection(&sequence, clip_id, mask_id)
             });
         self.selection.selected_effect = self.selection.selected_effect.and_then(|selection| {
             resolve_effect_selection(&sequence, selection.clip.clip_id, selection.effect_id)
@@ -475,4 +499,20 @@ pub fn resolve_effect_selection(
         .iter()
         .any(|effect| effect.id == effect_id)
         .then_some(SelectedEffectRef { clip: clip_selection, effect_id })
+}
+
+/// Resolve one Mask identity to its current video Track placement.
+pub fn resolve_mask_selection(
+    sequence: &Sequence,
+    clip_id: ClipId,
+    mask_id: MaskId,
+) -> Option<(MaskId, ClipId, TrackId)> {
+    sequence.video_tracks.iter().find_map(|track| {
+        track
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_id)
+            .filter(|clip| clip.masks.iter().any(|mask| mask.id == mask_id))
+            .map(|_| (mask_id, clip_id, track.id))
+    })
 }
