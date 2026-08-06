@@ -11,7 +11,7 @@ control exists.
   purposes. Fixed files pin bytes globally; generated files pin the recipe and
   are byte-pinned by each run.
 - `tests/validation/golden-project.json` defines the five-minute editing and
-  export workflow. Contract identity `windows-alpha-golden-v12` uses closed
+  export workflow. Contract identity `windows-alpha-golden-v13` uses closed
   schema v4 and fixes exact Hero Sequence raster/timing/color/audio
   values, fixture-role purposes, stable built-in delivery preset identities,
   resolved profile/depth/chroma/range/Alpha expectations, and independently
@@ -75,7 +75,7 @@ cannot satisfy a color golden even when it carries valid CICP tags.
 
 An execution slice is intentionally narrower than the complete Golden Project.
 It passes only if its exact required fixture roles, operations, and content have
-typed postcondition evidence. Golden v12 rejects unknown fields; requirement IDs
+typed postcondition evidence. Golden v13 rejects unknown fields; requirement IDs
 select evidence obligations but cannot substitute for observed author, media,
 delivery, or persistence facts.
 Every slice report explicitly records `complete_golden_project: false`. A
@@ -275,7 +275,7 @@ recovery; the supervisor recorded `forced_after_terminal_report: true` without
 changing semantic status. This current evidence supersedes v10 for the Golden
 release repetition obligation only and is historical after v12.
 
-The current v12 supervisor run
+The v12 supervisor run
 `20260805T163443Z-complete-golden-58886bac` passed `3/3` against the repository
 fixture root after `Pr/All` reference-asset validation. It was rebuilt from the
 current source with incremental compilation disabled in 467.818 s. The three
@@ -292,6 +292,25 @@ and `aa2da824abe8ca2385a4c31b9af304b7e1847d6a0735070baeffcd2e88b05877`.
 This closes only the versioned complete-Golden repetition obligation; it does
 not claim qualified-machine throughput, long-duration device/A/V, memory, or
 independent absolute color-reference evidence.
+
+The current v13 supervisor run
+`20260806T110402Z-complete-golden-c69b0bd8` passed `3/3` after `Pr/All`
+reference-asset validation. The non-incremental single-job product build took
+355.780 s. Its three processes used distinct run and Project identities,
+exited naturally, and published complete reports in 73.776 s, 68.908 s, and
+69.328 s. Every report binds all seven stages to one Hero Sequence, retains
+exactly Hero plus the strong-reference nested child, and includes Visual report
+schema v9 with the ordered Primary/LUT/Gaussian Blur/Sharpen stack. The
+aggregate report SHA-256 is
+`aadefedb08429bd7320204a6ea55e33862f9aa2948effe9732f1cf705af5bf3d`;
+the ordered pass-report hashes are
+`1ebedb7133ac92b02bdb0ec0582375239d22b5a53295005a91d2ec84d6ed2ff2`,
+`4501cd79525dbe9706d2aec5e962a936e87e653e9dc443d9d1f1090335eaac49`,
+and `e20eb9985c7c12f07ca3884461825cc8917784ce4bdb92a0183f7094c222f5cd`.
+This supersedes v12 for the complete-Golden repetition obligation only; it
+still does not claim independent Blur/Sharpen reference quality, qualified
+machine throughput, long-duration device/A/V, memory, or absolute color
+reference evidence.
 
 Heavy GPU/media work intentionally runs on a dedicated process main lifetime,
 not a libtest worker. The terminal JSON report is the semantic completion
@@ -459,22 +478,30 @@ cargo test -p mondrian-app --lib `
 This slice creates an exact adjacent generated edit, adds the product-default
 Cross Dissolve, creates and edits a Basic Title, applies working-space-aware
 Primary Color, and binds a generated identity cube to an explicitly authored
-Rec.709 processing domain. It also authors two-key Hold, Linear, and Bezier
-curves through production App Interfaces. Every edit,
+Rec.709 processing domain. The same ordered Clip stack then adds finite-kernel
+Gaussian Blur and Sharpen through the product Effect Interface. The report
+requires one compiled node for each operation in both the Preview and Export
+graph, records stable Effect identities and parameters, and proves Sharpen's
+canonical default plus authored value through a complete Undo/Redo pair. It
+also authors two-key Hold, Linear, and Bezier curves through production App
+Interfaces. Every edit,
 Undo, and Redo must advance the installed Authoring Session by exactly one
 Author Generation and Sequence Revision. The gate then performs production
 durable save/close/fresh-open and repeats Headless Preview execution. Preview
 uses the recursive timeline executor, real system-font rasterizer, and
 float-linear CPU compositor; its evaluated title, Cross Dissolve coefficient,
 and compiled effect-graph signature must equal the Export render plan. Effect
-IDs/order, Primary parameters, LUT processing space/path/content hash/domain,
-raster signature, and pixel hash must be unchanged after reopen. The exact named
+IDs/order, Primary/Blur/Sharpen parameters, LUT processing
+space/path/content hash/domain, raster signature, and pixel hash must be
+unchanged after reopen. The exact named
 Windows font is a real dependency, so missing or changed font data fails closed.
 These generated pixels and the generated identity LUT prove
 regression parity only: they do not replace an independent application or
-specification reference, real-media handle coverage, the complete keyframe
+specification reference, independent Blur/Sharpen visual or numerical
+references, real-media handle coverage, the complete keyframe
 editing UI, or any other complete-run stage. Visual report schema
-v7 records the Project-scoped stage-Sequence creation and runs over the same
+v9 records the Project-scoped stage-Sequence creation, Blur/Sharpen author and
+execution evidence, and runs over the same
 `GoldenProductWorkflowDriver` used by Foundation Audio. Its standalone wrapper
 still creates an isolated development run, while the complete coordinator
 invokes every reusable stage against one Project.
@@ -614,7 +641,7 @@ supervisor correctly classified the run as `passed-diagnostic`, not baseline,
 because `-Gate Video` omits the required Audio gate; this result closes the
 current-revision Windows long-video slice only.
 
-The Golden v12 contract resolves PCM, AAC, CFR and
+The Golden v13 contract resolves PCM, AAC, CFR and
 VFR Rec.709 H.264, HLG Main10, and sRGB Alpha fixture identities and assigns
 all six to executable slices.
 `foundation-audio-authoring-v1`, `visual-authoring-roundtrip-v1`,

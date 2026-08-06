@@ -828,3 +828,22 @@ immutable payload within that owner. The cache is LRU bounded by both entry
 count and logical bytes; an individually oversized payload is returned to the
 requesting Program but is not retained. The frame hot path never polls the
 filesystem, and Preview residency cannot mutate an Export attempt's cache.
+
+## Product qualification
+
+An executable Definition is not product completion by itself. The versioned
+`visual-authoring-roundtrip-v1` Golden slice enters every claimed effect through
+the same external product Action seam, requires one Author Generation and
+Sequence Revision per mutation, and records stable `EffectId`, parameter, and
+stack-order evidence. Visual report schema v9 extends that ordered stack from
+Primary Color and LUT to finite-kernel Gaussian Blur and Sharpen. Sharpen's
+static parameter is exercised through Undo/Redo, and durable close/reopen must
+preserve all four identities, values, and order.
+
+The execution half compiles the same reopened stack independently for Preview
+and Export. Matching diagnostic signatures are necessary but not sufficient:
+both graphs must expose exactly one Gaussian Blur and one Sharpen operation,
+and the final Headless float-linear raster must be byte-identical before and
+after reopen. This is a regression and integration contract, not an
+independent numerical or visual reference. Product qualification still needs
+such references before either effect can satisfy the complete operator DoD.

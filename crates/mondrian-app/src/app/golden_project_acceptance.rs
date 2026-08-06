@@ -569,7 +569,7 @@ fn golden_contract_is_closed_and_matches_product_delivery_presets() -> anyhow::R
     let contract = load_golden_contract(&root)?;
     let settings = sequence_settings_from_contract(&contract.timeline)?;
     ensure!(
-        contract.id == "windows-alpha-golden-v12"
+        contract.id == "windows-alpha-golden-v13"
             && contract
                 .required_operations
                 .iter()

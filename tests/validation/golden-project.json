@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "id": "windows-alpha-golden-v12",
+  "id": "windows-alpha-golden-v13",
   "kind": "golden",
   "hero_sequence": {
     "role": "hero",
@@ -85,6 +85,8 @@
     "opacity",
     "primary-color",
     "lut",
+    "gaussian-blur",
+    "sharpen",
     "cross-dissolve",
     "basic-title",
     "clip-audio-gain-pan-fades",
@@ -191,6 +193,8 @@
       "required_content": [
         "primary-color",
         "lut",
+        "gaussian-blur",
+        "sharpen",
         "cross-dissolve",
         "basic-title",
         "hold-keyframe",

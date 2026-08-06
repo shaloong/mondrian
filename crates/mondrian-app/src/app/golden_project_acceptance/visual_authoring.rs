@@ -42,7 +42,7 @@ use mondrian_core::{
     FrameRounding, PropertyHost, Resolution, TimelineTime, TrackId, VideoTransitionId,
 };
 use mondrian_editor_state::Action;
-use mondrian_effects::{EffectNode, EffectType};
+use mondrian_effects::{EffectGraphNodeKind, EffectNode, EffectRenderOp, EffectType};
 use mondrian_playback::PreviewResolutionScale;
 use mondrian_renderer::{
     evaluate_prepared_visual_program, BasicTitleRasterizer, PreparedVisualProgram,
@@ -120,9 +120,13 @@ struct VisualSetupEvidence {
 #[serde(tag = "id", rename_all = "kebab-case")]
 enum OperationEvidence {
     UndoRedo {
-        undo: AuthorTransitionEvidence,
+        effect_undo: Box<AuthorTransitionEvidence>,
+        sharpen_amount_after_undo: f32,
+        effect_redo: Box<AuthorTransitionEvidence>,
+        sharpen_amount_after_redo: f32,
+        keyframe_undo: Box<AuthorTransitionEvidence>,
         keyframes_after_undo: usize,
-        redo: AuthorTransitionEvidence,
+        keyframe_redo: Box<AuthorTransitionEvidence>,
         keyframes_after_redo: usize,
     },
     SaveReopen {
@@ -162,6 +166,18 @@ enum ContentEvidence {
         domain_max: [f32; 3],
         interpolation: &'static str,
         intensity: f32,
+    },
+    GaussianBlur {
+        author_steps: Vec<AuthorTransitionEvidence>,
+        clip_id: ClipId,
+        effect_id: EffectId,
+        radius_pixels: f32,
+    },
+    Sharpen {
+        author_steps: Vec<AuthorTransitionEvidence>,
+        clip_id: ClipId,
+        effect_id: EffectId,
+        amount: f32,
     },
     CrossDissolve {
         author_step: AuthorTransitionEvidence,
@@ -205,6 +221,8 @@ impl ContentEvidence {
         match self {
             Self::PrimaryColor { .. } => "primary-color",
             Self::Lut { .. } => "lut",
+            Self::GaussianBlur { .. } => "gaussian-blur",
+            Self::Sharpen { .. } => "sharpen",
             Self::CrossDissolve { .. } => "cross-dissolve",
             Self::BasicTitle { .. } => "basic-title",
             Self::HoldKeyframe { .. } => "hold-keyframe",
@@ -258,14 +276,35 @@ impl GoldenVisualReport {
                 _ => None,
             })
             .context("Visual report has no LUT evidence")?;
+        let blur_effect_id = self
+            .content
+            .iter()
+            .find_map(|content| match content {
+                ContentEvidence::GaussianBlur { effect_id, .. } => Some(*effect_id),
+                _ => None,
+            })
+            .context("Visual report has no Gaussian Blur evidence")?;
+        let sharpen_effect_id = self
+            .content
+            .iter()
+            .find_map(|content| match content {
+                ContentEvidence::Sharpen { effect_id, .. } => Some(*effect_id),
+                _ => None,
+            })
+            .context("Visual report has no Sharpen evidence")?;
         ensure!(
-            left.effects
-                .iter()
-                .map(|effect| effect.id)
-                .collect::<Vec<_>>()
-                .windows(2)
-                .any(|pair| pair == [primary_effect_id, lut_effect_id]),
-            "Visual Hero Clip lost the ordered Primary Color/LUT stack"
+            left.effects.iter().map(|effect| effect.id).collect::<Vec<_>>().windows(4).any(
+                |stack| {
+                    stack
+                        == [
+                            primary_effect_id,
+                            lut_effect_id,
+                            blur_effect_id,
+                            sharpen_effect_id,
+                        ]
+                }
+            ),
+            "Visual Hero Clip lost the ordered Primary Color/LUT/Blur/Sharpen stack"
         );
         Ok(())
     }
@@ -291,6 +330,8 @@ struct VisualExecutionEvidence {
     export_elements: usize,
     cross_dissolve_progress: f32,
     left_effect_graph_signature: u64,
+    left_gaussian_blur_nodes: usize,
+    left_sharpen_nodes: usize,
     title_raster_identities: Vec<String>,
     title: EvaluatedTitleEvidence,
     rgba_sha256: String,
@@ -328,6 +369,8 @@ fn visual_slice(slices: &[GoldenExecutionSlice]) -> anyhow::Result<&GoldenExecut
             == [
                 "primary-color",
                 "lut",
+                "gaussian-blur",
+                "sharpen",
                 "cross-dissolve",
                 "basic-title",
                 "hold-keyframe",
@@ -462,6 +505,27 @@ fn assert_effect_parameter(
         "save/reopen changed Effect {effect_id} parameter {parameter_id}"
     );
     Ok(())
+}
+
+fn evaluated_effect_f32_parameter(
+    sequence: &Sequence,
+    clip_id: ClipId,
+    effect_id: EffectId,
+    effect_type: EffectType,
+    parameter: &str,
+) -> anyhow::Result<f32> {
+    let effect = find_clip_effect(sequence, clip_id, effect_id)?;
+    ensure!(
+        effect.effect_type == effect_type,
+        "Effect {effect_id} type changed while evaluating {parameter}"
+    );
+    let parameter_id = effect_type
+        .parameter_id(parameter)
+        .with_context(|| format!("invalid parameter name: {parameter}"))?;
+    effect
+        .evaluate_parameter(&parameter_id, TimelineTime::ZERO)
+        .and_then(|value| value.as_f32())
+        .with_context(|| format!("Effect {effect_id} parameter {parameter_id} is not scalar"))
 }
 
 fn new_solid_asset(state: &mut AppState) -> anyhow::Result<mondrian_core::AssetId> {
@@ -613,10 +677,15 @@ fn sha256_bytes(bytes: &[u8]) -> String {
 
 fn export_transition_input_effect_signature(
     input: &mondrian_renderer::TimelineTransitionInputPlan,
-) -> anyhow::Result<u64> {
+) -> anyhow::Result<(u64, usize, usize)> {
     match input {
         mondrian_renderer::TimelineTransitionInputPlan::SolidColor(layer) => {
-            Ok(layer.effect_graph.signature_hash())
+            let (blur_nodes, sharpen_nodes) = effect_kernel_node_counts(&layer.effect_graph);
+            Ok((
+                layer.effect_graph.signature_hash(),
+                blur_nodes,
+                sharpen_nodes,
+            ))
         }
         other => bail!("visual Golden expected a Solid Color transition input, got {other:?}"),
     }
@@ -624,13 +693,33 @@ fn export_transition_input_effect_signature(
 
 fn preview_transition_input_effect_signature(
     input: &ResolvedPreviewTransitionInput,
-) -> anyhow::Result<u64> {
+) -> anyhow::Result<(u64, usize, usize)> {
     match input {
         ResolvedPreviewTransitionInput::SolidColor(layer) => {
-            Ok(layer.effect_graph.signature_hash())
+            let (blur_nodes, sharpen_nodes) = effect_kernel_node_counts(&layer.effect_graph);
+            Ok((
+                layer.effect_graph.signature_hash(),
+                blur_nodes,
+                sharpen_nodes,
+            ))
         }
         _ => bail!("visual Golden expected a resolved Solid Color transition input"),
     }
+}
+
+fn effect_kernel_node_counts(graph: &mondrian_effects::CompiledEffectGraph) -> (usize, usize) {
+    graph.graph().nodes.iter().fold((0, 0), |(blur, sharpen), node| {
+        let op = match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op, .. }
+            | EffectGraphNodeKind::DomainEffect { op, .. } => Some(op),
+            _ => None,
+        };
+        match op {
+            Some(EffectRenderOp::GaussianBlur { .. }) => (blur + 1, sharpen),
+            Some(EffectRenderOp::Sharpen { .. }) => (blur, sharpen + 1),
+            _ => (blur, sharpen),
+        }
+    })
 }
 
 fn execute_visual_frame(state: &AppState, frame: i64) -> anyhow::Result<VisualExecutionEvidence> {
@@ -658,8 +747,12 @@ fn execute_visual_frame(state: &AppState, frame: i64) -> anyhow::Result<VisualEx
             _ => None,
         })
         .context("Export render plan contains no Basic Title")?;
-    let export_left_effect_signature =
+    let export_left_effect_evidence =
         export_transition_input_effect_signature(&export_transition.left)?;
+    ensure!(
+        export_left_effect_evidence.1 == 1 && export_left_effect_evidence.2 == 1,
+        "Export graph must contain exactly one Gaussian Blur and one Sharpen node"
+    );
 
     let mut rasterizer = BasicTitleRasterizer::new();
     let mut raster_identities = Vec::new();
@@ -733,7 +826,7 @@ fn execute_visual_frame(state: &AppState, frame: i64) -> anyhow::Result<VisualEx
             _ => None,
         })
         .context("resolved Preview contains no Cross Dissolve")?;
-    let preview_left_effect_signature = resolved
+    let preview_left_effect_evidence = resolved
         .plan
         .elements
         .iter()
@@ -744,8 +837,8 @@ fn execute_visual_frame(state: &AppState, frame: i64) -> anyhow::Result<VisualEx
         .context("resolved Preview contains no Cross Dissolve input")
         .and_then(|input| preview_transition_input_effect_signature(input.as_ref()))?;
     ensure!(
-        preview_left_effect_signature == export_left_effect_signature,
-        "Preview and Export compiled different Clip effect graphs"
+        preview_left_effect_evidence == export_left_effect_evidence,
+        "Preview and Export compiled different Clip effect graphs or kernel nodes"
     );
     ensure!(
         preview_progress.to_bits() == export_transition.progress.to_bits(),
@@ -775,7 +868,9 @@ fn execute_visual_frame(state: &AppState, frame: i64) -> anyhow::Result<VisualEx
         preview_elements: resolved.plan.elements.len(),
         export_elements: export_plan.elements.len(),
         cross_dissolve_progress: preview_progress,
-        left_effect_graph_signature: export_left_effect_signature,
+        left_effect_graph_signature: export_left_effect_evidence.0,
+        left_gaussian_blur_nodes: export_left_effect_evidence.1,
+        left_sharpen_nodes: export_left_effect_evidence.2,
         title_raster_identities: raster_identities,
         title: title_evidence(&preview_title),
         rgba_sha256: sha256_bytes(&output.rgba),
@@ -976,6 +1071,73 @@ pub(super) fn execute_visual_stage(
         intensity: lut_intensity,
     };
 
+    let blur_radius = 2.75;
+    let (blur_effect_id, blur_add_step) = add_effect(
+        state,
+        left_clip,
+        EffectType::GaussianBlur,
+        "add-gaussian-blur",
+    )?;
+    let blur_steps = vec![
+        blur_add_step,
+        set_effect_parameter(
+            state,
+            left_clip,
+            blur_effect_id,
+            "radius",
+            PropertyValue::Float(blur_radius),
+            "set-gaussian-blur-radius",
+        )?,
+    ];
+    let blur_content = ContentEvidence::GaussianBlur {
+        author_steps: blur_steps,
+        clip_id: left_clip_id,
+        effect_id: blur_effect_id,
+        radius_pixels: blur_radius,
+    };
+
+    let sharpen_amount = 0.45;
+    let (sharpen_effect_id, sharpen_add_step) =
+        add_effect(state, left_clip, EffectType::Sharpen, "add-sharpen")?;
+    let sharpen_set_step = set_effect_parameter(
+        state,
+        left_clip,
+        sharpen_effect_id,
+        "amount",
+        PropertyValue::Float(sharpen_amount),
+        "set-sharpen-amount",
+    )?;
+    let sharpen_content = ContentEvidence::Sharpen {
+        author_steps: vec![sharpen_add_step, sharpen_set_step],
+        clip_id: left_clip_id,
+        effect_id: sharpen_effect_id,
+        amount: sharpen_amount,
+    };
+    let effect_undo = dispatch_author_transition(state, "undo-sharpen-amount", Action::Undo)?;
+    let sharpen_amount_after_undo = evaluated_effect_f32_parameter(
+        state.active_sequence().context("active Sequence is absent")?,
+        left_clip_id,
+        sharpen_effect_id,
+        EffectType::Sharpen,
+        "amount",
+    )?;
+    ensure!(
+        sharpen_amount_after_undo.to_bits() == 0.0f32.to_bits(),
+        "Undo did not restore the canonical Sharpen default"
+    );
+    let effect_redo = dispatch_author_transition(state, "redo-sharpen-amount", Action::Redo)?;
+    let sharpen_amount_after_redo = evaluated_effect_f32_parameter(
+        state.active_sequence().context("active Sequence is absent")?,
+        left_clip_id,
+        sharpen_effect_id,
+        EffectType::Sharpen,
+        "amount",
+    )?;
+    ensure!(
+        sharpen_amount_after_redo.to_bits() == sharpen_amount.to_bits(),
+        "Redo did not restore the authored Sharpen amount"
+    );
+
     let transitions_before = state
         .active_sequence()
         .context("active Sequence is absent")?
@@ -1134,7 +1296,8 @@ pub(super) fn execute_visual_stage(
     )?;
     bezier_steps.push(bezier_end);
 
-    let undo = dispatch_author_transition(state, "undo-bezier-font-size-end", Action::Undo)?;
+    let keyframe_undo =
+        dispatch_author_transition(state, "undo-bezier-font-size-end", Action::Undo)?;
     let after_undo = find_video_clip(
         state.active_sequence().context("active Sequence is absent")?,
         title_clip_id,
@@ -1149,7 +1312,8 @@ pub(super) fn execute_visual_stage(
         after_undo == 1,
         "Undo did not remove the last Bezier keyframe"
     );
-    let redo = dispatch_author_transition(state, "redo-bezier-font-size-end", Action::Redo)?;
+    let keyframe_redo =
+        dispatch_author_transition(state, "redo-bezier-font-size-end", Action::Redo)?;
     let after_redo = find_video_clip(
         state.active_sequence().context("active Sequence is absent")?,
         title_clip_id,
@@ -1261,6 +1425,8 @@ pub(super) fn execute_visual_stage(
     let content = vec![
         primary_content,
         lut_content,
+        blur_content,
+        sharpen_content,
         transition_content,
         title_content,
         ContentEvidence::HoldKeyframe {
@@ -1301,17 +1467,31 @@ pub(super) fn execute_visual_stage(
     let (reopened_left, reopened_left_track) = find_video_clip(sequence, left_clip_id)?;
     ensure!(
         reopened_left_track == video_track_id,
-        "save/reopen changed Primary Color/LUT Clip placement"
+        "save/reopen changed visual Effect Clip placement"
     );
     let reopened_effect_order = reopened_left
         .effects
         .iter()
-        .filter(|effect| effect.id == primary_effect_id || effect.id == lut_effect_id)
+        .filter(|effect| {
+            [
+                primary_effect_id,
+                lut_effect_id,
+                blur_effect_id,
+                sharpen_effect_id,
+            ]
+            .contains(&effect.id)
+        })
         .map(|effect| effect.id)
         .collect::<Vec<_>>();
     ensure!(
-        reopened_effect_order == [primary_effect_id, lut_effect_id],
-        "save/reopen changed Primary Color/LUT stack order"
+        reopened_effect_order
+            == [
+                primary_effect_id,
+                lut_effect_id,
+                blur_effect_id,
+                sharpen_effect_id,
+            ],
+        "save/reopen changed Primary Color/LUT/Blur/Sharpen stack order"
     );
     for (parameter, value) in [
         ("exposure", primary_exposure),
@@ -1352,6 +1532,22 @@ pub(super) fn execute_visual_stage(
         EffectType::Lut3D,
         "intensity",
         PropertyValue::Float(lut_intensity),
+    )?;
+    assert_effect_parameter(
+        sequence,
+        left_clip_id,
+        blur_effect_id,
+        EffectType::GaussianBlur,
+        "radius",
+        PropertyValue::Float(blur_radius),
+    )?;
+    assert_effect_parameter(
+        sequence,
+        left_clip_id,
+        sharpen_effect_id,
+        EffectType::Sharpen,
+        "amount",
+        PropertyValue::Float(sharpen_amount),
     )?;
     let reopened_lut_bytes = std::fs::read(&lut_path).context("read reopened Golden LUT")?;
     ensure!(
@@ -1397,9 +1593,13 @@ pub(super) fn execute_visual_stage(
 
     let operations = vec![
         OperationEvidence::UndoRedo {
-            undo,
+            effect_undo: Box::new(effect_undo),
+            sharpen_amount_after_undo,
+            effect_redo: Box::new(effect_redo),
+            sharpen_amount_after_redo,
+            keyframe_undo: Box::new(keyframe_undo),
             keyframes_after_undo: after_undo,
-            redo,
+            keyframe_redo: Box::new(keyframe_redo),
             keyframes_after_redo: after_redo,
         },
         OperationEvidence::SaveReopen { durability },
@@ -1416,7 +1616,7 @@ pub(super) fn execute_visual_stage(
     )?;
 
     Ok(GoldenVisualReport {
-        schema_version: 8,
+        schema_version: 9,
         profile: VISUAL_SLICE_ID,
         contract_id: contract.id.clone(),
         status: "passed",
@@ -1480,7 +1680,7 @@ fn golden_project_visual_authoring_roundtrip_gate() -> anyhow::Result<()> {
         }
         Err(error) => {
             let failure = serde_json::json!({
-                "schema_version": 8,
+                "schema_version": 9,
                 "profile": VISUAL_SLICE_ID,
                 "status": "failed",
                 "complete_golden_project": false,

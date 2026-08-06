@@ -1780,7 +1780,7 @@ deliverables are decoded through the production Preview media Adapter and
 compared at the same coordinates. This remains deterministic Mondrian
 regression evidence; it does not replace the independent external color
 references described below.
-The Golden v12 Proxy/Relink gate adds fixed-corpus signed-retime evidence
+The Golden v13 Proxy/Relink gate adds fixed-corpus signed-retime evidence
 without a second time interpreter. CFR and VFR Clips each execute exact `1/2`,
 `-1/2`, and reverse hold maps. Preview and Export plans must preserve the same
 complete `SourceSampleTarget`; reverse uses `StrictPredecessor`, never a
