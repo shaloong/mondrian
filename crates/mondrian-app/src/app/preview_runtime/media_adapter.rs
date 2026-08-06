@@ -70,7 +70,11 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let deadline = (access_mode == PreviewDecodeAccessMode::PlaybackCursor)
             .then(|| transport.demand().and_then(PreviewFrameDemandSnapshot::adapter_deadline))
             .flatten();
-        let intent = MediaPreviewRequestIntent::Current(current_demand_id);
+        let intent = if transport.is_successor_preparation() {
+            MediaPreviewRequestIntent::Prefetch
+        } else {
+            MediaPreviewRequestIntent::Current(current_demand_id)
+        };
         let admission = if request.cpu_working_required {
             self.request_cpu_working_media_preview(
                 key.clone(),

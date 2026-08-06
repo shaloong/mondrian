@@ -40,6 +40,7 @@ impl AppState {
             playback.state,
             playback.position,
             playback.epoch,
+            playback.quality_revision,
             self.playback_preview_resolution_scale(),
             self.last_timeline_seek_source,
             demand,
@@ -53,6 +54,14 @@ impl AppState {
         sampled_at: Instant,
     ) -> PreviewFrameExecutionRequest<'_> {
         PreviewFrameExecutionRequest::new(self.preview_execution_snapshot(sampled_at), self)
+    }
+
+    /// Capture ticketless preparation for the exact immediate playback successor.
+    pub(crate) fn preview_successor_execution_request(
+        &self,
+        sampled_at: Instant,
+    ) -> Option<PreviewFrameExecutionRequest<'_>> {
+        PreviewFrameExecutionRequest::successor(self.preview_execution_snapshot(sampled_at), self)
     }
 
     /// Recapture preroll facts after terminal Frame Deliveries were applied.

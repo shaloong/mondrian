@@ -1553,6 +1553,23 @@ impl AppState {
         self.finalize_frame_presentation_at(ticket, Instant::now(), publication)
     }
 
+    /// Complete a demand whose exact physical artifact was already visible at
+    /// the supplied observation instant.
+    ///
+    /// This narrow seam is only valid for an exact prepared successor that
+    /// aliases the current physical output. The commit may synchronize
+    /// semantic ownership metadata, but it must not replace pixels or perform
+    /// any fallible work. A distinct prepared buffer must use ordinary
+    /// presentation completion at its real visibility-commit instant.
+    pub(crate) fn finalize_already_visible_frame_presentation<C: FnOnce()>(
+        &mut self,
+        ticket: Option<FramePresentationTicket>,
+        already_visible_at: Instant,
+        publication: FramePresentationPublication<C>,
+    ) -> FramePresentationDisposition {
+        self.finalize_frame_presentation_at(ticket, already_visible_at, publication)
+    }
+
     fn finalize_frame_presentation_at<C: FnOnce()>(
         &mut self,
         ticket: Option<FramePresentationTicket>,

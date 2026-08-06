@@ -1250,6 +1250,7 @@ struct WindowViewerGpuPublishedOutput {
 #[derive(Default)]
 struct WindowViewerGpuPresentationState {
     published_output: Option<WindowViewerGpuPublishedOutput>,
+    prepared_output: Option<WindowViewerGpuPublishedOutput>,
     presentation: Option<ViewerExternalTexturePresentation>,
 }
 
@@ -1269,6 +1270,32 @@ impl WindowViewerGpuPresentationState {
         self.published_output.take()
     }
 
+    fn replace_prepared_output(
+        &mut self,
+        output: WindowViewerGpuPublishedOutput,
+    ) -> Option<WindowViewerGpuPublishedOutput> {
+        self.prepared_output.replace(output)
+    }
+
+    fn take_prepared_output(&mut self) -> Option<WindowViewerGpuPublishedOutput> {
+        self.prepared_output.take()
+    }
+
+    fn promote_prepared_output(
+        &mut self,
+        output_key: &crate::app::preview_execution::PreviewOutputKey,
+    ) -> Option<WindowViewerGpuPublishedOutput> {
+        if self
+            .prepared_output
+            .as_ref()
+            .is_none_or(|prepared| &prepared.output_key != output_key)
+        {
+            return None;
+        }
+        let prepared = self.prepared_output.take()?;
+        self.published_output.replace(prepared)
+    }
+
     fn take_published_output_for_submission(
         &mut self,
         submission_id: ViewerGpuSubmissionId,
@@ -1278,7 +1305,14 @@ impl WindowViewerGpuPresentationState {
             .as_ref()
             .is_some_and(|output| output.submission_id == submission_id)
         {
-            self.published_output.take()
+            return self.published_output.take();
+        }
+        if self
+            .prepared_output
+            .as_ref()
+            .is_some_and(|output| output.submission_id == submission_id)
+        {
+            self.prepared_output.take()
         } else {
             None
         }
@@ -1296,9 +1330,12 @@ impl WindowViewerGpuPresentationState {
         self.presentation.take().is_some()
     }
 
-    fn clear(&mut self) -> Option<WindowViewerGpuPublishedOutput> {
+    fn clear(&mut self) -> Vec<WindowViewerGpuPublishedOutput> {
         self.presentation = None;
-        self.published_output.take()
+        [self.published_output.take(), self.prepared_output.take()]
+            .into_iter()
+            .flatten()
+            .collect()
     }
 }
 
@@ -3336,16 +3373,21 @@ fn retire_window_viewer_gpu_registration(
 }
 
 fn retire_window_published_gpu_output(session: &mut AppUiWindowSession, host: &AppUiHost) -> bool {
-    let Some(published) = session.viewer_gpu_presentation.take_published_output() else {
-        return false;
-    };
-    session.frame_renderer.unregister_external_texture(&published.texture_key);
-    let _ = host.clear_external_viewer_frame_for_artifact(
-        &published.output_key,
-        published.texture_key.as_str(),
-    );
-    drop(published);
-    true
+    let outputs = [
+        session.viewer_gpu_presentation.take_published_output(),
+        session.viewer_gpu_presentation.take_prepared_output(),
+    ];
+    let mut retired = false;
+    for published in outputs.into_iter().flatten() {
+        retired = true;
+        session.frame_renderer.unregister_external_texture(&published.texture_key);
+        let _ = host.clear_external_viewer_frame_for_artifact(
+            &published.output_key,
+            published.texture_key.as_str(),
+        );
+        drop(published);
+    }
+    retired
 }
 
 fn begin_window_viewer_gpu_quarantine(
@@ -3838,6 +3880,13 @@ fn prepare_viewer_gpu_preview(
     let mut frame = match host.gpu_preview_frame_for_current_state() {
         PreviewGpuFrameState::Ready(frame) => frame,
         PreviewGpuFrameState::Current(candidate) => {
+            if let Some(output_key) = host.exact_current_viewer_gpu_output_key()
+                && let Some(previous) =
+                    session.viewer_gpu_presentation.promote_prepared_output(&output_key)
+            {
+                session.frame_renderer.unregister_external_texture(&previous.texture_key);
+                drop(previous);
+            }
             let physical_is_exact =
                 session.viewer_gpu_presentation.published_output().is_some_and(|physical| {
                     host.has_external_viewer_frame_artifact(
@@ -3868,6 +3917,20 @@ fn prepare_viewer_gpu_preview(
                 AppUiViewerGpuOutputPreviewCandidateState::Current,
                 None,
             );
+            session.viewer_gpu_output_telemetry.record_current_skip();
+            if program_scopes_requested {
+                finish_prepare!();
+            }
+            match host.gpu_preview_successor_for_current_state() {
+                PreviewGpuFrameState::Ready(frame) => frame,
+                PreviewGpuFrameState::Prepared
+                | PreviewGpuFrameState::Current(_)
+                | PreviewGpuFrameState::Transparent(_)
+                | PreviewGpuFrameState::Loading
+                | PreviewGpuFrameState::Unavailable(_) => finish_prepare!(),
+            }
+        }
+        PreviewGpuFrameState::Prepared => {
             session.viewer_gpu_output_telemetry.record_current_skip();
             finish_prepare!();
         }
@@ -3915,7 +3978,13 @@ fn prepare_viewer_gpu_preview(
             finish_prepare!();
         }
     };
-    if !host.preflight_viewer_gpu_presentation(frame.presentation_ticket()) {
+    if !frame.is_successor_preparation()
+        && !host.preflight_viewer_gpu_presentation(frame.presentation_ticket())
+    {
+        finish_prepare!();
+    }
+    if frame.is_successor_preparation() && frame.has_heterogeneous_gpu_execution() {
+        fail_viewer_gpu_frame(host, &mut frame);
         finish_prepare!();
     }
     let Some(texture_key_base) = ExternalTextureKey::new(format!(
@@ -4506,6 +4575,56 @@ fn publish_ordinary_window_viewer_gpu_submission(
         );
         return;
     };
+    let successor_preparation = session
+        .viewer_gpu_submissions
+        .owner(submission_id)
+        .is_some_and(|owner| owner.frame.is_successor_preparation());
+    if successor_preparation {
+        let Some(visible_output) = mondrian_ui_widgets::ViewerExternalTextureFrame::new_spatial(
+            texture_key.as_str().to_owned(),
+            presentation,
+        ) else {
+            session.frame_renderer.unregister_external_texture(&texture_key);
+            drop(output_lease);
+            return;
+        };
+        let Some(owner) = session.viewer_gpu_submissions.owner(submission_id) else {
+            session.frame_renderer.unregister_external_texture(&texture_key);
+            drop(output_lease);
+            return;
+        };
+        host.register_prepared_viewer_gpu_successor(&owner.frame, visible_output);
+        if session.viewer_gpu_device_progress.generation_terminal().is_some() {
+            let _ =
+                host.clear_external_viewer_frame_for_artifact(&output_key, texture_key.as_str());
+            session.frame_renderer.unregister_external_texture(&texture_key);
+            drop(output_lease);
+            return;
+        }
+        if let Some(owner) = session.viewer_gpu_submissions.owner_mut(submission_id) {
+            owner.texture_registered = false;
+        }
+        let next = WindowViewerGpuPublishedOutput {
+            submission_id,
+            output_key,
+            texture_key,
+            _output_lease: output_lease,
+        };
+        if let Some(previous) = session.viewer_gpu_presentation.replace_prepared_output(next) {
+            session.frame_renderer.unregister_external_texture(&previous.texture_key);
+            let _ = host.clear_external_viewer_frame_for_artifact(
+                &previous.output_key,
+                previous.texture_key.as_str(),
+            );
+            drop(previous);
+        }
+        if let Some(owner) = session.viewer_gpu_submissions.owner(submission_id) {
+            session
+                .viewer_gpu_output_telemetry
+                .record_registered_frame(owner.stage_diagnostics);
+        }
+        return;
+    }
     let disposition = {
         let Some(owner) = session.viewer_gpu_submissions.owner(submission_id) else {
             tracing::error!(
@@ -4990,7 +5109,7 @@ fn refresh_display_output_contract(
 fn invalidate_display_dependent_gpu_preview(session: &mut AppUiWindowSession, host: &AppUiHost) {
     let cleanup_deferred =
         cancel_viewer_gpu_submission(session, host, WindowViewerGpuDeferredCleanup::Reset);
-    if let Some(previous) = session.viewer_gpu_presentation.clear() {
+    for previous in session.viewer_gpu_presentation.clear() {
         session.frame_renderer.unregister_external_texture(&previous.texture_key);
         let _ = host.clear_external_viewer_frame_for_artifact(
             &previous.output_key,

@@ -115,6 +115,8 @@ pub(crate) enum HeadlessCompletedGpuDisposition {
     PublishedCurrent {
         completed_demand: Option<mondrian_playback::FrameDemandIdentity>,
     },
+    /// Ticketless successor execution completed and remains retained off-screen.
+    PreparedSuccessor,
     /// The visual lifecycle no longer permitted this artifact to publish.
     Released,
     /// The artifact could not publish because the exact demand accepted this
@@ -135,6 +137,18 @@ pub(crate) fn present_headless_preview_candidate(
     gpu: &mut HeadlessViewerGpuAdapter,
     gpu_completion_deadline: HeadlessGpuCompletionDeadline,
 ) -> anyhow::Result<HeadlessPreviewCandidate> {
+    present_headless_preview_candidate_at(preview, state, gpu, gpu_completion_deadline, None)
+}
+
+/// Present through the ordinary path, optionally retaining the exact instant
+/// at which an aliased successor artifact was already visible.
+pub(crate) fn present_headless_preview_candidate_at(
+    preview: &HeadlessPreviewRuntime,
+    state: &mut AppState,
+    gpu: &mut HeadlessViewerGpuAdapter,
+    gpu_completion_deadline: HeadlessGpuCompletionDeadline,
+    already_visible_at: Option<Instant>,
+) -> anyhow::Result<HeadlessPreviewCandidate> {
     if let Some(candidate) = drive_headless_gpu_submission(preview, state, gpu)? {
         return Ok(candidate);
     }
@@ -146,6 +160,7 @@ pub(crate) fn present_headless_preview_candidate(
     if state.pending_playback_frame_demand_identity().is_none()
         && let Some(output_key) = preview.registered_exact_current_gpu_output_key()
     {
+        gpu.promote_prepared_successor(&output_key);
         if headless_gpu_output_is_exact_current(preview, gpu, &output_key) {
             return Ok(HeadlessPreviewCandidate::Ready {
                 output: HeadlessPresentedOutput::CurrentGpu,
@@ -154,7 +169,9 @@ pub(crate) fn present_headless_preview_candidate(
         }
         clear_mismatched_headless_gpu_output(preview, gpu, &output_key);
     }
-    match state.preflight_pending_frame_presentation(Instant::now()) {
+    match state
+        .preflight_pending_frame_presentation(already_visible_at.unwrap_or_else(Instant::now))
+    {
         FramePresentationPreflight::MaySubmit => {}
         FramePresentationPreflight::DroppedLate(_) => {
             return Ok(HeadlessPreviewCandidate::DroppedLate);
@@ -257,17 +274,29 @@ pub(crate) fn present_headless_preview_candidate(
             }
         }
         PreviewGpuFrameState::Current(candidate) => {
+            ensure!(
+                already_visible_at.is_none() || candidate.was_already_visible(),
+                "Headless successor reused an earlier visibility timestamp for a replacement output"
+            );
             let output_key = preview
                 .registered_gpu_output_key()
                 .context("exact-current Headless GPU candidate omitted its output key")?;
+            gpu.promote_prepared_successor(&output_key);
             if !headless_gpu_output_is_exact_current(preview, gpu, &output_key) {
                 clear_mismatched_headless_gpu_output(preview, gpu, &output_key);
                 return Ok(HeadlessPreviewCandidate::Loading);
             }
-            let presentation = state.finalize_frame_presentation(
-                candidate.presentation_ticket(),
-                FramePresentationPublication::prepared(|| {}),
-            );
+            let presentation = match already_visible_at {
+                Some(visible_at) => state.finalize_already_visible_frame_presentation(
+                    candidate.presentation_ticket(),
+                    visible_at,
+                    FramePresentationPublication::prepared(|| {}),
+                ),
+                None => state.finalize_frame_presentation(
+                    candidate.presentation_ticket(),
+                    FramePresentationPublication::prepared(|| {}),
+                ),
+            };
             let Some(completed_demand) =
                 headless_published_demand_completion(preview, presentation)?
             else {
@@ -279,6 +308,7 @@ pub(crate) fn present_headless_preview_candidate(
                 completed_demand,
             })
         }
+        PreviewGpuFrameState::Prepared => Ok(HeadlessPreviewCandidate::Loading),
         PreviewGpuFrameState::Transparent(candidate) => {
             let presentation = state.finalize_frame_presentation(
                 candidate.presentation_ticket(),
@@ -302,6 +332,62 @@ pub(crate) fn present_headless_preview_candidate(
         PreviewGpuFrameState::Unavailable(reason) => {
             Ok(HeadlessPreviewCandidate::Unavailable(reason))
         }
+    }
+}
+
+/// Opportunistically prepare the exact immediate successor through the same
+/// production Viewer Runtime and physical GPU Adapter.
+///
+/// The candidate carries no Frame Demand and cannot become visible here. Only
+/// a later current-frame resolution with the same complete output identity may
+/// promote both semantic and physical slots.
+#[cfg(test)]
+pub(crate) fn prepare_headless_preview_successor(
+    preview: &HeadlessPreviewRuntime,
+    state: &AppState,
+    gpu: &mut HeadlessViewerGpuAdapter,
+    gpu_completion_deadline: HeadlessGpuCompletionDeadline,
+) -> anyhow::Result<Option<crate::app::preview_execution::PreviewPlaybackIntent>> {
+    if gpu.has_submission_in_flight() {
+        return Ok(None);
+    }
+    let Some(request) = state.preview_successor_execution_request(Instant::now()) else {
+        return Ok(None);
+    };
+    let playback_intent = request.snapshot().transport().playback_intent();
+    match preview.gpu_preview_frame(request) {
+        PreviewGpuFrameState::Prepared => Ok(Some(playback_intent)),
+        PreviewGpuFrameState::Ready(mut frame) => {
+            ensure!(
+                frame.is_successor_preparation() && frame.presentation_ticket().is_none(),
+                "successor Preview request produced current presentation authority"
+            );
+            if let Some(execution) = frame.take_heterogeneous_gpu_execution() {
+                let _ = preview.fail_heterogeneous_gpu_execution(execution);
+                return Ok(None);
+            }
+            let submitted = match gpu.submit(*frame, gpu_completion_deadline) {
+                Ok(submitted) => submitted,
+                Err(HeadlessViewerGpuError::Backpressure(_)) => return Ok(None),
+                Err(error) => return Err(error).context("submit Headless successor candidate"),
+            };
+            ensure!(
+                !submitted.heterogeneous,
+                "ordinary successor submission unexpectedly retained heterogeneous execution"
+            );
+            gpu.retain_ordinary_successor(submitted.submission_id, |frame, output| {
+                preview.register_prepared_gpu_successor(
+                    frame.playback_intent(),
+                    frame.output_key.clone(),
+                    output.clone(),
+                );
+            })?;
+            Ok(Some(playback_intent))
+        }
+        PreviewGpuFrameState::Current(_)
+        | PreviewGpuFrameState::Transparent(_)
+        | PreviewGpuFrameState::Loading
+        | PreviewGpuFrameState::Unavailable(_) => Ok(None),
     }
 }
 
@@ -365,6 +451,9 @@ fn drive_headless_gpu_submission(
         HeadlessViewerGpuCompletionPoll::Pending { submission_id, quarantined } => {
             if quarantined {
                 return Ok(Some(HeadlessPreviewCandidate::Loading));
+            }
+            if gpu.has_prepared_successor_submission(submission_id) {
+                return Ok(None);
             }
             if gpu.has_queued_publication(submission_id) {
                 let output_key = gpu
@@ -466,6 +555,19 @@ fn drive_headless_gpu_submission(
                 return Ok(Some(HeadlessPreviewCandidate::CompletedGpu {
                     execution: Box::new(completed.execution),
                     disposition: HeadlessCompletedGpuDisposition::Released,
+                }));
+            }
+            if completed.successor_prepared {
+                ensure!(
+                    completed.queued_publication.is_none()
+                        && completed.heterogeneous_completion.is_none()
+                        && completed.frame.is_successor_preparation()
+                        && completed.frame.presentation_ticket().is_none(),
+                    "prepared Headless successor retained incompatible publication authority"
+                );
+                return Ok(Some(HeadlessPreviewCandidate::CompletedGpu {
+                    execution: Box::new(completed.execution),
+                    disposition: HeadlessCompletedGpuDisposition::PreparedSuccessor,
                 }));
             }
             if let Some(publication) = completed.queued_publication {

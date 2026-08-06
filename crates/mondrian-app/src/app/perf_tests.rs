@@ -28,8 +28,9 @@ mod perf_decode_progress;
 #[path = "perf_process_memory.rs"]
 mod perf_process_memory;
 use crate::app::headless_preview_presentation::{
-    present_headless_preview_candidate, HeadlessCompletedGpuDisposition, HeadlessPresentedOutput,
-    HeadlessPreviewCandidate, HeadlessPreviewRuntime,
+    prepare_headless_preview_successor, present_headless_preview_candidate,
+    present_headless_preview_candidate_at, HeadlessCompletedGpuDisposition,
+    HeadlessPresentedOutput, HeadlessPreviewCandidate, HeadlessPreviewRuntime,
 };
 use crate::app::headless_viewer_gpu::{
     HeadlessGpuCompletionDeadline, HeadlessNativeVideoImportGpuTimingFinalEvidence,
@@ -341,6 +342,12 @@ struct HeadlessViewerGpuExecutionSummary {
     published_rendered_frames: usize,
     /// Completed executions released because their visual lifecycle was stale.
     released_rendered_frames: usize,
+    /// Completed ticketless executions retained as immediate successors.
+    prepared_successor_frames: usize,
+    /// Bounded attempts to establish or observe the immediate successor.
+    successor_preparation_attempts: usize,
+    /// Attempts that found an already-prepared successor or retained one.
+    successor_preparation_ready: usize,
     /// Completed executions rejected by an exact terminal Frame Delivery.
     terminal_rejected_rendered_frames: usize,
     /// Terminal-rejected rendered executions classified specifically as Late.
@@ -458,6 +465,9 @@ impl HeadlessViewerGpuExecutionSummary {
             }
             HeadlessGpuExecutionPublication::Released => {
                 self.released_rendered_frames = self.released_rendered_frames.saturating_add(1);
+            }
+            HeadlessGpuExecutionPublication::PreparedSuccessor => {
+                self.prepared_successor_frames = self.prepared_successor_frames.saturating_add(1);
             }
             HeadlessGpuExecutionPublication::TerminalRejected(kind) => {
                 self.terminal_rejected_rendered_frames =
@@ -881,6 +891,7 @@ fn build_native_video_gpu_timing_report(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HeadlessGpuExecutionPublication {
     PublishedCurrent,
+    PreparedSuccessor,
     Released,
     TerminalRejected(mondrian_playback::FrameDeliveryKind),
 }
@@ -3459,6 +3470,10 @@ fn playback_cpal_av_external_smoke() -> anyhow::Result<()> {
             gpu_summary.presented_unique_frame_completions > 0,
             "CPAL smoke completed no exact-current headless GPU Frame Demand"
         );
+        anyhow::ensure!(
+            gpu_summary.successor_preparation_ready > 0,
+            "CPAL smoke established no exact immediate-successor preparation"
+        );
         let evidence = state.playback_evidence_report();
         anyhow::ensure!(
             evidence.deliveries.rejected == 0,
@@ -3477,6 +3492,10 @@ fn playback_cpal_av_external_smoke() -> anyhow::Result<()> {
                 "gpu_presented_demand_completions": gpu_summary.presented_demand_completions,
                 "gpu_presented_unique_frame_completions":
                     gpu_summary.presented_unique_frame_completions,
+                "successor_preparation_attempts":
+                    gpu_summary.successor_preparation_attempts,
+                "successor_preparation_ready": gpu_summary.successor_preparation_ready,
+                "prepared_successor_gpu_completions": gpu_summary.prepared_successor_frames,
                 "delivery_phase_error": evidence.delivery_phase_error,
                 "deliveries": evidence.deliveries,
                 "video_readiness": readiness,
@@ -4032,8 +4051,48 @@ fn run_headless_realtime_interval(
         interval_timing.preview_pump.observe(preview_pump_started.elapsed());
         if state.playback_epoch() != sampled_epoch || state.current_frame() != sampled_frame {
             let sample = driver.sample(sampled_intent, preview_service);
+            let sample_candidate_status = driver.candidate_status;
+            let current_intent = HeadlessGpuCandidateIntent::from_state(state);
+            let prepared_intent =
+                state.preview_execution_snapshot(Instant::now()).transport().playback_intent();
+            if preview_service.has_prepared_successor_for_intent(prepared_intent) {
+                let already_visible_at = preview_service
+                    .already_visible_successor_output_key(prepared_intent)
+                    .filter(|key| gpu_adapter.has_current_physical_output_for_key(key))
+                    .map(|_| now);
+                let candidate_started = Instant::now();
+                let attempt = execute_headless_gpu_candidate_at(
+                    preview_service,
+                    state,
+                    gpu_adapter,
+                    gpu_summary,
+                    safety_deadline,
+                    already_visible_at,
+                )?;
+                interval_timing.candidate.observe(candidate_started.elapsed());
+                driver.candidate_status = attempt.status;
+                apply_headless_candidate_binding(
+                    &mut driver.candidate_binding,
+                    current_intent,
+                    attempt.binding,
+                );
+                apply_headless_candidate_output_binding(
+                    &mut driver.candidate_output_binding,
+                    attempt.output_binding,
+                );
+            }
             interval_timing.total.observe(interval_started.elapsed());
-            driver.timing.record_interval(sample, driver.candidate_status, interval_timing);
+            let advanced_frames = if state.playback_epoch() == sampled_epoch {
+                state.current_frame().saturating_sub(sampled_frame).max(1) as u64
+            } else {
+                1
+            };
+            driver.timing.record_interval(
+                sample,
+                sample_candidate_status,
+                advanced_frames,
+                interval_timing,
+            );
             return Ok(HeadlessRealtimeIntervalOutcome::Advanced {
                 epoch: sampled_epoch,
                 frame: sampled_frame,
@@ -4062,12 +4121,14 @@ fn run_headless_realtime_interval(
         );
 
         let current_intent = HeadlessGpuCandidateIntent::from_state(state);
-        if should_attempt_headless_gpu_candidate(
-            driver.candidate_status,
-            driver.candidate_binding,
-            current_intent,
-            pump_outcome,
-        ) {
+        if gpu_adapter.has_submission_in_flight()
+            || should_attempt_headless_gpu_candidate(
+                driver.candidate_status,
+                driver.candidate_binding,
+                current_intent,
+                pump_outcome,
+            )
+        {
             let candidate_started = Instant::now();
             let attempt = execute_headless_gpu_candidate(
                 preview_service,
@@ -4087,6 +4148,29 @@ fn run_headless_realtime_interval(
                 &mut driver.candidate_output_binding,
                 attempt.output_binding,
             );
+        }
+        if driver.candidate_status == HeadlessGpuCandidateStatus::Ready {
+            let successor_intent = state
+                .preview_successor_execution_request(Instant::now())
+                .map(|request| request.snapshot().transport().playback_intent());
+            let already_prepared = successor_intent.is_some_and(|intent| {
+                driver.prepared_successor_intent == Some(intent)
+                    && preview_service.has_prepared_successor_for_intent(intent)
+            });
+            if !already_prepared {
+                gpu_summary.successor_preparation_attempts =
+                    gpu_summary.successor_preparation_attempts.saturating_add(1);
+                if let Some(intent) = prepare_headless_preview_successor(
+                    preview_service,
+                    state,
+                    gpu_adapter,
+                    safety_deadline,
+                )? {
+                    driver.prepared_successor_intent = Some(intent);
+                    gpu_summary.successor_preparation_ready =
+                        gpu_summary.successor_preparation_ready.saturating_add(1);
+                }
+            }
         }
 
         // Candidate work and result pumping can change both Engine phase and
@@ -4119,6 +4203,7 @@ fn run_headless_realtime_interval(
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 struct HeadlessRealtimeStageTiming {
+    observations: u64,
     max_us: u64,
     above_5ms: u64,
     above_20ms: u64,
@@ -4127,6 +4212,7 @@ struct HeadlessRealtimeStageTiming {
 
 impl HeadlessRealtimeStageTiming {
     fn observe(&mut self, duration: Duration) {
+        self.observations = self.observations.saturating_add(1);
         let elapsed_us = duration.as_micros().min(u128::from(u64::MAX)) as u64;
         self.max_us = self.max_us.max(elapsed_us);
         self.above_5ms = self.above_5ms.saturating_add(u64::from(elapsed_us > 5_000));
@@ -4136,6 +4222,7 @@ impl HeadlessRealtimeStageTiming {
     }
 
     fn merge(&mut self, interval: Self) {
+        self.observations = self.observations.saturating_add(interval.observations);
         self.max_us = self.max_us.max(interval.max_us);
         self.above_5ms = self.above_5ms.saturating_add(interval.above_5ms);
         self.above_20ms = self.above_20ms.saturating_add(interval.above_20ms);
@@ -4158,6 +4245,12 @@ struct HeadlessRealtimeIntervalTiming {
 struct HeadlessRealtimeCoordinatorTiming {
     intervals: u64,
     stale_intervals: u64,
+    candidate_attempts: u64,
+    stale_without_candidate_attempt: u64,
+    stale_after_candidate_attempt: u64,
+    advanced_frames: u64,
+    non_unit_frame_advances: u64,
+    maximum_frame_advance: u64,
     stale_bursts: u64,
     max_consecutive_stale: u64,
     stale_candidate_status: HeadlessRealtimeCandidateStatusCounts,
@@ -4176,9 +4269,16 @@ impl HeadlessRealtimeCoordinatorTiming {
         &mut self,
         sample: HeadlessPreviewSample,
         candidate_status: HeadlessGpuCandidateStatus,
+        advanced_frames: u64,
         interval: HeadlessRealtimeIntervalTiming,
     ) {
         self.intervals = self.intervals.saturating_add(1);
+        self.candidate_attempts =
+            self.candidate_attempts.saturating_add(interval.candidate.observations);
+        self.advanced_frames = self.advanced_frames.saturating_add(advanced_frames);
+        self.non_unit_frame_advances =
+            self.non_unit_frame_advances.saturating_add(u64::from(advanced_frames != 1));
+        self.maximum_frame_advance = self.maximum_frame_advance.max(advanced_frames);
         if sample.current_gpu_ready {
             self.current_consecutive_stale = 0;
         } else {
@@ -4189,6 +4289,13 @@ impl HeadlessRealtimeCoordinatorTiming {
             }
             self.max_consecutive_stale =
                 self.max_consecutive_stale.max(self.current_consecutive_stale);
+            if interval.candidate.observations == 0 {
+                self.stale_without_candidate_attempt =
+                    self.stale_without_candidate_attempt.saturating_add(1);
+            } else {
+                self.stale_after_candidate_attempt =
+                    self.stale_after_candidate_attempt.saturating_add(1);
+            }
             self.stale_candidate_status.record(candidate_status);
         }
         self.total.merge(interval.total);
@@ -4204,6 +4311,12 @@ impl HeadlessRealtimeCoordinatorTiming {
         ProfessionalVideoCoordinatorObservation {
             intervals: self.intervals,
             stale_intervals: self.stale_intervals,
+            candidate_attempts: self.candidate_attempts,
+            stale_without_candidate_attempt: self.stale_without_candidate_attempt,
+            stale_after_candidate_attempt: self.stale_after_candidate_attempt,
+            advanced_frames: self.advanced_frames,
+            non_unit_frame_advances: self.non_unit_frame_advances,
+            maximum_frame_advance: self.maximum_frame_advance,
             stale_bursts: self.stale_bursts,
             max_consecutive_stale: self.max_consecutive_stale,
             stale_ready: self.stale_candidate_status.ready,
@@ -4250,6 +4363,7 @@ struct HeadlessRealtimePlaybackDriver {
     candidate_binding: Option<HeadlessGpuCandidateBinding>,
     candidate_output_binding: Option<HeadlessGpuCandidateOutputBinding>,
     candidate_status: HeadlessGpuCandidateStatus,
+    prepared_successor_intent: Option<crate::app::preview_execution::PreviewPlaybackIntent>,
     timing: HeadlessRealtimeCoordinatorTiming,
 }
 
@@ -4276,6 +4390,7 @@ impl HeadlessRealtimePlaybackDriver {
             candidate_binding: None,
             candidate_output_binding: None,
             candidate_status: HeadlessGpuCandidateStatus::Loading,
+            prepared_successor_intent: None,
             timing: HeadlessRealtimeCoordinatorTiming::default(),
         })
     }
@@ -6840,13 +6955,42 @@ fn execute_headless_gpu_candidate(
     gpu_summary: &mut HeadlessViewerGpuExecutionSummary,
     gpu_completion_deadline: HeadlessGpuCompletionDeadline,
 ) -> anyhow::Result<HeadlessGpuCandidateAttempt> {
-    let submission_was_in_flight = gpu_adapter.has_submission_in_flight();
-    match present_headless_preview_candidate(
+    execute_headless_gpu_candidate_at(
         preview_service,
         state,
         gpu_adapter,
+        gpu_summary,
         gpu_completion_deadline,
-    )? {
+        None,
+    )
+}
+
+fn execute_headless_gpu_candidate_at(
+    preview_service: &HeadlessPreviewRuntime,
+    state: &mut AppState,
+    gpu_adapter: &mut HeadlessViewerGpuAdapter,
+    gpu_summary: &mut HeadlessViewerGpuExecutionSummary,
+    gpu_completion_deadline: HeadlessGpuCompletionDeadline,
+    already_visible_at: Option<Instant>,
+) -> anyhow::Result<HeadlessGpuCandidateAttempt> {
+    let submission_was_in_flight = gpu_adapter.has_submission_in_flight();
+    let candidate = if already_visible_at.is_some() {
+        present_headless_preview_candidate_at(
+            preview_service,
+            state,
+            gpu_adapter,
+            gpu_completion_deadline,
+            already_visible_at,
+        )?
+    } else {
+        present_headless_preview_candidate(
+            preview_service,
+            state,
+            gpu_adapter,
+            gpu_completion_deadline,
+        )?
+    };
+    match candidate {
         HeadlessPreviewCandidate::Ready { output, completed_demand } => {
             let (status, binding, output_binding) = match output {
                 HeadlessPresentedOutput::Gpu { execution } => {
@@ -6907,6 +7051,9 @@ fn execute_headless_gpu_candidate(
                     HeadlessGpuExecutionPublication::PublishedCurrent,
                     completed_demand,
                 ),
+                HeadlessCompletedGpuDisposition::PreparedSuccessor => {
+                    (HeadlessGpuExecutionPublication::PreparedSuccessor, None)
+                }
                 HeadlessCompletedGpuDisposition::Released => {
                     (HeadlessGpuExecutionPublication::Released, None)
                 }

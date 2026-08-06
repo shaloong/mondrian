@@ -48,7 +48,7 @@ use crate::app::preview_display_contract::preview_blockers_from_snapshot;
 use crate::app::preview_execution::PreviewDecodeExecutionSummary;
 use crate::app::preview_execution::{
     PreviewCandidateDecision, PreviewExecutionCoordinator, PreviewGenerationBinding,
-    PreviewSemanticIdentityBuilder,
+    PreviewPreparedPromotion, PreviewSemanticIdentityBuilder,
 };
 use crate::app::preview_execution::{
     PreviewGpuFrame, PreviewGpuFrameState, PreviewGpuHeterogeneousCompletionError,
@@ -206,6 +206,7 @@ pub(crate) enum PreviewPresentationContent<O> {
 pub(crate) struct PreviewPresentationCandidate<T> {
     value: T,
     presentation_ticket: Option<mondrian_playback::FramePresentationTicket>,
+    already_visible: bool,
 }
 
 impl<T> PreviewPresentationCandidate<T> {
@@ -213,7 +214,16 @@ impl<T> PreviewPresentationCandidate<T> {
         value: T,
         presentation_ticket: Option<mondrian_playback::FramePresentationTicket>,
     ) -> Self {
-        Self { value, presentation_ticket }
+        Self { value, presentation_ticket, already_visible: false }
+    }
+
+    /// Bind a candidate whose exact physical artifact was already visible
+    /// before the current transport coordinate became active.
+    pub(crate) fn already_visible(
+        value: T,
+        presentation_ticket: Option<mondrian_playback::FramePresentationTicket>,
+    ) -> Self {
+        Self { value, presentation_ticket, already_visible: true }
     }
 
     /// Exact terminal authority captured with this candidate.
@@ -221,6 +231,11 @@ impl<T> PreviewPresentationCandidate<T> {
         &self,
     ) -> Option<mondrian_playback::FramePresentationTicket> {
         self.presentation_ticket
+    }
+
+    /// Whether publication only needs to synchronize semantic ownership.
+    pub(crate) const fn was_already_visible(&self) -> bool {
+        self.already_visible
     }
 
     /// Consume the candidate after presentation arbitration.
@@ -705,7 +720,40 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             PreviewGenerationBinding::Current(generation)
             | PreviewGenerationBinding::Rotated(generation) => generation,
         };
-        if transport.is_playing() && transport.demand().is_none() {
+        let playback_intent = transport.playback_intent();
+        if transport.is_successor_preparation()
+            && self.execution.borrow().has_prepared_successor_for_intent(playback_intent)
+        {
+            self.scheduler.prune_obsolete();
+            return PreviewGpuFrameState::Prepared;
+        }
+        let prepared_promotion = if transport.is_successor_preparation() {
+            None
+        } else {
+            self.execution
+                .borrow_mut()
+                .promote_prepared_successor_for_intent(playback_intent)
+        };
+        if let Some(prepared) = prepared_promotion {
+            self.scheduler.prune_obsolete();
+            return match prepared {
+                PreviewPreparedPromotion::Gpu { already_visible, .. } => {
+                    bump(&self.metrics.gpu_preview_candidate_current);
+                    let ticket = self.playback_presentation_ticket(snapshot);
+                    let candidate = if already_visible {
+                        PreviewPresentationCandidate::already_visible((), ticket)
+                    } else {
+                        PreviewPresentationCandidate::new((), ticket)
+                    };
+                    PreviewGpuFrameState::Current(candidate)
+                }
+                PreviewPreparedPromotion::Transparent => self.transparent_gpu_candidate(snapshot),
+            };
+        }
+        if transport.is_playing()
+            && transport.demand().is_none()
+            && !transport.is_successor_preparation()
+        {
             if matches!(generation_binding, PreviewGenerationBinding::Current(_))
                 && self.execution.borrow().has_exact_current_output()
             {
@@ -749,6 +797,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         ) {
             PreviewTimelineResolution::Ready(resolved) => resolved.plan,
             PreviewTimelineResolution::Empty => {
+                if transport.is_successor_preparation() {
+                    self.execution
+                        .borrow_mut()
+                        .register_prepared_transparent_successor(playback_intent);
+                    self.scheduler.prune_obsolete();
+                    return PreviewGpuFrameState::Prepared;
+                }
                 let decision = self.execution.borrow_mut().plan_candidate(None);
                 self.execution
                     .borrow_mut()
@@ -823,6 +878,16 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             .borrow_mut()
             .set_presentation_quality(resolved_preview_presentation_quality(&resolved.elements));
         let mut cache_key = resolved.cache_key.clone();
+        if transport.is_successor_preparation()
+            && resolved.cache_reusable
+            && self
+                .execution
+                .borrow_mut()
+                .prepare_successor_from_current(playback_intent, &cache_key)
+        {
+            self.scheduler.prune_obsolete();
+            return PreviewGpuFrameState::Prepared;
+        }
         if resolved.cache_reusable && self.execution.borrow_mut().output_for(&cache_key).is_some() {
             self.schedule_media_prefetches(snapshot, proxy_demands, sequence, frame, width, height);
             self.scheduler.prune_obsolete();
@@ -1002,7 +1067,11 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     let admission = VisualExecutionAdmission::new(
                         visual_key,
                         generation,
-                        mondrian_playback::FrameWorkPriority::Current,
+                        if transport.is_successor_preparation() {
+                            mondrian_playback::FrameWorkPriority::Prefetch
+                        } else {
+                            mondrian_playback::FrameWorkPriority::Current
+                        },
                         work_class,
                         demand.map(|demand| demand.identity()),
                         deadline,
@@ -1185,6 +1254,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             program_output_boundary,
             monitor_adaptation,
             candidate_id,
+            if transport.is_successor_preparation() {
+                crate::app::preview_execution::PreviewGpuFramePurpose::SuccessorPreparation
+            } else {
+                crate::app::preview_execution::PreviewGpuFramePurpose::Current
+            },
+            playback_intent,
             self.playback_presentation_ticket(snapshot),
             decode_execution,
             heterogeneous_execution,
@@ -1212,6 +1287,45 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     pub(crate) fn register_gpu_output(&self, output_key: PreviewOutputKey, output: O) {
         self.execution.borrow_mut().register_output(output_key, output);
         bump(&self.metrics.gpu_preview_external_frames_registered);
+    }
+
+    /// Retain one ticketless immediate-successor GPU output for later promotion.
+    ///
+    /// This never changes the currently visible output. Generation rotation or
+    /// a later successor replacement retires the slot automatically.
+    pub(crate) fn register_prepared_gpu_successor(
+        &self,
+        playback_intent: crate::app::preview_execution::PreviewPlaybackIntent,
+        output_key: PreviewOutputKey,
+        output: O,
+    ) {
+        self.execution.borrow_mut().register_prepared_successor(
+            playback_intent,
+            output_key,
+            output,
+        );
+        bump(&self.metrics.gpu_preview_external_frames_registered);
+    }
+
+    /// Whether ticketless work already proves this exact running coordinate.
+    ///
+    /// This is a bounded scheduling observation only. Presentation still
+    /// requires a fresh current request carrying the active Frame Demand.
+    #[cfg(test)]
+    pub(crate) fn has_prepared_successor_for_intent(
+        &self,
+        playback_intent: crate::app::preview_execution::PreviewPlaybackIntent,
+    ) -> bool {
+        self.execution.borrow().has_prepared_successor_for_intent(playback_intent)
+    }
+
+    /// Exact successor output that was already visible before its boundary.
+    #[cfg(test)]
+    pub(crate) fn already_visible_successor_output_key(
+        &self,
+        playback_intent: crate::app::preview_execution::PreviewPlaybackIntent,
+    ) -> Option<PreviewOutputKey> {
+        self.execution.borrow().already_visible_successor_key(playback_intent).cloned()
     }
 
     /// Whether the coordinator retains any physically usable GPU output,
@@ -1242,7 +1356,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     /// Unlike candidate resolution, this query cannot reactivate a stale
     /// output or schedule work. Presentation Adapters use it to observe a
     /// durable current artifact after its Frame Demand was already consumed.
-    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn registered_exact_current_gpu_output_key(&self) -> Option<PreviewOutputKey> {
         self.execution.borrow().exact_current_output().map(|(key, _)| key.clone())
     }
@@ -1256,7 +1369,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     pub(crate) fn has_gpu_output_artifact(
         &self,
         key: &PreviewOutputKey,
-        matches_artifact: impl FnOnce(&O) -> bool,
+        matches_artifact: impl Fn(&O) -> bool,
     ) -> bool {
         self.execution
             .borrow()
@@ -1551,7 +1664,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     pub(crate) fn clear_external_viewer_frame_for_artifact(
         &self,
         key: &PreviewOutputKey,
-        matches_artifact: impl FnOnce(&O) -> bool,
+        matches_artifact: impl Fn(&O) -> bool,
     ) -> bool {
         let cleared = self.execution.borrow_mut().clear_output_if(key, matches_artifact);
         if cleared {

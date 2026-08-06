@@ -22,9 +22,19 @@ use mondrian_renderer::PreparedVisualAuthorSnapshotIdentity;
 use mondrian_timeline::sequence::{Sequence, SequenceCollection};
 
 use crate::app::playback_preview::PreviewTransportIntent;
+use crate::app::preview_execution::PreviewPlaybackIntent;
 use crate::app::preview_media_source::PreviewProxyGenerationIntent;
 use crate::app::proxy_generation::ProxyGenerationRequestOutcome;
 use crate::app::ui_actions::TimelineSeekSource;
+
+/// Scheduling role of one frame-producing Preview request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreviewFrameExecutionPurpose {
+    /// Resolve the exact visible transport frame and carry its Frame Demand.
+    Current,
+    /// Prepare the immediate successor without presentation authority.
+    SuccessorPreparation,
+}
 
 /// Narrow command seam used when Preview source resolution discovers missing
 /// or stale proxy work.
@@ -193,9 +203,11 @@ pub(crate) struct PreviewTransportSnapshot {
     state: TransportState,
     position: FramePosition,
     epoch: PlaybackEpoch,
+    quality_revision: u64,
     runtime_scale: PreviewResolutionScale,
     seek_source: TimelineSeekSource,
     demand: Option<PreviewFrameDemandSnapshot>,
+    purpose: PreviewFrameExecutionPurpose,
 }
 
 impl PreviewTransportSnapshot {
@@ -204,6 +216,7 @@ impl PreviewTransportSnapshot {
         state: TransportState,
         position: FramePosition,
         epoch: PlaybackEpoch,
+        quality_revision: u64,
         runtime_scale: PreviewResolutionScale,
         seek_source: TimelineSeekSource,
         demand: Option<PreviewFrameDemandSnapshot>,
@@ -212,9 +225,11 @@ impl PreviewTransportSnapshot {
             state,
             position,
             epoch,
+            quality_revision,
             runtime_scale,
             seek_source,
             demand,
+            purpose: PreviewFrameExecutionPurpose::Current,
         }
     }
 
@@ -241,6 +256,11 @@ impl PreviewTransportSnapshot {
         self.epoch
     }
 
+    /// Exact playback coordinate used to bind prepared Viewer work.
+    pub(crate) const fn playback_intent(self) -> PreviewPlaybackIntent {
+        PreviewPlaybackIntent::new(self.epoch, self.quality_revision, self.position.frame)
+    }
+
     /// Runtime-only resolution scale after Playback and resource policy merge.
     pub(crate) const fn runtime_scale(self) -> PreviewResolutionScale {
         self.runtime_scale
@@ -259,6 +279,24 @@ impl PreviewTransportSnapshot {
     /// Current Frame Demand, if any.
     pub(crate) const fn demand(self) -> Option<PreviewFrameDemandSnapshot> {
         self.demand
+    }
+
+    /// Whether this snapshot describes bounded immediate-successor preparation.
+    pub(crate) const fn is_successor_preparation(self) -> bool {
+        matches!(
+            self.purpose,
+            PreviewFrameExecutionPurpose::SuccessorPreparation
+        )
+    }
+
+    fn for_successor_preparation(mut self, frame: i64) -> Option<Self> {
+        if !self.is_playing() || frame != self.position.frame.checked_add(1)? {
+            return None;
+        }
+        self.position = FramePosition::new(frame, self.position.time_base);
+        self.demand = None;
+        self.purpose = PreviewFrameExecutionPurpose::SuccessorPreparation;
+        Some(self)
     }
 }
 
@@ -321,6 +359,16 @@ impl<'a> PreviewFrameExecutionRequest<'a> {
         proxy_demands: &'a dyn PreviewProxyDemandSink,
     ) -> Self {
         Self { snapshot, proxy_demands }
+    }
+
+    /// Bind the exact immediate successor as speculative, ticketless work.
+    pub(crate) fn successor(
+        mut snapshot: PreviewExecutionSnapshot<'a>,
+        proxy_demands: &'a dyn PreviewProxyDemandSink,
+    ) -> Option<Self> {
+        let successor = snapshot.transport().current_frame().checked_add(1)?;
+        snapshot.transport = snapshot.transport.for_successor_preparation(successor)?;
+        Some(Self { snapshot, proxy_demands })
     }
 
     /// Immutable execution facts.

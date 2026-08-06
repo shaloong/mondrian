@@ -147,6 +147,8 @@ pub struct AppUiHost {
     preview_service: WindowPreviewAdapter,
     window_preview_state: RefCell<ViewerPreviewState>,
     playback_feedback: ViewerPlaybackFeedback,
+    /// Exact observation that most recently crossed a running frame boundary.
+    last_playback_frame_advance_at: Cell<Option<Instant>>,
     mode: AppUiMode,
     system_theme_preset: ThemePreset,
     ui_dirty: Cell<bool>,
@@ -252,6 +254,7 @@ impl AppUiHost {
             preview_service,
             window_preview_state: RefCell::new(window_preview_state),
             playback_feedback,
+            last_playback_frame_advance_at: Cell::new(None),
             mode,
             system_theme_preset,
             ui_dirty: Cell::new(false),
@@ -326,6 +329,37 @@ impl AppUiHost {
         let state = self.app_state.borrow();
         self.preview_service
             .gpu_preview_frame(state.preview_frame_execution_request(std::time::Instant::now()))
+    }
+
+    /// Build ticketless immediate-successor work from the same Preview Runtime.
+    pub(crate) fn gpu_preview_successor_for_current_state(&self) -> PreviewGpuFrameState {
+        let state = self.app_state.borrow();
+        state
+            .preview_successor_execution_request(std::time::Instant::now())
+            .map_or(PreviewGpuFrameState::Loading, |request| {
+                self.preview_service.gpu_preview_frame(request)
+            })
+    }
+
+    /// Retain a completed successor without publishing it to the Viewer widget.
+    pub(crate) fn register_prepared_viewer_gpu_successor(
+        &self,
+        frame: &PreviewGpuFrame,
+        output: mondrian_ui_widgets::ViewerExternalTextureFrame,
+    ) {
+        debug_assert!(frame.is_successor_preparation());
+        self.preview_service.register_prepared_gpu_successor(
+            frame.playback_intent(),
+            frame.output_key.clone(),
+            output,
+        );
+    }
+
+    /// Complete output identity currently proved by Preview semantics.
+    pub(crate) fn exact_current_viewer_gpu_output_key(
+        &self,
+    ) -> Option<crate::app::preview_execution::PreviewOutputKey> {
+        self.preview_service.registered_exact_current_gpu_output_key()
     }
 
     /// Clone the UI-independent watch for pollable Preview worker results.
@@ -454,16 +488,26 @@ impl AppUiHost {
         let visible_changed = Cell::new(false);
         let disposition = if let Some((next, changed)) = self.prepared_retained_window_preview() {
             let clear_external_gpu = !window_preview_state_retains_external_gpu(&next);
-            self.app_state.borrow_mut().finalize_frame_presentation(
-                candidate.presentation_ticket(),
-                FramePresentationPublication::prepared(|| {
-                    if clear_external_gpu {
-                        self.preview_service.clear_external_viewer_frame();
-                    }
-                    self.window_preview_state.replace(next);
-                    visible_changed.set(changed);
-                }),
-            )
+            let publication = FramePresentationPublication::prepared(|| {
+                if clear_external_gpu {
+                    self.preview_service.clear_external_viewer_frame();
+                }
+                self.window_preview_state.replace(next);
+                visible_changed.set(changed);
+            });
+            if candidate.was_already_visible()
+                && let Some(already_visible_at) = self.last_playback_frame_advance_at.get()
+            {
+                self.app_state.borrow_mut().finalize_already_visible_frame_presentation(
+                    candidate.presentation_ticket(),
+                    already_visible_at,
+                    publication,
+                )
+            } else {
+                self.app_state
+                    .borrow_mut()
+                    .finalize_frame_presentation(candidate.presentation_ticket(), publication)
+            }
         } else {
             self.app_state.borrow_mut().finalize_frame_presentation(
                 candidate.presentation_ticket(),
@@ -998,7 +1042,8 @@ impl AppUiHost {
 
     /// Advance active playback and refresh UI models when the visible frame changes.
     pub fn advance_playback_clock(&mut self, observed_at: Instant, bounds: Rect) -> bool {
-        let playback_changed = {
+        let observed_at = Instant::now().max(observed_at);
+        let (playback_changed, crossed_frame) = {
             let mut state = self.app_state.borrow_mut();
             // Audio Device Clock is the authority while available. Apply its
             // latest coherent callback fact before asking the Engine to derive
@@ -1006,14 +1051,16 @@ impl AppUiHost {
             // unnecessarily expired demand that a fresh observation is not
             // allowed to extend.
             let audio_result = state.pump_audio_output();
-            let changed = state
-                .advance_playback_clock_at(Instant::now().max(observed_at))
-                .requires_refresh();
+            let advance = state.advance_playback_clock_at(observed_at);
+            let changed = advance.requires_refresh();
             if let Err(error) = audio_result {
                 tracing::error!(%error, "audio output pump failed closed");
             }
-            changed
+            (changed, advance.frames_advanced > 0)
         };
+        if crossed_frame {
+            self.last_playback_frame_advance_at.set(Some(observed_at));
+        }
         if !playback_changed {
             return false;
         }

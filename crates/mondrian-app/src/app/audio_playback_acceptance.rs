@@ -130,6 +130,12 @@ impl ProfessionalVideoReadinessObservation {
 pub(crate) struct ProfessionalVideoCoordinatorObservation {
     pub(crate) intervals: u64,
     pub(crate) stale_intervals: u64,
+    pub(crate) candidate_attempts: u64,
+    pub(crate) stale_without_candidate_attempt: u64,
+    pub(crate) stale_after_candidate_attempt: u64,
+    pub(crate) advanced_frames: u64,
+    pub(crate) non_unit_frame_advances: u64,
+    pub(crate) maximum_frame_advance: u64,
     pub(crate) stale_bursts: u64,
     pub(crate) max_consecutive_stale: u64,
     pub(crate) stale_ready: u64,
@@ -599,13 +605,20 @@ pub(crate) fn evaluate_professional_audio_playback(
         &mut failures,
         coordinator.intervals == video_total_samples
             && coordinator.stale_intervals == observation.video_readiness.stale
+            && coordinator
+                .stale_without_candidate_attempt
+                .saturating_add(coordinator.stale_after_candidate_attempt)
+                == coordinator.stale_intervals
+            && coordinator.advanced_frames == coordinator.intervals
+            && coordinator.non_unit_frame_advances == 0
+            && coordinator.maximum_frame_advance == u64::from(coordinator.intervals > 0)
             && coordinator.classified_stale() == coordinator.stale_intervals
             && coordinator.stale_bursts <= coordinator.stale_intervals
             && coordinator.max_consecutive_stale <= coordinator.stale_intervals
             && (coordinator.stale_intervals > 0
                 || (coordinator.stale_bursts == 0 && coordinator.max_consecutive_stale == 0)),
         "video_coordinator_evidence_inconsistent",
-        "coordinator intervals close against readiness and every stale interval has one candidate-state classification",
+        "coordinator intervals close against readiness, advance exactly one frame each, and every stale interval has one candidate-state classification",
         format!("{coordinator:?}"),
         "headless realtime coordinator evidence",
     );
@@ -1115,6 +1128,9 @@ mod tests {
             },
             video_coordinator: ProfessionalVideoCoordinatorObservation {
                 intervals: 1,
+                candidate_attempts: 1,
+                advanced_frames: 1,
+                maximum_frame_advance: 1,
                 ..ProfessionalVideoCoordinatorObservation::default()
             },
             gpu_presented_frames: 1,
@@ -1213,6 +1229,10 @@ mod tests {
             video_coordinator: ProfessionalVideoCoordinatorObservation {
                 intervals: 54_000,
                 stale_intervals: 100,
+                candidate_attempts: 54_000,
+                stale_after_candidate_attempt: 100,
+                advanced_frames: 54_000,
+                maximum_frame_advance: 1,
                 stale_bursts: 100,
                 max_consecutive_stale: 1,
                 stale_dropped_late: 100,

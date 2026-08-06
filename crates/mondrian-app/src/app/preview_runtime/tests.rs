@@ -944,6 +944,7 @@ fn paused_gpu_candidate_carries_untimed_presentation_authority() {
     let frame = match execute_gpu_preview_for_test_app(&service, &state) {
         PreviewGpuFrameState::Ready(frame) => frame,
         PreviewGpuFrameState::Current(_) => panic!("expected new GPU preview candidate"),
+        PreviewGpuFrameState::Prepared => panic!("expected current GPU preview candidate"),
         PreviewGpuFrameState::Transparent(_) => {
             panic!("expected rendered GPU preview candidate")
         }
@@ -1610,6 +1611,40 @@ fn playing_current_gpu_candidate_releases_execution_borrow_before_prefetch() {
     assert!(matches!(
         execute_gpu_preview_for_test_app(&service, &state),
         PreviewGpuFrameState::Current(_)
+    ));
+}
+
+#[test]
+fn identical_successor_pixels_still_create_an_exact_transport_preparation() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    state.play().expect("play");
+    let frame = match execute_gpu_preview_for_test_app(&service, &state) {
+        PreviewGpuFrameState::Ready(frame) => frame,
+        _ => panic!("expected ready current GPU preview candidate"),
+    };
+    assert!(register_test_window_preview_output(
+        &service,
+        &frame,
+        frame.external_texture_key(),
+        ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
+            .expect("full-frame presentation"),
+    ));
+
+    let successor = state
+        .preview_successor_execution_request(Instant::now())
+        .expect("playing state has an immediate successor");
+    let successor_intent = successor.snapshot().transport().playback_intent();
+    assert!(matches!(
+        service.gpu_preview_frame(successor),
+        PreviewGpuFrameState::Prepared
+    ));
+    assert!(service.has_prepared_successor_for_intent(successor_intent));
+    assert!(matches!(
+        state
+            .preview_successor_execution_request(Instant::now())
+            .map(|request| service.gpu_preview_frame(request)),
+        Some(PreviewGpuFrameState::Prepared)
     ));
 }
 

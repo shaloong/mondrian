@@ -786,6 +786,31 @@ Loading, a superseded candidate, and a Late completion preserve that state only
 as stale and cannot replace it. Transparent output follows the same
 ready/stale lifecycle even though it has no texture payload.
 
+Running Viewer execution additionally owns one capacity-one immediate-successor
+slot. Successor work is ticketless and binds the exact Playback Epoch, quality
+revision and frame separately from the complete pixel-output identity. This
+separation is required because two adjacent coordinates may legitimately
+resolve to identical pixels: evaluation of frame N is not proof that frame N+1
+was evaluated, while a proved identical successor can safely alias the one
+already-visible physical artifact. A different ordinary GPU result owns an
+independent prepared physical lease; a blank Program owns an explicit
+transparent successor. Neither slot changes the current Viewer, consumes a
+future Frame Demand, extends a deadline, nor survives Preview-generation
+rotation. Only an exact current-coordinate request promotes semantic and
+physical ownership. Late cleanup is artifact/submission-scoped and cannot erase
+or revive a newer prepared result.
+
+The already-visible alias is the sole exception to sampling a new visibility
+timestamp: after the Clock crosses its exact frame boundary, Window or Headless
+may complete the new ticket at that same boundary observation because the
+correct physical pixels were continuously visible and the commit only
+synchronizes semantic ownership. A distinct buffer, texture, transparent
+transition, or any fallible work must use the ordinary real commit instant;
+backdating it is prohibited. Heterogeneous Viewer execution is not silently
+treated as prepared by the current ordinary-successor Adapter: it releases the
+speculative attempt and executes through its existing current-demand completion
+contract until a dedicated prepared heterogeneous ownership protocol exists.
+
 Widget `Ready`, `Blocked`, and other payload-free lifecycle values are
 post-admission projections only. They contain no demand identity and therefore
 cannot mint, rebind, or consume a terminal delivery during later UI feedback
@@ -1009,7 +1034,8 @@ result diagnostics, and lookahead observation; it does not own Playback state
 transitions or Viewer candidate lifecycle. `app::preview_execution` owns the
 complete output key and GPU execution contract consumed by both Window and
 Headless Adapters, and atomically coordinates generation binding, pending state,
-executed quality, candidate IDs, and exact registered-output reuse. Cache
+executed quality, candidate IDs, exact registered-output reuse, and the bounded
+transport-qualified successor slot. Cache
 residency/eviction remains in the playback-owned `PreviewFrameStore`; GPU/color
 mathematics remain renderer-owned. Renderer `PreparedVisualFrameClosure` is the
 sole authority for nested time, lookup/cycle/depth, per-Sequence runtime sizing,

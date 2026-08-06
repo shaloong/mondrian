@@ -186,6 +186,7 @@ impl GoldenHeadlessPreview {
                         HeadlessCompletedGpuDisposition::PublishedCurrent { completed_demand } => {
                             queued_demand_completed |= completed_demand.is_some();
                         }
+                        HeadlessCompletedGpuDisposition::PreparedSuccessor => {}
                         HeadlessCompletedGpuDisposition::Released => {}
                         HeadlessCompletedGpuDisposition::TerminalDelivery(kind) => {
                             ensure!(
