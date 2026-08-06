@@ -119,6 +119,7 @@ mod media_import;
 pub(crate) mod native_video_import;
 mod playback;
 pub(crate) mod viewer_gpu_device_progress;
+pub(crate) mod viewer_gpu_publication;
 pub(crate) mod viewer_gpu_submission;
 pub(crate) use playback::{
     FramePresentationDisposition, FramePresentationPreflight, FramePresentationPublication,

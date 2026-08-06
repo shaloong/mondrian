@@ -25,6 +25,7 @@ use crate::app::viewer_gpu_device_progress::{
     ViewerGpuDeviceProgressOwner, ViewerGpuDeviceProgressReserveError,
     ViewerGpuDeviceProgressStartError, ViewerGpuDeviceProgressWake,
 };
+use crate::app::viewer_gpu_publication::{ViewerGpuPhysicalPublication, ViewerGpuPublicationSlots};
 use crate::app::viewer_gpu_submission::{
     ViewerGpuCompletedSubmission, ViewerGpuSubmissionAdmissionError, ViewerGpuSubmissionId,
     ViewerGpuSubmissionLifecycle, ViewerGpuSubmissionPoll, ViewerGpuSubmissionQuarantine,
@@ -272,12 +273,7 @@ pub(crate) struct HeadlessViewerGpuAdapter {
         HeadlessViewerGpuSubmissionOwner,
         ViewerHeterogeneousGpuCompletedBatch,
     >,
-    current_physical_output: HeadlessViewerGpuPhysicalOutputSlot<
-        crate::app::preview_execution::PreviewOutputKey,
-        HeadlessViewerGpuOutput,
-        ViewerGpuPresentationOutputLease,
-    >,
-    prepared_physical_output: HeadlessViewerGpuPhysicalOutputSlot<
+    physical_outputs: ViewerGpuPublicationSlots<
         crate::app::preview_execution::PreviewOutputKey,
         HeadlessViewerGpuOutput,
         ViewerGpuPresentationOutputLease,
@@ -392,86 +388,7 @@ impl HeadlessNativeVideoImportGpuTimingSession {
     }
 }
 
-/// Adapter-local publication owner for one live physical Viewer resource.
-///
-/// `PreviewProductionRuntime` intentionally stores only cloneable semantic
-/// metadata. This slot is the independent proof that the corresponding
-/// physical allocation is still exclusively owned and can actually be used.
-struct HeadlessViewerGpuPhysicalOutput<K, O, L> {
-    source_submission_id: u64,
-    output_key: K,
-    output: O,
-    _lease: L,
-}
-
-/// Capacity-one physical publication slot.
-///
-/// Submission capacity and publication capacity are separate: the last
-/// accepted output may remain current while one replacement is in flight.
-struct HeadlessViewerGpuPhysicalOutputSlot<K, O, L> {
-    current: Option<HeadlessViewerGpuPhysicalOutput<K, O, L>>,
-}
-
-impl<K, O, L> Default for HeadlessViewerGpuPhysicalOutputSlot<K, O, L> {
-    fn default() -> Self {
-        Self { current: None }
-    }
-}
-
-impl<K: PartialEq, O, L> HeadlessViewerGpuPhysicalOutputSlot<K, O, L> {
-    fn publish(&mut self, source_submission_id: u64, output_key: K, output: O, lease: L) {
-        self.current = Some(HeadlessViewerGpuPhysicalOutput {
-            source_submission_id,
-            output_key,
-            output,
-            _lease: lease,
-        });
-    }
-
-    fn output_for_key(&self, output_key: &K) -> Option<&O> {
-        self.current
-            .as_ref()
-            .filter(|current| &current.output_key == output_key)
-            .map(|current| &current.output)
-    }
-
-    fn take_matching(
-        &mut self,
-        output_key: &K,
-    ) -> Option<HeadlessViewerGpuPhysicalOutput<K, O, L>> {
-        if self.current.as_ref().is_none_or(|current| &current.output_key != output_key) {
-            return None;
-        }
-        self.current.take()
-    }
-
-    fn replace_physical(&mut self, output: HeadlessViewerGpuPhysicalOutput<K, O, L>) {
-        self.current = Some(output);
-    }
-
-    fn clear(&mut self) -> bool {
-        self.current.take().is_some()
-    }
-
-    fn take_current_artifact(&mut self) -> Option<(K, O)> {
-        let current = self.current.take()?;
-        Some((current.output_key, current.output))
-    }
-
-    fn take_for_submission(&mut self, source_submission_id: u64) -> Option<O> {
-        if self
-            .current
-            .as_ref()
-            .is_none_or(|current| current.source_submission_id != source_submission_id)
-        {
-            return None;
-        }
-        let current = self.current.take()?;
-        Some(current.output)
-    }
-}
-
-type HeadlessViewerGpuOutputSlot = HeadlessViewerGpuPhysicalOutputSlot<
+type HeadlessViewerGpuOutputSlots = ViewerGpuPublicationSlots<
     crate::app::preview_execution::PreviewOutputKey,
     HeadlessViewerGpuOutput,
     ViewerGpuPresentationOutputLease,
@@ -486,8 +403,7 @@ struct HeadlessViewerGpuGenerationRetirement {
     _device: wgpu::Device,
     _queue: wgpu::Queue,
     _timestamp_ring: Option<GpuTimestampQueryRing>,
-    _current_physical_output: HeadlessViewerGpuOutputSlot,
-    _prepared_physical_output: HeadlessViewerGpuOutputSlot,
+    _physical_outputs: HeadlessViewerGpuOutputSlots,
     _completed_submission: Option<
         ViewerGpuCompletedSubmission<
             HeadlessViewerGpuSubmissionOwner,
@@ -574,8 +490,7 @@ impl Drop for HeadlessViewerGpuAdapter {
             _device: self.device.clone(),
             _queue: self.queue.clone(),
             _timestamp_ring: self.timestamp_ring.take(),
-            _current_physical_output: std::mem::take(&mut self.current_physical_output),
-            _prepared_physical_output: std::mem::take(&mut self.prepared_physical_output),
+            _physical_outputs: std::mem::take(&mut self.physical_outputs),
             _completed_submission: None,
             _lost_submission_owner: None,
             native_retirement_error_logged: false,
@@ -712,8 +627,7 @@ impl HeadlessViewerGpuAdapter {
             native_import_gpu_timing,
             reported_orphaned_completion_count: 0,
             submission_lifecycle: ViewerGpuSubmissionLifecycle::new(),
-            current_physical_output: HeadlessViewerGpuPhysicalOutputSlot::default(),
-            prepared_physical_output: HeadlessViewerGpuPhysicalOutputSlot::default(),
+            physical_outputs: ViewerGpuPublicationSlots::default(),
         })
     }
 
@@ -868,8 +782,6 @@ impl HeadlessViewerGpuAdapter {
     ) -> Result<HeadlessViewerGpuSubmittedCandidate, HeadlessViewerGpuError> {
         ensure_headless_gpu_deadline(deadline)?;
         if let Some(terminal) = self.device_progress.generation_terminal() {
-            self.current_physical_output.clear();
-            self.prepared_physical_output.clear();
             return Err(HeadlessViewerGpuError::DeviceGenerationTerminal(terminal));
         }
         if frame.width == 0 || frame.height == 0 {
@@ -999,7 +911,6 @@ impl HeadlessViewerGpuAdapter {
                     .map_err(|error| HeadlessViewerGpuError::Timestamp(error.to_string()))?;
             }
             drop(presentation_lease);
-            self.current_physical_output.clear();
             return Err(HeadlessViewerGpuError::DeviceGenerationTerminal(terminal));
         }
         let submission = self.queue.submit(std::iter::once(encoder.finish()));
@@ -1087,13 +998,10 @@ impl HeadlessViewerGpuAdapter {
         publish: impl FnOnce(&PreviewGpuFrame, &HeadlessViewerGpuOutput) -> FramePresentationDisposition,
     ) -> Result<FramePresentationDisposition, HeadlessViewerGpuError> {
         if let Some(terminal) = self.device_progress.generation_terminal() {
-            self.current_physical_output.clear();
             return Err(HeadlessViewerGpuError::DeviceGenerationTerminal(terminal));
         }
-        let (submission_lifecycle, current_physical_output) = (
-            &mut self.submission_lifecycle,
-            &mut self.current_physical_output,
-        );
+        let (submission_lifecycle, physical_outputs) =
+            (&mut self.submission_lifecycle, &mut self.physical_outputs);
         let owner = submission_lifecycle.owner_mut(submission_id).ok_or(
             HeadlessViewerGpuError::UnknownSubmission(submission_id.get()),
         )?;
@@ -1113,12 +1021,11 @@ impl HeadlessViewerGpuAdapter {
         let disposition =
             publish_ordinary_once(queued_publication, || publish(frame, &execution.output))?;
         if let Some(terminal) = self.device_progress.generation_terminal() {
-            current_physical_output.clear();
             return Err(HeadlessViewerGpuError::DeviceGenerationTerminal(terminal));
         }
         commit_physical_publication(
-            current_physical_output,
-            submission_id.get(),
+            physical_outputs,
+            submission_id,
             &frame.output_key,
             &execution.output,
             presentation_lease,
@@ -1135,14 +1042,10 @@ impl HeadlessViewerGpuAdapter {
         retain: impl FnOnce(&PreviewGpuFrame, &HeadlessViewerGpuOutput),
     ) -> Result<(), HeadlessViewerGpuError> {
         if let Some(terminal) = self.device_progress.generation_terminal() {
-            self.current_physical_output.clear();
-            self.prepared_physical_output.clear();
             return Err(HeadlessViewerGpuError::DeviceGenerationTerminal(terminal));
         }
-        let (submission_lifecycle, prepared_physical_output) = (
-            &mut self.submission_lifecycle,
-            &mut self.prepared_physical_output,
-        );
+        let (submission_lifecycle, physical_outputs) =
+            (&mut self.submission_lifecycle, &mut self.physical_outputs);
         let owner = submission_lifecycle.owner_mut(submission_id).ok_or(
             HeadlessViewerGpuError::UnknownSubmission(submission_id.get()),
         )?;
@@ -1168,8 +1071,8 @@ impl HeadlessViewerGpuAdapter {
                 submission_id.get(),
             ));
         };
-        prepared_physical_output.publish(
-            submission_id.get(),
+        let _ = physical_outputs.publish_prepared(
+            submission_id,
             owner.frame.output_key.clone(),
             owner.execution.output.clone(),
             lease,
@@ -1182,14 +1085,10 @@ impl HeadlessViewerGpuAdapter {
         &mut self,
         output_key: &crate::app::preview_execution::PreviewOutputKey,
     ) -> bool {
-        if self.current_physical_output.output_for_key(output_key).is_some() {
-            return true;
-        }
-        let Some(prepared) = self.prepared_physical_output.take_matching(output_key) else {
-            return false;
-        };
-        self.current_physical_output.replace_physical(prepared);
-        true
+        let promotion = self.physical_outputs.promote_prepared_exact(output_key);
+        let exact_output_available = promotion.exact_output_available();
+        drop(promotion.into_retired());
+        exact_output_available
     }
 
     /// Publish a completed heterogeneous candidate through the same physical
@@ -1204,8 +1103,6 @@ impl HeadlessViewerGpuAdapter {
         publish: impl FnOnce(&PreviewGpuFrame, &HeadlessViewerGpuOutput) -> FramePresentationDisposition,
     ) -> Result<FramePresentationDisposition, HeadlessViewerGpuError> {
         if let Some(terminal) = self.device_progress.generation_terminal() {
-            completed.revoked_current_physical_output =
-                self.current_physical_output.take_current_artifact().map(|(_, output)| output);
             return Err(HeadlessViewerGpuError::DeviceGenerationTerminal(terminal));
         }
         if completed.quarantine_reason.is_some() {
@@ -1225,13 +1122,11 @@ impl HeadlessViewerGpuAdapter {
         )?;
         let disposition = publish(&completed.frame, &completed.execution.output);
         if let Some(terminal) = self.device_progress.generation_terminal() {
-            completed.revoked_current_physical_output =
-                self.current_physical_output.take_current_artifact().map(|(_, output)| output);
             return Err(HeadlessViewerGpuError::DeviceGenerationTerminal(terminal));
         }
         commit_physical_publication(
-            &mut self.current_physical_output,
-            completed.submission_id.get(),
+            &mut self.physical_outputs,
+            completed.submission_id,
             &completed.frame.output_key,
             &completed.execution.output,
             &mut completed.presentation_lease,
@@ -1250,8 +1145,8 @@ impl HeadlessViewerGpuAdapter {
         if self.device_progress.generation_terminal().is_some() {
             return false;
         }
-        self.current_physical_output
-            .output_for_key(output_key)
+        self.physical_outputs
+            .current_artifact_for_key(output_key)
             .is_some_and(|current| current == output)
     }
 
@@ -1262,12 +1157,12 @@ impl HeadlessViewerGpuAdapter {
         output_key: &crate::app::preview_execution::PreviewOutputKey,
     ) -> bool {
         self.device_progress.generation_terminal().is_none()
-            && self.current_physical_output.output_for_key(output_key).is_some()
+            && self.physical_outputs.current_artifact_for_key(output_key).is_some()
     }
 
-    /// Clear the physical current slot after an accepted non-GPU presentation.
-    pub(crate) fn clear_current_physical_output(&mut self) -> bool {
-        self.current_physical_output.clear()
+    /// Clear all GPU publications after an accepted non-GPU presentation.
+    pub(crate) fn clear_physical_outputs(&mut self) -> bool {
+        self.physical_outputs.drain().into_iter().flatten().count() != 0
     }
 
     /// Clear only the physical publication produced by one exact submission.
@@ -1285,9 +1180,9 @@ impl HeadlessViewerGpuAdapter {
         &mut self,
         submission_id: ViewerGpuSubmissionId,
     ) -> Option<HeadlessViewerGpuOutput> {
-        self.current_physical_output
-            .take_for_submission(submission_id.get())
-            .or_else(|| self.prepared_physical_output.take_for_submission(submission_id.get()))
+        self.physical_outputs
+            .take_for_submission(submission_id)
+            .map(ViewerGpuPhysicalPublication::into_artifact)
     }
 
     /// Revoke every physical publication from a terminal device generation.
@@ -1300,18 +1195,19 @@ impl HeadlessViewerGpuAdapter {
         reason: String,
     ) -> (
         Option<ViewerGpuSubmissionId>,
-        Option<(
+        [Option<(
             crate::app::preview_execution::PreviewOutputKey,
             HeadlessViewerGpuOutput,
-        )>,
+        )>; 2],
     ) {
         let active_submission = self.submission_lifecycle.current_submission_id();
         if active_submission.is_some() {
             let _ = self.submission_lifecycle.quarantine_after_device_failure(reason);
         }
-        let revoked_current_output = self.current_physical_output.take_current_artifact();
-        self.prepared_physical_output.clear();
-        (active_submission, revoked_current_output)
+        let revoked_outputs = self.physical_outputs.drain().map(|publication| {
+            publication.map(ViewerGpuPhysicalPublication::into_key_and_artifact)
+        });
+        (active_submission, revoked_outputs)
     }
 
     /// Whether the exact ordinary submission already ran queue-ordered
@@ -1659,8 +1555,8 @@ fn ensure_physical_publication_available<L>(
 }
 
 fn commit_physical_publication<K: Clone + PartialEq, O: Clone, L>(
-    current: &mut HeadlessViewerGpuPhysicalOutputSlot<K, O, L>,
-    source_submission_id: u64,
+    current: &mut ViewerGpuPublicationSlots<K, O, L>,
+    source_submission_id: ViewerGpuSubmissionId,
     output_key: &K,
     output: &O,
     presentation_lease: &mut Option<L>,
@@ -1674,10 +1570,10 @@ fn commit_physical_publication<K: Clone + PartialEq, O: Clone, L>(
     }
     let Some(lease) = presentation_lease.take() else {
         return Err(HeadlessViewerGpuError::MissingPresentationOutput(
-            source_submission_id,
+            source_submission_id.get(),
         ));
     };
-    current.publish(
+    let _ = current.publish_current(
         source_submission_id,
         output_key.clone(),
         output.clone(),
@@ -1929,15 +1825,14 @@ mod tests {
     #[test]
     fn accepted_publication_moves_the_lease_into_the_physical_current_slot() {
         let drops = Arc::new(AtomicUsize::new(0));
-        let mut slot =
-            HeadlessViewerGpuPhysicalOutputSlot::<String, TestOutput, TestLease>::default();
+        let mut slot = ViewerGpuPublicationSlots::<String, TestOutput, TestLease>::default();
         let mut lease = Some(TestLease(Arc::clone(&drops)));
         let output_key = "output-a".to_owned();
         let output = TestOutput("metadata-a");
 
         commit_physical_publication(
             &mut slot,
-            7,
+            ViewerGpuSubmissionId::for_test(7),
             &output_key,
             &output,
             &mut lease,
@@ -1947,12 +1842,14 @@ mod tests {
 
         assert!(lease.is_none());
         assert_eq!(
-            slot.output_for_key(&output_key).map(|output| output.0),
+            slot.current_artifact_for_key(&output_key).map(|output| output.0),
             Some("metadata-a")
         );
         assert_eq!(drops.load(Ordering::Relaxed), 0);
         assert_eq!(
-            slot.take_for_submission(7).map(|output| output.0),
+            slot.take_for_submission(ViewerGpuSubmissionId::for_test(7))
+                .map(ViewerGpuPhysicalPublication::into_artifact)
+                .map(|output| output.0),
             Some("metadata-a")
         );
         assert_eq!(drops.load(Ordering::Relaxed), 1);
@@ -1961,13 +1858,12 @@ mod tests {
     #[test]
     fn rejected_publication_retains_its_lease_until_submission_retirement() {
         let drops = Arc::new(AtomicUsize::new(0));
-        let mut slot =
-            HeadlessViewerGpuPhysicalOutputSlot::<String, TestOutput, TestLease>::default();
+        let mut slot = ViewerGpuPublicationSlots::<String, TestOutput, TestLease>::default();
         let mut lease = Some(TestLease(Arc::clone(&drops)));
 
         commit_physical_publication(
             &mut slot,
-            11,
+            ViewerGpuSubmissionId::for_test(11),
             &"rejected".to_owned(),
             &TestOutput("metadata"),
             &mut lease,
@@ -1976,64 +1872,9 @@ mod tests {
         .expect("rejection is not a physical-publication failure");
 
         assert!(lease.is_some());
-        assert!(slot.current.is_none());
+        assert!(slot.current().is_none());
         assert_eq!(drops.load(Ordering::Relaxed), 0);
         drop(lease);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
-    }
-
-    #[test]
-    fn late_retirement_cannot_clear_a_newer_physical_publication() {
-        let drops = Arc::new(AtomicUsize::new(0));
-        let mut slot =
-            HeadlessViewerGpuPhysicalOutputSlot::<String, TestOutput, TestLease>::default();
-        slot.publish(
-            19,
-            "same-semantic".to_owned(),
-            TestOutput("resource-old"),
-            TestLease(Arc::clone(&drops)),
-        );
-        slot.publish(
-            23,
-            "same-semantic".to_owned(),
-            TestOutput("resource-new"),
-            TestLease(Arc::clone(&drops)),
-        );
-
-        assert_eq!(
-            drops.load(Ordering::Relaxed),
-            1,
-            "replacement must release exactly the previous current lease"
-        );
-        assert!(slot.take_for_submission(19).is_none());
-        assert_eq!(
-            slot.output_for_key(&"same-semantic".to_owned()).map(|output| output.0),
-            Some("resource-new")
-        );
-        assert_eq!(
-            slot.take_for_submission(23).map(|output| output.0),
-            Some("resource-new")
-        );
-        assert_eq!(drops.load(Ordering::Relaxed), 2);
-    }
-
-    #[test]
-    fn device_generation_retirement_revokes_whichever_output_is_current() {
-        let drops = Arc::new(AtomicUsize::new(0));
-        let mut slot =
-            HeadlessViewerGpuPhysicalOutputSlot::<String, TestOutput, TestLease>::default();
-        slot.publish(
-            29,
-            "previous-completed-output".to_owned(),
-            TestOutput("resource-from-device-generation"),
-            TestLease(Arc::clone(&drops)),
-        );
-
-        let (output_key, output) =
-            slot.take_current_artifact().expect("device-generation artifact");
-        assert_eq!(output_key, "previous-completed-output");
-        assert_eq!(output.0, "resource-from-device-generation");
-        assert_eq!(drops.load(Ordering::Relaxed), 1);
-        assert!(slot.current.is_none());
     }
 }

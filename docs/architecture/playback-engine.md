@@ -800,6 +800,19 @@ rotation. Only an exact current-coordinate request promotes semantic and
 physical ownership. Late cleanup is artifact/submission-scoped and cannot erase
 or revive a newer prepared result.
 
+`app::viewer_gpu_publication::ViewerGpuPublicationSlots` is the sole physical
+ownership Module for this contract. It retains one current and one prepared
+publication, each binding the semantic output key, process-local submission,
+Adapter artifact, and move-only renderer lease. Window supplies an external
+texture key and Headless supplies its validation output; neither Adapter owns a
+second promotion rule. Exact promotion returns any replaced owner for ordered
+Adapter cleanup, exact submission retirement cannot touch a replacement, and
+device-generation retirement drains both slots. Accepted Transparent/CPU
+output, spatial-presentation change, or semantic/physical disagreement also
+drains both slots and clears their exact semantic artifacts before reevaluation;
+there is no path that silently drops a prepared lease while leaving its
+semantic successor advertised.
+
 The already-visible alias is the sole exception to sampling a new visibility
 timestamp: after the Clock crosses its exact frame boundary, Window or Headless
 may complete the new ticket at that same boundary observation because the
@@ -1585,13 +1598,13 @@ quarantines it until the exact late callback retires its frame and
 media-protection leases. Headless Preview state retains only cloneable semantic
 output metadata; the Adapter alone owns the move-only presentation lease.
 Successful ordinary publication moves that lease synchronously from the
-submission owner to the current physical slot, while heterogeneous publication
+submission owner to the shared current physical slot, while heterogeneous publication
 moves it only after callback/Broker validation. `Current` and queued-Ready reuse
 requires the exact semantic key and unique submission resource key on both
 sides. Timeout, cancellation, and late completion may clear Preview metadata
 only after exact submission identity removed that same physical artifact;
 same-semantic replacement is never clear authority. Accepted Transparent and
-CPU Raster presentation clear the physical GPU slot in the same publication
+CPU Raster presentation clear both physical GPU slots in the same publication
 commit. Once a presentable publication has consumed its Frame Demand, later
 Headless probes may observe the already-published output without inventing a
 replacement ticket, but only through a read-only predicate that requires both

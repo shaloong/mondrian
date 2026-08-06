@@ -168,6 +168,7 @@ pub(crate) fn present_headless_preview_candidate_at(
             });
         }
         clear_mismatched_headless_gpu_output(preview, gpu, &output_key);
+        gpu.clear_physical_outputs();
     }
     match state
         .preflight_pending_frame_presentation(already_visible_at.unwrap_or_else(Instant::now))
@@ -284,6 +285,7 @@ pub(crate) fn present_headless_preview_candidate_at(
             gpu.promote_prepared_successor(&output_key);
             if !headless_gpu_output_is_exact_current(preview, gpu, &output_key) {
                 clear_mismatched_headless_gpu_output(preview, gpu, &output_key);
+                gpu.clear_physical_outputs();
                 return Ok(HeadlessPreviewCandidate::Loading);
             }
             let presentation = match already_visible_at {
@@ -313,7 +315,7 @@ pub(crate) fn present_headless_preview_candidate_at(
             let presentation = state.finalize_frame_presentation(
                 candidate.presentation_ticket(),
                 FramePresentationPublication::prepared(|| {
-                    gpu.clear_current_physical_output();
+                    gpu.clear_physical_outputs();
                     preview.clear_external_viewer_frame();
                 }),
             );
@@ -403,12 +405,11 @@ fn drive_headless_gpu_submission(
             || "outside an active Viewer submission".to_owned(),
             |submission_id| format!("after submission attempt {}", submission_id.get()),
         );
-        let (active_submission, revoked_current_output) =
-            gpu.enter_device_generation_retirement(format!(
-                "device generation terminal {failure_context}: {}",
-                terminal.reason
-            ));
-        if let Some((output_key, output)) = revoked_current_output.as_ref() {
+        let (active_submission, revoked_outputs) = gpu.enter_device_generation_retirement(format!(
+            "device generation terminal {failure_context}: {}",
+            terminal.reason
+        ));
+        for (output_key, output) in revoked_outputs.iter().flatten() {
             clear_revoked_headless_gpu_output(preview, output_key, output);
         }
         match &mut completion {
@@ -799,7 +800,7 @@ pub(crate) fn present_headless_preview_output(
                             let presentation = state.finalize_frame_presentation(
                                 ticket,
                                 FramePresentationPublication::prepared(|| {
-                                    gpu.clear_current_physical_output();
+                                    gpu.clear_physical_outputs();
                                     preview.clear_external_viewer_frame();
                                 }),
                             );
@@ -843,7 +844,7 @@ pub(crate) fn present_headless_preview_output(
                     let presentation = state.finalize_frame_presentation(
                         candidate.presentation_ticket(),
                         FramePresentationPublication::prepared(|| {
-                            gpu.clear_current_physical_output();
+                            gpu.clear_physical_outputs();
                             preview.clear_external_viewer_frame();
                         }),
                     );
