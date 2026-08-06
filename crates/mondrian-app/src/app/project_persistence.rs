@@ -1462,10 +1462,14 @@ mod tests {
     use mondrian_timeline::{Sequence, SequenceCollection, SequenceSettings};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-    fn unique_root(_name: &str) -> PathBuf {
+    fn unique_root(name: &str) -> PathBuf {
         static NEXT_ROOT_ID: AtomicU64 = AtomicU64::new(1);
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
         std::env::temp_dir().join(format!(
-            "mp-{:x}-{:x}",
+            "mp-{name}-{:x}-{created_at:x}-{:x}",
             std::process::id(),
             NEXT_ROOT_ID.fetch_add(1, Ordering::Relaxed)
         ))

@@ -586,6 +586,13 @@ Session and a final durable reopen; stable IDs or a Project hash alone are
 insufficient. This product-path evidence does not replace filesystem
 fault-injection or conflict-UX qualification.
 
+Persistence unit fixtures use a cross-run unique runtime parent identity that
+includes the test purpose, process, creation time, and an in-process sequence.
+PID reuse or a retained directory from an interrupted test must never collide
+with a later fixture and be mistaken for a markerless production runtime root;
+the production ownership check remains fail-closed and is not weakened for
+tests.
+
 The repeated-crash qualification uses three independent child processes. Each
 process opens the preceding Recovery Authority, verifies the recovered author
 state, commits a new edit, durably publishes an autosave, and terminates through
