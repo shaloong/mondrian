@@ -8,6 +8,7 @@
 mod desktop;
 mod display;
 mod memory;
+mod user_state_directory;
 
 pub use desktop::{
     ClipboardError, FileDialogError, FileDialogOutcome, FileFilter, FileRevealError,
@@ -23,6 +24,7 @@ pub use memory::{
     ProcessMemoryProbeResult, ProcessMemoryScope, ProcessPrivateMemoryMetric, SystemMemoryProbe,
     SystemMemoryProbeBackend, SystemMemoryProbeResult,
 };
+pub use user_state_directory::{UserStateDirectory, UserStateDirectoryError};
 
 /// Empty platform implementation for tests and headless UI execution.
 ///

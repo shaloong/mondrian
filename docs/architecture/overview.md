@@ -43,8 +43,16 @@ foundation:
   owns dependency/lock/link-group admission and Timeline owns atomic map
   replacement.
 - `mondrian-editor-ui`: product-level panel/workspace descriptors. It should define editor UI concepts, not render widgets.
-- `mondrian-platform-core`: platform service traits and native-fact result types. No OS calls.
-- `mondrian-platform`: desktop platform implementations such as clipboard, dialogs, file reveal, eyedropper/global pointer capture, display discovery, playback-thread scheduling, and explicitly scoped memory observation. It owns OS services and facts, not device-bound Renderer capability; native video import support belongs to the active Renderer Adapter/Device runtime.
+- `mondrian-platform-core`: narrow platform service traits and native-fact result
+  types, including stable per-user state-directory discovery. It makes no OS
+  calls and owns no product filesystem namespace or persistence policy.
+- `mondrian-platform`: desktop platform implementations such as clipboard,
+  dialogs, file reveal, stable per-user state-directory discovery,
+  eyedropper/global pointer capture, display discovery, playback-thread
+  scheduling, and explicitly scoped memory observation. It owns OS services and
+  facts, not product directory creation/durability or device-bound Renderer
+  capability; native video import support belongs to the active Renderer
+  Adapter/Device runtime.
 - `mondrian-ui-core`: retained widget trait, events, accessibility metadata, focus/shortcut/tooltip traits, tree traversal.
 - `mondrian-ui-theme`: semantic theme tokens. Only Dark and Light are concrete themes; System is a resolver mode.
 - `mondrian-ui-layout`: reusable layout algorithms.
@@ -143,13 +151,20 @@ Lower layers cannot depend on higher layers:
   traversing authoring or execution internals. A custom slice may be replaced
   only atomically with equivalent typed behavior.
 - Platform services are injected into event/app layers; widgets never call OS APIs directly. Windows, macOS, Linux, and Headless implement one Platform Execution Contract throughout M1/M2. D3D12, Vulkan, Metal, native media surfaces, window-system objects, audio devices, and display payloads remain concrete Adapter details; shared Project, Timeline, Playback, Audio, Effects, Color, Viewer, and Export Interfaces carry only typed capability, ownership, synchronization, fallback, and terminal evidence. Windows is the current real-device qualification platform, not the semantic owner of the production Implementation.
-- Platform contracts keep Locality in independent `desktop`, `display`, and
-  `memory` Modules; the crate root only re-exports their stable public API and
+- Platform contracts keep Locality in independent `desktop`, `display`,
+  `memory`, and `user_state_directory` Modules; the crate root only re-exports
+  their stable public API and
   defines the capability-empty Headless adapter. Platform implementation keeps
   the same boundary in deep `memory`, `process_memory`, `playback_scheduling`,
-  `display/{windows,macos,linux}`, `global_pointer`, and `eyedropper` Modules.
+  `user_state_directory`, `display/{windows,macos,linux}`, `global_pointer`, and
+  `eyedropper` Modules.
   Its `lib.rs` is only the composition root: OS display APIs and desktop-capture
-  session state do not live beside `PlatformService` wiring. Native file-dialog
+  session state do not live beside `PlatformService` wiring. The narrow
+  `UserStateDirectory` Interface returns one absolute, uncreated platform root:
+  Windows uses Local App Data, macOS Application Support, and Linux the XDG
+  state directory with the standard home fallback. The Project Runtime Module
+  alone appends its namespace and owns creation, permissions, symlink defense,
+  locking, markers, and durability. Native file-dialog
   outcomes distinguish `Selected` from user `Cancelled`, while an unavailable
   or failed Adapter is an error; file-manager dispatch likewise reports
   unavailable/launch failure instead of silently succeeding. Playback scheduling is

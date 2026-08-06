@@ -12,6 +12,7 @@ mod global_pointer;
 mod memory;
 mod playback_scheduling;
 mod process_memory;
+mod user_state_directory;
 pub use mondrian_platform_core::{
     ClipboardError, DisplayHdrProbe, DisplayHdrProbeDetails, DisplayHdrProbeResult,
     DisplayIccProfileProbeResult, DisplayProbeBackend, DisplayProfileProbe,
@@ -20,7 +21,7 @@ pub use mondrian_platform_core::{
     PhysicalMemoryCapacityProbeBackend, PhysicalMemoryCapacityProbeResult, PlatformService,
     ProcessMemoryProbe, ProcessMemoryProbeBackend, ProcessMemoryProbeResult, ProcessMemoryScope,
     ProcessPrivateMemoryMetric, SystemMemoryProbe, SystemMemoryProbeBackend,
-    SystemMemoryProbeResult,
+    SystemMemoryProbeResult, UserStateDirectory, UserStateDirectoryError,
 };
 
 /// Default desktop platform implementation.
@@ -110,6 +111,12 @@ impl PhysicalMemoryCapacityProbe for SystemPlatformService {
 impl SystemMemoryProbe for SystemPlatformService {
     fn current_system_memory(&self) -> SystemMemoryProbeResult {
         system_memory()
+    }
+}
+
+impl UserStateDirectory for SystemPlatformService {
+    fn user_state_directory(&self) -> Result<PathBuf, UserStateDirectoryError> {
+        user_state_directory::system_user_state_directory()
     }
 }
 

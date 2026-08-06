@@ -26,10 +26,10 @@ Project save/open issues usually involve:
 Inspect the recovery-bearing runtime root under the stable per-user state
 namespace:
 
-- Windows: `%LOCALAPPDATA%/Mondrian/state/project-runtime-v4/`
-- macOS: `~/Library/Application Support/Mondrian/state/project-runtime-v4/`
-- other Unix: `$XDG_STATE_HOME/mondrian/project-runtime-v4/`, falling back to
-  `~/.local/state/mondrian/project-runtime-v4/`
+- Windows: `%LOCALAPPDATA%/mondrian-project-runtime-v4/`
+- macOS: `~/Library/Application Support/mondrian-project-runtime-v4/`
+- Linux: `$XDG_STATE_HOME/mondrian-project-runtime-v4/`, falling back to
+  `~/.local/state/mondrian-project-runtime-v4/`
 
 `library-generation-<uuid>/` is explicitly ephemeral; `autosave/` and its
 manifest are recovery authority and must not be treated as disposable cache.

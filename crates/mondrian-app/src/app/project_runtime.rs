@@ -18,6 +18,8 @@
 //! before mutation, so Unix unlink-and-replace cannot silently split authority.
 
 use mondrian_core::ProjectId;
+#[cfg(not(test))]
+use mondrian_platform::{SystemPlatformService, UserStateDirectory};
 use mondrian_storage::{
     create_durable_direct_child, ensure_durable_directory_chain, write_durable_file_atomically,
     write_durable_file_atomically_with_mode, DirectoryPublicationFailure,
@@ -724,23 +726,9 @@ pub(super) fn lease_existing_project_runtime_sharing_logical_authority(
 /// This location is deliberately independent from process `TEMP`, `TMPDIR`,
 /// and `XDG_RUNTIME_DIR`: operating-system cleanup of ephemeral runtime files
 /// must not silently destroy Recovery Authority.
-#[cfg(all(windows, not(test)))]
+#[cfg(not(test))]
 pub(super) fn project_runtime_parent() -> Result<PathBuf, String> {
-    Ok(windows_local_app_data()?.join(PROJECT_RUNTIME_STATE_DIRECTORY))
-}
-
-#[cfg(all(target_os = "macos", not(test)))]
-pub(super) fn project_runtime_parent() -> Result<PathBuf, String> {
-    Ok(macos_application_support_directory()?.join(PROJECT_RUNTIME_STATE_DIRECTORY))
-}
-
-#[cfg(all(unix, not(target_os = "macos"), not(test)))]
-pub(super) fn project_runtime_parent() -> Result<PathBuf, String> {
-    let state_home = unix_state_home(
-        std::env::var_os("XDG_STATE_HOME").as_deref(),
-        std::env::var_os("HOME").as_deref(),
-    )?;
-    Ok(state_home.join(PROJECT_RUNTIME_STATE_DIRECTORY))
+    Ok(stable_user_state_root()?.join(PROJECT_RUNTIME_STATE_DIRECTORY))
 }
 
 #[cfg(test)]
@@ -775,58 +763,17 @@ pub(super) fn project_runtime_parent() -> Result<PathBuf, String> {
 /// merely because two processes inherited different temporary environments.
 #[cfg(all(windows, not(test)))]
 fn project_authority_root() -> Result<PathBuf, String> {
-    Ok(windows_local_app_data()?
+    Ok(stable_user_state_root()?
         .join("Mondrian")
         .join("authority")
         .join("project-runtime-v2"))
 }
 
-#[cfg(all(windows, not(test)))]
-fn windows_local_app_data() -> Result<PathBuf, String> {
-    use windows_sys::Win32::System::Com::CoTaskMemFree;
-    use windows_sys::Win32::UI::Shell::{FOLDERID_LocalAppData, SHGetKnownFolderPath};
-
-    let mut raw_path: windows_sys::core::PWSTR = std::ptr::null_mut();
-    // SAFETY: the API initializes `raw_path` with a COM-task allocation on
-    // success. The current user token is selected by a null token handle and
-    // the allocation is released exactly once below.
-    let result = unsafe {
-        SHGetKnownFolderPath(
-            &FOLDERID_LocalAppData,
-            0,
-            std::ptr::null_mut(),
-            &mut raw_path,
-        )
-    };
-    if result < 0 {
-        return Err(format!(
-            "failed to locate stable per-user Project authority root (HRESULT 0x{:08x})",
-            result as u32
-        ));
-    }
-    if raw_path.is_null() {
-        return Err("stable per-user Project authority root is unavailable".to_owned());
-    }
-    let mut length = 0_usize;
-    // SAFETY: `SHGetKnownFolderPath` returns one NUL-terminated UTF-16 string.
-    while unsafe { *raw_path.add(length) } != 0 {
-        if length >= 32_768 {
-            // SAFETY: `raw_path` is the exact COM-task allocation returned above.
-            unsafe { CoTaskMemFree(raw_path.cast()) };
-            return Err("Project authority path exceeds the Windows path limit".to_owned());
-        }
-        length += 1;
-    }
-    // SAFETY: the preceding scan proved that the first `length` units are
-    // initialized and precede the terminating NUL.
-    let units = unsafe { std::slice::from_raw_parts(raw_path, length) };
-    let local_app_data = PathBuf::from(std::ffi::OsString::from_wide(units));
-    // SAFETY: `raw_path` is the exact COM-task allocation returned above.
-    unsafe { CoTaskMemFree(raw_path.cast()) };
-    if !local_app_data.is_absolute() {
-        return Err("stable per-user LocalAppData path is not absolute".to_owned());
-    }
-    Ok(local_app_data)
+#[cfg(not(test))]
+fn stable_user_state_root() -> Result<PathBuf, String> {
+    SystemPlatformService
+        .user_state_directory()
+        .map_err(|error| format!("failed to resolve stable per-user Project state root: {error}"))
 }
 
 #[cfg(all(unix, not(test)))]
@@ -853,34 +800,6 @@ fn project_authority_root() -> Result<PathBuf, String> {
 fn effective_user_id() -> libc::uid_t {
     // SAFETY: `geteuid` has no preconditions and reads process identity only.
     unsafe { libc::geteuid() }
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn unix_state_home(
-    xdg_state_home: Option<&OsStr>,
-    home: Option<&OsStr>,
-) -> Result<PathBuf, String> {
-    if let Some(candidate) = xdg_state_home.map(Path::new).filter(|path| path.is_absolute()) {
-        return Ok(candidate.to_path_buf());
-    }
-    let home = home.map(Path::new).filter(|path| path.is_absolute()).ok_or_else(|| {
-        "stable per-user Project state root requires absolute XDG_STATE_HOME or HOME".to_owned()
-    })?;
-    Ok(home.join(".local").join("state"))
-}
-
-#[cfg(all(target_os = "macos", not(test)))]
-fn stable_home_directory() -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .ok_or_else(|| "stable per-user Project state root requires an absolute HOME".to_owned())?;
-    Ok(home)
-}
-
-#[cfg(all(target_os = "macos", not(test)))]
-fn macos_application_support_directory() -> Result<PathBuf, String> {
-    Ok(stable_home_directory()?.join("Library").join("Application Support"))
 }
 
 /// Read-only verification of immutable runtime ownership.
@@ -1528,21 +1447,17 @@ fn trusted_runtime_parent_anchor(runtime_parent: &Path) -> Result<PathBuf, Strin
 
 #[cfg(all(windows, not(test)))]
 fn trusted_runtime_parent_anchor(_runtime_parent: &Path) -> Result<PathBuf, String> {
-    windows_local_app_data()
+    stable_user_state_root()
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
 fn trusted_runtime_parent_anchor(_runtime_parent: &Path) -> Result<PathBuf, String> {
-    existing_direct_anchor_or_ancestor(&macos_application_support_directory()?)
+    existing_direct_anchor_or_ancestor(&stable_user_state_root()?)
 }
 
 #[cfg(all(unix, not(target_os = "macos"), not(test)))]
 fn trusted_runtime_parent_anchor(_runtime_parent: &Path) -> Result<PathBuf, String> {
-    let state_home = unix_state_home(
-        std::env::var_os("XDG_STATE_HOME").as_deref(),
-        std::env::var_os("HOME").as_deref(),
-    )?;
-    existing_direct_anchor_or_ancestor(&state_home)
+    existing_direct_anchor_or_ancestor(&stable_user_state_root()?)
 }
 
 #[cfg(all(unix, not(test)))]
@@ -2547,40 +2462,6 @@ mod tests {
             .expect_err("production lease must not create authority under an arbitrary parent");
         assert!(error.contains("outside the canonical runtime authority namespace"));
         let _ = fs::remove_dir_all(base);
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    #[test]
-    fn unix_absolute_xdg_state_home_is_preferred_for_recovery_payload() {
-        let container = unique_root("xdg-state-home");
-        let xdg_state_home = container.join("xdg-state");
-        let home = container.join("home");
-        assert_eq!(
-            unix_state_home(Some(xdg_state_home.as_os_str()), Some(home.as_os_str()))
-                .expect("absolute XDG state home"),
-            xdg_state_home
-        );
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    #[test]
-    fn unix_relative_or_missing_xdg_state_home_falls_back_to_home_state() {
-        let container = unique_root("xdg-state-fallback");
-        let home = container.join("home");
-        let expected = home.join(".local").join("state");
-        assert_eq!(
-            unix_state_home(Some(OsStr::new("relative-state")), Some(home.as_os_str()))
-                .expect("HOME fallback"),
-            expected
-        );
-        assert_eq!(
-            unix_state_home(None, Some(home.as_os_str())).expect("HOME fallback"),
-            expected
-        );
-        assert!(
-            unix_state_home(None, Some(OsStr::new("relative-home"))).is_err(),
-            "a relative fallback must not create process-working-directory recovery state"
-        );
     }
 
     #[cfg(unix)]

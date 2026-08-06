@@ -229,6 +229,14 @@ macOS below Application Support, and other Unix platforms below
 `TMPDIR`, and `XDG_RUNTIME_DIR`, while processes with different temporary
 environments still contend on the same Project and publication locks.
 
+Native discovery of that stable per-user anchor crosses the narrow
+`mondrian_platform_core::UserStateDirectory` Interface. The
+`mondrian-platform` Adapter resolves one absolute path without creating it.
+Project Runtime remains the sole owner of the product namespace, durable
+directory chain, permissions, symlink/object-identity checks, leases, and
+recovery semantics; these domain rules must not move into a generic platform
+utility or be reimplemented in the App composition root.
+
 Runtime-parent creation uses one product-owned leaf,
 `mondrian-project-runtime-v4`, directly below the platform state anchor: Local
 App Data, Application Support, or the selected XDG/HOME state directory. If

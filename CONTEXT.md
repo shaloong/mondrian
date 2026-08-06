@@ -570,6 +570,10 @@ _Avoid_: `update_project_path` boolean, resampling `AuthoringSession::project_fi
 The strict versioned Project-runtime index that binds one canonical Project ID/absolute path to immutable `CreateNew` autosave archives by exact absolute child path, timestamp, Author Generation, Asset Library revision, embedded document revision, and SHA-256. Each archive leaf contains wall-clock, Author Generation, and random UUID identity; new-point publication consumes exact Project Archive Publication Evidence only after the archive is durable.
 _Avoid_: Directory scan as authority, unversioned file list, path-only recovery candidate, manifest published before its archive, overwriteable autosave leaf, filename timestamp as uniqueness or authority
 
+**User State Directory**:
+The narrow platform Interface that discovers one absolute, stable per-user state anchor without creating or modifying it. Its Windows, macOS, and Linux Adapters resolve Local App Data, Application Support, and XDG state/Home respectively. Every caller appends its own product namespace and remains responsible for creation, permissions, symlink/object identity, locking, and durability.
+_Avoid_: Process TEMP/TMPDIR/XDG_RUNTIME_DIR, UI/App code calling native discovery directly, generic platform code creating Project directories or owning Recovery Authority
+
 **Project Runtime Owner Manifest**:
 The strict durable identity that binds one stable runtime root to the complete domain-separated SHA-256 of the normalized Project publication target that first allocated it and to exactly one Project ID. It authorizes root reuse and child deletion but owns no recovery point or mutable canonical Project path; Save As keeps the allocation identity and root stable.
 _Avoid_: Lossy display path as authority, unresolved filesystem aliases, truncated hash, directory name alone, Recovery Manifest duplicate, deleting an unowned runtime tree

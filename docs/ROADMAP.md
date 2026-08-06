@@ -1,6 +1,6 @@
 # Mondrian 产品路线图
 
-> 更新日期：2026-08-05
+> 更新日期：2026-08-06
 >
 > 当前主目标：以同一套跨平台产品实现完成可信的真实项目制作闭环；M1/M2 暂以 Windows 实机作为发布资格证据平台，但不得把 Windows 专属实现写入共享语义。
 >
@@ -75,6 +75,16 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 | 插件 | 内部效果 definition、graph DSL、能力/缓存/失败隔离契约已有；plugin contract 已成为不可变 `EffectDefinition` 的一部分，不再由平行全局合同注册表提供，运行期 quarantine 只按精确 Definition Registry generation 记录，不能污染同 key 的替换定义 | 尚无稳定外部 ABI、包加载/权限/进程隔离/兼容矩阵；generation-scoped quarantine 也不是外部插件 host，当前只能称内部扩展接缝 | L0 |
 | AI | Provider trait、workflow schema 与 fail-closed orchestrator 存在；没有生产 Adapter 时，未知/未绑定 Provider 与 `place_on_timeline` 都返回结构化失败，且不会发布虚假的 step/workflow completion | 尚无生产 Provider 或 UI-independent typed editor Action Adapter，不进入核心发布承诺 | L0 |
 | 跨平台 | Platform Execution Contract、Noop/headless、winit/wgpu 产品入口、剪贴板/文件对话框/文件定位、显示 ICC/HDR、物理/系统/进程树内存、线程仿射播放调度和全局指针均有 Windows/Linux/macOS 生产 Adapter；受 Wayland 安全模型约束而没有全局指针权限时明确退回普通 winit 窗口事件。平台层使用本地 `DesktopRgba8` 表达精确桌面样本，不再依赖 `mondrian-core`/OCIO；显示、全局指针与桌面取色各有深 Module，组合根不承载 OS 实现。D3D12/Metal/Vulkan 原生视频导入属于当前 Renderer 设备而非 Platform Service。常规 CI 已配置 Windows/Linux/macOS workspace、完整 App path 和 Linux UI Gate，Release 也原生构建三平台产品、收集私有动态媒体依赖闭包并执行隔离运行时检查。实时音频的系统默认/指定稳定设备选择和切换已共用 CPAL 产品路径 | 当前本机已完成 Windows 全特性编译与 macOS platform target 交叉编译；Linux 交叉 target 在本仓库代码前受 DBus/pkg-config sysroot 限制，必须由原生 runner 关闭。仍须由原生 CI 运行结果与真实设备分别关闭 Linux/macOS 构建、ICC/HDR、全局指针权限/降级、安装/卸载及动态依赖制品资格；named 5.1/7.1 还必须由能控制实际 stream channel map 的原生音频 Adapter 证明，不能只读取设备默认 mask 后继续让 CPAL direct-out 写入。原生设备缺失允许语义正确的 CPU/upload/SDR fallback，但 capability 不能由 OS 名称单独冒充执行成功 | OS Adapter Locality、三平台 Implementation、原生 CI/Release 配置和稳定音频设备选择已收敛；Linux/macOS CI 运行、设备与发布制品资格仍未闭合 |
+
+本轮继续关闭了一条跨平台 Locality 缺口：稳定的每用户状态目录现在由
+`mondrian-platform-core::UserStateDirectory` 定义窄 Interface，并由
+`mondrian-platform::user_state_directory` 分别实现 Windows Local App Data、macOS
+Application Support 与 Linux XDG state/Home 解析。App 不再直接包含三套 OS
+发现逻辑；Project Runtime 仍独占产品命名空间、目录创建、权限、symlink/object
+identity、锁、耐久性与 Recovery Authority，避免把领域策略膨胀成通用平台工具。
+Windows 原生测试与 App 生产编译已通过，macOS Adapter 已在
+`aarch64-apple-darwin` 目标交叉编译；Linux 原生 CI/实机证据仍按上表退出门槛关闭，
+不得由 Windows 上缺少 DBus/pkg-config sysroot 的交叉编译失败冒充代码失败或成功。
 
 本轮音频执行需求已收敛为编译后 Signal Closure 产生的
 [`AudioProgramExecutionDemand`](../crates/mondrian-audio/src/plan.rs)
