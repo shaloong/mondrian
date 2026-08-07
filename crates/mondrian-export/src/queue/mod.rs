@@ -5225,8 +5225,10 @@ mod tests {
     use mondrian_core::{JobId, VideoContentLightMetadata, VideoMasteringDisplayMetadata};
     use mondrian_effects::{
         apply_compiled_effect_graph_rgba_f32, compile_reference_effect_graph,
+        compile_reference_render_graph,
         compiled_effect_graph_supports_rgba_f32_with_domain_processor, CompiledEffectGraph,
-        EffectNodeExt, EffectRenderPlan, PreparedEffectProgram,
+        EffectColorDomain, EffectGraphBuilderState, EffectNodeExt, EffectRenderOp,
+        EffectRenderPlan, MaskOp, MaskShape, PreparedEffectProgram,
     };
     use mondrian_renderer::RenderOutputColorBoundaryTarget;
     use mondrian_timeline::clip::Clip;
@@ -5569,23 +5571,38 @@ mod tests {
         .expect("compile heterogeneous Export CPU-DAG graph")
     }
 
+    fn heterogeneous_gpu_mask_graph() -> Arc<CompiledEffectGraph> {
+        let mut graph = EffectGraphBuilderState::new();
+        let source = graph.source();
+        let filtered = graph.add_unary_from(source, EffectRenderOp::GaussianBlur { radius: 1.0 });
+        let mask = graph.add_mask_source(
+            MaskShape::Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+                corner_radius: 0.0,
+            },
+            0.0,
+            0.0,
+            0.35,
+        );
+        let output = graph.add_mask(filtered, mask, false, MaskOp::Add);
+        graph.set_current_output(output);
+        compile_reference_render_graph(graph.finish()).expect("compile heterogeneous GPU Mask")
+    }
+
     fn freeze_test_heterogeneous_route(
         session: &mut ExportVisualRenderSession,
         graph: &Arc<CompiledEffectGraph>,
         placement: ExportHeterogeneousPlacement,
         extent: EffectFrameExtent,
     ) -> mondrian_renderer::PreparedHeterogeneousEffectRoute {
-        let (route, budget) = session
+        let route = session
             .prepare_heterogeneous_route(graph, extent, placement)
             .expect("prepare heterogeneous Export test route");
         session
-            .register_or_validate_route_contract(
-                graph,
-                route.prepared_work(),
-                placement,
-                extent,
-                budget,
-            )
+            .register_or_validate_route_contract(&route, placement, extent)
             .expect("freeze heterogeneous Export test route");
         route
     }
@@ -5607,6 +5624,30 @@ mod tests {
 
         assert_eq!(route.prepared_work().cpu_nodes().len(), 3);
         assert_eq!(route.prepared_work().gpu_suffix().node_ids().len(), 1);
+        assert_eq!(session.heterogeneous_route_contracts.len(), 1);
+    }
+
+    #[test]
+    fn export_route_contract_accepts_typed_alpha_mask_frontier() {
+        let graph = heterogeneous_gpu_mask_graph();
+        let extent = EffectFrameExtent::new(4, 3);
+        let mut session = ExportVisualRenderSession::for_reference_generation(
+            74,
+            service::ExportExecutionResourcePolicy::default(),
+        );
+        let route = freeze_test_heterogeneous_route(
+            &mut session,
+            &graph,
+            ExportHeterogeneousPlacement::Media,
+            extent,
+        );
+
+        assert!(
+            route.prepared_work().plan().materializations().iter().any(|materialization| {
+                materialization.residency().format().domain() == EffectColorDomain::AlphaMask
+            })
+        );
+        assert_eq!(route.cpu_frontier_retained_bytes(), 2 * 4 * 3 * 16);
         assert_eq!(session.heterogeneous_route_contracts.len(), 1);
     }
 
@@ -5693,17 +5734,15 @@ mod tests {
             extent,
         );
         session.route_contracts_sealed = true;
-        let (drifted_route, budget) = session
+        let drifted_route = session
             .prepare_heterogeneous_route(&drifted, extent, ExportHeterogeneousPlacement::Media)
             .expect("prepare shape-drift probe");
 
         let error = session
             .register_or_validate_route_contract(
-                &drifted,
-                drifted_route.prepared_work(),
+                &drifted_route,
                 ExportHeterogeneousPlacement::Media,
                 extent,
-                budget,
             )
             .expect_err("runtime route shape not frozen by preflight must fail closed");
         assert!(matches!(

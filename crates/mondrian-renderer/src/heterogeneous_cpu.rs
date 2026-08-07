@@ -14,8 +14,8 @@ use mondrian_core::WorkingColorSpace;
 use mondrian_effects::{
     CompiledEffectGraph, EffectExecutionSessionConfig, EffectFrameExtent,
     EffectGraphExecutionBudget, HeterogeneousCpuExecutionStopReason,
-    PreparedHeterogeneousCpuCompletion, PreparedHeterogeneousEffectWork,
-    PreparedHeterogeneousEffectWorkError,
+    HeterogeneousEffectShapeIdentity, PreparedHeterogeneousCpuCompletion,
+    PreparedHeterogeneousEffectWork, PreparedHeterogeneousEffectWorkError,
 };
 
 use crate::{
@@ -92,6 +92,36 @@ impl PreparedHeterogeneousEffectRoute {
     /// Effect-owned prepared graph-value work used by CPU and GPU executors.
     pub fn prepared_work(&self) -> &PreparedHeterogeneousEffectWork {
         &self.work
+    }
+
+    /// Effects-owned executable route-shape identity.
+    pub fn shape_identity(&self) -> HeterogeneousEffectShapeIdentity {
+        self.work.shape_identity()
+    }
+
+    /// Exact logical bytes retained by all successful CPU frontier values.
+    pub fn cpu_frontier_retained_bytes(&self) -> u64 {
+        self.work.cpu_frontier_retained_bytes()
+    }
+
+    /// Exact peak host residency proved by graph-value planning.
+    pub fn graph_peak_host_bytes(&self) -> u64 {
+        self.work.plan().peak_host_bytes()
+    }
+
+    /// Exact peak device residency proved by graph-value planning.
+    pub fn graph_peak_device_bytes(&self) -> u64 {
+        self.work.plan().peak_device_bytes()
+    }
+
+    /// Exact aggregate transfer bytes proved by graph-value planning.
+    pub fn graph_transfer_bytes(&self) -> u64 {
+        self.work.plan().transfer_bytes()
+    }
+
+    /// Exact transient scalar bytes required by the CPU prefix.
+    pub fn cpu_required_working_bytes(&self) -> usize {
+        self.work.cpu_required_working_bytes()
     }
 
     /// Exact graph-planning authority used during preparation.
@@ -209,8 +239,8 @@ impl HeterogeneousCpuPrefixBatchGrant {
         self.max_batch_items
     }
 
-    /// Maximum aggregate logical bytes retained by immutable inputs plus
-    /// successful CPU-prefix outputs.
+    /// Maximum aggregate logical bytes retained by immutable inputs plus all
+    /// successful CPU frontier values.
     pub const fn max_batch_pixel_bytes(self) -> u64 {
         self.max_batch_pixel_bytes
     }
@@ -554,7 +584,7 @@ fn validate_batch_request(
             .ok_or(HeterogeneousCpuPrefixBatchError::BatchPixelBytesOverflow)?;
         retained_pixel_bytes = retained_pixel_bytes
             .checked_add(frame_bytes)
-            .and_then(|bytes| bytes.checked_add(frame_bytes))
+            .and_then(|bytes| bytes.checked_add(item.route.cpu_frontier_retained_bytes()))
             .ok_or(HeterogeneousCpuPrefixBatchError::BatchPixelBytesOverflow)?;
     }
     if retained_pixel_bytes > request.grant.max_batch_pixel_bytes {
@@ -628,11 +658,15 @@ fn validate_working_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_core::BlendMode;
     use mondrian_core::{
         effect_data::{EffectNode, EffectType},
         PropertyValue, TimelineTime, WorkingRgbaF32Frame,
     };
-    use mondrian_effects::{EffectNodeExt, PreparedEffectProgram};
+    use mondrian_effects::{
+        compile_reference_render_graph, EffectGraphBuilderState, EffectNodeExt, EffectRenderOp,
+        PreparedEffectProgram,
+    };
 
     const EXTENT: EffectFrameExtent = EffectFrameExtent::new(3, 2);
     const WORKING_SPACE: WorkingColorSpace = WorkingColorSpace::LinearRec2020;
@@ -701,6 +735,48 @@ mod tests {
         )
     }
 
+    fn two_frontier_graph() -> Arc<CompiledEffectGraph> {
+        let mut builder = EffectGraphBuilderState::new();
+        let source = builder.source();
+        let blurred = builder.add_unary_from(source, EffectRenderOp::GaussianBlur { radius: 1.0 });
+        let sharpened = builder.add_unary_from(source, EffectRenderOp::Sharpen { amount: 0.4 });
+        let output = builder.add_blend(blurred, sharpened, BlendMode::Screen, 0.6);
+        builder.set_current_output(output);
+        compile_reference_render_graph(builder.finish()).expect("compile two-frontier graph")
+    }
+
+    fn two_frontier_item(address: u32) -> HeterogeneousCpuPrefixBatchItem {
+        let grant = grant();
+        let route = PreparedHeterogeneousEffectRoute::prepare(
+            two_frontier_graph(),
+            EXTENT,
+            grant.graph_execution(),
+        )
+        .expect("prepare two-frontier heterogeneous route");
+        HeterogeneousCpuPrefixBatchItem::new(
+            address,
+            route,
+            CpuColorFrame::working(WorkingRgbaF32Frame {
+                width: EXTENT.width(),
+                height: EXTENT.height(),
+                color_space: WORKING_SPACE,
+                data: vec![[0.2, 0.4, 0.6, 1.0]; 6],
+            }),
+            WORKING_SPACE,
+            19,
+        )
+    }
+
+    fn grant_with_retained_limit(max_batch_pixel_bytes: u64) -> HeterogeneousCpuPrefixBatchGrant {
+        let base = grant();
+        HeterogeneousCpuPrefixBatchGrant::new(
+            base.effect_session(),
+            base.graph_execution(),
+            base.max_batch_items(),
+            max_batch_pixel_bytes,
+        )
+    }
+
     #[test]
     fn validation_rejects_duplicate_addresses_before_execution() {
         let request = HeterogeneousCpuPrefixBatchRequest::new(grant(), vec![item(7), item(7)]);
@@ -760,6 +836,39 @@ mod tests {
         assert!(output.completions().iter().all(|completion| {
             completion.completion().evidence().working_color_space() == WORKING_SPACE
         }));
+    }
+
+    #[test]
+    fn batch_budget_counts_every_retained_cpu_frontier_value() {
+        const FRAME_BYTES: u64 = 3 * 2 * 16;
+        const ONE_ITEM_RETAINED_BYTES: u64 = FRAME_BYTES * 3;
+        let item = two_frontier_item(5);
+        assert_eq!(item.route.cpu_frontier_retained_bytes(), FRAME_BYTES * 2);
+
+        let undersized = HeterogeneousCpuPrefixBatchRequest::new(
+            grant_with_retained_limit(ONE_ITEM_RETAINED_BYTES - 1),
+            vec![item.clone()],
+        );
+        assert!(matches!(
+            undersized.validate(),
+            Err(HeterogeneousCpuPrefixBatchError::BatchPixelBytesExceeded {
+                required: ONE_ITEM_RETAINED_BYTES,
+                limit
+            }) if limit == ONE_ITEM_RETAINED_BYTES - 1
+        ));
+
+        let exact = HeterogeneousCpuPrefixBatchRequest::new(
+            grant_with_retained_limit(ONE_ITEM_RETAINED_BYTES * 2),
+            vec![item, two_frontier_item(9)],
+        );
+        exact.validate().expect("exact two-item frontier budget");
+        let output = HeterogeneousCpuPrefixBatchExecutor::default()
+            .execute(exact, 17, || None)
+            .expect("execute exactly admitted multi-frontier batch");
+        assert!(output
+            .completions()
+            .iter()
+            .all(|completion| { completion.completion().boundary_values().len() == 2 }));
     }
 
     #[test]

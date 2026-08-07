@@ -1533,11 +1533,11 @@ fn preview_heterogeneous_effect_execution_decision(
     class: MachineResourceClass,
     effect_working_bytes: usize,
 ) -> PreviewHeterogeneousEffectExecutionDecision {
-    // `max_batch_pixel_bytes` counts each immutable CPU input plus its
-    // successful CPU-prefix output. One UHD RGBA-F32 pair is 253.125 MiB.
-    // MinimumSupported therefore admits one such item; larger classes admit
-    // additional simultaneous Viewer contributions without changing the
-    // per-item graph execution contract.
+    // `max_batch_pixel_bytes` is a policy ceiling. Renderer admission counts
+    // each immutable CPU input plus every Effects-owned frontier value for the
+    // prepared route. One UHD input plus one frontier is 253.125 MiB, so
+    // MinimumSupported admits that baseline shape; wider frontiers consume
+    // proportionally more authority rather than being hidden by this policy.
     let max_batch_pixel_bytes = match class {
         MachineResourceClass::BelowMinimum | MachineResourceClass::UnknownConservative => {
             128 * MIB as u64
@@ -2000,7 +2000,7 @@ mod tests {
     }
 
     #[test]
-    fn heterogeneous_preview_grants_are_machine_bound_and_cover_one_uhd_pair_at_eight_gib() {
+    fn heterogeneous_preview_grants_cover_one_single_frontier_uhd_route_at_eight_gib() {
         const UHD_RGBA_F32_FRAME_BYTES: u64 = 3_840 * 2_160 * 16;
         const UHD_CPU_PREFIX_RETAINED_BYTES: u64 = UHD_RGBA_F32_FRAME_BYTES * 2;
         let minimum =
@@ -2013,7 +2013,7 @@ mod tests {
         assert!(minimum_cpu.max_batch_items() >= 1);
         assert!(
             minimum_cpu.max_batch_pixel_bytes() >= UHD_CPU_PREFIX_RETAINED_BYTES,
-            "8 GiB must admit one UHD Float32 input plus its CPU-prefix output"
+            "8 GiB must admit one UHD Float32 input plus one CPU frontier value"
         );
         assert!(
             minimum_cpu.effect_session().max_working_bytes >= 256 * MIB,

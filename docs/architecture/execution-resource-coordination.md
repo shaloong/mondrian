@@ -351,14 +351,18 @@ separately governed.
 
 Preview heterogeneous execution freezes two correlated grants before any CPU
 prefix starts. The CPU grant bounds one atomic addressed batch, Effect Session,
-graph steps/materializations, and retained input-plus-prefix-output pixels; the
+graph steps/materializations, and retained input-plus-all-frontier pixels. The
+Effects-prepared route publishes the exact frontier charge, and Renderer sums
+it with each immutable input before scheduling; policy never assumes one
+frontier per item. The
 GPU grant bounds the matching upload/device continuation and grants zero
 readback because the value proceeds directly into the Viewer composite. Its
 texture/resource admission consumes the heterogeneous plan's exact peak live
 device-materialization count; it never derives a texture count by dividing
 device bytes by an assumed RGBA32F frame size. The 8 GiB class admits one UHD
-RGBA-F32 input/output pair with a 256 MiB retained
-pixel grant. The 16 GiB class raises the batch pixel grant to 768 MiB while
+RGBA-F32 input plus one frontier value with a 256 MiB retained pixel grant;
+wider frontiers consume their exact additional bytes. The 16 GiB class raises
+the batch pixel grant to 768 MiB while
 retaining the same graph semantics. Elevated or Critical pressure may trim
 optional Effect cache residency but cannot reinterpret or shrink these grants
 under an admitted attempt.

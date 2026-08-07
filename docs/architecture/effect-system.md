@@ -301,6 +301,13 @@ graph, extent, graph-planning budget, semantic fingerprint, graph-value plan,
 CPU prefix, and GPU suffix before source pixels exist. Preview and Export bind
 pixels to that same object; neither execution worker may choose lanes or
 replan. A changed extent or batch grant fails before CPU execution.
+Effects also derives one opaque, versioned `HeterogeneousEffectShapeIdentity`
+from the complete dispatch/transfer/release sequence, lane/backend choices,
+exact value formats, and executable operation kinds. Frame extent and authored
+parameter values are deliberately outside this shape identity. Renderer
+exposes it through the prepared route, and Export binds it into the attempt
+ledger; Export does not walk graph nodes or reinterpret value domains to
+reconstruct a second route fingerprint.
 `PreparedHeterogeneousEffectWork` then executes the prepared semantics. With a
 caller-supplied scene-linear CPU Float32 working frame it
 executes an exact source-closed CPU DAG prefix directly from the planned
@@ -340,6 +347,11 @@ clones only fan-out values with future consumers, releases join inputs, and
 checks the resulting peak plus Mask geometry/row scratch and Gaussian/Sharpen scratch against the bound
 Effect Execution Session before allocation. Input and fan-out copies observe
 the same fixed-size cooperative checkpoints as long-running kernels. The GPU
+route additionally publishes the exact logical bytes retained by every CPU
+frontier materialization. Renderer batch admission sums the immutable caller
+input plus all of those values for every item; it never assumes that one route
+has exactly one output frame.
+The GPU
 Adapter executes an ordered MultiInput with at least two inputs as a left fold
 over the shared straight-alpha BlendMode compositor. An N-input dispatch owns
 `N - 2` private intermediate textures plus its semantic output; the physical

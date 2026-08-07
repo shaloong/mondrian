@@ -19,10 +19,11 @@ use crate::{
     CompiledEffectGpuPlan, CompiledEffectGraph, EffectColorDomain, EffectExecutionEnvironment,
     EffectExecutionLane, EffectExecutionLaneId, EffectExecutionModes, EffectExecutionSession,
     EffectFrameExtent, EffectGpuPlanBlocker, EffectGraphNodeId, EffectGraphNodeKind,
-    EffectProcessingBackend, EffectResourceLifetime, EffectStateModel, EffectTemporalInputExtent,
-    EffectWorkingPrecision,
+    EffectProcessingBackend, EffectRenderOp, EffectResourceLifetime, EffectStateModel,
+    EffectTemporalInputExtent, EffectWorkingPrecision,
 };
-use mondrian_core::{types::BlendMode, WorkingColorSpace};
+use mondrian_core::{types::BlendMode, ColorSpace, WorkingColorSpace};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -57,6 +58,25 @@ impl EffectValueFormat {
 pub struct EffectValueResidency {
     lane: EffectExecutionLaneId,
     format: EffectValueFormat,
+}
+
+const HETEROGENEOUS_EFFECT_SHAPE_SCHEMA_VERSION: u16 = 1;
+
+/// Opaque, versioned identity of one executable heterogeneous route shape.
+///
+/// The identity covers the complete dispatch/transfer/release plan, exact
+/// lane and value formats, and executable operation kinds. Authored parameter
+/// values and frame extent are deliberately excluded so preflight can admit a
+/// shape once and bind bounded per-frame values and extents later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HeterogeneousEffectShapeIdentity([u8; 32]);
+
+impl HeterogeneousEffectShapeIdentity {
+    /// Canonical digest bytes for ledgers that bind this identity into a
+    /// larger attempt contract.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
 }
 
 impl EffectValueResidency {
@@ -1967,7 +1987,10 @@ impl PreparedHeterogeneousCpuBoundaryValue {
         self.transfer
     }
 
-    /// Scene-linear Float32 pixels for this boundary materialization.
+    /// Typed Float32 graph-value pixels for this boundary materialization.
+    ///
+    /// The exact color/data domain is carried by [`Self::transfer`]. AlphaMask
+    /// values currently use the alpha channel of this physical RGBA layout.
     pub fn pixels(&self) -> &[[f32; 4]] {
         &self.pixels
     }
@@ -2126,6 +2149,198 @@ struct PreparedCpuGraphDispatch {
     output: EffectMaterializationId,
 }
 
+fn heterogeneous_effect_shape_identity(
+    compiled: &CompiledEffectGraph,
+    plan: &CompiledEffectValueExecutionPlan,
+    cpu_nodes: &[EffectGraphNodeId],
+    gpu_nodes: &[EffectGraphNodeId],
+) -> Result<HeterogeneousEffectShapeIdentity, PreparedHeterogeneousEffectWorkError> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mondrian.heterogeneous-effect-shape");
+    hasher.update(HETEROGENEOUS_EFFECT_SHAPE_SCHEMA_VERSION.to_le_bytes());
+    hasher.update((plan.materializations().len() as u64).to_le_bytes());
+    for materialization in plan.materializations() {
+        hasher.update(materialization.id().get().to_le_bytes());
+        hasher.update(materialization.value().0.to_le_bytes());
+        hash_effect_residency(&mut hasher, materialization.residency());
+        hasher.update(materialization.completion().get().to_le_bytes());
+    }
+    hasher.update((plan.steps().len() as u64).to_le_bytes());
+    for step in plan.steps() {
+        match step {
+            EffectGraphExecutionStep::Dispatch {
+                node,
+                lane,
+                backend,
+                precision,
+                inputs,
+                output,
+                waits,
+                signal,
+            } => {
+                hasher.update([1]);
+                hasher.update(node.0.to_le_bytes());
+                hasher.update(lane.get().to_le_bytes());
+                hasher.update([effect_backend_tag(*backend)]);
+                hasher.update([effect_precision_tag(*precision)]);
+                hasher.update((inputs.len() as u64).to_le_bytes());
+                for input in inputs.iter() {
+                    hasher.update(input.get().to_le_bytes());
+                }
+                hasher.update(output.get().to_le_bytes());
+                hasher.update((waits.len() as u64).to_le_bytes());
+                for wait in waits.iter() {
+                    hasher.update(wait.get().to_le_bytes());
+                }
+                hasher.update(signal.get().to_le_bytes());
+            }
+            EffectGraphExecutionStep::Transfer { value, input, output, from, to, wait, signal } => {
+                hasher.update([2]);
+                hasher.update(value.0.to_le_bytes());
+                hasher.update(input.get().to_le_bytes());
+                hasher.update(output.get().to_le_bytes());
+                hash_effect_residency(&mut hasher, *from);
+                hash_effect_residency(&mut hasher, *to);
+                hasher.update(wait.get().to_le_bytes());
+                hasher.update(signal.get().to_le_bytes());
+            }
+            EffectGraphExecutionStep::Release { materialization, after } => {
+                hasher.update([3]);
+                hasher.update(materialization.get().to_le_bytes());
+                hasher.update(after.get().to_le_bytes());
+            }
+        }
+    }
+    hasher.update((cpu_nodes.len() as u64).to_le_bytes());
+    for node in cpu_nodes {
+        hasher.update(node.0.to_le_bytes());
+        hash_effect_operation_shape(&mut hasher, compiled, *node)?;
+    }
+    hasher.update((gpu_nodes.len() as u64).to_le_bytes());
+    for node in gpu_nodes {
+        hasher.update(node.0.to_le_bytes());
+        hash_effect_operation_shape(&mut hasher, compiled, *node)?;
+    }
+    Ok(HeterogeneousEffectShapeIdentity(hasher.finalize().into()))
+}
+
+fn hash_effect_residency(hasher: &mut Sha256, residency: EffectValueResidency) {
+    hasher.update(residency.lane().get().to_le_bytes());
+    hasher.update([effect_precision_tag(residency.format().precision())]);
+    hash_effect_domain(hasher, residency.format().domain());
+}
+
+fn hash_effect_domain(hasher: &mut Sha256, domain: EffectColorDomain) {
+    match domain {
+        EffectColorDomain::SceneLinearRgb => hasher.update([1]),
+        EffectColorDomain::LogPerceptualRgb { color_space } => {
+            hasher.update([2, color_space_tag(color_space)]);
+        }
+        EffectColorDomain::DisplayLinearRgb { color_space } => {
+            hasher.update([3, color_space_tag(color_space)]);
+        }
+        EffectColorDomain::DisplayEncodedRgb { color_space } => {
+            hasher.update([4, color_space_tag(color_space)]);
+        }
+        EffectColorDomain::Data => hasher.update([5]),
+        EffectColorDomain::AlphaMask => hasher.update([6]),
+    };
+}
+
+const fn effect_backend_tag(backend: EffectProcessingBackend) -> u8 {
+    match backend {
+        EffectProcessingBackend::Cpu => 1,
+        EffectProcessingBackend::Gpu => 2,
+        EffectProcessingBackend::ExternalProcessor => 3,
+    }
+}
+
+const fn effect_precision_tag(precision: EffectWorkingPrecision) -> u8 {
+    match precision {
+        EffectWorkingPrecision::NormalizedU8 => 1,
+        EffectWorkingPrecision::Float16 => 2,
+        EffectWorkingPrecision::Float32 => 3,
+    }
+}
+
+const fn color_space_tag(color_space: ColorSpace) -> u8 {
+    match color_space {
+        ColorSpace::Rec709 => 1,
+        ColorSpace::Rec601Pal => 2,
+        ColorSpace::Rec601Ntsc => 3,
+        ColorSpace::Rec2100Hlg => 4,
+        ColorSpace::Rec2100Pq => 5,
+        ColorSpace::Srgb => 6,
+        ColorSpace::Rec2020 => 7,
+        ColorSpace::DisplayP3 => 8,
+        ColorSpace::LinearRec709 => 9,
+        ColorSpace::LinearRec2020 => 10,
+        ColorSpace::LinearP3D65 => 11,
+        ColorSpace::Aces2065_1 => 12,
+        ColorSpace::AcesCg => 13,
+        ColorSpace::AcesCct => 14,
+        ColorSpace::AppleLogBt2020 => 15,
+        ColorSpace::SonySLog2SGamut => 16,
+        ColorSpace::SonySLog3SGamut3 => 17,
+        ColorSpace::SonySLog3SGamut3Cine => 18,
+        ColorSpace::ArriLogC3WideGamut3 => 19,
+        ColorSpace::ArriLogC4WideGamut4 => 20,
+        ColorSpace::CanonLog2CinemaGamutD55 => 21,
+        ColorSpace::CanonLog3CinemaGamutD55 => 22,
+        ColorSpace::PanasonicVLogVGamut => 23,
+        ColorSpace::RedLog3G10WideGamutRgb => 24,
+        ColorSpace::BlackmagicFilmWideGamutGen5 => 25,
+        ColorSpace::DjiDLogDGamut => 26,
+        ColorSpace::DavinciIntermediateWideGamut => 27,
+    }
+}
+
+fn hash_effect_operation_shape(
+    hasher: &mut Sha256,
+    compiled: &CompiledEffectGraph,
+    node_id: EffectGraphNodeId,
+) -> Result<(), PreparedHeterogeneousEffectWorkError> {
+    let node = compiled.graph().node(node_id).ok_or(
+        PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+            reason: "shape_identity_node_missing",
+        },
+    )?;
+    match &node.kind {
+        EffectGraphNodeKind::UnaryEffect { op, .. } => {
+            hasher.update([1, effect_operation_shape_tag(op)]);
+        }
+        EffectGraphNodeKind::DomainEffect { op, .. } => {
+            hasher.update([2, effect_operation_shape_tag(op)]);
+        }
+        EffectGraphNodeKind::Blend { .. } => hasher.update([3]),
+        EffectGraphNodeKind::Mask { .. } => hasher.update([4]),
+        EffectGraphNodeKind::MaskSource { .. } => hasher.update([5]),
+        EffectGraphNodeKind::MultiInput { .. } => hasher.update([6]),
+        EffectGraphNodeKind::Source => {
+            return Err(
+                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                    reason: "shape_identity_contains_source_dispatch",
+                },
+            );
+        }
+    };
+    Ok(())
+}
+
+const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
+    match operation {
+        EffectRenderOp::ColorAdjust { .. } => 1,
+        EffectRenderOp::GaussianBlur { .. } => 2,
+        EffectRenderOp::Sharpen { .. } => 3,
+        EffectRenderOp::Vignette { .. } => 4,
+        EffectRenderOp::ChromaticAberration { .. } => 5,
+        EffectRenderOp::Grain { .. } => 6,
+        EffectRenderOp::TemporalFrameBlend { .. } => 7,
+        EffectRenderOp::Lut3D { .. } => 8,
+        EffectRenderOp::Custom { .. } => 9,
+    }
+}
+
 /// Reusable exact CPU-DAG-prefix/GPU-DAG-suffix work prepared from one compiled graph.
 #[derive(Debug)]
 pub struct PreparedHeterogeneousEffectWork {
@@ -2139,6 +2354,8 @@ pub struct PreparedHeterogeneousEffectWork {
     gpu_suffix: Arc<PreparedHeterogeneousGpuSuffix>,
     output_token: EffectCompletionToken,
     frame_extent: EffectFrameExtent,
+    shape_identity: HeterogeneousEffectShapeIdentity,
+    cpu_frontier_retained_bytes: u64,
     cpu_required_working_bytes: usize,
     mask_auxiliary_bytes: usize,
 }
@@ -2331,6 +2548,18 @@ impl PreparedHeterogeneousEffectWork {
         )?
         .checked_add(mask_auxiliary_bytes)
         .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
+        let shape_identity =
+            heterogeneous_effect_shape_identity(&compiled, &plan, &cpu_nodes, &gpu_nodes)?;
+        let cpu_frontier_retained_bytes = transfers.iter().try_fold(0_u64, |total, transfer| {
+            let materialization = plan.materialization(transfer.cpu_materialization).ok_or(
+                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                    reason: "cpu_frontier_materialization_missing",
+                },
+            )?;
+            total
+                .checked_add(materialization.bytes())
+                .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)
+        })?;
         let output_token = plan
             .materialization(plan.output_materialization())
             .ok_or(
@@ -2350,6 +2579,8 @@ impl PreparedHeterogeneousEffectWork {
             gpu_suffix,
             output_token,
             frame_extent,
+            shape_identity,
+            cpu_frontier_retained_bytes,
             cpu_required_working_bytes,
             mask_auxiliary_bytes,
         })
@@ -2368,6 +2599,19 @@ impl PreparedHeterogeneousEffectWork {
     /// Exact prepared GPU DAG suffix.
     pub fn gpu_suffix(&self) -> &PreparedHeterogeneousGpuSuffix {
         &self.gpu_suffix
+    }
+
+    /// Effects-owned executable route-shape identity.
+    pub const fn shape_identity(&self) -> HeterogeneousEffectShapeIdentity {
+        self.shape_identity
+    }
+
+    /// Exact logical bytes retained by every successful CPU frontier value.
+    ///
+    /// This excludes the immutable caller input and transient CPU scratch;
+    /// batch schedulers account those authorities separately.
+    pub const fn cpu_frontier_retained_bytes(&self) -> u64 {
+        self.cpu_frontier_retained_bytes
     }
 
     /// Exact transient scalar bytes required by the prepared CPU prefix.
@@ -4507,6 +4751,19 @@ mod tests {
             ])
         );
         assert_eq!(completion.boundary_values().len(), 2);
+        assert_eq!(work.cpu_frontier_retained_bytes(), 2 * 4 * 3 * 16);
+
+        let parameter_variant = PreparedHeterogeneousEffectWork::prepare(
+            cpu_mask_source_to_gpu_mask_graph(false, MaskOp::Add),
+            &test_environment(),
+            request(extent),
+        )
+        .expect("prepare parameter variant of the same GPU Mask route");
+        assert_eq!(
+            work.shape_identity(),
+            parameter_variant.shape_identity(),
+            "frame-varying Mask parameters must not fork the executable route shape"
+        );
     }
 
     #[test]

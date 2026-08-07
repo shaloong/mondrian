@@ -14,9 +14,8 @@ use super::{
 use mondrian_core::{ExecutionCancellationToken, Resolution, SequenceId, WorkingColorSpace};
 use mondrian_effects::{
     compiled_effect_graph_supports_rgba_f32_with_domain_processor, identity_compiled_effect_graph,
-    CompiledEffectGraph, EffectFrameExtent, EffectGraphExecutionBudget, EffectGraphExecutionStep,
-    EffectGraphNodeKind, EffectProcessingBackend, EffectRenderOp, EffectValueResidency,
-    EffectWorkingPrecision, PreparedHeterogeneousEffectWork, PreparedHeterogeneousEffectWorkError,
+    CompiledEffectGraph, EffectFrameExtent, EffectGraphExecutionBudget,
+    HeterogeneousEffectShapeIdentity, PreparedHeterogeneousEffectWorkError,
 };
 use mondrian_renderer::{
     admit_timeline_render_plan_for_cpu_compositor, ColorFrameAlpha, ColorFrameDomain,
@@ -74,7 +73,7 @@ impl ExportHeterogeneousPlacement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ExportHeterogeneousRouteContract {
     canonical_fingerprint: [u8; 32],
-    shape_fingerprint: [u8; 32],
+    shape_identity: HeterogeneousEffectShapeIdentity,
     placement: ExportHeterogeneousPlacement,
     maximum_extent: EffectFrameExtent,
     maximum_peak_host_bytes: u64,
@@ -164,195 +163,39 @@ pub(super) enum ExportHeterogeneousEffectError {
     IdentityUnavailable,
 }
 
-fn export_heterogeneous_route_shape_fingerprint(
-    graph: &CompiledEffectGraph,
-    prepared: &PreparedHeterogeneousEffectWork,
-) -> Result<[u8; 32], ExportHeterogeneousEffectError> {
-    let mut hasher = Sha256::new();
-    hasher.update(b"mondrian.export.heterogeneous-route-shape");
-    hasher.update(EXPORT_HETEROGENEOUS_ROUTE_SCHEMA_VERSION.to_le_bytes());
-    let plan = prepared.plan();
-    hasher.update((plan.materializations().len() as u64).to_le_bytes());
-    for materialization in plan.materializations() {
-        hasher.update(materialization.id().get().to_le_bytes());
-        hasher.update(materialization.value().0.to_le_bytes());
-        hash_effect_residency(&mut hasher, materialization.residency())?;
-        hasher.update(materialization.completion().get().to_le_bytes());
-    }
-    hasher.update((plan.steps().len() as u64).to_le_bytes());
-    for step in plan.steps() {
-        match step {
-            EffectGraphExecutionStep::Dispatch {
-                node,
-                lane,
-                backend,
-                precision,
-                inputs,
-                output,
-                waits,
-                signal,
-            } => {
-                hasher.update([1]);
-                hasher.update(node.0.to_le_bytes());
-                hasher.update(lane.get().to_le_bytes());
-                hasher.update([effect_backend_tag(*backend)]);
-                hasher.update([effect_precision_tag(*precision)]);
-                hasher.update((inputs.len() as u64).to_le_bytes());
-                for input in inputs.iter() {
-                    hasher.update(input.get().to_le_bytes());
-                }
-                hasher.update(output.get().to_le_bytes());
-                hasher.update((waits.len() as u64).to_le_bytes());
-                for wait in waits.iter() {
-                    hasher.update(wait.get().to_le_bytes());
-                }
-                hasher.update(signal.get().to_le_bytes());
-            }
-            EffectGraphExecutionStep::Transfer { value, input, output, from, to, wait, signal } => {
-                hasher.update([2]);
-                hasher.update(value.0.to_le_bytes());
-                hasher.update(input.get().to_le_bytes());
-                hasher.update(output.get().to_le_bytes());
-                hash_effect_residency(&mut hasher, *from)?;
-                hash_effect_residency(&mut hasher, *to)?;
-                hasher.update(wait.get().to_le_bytes());
-                hasher.update(signal.get().to_le_bytes());
-            }
-            EffectGraphExecutionStep::Release { materialization, after } => {
-                hasher.update([3]);
-                hasher.update(materialization.get().to_le_bytes());
-                hasher.update(after.get().to_le_bytes());
-            }
-        }
-    }
-    hasher.update((prepared.cpu_nodes().len() as u64).to_le_bytes());
-    for node in prepared.cpu_nodes() {
-        hasher.update(node.0.to_le_bytes());
-        hash_effect_operation_shape(&mut hasher, graph, *node)?;
-    }
-    hasher.update((prepared.gpu_suffix().node_ids().len() as u64).to_le_bytes());
-    for node in prepared.gpu_suffix().node_ids() {
-        hasher.update(node.0.to_le_bytes());
-        hash_effect_operation_shape(&mut hasher, graph, *node)?;
-    }
-    Ok(hasher.finalize().into())
-}
-
 fn export_heterogeneous_route_contract(
-    graph: &CompiledEffectGraph,
-    prepared: &PreparedHeterogeneousEffectWork,
+    route: &PreparedHeterogeneousEffectRoute,
     placement: ExportHeterogeneousPlacement,
     maximum_extent: EffectFrameExtent,
-    budget: EffectGraphExecutionBudget,
 ) -> Result<ExportHeterogeneousRouteContract, ExportHeterogeneousEffectError> {
-    let shape_fingerprint = export_heterogeneous_route_shape_fingerprint(graph, prepared)?;
-    let plan = prepared.plan();
+    let shape_identity = route.shape_identity();
+    let budget = route.graph_budget();
     let mut hasher = Sha256::new();
     hasher.update(b"mondrian.export.heterogeneous-route-contract");
     hasher.update(EXPORT_HETEROGENEOUS_ROUTE_SCHEMA_VERSION.to_le_bytes());
     hasher.update([placement.tag()]);
     hasher.update(maximum_extent.width().to_le_bytes());
     hasher.update(maximum_extent.height().to_le_bytes());
-    hasher.update(shape_fingerprint);
+    hasher.update(shape_identity.as_bytes());
     hasher.update(budget.max_host_bytes().to_le_bytes());
     hasher.update(budget.max_device_bytes().to_le_bytes());
     hasher.update(budget.max_transfer_bytes().to_le_bytes());
     hasher.update((budget.max_materializations() as u64).to_le_bytes());
     hasher.update((budget.max_steps() as u64).to_le_bytes());
-    hasher.update(plan.peak_host_bytes().to_le_bytes());
-    hasher.update(plan.peak_device_bytes().to_le_bytes());
-    hasher.update(plan.transfer_bytes().to_le_bytes());
-    hasher.update((prepared.cpu_required_working_bytes() as u64).to_le_bytes());
+    hasher.update(route.graph_peak_host_bytes().to_le_bytes());
+    hasher.update(route.graph_peak_device_bytes().to_le_bytes());
+    hasher.update(route.graph_transfer_bytes().to_le_bytes());
+    hasher.update((route.cpu_required_working_bytes() as u64).to_le_bytes());
     Ok(ExportHeterogeneousRouteContract {
         canonical_fingerprint: hasher.finalize().into(),
-        shape_fingerprint,
+        shape_identity,
         placement,
         maximum_extent,
-        maximum_peak_host_bytes: plan.peak_host_bytes(),
-        maximum_peak_device_bytes: plan.peak_device_bytes(),
-        maximum_transfer_bytes: plan.transfer_bytes(),
-        maximum_cpu_working_bytes: prepared.cpu_required_working_bytes(),
+        maximum_peak_host_bytes: route.graph_peak_host_bytes(),
+        maximum_peak_device_bytes: route.graph_peak_device_bytes(),
+        maximum_transfer_bytes: route.graph_transfer_bytes(),
+        maximum_cpu_working_bytes: route.cpu_required_working_bytes(),
     })
-}
-
-fn hash_effect_residency(
-    hasher: &mut Sha256,
-    residency: EffectValueResidency,
-) -> Result<(), ExportHeterogeneousEffectError> {
-    hasher.update(residency.lane().get().to_le_bytes());
-    hasher.update([effect_precision_tag(residency.format().precision())]);
-    match residency.format().domain() {
-        mondrian_effects::EffectColorDomain::SceneLinearRgb => hasher.update([1]),
-        domain => {
-            return Err(ExportHeterogeneousEffectError::FrameContractMismatch {
-                expected: "scene_linear_rgb".to_owned(),
-                actual: format!("{domain:?}"),
-            });
-        }
-    }
-    Ok(())
-}
-
-const fn effect_backend_tag(backend: EffectProcessingBackend) -> u8 {
-    match backend {
-        EffectProcessingBackend::Cpu => 1,
-        EffectProcessingBackend::Gpu => 2,
-        EffectProcessingBackend::ExternalProcessor => 3,
-    }
-}
-
-const fn effect_precision_tag(precision: EffectWorkingPrecision) -> u8 {
-    match precision {
-        EffectWorkingPrecision::NormalizedU8 => 1,
-        EffectWorkingPrecision::Float16 => 2,
-        EffectWorkingPrecision::Float32 => 3,
-    }
-}
-
-fn hash_effect_operation_shape(
-    hasher: &mut Sha256,
-    graph: &CompiledEffectGraph,
-    node_id: mondrian_effects::EffectGraphNodeId,
-) -> Result<(), ExportHeterogeneousEffectError> {
-    let node = graph.graph().node(node_id).ok_or_else(|| {
-        ExportHeterogeneousEffectError::FrameContractMismatch {
-            expected: "compiled effect node".to_owned(),
-            actual: format!("missing node {node_id:?}"),
-        }
-    })?;
-    match &node.kind {
-        EffectGraphNodeKind::UnaryEffect { op, .. } => {
-            hasher.update([1, effect_operation_shape_tag(op)]);
-        }
-        EffectGraphNodeKind::DomainEffect { op, .. } => {
-            hasher.update([2, effect_operation_shape_tag(op)]);
-        }
-        EffectGraphNodeKind::Blend { .. } => hasher.update([3]),
-        EffectGraphNodeKind::Mask { .. } => hasher.update([4]),
-        EffectGraphNodeKind::MaskSource { .. } => hasher.update([5]),
-        EffectGraphNodeKind::MultiInput { .. } => hasher.update([6]),
-        EffectGraphNodeKind::Source => {
-            return Err(ExportHeterogeneousEffectError::FrameContractMismatch {
-                expected: "executable heterogeneous effect node".to_owned(),
-                actual: "Source".to_owned(),
-            });
-        }
-    }
-    Ok(())
-}
-
-const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
-    match operation {
-        EffectRenderOp::ColorAdjust { .. } => 1,
-        EffectRenderOp::GaussianBlur { .. } => 2,
-        EffectRenderOp::Sharpen { .. } => 3,
-        EffectRenderOp::Vignette { .. } => 4,
-        EffectRenderOp::ChromaticAberration { .. } => 5,
-        EffectRenderOp::Grain { .. } => 6,
-        EffectRenderOp::TemporalFrameBlend { .. } => 7,
-        EffectRenderOp::Lut3D { .. } => 8,
-        EffectRenderOp::Custom { .. } => 9,
-    }
 }
 
 fn hex_fingerprint(fingerprint: [u8; 32]) -> String {
@@ -411,34 +254,23 @@ impl ExportVisualRenderSession {
         graph: &Arc<CompiledEffectGraph>,
         extent: EffectFrameExtent,
         placement: ExportHeterogeneousPlacement,
-    ) -> Result<
-        (PreparedHeterogeneousEffectRoute, EffectGraphExecutionBudget),
-        ExportHeterogeneousEffectError,
-    > {
+    ) -> Result<PreparedHeterogeneousEffectRoute, ExportHeterogeneousEffectError> {
         let budget = self.heterogeneous_graph_budget()?;
         let prepared = PreparedHeterogeneousEffectRoute::prepare(Arc::clone(graph), extent, budget)
             .map_err(|source| ExportHeterogeneousEffectError::Preparation {
                 placement: placement.label(),
                 source,
             })?;
-        Ok((prepared, budget))
+        Ok(prepared)
     }
 
     pub(super) fn register_or_validate_route_contract(
         &mut self,
-        graph: &CompiledEffectGraph,
-        prepared: &PreparedHeterogeneousEffectWork,
+        route: &PreparedHeterogeneousEffectRoute,
         placement: ExportHeterogeneousPlacement,
         maximum_extent: EffectFrameExtent,
-        budget: EffectGraphExecutionBudget,
     ) -> Result<(), ExportHeterogeneousEffectError> {
-        let contract = export_heterogeneous_route_contract(
-            graph,
-            prepared,
-            placement,
-            maximum_extent,
-            budget,
-        )?;
+        let contract = export_heterogeneous_route_contract(route, placement, maximum_extent)?;
         if self.route_contracts_sealed {
             if self
                 .heterogeneous_route_contracts
@@ -452,7 +284,7 @@ impl ExportVisualRenderSession {
                     placement: placement.label(),
                     width: maximum_extent.width(),
                     height: maximum_extent.height(),
-                    shape: hex_fingerprint(contract.shape_fingerprint),
+                    shape: hex_fingerprint(*contract.shape_identity.as_bytes()),
                 },
             );
         }
@@ -490,22 +322,20 @@ impl ExportVisualRenderSession {
 
     fn validate_exact_route_contract(
         &self,
-        graph: &CompiledEffectGraph,
-        prepared: &PreparedHeterogeneousEffectWork,
+        route: &PreparedHeterogeneousEffectRoute,
         placement: ExportHeterogeneousPlacement,
         exact_extent: EffectFrameExtent,
     ) -> Result<(), ExportHeterogeneousEffectError> {
-        let shape_fingerprint = export_heterogeneous_route_shape_fingerprint(graph, prepared)?;
-        let plan = prepared.plan();
+        let shape_identity = route.shape_identity();
         if self.heterogeneous_route_contracts.iter().any(|contract| {
             contract.placement == placement
-                && contract.shape_fingerprint == shape_fingerprint
+                && contract.shape_identity == shape_identity
                 && exact_extent.width() <= contract.maximum_extent.width()
                 && exact_extent.height() <= contract.maximum_extent.height()
-                && plan.peak_host_bytes() <= contract.maximum_peak_host_bytes
-                && plan.peak_device_bytes() <= contract.maximum_peak_device_bytes
-                && plan.transfer_bytes() <= contract.maximum_transfer_bytes
-                && prepared.cpu_required_working_bytes() <= contract.maximum_cpu_working_bytes
+                && route.graph_peak_host_bytes() <= contract.maximum_peak_host_bytes
+                && route.graph_peak_device_bytes() <= contract.maximum_peak_device_bytes
+                && route.graph_transfer_bytes() <= contract.maximum_transfer_bytes
+                && route.cpu_required_working_bytes() <= contract.maximum_cpu_working_bytes
         }) {
             return Ok(());
         }
@@ -514,7 +344,7 @@ impl ExportVisualRenderSession {
                 placement: placement.label(),
                 width: exact_extent.width(),
                 height: exact_extent.height(),
-                shape: hex_fingerprint(shape_fingerprint),
+                shape: hex_fingerprint(*shape_identity.as_bytes()),
             },
         )
     }
@@ -539,7 +369,7 @@ impl ExportVisualRenderSession {
             // NormalizedU8 export boundary retain their canonical diagnostics.
             return Ok(None);
         }
-        let (route, budget) = self.prepare_heterogeneous_route(graph, maximum_extent, placement)?;
+        let route = self.prepare_heterogeneous_route(graph, maximum_extent, placement)?;
         if !placement.supports_current_adapter() {
             return Err(ExportHeterogeneousEffectError::UnsupportedPlacement {
                 placement: placement.label(),
@@ -548,13 +378,7 @@ impl ExportVisualRenderSession {
         if self.gpu_output.ensure_ready().is_err() {
             return Err(ExportHeterogeneousEffectError::RequiredGpuUnavailable);
         }
-        self.register_or_validate_route_contract(
-            graph,
-            route.prepared_work(),
-            placement,
-            maximum_extent,
-            budget,
-        )?;
+        self.register_or_validate_route_contract(&route, placement, maximum_extent)?;
         Ok(Some(route))
     }
 
@@ -592,12 +416,7 @@ impl ExportVisualRenderSession {
                 actual: format!("materialized extent {extent:?}"),
             });
         }
-        self.validate_exact_route_contract(
-            route.route.graph(),
-            route.route.prepared_work(),
-            route.placement,
-            extent,
-        )?;
+        self.validate_exact_route_contract(&route.route, route.placement, extent)?;
         let gpu_grant = self.heterogeneous_gpu_grant()?;
         route.route.gpu_recording_requirements().validate(gpu_grant).map_err(|source| {
             ExportHeterogeneousEffectError::GpuContinuation {

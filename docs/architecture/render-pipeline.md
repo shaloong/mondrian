@@ -306,6 +306,14 @@ Renderer wraps `PreparedHeterogeneousEffectWork` in one cloneable
 extent, graph-planning budget, and semantic fingerprint before source pixels
 are materialized. Batch binding rejects a different extent or resource grant;
 the worker executes this object and never replans it. The underlying work
+also carries an Effects-owned, versioned route-shape identity over the exact
+plan structure, lanes, value formats, and operation kinds. Export consumes
+that opaque identity for preflight/runtime ledger equality instead of
+reconstructing graph shape or accepting only RGB-domain materializations.
+Renderer exposes exact CPU-frontier retained bytes beside that identity, so an
+atomic batch is charged for each immutable input plus every frontier value,
+including simultaneous RGB and AlphaMask uploads.
+The underlying work
 consumes the planned CPU materialization DAG when the caller already owns a
 scene-linear CPU Float32 working frame. It moves last-use values, clones only
 live fan-out inputs, executes unary and join nodes through the shared Float32
